@@ -52,9 +52,25 @@ impl StealthHttpClient {
         // bundled Mozilla roots (`webpki-root-certs`), same on every platform.
         let cert_store = wreq::tls::CertStore::default();
 
+        // The emulation OS must match the advertised User-Agent, otherwise the
+        // TLS/JA3 fingerprint (OS-specific) clashes with the HTTP UA — a strong
+        // anti-bot signal ("shape coherence"). Derive from AGINXBROWER_UA.
+        let ua = std::env::var("AGINXBROWER_UA").unwrap_or_default();
+        let os = if ua.contains("Windows") {
+            wreq_util::EmulationOS::Windows
+        } else if ua.contains("Macintosh") || ua.contains("Mac OS X") {
+            wreq_util::EmulationOS::MacOS
+        } else if ua.contains("Android") {
+            wreq_util::EmulationOS::Android
+        } else if ua.contains("iPhone") || ua.contains("iPad") {
+            wreq_util::EmulationOS::IOS
+        } else {
+            wreq_util::EmulationOS::Linux
+        };
+
         let emulation_opts = wreq_util::EmulationOption::builder()
             .emulation(wreq_util::Emulation::Chrome145)
-            .emulation_os(wreq_util::EmulationOS::Linux)
+            .emulation_os(os)
             .build();
 
         let mut builder = wreq::Client::builder()
