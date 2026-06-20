@@ -223,7 +223,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/eval", post(eval_handler))
         .route("/search", post(search_handler));
 
-    let bind_addr = std::env::var("AGINXBROWER_BIND").unwrap_or_else(|_| "0.0.0.0:8089".to_string());
+    let bind_addr = std::env::var("AGINXBROWSER_BIND").unwrap_or_else(|_| "0.0.0.0:8089".to_string());
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     tracing::info!("aginxbrowser listening on {}", listener.local_addr()?);
     axum::serve(listener, app).await?;
@@ -238,7 +238,7 @@ async fn fetch_handler(Json(req): Json<FetchRequest>) -> Result<impl IntoRespons
     // Short-lived in-process cache. Each /fetch spins up a fresh V8 browser
     // (expensive), so repeated grabs of the same URL in one session benefit a
     // lot. Keyed by everything that affects the result (url/format/selector/
-    // cookies/use_proxy/max_chars). TTL via AGINXBROWER_CACHE_TTL_SECS
+    // cookies/use_proxy/max_chars). TTL via AGINXBROWSER_CACHE_TTL_SECS
     // (default 600s; 0 disables).
     let cache_key = fetch_cache_key(&req);
     if let Some(cached) = fetch_cache_get(&cache_key) {
@@ -266,7 +266,7 @@ static FETCH_CACHE: std::sync::LazyLock<FetchCache> = std::sync::LazyLock::new(|
 });
 
 fn cache_ttl_secs() -> u64 {
-    std::env::var("AGINXBROWER_CACHE_TTL_SECS")
+    std::env::var("AGINXBROWSER_CACHE_TTL_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(600)

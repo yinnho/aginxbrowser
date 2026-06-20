@@ -104,7 +104,7 @@ impl BrowserContext {
             client.block_trackers = true;
         }
         let resolved_ua = user_agent.unwrap_or_else(|| {
-            std::env::var("AGINXBROWER_UA").unwrap_or_else(|_| {
+            std::env::var("AGINXBROWSER_UA").unwrap_or_else(|_| {
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36".to_string()
             })
         });

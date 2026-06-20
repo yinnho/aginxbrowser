@@ -14,7 +14,7 @@
 向 AginxBrowser 发 HTTP 请求（`POST /eval`），执行 JS 提取标题/作者/正文：
 
 ```
-POST http://<AGINXBROWER_ADDR>/eval
+POST http://<AGINXBROWSER_ADDR>/eval
 Content-Type: application/json
 
 {
@@ -24,7 +24,7 @@ Content-Type: application/json
 }
 ```
 
-- `<AGINXBROWER_ADDR>`：AginxBrowser 服务地址（同机部署为 `127.0.0.1:8089`，跨机为服务器 IP `106.75.32.216:8089`）。
+- `<AGINXBROWSER_ADDR>`：AginxBrowser 服务地址（同机部署为 `127.0.0.1:8089`，跨机为服务器 IP `106.75.32.216:8089`）。
 - `wait_secs: 4`：等微信页面 JS 渲染完，必须给（微信正文是 JS 渲染的，不等会拿到空）。
 - **不需要任何 cookie**：微信文章是公开页，AginxBrowser 的 stealth 指纹伪装已足够绕过风控。
 

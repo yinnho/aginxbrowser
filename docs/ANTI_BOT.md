@@ -91,7 +91,7 @@ IntersectionObserver、Web Components… 无穷无尽。
 ## 改进方向（优先级）
 
 ### P1（已做）TLS 指纹自洽
-wreq `EmulationOS` 从 `AGINXBROWER_UA` 动态推导（macOS UA → MacOS TLS 指纹）。
+wreq `EmulationOS` 从 `AGINXBROWSER_UA` 动态推导（macOS UA → MacOS TLS 指纹）。
 
 ### P2（已做）知乎专栏免登录
 只需 `__zse_ck`（一年有效），从 `js-initialData` 提取正文。

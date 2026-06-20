@@ -18,9 +18,9 @@ pub enum SearchError {
 /// sites should pass `false` (direct is faster and SOCKS5 often times out);
 /// foreign sites that are blocked/unreachable directly pass `true`.
 fn build_browser(use_proxy: bool) -> Result<Browser> {
-    // Stealth defaults on; disable via AGINXBROWER_STEALTH=0 (diagnostic / when
+    // Stealth defaults on; disable via AGINXBROWSER_STEALTH=0 (diagnostic / when
     // the wreq stealth client misbehaves on a given site).
-    let stealth = !matches!(std::env::var("AGINXBROWER_STEALTH").ok().as_deref(), Some("0"));
+    let stealth = !matches!(std::env::var("AGINXBROWSER_STEALTH").ok().as_deref(), Some("0"));
     let mut builder = Browser::builder().stealth(stealth);
     if use_proxy {
         if let Ok(proxy) = std::env::var("OBSCURA_PROXY") {

@@ -21,13 +21,13 @@
 #   (首次访问知乎会弹易盾验证码, 人工过一次后 __zse_ck 长期有效;
 #    aginxbrowser 自动过验证码需 OCR, 见 docs/ANTI_BOT.md 的 P3)
 #
-# 服务地址可通过 AGINXBROWER_ADDR 环境变量覆盖 (默认本机 8089)。
+# 服务地址可通过 AGINXBROWSER_ADDR 环境变量覆盖 (默认本机 8089)。
 
 set -euo pipefail
 
 URL="${1:?用法: $0 <文章URL> <__zse_ck>}"
 ZSECK="${2:?缺少 __zse_ck (浏览器 F12 -> Cookies -> .zhihu.com -> __zse_ck)}"
-ADDR="${AGINXBROWER_ADDR:-127.0.0.1:8089}"
+ADDR="${AGINXBROWSER_ADDR:-127.0.0.1:8089}"
 
 # 从 js-initialData 同步提取正文 (不走 async/JS 渲染, 稳定可靠)
 SCRIPT='(()=>{

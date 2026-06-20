@@ -258,7 +258,7 @@ impl Page {
         rt.set_title(&self.title);
 
         // JS-layer UA must match the HTTP-layer UA we advertise (set via
-        // AGINXBROWER_UA / context.user_agent). Hardcoding the stealth
+        // AGINXBROWSER_UA / context.user_agent). Hardcoding the stealth
         // client's Linux UA here left navigator.userAgent as Linux while HTTP
         // headers said macOS — anti-bot checks that read navigator (Baidu
         // Wenku's 安全验证) caught the mismatch. Prefer the context UA; fall
@@ -274,7 +274,7 @@ impl Page {
         if !ua_to_set.is_empty() {
             rt.set_user_agent(&ua_to_set);
         }
-        let lang = std::env::var("AGINXBROWER_ACCEPT_LANGUAGE")
+        let lang = std::env::var("AGINXBROWSER_ACCEPT_LANGUAGE")
             .unwrap_or_else(|_| "zh-CN,zh;q=0.9,en;q=0.8".to_string());
         rt.set_language(&lang);
 
