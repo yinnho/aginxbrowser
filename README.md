@@ -215,6 +215,21 @@ API 返回不同 HTTP 状态码区分错误类型：
 | 504 | 请求超时 |
 | 500 | 其他内部错误 |
 
+## 作为外挂接入其他系统（以 OpenCarrier 为例）
+
+AginxBrower 定位是**纯外挂基础设施**——像真实浏览器一样作为独立服务挂在系统里，谁需要谁调用，不嵌入宿主代码、不污染宿主配置。同机部署一个实例（systemd 守护），所有需要"渲染 + 抓取"能力的应用共享它。
+
+**OpenCarrier 的接入方式**：OpenCarrier 的内置 `web_fetch` 工具默认走 reqwest 直连，但微信公众号、知乎专栏等风控/JS 渲染页面只能拿到空壳。OpenCarrier 不把 AginxBrower 写进自己的配置体系，而是读一个环境变量：
+
+```bash
+export AGINXBROWER_URL=http://127.0.0.1:8089
+```
+
+- **未设** → `web_fetch` 纯 reqwest，行为完全不变（可随时回退）
+- **设了** → `web_fetch` 内部识别到已知风控站时，调 AginxBrower 的 `/fetch` 渲染抓取；失败自动回退 reqwest，不报错
+
+宿主侧零新增配置字段、Agent 侧零接口变化——AginxBrower 是一个环境变量挂上去的"浏览器外挂"。OpenCarrier 同时提供独立的 `browser_*` 工具集（`browser_navigate`/`browser_evaluate`/`browser_click`），给需要点击/滚动/执行 JS 的交互场景显式调用。
+
 ## 已知限制
 
 ## 站点抓取示例
