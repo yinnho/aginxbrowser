@@ -13,6 +13,7 @@ mod config;
 mod cookie;
 mod error;
 mod page;
+mod search;
 mod server;
 
 // Inlined Obscura engine (formerly external crates).
@@ -21,7 +22,7 @@ mod obscura_net;
 mod obscura_js;
 mod obscura_browser;
 
-use server::{do_click, do_eval, do_fetch};
+use server::{do_click, do_eval, do_fetch, do_search, SearchError};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct FetchRequest {
@@ -111,6 +112,62 @@ pub struct EvalResponse {
     pub result: serde_json::Value,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct SearchRequest {
+    pub q: String,
+    #[serde(default)]
+    pub fetch_top: usize,
+    #[serde(default = "default_categories")]
+    pub categories: String,
+    #[serde(default = "default_language")]
+    pub language: String,
+    #[serde(default = "default_max_results")]
+    pub max_results: usize,
+    #[serde(default = "default_max_chars_per")]
+    pub max_chars_per: usize,
+    #[serde(default = "default_wait_secs_search")]
+    pub wait_secs: u64,
+    #[serde(default)]
+    pub use_proxy: bool,
+}
+
+fn default_categories() -> String {
+    "general".into()
+}
+fn default_language() -> String {
+    "zh-CN".into()
+}
+fn default_max_results() -> usize {
+    10
+}
+fn default_max_chars_per() -> usize {
+    4000
+}
+fn default_wait_secs_search() -> u64 {
+    3
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SearchResultItem {
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+    pub engines: Vec<String>,
+    pub score: f64,
+    /// 正文（仅 index < fetch_top 才有值，否则 None）
+    pub content: Option<String>,
+    pub content_truncated: bool,
+    pub fetch_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchResponse {
+    pub query: String,
+    pub number_of_results: usize,
+    pub results: Vec<SearchResultItem>,
+    pub search_backend: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     pub error: String,
@@ -121,6 +178,7 @@ pub enum AppError {
     NotFound(String),
     BadGateway(String),
     GatewayTimeout(String),
+    ServiceUnavailable(String),
     Internal(String),
 }
 
@@ -131,6 +189,7 @@ impl IntoResponse for AppError {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             AppError::BadGateway(msg) => (StatusCode::BAD_GATEWAY, msg),
             AppError::GatewayTimeout(msg) => (StatusCode::GATEWAY_TIMEOUT, msg),
+            AppError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg),
             AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
         };
         (status, Json(ErrorResponse { error: message })).into_response()
@@ -161,11 +220,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health_handler))
         .route("/fetch", post(fetch_handler))
         .route("/click", post(click_handler))
-        .route("/eval", post(eval_handler));
+        .route("/eval", post(eval_handler))
+        .route("/search", post(search_handler));
 
     let bind_addr = std::env::var("AGINXBROWER_BIND").unwrap_or_else(|_| "0.0.0.0:8089".to_string());
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-    tracing::info!("aginxbrower listening on {}", listener.local_addr()?);
+    tracing::info!("aginxbrowser listening on {}", listener.local_addr()?);
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -255,6 +315,14 @@ async fn click_handler(Json(req): Json<ClickRequest>) -> Result<impl IntoRespons
 async fn eval_handler(Json(req): Json<EvalRequest>) -> Result<impl IntoResponse, AppError> {
     let resp = spawn_blocking(move || do_eval(req)).await?;
     Ok((StatusCode::OK, Json(resp?)))
+}
+
+async fn search_handler(Json(req): Json<SearchRequest>) -> Result<impl IntoResponse, AppError> {
+    let resp = do_search(req).await.map_err(|e| match e {
+        SearchError::BackendUnavailable(msg) => AppError::ServiceUnavailable(msg),
+        SearchError::Other(msg) => AppError::Internal(msg),
+    })?;
+    Ok((StatusCode::OK, Json(resp)))
 }
 
 fn spawn_blocking<F, R>(f: F) -> tokio::task::JoinHandle<R>

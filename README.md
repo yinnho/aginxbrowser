@@ -1,4 +1,4 @@
-# AginxBrower
+# AginxBrowser
 
 轻量级服务端浏览器引擎，内置 Obscura 浏览器内核，用于快速页面抓取和 JS 交互。
 
@@ -13,7 +13,7 @@
 ## 目录结构
 
 ```
-aginxbrower/
+aginxbrowser/
 ├── Cargo.toml
 ├── build.rs              # V8 snapshot 生成
 ├── js/
@@ -49,7 +49,7 @@ aginxbrower/
   ```bash
   export OBSCURA_PROXY=socks5://127.0.0.1:8800
   ```
-- **`/search` 依赖 SearXNG**（同机部署，默认 `http://127.0.0.1:8888`，由 `SEARXNG_URL` 配置）。SearXNG 是元搜索引擎，聚合百度/Google/Bing 等；AginxBrower 调它做搜索，自己做抓取，各司其职（不重写 SearXNG）。SearXNG 不可用时 `/search` 返回 503，不影响 `/fetch` `/eval` `/click`。
+- **`/search` 依赖 SearXNG**（同机部署，默认 `http://127.0.0.1:8888`，由 `SEARXNG_URL` 配置）。SearXNG 是元搜索引擎，聚合百度/Google/Bing 等；AginxBrowser 调它做搜索，自己做抓取，各司其职（不重写 SearXNG）。SearXNG 不可用时 `/search` 返回 503，不影响 `/fetch` `/eval` `/click`。
 
 ## 运行时环境变量
 
@@ -79,13 +79,13 @@ release 二进制预计在 70MB 左右。
 
 ```bash
 export OBSCURA_PROXY=socks5://127.0.0.1:8800   # 可选
-./target/release/aginxbrower
+./target/release/aginxbrowser
 ```
 
 默认监听 `0.0.0.0:8089`，可通过 `AGINXBROWER_BIND` 修改：
 
 ```bash
-AGINXBROWER_BIND=0.0.0.0:8090 ./target/release/aginxbrower
+AGINXBROWER_BIND=0.0.0.0:8090 ./target/release/aginxbrowser
 ```
 
 ## HTTP API
@@ -294,18 +294,18 @@ API 返回不同 HTTP 状态码区分错误类型：
 
 ## 作为外挂接入其他系统（以 OpenCarrier 为例）
 
-AginxBrower 定位是**纯外挂基础设施**——像真实浏览器一样作为独立服务挂在系统里，谁需要谁调用，不嵌入宿主代码、不污染宿主配置。同机部署一个实例（systemd 守护），所有需要"渲染 + 抓取"能力的应用共享它。
+AginxBrowser 定位是**纯外挂基础设施**——像真实浏览器一样作为独立服务挂在系统里，谁需要谁调用，不嵌入宿主代码、不污染宿主配置。同机部署一个实例（systemd 守护），所有需要"渲染 + 抓取"能力的应用共享它。
 
-**OpenCarrier 的接入方式**：OpenCarrier 的内置 `web_fetch` 工具默认走 reqwest 直连，但微信公众号、知乎专栏等风控/JS 渲染页面只能拿到空壳。OpenCarrier 不把 AginxBrower 写进自己的配置体系，而是读一个环境变量：
+**OpenCarrier 的接入方式**：OpenCarrier 的内置 `web_fetch` 工具默认走 reqwest 直连，但微信公众号、知乎专栏等风控/JS 渲染页面只能拿到空壳。OpenCarrier 不把 AginxBrowser 写进自己的配置体系，而是读一个环境变量：
 
 ```bash
 export AGINXBROWER_URL=http://127.0.0.1:8089
 ```
 
 - **未设** → `web_fetch` 纯 reqwest，行为完全不变（可随时回退）
-- **设了** → `web_fetch` 内部识别到已知风控站时，调 AginxBrower 的 `/fetch` 渲染抓取；失败自动回退 reqwest，不报错
+- **设了** → `web_fetch` 内部识别到已知风控站时，调 AginxBrowser 的 `/fetch` 渲染抓取；失败自动回退 reqwest，不报错
 
-宿主侧零新增配置字段、Agent 侧零接口变化——AginxBrower 是一个环境变量挂上去的"浏览器外挂"。OpenCarrier 同时提供独立的 `browser_*` 工具集（`browser_navigate`/`browser_evaluate`/`browser_click`），给需要点击/滚动/执行 JS 的交互场景显式调用。
+宿主侧零新增配置字段、Agent 侧零接口变化——AginxBrowser 是一个环境变量挂上去的"浏览器外挂"。OpenCarrier 同时提供独立的 `browser_*` 工具集（`browser_navigate`/`browser_evaluate`/`browser_click`），给需要点击/滚动/执行 JS 的交互场景显式调用。
 
 ## 站点抓取示例
 
@@ -362,7 +362,7 @@ curl -s -X POST http://127.0.0.1:8089/eval -H 'Content-Type: application/json' -
 
 ## 与 Chromium 对比
 
-| 项目 | AginxBrower | Chromium |
+| 项目 | AginxBrowser | Chromium |
 |------|------------|----------|
 | 二进制体积 | ~70MB | ~256MB+ |
 | 启动速度 | 快 | 慢 |

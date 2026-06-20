@@ -1,5 +1,5 @@
 [package]
-name = "aginxbrower"
+name = "aginxbrowser"
 version = "0.1.0"
 edition = "2021"
 authors = ["OpenCarrier Team"]
@@ -32,10 +32,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # --- http client (non-stealth path) ---
-reqwest = { version = "0.12", features = ["cookies", "gzip", "brotli", "deflate", "rustls-tls", "socks"], default-features = false }
+reqwest = { version = "0.12", features = ["cookies", "gzip", "brotli", "deflate", "rustls-tls", "socks", "json"], default-features = false }
 encoding_rs = "0.8"
 tempfile = "3"
 url = "2"
+urlencoding = "2"
 
 # --- html / dom parsing ---
 html5ever = "0.29"

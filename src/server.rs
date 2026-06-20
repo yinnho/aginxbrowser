@@ -1,9 +1,17 @@
 use crate::{
     ClickRequest, ClickResponse, EvalRequest, EvalResponse, FetchRequest, FetchResponse,
-    OutputFormat,
+    OutputFormat, SearchRequest, SearchResponse, SearchResultItem,
 };
 use crate::browser::Browser;
 use anyhow::{Context, Result};
+
+/// Error type for /search (separate from anyhow so we can map to 503 vs 500).
+pub enum SearchError {
+    /// SearXNG backend unreachable / errored → 503
+    BackendUnavailable(String),
+    /// Other internal error → 500
+    Other(String),
+}
 
 /// Build a browser instance.
 /// `use_proxy` decides whether the upstream `OBSCURA_PROXY` is applied. Domestic
@@ -109,6 +117,35 @@ fn collapse_whitespace(s: &str) -> String {
         .filter(|l| !l.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Core fetch: navigate to `url`, wait for JS, return rendered text (markdown-like).
+/// Used by both /fetch and /search's body-grabbing. Runs on a dedicated
+/// current-thread runtime (V8 is !Send). `max_chars=0` means unlimited.
+fn fetch_url_text(
+    url: String,
+    use_proxy: bool,
+    wait_secs: u64,
+    max_chars: usize,
+) -> Result<(String, bool)> {
+    run_on_local_runtime(move |_rt| {
+        Box::pin(async move {
+            let browser = build_browser(use_proxy)?;
+            let mut page = browser.new_page().await?;
+            page.goto(&url).await?;
+            if wait_secs > 0 {
+                page.settle(wait_secs * 1000).await;
+            }
+            let content = rendered_text(&mut page, None);
+
+            let (content, truncated) = if max_chars > 0 && content.chars().count() > max_chars {
+                (content.chars().take(max_chars).collect::<String>(), true)
+            } else {
+                (content, false)
+            };
+            Ok((content, truncated))
+        })
+    })
 }
 
 /// Fetch a page and return content in the requested format.
@@ -225,6 +262,59 @@ pub fn do_eval(req: EvalRequest) -> Result<EvalResponse> {
                 result,
             })
         })
+    })
+}
+
+/// /search: native search across Baidu/Bing/Sogou/Google, optionally grab body for top N results.
+pub async fn do_search(req: SearchRequest) -> Result<SearchResponse, SearchError> {
+    // Step 1: native search via built-in engines.
+    let registry = crate::search::SearchEngineRegistry::new();
+    let params = crate::search::SearchParams {
+        language: req.language.clone(),
+        pageno: 1,
+        use_proxy: req.use_proxy,
+        timeout_secs: 15,
+    };
+
+    let (mut items, number_of_results) =
+        crate::search::native_search(&registry, &req.q, params, &req.categories, req.max_results).await;
+
+    // Step 2: optionally grab body for the top fetch_top results (concurrent).
+    // Each fetch runs in its own blocking thread + current-thread runtime
+    // (V8 is !Send), so spawn_blocking gives natural isolation + concurrency.
+    let n = req.fetch_top.min(items.len());
+    if n > 0 {
+        let mut handles = Vec::with_capacity(n);
+        for i in 0..n {
+            let url = items[i].url.clone();
+            let use_proxy = req.use_proxy;
+            let wait = req.wait_secs;
+            let max_chars = req.max_chars_per;
+            handles.push(tokio::task::spawn_blocking(move || {
+                (i, fetch_url_text(url, use_proxy, wait, max_chars))
+            }));
+        }
+        for h in handles {
+            let (i, res) = h.await.map_err(|e| {
+                SearchError::Other(format!("fetch task panicked: {e}"))
+            })?;
+            match res {
+                Ok((content, truncated)) => {
+                    items[i].content = Some(content);
+                    items[i].content_truncated = truncated;
+                }
+                Err(e) => {
+                    items[i].fetch_error = Some(format!("{e}"));
+                }
+            }
+        }
+    }
+
+    Ok(SearchResponse {
+        query: req.q,
+        number_of_results,
+        results: items,
+        search_backend: "native".into(),
     })
 }
 

@@ -1,18 +1,18 @@
 # `/search` 设计：搜索 + 抓取一体化
 
-> AginxBrower 的第四个端点。把"搜索"和"抓正文"合并成一个调用，
+> AginxBrowser 的第四个端点。把"搜索"和"抓正文"合并成一个调用，
 > 让 Agent 一步完成"搜 → 读"。OpenCarrier 侧删除 SearXNG MCP，
-> 搜索能力下沉到 AginxBrower，OpenCarrier 回归 Agent 本身。
+> 搜索能力下沉到 AginxBrowser，OpenCarrier 回归 Agent 本身。
 
 ## 定位与决策
 
-### 为什么把搜索放进 AginxBrower
+### 为什么把搜索放进 AginxBrowser
 
 搜索和抓取是 Agent 最常见的连续动作：**搜关键词 → 读前几个结果的正文 → 总结**。
 现在这两步分裂在两个系统（SearXNG MCP 搜、web_fetch 抓），Agent 要多次往返，
-且搜索结果指向的页面经常是动态渲染/风控页（公众号、知乎），只有 AginxBrower 抓得动。
+且搜索结果指向的页面经常是动态渲染/风控页（公众号、知乎），只有 AginxBrowser 抓得动。
 
-把搜索下沉到 AginxBrower，`/search` 一步返回"结果 + 正文"，且正文由 AginxBrower
+把搜索下沉到 AginxBrowser，`/search` 一步返回"结果 + 正文"，且正文由 AginxBrowser
 的 stealth 抓取能力保证质量。
 
 ### 关键决策：调用 SearXNG，不重写
@@ -20,30 +20,30 @@
 SearXNG 是**元搜索引擎**——自己不爬，聚合百度/Google/Bing/Brave 等。它的核心价值
 是几百个引擎结果页解析器（社区十年维护），搜索引擎改版它跟着改。
 
-**重写 SearXNG 是自杀**（一个人维护几百个解析器）。AginxBrower 直接调用本机已部署的
+**重写 SearXNG 是自杀**（一个人维护几百个解析器）。AginxBrowser 直接调用本机已部署的
 SearXNG（`127.0.0.1:8888`）作为搜索后端，白嫖它的聚合能力，自己只做"抓正文"这件
 它擅长的事。
 
 ```
 Agent → POST /search?q=macbook&fetch_top=3
          │
-         ├─① AginxBrower 调 SearXNG (127.0.0.1:8888/search?format=json)
+         ├─① AginxBrowser 调 SearXNG (127.0.0.1:8888/search?format=json)
          │     SearXNG 聚合百度/Google/Bing，返回 results[]
          │
-         └─② AginxBrower 对前 3 个 url 并发调自己的抓取能力(stealth+JS渲染)
+         └─② AginxBrowser 对前 3 个 url 并发调自己的抓取能力(stealth+JS渲染)
                拿到每条的正文 content
 
          → 返回 [{title,url,snippet,content}, ...]
 ```
 
-各司其职：**SearXNG 聚合（它的十年积累），AginxBrower 抓取（它修好的 stealth/JS）**。
+各司其职：**SearXNG 聚合（它的十年积累），AginxBrowser 抓取（它修好的 stealth/JS）**。
 
 ## 依赖关系
 
-- **SearXNG 作为 AginxBrower 的依赖**，同机部署，`127.0.0.1:8888`。
+- **SearXNG 作为 AginxBrowser 的依赖**，同机部署，`127.0.0.1:8888`。
 - 地址由环境变量 `SEARXNG_URL` 配置（默认 `http://127.0.0.1:8888`）。
 - **降级**：SearXNG 不可用时，`/search` 返回 503（搜索后端不可用），**不影响 `/fetch` `/eval` `/click`**——它们不依赖 SearXNG。
-- 部署清单：SearXNG（systemd/已有）+ AginxBrower（systemd/已有），同机。
+- 部署清单：SearXNG（systemd/已有）+ AginxBrowser（systemd/已有），同机。
 
 ## API
 
@@ -156,10 +156,10 @@ cookie 注入等。
 
 OpenCarrier 侧：
 - **删除** `mcp_searxng_web_search` 工具 + SearXNG MCP 配置（`config.toml` 的 searxng 条目）
-- Agent 需要搜索时，调 AginxBrower 的 `/search`（通过 `web_fetch` 或新增工具）
+- Agent 需要搜索时，调 AginxBrowser 的 `/search`（通过 `web_fetch` 或新增工具）
 
 OpenCarrier 不再背"搜索基础设施"，回归 Agent 本身。SearXNG 从 OpenCarrier 的依赖
-变成 AginxBrower 的依赖，但物理上还是同一个进程、同一台机器，只是归属变了。
+变成 AginxBrowser 的依赖，但物理上还是同一个进程、同一台机器，只是归属变了。
 
 ## 缓存
 
