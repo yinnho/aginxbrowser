@@ -4,7 +4,10 @@
 
 ## 定位
 
-- **AginxBrower**：服务端浏览器，内置 V8 引擎，支持 JS 执行、CSS 选择器、页面导航
+**轻量级服务端浏览器 + 搜索外挂**——内置 V8 引擎，支持 JS 执行、CSS 选择器、页面导航，并能聚合搜索 + 抓正文一体化。定位是**纯外挂基础设施**：作为独立服务挂在系统里，谁需要谁调，不嵌入宿主代码。
+
+- **抓取**：渲染 JS、过风控（微信公众号免 cookie）、提取正文
+- **搜索**：`/search` 调本机 SearXNG 聚合百度/Google/Bing，并可对前 N 条结果自动抓正文，Agent 一步完成"搜→读"
 - **复杂场景 fallback 到 Chromium**：本 PoC 不实现 Chromium fallback，后续可在调度层根据失败类型切换
 
 ## 目录结构
@@ -46,6 +49,19 @@ aginxbrower/
   ```bash
   export OBSCURA_PROXY=socks5://127.0.0.1:8800
   ```
+- **`/search` 依赖 SearXNG**（同机部署，默认 `http://127.0.0.1:8888`，由 `SEARXNG_URL` 配置）。SearXNG 是元搜索引擎，聚合百度/Google/Bing 等；AginxBrower 调它做搜索，自己做抓取，各司其职（不重写 SearXNG）。SearXNG 不可用时 `/search` 返回 503，不影响 `/fetch` `/eval` `/click`。
+
+## 运行时环境变量
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `AGINXBROWER_BIND` | `0.0.0.0:8089` | 监听地址 |
+| `AGINXBROWER_STEALTH` | 启用 | `0` 关闭 stealth（诊断用） |
+| `AGINXBROWER_UA` | Linux Chrome145 | 伪装 UA（stealth 下应设为 macOS Chrome145 保持指纹自洽） |
+| `AGINXBROWER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language |
+| `OBSCURA_PROXY` | 无 | 代理地址，`use_proxy:true` 时使用 |
+| `AGINXBROWER_CACHE_TTL_SECS` | `600` | `/fetch` 缓存 TTL，`0` 禁用 |
+| `SEARXNG_URL` | `http://127.0.0.1:8888` | SearXNG 地址（`/search` 用） |
 
 ## 构建
 
@@ -202,6 +218,67 @@ EOF
   "result": "Example Domain"
 }
 ```
+
+### POST /search
+
+聚合搜索（SearXNG 后端）+ 可选自动抓正文。Agent 一步完成"搜→读"。
+
+请求字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| q | string | 是 | 搜索关键词 |
+| fetch_top | usize | 否 | 对前 N 条结果抓正文，默认 `0`（只返回 title/url/snippet，毫秒级） |
+| categories | string | 否 | SearXNG 分类，默认 `general` |
+| language | string | 否 | 语言，默认 `zh-CN` |
+| max_results | usize | 否 | 返回结果上限，默认 `10` |
+| max_chars_per | usize | 否 | 每条正文字符截断，默认 `4000`，`0` 不限 |
+| wait_secs | u64 | 否 | 抓正文时每页 JS 渲染等待秒数，默认 `3` |
+| use_proxy | bool | 否 | 抓正文时是否走代理（国外站），默认 `false` |
+
+示例（纯搜索，快）：
+
+```bash
+curl -s -X POST http://127.0.0.1:8089/search \
+  -H "Content-Type: application/json" \
+  -d '{"q":"macbook 价格","max_results":5}'
+```
+
+示例（搜索 + 抓前 3 条正文，一步到位）：
+
+```bash
+curl -s -X POST http://127.0.0.1:8089/search \
+  -H "Content-Type: application/json" \
+  -d '{"q":"macbook 价格","fetch_top":3,"max_chars_per":2000}'
+```
+
+响应：
+
+```json
+{
+  "query": "macbook 价格",
+  "number_of_results": 1000,
+  "results": [
+    {
+      "title": "MacBook Air - Apple",
+      "url": "https://www.apple.com/mac/",
+      "snippet": "...(SearXNG 摘要)...",
+      "engines": ["bing", "google"],
+      "score": 8.5,
+      "content": "...(正文,仅 index<fetch_top 才有,否则 null)...",
+      "content_truncated": false,
+      "fetch_error": null
+    }
+  ],
+  "search_backend": "searxng"
+}
+```
+
+- `fetch_top=0`：纯搜索，等价 SearXNG，毫秒级。
+- `fetch_top>0`：前 N 条并发抓正文（复用 `/fetch` 的 stealth + JS 渲染），单条失败不影响其他（`fetch_error` 标记）。
+- SearXNG 不可用：返回 503，不影响其他端点。
+
+> 设计细节见 [`docs/search-design.md`](docs/search-design.md)。
 
 ## 错误处理
 

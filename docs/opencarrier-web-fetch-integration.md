@@ -107,6 +107,51 @@ async fn fetch_via_aginxbrower(&self, url: &str) -> Result<String, String> {
 
 env var 差异：`browser.rs` 未设 `AGINXBROWER_URL` 时用默认 `127.0.0.1:8089`（默认启用）；`web_fetch` 未设时为 None（默认禁用，保回归）。各自语义合理。
 
+## 搜索能力下沉：删除 SearXNG MCP，改用 AginxBrower /search
+
+### 背景
+
+OpenCarrier 原本通过 `mcp_searxng_web_search` 工具（SearXNG MCP）提供搜索。这把
+"搜索基础设施"塞进了 Agent 运行时，违背"OpenCarrier 回归 Agent 本身"的原则。
+
+决策：**搜索下沉到 AginxBrower**。OpenCarrier 删除 SearXNG MCP，Agent 需要搜索时
+调 AginxBrower 的 `/search`。SearXNG 从 OpenCarrier 的依赖变成 AginxBrower 的依赖
+（物理上仍是同机同一个进程，只是归属转移）。
+
+### OpenCarrier 侧改动
+
+1. **删除** `config.toml` 里的 searxng MCP 条目：
+   ```toml
+   # 删除这一段
+   [[mcp_servers]]
+   name = "searxng"
+   transport = { type = "stdio", command = "/Users/.../searxng-mcp" }
+   ```
+2. **删除** `mcp_searxng_web_search` 工具的注册/分发代码。
+3. **新增** 一个调 AginxBrower `/search` 的内置工具（或复用 web_fetch 的 AginxBrower
+   路由），例如 `web_search`：
+   - `web_search(q, fetch_top=0)` → POST `http://<AGINXBROWER_URL>/search`
+   - 复用 `AGINXBROWER_URL` 环境变量（和 web_fetch 同一个开关）
+
+### 关键设计：不重写 SearXNG
+
+AginxBrower 的 `/search` **调用**本机 SearXNG（`SEARXNG_URL`，默认
+`http://127.0.0.1:8888`）做聚合，自己只做"抓正文"。SearXNG 的几百个引擎解析器
+（百度/Google 改版维护）是社区十年积累，重写是自杀——白嫖它。
+
+`/search` 的两种模式：
+- `fetch_top=0`：纯搜索（等价原 SearXNG MCP），毫秒级
+- `fetch_top>0`：搜完对前 N 条抓正文（复用 AginxBrower 的 stealth+JS），Agent 一步拿到"结果+正文"
+
+### 部署
+
+SearXNG 仍同机部署（`127.0.0.1:8888`），只是它的"上层调用方"从 OpenCarrier 换成
+AginxBrower。SearXNG 不可用时，`/search` 返回 503，不影响 AginxBrower 的其他端点
+（`/fetch` `/eval` `/click` 都不依赖 SearXNG）。
+
+详见 [`docs/search-design.md`](search-design.md)。
+
+
 ## 部署
 
 1. AginxBrower 与 OpenCarrier 同机部署（`127.0.0.1:8089`）
