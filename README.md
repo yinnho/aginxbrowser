@@ -98,13 +98,27 @@ curl http://127.0.0.1:8089/health
 | format | string | 否 | `markdown` / `html` / `text`，默认 `markdown` |
 | selector | string | 否 | CSS 选择器，仅提取选中区域 |
 | wait_secs | u64 | 否 | 页面加载后额外等待秒数 |
+| use_proxy | bool | 否 | 走 `OBSCURA_PROXY` 代理，默认 `false`（国内站点直连；国外站点设 `true`） |
+| cookies | string[] | 否 | 导航前注入的 cookie（`["name=value", ...]`），用于需登录态的站点 |
+| max_chars | usize | 否 | 截断 `content` 到指定字符数，默认 `50000`，`0` 不限 |
+
+响应字段：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| url | string | 最终 URL（重定向后） |
+| title | string? | 页面标题 |
+| content | string | 抓取内容（markdown/html/text） |
+| truncated | bool | `content` 是否被 `max_chars` 截断 |
+
+**缓存**：`/fetch` 有进程内缓存（key 含 url/format/selector/cookies/use_proxy/max_chars），TTL 由 `AGINXBROWER_CACHE_TTL_SECS` 控制（默认 600s，`0` 禁用）。重复抓取同一 URL 命中缓存（~0.01s vs 首次 ~1s）。
 
 示例：
 
 ```bash
 cat <<EOF | curl -sS -X POST http://127.0.0.1:8089/fetch \
   -H "Content-Type: application/json" -d @-
-{"url":"https://github.com/trending","format":"text","selector":"article"}
+{"url":"https://github.com/trending","format":"text","selector":"article","use_proxy":true}
 EOF
 ```
 
@@ -114,9 +128,12 @@ EOF
 {
   "url": "https://github.com/trending",
   "title": "Trending  repositories on GitHub today · GitHub",
-  "content": "..."
+  "content": "...",
+  "truncated": false
 }
 ```
+
+**安全**：内置 SSRF 防护（`validate_url` 拦截非 http(s/file) scheme、私网/loopback IP），robots.txt、tracker 拦截（stealth 模式）。
 
 ### POST /click
 
@@ -129,6 +146,8 @@ EOF
 | url | string | 是 | 目标 URL |
 | selector | string | 是 | CSS 选择器 |
 | wait_secs | u64 | 否 | 页面加载后额外等待秒数 |
+| use_proxy | bool | 否 | 走 `OBSCURA_PROXY` 代理，默认 `false` |
+| cookies | string[] | 否 | 导航前注入的 cookie |
 
 示例：
 
@@ -159,8 +178,12 @@ EOF
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | url | string | 是 | 目标 URL |
-| script | string | 是 | JS 表达式或 IIFE |
+| script | string | 是 | JS 表达式或 async IIFE（支持 awaitPromise，可等动态渲染） |
 | wait_secs | u64 | 否 | 页面加载后额外等待秒数 |
+| use_proxy | bool | 否 | 走 `OBSCURA_PROXY` 代理，默认 `false` |
+| cookies | string[] | 否 | 导航前注入的 cookie |
+
+> `/eval` 支持 **async 脚本**（返回 Promise 会被 await），适合抓取 React/Vue 等动态渲染页面：`script: "(async()=>{await new Promise(r=>setTimeout(r,3000));return document.body.innerText})()"`。
 
 示例：
 
