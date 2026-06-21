@@ -32,9 +32,13 @@ impl SearchEngine for BingEngine {
         query: &str,
         params: SearchParams,
     ) -> Result<Vec<RawSearchResult>, SearchEngineError> {
+        // Use cn.bing.com directly — the server is in China and www.bing.com
+        // 302-redirects to cn.bing.com, which plain_fetch treats as a transient
+        // error (redirect policy is "none" for CAPTCHA detection). Using the
+        // China endpoint directly avoids the redirect entirely.
         let offset = (params.pageno.saturating_sub(1)) * 10;
         let url = format!(
-            "https://www.bing.com/search?q={}&count=10&offset={}&setlang={}",
+            "https://cn.bing.com/search?q={}&count=10&offset={}&setlang={}",
             urlencoding::encode(query),
             offset,
             urlencoding::encode(&params.language),

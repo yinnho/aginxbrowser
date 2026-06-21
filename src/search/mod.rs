@@ -385,12 +385,21 @@ pub async fn stealth_fetch(
         .map_err(|e| SearchEngineError::Transient(format!("fetch error: {e}")))?;
 
     // CAPTCHA detection: check if any intermediate redirect went to an
-    // anti-spider URL. The stealth client follows redirects internally but
-    // records them in redirected_from.
+    // anti-spider URL, or if the final URL landed on one. The stealth client
+    // follows redirects internally; redirected_from holds the *source* URLs
+    // and resp.url is the final destination.
+    let final_url = resp.url.as_str();
+    if final_url.contains("/antispider")
+        || final_url.contains("wappass.baidu.com")
+        || final_url.contains("sorry.google.com")
+    {
+        return Err(SearchEngineError::Captcha { suspend_secs: 1800 });
+    }
     for redirected in &resp.redirected_from {
-        if redirected.as_str().contains("/antispider")
-            || redirected.as_str().contains("wappass.baidu.com")
-            || redirected.as_str().contains("sorry.google.com")
+        let next = redirected.as_str();
+        if next.contains("/antispider")
+            || next.contains("wappass.baidu.com")
+            || next.contains("sorry.google.com")
         {
             return Err(SearchEngineError::Captcha { suspend_secs: 1800 });
         }
@@ -402,36 +411,55 @@ pub async fn stealth_fetch(
 }
 
 /// Fetch a URL via plain reqwest, returning the decoded text. Handles
-/// charset decoding for Chinese engines (GBK/GB2312).
+/// charset decoding for Chinese engines (GBK/GB2312). Follows non-CAPTCHA
+/// redirects up to `max_redirects` hops.
 pub async fn plain_fetch(client: &reqwest::Client, url: &str) -> Result<String, SearchEngineError> {
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| SearchEngineError::Transient(format!("fetch error: {e}")))?;
+    let mut current_url = url.to_string();
+    let max_redirects = 5;
 
-    // CAPTCHA detection: check for 302 to known anti-spider locations.
-    if resp.status().is_redirection() {
-        if let Some(location) = resp.headers().get("location") {
-            let loc = location.to_str().unwrap_or("");
-            if loc.contains("/antispider")
-                || loc.contains("wappass.baidu.com")
-                || loc.contains("sorry.google.com")
-            {
-                return Err(SearchEngineError::Captcha { suspend_secs: 1800 });
+    for _ in 0..max_redirects {
+        let resp = client
+            .get(&current_url)
+            .send()
+            .await
+            .map_err(|e| SearchEngineError::Transient(format!("fetch error: {e}")))?;
+
+        // CAPTCHA detection: check for 302 to known anti-spider locations.
+        if resp.status().is_redirection() {
+            if let Some(location) = resp.headers().get("location") {
+                let loc = location.to_str().unwrap_or("");
+                if loc.contains("/antispider")
+                    || loc.contains("wappass.baidu.com")
+                    || loc.contains("sorry.google.com")
+                {
+                    return Err(SearchEngineError::Captcha { suspend_secs: 1800 });
+                }
+                // Normal redirect — follow it.
+                current_url = if loc.starts_with("http") {
+                    loc.to_string()
+                } else {
+                    // Relative redirect.
+                    let base = url::Url::parse(&current_url)
+                        .map_err(|e| SearchEngineError::Transient(format!("bad url: {e}")))?;
+                    base.join(loc)
+                        .map(|u| u.to_string())
+                        .unwrap_or_else(|_| loc.to_string())
+                };
+                continue;
             }
+            return Err(SearchEngineError::Transient("redirect without location".into()));
         }
-        // For non-CAPTCHA redirects, follow manually by re-requesting.
-        // For simplicity, we'll just return an error for now.
-        return Err(SearchEngineError::Transient(format!("redirect to: {}", resp.headers().get("location").and_then(|v| v.to_str().ok()).unwrap_or("?"))));
+
+        // Non-redirect response — read body.
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| SearchEngineError::Transient(format!("read body error: {e}")))?;
+
+        // Decode with charset detection (handles GBK/GB2312 from Baidu/Sogou).
+        let text = crate::obscura_net::encoding::decode_non_html(&bytes.to_vec(), None);
+        return Ok(text);
     }
 
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| SearchEngineError::Transient(format!("read body error: {e}")))?;
-
-    // Decode with charset detection (handles GBK/GB2312 from Baidu/Sogou).
-    let text = crate::obscura_net::encoding::decode_non_html(&bytes.to_vec(), None);
-    Ok(text)
+    Err(SearchEngineError::Transient("too many redirects".into()))
 }
