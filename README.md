@@ -251,12 +251,12 @@ EOF
 | Baidu | general | wreq stealth | 百度 JSON API，中国最常用 |
 | Bing | general | plain reqwest | Bing HTML 解析，稳定可靠 |
 | Sogou | general | plain reqwest | 搜狗通用搜索 |
-| Sogou WeChat | general, news | plain reqwest | 搜狗微信搜索，plain reqwest 搜索 + 解析 /link 跳转 |
+| Sogou WeChat | general, news | plain reqwest | 搜狗微信搜索 |
 | Google | general | wreq stealth + proxy | Google HTML 解析，国内需代理 |
 
 - **合并去重**：多引擎返回的同一 URL（归一化后）合并为一条结果，`engines` 字段列出所有来源引擎，`score` 累加
 - **CAPTCHA 暂停**：引擎触发验证码后自动暂停（搜狗微信 60 分钟，其他 30 分钟），不影响其他引擎
-- **stealth 优势**：wreq 使用 BoringSSL 模拟 Chrome145 TLS 指纹，绕过百度等基于 TLS 指纹的反爬检测；搜狗搜索不检测 TLS 指纹（plain reqwest 即可），但 `/link` 跳转需要同会话 cookie + Referer 才能解析到真实微信文章 URL
+- **stealth 优势**：wreq 使用 BoringSSL 模拟 Chrome145 TLS 指纹，绕过基于 TLS 指纹的反爬检测
 
 示例（纯搜索，快）：
 
@@ -346,7 +346,7 @@ curl -s -X POST http://127.0.0.1:8089/eval -H 'Content-Type: application/json' -
 
 ### 微信公众号文章（公开，无需登录）
 
-stealth 指纹 + macOS UA 即可，**不需要 cookie**：
+stealth 模式可直接抓取，**不需要 cookie**：
 
 ```bash
 curl -s -X POST http://127.0.0.1:8089/eval -H 'Content-Type: application/json' -d '{
@@ -362,17 +362,13 @@ curl -s -X POST http://127.0.0.1:8089/search -H 'Content-Type: application/json'
   -d '{"q":"AI人工智能","categories":"news","fetch_top":3,"max_chars_per":2000}'
 ```
 
-> 搜狗微信引擎使用 plain reqwest 搜索 + 解析 `/link` 跳转 URL，获取真实 `mp.weixin.qq.com` 链接后由 obscura 浏览器（macOS UA）抓取正文。需设置 `AGINXBROWSER_UA` 为 macOS Chrome UA。
+### 知乎专栏（需 cookie）
 
-### 知乎专栏（需 __zse_ck cookie）
-
-知乎专栏是公开内容（无需登录），但知乎要求带 `__zse_ck` cookie 才放行（否则 403）。**只需 `__zse_ck` 一个 cookie，不需要 d_c0 / 登录态 / 住宅代理**；同一个 `__zse_ck` 对所有专栏文章通用，有效期约一年。正文在初始 HTML 的 `<script id="js-initialData">` JSON 里（SSR），直接解析即可，不依赖 JS 渲染，绕过 DOM 完整性问题。
+知乎专栏是公开内容（无需登录），但需要提供有效 cookie 才能访问：
 
 ```bash
-./examples/zhihu.sh "<文章URL>" "<__zse_ck值>"
+./examples/zhihu.sh "<文章URL>" "<cookie值>"
 ```
-
-`__zse_ck` 获取（约一年一次）：浏览器打开任意知乎专栏 → F12 → Application → Cookies → `.zhihu.com` → 复制 `__zse_ck`。首次访问知乎会弹易盾验证码，人工过一次后 `__zse_ck` 长期有效。
 
 ## 已知限制
 
