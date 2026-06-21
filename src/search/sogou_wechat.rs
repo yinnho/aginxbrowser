@@ -3,25 +3,20 @@ use async_trait::async_trait;
 use super::{SearchParams, RawSearchResult, SearchEngine, SearchEngineError};
 
 /// Sogou WeChat search engine. Searches WeChat public account articles.
-/// MUST use wreq stealth client — weixin.sogou.com blocks plain reqwest and
-/// httpx TLS fingerprints.
+///
+/// Uses plain reqwest for BOTH search and /link redirect resolution.
+/// weixin.sogou.com search doesn't check TLS fingerprint (curl works fine).
+/// wreq stealth (even with Linux UA) sometimes triggers /link's antispider
+/// due to its auto-injected sec-ch-ua/sec-fetch headers. And with macOS UA
+/// (needed for WeChat article fetching), the search page itself triggers
+/// antispider. Plain reqwest avoids both issues.
 pub struct SogouWechatEngine {
-    #[cfg(feature = "stealth")]
-    stealth: Option<std::sync::Arc<crate::obscura_net::wreq_client::StealthHttpClient>>,
     plain_client: reqwest::Client,
 }
 
 impl SogouWechatEngine {
     pub fn new() -> Self {
-        #[cfg(feature = "stealth")]
-        let stealth = {
-            let s = super::build_stealth_client(false); // Sogou is domestic, direct
-            Some(s)
-        };
-
         SogouWechatEngine {
-            #[cfg(feature = "stealth")]
-            stealth,
             plain_client: super::build_plain_client(10),
         }
     }
@@ -42,67 +37,236 @@ impl SearchEngine for SogouWechatEngine {
         query: &str,
         params: SearchParams,
     ) -> Result<Vec<RawSearchResult>, SearchEngineError> {
-        let url = format!(
-            "https://weixin.sogou.com/weixin?type=2&query={}&page={}&ie=utf8",
-            urlencoding::encode(query),
-            params.pageno,
-        );
+        // Use plain reqwest for the entire search + redirect resolution flow.
+        // weixin.sogou.com doesn't check TLS fingerprint (curl works fine),
+        // and plain reqwest avoids the Chrome Client Hints headers that
+        // wreq stealth auto-injects (which trigger /link's antispider).
+        let results = reqwest_search_and_resolve(&self.plain_client, query, params.pageno).await;
 
-        // Try stealth client first, fall back to plain reqwest.
-        let html;
-        #[cfg(feature = "stealth")]
-        {
-            html = if let Some(ref stealth) = self.stealth {
-                match super::stealth_fetch(stealth.as_ref(), &url).await {
-                    Ok((text, _)) => text,
-                    Err(e) => return Err(e),
-                }
-            } else {
-                super::plain_fetch(&self.plain_client, &url).await?
-            };
-        }
-        #[cfg(not(feature = "stealth"))]
-        {
-            html = super::plain_fetch(&self.plain_client, &url).await?;
-        }
-
-        // Check for CAPTCHA indicators in the HTML body.
-        if html.contains("antispider") || html.contains("用户频率限制") {
-            return Err(SearchEngineError::Captcha {
-                suspend_secs: 3600, // 60 minutes — Sogou WeChat CAPTCHA is hard to pass
-            });
-        }
-
-        let mut results = parse_sogou_wechat_html(&html)?;
-
-        // Inject session cookies from the wreq stealth client into results.
-        // The /link redirect URLs need these cookies to pass sogou's antispider
-        // check during the fetch phase. Without them, the obscura browser gets
-        // redirected to the CAPTCHA page.
-        #[cfg(feature = "stealth")]
-        if let Some(ref stealth) = self.stealth {
-            let cookie_header = stealth.cookie_jar.get_cookie_header(
-                &url::Url::parse("https://weixin.sogou.com/").unwrap()
-            );
-            tracing::debug!("sogou_wechat: session cookie header for weixin.sogou.com: {:?} (len={})", cookie_header, cookie_header.len());
-            if !cookie_header.is_empty() {
-                // Convert "name1=val1; name2=val2" into Set-Cookie style strings
-                // that inject_cookies() can parse.
-                let cookies: Vec<String> = cookie_header
-                    .split("; ")
-                    .map(|pair| {
-                        let domain = "Domain=weixin.sogou.com";
-                        format!("{}; {}; Path=/", pair.trim(), domain)
-                    })
-                    .collect();
-                tracing::debug!("sogou_wechat: injecting {} cookies into results", cookies.len());
-                for r in &mut results {
-                    r.cookies = cookies.clone();
-                }
-            }
+        if results.is_empty() {
+            // Could be CAPTCHA or network error — return empty rather than
+            // erroring so other engines can still contribute results.
+            return Ok(Vec::new());
         }
 
         Ok(results)
+    }
+}
+
+/// Use plain reqwest
+async fn reqwest_search_and_resolve(
+    plain_client: &reqwest::Client,
+    query: &str,
+    pageno: usize,
+) -> Vec<RawSearchResult> {
+    let search_url = format!(
+        "https://weixin.sogou.com/weixin?type=2&query={}&page={}&ie=utf8",
+        urlencoding::encode(query),
+        pageno,
+    );
+
+    // Step 1: Search with plain reqwest, collect cookies.
+    let resp = match plain_client.get(&search_url)
+        .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36")
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("sogou_wechat: reqwest search failed: {}", e);
+            return Vec::new();
+        }
+    };
+
+    // Collect cookies from Set-Cookie headers.
+    let mut cookies: Vec<String> = Vec::new();
+    for val in resp.headers().get_all("set-cookie") {
+        if let Ok(s) = val.to_str() {
+            if let Some(pair) = s.split(';').next() {
+                let trimmed = pair.trim();
+                if !trimmed.is_empty() {
+                    cookies.push(trimmed.to_string());
+                }
+            }
+        }
+    }
+    let cookie_header = cookies.join("; ");
+    tracing::info!("sogou_wechat: reqwest search cookies: '{}' len={}", cookie_header, cookie_header.len());
+
+    let html = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("sogou_wechat: reqwest search read body failed: {}", e);
+            return Vec::new();
+        }
+    };
+
+    // Check for CAPTCHA.
+    if html.contains("antispider") || html.contains("用户频率限制") {
+        tracing::warn!("sogou_wechat: reqwest search hit CAPTCHA");
+        return Vec::new();
+    }
+
+    // Step 2: Parse search results.
+    let mut results = match parse_sogou_wechat_html(&html) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("sogou_wechat: reqwest parse failed: {:?}", e);
+            return Vec::new();
+        }
+    };
+
+    if results.is_empty() {
+        return results;
+    }
+
+    // Step 3: Resolve /link redirect URLs.
+    for result in results.iter_mut() {
+        if !result.url.contains("weixin.sogou.com/link") {
+            continue;
+        }
+
+        let mut req = plain_client.get(&result.url)
+            .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36")
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+            .header("Referer", &search_url);
+
+        if !cookie_header.is_empty() {
+            req = req.header("Cookie", &cookie_header);
+        }
+
+        match req.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_redirection() {
+                    if let Some(location) = resp.headers().get("location") {
+                        let loc = location.to_str().unwrap_or("");
+                        if loc.contains("/antispider") {
+                            tracing::debug!("sogou_wechat: /link hit antispider");
+                        } else if loc.contains("mp.weixin.qq.com") {
+                            tracing::info!("sogou_wechat: resolved {} -> {}", result.url, loc);
+                            result.url = loc.to_string();
+                        } else if loc.starts_with("http") {
+                            // Follow one more hop.
+                            if let Ok(next) = plain_client.get(loc)
+                                .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36")
+                                .send().await
+                            {
+                                if next.status().is_redirection() {
+                                    if let Some(loc2) = next.headers().get("location") {
+                                        let loc2_str = loc2.to_str().unwrap_or("");
+                                        if loc2_str.contains("mp.weixin.qq.com") {
+                                            tracing::info!("sogou_wechat: resolved {} -> {}", result.url, loc2_str);
+                                            result.url = loc2_str.to_string();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if status.is_success() {
+                    // 200 with HTML — might contain meta/JS redirect.
+                    if let Ok(body) = resp.text().await {
+                        if let Some(real_url) = extract_weixin_url_from_html(&body) {
+                            tracing::info!("sogou_wechat: resolved (200) {} -> {}", result.url, real_url);
+                            result.url = real_url;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!("sogou_wechat: /link resolve failed: {}", e);
+            }
+        }
+    }
+
+    results
+}
+
+/// Extract mp.weixin.qq.com
+fn extract_weixin_url_from_html(html: &str) -> Option<String> {
+    // Strategy 1: Collect JS string concatenation fragments.
+    // Look for patterns like: url += '...';  or url = '...';
+    // The variable is named "url" and is built up with += assignments.
+    let mut fragments: Vec<String> = Vec::new();
+    for line in html.lines() {
+        let trimmed = line.trim();
+        // Match: url += '...' or url += "..."
+        // Also match: url = '...' or url = "..."
+        if trimmed.starts_with("url +=") || trimmed.starts_with("url=") {
+            let rest = if trimmed.starts_with("url +=") {
+                trimmed[6..].trim()
+            } else {
+                trimmed[4..].trim()
+            };
+            // Extract the string between quotes.
+            if let Some(content) = extract_quoted_string(rest) {
+                fragments.push(content);
+            }
+        }
+    }
+    if !fragments.is_empty() {
+        let full_url: String = fragments.join("");
+        if full_url.contains("mp.weixin.qq.com") || full_url.contains("weixin.qq") {
+            tracing::debug!("sogou_wechat: reconstructed URL from {} fragments: {}", fragments.len(), full_url);
+            return Some(full_url);
+        }
+    }
+
+    // Strategy 2: Look for meta refresh.
+    if let Some(start) = html.find("url=") {
+        let rest = &html[start + 4..];
+        let end = rest.find(&['"', '\'', ';', ' ']).unwrap_or(rest.len());
+        let url = &rest[..end];
+        if url.contains("mp.weixin.qq.com") {
+            return Some(url.to_string());
+        }
+    }
+
+    // Strategy 3: Look for location.href or window.location in JS.
+    for pattern in &["location.href=\"", "location.href='", "location=\"", "location='", "window.location=\"", "window.location='"] {
+        if let Some(start) = html.find(pattern) {
+            let rest = &html[start + pattern.len()..];
+            let end = rest.find(&['"', '\'']).unwrap_or(rest.len());
+            let url = &rest[..end];
+            if url.contains("mp.weixin.qq.com") {
+                return Some(url.to_string());
+            }
+        }
+    }
+
+    // Strategy 4: Look for any mp.weixin.qq.com or weixin.qq in the HTML
+    // (handles cases where the URL is partially split but still visible).
+    if let Some(pos) = html.find("weixin.qq") {
+        // Walk backwards to find "http".
+        let before = &html[..pos];
+        let proto_start = before.rfind("http").unwrap_or(0);
+        let url_start = &html[proto_start..];
+        // Find the end of the URL.
+        let end = url_start.find(&['"', '\'', '<', ' ', '\\', '\n']).unwrap_or(url_start.len());
+        let url = &url_start[..end];
+        if url.starts_with("http") && url.contains("weixin.qq") {
+            return Some(url.to_string());
+        }
+    }
+
+    None
+}
+
+/// Extract the content of
+fn extract_quoted_string(s: &str) -> Option<String> {
+    let s = s.trim_start();
+    if s.starts_with('\'') {
+        let end = s[1..].find('\'')?;
+        Some(s[1..1 + end].to_string())
+    } else if s.starts_with('"') {
+        let end = s[1..].find('"')?;
+        Some(s[1..1 + end].to_string())
+    } else {
+        None
     }
 }
 
