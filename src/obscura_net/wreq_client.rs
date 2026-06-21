@@ -47,25 +47,37 @@ impl StealthHttpClient {
     /// is wired via `Proxy::http` (see note below); otherwise the client is
     /// direct-only.
     fn build_stealth_client(proxy_url: Option<&str>) -> wreq::Client {
-        // Issue #184: `set_default_paths()` reads OpenSSL's compile-time CA
-        // paths, which only resolve on Linux. `CertStore::default()` uses wreq's
-        // bundled Mozilla roots (`webpki-root-certs`), same on every platform.
+        Self::build_stealth_client_with_os(proxy_url, None)
+    }
+
+    /// Build a stealth wreq client with an optional explicit OS override.
+    /// When `os_override` is Some, it takes precedence over the UA-derived OS,
+    /// allowing engines like Google to use Android TLS fingerprints for GSA
+    /// User-Agent requests.
+    fn build_stealth_client_with_os(
+        proxy_url: Option<&str>,
+        os_override: Option<wreq_util::EmulationOS>,
+    ) -> wreq::Client {
         let cert_store = wreq::tls::CertStore::default();
 
-        // The emulation OS must match the advertised User-Agent, otherwise the
-        // TLS/JA3 fingerprint (OS-specific) clashes with the HTTP UA — a strong
-        // anti-bot signal ("shape coherence"). Derive from AGINXBROWSER_UA.
-        let ua = std::env::var("AGINXBROWSER_UA").unwrap_or_default();
-        let os = if ua.contains("Windows") {
-            wreq_util::EmulationOS::Windows
-        } else if ua.contains("Macintosh") || ua.contains("Mac OS X") {
-            wreq_util::EmulationOS::MacOS
-        } else if ua.contains("Android") {
-            wreq_util::EmulationOS::Android
-        } else if ua.contains("iPhone") || ua.contains("iPad") {
-            wreq_util::EmulationOS::IOS
+        let os = if let Some(os) = os_override {
+            os
         } else {
-            wreq_util::EmulationOS::Linux
+            // The emulation OS must match the advertised User-Agent, otherwise the
+            // TLS/JA3 fingerprint (OS-specific) clashes with the HTTP UA — a strong
+            // anti-bot signal ("shape coherence"). Derive from AGINXBROWSER_UA.
+            let ua = std::env::var("AGINXBROWSER_UA").unwrap_or_default();
+            if ua.contains("Windows") {
+                wreq_util::EmulationOS::Windows
+            } else if ua.contains("Macintosh") || ua.contains("Mac OS X") {
+                wreq_util::EmulationOS::MacOS
+            } else if ua.contains("Android") {
+                wreq_util::EmulationOS::Android
+            } else if ua.contains("iPhone") || ua.contains("iPad") {
+                wreq_util::EmulationOS::IOS
+            } else {
+                wreq_util::EmulationOS::Linux
+            }
         };
 
         let emulation_opts = wreq_util::EmulationOption::builder()
@@ -96,9 +108,19 @@ impl StealthHttpClient {
     }
 
     pub fn with_proxy(cookie_jar: Arc<CookieJar>, proxy_url: Option<&str>) -> Self {
-        let proxied_client = proxy_url.map(|_| Self::build_stealth_client(proxy_url));
-        // Direct client is always built (no proxy arg).
-        let direct_client = Self::build_stealth_client(None);
+        Self::with_proxy_and_os(cookie_jar, proxy_url, None)
+    }
+
+    /// Build a StealthHttpClient with an explicit OS override for TLS emulation.
+    /// This allows Google engine to use Android TLS fingerprints matching its GSA
+    /// User-Agent, so Google returns server-rendered HTML instead of JS-only pages.
+    pub fn with_proxy_and_os(
+        cookie_jar: Arc<CookieJar>,
+        proxy_url: Option<&str>,
+        os_override: Option<wreq_util::EmulationOS>,
+    ) -> Self {
+        let proxied_client = proxy_url.map(|_| Self::build_stealth_client_with_os(proxy_url, os_override));
+        let direct_client = Self::build_stealth_client_with_os(None, os_override);
 
         StealthHttpClient {
             proxied_client,
@@ -155,9 +177,18 @@ impl StealthHttpClient {
             let ua = self.user_agent.read().await.clone();
             let lang = self.accept_language.read().await.clone();
             let (_, platform) = crate::obscura_net::client::derive_client_hints(&ua);
+            let extra = self.extra_headers.read().await;
             req = req.header("User-Agent", &ua);
-            req = req.header("Accept-Language", &lang);
-            req = req.header("Sec-Ch-Ua-Platform", &platform);
+            // Only set Accept-Language automatically if not overridden in extra_headers.
+            if !extra.contains_key("Accept-Language") {
+                req = req.header("Accept-Language", &lang);
+            }
+            // Only set Sec-Ch-Ua-Platform automatically if not overridden.
+            // Some engines (e.g. Google with GSA UA) explicitly set this to ""
+            // in extra_headers to suppress it.
+            if !extra.contains_key("Sec-Ch-Ua-Platform") {
+                req = req.header("Sec-Ch-Ua-Platform", &platform);
+            }
 
             let cookie_header = self.cookie_jar.get_cookie_header(&current_url);
             if !cookie_header.is_empty() {

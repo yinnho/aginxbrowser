@@ -371,6 +371,33 @@ pub fn build_stealth_client(_use_proxy: bool) -> Option<()> {
     None
 }
 
+/// Build an Android Chrome145 stealth client. Google requires an Android TLS
+/// fingerprint to match the GSA (Google Search App) User-Agent; a desktop
+/// Chrome145 TLS fingerprint + mobile UA is detected as inconsistent and
+/// Google returns a JS-only page instead of server-rendered HTML.
+#[cfg(feature = "stealth")]
+pub fn build_android_stealth_client(
+    use_proxy: bool,
+) -> Arc<crate::obscura_net::wreq_client::StealthHttpClient> {
+    let proxy_url = if use_proxy {
+        std::env::var("OBSCURA_PROXY").ok()
+    } else {
+        None
+    };
+    let cookie_jar = Arc::new(crate::obscura_net::cookies::CookieJar::new());
+    let client = crate::obscura_net::wreq_client::StealthHttpClient::with_proxy_and_os(
+        cookie_jar,
+        proxy_url.as_deref(),
+        Some(wreq_util::EmulationOS::Android),
+    );
+    Arc::new(client)
+}
+
+#[cfg(not(feature = "stealth"))]
+pub fn build_android_stealth_client(_use_proxy: bool) -> Option<()> {
+    None
+}
+
 /// Fetch a URL via the stealth client, returning the decoded text and the
 /// final URL. Handles CAPTCHA detection via 302 redirects.
 #[cfg(feature = "stealth")]
