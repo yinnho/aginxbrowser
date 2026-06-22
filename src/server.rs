@@ -130,6 +130,55 @@ fn inject_cookies(browser: &Browser, cookies: &[String], target_url: &str) {
     }
 }
 
+/// Check if the current page is a Cloudflare challenge.
+fn is_cloudflare_challenge(page: &mut crate::page::Page) -> bool {
+    let title_val = page.evaluate("document.title");
+    let title = title_val.as_str().unwrap_or("");
+    if title.contains("Just a moment") || title.contains("Attention Required") {
+        return true;
+    }
+    let has_turnstile_val = page.evaluate(
+        r#"!!document.querySelector('iframe[src*="challenges.cloudflare.com"]')"#,
+    );
+    has_turnstile_val.as_bool().unwrap_or(false)
+}
+
+/// After goto(), detect and auto-bypass Cloudflare Turnstile challenges.
+/// Waits for `cf_clearance` cookie, then re-navigates if the page hasn't
+/// auto-redirected.
+async fn maybe_bypass_challenge(page: &mut crate::page::Page) -> Result<()> {
+    if !is_cloudflare_challenge(page) {
+        return Ok(());
+    }
+    let url = page.url();
+    tracing::info!("Cloudflare challenge detected at {}, auto-bypassing...", url);
+
+    // Give Turnstile JS time to execute (managed challenge auto-completes).
+    page.settle(5000).await;
+
+    // Wait for cf_clearance cookie (the signal that Turnstile passed).
+    match page
+        .wait_for_cookie("cf_clearance", std::time::Duration::from_secs(25))
+        .await
+    {
+        Ok(()) => {
+            tracing::info!("cf_clearance cookie received, challenge passed");
+            // If the page didn't auto-redirect, re-navigate.
+            if is_cloudflare_challenge(page) {
+                tracing::info!("Re-navigating to {} after challenge pass", url);
+                page.goto(&url).await?;
+                page.settle(3000).await;
+            }
+        }
+        Err(e) => {
+            tracing::warn!("cf_clearance timeout: {}", e);
+            // Don't fail hard — the page might still have usable content
+            // (e.g. invisible challenge that completed without cookie).
+        }
+    }
+    Ok(())
+}
+
 /// Read the rendered text content from the live DOM (after JS has run).
 /// When `selector` is given, return that element's innerText; otherwise the
 /// whole body. This reflects JS-filled content (WeChat/SPA), unlike parsing
@@ -198,6 +247,10 @@ fn fetch_url_text_with_cookies(
             }
             let mut page = browser.new_page().await?;
             page.goto(&url).await?;
+
+            // Auto-bypass Cloudflare Turnstile challenge if detected.
+            maybe_bypass_challenge(&mut page).await?;
+
             if wait_secs > 0 {
                 page.settle(wait_secs * 1000).await;
             }
@@ -207,7 +260,8 @@ fn fetch_url_text_with_cookies(
             tracing::info!("fetch_url_text: {} -> final_url={}", url, final_url);
             let is_antispider = final_url.contains("/antispider")
                 || final_url.contains("wappass.baidu.com")
-                || final_url.contains("sorry.google.com");
+                || final_url.contains("sorry.google.com")
+                || final_url.contains("challenge-platform");
             let content = rendered_text(&mut page, None);
 
             // If we landed on an antispider/CAPTCHA page, treat it as an error
@@ -234,6 +288,11 @@ pub fn do_fetch(req: FetchRequest) -> Result<FetchResponse> {
             inject_cookies(&browser, &req.cookies, &req.url);
             let mut page = browser.new_page().await?;
             page.goto(&req.url).await?;
+
+            // Auto-bypass Cloudflare Turnstile challenge if detected.
+            if req.auto_bypass_challenge {
+                maybe_bypass_challenge(&mut page).await?;
+            }
 
             if let Some(wait) = req.wait_secs {
                 page.settle(wait * 1000).await;

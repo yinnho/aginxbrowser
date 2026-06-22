@@ -33,6 +33,9 @@ pub struct FetchParams {
     /// Maximum characters to return (default: 50000)
     #[serde(default = "default_max_chars")]
     pub max_chars: usize,
+    /// Auto-detect and bypass Cloudflare Turnstile challenges (default: true)
+    #[serde(default = "default_true")]
+    pub auto_bypass_challenge: bool,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -90,6 +93,9 @@ fn default_max_results() -> usize {
 fn default_max_chars_per() -> usize {
     4000
 }
+fn default_true() -> bool {
+    true
+}
 
 // ============================================================================
 // MCP Server — wraps aginxbrowser HTTP API as MCP tools
@@ -124,6 +130,7 @@ impl AginxBrowserMcp {
             use_proxy: params.use_proxy,
             cookies: vec![],
             max_chars: params.max_chars,
+            auto_bypass_challenge: params.auto_bypass_challenge,
         };
 
         match tokio::task::spawn_blocking(move || do_fetch(req)).await {

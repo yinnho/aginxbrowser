@@ -99,6 +99,32 @@ impl Page {
         }
     }
 
+    /// Wait for a named cookie to appear (polls every 200ms).
+    pub async fn wait_for_cookie(&self, name: &str, timeout: Duration) -> Result<(), Error> {
+        let start = std::time::Instant::now();
+        loop {
+            let url_str = self.url();
+            if let Ok(parsed) = url::Url::parse(&url_str) {
+                let header = self.context.cookie_jar.get_cookie_header(&parsed);
+                // Cookie header format: "name1=value1; name2=value2"
+                if header
+                    .split("; ")
+                    .any(|pair| pair.split('=').next().map(|n| n == name).unwrap_or(false))
+                {
+                    return Ok(());
+                }
+            }
+            if start.elapsed() > timeout {
+                return Err(Error::Timeout(format!(
+                    "wait_for_cookie({}) timed out after {}ms",
+                    name,
+                    timeout.as_millis()
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
     /// Drive the page's JS event loop for up to `max_ms` milliseconds.
     ///
     /// Call this after `evaluate()` kicks off async work (Promises, fetch,

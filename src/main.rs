@@ -46,10 +46,19 @@ pub struct FetchRequest {
     /// Default 50000 — keeps responses from blowing up an LLM context window.
     #[serde(default = "default_max_chars")]
     pub max_chars: usize,
+    /// Automatically detect and bypass Cloudflare Turnstile challenges.
+    /// When a "Just a moment..." page is detected, waits up to 25s for
+    /// the `cf_clearance` cookie and re-navigates. Default: true.
+    #[serde(default = "default_true")]
+    pub auto_bypass_challenge: bool,
 }
 
 fn default_max_chars() -> usize {
     50_000
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
