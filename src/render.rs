@@ -79,7 +79,7 @@ fn extract_title(html: &str) -> Option<String> {
 
 /// Remove `<style>`, `<script>`, `<noscript>`, and `<head>` blocks from HTML so
 /// they don't leak into markdown/text output (html2md doesn't strip them).
-fn strip_non_content(html: &str) -> String {
+pub fn strip_non_content(html: &str) -> String {
     let lower = html.to_ascii_lowercase();
     let mut out = String::with_capacity(html.len());
     let bytes = html.as_bytes();

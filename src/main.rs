@@ -12,6 +12,7 @@ mod browser;
 mod config;
 mod cookie;
 mod error;
+mod firecrawl_compat;
 mod mcp;
 mod page;
 mod render;
@@ -263,7 +264,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/fetch", post(fetch_handler))
         .route("/click", post(click_handler))
         .route("/eval", post(eval_handler))
-        .route("/search", post(search_handler));
+        .route("/search", post(search_handler))
+        .route("/v1/scrape", post(firecrawl_compat::scrape_handler));
 
     let bind_addr = std::env::var("AGINXBROWSER_BIND").unwrap_or_else(|_| "0.0.0.0:8089".to_string());
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
