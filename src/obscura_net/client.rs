@@ -9,7 +9,6 @@ use tokio::sync::RwLock;
 use url::Url;
 
 use crate::obscura_net::cookies::CookieJar;
-use crate::obscura_net::interceptor::{InterceptAction, RequestInterceptor};
 
 #[derive(Debug, Clone)]
 pub struct Response {
@@ -48,29 +47,6 @@ impl Response {
             .unwrap_or(false)
     }
 }
-
-#[derive(Debug, Clone)]
-pub struct RequestInfo {
-    pub url: Url,
-    pub method: String,
-    pub headers: HashMap<String, String>,
-    pub resource_type: ResourceType,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResourceType {
-    Document,
-    Script,
-    Stylesheet,
-    Image,
-    Font,
-    Xhr,
-    Fetch,
-    Other,
-}
-
-pub type RequestCallback = Arc<dyn Fn(&RequestInfo) + Send + Sync>;
-pub type ResponseCallback = Arc<dyn Fn(&RequestInfo, &Response) + Send + Sync>;
 
 /// Process-wide opt-in via env var. Older flow that issue #4 introduced. The
 /// new `--allow-private-network` CLI flag (issue #33) sets a per-client field
@@ -198,9 +174,6 @@ pub struct ObscuraHttpClient {
     pub cookie_jar: Arc<CookieJar>,
     pub user_agent: RwLock<String>,
     pub extra_headers: RwLock<HashMap<String, String>>,
-    pub interceptor: RwLock<Option<Box<dyn RequestInterceptor + Send + Sync>>>,
-    pub on_request: RwLock<Vec<RequestCallback>>,
-    pub on_response: RwLock<Vec<ResponseCallback>>,
     pub timeout: Duration,
     pub in_flight: Arc<std::sync::atomic::AtomicU32>,
     pub block_trackers: bool,
@@ -239,9 +212,6 @@ impl ObscuraHttpClient {
                 }),
             ),
             extra_headers: RwLock::new(HashMap::new()),
-            interceptor: RwLock::new(None),
-            on_request: RwLock::new(Vec::new()),
-            on_response: RwLock::new(Vec::new()),
             in_flight: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             timeout: Duration::from_secs(30),
             block_trackers: false,
@@ -343,33 +313,6 @@ impl ObscuraHttpClient {
         let max_redirects = 20;
 
         for _redirect_count in 0..max_redirects {
-            let request_info = RequestInfo {
-                url: current_url.clone(),
-                method: method.to_string(),
-                headers: self.extra_headers.read().await.clone(),
-                resource_type: ResourceType::Document,
-            };
-
-            if let Some(interceptor) = self.interceptor.read().await.as_ref() {
-                match interceptor.intercept(&request_info).await {
-                    InterceptAction::Continue => {}
-                    InterceptAction::Block => {
-                        return Err(ObscuraNetError::Blocked(current_url.to_string()));
-                    }
-                    InterceptAction::Fulfill(response) => {
-                        return Ok(response);
-                    }
-                    InterceptAction::ModifyHeaders(headers) => {
-                        let mut extra = self.extra_headers.write().await;
-                        extra.extend(headers);
-                    }
-                }
-            }
-
-            for cb in self.on_request.read().await.iter() {
-                cb(&request_info);
-            }
-
             let ua = self.user_agent.read().await.clone();
             let (sec_ch_ua, platform) = derive_client_hints(&ua);
             let mut headers = HeaderMap::new();
@@ -525,10 +468,6 @@ impl ObscuraHttpClient {
                 body: body_bytes,
                 redirected_from: redirects,
             };
-
-            for cb in self.on_response.read().await.iter() {
-                cb(&request_info, &response);
-            }
 
             return Ok(response);
         }

@@ -5,15 +5,10 @@ use crate::{
 use crate::browser::Browser;
 use anyhow::{Context, Result};
 
-/// Error type for /search (separate from anyhow so we can map to 503 vs 500).
+/// Error type for /search (separate from anyhow so we can map to HTTP status).
 #[derive(Debug)]
 pub enum SearchError {
-    /// Search backend unreachable / errored → 503 Service Unavailable.
-    /// Reserved for future backend integration; not currently constructed
-    /// by the native engines.
-    #[allow(dead_code)]
-    BackendUnavailable(String),
-    /// Other internal error → 500
+    /// Internal error → 500
     Other(String),
 }
 
@@ -451,6 +446,5 @@ pub async fn do_search(req: SearchRequest) -> Result<SearchResponse, SearchError
         query: req.q,
         number_of_results,
         results: items,
-        search_backend: "native".into(),
     })
 }

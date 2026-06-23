@@ -210,7 +210,6 @@ pub struct SearchResponse {
     pub query: String,
     pub number_of_results: usize,
     pub results: Vec<SearchResultItem>,
-    pub search_backend: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -414,7 +413,6 @@ async fn eval_handler(Json(req): Json<EvalRequest>) -> Result<impl IntoResponse,
 
 async fn search_handler(Json(req): Json<SearchRequest>) -> Result<impl IntoResponse, AppError> {
     let resp = do_search(req).await.map_err(|e| match e {
-        SearchError::BackendUnavailable(msg) => AppError::ServiceUnavailable(msg),
         SearchError::Other(msg) => AppError::Internal(msg),
     })?;
     Ok((StatusCode::OK, Json(resp)))
