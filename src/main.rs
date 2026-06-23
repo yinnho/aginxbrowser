@@ -307,9 +307,10 @@ async fn fetch_handler(Json(req): Json<FetchRequest>) -> Result<impl IntoRespons
 /// Cache key: the request fields that change the response.
 fn fetch_cache_key(req: &FetchRequest) -> String {
     format!(
-        "{}|{:?}|{:?}|{}|{:?}|{}|{}|{}|{:?}",
+        "{}|{:?}|{:?}|{}|{:?}|{}|{}|{}|{:?}|{:?}",
         req.url, req.format, req.selector, req.use_proxy, req.cookies, req.max_chars,
         req.wait_secs.unwrap_or(0), req.auto_bypass_challenge, req.render_tier,
+        req.tls_fingerprint,
     )
 }
 
@@ -319,11 +320,18 @@ static FETCH_CACHE: std::sync::LazyLock<FetchCache> = std::sync::LazyLock::new(|
     std::sync::Mutex::new(HashMap::new())
 });
 
+/// Max entries before triggering eviction.
+const CACHE_CAPACITY: usize = 256;
+
+/// Lazy-initialized TTL read from env (parsed once, then cached).
 fn cache_ttl_secs() -> u64 {
-    std::env::var("AGINXBROWSER_CACHE_TTL_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(600)
+    static TTL: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *TTL.get_or_init(|| {
+        std::env::var("AGINXBROWSER_CACHE_TTL_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(600)
+    })
 }
 
 fn fetch_cache_get(key: &str) -> Option<FetchResponse> {
@@ -332,33 +340,54 @@ fn fetch_cache_get(key: &str) -> Option<FetchResponse> {
         return None;
     }
     let now = now_secs();
-    let cache = FETCH_CACHE.lock().ok()?;
-    let (ts, resp) = cache.get(key)?;
+    let Ok(mut cache) = FETCH_CACHE.lock() else {
+        return None;
+    };
+    let Some((ts, resp)) = cache.get(key) else {
+        return None;
+    };
     if now.saturating_sub(*ts) < ttl {
         Some(resp.clone())
     } else {
+        // Lazily remove expired entry on miss (avoids stale buildup).
+        cache.remove(key);
         None
     }
 }
 
 fn fetch_cache_put(key: &str, resp: &FetchResponse) {
-    if cache_ttl_secs() == 0 {
+    let ttl = cache_ttl_secs();
+    if ttl == 0 {
         return;
     }
     if let Ok(mut cache) = FETCH_CACHE.lock() {
-        // Bound the cache to avoid unbounded growth across distinct URLs.
-        if cache.len() > 256 {
-            // First, remove expired entries.
-            let ttl = cache_ttl_secs();
+        // Evict when over capacity.
+        if cache.len() >= CACHE_CAPACITY {
             let now = now_secs();
+            // First pass: drop expired entries.
             cache.retain(|_, (ts, _)| now.saturating_sub(*ts) < ttl);
-            // If still over limit after eviction, keep only the newest half.
-            if cache.len() > 256 {
-                let mut entries: Vec<(String, (u64, FetchResponse))> = cache.drain().collect();
-                entries.sort_by_key(|(_, (ts, _))| *ts);
-                let keep = entries.len() / 2;
-                for (k, v) in entries.into_iter().rev().take(keep) {
-                    cache.insert(k, v);
+            // Second pass: if still over capacity, evict oldest entries one-by-one
+            // until we're under the limit. This preserves recent/hot entries better
+            // than the old "keep newest half" approach.
+            while cache.len() >= CACHE_CAPACITY {
+                if let Some(oldest) = cache
+                    .iter()
+                    .filter(|(_, (ts, _))| now.saturating_sub(*ts) >= ttl)
+                    .map(|(k, _)| k.clone())
+                    .next()
+                {
+                    cache.remove(&oldest);
+                } else {
+                    // All entries are within TTL; evict the single oldest.
+                    let oldest = cache
+                        .iter()
+                        .min_by_key(|(_, (ts, _))| *ts)
+                        .map(|(k, _)| k.clone());
+                    if let Some(k) = oldest {
+                        cache.remove(&k);
+                    } else {
+                        break;
+                    }
                 }
             }
         }
@@ -397,4 +426,118 @@ where
     R: Send + 'static,
 {
     tokio::task::spawn_blocking(f)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req(url: &str) -> FetchRequest {
+        FetchRequest {
+            url: url.into(),
+            format: OutputFormat::Markdown,
+            selector: None,
+            wait_secs: None,
+            use_proxy: false,
+            cookies: vec![],
+            max_chars: 50000,
+            auto_bypass_challenge: true,
+            render_tier: RenderTier::Auto,
+            tls_fingerprint: None,
+        }
+    }
+
+    fn resp(url: &str) -> FetchResponse {
+        FetchResponse {
+            url: url.into(),
+            title: Some("t".into()),
+            content: "c".into(),
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn cache_key_distinguishes_fields() {
+        let a = req("https://e.com");
+        let mut b = req("https://e.com");
+        // Same → same key.
+        assert_eq!(fetch_cache_key(&a), fetch_cache_key(&b));
+
+        // Different url → different key.
+        b.url = "https://other.com".into();
+        assert_ne!(fetch_cache_key(&a), fetch_cache_key(&b));
+
+        // Different max_chars → different key.
+        b = req("https://e.com");
+        b.max_chars = 100;
+        assert_ne!(fetch_cache_key(&a), fetch_cache_key(&b));
+
+        // Different render_tier → different key.
+        b = req("https://e.com");
+        b.render_tier = RenderTier::Http;
+        assert_ne!(fetch_cache_key(&a), fetch_cache_key(&b));
+
+        // Different use_proxy → different key.
+        b = req("https://e.com");
+        b.use_proxy = true;
+        assert_ne!(fetch_cache_key(&a), fetch_cache_key(&b));
+
+        // Different tls_fingerprint → different key.
+        b = req("https://e.com");
+        b.tls_fingerprint = Some("firefox133".into());
+        assert_ne!(fetch_cache_key(&a), fetch_cache_key(&b));
+    }
+
+    #[test]
+    fn cache_put_then_get_hits() {
+        let key = format!("test_put_get:{}", now_secs());
+        fetch_cache_put(&key, &resp("https://e.com"));
+        let got = fetch_cache_get(&key);
+        assert!(got.is_some());
+        assert_eq!(got.unwrap().url, "https://e.com");
+    }
+
+    #[test]
+    fn cache_get_miss_for_unknown_key() {
+        let key = format!("test_miss:{}:{}", now_secs(), std::process::id());
+        assert!(fetch_cache_get(&key).is_none());
+    }
+
+    #[test]
+    fn cache_evicts_oldest_when_over_capacity() {
+        // Clear the shared global cache so other tests' entries don't interfere.
+        if let Ok(mut cache) = FETCH_CACHE.lock() {
+            cache.clear();
+        }
+        // Insert well over CACHE_CAPACITY entries.
+        let base = now_secs();
+        for i in 0..CACHE_CAPACITY + 10 {
+            let key = format!("test_evict:{i}:{base}");
+            fetch_cache_put(&key, &resp(&format!("https://e.com/{i}")));
+        }
+        // The cache should stay at or below CACHE_CAPACITY (not grow unbounded).
+        if let Ok(cache) = FETCH_CACHE.lock() {
+            assert!(
+                cache.len() <= CACHE_CAPACITY,
+                "cache grew to {} entries (capacity {})",
+                cache.len(),
+                CACHE_CAPACITY,
+            );
+        }
+    }
+
+    #[test]
+    fn cache_expired_entry_removed_on_get() {
+        // Insert with a timestamp far in the past to simulate expiry.
+        let key = format!("test_expired:{}", now_secs());
+        if let Ok(mut cache) = FETCH_CACHE.lock() {
+            cache.insert(key.clone(), (0, resp("https://expired.com")));
+        }
+        // get should return None and remove the stale entry.
+        assert!(fetch_cache_get(&key).is_none());
+        // Confirm it was actually removed from the map.
+        if let Ok(cache) = FETCH_CACHE.lock() {
+            assert!(!cache.contains_key(&key));
+        }
+    }
 }

@@ -515,3 +515,109 @@ pub async fn plain_fetch(client: &reqwest::Client, url: &str) -> Result<String, 
 
     Err(SearchEngineError::Transient("too many redirects".into()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- normalize_url ----
+
+    #[test]
+    fn normalize_strips_www_and_lowercases() {
+        assert_eq!(normalize_url("https://WWW.Example.com/path"), "https://example.com/path");
+    }
+
+    #[test]
+    fn normalize_preserves_port() {
+        assert_eq!(normalize_url("https://example.com:8080/p"), "https://example.com:8080/p");
+    }
+
+    #[test]
+    fn normalize_strips_trailing_slash() {
+        // Path with trailing slash is stripped.
+        assert_eq!(normalize_url("https://example.com/path/"), "https://example.com/path");
+        // Bare root: the `url` crate normalizes example.com back to "/" so the
+        // trailing slash is preserved (cannot represent a truly empty path).
+        assert_eq!(normalize_url("https://example.com/"), "https://example.com/");
+    }
+
+    #[test]
+    fn normalize_strips_tracking_params() {
+        let n = normalize_url("https://example.com/a?utm_source=x&q=hello&utm_medium=y");
+        assert!(n.contains("q=hello"));
+        assert!(!n.contains("utm_source"));
+        assert!(!n.contains("utm_medium"));
+    }
+
+    #[test]
+    fn normalize_dedup_equivalent_urls() {
+        let a = normalize_url("https://www.example.com/article/?utm_source=feed");
+        let b = normalize_url("https://EXAMPLE.COM/article");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn normalize_invalid_url_returns_lowered_input() {
+        assert_eq!(normalize_url("NOT A URL"), "not a url");
+    }
+
+    // ---- merge_results ----
+
+    fn raw(title: &str, url: &str, engine: &str, score: f64) -> RawSearchResult {
+        RawSearchResult {
+            title: title.into(),
+            url: url.into(),
+            snippet: "s".into(),
+            engine: engine.into(),
+            score,
+            cookies: vec![],
+        }
+    }
+
+    #[test]
+    fn merge_dedups_by_normalized_url() {
+        let results = vec![
+            raw("Foo", "https://example.com/a", "bing", 5.0),
+            raw("Foo Bar", "https://www.example.com/a/", "baidu", 3.0),
+        ];
+        let merged = merge_results(results, 10);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].engines, vec!["bing", "baidu"]);
+        assert_eq!(merged[0].score, 8.0);
+        // Picks the longest title.
+        assert_eq!(merged[0].title, "Foo Bar");
+    }
+
+    #[test]
+    fn merge_sorts_by_score_desc() {
+        let results = vec![
+            raw("Low", "https://example.com/low", "bing", 1.0),
+            raw("High", "https://example.com/high", "baidu", 9.0),
+        ];
+        let merged = merge_results(results, 10);
+        assert_eq!(merged[0].title, "High");
+        assert_eq!(merged[1].title, "Low");
+    }
+
+    #[test]
+    fn merge_truncates_to_max_results() {
+        let results: Vec<RawSearchResult> = (0..5)
+            .map(|i| raw(&format!("t{i}"), &format!("https://e.com/{i}"), "bing", 5.0 - i as f64))
+            .collect();
+        let merged = merge_results(results, 3);
+        assert_eq!(merged.len(), 3);
+    }
+
+    #[test]
+    fn merge_empty_input() {
+        assert!(merge_results(vec![], 10).is_empty());
+    }
+
+    #[test]
+    fn merge_carries_cookies() {
+        let mut r = raw("T", "https://example.com/a", "sogou", 5.0);
+        r.cookies = vec!["session=abc".into()];
+        let merged = merge_results(vec![r], 10);
+        assert_eq!(merged[0].cookies, vec!["session=abc"]);
+    }
+}

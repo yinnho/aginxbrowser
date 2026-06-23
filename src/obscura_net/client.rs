@@ -602,3 +602,47 @@ pub enum ObscuraNetError {
     #[error("Request blocked: {0}")]
     Blocked(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derive_client_hints_chrome_version() {
+        let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
+        let (ch_ua, platform) = derive_client_hints(ua);
+        assert!(ch_ua.contains(r#""Chromium";v="145""#));
+        assert!(ch_ua.contains(r#""Google Chrome";v="145""#));
+        assert_eq!(platform, r#""macOS""#);
+    }
+
+    #[test]
+    fn derive_client_hints_windows() {
+        let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+        let (ch_ua, platform) = derive_client_hints(ua);
+        assert!(ch_ua.contains(r#""Chromium";v="131""#));
+        assert_eq!(platform, r#""Windows""#);
+    }
+
+    #[test]
+    fn derive_client_hints_linux() {
+        let ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
+        let (_, platform) = derive_client_hints(ua);
+        assert_eq!(platform, r#""Linux""#);
+    }
+
+    #[test]
+    fn derive_client_hints_android() {
+        let ua = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36";
+        let (_, platform) = derive_client_hints(ua);
+        assert_eq!(platform, r#""Android""#);
+    }
+
+    #[test]
+    fn derive_client_hints_defaults_when_no_version() {
+        // No Chrome/ token → falls back to 145.
+        let ua = "Mozilla/5.0 (Macintosh) Gecko Firefox/120.0";
+        let (ch_ua, _) = derive_client_hints(ua);
+        assert!(ch_ua.contains(r#""Chromium";v="145""#));
+    }
+}

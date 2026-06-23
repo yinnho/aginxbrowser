@@ -321,3 +321,114 @@ pub async fn smart_fetch(req: crate::FetchRequest) -> Result<FetchResponse, anyh
         Err(e) => Err(anyhow::anyhow!("Tier 2 fetch task panicked: {}", e)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- is_content_sufficient ----
+
+    #[test]
+    fn content_sufficient_static_html() {
+        let html = r#"<html><head><title>Hello World Page Title</title></head>
+            <body><h1>Welcome to the site</h1>
+            <p>This is a real page with more than enough visible text content to clearly pass the threshold for sufficiency checking.</p></body></html>"#;
+        assert!(is_content_sufficient(html));
+    }
+
+    #[test]
+    fn content_insufficient_spa_shell() {
+        // SPA mount point with near-empty body text.
+        let html = r#"<html><body><div id="app"></div></body></html>"#;
+        assert!(!is_content_sufficient(html));
+    }
+
+    #[test]
+    fn content_sufficient_spa_with_text() {
+        // SPA mount that already has substantial SSR text (> 200 chars) —
+        // passes the stricter SPA-shell threshold.
+        let html = r#"<html><body><div id="app">This rendered content contains substantially more than two hundred characters of real visible text so it passes the stricter SPA-shell threshold that the content sufficiency heuristic applies whenever a known framework mount point is detected in the page markup.</div></body></html>"#;
+        assert!(is_content_sufficient(html));
+    }
+
+    #[test]
+    fn content_insufficient_noscript_js_hint() {
+        let html = r#"<html><head><title>x</title></head>
+            <body><noscript>Please enable JavaScript to run this app.</noscript></body></html>"#;
+        assert!(!is_content_sufficient(html));
+    }
+
+    #[test]
+    fn content_insufficient_near_empty() {
+        // Very little visible text — looks like a challenge stub.
+        let html = "<html><body>ok</body></html>";
+        assert!(!is_content_sufficient(html));
+    }
+
+    // ---- is_antispider_url ----
+
+    #[test]
+    fn antispider_url_detection() {
+        assert!(is_antispider_url("https://wappass.baidu.com/captcha"));
+        assert!(is_antispider_url("https://example.com/antispider/check"));
+        assert!(is_antispider_url("https://sorry.google.com/sorry"));
+        assert!(is_antispider_url("https://x.com/cdn-cgi/challenge-platform/h/g/"));
+    }
+
+    #[test]
+    fn normal_url_not_antispider() {
+        assert!(!is_antispider_url("https://example.com/"));
+        assert!(!is_antispider_url("https://mp.weixin.qq.com/s/article"));
+    }
+
+    // ---- extract_title ----
+
+    #[test]
+    fn extract_title_present() {
+        assert_eq!(extract_title("<html><head><title>My Page</title></head></html>").as_deref(), Some("My Page"));
+    }
+
+    #[test]
+    fn extract_title_missing() {
+        assert_eq!(extract_title("<html><body>no title</body></html>"), None);
+    }
+
+    #[test]
+    fn extract_title_case_insensitive_tag() {
+        assert_eq!(extract_title("<TITLE>Mixed Case</TITLE>").as_deref(), Some("Mixed Case"));
+    }
+
+    // ---- strip_non_content ----
+
+    #[test]
+    fn strip_non_content_removes_style_script() {
+        let html = r#"<style>body{color:red}</style><script>alert(1)</script><p>keep me</p>"#;
+        let out = strip_non_content(html);
+        assert!(!out.contains("color:red"));
+        assert!(!out.contains("alert(1)"));
+        assert!(out.contains("keep me"));
+    }
+
+    #[test]
+    fn strip_non_content_keeps_body() {
+        let html = "<head><meta charset='utf-8'></head><body><p>text</p></body>";
+        let out = strip_non_content(html);
+        assert!(out.contains("text"));
+        assert!(!out.contains("charset"));
+    }
+
+    // ---- strip_html_tags ----
+
+    #[test]
+    fn strip_html_tags_collapses_whitespace() {
+        let html = "<p>hello</p>\n  <b>world</b>";
+        let out = strip_html_tags(html);
+        assert_eq!(out, "hello world");
+    }
+
+    #[test]
+    fn strip_html_tags_nested() {
+        let out = strip_html_tags("<div><span>a</span><span>b</span></div>");
+        assert_eq!(out, "ab");
+    }
+}

@@ -75,6 +75,9 @@ wreq = { version = "=6.0.0-rc.28", optional = true, features = ["socks"] }
 [build-dependencies]
 deno_core = "0.350"
 
+[dev-dependencies]
+ureq = { version = "2", features = ["json"] }
+
 # Unwinding is REQUIRED: ops wrap their bodies in std::panic::catch_unwind so a
 # panic degrades to an error return instead of unwinding into V8's FFI frame and
 # aborting the process. panic="abort" turns every catchable op panic into a crash.

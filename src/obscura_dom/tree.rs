@@ -1,4 +1,9 @@
 use html5ever::{LocalName, Namespace, QualName};
+// The `ns!`/`local_name!`/`namespace_url!` macros are only used in the
+// `#[cfg(test)]` DOM tests below; gate their import to avoid unused-import
+// warnings in release builds.
+#[cfg(test)]
+use html5ever::{local_name, namespace_url, ns};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
