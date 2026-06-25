@@ -258,7 +258,17 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| {
+                    tracing_subscriber::EnvFilter::new(
+                        "aginxbrowser=info,obscura_browser::page=warn,obscura_net::wreq_client=warn,obscura::console=error",
+                    )
+                }),
+        )
+        .init();
 
     // Check if running in MCP mode
     let args: Vec<String> = std::env::args().collect();
