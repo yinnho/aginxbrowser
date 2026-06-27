@@ -131,6 +131,49 @@ fn validate_url(url: &Url, allow_private_network: bool) -> Result<(), ObscuraNet
     Ok(())
 }
 
+/// DNS rebinding protection: resolve the domain and verify that none of the
+/// resulting IPs are private/internal. This catches attacks where a domain
+/// initially resolves to a public IP (passing `validate_url`) but then
+/// rebinds to an internal address.
+///
+/// Skip when a proxy is configured — the proxy handles DNS resolution itself.
+async fn validate_url_rebinding(url: &Url, has_proxy: bool) -> Result<(), ObscuraNetError> {
+    if has_proxy || env_allows_private_network() {
+        return Ok(());
+    }
+    let Some(url::Host::Domain(domain)) = url.host() else {
+        return Ok(()); // Direct IPs already checked by validate_url.
+    };
+    let lookup = format!("{}:{}", domain, url.port().unwrap_or(80));
+    match tokio::net::lookup_host(&lookup).await {
+        Ok(addrs) => {
+            for addr in addrs {
+                let ip = addr.ip();
+                let is_internal = match ip {
+                    std::net::IpAddr::V4(v4) => {
+                        v4.is_loopback() || v4.is_private() || v4.is_link_local()
+                    }
+                    std::net::IpAddr::V6(v6) => {
+                        v6.is_loopback() || v6.is_unicast_link_local()
+                    }
+                };
+                if is_internal {
+                    return Err(ObscuraNetError::Network(format!(
+                        "DNS rebinding blocked: {} resolved to private/internal IP {}",
+                        domain, ip
+                    )));
+                }
+            }
+        }
+        Err(e) => {
+            // DNS resolution failure — don't block, let the actual request
+            // fail naturally with a more specific error.
+            tracing::debug!("DNS pre-check for {} failed: {}", domain, e);
+        }
+    }
+    Ok(())
+}
+
 async fn fetch_file_url(url: &Url) -> Result<Response, ObscuraNetError> {
     let path = url
         .to_file_path()
@@ -286,6 +329,7 @@ impl ObscuraHttpClient {
         initial_body: Option<Vec<u8>>,
     ) -> Result<Response, ObscuraNetError> {
         validate_url(url, self.allow_private_network)?;
+        validate_url_rebinding(url, self.proxy_url.is_some()).await?;
 
         if url.scheme() == "file" {
             return fetch_file_url(url).await;
@@ -443,6 +487,7 @@ impl ObscuraHttpClient {
                         ObscuraNetError::Network(format!("Invalid redirect URL: {}", e))
                     })?;
                     validate_url(&next_url, self.allow_private_network)?;
+                    validate_url_rebinding(&next_url, self.proxy_url.is_some()).await?;
                     redirects.push(current_url.clone());
                     current_url = next_url;
                     if status == reqwest::StatusCode::MOVED_PERMANENTLY
