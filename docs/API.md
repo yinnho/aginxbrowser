@@ -17,6 +17,11 @@ curl http://127.0.0.1:8089/health
 curl -sS -X POST http://127.0.0.1:8089/fetch \
   -H "Content-Type: application/json" \
   -d '{"url":"https://example.com"}'
+
+# 创建交互式会话
+curl -sS -X POST http://127.0.0.1:8089/session/create \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com"}'
 ```
 
 ---
@@ -43,7 +48,7 @@ curl http://127.0.0.1:8089/health
 
 ### POST /fetch
 
-抓取页面并返回内容。支持分层渲染、Cloudflare 自动绕过、TLS 指纹切换。
+抓取页面并返回内容。支持分层渲染、Cloudflare 自动绕过、TLS 指纹切换、JS 数据提取。
 
 **请求字段：**
 
@@ -59,6 +64,7 @@ curl http://127.0.0.1:8089/health
 | auto_bypass_challenge | bool | | `true` | 自动检测并绕过 Cloudflare Turnstile 挑战 |
 | render_tier | string | | `"auto"` | 渲染策略（见下方说明） |
 | tls_fingerprint | string | | `null` | TLS 指纹（stealth 模式），见下方说明 |
+| js_extract | object | | `null` | JS 数据提取（见下方说明） |
 
 **render_tier 选项：**
 
@@ -81,6 +87,20 @@ curl http://127.0.0.1:8089/health
 | `"safari26"` | Safari 26 |
 | `"edge145"` | Edge 145 |
 
+**js_extract 格式：**
+
+```json
+{
+  "expression": "JSON.stringify(window.__INITIAL_STATE__)",
+  "timeout_ms": 5000
+}
+```
+
+| 字段 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| expression | string | — | JS 表达式，在页面上下文中执行 |
+| timeout_ms | u64 | `5000` | 等待非 null 结果的超时时间（毫秒） |
+
 **响应字段：**
 
 | 字段 | 类型 | 说明 |
@@ -89,6 +109,18 @@ curl http://127.0.0.1:8089/health
 | title | string? | 页面标题 |
 | content | string | 抓取内容（markdown/html/text） |
 | truncated | bool | `content` 是否被 `max_chars` 截断 |
+| js_extract_result | any? | JS 提取结果（仅 `js_extract` 非空时有值） |
+| captcha_event | object? | CAPTCHA 事件（仅检测到验证码时有值） |
+
+**captcha_event 格式：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| engine | string | 触发 CAPTCHA 的搜索引擎名（`/fetch` 时为空） |
+| captcha_type | string | `cloudflare_turnstile` / `recaptcha_v2` / `hcaptcha` / `slider` / `unknown` |
+| url | string | 触发 CAPTCHA 的 URL |
+| auto_solve_attempted | bool | 是否尝试了自动解决 |
+| auto_solve_succeeded | bool | 自动解决是否成功 |
 
 **示例 — 基础抓取：**
 
@@ -107,6 +139,20 @@ curl -sS -X POST http://127.0.0.1:8089/fetch \
 }
 ```
 
+**示例 — 提取 SPA 结构化数据：**
+
+```bash
+curl -sS -X POST http://127.0.0.1:8089/fetch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://spa-site.example.com",
+    "js_extract": {
+      "expression": "JSON.stringify(window.__INITIAL_STATE__)",
+      "timeout_ms": 3000
+    }
+  }'
+```
+
 **示例 — 提取特定区域（CSS 选择器）：**
 
 ```bash
@@ -115,17 +161,9 @@ curl -sS -X POST http://127.0.0.1:8089/fetch \
   -d '{"url":"https://github.com/trending","format":"text","selector":"article","use_proxy":true}'
 ```
 
-**示例 — 强制浏览器渲染：**
-
-```bash
-curl -sS -X POST http://127.0.0.1:8089/fetch \
-  -H "Content-Type: application/json" \
-  -d '{"url":"https://react-app.example.com","render_tier":"obscura"}'
-```
-
 **缓存**：`/fetch` 有进程内缓存（key 含 url/format/selector/cookies/use_proxy/max_chars/render_tier/tls_fingerprint），TTL 由 `AGINXBROWSER_CACHE_TTL_SECS` 控制（默认 600s，`0` 禁用）。重复抓取同一 URL 命中缓存（~0.01s vs 首次 ~1s）。
 
-**安全**：内置 SSRF 防护（拦截非 http(s) scheme、私网/loopback IP）、robots.txt 遵守、tracker 拦截（stealth 模式）。
+**安全**：内置 SSRF 防护（拦截非 http(s) scheme、私网/loopback IP）、DNS 重绑定防护、robots.txt 遵守、tracker 拦截（stealth 模式）。
 
 ---
 
@@ -161,15 +199,6 @@ curl -sS -X POST http://127.0.0.1:8089/click \
   -d '{"url":"https://example.com","selector":"a"}'
 ```
 
-```json
-{
-  "url": "https://example.com/",
-  "selector": "a",
-  "clicked": true,
-  "text_after": "..."
-}
-```
-
 ---
 
 ### POST /eval
@@ -194,17 +223,7 @@ curl -sS -X POST http://127.0.0.1:8089/click \
 | url | string | 最终 URL |
 | result | any | JS 执行结果 |
 
-**示例 — 简单表达式：**
-
-```bash
-curl -sS -X POST http://127.0.0.1:8089/eval \
-  -H "Content-Type: application/json" \
-  -d '{"url":"https://example.com","script":"document.title"}'
-```
-
-```json
-{"url":"https://example.com/","result":"Example Domain"}
-```
+> `/eval` 的 `script` 参数支持 **async 函数**：返回 Promise 会被自动 await。适合 React/Vue 等动态渲染页面——等渲染完成再提取数据。
 
 **示例 — async 脚本（等动态渲染）：**
 
@@ -217,8 +236,6 @@ curl -sS -X POST http://127.0.0.1:8089/eval \
     "use_proxy":true
   }'
 ```
-
-> `/eval` 的 `script` 参数支持 **async 函数**：返回 Promise 会被自动 await。适合 React/Vue 等动态渲染页面——等渲染完成再提取数据。
 
 ---
 
@@ -249,7 +266,9 @@ curl -sS -X POST http://127.0.0.1:8089/eval \
 | Sogou WeChat | general, news | plain reqwest | 搜狗微信搜索 |
 | Google | general | wreq stealth + proxy | Google HTML 解析，国内需代理 |
 
-多引擎并发查询，结果合并去重：同一 URL（归一化后）合并为一条，`engines` 列出来源引擎，`score` 累加。引擎触发验证码后自动暂停（搜狗微信 60 分钟，其他 30 分钟），不影响其他引擎。
+多引擎并发查询，结果合并去重：同一 URL（归一化后）合并为一条，`engines` 列出来源引擎，`score` 累加。
+
+**CAPTCHA 渐进退避**：引擎触发验证码后自动暂停，暂停时长随连续触发次数递增（5min → 10min → 30min → 1h），成功搜索后重置。设置 `CAPTCHA_SOLVER_API_KEY` 环境变量后可自动解决验证码。
 
 **响应字段：**
 
@@ -258,6 +277,7 @@ curl -sS -X POST http://127.0.0.1:8089/eval \
 | query | string | 搜索关键词 |
 | number_of_results | usize | 结果总数 |
 | results | array | 结果列表 |
+| captcha_events | array | CAPTCHA 事件列表 |
 
 **results 内每条：**
 
@@ -272,14 +292,6 @@ curl -sS -X POST http://127.0.0.1:8089/eval \
 | content_truncated | bool | 正文是否被截断 |
 | fetch_error | string? | 抓正文失败原因 |
 
-**示例 — 纯搜索（快，毫秒级）：**
-
-```bash
-curl -sS -X POST http://127.0.0.1:8089/search \
-  -H "Content-Type: application/json" \
-  -d '{"q":"macbook 价格","max_results":5}'
-```
-
 **示例 — 搜索 + 抓前 3 条正文：**
 
 ```bash
@@ -287,29 +299,6 @@ curl -sS -X POST http://127.0.0.1:8089/search \
   -H "Content-Type: application/json" \
   -d '{"q":"macbook 价格","fetch_top":3,"max_chars_per":2000}'
 ```
-
-响应：
-
-```json
-{
-  "query": "macbook 价格",
-  "number_of_results": 1000,
-  "results": [
-    {
-      "title": "MacBook Air - Apple",
-      "url": "https://www.apple.com/mac/",
-      "snippet": "...",
-      "engines": ["bing", "baidu"],
-      "score": 8.5,
-      "content": "...(正文)...",
-      "content_truncated": false,
-      "fetch_error": null
-    }
-  ]
-}
-```
-
-> `fetch_top=0`：纯搜索，毫秒级。`fetch_top>0`：前 N 条并发抓正文（复用 `/fetch` 的 stealth + JS 渲染），单条失败不影响其他（`fetch_error` 标记）。
 
 ---
 
@@ -366,24 +355,196 @@ curl -sS -X POST http://127.0.0.1:8089/search \
 }
 ```
 
-失败时：
+---
+
+## Session API（交互式浏览器会话）
+
+持久化浏览器会话，支持索引化交互。每个会话有独立的 V8 运行时 + 页面上下文，8 分钟无操作自动回收。
+
+适合 AI Agent 像"人"一样浏览网页：打开页面 → 查看状态 → 点击/输入 → 获取结果。
+
+### POST /session/create
+
+创建交互式浏览器会话。
+
+**请求字段：**
+
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| url | string | | `null` | 初始 URL（可选） |
+| use_proxy | bool | | `false` | 走代理 |
+
+**响应：**
 
 ```json
-{
-  "success": false,
-  "data": {
-    "markdown": null,
-    "html": null,
-    "metadata": {
-      "title": null,
-      "sourceURL": "https://example.com/",
-      "description": null,
-      "statusCode": 500,
-      "error": "..."
-    }
-  }
-}
+{"session_id": "s_1", "url": "https://example.com/"}
 ```
+
+### POST /session/{id}/navigate
+
+导航到新 URL。
+
+**请求字段：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| url | string | ✅ | 目标 URL |
+
+**响应：**
+
+```json
+{"url": "https://example.com/page2", "title": "Page 2"}
+```
+
+### POST /session/{id}/state
+
+获取当前页面状态，返回索引化的交互元素列表。
+
+**响应格式（紧凑文本）：**
+
+```
+url=https://example.com/login
+title=Login
+
+[0] <a href="/home">Home</a>
+[1] <input type=email placeholder=Email />
+[2] <input type=password placeholder=Password />
+[3] <button id=submit>Sign In</button>
+[4] <a href="/forgot">Forgot password?</a>
+```
+
+索引号 `[N]` 用于 `click` / `input` 操作。
+
+### POST /session/{id}/click
+
+按索引点击交互元素。
+
+**请求字段：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| index | usize | ✅ | 元素索引（从 `/state` 获取） |
+
+**响应：**
+
+```json
+{"url": "https://example.com/dashboard", "clicked": true}
+```
+
+### POST /session/{id}/input
+
+按索引在输入框中填入文本。
+
+**请求字段：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| index | usize | ✅ | 元素索引 |
+| text | string | ✅ | 要输入的文本 |
+
+**响应：**
+
+```json
+{"filled": true}
+```
+
+### POST /session/{id}/scroll
+
+滚动页面。
+
+**请求字段：**
+
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| direction | string | | `"down"` | `up` 或 `down` |
+| amount | u32 | | `3` | 滚动视口高度数 |
+
+**响应：**
+
+```json
+{"scrolled": true}
+```
+
+### POST /session/{id}/eval
+
+在会话中执行 JavaScript。
+
+**请求字段：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| script | string | ✅ | JS 代码（支持 async） |
+
+**响应：**
+
+```json
+{"result": "..."}
+```
+
+### POST /session/{id}/close
+
+关闭会话，释放资源。
+
+**响应：**
+
+```json
+{"ok": true}
+```
+
+### Session 使用示例
+
+```bash
+# 1. 创建会话
+SID=$(curl -sS -X POST http://127.0.0.1:8089/session/create \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com/login"}' | jq -r .session_id)
+
+# 2. 查看页面状态
+curl -sS -X POST http://127.0.0.1:8089/session/$SID/state
+
+# 3. 输入用户名
+curl -sS -X POST http://127.0.0.1:8089/session/$SID/input \
+  -H "Content-Type: application/json" \
+  -d '{"index":1,"text":"user@example.com"}'
+
+# 4. 输入密码
+curl -sS -X POST http://127.0.0.1:8089/session/$SID/input \
+  -H "Content-Type: application/json" \
+  -d '{"index":2,"text":"mypassword"}'
+
+# 5. 点击登录
+curl -sS -X POST http://127.0.0.1:8089/session/$SID/click \
+  -H "Content-Type: application/json" \
+  -d '{"index":3}'
+
+# 6. 查看登录后状态
+curl -sS -X POST http://127.0.0.1:8089/session/$SID/state
+
+# 7. 关闭会话
+curl -sS -X POST http://127.0.0.1:8089/session/$SID/close
+```
+
+---
+
+## CAPTCHA 自动解决
+
+当搜索引擎或目标网站触发验证码时，AginxBrowser 会：
+
+1. **检测** CAPTCHA 类型（Cloudflare Turnstile、reCAPTCHA v2、hCaptcha、滑动验证码）
+2. **上报** `captcha_event` 字段，让调用方知情
+3. **自动解决**（如果设置了 `CAPTCHA_SOLVER_API_KEY` 环境变量）
+
+**配置：**
+
+```bash
+# 设置 2captcha API Key
+export CAPTCHA_SOLVER_API_KEY=your_api_key_here
+
+# 可选：切换验证码解决服务（默认 2captcha）
+export CAPTCHA_SOLVER_SERVICE=2captcha
+```
+
+设置后，`/fetch` 和 `/search` 遇到验证码会自动提交到 2captcha 并注入 token，无需手动干预。
 
 ---
 
@@ -399,11 +560,31 @@ curl -sS -X POST http://127.0.0.1:8089/search \
 
 MCP 走 stdio 协议，不启动 HTTP 服务器，通过 stdin/stdout 与 MCP 客户端通信。
 
-### 提供的工具
+### 提供的工具（12 个）
 
-#### fetch
+#### 基础工具
 
-抓取网页并返回内容。支持 JS 渲染、stealth 模式、多种输出格式。
+| 工具 | 说明 |
+|------|------|
+| `fetch` | 抓取网页（支持分层渲染、stealth、js_extract） |
+| `eval` | 在页面上执行 JavaScript（支持 async/Promise） |
+| `click` | 点击页面元素（CSS 选择器） |
+| `search` | 多引擎聚合搜索（百度/Bing/搜狗/搜狗微信/Google） |
+
+#### Session 工具
+
+| 工具 | 说明 |
+|------|------|
+| `session_create` | 创建交互式浏览器会话 |
+| `session_navigate` | 会话内导航到新 URL |
+| `session_state` | 获取索引化的页面状态 |
+| `session_click` | 按索引点击元素 |
+| `session_input` | 按索引输入文本 |
+| `session_scroll` | 滚动页面 |
+| `session_eval` | 在会话中执行 JavaScript |
+| `session_close` | 关闭会话 |
+
+#### fetch 工具参数
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
@@ -416,38 +597,18 @@ MCP 走 stdio 协议，不启动 HTTP 服务器，通过 stdin/stdout 与 MCP �
 | auto_bypass_challenge | bool | | `true` | 自动绕过 Cloudflare Turnstile |
 | render_tier | string | | `"auto"` | 渲染策略：`auto` / `http` / `obscura` |
 | tls_fingerprint | string | | `null` | TLS 指纹 |
+| js_extract | object | | `null` | JS 数据提取：`{expression, timeout_ms}` |
 
-#### eval
-
-在页面上执行 JavaScript 并返回结果。支持 async/Promise。
-
-| 参数 | 类型 | 必填 | 默认 | 说明 |
-|------|------|------|------|------|
-| url | string | ✅ | — | 目标 URL |
-| script | string | ✅ | — | JS 代码 |
-| wait_secs | u64 | | `null` | 页面加载后等待秒数 |
-
-#### click
-
-点击页面上的元素。
+#### session_create 参数
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
-| url | string | ✅ | — | 目标 URL |
-| selector | string | ✅ | — | CSS 选择器 |
-| wait_secs | u64 | | `null` | 页面加载后等待秒数 |
+| url | string | | `null` | 初始 URL |
+| use_proxy | bool | | `false` | 走代理 |
 
-#### search
+#### session 操作参数
 
-多引擎搜索（百度/Bing/搜狗/搜狗微信/Google），可对前 N 条结果自动抓正文。
-
-| 参数 | 类型 | 必填 | 默认 | 说明 |
-|------|------|------|------|------|
-| q | string | ✅ | — | 搜索关键词 |
-| fetch_top | usize | | `0` | 对前 N 条结果抓正文 |
-| categories | string | | `"general"` | 搜索分类 |
-| max_results | usize | | `10` | 结果上限 |
-| max_chars_per | usize | | `4000` | 每条正文截断字符数 |
+所有 session 操作都需要 `session_id` 参数。`click`/`input` 需要 `index`（从 `session_state` 获取），`input` 还需要 `text`，`eval` 需要 `script`。
 
 ### 客户端配置
 
@@ -540,6 +701,8 @@ MCP 走 stdio 协议，不启动 HTTP 服务器，通过 stdin/stdout 与 MCP �
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 缓存 TTL（秒），`0` 禁用 |
 | `OBSCURA_PROXY` | 无 | 代理地址（`use_proxy:true` 时使用） |
+| `CAPTCHA_SOLVER_API_KEY` | 无 | 2captcha API Key，设置后自动解决验证码 |
+| `CAPTCHA_SOLVER_SERVICE` | `2captcha` | 验证码解决服务 |
 
 ---
 
@@ -573,15 +736,20 @@ curl -sS -X POST http://127.0.0.1:8089/search -H 'Content-Type: application/json
   -d '{"q":"AI人工智能","categories":"news","fetch_top":3,"max_chars_per":2000}'
 ```
 
-### 知乎专栏（需 cookie）
-
-知乎专栏是公开内容，但需要有效 cookie 才能访问：
+### 交互式登录（Session API）
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8089/fetch -H 'Content-Type: application/json' -d '{
-  "url": "https://zhuanlan.zhihu.com/p/xxxxx",
-  "cookies": ["d_c0=YOUR_D_C0; __zse_ck=YOUR_ZSE_CK"]
-}'
+# 创建会话 → 查看页面 → 输入 → 点击 → 查看结果
+SID=$(curl -sS -X POST http://127.0.0.1:8089/session/create \
+  -d '{"url":"https://example.com/login"}' | jq -r .session_id)
+
+curl -sS -X POST http://127.0.0.1:8089/session/$SID/input \
+  -d '{"index":1,"text":"user@example.com"}'
+
+curl -sS -X POST http://127.0.0.1:8089/session/$SID/click \
+  -d '{"index":3}'
+
+curl -sS -X POST http://127.0.0.1:8089/session/$SID/state
 ```
 
 ### Cloudflare 保护的站点
@@ -589,27 +757,20 @@ curl -sS -X POST http://127.0.0.1:8089/fetch -H 'Content-Type: application/json'
 默认开启 `auto_bypass_challenge`，自动检测 "Just a moment..." 页面并等待 `cf_clearance` cookie：
 
 ```bash
-# 默认行为，自动绕过
 curl -sS -X POST http://127.0.0.1:8089/fetch -H 'Content-Type: application/json' -d '{
   "url": "https://cloudflare-protected-site.com"
 }'
-
-# 显式关闭自动绕过
-curl -sS -X POST http://127.0.0.1:8089/fetch -H 'Content-Type: application/json' -d '{
-  "url": "https://cloudflare-protected-site.com",
-  "auto_bypass_challenge": false
-}'
 ```
 
-### 动态渲染页面（React/Vue SPA）
-
-用 `/eval` 的 async 脚本等待渲染完成后再提取：
+### 提取 SPA 结构化数据
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8089/eval -H 'Content-Type: application/json' -d '{
-  "url": "https://github.com/trending",
-  "script": "(async()=>{await new Promise(r=>setTimeout(r,4000));return Array.from(document.querySelectorAll(\"article.Box-row\")).slice(0,5).map(a=>a.querySelector(\"h2 a\")?.textContent?.trim())})()",
-  "use_proxy": true
+curl -sS -X POST http://127.0.0.1:8089/fetch -H 'Content-Type: application/json' -d '{
+  "url": "https://spa-site.example.com",
+  "js_extract": {
+    "expression": "JSON.stringify(window.__INITIAL_STATE__)",
+    "timeout_ms": 3000
+  }
 }'
 ```
 

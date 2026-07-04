@@ -3,7 +3,7 @@ name = "aginxbrowser"
 version = "0.1.0"
 edition = "2021"
 authors = ["OpenCarrier Team"]
-description = "Lightweight server-side browser engine (inlined Obscura) for fast scraping and JS click."
+description = "Pure server-side browser engine with built-in V8. HTTP API for scraping, search, and interactive browsing. No Chromium required."
 
 [features]
 default = []

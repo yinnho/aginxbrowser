@@ -58,7 +58,10 @@ impl SearchEngine for SogouEngine {
             if let Some(location) = resp.headers().get("location") {
                 let loc = location.to_str().unwrap_or("");
                 if loc.contains("/antispider") {
-                    return Err(SearchEngineError::Captcha);
+                    return Err(SearchEngineError::Captcha {
+                        url: url.to_string(),
+                        captcha_type: Some(crate::captcha::CaptchaType::SliderCaptcha),
+                    });
                 }
             }
             return Err(SearchEngineError::Transient(format!("redirect: {}", resp.headers().get("location").and_then(|v| v.to_str().ok()).unwrap_or("?"))));
@@ -73,7 +76,10 @@ impl SearchEngine for SogouEngine {
         // Check for CAPTCHA indicators in the HTML body.
         if html.contains("/antispider") || html.contains("用户频率限制") {
             tracing::warn!("sogou: CAPTCHA detected in HTML body (len={})", html.len());
-            return Err(SearchEngineError::Captcha);
+            return Err(SearchEngineError::Captcha {
+                url: url.to_string(),
+                captcha_type: Some(crate::captcha::CaptchaType::SliderCaptcha),
+            });
         }
 
         parse_sogou_html(&html)
@@ -144,6 +150,7 @@ fn parse_sogou_standard_item(
         engine: "sogou".to_string(),
         score: 0.0, // Will be assigned by position later.
         cookies: vec![],
+        js_extract_result: None,
     })
 }
 
@@ -175,6 +182,7 @@ fn parse_sogou_vrwrap_item(
         engine: "sogou".to_string(),
         score: 0.0,
         cookies: vec![],
+        js_extract_result: None,
     })
 }
 

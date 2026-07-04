@@ -97,6 +97,7 @@ fn parse_bing_html(html: &str) -> Result<Vec<RawSearchResult>, SearchEngineError
             engine: "bing".to_string(),
             score: total - i as f64,
             cookies: vec![],
+            js_extract_result: None,
         });
     }
 

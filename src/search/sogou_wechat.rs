@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 
 use super::{SearchParams, RawSearchResult, SearchEngine, SearchEngineError};
@@ -30,6 +32,10 @@ impl SearchEngine for SogouWechatEngine {
 
     fn categories(&self) -> &[&str] {
         &["general", "news"]
+    }
+
+    fn base_captcha_suspend(&self) -> Duration {
+        Duration::from_secs(3600)
     }
 
     async fn search(
@@ -99,7 +105,10 @@ async fn reqwest_search_and_resolve(
     // Check for CAPTCHA.
     if html.contains("antispider") || html.contains("用户频率限制") {
         tracing::warn!("sogou_wechat: reqwest search hit CAPTCHA");
-        return Err(SearchEngineError::Captcha);
+        return Err(SearchEngineError::Captcha {
+            url: search_url.clone(),
+            captcha_type: Some(crate::captcha::CaptchaType::SliderCaptcha),
+        });
     }
 
     // Step 2: Parse search results.
@@ -291,6 +300,7 @@ fn parse_sogou_wechat_html(html: &str) -> Result<Vec<RawSearchResult>, SearchEng
             engine: "sogou_wechat".to_string(),
             score: total - i as f64,
             cookies: vec![], // Filled in by search() from wreq session.
+            js_extract_result: None,
         });
     }
 

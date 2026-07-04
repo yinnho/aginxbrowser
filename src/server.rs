@@ -59,7 +59,7 @@ pub fn should_auto_proxy(url: &str) -> bool {
 ///
 /// Auto-detection: if the target URL matches a known blocked domain, proxy is
 /// used regardless of `use_proxy` flag (the site is unreachable without proxy).
-fn build_browser(use_proxy: bool, url: &str, tls_fingerprint: Option<&str>) -> Result<Browser> {
+pub fn build_browser(use_proxy: bool, url: &str, tls_fingerprint: Option<&str>) -> Result<Browser> {
     // Stealth defaults on; disable via AGINXBROWSER_STEALTH=0 (diagnostic / when
     // the wreq stealth client misbehaves on a given site).
     let stealth = !matches!(std::env::var("AGINXBROWSER_STEALTH").ok().as_deref(), Some("0"));
@@ -269,6 +269,43 @@ fn fetch_url_text_with_cookies(
     })
 }
 
+/// Evaluate a JS expression on a page, retrying until it returns non-null
+/// or the timeout expires. Used for extracting `window.__INITIAL_STATE__`
+/// and similar JS globals from SPA pages.
+fn extract_js_global(
+    page: &mut crate::page::Page,
+    expression: &str,
+    timeout_ms: u64,
+) -> serde_json::Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let mut interval = 200u64;
+    loop {
+        let js = format!(
+            "(function() {{ try {{ var r = {}; return r == null ? null : (typeof r === 'object' ? JSON.stringify(r) : r); }} catch(e) {{ return null; }} }})()",
+            expression
+        );
+        let val = page.evaluate(&js);
+        if !val.is_null() {
+            // If the value is a string containing JSON, parse it.
+            if let Some(s) = val.as_str() {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
+                    return parsed;
+                }
+                return serde_json::Value::String(s.to_string());
+            }
+            return val;
+        }
+        if std::time::Instant::now() >= deadline {
+            return serde_json::Value::Null;
+        }
+        // Synchronous sleep — we're inside run_on_local_runtime.
+        std::thread::sleep(std::time::Duration::from_millis(interval));
+        interval = (interval * 2).min(2000);
+        // Also pump the JS event loop.
+        let _ = page.evaluate("1+1");
+    }
+}
+
 /// Fetch a page and return content in the requested format.
 pub fn do_fetch(req: FetchRequest) -> Result<FetchResponse> {
     run_on_local_runtime(move |_rt| {
@@ -322,11 +359,48 @@ pub fn do_fetch(req: FetchRequest) -> Result<FetchResponse> {
                 (content, false)
             };
 
+            // JS extraction: evaluate the user-specified expression after page
+            // has settled and content is extracted.
+            let js_extract_result = req
+                .js_extract
+                .as_ref()
+                .map(|cfg| extract_js_global(&mut page, &cfg.expression, cfg.timeout_ms));
+
+            // CAPTCHA detection and optional auto-solve.
+            let captcha_event = {
+                let final_url = page.url();
+                let html_snapshot = page.content();
+                if let Some(ct) = crate::captcha::detect_captcha_type(&final_url, Some(&html_snapshot)) {
+                    let mut event = crate::captcha::CaptchaEvent {
+                        engine: String::new(),
+                        captcha_type: ct.clone(),
+                        url: final_url.clone(),
+                        auto_solve_attempted: false,
+                        auto_solve_succeeded: false,
+                    };
+                    if let Some(config) = crate::captcha::load_solver_config_from_env() {
+                        event.auto_solve_attempted = true;
+                        let result = crate::captcha::auto_solve_captcha(
+                            &final_url, &html_snapshot, &ct, &config,
+                        ).await;
+                        event.auto_solve_succeeded = matches!(
+                            result,
+                            crate::captcha::CaptchaSolveResult::Solved { .. }
+                        );
+                    }
+                    Some(event)
+                } else {
+                    None
+                }
+            };
+
             Ok(FetchResponse {
                 url: page.url(),
                 title,
                 content,
                 truncated,
+                captcha_event,
+                js_extract_result,
             })
         })
     })
@@ -394,7 +468,8 @@ pub fn do_eval(req: EvalRequest) -> Result<EvalResponse> {
 /// /search: native search across Baidu/Bing/Sogou/Google, optionally grab body for top N results.
 pub async fn do_search(req: SearchRequest) -> Result<SearchResponse, SearchError> {
     // Step 1: native search via built-in engines.
-    let registry = crate::search::SearchEngineRegistry::new();
+    static REGISTRY: std::sync::LazyLock<crate::search::SearchEngineRegistry> =
+        std::sync::LazyLock::new(crate::search::SearchEngineRegistry::new);
     let params = crate::search::SearchParams {
         language: req.language.clone(),
         pageno: 1,
@@ -402,8 +477,8 @@ pub async fn do_search(req: SearchRequest) -> Result<SearchResponse, SearchError
         timeout_secs: 15,
     };
 
-    let (mut items, number_of_results) =
-        crate::search::native_search(&registry, &req.q, params, &req.categories, req.max_results).await;
+    let (mut items, number_of_results, captcha_events) =
+        crate::search::native_search(&REGISTRY, &req.q, params, &req.categories, req.max_results).await;
 
     // Step 2: optionally grab body for the top fetch_top results (concurrent).
     // Each fetch runs in its own blocking thread + current-thread runtime
@@ -446,5 +521,6 @@ pub async fn do_search(req: SearchRequest) -> Result<SearchResponse, SearchError
         query: req.q,
         number_of_results,
         results: items,
+        captcha_events,
     })
 }

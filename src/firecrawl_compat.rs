@@ -153,6 +153,7 @@ pub async fn scrape_handler(
         auto_bypass_challenge: true,
         render_tier: Default::default(),
         tls_fingerprint: req.tls_fingerprint.clone(),
+        js_extract: None,
     };
 
     match smart_fetch(fetch_req).await {

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::server::{do_click, do_eval, do_fetch, do_search};
+use crate::session::{self, SessionCommand};
 use crate::{ClickRequest, EvalRequest, FetchRequest, OutputFormat, SearchRequest};
 
 // ============================================================================
@@ -42,6 +43,18 @@ pub struct FetchParams {
     /// TLS fingerprint override (stealth mode only): "chrome145", "firefox133", etc.
     #[serde(default)]
     pub tls_fingerprint: Option<String>,
+    /// JS expression to extract from the page after rendering
+    #[serde(default)]
+    pub js_extract: Option<JsExtractParams>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct JsExtractParams {
+    /// JavaScript expression to evaluate (e.g. "window.__INITIAL_STATE__")
+    pub expression: String,
+    /// Timeout in milliseconds (default: 5000)
+    #[serde(default = "default_js_timeout")]
+    pub timeout_ms: u64,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -84,6 +97,85 @@ pub struct SearchParams {
     pub max_chars_per: usize,
 }
 
+// ---------------------------------------------------------------------------
+// Session tool parameter structs
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionCreateParams {
+    /// Initial URL to navigate to (optional)
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Route through proxy (default: false)
+    #[serde(default)]
+    pub use_proxy: bool,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionNavigateParams {
+    /// Session ID
+    pub session_id: String,
+    /// URL to navigate to
+    pub url: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionStateParams {
+    /// Session ID
+    pub session_id: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionClickParams {
+    /// Session ID
+    pub session_id: String,
+    /// Element index (from /state output)
+    pub index: usize,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionInputParams {
+    /// Session ID
+    pub session_id: String,
+    /// Element index (from /state output)
+    pub index: usize,
+    /// Text to type into the input field
+    pub text: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionScrollParams {
+    /// Session ID
+    pub session_id: String,
+    /// Scroll direction: "up" or "down" (default: down)
+    #[serde(default = "default_scroll_dir")]
+    pub direction: String,
+    /// Scroll amount in viewport-heights (default: 3)
+    #[serde(default = "default_scroll_amount")]
+    pub amount: u32,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionEvalParams {
+    /// Session ID
+    pub session_id: String,
+    /// JavaScript code to execute
+    pub script: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionCloseParams {
+    /// Session ID
+    pub session_id: String,
+}
+
+fn default_scroll_dir() -> String {
+    "down".to_string()
+}
+fn default_scroll_amount() -> u32 {
+    3
+}
+
 fn default_format() -> String {
     "markdown".to_string()
 }
@@ -101,6 +193,9 @@ fn default_max_chars_per() -> usize {
 }
 fn default_true() -> bool {
     true
+}
+fn default_js_timeout() -> u64 {
+    5000
 }
 
 // ============================================================================
@@ -139,6 +234,10 @@ impl AginxBrowserMcp {
             auto_bypass_challenge: params.auto_bypass_challenge,
             render_tier: params.render_tier,
             tls_fingerprint: params.tls_fingerprint,
+            js_extract: params.js_extract.map(|j| crate::JsExtractConfig {
+                expression: j.expression,
+                timeout_ms: j.timeout_ms,
+            }),
         };
 
         match tokio::task::spawn_blocking(move || do_fetch(req)).await {
@@ -232,6 +331,124 @@ impl AginxBrowserMcp {
             .to_string(),
             Err(e) => json!({ "error": format!("{:?}", e) }).to_string(),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Session tools
+    // ------------------------------------------------------------------
+
+    #[tool(
+        description = "Create an interactive browser session. Returns a session_id for use with other session tools. The session persists for 8 minutes of inactivity.",
+        annotations(title = "Create Browser Session")
+    )]
+    async fn session_create(&self, Parameters(params): Parameters<SessionCreateParams>) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        mgr.evict_expired();
+        let id = mgr.create(params.url.as_deref(), params.use_proxy);
+        json!({ "session_id": id, "url": params.url }).to_string()
+    }
+
+    #[tool(
+        description = "Navigate a browser session to a new URL.",
+        annotations(title = "Session Navigate")
+    )]
+    async fn session_navigate(&self, Parameters(params): Parameters<SessionNavigateParams>) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        match mgr.send(&params.session_id, |reply| SessionCommand::Navigate {
+            url: params.url.clone(),
+            reply,
+        }).await {
+            Ok(resp) => json!({ "url": resp.url, "title": resp.title }).to_string(),
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Get the current page state as an indexed list of interactive elements. Returns compact text with [N] indexes for use with click/input tools.",
+        annotations(title = "Session State", read_only_hint = true)
+    )]
+    async fn session_state(&self, Parameters(params): Parameters<SessionStateParams>) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        match mgr.send(&params.session_id, |reply| SessionCommand::State { reply }).await {
+            Ok(text) => text,
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Click an interactive element by its index (from session_state output).",
+        annotations(title = "Session Click")
+    )]
+    async fn session_click(&self, Parameters(params): Parameters<SessionClickParams>) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        match mgr.send(&params.session_id, |reply| SessionCommand::Click {
+            index: params.index,
+            reply,
+        }).await {
+            Ok(resp) => json!({ "url": resp.url, "clicked": resp.clicked }).to_string(),
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Type text into an input/textarea element by its index (from session_state output).",
+        annotations(title = "Session Input")
+    )]
+    async fn session_input(&self, Parameters(params): Parameters<SessionInputParams>) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        match mgr.send(&params.session_id, |reply| SessionCommand::Input {
+            index: params.index,
+            text: params.text.clone(),
+            reply,
+        }).await {
+            Ok(filled) => json!({ "filled": filled }).to_string(),
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Scroll the page up or down by a number of viewport-heights.",
+        annotations(title = "Session Scroll")
+    )]
+    async fn session_scroll(&self, Parameters(params): Parameters<SessionScrollParams>) -> String {
+        let direction = match params.direction.as_str() {
+            "up" => session::ScrollDirection::Up,
+            _ => session::ScrollDirection::Down,
+        };
+        let mut mgr = session::SESSIONS.lock().await;
+        match mgr.send(&params.session_id, |reply| SessionCommand::Scroll {
+            direction,
+            amount: params.amount,
+            reply,
+        }).await {
+            Ok(scrolled) => json!({ "scrolled": scrolled }).to_string(),
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Execute arbitrary JavaScript in the browser session and return the result.",
+        annotations(title = "Session Eval")
+    )]
+    async fn session_eval(&self, Parameters(params): Parameters<SessionEvalParams>) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        match mgr.send(&params.session_id, |reply| SessionCommand::Eval {
+            script: params.script.clone(),
+            reply,
+        }).await {
+            Ok(result) => json!({ "result": result }).to_string(),
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Close a browser session and free its resources.",
+        annotations(title = "Session Close")
+    )]
+    async fn session_close(&self, Parameters(params): Parameters<SessionCloseParams>) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        mgr.close(&params.session_id);
+        json!({ "ok": true }).to_string()
     }
 }
 

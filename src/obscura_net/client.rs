@@ -136,6 +136,11 @@ fn validate_url(url: &Url, allow_private_network: bool) -> Result<(), ObscuraNet
 /// initially resolves to a public IP (passing `validate_url`) but then
 /// rebinds to an internal address.
 ///
+/// **Limitation**: This is a TOCTOU check — reqwest resolves DNS independently
+/// when sending the request, so a short-TTL rebinding attack can slip through
+/// the gap. The check raises the bar for attackers but is not airtight.
+/// A proper fix would require a custom DNS resolver that pins the resolved IPs.
+///
 /// Skip when a proxy is configured — the proxy handles DNS resolution itself.
 async fn validate_url_rebinding(url: &Url, has_proxy: bool) -> Result<(), ObscuraNetError> {
     if has_proxy || env_allows_private_network() {
@@ -144,7 +149,8 @@ async fn validate_url_rebinding(url: &Url, has_proxy: bool) -> Result<(), Obscur
     let Some(url::Host::Domain(domain)) = url.host() else {
         return Ok(()); // Direct IPs already checked by validate_url.
     };
-    let lookup = format!("{}:{}", domain, url.port().unwrap_or(80));
+    let default_port = if url.scheme() == "https" { 443 } else { 80 };
+    let lookup = format!("{}:{}", domain, url.port().unwrap_or(default_port));
     match tokio::net::lookup_host(&lookup).await {
         Ok(addrs) => {
             for addr in addrs {

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 mod browser;
+mod captcha;
 mod config;
 mod cookie;
 mod error;
@@ -18,6 +19,7 @@ mod page;
 mod render;
 mod search;
 mod server;
+mod session;
 
 // Inlined Obscura engine (formerly external crates).
 mod obscura_dom;
@@ -63,6 +65,27 @@ pub struct FetchRequest {
     /// "safari17_5", "edge145", etc. None → Chrome145 default.
     #[serde(default)]
     pub tls_fingerprint: Option<String>,
+    /// Optional JS expression to evaluate after page load. The result is
+    /// returned as `js_extract_result` in the response. Example:
+    /// `"JSON.stringify(window.__INITIAL_STATE__)"`.
+    #[serde(default)]
+    pub js_extract: Option<JsExtractConfig>,
+}
+
+/// Configuration for JS global extraction after page load.
+#[derive(Debug, Deserialize, Serialize, Clone, schemars::JsonSchema)]
+pub struct JsExtractConfig {
+    /// JS expression to evaluate. Must return a JSON-serializable value.
+    pub expression: String,
+    /// Maximum time (ms) to wait for the expression to return non-null.
+    /// The page is settled and the expression retried until it succeeds or
+    /// this timeout expires. Default 5000.
+    #[serde(default = "default_js_extract_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_js_extract_timeout_ms() -> u64 {
+    5000
 }
 
 /// Tiered rendering strategy selector.
@@ -137,6 +160,12 @@ pub struct FetchResponse {
     /// True when `content` was truncated to `max_chars`.
     #[serde(default)]
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub captcha_event: Option<crate::captcha::CaptchaEvent>,
+    /// Result of evaluating `js_extract.expression` after page load.
+    /// Only present when `js_extract` was set in the request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub js_extract_result: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -203,6 +232,9 @@ pub struct SearchResultItem {
     /// Not serialized in API response — only used internally during fetch.
     #[serde(skip)]
     pub cookies: Vec<String>,
+    /// Result of evaluating `js_extract` expression for this result's page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub js_extract_result: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -210,6 +242,8 @@ pub struct SearchResponse {
     pub query: String,
     pub number_of_results: usize,
     pub results: Vec<SearchResultItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub captcha_events: Vec<crate::captcha::CaptchaEvent>,
 }
 
 #[derive(Debug, Serialize)]
@@ -256,6 +290,60 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Session API types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct SessionCreateRequest {
+    pub url: Option<String>,
+    #[serde(default)]
+    pub use_proxy: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionCreateResponse {
+    pub session_id: String,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SessionClickRequest {
+    pub index: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SessionInputRequest {
+    pub index: usize,
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SessionScrollRequest {
+    #[serde(default = "default_scroll_direction")]
+    pub direction: session::ScrollDirection,
+    #[serde(default = "default_scroll_amount")]
+    pub amount: u32,
+}
+
+fn default_scroll_direction() -> session::ScrollDirection {
+    session::ScrollDirection::Down
+}
+
+fn default_scroll_amount() -> u32 {
+    3
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SessionEvalRequest {
+    pub script: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SessionNavigateRequest {
+    pub url: String,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -284,7 +372,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/click", post(click_handler))
         .route("/eval", post(eval_handler))
         .route("/search", post(search_handler))
-        .route("/v1/scrape", post(firecrawl_compat::scrape_handler));
+        .route("/v1/scrape", post(firecrawl_compat::scrape_handler))
+        .route("/session/create", post(session_create_handler))
+        .route("/session/{id}/navigate", post(session_navigate_handler))
+        .route("/session/{id}/state", post(session_state_handler))
+        .route("/session/{id}/click", post(session_click_handler))
+        .route("/session/{id}/input", post(session_input_handler))
+        .route("/session/{id}/scroll", post(session_scroll_handler))
+        .route("/session/{id}/eval", post(session_eval_handler))
+        .route("/session/{id}/close", post(session_close_handler));
 
     let bind_addr = std::env::var("AGINXBROWSER_BIND").unwrap_or_else(|_| "0.0.0.0:8089".to_string());
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
@@ -428,6 +524,100 @@ async fn search_handler(Json(req): Json<SearchRequest>) -> Result<impl IntoRespo
     Ok((StatusCode::OK, Json(resp)))
 }
 
+// ---------------------------------------------------------------------------
+// Session handlers
+// ---------------------------------------------------------------------------
+
+async fn session_create_handler(Json(req): Json<SessionCreateRequest>) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    mgr.evict_expired();
+    let id = mgr.create(req.url.as_deref(), req.use_proxy);
+    Ok((StatusCode::OK, Json(SessionCreateResponse {
+        session_id: id,
+        url: req.url,
+    })))
+}
+
+async fn session_navigate_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<SessionNavigateRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    let resp = mgr.send(&id, |reply| session::SessionCommand::Navigate {
+        url: req.url.clone(),
+        reply,
+    }).await.map_err(|e| AppError::Internal(e))?;
+    Ok((StatusCode::OK, Json(resp)))
+}
+
+async fn session_state_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    let compact_text = mgr.send(&id, |reply| session::SessionCommand::State { reply }).await
+        .map_err(|e| AppError::Internal(e))?;
+    // Return as plain text for token efficiency.
+    Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], compact_text))
+}
+
+async fn session_click_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<SessionClickRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    let resp = mgr.send(&id, |reply| session::SessionCommand::Click {
+        index: req.index,
+        reply,
+    }).await.map_err(|e| AppError::Internal(e))?;
+    Ok((StatusCode::OK, Json(resp)))
+}
+
+async fn session_input_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<SessionInputRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    let filled = mgr.send(&id, |reply| session::SessionCommand::Input {
+        index: req.index,
+        text: req.text,
+        reply,
+    }).await.map_err(|e| AppError::Internal(e))?;
+    Ok((StatusCode::OK, Json(serde_json::json!({ "filled": filled }))))
+}
+
+async fn session_scroll_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<SessionScrollRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    let scrolled = mgr.send(&id, |reply| session::SessionCommand::Scroll {
+        direction: req.direction,
+        amount: req.amount,
+        reply,
+    }).await.map_err(|e| AppError::Internal(e))?;
+    Ok((StatusCode::OK, Json(serde_json::json!({ "scrolled": scrolled }))))
+}
+
+async fn session_eval_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<SessionEvalRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    let result = mgr.send(&id, |reply| session::SessionCommand::Eval {
+        script: req.script,
+        reply,
+    }).await.map_err(|e| AppError::Internal(e))?;
+    Ok((StatusCode::OK, Json(serde_json::json!({ "result": result }))))
+}
+
+async fn session_close_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    mgr.close(&id);
+    Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
+}
+
 fn spawn_blocking<F, R>(f: F) -> tokio::task::JoinHandle<R>
 where
     F: FnOnce() -> R + Send + 'static,
@@ -452,6 +642,7 @@ mod tests {
             auto_bypass_challenge: true,
             render_tier: RenderTier::Auto,
             tls_fingerprint: None,
+            js_extract: None,
         }
     }
 
@@ -461,6 +652,8 @@ mod tests {
             title: Some("t".into()),
             content: "c".into(),
             truncated: false,
+            captcha_event: None,
+            js_extract_result: None,
         }
     }
 

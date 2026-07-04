@@ -251,6 +251,8 @@ pub async fn http_fetch(
         title,
         content,
         truncated,
+        captcha_event: None,
+        js_extract_result: None,
     }))
 }
 

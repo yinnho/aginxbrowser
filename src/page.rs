@@ -126,12 +126,13 @@ impl Page {
     }
 
     /// Drive the page's JS event loop for up to `max_ms` milliseconds.
-    ///
-    /// Call this after `evaluate()` kicks off async work (Promises, fetch,
-    /// setTimeout, RxJS subscribers) to let the V8 event loop pump and
-    /// resolve scheduled microtasks/macrotasks before the next `evaluate()`.
     pub async fn settle(&mut self, max_ms: u64) {
         self.inner.settle(max_ms).await
+    }
+
+    /// Scroll the page by a relative offset.
+    pub fn scroll_by(&mut self, dx: i32, dy: i32) {
+        self.evaluate(&format!("window.scrollBy({}, {})", dx, dy));
     }
 }
 

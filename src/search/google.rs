@@ -87,7 +87,10 @@ impl SearchEngine for GoogleEngine {
             if let Some(location) = resp.headers().get("location") {
                 let loc = location.to_str().unwrap_or("");
                 if loc.contains("sorry.google.com") || loc.contains("/sorry/") {
-                    return Err(SearchEngineError::Captcha);
+                    return Err(SearchEngineError::Captcha {
+                        url: url.to_string(),
+                        captcha_type: Some(super::super::captcha::CaptchaType::RecaptchaV2),
+                    });
                 }
             }
             return Err(SearchEngineError::Transient(format!("redirect: {}", resp.headers().get("location").and_then(|v| v.to_str().ok()).unwrap_or("?"))));
@@ -98,7 +101,10 @@ impl SearchEngine for GoogleEngine {
 
         // Check for CAPTCHA in body
         if html.contains("/sorry/") || html.contains("unusual traffic") {
-            return Err(SearchEngineError::Captcha);
+            return Err(SearchEngineError::Captcha {
+                url: url.to_string(),
+                captcha_type: Some(super::super::captcha::CaptchaType::RecaptchaV2),
+            });
         }
 
         parse_google_html(&html)
@@ -151,6 +157,7 @@ fn parse_google_html(html: &str) -> Result<Vec<RawSearchResult>, SearchEngineErr
             engine: "google".to_string(),
             score: 0.0, // assigned below
             cookies: vec![],
+            js_extract_result: None,
         });
     }
 
@@ -306,5 +313,6 @@ fn parse_google_result_fallback(item: &scraper::ElementRef) -> Option<RawSearchR
         engine: "google".to_string(),
         score: 0.0,
         cookies: vec![],
+        js_extract_result: None,
     })
 }

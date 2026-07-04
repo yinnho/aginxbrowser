@@ -1,18 +1,71 @@
 # AginxBrowser
 
-轻量级服务端浏览器引擎，内置 Obscura 浏览器内核，用于快速页面抓取、JS 交互和聚合搜索。
+**纯服务端浏览器引擎** — 内置 V8，无需 Chromium。给 AI Agent 用的浏览器。
 
-## 定位
+一个二进制，零依赖，启动即服务。抓取、搜索、交互，HTTP API 一把梭。
 
-**轻量级服务端浏览器 + 原生搜索引擎**——内置 V8 引擎，支持 JS 执行、CSS 选择器、页面导航；内置 Rust 原生搜索引擎（百度/Bing/搜狗/搜狗微信/Google），聚合搜索 + 抓正文一体化。定位是**纯外挂基础设施**：作为独立服务挂在系统里，谁需要谁调，不嵌入宿主代码。
+## 为什么选 AginxBrowser
 
-- **抓取**：渲染 JS、过风控（微信公众号免 cookie）、提取正文
-- **搜索**：`/search` 原生多引擎聚合（百度/Bing/搜狗/搜狗微信/Google），并可对前 N 条结果自动抓正文，Agent 一步完成"搜→读"
-- **分层渲染**：静态页面纯 HTTP 直取（~100ms），需要 JS 渲染时才启动浏览器（~1-2s），80% 页面加速
-- **Cloudflare Turnstile 自动绕过**：检测 "Just a moment..." 挑战页，自动等待 `cf_clearance` cookie
-- **TLS 指纹伪装**：stealth 模式模拟 Chrome145/Firefox133/Safari/Edge 指纹，可按请求切换，绕过基于 TLS 指纹的反爬检测
-- **MCP Server**：`--mcp` 模式暴露 fetch/eval/click/search 为 MCP 工具，Claude Code/Claude Desktop/Cursor 直接调用
+| | AginxBrowser | Puppeteer/Playwright | Firecrawl |
+|---|---|---|---|
+| 二进制体积 | ~70MB | ~500MB+（需 Chromium） | Docker 镜像 ~1GB |
+| 启动方式 | 单二进制，`./aginxbrowser` | 装 Node + Chromium | Docker compose |
+| JS 执行 | 内置 V8，原生执行 | V8 via Chromium | 无 |
+| 内置搜索 | 5 引擎聚合 | 无 | 无 |
+| 分层渲染 | HTTP 优先，自动回退浏览器 | 只有浏览器 | 只有浏览器 |
+| TLS 指纹 | 可切换 Chrome/Firefox/Safari | 需额外插件 | 无 |
+| MCP 协议 | 原生支持 | 无 | 无 |
+| 交互式 Session | 有（click/input/scroll/eval） | 有 | 无 |
+| CAPTCHA 自动解决 | 有（2captcha 集成） | 需自己接 | 无 |
+
+**核心优势：不依赖 Chromium。** AginxBrowser 内联了 Obscura 浏览器内核（V8 + 自研 HTTP 栈），不需要 Puppeteer、不需要 Chrome、不需要 Docker。一个 Rust 二进制，systemd 守护，就是你的浏览器基础设施。
+
+## 核心能力
+
+- **分层渲染**：静态页面纯 HTTP 直取（~100ms），需要 JS 渲染时才启动 V8（~1-2s），80% 页面加速 10x
+- **5 引擎聚合搜索**：百度/Bing/搜狗/搜狗微信/Google 并发查询，合并去重，可选自动抓正文，Agent 一步完成"搜→读"
+- **交互式 Session**：持久化浏览器会话，索引化交互（state/click/input/scroll/eval），AI Agent 像人一样浏览网页
+- **CAPTCHA 自动解决**：检测验证码类型，可选 2captcha 自动解决，搜索不再卡死
+- **JS 数据提取**：`js_extract` 参数，从 SPA 提取 `window.__INITIAL_STATE__` 等结构化数据
+- **Cloudflare 自动绕过**：检测 "Just a moment..." 挑战页，自动等待 `cf_clearance`
+- **TLS 指纹伪装**：stealth 模式模拟 Chrome145/Firefox133/Safari/Edge，可按请求切换
+- **MCP Server**：`--mcp` 模式暴露 12 个工具（fetch/eval/click/search + 8 个 session 工具），Claude Code / Claude Desktop / Cursor 直接调用
 - **Firecrawl 兼容**：`/v1/scrape` 端点，现有 Firecrawl 客户端改 base URL 即可迁移
+- **DNS 重绑定防护**：内置 SSRF 防护 + DNS 解析后 IP 校验
+
+## 快速开始
+
+```bash
+# 构建
+cargo build --release
+
+# 启动服务
+./target/release/aginxbrowser
+# → Listening on 0.0.0.0:8089
+
+# 验证
+curl http://127.0.0.1:8089/health
+# → {"status":"ok","engine":"obscura"}
+
+# 抓取页面
+curl -sS -X POST http://127.0.0.1:8089/fetch \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com"}'
+
+# 搜索
+curl -sS -X POST http://127.0.0.1:8089/search \
+  -H "Content-Type: application/json" \
+  -d '{"q":"macbook 价格","max_results":5}'
+
+# 创建交互式会话
+curl -sS -X POST http://127.0.0.1:8089/session/create \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com"}'
+# → {"session_id":"s_1","url":"https://example.com/"}
+
+# MCP 模式（给 AI Agent 用）
+./target/release/aginxbrowser --mcp
+```
 
 ## 目录结构
 
@@ -24,13 +77,14 @@ aginxbrowser/
 │   └── bootstrap.js      # V8 启动脚本
 ├── README.md
 ├── docs/
-│   ├── API.md            # 完整 API 参考（HTTP + MCP）
-│   └── search-design.md  # 搜索引擎设计文档
+│   └── API.md            # 完整 API 参考（HTTP + MCP）
 └── src/
-    ├── main.rs              # HTTP 服务入口与路由
+    ├── main.rs              # HTTP 服务���口与路由
     ├── server.rs            # 业务层（fetch/click/eval/search）
+    ├── session.rs           # 交互式浏览器会话
+    ├── captcha.rs           # CAPTCHA 检测与自动解决
     ├── render.rs            # 分层渲染（HTTP 直取 → obscura 浏览器）
-    ├── mcp.rs               # MCP Server（stdio，fetch/eval/click/search 工具）
+    ├── mcp.rs               # MCP Server（12 个工具）
     ├── firecrawl_compat.rs  # Firecrawl 兼容 /v1/scrape 端点
     ├── browser.rs           # 顶层 API：Browser、BrowserBuilder
     ├── page.rs              # 顶层 API：Page、Element
@@ -38,7 +92,7 @@ aginxbrowser/
     ├── cookie.rs            # CookieStore
     ├── error.rs             # Error 类型
     ├── search/              # 原生搜索引擎
-    │   ├── mod.rs           #   SearchEngine trait、Registry、合并去重、CAPTCHA 暂停
+    │   ├── mod.rs           #   SearchEngine trait、Registry、合并去重、渐进退避
     │   ├── baidu.rs         #   百度（JSON API，wreq stealth）
     │   ├── bing.rs          #   Bing（HTML 解析，plain reqwest）
     │   ├── sogou.rs         #   搜狗通用（HTML 解析，plain reqwest）
@@ -63,53 +117,6 @@ cargo build --release --features stealth
 
 依赖：Rust 1.78+，首次编译自动下载 V8 静态库（需网络）。启用 stealth 需额外 `go`、`cmake`、C++ 编译器。
 
-## 运行
-
-```bash
-export OBSCURA_PROXY=socks5://127.0.0.1:8800   # 可选
-./target/release/aginxbrowser
-```
-
-默认监听 `0.0.0.0:8089`，可通过 `AGINXBROWSER_BIND` 修改。
-
-## 快速验证
-
-```bash
-# 健康检查
-curl http://127.0.0.1:8089/health
-# → {"status":"ok","engine":"obscura"}
-
-# 抓取页面
-curl -sS -X POST http://127.0.0.1:8089/fetch \
-  -H "Content-Type: application/json" \
-  -d '{"url":"https://example.com"}'
-
-# 搜索
-curl -sS -X POST http://127.0.0.1:8089/search \
-  -H "Content-Type: application/json" \
-  -d '{"q":"macbook 价格","max_results":5}'
-
-# MCP 模式
-./target/release/aginxbrowser --mcp
-```
-
-## API 文档
-
-**完整 API 参考** → [`docs/API.md`](docs/API.md)
-
-包含：
-- 所有 HTTP 端点的完整参数表 + 请求/响应示例（`/fetch`、`/click`、`/eval`、`/search`、`/v1/scrape`）
-- MCP Server 的 4 个工具及参数
-- **Claude Code** / **Claude Desktop** / **Cursor** 客户端配置
-- 远程服务器 SSH 接入方式
-- 环境变量、错误码、站点抓取示例
-
-## Features
-
-| Feature | 默认 | 说明 |
-|---------|------|------|
-| `stealth` | 关闭 | TLS/JA3 指纹伪装（依赖 BoringSSL，需 `go` + C++ 工具链） |
-
 ## 运行时环境变量
 
 | 变量 | 默认 | 说明 |
@@ -120,6 +127,19 @@ curl -sS -X POST http://127.0.0.1:8089/search \
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language |
 | `OBSCURA_PROXY` | 无 | 代理地址，`use_proxy:true` 时使用 |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 缓存 TTL，`0` 禁用 |
+| `CAPTCHA_SOLVER_API_KEY` | 无 | 2captcha API Key，设置后自动解决验证码 |
+| `CAPTCHA_SOLVER_SERVICE` | `2captcha` | 验证码解决服务 |
+
+## API 文档
+
+**完整 API 参考** → [`docs/API.md`](docs/API.md)
+
+包含：
+- 所有 HTTP 端点（`/fetch`、`/click`、`/eval`、`/search`、`/v1/scrape`、8 个 Session 端点）
+- MCP Server 的 12 个工具及参数
+- Claude Code / Claude Desktop / Cursor 客户端配置
+- 远程服务器 SSH 接入方式
+- 环境变量、错误码、站点抓取示例
 
 ## 作为外挂接入其他系统
 
@@ -135,25 +155,6 @@ AginxBrowser 定位是**纯外挂基础设施**——像真实浏览器一样作
 4. **代理支持**：HTTP/HTTPS/SOCKS5，通过 `OBSCURA_PROXY` 传入
 5. **强风控站点**：百度文库暂不支持；知乎专栏需有效 `__zse_ck`
 
-## 与 Chromium 对比
-
-| 项目 | AginxBrowser | Chromium |
-|------|------------|----------|
-| 二进制体积 | ~70MB | ~256MB+ |
-| 启动速度 | 快 | 慢 |
-| 截图 | ❌ | ✅ |
-| 坐标点击 | ❌ | ✅ |
-| JS click / scraping | ✅ | ✅ |
-| 复杂 SPA 兼容 | 中等 | 高 |
-| 代理 | ✅ | ✅ |
-| Cookie 持久化 | ✅ | ✅ |
-| TLS 指纹伪装 | ✅ (stealth，可切换) | ✅ |
-| 内置搜索 | ✅ (5 引擎) | ❌ |
-| 分层渲染加速 | ✅ (HTTP 直取优先) | ❌ |
-| Cloudflare 自动绕过 | ✅ | 需插件 |
-| MCP Server | ✅ | ❌ |
-| Firecrawl 兼容 API | ✅ | ❌ |
-
-## 许可证
+## ���可证
 
 与 OpenCarrier 主项目保持一致。

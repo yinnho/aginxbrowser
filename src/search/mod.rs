@@ -38,14 +38,18 @@ pub struct RawSearchResult {
     /// Cookies needed to fetch this URL (e.g. sogou session cookies for
     /// /link redirect URLs). Passed to the obscura browser during fetch.
     pub cookies: Vec<String>,
+    /// Result of evaluating `js_extract_script()` on this result's page.
+    pub js_extract_result: Option<serde_json::Value>,
 }
 
 /// Error from a single engine.
 #[derive(Debug)]
 pub enum SearchEngineError {
-    /// Engine hit a CAPTCHA; should be suspended. Duration is decided by the
-    /// registry's progressive backoff, not the engine itself.
-    Captcha,
+    /// Engine hit a CAPTCHA; should be suspended. Carries metadata for reporting.
+    Captcha {
+        url: String,
+        captcha_type: Option<crate::captcha::CaptchaType>,
+    },
     /// Network / parse error; transient, do not suspend.
     Transient(String),
     /// Engine is currently suspended (skipped).
@@ -60,7 +64,17 @@ pub enum SearchEngineError {
 pub trait SearchEngine: Send + Sync {
     fn name(&self) -> &str;
     fn categories(&self) -> &[&str];
-
+    /// Minimum CAPTCHA suspension for this engine. Override for engines
+    /// whose anti-spider cooldown requires a longer minimum suspension.
+    fn base_captcha_suspend(&self) -> Duration {
+        Duration::from_secs(300)
+    }
+    /// Optional JS expression to extract structured data from search result
+    /// pages. If Some, the engine's fetch_top results will use V8-based
+    /// extraction. Default: None (use HTTP-only).
+    fn js_extract_script(&self) -> Option<&str> {
+        None
+    }
     /// Execute a search. The engine must handle its own HTTP client selection
     /// (stealth wreq vs plain reqwest) internally.
     async fn search(
@@ -74,18 +88,24 @@ pub trait SearchEngine: Send + Sync {
 // SearchEngineRegistry
 // ---------------------------------------------------------------------------
 
-pub struct SearchEngineRegistry {
-    engines: Vec<Arc<dyn SearchEngine>>,
-    /// Engines suspended due to CAPTCHA. Key = engine name, Value = resume time.
-    suspended: Arc<RwLock<HashMap<String, std::time::Instant>>>,
-    /// Consecutive CAPTCHA count per engine. Reset on success.
-    captcha_counts: Arc<RwLock<HashMap<String, u32>>>,
+/// Per-engine suspension and backoff state.
+struct EngineSuspendState {
+    /// Resume time if currently suspended.
+    resume_at: Option<std::time::Instant>,
+    /// Consecutive CAPTCHA count. Reset on success or expiry.
+    captcha_count: u32,
 }
 
-/// Progressive backoff: first CAPTCHA → 5 min, then 10 min, 30 min, 1 h.
+pub struct SearchEngineRegistry {
+    engines: Vec<Arc<dyn SearchEngine>>,
+    /// Per-engine suspension + CAPTCHA backoff state.
+    state: Arc<RwLock<HashMap<String, EngineSuspendState>>>,
+}
+
+/// Progressive backoff: 1st CAPTCHA → 5 min, 2nd → 10 min, 3rd → 30 min, 4th+ → 1 h.
 fn captcha_backoff(count: u32) -> Duration {
     match count {
-        0..=1 => Duration::from_secs(300),
+        0 | 1 => Duration::from_secs(300),
         2 => Duration::from_secs(600),
         3 => Duration::from_secs(1800),
         _ => Duration::from_secs(3600),
@@ -96,8 +116,7 @@ impl SearchEngineRegistry {
     pub fn new() -> Self {
         let mut registry = SearchEngineRegistry {
             engines: Vec::new(),
-            suspended: Arc::new(RwLock::new(HashMap::new())),
-            captcha_counts: Arc::new(RwLock::new(HashMap::new())),
+            state: Arc::new(RwLock::new(HashMap::new())),
         };
 
         // Register engines. Each engine internally decides whether to use
@@ -119,40 +138,69 @@ impl SearchEngineRegistry {
     /// Check if an engine is currently suspended.
     #[allow(dead_code)]
     async fn is_suspended(&self, name: &str) -> bool {
-        let suspended = self.suspended.read().await;
-        if let Some(resume_at) = suspended.get(name) {
-            if std::time::Instant::now() < *resume_at {
-                return true;
+        let state = self.state.read().await;
+        if let Some(s) = state.get(name) {
+            if let Some(resume_at) = s.resume_at {
+                if std::time::Instant::now() < resume_at {
+                    return true;
+                }
             }
         }
         false
     }
 
     /// Suspend an engine after CAPTCHA, using progressive backoff.
-    async fn suspend_engine(&self, name: &str) {
-        let count = {
-            let mut counts = self.captcha_counts.write().await;
-            let c = counts.entry(name.to_string()).or_insert(0);
-            *c += 1;
-            *c
-        };
-        let duration = captcha_backoff(count);
+    /// Duration is max(backoff_ladder, engine's base_captcha_suspend).
+    async fn suspend_engine(&self, name: &str, base_suspend: Duration) {
+        let mut state = self.state.write().await;
+        let s = state.entry(name.to_string()).or_insert(EngineSuspendState {
+            resume_at: None,
+            captcha_count: 0,
+        });
+        s.captcha_count += 1;
+        let backoff = captcha_backoff(s.captcha_count);
+        let duration = backoff.max(base_suspend);
         let resume_at = std::time::Instant::now() + duration;
-        self.suspended.write().await.insert(name.to_string(), resume_at);
-        tracing::warn!("search: engine {} suspended for {:?} (CAPTCHA #{})", name, duration, count);
+        s.resume_at = Some(resume_at);
+        tracing::warn!(
+            "search: engine {} suspended for {:?} (CAPTCHA #{})",
+            name, duration, s.captcha_count
+        );
     }
 
     /// Reset CAPTCHA count for an engine after a successful search.
     async fn reset_captcha_count(&self, name: &str) {
-        let mut counts = self.captcha_counts.write().await;
-        counts.remove(name);
+        let mut state = self.state.write().await;
+        if let Some(s) = state.get_mut(name) {
+            s.captcha_count = 0;
+        }
     }
 
-    /// Clean up expired suspensions.
+    /// Clean up expired suspensions and reset their backoff counts so
+    /// the engine starts fresh after the cooldown period.
     async fn cleanup_suspensions(&self) {
-        let mut suspended = self.suspended.write().await;
+        // Fast path: check under read lock if there's anything to clean up.
+        {
+            let state = self.state.read().await;
+            let now = std::time::Instant::now();
+            let needs_cleanup = state.values().any(|s| {
+                s.resume_at.is_some_and(|t| t <= now)
+            });
+            if !needs_cleanup {
+                return;
+            }
+        }
+        let mut state = self.state.write().await;
         let now = std::time::Instant::now();
-        suspended.retain(|_, resume_at| *resume_at > now);
+        state.retain(|_, s| {
+            if let Some(resume_at) = s.resume_at {
+                if resume_at <= now {
+                    s.resume_at = None;
+                    s.captcha_count = 0;
+                }
+            }
+            s.resume_at.is_some() || s.captcha_count > 0
+        });
     }
 }
 
@@ -167,7 +215,7 @@ pub async fn native_search(
     params: SearchParams,
     categories: &str,
     max_results: usize,
-) -> (Vec<SearchResultItem>, usize) {
+) -> (Vec<SearchResultItem>, usize, Vec<crate::captcha::CaptchaEvent>) {
     registry.cleanup_suspensions().await;
 
     // Filter engines by category.
@@ -191,15 +239,17 @@ pub async fn native_search(
             timeout_secs: params.timeout_secs,
         };
 
-        let suspended = registry.suspended.clone();
+        let state = registry.state.clone();
 
         handles.push(tokio::spawn(async move {
             // Check suspension inside the task.
             {
-                let s = suspended.read().await;
-                if let Some(resume_at) = s.get(&name) {
-                    if std::time::Instant::now() < *resume_at {
-                        return (name, Err(SearchEngineError::Suspended));
+                let s = state.read().await;
+                if let Some(es) = s.get(&name) {
+                    if let Some(resume_at) = es.resume_at {
+                        if std::time::Instant::now() < resume_at {
+                            return (name, Err(SearchEngineError::Suspended));
+                        }
                     }
                 }
             }
@@ -212,6 +262,7 @@ pub async fn native_search(
     // Collect results.
     let mut all_results: Vec<RawSearchResult> = Vec::new();
     let mut total_count = 0usize;
+    let mut captcha_events: Vec<crate::captcha::CaptchaEvent> = Vec::new();
 
     for handle in handles {
         match handle.await {
@@ -220,8 +271,21 @@ pub async fn native_search(
                 all_results.extend(results);
                 registry.reset_captcha_count(&name).await;
             }
-            Ok((name, Err(SearchEngineError::Captcha))) => {
-                registry.suspend_engine(&name).await;
+            Ok((name, Err(SearchEngineError::Captcha { url, captcha_type }))) => {
+                let base_suspend = registry
+                    .engines
+                    .iter()
+                    .find(|e| e.name() == name)
+                    .map(|e| e.base_captcha_suspend())
+                    .unwrap_or(Duration::from_secs(300));
+                registry.suspend_engine(&name, base_suspend).await;
+                captcha_events.push(crate::captcha::CaptchaEvent {
+                    engine: name,
+                    captcha_type: captcha_type.unwrap_or(crate::captcha::CaptchaType::Unknown),
+                    url,
+                    auto_solve_attempted: false,
+                    auto_solve_succeeded: false,
+                });
             }
             Ok((name, Err(SearchEngineError::Transient(msg)))) => {
                 tracing::warn!("search: engine {} transient error: {}", name, msg);
@@ -237,7 +301,7 @@ pub async fn native_search(
 
     // Merge and dedup.
     let merged = merge_results(all_results, max_results);
-    (merged, total_count)
+    (merged, total_count, captcha_events)
 }
 
 // ---------------------------------------------------------------------------
@@ -335,13 +399,13 @@ fn merge_results(results: Vec<RawSearchResult>, max_results: usize) -> Vec<Searc
             let mut best_snippet = String::new();
             let mut best_url = String::new();
             let mut cookies = Vec::new();
+            let mut js_extract_result = None;
 
             for r in &group {
                 if !engines.contains(&r.engine) {
                     engines.push(r.engine.clone());
                 }
                 total_score += r.score;
-                // Prefer the result with the longest title (usually most descriptive).
                 if r.title.len() > best_title.len() {
                     best_title = r.title.clone();
                     best_url = r.url.clone();
@@ -349,9 +413,11 @@ fn merge_results(results: Vec<RawSearchResult>, max_results: usize) -> Vec<Searc
                 if r.snippet.len() > best_snippet.len() {
                     best_snippet = r.snippet.clone();
                 }
-                // Take cookies from the first result that has them.
                 if cookies.is_empty() && !r.cookies.is_empty() {
                     cookies = r.cookies.clone();
+                }
+                if js_extract_result.is_none() && r.js_extract_result.is_some() {
+                    js_extract_result = r.js_extract_result.clone();
                 }
             }
 
@@ -365,6 +431,7 @@ fn merge_results(results: Vec<RawSearchResult>, max_results: usize) -> Vec<Searc
                 content_truncated: false,
                 fetch_error: None,
                 cookies,
+                js_extract_result,
             }
         })
         .collect();
@@ -471,7 +538,10 @@ pub async fn stealth_fetch(
         || final_url.contains("wappass.baidu.com")
         || final_url.contains("sorry.google.com")
     {
-        return Err(SearchEngineError::Captcha);
+        return Err(SearchEngineError::Captcha {
+            url: final_url.to_string(),
+            captcha_type: crate::captcha::detect_captcha_type(final_url, None),
+        });
     }
     for redirected in &resp.redirected_from {
         let next = redirected.as_str();
@@ -479,7 +549,10 @@ pub async fn stealth_fetch(
             || next.contains("wappass.baidu.com")
             || next.contains("sorry.google.com")
         {
-            return Err(SearchEngineError::Captcha);
+            return Err(SearchEngineError::Captcha {
+                url: next.to_string(),
+                captcha_type: crate::captcha::detect_captcha_type(next, None),
+            });
         }
     }
 
@@ -510,7 +583,10 @@ pub async fn plain_fetch(client: &reqwest::Client, url: &str) -> Result<String, 
                     || loc.contains("wappass.baidu.com")
                     || loc.contains("sorry.google.com")
                 {
-                    return Err(SearchEngineError::Captcha);
+                    return Err(SearchEngineError::Captcha {
+                        url: current_url.clone(),
+                        captcha_type: crate::captcha::detect_captcha_type(loc, None),
+                    });
                 }
                 // Normal redirect — follow it.
                 current_url = if loc.starts_with("http") {
@@ -597,6 +673,7 @@ mod tests {
             engine: engine.into(),
             score,
             cookies: vec![],
+            js_extract_result: None,
         }
     }
 
