@@ -151,6 +151,7 @@ fn parse_sogou_standard_item(
         score: 0.0, // Will be assigned by position later.
         cookies: vec![],
         js_extract_result: None,
+        image: None,
     })
 }
 
@@ -183,6 +184,7 @@ fn parse_sogou_vrwrap_item(
         score: 0.0,
         cookies: vec![],
         js_extract_result: None,
+        image: None,
     })
 }
 

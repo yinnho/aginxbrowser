@@ -158,6 +158,7 @@ fn parse_google_html(html: &str) -> Result<Vec<RawSearchResult>, SearchEngineErr
             score: 0.0, // assigned below
             cookies: vec![],
             js_extract_result: None,
+            image: None,
         });
     }
 
@@ -314,5 +315,6 @@ fn parse_google_result_fallback(item: &scraper::ElementRef) -> Option<RawSearchR
         score: 0.0,
         cookies: vec![],
         js_extract_result: None,
+        image: None,
     })
 }

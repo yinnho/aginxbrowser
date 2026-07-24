@@ -489,6 +489,11 @@ pub async fn do_search(req: SearchRequest) -> Result<SearchResponse, SearchError
     if n > 0 {
         let mut handles = Vec::with_capacity(n);
         for i in 0..n {
+            // Image results: `url` is a binary image link, not a page — fetching
+            // it as HTML is meaningless. Leave content as None for images.
+            if items[i].image_url.is_some() {
+                continue;
+            }
             let url = items[i].url.clone();
             let cookies = items[i].cookies.clone();
             let use_proxy = req.use_proxy;

@@ -235,6 +235,16 @@ pub struct SearchResultItem {
     /// Result of evaluating `js_extract` expression for this result's page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub js_extract_result: Option<serde_json::Value>,
+    /// 图片直链（二进制，curl -o 可直接下成 jpg/png）。仅 `images` 分类结果有值。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
+    /// 图片所在网页 URL（溯源/版权）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]

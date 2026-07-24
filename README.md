@@ -24,6 +24,7 @@
 
 - **分层渲染**：静态页面纯 HTTP 直取（~100ms），需要 JS 渲染时才启动 V8（~1-2s），80% 页面加速 10x
 - **5 引擎聚合搜索**：百度/Bing/搜狗/搜狗微信/Google 并发查询，合并去重，可选自动抓正文，Agent 一步完成"搜→读"
+- **图片搜索**：`categories=images` 接百度图片/必应图片，返回 `image_url` 二进制直链（`curl -o` 可直接下成 jpg/png）+ `source_url` 溯源，Agent 自主补真实素材
 - **交互式 Session**：持久化浏览器会话，索引化交互（state/click/input/scroll/eval），AI Agent 像人一样浏览网页
 - **CAPTCHA 自动解决**：检测验证码类型，可选 2captcha 自动解决，搜索不再卡死
 - **JS 数据提取**：`js_extract` 参数，从 SPA 提取 `window.__INITIAL_STATE__` 等结构化数据

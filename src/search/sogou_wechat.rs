@@ -301,6 +301,7 @@ fn parse_sogou_wechat_html(html: &str) -> Result<Vec<RawSearchResult>, SearchEng
             score: total - i as f64,
             cookies: vec![], // Filled in by search() from wreq session.
             js_extract_result: None,
+            image: None,
         });
     }
 

@@ -1,5 +1,7 @@
 pub mod baidu;
+pub mod baidu_images;
 pub mod bing;
+pub mod bing_images;
 pub mod google;
 pub mod sogou;
 pub mod sogou_wechat;
@@ -26,6 +28,20 @@ pub struct SearchParams {
     pub timeout_secs: u64,
 }
 
+/// Image-specific result fields. Populated only for `images`-category results.
+/// Kept in a sub-struct so general-result construction sites only add
+/// `image: None` instead of four separate fields.
+#[derive(Debug, Clone)]
+pub struct ImageResult {
+    /// Binary direct link to the image — `curl -o` downloadable as jpg/png.
+    /// NOT the URL of the page where the image appears.
+    pub image_url: String,
+    /// Page where the image appears (attribution / source tracing).
+    pub source_url: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
 /// A single raw result from one engine, before merging.
 #[derive(Debug, Clone)]
 pub struct RawSearchResult {
@@ -40,6 +56,8 @@ pub struct RawSearchResult {
     pub cookies: Vec<String>,
     /// Result of evaluating `js_extract_script()` on this result's page.
     pub js_extract_result: Option<serde_json::Value>,
+    /// Present only for `images`-category results. None for general results.
+    pub image: Option<ImageResult>,
 }
 
 /// Error from a single engine.
@@ -122,7 +140,9 @@ impl SearchEngineRegistry {
         // Register engines. Each engine internally decides whether to use
         // wreq (stealth) or reqwest (plain), and holds its own client.
         registry.register(baidu::BaiduEngine::new());
+        registry.register(baidu_images::BaiduImagesEngine::new());
         registry.register(bing::BingEngine::new());
+        registry.register(bing_images::BingImagesEngine::new());
         registry.register(sogou::SogouEngine::new());
         registry.register(sogou_wechat::SogouWechatEngine::new());
         registry.register(google::GoogleEngine::new());
@@ -400,6 +420,7 @@ fn merge_results(results: Vec<RawSearchResult>, max_results: usize) -> Vec<Searc
             let mut best_url = String::new();
             let mut cookies = Vec::new();
             let mut js_extract_result = None;
+            let mut image: Option<ImageResult> = None;
 
             for r in &group {
                 if !engines.contains(&r.engine) {
@@ -419,6 +440,9 @@ fn merge_results(results: Vec<RawSearchResult>, max_results: usize) -> Vec<Searc
                 if js_extract_result.is_none() && r.js_extract_result.is_some() {
                     js_extract_result = r.js_extract_result.clone();
                 }
+                if image.is_none() && r.image.is_some() {
+                    image = r.image.clone();
+                }
             }
 
             SearchResultItem {
@@ -432,6 +456,10 @@ fn merge_results(results: Vec<RawSearchResult>, max_results: usize) -> Vec<Searc
                 fetch_error: None,
                 cookies,
                 js_extract_result,
+                image_url: image.as_ref().map(|i| i.image_url.clone()),
+                source_url: image.as_ref().and_then(|i| i.source_url.clone()),
+                width: image.as_ref().and_then(|i| i.width),
+                height: image.as_ref().and_then(|i| i.height),
             }
         })
         .collect();
@@ -447,6 +475,17 @@ fn merge_results(results: Vec<RawSearchResult>, max_results: usize) -> Vec<Searc
 // ---------------------------------------------------------------------------
 // Helpers for engine implementations
 // ---------------------------------------------------------------------------
+
+/// Unescape common HTML entities. Shared by image-search engines; Baidu image
+/// titles and Bing `m.t` fields arrive HTML-entity-encoded.
+pub fn html_unescape(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+}
 
 /// Build a plain reqwest client suitable for search (no auto-redirect, 15s timeout).
 pub fn build_plain_client(timeout_secs: u64) -> reqwest::Client {
@@ -674,6 +713,7 @@ mod tests {
             score,
             cookies: vec![],
             js_extract_result: None,
+            image: None,
         }
     }
 

@@ -249,7 +249,7 @@ curl -sS -X POST http://127.0.0.1:8089/eval \
 |------|------|------|------|------|
 | q | string | ✅ | — | 搜索关键词 |
 | fetch_top | usize | | `0` | 对前 N 条结果抓正文。`0` = 只返回摘要 |
-| categories | string | | `"general"` | 搜索分类 |
+| categories | string | | `"general"` | 搜索分类，逗号分隔：`general` / `images` / `news`。`images` 返回图片直链 |
 | language | string | | `"zh-CN"` | 语言 |
 | max_results | usize | | `10` | 返回结果上限 |
 | max_chars_per | usize | | `4000` | 每条正文字符截断。`0` 不限 |
@@ -265,6 +265,8 @@ curl -sS -X POST http://127.0.0.1:8089/eval \
 | Sogou | general | plain reqwest | 搜狗通用搜索 |
 | Sogou WeChat | general, news | plain reqwest | 搜狗微信搜索 |
 | Google | general | wreq stealth + proxy | Google HTML 解析，国内需代理 |
+| Baidu Images | images | wreq stealth | 百度图片 `acjson` JSON |
+| Bing Images | images | plain reqwest | Bing 图片 `images/async` |
 
 多引擎并发查询，结果合并去重：同一 URL（归一化后）合并为一条，`engines` 列出来源引擎，`score` 累加。
 
@@ -291,6 +293,12 @@ curl -sS -X POST http://127.0.0.1:8089/eval \
 | content | string? | 正文（仅 `fetch_top` 范围内有值） |
 | content_truncated | bool | 正文是否被截断 |
 | fetch_error | string? | 抓正文失败原因 |
+| image_url | string? | 图片二进制直链（`curl -o` 可直接下成 jpg/png）。仅 `categories=images` |
+| source_url | string? | 图片所在网页 URL（溯源/版权） |
+| width | u32? | 图片宽度（px） |
+| height | u32? | 图片高度（px） |
+
+> `categories=images` 时，`url` 字段等于 `image_url`（图片直链，便于直接下载）；`snippet` 为空。百度图片优先返回 `objURL`（原图，最高清），拿不到则回退 CDN 代理直链。
 
 **示例 — 搜索 + 抓前 3 条正文：**
 
@@ -298,6 +306,36 @@ curl -sS -X POST http://127.0.0.1:8089/eval \
 curl -sS -X POST http://127.0.0.1:8089/search \
   -H "Content-Type: application/json" \
   -d '{"q":"macbook 价格","fetch_top":3,"max_chars_per":2000}'
+```
+
+**示例 — 图片搜索（返回直链，curl 可直接下载）：**
+
+```bash
+curl -sS -X POST http://127.0.0.1:8089/search \
+  -H "Content-Type: application/json" \
+  -d '{"q":"蔚来ES8 酒红内饰 后排视角","categories":"images","max_results":10}'
+```
+
+```json
+{
+  "query": "蔚来ES8 酒红内饰 后排视角",
+  "number_of_results": 20,
+  "results": [
+    {
+      "title": "蔚来ES8 酒红内饰后排实拍",
+      "url": "https://n.sinaimg.cn/.../img.jpg",
+      "engines": ["baidu_images"],
+      "score": 20.0,
+      "image_url": "https://n.sinaimg.cn/.../img.jpg",
+      "source_url": "https://auto.sina.com.cn/...",
+      "width": 1920,
+      "height": 1080
+    }
+  ]
+}
+
+# 下载图片
+curl -sL -o cabin_ref.jpg "<image_url>"
 ```
 
 ---
