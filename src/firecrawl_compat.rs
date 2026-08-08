@@ -120,9 +120,14 @@ pub async fn scrape_handler(
     #[cfg(not(feature = "screenshot"))]
     let screenshot_available = false;
 
-    // Actions or a screenshot need a real single-page browser session so the
-    // actions affect what gets extracted. Plain scrapes stay on the fast path.
-    let needs_session = !req.actions.is_empty() || (wants_screenshot && screenshot_available);
+    // Only actions that mutate the page (click/writeText/pressKey/scroll) or a
+    // screenshot need the single-page session; a pure `wait` folds into the fast
+    // path's settle budget instead of booting a full V8 browser.
+    let needs_session = req
+        .actions
+        .iter()
+        .any(|a| !matches!(a, ScrapeAction::Wait { .. }))
+        || (wants_screenshot && screenshot_available);
 
     if needs_session {
         return Ok(scrape_with_session(&req, wants_html, wants_markdown, wants_screenshot).await);
@@ -142,7 +147,22 @@ async fn scrape_with_fetch(
     } else {
         OutputFormat::Markdown
     };
-    let wait_secs = req.wait_for.map(|ms| ms / 1000).filter(|s| *s > 0);
+    // Fold pure `wait` actions into a single settle budget (they don't mutate
+    // the page, so the fast layered renderer handles them).
+    let extra_wait: u64 = req
+        .actions
+        .iter()
+        .map(|a| match a {
+            ScrapeAction::Wait { milliseconds } => *milliseconds as u64,
+            _ => 0,
+        })
+        .sum::<u64>()
+        / 1000;
+    let wait_secs = req
+        .wait_for
+        .map(|ms| ms / 1000)
+        .filter(|s| *s > 0)
+        .or_else(|| (extra_wait > 0).then_some(extra_wait));
     let fetch_req = FetchRequest {
         url: req.url.clone(),
         format: format.clone(),
@@ -343,7 +363,12 @@ async fn scrape_with_session(
 
             let final_url = page.url();
             let title = page
-                .evaluate("document.title")
+                .evaluate(
+                    "((document.querySelector('#activity-name,h1,.article-title')||{}).textContent||'').trim()\
+                     || document.title\
+                     || (document.querySelector('meta[property=\"og:title\"]')||{}).content\
+                     || ''",
+                )
                 .as_str()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
