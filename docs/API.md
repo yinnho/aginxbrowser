@@ -643,15 +643,30 @@ export CAPTCHA_SOLVER_SERVICE=2captcha
 
 ## MCP Server
 
-`--mcp` 模式将 AginxBrowser 包装为 MCP（Model Context Protocol）Server，AI Agent 可直接调用，无需 HTTP 客户端。
+AginxBrowser 将核心操作包装为 MCP（Model Context Protocol）Server，AI Agent 可直接调用，无需手写 HTTP 客户端。支持两种接入方式：
+
+- **stdio**：`--mcp` 模式，本地/自部署，通过 stdin/stdout 通信
+- **streamable HTTP**：HTTP Server 自带 `/mcp` 端点，公网可直接访问（托管实例开箱即用）
 
 ### 启动方式
+
+**方式一：托管实例（无需部署，推荐）**
+
+本项目运行着一个公网托管实例，Claude Code 一行接入：
+
+```bash
+claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
+```
+
+HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支持 `GET`（SSE 事件流）和 `POST`（请求/响应）。任何支持 HTTP transport 的 MCP 客户端（Claude Code / Claude Desktop / Cursor）都能连。
+
+**方式二：自部署 stdio**
 
 ```bash
 ./target/release/aginxbrowser --mcp
 ```
 
-MCP 走 stdio 协议，不启动 HTTP 服务器，通过 stdin/stdout 与 MCP 客户端通信。
+`--mcp` 模式走 stdio 协议，不启动 HTTP 服务器，通过 stdin/stdout 与 MCP 客户端通信。
 
 ### 提供的工具（12 个）
 
@@ -707,7 +722,26 @@ MCP 走 stdio 协议，不启动 HTTP 服务器，通过 stdin/stdout 与 MCP �
 
 #### Claude Code
 
-编辑项目或全局的 settings 文件：
+**托管实例（一行命令）**：
+
+```bash
+claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
+```
+
+或在 settings 文件里配置 HTTP transport：
+
+```json
+{
+  "mcpServers": {
+    "aginxbrowser": {
+      "type": "http",
+      "url": "https://browser.aginx.net/mcp"
+    }
+  }
+}
+```
+
+**自部署（stdio）**：编辑项目或全局的 settings 文件：
 
 **项目级** `.claude/settings.json`：
 
