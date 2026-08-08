@@ -54,7 +54,12 @@ pub enum ScrapeAction {
     #[serde(rename = "wait")]
     Wait { milliseconds: u32 },
     #[serde(rename = "screenshot")]
-    Screenshot,
+    Screenshot {
+        /// Capture the full scrolled page height (can be large) instead of just
+        /// the viewport. Default false — viewport-only keeps buffers bounded.
+        #[serde(default, rename = "fullPage")]
+        full_page: bool,
+    },
     #[serde(rename = "scroll")]
     Scroll,
     #[serde(rename = "writeText")]
@@ -105,12 +110,19 @@ pub async fn scrape_handler(
 ) -> Result<impl IntoResponse, AppError> {
     let wants_html = req.formats.iter().any(|f| f == "html");
     let wants_markdown = req.formats.iter().any(|f| f == "markdown");
-    let wants_screenshot = req.actions.iter().any(|a| matches!(a, ScrapeAction::Screenshot))
+    let wants_screenshot = req.actions.iter().any(|a| matches!(a, ScrapeAction::Screenshot { .. }))
         || req.formats.iter().any(|f| f == "screenshot");
+
+    // Screenshots can only be produced when built with the `screenshot` feature.
+    // Without it, don't route to a session (or imply success) just for one.
+    #[cfg(feature = "screenshot")]
+    let screenshot_available = true;
+    #[cfg(not(feature = "screenshot"))]
+    let screenshot_available = false;
 
     // Actions or a screenshot need a real single-page browser session so the
     // actions affect what gets extracted. Plain scrapes stay on the fast path.
-    let needs_session = !req.actions.is_empty() || wants_screenshot;
+    let needs_session = !req.actions.is_empty() || (wants_screenshot && screenshot_available);
 
     if needs_session {
         return Ok(scrape_with_session(&req, wants_html, wants_markdown, wants_screenshot).await);
@@ -259,11 +271,11 @@ async fn scrape_with_session(
                         // pressKey). For anchors, return the href and navigate
                         // via page.goto() so the chain continues on the target.
                         let nav = page.evaluate(&format!(
-                            "(() => {{ const el = document.querySelector({sel}); if (!el) return ''; if (el.tagName === 'A' && el.href) return el.href; el.click(); return ''; }})()",
+                            "(() => {{ const el = document.querySelector({sel}); if (!el) return ''; if (el.tagName === 'A' && el.href) {{ if (el.target === '_blank') return 'HANDLED'; const href = el.href; const attr = el.getAttribute('href') || ''; if (href.startsWith('javascript:') || attr.startsWith('#')) return 'HANDLED'; return href; }} el.click(); return ''; }})()",
                             sel = js_str(selector),
                         ));
                         let mut navigated = false;
-                        if let Some(url) = nav.as_str().filter(|s| !s.is_empty()) {
+                        if let Some(url) = nav.as_str().filter(|s| s.starts_with("http")) {
                             page.goto(url).await?;
                             navigated = true;
                         }
@@ -299,14 +311,14 @@ async fn scrape_with_session(
                         // navigate with page.goto() — the browser's real nav path.
                         let submit = if key.eq_ignore_ascii_case("enter") { "true" } else { "false" };
                         let nav = page.evaluate(&format!(
-                            "(() => {{ const el = document.activeElement; if (!el) return ''; const opts = {{ key: {key}, code: {code}, keyCode: {key_code}, which: {key_code}, bubbles: true }}; el.dispatchEvent(new KeyboardEvent('keydown', opts)); el.dispatchEvent(new KeyboardEvent('keypress', opts)); el.dispatchEvent(new KeyboardEvent('keyup', opts)); if ({submit}) {{ const form = el.form; if (form && !(form.method && form.method.toLowerCase() === 'post')) {{ try {{ const u = new URL(form.action || window.location.href, window.location.href); for (const c of form.elements) {{ if (!c.name || c.type === 'submit' || c.type === 'button' || c.type === 'image') continue; if (c.value) u.searchParams.append(c.name, c.value); }} return u.toString(); }} catch (e) {{ return ''; }} }} }} return ''; }})()",
+                            "(() => {{ const el = document.activeElement; if (!el) return ''; const opts = {{ key: {key}, code: {code}, keyCode: {key_code}, which: {key_code}, bubbles: true }}; el.dispatchEvent(new KeyboardEvent('keydown', opts)); el.dispatchEvent(new KeyboardEvent('keypress', opts)); el.dispatchEvent(new KeyboardEvent('keyup', opts)); if ({submit}) {{ const form = el.form; if (form && !(form.method && form.method.toLowerCase() === 'post')) {{ try {{ const u = new URL(form.action || window.location.href, window.location.href); for (const c of form.elements) {{ if (!c.name) continue; const t = c.type; if (t === 'submit' || t === 'button' || t === 'image' || t === 'file') continue; if (t === 'checkbox' || t === 'radio') {{ if (c.checked) u.searchParams.append(c.name, c.value || 'on'); continue; }} u.searchParams.append(c.name, c.value !== undefined ? c.value : ''); }} return u.toString(); }} catch (e) {{ return ''; }} }} }} return ''; }})()",
                             key = js_str(key),
                             code = js_str(&code),
                             key_code = key_code,
                             submit = submit,
                         ));
                         let mut navigated = false;
-                        if let Some(url) = nav.as_str().filter(|s| !s.is_empty()) {
+                        if let Some(url) = nav.as_str().filter(|s| s.starts_with("http")) {
                             page.goto(url).await?;
                             navigated = true;
                         }
@@ -320,7 +332,7 @@ async fn scrape_with_session(
                     ScrapeAction::Scroll => {
                         page.scroll_by(0, 800);
                     }
-                    ScrapeAction::Screenshot => {
+                    ScrapeAction::Screenshot { .. } => {
                         // Captured from the page's final state below.
                     }
                 }
@@ -349,6 +361,15 @@ async fn scrape_with_session(
                 None => full_html.clone(),
             };
 
+            // Free the V8 page/browser before the CPU-bound Blitz layout/paint
+            // (do_screenshot drops them first for the same reason) so peak memory
+            // stays bounded on large pages.
+            let full_page = actions
+                .iter()
+                .any(|a| matches!(a, ScrapeAction::Screenshot { full_page } if *full_page));
+            drop(page);
+            drop(browser);
+
             #[cfg(feature = "screenshot")]
             let screenshot_png = if wants_screenshot {
                 // A render failure must not abort the scrape — the markdown/html
@@ -360,7 +381,7 @@ async fn scrape_with_session(
                     1280,
                     800,
                     1.0,
-                    true,
+                    full_page,
                 ) {
                     Ok(png) => Some(png),
                     Err(e) => {
