@@ -47,8 +47,10 @@ fn default_formats() -> Vec<String> {
     vec!["markdown".into()]
 }
 
-/// A pre-extraction action. We support `click` and `wait`; `screenshot` and
-/// others are accepted but ignored (no screenshot support yet).
+/// A pre-extraction action. `click` and `wait` are executed; `screenshot`
+/// captures the rendered page (when the `screenshot` feature is built) and
+/// returns it as base64 in the response. The rest are accepted for Firecrawl
+/// API compatibility but ignored.
 #[allow(dead_code)] // WriteText/PressKey fields parsed for API completeness, not implemented
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -76,6 +78,11 @@ pub struct ScrapeData {
     pub html: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub links: Option<Vec<String>>,
+    /// Base64 data-URI PNG of the rendered page, present when a `screenshot`
+    /// action or `formats: ["screenshot"]` is requested and the binary is built
+    /// with the `screenshot` feature.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screenshot: Option<String>,
     pub metadata: ScrapeMetadata,
 }
 
@@ -134,8 +141,10 @@ pub async fn scrape_handler(
             ScrapeAction::Wait { milliseconds } => {
                 extra_wait += (*milliseconds as u64) / 1000;
             }
-            ScrapeAction::Screenshot | ScrapeAction::Scroll
-            | ScrapeAction::WriteText { .. } | ScrapeAction::PressKey { .. } => {
+            ScrapeAction::Screenshot => {
+                // Handled after fetch via capture_screenshot below.
+            }
+            ScrapeAction::Scroll | ScrapeAction::WriteText { .. } | ScrapeAction::PressKey { .. } => {
                 // Not yet supported; ignored.
             }
         }
@@ -188,10 +197,13 @@ pub async fn scrape_handler(
             // Extract description from the HTML if we have it, else leave None.
             let description = html.as_deref().and_then(extract_description);
 
+            let screenshot = capture_screenshot(&req, wait_secs).await;
+
             let data = ScrapeData {
                 markdown,
                 html,
                 links: None,
+                screenshot,
                 metadata: ScrapeMetadata {
                     title: resp.title.clone(),
                     source_url: resp.url.clone(),
@@ -208,6 +220,7 @@ pub async fn scrape_handler(
                 markdown: None,
                 html: None,
                 links: None,
+                screenshot: None,
                 metadata: ScrapeMetadata {
                     title: None,
                     source_url: req.url,
@@ -221,6 +234,51 @@ pub async fn scrape_handler(
                 Json(ScrapeResponse { success: false, data }),
             ))
         }
+    }
+}
+
+/// Capture a real screenshot when the request asks for one (`screenshot` action
+/// or `formats: ["screenshot"]`) and the binary is built with the `screenshot`
+/// feature. Returns a base64 data-URI PNG. Without the feature this is a no-op
+/// (the response simply omits the `screenshot` field).
+async fn capture_screenshot(req: &ScrapeRequest, wait_secs: Option<u64>) -> Option<String> {
+    let requested = req.actions.iter().any(|a| matches!(a, ScrapeAction::Screenshot))
+        || req.formats.iter().any(|f| f == "screenshot");
+    if !requested {
+        return None;
+    }
+
+    #[cfg(feature = "screenshot")]
+    {
+        let shot_req = crate::ScreenshotRequest {
+            url: req.url.clone(),
+            width: 1280,
+            height: 800,
+            scale: 1.0,
+            full_page: true,
+            wait_secs,
+            use_proxy: false,
+            cookies: vec![],
+            tls_fingerprint: req.tls_fingerprint.clone(),
+        };
+        // do_screenshot spawns its own local runtime; run on a blocking thread
+        // to avoid "cannot start a runtime from within a runtime".
+        match tokio::task::spawn_blocking(move || crate::server::do_screenshot(shot_req)).await {
+            Ok(Ok(resp)) => Some(format!("data:image/png;base64,{}", resp.image_base64)),
+            Ok(Err(e)) => {
+                tracing::warn!("firecrawl screenshot action failed: {}", e);
+                None
+            }
+            Err(e) => {
+                tracing::warn!("firecrawl screenshot task failed: {}", e);
+                None
+            }
+        }
+    }
+    #[cfg(not(feature = "screenshot"))]
+    {
+        let _ = wait_secs;
+        None
     }
 }
 

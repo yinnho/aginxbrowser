@@ -425,10 +425,12 @@ curl -sS -X POST http://127.0.0.1:8089/screenshot \
 |------|------|------|
 | `click` | `selector` | 点击元素 |
 | `wait` | `milliseconds` | 等待指定毫秒 |
-| `screenshot` | — | 接受但不实现 |
+| `screenshot` | — | 截图渲染后的页面，返回 base64 data-URI（需 `screenshot` feature） |
 | `scroll` | — | 接受但不实现 |
 | `writeText` | `text`, `selector?` | 接受但不实现 |
 | `pressKey` | `key` | 接受但不实现 |
+
+请求里带 `screenshot` 动作（或 `formats` 含 `"screenshot"`）时，响应 `data.screenshot` 返回 `data:image/png;base64,...` 形式的截图。未启用 `screenshot` feature 时该字段省略。
 
 **响应（Firecrawl 格式，成功/失败均返回 HTTP 200）：**
 
