@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Json, State},
+    extract::{Json, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -32,7 +32,7 @@ mod obscura_net;
 mod obscura_js;
 mod obscura_browser;
 
-use server::{do_click, do_eval, do_search, SearchError};
+use server::{do_click, do_eval, do_fetch, do_search, SearchError};
 use render::smart_fetch;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -439,6 +439,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/health", get(health_handler))
+        .route("/doctor", get(doctor_handler))
         .route("/fetch", post(fetch_handler))
         .route("/click", post(click_handler))
         .route("/eval", post(eval_handler))
@@ -465,7 +466,105 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn health_handler() -> impl IntoResponse {
-    Json(serde_json::json!({ "status": "ok", "engine": "obscura" }))
+    // Cheap liveness check for uptime monitors / load balancers. Includes
+    // compiled-in capabilities so an agent can learn what's available from a
+    // single cheap call (no network probe - see /doctor for that).
+    Json(serde_json::json!({
+        "status": "ok",
+        "engine": "obscura",
+        "version": env!("CARGO_PKG_VERSION"),
+        "capabilities": {
+            "screenshot": cfg!(feature = "screenshot"),
+            "stealth": cfg!(feature = "stealth"),
+            "captcha_solver": std::env::var("CAPTCHA_SOLVER_API_KEY").is_ok(),
+        }
+    }))
+}
+
+/// Query params for /doctor.
+#[derive(Deserialize)]
+struct DoctorParams {
+    /// `?probe=true` runs a live micro-fetch (proves the fetch pipeline +
+    /// network egress actually work, not just that the binary is up). Off by
+    /// default - a probe spins up a browser and hits the network, so it's
+    /// opt-in (borrowing agent-reach's lesson: "shutil.which() alone is NOT
+    /// proof of health - really execute a lightweight command").
+    #[serde(default)]
+    probe: Option<bool>,
+}
+
+/// Deep capability self-report + optional live probe. Agents should call this
+/// (not /health) when they want to know which features are usable before
+/// relying on them.
+async fn doctor_handler(Query(params): Query<DoctorParams>) -> impl IntoResponse {
+    let capabilities = serde_json::json!({
+        "screenshot": cfg!(feature = "screenshot"),
+        "stealth": cfg!(feature = "stealth"),
+        "captcha_solver": std::env::var("CAPTCHA_SOLVER_API_KEY").is_ok(),
+    });
+
+    let probe = if params.probe.unwrap_or(false) {
+        let probe_url = std::env::var("AGINXBROWSER_DOCTOR_URL")
+            .unwrap_or_else(|_| "https://example.com".to_string());
+        let req = FetchRequest {
+            url: probe_url.clone(),
+            format: OutputFormat::Markdown,
+            selector: None,
+            wait_secs: None,
+            use_proxy: false,
+            cookies: vec![],
+            max_chars: 500,
+            auto_bypass_challenge: true,
+            render_tier: RenderTier::Auto,
+            tls_fingerprint: None,
+            js_extract: None,
+        };
+        // do_fetch drives the real fetch pipeline (build_browser -> goto ->
+        // extract) on a local runtime; spawn_blocking because it is !Send and
+        // cannot run inside the tokio runtime - same pattern as the MCP tools.
+        let start = std::time::Instant::now();
+        let result = tokio::task::spawn_blocking(move || do_fetch(req)).await;
+        let latency_ms = start.elapsed().as_millis() as u64;
+        match result {
+            Ok(Ok(resp)) => serde_json::json!({
+                "url": probe_url,
+                "ok": true,
+                "latency_ms": latency_ms,
+                "title": resp.title,
+                "content_chars": resp.content.chars().count(),
+            }),
+            Ok(Err(e)) => serde_json::json!({
+                "url": probe_url,
+                "ok": false,
+                "latency_ms": latency_ms,
+                "error": format!("{:?}", e),
+            }),
+            Err(e) => serde_json::json!({
+                "url": probe_url,
+                "ok": false,
+                "latency_ms": latency_ms,
+                "error": format!("task panicked: {}", e),
+            }),
+        }
+    } else {
+        serde_json::Value::Null
+    };
+
+    Json(serde_json::json!({
+        "status": "ok",
+        "engine": "obscura",
+        "version": env!("CARGO_PKG_VERSION"),
+        "capabilities": capabilities,
+        "search_engines": [
+            "baidu", "bing", "sogou", "sogou_wechat", "google",
+            "baidu_images", "bing_images"
+        ],
+        "endpoints": [
+            "/health", "/doctor", "/fetch", "/click", "/eval", "/search",
+            "/v1/scrape", "/session/create", "/mcp"
+        ],
+        "probe": probe,
+    }))
 }
 
 async fn mcp_handler(

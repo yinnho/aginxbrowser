@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AginxBrowser — Agent 的浏览器。看世界，和世界交互。</title>
-<meta name="description" content="AginxBrowser — 从第一行代码就为 AI Agent 设计的浏览器。一个 Rust 二进制，内置 V8，不依赖 Chromium。看世界、读世界、搜世界、操世界。">
-<meta property="og:title" content="AginxBrowser — Agent 的浏览器">
+<title>AginxBrowser - Agent 的浏览器。看世界，和世界交互。</title>
+<meta name="description" content="AginxBrowser - 从第一行代码就为 AI Agent 设计的浏览器。一个 Rust 二进制，内置 V8，不依赖 Chromium。看世界、读世界、搜世界、操世界。">
+<meta property="og:title" content="AginxBrowser - Agent 的浏览器">
 <meta property="og:description" content="看世界，和世界交互。一个 Rust 二进制，内置 V8，不依赖 Chromium。">
 <style>
 :root {
@@ -17,6 +17,7 @@
   --text-dim: #8aa0b8;
   --accent: #4dd0ff;
   --accent-2: #7ee0a3;
+  --warn: #ffb86b;
   --code-bg: #0b111b;
   --radius: 12px;
 }
@@ -49,33 +50,53 @@ nav {
 .nav-links a:hover { color: var(--text); text-decoration: none; }
 
 /* ---------- hero ---------- */
-.hero { padding: 88px 0 64px; text-align: center; background: radial-gradient(ellipse at 50% -20%, #123a55 0%, transparent 55%); }
+.hero { padding: 80px 0 56px; text-align: center; background: radial-gradient(ellipse at 50% -20%, #123a55 0%, transparent 55%); }
 .hero .badge {
   display: inline-block; padding: 5px 14px; border-radius: 999px;
   border: 1px solid var(--border); background: var(--panel);
   color: var(--accent-2); font-size: 13px; letter-spacing: 0.5px;
 }
-.hero h1 { margin: 26px auto 18px; font-size: 48px; font-weight: 800; letter-spacing: -1px; max-width: 800px; line-height: 1.25; }
+.hero h1 { margin: 24px auto 16px; font-size: 46px; font-weight: 800; letter-spacing: -1px; max-width: 800px; line-height: 1.25; }
 .hero h1 .accent { color: var(--accent); }
-.hero .sub { font-size: 20px; color: var(--text-dim); max-width: 640px; margin: 0 auto; }
-.hero .tagline { margin-top: 14px; color: var(--accent-2); font-weight: 600; font-size: 15px; }
-.hero .cta { margin-top: 38px; display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
-.btn {
-  display: inline-block; padding: 13px 28px; border-radius: 10px; font-weight: 600; font-size: 15px;
-  transition: transform 0.12s ease, box-shadow 0.12s ease;
+.hero .sub { font-size: 19px; color: var(--text-dim); max-width: 640px; margin: 0 auto; }
+.hero .tagline { margin-top: 12px; color: var(--accent-2); font-weight: 600; font-size: 15px; }
+
+/* ---------- install box (head CTA) ---------- */
+.install-box { max-width: 680px; margin: 34px auto 0; text-align: left; }
+.install-label { font-size: 13px; color: var(--text-dim); margin-bottom: 8px; text-align: center; }
+.install-cmd {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px;
+  padding: 14px 16px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13.5px; color: #c9e2ff; overflow-x: auto;
 }
-.btn:hover { text-decoration: none; transform: translateY(-1px); }
-.btn-primary { background: var(--accent); color: #04121f; box-shadow: 0 4px 24px rgba(77, 208, 255, 0.25); }
-.btn-primary:hover { box-shadow: 0 6px 30px rgba(77, 208, 255, 0.4); }
-.btn-ghost { border: 1px solid var(--border); color: var(--text); background: var(--panel); }
-.btn-ghost:hover { border-color: var(--accent); }
-.hero .stats { margin-top: 48px; display: flex; gap: 40px; justify-content: center; flex-wrap: wrap; color: var(--text-dim); font-size: 14px; }
+.install-cmd code { flex: 1; white-space: nowrap; }
+.copy-btn {
+  flex-shrink: 0; cursor: pointer; border: 1px solid var(--border); background: var(--panel);
+  color: var(--accent); font-size: 12.5px; padding: 5px 12px; border-radius: 7px; font-weight: 600;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.copy-btn:hover { border-color: var(--accent); background: #162234; }
+.copy-btn.copied { color: var(--accent-2); border-color: var(--accent-2); }
+.install-hint { text-align: center; margin-top: 12px; font-size: 13.5px; color: var(--text-dim); }
+.hero .stats { margin-top: 40px; display: flex; gap: 40px; justify-content: center; flex-wrap: wrap; color: var(--text-dim); font-size: 14px; }
 .hero .stats b { display: block; color: var(--text); font-size: 26px; font-weight: 700; }
 
 /* ---------- sections ---------- */
-section { padding: 72px 0; }
+section { padding: 68px 0; }
 .section-title { text-align: center; font-size: 32px; font-weight: 800; letter-spacing: -0.5px; margin-bottom: 12px; }
 .section-desc { text-align: center; color: var(--text-dim); max-width: 620px; margin: 0 auto 44px; font-size: 16px; }
+
+/* ---------- pain ---------- */
+.pain { background: var(--bg-soft); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.pain-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 16px; }
+.pain-card {
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 22px; border-left: 3px solid var(--warn);
+}
+.pain-card .h { font-weight: 700; font-size: 15px; margin-bottom: 6px; color: var(--warn); }
+.pain-card p { color: var(--text-dim); font-size: 14px; }
+.pain-card .fix { margin-top: 10px; font-size: 13px; color: var(--accent-2); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 /* ---------- five senses ---------- */
 .senses { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; }
@@ -90,11 +111,19 @@ section { padding: 72px 0; }
 .sense .tag { display: inline-block; margin-top: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; color: var(--accent-2); }
 
 /* ---------- why no chromium ---------- */
-.why { background: var(--bg-soft); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.why { border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .why-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 18px; }
 .why-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px; }
 .why-card h4 { font-size: 15.5px; margin-bottom: 8px; }
 .why-card p { color: var(--text-dim); font-size: 14px; }
+
+/* ---------- tiers ---------- */
+.tiers-table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.tiers-table th, .tiers-table td { padding: 16px 20px; text-align: left; border-bottom: 1px solid var(--border); font-size: 14.5px; vertical-align: top; }
+.tiers-table th { background: #0d1421; color: var(--text-dim); font-size: 13px; font-weight: 600; }
+.tiers-table tr:last-child td { border-bottom: none; }
+.tiers-table .tier-name { font-weight: 700; color: var(--accent); white-space: nowrap; }
+.tiers-table .tier-now { color: var(--accent-2); font-size: 13px; }
 
 /* ---------- quickstart ---------- */
 .quickstart pre {
@@ -117,8 +146,9 @@ footer .brand { justify-content: center; margin-bottom: 12px; font-size: 15px; c
 footer p { margin-top: 6px; }
 
 @media (max-width: 640px) {
-  .hero h1 { font-size: 34px; }
-  .nav-links a:not(:first-child) { display: none; }
+  .hero h1 { font-size: 32px; }
+  .nav-links a:not(:first-child):not(:last-child) { display: none; }
+  .install-cmd { font-size: 12px; }
 }
 </style>
 </head>
@@ -128,9 +158,10 @@ footer p { margin-top: 6px; }
   <div class="nav-inner">
     <div class="brand"><span class="dot"></span>AginxBrowser</div>
     <div class="nav-links">
+      <a href="#pain">痛点</a>
       <a href="#capabilities">能力</a>
       <a href="#why">架构</a>
-      <a href="#quickstart">接入</a>
+      <a href="#tiers">用法</a>
       <a href="https://github.com/yinnho/aginxbrowser">GitHub</a>
     </div>
   </div>
@@ -140,12 +171,18 @@ footer p { margin-top: 6px; }
   <div class="container">
     <span class="badge">为 AI Agent 而生 · 不依赖 Chromium</span>
     <h1>Agent 的浏览器。<br><span class="accent">看世界，和世界交互。</span></h1>
-    <p class="sub">不是给人用的浏览器改吧改吧给 Agent。是从第一行代码就为 AI Agent 设计的——看世界、读世界、搜世界、操世界。</p>
+    <p class="sub">不是给人用的浏览器改吧改吧给 Agent。是从第一行代码就为 AI Agent 设计的--看世界、读世界、搜世界、操世界。</p>
     <p class="tagline">人有 Chrome，Agent 有 AginxBrowser。</p>
-    <div class="cta">
-      <a class="btn btn-primary" href="#quickstart">接入你的 Agent</a>
-      <a class="btn btn-ghost" href="https://github.com/yinnho/aginxbrowser" target="_blank" rel="noopener">GitHub 开源</a>
+
+    <div class="install-box">
+      <div class="install-label">一行接入 Claude Code（公网托管，无需部署）</div>
+      <div class="install-cmd">
+        <code id="install-cmd">claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp</code>
+        <button class="copy-btn" onclick="copyInstall()" id="copy-btn">复制</button>
+      </div>
+      <div class="install-hint">或 <a href="#quickstart">HTTP API 直接调用</a> · <a href="#tiers">自己部署</a> · <a href="https://github.com/yinnho/aginxbrowser/blob/main/docs/install.md">让 Agent 自己装</a></div>
     </div>
+
     <div class="stats">
       <div><b>1</b> 个 Rust 二进制</div>
       <div><b>0</b> 依赖 Chromium</div>
@@ -154,6 +191,45 @@ footer p { margin-top: 6px; }
     </div>
   </div>
 </header>
+
+<section id="pain" class="pain">
+  <div class="container">
+    <h2 class="section-title">Agent 上网，现在抓瞎</h2>
+    <p class="section-desc">Agent 已经能写代码、改文档、管项目--但你让它去网上看看，它就抓瞎了。通用工具每一个都差一口气。</p>
+    <div class="pain-grid">
+      <div class="pain-card">
+        <div class="h">JS 渲染页读不到</div>
+        <p>SPA、数据接口页抓回来一堆空壳 HTML，正文是 JS 填进去的，纯 HTTP 拿不到。</p>
+        <div class="fix">→ 内置 V8，真渲染 + js_extract 抠结构化数据</div>
+      </div>
+      <div class="pain-card">
+        <div class="h">Cloudflare / 反爬拦截</div>
+        <p>服务器 IP 被 403，或卡在 "Just a moment..." 挑战页，流程直接断。</p>
+        <div class="fix">→ 自动绕过 Turnstile + stealth TLS 指纹切换</div>
+      </div>
+      <div class="pain-card">
+        <div class="h">只读不会动</div>
+        <p>能抓页面但不能点击、填表、登录、翻页。遇到要交互的就废。</p>
+        <div class="fix">→ 持久会话，索引化 click/input，像人一样浏览</div>
+      </div>
+      <div class="pain-card">
+        <div class="h">截图要 Chromium</div>
+        <p>给 Agent 当视觉输入要截图，但 Puppeteer/Playwright 要装整个 Chromium，服务器扛不住。</p>
+        <div class="fix">→ 内置 Blitz 渲染栈，纯 CPU，无 Chromium</div>
+      </div>
+      <div class="pain-card">
+        <div class="h">搜不到</div>
+        <p>没有好用的搜索：官方 API 要审批要钱，免费的质量差，国内国外还不通。</p>
+        <div class="fix">→ 5 引擎并发聚合去重，能搜网页也能搜图</div>
+      </div>
+      <div class="pain-card">
+        <div class="h">抓回来一堆标签</div>
+        <p>通用爬虫返回原始 HTML，Agent 根本没法读，还得自己清洗。</p>
+        <div class="fix">→ 直接返回 markdown，Agent 拿来就能用</div>
+      </div>
+    </div>
+  </div>
+</section>
 
 <section id="capabilities">
   <div class="container">
@@ -175,13 +251,13 @@ footer p { margin-top: 6px; }
       <div class="sense">
         <div class="icon">🔎</div>
         <h3>找得到</h3>
-        <p>百度 / Bing / 搜狗 / 搜狗微信 / Google 并发聚合去重，还能图搜返回图片直链。Agent 一步完成「搜 → 读」，不用人喂 URL。</p>
+        <p>百度 / Bing / 搜狗 / 搜狗微信 / Google 并发聚合去重，还能图搜返回图片直链。Agent 一步完成「搜 -> 读」，不用人喂 URL。</p>
         <span class="tag">POST /search</span>
       </div>
       <div class="sense">
         <div class="icon">🖐️</div>
         <h3>操得了</h3>
-        <p>持久化浏览器会话，索引化交互——不用猜屏幕坐标，click index:3 就点登录。CAPTCHA 自动解决，Cloudflare 自动绕过。</p>
+        <p>持久化浏览器会话，索引化交互--不用猜屏幕坐标，click index:3 就点登录。CAPTCHA 自动解决，Cloudflare 自动绕过。</p>
         <span class="tag">POST /session/create</span>
       </div>
       <div class="sense">
@@ -197,7 +273,7 @@ footer p { margin-top: 6px; }
 <section id="why" class="why">
   <div class="container">
     <h2 class="section-title">为什么不依赖 Chromium</h2>
-    <p class="section-desc">这不是「更轻」的炫耀，是架构选择。Chromium 为人设计，要处理 GPU 合成、音频、扩展、多进程沙箱——Agent 一个都用不到，每一个都是部署负担和故障面。</p>
+    <p class="section-desc">这不是「更轻」的炫耀，是架构选择。Chromium 为人设计，要处理 GPU 合成、音频、扩展、多进程沙箱--Agent 一个都用不到，每一个都是部署负担和故障面。</p>
     <div class="why-grid">
       <div class="why-card">
         <h4>🔒 TLS 指纹伪装</h4>
@@ -219,6 +295,35 @@ footer p { margin-top: 6px; }
   </div>
 </section>
 
+<section id="tiers">
+  <div class="container">
+    <h2 class="section-title">三种用法</h2>
+    <p class="section-desc">从「一行接入立刻能用」到「私有部署全开」。能力是否可用，<a href="https://browser.aginx.net/doctor">/doctor</a> 一查便知。</p>
+    <table class="tiers-table">
+      <thead>
+        <tr><th>层</th><th>包含</th><th>现状</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="tier-name">🆓 零配置<br><span style="font-weight:400;font-size:12px;color:var(--text-dim)">公网托管</span></td>
+          <td>fetch / search / eval / click / session 全部交互能力，12 个 MCP 工具开箱即用</td>
+          <td class="tier-now">免费可用，一行接入</td>
+        </tr>
+        <tr>
+          <td class="tier-name">⚡ 进阶<br><span style="font-weight:400;font-size:12px;color:var(--text-dim)">能力开关</span></td>
+          <td>screenshot 截图 / stealth TLS 指纹 / CAPTCHA 自动解决 / 高速率</td>
+          <td class="tier-now">托管实例按 feature 开（<a href="https://browser.aginx.net/doctor">/doctor</a> 可查）；自部署 <code>--features stealth,screenshot</code> 全开</td>
+        </tr>
+        <tr>
+          <td class="tier-name">🏗 自部署<br><span style="font-weight:400;font-size:12px;color:var(--text-dim)">开源私有</span></td>
+          <td>全部能力 + 私有网络 + 自定义代理 + 不限流 + 合规可控</td>
+          <td class="tier-now">开源 Apache-2.0，单二进制 systemd 守护</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
 <section id="quickstart" class="quickstart">
   <div class="container">
     <h2 class="section-title">接入你的 Agent</h2>
@@ -233,20 +338,18 @@ claude mcp add aginxbrowser \
 
     <div class="step">
       <div class="h"><span class="num">2</span> HTTP API 直接调用</div>
-      <pre><span class="c"># 抓取页面 → markdown</span>
+      <pre><span class="c"># 抓取页面 -> markdown</span>
 curl -sS -X POST https://<span class="k">browser.aginx.net/fetch</span> \
   -H "Content-Type: application/json" \
   -d '{"url":"https://example.com"}'
 
-<span class="c"># 搜索 → 聚合去重</span>
+<span class="c"># 搜索 -> 聚合去重</span>
 curl -sS -X POST https://<span class="k">browser.aginx.net/search</span> \
   -H "Content-Type: application/json" \
   -d '{"q":"macbook 价格","max_results":5}'
 
-<span class="c"># 截图 → Agent 视觉输入</span>
-curl -sS -X POST https://<span class="k">browser.aginx.net/screenshot</span> \
-  -H "Content-Type: application/json" \
-  -d '{"url":"https://cn.bing.com/search?q=ES8","full_page":true}'</pre>
+<span class="c"># 看能力清单（不抓网，秒回）</span>
+curl -sS https://<span class="k">browser.aginx.net/doctor</span> | jq .</pre>
     </div>
 
     <div class="step">
@@ -262,11 +365,31 @@ cargo build --release --features stealth,screenshot
   <div class="container">
     <div class="brand"><span class="dot"></span>AginxBrowser</div>
     <p>Agent 互联网正在成形。Agent 要互相协作、要访问世界、要被人访问。</p>
-    <p>AginxBrowser 是其中「看世界」这一层——给每一个 Agent 装上眼睛和手。</p>
-    <p style="margin-top:14px;"><a href="https://github.com/yinnho/aginxbrowser">GitHub</a> · <a href="https://github.com/yinnho/aginxbrowser/blob/main/docs/API.md">API 文档</a></p>
-    <p style="margin-top:18px; font-size:13px; color:#5b6f85;">© 2026 OpenCarrier · Apache-2.0 开源</p>
+    <p>AginxBrowser 是其中「看世界」这一层--给每一个 Agent 装上眼睛和手。</p>
+    <p style="margin-top:14px;"><a href="https://github.com/yinnho/aginxbrowser">GitHub</a> · <a href="https://github.com/yinnho/aginxbrowser/blob/main/docs/API.md">API 文档</a> · <a href="https://github.com/yinnho/aginxbrowser/blob/main/docs/install.md">安装指南</a> · <a href="https://github.com/yinnho/aginxbrowser/blob/main/SKILL.md">SKILL.md</a></p>
+    <p style="margin-top:18px; font-size:13px; color:#5b6f85;">© 2026 OpenCarrier · Apache-2.0 开源 · 托管于 browser.aginx.net</p>
   </div>
 </footer>
+
+<script>
+function copyInstall() {
+  var cmd = document.getElementById('install-cmd').textContent;
+  var btn = document.getElementById('copy-btn');
+  navigator.clipboard.writeText(cmd).then(function() {
+    btn.textContent = '已复制';
+    btn.classList.add('copied');
+    setTimeout(function() { btn.textContent = '复制'; btn.classList.remove('copied'); }, 1800);
+  }).catch(function() {
+    // fallback for non-secure contexts
+    var ta = document.createElement('textarea');
+    ta.value = cmd; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); btn.textContent = '已复制'; btn.classList.add('copied');
+      setTimeout(function() { btn.textContent = '复制'; btn.classList.remove('copied'); }, 1800);
+    } catch(e) {}
+    document.body.removeChild(ta);
+  });
+}
+</script>
 
 </body>
 </html>

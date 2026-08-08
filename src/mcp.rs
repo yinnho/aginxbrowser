@@ -220,7 +220,7 @@ pub struct AginxBrowserMcp;
 #[tool_router]
 impl AginxBrowserMcp {
     #[tool(
-        description = "Fetch a webpage and return its content. Supports JS rendering, stealth mode, and multiple output formats (markdown/html/text).",
+        description = "Fetch a webpage and return clean markdown/html/text. Use whenever the agent needs to READ any web page - blogs, docs, articles, JS-rendered SPAs, Cloudflare-protected sites. Supports JS rendering, stealth TLS fingerprints, and structured-data extraction via js_extract.",
         annotations(title = "Fetch Webpage", read_only_hint = true)
     )]
     async fn fetch(&self, Parameters(params): Parameters<FetchParams>) -> String {
@@ -310,7 +310,7 @@ impl AginxBrowserMcp {
     }
 
     #[tool(
-        description = "Search the web using multiple engines (Baidu, Bing, Sogou, WeChat, Google) and optionally fetch page content for top results.",
+        description = "Search the web across Baidu/Bing/Sogou/WeChat/Google (aggregated + deduped) and optionally fetch the top results' full content. Use when the agent needs to FIND information online - replaces a search API. Supports image search returning direct image URLs.",
         annotations(title = "Web Search", read_only_hint = true)
     )]
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
@@ -343,7 +343,7 @@ impl AginxBrowserMcp {
     // ------------------------------------------------------------------
 
     #[tool(
-        description = "Create an interactive browser session. Returns a session_id for use with other session tools. The session persists for 8 minutes of inactivity.",
+        description = "Create a persistent interactive browser session for multi-step interaction - clicking, typing, scrolling, reading state across page transitions. Use when the agent must INTERACT with a page (login flows, forms, pagination, click-through) rather than read it once. Returns session_id; persists 8 min idle.",
         annotations(title = "Create Browser Session")
     )]
     async fn session_create(&self, Parameters(params): Parameters<SessionCreateParams>) -> String {
