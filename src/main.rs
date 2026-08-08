@@ -372,7 +372,7 @@ pub struct SessionCreateRequest {
     pub use_proxy: bool,
     /// Cookies to inject before navigation (`["name=value", ...]`). Lets a
     /// session start already logged-in. Round-trips with
-    /// GET /session/{id}/cookies.
+    /// GET /session/:id/cookies.
     #[serde(default)]
     pub cookies: Vec<String>,
 }
@@ -451,14 +451,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/search", post(search_handler))
         .route("/v1/scrape", post(firecrawl_compat::scrape_handler))
         .route("/session/create", post(session_create_handler))
-        .route("/session/{id}/navigate", post(session_navigate_handler))
-        .route("/session/{id}/state", post(session_state_handler))
-        .route("/session/{id}/cookies", get(session_cookies_handler))
-        .route("/session/{id}/click", post(session_click_handler))
-        .route("/session/{id}/input", post(session_input_handler))
-        .route("/session/{id}/scroll", post(session_scroll_handler))
-        .route("/session/{id}/eval", post(session_eval_handler))
-        .route("/session/{id}/close", post(session_close_handler))
+        .route("/session/:id/navigate", post(session_navigate_handler))
+        .route("/session/:id/state", post(session_state_handler))
+        .route("/session/:id/cookies", get(session_cookies_handler))
+        .route("/session/:id/click", post(session_click_handler))
+        .route("/session/:id/input", post(session_input_handler))
+        .route("/session/:id/scroll", post(session_scroll_handler))
+        .route("/session/:id/eval", post(session_eval_handler))
+        .route("/session/:id/close", post(session_close_handler))
         .route("/mcp", get(mcp_handler).post(mcp_handler));
 
     #[cfg(feature = "screenshot")]
