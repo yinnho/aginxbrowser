@@ -46,6 +46,14 @@ Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操
 
 ## 快速开始
 
+想先体验？直接用托管实例 **https://browser.aginx.net/**，Claude Code 一行接入：
+
+```bash
+claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
+```
+
+下面是自己部署的方式：
+
 ```bash
 # 构建
 cargo build --release

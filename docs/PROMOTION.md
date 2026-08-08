@@ -36,11 +36,13 @@ Agent 用浏览器到底要什么？想清楚这件事，会发现就五件事�
 我们内联了一个纯 Rust 渲染栈（Blitz：Servo 的 Stylo 做 CSS、Taffy 做布局、vello_cpu 做绘制），CPU 渲染，服务器无显存也能跑。Agent 拿到 base64 PNG，直接当多模态视觉输入，或者 `data:image/png;base64,...` 嵌进自己的上下文。
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8089/screenshot \
+curl -sS -X POST https://browser.aginx.net/screenshot \
   -H "Content-Type: application/json" \
   -d '{"url":"https://cn.bing.com/search?q=蔚来ES8内饰","full_page":true}' \
   | jq -r .image_base64 | base64 -d > cabin.png
 ```
+
+> 上面用的是**托管实例** `browser.aginx.net`，直接就能试——本篇文章里的所有 API 示例都对着这个实例，可照抄验证。
 
 这里有个真实的故事。Blitz 是 beta，我们一开始喂它真实站点（百度、GitHub），出来的截图全白——一片空白。排查到最后，根因是 Blitz 假设"总会有网络层去拉 CSS/字体"，遇到我们这种"V8 渲染完直接喂 DOM、不拉子资源"的集成就卡死了：head 里的 stylesheet 永远等不到加载完成的回调，paint 阶段直接跳过整页。
 
@@ -59,7 +61,7 @@ curl -sS -X POST http://127.0.0.1:8089/screenshot \
 `/search` 并发查百度/Bing/搜狗/搜狗微信/Google，合并去重，可选自动抓前 N 条正文。Agent 一步完成"搜→读"。
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8089/search \
+curl -sS -X POST https://browser.aginx.net/search \
   -H "Content-Type: application/json" \
   -d '{"q":"蔚来ES8 酒红内饰 后排视角","categories":"images","max_results":10}'
 ```
@@ -83,7 +85,13 @@ curl -sS -X POST http://127.0.0.1:8089/search \
 
 一个二进制 ~70MB（含截图功能 ~104MB），不需要 Node、不需要 Chromium、不需要 Docker。systemd 守护，就是基础设施。
 
-`--mcp` 模式直接暴露 12 个工具，Claude Code / Claude Desktop / Cursor 配一下就能调，不用写 HTTP 客户端：
+`--mcp` 模式直接暴露 12 个工具，Claude Code / Claude Desktop / Cursor 配一下就能调，不用写 HTTP 客户端。**托管实例一行接入**（Claude Code）：
+
+```bash
+claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
+```
+
+自部署则走 stdio：
 
 ```json
 {
@@ -115,14 +123,23 @@ Chromium 是为人设计的浏览器，它要处理 GPU 合成、音频、扩展
 
 ## 接入
 
+**在线体验（托管实例）**：https://browser.aginx.net/ —— 一个实例，谁都能用，本篇文章所有示例都是直接打在它上面验证过的。
+
 ```bash
-# 全功能构建
+# Claude Code 一行接入
+claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
+
+# 或直接调 HTTP API
+curl https://browser.aginx.net/health
+# → {"status":"ok","engine":"obscura"}
+```
+
+**自己部署**：
+
+```bash
 cargo build --release --features stealth,screenshot
 ./target/release/aginxbrowser
-
-# 验证
-curl http://127.0.0.1:8089/health
-# → {"status":"ok","engine":"obscura"}
+# → Listening on 0.0.0.0:8089
 ```
 
 GitHub：https://github.com/yinnho/aginxbrowser
