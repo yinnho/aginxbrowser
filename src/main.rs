@@ -1,9 +1,12 @@
 use axum::{
-    extract::Json,
+    extract::{Json, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
     Router,
+};
+use rmcp::transport::streamable_http_server::{
+    session::local::LocalSessionManager, StreamableHttpService,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -448,7 +451,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/session/{id}/input", post(session_input_handler))
         .route("/session/{id}/scroll", post(session_scroll_handler))
         .route("/session/{id}/eval", post(session_eval_handler))
-        .route("/session/{id}/close", post(session_close_handler));
+        .route("/session/{id}/close", post(session_close_handler))
+        .route("/mcp", get(mcp_handler).post(mcp_handler));
 
     #[cfg(feature = "screenshot")]
     let app = app.route("/screenshot", post(screenshot_handler));
@@ -456,12 +460,23 @@ async fn main() -> anyhow::Result<()> {
     let bind_addr = std::env::var("AGINXBROWSER_BIND").unwrap_or_else(|_| "0.0.0.0:8089".to_string());
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     tracing::info!("aginxbrowser listening on {}", listener.local_addr()?);
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.with_state(mcp::mcp_http_service())).await?;
     Ok(())
 }
 
 async fn health_handler() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok", "engine": "obscura" }))
+}
+
+async fn mcp_handler(
+    State(service): State<StreamableHttpService<mcp::AginxBrowserMcp, LocalSessionManager>>,
+    req: axum::extract::Request,
+) -> Response {
+    let (parts, body) = service.handle(req).await.into_parts();
+    // rmcp's body error is Infallible (never produced); coerce to an Error type.
+    use http_body_util::BodyExt;
+    let body = axum::body::Body::new(body.map_err(|never| -> std::io::Error { match never {} }));
+    Response::from_parts(parts, body)
 }
 
 async fn fetch_handler(Json(req): Json<FetchRequest>) -> Result<impl IntoResponse, AppError> {

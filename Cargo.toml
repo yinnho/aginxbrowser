@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["OpenCarrier Team"]
 description = "Pure server-side browser engine with built-in V8. HTTP API for scraping, search, and interactive browsing. No Chromium required."
+license = "Apache-2.0"
 
 [features]
 default = []
@@ -35,7 +36,7 @@ axum = "0.7"
 tower-http = { version = "0.5", features = ["cors"] }
 
 # --- MCP (Model Context Protocol) ---
-rmcp = { version = "1.7", features = ["server", "transport-io"] }
+rmcp = { version = "1.7", features = ["server", "transport-io", "transport-streamable-http-server"] }
 schemars = "1"
 
 # --- serialization ---
@@ -54,6 +55,7 @@ encoding_rs = "0.8"
 tempfile = "3"
 url = "2"
 urlencoding = "2"
+http-body-util = "0.1"
 
 # --- html / dom parsing ---
 html5ever = "0.29"

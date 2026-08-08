@@ -1,7 +1,12 @@
+use std::sync::Arc;
+
 use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::wrapper::Parameters,
     tool, tool_handler, tool_router,
+};
+use rmcp::transport::streamable_http_server::{
+    session::local::LocalSessionManager, StreamableHttpService, StreamableHttpServerConfig,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -468,4 +473,22 @@ pub async fn run_mcp_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sy
         .waiting()
         .await?;
     Ok(())
+}
+
+/// Build an MCP server for the streamable HTTP transport, mounted at `/mcp`.
+///
+/// rmcp's streamable HTTP server validates the inbound `Host` header against
+/// `allowed_hosts` (defaults to loopback only) to prevent DNS rebinding, so a
+/// public deployment must list its own hostname.
+pub fn mcp_http_service() -> StreamableHttpService<AginxBrowserMcp, LocalSessionManager> {
+    let config = StreamableHttpServerConfig::default().with_allowed_hosts(vec![
+        "browser.aginx.net".to_string(),
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+    ]);
+    StreamableHttpService::new(
+        || Ok(AginxBrowserMcp),
+        Arc::new(LocalSessionManager::default()),
+        config,
+    )
 }
