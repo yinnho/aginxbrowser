@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AginxBrowser — Agent 的浏览器。看世界，和世界交互。</title>
+<meta name="description" content="AginxBrowser — 从第一行代码就为 AI Agent 设计的浏览器。一个 Rust 二进制，内置 V8，不依赖 Chromium。看世界、读世界、搜世界、操世界。">
+<meta property="og:title" content="AginxBrowser — Agent 的浏览器">
+<meta property="og:description" content="看世界，和世界交互。一个 Rust 二进制，内置 V8，不依赖 Chromium。">
+<style>
+:root {
+  --bg: #0a0e14;
+  --bg-soft: #0f1520;
+  --panel: #111a27;
+  --border: #1e2b3d;
+  --text: #dbe4f0;
+  --text-dim: #8aa0b8;
+  --accent: #4dd0ff;
+  --accent-2: #7ee0a3;
+  --code-bg: #0b111b;
+  --radius: 12px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.container { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+
+/* ---------- nav ---------- */
+nav {
+  position: sticky; top: 0; z-index: 10;
+  background: rgba(10, 14, 20, 0.85);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+}
+.nav-inner { display: flex; align-items: center; justify-content: space-between; padding: 14px 24px; max-width: 1080px; margin: 0 auto; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 16px; color: var(--text); }
+.brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent); }
+.nav-links { display: flex; gap: 22px; align-items: center; }
+.nav-links a { color: var(--text-dim); font-size: 14px; }
+.nav-links a:hover { color: var(--text); text-decoration: none; }
+
+/* ---------- hero ---------- */
+.hero { padding: 88px 0 64px; text-align: center; background: radial-gradient(ellipse at 50% -20%, #123a55 0%, transparent 55%); }
+.hero .badge {
+  display: inline-block; padding: 5px 14px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--panel);
+  color: var(--accent-2); font-size: 13px; letter-spacing: 0.5px;
+}
+.hero h1 { margin: 26px auto 18px; font-size: 48px; font-weight: 800; letter-spacing: -1px; max-width: 800px; line-height: 1.25; }
+.hero h1 .accent { color: var(--accent); }
+.hero .sub { font-size: 20px; color: var(--text-dim); max-width: 640px; margin: 0 auto; }
+.hero .tagline { margin-top: 14px; color: var(--accent-2); font-weight: 600; font-size: 15px; }
+.hero .cta { margin-top: 38px; display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+.btn {
+  display: inline-block; padding: 13px 28px; border-radius: 10px; font-weight: 600; font-size: 15px;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.btn:hover { text-decoration: none; transform: translateY(-1px); }
+.btn-primary { background: var(--accent); color: #04121f; box-shadow: 0 4px 24px rgba(77, 208, 255, 0.25); }
+.btn-primary:hover { box-shadow: 0 6px 30px rgba(77, 208, 255, 0.4); }
+.btn-ghost { border: 1px solid var(--border); color: var(--text); background: var(--panel); }
+.btn-ghost:hover { border-color: var(--accent); }
+.hero .stats { margin-top: 48px; display: flex; gap: 40px; justify-content: center; flex-wrap: wrap; color: var(--text-dim); font-size: 14px; }
+.hero .stats b { display: block; color: var(--text); font-size: 26px; font-weight: 700; }
+
+/* ---------- sections ---------- */
+section { padding: 72px 0; }
+.section-title { text-align: center; font-size: 32px; font-weight: 800; letter-spacing: -0.5px; margin-bottom: 12px; }
+.section-desc { text-align: center; color: var(--text-dim); max-width: 620px; margin: 0 auto 44px; font-size: 16px; }
+
+/* ---------- five senses ---------- */
+.senses { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; }
+.sense {
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 26px; transition: border-color 0.15s ease, transform 0.15s ease;
+}
+.sense:hover { border-color: var(--accent); transform: translateY(-2px); }
+.sense .icon { font-size: 28px; }
+.sense h3 { margin: 14px 0 8px; font-size: 18px; }
+.sense p { color: var(--text-dim); font-size: 14.5px; }
+.sense .tag { display: inline-block; margin-top: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; color: var(--accent-2); }
+
+/* ---------- why no chromium ---------- */
+.why { background: var(--bg-soft); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.why-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 18px; }
+.why-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px; }
+.why-card h4 { font-size: 15.5px; margin-bottom: 8px; }
+.why-card p { color: var(--text-dim); font-size: 14px; }
+
+/* ---------- quickstart ---------- */
+.quickstart pre {
+  background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 22px 24px; overflow-x: auto; font-size: 13.5px; line-height: 1.65;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #c9e2ff;
+}
+.quickstart pre .c { color: var(--text-dim); }
+.quickstart pre .k { color: var(--accent-2); }
+.step { max-width: 760px; margin: 0 auto 28px; }
+.step .h { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-weight: 700; }
+.step .num {
+  width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: #04121f;
+  display: inline-flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 800;
+}
+
+/* ---------- footer ---------- */
+footer { border-top: 1px solid var(--border); padding: 44px 0 60px; text-align: center; color: var(--text-dim); font-size: 14px; }
+footer .brand { justify-content: center; margin-bottom: 12px; font-size: 15px; color: var(--text); }
+footer p { margin-top: 6px; }
+
+@media (max-width: 640px) {
+  .hero h1 { font-size: 34px; }
+  .nav-links a:not(:first-child) { display: none; }
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <div class="brand"><span class="dot"></span>AginxBrowser</div>
+    <div class="nav-links">
+      <a href="#capabilities">能力</a>
+      <a href="#why">架构</a>
+      <a href="#quickstart">接入</a>
+      <a href="https://github.com/yinnho/aginxbrowser">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="container">
+    <span class="badge">为 AI Agent 而生 · 不依赖 Chromium</span>
+    <h1>Agent 的浏览器。<br><span class="accent">看世界，和世界交互。</span></h1>
+    <p class="sub">不是给人用的浏览器改吧改吧给 Agent。是从第一行代码就为 AI Agent 设计的——看世界、读世界、搜世界、操世界。</p>
+    <p class="tagline">人有 Chrome，Agent 有 AginxBrowser。</p>
+    <div class="cta">
+      <a class="btn btn-primary" href="#quickstart">接入你的 Agent</a>
+      <a class="btn btn-ghost" href="https://github.com/yinnho/aginxbrowser" target="_blank" rel="noopener">GitHub 开源</a>
+    </div>
+    <div class="stats">
+      <div><b>1</b> 个 Rust 二进制</div>
+      <div><b>0</b> 依赖 Chromium</div>
+      <div><b>5</b> 引擎聚合搜索</div>
+      <div><b>12</b> 个 MCP 工具</div>
+    </div>
+  </div>
+</header>
+
+<section id="capabilities">
+  <div class="container">
+    <h2 class="section-title">Agent 用浏览器，只要五件事</h2>
+    <p class="section-desc">现在的主流方案要么是为调试而生（Puppeteer），要么只读不会动（Firecrawl）。AginxBrowser 从第一行代码就想清楚：Agent 到底要什么。</p>
+    <div class="senses">
+      <div class="sense">
+        <div class="icon">👁️</div>
+        <h3>看得见</h3>
+        <p>内置 Blitz 渲染栈（Stylo / Taffy / vello_cpu，纯 CPU），把 JS 渲染后的页面画成 PNG，作为 Agent 的视觉输入。服务器无显存也能跑。</p>
+        <span class="tag">POST /screenshot</span>
+      </div>
+      <div class="sense">
+        <div class="icon">📖</div>
+        <h3>读得懂</h3>
+        <p>页面自动转 markdown，SPA 用 js_extract 直接抠结构化数据。分层渲染：静态页纯 HTTP ~100ms，需要 JS 才启动 V8，80% 页面加速 10 倍。</p>
+        <span class="tag">POST /fetch</span>
+      </div>
+      <div class="sense">
+        <div class="icon">🔎</div>
+        <h3>找得到</h3>
+        <p>百度 / Bing / 搜狗 / 搜狗微信 / Google 并发聚合去重，还能图搜返回图片直链。Agent 一步完成「搜 → 读」，不用人喂 URL。</p>
+        <span class="tag">POST /search</span>
+      </div>
+      <div class="sense">
+        <div class="icon">🖐️</div>
+        <h3>操得了</h3>
+        <p>持久化浏览器会话，索引化交互——不用猜屏幕坐标，click index:3 就点登录。CAPTCHA 自动解决，Cloudflare 自动绕过。</p>
+        <span class="tag">POST /session/create</span>
+      </div>
+      <div class="sense">
+        <div class="icon">⚡</div>
+        <h3>跑得动</h3>
+        <p>一个二进制 ~70MB（含截图 ~104MB），不需要 Node、不需要 Chromium、不需要 Docker。systemd 守护，就是基础设施。</p>
+        <span class="tag">HTTP API + MCP</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="why" class="why">
+  <div class="container">
+    <h2 class="section-title">为什么不依赖 Chromium</h2>
+    <p class="section-desc">这不是「更轻」的炫耀，是架构选择。Chromium 为人设计，要处理 GPU 合成、音频、扩展、多进程沙箱——Agent 一个都用不到，每一个都是部署负担和故障面。</p>
+    <div class="why-grid">
+      <div class="why-card">
+        <h4>🔒 TLS 指纹伪装</h4>
+        <p>stealth 模式模拟 Chrome145 / Firefox133 / Safari / Edge，可按请求切换，绕开反爬指纹检测。</p>
+      </div>
+      <div class="why-card">
+        <h4>🧩 CAPTCHA 自动解决</h4>
+        <p>检测验证码类型，可选 2captcha 自动解决。搜索不再因为验证码卡死。</p>
+      </div>
+      <div class="why-card">
+        <h4>☁️ Cloudflare 自动绕过</h4>
+        <p>检测 "Just a moment..." 挑战页，自动等待 cf_clearance，不打断 Agent 流程。</p>
+      </div>
+      <div class="why-card">
+        <h4>🛡️ DNS 重绑定防护</h4>
+        <p>内置 SSRF 防护 + DNS 解析后 IP 校验，MCP over HTTP 默认只收可信 Host，公网安全。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="quickstart" class="quickstart">
+  <div class="container">
+    <h2 class="section-title">接入你的 Agent</h2>
+    <p class="section-desc">MCP 或 HTTP 任选。Claude Code / Claude Desktop / Cursor 配一行就能用。</p>
+
+    <div class="step">
+      <div class="h"><span class="num">1</span> MCP 一键接入（Claude Code）</div>
+      <pre><span class="c"># 本项目就是一个托管实例，直接连公网端点：</span>
+claude mcp add aginxbrowser \
+  --transport http https://<span class="k">browser.aginx.net/mcp</span></pre>
+    </div>
+
+    <div class="step">
+      <div class="h"><span class="num">2</span> HTTP API 直接调用</div>
+      <pre><span class="c"># 抓取页面 → markdown</span>
+curl -sS -X POST https://<span class="k">browser.aginx.net/fetch</span> \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com"}'
+
+<span class="c"># 搜索 → 聚合去重</span>
+curl -sS -X POST https://<span class="k">browser.aginx.net/search</span> \
+  -H "Content-Type: application/json" \
+  -d '{"q":"macbook 价格","max_results":5}'
+
+<span class="c"># 截图 → Agent 视觉输入</span>
+curl -sS -X POST https://<span class="k">browser.aginx.net/screenshot</span> \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://cn.bing.com/search?q=ES8","full_page":true}'</pre>
+    </div>
+
+    <div class="step">
+      <div class="h"><span class="num">3</span> 自己部署</div>
+      <pre><span class="c"># 单二进制，零依赖，systemd 守护</span>
+cargo build --release --features stealth,screenshot
+./target/release/aginxbrowser</pre>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <div class="brand"><span class="dot"></span>AginxBrowser</div>
+    <p>Agent 互联网正在成形。Agent 要互相协作、要访问世界、要被人访问。</p>
+    <p>AginxBrowser 是其中「看世界」这一层——给每一个 Agent 装上眼睛和手。</p>
+    <p style="margin-top:14px;"><a href="https://github.com/yinnho/aginxbrowser">GitHub</a> · <a href="https://github.com/yinnho/aginxbrowser/blob/main/docs/API.md">API 文档</a></p>
+    <p style="margin-top:18px; font-size:13px; color:#5b6f85;">© 2026 OpenCarrier · Apache-2.0 开源</p>
+  </div>
+</footer>
+
+</body>
+</html>
