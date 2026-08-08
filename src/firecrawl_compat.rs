@@ -262,8 +262,19 @@ async fn scrape_with_session(
                             "(() => {{ const el = document.querySelector({sel}); if (!el) return ''; if (el.tagName === 'A' && el.href) return el.href; el.click(); return ''; }})()",
                             sel = js_str(selector),
                         ));
+                        let mut navigated = false;
                         if let Some(url) = nav.as_str().filter(|s| !s.is_empty()) {
                             page.goto(url).await?;
+                            navigated = true;
+                        }
+                        // Drain any JS-initiated navigation from a non-anchor
+                        // click handler (location.href / form.submit) that
+                        // evaluate couldn't complete.
+                        navigated |= page.process_pending_navigation().await?;
+                        if navigated {
+                            // Let the target page's async render land before the
+                            // next action runs (SPA routes render after load).
+                            page.settle(1200).await;
                         }
                     }
                     ScrapeAction::Wait { milliseconds } => {
@@ -294,8 +305,16 @@ async fn scrape_with_session(
                             key_code = key_code,
                             submit = submit,
                         ));
+                        let mut navigated = false;
                         if let Some(url) = nav.as_str().filter(|s| !s.is_empty()) {
                             page.goto(url).await?;
+                            navigated = true;
+                        }
+                        // Drain a navigation the site's own key handler started
+                        // (e.g. Enter on a POST form whose submit handler runs).
+                        navigated |= page.process_pending_navigation().await?;
+                        if navigated {
+                            page.settle(1200).await;
                         }
                     }
                     ScrapeAction::Scroll => {

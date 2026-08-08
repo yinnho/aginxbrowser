@@ -36,6 +36,17 @@ impl Page {
         self.inner.url_string()
     }
 
+    /// Drain a JS-initiated navigation (location.href / form.submit recorded
+    /// while running an `evaluate`) through the real navigation path. JS
+    /// navigation set during an evaluate would otherwise sit unconsumed.
+    /// Returns true if a pending navigation was drained.
+    pub async fn process_pending_navigation(&mut self) -> Result<bool, Error> {
+        self.inner
+            .process_pending_navigation()
+            .await
+            .map_err(|e| Error::Navigation(e.to_string()))
+    }
+
     /// Execute JS in the page.
     pub fn evaluate(&mut self, expression: &str) -> Value {
         self.inner.evaluate(expression)
