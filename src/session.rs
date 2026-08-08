@@ -50,6 +50,12 @@ pub enum SessionCommand {
         script: String,
         reply: oneshot::Sender<Result<Value, String>>,
     },
+    /// Export the session's current cookies (for the page's URL) as a JSON
+    /// string `{"url":...,"cookies":["name=value",...]}`. Round-trips with
+    /// `session_create`'s `cookies` field to replay a logged-in session.
+    Cookies {
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     Close,
 }
 
@@ -111,7 +117,7 @@ impl SessionManager {
     }
 
     /// Create a new browser session. Returns the session ID.
-    pub fn create(&mut self, start_url: Option<&str>, use_proxy: bool) -> String {
+    pub fn create(&mut self, start_url: Option<&str>, use_proxy: bool, cookies: Vec<String>) -> String {
         let session_id = format!("s_{}", SESSION_COUNTER.fetch_add(1, Ordering::Relaxed));
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
@@ -121,7 +127,7 @@ impl SessionManager {
         std::thread::Builder::new()
             .name(format!("session-{}", &thread_id[..8.min(thread_id.len())]))
             .spawn(move || {
-                session_thread(thread_id, thread_url, use_proxy, cmd_rx);
+                session_thread(thread_id, thread_url, use_proxy, cookies, cmd_rx);
             })
             .expect("failed to spawn session thread");
 
@@ -189,6 +195,7 @@ fn session_thread(
     _session_id: String,
     start_url: Option<String>,
     use_proxy: bool,
+    cookies: Vec<String>,
     mut cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
 ) {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -203,6 +210,13 @@ fn session_thread(
             .run_until(async {
                 let browser = crate::server::build_browser(use_proxy, "", None)
                     .expect("failed to build session browser");
+                // Inject cookies before navigation so a session can start
+                // already logged-in (cookies gathered from a prior session via
+                // the Cookies command, or hand-exported). Mirrors /fetch.
+                if !cookies.is_empty() {
+                    let target = start_url.as_deref().unwrap_or("");
+                    crate::server::inject_cookies(&browser, &cookies, target);
+                }
                 let mut page = browser.new_page().await.expect("failed to create session page");
 
                 // Navigate to start URL if provided.
@@ -264,6 +278,23 @@ fn session_thread(
                         SessionCommand::Eval { script, reply } => {
                             let val = page.evaluate_async(&script).await;
                             let _ = reply.send(Ok(val));
+                        }
+
+                        SessionCommand::Cookies { reply } => {
+                            let url_str = page.url();
+                            let cookies: Vec<String> = match url::Url::parse(&url_str) {
+                                Ok(u) => page
+                                    .context
+                                    .cookie_jar
+                                    .get_cookie_header(&u)
+                                    .split("; ")
+                                    .filter(|s| !s.is_empty())
+                                    .map(|s| s.to_string())
+                                    .collect(),
+                                Err(_) => vec![],
+                            };
+                            let resp = serde_json::json!({ "url": url_str, "cookies": cookies });
+                            let _ = reply.send(Ok(resp.to_string()));
                         }
 
                         SessionCommand::Close => {

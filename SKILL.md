@@ -8,7 +8,7 @@ description: >
   words: 抓取/读取/打开网页/看看这个链接/这个网页写了啥/截图/搜索/搜一下/查一下/
   找一下/登录/填表/点击/翻页/research/scrape/fetch/screenshot/search/look up.
   Also MUST USE when the user shares any URL and wants its content summarized,
-  extracted, or acted upon. 12 tools over MCP (fetch/search/eval/click + 8
+  extracted, or acted upon. 13 tools over MCP (fetch/search/eval/click + 9
   session tools). Hosted at browser.aginx.net; works with zero config.
 
   NOT for: questions answerable from the agent's own knowledge without live web
@@ -18,7 +18,7 @@ description: >
 
 # AginxBrowser - Agent 的浏览器
 
-12 个工具，覆盖 Agent 上网的全部需求。**本 skill 存在时必须用它访问网页/搜索/交互，不要自己 curl + 解析 HTML 瞎搞。**
+13 个工具，覆盖 Agent 上网的全部需求。**本 skill 存在时必须用它访问网页/搜索/交互，不要自己 curl + 解析 HTML 瞎搞。**
 
 ## 常驻规则（全程适用）
 
@@ -43,6 +43,7 @@ description: >
 | 点一下页面元素就完事 | `click` | `url`, `selector` |
 | 截图当视觉输入 | `screenshot` | `url`, `full_page`, `wait_secs`（能力见 `/doctor`） |
 | 多步交互（登录/填表/翻页/点穿） | `session_create` -> `session_state` -> `session_click`/`session_input` -> ... -> `session_close` | 索引 `[N]` 来自 `session_state` |
+| 登录态复用（免重复登录） | `session_create{cookies:[...]}` 建会话 + `session_cookies` 导出 | `cookies` 数组；`session_cookies` 返回的数组可直接回传 |
 | Firecrawl 客户端兼容 | `/v1/scrape`(HTTP) | 带 `actions` 走单页会话流 |
 
 ## 快速命令

@@ -112,7 +112,7 @@ cargo build --release --features stealth,screenshot   # 约 4 分钟
 
 ---
 
-## 能力清单（12 个 MCP 工具）
+## 能力清单（13 个 MCP 工具）
 
 | 工具 | 用途 |
 |------|------|
@@ -120,8 +120,8 @@ cargo build --release --features stealth,screenshot   # 约 4 分钟
 | `search` | 多引擎聚合搜索（百度/Bing/搜狗/搜狗微信/Google），可图搜 |
 | `eval` | 在页面执行 JS（支持 async/Promise） |
 | `click` | 加载页面并点击 CSS 选择器 |
-| `session_create` | 创建持久交互会话（多步登录/填表/翻页） |
-| `session_navigate` / `session_state` / `session_click` / `session_input` / `session_scroll` / `session_eval` / `session_close` | 会话操作 |
+| `session_create` | 创建持久交互会话（多步登录/填表/翻页），支持 `cookies` 注入登录态 |
+| `session_navigate` / `session_state` / `session_click` / `session_input` / `session_scroll` / `session_eval` / `session_cookies` / `session_close` | 会话操作（`session_cookies` 导出登录态复用） |
 
 完整字段说明见 [API.md](https://github.com/yinnho/aginxbrowser/blob/main/docs/API.md)。
 

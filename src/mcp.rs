@@ -114,6 +114,16 @@ pub struct SessionCreateParams {
     /// Route through proxy (default: false)
     #[serde(default)]
     pub use_proxy: bool,
+    /// Cookies to inject before navigation (["name=value", ...]). Lets the
+    /// session start already logged-in. Round-trips with session_cookies.
+    #[serde(default)]
+    pub cookies: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionCookiesParams {
+    /// Session ID
+    pub session_id: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -349,8 +359,9 @@ impl AginxBrowserMcp {
     async fn session_create(&self, Parameters(params): Parameters<SessionCreateParams>) -> String {
         let mut mgr = session::SESSIONS.lock().await;
         mgr.evict_expired();
-        let id = mgr.create(params.url.as_deref(), params.use_proxy);
-        json!({ "session_id": id, "url": params.url }).to_string()
+        let url = params.url.clone();
+        let id = mgr.create(params.url.as_deref(), params.use_proxy, params.cookies);
+        json!({ "session_id": id, "url": url }).to_string()
     }
 
     #[tool(
@@ -375,6 +386,18 @@ impl AginxBrowserMcp {
     async fn session_state(&self, Parameters(params): Parameters<SessionStateParams>) -> String {
         let mut mgr = session::SESSIONS.lock().await;
         match mgr.send(&params.session_id, |reply| SessionCommand::State { reply }).await {
+            Ok(text) => text,
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Export the session's current cookies as [\"name=value\", ...] for the page's URL. Use to persist a logged-in session and replay it later via session_create with cookies. Round-trips with session_create's cookies field.",
+        annotations(title = "Session Cookies", read_only_hint = true)
+    )]
+    async fn session_cookies(&self, Parameters(params): Parameters<SessionCookiesParams>) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        match mgr.send(&params.session_id, |reply| SessionCommand::Cookies { reply }).await {
             Ok(text) => text,
             Err(e) => json!({ "error": e }).to_string(),
         }

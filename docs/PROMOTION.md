@@ -81,11 +81,13 @@ curl -sS -X POST https://browser.aginx.net/search \
 
 索引化交互——Agent 不用猜屏幕坐标，`click index:3` 就点登录。比 LLM 盲点坐标靠谱得多。
 
+**登录态也能复用**：会话里登一次，`session_cookies` 导出 cookie，下次 `session_create` 带上这组 cookie 直接以登录态起会话，不用重新登录。托管实例不落盘任何 cookie——登录态由你自己持有（建议用小号）。
+
 ### 跑得动 —— 单二进制，MCP 直连
 
 一个二进制 ~70MB（含截图功能 ~104MB），不需要 Node、不需要 Chromium、不需要 Docker。systemd 守护，就是基础设施。
 
-`--mcp` 模式直接暴露 12 个工具，Claude Code / Claude Desktop / Cursor 配一下就能调，不用写 HTTP 客户端。**托管实例一行接入**（Claude Code）：
+`--mcp` 模式直接暴露 13 个工具，Claude Code / Claude Desktop / Cursor 配一下就能调，不用写 HTTP 客户端。**托管实例一行接入**（Claude Code）：
 
 ```bash
 claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
@@ -131,8 +133,18 @@ claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
 
 # 或直接调 HTTP API
 curl https://browser.aginx.net/health
-# → {"status":"ok","engine":"obscura"}
+# → {"status":"ok","engine":"obscura","version":"...","capabilities":{...}}
 ```
+
+**让 Agent 自己装**——把这句话丢给你的 Agent，它读完文档自己完成接入：
+
+```
+帮我安装 AginxBrowser：https://raw.githubusercontent.com/yinnho/aginxbrowser/main/docs/install.md
+```
+
+**体检**：`curl https://browser.aginx.net/doctor` 告诉你当前哪些能力可用（screenshot/stealth 是否编译进去）、搜索走哪些引擎；`?probe=true` 真跑一次抓取确认链路通。
+
+**SKILL.md**：仓库根有 `SKILL.md`，放进 Agent 的 skills 目录后，它在「读网页/搜索/截图/交互」类任务上会主动调用，不用你提醒。
 
 **自己部署**：
 

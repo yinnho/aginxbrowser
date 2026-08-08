@@ -108,7 +108,7 @@ where
 /// are scoped to the target URL's host so they attach to the first request —
 /// needed for sites (e.g. WeChat articles) that gate content behind a
 /// logged-in session cookie.
-fn inject_cookies(browser: &Browser, cookies: &[String], target_url: &str) {
+pub(crate) fn inject_cookies(browser: &Browser, cookies: &[String], target_url: &str) {
     if cookies.is_empty() {
         return;
     }

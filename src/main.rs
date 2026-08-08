@@ -370,6 +370,11 @@ pub struct SessionCreateRequest {
     pub url: Option<String>,
     #[serde(default)]
     pub use_proxy: bool,
+    /// Cookies to inject before navigation (`["name=value", ...]`). Lets a
+    /// session start already logged-in. Round-trips with
+    /// GET /session/{id}/cookies.
+    #[serde(default)]
+    pub cookies: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -448,6 +453,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/session/create", post(session_create_handler))
         .route("/session/{id}/navigate", post(session_navigate_handler))
         .route("/session/{id}/state", post(session_state_handler))
+        .route("/session/{id}/cookies", get(session_cookies_handler))
         .route("/session/{id}/click", post(session_click_handler))
         .route("/session/{id}/input", post(session_input_handler))
         .route("/session/{id}/scroll", post(session_scroll_handler))
@@ -724,7 +730,7 @@ async fn search_handler(Json(req): Json<SearchRequest>) -> Result<impl IntoRespo
 async fn session_create_handler(Json(req): Json<SessionCreateRequest>) -> Result<impl IntoResponse, AppError> {
     let mut mgr = session::SESSIONS.lock().await;
     mgr.evict_expired();
-    let id = mgr.create(req.url.as_deref(), req.use_proxy);
+    let id = mgr.create(req.url.as_deref(), req.use_proxy, req.cookies);
     Ok((StatusCode::OK, Json(SessionCreateResponse {
         session_id: id,
         url: req.url,
@@ -751,6 +757,19 @@ async fn session_state_handler(
         .map_err(|e| AppError::Internal(e))?;
     // Return as plain text for token efficiency.
     Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], compact_text))
+}
+
+async fn session_cookies_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    let text = mgr.send(&id, |reply| session::SessionCommand::Cookies { reply }).await
+        .map_err(|e| AppError::Internal(e))?;
+    // `text` is a JSON string {"url":...,"cookies":[...]} from the session
+    // thread; parse it back so we emit a real JSON response.
+    let val: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| AppError::Internal(format!("cookies parse error: {}", e)))?;
+    Ok((StatusCode::OK, Json(val)))
 }
 
 async fn session_click_handler(

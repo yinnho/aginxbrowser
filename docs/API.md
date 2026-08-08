@@ -468,6 +468,7 @@ curl -sS -X POST http://127.0.0.1:8089/screenshot \
 |------|------|------|------|------|
 | url | string | | `null` | 初始 URL（可选） |
 | use_proxy | bool | | `false` | 走代理 |
+| cookies | string[] | | `[]` | 导航前注入的 cookie（`["name=value",...]`），让会话创建即登录态 |
 
 **响应：**
 
@@ -586,6 +587,31 @@ title=Login
 {"ok": true}
 ```
 
+### GET /session/{id}/cookies
+
+导出会话当前页面的 cookie（`["name=value",...]` 数组）。用于把登录态持久化——存下来，下次 `session_create` 传 `cookies` 直接以登录态起会话，不用重新登录。
+
+**响应：**
+
+```json
+{"url": "https://example.com/dashboard", "cookies": ["sessionid=abc123", "csrftoken=xyz"]}
+```
+
+**登录态复用闭环：**
+
+```bash
+# 1. 正常登录一个会话（session_create -> input -> click）
+# 2. 导出 cookie
+curl -sS http://127.0.0.1:8089/session/$SID/cookies | jq -r .cookies[]
+
+# 3. 下次直接带 cookie 建会话，免登录
+curl -sS -X POST http://127.0.0.1:8089/session/create \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com/dashboard","cookies":["sessionid=abc123","csrftoken=xyz"]}'
+```
+
+> 🔒 托管实例**不落盘**任何 cookie——cookie 只在会话内存里，会话 8 分钟空闲回收即清。登录态由调用方自己持有（建议用小号，别用主账号）。
+
 ### Session 使用示例
 
 ```bash
@@ -670,7 +696,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 
 `--mcp` 模式走 stdio 协议，不启动 HTTP 服务器，通过 stdin/stdout 与 MCP 客户端通信。
 
-### 提供的工具（12 个）
+### 提供的工具（13 个）
 
 #### 基础工具
 
@@ -688,6 +714,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 | `session_create` | 创建交互式浏览器会话 |
 | `session_navigate` | 会话内导航到新 URL |
 | `session_state` | 获取索引化的页面状态 |
+| `session_cookies` | 导出会话当前 cookie（`["name=value",...]`，用于登录态复用） |
 | `session_click` | 按索引点击元素 |
 | `session_input` | 按索引输入文本 |
 | `session_scroll` | 滚动页面 |
@@ -715,6 +742,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 |------|------|------|------|------|
 | url | string | | `null` | 初始 URL |
 | use_proxy | bool | | `false` | 走代理 |
+| cookies | string[] | | `[]` | 注入 cookie（`["name=value",...]`），会话创建即登录态。配合 `session_cookies` 复用登录态 |
 
 #### session 操作参数
 
