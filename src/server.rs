@@ -149,7 +149,7 @@ fn is_cloudflare_challenge(page: &mut crate::page::Page) -> bool {
 /// After goto(), detect and auto-bypass Cloudflare Turnstile challenges.
 /// Waits for `cf_clearance` cookie, then re-navigates if the page hasn't
 /// auto-redirected.
-async fn maybe_bypass_challenge(page: &mut crate::page::Page) -> Result<()> {
+pub(crate) async fn maybe_bypass_challenge(page: &mut crate::page::Page) -> Result<()> {
     if !is_cloudflare_challenge(page) {
         return Ok(());
     }

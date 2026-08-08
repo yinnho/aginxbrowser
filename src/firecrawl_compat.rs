@@ -244,6 +244,10 @@ async fn scrape_with_session(
             let mut page = browser.new_page().await?;
             page.goto(&url).await?;
 
+            // Auto-bypass Cloudflare Turnstile challenges, matching do_fetch —
+            // otherwise the "Just a moment..." stub would be scraped as content.
+            crate::server::maybe_bypass_challenge(&mut page).await?;
+
             // Let JS settle after navigation before running actions.
             page.settle(wait_for_ms.max(2000)).await;
 
@@ -328,14 +332,23 @@ async fn scrape_with_session(
 
             #[cfg(feature = "screenshot")]
             let screenshot_png = if wants_screenshot {
-                Some(crate::screenshot::render_html_to_png(
+                // A render failure must not abort the scrape — the markdown/html
+                // are already extracted; just omit the screenshot (like the old
+                // capture_screenshot, which warned and returned None).
+                match crate::screenshot::render_html_to_png(
                     &full_html,
                     &final_url,
                     1280,
                     800,
                     1.0,
                     true,
-                )?)
+                ) {
+                    Ok(png) => Some(png),
+                    Err(e) => {
+                        tracing::warn!("firecrawl screenshot render failed: {}", e);
+                        None
+                    }
+                }
             } else {
                 None
             };
