@@ -423,14 +423,14 @@ curl -sS -X POST http://127.0.0.1:8089/screenshot \
 
 | type | 字段 | 说明 |
 |------|------|------|
-| `click` | `selector` | 点击元素 |
+| `click` | `selector` | 点击元素（锚点链接会导航到目标页） |
 | `wait` | `milliseconds` | 等待指定毫秒 |
 | `screenshot` | — | 截图渲染后的页面，返回 base64 data-URI（需 `screenshot` feature） |
-| `scroll` | — | 接受但不实现 |
-| `writeText` | `text`, `selector?` | 接受但不实现 |
-| `pressKey` | `key` | 接受但不实现 |
+| `scroll` | — | 滚动页面 |
+| `writeText` | `text`, `selector` | 向匹配元素输入文本 |
+| `pressKey` | `key` | 按下按键（Enter 会提交所在 GET 表单） |
 
-请求里带 `screenshot` 动作（或 `formats` 含 `"screenshot"`）时，响应 `data.screenshot` 返回 `data:image/png;base64,...` 形式的截图。未启用 `screenshot` feature 时该字段省略。
+带任意 `actions` 时，`/v1/scrape` 走**单页会话流程**：导航一次 → 按序执行动作 → 从该页面的最终状态提取。所有动作作用于同一页面。请求里带 `screenshot` 动作（或 `formats` 含 `"screenshot"`）时，响应 `data.screenshot` 返回 `data:image/png;base64,...` 形式的截图；未启用 `screenshot` feature 时该字段省略。
 
 **响应（Firecrawl 格式，成功/失败均返回 HTTP 200）：**
 

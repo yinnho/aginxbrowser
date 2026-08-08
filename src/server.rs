@@ -84,7 +84,7 @@ pub fn build_browser(use_proxy: bool, url: &str, tls_fingerprint: Option<&str>) 
 /// runtime. We spin up a current-thread runtime on a blocking thread and drive
 /// the whole navigation there — the V8 isolate stays on one thread for its
 /// entire lifetime, which is what deno_core expects.
-fn run_on_local_runtime<F, T>(f: F) -> Result<T>
+pub(crate) fn run_on_local_runtime<F, T>(f: F) -> Result<T>
 where
     F: for<'a> FnOnce(&'a tokio::runtime::Runtime) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + 'a>>
         + Send

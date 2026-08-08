@@ -1,20 +1,16 @@
 //! Firecrawl-compatible `/v1/scrape` endpoint.
 //!
 //! Lets existing Firecrawl clients switch to aginxbrowser by changing only the
-//! base URL. This is a thin adapter over `smart_fetch` — request shapes are
-//! mapped to our `FetchRequest`, and our `FetchResponse` is reshaped to the
-//! Firecrawl response envelope.
+//! base URL. Plain scrapes (no actions) use the fast layered renderer. When the
+//! request carries actions or a screenshot, we run a real single-page browser
+//! session: navigate once, execute the actions in order on that page, then
+//! extract content (and optionally a screenshot) from its final state.
 
-use axum::{
-    Json,
-    http::StatusCode,
-    response::IntoResponse,
-};
+use axum::{Json, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 
 use crate::render::smart_fetch;
-use crate::server::{do_click};
-use crate::{AppError, ClickRequest, FetchRequest, OutputFormat};
+use crate::{AppError, FetchRequest, OutputFormat};
 
 /// Firecrawl `/v1/scrape` request.
 #[allow(dead_code)] // only_main_content/timeout accepted for API compat, not yet wired
@@ -31,7 +27,7 @@ pub struct ScrapeRequest {
     pub wait_for: Option<u64>,
     #[serde(default)]
     pub timeout: Option<u32>,
-    /// Pre-extraction actions (click / wait / screenshot).
+    /// Pre-extraction actions, executed sequentially on a single page.
     #[serde(default)]
     pub actions: Vec<ScrapeAction>,
     /// Optional CSS selector (Firecrawl's `excludeTags`/main-content handling
@@ -47,19 +43,23 @@ fn default_formats() -> Vec<String> {
     vec!["markdown".into()]
 }
 
-/// A pre-extraction action. `click` and `wait` are executed; `screenshot`
-/// captures the rendered page (when the `screenshot` feature is built) and
-/// returns it as base64 in the response. The rest are accepted for Firecrawl
-/// API compatibility but ignored.
-#[allow(dead_code)] // WriteText/PressKey fields parsed for API completeness, not implemented
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+/// A pre-extraction action, executed in order on the same page. `click`,
+/// `writeText`, `pressKey`, `scroll` and `wait` all run against the live page;
+/// `screenshot` captures the page's final state (needs the `screenshot` feature).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
 pub enum ScrapeAction {
+    #[serde(rename = "click")]
     Click { selector: String },
+    #[serde(rename = "wait")]
     Wait { milliseconds: u32 },
+    #[serde(rename = "screenshot")]
     Screenshot,
+    #[serde(rename = "scroll")]
     Scroll,
+    #[serde(rename = "writeText")]
     WriteText { text: String, selector: Option<String> },
+    #[serde(rename = "pressKey")]
     PressKey { key: String },
 }
 
@@ -105,52 +105,32 @@ pub async fn scrape_handler(
 ) -> Result<impl IntoResponse, AppError> {
     let wants_html = req.formats.iter().any(|f| f == "html");
     let wants_markdown = req.formats.iter().any(|f| f == "markdown");
+    let wants_screenshot = req.actions.iter().any(|a| matches!(a, ScrapeAction::Screenshot))
+        || req.formats.iter().any(|f| f == "screenshot");
 
-    // If both formats requested (or html is among them), fetch raw HTML and
-    // derive markdown from it via html2md. This avoids a second navigation.
+    // Actions or a screenshot need a real single-page browser session so the
+    // actions affect what gets extracted. Plain scrapes stay on the fast path.
+    let needs_session = !req.actions.is_empty() || wants_screenshot;
+
+    if needs_session {
+        return Ok(scrape_with_session(&req, wants_html, wants_markdown, wants_screenshot).await);
+    }
+    Ok(scrape_with_fetch(&req, wants_html, wants_markdown).await)
+}
+
+/// Fast path: plain scrape with no interactive actions. Uses the layered
+/// renderer (HTTP direct when the page is static, obscura when JS is needed).
+async fn scrape_with_fetch(
+    req: &ScrapeRequest,
+    wants_html: bool,
+    wants_markdown: bool,
+) -> (StatusCode, Json<ScrapeResponse>) {
     let format = if wants_html {
         OutputFormat::Html
     } else {
         OutputFormat::Markdown
     };
-
-    // Map waitFor → wait_secs (seconds).
     let wait_secs = req.wait_for.map(|ms| ms / 1000).filter(|s| *s > 0);
-
-    // Run click actions first (each navigates + clicks). We take the last
-    // click's resulting page implicitly — Firecrawl actions chain on one page,
-    // but our do_click opens a fresh page each time. For v1 we run the final
-    // click and let smart_fetch re-navigate; this covers the common single-click
-    // case. Pure-wait actions just extend the wait.
-    let mut extra_wait: u64 = 0;
-    for action in &req.actions {
-        match action {
-            ScrapeAction::Click { selector } => {
-                let click_req = ClickRequest {
-                    url: req.url.clone(),
-                    selector: selector.clone(),
-                    wait_secs: Some(2),
-                    use_proxy: false,
-                    cookies: vec![],
-                    tls_fingerprint: req.tls_fingerprint.clone(),
-                };
-                if let Err(e) = tokio::task::spawn_blocking(move || do_click(click_req)).await {
-                    tracing::warn!("firecrawl click action failed: {}", e);
-                }
-            }
-            ScrapeAction::Wait { milliseconds } => {
-                extra_wait += (*milliseconds as u64) / 1000;
-            }
-            ScrapeAction::Screenshot => {
-                // Handled after fetch via capture_screenshot below.
-            }
-            ScrapeAction::Scroll | ScrapeAction::WriteText { .. } | ScrapeAction::PressKey { .. } => {
-                // Not yet supported; ignored.
-            }
-        }
-    }
-    let wait_secs = wait_secs.or_else(|| (extra_wait > 0).then_some(extra_wait));
-
     let fetch_req = FetchRequest {
         url: req.url.clone(),
         format: format.clone(),
@@ -194,16 +174,12 @@ pub async fn scrape_handler(
                 OutputFormat::Text => (Some(resp.content.clone()), None),
             };
 
-            // Extract description from the HTML if we have it, else leave None.
             let description = html.as_deref().and_then(extract_description);
-
-            let screenshot = capture_screenshot(&req, wait_secs).await;
-
             let data = ScrapeData {
                 markdown,
                 html,
                 links: None,
-                screenshot,
+                screenshot: None,
                 metadata: ScrapeMetadata {
                     title: resp.title.clone(),
                     source_url: resp.url.clone(),
@@ -212,7 +188,7 @@ pub async fn scrape_handler(
                     error: None,
                 },
             };
-            Ok((StatusCode::OK, Json(ScrapeResponse { success: true, data })))
+            (StatusCode::OK, Json(ScrapeResponse { success: true, data }))
         }
         Err(e) => {
             // Firecrawl returns success:false on failure rather than an HTTP error.
@@ -223,62 +199,245 @@ pub async fn scrape_handler(
                 screenshot: None,
                 metadata: ScrapeMetadata {
                     title: None,
-                    source_url: req.url,
+                    source_url: req.url.clone(),
                     description: None,
                     status_code: 500,
                     error: Some(format!("{}", e)),
                 },
             };
-            Ok((
-                StatusCode::OK,
-                Json(ScrapeResponse { success: false, data }),
-            ))
+            (StatusCode::OK, Json(ScrapeResponse { success: false, data }))
         }
     }
 }
 
-/// Capture a real screenshot when the request asks for one (`screenshot` action
-/// or `formats: ["screenshot"]`) and the binary is built with the `screenshot`
-/// feature. Returns a base64 data-URI PNG. Without the feature this is a no-op
-/// (the response simply omits the `screenshot` field).
-async fn capture_screenshot(req: &ScrapeRequest, wait_secs: Option<u64>) -> Option<String> {
-    let requested = req.actions.iter().any(|a| matches!(a, ScrapeAction::Screenshot))
-        || req.formats.iter().any(|f| f == "screenshot");
-    if !requested {
-        return None;
-    }
+/// Result of a single-page session scrape.
+struct ScrapeSessionOutcome {
+    url: String,
+    title: Option<String>,
+    /// JS-rendered DOM (selector-scoped when `selector` was given).
+    html: String,
+    /// Raw PNG bytes of the rendered page, if requested (screenshot feature).
+    screenshot_png: Option<Vec<u8>>,
+}
 
-    #[cfg(feature = "screenshot")]
-    {
-        let shot_req = crate::ScreenshotRequest {
-            url: req.url.clone(),
-            width: 1280,
-            height: 800,
-            scale: 1.0,
-            full_page: true,
-            wait_secs,
-            use_proxy: false,
-            cookies: vec![],
-            tls_fingerprint: req.tls_fingerprint.clone(),
-        };
-        // do_screenshot spawns its own local runtime; run on a blocking thread
-        // to avoid "cannot start a runtime from within a runtime".
-        match tokio::task::spawn_blocking(move || crate::server::do_screenshot(shot_req)).await {
-            Ok(Ok(resp)) => Some(format!("data:image/png;base64,{}", resp.image_base64)),
-            Ok(Err(e)) => {
-                tracing::warn!("firecrawl screenshot action failed: {}", e);
-                None
+/// Run all actions sequentially on a single page, then extract markdown/html
+/// (and optionally a screenshot) from that page's final state.
+async fn scrape_with_session(
+    req: &ScrapeRequest,
+    wants_html: bool,
+    wants_markdown: bool,
+    wants_screenshot: bool,
+) -> (StatusCode, Json<ScrapeResponse>) {
+    let url = req.url.clone();
+    let actions = req.actions.clone();
+    let selector = req.selector.clone();
+    let tls_fingerprint = req.tls_fingerprint.clone();
+    let wait_for_ms = req.wait_for.unwrap_or(0);
+
+    // run_on_local_runtime creates its own current-thread runtime (V8 is !Send),
+    // so it must run on a blocking thread — same pattern as do_click/do_eval/
+    // do_screenshot. Otherwise "cannot start a runtime from within a runtime".
+    let outcome = tokio::task::spawn_blocking(move || {
+        crate::server::run_on_local_runtime(move |_rt| {
+            Box::pin(async move {
+            let browser = crate::server::build_browser(false, &url, tls_fingerprint.as_deref())?;
+            let mut page = browser.new_page().await?;
+            page.goto(&url).await?;
+
+            // Let JS settle after navigation before running actions.
+            page.settle(wait_for_ms.max(2000)).await;
+
+            for action in &actions {
+                match action {
+                    ScrapeAction::Click { selector } => {
+                        // el.click() side-effects persist, but the navigation it
+                        // initiates inside evaluate does not survive (same as
+                        // pressKey). For anchors, return the href and navigate
+                        // via page.goto() so the chain continues on the target.
+                        let nav = page.evaluate(&format!(
+                            "(() => {{ const el = document.querySelector({sel}); if (!el) return ''; if (el.tagName === 'A' && el.href) return el.href; el.click(); return ''; }})()",
+                            sel = js_str(selector),
+                        ));
+                        if let Some(url) = nav.as_str().filter(|s| !s.is_empty()) {
+                            page.goto(url).await?;
+                        }
+                    }
+                    ScrapeAction::Wait { milliseconds } => {
+                        tokio::time::sleep(std::time::Duration::from_millis(*milliseconds as u64)).await;
+                    }
+                    ScrapeAction::WriteText { text, selector } => {
+                        if let Some(sel) = selector {
+                            page.evaluate(&format!(
+                                "(() => {{ const el = document.querySelector({sel}); if (!el) return false; el.focus(); const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value')?.set || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value')?.set; if (setter) setter.call(el, {text}); else el.value = {text}; el.dispatchEvent(new Event('input',{{bubbles:true}})); el.dispatchEvent(new Event('change',{{bubbles:true}})); return true; }})()",
+                                sel = js_str(sel),
+                                text = js_str(text),
+                            ));
+                        }
+                    }
+                    ScrapeAction::PressKey { key } => {
+                        let (code, key_code) = key_code_for(key);
+                        // Synthetic KeyboardEvents don't trigger native form
+                        // implicit submission, and JS-initiated navigation inside
+                        // evaluate is unreliable. So: dispatch the key events,
+                        // and when Enter lands in a GET form, have the script
+                        // RETURN the form's action URL (controls serialized) and
+                        // navigate with page.goto() — the browser's real nav path.
+                        let submit = if key.eq_ignore_ascii_case("enter") { "true" } else { "false" };
+                        let nav = page.evaluate(&format!(
+                            "(() => {{ const el = document.activeElement; if (!el) return ''; const opts = {{ key: {key}, code: {code}, keyCode: {key_code}, which: {key_code}, bubbles: true }}; el.dispatchEvent(new KeyboardEvent('keydown', opts)); el.dispatchEvent(new KeyboardEvent('keypress', opts)); el.dispatchEvent(new KeyboardEvent('keyup', opts)); if ({submit}) {{ const form = el.form; if (form && !(form.method && form.method.toLowerCase() === 'post')) {{ try {{ const u = new URL(form.action || window.location.href, window.location.href); for (const c of form.elements) {{ if (!c.name || c.type === 'submit' || c.type === 'button' || c.type === 'image') continue; if (c.value) u.searchParams.append(c.name, c.value); }} return u.toString(); }} catch (e) {{ return ''; }} }} }} return ''; }})()",
+                            key = js_str(key),
+                            code = js_str(&code),
+                            key_code = key_code,
+                            submit = submit,
+                        ));
+                        if let Some(url) = nav.as_str().filter(|s| !s.is_empty()) {
+                            page.goto(url).await?;
+                        }
+                    }
+                    ScrapeAction::Scroll => {
+                        page.scroll_by(0, 800);
+                    }
+                    ScrapeAction::Screenshot => {
+                        // Captured from the page's final state below.
+                    }
+                }
             }
-            Err(e) => {
-                tracing::warn!("firecrawl screenshot task failed: {}", e);
+
+            // Let async effects of the actions land before extracting.
+            page.settle(1500).await;
+
+            let final_url = page.url();
+            let title = page
+                .evaluate("document.title")
+                .as_str()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let full_html = page.content();
+
+            let html = match &selector {
+                Some(sel) => page
+                    .evaluate(&format!(
+                        "(() => {{ const el = document.querySelector({sel}); return el ? el.outerHTML : document.documentElement.outerHTML; }})()",
+                        sel = js_str(sel),
+                    ))
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| full_html.clone()),
+                None => full_html.clone(),
+            };
+
+            #[cfg(feature = "screenshot")]
+            let screenshot_png = if wants_screenshot {
+                Some(crate::screenshot::render_html_to_png(
+                    &full_html,
+                    &final_url,
+                    1280,
+                    800,
+                    1.0,
+                    true,
+                )?)
+            } else {
                 None
-            }
+            };
+            #[cfg(not(feature = "screenshot"))]
+            let screenshot_png: Option<Vec<u8>> = None;
+            #[cfg(not(feature = "screenshot"))]
+            let _ = wants_screenshot;
+
+            Ok(ScrapeSessionOutcome {
+                url: final_url,
+                title,
+                html,
+                screenshot_png,
+            })
+            })
+        })
+    })
+    .await;
+
+    match outcome {
+        Ok(Ok(outcome)) => {
+            let stripped = crate::render::strip_non_content(&outcome.html);
+            let markdown = if wants_markdown {
+                Some(html2md::parse_html(&stripped))
+            } else {
+                None
+            };
+            let html = if wants_html { Some(outcome.html) } else { None };
+            let description = html.as_deref().and_then(extract_description);
+            let screenshot = outcome.screenshot_png.map(|png| {
+                use base64::{engine::general_purpose::STANDARD, Engine as _};
+                format!("data:image/png;base64,{}", STANDARD.encode(&png))
+            });
+
+            let data = ScrapeData {
+                markdown,
+                html,
+                links: None,
+                screenshot,
+                metadata: ScrapeMetadata {
+                    title: outcome.title,
+                    source_url: outcome.url,
+                    description,
+                    status_code: 200,
+                    error: None,
+                },
+            };
+            (StatusCode::OK, Json(ScrapeResponse { success: true, data }))
+        }
+        Ok(Err(e)) => {
+            let data = ScrapeData {
+                markdown: None,
+                html: None,
+                links: None,
+                screenshot: None,
+                metadata: ScrapeMetadata {
+                    title: None,
+                    source_url: req.url.clone(),
+                    description: None,
+                    status_code: 500,
+                    error: Some(format!("{}", e)),
+                },
+            };
+            (StatusCode::OK, Json(ScrapeResponse { success: false, data }))
+        }
+        Err(e) => {
+            let data = ScrapeData {
+                markdown: None,
+                html: None,
+                links: None,
+                screenshot: None,
+                metadata: ScrapeMetadata {
+                    title: None,
+                    source_url: req.url.clone(),
+                    description: None,
+                    status_code: 500,
+                    error: Some(format!("{}", e)),
+                },
+            };
+            (StatusCode::OK, Json(ScrapeResponse { success: false, data }))
         }
     }
-    #[cfg(not(feature = "screenshot"))]
-    {
-        let _ = wait_secs;
-        None
+}
+/// Encode a Rust string as a JSON string literal (also a valid JS string literal).
+fn js_str(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
+}
+
+/// Map a key name to its DOM `code` and numeric `keyCode`.
+fn key_code_for(key: &str) -> (String, u32) {
+    match key.to_ascii_lowercase().as_str() {
+        "enter" => ("Enter".into(), 13),
+        "escape" | "esc" => ("Escape".into(), 27),
+        "backspace" => ("Backspace".into(), 8),
+        "tab" => ("Tab".into(), 9),
+        "arrowup" => ("ArrowUp".into(), 38),
+        "arrowdown" => ("ArrowDown".into(), 40),
+        "arrowleft" => ("ArrowLeft".into(), 37),
+        "arrowright" => ("ArrowRight".into(), 39),
+        "space" => ("Space".into(), 32),
+        "delete" => ("Delete".into(), 46),
+        other => (other.to_string(), 0),
     }
 }
 
