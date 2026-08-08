@@ -1,24 +1,33 @@
 # AginxBrowser
 
-**纯服务端浏览器引擎** — 内置 V8，无需 Chromium。给 AI Agent 用的浏览器。
+**Agent 的浏览器。看世界，和世界交互。**
 
-一个二进制，零依赖，启动即服务。抓取、搜索、交互，HTTP API 一把梭。
+不是给人用的浏览器改吧改吧给 Agent。是从第一行代码就为 AI Agent 设计的——看世界、读世界、搜世界、操世界，一个 Rust 二进制，内置 V8，不依赖 Chromium。
 
-## 为什么选 AginxBrowser
+> 人有 Chrome，Agent 有 AginxBrowser。
 
-| | AginxBrowser | Puppeteer/Playwright | Firecrawl |
-|---|---|---|---|
-| 二进制体积 | ~70MB | ~500MB+（需 Chromium） | Docker 镜像 ~1GB |
-| 启动方式 | 单二进制，`./aginxbrowser` | 装 Node + Chromium | Docker compose |
-| JS 执行 | 内置 V8，原生执行 | V8 via Chromium | 无 |
-| 内置搜索 | 5 引擎聚合 | 无 | 无 |
-| 分层渲染 | HTTP 优先，自动回退浏览器 | 只有浏览器 | 只有浏览器 |
-| TLS 指纹 | 可切换 Chrome/Firefox/Safari | 需额外插件 | 无 |
-| MCP 协议 | 原生支持 | 无 | 无 |
-| 交互式 Session | 有（click/input/scroll/eval） | 有 | 无 |
-| CAPTCHA 自动解决 | 有（2captcha 集成） | 需自己接 | 无 |
+一个二进制，零依赖，启动即服务。HTTP API + MCP，Agent 拿来就能用。
 
-**核心优势：不依赖 Chromium。** AginxBrowser 内联了 Obscura 浏览器内核（V8 + 自研 HTTP 栈），不需要 Puppeteer、不需要 Chrome、不需要 Docker。一个 Rust 二进制，systemd 守护，就是你的浏览器基础设施。
+## 为什么 Agent 需要专属浏览器
+
+现有的"浏览器自动化"方案都是为人或为抓取设计的，不是为 Agent：
+
+| | AginxBrowser | Puppeteer/Playwright | Firecrawl | Browser-use |
+|---|---|---|---|---|
+| 为谁设计 | **Agent-first** | 人调试 | 抓取服务 | LLM 套壳 |
+| 依赖 | 单二进制，无 Chromium | Chromium ~500MB | Docker ~1GB | Chromium |
+| 看得见（截图） | ✅ 内置 Blitz 渲染 | 需 Chromium | ❌ | 需 Chromium |
+| 读得懂 | markdown + js_extract | 要自己写 | markdown | 要自己写 |
+| 找得到（搜索） | ✅ 5 引擎聚合 | ❌ | ❌ | ❌ |
+| 操得了 | session 索引化交互 | DevTools | ❌ | LLM 驱动 |
+| 协议 | HTTP + MCP 原生 | Node API | HTTP | Python |
+| TLS 指纹 | ✅ Chrome/Firefox/Safari | 需插件 | ❌ | 需插件 |
+| CAPTCHA | ✅ 自动解决 | 需自己接 | ❌ | 需自己接 |
+| 交互式 Session | ✅ | ✅ | ❌ | ✅ |
+
+Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操得了、跑得动。** 一个二进制全包，systemd 守护，MCP 直连 Claude/Cursor，零依赖启动即服务。
+
+**核心优势：不依赖 Chromium。** AginxBrowser 内联了 Obscura 浏览器内核（V8 + 自研 HTTP 栈 + 内置 Blitz 渲染栈），不需要 Puppeteer、不需要 Chrome、不需要 Docker。一个 Rust 二进制，systemd 守护，就是 agent 的浏览器基础设施。
 
 ## 核心能力
 
