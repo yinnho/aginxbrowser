@@ -28,6 +28,7 @@
 - **交互式 Session**：持久化浏览器会话，索引化交互（state/click/input/scroll/eval），AI Agent 像人一样浏览网页
 - **CAPTCHA 自动解决**：检测验证码类型，可选 2captcha 自动解决，搜索不再卡死
 - **JS 数据提取**：`js_extract` 参数，从 SPA 提取 `window.__INITIAL_STATE__` 等结构化数据
+- **截图渲染**：`/screenshot` 端点（`--features screenshot`），JS 渲染后的 DOM 喂给内置 Blitz 渲染栈（Stylo/Taffy/vello_cpu，纯 CPU，无 Chromium）出 PNG，agent 的视觉输入
 - **Cloudflare 自动绕过**：检测 "Just a moment..." 挑战页，自动等待 `cf_clearance`
 - **TLS 指纹伪装**：stealth 模式模拟 Chrome145/Firefox133/Safari/Edge，可按请求切换
 - **MCP Server**：`--mcp` 模式暴露 12 个工具（fetch/eval/click/search + 8 个 session 工具），Claude Code / Claude Desktop / Cursor 直接调用
@@ -114,9 +115,15 @@ cargo build --release
 
 # 含 stealth（需 go + cmake + C++ 工具链，启用 TLS 指纹伪装）
 cargo build --release --features stealth
+
+# 含截图渲染（启用 /screenshot，拉入内置 Blitz 渲染栈，二进制 +30-40MB）
+cargo build --release --features screenshot
+
+# 全功能（推荐生产部署）
+cargo build --release --features stealth,screenshot
 ```
 
-依赖：Rust 1.78+，首次编译自动下载 V8 静态库（需网络）。启用 stealth 需额外 `go`、`cmake`、C++ 编译器。
+依赖：Rust 1.78+，首次编译自动下载 V8 静态库（需网络）。启用 stealth 需额外 `go`、`cmake`、C++ 编译器。启用 screenshot 需服务器装 CJK 字体（`fonts-noto-cjk`）以正确渲染中文。
 
 ## 运行时环境变量
 
@@ -150,8 +157,8 @@ AginxBrowser 定位是**纯外挂基础设施**——像真实浏览器一样作
 
 ## 已知限制
 
-1. **无法截图**：没有 layout/paint 引擎
-2. **无元素坐标**：只能做 JS click，不能做基于屏幕坐标的点击
+1. **截图需 opt-in feature**：`/screenshot` 需 `cargo build --release --features screenshot` 启用（拉入内置 Blitz 渲染栈，二进制 +30-40MB）。内置 Blitz 是 beta，复杂站点 CSS 渲染近似（非 Chromium 像素级精准），图片子资源不单独拉取
+2. **无元素坐标**：只能做 JS click，不能做基于屏幕坐标的点击（`screenshot` feature 下 Blitz 内部已算出 `final_layout()` 坐标，尚未暴露给 API）
 3. **JS 复杂组件可能失败**：React/Vue 事件委托可能不响应原生 `click()`
 4. **代理支持**：HTTP/HTTPS/SOCKS5，通过 `OBSCURA_PROXY` 传入
 5. **强风控站点**：百度文库暂不支持；知乎专栏需有效 `__zse_ck`

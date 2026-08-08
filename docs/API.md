@@ -340,6 +340,61 @@ curl -sL -o cabin_ref.jpg "<image_url>"
 
 ---
 
+### POST /screenshot
+
+把页面 JS 渲染后的 DOM 渲染成 PNG 截图（base64 返回）。**需 `--features screenshot` 构建**（默认不含，见构建章节）。
+
+不走 `/fetch` 的分层渲染——始终驱动 obscura 浏览器跑完 JS，再喂给内置 Blitz 渲染栈（Stylo + Taffy + vello_cpu，纯 CPU，无 Chromium）。
+
+**请求字段：**
+
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| url | string | ✅ | — | 目标 URL |
+| width | u32 | | `1280` | 视口宽度（CSS px） |
+| height | u32 | | `800` | 视口高度（CSS px；`full_page` 时仅作下限） |
+| scale | f32 | | `1.0` | 设备像素比，调高更清晰但 PNG 更大 |
+| full_page | bool | | `true` | 截完整滚动页（跟踪内容高度，上限 16000px） |
+| wait_secs | u64 | | `null` | 加载后额外等待秒数（等 JS 渲染） |
+| use_proxy | bool | | `false` | 走 `OBSCURA_PROXY` 代理 |
+| cookies | string[] | | `[]` | 导航前注入的 cookie |
+| tls_fingerprint | string | | `null` | TLS 指纹（stealth 模式） |
+
+**响应字段：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| url | string | 最终 URL（重定向后） |
+| title | string? | 页面标题 |
+| width | u32 | 请求的宽度 |
+| height | u32 | 请求的高度（实际 PNG 高度可能不同，`full_page` 时跟踪内容） |
+| image_base64 | string | PNG 的 base64 编码。`base64 -d` 解码，或 `data:image/png;base64,...` 直接用 |
+| format | string | 固定 `"png"` |
+
+**示例 — 截百度搜索：**
+
+```bash
+curl -sS -X POST http://127.0.0.1:8089/screenshot \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://www.baidu.com/s?wd=蔚来ES8","full_page":true,"wait_secs":2}' \
+  | jq -r .image_base64 | base64 -d > baidu.png
+```
+
+```json
+{
+  "url": "https://www.baidu.com/s?wd=蔚来ES8",
+  "title": "蔚来ES8_百度搜索",
+  "width": 1280,
+  "height": 800,
+  "image_base64": "iVBORw0KGgo...",
+  "format": "png"
+}
+```
+
+> 截图是 agent 的"视觉输入"——但内联 Blitz 是 beta，复杂站点的 CSS 渲染近似（非 Chromium 像素级精准）。图片等子资源不单独拉取（截图里 `<img>` 可能缺），文字和布局可靠。
+
+---
+
 ### POST /v1/scrape（Firecrawl 兼容）
 
 [Firecrawl](https://github.com/mendableai/firecrawl) 兼容端点。现有 Firecrawl 客户端只需改 base URL 即可迁移。

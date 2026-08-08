@@ -2,6 +2,8 @@ use crate::{
     ClickRequest, ClickResponse, EvalRequest, EvalResponse, FetchRequest, FetchResponse,
     OutputFormat, SearchRequest, SearchResponse,
 };
+#[cfg(feature = "screenshot")]
+use crate::{ScreenshotRequest, ScreenshotResponse};
 use crate::browser::Browser;
 use anyhow::{Context, Result};
 
@@ -463,6 +465,67 @@ pub fn do_eval(req: EvalRequest) -> Result<EvalResponse> {
             })
         })
     })
+}
+
+/// /screenshot: render the JS-rendered DOM of a page to a PNG via inlined Blitz.
+///
+/// Unlike /fetch (which can short-circuit to raw HTTP for static pages), this
+/// always drives the obscura browser so SPA/JS-rendered content is captured.
+/// The page's `document.documentElement.outerHTML` is then fed to Blitz for
+/// layout + paint — no Chromium, no sub-resource fetches (Blitz's DummyNetProvider
+/// is a no-op, and the fork's is_noop() patch stops head stylesheets from
+/// blocking paint forever).
+#[cfg(feature = "screenshot")]
+pub fn do_screenshot(req: ScreenshotRequest) -> Result<ScreenshotResponse> {
+    run_on_local_runtime(move |_rt| {
+        Box::pin(async move {
+            let browser = build_browser(req.use_proxy, &req.url, req.tls_fingerprint.as_deref())?;
+            inject_cookies(&browser, &req.cookies, &req.url);
+            let mut page = browser.new_page().await?;
+            page.goto(&req.url).await?;
+
+            if let Some(wait) = req.wait_secs {
+                page.settle(wait * 1000).await;
+            }
+
+            let final_url = page.url();
+            let title: Option<String> = {
+                let v = page.evaluate("document.title");
+                v.as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+            };
+
+            // JS-rendered DOM — the same source /fetch uses for OutputFormat::Html.
+            let html = page.content();
+            drop(page);
+            drop(browser);
+
+            // Render off-thread-ish: Blitz layout/paint is sync and CPU-bound.
+            // We're already on a blocking runtime thread, so just call it directly.
+            let png_bytes = crate::screenshot::render_html_to_png(
+                &html,
+                &final_url,
+                req.width,
+                req.height,
+                req.scale,
+                req.full_page,
+            )?;
+
+            Ok(ScreenshotResponse {
+                url: final_url,
+                title,
+                width: req.width,
+                height: req.height, // caller sees requested height; actual may differ for full_page
+                image_base64: base64_png(&png_bytes),
+                format: "png".to_string(),
+            })
+        })
+    })
+}
+
+#[cfg(feature = "screenshot")]
+fn base64_png(bytes: &[u8]) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    STANDARD.encode(bytes)
 }
 
 /// /search: native search across Baidu/Bing/Sogou/Google, optionally grab body for top N results.

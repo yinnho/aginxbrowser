@@ -10,6 +10,19 @@ default = []
 # Stealth HTTP client with TLS/JA3 fingerprint spoofing via wreq (BoringSSL).
 # Disable for plain reqwest-only builds.
 stealth = ["dep:wreq", "dep:wreq-util"]
+# Screenshot rendering via inlined Blitz (Stylo/Taffy/vello_cpu). Adds ~30-40MB
+# to the binary and notable compile time, so opt-in. Renders the JS-rendered DOM
+# (captured by the obscura V8 path) to a PNG — no Chromium required.
+screenshot = [
+    "dep:blitz-dom",
+    "dep:blitz-html",
+    "dep:blitz-paint",
+    "dep:blitz-traits",
+    "dep:anyrender",
+    "dep:anyrender_vello_cpu",
+    "dep:peniko",
+    "dep:png",
+]
 
 [dependencies]
 # --- async runtime ---
@@ -66,11 +79,35 @@ sha2 = "0.10"
 # but the renaming is only correct on Linux/Android (per wreq's README).
 wreq-util = { version = "=3.0.0-rc.10", optional = true }
 
+# --- screenshot rendering (Blitz, opt-in via `screenshot` feature) ---
+# Uses a fork on yinnho/blitz branch fix/noop-netprovider-critical-resources that
+# skips critical-resource gating when NetProvider is a no-op — without this, real
+# sites render blank (see docs + memory: blitz-rendering-spike). PR pending upstream.
+# crates.io's blitz 0.3.0-beta.1 is a stale snapshot (blitz-paint wants anyrender
+# 0.11) incompatible with the git version (anyrender 0.12), so all blitz-* + anyrender*
+# must come from git with matching [patch.crates-io].
+blitz-dom = { git = "https://github.com/yinnho/blitz", branch = "fix/noop-netprovider-critical-resources", optional = true, features = ["default"] }
+blitz-html = { git = "https://github.com/yinnho/blitz", branch = "fix/noop-netprovider-critical-resources", optional = true }
+blitz-paint = { git = "https://github.com/yinnho/blitz", branch = "fix/noop-netprovider-critical-resources", optional = true }
+blitz-traits = { git = "https://github.com/yinnho/blitz", branch = "fix/noop-netprovider-critical-resources", optional = true }
+anyrender = { git = "https://github.com/DioxusLabs/anyrender", branch = "devin/1785858394-usvg-048", optional = true }
+anyrender_vello_cpu = { git = "https://github.com/DioxusLabs/anyrender", branch = "devin/1785858394-usvg-048", optional = true, features = ["multithreading"] }
+peniko = { version = "0.6", optional = true }
+png = { version = "0.18", optional = true }
+
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 wreq = { version = "=6.0.0-rc.28", optional = true, features = ["prefix-symbols", "socks"] }
 
 [target.'cfg(not(any(target_os = "linux", target_os = "android")))'.dependencies]
 wreq = { version = "=6.0.0-rc.28", optional = true, features = ["socks"] }
+
+[patch.crates-io]
+# usvg intrinsic_dimensions + anyrender 0.12 alignment (blitz upstream patches).
+usvg = { git = "https://github.com/DioxusLabs/resvg", branch = "devin/1785858271-intrinsic-dimensions" }
+anyrender = { git = "https://github.com/DioxusLabs/anyrender", branch = "devin/1785858394-usvg-048" }
+anyrender_svg = { git = "https://github.com/DioxusLabs/anyrender", branch = "devin/1785858394-usvg-048" }
+anyrender_vello_cpu = { git = "https://github.com/DioxusLabs/anyrender", branch = "devin/1785858394-usvg-048" }
+anyrender_vello = { git = "https://github.com/DioxusLabs/anyrender", branch = "devin/1785858394-usvg-048" }
 
 [build-dependencies]
 deno_core = "0.350"

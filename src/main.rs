@@ -20,6 +20,8 @@ mod render;
 mod search;
 mod server;
 mod session;
+#[cfg(feature = "screenshot")]
+mod screenshot;
 
 // Inlined Obscura engine (formerly external crates).
 mod obscura_dom;
@@ -180,6 +182,62 @@ pub struct ClickResponse {
 pub struct EvalResponse {
     pub url: String,
     pub result: serde_json::Value,
+}
+
+/// /screenshot request: render a page's JS-rendered DOM to a PNG.
+#[cfg(feature = "screenshot")]
+#[derive(Debug, Deserialize, Clone)]
+pub struct ScreenshotRequest {
+    pub url: String,
+    /// Viewport width in CSS pixels. Default 1280.
+    #[serde(default = "default_screenshot_width")]
+    pub width: u32,
+    /// Viewport height in CSS pixels. Default 800 (ignored when `full_page`).
+    #[serde(default = "default_screenshot_height")]
+    pub height: u32,
+    /// Device pixel ratio. Default 1.0. Higher = sharper but larger PNG.
+    #[serde(default = "default_screenshot_scale")]
+    pub scale: f32,
+    /// Capture the full scrolled page height (tracks computed content height,
+    /// capped at 16000px) instead of just the viewport. Default true.
+    #[serde(default = "default_screenshot_full_page")]
+    pub full_page: bool,
+    /// Extra seconds to wait for JS rendering after load before capturing.
+    #[serde(default)]
+    pub wait_secs: Option<u64>,
+    /// Route through OBSCURA_PROXY. Default false (direct).
+    #[serde(default)]
+    pub use_proxy: bool,
+    /// Cookies to inject before navigation.
+    #[serde(default)]
+    pub cookies: Vec<String>,
+    /// TLS fingerprint override (stealth mode only).
+    #[serde(default)]
+    pub tls_fingerprint: Option<String>,
+}
+
+#[cfg(feature = "screenshot")]
+fn default_screenshot_width() -> u32 { 1280 }
+#[cfg(feature = "screenshot")]
+fn default_screenshot_height() -> u32 { 800 }
+#[cfg(feature = "screenshot")]
+fn default_screenshot_scale() -> f32 { 1.0 }
+#[cfg(feature = "screenshot")]
+fn default_screenshot_full_page() -> bool { true }
+
+/// /screenshot response: PNG encoded as base64 (so it rides in the existing
+/// JSON API; clients `base64 -d` or `<img src="data:image/png;base64,...">`).
+#[cfg(feature = "screenshot")]
+#[derive(Debug, Serialize)]
+pub struct ScreenshotResponse {
+    pub url: String,
+    pub title: Option<String>,
+    pub width: u32,
+    pub height: u32,
+    /// Base64-encoded PNG bytes.
+    pub image_base64: String,
+    /// Always "png" for now.
+    pub format: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -392,6 +450,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/session/{id}/eval", post(session_eval_handler))
         .route("/session/{id}/close", post(session_close_handler));
 
+    #[cfg(feature = "screenshot")]
+    let app = app.route("/screenshot", post(screenshot_handler));
+
     let bind_addr = std::env::var("AGINXBROWSER_BIND").unwrap_or_else(|_| "0.0.0.0:8089".to_string());
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     tracing::info!("aginxbrowser listening on {}", listener.local_addr()?);
@@ -525,6 +586,14 @@ async fn click_handler(Json(req): Json<ClickRequest>) -> Result<impl IntoRespons
 async fn eval_handler(Json(req): Json<EvalRequest>) -> Result<impl IntoResponse, AppError> {
     let resp = spawn_blocking(move || do_eval(req)).await?;
     Ok((StatusCode::OK, Json(resp?)))
+}
+
+#[cfg(feature = "screenshot")]
+async fn screenshot_handler(Json(req): Json<ScreenshotRequest>) -> Result<impl IntoResponse, AppError> {
+    // V8 (deno_core) holds !Send state, so drive the whole capture on a
+    // current-thread runtime on a blocking thread — same pattern as do_eval.
+    let resp = spawn_blocking(move || server::do_screenshot(req)).await??;
+    Ok((StatusCode::OK, Json(resp)))
 }
 
 async fn search_handler(Json(req): Json<SearchRequest>) -> Result<impl IntoResponse, AppError> {
