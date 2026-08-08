@@ -37,6 +37,16 @@ pub struct ScrapeRequest {
     /// TLS fingerprint override (stealth mode only): "chrome145", "firefox133", etc.
     #[serde(default)]
     pub tls_fingerprint: Option<String>,
+    /// Capture the full scrolled page height (can be large) instead of just the
+    /// viewport, when a screenshot is requested via `formats: ["screenshot"]`
+    /// with no `screenshot` action. Default true (matches Firecrawl). Ignored
+    /// when a `screenshot` action is present — its `fullPage` field wins.
+    #[serde(default = "default_screenshot_full_page")]
+    pub screenshot_full_page: bool,
+}
+
+fn default_screenshot_full_page() -> bool {
+    true
 }
 
 fn default_formats() -> Vec<String> {
@@ -120,13 +130,12 @@ pub async fn scrape_handler(
     #[cfg(not(feature = "screenshot"))]
     let screenshot_available = false;
 
-    // Only actions that mutate the page (click/writeText/pressKey/scroll) or a
-    // screenshot need the single-page session; a pure `wait` folds into the fast
-    // path's settle budget instead of booting a full V8 browser.
-    let needs_session = req
-        .actions
-        .iter()
-        .any(|a| !matches!(a, ScrapeAction::Wait { .. }))
+    // Any action (including `wait`) or a screenshot needs the single-page
+    // session. A `wait` action must drive the V8 event loop — the fast path's
+    // Tier-1 HTTP-direct can return an unrendered SPA shell and ignores
+    // wait_secs entirely, so a Wait-only scrape of a JS-rendered page would
+    // miss the JS-injected content. Plain scrapes (no actions) stay fast.
+    let needs_session = !req.actions.is_empty()
         || (wants_screenshot && screenshot_available);
 
     if needs_session {
@@ -147,22 +156,25 @@ async fn scrape_with_fetch(
     } else {
         OutputFormat::Markdown
     };
-    // Fold pure `wait` actions into a single settle budget (they don't mutate
-    // the page, so the fast layered renderer handles them).
-    let extra_wait: u64 = req
+    // Fold any `wait` actions into the settle budget. Take the larger of
+    // wait_for and the summed wait actions (they express the same intent —
+    // don't silently drop one when the other is set). Round up to the next
+    // second so a sub-second wait (e.g. 500ms) still yields ≥1s of settle,
+    // not zero.
+    let extra_wait_ms: u64 = req
         .actions
         .iter()
         .map(|a| match a {
             ScrapeAction::Wait { milliseconds } => *milliseconds as u64,
             _ => 0,
         })
-        .sum::<u64>()
-        / 1000;
-    let wait_secs = req
-        .wait_for
-        .map(|ms| ms / 1000)
-        .filter(|s| *s > 0)
-        .or_else(|| (extra_wait > 0).then_some(extra_wait));
+        .sum();
+    let wait_ms = req.wait_for.unwrap_or(0).max(extra_wait_ms);
+    let wait_secs = if wait_ms > 0 {
+        Some((wait_ms + 999) / 1000)
+    } else {
+        None
+    };
     let fetch_req = FetchRequest {
         url: req.url.clone(),
         format: format.clone(),
@@ -265,6 +277,7 @@ async fn scrape_with_session(
     let selector = req.selector.clone();
     let tls_fingerprint = req.tls_fingerprint.clone();
     let wait_for_ms = req.wait_for.unwrap_or(0);
+    let screenshot_full_page = req.screenshot_full_page;
 
     // run_on_local_runtime creates its own current-thread runtime (V8 is !Send),
     // so it must run on a blocking thread — same pattern as do_click/do_eval/
@@ -286,23 +299,36 @@ async fn scrape_with_session(
             for action in &actions {
                 match action {
                     ScrapeAction::Click { selector } => {
-                        // el.click() side-effects persist, but the navigation it
-                        // initiates inside evaluate does not survive (same as
-                        // pressKey). For anchors, return the href and navigate
-                        // via page.goto() so the chain continues on the target.
+                        // Click the element first so SPA click/hashchange listeners
+                        // fire (a #fragment anchor's routing is driven by the click
+                        // event, not by navigating to the href). Then, for http(s)
+                        // anchors, also goto the href so the chain continues on the
+                        // target when the site relies on native navigation. JS
+                        // navigations the click handler starts are drained next.
                         let nav = page.evaluate(&format!(
-                            "(() => {{ const el = document.querySelector({sel}); if (!el) return ''; if (el.tagName === 'A' && el.href) {{ if (el.target === '_blank') return 'HANDLED'; const href = el.href; const attr = el.getAttribute('href') || ''; if (href.startsWith('javascript:') || attr.startsWith('#')) return 'HANDLED'; return href; }} el.click(); return ''; }})()",
+                            "(() => {{ const el = document.querySelector({sel}); if (!el) return ''; el.click(); if (el.tagName === 'A' && el.href) {{ const attr = el.getAttribute('href') || ''; if (el.href.startsWith('javascript:') || attr.startsWith('#')) return ''; return el.href; }} return ''; }})()",
                             sel = js_str(selector),
                         ));
                         let mut navigated = false;
-                        if let Some(url) = nav.as_str().filter(|s| s.starts_with("http")) {
-                            page.goto(url).await?;
+                        if let Some(url) = nav.as_str().filter(|s| !s.starts_with("javascript:") && !s.is_empty()) {
+                            if let Ok(_u) = url::Url::parse(url) {
+                                // A dead/timeout target must not abort the scrape —
+                                // log and continue with the current page state.
+                                if let Err(e) = page.goto(url).await {
+                                    tracing::warn!("firecrawl click goto failed: {}", e);
+                                } else {
+                                    navigated = true;
+                                }
+                            }
+                        }
+                        // Drain any JS-initiated navigation from the click handler
+                        // (location.href / form.submit) that evaluate couldn't
+                        // complete.
+                        if let Err(e) = page.process_pending_navigation().await {
+                            tracing::warn!("firecrawl click nav drain failed: {}", e);
+                        } else {
                             navigated = true;
                         }
-                        // Drain any JS-initiated navigation from a non-anchor
-                        // click handler (location.href / form.submit) that
-                        // evaluate couldn't complete.
-                        navigated |= page.process_pending_navigation().await?;
                         if navigated {
                             // Let the target page's async render land before the
                             // next action runs (SPA routes render after load).
@@ -329,22 +355,36 @@ async fn scrape_with_session(
                         // and when Enter lands in a GET form, have the script
                         // RETURN the form's action URL (controls serialized) and
                         // navigate with page.goto() — the browser's real nav path.
+                        // Serialization matches real form submission: skip disabled
+                        // controls, checkbox/radio only when checked, <select
+                        // multiple> appends every selected option's value.
                         let submit = if key.eq_ignore_ascii_case("enter") { "true" } else { "false" };
                         let nav = page.evaluate(&format!(
-                            "(() => {{ const el = document.activeElement; if (!el) return ''; const opts = {{ key: {key}, code: {code}, keyCode: {key_code}, which: {key_code}, bubbles: true }}; el.dispatchEvent(new KeyboardEvent('keydown', opts)); el.dispatchEvent(new KeyboardEvent('keypress', opts)); el.dispatchEvent(new KeyboardEvent('keyup', opts)); if ({submit}) {{ const form = el.form; if (form && !(form.method && form.method.toLowerCase() === 'post')) {{ try {{ const u = new URL(form.action || window.location.href, window.location.href); for (const c of form.elements) {{ if (!c.name) continue; const t = c.type; if (t === 'submit' || t === 'button' || t === 'image' || t === 'file') continue; if (t === 'checkbox' || t === 'radio') {{ if (c.checked) u.searchParams.append(c.name, c.value || 'on'); continue; }} u.searchParams.append(c.name, c.value !== undefined ? c.value : ''); }} return u.toString(); }} catch (e) {{ return ''; }} }} }} return ''; }})()",
+                            "(() => {{ const el = document.activeElement; if (!el) return ''; const opts = {{ key: {key}, code: {code}, keyCode: {key_code}, which: {key_code}, bubbles: true }}; el.dispatchEvent(new KeyboardEvent('keydown', opts)); el.dispatchEvent(new KeyboardEvent('keypress', opts)); el.dispatchEvent(new KeyboardEvent('keyup', opts)); if ({submit}) {{ const form = el.form; if (form && !(form.method && form.method.toLowerCase() === 'post')) {{ try {{ const u = new URL(form.action || window.location.href, window.location.href); for (const c of form.elements) {{ if (!c.name || c.disabled) continue; const t = c.type; if (t === 'submit' || t === 'button' || t === 'image' || t === 'file' || t === 'reset') continue; if (t === 'checkbox' || t === 'radio') {{ if (c.checked) u.searchParams.append(c.name, c.value || 'on'); continue; }} if (t === 'select-multiple') {{ for (const o of c.selectedOptions) u.searchParams.append(c.name, o.value); continue; }} u.searchParams.append(c.name, c.value !== undefined ? c.value : ''); }} return u.toString(); }} catch (e) {{ return ''; }} }} }} return ''; }})()",
                             key = js_str(key),
                             code = js_str(&code),
                             key_code = key_code,
                             submit = submit,
                         ));
                         let mut navigated = false;
-                        if let Some(url) = nav.as_str().filter(|s| s.starts_with("http")) {
-                            page.goto(url).await?;
-                            navigated = true;
+                        if let Some(url) = nav.as_str().filter(|s| !s.starts_with("javascript:") && !s.is_empty()) {
+                            if let Ok(_u) = url::Url::parse(url) {
+                                // A dead/timeout target must not abort the scrape —
+                                // log and continue with the current page state.
+                                if let Err(e) = page.goto(url).await {
+                                    tracing::warn!("firecrawl pressKey goto failed: {}", e);
+                                } else {
+                                    navigated = true;
+                                }
+                            }
                         }
                         // Drain a navigation the site's own key handler started
                         // (e.g. Enter on a POST form whose submit handler runs).
-                        navigated |= page.process_pending_navigation().await?;
+                        if let Err(e) = page.process_pending_navigation().await {
+                            tracing::warn!("firecrawl pressKey nav drain failed: {}", e);
+                        } else {
+                            navigated = true;
+                        }
                         if navigated {
                             page.settle(1200).await;
                         }
@@ -388,10 +428,19 @@ async fn scrape_with_session(
 
             // Free the V8 page/browser before the CPU-bound Blitz layout/paint
             // (do_screenshot drops them first for the same reason) so peak memory
-            // stays bounded on large pages.
+            // stays bounded on large pages. full_page: an explicit Screenshot
+            // action's fullPage wins; otherwise the request-level screenshot_full_page
+            // (default true, matches Firecrawl) applies for formats-only requests.
+            #[cfg(feature = "screenshot")]
             let full_page = actions
                 .iter()
-                .any(|a| matches!(a, ScrapeAction::Screenshot { full_page } if *full_page));
+                .find_map(|a| match a {
+                    ScrapeAction::Screenshot { full_page } => Some(*full_page),
+                    _ => None,
+                })
+                .unwrap_or(screenshot_full_page);
+            #[cfg(not(feature = "screenshot"))]
+            let _ = screenshot_full_page;
             drop(page);
             drop(browser);
 
@@ -435,8 +484,11 @@ async fn scrape_with_session(
 
     match outcome {
         Ok(Ok(outcome)) => {
-            let stripped = crate::render::strip_non_content(&outcome.html);
+            // Only strip+convert when markdown was requested — strip_non_content
+            // allocates a lowercased copy + same-capacity output, wasted on a
+            // screenshot-only or html-only request.
             let markdown = if wants_markdown {
+                let stripped = crate::render::strip_non_content(&outcome.html);
                 Some(html2md::parse_html(&stripped))
             } else {
                 None

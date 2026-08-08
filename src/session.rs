@@ -242,7 +242,7 @@ fn session_thread(
                         }
 
                         SessionCommand::Click { index, reply } => {
-                            let result = click_by_index(&mut page, &element_map, index);
+                            let result = click_by_index(&mut page, &element_map, index).await;
                             let _ = reply.send(result);
                         }
 
@@ -396,7 +396,7 @@ fn extract_indexed_state(
 // Click / Input by index
 // ---------------------------------------------------------------------------
 
-fn click_by_index(
+async fn click_by_index(
     page: &mut Page,
     element_map: &HashMap<usize, u64>,
     index: usize,
@@ -408,7 +408,13 @@ fn click_by_index(
     );
     let result = page.evaluate(&js);
     let clicked = result.as_bool().unwrap_or(false);
-    // Small settle to let navigation begin.
+    // Drain any JS-initiated navigation the click started (location.href /
+    // form.submit) so the returned URL reflects the post-click page — matches
+    // the firecrawl /v1/scrape click handling.
+    let _ = page.process_pending_navigation().await;
+    if clicked {
+        page.settle(800).await;
+    }
     let url = page.url();
     Ok(SessionClickResponse { url, clicked })
 }
