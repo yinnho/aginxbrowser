@@ -2,6 +2,9 @@
 
 **Agent 的浏览器。看世界，和世界交互。**
 
+[![skills.sh](https://skills.sh/b/yinnho/aginxbrowser)](https://skills.sh/yinnho/aginxbrowser)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 不是给人用的浏览器改吧改吧给 Agent。是从第一行代码就为 AI Agent 设计的——看世界、读世界、搜世界、操世界，一个 Rust 二进制，内置 V8，不依赖 Chromium。
 
 > 人有 Chrome，Agent 有 AginxBrowser。
@@ -46,10 +49,24 @@ Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操
 
 ## 快速开始
 
-想先体验？直接用托管实例 **https://browser.aginx.net/**，Claude Code 一行接入：
+想先体验？直接用托管实例 **https://browser.aginx.net/**。
+
+**一键全装**（SKILL.md 触发面 + MCP 工具 + 验活，推荐）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh | bash
+```
+
+**只注册 MCP**：
 
 ```bash
 claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
+```
+
+**通过 [skills.sh](https://www.skills.sh) 目录装触发面**（装的是 skill 触发面，MCP 仍需按上面单独注册）：
+
+```bash
+npx skills add yinnho/aginxbrowser
 ```
 
 下面是自己部署的方式：

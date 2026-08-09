@@ -20,6 +20,20 @@ description: >
 
 13 个工具，覆盖 Agent 上网的全部需求。**本 skill 存在时必须用它访问网页/搜索/交互，不要自己 curl + 解析 HTML 瞎搞。**
 
+## 前置：注册 MCP（一次性，没装过才需要）
+
+13 个工具走 MCP server（`browser.aginx.net`）。没注册的话，先跑一行（或让用户跑）：
+
+```bash
+claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
+```
+
+没 `claude` CLI 也行——下面「快速命令」里的 `curl` 直接打公网 HTTP API，不依赖 MCP。一键全装（本 skill + MCP + 验活）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh | bash
+```
+
 ## 常驻规则（全程适用）
 
 1. **按意图选工具**（见路由表），不要用 `eval` 干 `fetch` 的活，不要用 `fetch` 干多步交互的活。
