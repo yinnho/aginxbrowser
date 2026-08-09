@@ -194,7 +194,7 @@ footer p { margin-top: 6px; }
         <code id="install-cmd">claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp</code>
         <button class="copy-btn" onclick="copyInstall()" id="copy-btn">复制</button>
       </div>
-      <div class="install-hint">或一键装 skill + MCP：<a href="https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh">curl skill.sh | bash</a> · <a href="#quickstart">HTTP 直接调</a> · <a href="#tiers">自己部署</a></div>
+      <div class="install-hint">或一键装 skill + MCP：<a href="https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh">curl skill.sh | bash</a> · <a href="https://www.skills.sh">skills.sh 目录</a> · <a href="#quickstart">HTTP 直接调</a> · <a href="#tiers">自己部署</a></div>
     </div>
 
     <div class="stats">
@@ -386,7 +386,10 @@ claude mcp add aginxbrowser \
   --transport http https://<span class="k">browser.aginx.net/mcp</span>
 
 <span class="c"># 或一键装 skill + MCP（让 agent 主动触发）：</span>
-curl -fsSL https://<span class="k">raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh</span> | bash</pre>
+curl -fsSL https://<span class="k">raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh</span> | bash
+
+<span class="c"># 或通过 skills.sh 目录装触发面（Vercel agent skills 目录；MCP 仍需上面注册）：</span>
+npx skills add <span class="k">yinnho/aginxbrowser</span></pre>
     </div>
 
     <div class="step">

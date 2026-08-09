@@ -128,8 +128,14 @@ Chromium 是为人设计的浏览器，它要处理 GPU 合成、音频、扩展
 **在线体验（托管实例）**：https://browser.aginx.net/ —— 一个实例，谁都能用，本篇文章所有示例都是直接打在它上面验证过的。
 
 ```bash
-# Claude Code 一行接入
+# 1) 一键全装（SKILL.md + MCP + 验活，推荐）
+curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh | bash
+
+# 2) 只注册 MCP（Claude Code）
 claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
+
+# 3) skills.sh 目录装触发面（Vercel agent skills 目录；MCP 仍需按 2 注册）
+npx skills add yinnho/aginxbrowser
 
 # 或直接调 HTTP API
 curl https://browser.aginx.net/health
@@ -144,7 +150,7 @@ curl https://browser.aginx.net/health
 
 **体检**：`curl https://browser.aginx.net/doctor` 告诉你当前哪些能力可用（screenshot/stealth 是否编译进去）、搜索走哪些引擎；`?probe=true` 真跑一次抓取确认链路通。
 
-**SKILL.md**：仓库根有 `SKILL.md`，放进 Agent 的 skills 目录后，它在「读网页/搜索/截图/交互」类任务上会主动调用，不用你提醒。
+**SKILL.md / skills.sh**：仓库根有 `SKILL.md`，放进 Agent 的 skills 目录后，它在「读网页/搜索/截图/交互」类任务上会主动调用，不用你提醒。也已上 [skills.sh](https://www.skills.sh)（Vercel 的 agent skills 目录）--`npx skills add yinnho/aginxbrowser` 装机，按装机量上排行。
 
 **自己部署**：
 
