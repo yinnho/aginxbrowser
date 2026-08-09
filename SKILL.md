@@ -1,24 +1,29 @@
 ---
 name: aginxbrowser
 description: >
-  MUST USE when the agent needs to access the live web - read/fetch/scrape any
-  web page (including JS-rendered SPAs and Cloudflare-protected sites), search
-  the web, screenshot a page as visual input, or interact with a page (click,
-  type, scroll, fill forms, login flows, pagination, click-through). Trigger
-  words: 抓取/读取/打开网页/看看这个链接/这个网页写了啥/截图/搜索/搜一下/查一下/
-  找一下/登录/填表/点击/翻页/research/scrape/fetch/screenshot/search/look up.
-  Also MUST USE when the user shares any URL and wants its content summarized,
-  extracted, or acted upon. 13 tools over MCP (fetch/search/eval/click + 9
-  session tools). Hosted at browser.aginx.net; works with zero config.
+  Read, search, screenshot, and interact with the live web from an AI agent. A
+  browser engine (not a search index) that fetches the current page - including
+  JS-rendered SPAs and Cloudflare-protected sites - and returns clean markdown,
+  takes screenshots as visual input, runs 5-engine aggregated web search, and
+  drives multi-step interactions (click, type, scroll, fill forms, login,
+  pagination) through an indexed session. 13 tools over MCP, zero config,
+  hosted at browser.aginx.net, no Chromium.
 
-  NOT for: questions answerable from the agent's own knowledge without live web
-  data; sending email/messages; anything that isn't "go look at / interact with
-  a web page or search the web".
+  Use when the agent needs to fetch or read a web page, extract content or
+  structured data from a URL, search the web, screenshot a page, log in or fill
+  a form, or click through interactive/paginated content. Trigger words:
+  scrape, fetch, read this page, open this link, web search, look up, search
+  for, screenshot, browser automation, headless browser, Cloudflare bypass,
+  抓取/读取/打开网页/这个链接写了啥/截图/搜索/搜一下/查一下/登录/填表/点击/翻页.
+
+  Not for: questions answerable from the agent's own knowledge without live web
+  data; sending email/messages; anything that isn't reading, searching, or
+  interacting with a web page.
 ---
 
 # AginxBrowser - Agent 的浏览器
 
-13 个工具，覆盖 Agent 上网的全部需求。**本 skill 存在时必须用它访问网页/搜索/交互，不要自己 curl + 解析 HTML 瞎搞。**
+13 个工具，覆盖 Agent 上网的全部需求。涉及读网页/搜索/截图/交互时优先用本 skill 的工具，而不是手写 curl 抓取再解析 HTML。
 
 ## 前置：注册 MCP（一次性，没装过才需要）
 
