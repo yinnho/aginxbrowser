@@ -36,7 +36,9 @@ claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
 没 `claude` CLI 也行——下面「快速命令」里的 `curl` 直接打公网 HTTP API，不依赖 MCP。一键全装（本 skill + MCP + 验活）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh | bash
+curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh -o skill.sh
+less skill.sh          # 先看一眼脚本内容，别盲跑
+bash skill.sh          # 确认无误再执行
 ```
 
 ## 常驻规则（全程适用）
