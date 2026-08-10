@@ -538,6 +538,7 @@ pub async fn do_search(req: SearchRequest) -> Result<SearchResponse, SearchError
         pageno: 1,
         use_proxy: req.use_proxy,
         timeout_secs: 15,
+        engine_filter: req.engines,
     };
 
     let (mut items, number_of_results, captcha_events) =

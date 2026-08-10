@@ -26,6 +26,8 @@ pub struct SearchParams {
     pub pageno: usize,
     pub use_proxy: bool,
     pub timeout_secs: u64,
+    /// Restrict to these engine names; empty = all eligible engines for the category.
+    pub engine_filter: Vec<String>,
 }
 
 /// Image-specific result fields. Populated only for `images`-category results.
@@ -244,6 +246,7 @@ pub async fn native_search(
         .engines
         .iter()
         .filter(|e| e.categories().iter().any(|c| requested.contains(c)))
+        .filter(|e| params.engine_filter.is_empty() || params.engine_filter.iter().any(|n| n.as_str() == e.name()))
         .cloned() // Arc clone — cheap
         .collect();
 
@@ -257,6 +260,7 @@ pub async fn native_search(
             pageno: params.pageno,
             use_proxy: params.use_proxy,
             timeout_secs: params.timeout_secs,
+            engine_filter: Vec::new(),
         };
 
         let state = registry.state.clone();

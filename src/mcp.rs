@@ -333,6 +333,7 @@ impl AginxBrowserMcp {
             max_chars_per: params.max_chars_per,
             wait_secs: 3,
             use_proxy: false,
+            engines: Vec::new(),
         };
 
         // do_search is already async and uses spawn_blocking internally for

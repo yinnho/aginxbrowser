@@ -260,6 +260,9 @@ pub struct SearchRequest {
     pub wait_secs: u64,
     #[serde(default)]
     pub use_proxy: bool,
+    /// Restrict search to these engine names (e.g. ["baidu"]). Empty = all eligible engines.
+    #[serde(default)]
+    pub engines: Vec<String>,
 }
 
 fn default_categories() -> String {
