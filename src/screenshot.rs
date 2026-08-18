@@ -4,9 +4,9 @@
 //! This module is the "paint what the agent already sees" layer — aginxbrowser's
 //! V8 path has already run the page's JS and produced the final DOM; we hand
 //! that DOM to Blitz purely for layout + rasterization. No sub-resource fetches
-//! happen here (Blitz's DummyNetProvider is a no-op, and the fork's `is_noop()`
-//! patch stops `<head>` stylesheets from blocking paint forever — see the
-//! `screenshot` feature note in Cargo.toml).
+//! happen here (Blitz's DummyNetProvider is a no-op, and upstream #636's
+//! `is_noop()` gating stops `<head>` stylesheets from blocking paint forever —
+//! see the `screenshot` feature note in Cargo.toml).
 
 use anyhow::Result;
 use blitz_dom::{DocumentConfig, util::Color};
@@ -36,9 +36,9 @@ pub fn render_html_to_png(
     }
     let scale_f = scale.max(0.1) as f64;
 
-    // No net provider → DummyNetProvider (no-op). The fork's is_noop() patch
-    // ensures head stylesheets don't permanently block paint. We never fetch
-    // sub-resources here; the DOM is already JS-rendered by the V8 path.
+    // No net provider → DummyNetProvider (no-op). Upstream #636's is_noop()
+    // gating ensures head stylesheets don't permanently block paint. We never
+    // fetch sub-resources here; the DOM is already JS-rendered by the V8 path.
     let mut document = HtmlDocument::from_html(
         html,
         DocumentConfig {
@@ -63,7 +63,7 @@ pub fn render_html_to_png(
     // Guard: if critical resources are somehow still pending, paint_scene would
     // no-op the whole frame. Surface this explicitly rather than returning blank.
     if document.as_ref().has_pending_critical_resources() {
-        anyhow::bail!("render_html_to_png: Blitz still reports pending critical resources (is_noop patch not applied?)");
+        anyhow::bail!("render_html_to_png: Blitz still reports pending critical resources (is_noop gating from upstream #636 not active?)");
     }
 
     let root_layout = document.as_ref().root_element().final_layout().size;

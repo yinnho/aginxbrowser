@@ -82,18 +82,29 @@ sha2 = "0.10"
 wreq-util = { version = "=3.0.0-rc.10", optional = true }
 
 # --- screenshot rendering (Blitz, opt-in via `screenshot` feature) ---
-# Uses a fork on yinnho/blitz branch fix/noop-netprovider-critical-resources that
-# skips critical-resource gating when NetProvider is a no-op — without this, real
-# sites render blank (see docs + memory: blitz-rendering-spike). PR pending upstream.
-# crates.io's blitz 0.3.0-beta.1 is a stale snapshot (blitz-paint wants anyrender
-# 0.11) incompatible with the git version (anyrender 0.12), so all blitz-* + anyrender*
-# must come from git with matching [patch.crates-io].
-blitz-dom = { git = "https://github.com/yinnho/blitz", branch = "fix/noop-netprovider-critical-resources", optional = true, features = ["default"] }
-blitz-html = { git = "https://github.com/yinnho/blitz", branch = "fix/noop-netprovider-critical-resources", optional = true }
-blitz-paint = { git = "https://github.com/yinnho/blitz", branch = "fix/noop-netprovider-critical-resources", optional = true }
-blitz-traits = { git = "https://github.com/yinnho/blitz", branch = "fix/noop-netprovider-critical-resources", optional = true }
-anyrender = { git = "https://github.com/DioxusLabs/anyrender", branch = "devin/1785858394-usvg-048", optional = true }
-anyrender_vello_cpu = { git = "https://github.com/DioxusLabs/anyrender", branch = "devin/1785858394-usvg-048", optional = true, features = ["multithreading"] }
+# Upstream DioxusLabs/blitz, rev-pinned (bump deliberately). The old yinnho/blitz
+# fork existed only for the no-op NetProvider critical-resource fix — merged
+# upstream as DioxusLabs/blitz#636 (2026-08-08), so the fork is retired.
+#
+# WHY 2fa6434d (#724, parley 0.10) AND NOT main: parley 0.11 (#725 — a pure dep
+# bump, zero blitz code change) hangs line breaking indefinitely on CJK-heavy
+# pages. baidu.com never finishes layout even in release (spins in parley
+# BreakLines::break_remaining under blitz compute_inline_layout). Bisected:
+# #724 renders baidu in ~4s / 1533 colors; #726 (parley 0.11.1) still spinning
+# at 150s. Reported upstream as linebender/parley#752 (repro minimized to a
+# 1.4KB baidu IME-menu fragment + page CSS; not CJK-text-dependent). Bump past
+# this rev only after that lands; doing so also unblocks #726–#735 (taffy
+# sizing + spurious horizontal-scroll fixes).
+#
+# crates.io's blitz 0.3.0-beta.1 is a stale snapshot and upstream pins taffy to
+# an unreleased git rev, so blitz-* must come from git. anyrender 0.13 /
+# anyrender_vello_cpu 0.16 are on crates.io and are what blitz consumes here.
+blitz-dom = { git = "https://github.com/DioxusLabs/blitz", rev = "2fa6434d", optional = true, features = ["default"] }
+blitz-html = { git = "https://github.com/DioxusLabs/blitz", rev = "2fa6434d", optional = true }
+blitz-paint = { git = "https://github.com/DioxusLabs/blitz", rev = "2fa6434d", optional = true }
+blitz-traits = { git = "https://github.com/DioxusLabs/blitz", rev = "2fa6434d", optional = true }
+anyrender = { version = "0.13", optional = true }
+anyrender_vello_cpu = { version = "0.16", optional = true, features = ["multithreading"] }
 peniko = { version = "0.6", optional = true }
 png = { version = "0.18", optional = true }
 
@@ -102,14 +113,6 @@ wreq = { version = "=6.0.0-rc.28", optional = true, features = ["prefix-symbols"
 
 [target.'cfg(not(any(target_os = "linux", target_os = "android")))'.dependencies]
 wreq = { version = "=6.0.0-rc.28", optional = true, features = ["socks"] }
-
-[patch.crates-io]
-# usvg intrinsic_dimensions + anyrender 0.12 alignment (blitz upstream patches).
-usvg = { git = "https://github.com/DioxusLabs/resvg", branch = "devin/1785858271-intrinsic-dimensions" }
-anyrender = { git = "https://github.com/DioxusLabs/anyrender", branch = "devin/1785858394-usvg-048" }
-anyrender_svg = { git = "https://github.com/DioxusLabs/anyrender", branch = "devin/1785858394-usvg-048" }
-anyrender_vello_cpu = { git = "https://github.com/DioxusLabs/anyrender", branch = "devin/1785858394-usvg-048" }
-anyrender_vello = { git = "https://github.com/DioxusLabs/anyrender", branch = "devin/1785858394-usvg-048" }
 
 [build-dependencies]
 deno_core = "0.350"

@@ -473,7 +473,7 @@ pub fn do_eval(req: EvalRequest) -> Result<EvalResponse> {
 /// always drives the obscura browser so SPA/JS-rendered content is captured.
 /// The page's `document.documentElement.outerHTML` is then fed to Blitz for
 /// layout + paint — no Chromium, no sub-resource fetches (Blitz's DummyNetProvider
-/// is a no-op, and the fork's is_noop() patch stops head stylesheets from
+/// is a no-op, and upstream #636's is_noop() gating stops head stylesheets from
 /// blocking paint forever).
 #[cfg(feature = "screenshot")]
 pub fn do_screenshot(req: ScreenshotRequest) -> Result<ScreenshotResponse> {
