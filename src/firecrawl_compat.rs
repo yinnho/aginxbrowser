@@ -577,9 +577,25 @@ fn extract_description(html: &str) -> Option<String> {
     // Look for name="description" then walk back/forward to the content attr.
     let needle = r#"name="description""#;
     let idx = lower.find(needle).or_else(|| lower.find(r#"name='description'"#))?;
-    // Search within ±200 chars for content="..."
-    let start = idx.saturating_sub(200);
-    let end = (idx + 200).min(lower.len());
+    // Search within ±200 chars for content="...". Snap the window to char
+    // boundaries — a CJK description means raw byte offsets can land mid-char
+    // and slicing would panic (observed on baidu.com).
+    let snap_floor = |i: usize| {
+        let mut i = i;
+        while i > 0 && !lower.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    };
+    let snap_ceil = |i: usize| {
+        let mut i = i.min(lower.len());
+        while i < lower.len() && !lower.is_char_boundary(i) {
+            i += 1;
+        }
+        i
+    };
+    let start = snap_floor(idx.saturating_sub(200));
+    let end = snap_ceil(idx + 200);
     let window = &lower[start..end];
     let content_idx = window.find("content=")?;
     let after = &window[content_idx + 8..];
