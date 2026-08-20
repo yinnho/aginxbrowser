@@ -8,10 +8,15 @@ description: >
   fill forms, login, paginate) through indexed sessions. 13 MCP tools over a
   single Rust binary — no Chromium. Use when the agent needs to read a web
   page, scrape or extract content from a URL, search the web, screenshot a
-  page, log in or fill a form, or click through interactive content. Trigger
-  words: scrape, fetch, read this page, open this link, web search, look up,
-  screenshot, headless browser, browser automation, Cloudflare bypass,
-  CAPTCHA, login, fill form, paginate, 抓取/读取/搜索/截图/登录/填表/翻页.
+  page, log in or fill a form, or click through interactive content. Triggers
+  include user requests to "read this page", "open this link", "what does
+  this site say", "search the web", "take a screenshot", "scrape this page",
+  "log in and do X", "fill out this form", "click through this", "bypass
+  Cloudflare", and Chinese equivalents (打开这个网页/看看这个网站/搜一下/
+  截图/登录/填表/翻页). Trigger words: scrape, fetch, read this page, open
+  this link, web search, look up, screenshot, headless browser, browser
+  automation, Cloudflare bypass, CAPTCHA, login, fill form, paginate,
+  抓取/读取/搜索/截图/登录/填表/翻页.
 ---
 
 # AginxBrowser — a browser engine for agents
@@ -106,6 +111,19 @@ curl -sS -X POST https://browser.aginx.net/search \
 # 6. session_state {session_id}                     -> check post-login state
 # 7. session_close {session_id}
 ```
+
+## Why aginxbrowser
+
+- Single Rust binary — no Chromium, no Playwright, no Puppeteer, no Docker
+- Real TLS fingerprinting (Chrome145 / Firefox133 / Safari / Edge) to get
+  through Cloudflare and other anti-bot defenses
+- 5-engine aggregated search including Baidu, Sogou, and WeChat — the Chinese
+  web is first-class, not an afterthought
+- Stateful sessions (8-min idle keep-alive) with cookie inject/export for
+  logged-in workflows
+- 13 MCP tools over HTTP + MCP dual protocol — Claude Code, Cursor, Claude
+  Desktop, and any MCP client
+- Screenshots and element coordinates from a pure-CPU Rust renderer, no GPU
 
 ## Capabilities & boundaries
 

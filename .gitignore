@@ -13,3 +13,8 @@
 
 # Logs / runtime
 *.log
+
+# Local npx skills install artifacts / session state
+.agents/
+.claude/
+skills-lock.json
