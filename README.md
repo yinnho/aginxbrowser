@@ -43,7 +43,7 @@ Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操
 - **截图渲染**：`/screenshot` 端点（`--features screenshot`），JS 渲染后的 DOM 喂给内置 Blitz 渲染栈（Stylo/Taffy/vello_cpu，纯 CPU，无 Chromium）出 PNG，agent 的视觉输入
 - **Cloudflare 自动绕过**：检测 "Just a moment..." 挑战页，自动等待 `cf_clearance`
 - **TLS 指纹伪装**：stealth 模式模拟 Chrome145/Firefox133/Safari/Edge，可按请求切换
-- **MCP Server**：`--mcp` 模式暴露 12 个工具（fetch/eval/click/search + 8 个 session 工具），Claude Code / Claude Desktop / Cursor 直接调用
+- **MCP Server**：`--mcp` 模式暴露 13 个工具（fetch/eval/click/search + 9 个 session 工具），Claude Code / Claude Desktop / Cursor 直接调用
 - **Firecrawl 兼容**：`/v1/scrape` 端点，现有 Firecrawl 客户端改 base URL 即可迁移
 - **DNS 重绑定防护**：内置 SSRF 防护 + DNS 解析后 IP 校验
 
@@ -120,7 +120,7 @@ aginxbrowser/
     ├── session.rs           # 交互式浏览器会话
     ├── captcha.rs           # CAPTCHA 检测与自动解决
     ├── render.rs            # 分层渲染（HTTP 直取 → obscura 浏览器）
-    ├── mcp.rs               # MCP Server（12 个工具）
+    ├── mcp.rs               # MCP Server（13 个工具）
     ├── firecrawl_compat.rs  # Firecrawl 兼容 /v1/scrape 端点
     ├── browser.rs           # 顶层 API：Browser、BrowserBuilder
     ├── page.rs              # 顶层 API：Page、Element
@@ -178,7 +178,7 @@ cargo build --release --features stealth,screenshot
 
 包含：
 - 所有 HTTP 端点（`/fetch`、`/click`、`/eval`、`/search`、`/v1/scrape`、8 个 Session 端点）
-- MCP Server 的 12 个工具及参数
+- MCP Server 的 13 个工具及参数
 - Claude Code / Claude Desktop / Cursor 客户端配置
 - 远程服务器 SSH 接入方式
 - 环境变量、错误码、站点抓取示例
@@ -192,11 +192,11 @@ AginxBrowser 定位是**纯外挂基础设施**——像真实浏览器一样作
 ## 已知限制
 
 1. **截图需 opt-in feature**：`/screenshot` 需 `cargo build --release --features screenshot` 启用（拉入内置 Blitz 渲染栈，二进制 +30-40MB）。内置 Blitz 是 beta，复杂站点 CSS 渲染近似（非 Chromium 像素级精准），图片子资源不单独拉取
-2. **无元素坐标**：只能做 JS click，不能做基于屏幕坐标的点击（`screenshot` feature 下 Blitz 内部已算出 `final_layout()` 坐标，尚未暴露给 API）
+2. **元素坐标已支持（块级）**：`/screenshot` 带 `selector` 返回元素页面坐标（`selector_rects`，CSS px），`selector`+默认模式直接截该元素区域；坐标与截图同源（Blitz `final_layout`）。纯行内元素（`<a>文字</a>`）无独立盒子，选块级祖先
 3. **JS 复杂组件可能失败**：React/Vue 事件委托可能不响应原生 `click()`
 4. **代理支持**：HTTP/HTTPS/SOCKS5，通过 `OBSCURA_PROXY` 传入
 5. **强风控站点**：百度文库暂不支持；知乎专栏需有效 `__zse_ck`
 
-## ���可证
+## 许可证
 
 与 OpenCarrier 主项目保持一致。

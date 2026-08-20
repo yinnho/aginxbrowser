@@ -208,6 +208,16 @@ pub struct ScreenshotRequest {
     /// Extra seconds to wait for JS rendering after load before capturing.
     #[serde(default)]
     pub wait_secs: Option<u64>,
+    /// CSS selector for element-level capture. Default (None): whole page.
+    /// With `selector_all=false` the image is cropped to the first match and
+    /// its rect is returned; with `selector_all=true` the image renders
+    /// normally and rects for every match are returned.
+    #[serde(default)]
+    pub selector: Option<String>,
+    /// With `selector`: report rects for ALL matches instead of cropping to
+    /// the first. Default false.
+    #[serde(default)]
+    pub selector_all: bool,
     /// Route through OBSCURA_PROXY. Default false (direct).
     #[serde(default)]
     pub use_proxy: bool,
@@ -235,12 +245,18 @@ fn default_screenshot_full_page() -> bool { true }
 pub struct ScreenshotResponse {
     pub url: String,
     pub title: Option<String>,
+    /// Actual rendered pixel dimensions of the PNG (differs from the request
+    /// when `full_page` tracks content height or a `selector` crop is used).
     pub width: u32,
     pub height: u32,
     /// Base64-encoded PNG bytes.
     pub image_base64: String,
     /// Always "png" for now.
     pub format: String,
+    /// CSS-pixel rects (page-relative) for the `selector` match(es). Present
+    /// only when a selector was given. Single match = the cropped region.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selector_rects: Option<Vec<crate::screenshot::ElementRect>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

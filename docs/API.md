@@ -356,6 +356,8 @@ curl -sL -o cabin_ref.jpg "<image_url>"
 | scale | f32 | | `1.0` | 设备像素比，调高更清晰但 PNG 更大 |
 | full_page | bool | | `true` | 截完整滚动页（跟踪内容高度，上限 16000px） |
 | wait_secs | u64 | | `null` | 加载后额外等待秒数（等 JS 渲染） |
+| selector | string | | `null` | CSS 选择器，截**指定元素区域**而非整页（见下） |
+| selector_all | bool | | `false` | 配合 `selector`：不裁剪，返回**所有匹配**的坐标 |
 | use_proxy | bool | | `false` | 走 `OBSCURA_PROXY` 代理 |
 | cookies | string[] | | `[]` | 导航前注入的 cookie |
 | tls_fingerprint | string | | `null` | TLS 指纹（stealth 模式） |
@@ -366,10 +368,19 @@ curl -sL -o cabin_ref.jpg "<image_url>"
 |------|------|------|
 | url | string | 最终 URL（重定向后） |
 | title | string? | 页面标题 |
-| width | u32 | 请求的宽度 |
-| height | u32 | 请求的高度（实际 PNG 高度可能不同，`full_page` 时跟踪内容） |
+| width | u32 | 实际渲染的 PNG 像素宽度（`full_page` 跟踪内容高度、`selector` 裁剪时与请求值不同） |
+| height | u32 | 实际渲染的 PNG 像素高度 |
 | image_base64 | string | PNG 的 base64 编码。`base64 -d` 解码，或 `data:image/png;base64,...` 直接用 |
 | format | string | 固定 `"png"` |
+| selector_rects | object[]? | 仅当请求带 `selector` 时出现。每个元素 `{x, y, width, height}`，**CSS px，页面左上角为原点**（不是视口坐标） |
+
+**selector 模式（元素级截图 + 坐标）：**
+
+- `selector` + `selector_all=false`（默认）：图像裁剪到第一个匹配元素的边框盒，`selector_rects` 恰好一项（即裁剪区域）。
+- `selector` + `selector_all=true`：图像照常整页渲染，`selector_rects` 返回**每个匹配**的坐标，agent 可以只读坐标不要图。
+- 坐标来自 Blitz 布局后的 `final_layout`（Taffy 边框盒），沿布局树累加得到页面绝对坐标。
+
+> ⚠️ **行内元素限制**：纯文字行内元素（如 `<a>文字</a>`）没有独立的 Taffy 盒子，crop 模式会报错提示选块级祖先；`selector_all` 模式下返回 `0x0`。含块级/替换内容的行内元素（`<a><img>` 等）会回退到后代盒子的并集。选择器选**块级容器**（div/section/li 等）坐标可靠。
 
 **示例 — 截百度搜索：**
 
@@ -378,6 +389,23 @@ curl -sS -X POST http://127.0.0.1:8089/screenshot \
   -H "Content-Type: application/json" \
   -d '{"url":"https://www.baidu.com/s?wd=蔚来ES8","full_page":true,"wait_secs":2}' \
   | jq -r .image_base64 | base64 -d > baidu.png
+```
+
+**示例 — 截第一个搜索结果 + 拿所有结果坐标：**
+
+```bash
+# 只截 #content_left 下第一个 .result
+curl -sS -X POST http://127.0.0.1:8089/screenshot \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://www.baidu.com/s?wd=蔚来ES8","selector":"#content_left .result"}' \
+  | jq -r .image_base64 | base64 -d > first-result.png
+
+# 不要图，只要 9 条结果的页面坐标
+curl -sS -X POST http://127.0.0.1:8089/screenshot \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://www.baidu.com/s?wd=蔚来ES8","selector":"#content_left .result","selector_all":true,"full_page":false,"width":100,"height":100}' \
+  | jq -c '.selector_rects'
+# [{"x":150,"y":2843,"width":608,"height":153}, {"x":150,"y":3016,"width":608,"height":69}, ...]
 ```
 
 ```json

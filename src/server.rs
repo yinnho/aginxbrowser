@@ -501,22 +501,29 @@ pub fn do_screenshot(req: ScreenshotRequest) -> Result<ScreenshotResponse> {
 
             // Render off-thread-ish: Blitz layout/paint is sync and CPU-bound.
             // We're already on a blocking runtime thread, so just call it directly.
-            let png_bytes = crate::screenshot::render_html_to_png(
+            let rendered = crate::screenshot::render_html_to_png(
                 &html,
                 &final_url,
                 req.width,
                 req.height,
                 req.scale,
                 req.full_page,
+                req.selector.as_deref(),
+                req.selector_all,
             )?;
 
             Ok(ScreenshotResponse {
                 url: final_url,
                 title,
-                width: req.width,
-                height: req.height, // caller sees requested height; actual may differ for full_page
-                image_base64: base64_png(&png_bytes),
+                width: rendered.pixel_width,
+                height: rendered.pixel_height,
+                image_base64: base64_png(&rendered.png),
                 format: "png".to_string(),
+                selector_rects: if req.selector.is_some() {
+                    Some(rendered.rects)
+                } else {
+                    None
+                },
             })
         })
     })

@@ -456,8 +456,10 @@ async fn scrape_with_session(
                     800,
                     1.0,
                     full_page,
+                    None,
+                    false,
                 ) {
-                    Ok(png) => Some(png),
+                    Ok(rendered) => Some(rendered.png),
                     Err(e) => {
                         tracing::warn!("firecrawl screenshot render failed: {}", e);
                         None
