@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>博客 · AginxBrowser — Agent 的浏览器</title>
+<meta name="description" content="AginxBrowser 博客：Agent 浏览器、纯 Rust 渲染、反爬、元素坐标、5 引擎搜索——真实工程叙事与技术复盘。">
+<meta property="og:title" content="博客 · AginxBrowser">
+<meta property="og:description" content="Agent 浏览器、纯 Rust 渲染、反爬、元素坐标——真实工程叙事与技术复盘。">
+<link rel="canonical" href="https://browser.aginx.net/blog/">
+<link rel="alternate" hreflang="zh-CN" href="https://browser.aginx.net/blog/index.html">
+<link rel="alternate" hreflang="en" href="https://browser.aginx.net/blog/en.html">
+<link rel="alternate" hreflang="x-default" href="https://browser.aginx.net/blog/en.html">
+<link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a href="/" class="brand"><span class="dot"></span>AginxBrowser</a>
+    <div class="nav-links">
+      <a href="/">首页</a>
+      <a href="/blog/en.html" style="color:var(--text-dim)">English</a>
+    </div>
+  </div>
+</nav>
+
+<div class="blog-head">
+  <h1>博客</h1>
+  <p class="desc">Agent 浏览器相关的真实工程叙事与技术复盘——做了什么、踩了什么坑、为什么这么选。</p>
+</div>
+
+<div class="post-list">
+  <a class="post" href="/blog/rendering-zh.html">
+    <h2>纯 Rust 的浏览器截图是怎么做的：不依赖 Chromium，喂给 Blitz 布局和绘制<span class="lang">中文</span></h2>
+    <div class="meta">2026-08-21 · 工程笔记</div>
+    <div class="excerpt">单二进制、零 Chromium 的承诺逼出了一条不一样的截图路径：自己 V8 跑完 JS，再喂给 Blitz（Stylo + Taffy + parley + vello_cpu）布局绘制。文章记录全白屏的根因链（上游 #636）、CJK 挂死的钉版决策（parley#752）、以及元素坐标实现里 paint_scene 裁剪的自相矛盾。</div>
+  </a>
+
+  <a class="post" href="/blog/launch-zh.html">
+    <h2>Cloudflare 刚做了个 Agent 浏览器，却在博客里公开承认了三件干不了的事<span class="lang">中文</span></h2>
+    <div class="meta">2026-08-21 · 观点</div>
+    <div class="excerpt">Kitesurf 验证了「Agent 需要自己的浏览器」这个判断，也公开承认了三件它干不了的事——真实 TLS 指纹、有状态登录会话、MCP 原生。恰好是 AginxBrowser 从第一天就在啃的。</div>
+  </a>
+
+  <a class="post" href="/blog/rendering-en.html">
+    <h2>How to screenshot a page without Chromium: feed the post-JS DOM to Blitz<span class="lang">English</span></h2>
+    <div class="meta">2026-08-21 · Engineering</div>
+    <div class="excerpt">The blank-screen root cause, the CJK hang, and the coordinate-crop trap — a full post-mortem of building screenshots on Dioxus Blitz with zero Chromium and no GPU.</div>
+  </a>
+
+  <a class="post" href="/blog/launch-en.html">
+    <h2>Cloudflare just shipped an agent browser — and admitted the three things it can't do<span class="lang">English</span></h2>
+    <div class="meta">2026-08-21 · Opinion</div>
+    <div class="excerpt">Kitesurf validated that agents need their own browser — then openly listed the three hardest things it won't do. Those are exactly what AginxBrowser was built for.</div>
+  </a>
+</div>
+
+<footer>
+  AginxBrowser · Agent 的浏览器 · Apache-2.0 · browser.aginx.net
+</footer>
+
+</body>
+</html>

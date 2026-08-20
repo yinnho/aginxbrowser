@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blog · AginxBrowser — the agent's browser</title>
+<meta name="description" content="The AginxBrowser blog: agent browsers, pure-Rust rendering without Chromium, anti-bot TLS fingerprinting, element coordinates, 5-engine search — real engineering and honest post-mortems.">
+<meta property="og:title" content="Blog · AginxBrowser">
+<meta property="og:description" content="Agent browsers, pure-Rust rendering, anti-bot, element coordinates — real engineering and honest post-mortems.">
+<link rel="canonical" href="https://browser.aginx.net/blog/en.html">
+<link rel="alternate" hreflang="zh-CN" href="https://browser.aginx.net/blog/index.html">
+<link rel="alternate" hreflang="en" href="https://browser.aginx.net/blog/en.html">
+<link rel="alternate" hreflang="x-default" href="https://browser.aginx.net/blog/en.html">
+<link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a href="/" class="brand"><span class="dot"></span>AginxBrowser</a>
+    <div class="nav-links">
+      <a href="/">Home</a>
+      <a href="/blog/index.html" style="color:var(--text-dim)">中文</a>
+    </div>
+  </div>
+</nav>
+
+<div class="blog-head">
+  <h1>Blog</h1>
+  <p class="desc">Real engineering and honest post-mortems about building a browser for agents — what we did, the traps we hit, and why we chose this path.</p>
+</div>
+
+<div class="post-list">
+  <a class="post" href="/blog/rendering-en.html">
+    <h2>How to screenshot a page without Chromium: feed the post-JS DOM to Blitz<span class="lang">English</span></h2>
+    <div class="meta">2026-08-21 · Engineering</div>
+    <div class="excerpt">The "single binary, zero Chromium" promise left no room for headless Chrome. So we run the page's JS in our own V8 and hand the final DOM to Dioxus Blitz for layout and paint. The blank-screen root cause (upstream #636), the CJK hang and pin decision (parley#752), and the self-contradicting crop trap.</div>
+  </a>
+
+  <a class="post" href="/blog/launch-en.html">
+    <h2>Cloudflare just shipped an agent browser — and admitted the three things it can't do<span class="lang">English</span></h2>
+    <div class="meta">2026-08-21 · Opinion</div>
+    <div class="excerpt">Kitesurf validated that agents need their own browser — then openly listed the three hardest things it won't do: real TLS fingerprinting, persistent authenticated sessions, MCP-native tooling. Those are exactly what AginxBrowser was built for.</div>
+  </a>
+
+  <a class="post" href="/blog/rendering-zh.html">
+    <h2>纯 Rust 的浏览器截图是怎么做的：不依赖 Chromium，喂给 Blitz 布局和绘制<span class="lang">中文</span></h2>
+    <div class="meta">2026-08-21 · 工程笔记</div>
+    <div class="excerpt">全白屏根因链、CJK 挂死的钉版决策、元素坐标与 paint_scene 裁剪的自相矛盾——纯 Rust 渲染栈的真实踩坑记录。</div>
+  </a>
+
+  <a class="post" href="/blog/launch-zh.html">
+    <h2>Cloudflare 刚做了个 Agent 浏览器，却在博客里公开承认了三件干不了的事<span class="lang">中文</span></h2>
+    <div class="meta">2026-08-21 · 观点</div>
+    <div class="excerpt">Kitesurf 验证了方向，也公开承认了三个最难的场景它不做——正是 AginxBrowser 守着的山头。</div>
+  </a>
+</div>
+
+<footer>
+  AginxBrowser · the agent's browser · Apache-2.0 · browser.aginx.net
+</footer>
+
+</body>
+</html>

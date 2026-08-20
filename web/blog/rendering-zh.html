@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>纯 Rust 的浏览器截图是怎么做的：不依赖 Chromium，喂给 Blitz 布局和绘制 · AginxBrowser</title>
+<meta name="description" content="AginxBrowser 要在不打包 Chromium 的前提下给 agent 截图能力。做法：自己 V8 跑完 JS 拿到最终 DOM，再交给 Dioxus Blitz（Stylo + Taffy + parley + vello_cpu，纯 CPU）布局绘制。文章记录了我们踩过的白屏坑、CJK 挂死坑，和元素坐标的实现细节。">
+<meta property="og:title" content="纯 Rust 的浏览器截图是怎么做的：不依赖 Chromium，喂给 Blitz 布局和绘制">
+<meta property="og:description" content="自己 V8 跑完 JS，再喂 Blitz 布局绘制。白屏根因、CJK 挂死、坐标裁剪——真实踩坑记录。">
+<link rel="canonical" href="https://browser.aginx.net/blog/rendering-zh.html">
+<link rel="alternate" hreflang="zh-CN" href="https://browser.aginx.net/blog/rendering-zh.html">
+<link rel="alternate" hreflang="en" href="https://browser.aginx.net/blog/rendering-en.html">
+<link rel="alternate" hreflang="x-default" href="https://browser.aginx.net/blog/rendering-en.html">
+<link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a href="/" class="brand"><span class="dot"></span>AginxBrowser</a>
+    <div class="nav-links">
+      <a href="/blog/">博客</a>
+      <a href="/blog/en.html">English</a>
+      <a href="/" style="color:var(--text-dim)">← 首页</a>
+    </div>
+  </div>
+</nav>
+
+<article class="article">
+  <h1>纯 Rust 的浏览器截图是怎么做的：不依赖 Chromium，喂给 Blitz 布局和绘制</h1>
+  <div class="meta">AginxBrowser 工程笔记 · 2026-08-21 · <a href="/blog/rendering-en.html">English</a></div>
+
+  <p>AginxBrowser 的产品承诺是「单二进制、零 Chromium」。这意味着截图功能不能走「下载 500MB Chromium 再调 headless」的路——那会直接毁掉整个卖点。但 agent 需要「看见」页面，截图是刚需。这个矛盾逼出了一条完全不同的实现路径，也让我们踩进了几个上游都不一定见过的坑。这篇文章是完整的技术复盘。</p>
+
+  <h2>为什么不能用 headless Chromium</h2>
+  <p>Puppeteer / Playwright 的截图依赖 Chromium，而 Chromium 本身是个浏览器——它的 JS 引擎、渲染引擎、网络栈全都要。AginxBrowser 已经有自己的 V8 和 HTTP 栈（obscura 内核），再拖一个 Chromium 进去是重复造两个浏览器。</p>
+  <p>我们的选型是 <a href="https://github.com/DioxusLabs/blitz">Dioxus Blitz</a>：纯 Rust 的渲染栈，包含 Stylo（Servo 的 CSS 引擎）、Taffy（flexbox/grid 布局）、parley（文本排版）和 vello_cpu（纯 CPU 光栅化）。关键点在于 <strong>vello_cpu 不需要 GPU/wgpu</strong>——我们的生产服务器是无显存的，这条路径直接决定了可行性。</p>
+
+  <h2>集成模型：Blitz 只画「已经看到的世界」</h2>
+  <p>最早我们试过把 curl 抓到的原始 HTML 喂给 Blitz，结果复杂站点全白。原因是现代网页的可见内容依赖 JS 动态切换 <code>display</code> 和 CSS @media，原始 HTML 里的节点大多是 <code>display:none</code>。</p>
+  <p>修正后的模型很干净：<strong>obscura 的 V8 先把页面 JS 跑完，拿到真正的最终 DOM，序列化成 HTML 字符串，再喂给 Blitz 只做布局 + 绘制。</strong>Blitz 不负责看世界，它负责把「agent 已经看到的世界」画出来。这样 JS、stealth、搜索、session 全部保留在原栈不动，Blitz 只接管布局和光栅化这一层。</p>
+  <p>实测数据：百度全页（6217px 高）从 JS 渲染到出 PNG 约 4 秒，paint_scene 本身只要几毫秒到十几毫秒；人民日报 17495px 高也在这个量级。vello_cpu 纯 CPU 渲染，单页耗时比 markdown 转换还低。</p>
+
+  <h2>坑一：全白屏——一个上游假设带来的 bug</h2>
+  <p>集成后第一个大问题是：真实站点喂进去全是白图，自构造的简单页却正常。逐层排查后根因链非常清晰：</p>
+  <ol>
+    <li>我们传 <code>net_provider: None</code>，Blitz 会用 <code>DummyNetProvider</code>——一个 fetch 是空操作的假网络层；</li>
+    <li><code>&lt;head&gt;</code> 里的 <code>&lt;link rel="stylesheet"&gt;</code> 会被无条件记进 <code>pending_critical_resources</code>；</li>
+    <li>但 DummyNetProvider 永远不会回调 → 资源状态永远不结束；</li>
+    <li><code>paint_scene</code> 开头检查「还有关键资源未加载」→ 直接 return，整页不绘制。</li>
+  </ol>
+  <p>根因不是 Stylo/Taffy 能力不行——布局和样式解析一直是正确的。是「资源加载门控」逻辑没考虑「没有 net provider」的场景，错误地永久阻塞绘制。这是上游假设「总有 net provider 拉资源」的盲区，而「喂预渲染 DOM」正是我们这种集成的专属场景。</p>
+  <p>修复：给 <code>NetProvider</code> trait 加默认方法 <code>is_noop()</code>，<code>DummyNetProvider</code> 返回 true；只有非 noop 时才把 head 里的样式表记进 pending。修复后百度从 1 种颜色（全白）到 1653 种，GitHub 从 1 到 516，人民日报从 1 到 615。这个 patch 后来提了 PR，被上游合并（#636），fork 就此退役。</p>
+
+  <h2>坑二：CJK 挂死——为什么我们钉在旧版 parley</h2>
+  <p>把依赖切回上游主线后，发现重 CJK 页面行布局无限挂死。百度连 release 构建都 240 秒+ 不返回，profile 定位到 parley 的 <code>BreakLines::break_remaining</code> 死循环（<code>while break_next().is_some() {}</code> 无进展）。二分后发现是 parley 0.11 的纯依赖 bump 引入的 regression——非 CJK 文字也能触发，触发条件是一组特定的内联 span 嵌套 block + CSS 约束。</p>
+  <p>我们给上游提了最小复现（686KB → 1.4KB，linebender/parley#752），然后选择把 blitz 钉在 <code>2fa6434d</code>（parley 0.10）这个已知良好的版本。代价是收不到后面几个无关的修复，但换来确定性的渲染。这是「钉住 vs 追新」的权衡，对生产服务来说答案很明确。</p>
+
+  <h2>坑三：元素坐标——parent-relative 的位置和自相矛盾的裁剪</h2>
+  <p>agent 要基于屏幕坐标操作页面，光有截图不够，得知道元素在哪。Taffy 的 <code>final_layout().location</code> 是父元素相对的，所以绝对坐标 = 沿 <code>layout_parent</code> 链（包含匿名块盒子，和绘制遍历一致）累加每个节点的 location。我们验证：百度结果卡片 9 个 rect，x=150、宽 608 精确堆叠；GitHub trending 17 篇卡片，x=8、宽 1264 均匀排列。</p>
+  <p>裁剪这块踩了个反直觉的坑。<code>paint_scene</code> 的 x/y offset 参数会平移绘制位置，但视口裁剪用的是 <code>translate(-initial_x)</code> 把它抵消掉——所以元素在未滚动窗口外会被裁成白图（上游只传过 0,0，从来没人触发这个路径）。正确机制是 <code>set_viewport_scroll</code>，它同时平移绘制和裁剪，两者保持一致。</p>
+  <p>还有一层诚实的边界：纯行内元素（<code>&lt;a&gt;文字&lt;/a&gt;</code>）在 Taffy 里没有独立盒子（0×0），它的内容属于包含块的 inline layout。我们做了兜底——取元素后代盒的并集，能救 <code>&lt;a&gt;&lt;img&gt;&lt;/a&gt;</code> 这种混合内容；仍为空的就报错，引导用户选块级祖先。</p>
+
+  <h2>为什么这条路值得</h2>
+  <p>Blitz 还是 beta，复杂站点的 CSS 是近似而非像素级精准，图片子资源不单独拉取（会缺图）。这些我们都如实写在 README 的已知限制里。但选择这条路换来的是：一个二进制、零 Chromium、无 GPU 也能出图、中文正常渲染、坐标和截图同源。对「给 agent 装眼睛」这件事，这是目前最合理的技术路线——而且所有坑都是我们自己蹚出来的，文档、patch、issue 都在，可复现。</p>
+
+  <div class="related">📚 相关阅读：<a href="/blog/launch-zh.html">Cloudflare 刚做了个 Agent 浏览器，却在博客里公开承认了三件干不了的事</a> · 更多见 <a href="/blog/">/blog</a>。</div>
+
+  <div class="cta">
+    <p>想看真实的截图效果？</p>
+    <a class="btn" href="/">去体验</a>
+    <a class="btn ghost" href="https://github.com/yinnho/aginxbrowser">GitHub 开源</a>
+  </div>
+</article>
+
+<footer>
+  AginxBrowser · Agent 的浏览器 · Apache-2.0 · browser.aginx.net
+</footer>
+
+</body>
+</html>

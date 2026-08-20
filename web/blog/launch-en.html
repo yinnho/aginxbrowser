@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cloudflare just shipped an agent browser — and admitted the three things it can't do · AginxBrowser</title>
+<meta name="description" content="Kitesurf validated that agents need their own browser — then openly listed three things it can't do: real TLS fingerprinting, persistent authenticated sessions, and MCP-native tooling. Those are exactly what AginxBrowser was built for.">
+<meta property="og:title" content="Cloudflare just shipped an agent browser — and admitted the three things it can't do">
+<meta property="og:description" content="Kitesurf validated the direction and conceded the three hardest mountains. AginxBrowser holds them.">
+<link rel="canonical" href="https://browser.aginx.net/blog/launch-en.html">
+<link rel="alternate" hreflang="zh-CN" href="https://browser.aginx.net/blog/launch-zh.html">
+<link rel="alternate" hreflang="en" href="https://browser.aginx.net/blog/launch-en.html">
+<link rel="alternate" hreflang="x-default" href="https://browser.aginx.net/blog/launch-en.html">
+<link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a href="/" class="brand"><span class="dot"></span>AginxBrowser</a>
+    <div class="nav-links">
+      <a href="/blog/">Blog</a>
+      <a href="/blog/en.html">English</a>
+      <a href="/" style="color:var(--text-dim)">← Home</a>
+    </div>
+  </div>
+</nav>
+
+<article class="article">
+  <h1>Cloudflare just shipped an agent browser — and admitted the three things it can't do</h1>
+  <div class="meta">AginxBrowser · 2026-08-21 · <a href="/blog/launch-zh.html">中文版</a></div>
+
+  <p>Last week Cloudflare shipped <strong>Kitesurf</strong> — a browser purpose-built for AI agents. Built in 12 weeks, running on their global edge network's V8 isolates, no Chromium, free public beta.</p>
+  <p>Cloudflare is a $40B company. Their entry into this space says one thing: <strong>the bet that "agents need their own browser" has landed.</strong></p>
+  <p>But I read their launch post a few times, because there was one passage that stood out. Roughly:</p>
+  <blockquote>If you need to play video, render WebGL, <strong>handshake against anti-bot defenses with a real TLS fingerprint</strong>, or <strong>open a ten-minute authenticated session that needs persistent state</strong> — Kitesurf isn't the right tool. Use Chromium.</blockquote>
+  <p>That passage matters to me because the things Kitesurf openly can't do are <strong>exactly what AginxBrowser has been built around from day one.</strong></p>
+
+  <h2>The bigger picture</h2>
+  <p>Agents can write code, edit documents, run projects. But ask one to go look at the web, and it flails. Every tool it has falls short in a different way:</p>
+  <ul>
+    <li><code>curl</code> can't get JS-rendered pages — SPAs come back as empty shells.</li>
+    <li>Search APIs return stale index snapshots, days old; prices and inventory changed long ago.</li>
+    <li>Puppeteer / Playwright drag in a whole Chromium the server can't afford — and they're built for humans debugging, not for agents.</li>
+    <li>Scraping services like Firecrawl are read-only: no login, no pagination, no clicking.</li>
+  </ul>
+  <p>Agents don't need any one of these. Agents need all five at once: <strong>see, read, find, act, and just run.</strong></p>
+  <p>AginxBrowser does exactly that. A single Rust binary with an embedded V8, no Chromium. systemd-guarded, HTTP API + MCP, one line to wire into Claude Code.</p>
+  <p class="tagline">Humans have Chrome. Agents have AginxBrowser.</p>
+  <p>Here's the interesting part: Kitesurf and AginxBrowser are <strong>from the same lineage</strong> — both started from the obscura Rust headless engine, both use Blitz for HTML/CSS. The difference is the bet each made: <strong>Kitesurf built the lightest, cheapest browser it could. We built the one that does the things nobody else can.</strong></p>
+
+  <h2>The three things</h2>
+
+  <h3>1. Real TLS fingerprinting, through anti-bot defenses</h3>
+  <p>Kitesurf says it doesn't do TLS fingerprint negotiation — which is inevitable, really: Cloudflare <em>is</em> the world's largest anti-bot vendor. They structurally can't ship a browser that spoofs fingerprints to defeat anti-bot systems. So Kitesurf's traffic always wears an honest "I am a bot" badge.</p>
+  <p>AginxBrowser is different. In stealth mode it reproduces the <strong>entire TLS handshake</strong> of Chrome145, Firefox133, Safari, and Edge via BoringSSL — not a User-Agent swap — switchable per request. Cloudflare's "Just a moment..." challenge is auto-waited for <code>cf_clearance</code>. Sites that 403 everyone else, we walk through.</p>
+  <p><strong>This isn't a weakness. It's our turf.</strong></p>
+
+  <h3>2. Stateful, long-lived sessions</h3>
+  <p>Kitesurf is stateless — fetch and discard. For anything needing a logged-in session, its own docs say "use Chromium."</p>
+  <p>AginxBrowser keeps a persistent session with 8-minute idle keep-alive. Inject cookies to start logged-in (<code>session_create(cookies=...)</code>), then export them when you're done (<code>session_cookies</code>). Login → paginate → act → act again; the chain never breaks.</p>
+  <p>One-shot engines can't do "log in first, then run a series of operations." This one can.</p>
+
+  <h3>3. MCP-native, not CDP wrapped</h3>
+  <p>Kitesurf's core is Chrome DevTools Protocol; wiring it into MCP means wrapping it with <code>chrome-devtools-mcp</code>.</p>
+  <p>AginxBrowser's 13 tools are MCP first-class citizens. One line into Claude Code, Cursor, or Claude Desktop — no DevTools protocol to learn first. Agents just pick it up and go.</p>
+
+  <h2>What it's for</h2>
+  <p>Not a demo — these are real things people do with an agent browser:</p>
+  <ul>
+    <li><strong>Grinding through terrible admin consoles</strong> — AWS, App Store Connect, Google Play: clicking through dozens of menus to do one thing. Let the agent click; check back in when it needs your authorization.</li>
+    <li><strong>Batch operations behind login</strong> — filling a cart, digging up a receipt from order history, checking pages that only exist when authenticated.</li>
+    <li><strong>On-the-fly scripting</strong> — let the agent look at a page, write some JS, and <code>eval</code> it: highlight comparison tables, re-layout content, filter by hidden parameters the site doesn't expose. GreaseMonkey-on-steroids.</li>
+    <li><strong>China's internet</strong> — Baidu, Sogou, WeChat official accounts: 5-engine aggregated search plus correct CJK rendering, not an English-only view of the web.</li>
+  </ul>
+
+  <h2>Honest caveats</h2>
+  <p>Don't just take the good parts:</p>
+  <ul>
+    <li>The built-in Blitz renderer is still beta. Complex-site CSS is approximate, not Chromium pixel-perfect. Screenshots are usable, but don't expect byte-for-byte Chrome parity.</li>
+    <li>Element coordinates are in — <code>/screenshot</code> with <code>selector</code> returns <code>selector_rects</code> (CSS-px page coordinates) and can crop straight to an element; coordinate-based <em>clicking</em> isn't wired up yet, interaction is still JS <code>click()</code>.</li>
+    <li>The hardest sites (e.g. Baidu Wenku) aren't supported yet.</li>
+    <li><strong>Apache-2.0, single binary</strong>, runs on any machine you like, locked to no cloud — which Kitesurf can't say even open-sourced, since it only deploys into your own Cloudflare account.</li>
+  </ul>
+
+  <h2>One line to plug in</h2>
+  <p>Kitesurf validated the direction and conceded the three hardest mountains. AginxBrowser holds them.</p>
+  <pre><code>claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp</code></pre>
+  <p>Use the hosted instance at <strong>browser.aginx.net</strong> — or self-host from <strong>github.com/yinnho/aginxbrowser</strong>.</p>
+
+  <div class="related">📚 Read this in <a href="/blog/launch-zh.html">中文</a> · More from the blog at <a href="/blog/">/blog</a>.</div>
+
+  <div class="cta">
+    <p>The agent internet is taking shape. Putting eyes and hands on every agent — that's the job we took.</p>
+    <a class="btn" href="/">Try it</a>
+    <a class="btn ghost" href="https://github.com/yinnho/aginxbrowser">Open source on GitHub</a>
+  </div>
+</article>
+
+<footer>
+  AginxBrowser · the agent's browser · Apache-2.0 · browser.aginx.net
+</footer>
+
+</body>
+</html>

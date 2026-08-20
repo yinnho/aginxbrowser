@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How to screenshot a page without Chromium: feed the post-JS DOM to Blitz · AginxBrowser</title>
+<meta name="description" content="AginxBrowser's 'single binary, no Chromium' promise left no room for headless Chrome screenshots. So we run the page's JS in our own V8, serialize the final DOM, and hand it to Dioxus Blitz (Stylo + Taffy + parley + vello_cpu, pure CPU) for layout and paint. The blank-screen bug, the CJK hang, and element coordinates — real war stories.">
+<meta property="og:title" content="How to screenshot a page without Chromium: feed the post-JS DOM to Blitz">
+<meta property="og:description" content="Own V8 runs the JS, Blitz does layout and paint. The blank-screen root cause, a CJK hang, and the coordinate-crop trap — real engineering notes.">
+<link rel="canonical" href="https://browser.aginx.net/blog/rendering-en.html">
+<link rel="alternate" hreflang="zh-CN" href="https://browser.aginx.net/blog/rendering-zh.html">
+<link rel="alternate" hreflang="en" href="https://browser.aginx.net/blog/rendering-en.html">
+<link rel="alternate" hreflang="x-default" href="https://browser.aginx.net/blog/rendering-en.html">
+<link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a href="/" class="brand"><span class="dot"></span>AginxBrowser</a>
+    <div class="nav-links">
+      <a href="/blog/">Blog</a>
+      <a href="/blog/en.html">English</a>
+      <a href="/" style="color:var(--text-dim)">← Home</a>
+    </div>
+  </div>
+</nav>
+
+<article class="article">
+  <h1>How to screenshot a page without Chromium: feed the post-JS DOM to Blitz</h1>
+  <div class="meta">AginxBrowser engineering notes · 2026-08-21 · <a href="/blog/rendering-zh.html">中文版</a></div>
+
+  <p>AginxBrowser's product promise is "a single binary, zero Chromium." That leaves no room for the standard answer to screenshots — download 500MB of Chromium and drive its headless mode — because doing so would destroy the entire point. But agents need to <em>see</em> pages, so screenshots are a hard requirement. The contradiction forced a completely different implementation path, and it dragged us into a few traps even upstream maintainers had never hit. This is the full post-mortem.</p>
+
+  <h2>Why not headless Chromium</h2>
+  <p>Puppeteer and Playwright get screenshots from Chromium — which is itself a browser, bundling its own JS engine, renderer, and network stack. AginxBrowser already carries its own V8 and HTTP stack (the obscura core). Adding Chromium on top would mean building two browsers in one.</p>
+  <p>Our choice was <a href="https://github.com/DioxusLabs/blitz">Dioxus Blitz</a>: a pure-Rust rendering stack — Stylo (Servo's CSS engine), Taffy (flexbox/grid layout), parley (text shaping), and vello_cpu (pure-CPU rasterization). The key property: <strong>vello_cpu needs no GPU/wgpu</strong>. Our production server has no discrete GPU, so this one fact decided feasibility.</p>
+
+  <h2>The integration model: Blitz only paints what's already seen</h2>
+  <p>Our first attempt fed raw curl'd HTML into Blitz. Complex sites came back entirely white. The reason: modern pages make their visible content depend on JS flipping <code>display</code> and CSS media queries at runtime — the raw HTML's nodes sit in <code>display:none</code>.</p>
+  <p>The corrected model is clean: <strong>obscura's V8 runs the page's JS first, we serialize the real final DOM to an HTML string, and hand it to Blitz purely for layout + paint.</strong> Blitz doesn't go look at the world; it draws the world the agent has already seen. JS, stealth, search, and session all stay in the original stack untouched; Blitz takes over exactly one layer: layout and rasterization.</p>
+  <p>Measured: a full Baidu SERP page (6217px tall) goes from JS render to PNG in about 4 seconds, with paint_scene itself taking single-digit milliseconds; People's Daily at 17495px tall lands in the same ballpark. vello_cpu is pure CPU — one page costs less wall time than a markdown conversion.</p>
+
+  <h2>Trap one: all-white pages — a bug born of an upstream assumption</h2>
+  <p>The first big problem after integration: real sites rendered pure white while self-built simple pages were fine. Root cause, traced layer by layer:</p>
+  <ol>
+    <li>We pass <code>net_provider: None</code>, so Blitz uses <code>DummyNetProvider</code> — a fake network layer whose fetch is a no-op;</li>
+    <li>A <code>&lt;link rel="stylesheet"&gt;</code> in <code>&lt;head&gt;</code> gets unconditionally added to <code>pending_critical_resources</code>;</li>
+    <li>DummyNetProvider never calls back → the resource state never resolves;</li>
+    <li><code>paint_scene</code> checks "any critical resources pending" at its top → returns immediately, nothing is painted.</li>
+  </ol>
+  <p>The root cause wasn't a Stylo/Taffy capability gap — style resolution and layout were always correct. It was the "resource loading gate" not accounting for a no-net-provider scenario, and permanently blocking paint because of it. That's the blind spot of an upstream assumption that "there's always a net provider pulling resources" — and "feed it a pre-rendered DOM" is exactly the integration that trips it.</p>
+  <p>The fix: give <code>NetProvider</code> a default <code>is_noop()</code> method that <code>DummyNetProvider</code> overrides to true, and only count head stylesheets as pending when the provider isn't a no-op. Baidu went from 1 color (all white) to 1653, GitHub from 1 to 516, People's Daily from 1 to 615. That patch became a PR upstream and was merged (#636), retiring our fork.</p>
+
+  <h2>Trap two: the CJK hang — why we're pinned on an older parley</h2>
+  <p>After switching dependencies back to upstream mainline, heavy-CJK pages started hanging forever in line layout. Baidu wouldn't return even from a release build after 240+ seconds; profiling pinned it on parley's <code>BreakLines::break_remaining</code> spinning in a <code>while break_next().is_some() {}</code> loop with no progress. Bisection traced it to a pure dependency bump in parley 0.11 — and it triggers on non-CJK text too; the trigger is a specific arrangement of inline span nesting + CSS constraints.</p>
+  <p>We filed a minimized repro (686KB → 1.4KB, <a href="https://github.com/linebender/parley/issues/752">linebender/parley#752</a>) and chose to pin blitz at <code>2fa6434d</code> (parley 0.10), a known-good revision. The cost is missing a few unrelated upstream fixes; the payoff is deterministic rendering. That's the pin-vs-chase tradeoff, and for a production service the answer was obvious.</p>
+
+  <h2>Trap three: element coordinates — parent-relative positions and a self-contradicting crop</h2>
+  <p>Agents need to act on screen coordinates, not just screenshots — they need to know where an element is. Taffy's <code>final_layout().location</code> is parent-relative, so absolute coordinates = summing locations up the <code>layout_parent</code> chain (which includes anonymous block boxes, matching paint traversal). Verified against real pages: 9 Baidu result cards at x=150, width 608, stacking exactly; 17 GitHub trending cards at x=8, width 1264, evenly spaced.</p>
+  <p>Cropping hit a genuinely surprising trap. <code>paint_scene</code>'s x/y offset params shift painted positions, but the viewport culling cancels them with <code>translate(-initial_x)</code> — so an element outside the unscrolled window gets culled into a blank crop. (Upstream only ever passes 0,0, so nobody had hit this path.) The correct mechanism is <code>set_viewport_scroll</code>, which shifts painting and culling coherently.</p>
+  <p>One honest boundary: pure inline elements (<code>&lt;a&gt;text&lt;/a&gt;</code>) have no Taffy box (0×0) — their content belongs to the containing block's inline layout. Our fallback unions the element's descendant boxes (which rescues mixed content like <code>&lt;a&gt;&lt;img&gt;&lt;/a&gt;</code>); when that's still empty we error out and point the caller at a block ancestor.</p>
+
+  <h2>Why the path is worth it</h2>
+  <p>Blitz is still beta; complex-site CSS is approximate rather than pixel-perfect, and image sub-resources aren't fetched (images can be missing). We document all of this honestly in the README's known limitations. What the path buys: one binary, zero Chromium, no GPU required, correct CJK rendering, and element coordinates sourced from the same layout pass as the screenshot. For putting eyes on agents, it's the sanest route we know — and every trap above is ours, with the docs, patch, and issue all reproducible.</p>
+
+  <div class="related">📚 Related: <a href="/blog/launch-en.html">Cloudflare just shipped an agent browser — and admitted the three things it can't do</a> · More at <a href="/blog/">/blog</a>.</div>
+
+  <div class="cta">
+    <p>Want to see a real screenshot?</p>
+    <a class="btn" href="/">Try it</a>
+    <a class="btn ghost" href="https://github.com/yinnho/aginxbrowser">Open source on GitHub</a>
+  </div>
+</article>
+
+<footer>
+  AginxBrowser · the agent's browser · Apache-2.0 · browser.aginx.net
+</footer>
+
+</body>
+</html>

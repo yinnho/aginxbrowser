@@ -69,7 +69,7 @@ AginxBrowser 的 13 个工具本身就是 MCP 一等公民。Claude Code、Curso
 别只听好的:
 
 - 内置 Blitz 渲染栈还在 beta,复杂站点的 CSS 是近似,不是 Chromium 那种像素级精准。截图能用,但别指望和 Chrome 一模一样。
-- 现在只能 JS 点击,基于屏幕坐标的点击还没有(Blitz 内部坐标已算出来,没暴露给 API)。
+- 元素坐标已支持——`/screenshot` 带 `selector` 返回 `selector_rects`(CSS px 页面坐标),截图也能直接裁到某个元素;基于坐标的点击还没接上,交互仍是 JS `click()`。
 - 极强风控的站(百度文库等)暂时不支持。
 - **开源 Apache-2.0,单二进制**,想跑在哪台机器上都行,不锁任何云——这一点 Kitesurf 即使开源也做不到,它只能部署到你自己的 Cloudflare 账号。
 
