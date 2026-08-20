@@ -77,7 +77,10 @@ Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操
 **一键全装**（SKILL.md 触发面 + MCP 工具 + 验活，推荐）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh | bash
+# 下载 -> 先看一眼内容 -> 确认无误再执行（不要盲跑网络脚本）
+curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh -o skill.sh
+less skill.sh
+bash skill.sh
 ```
 
 **只注册 MCP**：

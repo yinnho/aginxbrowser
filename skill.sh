@@ -6,8 +6,10 @@
 #   1. SKILL.md  -> the trigger (tells the agent WHEN to use the tools)
 #   2. MCP server -> the tools themselves (fetch/search/screenshot/session)
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh | bash
+# Usage (download, review, then run - never blind-pipe from the network):
+#   curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh -o skill.sh
+#   less skill.sh
+#   bash skill.sh
 #   ./skill.sh
 #
 # Self-hosted? Point it at your own instance:

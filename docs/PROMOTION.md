@@ -129,7 +129,10 @@ Chromium 是为人设计的浏览器，它要处理 GPU 合成、音频、扩展
 
 ```bash
 # 1) 一键全装（SKILL.md + MCP + 验活，推荐）
-curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh | bash
+#    下载 -> 先看一眼 -> 确认无误再执行（不要盲跑网络脚本）
+curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh -o skill.sh
+less skill.sh
+bash skill.sh
 
 # 2) 只注册 MCP（Claude Code）
 claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
