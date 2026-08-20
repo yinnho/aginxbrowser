@@ -32,6 +32,18 @@ Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操
 
 **核心优势：不依赖 Chromium。** AginxBrowser 内联了 Obscura 浏览器内核（V8 + 自研 HTTP 栈 + 内置 Blitz 渲染栈），不需要 Puppeteer、不需要 Chrome、不需要 Docker。一个 Rust 二进制，systemd 守护，就是 agent 的浏览器基础设施。
 
+## 三件套：反爬 + 长会话 + MCP 原生
+
+刚冒出来的「agent 浏览器」大多是**无状态、无指纹**的一次性渲染引擎——抓公开页、出截图很轻，碰上 Cloudflare 防护或要登录的站就退出（"用 Chromium 吧"）。AginxBrowser 走相反的路，专啃它们干不了的三件事：
+
+- **🔐 真实 TLS 指纹** — stealth 模式用 BoringSSL 复刻 Chrome145 / Firefox133 / Safari / Edge 的完整 TLS 握手（不是只改 UA），可按请求切换；Cloudflare Turnstile 挑战页自动等待 `cf_clearance`。无指纹引擎碰反爬就是 403，我们穿过去。
+- **🤝 有状态交互 Session** — 持久化浏览器会话（8 分钟空闲保活），登录态可注入可导出（`session_create(cookies=...)` ↔ `session_cookies`），跨页面、跨翻页、跨多步流程不断。一次性引擎抓完即弃，做不了「登录 → 操作 → 再操作」。
+- **🔌 MCP 原生** — 13 个工具是一等公民（不是 CDP 套壳），Claude Code / Cursor / Claude Desktop 一行接入。HTTP + MCP 双协议，agent 不用先学一套 DevTools 协议就能上手。
+
+> 参照：Cloudflare Kitesurf 官方明确不做真实 TLS 指纹协商、不做需要持久状态的认证会话——反爬与登录正是 AginxBrowser 的地盘。
+
+加上 Apache-2.0 开源、单二进制，想自托管现在就能跑，不锁任何云。
+
 ## 核心能力
 
 - **分层渲染**：静态页面纯 HTTP 直取（~100ms），需要 JS 渲染时才启动 V8（~1-2s），80% 页面加速 10x
@@ -46,6 +58,17 @@ Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操
 - **MCP Server**：`--mcp` 模式暴露 13 个工具（fetch/eval/click/search + 9 个 session 工具），Claude Code / Claude Desktop / Cursor 直接调用
 - **Firecrawl 兼容**：`/v1/scrape` 端点，现有 Firecrawl 客户端改 base URL 即可迁移
 - **DNS 重绑定防护**：内置 SSRF 防护 + DNS 解析后 IP 校验
+
+## 适合做什么
+
+不是 demo，是真实有人在用 agent 浏览器干的事：
+
+- **啃烂后台** — AWS / App Store Connect / Google Play，点穿几十层菜单才干完一件事。让 agent 代你点，到要授权时再回来确认。
+- **登录后批量操作** — 往购物车加一打商品、翻历史订单找小票、查只对登录态开放的页面。注入 cookie 即用，操作完导出复用。
+- **穿反爬站点** — Cloudflare 防护、Turnstile 挑战、TLS 指纹检测，stealth 模式硬穿，不是碰 403 就退。
+- **中国互联网** — 百度 / 搜狗 / 微信公众号 5 引擎聚合搜索，中文页正确渲染，不只懂英文 web。
+- **现场写脚本** — 让 agent 看页面、写一段 JS、`eval` 执行——高亮对比表、重排内容、按隐藏参数过滤商品。GreaseMonkey-on-steroids。
+- **多模态视觉** — 截图当视觉输入，做「看图判断」的流程：找好座位、辨认页面布局、确认渲染对不对。
 
 ## 快速开始
 
