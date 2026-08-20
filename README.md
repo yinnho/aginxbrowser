@@ -201,6 +201,7 @@ cargo build --release --features stealth,screenshot
 ## API 文档
 
 **完整 API 参考** → [`docs/API.md`](docs/API.md)
+**安全审计说明** → [`docs/skills-sh-audit.md`](docs/skills-sh-audit.md) — 为什么 skills.sh 上显示 Critical Risk，每条告警对应的真实产品功能
 
 包含：
 - 所有 HTTP 端点（`/fetch`、`/click`、`/eval`、`/search`、`/v1/scrape`、8 个 Session 端点）
