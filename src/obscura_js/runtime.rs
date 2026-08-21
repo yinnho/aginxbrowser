@@ -1494,6 +1494,35 @@ mod tests {
     }
 
     #[test]
+    fn test_url_reflection_src_and_href_resolve_absolute() {
+        // Next.js/Turbopack webpack runtime does `new URL(x, document.currentScript.src)`
+        // to derive its chunk base. If src/href return the raw relative attribute,
+        // the base has no scheme and URL construction throws "TypeError: Invalid
+        // scheme", so React never hydrates. URL-reflection attributes must return
+        // the resolved absolute URL like real browsers.
+        let mut rt = setup_runtime(r#"<html><head><script src="/app.js"></script>
+            <link rel="stylesheet" href="/style.css"></head><body>
+            <img id="logo" src="/logos/x.png"><a id="link" href="/docs">docs</a></body></html>"#);
+        let res = rt.evaluate(r#"
+            const out = {};
+            out.scriptSrc = document.querySelector('script').src;
+            out.linkHref = document.querySelector('link').href;
+            out.imgSrc = document.getElementById('logo').src;
+            out.anchorHref = document.getElementById('link').href;
+            out.dataSrc = (function(){ const i = document.createElement('img'); i.setAttribute('src', 'data:image/png;base64,AAA'); return i.src; })();
+            out.absSrc = (function(){ const i = document.createElement('img'); i.setAttribute('src', 'https://cdn.example.com/x.png'); return i.src; })();
+            return JSON.stringify(out);
+        "#).unwrap();
+        let v = serde_json::from_str::<serde_json::Value>(res.as_str().unwrap()).unwrap();
+        assert_eq!(v["scriptSrc"], "http://example.com/app.js");
+        assert_eq!(v["linkHref"], "http://example.com/style.css");
+        assert_eq!(v["imgSrc"], "http://example.com/logos/x.png");
+        assert_eq!(v["anchorHref"], "http://example.com/docs");
+        assert_eq!(v["dataSrc"], "data:image/png;base64,AAA", "data: URLs stay absolute");
+        assert_eq!(v["absSrc"], "https://cdn.example.com/x.png", "absolute stays absolute");
+    }
+
+    #[test]
     fn test_navigator() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let ua = rt.evaluate("navigator.userAgent").unwrap();

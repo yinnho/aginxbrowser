@@ -1420,7 +1420,7 @@ class Element extends Node {
   // members use. Other elements reflect the raw attribute.
   get href() {
     const ln = this.localName;
-    if (ln === 'a' || ln === 'area') {
+    if (ln === 'a' || ln === 'area' || ln === 'link' || ln === 'base') {
       const raw = this.getAttribute('href');
       if (raw === null) return '';
       // Legacy-charset document: href must reflect the encoding-override query.
@@ -1451,7 +1451,19 @@ class Element extends Node {
   get hash() { const u = (this.localName === 'a' || this.localName === 'area') ? _elemHrefURL(this) : null; return u ? u.hash : ''; }
   set hash(v) { if (this.localName === 'a' || this.localName === 'area') _setElemHrefPart(this, 'hash', v); }
   get origin() { const u = (this.localName === 'a' || this.localName === 'area') ? _elemHrefURL(this) : null; return u ? u.origin : ''; }
-  get src() { return this.getAttribute("src") || ""; }
+  get src() {
+    const raw = this.getAttribute("src");
+    if (raw === null || raw === '') return raw || '';
+    // URL-reflection attribute (HTML spec): return the resolved absolute URL,
+    // not the raw attribute string. Real browsers resolve `img.src`,
+    // `script.src`, `iframe.src` etc. against the document base. Next.js /
+    // Turbopack's webpack runtime derives its chunk base from
+    // `document.currentScript.src` via `new URL(x, base)`; a relative base
+    // throws "TypeError: Invalid scheme" and React never hydrates (all
+    // delegated event listeners are dead). Resolve like real browsers.
+    const r = _urlResolveOp(raw, _anchorBase());
+    return r !== null ? r : raw;
+  }
   set src(v) {
     this.setAttribute("src", v);
     if (this.localName === 'iframe' && v && v !== 'about:blank') {
