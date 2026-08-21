@@ -1453,7 +1453,10 @@ class Element extends Node {
   get origin() { const u = (this.localName === 'a' || this.localName === 'area') ? _elemHrefURL(this) : null; return u ? u.origin : ''; }
   get src() {
     const raw = this.getAttribute("src");
-    if (raw === null || raw === '') return raw || '';
+    // Spec: missing attribute reflects as "". An empty attribute resolves
+    // against the document base (so `<img src="">.src` returns the document
+    // URL) — don't special-case '' away before resolution.
+    if (raw === null) return '';
     // URL-reflection attribute (HTML spec): return the resolved absolute URL,
     // not the raw attribute string. Real browsers resolve `img.src`,
     // `script.src`, `iframe.src` etc. against the document base. Next.js /
@@ -2381,6 +2384,31 @@ function __obscuraUADataPlatformFromUA() {
   if (ua.indexOf("Android") !== -1) return "Android";
   return "Linux";
 }
+
+// PluginArray / MimeTypeArray / Plugin / MimeType — real browsers expose these
+// constructors globally, and bot detectors reference them directly (absent →
+// ReferenceError) or check `navigator.plugins instanceof PluginArray`.
+// Making them real classes (not plain arrays) keeps instanceof working.
+globalThis.Plugin = class Plugin {
+  constructor(name, filename, description) { this.name = name; this.filename = filename; this.description = description; this.length = 1; }
+};
+globalThis.MimeType = class MimeType {
+  constructor(type, description, suffixes, enabledPlugin) { this.type = type; this.description = description; this.suffixes = suffixes; this.enabledPlugin = enabledPlugin; }
+};
+globalThis.PluginArray = class PluginArray extends Array {
+  item(i) { return this[i] || null; }
+  namedItem(name) { return this.find(p => p.name === name) || null; }
+  refresh() {}
+};
+globalThis.MimeTypeArray = class MimeTypeArray extends Array {
+  item(i) { return this[i] || null; }
+  namedItem(name) { return this.find(m => m.type === name) || null; }
+};
+// Cached singletons: real browsers return the same instance on every access
+// (`navigator.plugins === navigator.plugins`); fresh instances would be a
+// fingerprint anomaly.
+let _pluginsInst = null, _mimeTypesInst = null;
+
 globalThis.navigator = {
   get userAgent() { return globalThis.__obscura_ua || "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"; },
   get appVersion() { return this.userAgent.replace('Mozilla/', ''); },
@@ -2396,27 +2424,25 @@ globalThis.navigator = {
   get webdriver() { return undefined; },
   pdfViewerEnabled: true,
   get plugins() {
-    const p = [
-      { name: "PDF Viewer", filename: "internal-pdf-viewer", description: "Portable Document Format", length: 1 },
-      { name: "Chrome PDF Viewer", filename: "internal-pdf-viewer", description: "Portable Document Format", length: 1 },
-      { name: "Chromium PDF Viewer", filename: "internal-pdf-viewer", description: "Portable Document Format", length: 1 },
-      { name: "Microsoft Edge PDF Viewer", filename: "internal-pdf-viewer", description: "Portable Document Format", length: 1 },
-      { name: "WebKit built-in PDF", filename: "internal-pdf-viewer", description: "Portable Document Format", length: 1 },
-    ];
-    p.item = (i) => p[i] || null;
-    p.namedItem = (name) => p.find(x => x.name === name) || null;
-    p.refresh = () => {};
-    p[Symbol.iterator] = Array.prototype[Symbol.iterator].bind(p);
-    return p;
+    if (!_pluginsInst) {
+      _pluginsInst = new PluginArray(
+        new Plugin("PDF Viewer", "internal-pdf-viewer", "Portable Document Format"),
+        new Plugin("Chrome PDF Viewer", "internal-pdf-viewer", "Portable Document Format"),
+        new Plugin("Chromium PDF Viewer", "internal-pdf-viewer", "Portable Document Format"),
+        new Plugin("Microsoft Edge PDF Viewer", "internal-pdf-viewer", "Portable Document Format"),
+        new Plugin("WebKit built-in PDF", "internal-pdf-viewer", "Portable Document Format"),
+      );
+    }
+    return _pluginsInst;
   },
   get mimeTypes() {
-    const m = [
-      { type: "application/pdf", description: "Portable Document Format", suffixes: "pdf", enabledPlugin: null },
-      { type: "text/pdf", description: "Portable Document Format", suffixes: "pdf", enabledPlugin: null },
-    ];
-    m.item = (i) => m[i] || null;
-    m.namedItem = (name) => m.find(x => x.type === name) || null;
-    return m;
+    if (!_mimeTypesInst) {
+      _mimeTypesInst = new MimeTypeArray(
+        new MimeType("application/pdf", "Portable Document Format", "pdf", null),
+        new MimeType("text/pdf", "Portable Document Format", "pdf", null),
+      );
+    }
+    return _mimeTypesInst;
   },
   userAgentData: {
     brands: [
@@ -5058,7 +5084,8 @@ Element.prototype.getContext = function getContext(type) {
     return this._ctx;
   }
   if (type === 'webgl' || type === 'experimental-webgl' || type === 'webgl2') {
-    return {
+    if (this._glCtx) return this._glCtx;
+    const base = {
       canvas: this,
       getExtension(name) {
         if (name === 'WEBGL_debug_renderer_info') return { UNMASKED_VENDOR_WEBGL: 0x9245, UNMASKED_RENDERER_WEBGL: 0x9246 };
@@ -5082,9 +5109,19 @@ Element.prototype.getContext = function getContext(type) {
       drawArrays() {}, drawElements() {}, viewport() {}, clear() {}, clearColor() {},
       enable() {}, disable() {}, blendFunc() {}, depthFunc() {},
       getUniformLocation() { return {}; }, getAttribLocation() { return 0; },
-      uniform1f() {}, uniform1i() {}, uniformMatrix4fv() {},
+      uniform1f() {}, uniform1i() {}, uniform1fv() {}, uniform1iv() {},
+      uniform2f() {}, uniform2i() {}, uniform2fv() {}, uniform2iv() {},
+      uniform3f() {}, uniform3i() {}, uniform3fv() {}, uniform3iv() {},
+      uniform4f() {}, uniform4i() {}, uniform4fv() {}, uniform4iv() {},
+      uniformMatrix2fv() {}, uniformMatrix3fv() {}, uniformMatrix4fv() {},
       createTexture() { return {}; }, bindTexture() {}, texImage2D() {}, texParameteri() {},
       activeTexture() {}, pixelStorei() {}, generateMipmap() {},
+      deleteBuffer() {}, deleteTexture() {}, deleteProgram() {}, deleteFramebuffer() {},
+      getActiveUniform() { return null; }, getActiveAttrib() { return null; }, getUniform() { return null; },
+      getProgramInfoLog() { return ''; }, getShaderInfoLog() { return ''; },
+      getFramebufferStatus() { return 0x8CD5; }, checkFramebufferStatus() { return 0x8CD5; },
+      getError() { return 0; }, isContextLost() { return false; },
+      getContextAttributes() { return { alpha: true, antialias: true, depth: true, stencil: false, failIfMajorPerformanceCaveat: false, powerPreference: 'default', preserveDrawingBuffer: false, desynchronized: false, premultipliedAlpha: true }; },
       createFramebuffer() { return {}; }, bindFramebuffer() {}, framebufferTexture2D() {},
       readPixels(x,y,w,h,f,t,d) { if(d) for(let i=0;i<d.length;i++) d[i]=Math.floor(Math.random()*256); },
       VERTEX_SHADER: 0x8B31, FRAGMENT_SHADER: 0x8B30, LINK_STATUS: 0x8B82,
@@ -5092,6 +5129,29 @@ Element.prototype.getContext = function getContext(type) {
       TRIANGLES: 0x0004, COLOR_BUFFER_BIT: 0x4000, DEPTH_BUFFER_BIT: 0x100,
       TEXTURE_2D: 0x0DE1, RGBA: 0x1908, UNSIGNED_BYTE: 0x1401,
     };
+    // Prototype chain: `gl instanceof WebGLRenderingContext` must be true —
+    // three.js and bot detectors check it.
+    Object.setPrototypeOf(base, (type === 'webgl2')
+      ? globalThis.WebGL2RenderingContext.prototype
+      : globalThis.WebGLRenderingContext.prototype);
+    // Proxy fallback: any WebGL method a library calls that we didn't
+    // enumerate becomes a number-ish no-op instead of throwing TypeError.
+    const numNoop = function() { return 0; };
+    numNoop.valueOf = () => 0;
+    numNoop.toString = () => "0";
+    const gl = new Proxy(base, {
+      get(target, prop) {
+        // Symbols (Symbol.iterator, Symbol.toPrimitive, ...) must fall through
+        // to the real value, and 'then' must stay undefined — returning
+        // numNoop for it would make the context thenable and break
+        // await/Promise.resolve on it.
+        if (typeof prop === 'symbol' || prop === 'then' || prop === 'toJSON') return target[prop];
+        if (prop in target) return target[prop];
+        return numNoop;
+      },
+    });
+    this._glCtx = gl;
+    return gl;
   }
   return null;
 };

@@ -1511,6 +1511,8 @@ mod tests {
             out.anchorHref = document.getElementById('link').href;
             out.dataSrc = (function(){ const i = document.createElement('img'); i.setAttribute('src', 'data:image/png;base64,AAA'); return i.src; })();
             out.absSrc = (function(){ const i = document.createElement('img'); i.setAttribute('src', 'https://cdn.example.com/x.png'); return i.src; })();
+            out.emptySrc = (function(){ const i = document.createElement('img'); i.setAttribute('src', ''); return i.src; })();
+            out.missingSrc = document.createElement('img').src;
             return JSON.stringify(out);
         "#).unwrap();
         let v = serde_json::from_str::<serde_json::Value>(res.as_str().unwrap()).unwrap();
@@ -1520,6 +1522,58 @@ mod tests {
         assert_eq!(v["anchorHref"], "http://example.com/docs");
         assert_eq!(v["dataSrc"], "data:image/png;base64,AAA", "data: URLs stay absolute");
         assert_eq!(v["absSrc"], "https://cdn.example.com/x.png", "absolute stays absolute");
+        assert_eq!(v["emptySrc"], "http://example.com/test", "empty src resolves to the document URL");
+        assert_eq!(v["missingSrc"], "", "missing src attribute reflects as empty");
+    }
+
+    #[test]
+    fn test_stealth_fingerprint_apis_pluginarray_and_webgl() {
+        // authk.smithery.ai (WorkOS+Cloudflare) crashed after hydration:
+        // `ReferenceError: PluginArray is not defined` (bot-detector references
+        // the constructor) and `e.uniform2f is not a function` (missing WebGL
+        // methods). These must exist and behave like real browsers.
+        let mut rt = setup_runtime("<html><body><canvas id='c'></canvas></body></html>");
+        let res = rt.evaluate(r#"
+            const out = {};
+            out.pluginArrayDefined = typeof PluginArray !== 'undefined';
+            out.pluginsIsInstance = navigator.plugins instanceof PluginArray;
+            out.pluginsLength = navigator.plugins.length;
+            out.pluginsIdentity = navigator.plugins === navigator.plugins;
+            out.mimeIdentity = navigator.mimeTypes === navigator.mimeTypes;
+            out.pluginLength = navigator.plugins[0] && navigator.plugins[0].length;
+            out.mimeIsInstance = navigator.mimeTypes instanceof MimeTypeArray;
+            const c = document.getElementById('c');
+            const gl = c.getContext('webgl');
+            out.gl = !!gl;
+            out.glIdentity = c.getContext('webgl') === gl;
+            out.glInstanceof = gl instanceof WebGLRenderingContext;
+            out.gl2Instanceof = document.createElement('canvas').getContext('webgl2') instanceof WebGL2RenderingContext;
+            out.glNotThenable = gl.then === undefined;
+            out.glSymbolUndefined = gl[Symbol.iterator] === undefined;
+            out.uniform2f = typeof gl.uniform2f === 'function';
+            out.getContextAttributes = typeof gl.getContextAttributes === 'function' && !!gl.getContextAttributes();
+            out.getError = gl.getError() === 0;
+            out.unknownMethod = (function(){ try { return typeof gl.someUnknownMethod === 'function' && gl.someUnknownMethod(1,2) === 0; } catch(e) { return 'threw:' + e.message; } })();
+            return JSON.stringify(out);
+        "#).unwrap();
+        let v = serde_json::from_str::<serde_json::Value>(res.as_str().unwrap()).unwrap();
+        assert_eq!(v["pluginArrayDefined"], true, "PluginArray global must exist");
+        assert_eq!(v["pluginsIsInstance"], true, "navigator.plugins must be a PluginArray");
+        assert_eq!(v["pluginsLength"].as_i64().unwrap(), 5);
+        assert_eq!(v["pluginsIdentity"], true, "plugins must be a cached singleton (identity is fingerprintable)");
+        assert_eq!(v["mimeIdentity"], true, "mimeTypes must be a cached singleton");
+        assert_eq!(v["pluginLength"].as_i64().unwrap(), 1, "PDF plugins report one supported mime type");
+        assert_eq!(v["mimeIsInstance"], true);
+        assert_eq!(v["gl"], true);
+        assert_eq!(v["glIdentity"], true, "getContext must return the same context on repeat calls");
+        assert_eq!(v["glInstanceof"], true, "gl must be instanceof WebGLRenderingContext");
+        assert_eq!(v["gl2Instanceof"], true, "webgl2 context must be instanceof WebGL2RenderingContext");
+        assert_eq!(v["glNotThenable"], true, "gl.then must stay undefined or the context becomes thenable");
+        assert_eq!(v["glSymbolUndefined"], true, "symbol props must not hit the numNoop fallback");
+        assert_eq!(v["uniform2f"], true, "uniform2f must exist");
+        assert_eq!(v["getContextAttributes"], true);
+        assert_eq!(v["getError"], true);
+        assert_eq!(v["unknownMethod"], true, "unknown WebGL methods must not throw");
     }
 
     #[test]
