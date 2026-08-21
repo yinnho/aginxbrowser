@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use deno_core::{JsRuntime, RuntimeOptions};
+use deno_core::{v8, JsRuntime, RuntimeOptions};
 use crate::obscura_dom::DomTree;
 
 /// Re-exported so other crates (obscura-browser, obscura-cdp) can name the V8
@@ -81,6 +81,32 @@ pub fn spawn_watchdog(handle: IsolateHandle, budget: std::time::Duration) -> Wat
         }
     });
     WatchdogToken { pair, join: Some(join), fired }
+}
+
+impl Drop for WatchdogToken {
+    /// Cancellation safety for armed watchdogs. Async callers (the session
+    /// idle pump, settle futures) can be dropped between `arm_watchdog` and
+    /// `disarm_watchdog` — `tokio::select!` preempts the pump the moment a
+    /// command arrives. Without this the orphaned thread later fires
+    /// `terminate_execution()` into whatever runs next and bricks the
+    /// isolate (no `cancel_terminate_execution` ever follows; measured as
+    /// every subsequent eval failing with "Uncaught Error: execution
+    /// terminated"). Dropping the token cancels the thread instead: it
+    /// sleeps in `wait_timeout` while holding the mutex, so once we acquire
+    /// the lock the thread can only wake, see the cancel flag and exit — it
+    /// cannot have terminated in between. The remaining sliver (it fired
+    /// while we were blocked on the lock) is healed by the
+    /// retry-on-terminated path in `evaluate`.
+    fn drop(&mut self) {
+        {
+            let (lock, cvar) = &*self.pair;
+            *lock.lock().unwrap() = true;
+            cvar.notify_one();
+        }
+        if let Some(j) = self.join.take() {
+            let _ = j.join();
+        }
+    }
 }
 
 impl WatchdogToken {
@@ -222,12 +248,37 @@ impl ObscuraJsRuntime {
             format!("globalThis.__obscura_lang = '{}';", escaped),
         );
     }
+    /// `execute_script` that self-heals from a stray V8 termination. A
+    /// watchdog that fired without a paired disarm (the pre-Drop-token
+    /// cancellation race; see [`WatchdogToken`]) leaves the isolate's
+    /// termination flag set, after which *every* execute fails with
+    /// "Uncaught Error: execution terminated" forever. Clear the flag and
+    /// retry once: the caller's expression itself didn't run yet, so one
+    /// clean retry fully masks the hiccup.
+    fn execute_script_retry_terminated(
+        &mut self,
+        name: &'static str,
+        source: String,
+    ) -> Result<v8::Global<v8::Value>, String> {
+        match self.runtime.execute_script(name, source.clone()) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                let msg = e.to_string();
+                if !msg.contains("execution terminated") {
+                    return Err(format!("JS error: {}", msg));
+                }
+                tracing::warn!("cleared stray V8 termination flag before {}", name);
+                self.runtime.v8_isolate().cancel_terminate_execution();
+                self.runtime
+                    .execute_script(name, source)
+                    .map_err(|e| format!("JS error: {}", e))
+            }
+        }
+    }
+
     pub fn evaluate(&mut self, expression: &str) -> Result<serde_json::Value, String> {
         let wrapped = Self::wrap_expression(expression);
-        let result = self
-            .runtime
-            .execute_script("<eval>", wrapped)
-            .map_err(|e| format!("JS error: {}", e))?;
+        let result = self.execute_script_retry_terminated("<eval>", wrapped)?;
         self.v8_to_json(result)
     }
 
@@ -294,9 +345,7 @@ impl ObscuraJsRuntime {
         };
 
         let result = self
-            .runtime
-            .execute_script("<eval-remote>", meta_code)
-            .map_err(|e| format!("JS error: {}", e))?;
+            .execute_script_retry_terminated("<eval-remote>", meta_code)?;
 
         let meta_str = if await_promise {
             let __t0 = std::time::Instant::now();
