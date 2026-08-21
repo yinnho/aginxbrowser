@@ -112,37 +112,97 @@ function _fpNoise(x, y, channel) {
 }
 
 var _fpCache = null;
+// The persona must cohere with the UA the HTTP layer sends. A Windows
+// Direct3D11 ANGLE renderer behind a macOS or Linux UA (what the old
+// single-pool randomization produced) is a geographic/hardware
+// impossibility that risk engines (Castle) score immediately.
+function _fpPlatform() {
+  const ua = globalThis.__obscura_ua || '';
+  if (ua.indexOf('Windows') !== -1) return 'win';
+  if (ua.indexOf('Macintosh') !== -1 || ua.indexOf('Mac OS X') !== -1) return 'mac';
+  if (ua.indexOf('Android') !== -1) return 'linux';
+  return 'linux';
+}
 function _getFp() {
-  if (_fpCache) return _fpCache;
-  const gpuPool = [
-    'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)',
-    'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)',
-    'ANGLE (NVIDIA, NVIDIA GeForce RTX 2070 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)',
-    'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)',
-    'ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)',
-    'ANGLE (AMD, AMD Radeon RX 580 Direct3D11 vs_5_0 ps_5_0, D3D11)',
-    'ANGLE (AMD, AMD Radeon RX 6700 XT Direct3D11 vs_5_0 ps_5_0, D3D11)',
-    'ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0, D3D11)',
-    'ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Ti Direct3D11 vs_5_0 ps_5_0, D3D11)',
-    'ANGLE (Intel, Intel(R) UHD Graphics 770 Direct3D11 vs_5_0 ps_5_0, D3D11)',
-    'ANGLE (AMD, AMD Radeon RX 5700 XT Direct3D11 vs_5_0 ps_5_0, D3D11)',
-    'ANGLE (NVIDIA, NVIDIA GeForce RTX 3080 Direct3D11 vs_5_0 ps_5_0, D3D11)',
-  ];
-  const gpuVendorPool = [
-    'Google Inc. (NVIDIA)','Google Inc. (NVIDIA)','Google Inc. (NVIDIA)',
-    'Google Inc. (Intel)','Google Inc. (Intel)',
-    'Google Inc. (AMD)','Google Inc. (AMD)',
-    'Google Inc. (NVIDIA)','Google Inc. (NVIDIA)',
-    'Google Inc. (Intel)','Google Inc. (AMD)','Google Inc. (NVIDIA)',
-  ];
-  const idx = Math.floor(_fpRand(42) * gpuPool.length);
-  const screenPool = [[1920,1080],[2560,1440],[1366,768],[1536,864],[1440,900],[1680,1050],[1280,720],[3840,2160]];
+  // The cache is keyed by platform: during the V8 snapshot build no UA is
+  // configured yet, so the first materialization defaults to the linux
+  // persona. Once __obscura_ua is set (per context, before __obscura_init),
+  // the cache rebuilds for the real platform instead of serving the frozen
+  // snapshot-time one (which put Mesa GL strings behind a macOS UA).
+  if (_fpCache && _fpCache.platform === _fpPlatform()) return _fpCache;
+  const plat = _fpPlatform();
+  // Per-platform GPU pools — vendor string and renderer must describe the
+  // same machine the UA describes.
+  const pools = {
+    win: {
+      gpu: [
+        'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        'ANGLE (NVIDIA, NVIDIA GeForce RTX 2070 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        'ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        'ANGLE (AMD, AMD Radeon RX 580 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        'ANGLE (AMD, AMD Radeon RX 6700 XT Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        'ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        'ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Ti Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        'ANGLE (Intel, Intel(R) UHD Graphics 770 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        'ANGLE (AMD, AMD Radeon RX 5700 XT Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        'ANGLE (NVIDIA, NVIDIA GeForce RTX 3080 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+      ],
+      vendor: [
+        'Google Inc. (NVIDIA)','Google Inc. (NVIDIA)','Google Inc. (NVIDIA)',
+        'Google Inc. (Intel)','Google Inc. (Intel)',
+        'Google Inc. (AMD)','Google Inc. (AMD)',
+        'Google Inc. (NVIDIA)','Google Inc. (NVIDIA)',
+        'Google Inc. (Intel)','Google Inc. (AMD)','Google Inc. (NVIDIA)',
+      ],
+      screens: [[1920,1080],[2560,1440],[1366,768],[1536,864],[1440,900],[1680,1050],[1280,720],[3840,2160]],
+      dprs: [1,1,1,1.25,1,1,1,1],
+    },
+    mac: {
+      gpu: [
+        'ANGLE (Apple, ANGLE Metal Renderer: Apple M1, Unspecified Version)',
+        'ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)',
+        'ANGLE (Apple, ANGLE Metal Renderer: Apple M2 Pro, Unspecified Version)',
+        'ANGLE (Apple, ANGLE Metal Renderer: Apple M3, Unspecified Version)',
+        'ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Pro, Unspecified Version)',
+        'ANGLE (Apple, ANGLE Metal Renderer: Apple M4, Unspecified Version)',
+        'ANGLE (Intel, Intel(R) Iris(TM) Plus Graphics 645, OpenGL 4.1)',
+      ],
+      vendor: [
+        'Google Inc. (Apple)','Google Inc. (Apple)','Google Inc. (Apple)',
+        'Google Inc. (Apple)','Google Inc. (Apple)','Google Inc. (Apple)',
+        'Google Inc. (Intel)',
+      ],
+      screens: [[1512,982],[1728,1117],[1440,900],[1920,1080],[2560,1440],[1170,2532]],
+      // Built-in retina panels run at 2x; the two external sizes run at 1x.
+      dprs: [2,2,2,1,1,3],
+    },
+    linux: {
+      gpu: [
+        'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CML GT2), OpenGL 4.6 (Core Profile) Mesa 23.2.1)',
+        'ANGLE (Intel, Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2), OpenGL 4.6 (Core Profile) Mesa 23.2.1)',
+        'ANGLE (AMD, AMD Radeon RX 6700 XT (navi22, LLVM 15.0.7, DRM 3.54, LLVM 15.0.7), OpenGL 4.6 (Core Profile) Mesa 23.2.1)',
+        'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060/PCIe/SSE2, OpenGL 4.6.0 NVIDIA 535.183.01)',
+      ],
+      vendor: [
+        'Google Inc. (Intel)','Google Inc. (Intel)','Google Inc. (AMD)','Google Inc. (NVIDIA)',
+      ],
+      screens: [[1920,1080],[2560,1440],[1366,768],[3840,2160],[1680,1050]],
+      dprs: [1,1,1,1,1],
+    },
+  };
+  const pool = pools[plat];
+  const idx = Math.floor(_fpRand(42) * pool.gpu.length);
+  const sIdx = Math.floor(_fpRand(300) * pool.screens.length);
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
   let cfp = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg';
   for (let i = 0; i < 40; i++) cfp += chars[Math.floor(_fpRand(500 + i) * 64)];
   cfp += '==';
   _fpCache = {
-    gpu: gpuPool[idx], gpuVendor: gpuVendorPool[idx],
+    platform: plat,
+    gpu: pool.gpu[idx], gpuVendor: pool.vendor[idx],
+    screen: pool.screens[sIdx], dpr: pool.dprs[sIdx],
     audioBaseLatency: 0.002 + _fpRand(100) * 0.008,
     audioSampleRate: [44100, 48000][Math.floor(_fpRand(101) * 2)],
     compThreshold: -24 + (_fpRand(102) - 0.5) * 4,
@@ -150,7 +210,6 @@ function _getFp() {
     compRatio: 12 + (_fpRand(104) - 0.5) * 4,
     batteryLevel: 0.5 + _fpRand(200) * 0.5,
     batteryCharging: _fpRand(201) > 0.3,
-    screen: screenPool[Math.floor(_fpRand(300) * screenPool.length)],
     canvasFingerprint: cfp,
   };
   return _fpCache;
@@ -334,7 +393,10 @@ const _styleProxy = (decl) => new Proxy(decl, {
     return undefined;
   },
   set(t, p, v) {
-    if (typeof p === "string") { t._props[p] = String(v); return true; }
+    // cssText has a real setter on the prototype that parses declarations;
+    // storing it as _props['cssText'] silently made `style.cssText = "..."`
+    // a no-op (font-size & friends from cssText never applied).
+    if (typeof p === "string" && p !== "cssText") { t._props[p] = String(v); return true; }
     t[p] = v; return true;
   }
 });
@@ -1708,8 +1770,16 @@ class Element extends Node {
       set(_, k, v) { el.setAttribute("data-"+k.replace(/([A-Z])/g,"-$1").toLowerCase(), v); return true; },
     });
   }
-  get offsetWidth() { return this._isViewportRoot() ? (globalThis.innerWidth || 1280) : 100; }
-  get offsetHeight() { return this._isViewportRoot() ? (globalThis.innerHeight || 720) : 20; }
+  get offsetWidth() {
+    if (this._isViewportRoot()) return (globalThis.innerWidth || 1280);
+    const m = _obscuraFontBox(this);
+    return m ? m.w : 100;
+  }
+  get offsetHeight() {
+    if (this._isViewportRoot()) return (globalThis.innerHeight || 720);
+    const m = _obscuraFontBox(this);
+    return m ? m.h : 20;
+  }
   get offsetTop() { return 0; } get offsetLeft() { return 0; }
   // documentElement / body / window expose VIEWPORT geometry, not their own content box.
   // Puppeteer's #clickableBox clips boxes to document.documentElement.clientWidth/Height;
@@ -2549,6 +2619,108 @@ function __obscuraUADataPlatformFromUA() {
   return "Linux";
 }
 
+// ---- Font-presence metrics -------------------------------------------------
+// Font-probe fingerprinters (Castle's fonts collector, fingerprintjs,
+// WorkOS Radar) append a hidden 72px span and compare offsetWidth/offsetHeight
+// across `'Font Name', serif/sans-serif/monospace` lists: an INSTALLED font
+// changes the text box, a missing one falls back to the generic family and
+// matches the baseline exactly. The installed sets below are the fonts a real
+// Chrome can resolve per OS — Windows-only faces (Segoe UI, Calibri,
+// Consolas) are absent on macOS and vice versa (Menlo, Monaco), so the
+// detected set stays coherent with the UA persona.
+const _OBSCURA_FONT_PLATFORM = () => {
+  const p = __obscuraPlatformFromUA();
+  if (p === "Windows") return "win";
+  if (p === "MacIntel" || p === "iPhone") return "mac";
+  return "linux";
+};
+const _INSTALLED_FONTS = {
+  mac: ["Arial", "Verdana", "Helvetica", "Tahoma", "Trebuchet MS", "Georgia",
+    "Courier New", "Brush Script MT", "Comic Sans MS", "Impact", "Menlo", "Monaco"],
+  win: ["Arial", "Verdana", "Tahoma", "Trebuchet MS", "Georgia", "Garamond",
+    "Courier New", "Brush Script MT", "Palatino Linotype", "Lucida Console",
+    "Comic Sans MS", "Impact", "Lucida Sans Unicode", "Century Gothic",
+    "Segoe UI", "Cambria", "Calibri", "Consolas"],
+  linux: ["Arial", "Courier New", "DejaVu Sans", "Ubuntu", "Verdana",
+    "Trebuchet MS", "Times New Roman", "Georgia", "Cantarell"],
+};
+// Stable per-name width factor for an installed font, or null when the OS
+// persona doesn't have it. Always ≥1% off the generic baseline (0.92–1.14,
+// values inside ±1% nudged out) so the probe reliably detects installed
+// faces, exactly like a real font's metrics never coincide with the fallback.
+function _installedFontFactor(name) {
+  const list = _INSTALLED_FONTS[_OBSCURA_FONT_PLATFORM()] || _INSTALLED_FONTS.mac;
+  if (list.indexOf(name) === -1) return null;
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (Math.imul(h, 31) + name.charCodeAt(i)) | 0;
+  let f = 0.92 + ((h >>> 0) % 23) / 100;
+  if (f > 0.99 && f < 1.01) f += 0.03;
+  return f;
+}
+// Per-character advance widths (em) approximating Helvetica for lowercase,
+// with caps/digits from the same metrics table. Enough spread for
+// "mmMwWLli10Oo#@"-style probe strings to discriminate families.
+const _FONT_CHAR_EM = (ch) => {
+  switch (ch) {
+    case "i": case "l": case "j": return 0.222;
+    case "t": case "f": return 0.278;
+    case "r": return 0.333;
+    case "m": return 0.833;
+    case "w": return 0.722;
+    case "M": case "W": return 0.944;
+    case "L": return 0.611;
+    case "O": case "Q": case "G": case "D": case "U": case "H": case "B": case "N": case "R": case "S": case "E": case "K": return 0.722;
+    case "C": case "P": case "F": case "A": case "V": case "X": case "Y": return 0.667;
+    case "T": case "J": case "Z": case "I": return 0.611;
+    case "o": case "0": case "1": case "#": case "e": case "a": case "s": case "c": case "u": case "n": case "d": case "g": case "p": case "q": case "b": case "h": return 0.556;
+    case "@": return 0.833;
+    default: return /[A-Z]/.test(ch) ? 0.7 : 0.5;
+  }
+};
+// Generic-family width scale + line-height factor (em multiples).
+const _GENERIC_FONT = {
+  "serif": { w: 0.95, h: 1.15 },
+  "sans-serif": { w: 1.0, h: 1.2 },
+  "monospace": { w: 1.18, h: 1.21 },
+  "cursive": { w: 1.02, h: 1.2 },
+  "fantasy": { w: 1.04, h: 1.2 },
+  "system-ui": { w: 1.0, h: 1.2 },
+  "ui-sans-serif": { w: 1.0, h: 1.2 },
+};
+// Synthesize a leaf text element's content box from its inline font styles.
+// Returns null for elements we shouldn't size this way (containers, no text)
+// so their callers keep the default synthesized cell.
+function _obscuraFontBox(el) {
+  try {
+    const st = el.style;
+    if (!st || !st._props) return null;
+    const props = st._props;
+    const display = props["display"];
+    if (display === "none") return { w: 0, h: 0 };
+    if (el.children && el.children.length) return null;
+    const text = (el.textContent || "").trim();
+    if (!text) return null;
+    const fontSize = parseFloat(props["font-size"] || props["fontSize"]) || 16;
+    const famRaw = props["font-family"] || props["fontFamily"] || "serif";
+    const names = String(famRaw).split(",").map((s) => s.trim().replace(/^['"]|['"]$/g, "")).filter(Boolean);
+    // First installed family wins; otherwise the trailing generic.
+    let chosen = null, generic = null;
+    for (const n of names) {
+      if (_GENERIC_FONT[n]) { generic = generic || n; continue; }
+      if (chosen === null && _installedFontFactor(n) !== null) { chosen = n; break; }
+    }
+    if (!generic) generic = /sans/i.test(famRaw) ? "sans-serif" : "serif";
+    const g = _GENERIC_FONT[generic] || _GENERIC_FONT["serif"];
+    const ff = chosen ? _installedFontFactor(chosen) : 1;
+    let w = 0;
+    for (const ch of text) w += _FONT_CHAR_EM(ch);
+    return {
+      w: Math.round(w * fontSize * g.w * ff),
+      h: Math.round(fontSize * g.h * (chosen ? 1 + (ff - 1) * 0.45 : 1)),
+    };
+  } catch { return null; }
+}
+
 // PluginArray / MimeTypeArray / Plugin / MimeType — real browsers expose these
 // constructors globally, and bot detectors reference them directly (absent →
 // ReferenceError) or check `navigator.plugins instanceof PluginArray`.
@@ -2574,11 +2746,11 @@ globalThis.MimeTypeArray = class MimeTypeArray extends Array {
 let _pluginsInst = null, _mimeTypesInst = null;
 
 globalThis.navigator = {
-  get userAgent() { return globalThis.__obscura_ua || "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"; },
+  get userAgent() { return globalThis.__obscura_ua || "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"; },
   get appVersion() { return this.userAgent.replace('Mozilla/', ''); },
   get platform() { return __obscuraPlatformFromUA(); },
-  get language() { return globalThis.__obscura_lang || "zh-CN"; },
-  get languages() { const l = globalThis.__obscura_lang || "zh-CN"; return [l, "zh", "en"]; },
+  get language() { return __obscuraLangList()[0]; },
+  get languages() { return __obscuraLangList().slice(); },
   onLine: true, cookieEnabled: true, hardwareConcurrency: 8,
   maxTouchPoints: 0,
   vendor: "Google Inc.", product: "Gecko", productSub: "20030107",
@@ -2626,7 +2798,7 @@ globalThis.navigator = {
         mobile: false,
         model: "",
         platform: plat,
-        platformVersion: "10.15.0",
+        platformVersion: "15.2.0",
         uaFullVersion: "145.0.0.0",
       });
     },
@@ -3536,6 +3708,75 @@ if (typeof TextDecoder === 'undefined') {
 }
 
 globalThis.matchMedia = _markNative(function matchMedia(q) { return { matches: false, media: q, addListener(){}, removeListener(){}, addEventListener(){}, removeEventListener(){}, dispatchEvent(){return true;} }; });
+// Chrome's enumerable computed-style property set (kebab-case). Real
+// Chrome 145 exposes ~470 of these on every getComputedStyle() result;
+// count AND enumeration are fingerprint surfaces (Castle cssKeys).
+const _COMPUTED_PROPS_KEBAB = ('accent-color align-content align-items align-self alignment-baseline all animation animation-composition ' +
+  'animation-delay animation-direction animation-duration animation-fill-mode animation-iteration-count animation-name animation-play-state ' +
+  'animation-range animation-range-end animation-range-start animation-timeline app-region appearance ascent-override aspect-ratio ' +
+  'backdrop-filter backface-visibility background background-attachment background-blend-mode background-clip background-color ' +
+  'background-image background-origin background-position background-position-x background-position-y background-repeat background-size ' +
+  'baseline-shift block-size border border-block border-block-color border-block-end border-block-end-color border-block-end-style ' +
+  'border-block-end-width border-block-start border-block-start-color border-block-start-style border-block-start-width border-block-style ' +
+  'border-block-width border-bottom border-bottom-color border-bottom-left-radius border-bottom-right-radius border-bottom-style ' +
+  'border-bottom-width border-collapse border-color border-end-end-radius border-end-start-radius border-image border-image-outset ' +
+  'border-image-repeat border-image-slice border-image-source border-image-width border-left border-left-color border-left-style ' +
+  'border-left-width border-radius border-right border-right-color border-right-style border-right-width border-spacing ' +
+  'border-start-end-radius border-start-start-radius border-style border-top border-top-color border-top-left-radius ' +
+  'border-top-right-radius border-top-style border-top-width border-width bottom box-decoration-break box-shadow box-sizing break-after ' +
+  'break-before break-inside buffered-rendering caption-side caret caret-color caret-shape clear clip clip-path clip-rule color ' +
+  'color-interpolation color-interpolation-filters color-scheme column-count column-fill column-gap column-rule column-rule-color ' +
+  'column-rule-style column-rule-width column-span column-width columns contain contain-intrinsic-block-size contain-intrinsic-height ' +
+  'contain-intrinsic-inline-size contain-intrinsic-size contain-intrinsic-width container container-name container-type content ' +
+  'content-visibility counter-increment counter-reset counter-set cursor cx cy d descent-override direction display dominant-baseline ' +
+  'empty-cells field-sizing fill fill-opacity fill-rule filter flex flex-basis flex-direction flex-flow flex-grow flex-shrink flex-wrap ' +
+  'float flood-color flood-opacity font font-family font-feature-settings font-kerning font-optical-sizing font-palette font-size ' +
+  'font-size-adjust font-stretch font-style font-synthesis font-synthesis-position font-synthesis-small-caps font-synthesis-style ' +
+  'font-synthesis-weight font-variant font-variant-alternates font-variant-caps font-variant-east-asian font-variant-emoji ' +
+  'font-variant-ligatures font-variant-numeric font-variant-position font-variation-settings font-weight forced-color-adjust gap ' +
+  'glyph-orientation-horizontal glyph-orientation-vertical grid grid-area grid-auto-columns grid-auto-flow grid-auto-rows grid-column ' +
+  'grid-column-end grid-column-gap grid-column-start grid-row grid-row-end grid-row-gap grid-row-start grid-template grid-template-areas ' +
+  'grid-template-columns grid-template-rows hanging-punctuation height hyphenate-character hyphenate-limit-chars hyphens ' +
+  'image-orientation image-rendering image-resolution inherits initial-letter initial-letter-align inline-size input-security inset ' +
+  'inset-block inset-block-end inset-block-start inset-inline inset-inline-end inset-inline-start isolation justify-content ' +
+  'justify-items justify-self left letter-spacing lighting-color line-break line-height line-height-step list-style list-style-image ' +
+  'list-style-position list-style-type margin margin-block margin-block-end margin-block-start margin-bottom margin-inline ' +
+  'margin-inline-end margin-inline-start margin-left margin-right margin-top marker marker-end marker-mid marker-start mask mask-border ' +
+  'mask-border-mode mask-border-outset mask-border-repeat mask-border-slice mask-border-source mask-border-width mask-clip ' +
+  'mask-composite mask-image mask-mode mask-origin mask-position mask-repeat mask-size mask-type math-depth math-shift math-style ' +
+  'max-block-size max-height max-inline-size max-width min-block-size min-height min-inline-size min-width mix-blend-mode object-fit ' +
+  'object-position offset offset-anchor offset-distance offset-path offset-position offset-rotate opacity order orphans outline ' +
+  'outline-color outline-offset outline-style outline-width overflow overflow-anchor overflow-block overflow-clip-margin overflow-inline ' +
+  'overflow-wrap overflow-x overflow-y overlay overscroll-behavior overscroll-behavior-block overscroll-behavior-inline ' +
+  'overscroll-behavior-x overscroll-behavior-y padding padding-block padding-block-end padding-block-start padding-bottom ' +
+  'padding-inline padding-inline-end padding-inline-start padding-left padding-right padding-top page page-break-after page-break-before ' +
+  'page-break-inside paint-order perspective perspective-origin place-content place-items place-self pointer-events position ' +
+  'print-color-adjust quotes r resize right rotate row-gap ruby-align ruby-position rx ry scale scroll-behavior scroll-margin ' +
+  'scroll-margin-block scroll-margin-block-end scroll-margin-block-start scroll-margin-bottom scroll-margin-inline scroll-margin-inline-end ' +
+  'scroll-margin-inline-start scroll-margin-left scroll-margin-right scroll-margin-top scroll-padding scroll-padding-block ' +
+  'scroll-padding-block-end scroll-padding-block-start scroll-padding-bottom scroll-padding-inline scroll-padding-inline-end ' +
+  'scroll-padding-inline-start scroll-padding-left scroll-padding-right scroll-padding-top scroll-snap-align scroll-snap-stop ' +
+  'scroll-snap-type scroll-timeline-axis scroll-timeline-name scrollbar-color scrollbar-gutter scrollbar-width shape-image-threshold ' +
+  'shape-margin shape-outside shape-rendering speak speak-as tab-size table-layout text-align text-align-last text-anchor ' +
+  'text-combine-upright text-decoration text-decoration-color text-decoration-line text-decoration-skip-ink text-decoration-style ' +
+  'text-decoration-thickness text-emphasis text-emphasis-color text-emphasis-position text-emphasis-style text-indent text-justify ' +
+  'text-orientation text-overflow text-rendering text-shadow text-size-adjust text-transform text-underline-offset ' +
+  'text-underline-position text-wrap text-wrap-mode text-wrap-style timeline-scope top touch-action transform transform-box ' +
+  'transform-origin transform-style transition transition-behavior transition-delay transition-duration transition-property ' +
+  'transition-timing-function translate unicode-bidi user-select vector-effect vertical-align visibility white-space ' +
+  'white-space-collapse widows width will-change word-break word-spacing word-wrap writing-mode x y z-index zoom').split(' ');
+const _camelCache = new Map();
+const _camel = (kebab) => {
+  let c = _camelCache.get(kebab);
+  if (c === undefined) {
+    c = kebab.replace(/-([a-z])/g, (_, ch) => ch.toUpperCase());
+    _camelCache.set(kebab, c);
+  }
+  return c;
+};
+const _computedKebab = () => _COMPUTED_PROPS_KEBAB;
+const _computedSet = () => { if (!_computedSet._s) { _computedSet._s = new Set(_COMPUTED_PROPS_KEBAB.map(_camel)); } return _computedSet._s; };
+
 globalThis.getComputedStyle = (el) => {
   if (!el) el = document.body || {};
   const style = el?.style || el?._style || new CSSStyleDeclaration();
@@ -3609,15 +3850,38 @@ globalThis.getComputedStyle = (el) => {
   return new Proxy(style, {
     get(_, prop) {
       if (prop === Symbol.toPrimitive || prop === Symbol.toStringTag) return undefined;
-      if (prop in target) return target[prop];
+      // Interface members first — `prop in target` would otherwise answer
+      // with the inline style object's own (length: 0, cssText: '') values.
       if (prop === 'getPropertyValue') return (name) => lookup(name);
       if (prop === 'getPropertyPriority') return () => '';
-      if (prop === 'item') return (i) => '';
-      if (prop === 'length') return 0;
+      if (prop === 'item') return (i) => _computedKebab()[i] || '';
+      if (prop === 'length') return _computedKebab().length;
+      // Indexed access (cs[0], Array.from(cs)) — Chrome answers with the
+      // kebab-case property name. Castle's cssKeys collector iterates exactly
+      // this way; falling through to lookup() returned '' for every index.
+      if (typeof prop === 'string' && prop !== '' && !isNaN(prop) && prop.indexOf('.') === -1) {
+        const n = Number(prop);
+        if (Number.isInteger(n) && n >= 0 && n < _computedKebab().length) return _computedKebab()[n];
+      }
       if (prop === 'cssText') return '';
       if (prop === 'parentRule') return null;
+      if (prop in target) return target[prop];
       if (typeof prop === 'string') return lookup(prop);
       return undefined;
+    },
+    // Real Chrome enumerates ~470 camelCase property names on a computed
+    // style (Object.keys / for-in). A featureless object reads as 0 keys,
+    // which fingerprinters (Castle cssKeys) score as headless.
+    ownKeys() { return _computedKebab().map(_camel); },
+    getOwnPropertyDescriptor(_, prop) {
+      if (typeof prop === 'string' && _computedSet().has(prop)) {
+        return { configurable: true, enumerable: true, get: () => lookup(prop) };
+      }
+      return Object.getOwnPropertyDescriptor(target, prop);
+    },
+    has(_, prop) {
+      if (typeof prop === 'string' && _computedSet().has(prop)) return true;
+      return prop in target;
     },
   });
 };
@@ -5399,7 +5663,19 @@ class _Canvas2D {
   measureText(t) {
     const fontSize = parseInt(this.font) || 10;
     const scale = Math.max(1, Math.round(fontSize / 10));
-    return { width: String(t).length * 6 * scale, actualBoundingBoxAscent: 7*scale, actualBoundingBoxDescent: 2*scale };
+    // Per-font width factor so font-presence probes (measure the same
+    // string across many family names; available fonts change the width,
+    // missing ones fall back to the default) see a realistic spread.
+    // Shares the persona's installed-font table with _obscuraFontBox so
+    // canvas probing and offsetWidth probing agree on which faces exist.
+    const fam = String(this.font || '');
+    let factor = 1;
+    for (const name of fam.split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, ''))) {
+      const f = _installedFontFactor(name);
+      if (f !== null) { factor = f; break; }
+    }
+    const w = String(t).length * 6 * scale * factor;
+    return { width: Math.round(w * 100) / 100, actualBoundingBoxAscent: 7*scale, actualBoundingBoxDescent: 2*scale };
   }
   getImageData(x, y, w, h) {
     x=Math.round(x); y=Math.round(y); w=Math.round(w); h=Math.round(h);
@@ -5561,6 +5837,19 @@ Element.prototype.toDataURL = function(type) {
   return _fp('canvasFingerprint');
 };
 Element.prototype.toBlob = function(cb, type, q) { cb(new Blob([''])); };
+// Chrome desktop media support matrix — WorkOS Radar's mediaMime collector
+// probes audio/video elements with canPlayType over a fixed codec list and
+// hashes the non-empty answers (real Chrome: 8 of 9).
+Element.prototype.canPlayType = function(type) {
+  const t = String(type || '').toLowerCase();
+  if (!t) return '';
+  if (/x-matroska/.test(t)) return '';
+  if (/audio\/x-m4a|audio\/mp4|audio\/aiff/.test(t)) return 'maybe';
+  if (/^audio\/(aac|mpeg|mp3|wav|ogg|flac)|^video\/(mp4|webm|ogg)/.test(t)) return 'probably';
+  if (/codecs=("|')?(vp8|vp9|avc1|vorbis|opus|theora|1)("|')?/.test(t)) return 'probably';
+  return '';
+};
+_markNative(Element.prototype.canPlayType);
 
 _markNative(Element.prototype.getContext);
 _markNative(Element.prototype.toDataURL);
@@ -5828,7 +6117,46 @@ _markNativeProto(globalThis.OfflineAudioContext.prototype);
 
 globalThis.speechSynthesis = {
   speaking: false, pending: false, paused: false,
-  getVoices() { return [{ name:'Google US English', lang:'en-US', default:true, localService:true, voiceURI:'Google US English' }]; },
+  getVoices() {
+    // Real macOS Chrome exposes ~50 local system voices plus ~25 Google
+    // network voices across dozens of languages. A single synthetic voice
+    // is a fingerprint outlier (Castle voices collector).
+    if (!this._voices) {
+      const mk = (name, lang, local, def) => ({ name, lang, default: !!def, localService: !!local, voiceURI: name });
+      this._voices = [
+        mk('Alex', 'en-US', true, true), mk('Ava', 'en-US', true), mk('Ayumi', 'ja-JP', true),
+        mk('Bad News', 'en-US', true), mk('Bahh', 'en-US', true), mk('Bells', 'en-US', true),
+        mk('Boing', 'en-US', true), mk('Bruce', 'en-US', true), mk('Bubbles', 'en-US', true),
+        mk('Carmit', 'he-IL', true), mk('Cellos', 'en-US', true), mk('Chan-yu', 'zh-TW', true),
+        mk('Damayanti', 'id-ID', true), mk('Daniel', 'en-GB', true), mk('Deranged', 'en-US', true),
+        mk('Diego', 'es-AR', true), mk('Ellen', 'nl-BE', true), mk('Fiona', 'en-GB', true),
+        mk('Fred', 'en-US', true), mk('Good News', 'en-US', true), mk('Hesham', 'ar-SA', true),
+        mk('Jester', 'en-US', true), mk('Joana', 'pt-PT', true), mk('Junior', 'en-US', true),
+        mk('Kanya', 'th-TH', true), mk('Karen', 'en-AU', true), mk('Kathy', 'en-US', true),
+        mk('Katja', 'de-DE', true), mk('Kyoko', 'ja-JP', true), mk('Laura', 'sk-SK', true),
+        mk('Lekha', 'hi-IN', true), mk('Luciana', 'pt-BR', true), mk('Maged', 'ar-SA', true),
+        mk('Mariska', 'hu-HU', true), mk('Mei-Jia', 'zh-TW', true), mk('Melina', 'el-GR', true),
+        mk('Milena', 'ru-RU', true), mk('Moira', 'en-IE', true), mk('Monica', 'es-ES', true),
+        mk('Nora', 'nb-NO', true), mk('Organ', 'en-US', true), mk('Paulina', 'es-MX', true),
+        mk('Ralph', 'en-US', true), mk('Samantha', 'en-US', true), mk('Sara', 'da-DK', true),
+        mk('Satu', 'fi-FI', true), mk('Sin-ji', 'zh-HK', true), mk('Tessa', 'en-GB', true),
+        mk('Thomas', 'fr-FR', true), mk('Ting-Ting', 'zh-CN', true), mk('Tomas', 'cs-CZ', true),
+        mk('Trinoids', 'en-US', true), mk('Veena', 'en-IN', true), mk('Victoria', 'en-US', true),
+        mk('Whisper', 'en-US', true), mk('Xander', 'nl-NL', true), mk('Yelda', 'tr-TR', true),
+        mk('Yuna', 'ko-KR', true), mk('Zosia', 'pl-PL', true), mk('Zuzana', 'cs-CZ', true),
+        mk('Google US English', 'en-US', false), mk('Google UK English Female', 'en-GB', false),
+        mk('Google UK English Male', 'en-GB', false), mk('Google Deutsch', 'de-DE', false),
+        mk('Google español', 'es-ES', false), mk('Google français', 'fr-FR', false),
+        mk('Google हिन्दी', 'hi-IN', false), mk('Google Bahasa Indonesia', 'id-ID', false),
+        mk('Google italiano', 'it-IT', false), mk('Google 日本語', 'ja-JP', false),
+        mk('Google 한국의', 'ko-KR', false), mk('Google Nederlands', 'nl-NL', false),
+        mk('Google polski', 'pl-PL', false), mk('Google português do Brasil', 'pt-BR', false),
+        mk('Google русский', 'ru-RU', false), mk('Google 普通话（中国大陆）', 'zh-CN', false),
+        mk('Google 粤語（香港）', 'zh-HK', false), mk('Google闽南话（台湾）', 'zh-TW', false),
+      ];
+    }
+    return this._voices;
+  },
   speak() {}, cancel() {}, pause() {}, resume() {},
   addEventListener() {}, removeEventListener() {},
   onvoiceschanged: null,
@@ -5987,10 +6315,35 @@ _markNative(MediaStream); _markNative(MediaStreamTrack);
 _markNative(RTCPeerConnection); _markNative(RTCSessionDescription); _markNative(RTCIceCandidate);
 
 const _OrigDateTimeFormat = Intl.DateTimeFormat;
-const _defaultTZ = 'Europe/Berlin';
+// Derive the reported timezone from the configured language so the persona
+// stays coherent (zh-CN + Europe/Berlin — the old hardcoded default — is a
+// mismatch risk engines notice).
+// Accept-Language may arrive as a raw header ("zh-CN,zh;q=0.9,en;q=0.8").
+// navigator.language must be a single BCP-47 tag and navigator.languages a
+// tag list — a q-weighted string in either is a hard headless tell.
+function __obscuraLangList() {
+  const raw = String(globalThis.__obscura_lang || 'zh-CN');
+  const tags = raw.split(',').map((s) => s.split(';')[0].trim()).filter(Boolean);
+  const out = tags.length ? tags : ['zh-CN'];
+  if (out.length === 1 && out[0].indexOf('-') !== -1) out.push(out[0].split('-')[0]);
+  return out;
+}
+function __obscuraTZFromLang() {
+  const lang = __obscuraLangList()[0].toLowerCase();
+  const map = {
+    'zh': 'Asia/Shanghai', 'ja': 'Asia/Tokyo', 'ko': 'Asia/Seoul',
+    'en': 'America/New_York', 'de': 'Europe/Berlin', 'fr': 'Europe/Paris',
+    'es': 'Europe/Madrid', 'it': 'Europe/Rome', 'ru': 'Europe/Moscow',
+    'pt': 'Europe/Lisbon', 'nl': 'Europe/Amsterdam', 'tr': 'Europe/Istanbul',
+  };
+  for (const k of Object.keys(map)) {
+    if (lang.startsWith(k)) return map[k];
+  }
+  return 'Asia/Shanghai';
+}
 Intl.DateTimeFormat = function(locales, options) {
   if (!options) options = {};
-  if (!options.timeZone) options.timeZone = _defaultTZ;
+  if (!options.timeZone) options.timeZone = __obscuraTZFromLang();
   return new _OrigDateTimeFormat(locales, options);
 };
 Intl.DateTimeFormat.prototype = _OrigDateTimeFormat.prototype;
@@ -5998,7 +6351,7 @@ Intl.DateTimeFormat.supportedLocalesOf = _OrigDateTimeFormat.supportedLocalesOf;
 const _origResolved = _OrigDateTimeFormat.prototype.resolvedOptions;
 _OrigDateTimeFormat.prototype.resolvedOptions = function() {
   const r = _origResolved.call(this);
-  if (r.timeZone === 'UTC') r.timeZone = _defaultTZ;
+  if (r.timeZone === 'UTC') r.timeZone = __obscuraTZFromLang();
   return r;
 };
 
@@ -6015,33 +6368,67 @@ if (typeof navigator.credentials === 'undefined') {
 globalThis.opener = null;
 
 globalThis.Worker = class Worker {
-  constructor(url) {
+  constructor(url, options) {
     this.onmessage = null;
     this.onerror = null;
     this._terminated = false;
     this._listeners = {};
+    this._code = null;
+    this._codeReady = false;
     const worker = this;
 
-    if (typeof url === 'string' && (url.startsWith('blob:') || url.startsWith('http'))) {
-      const blobContent = globalThis.__blobStore?.[url];
-      if (blobContent) {
-        this._code = blobContent;
-      } else {
-        (async () => {
-          try {
-            const resp = await fetch(url);
-            worker._code = await resp.text();
-          } catch(e) { if (worker.onerror) worker.onerror(e); }
-        })();
+    // Resolve the source: blob store (text), blob object reference
+    // (readable immediately — Blob.text resolves as a microtask, before
+    // any setTimeout(0) macrotask), or fetch for http(s) URLs — INCLUDING
+    // RELATIVE ones like "/workers/signals-worker.js", which WorkOS Radar
+    // and many SDKs use. The old regex only accepted absolute http(s),
+    // so relative-script workers silently resolved to null and the page
+    // timed out waiting for onmessage.
+    const resolveCode = () => {
+      if (typeof url !== 'string') return Promise.resolve(null);
+      const text = globalThis.__blobStore?.[url];
+      if (text !== undefined) return Promise.resolve(text);
+      const obj = globalThis.__blobObjs?.[url];
+      if (obj && typeof obj.text === 'function') return obj.text();
+      let abs = url;
+      if (!/^(https?|blob|data):/i.test(url)) {
+        try { abs = new URL(url, globalThis.location?.href || 'https://example.com/').href; }
+        catch { return Promise.resolve(null); }
       }
-    }
+      if (/^https?:/i.test(abs)) {
+        return fetch(abs).then(r => r.text()).catch(e => { worker._fetchError = e; return null; });
+      }
+      return Promise.resolve(null);
+    };
+    resolveCode().then(code => {
+      worker._code = code;
+      worker._codeReady = true;
+    });
   }
   postMessage(data) {
     if (this._terminated) return;
     const worker = this;
-    setTimeout(() => {
-      if (worker._terminated || !worker._code) return;
+    // Retry until the source resolves — deadline-based, not a fixed attempt
+    // count: a real network fetch of the worker script can take far longer
+    // than the old 25×4ms (=100ms) budget, and a worker whose message was
+    // dropped is indistinguishable from a dead one to the page.
+    const deadline = Date.now() + 10000;
+    const attempt = () => {
+      if (worker._terminated) return;
+      if (!worker._codeReady) {
+        if (Date.now() < deadline) setTimeout(attempt, 8);
+        return;
+      }
+      if (!worker._code) {
+        const err = worker._fetchError || new Error('Worker script failed to load or execute (no message from browser)');
+        fireWorkerError(worker, err, worker._listeners);
+        return;
+      }
       try {
+        // WorkerGlobalScope-shaped `self`: real workers expose ~40 props
+        // and NO window/document. Parameter shadowing in the Function
+        // wrapper keeps the page realm's DOM out of the worker's scope,
+        // so `typeof window` inside the worker reads "undefined".
         const workerSelf = {
           onmessage: null,
           postMessage: (msg) => {
@@ -6051,6 +6438,7 @@ globalThis.Worker = class Worker {
             for (const h of handlers) h(evt);
           },
           addEventListener: (type, fn) => { workerSelf['on' + type] = fn; },
+          removeEventListener: () => {},
           close: () => { worker._terminated = true; },
           crypto: globalThis.crypto,
           TextEncoder: globalThis.TextEncoder,
@@ -6063,15 +6451,37 @@ globalThis.Worker = class Worker {
           clearInterval: globalThis.clearInterval,
           fetch: globalThis.fetch,
           console: globalThis.console,
+          performance: { now: () => Date.now(), timeOrigin: globalThis.performance?.timeOrigin || 0 },
+          location: { href: (globalThis.location && globalThis.location.href) || 'https://example.com/', origin: (globalThis.location && globalThis.location.origin) || 'https://example.com', protocol: 'https:', host: (globalThis.location && globalThis.location.host) || 'example.com', hostname: (globalThis.location && globalThis.location.hostname) || 'example.com', port: '', pathname: '/', search: '', hash: '', toString() { return this.href; } },
+          // Worker Navigator must mirror the page persona: collectors
+          // cross-check platform/userAgent against the main-thread values.
+          navigator: { hardwareConcurrency: globalThis.navigator.hardwareConcurrency, userAgent: globalThis.navigator.userAgent, appVersion: globalThis.navigator.appVersion, platform: globalThis.navigator.platform, language: globalThis.navigator.language, languages: globalThis.navigator.languages, deviceMemory: globalThis.navigator.deviceMemory, onLine: true },
+          Request: globalThis.Request, Response: globalThis.Response,
+          Headers: globalThis.Headers, Blob: globalThis.Blob,
+          FormData: globalThis.FormData, URL: globalThis.URL,
+          URLSearchParams: globalThis.URLSearchParams,
+          AbortController: globalThis.AbortController, AbortSignal: globalThis.AbortSignal,
+          WebSocket: globalThis.WebSocket, Event: globalThis.Event,
+          MessageEvent: globalThis.MessageEvent, ErrorEvent: globalThis.ErrorEvent,
+          indexedDB: { open: () => ({ onsuccess: null, onerror: null, onupgradeneeded: null }) },
+          caches: { open: () => Promise.reject(new DOMException('NotFoundError')), keys: () => Promise.resolve([]) },
+          isSecureContext: true,
+          origin: (globalThis.location && globalThis.location.origin) || 'https://example.com',
+          importScripts: () => {},
+          queueMicrotask: globalThis.queueMicrotask,
+          structuredClone: globalThis.structuredClone,
         };
-        const fn = new Function('self', 'postMessage', 'addEventListener', 'close', worker._code);
-        fn(workerSelf, workerSelf.postMessage, workerSelf.addEventListener, workerSelf.close);
+        workerSelf.self = workerSelf;
+        const fn = new Function('self', 'postMessage', 'addEventListener', 'removeEventListener', 'close', 'window', 'document', 'navigator', 'location', 'importScripts',
+          worker._code);
+        fn(workerSelf, workerSelf.postMessage, workerSelf.addEventListener, workerSelf.removeEventListener, workerSelf.close, undefined, undefined, workerSelf.navigator, workerSelf.location, workerSelf.importScripts);
         if (workerSelf.onmessage) workerSelf.onmessage({ data });
       } catch(e) {
         console.error('Worker error:', e.message);
-        if (worker.onerror) worker.onerror(e);
+        fireWorkerError(worker, e, worker._listeners);
       }
-    }, 0);
+    };
+    setTimeout(attempt, 0);
   }
   terminate() { this._terminated = true; }
   addEventListener(type, fn) {
@@ -6082,12 +6492,25 @@ globalThis.Worker = class Worker {
     if (this._listeners[type]) this._listeners[type] = this._listeners[type].filter(h => h !== fn);
   }
 };
+// Module-level so both construction-time fetch failures and execution-time
+// throws share one ErrorEvent-shaped path.
+function fireWorkerError(worker, err, listeners) {
+  const message = err instanceof Error ? (err.message || err.name) : String(err);
+  const evt = { message, filename: '', lineno: 0, colno: 0, error: err };
+  const handlers = ((listeners && listeners['error']) || []).slice();
+  if (worker.onerror) handlers.unshift(worker.onerror);
+  for (const h of handlers) { try { h(evt); } catch {} }
+}
 
 globalThis.__blobStore = globalThis.__blobStore || {};
+// Blob objects by URL, registered synchronously — Worker construction reads
+// these so the createObjectURL → new Worker race can't lose.
+globalThis.__blobObjs = globalThis.__blobObjs || {};
 const _origCreateObjectURL = URL.createObjectURL;
 URL.createObjectURL = function(blob) {
   if (blob && typeof blob.text === 'function') {
     const id = 'blob:obscura/' + Math.random().toString(36).substring(2);
+    globalThis.__blobObjs[id] = blob;
     blob.text().then(text => { globalThis.__blobStore[id] = text; });
     return id;
   }
@@ -6624,23 +7047,45 @@ if (typeof ShadowRoot !== 'undefined' && !ShadowRoot.prototype.elementFromPoint)
   };
 }
 
+// (Re)apply the platform persona: screen, dpr, hardwareConcurrency,
+// deviceMemory. Called from __obscura_init AND again from Rust's
+// set_user_agent — the runtime constructor runs init before the context's
+// UA is known, so the persona must refresh once the real UA lands.
+globalThis.__obscura_setPersona = function() {
+  const scr = _fp('screen');
+  const sw = scr[0], sh = scr[1];
+  globalThis.screen = { width:sw, height:sh, availWidth:sw, availHeight:sh-40, colorDepth:24, pixelDepth:24, availTop:0, availLeft:0, orientation:{type:"landscape-primary",angle:0,addEventListener(){},removeEventListener(){},dispatchEvent(){return true;}} };
+  globalThis.visualViewport = { width:sw, height:sh-80, offsetLeft:0, offsetTop:0, scale:1, addEventListener(){}, removeEventListener(){} };
+  // From the persona pool, so a retina Mac panel reports 2x (the old
+  // width-only heuristic gave 1x on 1512x982 — impossible for that panel).
+  globalThis.devicePixelRatio = _fp('dpr') || (sw >= 2560 ? 2 : 1);
+  globalThis.innerWidth = sw; globalThis.innerHeight = sh - 80;
+  globalThis.outerWidth = sw; globalThis.outerHeight = sh;
+
+  // Stable for the life of the process (drawn once), not per navigation —
+  // hardwareConcurrency flipping between pages of one visit is its own
+  // automation tell. Values are platform-plausible pairs: Chrome caps
+  // deviceMemory at 8, and 16-thread machines never report 2 GB.
+  const plat = _fpPlatform();
+  if (globalThis.__obscura_hw === undefined || globalThis.__obscura_hw_plat !== plat) {
+    let hws, mems;
+    if (plat === 'mac') { hws = [8, 10, 12]; mems = [8]; }
+    else if (plat === 'win') { hws = [4, 6, 8, 12, 16, 20, 24]; mems = [4, 8]; }
+    else { hws = [4, 6, 8, 12, 16]; mems = [4, 8]; }
+    globalThis.__obscura_hw = hws[Math.floor(_fpRand(400) * hws.length)];
+    globalThis.__obscura_mem = mems[Math.floor(_fpRand(401) * mems.length)];
+    globalThis.__obscura_hw_plat = plat;
+  }
+  globalThis.navigator.hardwareConcurrency = globalThis.__obscura_hw;
+  globalThis.navigator.deviceMemory = globalThis.__obscura_mem;
+};
+
 globalThis.__obscura_init = function() {
   _fpSeed = Date.now() ^ (Math.random() * 0xFFFFFFFF >>> 0);
   _fpCache = null;
   _installWasmStreamingFallback();
 
-  const scr = _fp('screen');
-  const sw = scr[0], sh = scr[1];
-  globalThis.screen = { width:sw, height:sh, availWidth:sw, availHeight:sh-40, colorDepth:24, pixelDepth:24, availTop:0, availLeft:0, orientation:{type:"landscape-primary",angle:0,addEventListener(){},removeEventListener(){},dispatchEvent(){return true;}} };
-  globalThis.visualViewport = { width:sw, height:sh-80, offsetLeft:0, offsetTop:0, scale:1, addEventListener(){}, removeEventListener(){} };
-  globalThis.devicePixelRatio = sw >= 2560 ? 2 : 1;
-  globalThis.innerWidth = sw; globalThis.innerHeight = sh - 80;
-  globalThis.outerWidth = sw; globalThis.outerHeight = sh;
-
-  var hwValues = [2, 4, 6, 8, 12, 16];
-  globalThis.navigator.hardwareConcurrency = hwValues[Math.floor(_fpRand(400) * hwValues.length)];
-  var memValues = [0.25, 0.5, 1, 2, 4, 8];
-  globalThis.navigator.deviceMemory = memValues[Math.floor(_fpRand(401) * memValues.length)];
+  globalThis.__obscura_setPersona();
 
   const t0 = Date.now() + Math.floor(_fpRand(641) * 100) - 50;
   globalThis.performance.timeOrigin = t0;

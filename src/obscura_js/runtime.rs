@@ -201,9 +201,18 @@ impl ObscuraJsRuntime {
 
     pub fn set_user_agent(&mut self, ua: &str) {
         let escaped = ua.replace('\\', "\\\\").replace('\'', "\\'");
+        // After the UA lands, refresh the platform persona (GPU pool, screen,
+        // dpr, hw/memory). The runtime constructor ran __obscura_init before
+        // any UA was known, so the persona materialized from the linux
+        // default — leaving Mesa GL strings behind a macOS UA.
         let _ = self.runtime.execute_script(
             "<set-ua>",
-            format!("globalThis.__obscura_ua = '{}';", escaped),
+            format!(
+                "globalThis.__obscura_ua = '{}'; \
+                 globalThis._fpCache = null; globalThis.__obscura_hw_plat = undefined; \
+                 globalThis.__obscura_setPersona();",
+                escaped
+            ),
         );
     }
     pub fn set_language(&mut self, lang: &str) {
