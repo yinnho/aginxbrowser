@@ -3694,22 +3694,112 @@ if (typeof TextDecoder === 'undefined') {
       Object.defineProperty(this, 'encoding', { value: name, enumerable: true });
       Object.defineProperty(this, 'fatal', { value: !!o.fatal, enumerable: true });
       Object.defineProperty(this, 'ignoreBOM', { value: !!o.ignoreBOM, enumerable: true });
+      // Bytes carried over between decode(..., {stream:true}) calls
+      // (TextDecoderStream splits chunks at arbitrary byte offsets).
+      this._pending = new Uint8Array(0);
+      this._bomChecked = false;
     }
     decode(input, options) {
-      if (input === undefined) return '';
-      const bytes = ArrayBuffer.isView(input)
-        ? new Uint8Array(input.buffer, input.byteOffset, input.byteLength)
-        : new Uint8Array(input);
+      const stream = !!(options && options.stream);
+      let bytes = input === undefined
+        ? new Uint8Array(0)
+        : ArrayBuffer.isView(input)
+          ? new Uint8Array(input.buffer, input.byteOffset, input.byteLength)
+          : new Uint8Array(input);
+      if (this._pending.length || stream) {
+        const merged = new Uint8Array(this._pending.length + bytes.length);
+        merged.set(this._pending);
+        merged.set(bytes, this._pending.length);
+        bytes = merged;
+        if (stream) {
+          if (this.encoding === 'utf-8' && !this.fatal) {
+            // Emit only complete UTF-8 sequences; hold the incomplete tail.
+            let cut = bytes.length;
+            for (let i = bytes.length - 1; i >= 0 && i >= bytes.length - 4; i--) {
+              const b = bytes[i];
+              if ((b & 0xC0) === 0x80) continue;
+              const need = b < 0x80 ? 0 : b < 0xE0 ? 1 : b < 0xF0 ? 2 : 3;
+              if (i + need + 1 > bytes.length) cut = i;
+              break;
+            }
+            this._pending = bytes.slice(cut);
+            bytes = bytes.slice(0, cut);
+          } else {
+            // Legacy encodings / fatal mode: withhold output until flush.
+            this._pending = bytes;
+            return '';
+          }
+        } else {
+          this._pending = new Uint8Array(0);
+        }
+      }
+      if (!stream) this._pending = new Uint8Array(0);
       // Fast path: plain UTF-8, non-fatal (Response/Blob text, most pages).
       if (this.encoding === 'utf-8' && !this.fatal) {
         let off = 0;
-        if (!this.ignoreBOM && bytes.length >= 3 && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) off = 3;
+        if (!this._bomChecked && bytes.length) {
+          this._bomChecked = true;
+          if (!this.ignoreBOM && bytes.length >= 3 && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) off = 3;
+        }
         return _utf8DecodeBytes(bytes, off);
       }
       // Legacy encodings / fatal mode: encoding_rs via the op.
       const r = JSON.parse(_OPS.op_text_decode(this.encoding, bytes, this.fatal, this.ignoreBOM));
       if (!r.ok) throw new TypeError("Failed to execute 'decode' on 'TextDecoder': The encoded data was not valid.");
       return r.v;
+    }
+  };
+}
+
+// React Router's SSR stream bootstrap does
+// `new ReadableStream(...).pipeThrough(new TextEncoderStream())`; without
+// these, hydration never runs and the whole client app is inert.
+// Composition, not `extends TransformStream`: TransformStream is installed
+// by a deno extension AFTER the snapshot is taken, so it does not exist yet
+// when this file is evaluated at build time.
+if (typeof TextEncoderStream === 'undefined') {
+  globalThis.TextEncoderStream = class TextEncoderStream {
+    constructor() {
+      let pending = '';
+      const enc = new TextEncoder();
+      const ts = new TransformStream({
+        transform(chunk, controller) {
+          chunk = pending + String(chunk);
+          pending = '';
+          const last = chunk.charCodeAt(chunk.length - 1);
+          if (last >= 0xD800 && last < 0xDC00) {
+            pending = chunk[chunk.length - 1];
+            chunk = chunk.slice(0, -1);
+          }
+          if (chunk) controller.enqueue(enc.encode(chunk));
+        },
+        flush(controller) {
+          if (pending) controller.enqueue(enc.encode(pending));
+        }
+      });
+      this.readable = ts.readable;
+      this.writable = ts.writable;
+    }
+    get encoding() { return 'utf-8'; }
+  };
+  globalThis.TextDecoderStream = class TextDecoderStream {
+    constructor(label, options) {
+      const dec = new TextDecoder(label, options);
+      const ts = new TransformStream({
+        transform(chunk, controller) {
+          const out = dec.decode(chunk, { stream: true });
+          if (out) controller.enqueue(out);
+        },
+        flush(controller) {
+          const out = dec.decode();
+          if (out) controller.enqueue(out);
+        }
+      });
+      this.readable = ts.readable;
+      this.writable = ts.writable;
+      Object.defineProperty(this, 'encoding', { value: dec.encoding, enumerable: true });
+      Object.defineProperty(this, 'fatal', { value: dec.fatal, enumerable: true });
+      Object.defineProperty(this, 'ignoreBOM', { value: dec.ignoreBOM, enumerable: true });
     }
   };
 }
@@ -6656,8 +6746,30 @@ if (typeof ReadableStream === 'undefined') {
       };
     }
     cancel() { this._closed = true; return Promise.resolve(); }
-    pipeTo(dest) { return Promise.resolve(); }
-    pipeThrough(transform) { return transform?.readable || new ReadableStream(); }
+    async pipeTo(dest) {
+      const reader = this.getReader();
+      const writer = dest.getWriter();
+      try {
+        for (;;) {
+          const r = await reader.read();
+          if (r.done) break;
+          await writer.write(r.value);
+        }
+        await writer.close();
+      } catch (e) {
+        try { await writer.abort(e); } catch (_) {}
+        throw e;
+      } finally {
+        try { reader.releaseLock(); } catch (_) {}
+        try { writer.releaseLock(); } catch (_) {}
+      }
+    }
+    pipeThrough(transform) {
+      const out = transform && transform.readable;
+      if (!out) return new ReadableStream();
+      this.pipeTo(transform.writable).catch(() => {});
+      return out;
+    }
     tee() {
       // Materialize what's buffered, then hand out two independent streams
       // over a copy — clone-style consumption. (Interleaved tee of a live
@@ -6704,16 +6816,25 @@ if (typeof TransformStream === 'undefined') {
     // silently drop the payload the way an empty stub does.
     constructor(transformer = {}) {
       let rc = null;
+      const controller = {
+        enqueue: (c2) => { if (rc) rc.enqueue(c2); },
+        close: () => { if (rc) rc.close(); },
+        error: (e) => { if (rc) rc.error(e); },
+      };
       this.readable = new ReadableStream({ start(c) { rc = c; } });
       this.writable = new WritableStream({
         write(chunk) {
           try {
             if (transformer.transform) {
-              transformer.transform(chunk, { enqueue: (c2) => { if (rc) rc.enqueue(c2); }, close: () => { if (rc) rc.close(); } });
+              transformer.transform(chunk, controller);
             } else if (rc) rc.enqueue(chunk);
           } catch (e) { if (rc) rc.error(e); }
         },
-        close() { if (rc) rc.close(); },
+        close() {
+          try { if (transformer.flush) transformer.flush(controller); }
+          catch (e) { if (rc) { rc.error(e); return; } }
+          if (rc) rc.close();
+        },
       });
     }
   };
