@@ -229,8 +229,23 @@ fn session_thread(
                 // Element index → _nid mapping (rebuilt on each /state call).
                 let mut element_map: HashMap<usize, u64> = HashMap::new();
 
-                // Command loop.
-                while let Some(cmd) = cmd_rx.recv().await {
+                // Command loop. Between commands the JS event loop keeps
+                // running (200ms slices) instead of freezing on a blocking
+                // recv(): timers, fetch callbacks and promise chains must
+                // progress while the session idles, exactly like a real
+                // browser's main thread. Without the pump, async work
+                // started by page scripts stalled until the next command -
+                // WorkOS Radar's 5s worker-response window expired with its
+                // timer un-pumped (measured 31s frozen).
+                loop {
+                    let cmd = tokio::select! {
+                        biased;
+                        cmd = cmd_rx.recv() => match cmd {
+                            Some(c) => c,
+                            None => break,
+                        },
+                        _ = page.pump_event_loop_slice(200) => continue,
+                    };
                     match cmd {
                         SessionCommand::Navigate { url, reply } => {
                             let result = match page.goto(&url).await {

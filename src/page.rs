@@ -147,6 +147,12 @@ impl Page {
         self.inner.settle_until_idle(max_ms).await
     }
 
+    /// One background event-loop slice (pump, then park when quiescent).
+    /// See [`crate::obscura_browser::Page::pump_event_loop_slice`].
+    pub async fn pump_event_loop_slice(&mut self, ms: u64) {
+        self.inner.pump_event_loop_slice(ms).await
+    }
+
     /// Scroll the page by a relative offset.
     pub fn scroll_by(&mut self, dx: i32, dy: i32) {
         self.evaluate(&format!("window.scrollBy({}, {})", dx, dy));

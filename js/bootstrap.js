@@ -6375,6 +6375,8 @@ globalThis.Worker = class Worker {
     this._listeners = {};
     this._code = null;
     this._codeReady = false;
+    this._pending = null;
+    this._workerSelf = null;
     const worker = this;
 
     // Resolve the source: blob store (text), blob object reference
@@ -6403,28 +6405,61 @@ globalThis.Worker = class Worker {
     resolveCode().then(code => {
       worker._code = code;
       worker._codeReady = true;
+      // Drain messages that queued while the source loaded. Delivery here
+      // runs as a microtask at the next JS yield - immune to macro-task
+      // starvation. A busy event loop (Next.js hydration executing dozens
+      // of chunks) can starve setTimeout retries for many seconds, long
+      // past a collector's 5s worker-response window (timings.worker was
+      // 10.9s on a real authk load before this).
+      if (worker._pending && worker._pending.length) {
+        const m = worker._pending.shift();
+        if (m && !m.delivered) {
+          m.delivered = true;
+          if (code) runWorkerMessage(worker, m.data);
+          else fireWorkerError(worker, worker._fetchError || new Error('Worker script failed to load or execute (no message from browser)'), worker._listeners);
+        }
+      }
     });
   }
   postMessage(data) {
     if (this._terminated) return;
     const worker = this;
-    // Retry until the source resolves — deadline-based, not a fixed attempt
-    // count: a real network fetch of the worker script can take far longer
-    // than the old 25×4ms (=100ms) budget, and a worker whose message was
-    // dropped is indistinguishable from a dead one to the page.
+    const msg = { data, delivered: false };
+    if (!this._codeReady) (this._pending = this._pending || []).push(msg);
+    // Timer fallback for the case where the source resolved before this
+    // message arrived. Retry until the source resolves - deadline-based,
+    // not a fixed attempt count: a real network fetch of the worker script
+    // can take far longer than a small retry budget, and a worker whose
+    // message was dropped is indistinguishable from a dead one to the page.
     const deadline = Date.now() + 10000;
     const attempt = () => {
-      if (worker._terminated) return;
+      if (worker._terminated || msg.delivered) return;
       if (!worker._codeReady) {
         if (Date.now() < deadline) setTimeout(attempt, 8);
         return;
       }
+      msg.delivered = true;
       if (!worker._code) {
         const err = worker._fetchError || new Error('Worker script failed to load or execute (no message from browser)');
         fireWorkerError(worker, err, worker._listeners);
         return;
       }
-      try {
+      runWorkerMessage(worker, data);
+    };
+    setTimeout(attempt, 0);
+  }
+  terminate() { this._terminated = true; }
+  addEventListener(type, fn) {
+    if (!this._listeners[type]) this._listeners[type] = [];
+    this._listeners[type].push(fn);
+  }
+  removeEventListener(type, fn) {
+    if (this._listeners[type]) this._listeners[type] = this._listeners[type].filter(h => h !== fn);
+  }
+};
+function runWorkerMessage(worker, data) {
+  try {
+    if (!worker._workerSelf) {
         // WorkerGlobalScope-shaped `self`: real workers expose ~40 props
         // and NO window/document. Parameter shadowing in the Function
         // wrapper keeps the page realm's DOM out of the worker's scope,
@@ -6472,26 +6507,18 @@ globalThis.Worker = class Worker {
           structuredClone: globalThis.structuredClone,
         };
         workerSelf.self = workerSelf;
+        worker._workerSelf = workerSelf;
         const fn = new Function('self', 'postMessage', 'addEventListener', 'removeEventListener', 'close', 'window', 'document', 'navigator', 'location', 'importScripts',
           worker._code);
         fn(workerSelf, workerSelf.postMessage, workerSelf.addEventListener, workerSelf.removeEventListener, workerSelf.close, undefined, undefined, workerSelf.navigator, workerSelf.location, workerSelf.importScripts);
-        if (workerSelf.onmessage) workerSelf.onmessage({ data });
-      } catch(e) {
-        console.error('Worker error:', e.message);
-        fireWorkerError(worker, e, worker._listeners);
-      }
-    };
-    setTimeout(attempt, 0);
+    }
+    if (worker._workerSelf.onmessage) worker._workerSelf.onmessage({ data });
+  } catch(e) {
+    console.error('Worker error:', e.message);
+    fireWorkerError(worker, e, worker._listeners);
   }
-  terminate() { this._terminated = true; }
-  addEventListener(type, fn) {
-    if (!this._listeners[type]) this._listeners[type] = [];
-    this._listeners[type].push(fn);
-  }
-  removeEventListener(type, fn) {
-    if (this._listeners[type]) this._listeners[type] = this._listeners[type].filter(h => h !== fn);
-  }
-};
+}
+
 // Module-level so both construction-time fetch failures and execution-time
 // throws share one ErrorEvent-shaped path.
 function fireWorkerError(worker, err, listeners) {

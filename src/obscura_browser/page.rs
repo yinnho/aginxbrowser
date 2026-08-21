@@ -778,6 +778,38 @@ impl Page {
         true
     }
 
+    /// One background event-loop slice for the idle session loop: pump the
+    /// JS event loop for up to `ms`; once the loop goes quiescent, park
+    /// until the slice deadline. A real browser's main thread never stops
+    /// between user actions - timers, fetch callbacks and promise chains
+    /// keep firing. Our sessions previously froze the loop between commands
+    /// (blocking `recv()`), which stalled collectors with their own
+    /// deadlines: WorkOS Radar's 5s worker-response window expired while
+    /// its 5s timer sat un-pumped (measured 31s frozen). Cancellation-safe
+    /// at slice boundaries - the caller drops this future via `select!`
+    /// when a command arrives, same as the `settle_until_idle` timeout path.
+    pub async fn pump_event_loop_slice(&mut self, ms: u64) {
+        if ms == 0 {
+            return;
+        }
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(ms);
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return;
+            }
+            let remaining = (deadline - now).as_millis() as u64;
+            let idle = self.settle_until_idle(remaining).await;
+            if idle {
+                // Quiescent: park for the rest of the slice. The session
+                // command loop races this against command arrival, so a
+                // new command preempts the park immediately.
+                tokio::time::sleep_until(deadline).await;
+                return;
+            }
+        }
+    }
+
     /// Append the current URL to the history stack, truncating any forward
     /// entries past the cursor (matches real Chrome: navigating after a
     /// goBack clobbers the forward history).
