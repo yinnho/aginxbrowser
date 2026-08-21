@@ -1176,7 +1176,8 @@ impl Page {
             match js.evaluate_with_timeout(expression, timeout) {
                 Ok(val) => val,
                 Err(e) => {
-                    tracing::debug!("JS eval error/timeout for '{}': {}", &expression[..expression.len().min(80)], e);
+                    let preview: String = expression.chars().take(80).collect();
+                    tracing::debug!("JS eval error/timeout for '{}': {}", preview, e);
                     serde_json::Value::Null
                 }
             }
@@ -1190,7 +1191,8 @@ impl Page {
             match js.evaluate(expression) {
                 Ok(val) => val,
                 Err(e) => {
-                    tracing::debug!("JS eval error for '{}': {}", &expression[..expression.len().min(80)], e);
+                    let preview: String = expression.chars().take(80).collect();
+                    tracing::debug!("JS eval error for '{}': {}", preview, e);
                     serde_json::Value::Null
                 }
             }

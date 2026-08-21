@@ -393,9 +393,11 @@ fn extract_indexed_state(
             if let Some(attrs) = attrs {
                 for (k, v) in attrs {
                     let vs = v.as_str().unwrap_or("");
-                    // Truncate long class values.
-                    if k == "class" && vs.len() > 50 {
-                        attr_parts.push(format!("{}=\"{}…\"", k, &vs[..50]));
+                    // Truncate long class values. Slice by chars, not bytes —
+                    // multi-byte UTF-8 (—, CJK) panics on byte indexing.
+                    if k == "class" && vs.chars().count() > 50 {
+                        let t: String = vs.chars().take(50).collect();
+                        attr_parts.push(format!("{}=\"{}…\"", k, t));
                     } else {
                         attr_parts.push(format!("{}=\"{}\"", k, vs));
                     }
@@ -410,8 +412,9 @@ fn extract_indexed_state(
             if text.is_empty() {
                 out.push_str(&format!("[{}] <{}{} />\n", idx, tag, attr_str));
             } else {
-                let display_text = if text.len() > 80 {
-                    format!("{}…", &text[..80])
+                let display_text = if text.chars().count() > 80 {
+                    let t: String = text.chars().take(80).collect();
+                    format!("{}…", t)
                 } else {
                     text.to_string()
                 };
