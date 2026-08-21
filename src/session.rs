@@ -493,9 +493,14 @@ fn input_by_index(
     let nid = *element_map.get(&index).ok_or_else(|| format!("invalid index: {}", index))?;
     // Escape single quotes in text.
     let escaped = text.replace('\\', "\\\\").replace('\'', "\\'");
+    // React/Vue controlled inputs: assigning `el.value` directly goes through
+    // React's _valueTracker own-property setter, which records the new value -
+    // the following `input` event then compares equal and React swallows it
+    // (onChange never fires). Reset the tracker and use the prototype setter
+    // so the dispatched event registers as a real change.
     let js = format!(
-        "(function() {{ var el = globalThis._wrap && globalThis._wrap({}); if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {{ el.focus(); el.value = '{}'; el.dispatchEvent(new Event('input', {{bubbles: true}})); el.dispatchEvent(new Event('change', {{bubbles: true}})); return true; }} return false; }})()",
-        nid, escaped
+        "(function() {{ var el = globalThis._wrap && globalThis._wrap({}); if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {{ el.focus(); if (el._valueTracker) el._valueTracker.setValue(''); var p = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value') || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value'); if (p && p.set) p.set.call(el, '{}'); else el.value = '{}'; el.dispatchEvent(new Event('input', {{bubbles: true}})); el.dispatchEvent(new Event('change', {{bubbles: true}})); return true; }} return false; }})()",
+        nid, escaped, escaped
     );
     let result = page.evaluate(&js);
     Ok(result.as_bool().unwrap_or(false))

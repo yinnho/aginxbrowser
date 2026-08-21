@@ -7649,3 +7649,98 @@ if (typeof Response !== 'undefined' && Response.prototype && !Response.prototype
 // arrayBuffer is the body primitive that blob/text/json derive from; the
 // engine's Response provides it natively, so it is intentionally not shimmed
 // here (a JS fallback could only recurse into itself).
+
+// ---- GlobalEventHandlers `on*` IDL properties ----
+// Real browsers expose every `on<event>` as an accessor property on
+// Element.prototype, Document.prototype and window. Libraries feature-detect
+// them: React's ChangeEventPlugin does `'oninput' in document` and, when that
+// misses, falls back to an IE9-era propertychange path that silently swallows
+// every synthetic `input` event - which is why filling React-controlled
+// inputs (native value setter + dispatchEvent('input')) never reached
+// onChange in this engine while `click` worked fine. The getter also
+// compiles inline content attributes (`<div oninput="...">`), so
+// `typeof el.oninput === 'function'` after setAttribute, like Chrome.
+// (Fingerprint note: accessors live on the prototype, so they do not show up
+// in Object.keys(instance) / hasOwnProperty scans of elements.)
+const _GLOBAL_EVENT_NAMES = [
+  'abort', 'animationcancel', 'animationend', 'animationiteration',
+  'animationstart', 'auxclick', 'beforeinput', 'beforematch', 'beforetoggle',
+  'blur', 'cancel', 'canplay', 'canplaythrough', 'change', 'click', 'close',
+  'contextlost', 'contextmenu', 'contextrestored', 'copy', 'cuechange', 'cut',
+  'dblclick', 'drag', 'dragend', 'dragenter', 'dragexit', 'dragleave',
+  'dragover', 'dragstart', 'drop', 'durationchange', 'emptied', 'ended',
+  'error', 'focus', 'focusin', 'focusout', 'formdata', 'gotpointercapture',
+  'input', 'invalid', 'keydown', 'keypress', 'keyup', 'load', 'loadeddata',
+  'loadedmetadata', 'loadstart', 'lostpointercapture', 'mousedown',
+  'mouseenter', 'mouseleave', 'mousemove', 'mouseout', 'mouseover', 'mouseup',
+  'paste', 'pause', 'play', 'playing', 'pointercancel', 'pointerdown',
+  'pointerenter', 'pointerleave', 'pointermove', 'pointerout', 'pointerover',
+  'pointerrawupdate', 'pointerup', 'progress', 'ratechange', 'reset',
+  'resize', 'scroll', 'scrollend', 'securitypolicyviolation', 'seeked',
+  'seeking', 'select', 'selectionchange', 'slotchange', 'stalled', 'submit',
+  'suspend', 'timeupdate', 'toggle', 'touchcancel', 'touchend',
+  'touchmove', 'touchstart', 'transitioncancel', 'transitionend',
+  'transitionrun', 'transitionstart', 'volumechange', 'waiting', 'wheel',
+];
+function _defineOnHandler(obj, name, storeKey, inlineFallback) {
+  if (Object.prototype.hasOwnProperty.call(obj, name)) return;
+  Object.defineProperty(obj, name, {
+    configurable: true,
+    get() {
+      const store = this[storeKey];
+      if (store && Object.prototype.hasOwnProperty.call(store, name)) return store[name];
+      // No JS handler assigned: reflect the inline content attribute, if any.
+      if (inlineFallback && typeof this._resolveInlineHandler === 'function') {
+        return this._resolveInlineHandler(name);
+      }
+      return null;
+    },
+    set(fn) {
+      if (typeof fn !== 'function') fn = null;
+      const store = this[storeKey] || (this[storeKey] = {});
+      store[name] = fn;
+    },
+  });
+}
+for (const _n of _GLOBAL_EVENT_NAMES) _defineOnHandler(Element.prototype, 'on' + _n, '__onHandlers', true);
+for (const _n of _GLOBAL_EVENT_NAMES) _defineOnHandler(Document.prototype, 'on' + _n, '__onHandlers', false);
+// window-only handlers (WindowEventHandlers + the rest of GlobalEventHandlers).
+// globalThis.onerror / onunhandledrejection are already real data properties;
+// the `hasOwnProperty` guard above skips them, keeping the error capture intact.
+const _WINDOW_EVENT_NAMES = _GLOBAL_EVENT_NAMES.concat([
+  'afterprint', 'beforeprint', 'beforeunload', 'hashchange', 'languagechange',
+  'message', 'messageerror', 'offline', 'online', 'pagehide', 'pageshow',
+  'popstate', 'rejectionhandled', 'storage', 'unload',
+]);
+for (const _n of _WINDOW_EVENT_NAMES) _defineOnHandler(globalThis, 'on' + _n, '__windowOnHandlers', false);
+// Fire the on* handler alongside addEventListener listeners for the two
+// dispatch paths that did not consult it before (document and window).
+// window.onerror is deliberately NOT consulted here: it is the uncaught-error
+// logger, not a dispatchEvent target in this engine.
+const _documentDispatch = Document.prototype.dispatchEvent;
+Document.prototype.dispatchEvent = function(event) {
+  if (event) {
+    const handler = this['on' + event.type];
+    if (typeof handler === 'function') {
+      try {
+        if (handler.call(this, event) === false && event.preventDefault) event.preventDefault();
+      } catch (e) { console.error('document event error:', e); }
+    }
+  }
+  return _documentDispatch.call(this, event);
+};
+_markNative(Document.prototype.dispatchEvent);
+const _windowDispatch = globalThis.dispatchEvent;
+globalThis.dispatchEvent = function(event) {
+  if (event) {
+    const store = globalThis.__windowOnHandlers || {};
+    const key = 'on' + event.type;
+    const handler = Object.prototype.hasOwnProperty.call(store, key) ? store[key] : null;
+    if (typeof handler === 'function') {
+      try {
+        if (handler.call(globalThis, event) === false && event.preventDefault) event.preventDefault();
+      } catch (e) { console.error(e); }
+    }
+  }
+  return _windowDispatch.call(this, event);
+};
