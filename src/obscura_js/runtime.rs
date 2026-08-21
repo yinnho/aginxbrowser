@@ -811,6 +811,22 @@ impl ObscuraJsRuntime {
         }
     }
 
+    /// Drive the event loop until it goes idle (no pending ops, tasks, or
+    /// timers), capped at `max_ms`. Returns `true` if the loop actually went
+    /// idle within the budget — `false` means work was still in flight (a
+    /// long fetch, an interval timer, or a synchronous overrun terminated by
+    /// the watchdog). Unlike [`Self::run_event_loop_bounded`], the caller can
+    /// tell "settled" from "still busy", which is what click/transition flows
+    /// need: a client-side route change is only done when the flight fetch,
+    /// parse, render, and pushState have all drained.
+    pub async fn run_event_loop_until_idle(&mut self, max_ms: u64) -> bool {
+        let budget = std::time::Duration::from_millis(max_ms);
+        let token = self.arm_watchdog(budget + std::time::Duration::from_millis(500));
+        let result = tokio::time::timeout(budget, self.run_event_loop()).await;
+        let fired = self.disarm_watchdog(token);
+        matches!(result, Ok(Ok(()))) && !fired
+    }
+
     /// Like [`Self::evaluate`] but bounded by a V8 watchdog, so a `--eval`
     /// expression that loops forever (or awaits a promise that never settles in
     /// synchronous form) cannot hang the process.

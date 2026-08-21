@@ -141,6 +141,12 @@ impl Page {
         self.inner.settle(max_ms).await
     }
 
+    /// Drive the JS event loop until quiescent, capped at `max_ms`. See
+    /// [`crate::obscura_browser::Page::settle_until_idle`].
+    pub async fn settle_until_idle(&mut self, max_ms: u64) -> bool {
+        self.inner.settle_until_idle(max_ms).await
+    }
+
     /// Scroll the page by a relative offset.
     pub fn scroll_by(&mut self, dx: i32, dy: i32) {
         self.evaluate(&format!("window.scrollBy({}, {})", dx, dy));

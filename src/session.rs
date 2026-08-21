@@ -301,6 +301,18 @@ fn session_thread(
                             break;
                         }
                     }
+
+                    // Pump the JS event loop briefly after every command.
+                    // Commands that only evaluate synchronously (Eval
+                    // returning a non-Promise, Scroll, State) can still have
+                    // started async work — a fetch fired from a submit/click
+                    // handler, promise chains, timers — which needs
+                    // event-loop turns to progress. Without this the work
+                    // stranded until the next navigation (React server-action
+                    // fetches never resolved). Returns immediately when the
+                    // loop is idle, so quiescent pages pay nothing; busy pages
+                    // get up to 1.5s of drain per command.
+                    page.settle_until_idle(1500).await;
                 }
             })
             .await;
@@ -447,7 +459,11 @@ async fn click_by_index(
     // the firecrawl /v1/scrape click handling.
     let _ = page.process_pending_navigation().await;
     if clicked {
-        page.settle(800).await;
+        // Wait for quiescence, not a fixed slice: a client-side route
+        // transition (RSC fetch → flight parse → render → pushState) only
+        // counts as done when the loop drains. Capped so interval-heavy
+        // pages can't pin the command.
+        page.settle_until_idle(5000).await;
     }
     let url = page.url();
     Ok(SessionClickResponse { url, clicked })

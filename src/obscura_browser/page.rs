@@ -763,6 +763,21 @@ impl Page {
         }
     }
 
+    /// Drive the JS event loop until it goes idle, capped at `max_ms`. Use
+    /// after interactions that kick off async work whose completion matters
+    /// (client-side route transitions: the RSC fetch → flight parse → render →
+    /// pushState chain). Returns `true` if the page quiesced within the
+    /// budget; `false` means still busy (or capped by an interval timer).
+    pub async fn settle_until_idle(&mut self, max_ms: u64) -> bool {
+        if max_ms == 0 {
+            return true;
+        }
+        if let Some(js) = &mut self.js {
+            return js.run_event_loop_until_idle(max_ms).await;
+        }
+        true
+    }
+
     /// Append the current URL to the history stack, truncating any forward
     /// entries past the cursor (matches real Chrome: navigating after a
     /// goBack clobbers the forward history).

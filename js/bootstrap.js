@@ -62,6 +62,22 @@ Function.prototype.toString = function() {
   return _origToString.call(this);
 };
 function _markNative(fn) { if (typeof fn === 'function') _nativeFns.add(fn); return fn; }
+// Mark every method AND accessor on a shim prototype as native. Lie
+// detectors (fingerprintjs-style) verify `Function.prototype.toString.call(fn)`
+// reports [native code] for each API they probe — an unmarked shim flips
+// their "API tampered" flag, and some detectors then run destructive probes
+// in the main document as punishment.
+function _markNativeProto(proto) {
+  if (!proto) return;
+  for (const p of Object.getOwnPropertyNames(proto)) {
+    if (p === 'constructor') continue;
+    const d = Object.getOwnPropertyDescriptor(proto, p);
+    if (!d) continue;
+    if (typeof d.value === 'function') _markNative(d.value);
+    if (typeof d.get === 'function') _markNative(d.get);
+    if (typeof d.set === 'function') _markNative(d.set);
+  }
+}
 _nativeFns.add(Function.prototype.toString);
 
 [Error, TypeError, ReferenceError, SyntaxError, RangeError, URIError, EvalError].forEach(E => {
@@ -195,6 +211,16 @@ const _consoleFn = (level, args) => {
     }
     return String(a);
   }).join(" ")); } catch {}
+  if (level === "error") {
+    try {
+      globalThis.__obscura_errors = globalThis.__obscura_errors || [];
+      globalThis.__obscura_errors.push({msg: args.map(a => {
+        if (a && a.stack) return a.stack;
+        if (a && a.message) return a.message;
+        return String(a);
+      }).join(" ")});
+    } catch {}
+  }
 };
 
 globalThis.console = {
@@ -212,8 +238,14 @@ const _intervals = new Set();
 
 const _scheduleAfter = (delay, fn) => {
   const d = Math.max(0, Number(delay) || 0);
-  if (d === 0) Promise.resolve().then(fn);
-  else Deno.core.ops.op_sleep(d).then(fn);
+  // setTimeout(0) must be a MACROtask: it runs on a later event-loop turn,
+  // after the current task's entire microtask queue has drained — the same
+  // task boundary a real browser provides. Delivering it as a microtask
+  // breaks every scheduler built on the distinction (React 19's Scheduler
+  // defers work through MessageChannel/setTimeout specifically to land on
+  // that boundary), so even delay-0 timers go through op_sleep: a resolved
+  // async op is the cheapest true event-loop turn the runtime offers.
+  Deno.core.ops.op_sleep(d).then(fn);
 };
 
 globalThis.setTimeout = (fn, delay = 0, ...args) => {
@@ -251,11 +283,17 @@ class MessageChannel {
   constructor() {
     this.port1 = { onmessage: null, postMessage: () => {}, close() {}, addEventListener() {}, removeEventListener() {} };
     this.port2 = { onmessage: null, postMessage: () => {}, close() {}, addEventListener() {}, removeEventListener() {} };
+    // Message delivery is a macrotask, exactly like a real browser: React's
+    // Scheduler posts work through a MessageChannel port precisely because
+    // delivery lands on a fresh task after the microtask queue drains.
+    // Microtask delivery interleaves scheduler work with unrelated promise
+    // chains and deterministically wedges transitions (observed as "server
+    // actions dispatch from some realms and never from others").
     this.port1.postMessage = (data) => {
-      Promise.resolve().then(() => { if (this.port2.onmessage) this.port2.onmessage({ data }); });
+      _scheduleAfter(0, () => { if (this.port2.onmessage) this.port2.onmessage({ data }); });
     };
     this.port2.postMessage = (data) => {
-      Promise.resolve().then(() => { if (this.port1.onmessage) this.port1.onmessage({ data }); });
+      _scheduleAfter(0, () => { if (this.port1.onmessage) this.port1.onmessage({ data }); });
     };
   }
 }
@@ -272,6 +310,22 @@ class CSSStyleDeclaration {
   get length() { return Object.keys(this._props).length; }
   item(i) { return Object.keys(this._props)[i] || ""; }
 }
+// Legacy Blink interface: real Chrome exposes `CSS2Properties` with style
+// property accessors living on its prototype, chained BELOW
+// CSSStyleDeclaration.prototype. Bot detectors (Castle) probe
+// `CSSStyleDeclaration.prototype` for it — a missing global is flagged as a
+// tampered API, which flips their iframe fallback and runs destructive DOM
+// probes in the main document.
+globalThis.CSS2Properties = class CSS2Properties {};
+Object.setPrototypeOf(CSSStyleDeclaration.prototype, CSS2Properties.prototype);
+for (const _m of ["setProperty", "getPropertyValue", "getPropertyPriority", "removeProperty", "item"]) {
+  if (typeof CSSStyleDeclaration.prototype[_m] === "function") {
+    CSS2Properties.prototype[_m] = CSSStyleDeclaration.prototype[_m];
+  }
+}
+_markNative(CSS2Properties);
+_markNativeProto(CSSStyleDeclaration.prototype);
+_markNativeProto(CSS2Properties.prototype);
 
 const _styleProxy = (decl) => new Proxy(decl, {
   get(t, p) {
@@ -366,8 +420,23 @@ class Node {
   get previousSibling() { return _wrap(+_dom("prev_sibling", this._nid)); }
   appendChild(c) {
     if (!c) return c;
+    // Per DOM spec, inserting a DocumentFragment inserts its CHILDREN — the
+    // fragment itself never enters the tree (a `#document-fragment` visible
+    // in body.childNodes is an instant bot tell).
+    if (c.nodeType === 11 && c.nodeName === '#document-fragment') {
+      const kids = Array.from(c.childNodes);
+      for (const k of kids) this.appendChild(k);
+      if (globalThis.__mutationObservers?.length) {
+        globalThis.__notifyMutation('childList', this._nid, kids.map(k => k._nid), []);
+      }
+      if (_nodeInDocument(this)) for (const k of kids) _registerIframesIn(k);
+      return c;
+    }
     _dom("append_child", this._nid, c._nid);
     if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('childList', this._nid, [c._nid], []);
+    // Insertion into the document instantiates browsing contexts for any
+    // iframes in the inserted subtree (window[N] / window.length).
+    if (_nodeInDocument(this)) _registerIframesIn(c);
     if (c instanceof Element && c.tagName === 'SCRIPT') {
       const scriptType = c.getAttribute('type') || '';
       const isModule = scriptType === 'module';
@@ -880,6 +949,7 @@ class Element extends Node {
       oldChildren = _domParse("child_nodes", this._nid) || [];
     }
     _dom("set_inner_html", this._nid, String(v ?? ""));
+    if (_nodeInDocument(this)) _registerIframesIn(this);
     if (globalThis.__mutationObservers?.length) {
       newChildren = _domParse("child_nodes", this._nid) || [];
       globalThis.__notifyMutation('childList', this._nid, newChildren, oldChildren);
@@ -2222,6 +2292,17 @@ class Document extends Node {
 }
 
 class DocumentFragment extends Node {
+  // `new DocumentFragment()` is legal in real browsers (creates a fresh
+  // detached fragment). Bot detectors' domrect fixtures use it; without this
+  // fallback `_nid` stayed undefined and the first appendChild tripped the
+  // _dom Illegal-invocation guard — an escaping error the detector treats as
+  // a broken environment.
+  constructor(nid) {
+    if (nid === undefined || nid === null || isNaN(+nid)) {
+      nid = +_dom("create_document_fragment");
+    }
+    super(nid);
+  }
   get nodeType() { return 11; }
   get nodeName() { return "#document-fragment"; }
   get innerHTML() { return _domParse("inner_html", this._nid) ?? ""; }
@@ -2304,7 +2385,31 @@ function _wrapEl(nid) {
 globalThis._wrap = _wrap;
 globalThis.self = globalThis;
 
-globalThis.document = null;
+// `document` is a lazy accessor: at snapshot/bootstrap time there is no DOM
+// yet (ObscuraState.dom is None until Page::init_js calls set_dom after the
+// runtime constructor ran __obscura_init), so the document node id cannot be
+// resolved eagerly. Resolving on first access also guarantees identity: the
+// global document IS `_wrap(documentNid)` — the same cached instance that
+// parentNode bubbling reaches. A separate `new Document(...)` here meant
+// React's delegated listeners (attached to the global `document`) lived on a
+// different object than the bubble target, so submit/click handlers never ran.
+let _documentInstance = null;
+Object.defineProperty(globalThis, 'document', {
+  configurable: true,
+  enumerable: true,
+  get() {
+    if (_documentInstance) return _documentInstance;
+    try {
+      const nid = +_dom("document_node_id"); // NaN while no DOM is attached
+      if (isNaN(nid) || nid < 0) return null;
+      _documentInstance = _wrap(nid);
+    } catch (e) {
+      return null; // ops unavailable during snapshot construction
+    }
+    return _documentInstance;
+  },
+  set(v) { _documentInstance = v; },
+});
 function _resolveUrl(url) {
   if (!url) return url;
   if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('about:')) return url;
@@ -2383,14 +2488,47 @@ Object.defineProperty(globalThis.Window, Symbol.hasInstance, {
 
 const _iframeRegistry = [];
 function _registerIframe(iframeEl) {
+  // Idempotent: attachment points (appendChild/innerHTML) and src loading can
+  // both reach the same element.
+  if (iframeEl._iframeRegistered) return;
+  iframeEl._iframeRegistered = true;
   const idx = _iframeRegistry.length;
   _iframeRegistry.push(iframeEl);
   globalThis.length = _iframeRegistry.length;
   Object.defineProperty(globalThis, idx, {
-    get() { return iframeEl._iframeWin || null; },
+    get() {
+      // Eagerly create the browsing context: detector code reads `self[i]`
+      // right after inserting fixture markup, before ever touching
+      // contentWindow — a null there reads as a missing iframe.
+      if (!iframeEl._iframeWin && typeof iframeEl.contentWindow !== 'undefined') {
+        void iframeEl.contentWindow;
+      }
+      return iframeEl._iframeWin || null;
+    },
     configurable: true,
     enumerable: false,
   });
+}
+// Browsers create an iframe's browsing context when it is INSERTED INTO the
+// document (not on src load, not on contentWindow access). Detector code
+// captures `e = self.length`, appends fixture markup containing an iframe,
+// then reads `self[e]` to get that iframe's window. Register iframes found in
+// an inserted subtree, in tree order, so numeric window indexing matches.
+function _registerIframesIn(node) {
+  if (!node || typeof node.querySelectorAll !== 'function') return;
+  const frames = node.nodeType === 1 && node.tagName === 'IFRAME'
+    ? [node, ...node.querySelectorAll('iframe')]
+    : [...node.querySelectorAll('iframe')];
+  for (const f of frames) _registerIframe(f);
+}
+function _nodeInDocument(node) {
+  let cur = node;
+  let steps = 0;
+  while (cur && steps++ < 200) {
+    if (cur.nodeType === 9) return true;
+    cur = cur.parentNode;
+  }
+  return false;
 }
 // Derive navigator.platform / userAgentData.platform from the UA so the JS
 // layer's claimed OS matches the HTTP-layer UA. Mismatches (macOS UA +
@@ -2591,6 +2729,83 @@ globalThis.Notification = class Notification {
 
 globalThis.WebGLRenderingContext = class WebGLRenderingContext {};
 globalThis.WebGL2RenderingContext = class WebGL2RenderingContext {};
+// Bot detectors verify these methods exist on the PROTOTYPE (they grab
+// `WebGLRenderingContext.prototype.getParameter` etc. to test for API
+// tampering); the per-canvas instance methods alone are not enough.
+// These prototype versions don't touch `this`, so they also survive being
+// called with a fake receiver.
+// Shared getParameter implementation with realistic ANGLE values. Array-valued
+// pnames must return iterables — detectors spread them (`[...gl.getParameter(gl.MAX_VIEWPORT_DIMS)]`).
+function _glParam(pname) {
+  switch (pname) {
+    case 0x9245: return _fp('gpuVendor');
+    case 0x9246: return _fp('gpu');
+    case 0x1F01: return 'WebKit WebGL';
+    case 0x1F00: return 'WebKit';
+    case 0x1F02: return 'OpenGL ES 3.0 (ANGLE)';
+    case 0x8B8C: return 'WebGL GLSL ES 3.00 (ANGLE)';
+    case 0x0D3A: return new Int32Array([32767, 32767]);   // MAX_VIEWPORT_DIMS
+    case 0x846E: return new Float32Array([1, 10]);        // ALIASED_LINE_WIDTH_RANGE
+    case 0x846D: return new Float32Array([1, 1024]);      // ALIASED_POINT_SIZE_RANGE
+    case 0x0B70: return new Float32Array([0, 1]);         // DEPTH_RANGE
+    case 0x0C22: return new Float32Array([0, 0, 0, 0]);   // COLOR_CLEAR_VALUE
+    case 0x0C2D: return new Float32Array([0, 0, 0, 0]);   // BLEND_COLOR
+    case 0x86A3: return new Uint32Array(0);               // COMPRESSED_TEXTURE_FORMATS
+    case 0x0D33: return 16384;   // MAX_TEXTURE_SIZE
+    case 0x0D38: return 16384;   // MAX_CUBE_MAP_TEXTURE_SIZE
+    case 0x84E8: return 16384;   // MAX_RENDERBUFFER_SIZE
+    case 0x8869: return 16;      // MAX_VERTEX_ATTRIBS
+    case 0x8872: return 16;      // MAX_TEXTURE_IMAGE_UNITS
+    case 0x8B4C: return 16;      // MAX_VERTEX_TEXTURE_IMAGE_UNITS
+    case 0x8B4D: return 32;      // MAX_COMBINED_TEXTURE_IMAGE_UNITS
+    case 0x8DFB: return 4096;    // MAX_VERTEX_UNIFORM_VECTORS
+    case 0x8DFD: return 1024;    // MAX_FRAGMENT_UNIFORM_VECTORS
+    case 0x8DFC: return 30;      // MAX_VARYING_VECTORS
+    case 0x84FF: return 16;      // MAX_TEXTURE_MAX_ANISOTROPY_EXT
+    case 0x8513: return 4;       // SAMPLES
+    case 0x80A9: return 1;       // SAMPLE_BUFFERS
+    case 0x0D50: return 4;       // SUBPIXEL_BITS
+    case 0x0D52: case 0x0D53: case 0x0D54: case 0x0D55: return 8;  // R/G/B/A BITS
+    case 0x0D56: return 24;      // DEPTH_BITS
+    case 0x0D57: return 0;       // STENCIL_BITS
+    default: return 0;
+  }
+}
+// GL constants. Real browsers expose these on the interface PROTOTYPE (WebIDL
+// constant semantics), so instances resolve them through the chain — including
+// our Proxy-backed contexts via `prop in target`. Without them, `gl.MAX_VIEWPORT_DIMS`
+// returned our numNoop sentinel instead of 0x0D3A and getParameter got garbage.
+const _GL_CONSTS = {
+  MAX_VIEWPORT_DIMS: 0x0D3A, ALIASED_LINE_WIDTH_RANGE: 0x846E, ALIASED_POINT_SIZE_RANGE: 0x846D,
+  DEPTH_RANGE: 0x0B70, COLOR_CLEAR_VALUE: 0x0C22, BLEND_COLOR: 0x0C2D, COMPRESSED_TEXTURE_FORMATS: 0x86A3,
+  MAX_TEXTURE_SIZE: 0x0D33, MAX_CUBE_MAP_TEXTURE_SIZE: 0x0D38, MAX_RENDERBUFFER_SIZE: 0x84E8,
+  MAX_VERTEX_ATTRIBS: 0x8869, MAX_TEXTURE_IMAGE_UNITS: 0x8872, MAX_VERTEX_TEXTURE_IMAGE_UNITS: 0x8B4C,
+  MAX_COMBINED_TEXTURE_IMAGE_UNITS: 0x8B4D, MAX_VERTEX_UNIFORM_VECTORS: 0x8DFB,
+  MAX_FRAGMENT_UNIFORM_VECTORS: 0x8DFD, MAX_VARYING_VECTORS: 0x8DFC, MAX_TEXTURE_MAX_ANISOTROPY_EXT: 0x84FF,
+  SAMPLES: 0x8513, SAMPLE_BUFFERS: 0x80A9, SUBPIXEL_BITS: 0x0D50,
+  RED_BITS: 0x0D52, GREEN_BITS: 0x0D53, BLUE_BITS: 0x0D54, ALPHA_BITS: 0x0D55,
+  DEPTH_BITS: 0x0D56, STENCIL_BITS: 0x0D57,
+};
+const _GL_EXT_ANISO = { MAX_TEXTURE_MAX_ANISOTROPY_EXT: 0x84FF };
+const _GL_EXT_DEBUG = { UNMASKED_VENDOR_WEBGL: 0x9245, UNMASKED_RENDERER_WEBGL: 0x9246 };
+const _GL_EXT_LOSE = { loseContext() {}, restoreContext() {} };
+for (const _GLC of [globalThis.WebGLRenderingContext, globalThis.WebGL2RenderingContext]) {
+  Object.assign(_GLC.prototype, _GL_CONSTS);
+  _GLC.prototype.getParameter = function(pname) { return _glParam(pname); };
+  // getExtension must return live objects for the extensions we advertise —
+  // detectors chain-read constants off the result
+  // (`gl.getExtension('EXT_texture_filter_anisotropic').MAX_TEXTURE_MAX_ANISOTROPY_EXT`).
+  _GLC.prototype.getExtension = function(name) {
+    if (name === 'WEBGL_debug_renderer_info') return _GL_EXT_DEBUG;
+    if (name === 'EXT_texture_filter_anisotropic') return _GL_EXT_ANISO;
+    if (name === 'WEBGL_lose_context') return _GL_EXT_LOSE;
+    return null;
+  };
+  _GLC.prototype.getSupportedExtensions = function() { return ['WEBGL_debug_renderer_info','EXT_texture_filter_anisotropic','WEBGL_compressed_texture_s3tc','WEBGL_lose_context']; };
+  _GLC.prototype.getShaderPrecisionFormat = function() { return { rangeMin: 127, rangeMax: 127, precision: 23 }; };
+  _GLC.prototype.bufferData = function() {};
+  _GLC.prototype.readPixels = function(x,y,w,h,f,t,d) { if(d) for(let i=0;i<d.length;i++) d[i]=0; };
+}
 
 globalThis.screen = { width:1920, height:1080, availWidth:1920, availHeight:1040, colorDepth:24, pixelDepth:24, availTop:0, availLeft:0, orientation:{type:"landscape-primary",angle:0,addEventListener(){},removeEventListener(){},dispatchEvent(){return true;}} };
 globalThis.visualViewport = { width:1920, height:1000, offsetLeft:0, offsetTop:0, scale:1, addEventListener(){}, removeEventListener(){} };
@@ -2667,8 +2882,31 @@ globalThis.fetch = async (input, init = {}) => {
     } catch(e) { /* keep as-is if URL resolution fails */ }
   }
   const method = init.method || (input instanceof Request ? input.method : "GET");
-  const hdrs = JSON.stringify(init.headers instanceof Headers ? Object.fromEntries(init.headers.entries()) : init.headers || {});
-  const body = init.body ? String(init.body) : "";
+  const hdrObj = init.headers instanceof Headers ? Object.fromEntries(init.headers.entries()) : Object.assign({}, init.headers || {});
+  let body = "";
+  if (init.body != null) {
+    if (typeof FormData === "function" && init.body instanceof FormData) {
+      // multipart/form-data with a generated boundary, like a real browser.
+      const boundary = "----obscuraFormBoundary" + Math.random().toString(16).slice(2) + Date.now().toString(16);
+      const parts = [];
+      for (const [k, v] of init.body.entries()) {
+        parts.push("--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + String(k).replace(/"/g, "%22") + "\"\r\n\r\n" + String(v) + "\r\n");
+      }
+      parts.push("--" + boundary + "--\r\n");
+      body = parts.join("");
+      if (!Object.keys(hdrObj).some(h => h.toLowerCase() === "content-type")) {
+        hdrObj["content-type"] = "multipart/form-data; boundary=" + boundary;
+      }
+    } else if (typeof URLSearchParams === "function" && init.body instanceof URLSearchParams) {
+      body = init.body.toString();
+      if (!Object.keys(hdrObj).some(h => h.toLowerCase() === "content-type")) {
+        hdrObj["content-type"] = "application/x-www-form-urlencoded;charset=UTF-8";
+      }
+    } else {
+      body = String(init.body);
+    }
+  }
+  const hdrs = JSON.stringify(hdrObj);
   const fetchMode = init.mode || (input instanceof Request ? input.mode : "cors");
   const pageOrigin = (function() { try { const u = new URL(_domParse("document_url") || "about:blank"); return u.origin; } catch(e) { return ""; } })();
   const raw = await Deno.core.ops.op_fetch_url(url, method, hdrs, body, pageOrigin, fetchMode);
@@ -3104,10 +3342,27 @@ if (typeof Response === 'undefined') {
       this.headers = new Headers(init.headers);
       this.type = init.type || 'basic'; this.url = init.url || ''; this.redirected = !!init.redirected;
     }
-    async text() { return _decodeBodyWithCharset(this._bodyBytes, this.headers); }
-    async json() { return JSON.parse(await this.text()); }
-    async arrayBuffer() { return _arrayBufferFromBytes(this._bodyBytes); }
-    async blob() { return new Blob([this._bodyBytes]); }
+    async text() { this._bodyUsed = true; return _decodeBodyWithCharset(this._bodyBytes, this.headers); }
+    async json() { this._bodyUsed = true; return JSON.parse(await this.text()); }
+    async arrayBuffer() { this._bodyUsed = true; return _arrayBufferFromBytes(this._bodyBytes); }
+    async blob() { this._bodyUsed = true; return new Blob([this._bodyBytes]); }
+    // RSC/flight consumers (React server actions, Next app-router prefetch)
+    // stream the payload through response.body.getReader(); without a body
+    // stream createFromFetch resolves `x.body` to undefined and the whole
+    // action/navigation promise chain hangs forever — the "server accepted
+    // the POST but the client never navigates" wedge. Always return a
+    // stream (empty+closed when there are no bytes) rather than null: the
+    // lazy-stream wrapper in the flight client cannot cope with null.
+    get body() {
+      if (!this._bodyStream) {
+        const bytes = this._bodyBytes;
+        this._bodyStream = new ReadableStream({
+          start(c) { if (bytes && bytes.length) c.enqueue(new Uint8Array(bytes)); c.close(); },
+        });
+      }
+      return this._bodyStream;
+    }
+    get bodyUsed() { return this._bodyUsed === true; }
     clone() { return new Response(this._bodyBytes, { status: this.status, statusText: this.statusText, headers: this.headers, type: this.type, url: this.url, redirected: this.redirected }); }
     static error() { return new Response(null, { status: 0 }); }
     static redirect(url, status) { return new Response(null, { status: status || 302, headers: { Location: url } }); }
@@ -3950,7 +4205,42 @@ if (typeof File === "undefined") globalThis.File = class File extends Blob {
   }
   get [Symbol.toStringTag]() { return "File"; }
 };
-if (typeof FormData === "undefined") globalThis.FormData = class FormData { constructor(){this._d=[];} append(k,v){this._d.push([k,v]);} get(k){const e=this._d.find(([a])=>a===k);return e?e[1]:null;} getAll(k){return this._d.filter(([a])=>a===k).map(([,v])=>v);} has(k){return this._d.some(([a])=>a===k);} entries(){return this._d[Symbol.iterator]();} forEach(cb){this._d.forEach(([k,v])=>cb(v,k));} };
+if (typeof FormData === "undefined") globalThis.FormData = class FormData {
+  // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#constructing-form-data-set
+  constructor(form, submitter) {
+    this._d = [];
+    if (!form) return;
+    const els = form.elements || [];
+    for (let i = 0; i < els.length; i++) {
+      const el = els[i];
+      if (!el || !el.name || el.disabled) continue;
+      const tag = (el.tagName || "").toUpperCase();
+      if (tag === "FIELDSET" || tag === "OBJECT") continue;
+      const t = String(el.type || "").toLowerCase();
+      if (t === "submit" || t === "button" || t === "reset" || t === "image") continue;
+      if ((t === "checkbox" || t === "radio") && !el.checked) continue;
+      if (tag === "SELECT" && el.selectedOptions) {
+        let any = false;
+        for (const opt of el.selectedOptions) { any = true; this._d.push([el.name, String(opt.value ?? "")]); }
+        if (any) continue;
+      }
+      this._d.push([el.name, el.value != null ? String(el.value) : ""]);
+    }
+    // The submitter's name/value is included (it is the clicked button).
+    if (submitter && submitter.name) this._d.push([submitter.name, String(submitter.value ?? "")]);
+  }
+  append(k,v){this._d.push([String(k),String(v)]);}
+  set(k,v){k=String(k);v=String(v);const i=this._d.findIndex(([a])=>a===k);if(i>=0)this._d[i]=[k,v];else this._d.push([k,v]);}
+  delete(k){this._d=this._d.filter(([a])=>a!==k);}
+  get(k){const e=this._d.find(([a])=>a===k);return e?e[1]:null;}
+  getAll(k){return this._d.filter(([a])=>a===k).map(([,v])=>v);}
+  has(k){return this._d.some(([a])=>a===k);}
+  *entries(){for(let i=0;i<this._d.length;i++)yield this._d[i];}
+  *keys(){for(const [k] of this._d)yield k;}
+  *values(){for(const [,v] of this._d)yield v;}
+  [Symbol.iterator](){return this.entries();}
+  forEach(cb,thisArg){this._d.forEach(([k,v])=>cb.call(thisArg,v,k,this));}
+};
 // application/x-www-form-urlencoded serializer: like encodeURIComponent but
 // space -> '+' and also percent-encoding the chars encodeURIComponent leaves
 // bare ( ! ~ ' ( ) ), keeping the form-urlencoded safe set ( * - . _ ).
@@ -4197,6 +4487,64 @@ var _commonFonts = [
   'Verdana',
   'Webdings', 'Wingdings',
 ];
+// FontFace constructor. document.fonts below returns FontFace-tagged objects,
+// but the WorkOS/font-loader code path calls `new FontFace(...)` directly and
+// a missing global throws a ReferenceError that aborts the script bundle —
+// intermittently killing the whole React mount (the authk flaky blank page).
+class FontFace {
+  // Spec-shaped FontFace: `family`/`style`/`weight`/`stretch`/`status` are
+  // PROTOTYPE accessors backed by private slots, not instance data
+  // properties. Bot detectors (Castle/WorkOS) do
+  // `getOwnPropertyDescriptor(FontFace.prototype, 'family')` — instance
+  // props made that undefined, which their lie-detector flags, which sends
+  // every "isolated iframe" probe into the MAIN document (page wipe).
+  constructor(family, source, descriptors) {
+    const d = descriptors || {};
+    this._ffFamily = String(family == null ? '' : family);
+    this._ffSource = String(source == null ? '' : source);
+    this._ffStyle = d.style || 'normal';
+    this._ffWeight = d.weight || '400';
+    this._ffStretch = d.stretch || 'normal';
+    this._ffDisplay = d.display || 'auto';
+    this._ffUnicodeRange = d.unicodeRange || 'U+0-10FFFF';
+    this._ffVariant = d.variant || 'normal';
+    this._ffFeatureSettings = d.featureSettings || 'normal';
+    this._ffStatus = 'unloaded';
+    this._ffLoaded = null;
+  }
+  get family() { return this._ffFamily; }
+  set family(v) { this._ffFamily = String(v == null ? '' : v); }
+  get source() { return this._ffSource; }
+  set source(v) { this._ffSource = String(v == null ? '' : v); }
+  get style() { return this._ffStyle; }
+  set style(v) { this._ffStyle = String(v == null ? 'normal' : v); }
+  get weight() { return this._ffWeight; }
+  set weight(v) { this._ffWeight = String(v == null ? '400' : v); }
+  get stretch() { return this._ffStretch; }
+  set stretch(v) { this._ffStretch = String(v == null ? 'normal' : v); }
+  get display() { return this._ffDisplay; }
+  set display(v) { this._ffDisplay = String(v == null ? 'auto' : v); }
+  get unicodeRange() { return this._ffUnicodeRange; }
+  set unicodeRange(v) { this._ffUnicodeRange = String(v == null ? 'U+0-10FFFF' : v); }
+  get variant() { return this._ffVariant; }
+  set variant(v) { this._ffVariant = String(v == null ? 'normal' : v); }
+  get featureSettings() { return this._ffFeatureSettings; }
+  set featureSettings(v) { this._ffFeatureSettings = String(v == null ? 'normal' : v); }
+  get status() { return this._ffStatus; }
+  get loaded() {
+    if (!this._ffLoaded) this._ffLoaded = this.load();
+    return this._ffLoaded;
+  }
+  load() {
+    this._ffStatus = 'loaded';
+    return Promise.resolve(this);
+  }
+}
+Object.defineProperty(FontFace.prototype, Symbol.toStringTag, { value: 'FontFace', configurable: true });
+_markNativeProto(FontFace.prototype);
+globalThis.FontFace = FontFace;
+_markNative(FontFace);
+
 Object.defineProperty(Document.prototype, 'fonts', {
   get() {
     const _set = _commonFonts.map((name, i) => ({
@@ -4394,6 +4742,30 @@ globalThis.HTMLDetailsElement = Element;
 globalThis.HTMLDialogElement = Element;
 globalThis.SVGElement = Element;
 globalThis.SVGSVGElement = Element;
+// API-tamper probes check these globals exist with the listed methods on
+// their prototypes (e.g. `SVGTextContentElement.prototype.getExtentOfChar`).
+globalThis.SVGGraphicsElement = class SVGGraphicsElement extends Element {
+  getBBox() { return { x: 0, y: 0, width: 0, height: 0 }; }
+  getScreenCTM() { return null; }
+  getCTM() { return null; }
+};
+globalThis.SVGTextContentElement = class SVGTextContentElement extends Element {
+  getExtentOfChar() { return { x: 0, y: 0, width: 0, height: 0 }; }
+  getSubStringLength() { return 0; }
+  getComputedTextLength() { return 0; }
+};
+globalThis.TextMetrics = class TextMetrics {
+  constructor() { this.width = 0; this.actualBoundingBoxLeft = 0; this.actualBoundingBoxRight = 0;
+    this.actualBoundingBoxAscent = 0; this.actualBoundingBoxDescent = 0; }
+};
+globalThis.GPUAdapter = class GPUAdapter {
+  requestAdapterInfo() { return Promise.resolve({ vendor: 'google', architecture: 'unknown', device: '', description: '' }); }
+  requestDevice() { return Promise.reject(new Error('GPUDevice unavailable')); }
+};
+globalThis.GPU = class GPU {
+  requestAdapter() { return Promise.resolve(null); }
+  getPreferredCanvasFormat() { return 'bgra8unorm'; }
+};
 globalThis.CharacterData = CharacterData;
 globalThis.Text = Text;
 globalThis.Comment = Comment;
@@ -4947,6 +5319,7 @@ class _Canvas2D {
     this._stateStack = [];
   }
   _parseColor(css) {
+    if (typeof css !== 'string') css = String(css ?? '');
     if (!css || css === 'none') return [0,0,0,0];
     if (css.startsWith('#')) {
       const hex = css.slice(1);
@@ -5113,21 +5486,10 @@ Element.prototype.getContext = function getContext(type) {
     if (this._glCtx) return this._glCtx;
     const base = {
       canvas: this,
-      getExtension(name) {
-        if (name === 'WEBGL_debug_renderer_info') return { UNMASKED_VENDOR_WEBGL: 0x9245, UNMASKED_RENDERER_WEBGL: 0x9246 };
-        return null;
-      },
-      getParameter(pname) {
-        if (pname === 0x9245) return _fp('gpuVendor');
-        if (pname === 0x9246) return _fp('gpu');
-        if (pname === 0x1F01) return 'WebKit WebGL';  // GL_RENDERER
-        if (pname === 0x1F00) return 'WebKit';          // GL_VENDOR
-        if (pname === 0x1F02) return 'OpenGL ES 3.0 (ANGLE)'; // GL_VERSION
-        if (pname === 0x8B8C) return 'WebGL GLSL ES 3.00 (ANGLE)'; // GL_SHADING_LANGUAGE_VERSION
-        return 0;
-      },
-      getSupportedExtensions() { return ['WEBGL_debug_renderer_info','EXT_texture_filter_anisotropic','WEBGL_compressed_texture_s3tc','WEBGL_lose_context']; },
-      getShaderPrecisionFormat() { return { rangeMin: 127, rangeMax: 127, precision: 23 }; },
+      // Introspection methods (getParameter/getExtension/getSupportedExtensions/
+      // getShaderPrecisionFormat) and all GL constants come from the
+      // WebGL{,2}RenderingContext.prototype set up at bootstrap — own copies
+      // here would shadow them.
       createBuffer() { return {}; }, createShader() { return {}; }, createProgram() { return {}; },
       shaderSource() {}, compileShader() {}, attachShader() {}, linkProgram() {},
       getProgramParameter() { return true; }, useProgram() {}, deleteShader() {},
@@ -5149,7 +5511,6 @@ Element.prototype.getContext = function getContext(type) {
       getError() { return 0; }, isContextLost() { return false; },
       getContextAttributes() { return { alpha: true, antialias: true, depth: true, stencil: false, failIfMajorPerformanceCaveat: false, powerPreference: 'default', preserveDrawingBuffer: false, desynchronized: false, premultipliedAlpha: true }; },
       createFramebuffer() { return {}; }, bindFramebuffer() {}, framebufferTexture2D() {},
-      readPixels(x,y,w,h,f,t,d) { if(d) for(let i=0;i<d.length;i++) d[i]=Math.floor(Math.random()*256); },
       VERTEX_SHADER: 0x8B31, FRAGMENT_SHADER: 0x8B30, LINK_STATUS: 0x8B82,
       ARRAY_BUFFER: 0x8892, STATIC_DRAW: 0x88E4, FLOAT: 0x1406,
       TRIANGLES: 0x0004, COLOR_BUFFER_BIT: 0x4000, DEPTH_BUFFER_BIT: 0x100,
@@ -5337,31 +5698,133 @@ if (typeof Document !== 'undefined' && typeof Document.parseHTMLUnsafe !== 'func
   _markNative(Document.parseHTMLUnsafe);
 }
 
-globalThis.AudioContext = class AudioContext {
-  constructor() { this.sampleRate=_fp('audioSampleRate'); this.state='running'; this.currentTime=0; this.baseLatency=_fp('audioBaseLatency'); this.destination={maxChannelCount:2,numberOfInputs:1,numberOfOutputs:0,channelCount:2}; }
-  createOscillator() { return {type:'sine',frequency:{value:440,setValueAtTime(){}},connect(){},start(){},stop(){},disconnect(){},addEventListener(){}}; }
-  createDynamicsCompressor() { return {threshold:{value:_fp('compThreshold')},knee:{value:_fp('compKnee')},ratio:{value:_fp('compRatio')},attack:{value:0.003},release:{value:0.25},reduction:0,connect(){},disconnect(){}}; }
-  createAnalyser() {
-    return {fftSize:2048,frequencyBinCount:1024,connect(){},disconnect(){},
-      getByteFrequencyData(a){for(let i=0;i<a.length;i++)a[i]=Math.floor(_fpRand(600+i)*10);},
-      getFloatFrequencyData(a){for(let i=0;i<a.length;i++)a[i]=-100+_fpRand(700+i)*5;}
-    };
+function _audioParam(value, min, max) {
+  const FLT_MAX = 3.4028234663852886e38;
+  return {
+    value, defaultValue: value,
+    minValue: min === undefined ? -FLT_MAX : min,
+    maxValue: max === undefined ? FLT_MAX : max,
+    setValueAtTime(v) { this.value = v; return this; },
+    linearRampToValueAtTime() { return this; },
+    exponentialRampToValueAtTime() { return this; },
+    setTargetAtTime() { return this; },
+    setValueCurveAtTime() { return this; },
+    cancelScheduledValues() { return this; },
+    cancelAndHoldAtTime() { return this; },
+  };
+}
+const _audioNodeBase = { connect(){}, disconnect(){}, addEventListener(){}, removeEventListener(){},
+  channelCount: 2, channelCountMode: 'max', channelInterpretation: 'speakers', numberOfInputs: 1, numberOfOutputs: 1 };
+// Every AudioNode exposes `.context` back to its AudioContext — fingerprint
+// probes read `analyser.context.sampleRate`.
+function _audioNode(ctx, extra) { return Object.assign({ context: ctx }, _audioNodeBase, extra); }
+// Real AudioBuffer: detectors check `"copyFromChannel" in AudioBuffer.prototype`
+// (ReferenceError if the global is missing) and verify copyFromChannel copies
+// what getChannelData exposes — one backing Float32Array per channel.
+globalThis.AudioBuffer = class AudioBuffer {
+  constructor(options) {
+    const o = options || {};
+    const nc = Math.max(1, o.numberOfChannels || 1);
+    const len = Math.max(0, (o.length | 0) || 0);
+    this._channels = [];
+    for (let i = 0; i < nc; i++) {
+      this._channels.push(o.channelData && o.channelData[i]
+        ? Float32Array.from(o.channelData[i])
+        : new Float32Array(len));
+    }
+    this._length = len;
+    this._sr = o.sampleRate || 44100;
   }
-  createGain() { return {gain:{value:1,setValueAtTime(){}},connect(){},disconnect(){}}; }
-  createBiquadFilter() { return {type:'lowpass',frequency:{value:350},Q:{value:1},connect(){},disconnect(){}}; }
-  createBufferSource() { return {buffer:null,connect(){},start(){},stop(){},disconnect(){},loop:false}; }
-  createBuffer(ch,len,rate) { return {length:len,sampleRate:rate,numberOfChannels:ch,getChannelData(c){return new Float32Array(len);},duration:len/rate}; }
-  createScriptProcessor() { return {connect(){},disconnect(){},onaudioprocess:null}; }
+  get numberOfChannels() { return this._channels.length; }
+  get length() { return this._length; }
+  get sampleRate() { return this._sr; }
+  get duration() { return this._length / this._sr; }
+  getChannelData(c) { return this._channels[c] || (this._channels[c] = new Float32Array(this._length)); }
+  copyFromChannel(dest, channel, bufferOffset) {
+    const src = this.getChannelData(channel);
+    const off = bufferOffset || 0;
+    const n = Math.min(dest.length, src.length - off);
+    for (let i = 0; i < n; i++) dest[i] = src[off + i];
+  }
+  copyToChannel(src, channel, bufferOffset) {
+    const dst = this.getChannelData(channel);
+    const off = bufferOffset || 0;
+    const n = Math.min(src.length, dst.length - off);
+    for (let i = 0; i < n; i++) dst[off + i] = src[i];
+  }
+};
+Object.defineProperty(AudioBuffer.prototype, Symbol.toStringTag, { value: 'AudioBuffer', configurable: true });
+_markNative(AudioBuffer);
+_markNativeProto(AudioBuffer.prototype);
+// The context classes are (re)defined below — sweep their prototypes only
+// after the definitions exist, otherwise snapshot creation crashes on
+// `undefined.prototype`.
+globalThis.BaseAudioContext = class BaseAudioContext {
+  constructor() { this.sampleRate=_fp('audioSampleRate'); this.state='running'; this.currentTime=0; this.baseLatency=_fp('audioBaseLatency'); this.outputLatency=0;
+    this.destination=_audioNode(this, {maxChannelCount:2,numberOfInputs:1,numberOfOutputs:0,channelCount:2});
+    this.listener={positionX:_audioParam(0),positionY:_audioParam(0),positionZ:_audioParam(0),forwardX:_audioParam(0),forwardY:_audioParam(0),forwardZ:_audioParam(-1),upX:_audioParam(0),upY:_audioParam(1),upZ:_audioParam(0),setPosition(){},setOrientation(){}}; }
+  // BaseAudioContext is an EventTarget (detectors addEventListener("complete")
+  // on OfflineAudioContext).
+  addEventListener(t, f) { if (typeof f === 'function') { const l = this._ls || (this._ls = {}); (l[t] || (l[t] = [])).push(f); } }
+  removeEventListener(t, f) { const l = this._ls && this._ls[t]; if (l) { const i = l.indexOf(f); if (i >= 0) l.splice(i, 1); } }
+  dispatchEvent(ev) { const l = (this._ls && this._ls[ev.type]) || []; for (const f of l.slice()) { try { f.call(this, ev); } catch (e) {} } return true; }
+  createOscillator() { return _audioNode(this, {type:'sine',frequency:_audioParam(440),detune:_audioParam(0),start(){},stop(){},onended:null}); }
+  createDynamicsCompressor() { return _audioNode(this, {threshold:_audioParam(_fp('compThreshold'),-100,0),knee:_audioParam(_fp('compKnee'),0,40),ratio:_audioParam(_fp('compRatio'),1,20),attack:_audioParam(0.003,0,1),release:_audioParam(0.25,0,1),reduction:0}); }
+  createAnalyser() {
+    return _audioNode(this, {fftSize:2048,frequencyBinCount:1024,minDecibels:-100,maxDecibels:-30,smoothingTimeConstant:0.8,
+      getByteFrequencyData(a){for(let i=0;i<a.length;i++)a[i]=Math.floor(_fpRand(600+i)*10);},
+      getFloatFrequencyData(a){for(let i=0;i<a.length;i++)a[i]=-100+_fpRand(700+i)*5;},
+      getByteTimeDomainData(a){for(let i=0;i<a.length;i++)a[i]=128;},
+      getFloatTimeDomainData(a){for(let i=0;i<a.length;i++)a[i]=0;}
+    });
+  }
+  createGain() { return _audioNode(this, {gain:_audioParam(1)}); }
+  createBiquadFilter() { return _audioNode(this, {type:'lowpass',frequency:_audioParam(350,0,24000),Q:_audioParam(1),detune:_audioParam(0),gain:_audioParam(0,-40,40),
+    getFrequencyResponse(){}}); }
+  createBufferSource() { return _audioNode(this, {buffer:null,playbackRate:_audioParam(1),detune:_audioParam(0),loop:false,loopStart:0,loopEnd:0,start(){},stop(){},onended:null}); }
+  createBuffer(ch,len,rate) { return new AudioBuffer({numberOfChannels:ch,length:len,sampleRate:rate||this.sampleRate}); }
+  createScriptProcessor() { return _audioNode(this, {onaudioprocess:null,bufferSize:4096}); }
+  createChannelMerger(n) { return _audioNode(this, {numberOfInputs:n||6,numberOfOutputs:1}); }
+  createChannelSplitter(n) { return _audioNode(this, {numberOfInputs:1,numberOfOutputs:n||6}); }
+  createDelay() { return _audioNode(this, {delayTime:_audioParam(0,0,1)}); }
+  createWaveShaper() { return _audioNode(this, {curve:null,oversample:'none'}); }
   decodeAudioData(buf) { return Promise.resolve(this.createBuffer(2,44100,44100)); }
   resume() { this.state='running'; return Promise.resolve(); }
   suspend() { this.state='suspended'; return Promise.resolve(); }
-  close() { this.state='closed'; return Promise.resolve(); }
 };
-globalThis.OfflineAudioContext = class OfflineAudioContext extends AudioContext {
-  constructor(ch,len,rate) { super(); this.length=len||44100; }
-  startRendering() { return Promise.resolve(this.createBuffer(2,this.length,44100)); }
+globalThis.AudioContext = class AudioContext extends BaseAudioContext {
+  close() { this.state='closed'; return Promise.resolve(); }
+  createMediaStreamDestination() { return _audioNode(this, {stream:{getTracks(){return [];},getAudioTracks(){return [];}}}); }
+  createMediaElementSource(el) { return _audioNode(this, {mediaElement:el||null}); }
+  getOutputTimestamp() { return {contextTime:this.currentTime,performanceTime:0}; }
+};
+globalThis.OfflineAudioContext = class OfflineAudioContext extends BaseAudioContext {
+  constructor(ch,len,rate) { super(); this.sampleRate=rate||44100; this.length=len||44100; this.numberOfChannels=ch||1; }
+  startRendering() {
+    const buf = this.createBuffer(this.numberOfChannels,this.length,this.sampleRate);
+    // Deterministic, identity-seeded pseudo-signal: an all-zero render reads as
+    // "audio is fake" to detectors; real Chrome yields a compressor-shaped
+    // waveform. Stable per fingerprint seed, nonzero, consistent between
+    // getChannelData and copyFromChannel.
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) {
+      d[i] = (_fpRand(8100 + i) * 2 - 1) * 0.1 * Math.exp(-i / (d.length * 0.7));
+    }
+    const p = Promise.resolve(buf);
+    // Real implementations fire 'complete' with the rendered buffer.
+    p.then(() => {
+      const ev = { type: 'complete', renderedBuffer: buf, target: this };
+      if (typeof this.oncomplete === 'function') { try { this.oncomplete(ev); } catch (e) {} }
+      this.dispatchEvent(ev);
+    });
+    return p;
+  }
 };
 globalThis.webkitAudioContext = globalThis.AudioContext;
+globalThis.webkitOfflineAudioContext = globalThis.OfflineAudioContext;
+_markNativeProto(globalThis.BaseAudioContext.prototype);
+_markNativeProto(globalThis.AudioContext.prototype);
+_markNativeProto(globalThis.OfflineAudioContext.prototype);
 
 globalThis.speechSynthesis = {
   speaking: false, pending: false, paused: false,
@@ -5518,7 +5981,7 @@ globalThis.caches = {
   keys() { return Promise.resolve([]); },
 };
 
-_markNative(AudioContext); _markNative(OfflineAudioContext);
+_markNative(BaseAudioContext); _markNative(AudioContext); _markNative(OfflineAudioContext);
 _markNative(SpeechSynthesisUtterance);
 _markNative(MediaStream); _markNative(MediaStreamTrack);
 _markNative(RTCPeerConnection); _markNative(RTCSessionDescription); _markNative(RTCIceCandidate);
@@ -5652,9 +6115,37 @@ globalThis.cancelIdleCallback = globalThis.cancelIdleCallback || function(id) { 
 if (typeof ReadableStream === 'undefined') {
   globalThis.ReadableStream = class ReadableStream {
     constructor(source = {}, strategy = {}) {
-      this._source = source; this._queue = []; this._closed = false;
-      this.locked = false;
-      if (source.start) source.start({ enqueue: (chunk) => this._queue.push(chunk), close: () => { this._closed = true; }, error: () => {} });
+      this._source = source; this._queue = []; this._closed = false; this._errored = null;
+      this.locked = false; this._pullBusy = false; this._pendingReads = [];
+      const stream = this;
+      this._controller = {
+        enqueue: (chunk) => {
+          if (stream._closed) return;
+          // A parked read gets the chunk directly; otherwise buffer it.
+          if (stream._pendingReads.length > 0) {
+            stream._pendingReads.shift().resolve({ value: chunk, done: false });
+          } else {
+            stream._queue.push(chunk);
+          }
+        },
+        close: () => {
+          if (stream._closed) return;
+          stream._closed = true;
+          const waiters = stream._pendingReads.splice(0);
+          for (const w of waiters) w.resolve({ value: undefined, done: true });
+        },
+        error: (e) => {
+          if (stream._closed) return;
+          stream._errored = e || new Error("stream error");
+          stream._closed = true;
+          const waiters = stream._pendingReads.splice(0);
+          for (const w of waiters) w.reject(stream._errored);
+        },
+        get desiredSize() { return 1; },
+      };
+      if (source.start) {
+        try { source.start(this._controller); } catch (e) { this._controller.error(e); }
+      }
     }
     getReader() {
       this.locked = true;
@@ -5662,18 +6153,60 @@ if (typeof ReadableStream === 'undefined') {
       return {
         read() {
           if (stream._queue.length > 0) return Promise.resolve({ value: stream._queue.shift(), done: false });
-          if (stream._closed) return Promise.resolve({ value: undefined, done: true });
-          return Promise.resolve({ value: undefined, done: true });
+          if (stream._closed) {
+            if (stream._errored) return Promise.reject(stream._errored);
+            return Promise.resolve({ value: undefined, done: true });
+          }
+          // Pull-driven source (e.g. React's partial-flight re-wrapping
+          // `new ReadableStream({async pull(controller){...}})`): ask the
+          // source for a chunk, then hand back whatever it enqueued.
+          if (stream._source.pull && !stream._pullBusy) {
+            stream._pullBusy = true;
+            return Promise.resolve()
+              .then(() => stream._source.pull(stream._controller))
+              .then(() => {
+                stream._pullBusy = false;
+                if (stream._queue.length > 0) return { value: stream._queue.shift(), done: false };
+                if (stream._errored) throw stream._errored;
+                return { value: undefined, done: true };
+              }, (e) => {
+                stream._pullBusy = false;
+                stream._controller.error(e);
+                throw stream._errored;
+              });
+          }
+          // Live producer (a TransformStream's readable side, or any source
+          // that enqueues after read): park the read until
+          // enqueue/close/error wakes it.
+          return new Promise((resolve, reject) => {
+            stream._pendingReads.push({ resolve, reject });
+          });
         },
         releaseLock() { stream.locked = false; },
-        cancel() { stream._closed = true; return Promise.resolve(); },
+        cancel() {
+          stream._closed = true;
+          if (stream._source.cancel) { try { stream._source.cancel(); } catch (e) {} }
+          return Promise.resolve();
+        },
         get closed() { return stream._closed ? Promise.resolve() : new Promise(() => {}); },
       };
     }
     cancel() { this._closed = true; return Promise.resolve(); }
     pipeTo(dest) { return Promise.resolve(); }
-    pipeThrough(transform) { return transform.readable || new ReadableStream(); }
-    tee() { return [new ReadableStream(), new ReadableStream()]; }
+    pipeThrough(transform) { return transform?.readable || new ReadableStream(); }
+    tee() {
+      // Materialize what's buffered, then hand out two independent streams
+      // over a copy — clone-style consumption. (Interleaved tee of a live
+      // pull-driven source is not supported; no in-the-wild consumer we
+      // care about does that.)
+      const chunks = this._queue.slice();
+      const wasClosed = this._closed;
+      const wasErr = this._errored;
+      const mk = () => new ReadableStream({
+        start(c) { for (const ch of chunks) c.enqueue(ch); if (wasErr) c.error(wasErr); else if (wasClosed) c.close(); },
+      });
+      return [mk(), mk()];
+    }
     [Symbol.asyncIterator]() {
       const reader = this.getReader();
       return { next: () => reader.read(), return: () => { reader.releaseLock(); return Promise.resolve({done:true}); } };
@@ -5702,9 +6235,22 @@ if (typeof WritableStream === 'undefined') {
 }
 if (typeof TransformStream === 'undefined') {
   globalThis.TransformStream = class TransformStream {
+    // Minimal but real: writes flow through `transformer.transform` (or pass
+    // through untouched) into the readable side, so pipeThrough() doesn't
+    // silently drop the payload the way an empty stub does.
     constructor(transformer = {}) {
-      this.readable = new ReadableStream();
-      this.writable = new WritableStream();
+      let rc = null;
+      this.readable = new ReadableStream({ start(c) { rc = c; } });
+      this.writable = new WritableStream({
+        write(chunk) {
+          try {
+            if (transformer.transform) {
+              transformer.transform(chunk, { enqueue: (c2) => { if (rc) rc.enqueue(c2); }, close: () => { if (rc) rc.close(); } });
+            } else if (rc) rc.enqueue(chunk);
+          } catch (e) { if (rc) rc.error(e); }
+        },
+        close() { if (rc) rc.close(); },
+      });
     }
   };
 }
@@ -6082,8 +6628,6 @@ globalThis.__obscura_init = function() {
   _fpSeed = Date.now() ^ (Math.random() * 0xFFFFFFFF >>> 0);
   _fpCache = null;
   _installWasmStreamingFallback();
-
-  globalThis.document = new Document(+_dom("document_node_id"));
 
   const scr = _fp('screen');
   const sw = scr[0], sh = scr[1];
