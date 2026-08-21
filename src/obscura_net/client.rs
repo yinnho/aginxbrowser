@@ -273,6 +273,14 @@ impl ObscuraHttpClient {
             let mut builder = Client::builder()
                 .redirect(Policy::none())
                 .timeout(Duration::from_secs(30))
+                .connect_timeout(Duration::from_secs(10))
+                // Bug #24 (long-run degradation): a pooled connection that went
+                // half-dead while idle (NAT drop, proxy reset) used to be handed
+                // back out and stall every subsequent request until the process
+                // was restarted. Keep the idle window short and send TCP
+                // keepalive so the pool reaps stale connections instead.
+                .pool_idle_timeout(Duration::from_secs(60))
+                .tcp_keepalive(Duration::from_secs(30))
                 .danger_accept_invalid_certs(false);
                 // No .gzip()/.brotli(): without these reqwest does not
                 // advertise Accept-Encoding, so servers reply with plain text
@@ -296,6 +304,11 @@ impl ObscuraHttpClient {
             Client::builder()
                 .redirect(Policy::none())
                 .timeout(Duration::from_secs(30))
+                .connect_timeout(Duration::from_secs(10))
+                // See get_client: short idle window + keepalive against
+                // half-dead pooled connections (bug #24).
+                .pool_idle_timeout(Duration::from_secs(60))
+                .tcp_keepalive(Duration::from_secs(30))
                 .danger_accept_invalid_certs(false)
                 .build()
                 .expect("failed to build direct HTTP client")

@@ -6506,6 +6506,13 @@ function runWorkerMessage(worker, data) {
           WebSocket: globalThis.WebSocket, Event: globalThis.Event,
           MessageEvent: globalThis.MessageEvent, ErrorEvent: globalThis.ErrorEvent,
           indexedDB: { open: () => ({ onsuccess: null, onerror: null, onupgradeneeded: null }) },
+          // Worker scope must expose OffscreenCanvas too: WorkOS Radar's
+          // signals-worker runs its WebGL fingerprint collector in the worker
+          // and crashed with `d.OffscreenCanvas is not a constructor` when
+          // missing (which then wedged the whole session's dispatch).
+          OffscreenCanvas: globalThis.OffscreenCanvas,
+          ImageBitmap: globalThis.ImageBitmap,
+          createImageBitmap: globalThis.createImageBitmap,
           caches: { open: () => Promise.reject(new DOMException('NotFoundError')), keys: () => Promise.resolve([]) },
           isSecureContext: true,
           origin: (globalThis.location && globalThis.location.origin) || 'https://example.com',

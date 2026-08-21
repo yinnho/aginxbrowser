@@ -1264,7 +1264,12 @@ impl Page {
             match js.evaluate_for_cdp(expression, return_by_value, await_promise).await {
                 Ok(info) => info,
                 Err(e) => {
-                    tracing::debug!("evaluate_for_cdp error: {}", e);
+                    // Bug #24 diagnosis aid: an erroring eval previously surfaced
+                    // as a silent `null` at the HTTP layer (and only a debug log
+                    // here), which is indistinguishable from a JS null return.
+                    // warn! so a wedged/degraded runtime is visible in logs.
+                    let preview: String = expression.chars().take(120).collect();
+                    tracing::warn!("evaluate_for_cdp error for '{}': {}", preview, e);
                     crate::obscura_js::runtime::RemoteObjectInfo {
                         js_type: "undefined".into(),
                         subtype: None,

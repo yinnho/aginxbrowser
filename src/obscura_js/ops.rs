@@ -526,12 +526,15 @@ fn build_request_client(proxy_url: Option<&str>) -> Result<reqwest::Client, Stri
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_millis(timeout_ms))
-        // Be explicit about pool size: default is unbounded which is fine,
-        // but pool_idle_timeout default (90s) is short for SPA-heavy
-        // workloads where the same origin is hit dozens of times across
-        // a navigation. Keep connections warm longer.
-        .pool_idle_timeout(std::time::Duration::from_secs(300))
-        .tcp_keepalive(std::time::Duration::from_secs(60));
+        .connect_timeout(std::time::Duration::from_secs(10))
+        // Be explicit about pool hygiene: these clients are cached
+        // process-wide (FETCH_CLIENT_CACHE), and a half-dead idle connection
+        // handed back out of the pool stalls every later request to that
+        // origin (the "long-run dispatch degradation", bug #24). A short
+        // idle window plus TCP keepalive reaps stale connections instead of
+        // trusting them.
+        .pool_idle_timeout(std::time::Duration::from_secs(60))
+        .tcp_keepalive(std::time::Duration::from_secs(30));
     if let Some(proxy) = proxy_url {
         let p = reqwest::Proxy::all(proxy)
             .map_err(|e| format!("Invalid op_fetch_url proxy '{}': {}", proxy, e))?;
