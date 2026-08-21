@@ -107,6 +107,12 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         None => return "null".to_string(),
     };
 
+    // Node-id args that fail to parse must NOT silently become node 0 (the
+    // document root) — a fake-receiver call like
+    // `Element.prototype.setHTMLUnsafe.call({})` would otherwise wipe the
+    // whole document. Mutating commands no-op on an invalid id.
+    let parse_nid = |s: &str| -> Option<NodeId> { s.parse::<u32>().ok().map(NodeId::new) };
+
     match cmd.as_str() {
         "document_node_id" => dom.document().index().to_string(),
         "document_title" => serde_json::to_string(&gs.title).unwrap_or("\"\"".into()),
@@ -215,8 +221,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             serde_json::to_string(&names).unwrap_or("[]".into())
         }
         "set_attribute" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
-            let node_id = NodeId::new(nid);
+            let node_id = match parse_nid(&arg1) { Some(id) => id, None => return "false".into() };
             if let Some((name, value)) = arg2.split_once('\0') {
                 if name == "id" {
                     let old_id = dom.get_node(node_id).and_then(|n| n.get_attribute("id").map(|s| s.to_string()));
@@ -237,25 +242,29 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             serde_json::to_string(&dom.outer_html(NodeId::new(nid))).unwrap_or("\"\"".into())
         }
         "append_child" => {
-            let parent = arg1.parse::<u32>().unwrap_or(0);
-            let child = arg2.parse::<u32>().unwrap_or(0);
-            dom.append_child(NodeId::new(parent), NodeId::new(child));
+            let (parent, child) = match (parse_nid(&arg1), parse_nid(&arg2)) {
+                (Some(p), Some(c)) => (p, c),
+                _ => return "false".into(),
+            };
+            dom.append_child(parent, child);
             "true".into()
         }
         "remove_child" => {
-            let child = arg1.parse::<u32>().unwrap_or(0);
-            dom.remove_child(NodeId::new(child));
+            let child = match parse_nid(&arg1) { Some(id) => id, None => return "false".into() };
+            dom.remove_child(child);
             "true".into()
         }
         "insert_before" => {
-            let new_node = arg1.parse::<u32>().unwrap_or(0);
-            let ref_node = arg2.parse::<u32>().unwrap_or(0);
-            dom.insert_before(NodeId::new(ref_node), NodeId::new(new_node));
+            let (new_node, ref_node) = match (parse_nid(&arg1), parse_nid(&arg2)) {
+                (Some(n), Some(r)) => (n, r),
+                _ => return "false".into(),
+            };
+            dom.insert_before(ref_node, new_node);
             "true".into()
         }
         "remove_attribute" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
-            dom.with_node_mut(NodeId::new(nid), |n| {
+            let nid = match parse_nid(&arg1) { Some(id) => id, None => return "false".into() };
+            dom.with_node_mut(nid, |n| {
                 if let NodeData::Element { attrs, .. } = &mut n.data {
                     attrs.retain(|a| a.name.local.as_ref() != arg2.as_str());
                 }
@@ -263,8 +272,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             "true".into()
         }
         "set_inner_html" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
-            let target = NodeId::new(nid);
+            let target = match parse_nid(&arg1) { Some(id) => id, None => return "false".into() };
             let children = dom.children(target);
             for child in children {
                 dom.detach(child);
@@ -277,8 +285,8 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             "true".into()
         }
         "set_text_content" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
-            dom.with_node_mut(NodeId::new(nid), |n| {
+            let nid = match parse_nid(&arg1) { Some(id) => id, None => return "false".into() };
+            dom.with_node_mut(nid, |n| {
                 match &mut n.data {
                     NodeData::Text { contents } => { *contents = arg2.clone(); }
                     NodeData::Comment { contents } => { *contents = arg2.clone(); }

@@ -25,7 +25,33 @@ globalThis.dispatchEvent = function(event) {
   return !event.defaultPrevented;
 };
 
-const _dom = (cmd, a1, a2) => Deno.core.ops.op_dom(cmd, String(a1 ?? ""), String(a2 ?? ""));
+// Receiver validation: real browsers throw TypeError("Illegal invocation")
+// when a DOM method is called with a fake receiver (e.g.
+// Object.create(HTMLSelectElement.prototype).setHTMLUnsafe(...) — a classic
+// bot-detector probe). Our shims used to pass this._nid (undefined) down,
+// where the Rust op's `parse().unwrap_or(0)` silently targeted node 0 — the
+// DOCUMENT — and e.g. set_inner_html wiped the whole page. Commands not in
+// _domStrA1 take a numeric node id as a1; reject anything else.
+const _domRaw = (cmd, a1, a2) => Deno.core.ops.op_dom(cmd, String(a1 ?? ""), String(a2 ?? ""));
+const _domStrA1 = new Set([
+  "create_element", "create_text_node", "create_comment_node",
+  "create_processing_instruction", "create_doctype",
+  "create_document_fragment",
+  "query_selector", "query_selector_all", "get_element_by_id",
+  "document_node_id", "document_title", "document_url", "document_encoding",
+  "document_element", "document_doctype",
+]);
+const _domNumA2 = new Set(["append_child", "insert_before", "compare_order"]);
+const _dom = (cmd, a1, a2) => {
+  if (!_domStrA1.has(cmd) && (a1 === undefined || a1 === null || a1 === "" || isNaN(+a1))) {
+    throw new TypeError("Illegal invocation");
+  }
+  if (_domNumA2.has(cmd) && (a2 === undefined || a2 === null || a2 === "" || isNaN(+a2))) {
+    throw new TypeError("Illegal invocation");
+  }
+  return _domRaw(cmd, a1, a2);
+};
+
 
 const _nativeFns = new Set();
 const _origToString = Function.prototype.toString;

@@ -1750,6 +1750,34 @@ mod tests {
     }
 
     #[test]
+    fn test_fake_receiver_dom_probe_throws_and_does_not_wipe_document() {
+        // Bot detectors probe with a fake receiver:
+        //   Object.create(HTMLSelectElement.prototype).setHTMLUnsafe(...)
+        // A real browser throws TypeError("Illegal invocation"). Our shim must
+        // do the same (this._nid is undefined on the fake object), and must NOT
+        // let the undefined nid fall through to Rust as node 0 = document.
+        let mut rt = setup_runtime(r#"<div id="target"><p>Survive</p></div>"#);
+        let result = rt.evaluate(
+            r#"(function() {
+                var threw = false, msg = '';
+                try {
+                    Object.create(HTMLSelectElement.prototype).setHTMLUnsafe('<strong>Wiped</strong>');
+                } catch (e) {
+                    threw = true; msg = e.name;
+                }
+                var body = document.getElementById('target');
+                return JSON.stringify([threw, msg, document.body.children.length,
+                    body ? body.innerHTML : null]);
+            })()"#,
+        ).unwrap();
+        let arr: Vec<serde_json::Value> = serde_json::from_str(result.as_str().unwrap()).unwrap();
+        assert_eq!(arr[0], serde_json::json!(true), "fake-receiver probe should throw");
+        assert_eq!(arr[1], serde_json::json!("TypeError"), "should throw TypeError");
+        assert!(arr[2].as_u64().unwrap() >= 1, "document body should still have children");
+        assert!(arr[3].as_str().unwrap().contains("Survive"), "document content must survive: {}", arr[3]);
+    }
+
+    #[test]
     fn test_input_value() {
         let mut rt = setup_runtime(r#"<form><input id="name" type="text" value="initial"><textarea id="bio">old text</textarea></form>"#);
         let val = rt.evaluate("document.getElementById('name').value").unwrap();
