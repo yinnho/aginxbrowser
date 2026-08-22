@@ -248,8 +248,41 @@ AGINXBROWSER_* 产品化环境变量、`__obscura_css` 注入时点（先于脚�
      拆开多次 evaluate；②`navigate()` 自带的 settle 窗口会追掉窗口内触发的
      timer 导航（inner 链直接消化），要测泵路径必须在 navigate 返回后再
      注入 timer。
-3. **批次 2（网络回调组）**：on_request/on_response 注册表 + response body
-   存储/流式取回 + sync_js_network_events。为服务层网络可见性铺路。
+3. **批次 2（网络回调组）✅ 2026-08-23**：337→344 测试。三件套按上游同
+   源结构落进我们的模块划分：
+   - **diting_net**：`CallbackRegistry`（on_request/on_response 注册表，
+     upstream #408 逐行同源）+ `RequestInfo` + `ResourceType`（8 类 CDP 标签）
+     + `fetch_with_callbacks`/`post_form_with_callbacks`（核心
+     `fetch_with_method_traced`：每跳发送前 fire_request（带完整构造头）、
+     终响应后 fire_response；`None` 走零开销原路径）。**未吸收上游
+     `ResourceRequest`**（mode/credentials/max_response_bytes 的按资源整形）
+     ——我们的 JS fetch op 自带 CORS/credentials 逻辑，net 层按资源整形是
+     渲染浪潮的伴生架构，等有消费者再立。
+   - **diting_js**：`op_fetch_url` 收尾三件事——响应体按
+     `fetch-{N}` 存入 state（LRU：`OBSCURA_NETWORK_BODY_BUFFER_ENTRIES`=128
+     / `_BYTES`=2MiB）+ `JsNetworkEvent` 入队（cap 4096，upstream #406）
+     + fire 回调（JS 发起的流量也进页面观察者视野）。文本 Content-Type
+     存 lossy-UTF-8，其余 base64。runtime 暴露 `set_callbacks`/
+     `get_network_response_body`/`clear_network_response_bodies`/
+     `take_js_network_events`。
+   - **obscura_browser**：Page 持 `callbacks` + `response_bodies`（LRU 同
+     上限）；`record_network_event` 改返 request_id，新增
+     `_with_body` 变体（文档/脚本/样式表三类都存体，upstream #360）；
+     `get_response_body`（页面侧 → JS 侧兜底）/`take_response_body_raw`
+     （取走移交）/`alias_response_body`（loaderId 别名，#340）/
+     `clear_response_bodies`（双侧清）；`sync_js_network_events`（drain
+     JS 队列进 network_events，幂等）；`on_request`/`on_response`/
+     `off_request`/`off_response`。文档/脚本/样式表 fetch 全部走
+     `_with_callbacks`；stealth 文档 fetch 走 wreq 旁路（无回调钩子，
+     观察者仍见脚本/样式/JS fetch）。
+   - 测试 7 个：Document/Script/Stylesheet 三类回调齐发+请求头非空/
+     off_request 双摘除可见/文档体存取+take 移交语义/alias 别名/
+     octet-stream base64+字节精确回取/JS fetch→观察者+sync 后
+     `fetch-{N}` 事件+体可解析+幂等 drain/clear 双侧清。测试基建新增
+     `local_http_server_typed`（按路由 Content-Type，老 helper 委派它）。
+   - 记档：**服务层尚无 network_events 消费者**——本批把内核管道铺通，
+     `/network` 接口或 MCP 网络可见性是产品侧后续立项；届时消费点自行
+     调 `sync_js_network_events`（pump 里不预调，避免无读者时白攒事件）。
 4. **批次 3（读通 + 改名 + C 组清算）**：全文件逐段精读一遍（此时已吸收
    B 组，剩余 diff 只剩渲染段与 frame 段，均为「明确不吸收+有理由」）→
    `obscura_browser` → `diting_browser`（Page/BrowserContext 名字保留，

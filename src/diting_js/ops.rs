@@ -77,6 +77,84 @@ pub struct ObscuraState {
     /// flight, and the CDP consumer snapshots before the script (and its
     /// load event) lands (upstream a6bb741).
     pub(crate) dynamic_script_fetches: std::cell::Cell<u32>,
+    /// Passive on_request/on_response registry owned by the page this realm
+    /// renders. JS fetch()/XHR requests fire it so page-scoped observers see
+    /// script-initiated traffic too (upstream #408). None when the runtime
+    /// has no owning page (bare module-loader runtimes).
+    pub(crate) callbacks: Option<std::sync::Arc<crate::diting_net::CallbackRegistry>>,
+    /// Response bodies retained for script-initiated requests (fetch/XHR),
+    /// keyed `fetch-{N}` — the same id the paired `js_network_events` entry
+    /// carries, so CDP `Network.getResponseBody` resolves. LRU-bounded by
+    /// `response_body_entry_limit` / `response_body_byte_limit`.
+    pub(crate) network_response_bodies: std::collections::HashMap<String, StoredNetworkResponseBody>,
+    pub(crate) network_response_body_order: std::collections::VecDeque<String>,
+    pub(crate) network_response_body_counter: u64,
+    /// Network events recorded for script-initiated requests (fetch/XHR),
+    /// drained into the owning Page's `network_events` by
+    /// `Page::sync_js_network_events` so the CDP layer emits
+    /// requestWillBeSent / responseReceived for them (upstream #406).
+    pub(crate) js_network_events: Vec<JsNetworkEvent>,
+}
+
+/// A script-initiated request as a CDP-shaped network event. Static
+/// navigation subresources go through Page::record_network_event; this is
+/// the parallel channel for script-initiated requests, which run in the V8
+/// op layer and would otherwise never surface as Network events (#406).
+#[derive(Debug, Clone)]
+pub struct JsNetworkEvent {
+    /// Matches the `fetch-{N}` id under which the body is stored, so CDP
+    /// Network.getResponseBody resolves for the same request.
+    pub request_id: String,
+    pub url: String,
+    pub method: String,
+    pub status: u16,
+    pub response_headers: HashMap<String, String>,
+    pub body_size: usize,
+    pub timestamp: f64,
+}
+
+/// A response body retained for `Network.getResponseBody`. Text bodies are
+/// stored lossy-UTF-8 (`base64_encoded = false`); binary bodies base64.
+#[derive(Debug, Clone)]
+pub struct StoredNetworkResponseBody {
+    pub body: String,
+    pub base64_encoded: bool,
+}
+
+fn response_body_entry_limit() -> usize {
+    std::env::var("OBSCURA_NETWORK_BODY_BUFFER_ENTRIES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(128)
+}
+
+fn response_body_byte_limit() -> usize {
+    std::env::var("OBSCURA_NETWORK_BODY_BUFFER_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2 * 1024 * 1024)
+}
+
+/// True when a Content-Type deserves text storage rather than base64. Mirrors
+/// the page-side document/script/stylesheet decision (no Content-Type at all
+/// counts as text, matching the HTML-parse default).
+fn text_like_content_type(content_type: Option<&str>) -> bool {
+    let ct = match content_type {
+        Some(c) => c.split(';').next().unwrap_or(c).trim().to_ascii_lowercase(),
+        None => return true,
+    };
+    if ct.is_empty() {
+        return true;
+    }
+    ct.starts_with("text/")
+        || ct == "application/json"
+        || ct == "application/xml"
+        || ct == "application/xhtml+xml"
+        || ct == "application/javascript"
+        || ct == "application/ecmascript"
+        || ct == "image/svg+xml"
+        || ct.ends_with("+json")
+        || ct.ends_with("+xml")
 }
 
 impl ObscuraState {
@@ -98,6 +176,11 @@ impl ObscuraState {
             write_stream: std::cell::RefCell::new(None),
             already_started_scripts: RefCell::new(HashSet::new()),
             dynamic_script_fetches: std::cell::Cell::new(0),
+            callbacks: None,
+            network_response_bodies: std::collections::HashMap::new(),
+            network_response_body_order: std::collections::VecDeque::new(),
+            network_response_body_counter: 0,
+            js_network_events: Vec::new(),
         }
     }
 }
@@ -888,7 +971,7 @@ async fn op_fetch_url(
         }
     }
 
-    let (cookie_jar, in_flight, intercept_tx, proxy_url, http_client) = {
+    let (cookie_jar, in_flight, intercept_tx, proxy_url, http_client, callbacks) = {
         let state_borrow = state.borrow();
         let gs = state_borrow.borrow::<SharedState>().clone();
         let mut gs = gs.borrow_mut();
@@ -916,7 +999,7 @@ async fn op_fetch_url(
         } else {
             None
         };
-        (jar, in_flight, itx, proxy_url, gs.http_client.clone())
+        (jar, in_flight, itx, proxy_url, gs.http_client.clone(), gs.callbacks.clone())
     };
 
     let mut override_url: Option<String> = None;
@@ -1069,6 +1152,25 @@ async fn op_fetch_url(
     let mut current_method = req_method;
     let mut current_body = body;
     let mut redirects_followed: usize = 0;
+
+    // Passive on_request observers (upstream #408): fire with the request as
+    // the script shaped it, once, before the first hop goes out.
+    if let Some(cbs) = callbacks.as_ref() {
+        if cbs.has_request_callbacks().await {
+            let sent_headers: HashMap<String, String> = custom_headers
+                .iter()
+                .map(|(k, v)| (k.to_lowercase(), v.clone()))
+                .collect();
+            let info = crate::diting_net::RequestInfo {
+                url: url::Url::parse(&current_url).unwrap_or_else(|_| url::Url::parse("about:blank").unwrap()),
+                method: current_method.to_string(),
+                headers: sent_headers,
+                resource_type: crate::diting_net::ResourceType::Fetch,
+            };
+            cbs.fire_request(&info).await;
+        }
+    }
+
     let response = loop {
         let mut req = client.request(current_method.clone(), &current_url);
 
@@ -1243,7 +1345,87 @@ async fn op_fetch_url(
     let resp_body = String::from_utf8_lossy(&resp_bytes).to_string();
     let resp_body_base64 = BASE64.encode(&resp_bytes);
 
-    tracing::debug!("op_fetch_url completed: {} {} ({} bytes)", method, url, resp_body.len());
+    // Retain the body + record a network event for this script-initiated
+    // request (upstream #406/#360): keyed `fetch-{N}`, LRU-bounded, so the
+    // CDP layer can emit Network events and resolve getResponseBody for
+    // fetch()/XHR traffic. Then fire the passive on_response observers.
+    let request_id = {
+        let state_borrow = state.borrow();
+        let gs = state_borrow.borrow::<SharedState>().clone();
+        let mut gs = gs.borrow_mut();
+        gs.network_response_body_counter += 1;
+        let request_id = format!("fetch-{}", gs.network_response_body_counter);
+        let max_entries = response_body_entry_limit();
+        let max_bytes = response_body_byte_limit();
+        let base64_encoded =
+            !text_like_content_type(resp_headers.get("content-type").map(|s| s.as_str()));
+        if max_entries > 0 && max_bytes > 0 && resp_bytes.len() <= max_bytes {
+            gs.network_response_bodies.insert(
+                request_id.clone(),
+                StoredNetworkResponseBody {
+                    body: if base64_encoded {
+                        resp_body_base64.clone()
+                    } else {
+                        resp_body.clone()
+                    },
+                    base64_encoded,
+                },
+            );
+            gs.network_response_body_order.push_back(request_id.clone());
+            while gs.network_response_body_order.len() > max_entries {
+                if let Some(oldest) = gs.network_response_body_order.pop_front() {
+                    gs.network_response_bodies.remove(&oldest);
+                }
+            }
+        }
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        gs.js_network_events.push(JsNetworkEvent {
+            request_id: request_id.clone(),
+            url: url.clone(),
+            method: method.clone(),
+            status,
+            response_headers: resp_headers.clone(),
+            body_size: resp_bytes.len(),
+            timestamp,
+        });
+        const MAX_JS_NETWORK_EVENTS: usize = 4096;
+        if gs.js_network_events.len() > MAX_JS_NETWORK_EVENTS {
+            let overflow = gs.js_network_events.len() - MAX_JS_NETWORK_EVENTS;
+            gs.js_network_events.drain(0..overflow);
+        }
+        request_id
+    };
+    tracing::debug!(
+        "op_fetch_url completed: {} {} ({} bytes, network event {})",
+        method,
+        url,
+        resp_body.len(),
+        request_id,
+    );
+
+    if let Some(cbs) = callbacks.as_ref() {
+        if cbs.has_response_callbacks().await {
+            let info = crate::diting_net::RequestInfo {
+                url: url::Url::parse(&current_url)
+                    .unwrap_or_else(|_| url::Url::parse("about:blank").unwrap()),
+                method: method.clone(),
+                headers: resp_headers.clone(),
+                resource_type: crate::diting_net::ResourceType::Fetch,
+            };
+            let net_resp = crate::diting_net::Response {
+                url: url::Url::parse(&current_url)
+                    .unwrap_or_else(|_| url::Url::parse("about:blank").unwrap()),
+                status,
+                headers: resp_headers.clone(),
+                body: resp_bytes.to_vec(),
+                redirected_from: Vec::new(),
+            };
+            cbs.fire_response(&info, &net_resp).await;
+        }
+    }
 
     Ok(serde_json::json!({
         "status": status,

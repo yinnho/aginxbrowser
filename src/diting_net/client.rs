@@ -50,6 +50,150 @@ impl Response {
     }
 }
 
+/// CDP `Network.ResourceType`-shaped label for a request. Drives
+/// `RequestInfo.resource_type` and the page's NetworkEvent kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceType {
+    Document,
+    Script,
+    Stylesheet,
+    Image,
+    Font,
+    Xhr,
+    Fetch,
+    Other,
+}
+
+impl ResourceType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Document => "Document",
+            Self::Script => "Script",
+            Self::Stylesheet => "Stylesheet",
+            Self::Image => "Image",
+            Self::Font => "Font",
+            Self::Xhr => "XHR",
+            Self::Fetch => "Fetch",
+            Self::Other => "Other",
+        }
+    }
+}
+
+/// A request about to be sent (or just answered), as seen by an
+/// on_request / on_response observer. Headers are the fully-built set the
+/// transport sent, lowercased like `Response.headers`.
+#[derive(Debug, Clone)]
+pub struct RequestInfo {
+    pub url: Url,
+    pub method: String,
+    pub headers: HashMap<String, String>,
+    pub resource_type: ResourceType,
+}
+
+pub type RequestCallback = Arc<dyn Fn(&RequestInfo) + Send + Sync>;
+pub type ResponseCallback = Arc<dyn Fn(&RequestInfo, &Response) + Send + Sync>;
+
+/// Page-scoped store for the passive on_request/on_response callbacks (upstream
+/// issue #408). Each `Page` owns one, so a callback never fires for another
+/// page's requests and dies with its page. The HTTP client itself stays
+/// callback-free; page-driven fetches pass the page's registry in. Ids keep
+/// the `u64` shape upstream established on `Page::on_request`/`on_response`.
+pub struct CallbackRegistry {
+    on_request: RwLock<Vec<(u64, RequestCallback)>>,
+    on_response: RwLock<Vec<(u64, ResponseCallback)>>,
+    id_counter: std::sync::atomic::AtomicU64,
+}
+
+impl CallbackRegistry {
+    pub fn new() -> Self {
+        CallbackRegistry {
+            on_request: RwLock::new(Vec::new()),
+            on_response: RwLock::new(Vec::new()),
+            id_counter: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+
+    fn next_id(&self) -> u64 {
+        self.id_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Register a request callback; the returned id detaches it via
+    /// `remove_request`. Sync like the pre-registry push path: registration
+    /// happens from `Page` setup where no reader holds the lock, so
+    /// `try_write` cannot fail there.
+    pub fn add_request(&self, cb: RequestCallback) -> u64 {
+        let id = self.next_id();
+        if let Ok(mut v) = self.on_request.try_write() {
+            v.push((id, cb));
+        }
+        id
+    }
+
+    /// Register a response callback; see `add_request`.
+    pub fn add_response(&self, cb: ResponseCallback) -> u64 {
+        let id = self.next_id();
+        if let Ok(mut v) = self.on_response.try_write() {
+            v.push((id, cb));
+        }
+        id
+    }
+
+    /// Detach a request callback. Returns true when the id was found and
+    /// removed, so a double detach is a visible no-op.
+    pub fn remove_request(&self, id: u64) -> bool {
+        match self.on_request.try_write() {
+            Ok(mut v) => {
+                let before = v.len();
+                v.retain(|(cid, _)| *cid != id);
+                v.len() != before
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Detach a response callback; see `remove_request`.
+    pub fn remove_response(&self, id: u64) -> bool {
+        match self.on_response.try_write() {
+            Ok(mut v) => {
+                let before = v.len();
+                v.retain(|(cid, _)| *cid != id);
+                v.len() != before
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// True when at least one request callback is registered. Lets fire sites
+    /// skip building a `RequestInfo` when nobody listens.
+    pub async fn has_request_callbacks(&self) -> bool {
+        !self.on_request.read().await.is_empty()
+    }
+
+    /// True when at least one response callback is registered.
+    pub async fn has_response_callbacks(&self) -> bool {
+        !self.on_response.read().await.is_empty()
+    }
+
+    pub async fn fire_request(&self, info: &RequestInfo) {
+        for (_, cb) in self.on_request.read().await.iter() {
+            cb(info);
+        }
+    }
+
+    pub async fn fire_response(&self, info: &RequestInfo, resp: &Response) {
+        for (_, cb) in self.on_response.read().await.iter() {
+            cb(info, resp);
+        }
+    }
+}
+
+impl Default for CallbackRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Process-wide opt-in via env var. Older flow that issue #4 introduced. The
 /// new `--allow-private-network` CLI flag (issue #33) sets a per-client field
 /// that is OR'd with this so existing scripts and Docker setups that pin the
@@ -384,11 +528,55 @@ impl HttpClient {
         self.fetch_with_method(Method::POST, url, Some(body.as_bytes().to_vec())).await
     }
 
+    /// Passive-observer variants (upstream issue #408): fire the registry's
+    /// on_request callbacks with the fully-built request just before each hop
+    /// is sent, and on_response with the completed response. `None` behaves
+    /// exactly like the untraced entry points.
+    pub async fn fetch_with_callbacks(
+        &self,
+        url: &Url,
+        callbacks: Option<&CallbackRegistry>,
+        resource_type: ResourceType,
+    ) -> Result<Response, NetError> {
+        self.fetch_with_method_traced(Method::GET, url, None, callbacks, resource_type)
+            .await
+    }
+
+    /// See `fetch_with_callbacks`.
+    pub async fn post_form_with_callbacks(
+        &self,
+        url: &Url,
+        body: &str,
+        callbacks: Option<&CallbackRegistry>,
+        resource_type: ResourceType,
+    ) -> Result<Response, NetError> {
+        self.fetch_with_method_traced(
+            Method::POST,
+            url,
+            Some(body.as_bytes().to_vec()),
+            callbacks,
+            resource_type,
+        )
+        .await
+    }
+
     pub async fn fetch_with_method(
         &self,
         initial_method: Method,
         url: &Url,
         initial_body: Option<Vec<u8>>,
+    ) -> Result<Response, NetError> {
+        self.fetch_with_method_traced(initial_method, url, initial_body, None, ResourceType::Document)
+            .await
+    }
+
+    async fn fetch_with_method_traced(
+        &self,
+        initial_method: Method,
+        url: &Url,
+        initial_body: Option<Vec<u8>>,
+        callbacks: Option<&CallbackRegistry>,
+        resource_type: ResourceType,
     ) -> Result<Response, NetError> {
         validate_url(url, self.allow_private_network)?;
 
@@ -505,6 +693,23 @@ impl HttpClient {
                 }
             }
 
+            // Passive on_request observers (upstream #408): capture the
+            // fully-built header set (it is moved into the request below)
+            // and fire per hop just before the request goes out. Skipped
+            // entirely when nobody listens.
+            let sent_headers = match callbacks {
+                Some(cbs) if cbs.has_request_callbacks().await => Some((
+                    cbs,
+                    headers
+                        .iter()
+                        .map(|(k, v)| {
+                            (k.as_str().to_lowercase(), v.to_str().unwrap_or("").to_string())
+                        })
+                        .collect::<HashMap<String, String>>(),
+                )),
+                _ => None,
+            };
+
             let mut req_builder = self.get_client_for().await.request(method.clone(), current_url.as_str())
                 .headers(headers);
 
@@ -516,6 +721,16 @@ impl HttpClient {
                     );
                 }
                 req_builder = req_builder.body(b.clone());
+            }
+
+            if let Some((cbs, sent_headers)) = sent_headers.as_ref() {
+                let info = RequestInfo {
+                    url: current_url.clone(),
+                    method: method.as_str().to_string(),
+                    headers: sent_headers.clone(),
+                    resource_type,
+                };
+                cbs.fire_request(&info).await;
             }
 
             self.in_flight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -573,6 +788,20 @@ impl HttpClient {
                 body: body_bytes,
                 redirected_from: redirects,
             };
+
+            // Passive on_response observers: fired with the completed final
+            // response (post-redirect, body read).
+            if let Some(cbs) = callbacks {
+                if cbs.has_response_callbacks().await {
+                    let info = RequestInfo {
+                        url: response.url.clone(),
+                        method: method.as_str().to_string(),
+                        headers: response.headers.clone(),
+                        resource_type,
+                    };
+                    cbs.fire_response(&info, &response).await;
+                }
+            }
 
             return Ok(response);
         }

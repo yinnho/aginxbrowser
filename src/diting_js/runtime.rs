@@ -319,6 +319,39 @@ impl JsRuntime {
         state.intercept_enabled = enabled;
     }
 
+    /// Attach the owning page's passive network-observer registry, so
+    /// script-initiated fetch()/XHR requests fire its on_request/on_response
+    /// callbacks (upstream #408). None detaches (bare runtimes).
+    pub fn set_callbacks(&self, callbacks: std::sync::Arc<crate::diting_net::CallbackRegistry>) {
+        self.state.borrow_mut().callbacks = Some(callbacks);
+    }
+
+    /// Retained response body for a script-initiated request, keyed by its
+    /// `fetch-{N}` id. See `ObscuraState::network_response_bodies`.
+    pub fn get_network_response_body(
+        &self,
+        request_id: &str,
+    ) -> Option<crate::diting_js::ops::StoredNetworkResponseBody> {
+        self.state
+            .borrow()
+            .network_response_bodies
+            .get(request_id)
+            .cloned()
+    }
+
+    pub fn clear_network_response_bodies(&self) {
+        let mut state = self.state.borrow_mut();
+        state.network_response_bodies.clear();
+        state.network_response_body_order.clear();
+    }
+
+    /// Drain network events recorded for script-initiated requests into the
+    /// owning Page's event list. Idempotent (the queue is taken), so calling
+    /// repeatedly never duplicates events.
+    pub fn take_js_network_events(&self) -> Vec<crate::diting_js::ops::JsNetworkEvent> {
+        std::mem::take(&mut self.state.borrow_mut().js_network_events)
+    }
+
     pub fn set_user_agent(&mut self, ua: &str) {
         let escaped = ua.replace('\\', "\\\\").replace('\'', "\\'");
         // After the UA lands, refresh the platform persona (GPU pool, screen,

@@ -124,6 +124,50 @@ pub struct NetworkEvent {
     pub timestamp: f64,
 }
 
+/// A response body retained for `get_response_body` (upstream #360). Text
+/// bodies are stored lossy-UTF-8 (`base64_encoded = false`); binary bodies
+/// base64 so `take_response_body_raw` is byte-exact.
+#[derive(Debug, Clone)]
+pub struct StoredResponseBody {
+    pub body: String,
+    pub base64_encoded: bool,
+}
+
+/// True when a Content-Type deserves text storage rather than base64. No
+/// Content-Type at all counts as text, matching the HTML-parse default.
+fn is_text_like_content_type(content_type: Option<&str>) -> bool {
+    let ct = match content_type {
+        Some(c) => c.split(';').next().unwrap_or(c).trim().to_ascii_lowercase(),
+        None => return true,
+    };
+    if ct.is_empty() {
+        return true;
+    }
+    ct.starts_with("text/")
+        || ct == "application/json"
+        || ct == "application/xml"
+        || ct == "application/xhtml+xml"
+        || ct == "application/javascript"
+        || ct == "application/ecmascript"
+        || ct == "image/svg+xml"
+        || ct.ends_with("+json")
+        || ct.ends_with("+xml")
+}
+
+fn response_body_entry_limit() -> usize {
+    std::env::var("OBSCURA_NETWORK_BODY_BUFFER_ENTRIES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(128)
+}
+
+fn response_body_byte_limit() -> usize {
+    std::env::var("OBSCURA_NETWORK_BODY_BUFFER_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2 * 1024 * 1024)
+}
+
 /// Compute the default `strict-origin-when-cross-origin` referrer for a
 /// document-initiated navigation (upstream edb1785). Same-origin sends the
 /// full source URL minus fragment/credentials; cross-origin sends only the
@@ -177,6 +221,17 @@ pub struct Page {
     pub history_index: usize,
     pub network_events: Vec<NetworkEvent>,
     network_event_counter: u32,
+    /// Passive on_request/on_response callbacks, scoped to this page (upstream
+    /// issue #408): they fire for document/subresource fetches this Page makes
+    /// and for script-initiated fetch()/XHR in its realm, never for a sibling
+    /// page's traffic, and die with the page.
+    callbacks: Arc<crate::diting_net::CallbackRegistry>,
+    /// Response bodies retained for `get_response_body`, keyed by the
+    /// NetworkEvent request id (`{page}.{N}` for page-side fetches,
+    /// `fetch-{N}` for script-initiated ones). LRU-bounded by
+    /// `response_body_entry_limit` / `response_body_byte_limit`.
+    response_bodies: std::collections::HashMap<String, StoredResponseBody>,
+    response_body_order: std::collections::VecDeque<String>,
     pub intercept_enabled: bool,
     pub intercept_block_patterns: Vec<String>,
     intercept_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::diting_js::ops::InterceptedRequest>>,
@@ -251,6 +306,9 @@ impl Page {
             history_index: 0,
             network_events: Vec::new(),
             network_event_counter: 0,
+            callbacks: Arc::new(crate::diting_net::CallbackRegistry::new()),
+            response_bodies: std::collections::HashMap::new(),
+            response_body_order: std::collections::VecDeque::new(),
             intercept_enabled: false,
             intercept_block_patterns: Vec::new(),
             intercept_tx: None,
@@ -282,12 +340,18 @@ impl Page {
         false
     }
 
-    async fn do_fetch(&self, url: &Url) -> Result<Response, NetError> {
+    /// Fetch the main document. Stealth mode bypasses the tracing client —
+    /// the wreq-backed stealth transport has no callback hook (and stealth
+    /// pages are exactly the ones whose observers should not double-fire on
+    /// a side channel); observers still see scripts/stylesheets/fetches.
+    async fn fetch_document(&self, url: &Url) -> Result<Response, NetError> {
         #[cfg(feature = "stealth")]
         if let Some(ref stealth) = self.stealth_client {
             return stealth.fetch(url).await;
         }
-        self.http_client.fetch(url).await
+        self.http_client
+            .fetch_with_callbacks(url, Some(&self.callbacks), crate::diting_net::ResourceType::Document)
+            .await
     }
     fn init_js(&mut self) {
         // Drop any existing runtime so the JS realm starts clean on
@@ -341,6 +405,10 @@ impl Page {
         if let Some(tx) = &self.intercept_tx {
             rt.set_intercept_tx(tx.clone());
         }
+
+        // Script-initiated fetch()/XHR fire the page's passive observers too
+        // (upstream #408).
+        rt.set_callbacks(self.callbacks.clone());
 
         if let Some(dom) = self.dom.take() {
             rt.set_dom(dom);
@@ -516,8 +584,10 @@ impl Page {
         }
 
         let client = self.http_client.clone();
+        let script_callbacks = self.callbacks.clone();
         let fetch_futures: Vec<_> = fetch_tasks.iter().map(|(idx, url)| {
             let client = client.clone();
+            let script_callbacks = script_callbacks.clone();
             let url = url.clone();
             let idx = *idx;
             async move {
@@ -546,7 +616,10 @@ impl Page {
                     };
                     return Some((idx, url, resp));
                 }
-                match client.fetch(&parsed).await {
+                match client
+                    .fetch_with_callbacks(&parsed, Some(script_callbacks.as_ref()), crate::diting_net::ResourceType::Script)
+                    .await
+                {
                     Ok(resp) => Some((idx, url, resp)),
                     Err(e) => {
                         tracing::warn!("Failed to fetch script {}: {}", url, e);
@@ -619,7 +692,7 @@ impl Page {
             if script.src.is_some() {
                 if let Some((url, code, resp)) = fetched.remove(&i) {
                     tracing::info!("Executing script ({} bytes): {}", code.len(), url);
-                    self.record_network_event(&url, "GET", "Script", resp.status, &resp.headers, resp.body.len());
+                    self.record_network_event_with_body(&url, "GET", "Script", resp.status, &resp.headers, &resp.body);
                     if let Some(js) = &mut self.js {
                         let _ = js.execute_script("<current-script>", &format!("globalThis.__currentScriptNid={};", script.nid));
                         if let Err(e) = js.execute_script_guarded(&url, &code) {
@@ -1089,21 +1162,23 @@ impl Page {
             headers.insert("content-type".to_string(), content_type);
             Ok(crate::diting_net::Response { url: url.clone(), status: 200, headers, body: body_bytes, redirected_from: Vec::new() })
         } else if method == "POST" {
-            self.http_client.post_form(&url, body).await
+            self.http_client
+                .post_form_with_callbacks(&url, body, Some(&self.callbacks), crate::diting_net::ResourceType::Document)
+                .await
         } else {
-            self.do_fetch(&url).await
+            self.fetch_document(&url).await
         }.map_err(|e| {
             self.lifecycle = LifecycleState::Failed;
             PageError::NetworkError(e.to_string())
         })?;
 
-        self.record_network_event(
+        self.record_network_event_with_body(
             url.as_str(),
-            "GET",
+            method,
             "Document",
             response.status,
             &response.headers,
-            response.body.len(),
+            &response.body,
         );
 
         if !response.redirected_from.is_empty() {
@@ -1165,12 +1240,17 @@ impl Page {
         }
 
         let client = self.http_client.clone();
+        let css_callbacks = self.callbacks.clone();
         let css_futures: Vec<_> = css_fetch_urls.iter().map(|full_url| {
             let client = client.clone();
+            let css_callbacks = css_callbacks.clone();
             let url_str = full_url.clone();
             async move {
                 let parsed = Url::parse(&url_str).unwrap_or_else(|_| Url::parse("about:blank").unwrap());
-                match client.fetch(&parsed).await {
+                match client
+                    .fetch_with_callbacks(&parsed, Some(css_callbacks.as_ref()), crate::diting_net::ResourceType::Stylesheet)
+                    .await
+                {
                     Ok(resp) => Some((url_str, resp)),
                     Err(e) => {
                         tracing::debug!("Failed to fetch stylesheet {}: {}", url_str, e);
@@ -1192,7 +1272,7 @@ impl Page {
                 // CSS bodies: honor the Content-Type charset; CSS @charset is
                 // out of scope for the current scrape-focused pipeline.
                 let css = crate::diting_net::decode_non_html(&resp.body, resp.content_type());
-                self.record_network_event(&url_str, "GET", "Stylesheet", resp.status, &resp.headers, resp.body.len());
+                self.record_network_event_with_body(&url_str, "GET", "Stylesheet", resp.status, &resp.headers, &resp.body);
                 css_sources.push(css);
             }
         }
@@ -1491,14 +1571,15 @@ impl Page {
         status: u16,
         response_headers: &std::collections::HashMap<String, String>,
         body_size: usize,
-    ) {
+    ) -> String {
         self.network_event_counter += 1;
+        let request_id = format!("{}.{}", self.id, self.network_event_counter);
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs_f64();
         self.network_events.push(NetworkEvent {
-            request_id: format!("{}.{}", self.id, self.network_event_counter),
+            request_id: request_id.clone(),
             url: url.to_string(),
             method: method.to_string(),
             resource_type: resource_type.to_string(),
@@ -1508,6 +1589,178 @@ impl Page {
             body_size,
             timestamp,
         });
+        request_id
+    }
+
+    /// Record the event and retain the body for `get_response_body`. Text
+    /// Content-Types store lossy-UTF-8; anything else stores base64 so
+    /// `take_response_body_raw` is byte-exact.
+    fn record_network_event_with_body(
+        &mut self,
+        url: &str,
+        method: &str,
+        resource_type: &str,
+        status: u16,
+        response_headers: &std::collections::HashMap<String, String>,
+        body: &[u8],
+    ) -> String {
+        let base64_encoded =
+            !is_text_like_content_type(response_headers.get("content-type").map(|s| s.as_str()));
+        let request_id = self.record_network_event(
+            url,
+            method,
+            resource_type,
+            status,
+            response_headers,
+            body.len(),
+        );
+        self.store_response_body(request_id.clone(), body, base64_encoded);
+        request_id
+    }
+
+    fn store_response_body(&mut self, request_id: String, body: &[u8], base64_encoded: bool) {
+        let max_entries = response_body_entry_limit();
+        let max_bytes = response_body_byte_limit();
+        if max_entries == 0 || max_bytes == 0 || body.len() > max_bytes {
+            return;
+        }
+        let body = if base64_encoded {
+            BASE64.encode(body)
+        } else {
+            String::from_utf8_lossy(body).to_string()
+        };
+        self.response_bodies.insert(
+            request_id.clone(),
+            StoredResponseBody {
+                body,
+                base64_encoded,
+            },
+        );
+        self.response_body_order.push_back(request_id);
+        while self.response_body_order.len() > max_entries {
+            if let Some(oldest) = self.response_body_order.pop_front() {
+                self.response_bodies.remove(&oldest);
+            }
+        }
+    }
+
+    /// Body stored for a request id: page-side (`{page}.{N}`) or
+    /// script-initiated (`fetch-{N}`, retained in the JS runtime).
+    pub fn get_response_body(&self, request_id: &str) -> Option<StoredResponseBody> {
+        self.response_bodies.get(request_id).cloned().or_else(|| {
+            self.js
+                .as_ref()?
+                .get_network_response_body(request_id)
+                .map(|body| StoredResponseBody {
+                    body: body.body,
+                    base64_encoded: body.base64_encoded,
+                })
+        })
+    }
+
+    /// Take a stored response body as raw bytes for CDP streaming
+    /// (Fetch.takeResponseBodyAsStream). Removes it from the page-side cache
+    /// and transfers ownership to the caller, so a large body is held once
+    /// and freed when the stream is closed rather than lingering in this
+    /// long-running process (upstream #360). Binary bodies are stored base64
+    /// (byte-exact); text bodies return their UTF-8 bytes. Returns None if
+    /// the body was never cached (e.g. it exceeded
+    /// OBSCURA_NETWORK_BODY_BUFFER_BYTES) or the id is unknown.
+    pub fn take_response_body_raw(&mut self, request_id: &str) -> Option<Vec<u8>> {
+        let stored = if let Some(body) = self.response_bodies.remove(request_id) {
+            self.response_body_order.retain(|id| id != request_id);
+            body
+        } else {
+            self.js
+                .as_ref()?
+                .get_network_response_body(request_id)
+                .map(|b| StoredResponseBody {
+                    body: b.body,
+                    base64_encoded: b.base64_encoded,
+                })?
+        };
+        if stored.base64_encoded {
+            BASE64.decode(stored.body.as_bytes()).ok()
+        } else {
+            Some(stored.body.into_bytes())
+        }
+    }
+
+    /// Make the body stored under `from_id` also retrievable under `to_id`.
+    /// The main navigation resource is stored under its internal request id,
+    /// but the CDP layer reports it with the navigation's loaderId as the
+    /// requestId (Chrome's `requestId === loaderId` convention). Without this
+    /// alias, `Network.getResponseBody(loaderId)` misses (upstream #340).
+    pub fn alias_response_body(&mut self, from_id: &str, to_id: &str) {
+        if from_id == to_id || self.response_bodies.contains_key(to_id) {
+            return;
+        }
+        if let Some(body) = self.response_bodies.get(from_id).cloned() {
+            self.response_bodies.insert(to_id.to_string(), body);
+            self.response_body_order.push_back(to_id.to_string());
+        }
+    }
+
+    pub fn clear_response_bodies(&mut self) {
+        self.response_bodies.clear();
+        self.response_body_order.clear();
+        if let Some(js) = &self.js {
+            js.clear_network_response_bodies();
+        }
+    }
+
+    /// Move network events recorded for script-initiated requests
+    /// (fetch/XHR) from the JS runtime into this page's `network_events`, so
+    /// the CDP layer emits Network.requestWillBeSent / responseReceived for
+    /// them (upstream #406). Idempotent: the runtime's queue is drained. The
+    /// `fetch-{N}` request id is preserved so get_response_body resolves.
+    pub fn sync_js_network_events(&mut self) {
+        let events = match self.js.as_ref() {
+            Some(js) => js.take_js_network_events(),
+            None => return,
+        };
+        for ev in events {
+            self.network_events.push(NetworkEvent {
+                request_id: ev.request_id,
+                url: ev.url,
+                method: ev.method,
+                resource_type: "Fetch".to_string(),
+                status: ev.status,
+                headers: std::collections::HashMap::new(),
+                response_headers: Arc::new(ev.response_headers),
+                body_size: ev.body_size,
+                timestamp: ev.timestamp,
+            });
+        }
+    }
+
+    /// Register a passive callback fired for every request this page's
+    /// fetches (document, subresources) and its JS fetch()/XHR make, once the
+    /// method/headers are known and before it is sent. Non-blocking; use
+    /// `enable_interception` to mutate or block. Returns a stable id; pass it
+    /// to `off_request` to detach (upstream #408). Scoped to this page: it
+    /// never sees sibling pages' requests and dies with the page.
+    pub fn on_request(&mut self, cb: crate::diting_net::RequestCallback) -> u64 {
+        self.callbacks.add_request(cb)
+    }
+
+    /// Register a passive callback fired with every response this page
+    /// receives, including its body. Non-blocking. The main path for crawlers
+    /// that need to capture API response payloads. Returns a stable id for
+    /// `off_response`. Page-scoped like `on_request`.
+    pub fn on_response(&mut self, cb: crate::diting_net::ResponseCallback) -> u64 {
+        self.callbacks.add_response(cb)
+    }
+
+    /// Detach a request observer registered with `on_request`. Returns true
+    /// if one was removed.
+    pub fn off_request(&mut self, id: u64) -> bool {
+        self.callbacks.remove_request(id)
+    }
+
+    /// Detach a response observer registered with `on_response`.
+    pub fn off_response(&mut self, id: u64) -> bool {
+        self.callbacks.remove_response(id)
     }
 
     pub fn execute_preload_script(&mut self, source: &str) -> Result<(), String> {
@@ -1664,6 +1917,18 @@ mod tests {
     /// Answers up to 64 requests: one navigation may pull the document plus
     /// stylesheets and scripts. Unmatched paths get a 404.
     fn local_http_server(routes: Vec<(&'static str, u16, String)>) -> u16 {
+        local_http_server_typed(
+            routes
+                .into_iter()
+                .map(|(p, s, b)| (p, s, "text/html", b))
+                .collect(),
+        )
+    }
+
+    /// `local_http_server` with a per-route Content-Type (batch 2: response
+    /// bodies store text lossy-UTF-8 vs binary base64, so tests need to
+    /// control it).
+    fn local_http_server_typed(routes: Vec<(&'static str, u16, &'static str, String)>) -> u16 {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
@@ -1678,13 +1943,13 @@ mod tests {
                     .and_then(|l| l.split_whitespace().nth(1))
                     .unwrap_or("/")
                     .to_string();
-                let (status, body) = routes
+                let (status, ctype, body) = routes
                     .iter()
-                    .find(|(p, _, _)| *p == path)
-                    .map(|(_, s, b)| (*s, b.clone()))
-                    .unwrap_or((404, String::new()));
+                    .find(|(p, _, _, _)| *p == path)
+                    .map(|(_, s, c, b)| (*s, *c, b.clone()))
+                    .unwrap_or((404, "text/html", String::new()));
                 let response = format!(
-                    "HTTP/1.1 {status}\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    "HTTP/1.1 {status}\r\ncontent-type: {ctype}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                     body.len()
                 );
                 let _ = stream.write_all(response.as_bytes());
@@ -2202,5 +2467,269 @@ mod tests {
         assert_eq!(p.navigation_timeout().as_millis() as u64, 1_500);
         p.set_navigation_timeout(None);
         assert_eq!(p.navigation_timeout().as_millis() as u64, env_or_default);
+    }
+
+    // ---- batch 2: network callbacks + response bodies ----------------------
+
+    /// Shared recorder for callback tests: on_request/on_response push into
+    /// these from inside the registry's fire path.
+    #[derive(Default)]
+    struct NetLog {
+        requests: std::sync::Mutex<Vec<(String, String)>>, // (resource_type, url)
+        responses: std::sync::Mutex<Vec<(String, String, usize)>>, // (type, url, body len)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn on_request_and_on_response_fire_for_document_and_subresources() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![
+            (
+                "/page",
+                200,
+                format!(
+                    "<html><head><link rel=stylesheet href='/s.css'></head>\
+                     <script src='/j.js'></script></html>"
+                ),
+            ),
+            ("/s.css", 200, "body{color:red}".into()),
+            ("/j.js", 200, "window.__j = 1;".into()),
+        ]);
+        let log = Arc::new(NetLog::default());
+        let mut p = test_page();
+        {
+            let log = log.clone();
+            p.on_request(Arc::new(move |info| {
+                log.requests
+                    .lock()
+                    .unwrap()
+                    .push((info.resource_type.as_str().to_string(), info.url.to_string()));
+            }));
+        }
+        {
+            let log = log.clone();
+            p.on_response(Arc::new(move |info, resp| {
+                log.responses.lock().unwrap().push((
+                    info.resource_type.as_str().to_string(),
+                    info.url.to_string(),
+                    resp.body.len(),
+                ));
+            }));
+        }
+        p.navigate(&format!("http://127.0.0.1:{port}/page")).await.unwrap();
+
+        let reqs = log.requests.lock().unwrap();
+        let kinds: Vec<&str> = reqs.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(kinds.contains(&"Document"), "requests: {reqs:?}");
+        assert!(kinds.contains(&"Script"), "requests: {reqs:?}");
+        assert!(kinds.contains(&"Stylesheet"), "requests: {reqs:?}");
+        // The document observer saw the fully-built header set, not an empty
+        // one: our client always sends User-Agent.
+        let resps = log.responses.lock().unwrap();
+        assert!(
+            resps
+                .iter()
+                .any(|(k, _, len)| k == "Document" && *len > 0),
+            "responses: {resps:?}"
+        );
+        assert!(
+            resps.iter().any(|(k, _, _)| k == "Stylesheet"),
+            "responses: {resps:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn off_request_detaches_observer() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![("/x", 200, "<html></html>".into())]);
+        let log = Arc::new(NetLog::default());
+        let mut p = test_page();
+        let id = {
+            let log = log.clone();
+            p.on_request(Arc::new(move |info| {
+                log.requests
+                    .lock()
+                    .unwrap()
+                    .push((info.resource_type.as_str().to_string(), info.url.to_string()));
+            }))
+        };
+        assert!(p.off_request(id));
+        // Double detach is a visible no-op.
+        assert!(!p.off_request(id));
+        p.navigate(&format!("http://127.0.0.1:{port}/x")).await.unwrap();
+        assert!(log.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn document_body_retrievable_and_take_removes() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![(
+            "/doc",
+            200,
+            "<html><head><title>BodyStore</title></head><body>MARKER-42</body></html>".into(),
+        )]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/doc")).await.unwrap();
+        let doc_event = p
+            .network_events
+            .iter()
+            .find(|e| e.resource_type == "Document")
+            .expect("document network event");
+        let rid = doc_event.request_id.clone();
+        let stored = p.get_response_body(&rid).expect("stored document body");
+        assert!(!stored.base64_encoded);
+        assert!(stored.body.contains("MARKER-42"), "{}", stored.body);
+        // take_response_body_raw hands over the bytes and drops the entry.
+        let raw = p.take_response_body_raw(&rid).expect("raw bytes");
+        assert!(String::from_utf8_lossy(&raw).contains("MARKER-42"));
+        assert!(p.get_response_body(&rid).is_none());
+        assert!(p.take_response_body_raw(&rid).is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn alias_response_body_renames_entry() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![("/d", 200, "<html>ALIAS-ME</html>".into())]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/d")).await.unwrap();
+        let rid = p
+            .network_events
+            .iter()
+            .find(|e| e.resource_type == "Document")
+            .unwrap()
+            .request_id
+            .clone();
+        // Chrome's requestId === loaderId convention (upstream #340).
+        p.alias_response_body(&rid, "loader-1");
+        assert!(p.get_response_body("loader-1").is_some());
+        assert!(p.get_response_body(&rid).is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn binary_body_stored_base64_and_take_is_byte_exact() {
+        let _g = net_test_guard();
+        // Non-text Content-Type forces base64 storage; the expectation is the
+        // exact wire bytes (a Rust String holds UTF-8, so chars >= 0x80 are
+        // sent as their multi-byte encodings — take must return those, lossless).
+        let bin: String = vec![0u8, 159, 146, 150, 255, 1, 2]
+            .into_iter()
+            .map(|b| b as char)
+            .collect();
+        let wire_bytes = bin.as_bytes().to_vec();
+        let port = local_http_server_typed(vec![
+            ("/bin", 200, "application/octet-stream", bin),
+            (
+                "/host",
+                200,
+                "text/html",
+                "<html><script src='/bin'></script></html>".into(),
+            ),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/host")).await.unwrap();
+        let rid = p
+            .network_events
+            .iter()
+            .find(|e| e.url.ends_with("/bin"))
+            .expect("script event for binary body")
+            .request_id
+            .clone();
+        let stored = p.get_response_body(&rid).expect("binary body stored");
+        assert!(stored.base64_encoded, "octet-stream must store base64");
+        let raw = p.take_response_body_raw(&rid).expect("raw bytes");
+        assert_eq!(raw, wire_bytes);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn js_fetch_surfaces_as_network_event_with_body() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![
+            (
+                "/app",
+                200,
+                "<html><script>\
+                 fetch('/api').then(r => r.text()).then(t => { window.__got = t; });\
+                 </script></html>"
+                    .into(),
+            ),
+            ("/api", 200, "{\"v\": 7}".into()),
+        ]);
+        let log = Arc::new(NetLog::default());
+        let mut p = test_page();
+        {
+            let log = log.clone();
+            p.on_response(Arc::new(move |info, resp| {
+                log.responses.lock().unwrap().push((
+                    info.resource_type.as_str().to_string(),
+                    info.url.to_string(),
+                    resp.body.len(),
+                ));
+            }));
+        }
+        p.navigate(&format!("http://127.0.0.1:{port}/app")).await.unwrap();
+        assert_eq!(p.evaluate("window.__got"), serde_json::json!("{\"v\": 7}"));
+
+        // Script-initiated traffic fires the page's observers too…
+        let resps = log.responses.lock().unwrap();
+        assert!(
+            resps.iter().any(|(k, u, _)| k == "Fetch" && u.ends_with("/api")),
+            "responses: {resps:?}"
+        );
+        drop(resps);
+
+        // …and syncs into the page's network events with a fetch-{N} id whose
+        // body resolves through the JS-side store.
+        p.sync_js_network_events();
+        let ev = p
+            .network_events
+            .iter()
+            .find(|e| e.url.ends_with("/api"))
+            .expect("fetch network event after sync");
+        assert_eq!(ev.resource_type, "Fetch");
+        assert!(ev.request_id.starts_with("fetch-"), "{}", ev.request_id);
+        let stored = p.get_response_body(&ev.request_id).expect("fetch body");
+        assert!(!stored.base64_encoded);
+        assert_eq!(stored.body, "{\"v\": 7}");
+        // Idempotent drain.
+        p.sync_js_network_events();
+        assert_eq!(
+            p.network_events.iter().filter(|e| e.url.ends_with("/api")).count(),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn clear_response_bodies_drops_page_and_js_stores() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![
+            (
+                "/app",
+                200,
+                "<html><script>fetch('/a1').then(r => r.text());</script></html>".into(),
+            ),
+            ("/a1", 200, "one".into()),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/app")).await.unwrap();
+        let doc_rid = p
+            .network_events
+            .iter()
+            .find(|e| e.resource_type == "Document")
+            .unwrap()
+            .request_id
+            .clone();
+        assert!(p.get_response_body(&doc_rid).is_some());
+        p.sync_js_network_events();
+        let fetch_rid = p
+            .network_events
+            .iter()
+            .find(|e| e.url.ends_with("/a1"))
+            .unwrap()
+            .request_id
+            .clone();
+        assert!(p.get_response_body(&fetch_rid).is_some());
+
+        p.clear_response_bodies();
+        assert!(p.get_response_body(&doc_rid).is_none());
+        assert!(p.get_response_body(&fetch_rid).is_none());
     }
 }
