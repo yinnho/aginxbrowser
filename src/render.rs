@@ -104,8 +104,10 @@ pub fn strip_non_content(html: &str) -> String {
                 }
             }
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        // 按 UTF-8 字符边界 push，而非单字节（否则中文/日文等非 ASCII 被拆成 Latin-1 乱码）
+        let ch = html[i..].chars().next().unwrap_or('\u{FFFD}');
+        out.push(ch);
+        i += ch.len_utf8();
     }
     out
 }
@@ -127,11 +129,11 @@ fn find_close_tag(lower: &str, start: usize) -> Option<usize> {
 fn strip_html_tags(html: &str) -> String {
     let mut out = String::with_capacity(html.len() / 2);
     let mut in_tag = false;
-    for &b in html.as_bytes() {
-        match b {
-            b'<' => in_tag = true,
-            b'>' => in_tag = false,
-            _ if !in_tag => out.push(b as char),
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
             _ => {}
         }
     }
@@ -432,5 +434,23 @@ mod tests {
     fn strip_html_tags_nested() {
         let out = strip_html_tags("<div><span>a</span><span>b</span></div>");
         assert_eq!(out, "ab");
+    }
+
+    // ---- UTF-8 multibyte preservation ----
+
+    #[test]
+    fn strip_non_content_preserves_multibyte_utf8() {
+        // The old byte-wise copy split each UTF-8 code unit into Latin-1
+        // mojibake ("这" -> "è ¿ \x99"). Chinese/Japanese text must survive.
+        let html = "<p>这是一段中文。</p><script>alert(1)</script>";
+        let out = strip_non_content(html);
+        assert!(out.contains("这是一段中文。"));
+        assert!(!out.contains("alert(1)"));
+    }
+
+    #[test]
+    fn strip_html_tags_preserves_multibyte_utf8() {
+        let out = strip_html_tags("<div>日本語のテキスト</div>");
+        assert_eq!(out, "日本語のテキスト");
     }
 }
