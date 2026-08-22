@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -47,6 +47,11 @@ pub struct ObscuraState {
     /// encoding override for `<a>`/`<area>` hrefs in legacy-charset documents.
     pub encoding: String,
     pub title: String,
+    /// URL of the document that initiated this document's navigation. Direct
+    /// automation navigations leave this empty; document-initiated navigations
+    /// set it per the strict-origin-when-cross-origin policy (upstream
+    /// edb1785).
+    pub referrer: String,
     pub blocked_urls: Vec<String>,
     pub cookie_jar: Option<Arc<CookieJar>>,
     pub http_client: Option<Arc<HttpClient>>,
@@ -61,6 +66,17 @@ pub struct ObscuraState {
     /// The document's input stream for `document.write()`, created on the
     /// first call. Why the calls share one parser is in `write_stream`.
     pub(crate) write_stream: std::cell::RefCell<Option<crate::obscura_js::write_stream::DocumentWriteStream>>,
+    /// HTML's per-script "already started" flag. This is native page state
+    /// rather than wrapper state, because it must survive moves and clones and
+    /// because fragment parsing can create nodes before a JS wrapper exists.
+    pub(crate) already_started_scripts: RefCell<HashSet<NodeId>>,
+    /// In-flight dynamic `<script src>` fetches. Dynamic scripts fetch via the
+    /// op-level reqwest client, invisible to the page-level http_client's
+    /// active_requests() counter — without this, the post-script settle loop
+    /// exits at its 500ms deadline while a slow external script is still in
+    /// flight, and the CDP consumer snapshots before the script (and its
+    /// load event) lands (upstream a6bb741).
+    pub(crate) dynamic_script_fetches: std::cell::Cell<u32>,
 }
 
 impl ObscuraState {
@@ -70,6 +86,7 @@ impl ObscuraState {
             url: "about:blank".to_string(),
             encoding: "UTF-8".to_string(),
             title: String::new(),
+            referrer: String::new(),
             blocked_urls: Vec::new(),
             cookie_jar: None,
             http_client: None,
@@ -79,11 +96,147 @@ impl ObscuraState {
             intercept_enabled: false,
             pending_binding_calls: Vec::new(),
             write_stream: std::cell::RefCell::new(None),
+            already_started_scripts: RefCell::new(HashSet::new()),
+            dynamic_script_fetches: std::cell::Cell::new(0),
         }
     }
 }
 
 pub type SharedState = Rc<RefCell<ObscuraState>>;
+
+pub(crate) fn node_is_script(dom: &DomTree, node_id: NodeId) -> bool {
+    dom.with_node(node_id, |node| {
+        node.as_element()
+            .map(|name| name.local.as_ref().eq_ignore_ascii_case("script"))
+            .unwrap_or(false)
+    })
+    .unwrap_or(false)
+}
+
+fn script_nodes_including_template_contents(dom: &DomTree, root: NodeId) -> Vec<NodeId> {
+    let mut scripts = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node_id) = stack.pop() {
+        if node_is_script(dom, node_id) {
+            scripts.push(node_id);
+        }
+        let template_contents = dom
+            .with_node(node_id, |node| match &node.data {
+                NodeData::Element { template_contents, .. } => *template_contents,
+                _ => None,
+            })
+            .flatten();
+        if let Some(contents) = template_contents {
+            stack.push(contents);
+        }
+        let children = dom.children(node_id);
+        for child in children.into_iter().rev() {
+            stack.push(child);
+        }
+    }
+    scripts
+}
+
+pub(crate) fn mark_script_subtree_started(state: &ObscuraState, root: NodeId) {
+    let Some(dom) = state.dom.as_ref() else {
+        return;
+    };
+    let scripts = script_nodes_including_template_contents(dom, root);
+    state.already_started_scripts.borrow_mut().extend(scripts);
+}
+
+fn propagate_script_start_state(
+    dom: &DomTree,
+    source_root: NodeId,
+    cloned_root: NodeId,
+    started: &RefCell<HashSet<NodeId>>,
+) {
+    let mut pairs = vec![(source_root, cloned_root)];
+    let mut additions = Vec::new();
+    let current = started.borrow();
+    while let Some((source, cloned)) = pairs.pop() {
+        if current.contains(&source) {
+            additions.push(cloned);
+        }
+
+        let source_template = dom
+            .with_node(source, |node| match &node.data {
+                NodeData::Element { template_contents, .. } => *template_contents,
+                _ => None,
+            })
+            .flatten();
+        let cloned_template = dom
+            .with_node(cloned, |node| match &node.data {
+                NodeData::Element { template_contents, .. } => *template_contents,
+                _ => None,
+            })
+            .flatten();
+        if let (Some(source_contents), Some(cloned_contents)) =
+            (source_template, cloned_template)
+        {
+            pairs.push((source_contents, cloned_contents));
+        }
+
+        let source_children = dom.children(source);
+        let cloned_children = dom.children(cloned);
+        for pair in source_children.into_iter().zip(cloned_children).rev() {
+            pairs.push(pair);
+        }
+    }
+    drop(current);
+    started.borrow_mut().extend(additions);
+}
+
+#[op2(fast)]
+fn op_script_mark_started(state: &OpState, nid: u32) -> bool {
+    let shared = state.borrow::<SharedState>().clone();
+    let state = shared.borrow();
+    let Some(dom) = state.dom.as_ref() else {
+        return false;
+    };
+    let node_id = NodeId::new(nid);
+    if !node_is_script(dom, node_id) {
+        return false;
+    }
+    state.already_started_scripts.borrow_mut().insert(node_id);
+    true
+}
+
+/// Atomically claim an executable script. A false result means the node was
+/// created inert by an HTML-string API or has already been prepared once.
+#[op2(fast)]
+fn op_script_try_start(state: &OpState, nid: u32) -> bool {
+    let shared = state.borrow::<SharedState>().clone();
+    let state = shared.borrow();
+    let Some(dom) = state.dom.as_ref() else {
+        return false;
+    };
+    let node_id = NodeId::new(nid);
+    if !node_is_script(dom, node_id) {
+        return false;
+    }
+    let newly_started = state.already_started_scripts.borrow_mut().insert(node_id);
+    newly_started
+}
+
+/// Bracket a dynamic `<script src>` fetch so the settle loop can distinguish
+/// "a script is still loading" from ordinary background XHR/fetch activity.
+/// The page-level http_client's active_requests() counter never sees these —
+/// they ride the op-level client cache — so without this bracket the settle
+/// loop's fast path would strand scripts slower than its 500ms budget.
+#[op2(fast)]
+fn op_dyn_script_fetch_begin(state: &OpState) {
+    let shared = state.borrow::<SharedState>().clone();
+    let state = shared.borrow();
+    state.dynamic_script_fetches.set(state.dynamic_script_fetches.get() + 1);
+}
+
+#[op2(fast)]
+fn op_dyn_script_fetch_end(state: &OpState) {
+    let shared = state.borrow::<SharedState>().clone();
+    let state = shared.borrow();
+    state.dynamic_script_fetches.set(state.dynamic_script_fetches.get().saturating_sub(1));
+}
 
 #[op2]
 #[string]
@@ -128,6 +281,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
     match cmd.as_str() {
         "document_node_id" => dom.document().index().to_string(),
         "document_title" => serde_json::to_string(&gs.title).unwrap_or("\"\"".into()),
+        "document_referrer" => serde_json::to_string(&gs.referrer).unwrap_or("\"\"".into()),
         "document_url" => serde_json::to_string(&gs.url).unwrap_or("\"\"".into()),
         "document_encoding" => serde_json::to_string(&gs.encoding).unwrap_or("\"UTF-8\"".into()),
         "document_element" => {
@@ -204,6 +358,27 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 "last_child" => n.last_child, "next_sibling" => n.next_sibling,
                 "prev_sibling" => n.prev_sibling, _ => None,
             }).map(|id| id.index().to_string()).unwrap_or("-1".into())
+        }
+        "next_in_subtree" => {
+            let root = NodeId::new(arg1.parse::<u32>().unwrap_or(0));
+            let current = NodeId::new(arg2.parse::<u32>().unwrap_or(0));
+            dom.next_in_subtree(root, current)
+                .map(|id| id.index().to_string())
+                .unwrap_or("-1".into())
+        }
+        "next_after_subtree" => {
+            let root = NodeId::new(arg1.parse::<u32>().unwrap_or(0));
+            let current = NodeId::new(arg2.parse::<u32>().unwrap_or(0));
+            dom.next_after_subtree(root, current)
+                .map(|id| id.index().to_string())
+                .unwrap_or("-1".into())
+        }
+        "prev_in_subtree" => {
+            let root = NodeId::new(arg1.parse::<u32>().unwrap_or(0));
+            let current = NodeId::new(arg2.parse::<u32>().unwrap_or(0));
+            dom.prev_in_subtree(root, current)
+                .map(|id| id.index().to_string())
+                .unwrap_or("-1".into())
         }
         "child_nodes" => {
             let nid = arg1.parse::<u32>().unwrap_or(0);
@@ -302,6 +477,11 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 };
                 let import_root = fragment.fragment_root();
                 dom.import_children_from(target, &fragment, import_root);
+                // innerHTML-created scripts are inert per spec — mark them
+                // started so a later move/clone never executes them.
+                for child in dom.children(target) {
+                    mark_script_subtree_started(&gs, child);
+                }
             }
             "true".into()
         }
@@ -346,6 +526,31 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         }
         "create_document_fragment" => {
             dom.new_node(NodeData::Document).index().to_string()
+        }
+        "clone_node" => {
+            let nid = match arg1.parse::<u32>() {
+                Ok(n) => n,
+                Err(_) => return "-1".into(),
+            };
+            let source = NodeId::new(nid);
+            match dom.clone_node(source, arg2 == "true") {
+                Some(cloned) => {
+                    propagate_script_start_state(
+                        dom,
+                        source,
+                        cloned,
+                        &gs.already_started_scripts,
+                    );
+                    cloned.index().to_string()
+                }
+                None => "-1".into(),
+            }
+        }
+        "template_contents" => {
+            let nid = arg1.parse::<u32>().unwrap_or(0);
+            dom.template_contents(NodeId::new(nid))
+                .map(|id| id.index().to_string())
+                .unwrap_or("-1".into())
         }
         "create_element" => {
             dom.new_node(NodeData::Element {
@@ -1671,6 +1876,10 @@ pub fn build_extension() -> Extension {
         ops: std::borrow::Cow::Owned(vec![
             op_dom(),
             op_console_msg(),
+            op_script_mark_started(),
+            op_script_try_start(),
+            op_dyn_script_fetch_begin(),
+            op_dyn_script_fetch_end(),
             op_fetch_url(),
             op_get_cookies(),
             op_set_cookie(),

@@ -654,6 +654,91 @@ impl DomTree {
         result
     }
 
+    /// Returns the node after `current` in document order, without leaving the
+    /// subtree rooted at `root`.
+    ///
+    /// Keeping the ancestor climb inside the DOM avoids one JS/native crossing
+    /// per ancestor when a TreeWalker reaches a deep leaf.
+    pub fn next_in_subtree(&self, root: NodeId, current: NodeId) -> Option<NodeId> {
+        let inner = self.inner.borrow();
+        let current_node = inner.nodes.get(current.index())?.as_ref()?;
+        if let Some(child) = current_node.first_child {
+            return Some(child);
+        }
+        Self::climb_to_next_sibling(&inner, root, current)
+    }
+
+    /// Returns the node after the whole subtree rooted at `current`, in document
+    /// order, without leaving the subtree rooted at `root`.
+    ///
+    /// This is `next_in_subtree` minus the descend-into-children step, which is
+    /// what `NodeFilter.FILTER_REJECT` needs: it rejects a node *and* its
+    /// descendants, unlike `FILTER_SKIP`, which only skips the node itself and
+    /// is served by `next_in_subtree`.
+    pub fn next_after_subtree(&self, root: NodeId, current: NodeId) -> Option<NodeId> {
+        let inner = self.inner.borrow();
+        Self::climb_to_next_sibling(&inner, root, current)
+    }
+
+    /// Returns the node before `current` in document order, without leaving the
+    /// subtree rooted at `root`. `root` has no predecessor within its own
+    /// subtree, but it is itself reachable as one — a NodeIterator can return
+    /// its root, unlike a TreeWalker.
+    ///
+    /// A NodeIterator applies no subtree pruning (DOM 6.2: FILTER_REJECT
+    /// behaves as FILTER_SKIP), so unlike the TreeWalker's backward walk the
+    /// whole step fits here instead of being interleaved with filter calls.
+    pub fn prev_in_subtree(&self, root: NodeId, current: NodeId) -> Option<NodeId> {
+        let inner = self.inner.borrow();
+        if current == root {
+            return None;
+        }
+        let current_node = inner.nodes.get(current.index())?.as_ref()?;
+
+        let Some(prev) = current_node.prev_sibling else {
+            // No previous sibling: the parent immediately precedes `current`.
+            return current_node.parent;
+        };
+
+        // Otherwise it is the previous sibling's deepest last descendant.
+        let mut node_id = prev;
+        for _ in 0..=inner.nodes.len() {
+            let node = inner.nodes.get(node_id.index())?.as_ref()?;
+            match node.last_child {
+                Some(child) => node_id = child,
+                None => return Some(node_id),
+            }
+        }
+
+        // Same defense in depth as the forward walk: a malformed tree must not
+        // spin here.
+        None
+    }
+
+    /// Follow `current`'s next sibling, climbing ancestors until one has a next
+    /// sibling — without stepping outside `root`.
+    fn climb_to_next_sibling(
+        inner: &DomTreeInner,
+        root: NodeId,
+        current: NodeId,
+    ) -> Option<NodeId> {
+        let mut node_id = current;
+        for _ in 0..=inner.nodes.len() {
+            if node_id == root {
+                return None;
+            }
+            let node = inner.nodes.get(node_id.index())?.as_ref()?;
+            if let Some(sibling) = node.next_sibling {
+                return Some(sibling);
+            }
+            node_id = node.parent?;
+        }
+
+        // Parent cycles are prevented by the mutation APIs. Keep a hard bound
+        // here as defense in depth for a malformed tree.
+        None
+    }
+
     pub fn ancestors(&self, node_id: NodeId) -> Vec<NodeId> {
         let inner = self.inner.borrow();
         let mut result = Vec::new();
@@ -761,6 +846,99 @@ impl DomTree {
             }
         }
         doc
+    }
+
+    /// Return the template contents document for a `<template>` element,
+    /// allocating one on demand for created templates — `.content` must be
+    /// usable whether or not the parser pre-created it.
+    ///
+    /// Returns `None` for a non-element node.
+    pub fn template_contents(&self, node_id: NodeId) -> Option<NodeId> {
+        {
+            let inner = self.inner.borrow();
+            let node = inner.nodes.get(node_id.index())?.as_ref()?;
+            match &node.data {
+                NodeData::Element { template_contents, .. } => {
+                    if let Some(existing) = *template_contents {
+                        return Some(existing);
+                    }
+                }
+                _ => return None,
+            }
+        }
+
+        // Borrow released above: `new_node` takes its own mutable borrow.
+        // Matches what the tree sink allocates for a parsed template.
+        let contents = self.new_node(NodeData::Document);
+        let mut inner = self.inner.borrow_mut();
+        if let Some(Some(node)) = inner.nodes.get_mut(node_id.index()) {
+            if let NodeData::Element { template_contents, .. } = &mut node.data {
+                *template_contents = Some(contents);
+                return Some(contents);
+            }
+        }
+        None
+    }
+
+    /// Clone one node within this tree without attaching the clone.
+    ///
+    /// This operates on node data directly instead of serializing and parsing
+    /// HTML. Besides avoiding context-sensitive fragment parsing (`<html>`,
+    /// table children, and foreign content), it preserves the cloned root's
+    /// element type and namespace. Template contents are stored in a separate
+    /// document node and therefore need their own remapped clone.
+    pub fn clone_node(&self, source_node_id: NodeId, deep: bool) -> Option<NodeId> {
+        let source_data = self.get_node(source_node_id)?.data;
+        let cloned_root = self.new_node(source_data);
+        let mut stack = Vec::new();
+        self.prepare_cloned_children(source_node_id, cloned_root, deep, &mut stack);
+
+        while let Some((dest_parent, source_node)) = stack.pop() {
+            let source_data = match self.get_node(source_node) {
+                Some(node) => node.data,
+                None => continue,
+            };
+            let cloned_node = self.new_node(source_data);
+            self.append_child(dest_parent, cloned_node);
+            self.prepare_cloned_children(source_node, cloned_node, true, &mut stack);
+        }
+
+        Some(cloned_root)
+    }
+
+    fn prepare_cloned_children(
+        &self,
+        source_node: NodeId,
+        cloned_node: NodeId,
+        deep: bool,
+        stack: &mut Vec<(NodeId, NodeId)>,
+    ) {
+        let source_contents = self
+            .with_node(source_node, |node| match &node.data {
+                NodeData::Element { template_contents, .. } => *template_contents,
+                _ => None,
+            })
+            .flatten();
+
+        if let Some(source_contents) = source_contents {
+            let cloned_contents = self.new_node(NodeData::Document);
+            self.with_node_mut(cloned_node, |node| {
+                if let NodeData::Element { template_contents, .. } = &mut node.data {
+                    *template_contents = Some(cloned_contents);
+                }
+            });
+            if deep {
+                for child in self.children(source_contents).into_iter().rev() {
+                    stack.push((cloned_contents, child));
+                }
+            }
+        }
+
+        if deep {
+            for child in self.children(source_node).into_iter().rev() {
+                stack.push((cloned_node, child));
+            }
+        }
     }
 
     pub fn import_children_from(&self, parent_id: NodeId, source: &DomTree, source_node: NodeId) {

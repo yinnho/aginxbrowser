@@ -124,6 +124,32 @@ pub struct NetworkEvent {
     pub timestamp: f64,
 }
 
+/// Compute the default `strict-origin-when-cross-origin` referrer for a
+/// document-initiated navigation (upstream edb1785). Same-origin sends the
+/// full source URL minus fragment/credentials; cross-origin sends only the
+/// origin; downgrades (https -> http) and non-HTTP(S) schemes send nothing.
+/// Referrer-Policy overrides are not yet plumbed through.
+fn navigation_referrer(source: &Url, target: &Url) -> String {
+    if !matches!(source.scheme(), "http" | "https")
+        || !matches!(target.scheme(), "http" | "https")
+        || (source.scheme() == "https" && target.scheme() == "http")
+    {
+        return String::new();
+    }
+
+    if source.origin() == target.origin() {
+        let mut sanitized = source.clone();
+        sanitized.set_fragment(None);
+        let _ = sanitized.set_username("");
+        let _ = sanitized.set_password(None);
+        return sanitized.to_string();
+    }
+
+    let mut origin = source.origin().ascii_serialization();
+    origin.push('/');
+    origin
+}
+
 pub struct Page {
     pub id: String,
     pub frame_id: String,
@@ -134,6 +160,11 @@ pub struct Page {
     pub http_client: Arc<HttpClient>,
     pub context: Arc<BrowserContext>,
     pub title: String,
+    /// URL of the document that initiated the current navigation, exposed to
+    /// JS as `document.referrer`. Direct automation navigations leave this
+    /// empty; document-initiated navigations (location.href, form submit)
+    /// set it per strict-origin-when-cross-origin (upstream edb1785).
+    pub referrer: String,
     /// WHATWG canonical name of the current document's character encoding
     /// (e.g. "UTF-8", "EUC-JP"), detected when the response body is decoded.
     /// Exposed to JS as `document.characterSet` and used for the URL query
@@ -209,6 +240,7 @@ impl Page {
             http_client,
             context,
             title: String::new(),
+            referrer: String::new(),
             encoding: "UTF-8".to_string(),
             history: Vec::new(),
             history_index: 0,
@@ -274,6 +306,7 @@ impl Page {
         rt.set_url(&self.url_string());
         rt.set_encoding(&self.encoding);
         rt.set_title(&self.title);
+        rt.set_referrer(&self.referrer);
 
         // JS-layer UA must match the HTTP-layer UA we advertise (set via
         // AGINXBROWSER_UA / context.user_agent). Hardcoding the stealth
@@ -616,7 +649,7 @@ impl Page {
 
                 tracing::info!("Loading ES module: {}", full_url);
                 if let Some(js) = &mut self.js {
-                    match js.load_module(&full_url).await {
+                    match js.load_module(&full_url, 10_000).await {
                         Ok(()) => {
                             tracing::info!("ES module loaded: {}", full_url);
                             self.record_network_event(&full_url, "GET", "Script", 200, &std::collections::HashMap::new(), 0);
@@ -629,7 +662,7 @@ impl Page {
             } else if !module_script.inline.is_empty() {
                 let base = self.url_string();
                 if let Some(js) = &mut self.js {
-                    if let Err(e) = js.load_inline_module(&module_script.inline, &base).await {
+                    if let Err(e) = js.load_inline_module(&module_script.inline, &base, 10_000).await {
                         tracing::warn!("Inline ES module error: {}", e);
                     }
                 }
@@ -660,12 +693,27 @@ impl Page {
             // issue series around the 40-site compat sweep).
             // A single run_event_loop poll that pins the thread inside V8 makes
             // the per-poll tokio timeouts below useless, so guard the whole loop
-            // with a watchdog that fires ~250ms past its 500ms deadline.
-            let settle_wd = js.arm_watchdog(std::time::Duration::from_millis(750));
-            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
+            // with a watchdog that fires 250ms past the longest deadline.
+            //
+            // A dynamic external script may still be in flight at 500ms. Keep
+            // pumping only while such a fetch is pending, up to a separate
+            // bounded budget, so normal pages and unrelated fetches retain the
+            // fast path (upstream a6bb741).
+            let dynamic_settle_ms = std::env::var("OBSCURA_DYNAMIC_SCRIPT_SETTLE_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(3_000)
+                .max(500);
+            let settle_wd = js.arm_watchdog(std::time::Duration::from_millis(dynamic_settle_ms + 250));
+            let started = tokio::time::Instant::now();
+            let deadline = started + tokio::time::Duration::from_millis(500);
+            let dynamic_deadline = started + tokio::time::Duration::from_millis(dynamic_settle_ms);
             let mut idle_count = 0u32;
             loop {
-                if tokio::time::Instant::now() >= deadline {
+                let now = tokio::time::Instant::now();
+                if now >= deadline
+                    && (now >= dynamic_deadline || !js.has_pending_dynamic_scripts())
+                {
                     break;
                 }
                 let result = tokio::time::timeout(
@@ -720,6 +768,10 @@ impl Page {
         method: &str,
         body: &str,
     ) -> Result<(), PageError> {
+        // Direct automation navigations carry no referrer (upstream edb1785:
+        // only document-initiated navigations set one; the JS-triggered chain
+        // inside the inner loop stamps each subsequent hop).
+        self.referrer = String::new();
         // Hard ceiling on a single end-to-end navigation. Without this a slow
         // primary fetch or a runaway settle loop can hold the V8 lock for
         // arbitrarily long (we've measured 60+ seconds on JS-heavy news
@@ -895,6 +947,12 @@ impl Page {
                     break;
                 }
                 tracing::info!("JS-triggered navigation chain: {} {} -> {}", current_method, current_url, next_url);
+                // The chain step is document-initiated: the new document sees
+                // the strict-origin-when-cross-origin referrer of this one.
+                self.referrer = Url::parse(&current_url)
+                    .ok()
+                    .and_then(|src| Url::parse(&next_url).ok().map(|dst| navigation_referrer(&src, &dst)))
+                    .unwrap_or_default();
                 current_url = next_url;
                 current_method = next_method;
                 current_body = next_body;

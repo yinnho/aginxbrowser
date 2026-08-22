@@ -75,6 +75,13 @@ pub struct ObscuraJsRuntime {
     /// microtask loop re-queues itself on the next pump, so pumping it again
     /// just re-feeds the storm).
     watchdog_fired_total: std::cell::Cell<u64>,
+    /// Per-module evaluation outcome cache (upstream 4f6d256): browsers
+    /// evaluate a module script exactly once per document. deno_core 0.350
+    /// asserts on a second mod_evaluate of the same ModuleId instead of
+    /// treating it as the spec's module-map no-op, so a page loading the same
+    /// module URL twice (duplicate <script type=module src>, or a root already
+    /// evaluated earlier as another graph's dependency) panics without this.
+    module_evaluations: HashMap<deno_core::ModuleId, Result<(), String>>,
 }
 
 /// Handle to an armed V8 execution watchdog (see [`ObscuraJsRuntime::arm_watchdog`]).
@@ -155,8 +162,7 @@ impl WatchdogToken {
     /// Stop the watchdog. Returns true if it had already fired (terminated the
     /// isolate). The caller must then clear the termination flag via
     /// [`ObscuraJsRuntime::cancel_termination`] before the next eval.
-    pub fn stop(mut self) -> bool {
-        {
+    pub fn stop(mut self) -> bool {        {
             let (lock, cvar) = &*self.pair;
             *lock.lock().unwrap() = true;
             cvar.notify_one();
@@ -172,6 +178,18 @@ impl WatchdogToken {
     /// while keeping the token alive for the final `stop()`.
     pub fn fired(&self) -> bool {
         self.fired.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Extract a display message from a caught panic payload (`&str`, `String`,
+/// or anything else reduced to "unknown panic").
+fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
     }
 }
 
@@ -228,6 +246,7 @@ impl ObscuraJsRuntime {
             isolate_handle,
             heap_limit_state,
             watchdog_fired_total: std::cell::Cell::new(0),
+            module_evaluations: HashMap::new(),
         }
     }
 
@@ -258,12 +277,27 @@ impl ObscuraJsRuntime {
         self.state.borrow_mut().title = title.to_string();
     }
 
+    /// Set the source document URL exposed as `document.referrer`
+    /// (navigation referrer semantics, upstream edb1785).
+    pub fn set_referrer(&self, referrer: &str) {
+        self.state.borrow_mut().referrer = referrer.to_string();
+    }
+
     pub fn set_blocked_urls(&self, patterns: Vec<String>) {
         self.state.borrow_mut().blocked_urls = patterns;
     }
 
     pub fn take_pending_navigation(&self) -> Option<(String, String, String)> {
         self.state.borrow_mut().pending_navigation.take()
+    }
+
+    /// Whether any dynamic `<script src>` fetch is still in flight. Dynamic
+    /// scripts ride the op-level client cache, invisible to the page-level
+    /// http_client's active_requests() counter, so the settle loop asks here
+    /// before cutting a page short at its fast-path deadline (upstream
+    /// a6bb741).
+    pub fn has_pending_dynamic_scripts(&self) -> bool {
+        self.state.borrow().dynamic_script_fetches.get() > 0
     }
 
     pub fn take_pending_binding_calls(&self) -> Vec<(String, String)> {
@@ -737,60 +771,138 @@ impl ObscuraJsRuntime {
         );
         self.object_store.clear();
     }
-    pub async fn load_module(&mut self, url: &str) -> Result<(), String> {
+    pub async fn load_module(&mut self, url: &str, budget_ms: u64) -> Result<(), String> {
+        let budget = tokio::time::Duration::from_millis(budget_ms);
         let specifier = deno_core::ModuleSpecifier::parse(url)
             .map_err(|e| format!("Invalid module URL {}: {}", url, e))?;
 
         // Fetch the module source. The old impl registered an empty string
         // and called it loaded, so every Vite / Next module bundle "loaded"
         // in 1ms with zero code and the SPA never mounted (issue #205).
+        // Failures now propagate (upstream be700f5): a 404/500 must not be
+        // evaluated as an empty module and reported as loaded.
         let client = self.state.borrow().http_client.clone();
         let source_code = match client {
-            Some(c) => match c.fetch(&specifier).await {
-                Ok(resp) => crate::diting_net::decode_non_html(&resp.body, resp.content_type()),
-                Err(e) => {
-                    tracing::warn!("Module fetch failed ({}): {}", url, e);
-                    String::new()
+            Some(c) => {
+                let resp = c
+                    .fetch(&specifier)
+                    .await
+                    .map_err(|e| format!("Module fetch failed ({}): {}", url, e))?;
+                if !(200..=299).contains(&resp.status) {
+                    return Err(format!("Module {} returned HTTP {}", url, resp.status));
                 }
-            },
+                crate::diting_net::decode_non_html(&resp.body, resp.content_type())
+            }
             None => {
-                tracing::warn!("No http_client wired to runtime; module {} will be empty", url);
-                String::new()
+                return Err(format!(
+                    "No http_client wired to runtime; cannot fetch module {}",
+                    url
+                ));
             }
         };
 
-        let module_id = self
-            .runtime
-            .load_side_es_module_from_code(&specifier, deno_core::ModuleCodeString::from(source_code))
-            .await
-            .map_err(|e| format!("Module load error: {}", e))?;
-
-        let result = self.runtime.mod_evaluate(module_id);
-
-        let timeout = tokio::time::timeout(
-            tokio::time::Duration::from_secs(10),
-            self.runtime.run_event_loop(deno_core::PollEventLoopOptions::default()),
-        ).await;
-
-        match timeout {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(format!("Module event loop error: {}", e)),
+        // Bound the graph fetch: submodules resolve recursively through the
+        // module loader, so a slow import chain must not hang page load.
+        let module_id = match tokio::time::timeout(
+            budget,
+            self.runtime.load_side_es_module_from_code(
+                &specifier,
+                deno_core::ModuleCodeString::from(source_code),
+            ),
+        )
+        .await
+        {
+            Ok(r) => r.map_err(|e| format!("Module load error: {}", e))?,
             Err(_) => {
-                tracing::warn!("Module evaluation timed out after 10s: {}", url);
-                return Ok(());
+                return Err(format!(
+                    "Module graph load timed out after {}ms: {}",
+                    budget_ms, url
+                ));
             }
-        }
+        };
 
-        match result.await {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                tracing::warn!("Module eval error: {}", e);
-                Ok(())
-            }
-        }
+        self.drive_module_eval(module_id, budget_ms, &format!("Module {}", url))
+            .await
     }
 
-    pub async fn load_inline_module(&mut self, code: &str, base_url: &str) -> Result<(), String> {
+    /// Drive a just-started module evaluation to completion, or up to
+    /// `budget_ms`. Returns as soon as the module finishes rather than waiting
+    /// for the event loop to go idle: a page timer (Vite's HMR client installs
+    /// a setInterval) keeps the loop busy forever, and waiting for idle burned
+    /// the whole budget on an early module and starved the one that mounts the
+    /// app, leaving #root empty (upstream #374). The outcome is cached per
+    /// ModuleId: browsers evaluate a module exactly once per document, and
+    /// deno_core 0.350 asserts on a repeat evaluation instead of no-op'ing —
+    /// the cache (plus a contained panic check) covers both duplicate roots
+    /// and roots already evaluated as another graph's dependency.
+    async fn drive_module_eval(
+        &mut self,
+        module_id: deno_core::ModuleId,
+        budget_ms: u64,
+        what: &str,
+    ) -> Result<(), String> {
+        if let Some(outcome) = self.module_evaluations.get(&module_id) {
+            return outcome.clone();
+        }
+
+        let budget = tokio::time::Duration::from_millis(budget_ms);
+        // deno_core 0.350 panics ("Module already evaluated") rather than
+        // treating a second evaluation as the module-map no-op browsers
+        // perform; that panic is a success, not a crash.
+        let evaluation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.runtime.mod_evaluate(module_id)
+        }));
+        let result = match evaluation {
+            Ok(result) => result,
+            Err(payload) => {
+                let message = panic_payload_message(payload);
+                let outcome = if message.contains("Module already evaluated") {
+                    Ok(())
+                } else {
+                    Err(format!("{} evaluation panicked: {}", what, message))
+                };
+                self.module_evaluations.insert(module_id, outcome.clone());
+                return outcome;
+            }
+        };
+        tokio::pin!(result);
+
+        // The event-loop arm is polled first (biased): a ready loop error
+        // must surface instead of being discarded while awaiting the result.
+        let outcome = tokio::time::timeout(budget, async {
+            let event_loop = self
+                .runtime
+                .run_event_loop(deno_core::PollEventLoopOptions::default());
+            tokio::pin!(event_loop);
+            tokio::select! {
+                biased;
+                e = &mut event_loop => { e?; (&mut result).await }
+                r = &mut result => r,
+            }
+        })
+        .await;
+
+        // An eval error or timeout is returned to the page lifecycle. The
+        // caller may keep rendering, but must not report the module as loaded.
+        let outcome = match outcome {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(format!("{} eval error: {}", what, e)),
+            Err(_) => Err(format!(
+                "{} evaluation timed out after {}ms",
+                what, budget_ms
+            )),
+        };
+        self.module_evaluations.insert(module_id, outcome.clone());
+        outcome
+    }
+
+    pub async fn load_inline_module(
+        &mut self,
+        code: &str,
+        base_url: &str,
+        budget_ms: u64,
+    ) -> Result<(), String> {
+        let budget = tokio::time::Duration::from_millis(budget_ms);
         let specifier = deno_core::ModuleSpecifier::parse(
             &format!("{}#inline-module-{}", base_url, self.object_counter),
         )
@@ -798,38 +910,28 @@ impl ObscuraJsRuntime {
 
         self.object_counter += 1;
 
-        let module_id = self
-            .runtime
-            .load_side_es_module_from_code(
+        let module_id = match tokio::time::timeout(
+            budget,
+            self.runtime.load_side_es_module_from_code(
                 &specifier,
                 deno_core::ModuleCodeString::from(code.to_string()),
-            )
-            .await
-            .map_err(|e| format!("Inline module load error: {}", e))?;
-
-        let result = self.runtime.mod_evaluate(module_id);
-
-        let timeout = tokio::time::timeout(
-            tokio::time::Duration::from_secs(10),
-            self.runtime.run_event_loop(deno_core::PollEventLoopOptions::default()),
-        ).await;
-
-        match timeout {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(format!("Module event loop error: {}", e)),
+            ),
+        )
+        .await
+        {
+            Ok(r) => r.map_err(|e| format!("Inline module load error: {}", e))?,
             Err(_) => {
-                tracing::warn!("Inline module timed out after 10s");
-                return Ok(());
+                return Err(format!(
+                    "Inline module graph load timed out after {}ms",
+                    budget_ms
+                ));
             }
-        }
+        };
 
-        match result.await {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                tracing::warn!("Inline module eval error: {}", e);
-                Ok(())
-            }
-        }
+        // Same completion-not-idle semantics as load_module (upstream #374):
+        // an inline preamble module that installs a timer must not burn the
+        // whole budget waiting for an idle that never comes.
+        self.drive_module_eval(module_id, budget_ms, "Inline module").await
     }
 
     pub fn execute_script(&mut self, _name: &str, source: &str) -> Result<(), String> {
@@ -1902,6 +2004,345 @@ mod tests {
         }"#;
         let result = rt.call_function_on_for_cdp(script, None, &[], true, false).await.unwrap();
         assert_eq!(result.value.unwrap(), serde_json::json!([true, true, true]));
+    }
+
+    #[test]
+    fn test_node_iterator_returns_root_and_has_detach() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // createNodeIterator was an alias of createTreeWalker, so the first
+        // nextNode() silently skipped the root and detach was missing (#467).
+        let result = rt.evaluate(r#"
+            const root = document.createElement('div');
+            root.innerHTML = '<a></a>';
+            const it = document.createNodeIterator(root, NodeFilter.SHOW_ELEMENT);
+            const tags = [];
+            let n;
+            while ((n = it.nextNode())) tags.push(n.tagName);
+            return [tags, typeof it.detach, it.root === root, it.referenceNode.tagName, it.pointerBeforeReferenceNode];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([["DIV", "A"], "function", true, "A", false])
+        );
+    }
+
+    #[test]
+    fn test_treewalker_next_document_order_and_reject_prunes() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // Document-order forward walk (#432); FILTER_REJECT prunes the whole
+        // subtree (#461) rather than just skipping the node.
+        let result = rt.evaluate(r#"
+            const root = document.createElement('div');
+            root.innerHTML = '<a><b></b></a><c></c>';
+            const w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
+                acceptNode(n) { return n.tagName === 'A' ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT; }
+            });
+            const tags = [];
+            let n;
+            while ((n = w.nextNode())) tags.push(n.tagName);
+            return tags;
+        "#).unwrap();
+        // A is rejected, so its child B is pruned too; C still follows. Root
+        // (DIV) is never returned by a TreeWalker's nextNode.
+        assert_eq!(result, serde_json::json!(["C"]));
+    }
+
+    #[test]
+    fn test_treewalker_skip_descends_into_children() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // FILTER_SKIP must still expose a skipped node's children (#469); the
+        // old firstChild stepped straight to the next sibling and returned null.
+        let result = rt.evaluate(r#"
+            const root = document.createElement('div');
+            root.innerHTML = '<section><a></a></section>';
+            const w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
+                acceptNode(n) { return n.tagName === 'SECTION' ? NodeFilter.FILTER_SKIP : NodeFilter.FILTER_ACCEPT; }
+            });
+            const first = w.firstChild();
+            return first ? first.tagName : null;
+        "#).unwrap();
+        assert_eq!(result, serde_json::json!("A"));
+    }
+
+    #[test]
+    fn test_treewalker_previousnode_reverse_order() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // previousNode walked reverse document order and died mid-tree when a
+        // candidate was filtered (#462). Walk forward to the end, then back.
+        let result = rt.evaluate(r#"
+            const root = document.createElement('div');
+            root.innerHTML = '<a><b></b></a><c></c>';
+            const w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
+                acceptNode(n) { return n.tagName === 'B' ? NodeFilter.FILTER_SKIP : NodeFilter.FILTER_ACCEPT; }
+            });
+            while (w.nextNode()) {}
+            const tags = [];
+            let n;
+            while ((n = w.previousNode())) tags.push(n.tagName);
+            return tags;
+        "#).unwrap();
+        // Reverse document order with B skipped: the walk from C finds A, then
+        // stops at root (which a backward traversal never returns).
+        assert_eq!(result, serde_json::json!(["A"]));
+    }
+
+    #[test]
+    fn test_treewalker_parentnode_stays_within_root() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // parentNode returned a node OUTSIDE the subtree when currentNode was
+        // root, and null instead of root when an accepted ancestor was root
+        // itself (#475).
+        let result = rt.evaluate(r#"
+            const root = document.createElement('div');
+            root.innerHTML = '<a><b></b></a>';
+            // Skip A, so parentNode must climb past it to the accepted ancestor root.
+            const w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
+                acceptNode(n) { return n.tagName === 'A' ? NodeFilter.FILTER_SKIP : NodeFilter.FILTER_ACCEPT; }
+            });
+            const b = root.querySelector('b');
+            w.currentNode = b;
+            const parent = w.parentNode();
+            // At root, parentNode must not surface <body> above it.
+            w.currentNode = root;
+            const above = w.parentNode();
+            return [parent === root, above];
+        "#).unwrap();
+        assert_eq!(result, serde_json::json!([true, null]));
+    }
+
+    #[test]
+    fn test_insert_before_flattens_document_fragment_in_order() {
+        let mut rt = setup_runtime(r#"<main id="host"><article id="last"></article></main>"#);
+        let result = rt.evaluate(r#"
+            const host = document.getElementById('host');
+            const last = document.getElementById('last');
+            const fragment = document.createDocumentFragment();
+            const first = document.createElement('article');
+            const second = document.createElement('article');
+            first.id = 'first';
+            second.id = 'second';
+            fragment.appendChild(first);
+            fragment.appendChild(second);
+
+            const returned = host.insertBefore(fragment, last);
+            return [
+                returned === fragment,
+                Array.from(host.children).map(node => node.id),
+                fragment.childNodes.length,
+                first.parentElement === host,
+                second.parentElement === host,
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([true, ["first", "second", "last"], 0, true, true])
+        );
+    }
+
+    #[test]
+    fn test_replace_child_flattens_document_fragment_and_removes_old_child() {
+        let mut rt = setup_runtime(
+            r#"<main id="host"><article id="old"></article><article id="tail"></article></main>"#,
+        );
+        let result = rt.evaluate(r#"
+            const host = document.getElementById('host');
+            const old = document.getElementById('old');
+            const fragment = document.createDocumentFragment();
+            const first = document.createElement('article');
+            const second = document.createElement('article');
+            first.id = 'first';
+            second.id = 'second';
+            fragment.appendChild(first);
+            fragment.appendChild(second);
+
+            const returned = host.replaceChild(fragment, old);
+            return [
+                returned === old,
+                Array.from(host.children).map(node => node.id),
+                fragment.childNodes.length,
+                old.parentNode === null,
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([true, ["first", "second", "tail"], 0, true])
+        );
+    }
+
+    #[test]
+    fn test_insert_before_and_replace_child_report_to_mutation_observers() {
+        // insertBefore/replaceChild ran the tree mutation but never notified
+        // MutationObserver — before()/after()/replaceWith() route through
+        // insertBefore, so they were silent too.
+        let mut rt = setup_runtime(r#"<main id="host"><p id="a"></p><p id="b"></p></main>"#);
+        let result = rt.evaluate(r#"
+            const host = document.getElementById('host');
+            const observer = new MutationObserver(() => {});
+            observer.observe(host, { childList: true });
+            const x = document.createElement('x-i');
+            host.insertBefore(x, document.getElementById('b'));
+            const y = document.createElement('x-r');
+            host.replaceChild(y, document.getElementById('a'));
+            // Observer delivery is a microtask; takeRecords() drains
+            // synchronously.
+            return observer.takeRecords().map(r => [r.addedNodes.length, r.removedNodes.length]);
+        "#).unwrap();
+        assert_eq!(result, serde_json::json!([[1, 0], [1, 1]]));
+    }
+
+    #[test]
+    fn test_checkbox_radio_default_value_on() {
+        // A checkbox/radio with no value attribute returns "on" in a real
+        // browser, not the empty string; an explicit value attribute wins.
+        let mut rt = setup_runtime(
+            r#"<input id="cb" type="checkbox"><input id="rd" type="radio"><input id="cbv" type="checkbox" value="yes"><input id="txt" type="text">"#,
+        );
+        let result = rt.evaluate(r#"
+            return [
+                document.getElementById('cb').value,
+                document.getElementById('rd').value,
+                document.getElementById('cbv').value,
+                document.getElementById('txt').value,
+            ];
+        "#).unwrap();
+        assert_eq!(result, serde_json::json!(["on", "on", "yes", ""]));
+    }
+
+    #[test]
+    fn test_child_nodes_is_a_real_nodelist() {
+        // childNodes returned a plain Array (Array.isArray true, toString
+        // "[object Array]") — an instant fingerprinting tell. A real browser
+        // reports "[object NodeList]" and Array.isArray false.
+        let mut rt = setup_runtime(r#"<div id="host"><p>A</p><p>B</p></div>"#);
+        let result = rt.evaluate(r#"
+            const list = document.getElementById('host').childNodes;
+            const seen = [];
+            list.forEach((n, i) => seen.push([i, n.tagName]));
+            return [
+                Array.isArray(list),
+                Object.prototype.toString.call(list),
+                list instanceof NodeList,
+                list.length,
+                list.item(0).tagName,
+                list.item(7),
+                [...list].map(n => n.tagName),
+                Array.from(list.keys()),
+                seen,
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                false, "[object NodeList]", true, 2, "P", null,
+                ["P", "P"], [0, 1], [[0, "P"], [1, "P"]]
+            ])
+        );
+    }
+
+    #[test]
+    fn test_adopt_node_and_toggle_attribute() {
+        // Lit/Stencil and several ad SDKs call both; the missing methods threw.
+        let mut rt = setup_runtime(r#"<div id="host"></div>"#);
+        let result = rt.evaluate(r#"
+            const host = document.getElementById('host');
+            const child = document.createElement('span');
+            host.appendChild(child);
+            const adopted = document.adoptNode(child);
+            const toggles = [
+                host.toggleAttribute('hidden'),
+                host.toggleAttribute('hidden'),
+                host.toggleAttribute('data-x', true),
+                host.toggleAttribute('data-x', true),
+                host.toggleAttribute('data-x', false),
+                host.toggleAttribute('data-x', false),
+            ];
+            return [
+                adopted === child,
+                toggles,
+                host.hasAttribute('hidden'),
+                host.hasAttribute('data-x'),
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([true, [true, false, true, true, false, false], false, false])
+        );
+    }
+
+    #[test]
+    fn test_clone_node_shallow_preserves_attributes_and_isolation() {
+        let mut rt = setup_runtime(
+            r#"<section id="src" class="source" data-token="original"><span>child</span></section>"#,
+        );
+        let result = rt.evaluate(r#"
+            const source = document.getElementById('src');
+            const clone = source.cloneNode(false);
+            clone.className = 'clone';
+            source.setAttribute('data-token', 'changed');
+            return [
+                clone instanceof Element,
+                clone.tagName,
+                clone.id,
+                clone.className,
+                clone.getAttribute('data-token'),
+                clone.childNodes.length,
+                clone.parentNode === null,
+                clone !== source,
+                source.className,
+                source.getAttribute('data-token'),
+                source.childNodes.length,
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                true, "SECTION", "src", "clone", "original", 0, true, true,
+                "source", "changed", 1
+            ])
+        );
+    }
+
+    #[test]
+    fn test_clone_node_deep_keeps_table_children_and_template_contents() {
+        // The old innerHTML round-trip parsed through a <div> context, which
+        // discards <tr>/<td>/<option> as invalid children. Structural cloning
+        // has no parsing context, so they survive; <template> contents hang
+        // off a separate fragment and need their own remapped clone.
+        let mut rt = setup_runtime(
+            r#"<table id="tbl"><tr><td>c1</td></tr></table><template id="tpl"><p>in-template</p></template>"#,
+        );
+        let result = rt.evaluate(r#"
+            const tblClone = document.getElementById('tbl').cloneNode(true);
+            const tplClone = document.getElementById('tpl').cloneNode(true);
+            return [
+                tblClone.querySelectorAll('td').length,
+                tblClone.querySelector('td').textContent,
+                tplClone.content.childNodes.length,
+                tplClone.content.querySelector('p').textContent,
+                tplClone.content !== document.getElementById('tpl').content,
+            ];
+        "#).unwrap();
+        assert_eq!(result, serde_json::json!([1, "c1", 1, "in-template", true]));
+    }
+
+    #[test]
+    fn test_clone_node_deep_subtree_does_not_overflow() {
+        // Structural cloning uses an explicit stack in Rust, so a pathological
+        // nesting depth cannot overflow the JS stack.
+        let mut rt = setup_runtime(r#"<div id="host"></div>"#);
+        let result = rt.evaluate(r#"
+            let node = document.getElementById('host');
+            for (let i = 0; i < 2000; i++) {
+                const child = document.createElement('div');
+                node.appendChild(child);
+                node = child;
+            }
+            const clone = document.getElementById('host').cloneNode(true);
+            let depth = 0, cur = clone;
+            while (cur.firstChild) { depth++; cur = cur.firstChild; }
+            return [depth];
+        "#).unwrap();
+        assert_eq!(result, serde_json::json!([2000]));
     }
 
     #[test]
@@ -3204,11 +3645,19 @@ mod tests {
 
     #[test]
     fn test_create_event_unknown_type_returns_event() {
+        // 7e6f403 flipped the contract: unknown interface names now throw
+        // NotSupportedError (Chrome behavior) instead of returning a generic
+        // Event whose init* methods would all be missing.
         let mut rt = setup_runtime("<html><body></body></html>");
         let kind = rt
-            .evaluate("document.createEvent('NotARealType') instanceof Event")
+            .evaluate(
+                r#"(() => {
+                    try { document.createEvent('NotARealType'); return 'no-throw'; }
+                    catch (e) { return e.name; }
+                })()"#,
+            )
             .unwrap();
-        assert_eq!(kind, serde_json::json!(true));
+        assert_eq!(kind, serde_json::json!("NotSupportedError"));
     }
 
     #[test]
@@ -3606,5 +4055,884 @@ mod tests {
             v,
             serde_json::json!([true, true, true, true, true])
         );
+    }
+
+    #[test]
+    fn test_style_in_and_object_keys_cssom_parity() {
+        // el.style was a bare get/set proxy: `'color' in el.style`,
+        // Object.keys(el.style), and camelCase↔dashed sync all failed.
+        let mut rt = setup_runtime(r#"<div id="el"></div>"#);
+        let result = rt.evaluate(r#"
+            const s = document.getElementById('el').style;
+            s.fontSize = '20px';
+            const keys = Object.keys(s);
+            return [
+                'color' in s,
+                'gap' in s,
+                'object-fit' in s,
+                s.getPropertyValue('font-size'),
+                s.fontSize,
+                keys.includes('color'),
+                keys.includes('fontSize'),
+                s.cssText,
+                s.length,
+                s.item(0),
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                true, true, true, "20px", "20px", true, true, "font-size: 20px;", 1, "font-size"
+            ])
+        );
+    }
+
+    #[test]
+    fn test_dataset_in_and_object_keys() {
+        // `'foo' in el.dataset` and Object.keys(el.dataset) must reflect data-*
+        // attributes (CSSOM/DOMStringMap parity).
+        let mut rt = setup_runtime(r#"<div id="el" data-foo-bar="1" data-baz="2"></div>"#);
+        let result = rt.evaluate(r#"
+            const d = document.getElementById('el').dataset;
+            return [
+                'fooBar' in d,
+                'baz' in d,
+                'missing' in d,
+                Object.keys(d).sort(),
+                d.fooBar,
+                d.baz,
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([true, true, false, ["baz", "fooBar"], "1", "2"])
+        );
+    }
+
+    #[test]
+    fn test_style_attribute_syncs_both_directions() {
+        // CSSStyleDeclaration was in-memory only: parsed inline styles were
+        // invisible to el.style.*, and el.style.x = … never reached the
+        // attribute or serialization.
+        let mut rt = setup_runtime(r#"<div id="el" style="color: red"></div>"#);
+        let result = rt.evaluate(r#"
+            const el = document.getElementById('el');
+            const before = el.style.color;
+            el.style.color = 'blue';
+            const attrAfterSet = el.getAttribute('style');
+            el.setAttribute('style', 'margin: 5px');
+            const margin = el.style.margin;
+            const colorGone = el.style.color;
+            el.style.removeProperty('margin');
+            return [before, attrAfterSet, margin, colorGone, el.getAttribute('style')];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!(["red", "color: blue;", "5px", "", null])
+        );
+    }
+
+    #[test]
+    fn test_insert_adjacent_html_case_insensitive_and_syntax_error() {
+        // Position was matched case-sensitively (so 'BeforeEnd' silently
+        // no-op'd) and an invalid position didn't throw SyntaxError.
+        let mut rt = setup_runtime(r#"<div id="el"><span>child</span></div>"#);
+        let result = rt.evaluate(r#"
+            const el = document.getElementById('el');
+            el.insertAdjacentHTML('BeforeEnd', '<b>X</b>');
+            let threw = null;
+            try { el.insertAdjacentHTML('sideways', '<i>Y</i>'); } catch (e) { threw = e.name; }
+            return [el.innerHTML, threw];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!(["<span>child</span><b>X</b>", "SyntaxError"])
+        );
+    }
+
+    #[test]
+    fn test_script_runs_once_across_dom_move() {
+        // Moving a <script> in the DOM must not execute its inline body a
+        // second time (upstream 41a8e1c — "already started" flag).
+        let mut rt = setup_runtime(r#"<div id="host"></div>"#);
+        let result = rt.evaluate(r#"
+            const host = document.getElementById('host');
+            window.__count = 0;
+            const s = document.createElement('script');
+            s.textContent = 'window.__count = (window.__count || 0) + 1;';
+            host.appendChild(s);
+            const afterFirst = window.__count;
+            host.removeChild(s);
+            host.appendChild(s);
+            const afterMove = window.__count;
+            const afterReinsert = (() => { host.removeChild(s); host.appendChild(s); return window.__count; })();
+            return [afterFirst, afterMove, afterReinsert];
+        "#).unwrap();
+        assert_eq!(result, serde_json::json!([1, 1, 1]));
+    }
+
+    #[test]
+    fn test_cloned_script_does_not_rerun() {
+        // cloneNode of a subtree whose script already ran must not run the
+        // clone's script (started state propagates to the clone).
+        let mut rt = setup_runtime(r#"<div id="host"></div>"#);
+        let result = rt.evaluate(r#"
+            const host = document.getElementById('host');
+            window.__count = 0;
+            const box = document.createElement('div');
+            const s = document.createElement('script');
+            s.textContent = 'window.__count = (window.__count || 0) + 1;';
+            box.appendChild(s);
+            host.appendChild(box);
+            const afterFirst = window.__count;
+            const clone = box.cloneNode(true);
+            host.appendChild(clone);
+            return [afterFirst, window.__count];
+        "#).unwrap();
+        assert_eq!(result, serde_json::json!([1, 1]));
+    }
+
+    #[test]
+    fn test_innerhtml_script_is_inert() {
+        // Scripts created by innerHTML never execute (per spec), unlike direct
+        // DOM insertion.
+        let mut rt = setup_runtime(r#"<div id="host"></div>"#);
+        let result = rt.evaluate(r#"
+            const host = document.getElementById('host');
+            window.__count = 0;
+            host.innerHTML = '<script>window.__count = 1;</script>';
+            const afterInner = window.__count;
+            // A directly-inserted script still runs.
+            const s = document.createElement('script');
+            s.textContent = 'window.__count = 2;';
+            host.appendChild(s);
+            return [afterInner, window.__count];
+        "#).unwrap();
+        assert_eq!(result, serde_json::json!([0, 2]));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_dynamic_data_url_script_executes() {
+        // Upstream 0c4740a + f841205: op_fetch_url's HTTP client cannot fetch
+        // the data: scheme, so dynamic <script src="data:..."> never ran. The
+        // decoder accepts any MIME, %-escapes, fragments, unpadded base64, and
+        // non-ASCII via a UTF-8 round-trip — and load fires on every path.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"async () => {
+            let loads = 0;
+            const mk = (url) => {
+                const s = document.createElement('script');
+                s.setAttribute('src', url);
+                s.addEventListener('load', () => loads++);
+                s.addEventListener('error', () => loads -= 100);
+                document.body.appendChild(s);
+            };
+            mk('data:,window.__a=1');
+            mk("data:text/plain,window.__g='%C3%A9'");
+            mk("data:text/javascript,window.__h='é'");
+            mk('data:text/javascript,window.__i=9#frag');
+            mk('data:text/javascript;base64,d2luZG93Ll9fYz0z');
+            mk('data:text/javascript;base64,d2luZG93Ll9fZD00NA');
+            await new Promise(r => setTimeout(r, 20));
+            return [window.__a, window.__g, window.__h, window.__i, window.__c, window.__d, loads];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!([1, "é", "é", 9, 3, 44, 6])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_dynamic_data_url_script_invalid_base64_errors() {
+        // Upstream f841205: a payload whose length % 4 === 1 can never be
+        // valid base64; the decoder must throw instead of executing garbage,
+        // and the script element fires error without evaluating anything.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"async () => {
+            let errors = 0;
+            const mk = (url) => {
+                const s = document.createElement('script');
+                s.setAttribute('src', url);
+                s.addEventListener('error', () => errors++);
+                document.body.appendChild(s);
+            };
+            mk('data:text/javascript;base64,AAAAA');
+            mk('data:text/javascript;base64,ab!c');
+            mk('data:,window.__ok=1');
+            await new Promise(r => setTimeout(r, 20));
+            return [errors, window.__ok];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(result.value.unwrap(), serde_json::json!([2, 1]));
+    }
+
+    /// Upstream f61493f: the HTML script-fetch algorithm treats an
+    /// unsuccessful HTTP response as a network error. A 404 body (here, one
+    /// that would clobber a global if it ran) must never become script source.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_dynamic_script_non_2xx_body_not_evaluated() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let body = b"window.__leak = 1;";
+            let response = format!(
+                "HTTP/1.1 404 Not Found\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port));
+        let script = format!(r#"async () => {{
+            let errors = 0, loads = 0;
+            const s = document.createElement('script');
+            s.setAttribute('src', 'http://127.0.0.1:{port}/missing.js');
+            s.addEventListener('error', () => errors++);
+            s.addEventListener('load', () => loads++);
+            document.body.appendChild(s);
+            await new Promise(r => setTimeout(r, 50));
+            return [errors, loads, window.__leak === undefined];
+        }}"#);
+        let result = rt.call_function_on_for_cdp(&script, None, &[], true, true).await.unwrap();
+        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+
+        assert_eq!(result.value.unwrap(), serde_json::json!([1, 0, true]));
+    }
+
+    /// Upstream a6bb741: a dynamic external script slower than the settle
+    /// loop's 500ms fast-path deadline must still be visible as pending while
+    /// in flight (so the loop keeps pumping) and must land once its fetch
+    /// resolves — including after a failed fetch, where the finally-bracket
+    /// must return the counter to zero.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_slow_dynamic_script_visible_as_pending_until_lands() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let body = b"window.__slow = 1;";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/javascript\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port));
+        let insert = format!(r#"
+            const s = document.createElement('script');
+            s.setAttribute('src', 'http://127.0.0.1:{port}/slow.js');
+            document.body.appendChild(s);
+        "#);
+        rt.evaluate(&insert).unwrap();
+
+        // Pump the event loop past 500ms while the 300ms-slow fetch is in
+        // flight; the counter must be observed live at least once, the script
+        // must land, and the counter must drain back to zero afterwards.
+        let start = tokio::time::Instant::now();
+        let mut saw_pending = false;
+        while start.elapsed() < std::time::Duration::from_millis(2_000) {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                rt.run_event_loop(),
+            ).await;
+            if rt.has_pending_dynamic_scripts() {
+                saw_pending = true;
+            }
+            if saw_pending
+                && !rt.has_pending_dynamic_scripts()
+                && rt.evaluate("window.__slow").unwrap().as_f64() == Some(1.0)
+            {
+                break;
+            }
+        }
+        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+
+        assert!(saw_pending, "slow dynamic script fetch should be observable as pending");
+        assert!(!rt.has_pending_dynamic_scripts(), "counter must drain after the fetch lands");
+        assert_eq!(rt.evaluate("window.__slow").unwrap().as_f64(), Some(1.0));
+    }
+
+    #[test]
+    fn test_domparser_xml_parsererror_on_malformed() {
+        // Upstream 53295fa+6927f11+869f700+20c4628: XML mime types get a
+        // well-formedness pass; malformed input yields a <parsererror>
+        // documentElement that querySelector('parsererror') finds, matching
+        // Chrome. Self-closing roots count as complete elements.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt.evaluate(r#"
+            const check = (src) => {
+                const doc = new DOMParser().parseFromString(src, "application/xml");
+                const err = doc.querySelector('parsererror');
+                return err ? ('E:' + doc.documentElement.tagName) : ('OK:' + doc.documentElement.tagName);
+            };
+            return [
+                check('<root><a></b></root>'),   // tag mismatch
+                check('<root></a></root>'),      // closing tag mismatch
+                check('<root/><b/>'),            // extra content after root
+                check('<root><a>'),              // unclosed tag
+                check('<root><a>1</a></root>'),  // well-formed
+                check('<root/>'),                // self-closing root is complete
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                "E:PARSERERROR", "E:PARSERERROR", "E:PARSERERROR", "E:PARSERERROR",
+                "OK:HTML", "OK:HTML",
+            ])
+        );
+    }
+
+    #[test]
+    fn test_domparser_xml_strict_fallback_and_html_unaffected() {
+        // The hand-rolled state machine catches what the regex pass cannot
+        // (here: zero root elements) and swaps in the generic parsererror.
+        // HTML mime types never run either check; comments/CDATA/PI/DOCTYPE
+        // are skipped by both layers.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt.evaluate(r#"
+            const doc1 = new DOMParser().parseFromString('not xml at all', 'application/xml');
+            const textOnly = !!doc1.querySelector('parsererror');
+            const doc2 = new DOMParser().parseFromString('<div>hi</div>', 'text/html');
+            const htmlOk = !doc2.querySelector('parsererror') && !!doc2.querySelector('div');
+            const doc3 = new DOMParser().parseFromString(
+                '<?xml version="1.0"?><!-- c --><root><![CDATA[x<y]]></root>', 'application/xml');
+            const skipsNoise = !doc3.querySelector('parsererror');
+            return [textOnly, htmlOk, skipsNoise];
+        "#).unwrap();
+        assert_eq!(result, serde_json::json!([true, true, true]));
+    }
+
+    #[test]
+    fn test_form_submit_bypasses_event_request_submit_fires_it() {
+        // Upstream 7e2cabf + ccfa5fb: submit() is a direct pass-through that
+        // a submit listener cannot veto; only requestSubmit() (and user
+        // clicks) fire the cancelable submit event. requestSubmit's submitter
+        // must be a submit button owned by this form.
+        let mut rt = setup_runtime(r#"
+            <form id="f" action="/go"><input name="q" value="x">
+                <button type="submit" id="b">Go</button></form>
+            <form id="other"><button type="submit" id="ob">Go</button></form>
+            <div id="notabutton"></div>"#);
+        // submit(): no event, navigation happens.
+        let r = rt.evaluate(r#"
+            const form = document.getElementById('f');
+            globalThis.__evts = 0;
+            form.addEventListener('submit', () => globalThis.__evts++);
+            form.submit();
+            return [globalThis.__evts];
+        "#).unwrap();
+        assert_eq!(r, serde_json::json!([0]));
+        assert!(rt.take_pending_navigation().is_some(), "submit() must navigate");
+
+        // requestSubmit(): event fires; preventDefault stops navigation.
+        let r = rt.evaluate(r#"
+            const form = document.getElementById('f');
+            form.addEventListener('submit', e => e.preventDefault());
+            form.requestSubmit();
+            return [globalThis.__evts];
+        "#).unwrap();
+        assert_eq!(r, serde_json::json!([1]));
+        assert!(rt.take_pending_navigation().is_none(), "preventDefault must veto navigation");
+
+        // Submitter validation (ccfa5fb): non-submit-button -> TypeError;
+        // foreign submit button -> NotFoundError; valid one fires the event.
+        let r = rt.evaluate(r#"
+            const form = document.getElementById('f');
+            const out = {};
+            try { form.requestSubmit(document.getElementById('notabutton')); out.a = 'no-throw'; }
+            catch (e) { out.a = e.name; }
+            try { form.requestSubmit(document.getElementById('ob')); out.b = 'no-throw'; }
+            catch (e) { out.b = e.name; }
+            form.requestSubmit(document.getElementById('b'));
+            out.c = globalThis.__evts;
+            return [out.a, out.b, out.c];
+        "#).unwrap();
+        // The preventDefault listener from the previous step is still attached,
+        // so the valid requestSubmit fires the event (2 total) but does not
+        // navigate.
+        assert_eq!(r, serde_json::json!(["TypeError", "NotFoundError", 2]));
+        assert!(rt.take_pending_navigation().is_none());
+    }
+
+    #[test]
+    fn test_select_parity_type_selectedindex_add_no_change_on_assign() {
+        // Upstream 5308e04: select/textarea report fixed IDL types;
+        // a single select implicitly selects its first option (a multiple
+        // one idles at -1); programmatic value assignment never fires
+        // change (assigning inside a change handler used to loop forever).
+        let mut rt = setup_runtime(r#"
+            <select id="s"><option value="a">A</option><option value="b">B</option></select>
+            <select id="m" multiple><option value="a">A</option></select>
+            <textarea id="t"></textarea>"#);
+        let result = rt.evaluate(r#"
+            const s = document.getElementById('s');
+            const m = document.getElementById('m');
+            const t = document.getElementById('t');
+            let changes = 0;
+            s.addEventListener('change', () => changes++);
+            s.value = 'b';
+            const afterAssign = [changes, s.value, s.selectedIndex];
+            s.selectedIndex = 0;
+            const afterIndex = [s.value, s.selectedIndex];
+            const types = [s.type, m.type, t.type];
+            const emptySingle = document.createElement('select');
+            const emptyMultiple = document.createElement('select');
+            emptyMultiple.setAttribute('multiple', '');
+            const opt = document.createElement('option');
+            opt.setAttribute('value', 'c'); opt.textContent = 'C';
+            s.add(opt);
+            return [
+                afterAssign, afterIndex, types,
+                emptySingle.selectedIndex, emptyMultiple.selectedIndex,
+                s.options.length, changes,
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                [0, "b", 1],          // no change on assignment; selection moved
+                ["a", 0],             // selectedIndex setter works both ways
+                ["select-one", "select-multiple", "textarea"],
+                -1, -1,               // empty selects idle at -1
+                3,                    // add() appended the option
+                0,                    // assignment never fired change
+            ])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_image_is_real_element_and_emulates_load() {
+        // Upstream a5a8de7 + 891d850: new Image() must be a real element
+        // (style/attribute reflection/event dispatch), assigning .src must
+        // emulate a successful decode (complete flips, load fires on both
+        // the onload property and listeners), and a pre-defined
+        // non-configurable own src (Booking.com instrumentation) must not
+        // crash the constructor.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"async () => {
+            const img = new Image(10, 20);
+            const isEl = img instanceof globalThis.HTMLImageElement;
+            const styleOk = img.style instanceof globalThis.CSSStyleDeclaration;
+            img.style.width = '30px';
+            const styleSet = img.style.width === '30px';
+            img.width = 10; img.height = 20;
+            let viaProp = 0, viaListener = 0;
+            img.onload = () => viaProp++;
+            img.addEventListener('load', () => viaListener++);
+            img.src = '/pixel.png';
+            const earlyComplete = img.complete;
+            await new Promise(r => setTimeout(r, 20));
+            // Anti-bot pattern: hijack createElement and pre-define a
+            // non-configurable own src on every <img>.
+            const origCreate = document.createElement.bind(document);
+            document.createElement = function (tag) {
+                const el = origCreate(tag);
+                if (String(tag).toLowerCase() === 'img') {
+                    Object.defineProperty(el, 'src', { value: '', writable: true, configurable: false });
+                }
+                return el;
+            };
+            let hijackSurvived = false, hijackW = 0;
+            try {
+                const img2 = new Image(7, 8);
+                hijackSurvived = true;
+                hijackW = img2.width;
+            } catch (e) { hijackSurvived = e.message; }
+            document.createElement = origCreate;
+            return [isEl, styleOk, styleSet, earlyComplete, img.complete,
+                    img.naturalWidth, viaProp, viaListener, hijackSurvived, hijackW];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!([true, true, true, false, true, 10, 1, 1, true, 7])
+        );
+    }
+
+    #[test]
+    fn test_network_information_event_listeners() {
+        // Upstream fc9f524: navigator.connection was a data-only object with
+        // no event methods at all; analytics libs calling addEventListener
+        // threw. dispatchEvent must run registered listeners with the
+        // connection as receiver, honor the on* property, and respect
+        // removeEventListener.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt.evaluate(r#"
+            const connection = navigator.connection;
+            let calls = 0, receiverMatches = false, viaProp = 0;
+            function listener(event) {
+                calls += 1;
+                receiverMatches = this === connection && event.type === 'change';
+            }
+            connection.addEventListener('change', listener);
+            connection.onchange = () => viaProp++;
+            const dispatchResult = connection.dispatchEvent(new Event('change'));
+            connection.removeEventListener('change', listener);
+            connection.dispatchEvent(new Event('change'));
+            return [
+                typeof connection.addEventListener,
+                typeof connection.removeEventListener,
+                typeof connection.dispatchEvent,
+                dispatchResult, calls, receiverMatches, viaProp,
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!(["function", "function", "function", true, 1, true, 2])
+        );
+    }
+
+    #[test]
+    fn test_document_referrer_semantics() {
+        // Upstream edb1785: document.referrer is explicit navigation state —
+        // empty for direct automation navigations, the strict-origin-
+        // when-cross-origin value for document-initiated hops.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        assert_eq!(rt.evaluate("document.referrer").unwrap(), serde_json::json!(""));
+        rt.set_referrer("https://source.example/path?q=1");
+        assert_eq!(
+            rt.evaluate("document.referrer").unwrap(),
+            serde_json::json!("https://source.example/path?q=1")
+        );
+    }
+
+    #[test]
+    fn test_thrown_error_in_one_script_does_not_stop_later_scripts() {
+        // Upstream 5c3d560 (regression for #355/#358): an uncaught throw in
+        // one inline script must not prevent later independent scripts from
+        // running — the babel-polyfill double-load pattern.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.execute_script("s1", "globalThis.__ran1 = true;").unwrap();
+        let err = rt
+            .execute_script("s2", "throw new Error('only one instance of babel-polyfill is allowed');")
+            .unwrap_err();
+        assert!(err.contains("babel-polyfill"), "expected the thrown message, got: {}", err);
+        rt.execute_script("s3", "globalThis.__ran3 = true;").unwrap();
+        let ran = rt
+            .evaluate("[globalThis.__ran1 === true, globalThis.__ran3 === true]")
+            .unwrap();
+        assert_eq!(ran, serde_json::json!([true, true]));
+    }
+
+    #[test]
+    fn test_event_constructor_webidl_semantics() {
+        // Upstream af1e15f: no-arg constructors throw, type coerces to string,
+        // CustomEvent.detail defaults to null, createEvent still builds "" type.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt.evaluate(r#"
+            const out = [];
+            try { new Event(); out.push('no-throw'); } catch (e) { out.push(e.name); }
+            try { new CustomEvent(); out.push('no-throw'); } catch (e) { out.push(e.name); }
+            out.push(new Event(123).type + ':' + typeof new Event(123).type);
+            out.push(String(new CustomEvent('x').detail));
+            out.push(String(new CustomEvent('x', { detail: 7 }).detail));
+            out.push(new Event('click').type);
+            out.push(document.createEvent('Event').type);
+            return out.join('|');
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!("TypeError|TypeError|123:string|null|7|click|")
+        );
+    }
+
+    #[test]
+    fn test_promise_rejection_event_requires_promise() {
+        // Upstream 0ff1ba0 + 776c915: the promise member is required; the
+        // class must exist globally (core-js feature-detects it).
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt.evaluate(r#"
+            const promise = Promise.resolve(1);
+            const event = new PromiseRejectionEvent('unhandledrejection', { promise, reason: 'failed' });
+            let missingThrows = false;
+            try { new PromiseRejectionEvent('unhandledrejection'); } catch (e) { missingThrows = e instanceof TypeError; }
+            let nullInitThrows = false;
+            try { new PromiseRejectionEvent('unhandledrejection', {}); } catch (e) { nullInitThrows = e instanceof TypeError; }
+            return [event instanceof Event, event.promise === promise, event.reason, missingThrows, nullInitThrows];
+        "#).unwrap();
+        assert_eq!(result, serde_json::json!([true, true, "failed", true, true]));
+    }
+
+    #[test]
+    fn test_storage_event_constructor_and_legacy_factory() {
+        // Upstream 776c915: StorageEvent global + legacy createEvent/initStorageEvent path.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt.evaluate(r#"
+            const event = new StorageEvent('storage', {
+                key: 'theme', oldValue: 'light', newValue: 'dark', url: 'https://example.test/'
+            });
+            const legacy = document.createEvent('StorageEvent');
+            legacy.initStorageEvent('storage', false, false, 'count', '1', '2', 'https://example.test/', null);
+            return [
+                event instanceof Event,
+                event.key, event.oldValue, event.newValue, event.url,
+                legacy instanceof StorageEvent, legacy.key, legacy.newValue
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([true, "theme", "light", "dark", "https://example.test/", true, "count", "2"])
+        );
+    }
+
+    #[test]
+    fn test_create_event_rejects_unknown_and_supports_legacy_aliases() {
+        // Upstream 7e6f403: unknown interface names throw NotSupportedError;
+        // the DOM Level 2 aliases and hashchange/message map entries resolve.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt.evaluate(r#"
+            let rejected = null;
+            try { document.createEvent('NotAnEventInterface'); } catch (e) { rejected = [e.name, e instanceof DOMException]; }
+            const aliases = ['Event', 'Events', 'HTMLEvents', 'SVGEvents'].map(name => {
+                const event = document.createEvent(name);
+                return [event instanceof Event, event.constructor === Event, event.type];
+            });
+            const hash = document.createEvent('HashChangeEvent') instanceof HashChangeEvent;
+            const message = document.createEvent('MessageEvent') instanceof MessageEvent;
+            let preRejects = null;
+            try { document.createEvent('PromiseRejectionEvent'); } catch (e) { preRejects = e.name; }
+            return [rejected, aliases, hash, message, preRejects];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                ["NotSupportedError", true],
+                [[true, true, ""], [true, true, ""], [true, true, ""], [true, true, ""]],
+                true, true, "NotSupportedError"
+            ])
+        );
+    }
+
+    #[test]
+    fn test_iframe_document_event_listeners() {
+        // Upstream 2e3f5d8: addEventListener/removeEventListener/dispatchEvent
+        // on an iframe document used to be no-ops.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt.evaluate(r#"
+            const iframe = document.createElement('iframe');
+            document.body.appendChild(iframe);
+            const doc = iframe.contentDocument;
+            let calls = 0;
+            const listener = () => calls++;
+            doc.addEventListener('probe', listener);
+            doc.dispatchEvent(new Event('probe'));
+            const afterRegister = calls;
+            doc.addEventListener('probe', listener);
+            doc.addEventListener('probe', listener);
+            doc.dispatchEvent(new Event('probe'));
+            const afterDuplicate = calls;
+            doc.removeEventListener('probe', listener);
+            doc.dispatchEvent(new Event('probe'));
+            const afterRemove = calls;
+            doc.addEventListener('cancelme', e => e.preventDefault());
+            const cancelReturn = doc.dispatchEvent(new Event('cancelme', { cancelable: true }));
+            const plainReturn = doc.dispatchEvent(new Event('nolisteners'));
+            return [!!doc, afterRegister, afterDuplicate, afterRemove, cancelReturn, plainReturn];
+        "#).unwrap();
+        assert_eq!(result, serde_json::json!([true, 1, 2, 2, false, true]));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_element_scroll_offsets_and_scroll_event_coalescing() {
+        // Upstream 29e20ae + 1c7402d: scrollTop/scrollLeft round-trip, direct
+        // assignment fires a scroll event (only on change), and scroll
+        // operations coalesce to one event per call.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"async () => {
+            const el = document.createElement('div');
+            document.body.appendChild(el);
+            let events = 0;
+            el.addEventListener('scroll', () => events++);
+            el.scrollTop = 100;          // changed -> 1 event
+            el.scrollTop = 100;          // unchanged -> no event
+            el.scrollTo(0, 250);         // one coalesced event
+            el.scrollBy({ left: 30, top: 50 });
+            el.scroll(0, -5);            // clamps both axes back to 0, 1 event
+            const offsets = [el.scrollTop, el.scrollLeft];
+            await new Promise(r => setTimeout(r, 10));
+            return [offsets, events];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(result.value.unwrap(), serde_json::json!([[0, 0], 4]));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_window_scroll_moves_page_offset_shared_with_scrolling_element() {
+        // Upstream f6ca133: window scroll methods move the page offset stored
+        // on the scrolling element; scrollX/scrollY/pageXOffset/pageYOffset are
+        // views of it, and a window scroll reaches document AND window listeners.
+        let mut rt = setup_runtime(r#"<html><body><div id="d"></div></body></html>"#);
+        let script = r#"async () => {
+            const isDocEl = document.scrollingElement === document.documentElement;
+            window.scrollTo(0, 500);
+            const afterTo = [window.scrollX, window.scrollY];
+            window.scrollBy(0, 200);
+            const afterBy = [window.pageXOffset, window.pageYOffset];
+            window.scrollTo({ left: 10, top: 40 });
+            const afterOptions = [window.scrollX, window.scrollY];
+            window.scrollTo(0, -100);
+            const afterClamp = window.scrollY;
+            document.scrollingElement.scrollTop = 90;
+            const viaWindow = window.scrollY;
+            let win = 0, doc = 0;
+            window.addEventListener('scroll', () => win++);
+            document.addEventListener('scroll', () => doc++);
+            window.scrollBy(0, 400);
+            await new Promise(r => setTimeout(r, 10));
+            // Five window scroll ops ran in total (four above the listeners
+            // plus the final scrollBy); each fires exactly one scroll at the
+            // document and one at the window, all drained by the await.
+            return [isDocEl, afterTo, afterBy, afterOptions, afterClamp, viaWindow, win, doc, window.scrollY];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!([true, [0, 500], [0, 700], [10, 40], 0, 90, 5, 5, 490])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_iframe_load_reaches_onload_and_addeventlistener() {
+        // Upstream 2e3f5d8: iframe load used to call el.onload() directly,
+        // bypassing addEventListener('load') listeners.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"async () => {
+            return await new Promise(resolve => {
+                const iframe = document.createElement('iframe');
+                const events = [];
+                iframe.onload = () => {
+                    events.push('property');
+                    Promise.resolve().then(() => resolve(events));
+                };
+                iframe.addEventListener('load', () => events.push('listener'));
+                document.body.appendChild(iframe);
+                // Unroutable port: fetch rejects, the catch path still fires load.
+                iframe.src = 'http://127.0.0.1:1/';
+            });
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!(["property", "listener"])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_timer_string_handlers_run_in_global_scope_at_fire_time() {
+        // Upstream 452cc85: string setTimeout/setInterval handlers run as
+        // global-scope classic scripts at fire time — declarations become
+        // globals, and a syntax error surfaces when the timer elapses instead
+        // of being swallowed at scheduling. We used to drop string handlers
+        // entirely (silent no-op that still returned a timer id).
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"async () => {
+            setTimeout('var strVarDecl = 7; window.__strRan = "ran";', 0);
+            let scheduleThrew = false;
+            try { setTimeout('this is (not javascript', 0); } catch (e) { scheduleThrew = true; }
+            window.__intervalCount = 0;
+            const iid = setInterval('window.__intervalCount++; clearInterval(window.__iid);', 0);
+            window.__iid = iid;
+            await new Promise(r => setTimeout(r, 10));
+            return [window.__strRan, strVarDecl, scheduleThrew, window.__intervalCount, typeof iid];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!(["ran", 7, false, 1, "number"])
+        );
+    }
+
+    #[test]
+    fn test_performance_now_is_offset_monotonic_and_bounded() {
+        // Upstream cdab919 + d93ff51: now() reports ms since timeOrigin (not
+        // the raw epoch), never goes backwards under bursty calls, and does
+        // not run ahead of real elapsed time. timeOrigin carries ±50ms of
+        // persona jitter, so allow a slightly negative floor.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt.evaluate(r#"
+            const n1 = performance.now();
+            const offsetSane = n1 > -100 && n1 < 60000;
+            let bad = 0, prev = -Infinity;
+            for (let i = 0; i < 10000; i++) {
+                const t = performance.now();
+                if (t < prev) bad++;
+                prev = t;
+            }
+            const lead = performance.now() - (Date.now() - performance.timeOrigin);
+            return [offsetSane, bad, lead <= 1];
+        "#).unwrap();
+        assert_eq!(result, serde_json::json!([true, 0, true]));
+    }
+
+    #[test]
+    fn test_location_navigation_coerces_url_objects() {
+        // Upstream fe26417: a URL object passed to location.href/assign/replace
+        // must coerce to its href string (our _resolveUrl called .startsWith on
+        // it and threw).
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let hrefs = rt.evaluate(r#"
+            const before = location.href;
+            location.href = new URL('/from-href', before);
+            const href = location.href;
+            location.assign(new URL('/from-assign', location.href));
+            const assigned = location.href;
+            location.replace(new URL('/from-replace', location.href));
+            return [href, assigned, location.href];
+        "#).unwrap();
+        assert_eq!(
+            hrefs,
+            serde_json::json!([
+                "http://example.com/from-href",
+                "http://example.com/from-assign",
+                "http://example.com/from-replace"
+            ])
+        );
+        assert_eq!(
+            rt.take_pending_navigation(),
+            Some((
+                "http://example.com/from-replace".to_string(),
+                "GET".to_string(),
+                "".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_push_replace_state_without_url_preserves_current_location() {
+        // Upstream 1fc5a24: pushState/replaceState with a missing url keep the
+        // current document URL — the new history entry must not reset location
+        // back to the original document URL.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt.evaluate(r#"
+            const first = history.pushState({}, '', '/dashboard');
+            const afterReplace = (history.replaceState({scroll:1}), location.pathname);
+            history.pushState({}, '', '/a');
+            const afterPush = (history.pushState({b:1}), location.pathname);
+            return [afterReplace, afterPush];
+        "#).unwrap();
+        assert_eq!(result, serde_json::json!(["/dashboard", "/a"]));
     }
 }
