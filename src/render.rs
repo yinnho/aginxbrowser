@@ -1,7 +1,7 @@
 //! Tiered rendering strategy: try cheap HTTP-direct first, fall back to the
 //! obscura browser only when the page needs JS rendering.
 //!
-//! - Tier 1 (`http_fetch`): pure `ObscuraHttpClient`, no V8. ~100ms. Works for
+//! - Tier 1 (`http_fetch`): pure `HttpClient`, no V8. ~100ms. Works for
 //!   static HTML. Returns `None` when the content looks insufficient (SPA shell,
 //!   antispider redirect, non-200) so the caller upgrades to Tier 2.
 //! - Tier 2 (`do_fetch` in `server.rs`): full obscura browser with V8/JS.
@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::{FetchResponse, OutputFormat, RenderTier};
 
-use crate::obscura_net::{CookieJar, ObscuraHttpClient};
+use crate::diting_net::{CookieJar, HttpClient};
 
 /// Does the URL point at a known antispider/CAPTCHA redirect target?
 /// Shared by the render tier and the search module.
@@ -185,7 +185,7 @@ pub async fn http_fetch(
         }
     }
 
-    let client = ObscuraHttpClient::with_full_options(jar, proxy, false);
+    let client = HttpClient::with_full_options(jar, proxy, false);
     let resp = client.fetch(&parsed).await.map_err(|e| e.to_string())?;
 
     // Non-200 → let Tier 2 try (it handles redirects/challenges differently).

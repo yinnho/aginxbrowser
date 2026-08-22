@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::obscura_net::{CookieJar, ObscuraHttpClient, RobotsCache};
+use crate::diting_net::{CookieJar, HttpClient, RobotsCache};
 
 pub struct BrowserContext {
     pub id: String,
     pub cookie_jar: Arc<CookieJar>,
-    pub http_client: Arc<ObscuraHttpClient>,
+    pub http_client: Arc<HttpClient>,
     pub user_agent: String,
     pub proxy_url: Option<String>,
     pub robots_cache: Arc<RobotsCache>,
@@ -104,7 +104,7 @@ impl BrowserContext {
             }
         }
 
-        let mut client = ObscuraHttpClient::with_full_options(
+        let mut client = HttpClient::with_full_options(
             cookie_jar.clone(),
             proxy_url.as_deref(),
             allow_private_network,

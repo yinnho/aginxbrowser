@@ -5,7 +5,10 @@ use url::Url;
 const DEFAULT_SAME_SITE: &str = "Lax";
 
 pub struct CookieJar {
-    cookies: RwLock<HashMap<String, HashMap<String, CookieEntry>>>,
+    // Keyed by (name, path): RFC 6265 identifies a cookie by the
+    // (name, domain, path) triple, so same-name cookies with different paths
+    // must coexist instead of overwriting each other.
+    cookies: RwLock<HashMap<String, HashMap<(String, String), CookieEntry>>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -14,6 +17,7 @@ struct CookieEntry {
     value: String,
     path: String,
     domain: String,
+    host_only: bool,
     secure: bool,
     http_only: bool,
     expires: Option<u64>,
@@ -35,8 +39,9 @@ impl CookieJar {
             None => return,
         };
 
-        let mut domain = url.host_str().unwrap_or("").to_lowercase();
-        let mut path = url.path().to_string();
+        let request_host = url.host_str().unwrap_or("").to_lowercase();
+        let mut domain_attr: Option<String> = None;
+        let mut path = default_cookie_path(url.path());
         let mut secure = false;
         let mut http_only = false;
         let mut expires: Option<u64> = None;
@@ -48,7 +53,7 @@ impl CookieJar {
                 if let Some((key, val)) = attr.split_once('=') {
                     match key.trim().to_lowercase().as_str() {
                         "domain" => {
-                            domain = val.trim().trim_start_matches('.').to_lowercase();
+                            domain_attr = Some(val.trim().trim_start_matches('.').to_lowercase());
                         }
                         "path" => {
                             path = val.trim().to_string();
@@ -72,7 +77,7 @@ impl CookieJar {
                             }
                         }
                         "samesite" => {
-                            same_site = val.trim().to_string();
+                            same_site = normalize_same_site(val);
                         }
                         _ => {}
                     }
@@ -86,19 +91,26 @@ impl CookieJar {
             }
         }
 
+        // Validate Domain against the response origin (RFC 6265): an unrelated
+        // Domain attribute must not let a response from attacker.example scope
+        // a cookie to victim.example (cookie tossing).
+        let (domain, host_only) = match resolve_cookie_domain(&request_host, domain_attr.as_deref()) {
+            Some(d) => d,
+            None => return,
+        };
+
         if let Some(exp) = expires {
-            if exp == 0 {
-                let mut cookies = self.cookies.write().unwrap();
-                if let Some(domain_cookies) = cookies.get_mut(&domain) {
-                    domain_cookies.remove(&name);
-                }
-                return;
-            }
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            if exp < now {
+            if exp <= now {
+                // An expired Set-Cookie is a deletion of the matching
+                // (name, path) entry, not a no-op.
+                let mut cookies = self.cookies.write().unwrap();
+                if let Some(domain_cookies) = cookies.get_mut(&domain) {
+                    domain_cookies.remove(&(name.clone(), path.clone()));
+                }
                 return;
             }
         }
@@ -106,8 +118,9 @@ impl CookieJar {
         let entry = CookieEntry {
             name: name.clone(),
             value,
-            path,
+            path: path.clone(),
             domain: domain.clone(),
+            host_only,
             secure,
             http_only,
             expires,
@@ -115,7 +128,7 @@ impl CookieJar {
         };
 
         let mut cookies = self.cookies.write().unwrap();
-        cookies.entry(domain).or_default().insert(name, entry);
+        cookies.entry(domain).or_default().insert((name, path), entry);
     }
 
     pub fn get_cookie_header(&self, url: &Url) -> String {
@@ -136,15 +149,18 @@ impl CookieJar {
                 continue;
             }
             for entry in domain_cookies.values() {
+                if entry.host_only && !host.eq_ignore_ascii_case(domain) {
+                    continue;
+                }
                 if let Some(exp) = entry.expires {
-                    if exp < now {
+                    if exp <= now {
                         continue;
                     }
                 }
                 if entry.secure && !is_secure {
                     continue;
                 }
-                if !path.starts_with(&entry.path) {
+                if !path_matches(path, &entry.path) {
                     continue;
                 }
                 matching.push(format!("{}={}", entry.name, entry.value));
@@ -156,9 +172,16 @@ impl CookieJar {
 
     pub fn get_all_cookies(&self) -> Vec<CookieInfo> {
         let cookies = self.cookies.read().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let mut result = Vec::new();
         for domain_cookies in cookies.values() {
             for entry in domain_cookies.values() {
+                if entry.expires.is_some_and(|expires| expires <= now) {
+                    continue;
+                }
                 result.push(CookieInfo {
                     name: entry.name.clone(),
                     value: entry.value.clone(),
@@ -183,17 +206,23 @@ impl CookieJar {
                 cookie.same_site
             };
             let expires = cookie.expires.and_then(|e| if e > 0 { Some(e as u64) } else { None });
+            if let Some(domain_cookies) = jar.get_mut(&cookie.domain) {
+                domain_cookies.retain(|_key, entry| {
+                    entry.name != cookie.name || entry.path != cookie.path
+                });
+            }
             let entry = CookieEntry {
                 name: cookie.name.clone(),
                 value: cookie.value,
-                path: cookie.path,
+                path: cookie.path.clone(),
                 domain: cookie.domain.clone(),
+                host_only: false,
                 secure: cookie.secure,
                 http_only: cookie.http_only,
                 expires,
                 same_site,
             };
-            jar.entry(cookie.domain).or_default().insert(cookie.name, entry);
+            jar.entry(cookie.domain.clone()).or_default().insert((cookie.name, cookie.path), entry);
         }
     }
 
@@ -218,15 +247,18 @@ impl CookieJar {
                 if entry.http_only {
                     continue;
                 }
+                if entry.host_only && !host.eq_ignore_ascii_case(domain) {
+                    continue;
+                }
                 if let Some(exp) = entry.expires {
-                    if exp < now {
+                    if exp <= now {
                         continue;
                     }
                 }
                 if entry.secure && !is_secure {
                     continue;
                 }
-                if !path.starts_with(&entry.path) {
+                if !path_matches(path, &entry.path) {
                     continue;
                 }
                 matching.push(format!("{}={}", entry.name, entry.value));
@@ -244,8 +276,9 @@ impl CookieJar {
             None => return,
         };
 
-        let mut domain = url.host_str().unwrap_or("").to_lowercase();
-        let mut path = url.path().to_string();
+        let request_host = url.host_str().unwrap_or("").to_lowercase();
+        let mut domain_attr: Option<String> = None;
+        let mut path = default_cookie_path(url.path());
         let mut secure = false;
         let mut expires: Option<u64> = None;
         let mut same_site = "Lax".to_string();
@@ -256,7 +289,7 @@ impl CookieJar {
                 if let Some((key, val)) = attr.split_once('=') {
                     match key.trim().to_lowercase().as_str() {
                         "domain" => {
-                            domain = val.trim().trim_start_matches('.').to_lowercase();
+                            domain_attr = Some(val.trim().trim_start_matches('.').to_lowercase());
                         }
                         "path" => {
                             path = val.trim().to_string();
@@ -280,7 +313,7 @@ impl CookieJar {
                             }
                         }
                         "samesite" => {
-                            same_site = val.trim().to_string();
+                            same_site = normalize_same_site(val);
                         }
                         _ => {}
                     }
@@ -293,19 +326,21 @@ impl CookieJar {
             }
         }
 
+        let (domain, host_only) = match resolve_cookie_domain(&request_host, domain_attr.as_deref()) {
+            Some(d) => d,
+            None => return,
+        };
+
         if let Some(exp) = expires {
-            if exp == 0 {
-                let mut cookies = self.cookies.write().unwrap();
-                if let Some(domain_cookies) = cookies.get_mut(&domain) {
-                    domain_cookies.remove(&name);
-                }
-                return;
-            }
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            if exp < now {
+            if exp <= now {
+                let mut cookies = self.cookies.write().unwrap();
+                if let Some(domain_cookies) = cookies.get_mut(&domain) {
+                    domain_cookies.remove(&(name.clone(), path.clone()));
+                }
                 return;
             }
         }
@@ -313,8 +348,9 @@ impl CookieJar {
         let entry = CookieEntry {
             name: name.clone(),
             value,
-            path,
+            path: path.clone(),
             domain: domain.clone(),
+            host_only,
             secure,
             http_only: false,
             expires,
@@ -322,14 +358,14 @@ impl CookieJar {
         };
 
         let mut cookies = self.cookies.write().unwrap();
-        cookies.entry(domain).or_default().insert(name, entry);
+        cookies.entry(domain).or_default().insert((name, path), entry);
     }
 
     pub fn delete_cookie(&self, name: &str, domain: &str) {
         let mut cookies = self.cookies.write().unwrap();
         if domain.is_empty() {
             for domain_cookies in cookies.values_mut() {
-                domain_cookies.remove(name);
+                domain_cookies.retain(|_k, e| e.name != name);
             }
         } else {
             let domains_to_try = [
@@ -339,7 +375,7 @@ impl CookieJar {
             ];
             for d in &domains_to_try {
                 if let Some(domain_cookies) = cookies.get_mut(d.as_str()) {
-                    domain_cookies.remove(name);
+                    domain_cookies.retain(|_k, e| e.name != name);
                 }
             }
         }
@@ -353,7 +389,7 @@ impl CookieJar {
         };
         if domain.is_empty() {
             for domain_cookies in cookies.values_mut() {
-                domain_cookies.retain(|n, e| !(n == name && matches_path(&e.path)));
+                domain_cookies.retain(|_k, e| !(e.name == name && matches_path(&e.path)));
             }
         } else {
             let domains_to_try = [
@@ -363,7 +399,7 @@ impl CookieJar {
             ];
             for d in &domains_to_try {
                 if let Some(domain_cookies) = cookies.get_mut(d.as_str()) {
-                    domain_cookies.retain(|n, e| !(n == name && matches_path(&e.path)));
+                    domain_cookies.retain(|_k, e| !(e.name == name && matches_path(&e.path)));
                 }
             }
         }
@@ -388,7 +424,7 @@ impl CookieJar {
         for domain_cookies in cookies.values() {
             for entry in domain_cookies.values() {
                 if let Some(exp) = entry.expires {
-                    if exp < now {
+                    if exp <= now {
                         continue;
                     }
                 }
@@ -488,6 +524,64 @@ fn parse_http_date(s: &str) -> Result<u64, ()> {
     days_total += day - 1;
 
     Ok(days_total * 86400 + hour * 3600 + minute * 60 + second)
+}
+
+fn normalize_same_site(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "strict" => "Strict",
+        "none" => "None",
+        _ => "Lax",
+    }
+    .to_string()
+}
+
+// Resolve the effective cookie domain per RFC 6265 5.3: a Domain attribute
+// that is not a parent domain of the request host is ignored and the cookie
+// falls back to host-only on the origin. Returns (domain, host_only).
+fn resolve_cookie_domain(origin_host: &str, domain_attr: Option<&str>) -> Option<(String, bool)> {
+    let origin = origin_host.trim().trim_start_matches('.').to_lowercase();
+    if origin.is_empty() {
+        return None;
+    }
+    let dom = match domain_attr {
+        None => return Some((origin, true)),
+        Some(raw) => raw.trim().trim_start_matches('.').to_lowercase(),
+    };
+    if dom.is_empty() || dom == origin {
+        return Some((origin, true));
+    }
+    if dom.contains('.') && origin.ends_with(&format!(".{dom}")) {
+        Some((dom, false))
+    } else {
+        Some((origin, true))
+    }
+}
+
+// RFC 6265 5.1.4 default-path: the directory of the request URI — everything
+// up to but not including the right-most '/'. Using the full request path
+// scopes a session cookie to the exact URL that set it, so a cookie set on
+// /app/login would not match /app/dashboard.
+pub fn default_cookie_path(request_path: &str) -> String {
+    if !request_path.starts_with('/') {
+        return "/".to_string();
+    }
+    match request_path.rfind('/') {
+        Some(0) | None => "/".to_string(),
+        Some(idx) => request_path[..idx].to_string(),
+    }
+}
+
+// RFC 6265 5.1.4 path-match: bare starts_with over-matches sibling paths that
+// share a string prefix (Path=/admin leaking to /administrator), so a prefix
+// match must end on a '/' boundary.
+fn path_matches(request_path: &str, cookie_path: &str) -> bool {
+    if request_path == cookie_path {
+        return true;
+    }
+    if !request_path.starts_with(cookie_path) {
+        return false;
+    }
+    cookie_path.ends_with('/') || request_path.as_bytes().get(cookie_path.len()) == Some(&b'/')
 }
 
 fn domain_matches(host: &str, domain: &str) -> bool {
@@ -729,6 +823,127 @@ mod tests {
         let url = Url::parse("https://example.com/").unwrap();
         assert!(jar.get_cookie_header(&url).is_empty());
     }
+
+    #[test]
+    fn test_same_name_cookies_with_different_paths_coexist() {
+        let jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        jar.set_cookie("n=a; Path=/", &url);
+        jar.set_cookie("n=b; Path=/app", &url);
+
+        let app_url = Url::parse("https://example.com/app/page").unwrap();
+        let header = jar.get_cookie_header(&app_url);
+        assert!(header.contains("n=a"), "root cookie missing in '{header}'");
+        assert!(header.contains("n=b"), "app cookie missing in '{header}'");
+    }
+
+    #[test]
+    fn test_same_name_same_path_cookie_is_replaced() {
+        let jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        jar.set_cookie("n=a; Path=/app", &url);
+        jar.set_cookie("n=b; Path=/app", &url);
+
+        let app_url = Url::parse("https://example.com/app/page").unwrap();
+        let header = jar.get_cookie_header(&app_url);
+        assert!(header.contains("n=b"));
+        assert!(!header.contains("n=a"));
+    }
+
+    #[test]
+    fn test_max_age_zero_deletes_only_matching_path() {
+        let jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        jar.set_cookie("n=root; Path=/", &url);
+        jar.set_cookie("n=app; Path=/app", &url);
+
+        jar.set_cookie("n=gone; Path=/app; Max-Age=0", &url);
+
+        let app_url = Url::parse("https://example.com/app/page").unwrap();
+        let header = jar.get_cookie_header(&app_url);
+        assert!(header.contains("n=root"), "root-path cookie must survive");
+        assert!(!header.contains("n=app"), "app-path cookie must be deleted");
+    }
+
+    #[test]
+    fn test_expired_update_deletes_existing_cookie() {
+        // An expired Set-Cookie is a deletion, not a no-op: previously the old
+        // cookie survived because exp<now just returned early.
+        let jar = CookieJar::new();
+        let url = Url::parse("https://example.com/app/login").unwrap();
+        jar.set_cookie("s=old", &url);
+        let app_url = Url::parse("https://example.com/app/dashboard").unwrap();
+        assert!(jar.get_cookie_header(&app_url).contains("s=old"));
+
+        jar.set_cookie("s=new; Expires=Thu, 01 Jan 2020 00:00:00 GMT", &url);
+        assert!(jar.get_cookie_header(&app_url).is_empty());
+    }
+
+    #[test]
+    fn test_default_cookie_path_is_request_directory() {
+        assert_eq!(default_cookie_path("/app/login"), "/app");
+        assert_eq!(default_cookie_path("/app/"), "/app");
+        assert_eq!(default_cookie_path("/"), "/");
+        assert_eq!(default_cookie_path("/x"), "/");
+        assert_eq!(default_cookie_path(""), "/");
+
+        // Cookie set on /app/login must match /app/dashboard.
+        let jar = CookieJar::new();
+        let login = Url::parse("https://example.com/app/login").unwrap();
+        jar.set_cookie("sess=1", &login);
+        let dashboard = Url::parse("https://example.com/app/dashboard").unwrap();
+        assert!(jar.get_cookie_header(&dashboard).contains("sess=1"));
+    }
+
+    #[test]
+    fn test_path_match_requires_slash_boundary() {
+        assert!(path_matches("/admin", "/admin"));
+        assert!(path_matches("/admin/users", "/admin"));
+        assert!(path_matches("/admin/", "/admin/"));
+        assert!(!path_matches("/administrator", "/admin"));
+        assert!(!path_matches("/api", "/app"));
+
+        let jar = CookieJar::new();
+        let url = Url::parse("https://example.com/admin").unwrap();
+        jar.set_cookie("a=1; Path=/admin", &url);
+        let sibling = Url::parse("https://example.com/administrator").unwrap();
+        assert!(jar.get_cookie_header(&sibling).is_empty(), "Path=/admin must not leak to /administrator");
+    }
+
+    #[test]
+    fn test_unrelated_domain_attr_falls_back_to_host_only() {
+        // A response from sub.example.com claiming Domain=other.com must not
+        // scope a cookie to other.com (cookie tossing).
+        let jar = CookieJar::new();
+        let url = Url::parse("https://sub.example.com/").unwrap();
+        jar.set_cookie("evil=1; Domain=other.com", &url);
+
+        assert!(jar.get_cookie_header(&Url::parse("https://other.com/").unwrap()).is_empty());
+        // Falls back to host-only on the origin.
+        assert!(jar.get_cookie_header(&url).contains("evil=1"));
+    }
+
+    #[test]
+    fn test_host_only_cookie_not_sent_to_subdomain() {
+        let jar = CookieJar::new();
+        let apex = Url::parse("https://example.com/").unwrap();
+        jar.set_cookie("h=1", &apex); // no Domain attr → host-only
+
+        assert!(jar.get_cookie_header(&apex).contains("h=1"));
+        let sub = Url::parse("https://www.example.com/").unwrap();
+        assert!(jar.get_cookie_header(&sub).is_empty(), "host-only cookie must not leak to subdomains");
+    }
+
+    #[test]
+    fn test_samesite_normalized() {
+        let jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        jar.set_cookie("a=1; SameSite=strict", &url);
+        let cookies = jar.get_all_cookies();
+        assert_eq!(cookies[0].same_site, "Strict");
+    }
+
+    #[test]
     fn test_save_load_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("cookies.json");

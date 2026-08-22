@@ -3,7 +3,7 @@ use std::sync::Arc;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use crate::diting_dom::{parse_html, DomTree};
 use crate::obscura_js::runtime::ObscuraJsRuntime;
-use crate::obscura_net::{ObscuraHttpClient, ObscuraNetError, Response};
+use crate::diting_net::{HttpClient, NetError, Response};
 use url::Url;
 
 use crate::obscura_browser::context::BrowserContext;
@@ -52,7 +52,7 @@ fn hex_val(b: u8) -> Option<u8> {
 }
 
 #[cfg(feature = "stealth")]
-use crate::obscura_net::StealthHttpClient;
+use crate::diting_net::StealthHttpClient;
 
 /// Returns true when a JS-initiated navigation would step from a
 /// non-file scheme into a file: URL. We treat that move as an SOP
@@ -131,7 +131,7 @@ pub struct Page {
     pub dom: Option<DomTree>,
     pub js: Option<ObscuraJsRuntime>,
     pub lifecycle: LifecycleState,
-    pub http_client: Arc<ObscuraHttpClient>,
+    pub http_client: Arc<HttpClient>,
     pub context: Arc<BrowserContext>,
     pub title: String,
     /// WHATWG canonical name of the current document's character encoding
@@ -187,7 +187,7 @@ impl Page {
             let emulation = context
                 .tls_fingerprint
                 .as_deref()
-                .and_then(crate::obscura_net::parse_tls_fingerprint)
+                .and_then(crate::diting_net::parse_tls_fingerprint)
                 .unwrap_or(wreq_util::Emulation::Chrome145);
             Some(Arc::new(StealthHttpClient::with_proxy_and_emulation(
                 context.cookie_jar.clone(),
@@ -244,7 +244,7 @@ impl Page {
         false
     }
 
-    async fn do_fetch(&self, url: &Url) -> Result<Response, ObscuraNetError> {
+    async fn do_fetch(&self, url: &Url) -> Result<Response, NetError> {
         #[cfg(feature = "stealth")]
         if let Some(ref stealth) = self.stealth_client {
             return stealth.fetch(url).await;
@@ -285,7 +285,7 @@ impl Page {
             ua.clone()
         } else {
             #[cfg(feature = "stealth")]
-            { if self.stealth_client.is_some() { crate::obscura_net::STEALTH_USER_AGENT.to_string() } else { String::new() } }
+            { if self.stealth_client.is_some() { crate::diting_net::STEALTH_USER_AGENT.to_string() } else { String::new() } }
             #[cfg(not(feature = "stealth"))]
             { String::new() }
         };
@@ -498,7 +498,7 @@ impl Page {
                         .to_string();
                     let mut headers = std::collections::HashMap::new();
                     headers.insert("content-type".to_string(), content_type);
-                    let resp = crate::obscura_net::Response {
+                    let resp = crate::diting_net::Response {
                         url: parsed,
                         status: 200,
                         headers,
@@ -538,12 +538,12 @@ impl Page {
             }
         };
 
-        let mut fetched: std::collections::HashMap<usize, (String, String, crate::obscura_net::Response)> = std::collections::HashMap::new();
+        let mut fetched: std::collections::HashMap<usize, (String, String, crate::diting_net::Response)> = std::collections::HashMap::new();
         for result in fetch_results {
             if let Some((idx, url, resp)) = result {
                 // Script bodies: only the HTTP Content-Type charset matters
                 // (no in-band meta-charset for JS).
-                let code = crate::obscura_net::decode_non_html(&resp.body, resp.content_type());
+                let code = crate::diting_net::decode_non_html(&resp.body, resp.content_type());
                 fetched.insert(idx, (url, code, resp));
             }
         }
@@ -981,7 +981,7 @@ impl Page {
             let body_bytes = decode_data_uri(url_str).unwrap_or_default();
             let mut headers = std::collections::HashMap::new();
             headers.insert("content-type".to_string(), content_type);
-            Ok(crate::obscura_net::Response { url: url.clone(), status: 200, headers, body: body_bytes, redirected_from: Vec::new() })
+            Ok(crate::diting_net::Response { url: url.clone(), status: 200, headers, body: body_bytes, redirected_from: Vec::new() })
         } else if method == "POST" {
             self.http_client.post_form(&url, body).await
         } else {
@@ -1009,7 +1009,7 @@ impl Page {
         // page (GBK, Big5, Shift-JIS, Windows-125x, EUC-KR, ISO-8859-x)
         // came through as replacement characters.
         let (body_text, encoding_name) =
-            crate::obscura_net::decode_response_with_name(&response.body, response.content_type());
+            crate::diting_net::decode_response_with_name(&response.body, response.content_type());
         self.encoding = encoding_name.to_string();
         let dom = parse_html(&body_text);
 
@@ -1085,7 +1085,7 @@ impl Page {
             if let Some((url_str, resp)) = result {
                 // CSS bodies: honor the Content-Type charset; CSS @charset is
                 // out of scope for the current scrape-focused pipeline.
-                let css = crate::obscura_net::decode_non_html(&resp.body, resp.content_type());
+                let css = crate::diting_net::decode_non_html(&resp.body, resp.content_type());
                 self.record_network_event(&url_str, "GET", "Stylesheet", resp.status, &resp.headers, resp.body.len());
                 css_sources.push(css);
             }
@@ -1503,8 +1503,8 @@ pub enum PageError {
     TooManyRedirects(usize),
 }
 
-impl From<ObscuraNetError> for PageError {
-    fn from(e: ObscuraNetError) -> Self {
+impl From<NetError> for PageError {
+    fn from(e: NetError) -> Self {
         PageError::NetworkError(e.to_string())
     }
 }

@@ -506,15 +506,15 @@ pub fn build_plain_client(timeout_secs: u64) -> reqwest::Client {
 #[cfg(feature = "stealth")]
 pub fn build_stealth_client(
     use_proxy: bool,
-) -> Arc<crate::obscura_net::wreq_client::StealthHttpClient> {
+) -> Arc<crate::diting_net::wreq_client::StealthHttpClient> {
     let proxy_url = if use_proxy {
         std::env::var("OBSCURA_PROXY").ok()
     } else {
         None
     };
-    let cookie_jar = Arc::new(crate::obscura_net::cookies::CookieJar::new());
+    let cookie_jar = Arc::new(crate::diting_net::cookies::CookieJar::new());
     let client =
-        crate::obscura_net::wreq_client::StealthHttpClient::with_proxy(cookie_jar, proxy_url.as_deref());
+        crate::diting_net::wreq_client::StealthHttpClient::with_proxy(cookie_jar, proxy_url.as_deref());
     Arc::new(client)
 }
 
@@ -532,14 +532,14 @@ pub fn build_stealth_client(_use_proxy: bool) -> Option<()> {
 #[allow(dead_code)] // public helper for engines needing an Android TLS fingerprint
 pub fn build_android_stealth_client(
     use_proxy: bool,
-) -> Arc<crate::obscura_net::wreq_client::StealthHttpClient> {
+) -> Arc<crate::diting_net::wreq_client::StealthHttpClient> {
     let proxy_url = if use_proxy {
         std::env::var("OBSCURA_PROXY").ok()
     } else {
         None
     };
-    let cookie_jar = Arc::new(crate::obscura_net::cookies::CookieJar::new());
-    let client = crate::obscura_net::wreq_client::StealthHttpClient::with_proxy_and_os(
+    let cookie_jar = Arc::new(crate::diting_net::cookies::CookieJar::new());
+    let client = crate::diting_net::wreq_client::StealthHttpClient::with_proxy_and_os(
         cookie_jar,
         proxy_url.as_deref(),
         Some(wreq_util::EmulationOS::Android),
@@ -557,7 +557,7 @@ pub fn build_android_stealth_client(_use_proxy: bool) -> Option<()> {
 /// final URL. Handles CAPTCHA detection via 302 redirects.
 #[cfg(feature = "stealth")]
 pub async fn stealth_fetch(
-    client: &crate::obscura_net::wreq_client::StealthHttpClient,
+    client: &crate::diting_net::wreq_client::StealthHttpClient,
     url: &str,
 ) -> Result<(String, String), SearchEngineError> {
     let parsed = Url::parse(url).map_err(|e| SearchEngineError::Transient(format!("bad url: {e}")))?;
@@ -654,7 +654,7 @@ pub async fn plain_fetch(client: &reqwest::Client, url: &str) -> Result<String, 
             .map_err(|e| SearchEngineError::Transient(format!("read body error: {e}")))?;
 
         // Decode with charset detection (handles GBK/GB2312 from Baidu/Sogou).
-        let text = crate::obscura_net::encoding::decode_non_html(&bytes, None);
+        let text = crate::diting_net::encoding::decode_non_html(&bytes, None);
         return Ok(text);
     }
 

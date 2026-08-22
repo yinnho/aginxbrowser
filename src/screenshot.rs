@@ -129,7 +129,7 @@ pub async fn prefetch_render_resources(
     async fn fetch_via(
         page: &crate::page::Page,
         u: &url::Url,
-    ) -> Option<crate::obscura_net::Response> {
+    ) -> Option<crate::diting_net::Response> {
         #[cfg(feature = "stealth")]
         if let Some(ref stealth) = page.inner.stealth_client {
             return stealth.fetch(u).await.ok();

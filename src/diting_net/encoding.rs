@@ -203,6 +203,71 @@ fn charset_from_content_type(header: &str) -> Option<String> {
     None
 }
 
+/// Return an exact attribute value from a lowercased `<meta ...>` tag.
+///
+/// This deliberately tokenizes attribute names instead of searching for a
+/// substring: `data-charset` and a description containing `charset=...` are
+/// not character encoding declarations.
+fn meta_attribute<'a>(tag: &'a str, target: &str) -> Option<&'a str> {
+    let mut rest = tag.strip_prefix("<meta")?;
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|c| !c.is_ascii_whitespace() && !matches!(c, '>' | '/'))
+    {
+        return None;
+    }
+
+    while !rest.is_empty() {
+        rest = rest.trim_start_matches(|c: char| c.is_ascii_whitespace() || c == '/');
+        if rest.is_empty() || rest.starts_with('>') {
+            break;
+        }
+
+        let name_end = rest
+            .find(|c: char| c.is_ascii_whitespace() || matches!(c, '=' | '>' | '/'))
+            .unwrap_or(rest.len());
+        if name_end == 0 {
+            rest = &rest[rest.chars().next()?.len_utf8()..];
+            continue;
+        }
+
+        let name = &rest[..name_end];
+        rest = rest[name_end..].trim_start();
+
+        let mut value = "";
+        if let Some(after_equals) = rest.strip_prefix('=') {
+            let after_equals = after_equals.trim_start();
+            if let Some(quote) = after_equals
+                .chars()
+                .next()
+                .filter(|c| matches!(c, '"' | '\''))
+            {
+                let quoted = &after_equals[quote.len_utf8()..];
+                if let Some(end) = quoted.find(quote) {
+                    value = &quoted[..end];
+                    rest = &quoted[end + quote.len_utf8()..];
+                } else {
+                    value = quoted;
+                    rest = "";
+                }
+            } else {
+                let end = after_equals
+                    .find(|c: char| c.is_ascii_whitespace() || matches!(c, '>' | '/'))
+                    .unwrap_or(after_equals.len());
+                value = &after_equals[..end];
+                rest = &after_equals[end..];
+            }
+        }
+
+        if name.eq_ignore_ascii_case(target) {
+            return Some(value);
+        }
+    }
+
+    None
+}
+
 /// Scan the first 1024 bytes for a `<meta charset="...">` or
 /// `<meta http-equiv="Content-Type" content="...; charset=...">` declaration.
 /// We only look at ASCII bytes; valid meta-charset declarations are always
@@ -223,21 +288,21 @@ fn sniff_meta_charset(bytes: &[u8]) -> Option<&'static Encoding> {
         let end = s[abs..].find('>').map(|e| abs + e).unwrap_or(s.len());
         let tag = &s[abs..end];
 
-        if let Some(charset_pos) = tag.find("charset") {
-            let after = &tag[charset_pos + "charset".len()..];
-            let after = after.trim_start();
-            if let Some(eq_rest) = after.strip_prefix('=') {
-                let value = eq_rest
-                    .trim_start()
-                    .trim_start_matches(|c: char| c == '"' || c == '\'')
-                    .split(|c: char| c == '"' || c == '\'' || c == ';' || c.is_whitespace() || c == '/')
-                    .next()
-                    .unwrap_or("");
-                if !value.is_empty() {
-                    if let Some(enc) = Encoding::for_label(value.as_bytes()) {
-                        return Some(enc);
-                    }
-                }
+        if let Some(enc) = meta_attribute(tag, "charset")
+            .filter(|value| !value.is_empty())
+            .and_then(|value| Encoding::for_label(value.as_bytes()))
+        {
+            return Some(enc);
+        }
+
+        let is_legacy_declaration = meta_attribute(tag, "http-equiv")
+            .is_some_and(|value| value.eq_ignore_ascii_case("content-type"));
+        if is_legacy_declaration {
+            if let Some(enc) = meta_attribute(tag, "content")
+                .and_then(|value| charset_from_content_type(value))
+                .and_then(|value| Encoding::for_label(value.as_bytes()))
+            {
+                return Some(enc);
             }
         }
 
@@ -281,6 +346,27 @@ mod tests {
         let bytes = b"<html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=EUC-KR\"></head></html>";
         let (enc, _) = detect_encoding(bytes, None);
         assert_eq!(enc.name(), "EUC-KR");
+    }
+
+    #[test]
+    #[test]
+    fn unrelated_meta_attributes_do_not_declare_a_charset() {
+        for bytes in [
+            &b"<meta name=\"description\" content=\"charset=gbk\">"[..],
+            &b"<meta data-charset=\"gbk\">"[..],
+            &b"<metadata charset=\"gbk\">"[..],
+        ] {
+            let (enc, source) = detect_encoding(bytes, None);
+            assert_eq!(enc.name(), "UTF-8");
+            assert_eq!(source, "default-utf8");
+        }
+    }
+
+    #[test]
+    fn legacy_http_equiv_meta_still_declares_charset() {
+        let bytes = br#"<meta http-equiv="Content-Type" content="text/html; charset=gbk">"#;
+        let (enc, _) = detect_encoding(bytes, None);
+        assert_eq!(enc.name(), "GBK");
     }
 
     #[test]

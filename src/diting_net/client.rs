@@ -1,14 +1,16 @@
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, USER_AGENT};
 use reqwest::redirect::Policy;
 use reqwest::{Client, Method};
 use tokio::sync::RwLock;
 use url::Url;
 
-use crate::obscura_net::cookies::CookieJar;
+use crate::diting_net::cookies::CookieJar;
 
 #[derive(Debug, Clone)]
 pub struct Response {
@@ -27,9 +29,9 @@ impl Response {
     /// 1KB, then UTF-8. Mirrors browser behaviour per the HTML5 spec.
     pub fn text(&self) -> String {
         if self.is_html() {
-            crate::obscura_net::encoding::decode_response(&self.body, self.content_type())
+            crate::diting_net::encoding::decode_response(&self.body, self.content_type())
         } else {
-            crate::obscura_net::encoding::decode_non_html(&self.body, self.content_type())
+            crate::diting_net::encoding::decode_non_html(&self.body, self.content_type())
         }
     }
 
@@ -52,6 +54,18 @@ impl Response {
 /// new `--allow-private-network` CLI flag (issue #33) sets a per-client field
 /// that is OR'd with this so existing scripts and Docker setups that pin the
 /// env var keep working unchanged.
+/// True when SSL_CERT_FILE / SSL_CERT_DIR point at a custom CA bundle.
+/// Empty strings count as unset — some environments export them empty.
+pub(crate) fn custom_cert_store_requested(
+    cert_file: Option<&std::ffi::OsStr>,
+    cert_dir: Option<&std::ffi::OsStr>,
+) -> bool {
+    fn present(v: Option<&std::ffi::OsStr>) -> bool {
+        v.is_some_and(|s| !s.is_empty())
+    }
+    present(cert_file) || present(cert_dir)
+}
+
 pub fn env_allows_private_network() -> bool {
     matches!(
         std::env::var("OBSCURA_ALLOW_PRIVATE_NETWORK")
@@ -64,11 +78,89 @@ pub fn env_allows_private_network() -> bool {
     )
 }
 
-fn validate_url(url: &Url, allow_private_network: bool) -> Result<(), ObscuraNetError> {
+/// True when `ip` must never be the target of an outbound request from the
+/// engine: loopback, RFC1918 private, link-local (incl. the 169.254.169.254
+/// cloud-metadata endpoint), broadcast, documentation, the unspecified address
+/// (0.0.0.0 / ::, which the OS routes to localhost), IPv6 unique-local
+/// (fc00::/7), and any IPv4-mapped/compatible IPv6 form of the above.
+/// Centralizes the SSRF deny-set so the literal-host check and the
+/// DNS-resolution check (`SsrfGuardResolver`) can never disagree.
+pub fn is_forbidden_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_unspecified()
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+            {
+                return true;
+            }
+            // Unwrap IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d)
+            // forms and re-check the embedded v4 so e.g. [::ffff:127.0.0.1] or
+            // [::ffff:169.254.169.254] cannot slip past the v6 arm.
+            if let Some(v4) = v6.to_ipv4_mapped().or_else(|| v6.to_ipv4()) {
+                return is_forbidden_ip(IpAddr::V4(v4));
+            }
+            false
+        }
+    }
+}
+
+/// reqwest DNS resolver that performs the lookup and then rejects the whole
+/// request if ANY resolved address is in the SSRF deny-set. This closes the
+/// DNS-rebinding bypass a host-string check alone cannot: a public name that
+/// resolves to 127.0.0.1 / 169.254.169.254 / an RFC1918 address is blocked at
+/// connect time, using the very addresses reqwest will dial. When private
+/// access is permitted (`--allow-private-network` or
+/// `OBSCURA_ALLOW_PRIVATE_NETWORK`) the lookup passes through unfiltered.
+pub struct SsrfGuardResolver {
+    allow_private: bool,
+}
+
+impl SsrfGuardResolver {
+    pub fn new(allow_private: bool) -> Self {
+        Self { allow_private }
+    }
+}
+
+impl Resolve for SsrfGuardResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let allow = self.allow_private || env_allows_private_network();
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
+                .collect();
+            if !allow {
+                if let Some(bad) = addrs.iter().find(|sa| is_forbidden_ip(sa.ip())) {
+                    return Err(format!(
+                        "SSRF blocked: '{}' resolves to forbidden address {}",
+                        host,
+                        bad.ip()
+                    )
+                    .into());
+                }
+            }
+            let iter: Addrs = Box::new(addrs.into_iter());
+            Ok(iter)
+        })
+    }
+}
+
+pub(crate) fn validate_url(url: &Url, allow_private_network: bool) -> Result<(), NetError> {
     let allow_private_network = allow_private_network || env_allows_private_network();
     let scheme = url.scheme();
     if scheme != "http" && scheme != "https" && scheme != "file" {
-        return Err(ObscuraNetError::Network(format!(
+        return Err(NetError::Network(format!(
             "Forbidden URL scheme '{}' - only http, https, and file are allowed",
             scheme
         )));
@@ -81,35 +173,19 @@ fn validate_url(url: &Url, allow_private_network: bool) -> Result<(), ObscuraNet
     if let Some(host) = url.host() {
         match host {
             url::Host::Ipv4(ip) => {
-                if ip.is_loopback()
-                    || ip.is_private()
-                    || ip.is_link_local()
-                    || ip.is_broadcast()
-                    || ip.is_documentation()
-                {
-                    return Err(ObscuraNetError::Network(format!(
+                if is_forbidden_ip(IpAddr::V4(ip)) {
+                    return Err(NetError::Network(format!(
                         "Access to private/internal IP address {} is not allowed",
                         ip
                     )));
                 }
             }
             url::Host::Ipv6(ip) => {
-                if ip.is_loopback() || ip.is_unicast_link_local() {
-                    return Err(ObscuraNetError::Network(format!(
+                if is_forbidden_ip(IpAddr::V6(ip)) {
+                    return Err(NetError::Network(format!(
                         "Access to private/internal IPv6 address {} is not allowed",
                         ip
                     )));
-                }
-                // Check for IPv4-mapped IPv6 addresses (::ffff:x.x.x.x)
-                if let Some(ipv4) = ip.to_ipv4() {
-                    if ipv4.is_loopback() || ipv4.is_private() || ipv4.is_link_local()
-                        || ipv4.is_broadcast() || ipv4.is_documentation()
-                    {
-                        return Err(ObscuraNetError::Network(format!(
-                            "Access to private/internal IP address {} (mapped from IPv6) is not allowed",
-                            ipv4
-                        )));
-                    }
                 }
             }
             url::Host::Domain(domain) => {
@@ -119,7 +195,7 @@ fn validate_url(url: &Url, allow_private_network: bool) -> Result<(), ObscuraNet
                     || lower_domain == "127.0.0.1"
                     || lower_domain == "::1"
                 {
-                    return Err(ObscuraNetError::Network(format!(
+                    return Err(NetError::Network(format!(
                         "Access to localhost domain '{}' is not allowed",
                         domain
                     )));
@@ -131,62 +207,13 @@ fn validate_url(url: &Url, allow_private_network: bool) -> Result<(), ObscuraNet
     Ok(())
 }
 
-/// DNS rebinding protection: resolve the domain and verify that none of the
-/// resulting IPs are private/internal. This catches attacks where a domain
-/// initially resolves to a public IP (passing `validate_url`) but then
-/// rebinds to an internal address.
-///
-/// **Limitation**: This is a TOCTOU check — reqwest resolves DNS independently
-/// when sending the request, so a short-TTL rebinding attack can slip through
-/// the gap. The check raises the bar for attackers but is not airtight.
-/// A proper fix would require a custom DNS resolver that pins the resolved IPs.
-///
-/// Skip when a proxy is configured — the proxy handles DNS resolution itself.
-async fn validate_url_rebinding(url: &Url, has_proxy: bool) -> Result<(), ObscuraNetError> {
-    if has_proxy || env_allows_private_network() {
-        return Ok(());
-    }
-    let Some(url::Host::Domain(domain)) = url.host() else {
-        return Ok(()); // Direct IPs already checked by validate_url.
-    };
-    let default_port = if url.scheme() == "https" { 443 } else { 80 };
-    let lookup = format!("{}:{}", domain, url.port().unwrap_or(default_port));
-    match tokio::net::lookup_host(&lookup).await {
-        Ok(addrs) => {
-            for addr in addrs {
-                let ip = addr.ip();
-                let is_internal = match ip {
-                    std::net::IpAddr::V4(v4) => {
-                        v4.is_loopback() || v4.is_private() || v4.is_link_local()
-                    }
-                    std::net::IpAddr::V6(v6) => {
-                        v6.is_loopback() || v6.is_unicast_link_local()
-                    }
-                };
-                if is_internal {
-                    return Err(ObscuraNetError::Network(format!(
-                        "DNS rebinding blocked: {} resolved to private/internal IP {}",
-                        domain, ip
-                    )));
-                }
-            }
-        }
-        Err(e) => {
-            // DNS resolution failure — don't block, let the actual request
-            // fail naturally with a more specific error.
-            tracing::debug!("DNS pre-check for {} failed: {}", domain, e);
-        }
-    }
-    Ok(())
-}
-
-async fn fetch_file_url(url: &Url) -> Result<Response, ObscuraNetError> {
+pub(crate) async fn fetch_file_url(url: &Url) -> Result<Response, NetError> {
     let path = url
         .to_file_path()
-        .map_err(|_| ObscuraNetError::Network("Invalid file URL".to_string()))?;
+        .map_err(|_| NetError::Network("Invalid file URL".to_string()))?;
     let body = tokio::fs::read(&path)
         .await
-        .map_err(|e| ObscuraNetError::Network(format!("Failed to read file: {}", e)))?;
+        .map_err(|e| NetError::Network(format!("Failed to read file: {}", e)))?;
 
     let mut headers = HashMap::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -215,7 +242,7 @@ async fn fetch_file_url(url: &Url) -> Result<Response, ObscuraNetError> {
     })
 }
 
-pub struct ObscuraHttpClient {
+pub struct HttpClient {
     client: tokio::sync::OnceCell<Client>,
     /// Direct-connect client (no proxy). Built once on first use.
     direct_client: tokio::sync::OnceCell<Client>,
@@ -232,7 +259,7 @@ pub struct ObscuraHttpClient {
     pub allow_private_network: bool,
 }
 
-impl ObscuraHttpClient {
+impl HttpClient {
     pub fn new() -> Self {
         Self::with_cookie_jar(Arc::new(CookieJar::new()))
     }
@@ -250,7 +277,7 @@ impl ObscuraHttpClient {
         proxy_url: Option<&str>,
         allow_private_network: bool,
     ) -> Self {
-        ObscuraHttpClient {
+        HttpClient {
             client: tokio::sync::OnceCell::new(),
             direct_client: tokio::sync::OnceCell::new(),
             proxy_url: proxy_url.map(|s| s.to_string()),
@@ -310,6 +337,13 @@ impl ObscuraHttpClient {
                 .pool_idle_timeout(Duration::from_secs(60))
                 .tcp_keepalive(Duration::from_secs(30))
                 .danger_accept_invalid_certs(false)
+                // SSRF guard: reject hostnames that resolve to a
+                // private/loopback IP at connect time (replaces the old
+                // TOCTOU pre-resolution check). Only on the direct client —
+                // with a proxy, the proxy resolves target DNS and the only
+                // local lookup is the proxy host itself, which is often
+                // deliberately a loopback address (e.g. socks5://127.0.0.1).
+                .dns_resolver(Arc::new(SsrfGuardResolver::new(self.allow_private_network)))
                 .build()
                 .expect("failed to build direct HTTP client")
         }).await
@@ -333,11 +367,11 @@ impl ObscuraHttpClient {
         self.proxy_url.as_deref()
     }
 
-    pub async fn fetch(&self, url: &Url) -> Result<Response, ObscuraNetError> {
+    pub async fn fetch(&self, url: &Url) -> Result<Response, NetError> {
         self.fetch_with_method(Method::GET, url, None).await
     }
 
-    pub async fn post_form(&self, url: &Url, body: &str) -> Result<Response, ObscuraNetError> {
+    pub async fn post_form(&self, url: &Url, body: &str) -> Result<Response, NetError> {
         self.fetch_with_method(Method::POST, url, Some(body.as_bytes().to_vec())).await
     }
 
@@ -346,9 +380,8 @@ impl ObscuraHttpClient {
         initial_method: Method,
         url: &Url,
         initial_body: Option<Vec<u8>>,
-    ) -> Result<Response, ObscuraNetError> {
+    ) -> Result<Response, NetError> {
         validate_url(url, self.allow_private_network)?;
-        validate_url_rebinding(url, self.proxy_url.is_some()).await?;
 
         if url.scheme() == "file" {
             return fetch_file_url(url).await;
@@ -358,7 +391,7 @@ impl ObscuraHttpClient {
         let mut body = initial_body;
         if self.block_trackers {
             if let Some(host) = url.host_str() {
-                if crate::obscura_net::blocklist::is_blocked(host) {
+                if crate::diting_net::blocklist::is_blocked(host) {
                     tracing::debug!("Blocked tracker: {}", url);
                     return Ok(Response {
                         status: 0,
@@ -479,7 +512,7 @@ impl ObscuraHttpClient {
             self.in_flight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let resp = req_builder.send().await.map_err(|e| {
                 self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                ObscuraNetError::Network(format!("{}: {}", current_url, e))
+                NetError::Network(format!("{}: {}", current_url, e))
             })?;
             self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -500,13 +533,12 @@ impl ObscuraHttpClient {
             if status.is_redirection() {
                 if let Some(location) = resp.headers().get(reqwest::header::LOCATION) {
                     let location_str = location.to_str().map_err(|_| {
-                        ObscuraNetError::Network("Invalid redirect Location header".into())
+                        NetError::Network("Invalid redirect Location header".into())
                     })?;
                     let next_url = current_url.join(location_str).map_err(|e| {
-                        ObscuraNetError::Network(format!("Invalid redirect URL: {}", e))
+                        NetError::Network(format!("Invalid redirect URL: {}", e))
                     })?;
                     validate_url(&next_url, self.allow_private_network)?;
-                    validate_url_rebinding(&next_url, self.proxy_url.is_some()).await?;
                     redirects.push(current_url.clone());
                     current_url = next_url;
                     if status == reqwest::StatusCode::MOVED_PERMANENTLY
@@ -522,7 +554,7 @@ impl ObscuraHttpClient {
 
             let body_bytes = resp.bytes().await.map_err(|e| {
                 tracing::warn!("body read failed for {}: {} (status={}, ctype={:?})", current_url, e, status, response_headers.get("content-type"));
-                ObscuraNetError::Network(format!("Failed to read body: {}", e))
+                NetError::Network(format!("Failed to read body: {}", e))
             })?.to_vec();
 
             let response = Response {
@@ -536,7 +568,7 @@ impl ObscuraHttpClient {
             return Ok(response);
         }
 
-        Err(ObscuraNetError::TooManyRedirects(current_url.to_string()))
+        Err(NetError::TooManyRedirects(current_url.to_string()))
     }
 
     pub async fn set_user_agent(&self, ua: &str) {
@@ -556,7 +588,7 @@ impl ObscuraHttpClient {
     }
 }
 
-impl Default for ObscuraHttpClient {
+impl Default for HttpClient {
     fn default() -> Self {
         Self::new()
     }
@@ -595,7 +627,7 @@ pub fn derive_client_hints(ua: &str) -> (String, String) {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ObscuraNetError {
+pub enum NetError {
     #[error("Network error: {0}")]
     Network(String),
 
@@ -648,4 +680,69 @@ mod tests {
         let (ch_ua, _) = derive_client_hints(ua);
         assert!(ch_ua.contains(r#""Chromium";v="145""#));
     }
+
+    // Env-sensitive: OBSCURA_ALLOW_PRIVATE_NETWORK overrides rejection, so this
+    // runs under the crate-wide env lock with the variable cleared.
+    #[tokio::test]
+    async fn validate_url_ssrf_rules() {
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+
+        for bad in [
+            "http://127.0.0.1/",
+            "http://127.1.2.3:8080/admin",
+            "http://10.0.0.5/",
+            "http://192.168.1.1/",
+            "http://172.16.0.1/",
+            "http://169.254.169.254/latest/meta-data",
+            "http://[::1]/",
+            "http://localhost:3000/",
+        ] {
+            let url = Url::parse(bad).unwrap();
+            assert!(validate_url(&url, false).is_err(), "{bad} must be rejected");
+        }
+
+        for good in ["http://example.com/", "https://example.com:8443/a?b=c", "file:///tmp/x.html"] {
+            let url = Url::parse(good).unwrap();
+            assert!(validate_url(&url, false).is_ok(), "{good} must be allowed");
+        }
+        let url = Url::parse("ftp://example.com/").unwrap();
+        assert!(validate_url(&url, false).is_err(), "ftp must be rejected");
+    }
+
+    #[test]
+    fn is_forbidden_ip_covers_mapped_and_unspecified() {
+        use std::str::FromStr;
+        for bad in [
+            "127.0.0.1", "10.1.2.3", "192.168.0.1", "172.16.5.4", "169.254.169.254",
+            "0.0.0.0", "255.255.255.255", "192.0.2.1", // documentation
+            "::1", "::", "fc00::1", "fe80::1",
+            "::ffff:127.0.0.1", "::ffff:10.0.0.1", // IPv4-mapped
+        ] {
+            assert!(is_forbidden_ip(IpAddr::from_str(bad).unwrap()), "{bad} must be forbidden");
+        }
+        for good in ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"] {
+            assert!(!is_forbidden_ip(IpAddr::from_str(good).unwrap()), "{good} must be allowed");
+        }
+    }
+
+    #[tokio::test]
+    async fn ssrf_guard_resolver_blocks_loopback_resolution() {
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+
+        let guarded = SsrfGuardResolver::new(false);
+        assert!(
+            guarded.resolve(Name::from_str("localhost").unwrap()).await.is_err(),
+            "localhost must be rejected by the guarded resolver"
+        );
+
+        let permissive = SsrfGuardResolver::new(true);
+        assert!(
+            permissive.resolve(Name::from_str("localhost").unwrap()).await.is_ok(),
+            "allow_private must pass localhost through"
+        );
+    }
+
+    use std::str::FromStr;
 }

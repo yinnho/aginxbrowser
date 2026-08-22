@@ -6,7 +6,7 @@ use super::{ImageResult, RawSearchResult, SearchEngine, SearchEngineError, Searc
 /// returns binary direct image links (curl -o downloadable), not page URLs.
 pub struct BaiduImagesEngine {
     #[cfg(feature = "stealth")]
-    stealth: Option<std::sync::Arc<crate::obscura_net::wreq_client::StealthHttpClient>>,
+    stealth: Option<std::sync::Arc<crate::diting_net::wreq_client::StealthHttpClient>>,
     plain_client: reqwest::Client,
 }
 

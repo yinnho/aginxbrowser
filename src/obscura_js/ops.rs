@@ -9,7 +9,7 @@ use deno_core::Extension;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use crate::diting_dom::{DomTree, NodeData, NodeId};
 use html5ever::namespace_url;
-use crate::obscura_net::{CookieJar, ObscuraHttpClient};
+use crate::diting_net::{CookieJar, HttpClient};
 use tokio::sync::Mutex;
 
 pub type InterceptCallback = Arc<Mutex<Option<Box<dyn Fn(String, String, String) -> Option<(u16, String, String)> + Send + Sync>>>>;
@@ -49,7 +49,7 @@ pub struct ObscuraState {
     pub title: String,
     pub blocked_urls: Vec<String>,
     pub cookie_jar: Option<Arc<CookieJar>>,
-    pub http_client: Option<Arc<ObscuraHttpClient>>,
+    pub http_client: Option<Arc<HttpClient>>,
     pub pending_navigation: Option<(String, String, String)>,
     pub intercept_tx: Option<tokio::sync::mpsc::UnboundedSender<InterceptedRequest>>,
     pub intercept_counter: u64,
@@ -468,7 +468,7 @@ fn op_console_msg(state: &OpState, #[string] level: &str, #[string] msg: &str) {
 // process-wide `OnceLock<reqwest::Client>` initialised with no proxy, so
 // every JS network call bypassed the configured upstream proxy. We now
 // build a client per request, threading whatever `proxy_url` the page's
-// ObscuraHttpClient was configured with.
+// HttpClient was configured with.
 //
 // The per-request build cost is negligible (≪1ms) compared with the actual
 // network round-trip; the simplification is worth not having to invalidate
@@ -915,7 +915,7 @@ fn validate_fetch_url(url: &url::Url) -> Result<(), String> {
         ));
     }
 
-    if scheme == "file" || crate::obscura_net::env_allows_private_network() {
+    if scheme == "file" || crate::diting_net::env_allows_private_network() {
         return Ok(());
     }
 
@@ -1210,7 +1210,7 @@ fn op_url_resolve(#[string] href: &str, #[string] base: &str) -> String {
 #[op2]
 #[string]
 fn op_encoding_for_label(#[string] label: &str) -> String {
-    crate::obscura_net::label_name(label).unwrap_or_default()
+    crate::diting_net::label_name(label).unwrap_or_default()
 }
 
 /// Decode bytes with a legacy/explicit encoding via encoding_rs. Returns
@@ -1219,7 +1219,7 @@ fn op_encoding_for_label(#[string] label: &str) -> String {
 #[op2]
 #[string]
 fn op_text_decode(#[string] label: &str, #[buffer] bytes: &[u8], fatal: bool, ignore_bom: bool) -> String {
-    match crate::obscura_net::decode_with_label(label, bytes, fatal, ignore_bom) {
+    match crate::diting_net::decode_with_label(label, bytes, fatal, ignore_bom) {
         Some(s) => serde_json::json!({ "ok": true, "v": s }).to_string(),
         None => "{\"ok\":false}".to_string(),
     }
@@ -1234,7 +1234,7 @@ fn op_text_decode(#[string] label: &str, #[buffer] bytes: &[u8], fatal: bool, ig
 #[op2]
 #[string]
 fn op_url_encode_query(#[string] query: &str, #[string] label: &str, special: bool) -> String {
-    crate::obscura_net::url_encode_query(query, label, special).unwrap_or_else(|| query.to_string())
+    crate::diting_net::url_encode_query(query, label, special).unwrap_or_else(|| query.to_string())
 }
 
 pub fn build_extension() -> Extension {

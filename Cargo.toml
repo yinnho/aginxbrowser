@@ -109,10 +109,10 @@ peniko = { version = "0.6", optional = true }
 png = { version = "0.18", optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
-wreq = { version = "=6.0.0-rc.28", optional = true, features = ["prefix-symbols", "socks"] }
+wreq = { version = "=6.0.0-rc.28", optional = true, features = ["prefix-symbols", "socks", "gzip", "brotli", "deflate", "zstd"] }
 
 [target.'cfg(not(any(target_os = "linux", target_os = "android")))'.dependencies]
-wreq = { version = "=6.0.0-rc.28", optional = true, features = ["socks"] }
+wreq = { version = "=6.0.0-rc.28", optional = true, features = ["socks", "gzip", "brotli", "deflate", "zstd"] }
 
 [build-dependencies]
 deno_core = "0.350"

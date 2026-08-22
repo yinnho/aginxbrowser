@@ -5,7 +5,7 @@ use super::{SearchParams, RawSearchResult, SearchEngine, SearchEngineError};
 /// Baidu search engine. Uses Baidu's JSON API endpoint (tn=json).
 pub struct BaiduEngine {
     #[cfg(feature = "stealth")]
-    stealth: Option<std::sync::Arc<crate::obscura_net::wreq_client::StealthHttpClient>>,
+    stealth: Option<std::sync::Arc<crate::diting_net::wreq_client::StealthHttpClient>>,
     plain_client: reqwest::Client,
 }
 

@@ -8,7 +8,7 @@ pub mod blocklist;
 pub mod wreq_client;
 
 pub use client::{
-    env_allows_private_network, ObscuraHttpClient, ObscuraNetError,
+    env_allows_private_network, HttpClient, NetError,
     Response,
 };
 pub use cookies::CookieJar;
@@ -19,3 +19,8 @@ pub use encoding::{
 pub use robots::RobotsCache;
 #[cfg(feature = "stealth")]
 pub use wreq_client::{StealthHttpClient, STEALTH_USER_AGENT, parse_tls_fingerprint};
+
+/// Serializes tests that read or mutate `OBSCURA_ALLOW_PRIVATE_NETWORK`,
+/// since process env is shared across parallel test threads.
+#[cfg(test)]
+pub(crate) static PRIVATE_NET_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

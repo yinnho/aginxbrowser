@@ -13,9 +13,9 @@ use tokio::sync::RwLock;
 use url::Url;
 
 #[cfg(feature = "stealth")]
-use crate::obscura_net::cookies::CookieJar;
+use crate::diting_net::cookies::CookieJar;
 #[cfg(feature = "stealth")]
-use crate::obscura_net::client::{Response, ObscuraNetError};
+use crate::diting_net::client::{Response, NetError};
 
 #[cfg(feature = "stealth")]
 pub const STEALTH_USER_AGENT: &str =
@@ -37,6 +37,27 @@ pub fn parse_tls_fingerprint(s: &str) -> Option<wreq_util::Emulation> {
         "safari18" => Some(wreq_util::Emulation::Safari18),
         "edge145" | "edge" => Some(wreq_util::Emulation::Edge145),
         _ => None,
+    }
+}
+
+/// GETs are idempotent, so a connection reset mid-request is safe to retry
+/// once. Some anti-bot frontends RST the first TLS connection from a fresh IP
+/// and only serve the retry.
+#[cfg(feature = "stealth")]
+async fn send_get_with_connection_reset_retry(
+    request: wreq::RequestBuilder,
+    url: &Url,
+) -> Result<wreq::Response, wreq::Error> {
+    let retry = request.try_clone();
+    match request.send().await {
+        Err(error) if error.is_connection_reset() => {
+            let Some(retry) = retry else {
+                return Err(error);
+            };
+            tracing::debug!(%url, "retrying GET after connection reset");
+            retry.send().await
+        }
+        result => result,
     }
 }
 
@@ -74,7 +95,27 @@ impl StealthHttpClient {
         os_override: Option<wreq_util::EmulationOS>,
         emulation: wreq_util::Emulation,
     ) -> wreq::Client {
-        let cert_store = wreq::tls::CertStore::default();
+        // Honor SSL_CERT_FILE / SSL_CERT_DIR (opt-in only): when set, load
+        // those CA roots instead of the bundled defaults, so hosts behind a
+        // private/national CA verify on the stealth path too. Unset keeps the
+        // previous behavior byte-for-byte.
+        let cert_store = if crate::diting_net::client::custom_cert_store_requested(
+            std::env::var_os("SSL_CERT_FILE").as_deref(),
+            std::env::var_os("SSL_CERT_DIR").as_deref(),
+        ) {
+            match wreq::tls::CertStore::builder().set_default_paths().build() {
+                Ok(store) => store,
+                Err(e) => {
+                    tracing::warn!(
+                        "SSL_CERT_FILE/SSL_CERT_DIR set but cert store failed to build ({}); using default roots",
+                        e
+                    );
+                    wreq::tls::CertStore::default()
+                }
+            }
+        } else {
+            wreq::tls::CertStore::default()
+        };
 
         let os = if let Some(os) = os_override {
             os
@@ -178,11 +219,19 @@ impl StealthHttpClient {
         }
     }
 
-    pub async fn fetch(&self, url: &Url) -> Result<Response, ObscuraNetError> {
+    pub async fn fetch(&self, url: &Url) -> Result<Response, NetError> {
+        // The stealth path must enforce the same SSRF rules as the reqwest
+        // path — without this, StealthHttpClient could reach loopback/private
+        // addresses that HttpClient rejects.
+        crate::diting_net::client::validate_url(url, false)?;
+        if url.scheme() == "file" {
+            return crate::diting_net::client::fetch_file_url(url).await;
+        }
+
         let mut current_url = url.clone();
 
         if let Some(host) = current_url.host_str() {
-            if crate::obscura_net::blocklist::is_blocked(host) {
+            if crate::diting_net::blocklist::is_blocked(host) {
                 tracing::debug!("Blocked tracker: {}", current_url);
                 return Ok(Response {
                     status: 0,
@@ -204,7 +253,7 @@ impl StealthHttpClient {
             // match sec-ch-ua-platform; Chinese sites expect zh-CN).
             let ua = self.user_agent.read().await.clone();
             let lang = self.accept_language.read().await.clone();
-            let (_, platform) = crate::obscura_net::client::derive_client_hints(&ua);
+            let (_, platform) = crate::diting_net::client::derive_client_hints(&ua);
             let extra = self.extra_headers.read().await;
             req = req.header("User-Agent", &ua);
             // Only set Accept-Language automatically if not overridden in extra_headers.
@@ -228,9 +277,9 @@ impl StealthHttpClient {
             }
 
             self.in_flight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let resp = req.send().await.map_err(|e| {
+            let resp = send_get_with_connection_reset_retry(req, &current_url).await.map_err(|e| {
                 self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                ObscuraNetError::Network(format!("{}: {} (source: {:?})", current_url, e, e.source()))
+                NetError::Network(format!("{}: {} (source: {:?})", current_url, e, e.source()))
             })?;
             self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -252,11 +301,17 @@ impl StealthHttpClient {
             if status.is_redirection() {
                 if let Some(location) = resp.headers().get("location") {
                     let location_str = location.to_str().map_err(|_| {
-                        ObscuraNetError::Network("Invalid redirect Location".into())
+                        NetError::Network("Invalid redirect Location".into())
                     })?;
                     let next_url = current_url.join(location_str).map_err(|e| {
-                        ObscuraNetError::Network(format!("Invalid redirect URL: {}", e))
+                        NetError::Network(format!("Invalid redirect URL: {}", e))
                     })?;
+                    // A redirect must not be able to bounce the stealth client
+                    // to a forbidden target (e.g. 302 -> http://127.0.0.1/).
+                    crate::diting_net::client::validate_url(&next_url, false)?;
+                    if next_url.scheme() == "file" {
+                        return crate::diting_net::client::fetch_file_url(&next_url).await;
+                    }
                     redirects.push(current_url.clone());
                     tracing::info!("stealth redirect {} -> {}", current_url, next_url);
                     current_url = next_url;
@@ -265,7 +320,7 @@ impl StealthHttpClient {
             }
 
             let body = resp.bytes().await.map_err(|e| {
-                ObscuraNetError::Network(format!("Failed to read body: {}", e))
+                NetError::Network(format!("Failed to read body: {}", e))
             })?.to_vec();
 
             return Ok(Response {
@@ -277,7 +332,7 @@ impl StealthHttpClient {
             });
         }
 
-        Err(ObscuraNetError::TooManyRedirects(url.to_string()))
+        Err(NetError::TooManyRedirects(url.to_string()))
     }
 
     pub async fn set_extra_headers(&self, headers: HashMap<String, String>) {
@@ -290,5 +345,80 @@ impl StealthHttpClient {
 
     pub fn is_network_idle(&self) -> bool {
         self.active_requests() == 0
+    }
+}
+
+#[cfg(all(test, feature = "stealth"))]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use url::Url;
+
+    use super::StealthHttpClient;
+    use crate::diting_net::cookies::CookieJar;
+
+    const PLAIN_BODY: &str = "<!DOCTYPE html><html><body><p id=\"mark\">gzip ok</p></body></html>";
+
+    // gzip (level 9) of PLAIN_BODY, hardcoded so the fixture needs no
+    // compression dependency. A wrong byte fails the assert below.
+    const GZIP_BODY: &[u8] = &[
+        0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03, 0xb3, 0x51,
+        0x74, 0xf1, 0x77, 0x0e, 0x89, 0x0c, 0x70, 0x55, 0xc8, 0x28, 0xc9, 0xcd,
+        0xb1, 0xb3, 0x81, 0x90, 0x49, 0xf9, 0x29, 0x95, 0x76, 0x36, 0x05, 0x0a,
+        0x99, 0x29, 0xb6, 0x4a, 0xb9, 0x89, 0x45, 0xd9, 0x4a, 0x76, 0xe9, 0x55,
+        0x99, 0x05, 0x0a, 0xf9, 0xd9, 0x36, 0xfa, 0x05, 0x76, 0x36, 0xfa, 0x10,
+        0x69, 0x7d, 0xb0, 0x5a, 0x00, 0x80, 0x3d, 0x1c, 0x5f, 0x41, 0x00, 0x00,
+        0x00,
+    ];
+
+    /// Serve one `Content-Encoding: gzip` response on an ephemeral port.
+    async fn gzip_fixture() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = stream.read(&mut buf).await;
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-encoding: gzip\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        GZIP_BODY.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes()).await;
+                    let _ = stream.write_all(GZIP_BODY).await;
+                });
+            }
+        });
+
+        port
+    }
+
+    // The emulation profile advertises gzip, so origins compress. Without the
+    // decoder the raw gzip bytes reach the HTML parser as document text.
+    // The fixture is on loopback, so this runs under the env lock with
+    // OBSCURA_ALLOW_PRIVATE_NETWORK set, then restores it.
+    #[tokio::test]
+    async fn stealth_client_decodes_gzip_response() {
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+        let port = gzip_fixture().await;
+        let client = StealthHttpClient::new(Arc::new(CookieJar::new()));
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let result = client.fetch(&url).await;
+        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+        let resp = result.unwrap();
+        assert_eq!(resp.text(), PLAIN_BODY, "gzip body must be decompressed");
+    }
+
+    // The stealth path must enforce the same SSRF rules as the reqwest path.
+    #[tokio::test]
+    async fn stealth_fetch_rejects_loopback() {
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+        let client = StealthHttpClient::new(Arc::new(CookieJar::new()));
+        let url = Url::parse("http://127.0.0.1:1/").unwrap();
+        assert!(client.fetch(&url).await.is_err(), "loopback must be rejected");
     }
 }

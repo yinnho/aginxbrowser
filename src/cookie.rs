@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 use std::sync::Arc;
-use crate::obscura_net::CookieJar;
+use crate::diting_net::CookieJar;
 use serde::{Deserialize, Serialize};
 
 /// A cookie as exposed to the Rust API.

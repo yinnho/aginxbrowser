@@ -184,11 +184,11 @@ impl ObscuraJsRuntime {
         }
     }
 
-    pub fn set_cookie_jar(&self, jar: std::sync::Arc<crate::obscura_net::CookieJar>) {
+    pub fn set_cookie_jar(&self, jar: std::sync::Arc<crate::diting_net::CookieJar>) {
         self.state.borrow_mut().cookie_jar = Some(jar);
     }
 
-    pub fn set_http_client(&self, client: std::sync::Arc<crate::obscura_net::ObscuraHttpClient>) {
+    pub fn set_http_client(&self, client: std::sync::Arc<crate::diting_net::HttpClient>) {
         self.state.borrow_mut().http_client = Some(client);
     }
 
@@ -673,7 +673,7 @@ impl ObscuraJsRuntime {
         let client = self.state.borrow().http_client.clone();
         let source_code = match client {
             Some(c) => match c.fetch(&specifier).await {
-                Ok(resp) => crate::obscura_net::decode_non_html(&resp.body, resp.content_type()),
+                Ok(resp) => crate::diting_net::decode_non_html(&resp.body, resp.content_type()),
                 Err(e) => {
                     tracing::warn!("Module fetch failed ({}): {}", url, e);
                     String::new()
@@ -1997,9 +1997,9 @@ mod tests {
         assert_eq!(result.value.unwrap().as_f64().unwrap() as i64, 84);
     }
 
-    fn setup_runtime_with_cookies(html: &str) -> (ObscuraJsRuntime, std::sync::Arc<crate::obscura_net::CookieJar>) {
+    fn setup_runtime_with_cookies(html: &str) -> (ObscuraJsRuntime, std::sync::Arc<crate::diting_net::CookieJar>) {
         let dom = crate::diting_dom::parse_html(html);
-        let jar = std::sync::Arc::new(crate::obscura_net::CookieJar::new());
+        let jar = std::sync::Arc::new(crate::diting_net::CookieJar::new());
         let rt = ObscuraJsRuntime::new();
         rt.set_dom(dom);
         rt.set_url("http://example.com/test");
@@ -2465,17 +2465,17 @@ mod tests {
     // the prod fix.
     #[test]
     fn http_client_round_trips_proxy_url() {
-        use crate::obscura_net::{CookieJar, ObscuraHttpClient};
+        use crate::diting_net::{CookieJar, HttpClient};
         let jar = std::sync::Arc::new(CookieJar::new());
         let configured =
-            ObscuraHttpClient::with_options(jar.clone(), Some("http://proxy.test:8080"));
+            HttpClient::with_options(jar.clone(), Some("http://proxy.test:8080"));
         assert_eq!(
             configured.proxy_url(),
             Some("http://proxy.test:8080"),
             "proxy_url() must expose the value passed to with_options"
         );
 
-        let direct = ObscuraHttpClient::with_options(jar, None);
+        let direct = HttpClient::with_options(jar, None);
         assert_eq!(
             direct.proxy_url(),
             None,

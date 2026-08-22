@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::obscura_browser::BrowserContext;
-use crate::obscura_net::CookieJar;
+use crate::diting_net::CookieJar;
 
 use crate::config::BrowserConfig;
 use crate::cookie::CookieStore;
