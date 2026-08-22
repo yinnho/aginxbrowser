@@ -6,7 +6,7 @@ use html5ever::tendril::StrTendril;
 use html5ever::tree_builder::{ElemName, ElementFlags, NodeOrText, QuirksMode, TreeSink};
 use html5ever::{local_name, namespace_url, ns, Attribute as HtmlAttribute, LocalName, Namespace, QualName};
 
-use crate::obscura_dom::tree::{Attribute, DomTree, NodeData, NodeId};
+use crate::diting_dom::tree::{Attribute, DomTree, NodeData, NodeId};
 
 pub struct ObscuraElemName<'a> {
     _ref: Ref<'a, ()>,

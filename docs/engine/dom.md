@@ -103,5 +103,5 @@ NodeData = Document | Doctype | Element{name,attrs,template_contents,...}
 
 1. **先补特征测试** ✅ 2026-08-22 已补 10 个(成环/双删/命名空间属性/template 重映射/深嵌套/quirks/伪类),43 个 dom 测试全绿。
 2. **吸收 B 组修复** ✅ 已完成,见上表。
-3. **改名 `diting_dom`**:待做。纯机械重命名(mod.rs 的 re-export 不变,服务层只改 import 路径)。
+3. **改名 `diting_dom`** ✅ 2026-08-22 完成:目录 git mv,4 个外部引用点(main/runtime/ops/page)+ 日志 target 同步改为 `diting::`。
 4. **C 组挂账**:Shadow DOM 和 :has() 记为"已知不支持",等渲染路线(Phase 2)再议。

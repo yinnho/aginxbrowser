@@ -583,7 +583,7 @@ impl DomTree {
             // chain is at most nodes.len() long. Exceeding it means
             // next_sibling forms a cycle; stop rather than loop forever.
             if result.len() > inner.nodes.len() {
-                eprintln!("obscura: children() cap hit at node {} - cycle", node_id.index());
+                eprintln!("diting: children() cap hit at node {} - cycle", node_id.index());
                 break;
             }
             current = inner.nodes.get(child_id.index())
@@ -605,7 +605,7 @@ impl DomTree {
         while let Some(child_id) = first {
             children_to_push.push(child_id);
             if children_to_push.len() > inner.nodes.len() {
-                eprintln!("obscura: sibling-chain cap hit at node {} - cycle", node_id.index());
+                eprintln!("diting: sibling-chain cap hit at node {} - cycle", node_id.index());
                 break;
             }
             first = inner.nodes.get(child_id.index())
@@ -625,7 +625,7 @@ impl DomTree {
             // valid tree this bound is never reached, so the hot path is unchanged.
             if result.len() > inner.nodes.len() {
                 eprintln!(
-                    "obscura: descendants() cap hit at node {} ({} nodes) - tree has a cycle",
+                    "diting: descendants() cap hit at node {} ({} nodes) - tree has a cycle",
                     node_id.index(),
                     inner.nodes.len()
                 );
@@ -639,7 +639,7 @@ impl DomTree {
             while let Some(child_id) = child {
                 children_to_push.push(child_id);
                 if children_to_push.len() > inner.nodes.len() {
-                    eprintln!("obscura: sibling-chain cap hit at node {} - cycle", current.index());
+                    eprintln!("diting: sibling-chain cap hit at node {} - cycle", current.index());
                     break;
                 }
                 child = inner.nodes.get(child_id.index())
@@ -666,7 +666,7 @@ impl DomTree {
             // long. Exceeding it means parent forms a cycle; stop rather
             // than loop forever.
             if result.len() > inner.nodes.len() {
-                eprintln!("obscura: ancestors() cap hit at node {} - cycle", node_id.index());
+                eprintln!("diting: ancestors() cap hit at node {} - cycle", node_id.index());
                 break;
             }
             current = inner.nodes.get(parent_id.index())
@@ -853,7 +853,7 @@ fn collect_text_inner(inner: &DomTreeInner, node_id: NodeId, buf: &mut String) {
     while let Some(id) = stack.pop() {
         steps += 1;
         if steps > max_steps {
-            eprintln!("obscura: collect_text_inner cap hit - tree has a cycle");
+            eprintln!("diting: collect_text_inner cap hit - tree has a cycle");
             break;
         }
 
@@ -876,7 +876,7 @@ fn collect_text_inner(inner: &DomTreeInner, node_id: NodeId, buf: &mut String) {
                 while let Some(child_id) = child {
                     kids.push(child_id);
                     if kids.len() > inner.nodes.len() {
-                        eprintln!("obscura: collect_text_inner sibling cap hit - cycle");
+                        eprintln!("diting: collect_text_inner sibling cap hit - cycle");
                         break;
                     }
                     child = inner.nodes.get(child_id.index())
@@ -1160,7 +1160,7 @@ mod tests {
         // A parsed namespaced attribute stores prefix separately from the local
         // name (xlink:href -> prefix="xlink", local="href"). set_attribute must
         // match on the qualified name, or it silently pushes a duplicate.
-        let tree = crate::obscura_dom::tree_sink::parse_html(
+        let tree = crate::diting_dom::tree_sink::parse_html(
             r##"<svg><use xlink:href="#icon"/></svg>"##,
         );
         let use_el = tree.query_selector("use").unwrap().unwrap();
@@ -1219,7 +1219,7 @@ mod tests {
         // A cloned <template> carries the SOURCE tree's contents NodeId, which
         // in the destination tree indexes an unrelated slot. The import must
         // allocate a fresh contents document and remap the reference.
-        let source = crate::obscura_dom::tree_sink::parse_html(
+        let source = crate::diting_dom::tree_sink::parse_html(
             r#"<div><template><span>tmpl</span></template></div>"#,
         );
         let dest = DomTree::new();
@@ -1261,7 +1261,7 @@ mod tests {
             html.push_str("<div>");
         }
         html.push('x');
-        let tree = crate::obscura_dom::tree_sink::parse_html(&html);
+        let tree = crate::diting_dom::tree_sink::parse_html(&html);
 
         let text = tree.text_content(tree.document());
         assert_eq!(text, "x");

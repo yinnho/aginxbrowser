@@ -1,4 +1,4 @@
-use crate::obscura_dom::tree::{DomTree, NodeData, NodeId};
+use crate::diting_dom::tree::{DomTree, NodeData, NodeId};
 
 // A unit of pending serialization work. Held on an explicit heap stack instead
 // of the call stack so a deeply nested tree cannot overflow the thread stack and
@@ -59,7 +59,7 @@ impl DomTree {
         while let Some(work) = stack.pop() {
             steps += 1;
             if steps > max_steps {
-                eprintln!("obscura: serialize worklist cap hit - tree has a cycle");
+                eprintln!("diting: serialize worklist cap hit - tree has a cycle");
                 break;
             }
 
@@ -204,7 +204,7 @@ fn is_raw_text_element(tag: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::obscura_dom::tree_sink::parse_html;
+    use crate::diting_dom::tree_sink::parse_html;
 
     #[test]
     fn test_outer_html() {
@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn comment_serialization_neutralizes_all_terminator_forms() {
-        use crate::obscura_dom::tree::NodeData;
+        use crate::diting_dom::tree::NodeData;
 
         // A comment ends on any of "-->", "--!>", a leading ">", or a leading
         // "->". `document.createComment(...)` accepts arbitrary strings, so a

@@ -7,7 +7,7 @@ use deno_core::op2;
 use deno_core::OpState;
 use deno_core::Extension;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use crate::obscura_dom::{DomTree, NodeData, NodeId};
+use crate::diting_dom::{DomTree, NodeData, NodeId};
 use html5ever::namespace_url;
 use crate::obscura_net::{CookieJar, ObscuraHttpClient};
 use tokio::sync::Mutex;
@@ -139,7 +139,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         "document_doctype" => {
             for cid in dom.children(dom.document()) {
                 if let Some(n) = dom.get_node(cid) {
-                    if let crate::obscura_dom::NodeData::Doctype { name, public_id, system_id } = &n.data {
+                    if let crate::diting_dom::NodeData::Doctype { name, public_id, system_id } = &n.data {
                         return serde_json::json!({
                             "name": name,
                             "publicId": public_id,
@@ -286,7 +286,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 dom.detach(child);
             }
             if !arg2.is_empty() {
-                let fragment = crate::obscura_dom::parse_fragment(&arg2);
+                let fragment = crate::diting_dom::parse_fragment(&arg2);
                 let import_root = fragment.find_body_or_root();
                 dom.import_children_from(target, &fragment, import_root);
             }
@@ -458,9 +458,9 @@ fn compare_node_order(dom: &DomTree, a: NodeId, b: NodeId) -> i32 {
 fn op_console_msg(state: &OpState, #[string] level: &str, #[string] msg: &str) {
     let _ = state;
     match level {
-        "warn" => tracing::warn!(target: "obscura::console", "{}", msg),
-        "error" => tracing::error!(target: "obscura::console", "{}", msg),
-        _ => tracing::info!(target: "obscura::console", "{}", msg),
+        "warn" => tracing::warn!(target: "diting::console", "{}", msg),
+        "error" => tracing::error!(target: "diting::console", "{}", msg),
+        _ => tracing::info!(target: "diting::console", "{}", msg),
     }
 }
 
@@ -1239,7 +1239,7 @@ fn op_url_encode_query(#[string] query: &str, #[string] label: &str, special: bo
 
 pub fn build_extension() -> Extension {
     Extension {
-        name: "obscura_dom",
+        name: "diting_dom",
         ops: std::borrow::Cow::Owned(vec![
             op_dom(),
             op_console_msg(),

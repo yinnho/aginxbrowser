@@ -27,7 +27,7 @@ mod session;
 mod screenshot;
 
 // Inlined Obscura engine (formerly external crates).
-mod obscura_dom;
+mod diting_dom;
 mod obscura_net;
 mod obscura_js;
 mod obscura_browser;
@@ -447,7 +447,7 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| {
                     tracing_subscriber::EnvFilter::new(
-                        "aginxbrowser=info,obscura_browser::page=warn,obscura_net::wreq_client=warn,obscura::console=error",
+                        "aginxbrowser=info,obscura_browser::page=warn,obscura_net::wreq_client=warn,diting::console=error",
                     )
                 }),
         )

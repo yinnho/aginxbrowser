@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use deno_core::{v8, JsRuntime, RuntimeOptions};
-use crate::obscura_dom::DomTree;
+use crate::diting_dom::DomTree;
 
 /// Re-exported so other crates (obscura-browser, obscura-cdp) can name the V8
 /// isolate handle without taking a direct dependency on deno_core.
@@ -167,7 +167,7 @@ impl ObscuraJsRuntime {
 
         runtime
             .execute_script(
-                "<obscura:init>",
+                "<diting:init>",
                 "globalThis.__obscura_objects = {}; globalThis.__obscura_oid = 0; globalThis.__obscura_init();".to_string(),
             )
             .expect("init should not fail");
@@ -1303,7 +1303,7 @@ impl Default for ObscuraJsRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::obscura_dom::parse_html;
+    use crate::diting_dom::parse_html;
 
     fn setup_runtime(html: &str) -> ObscuraJsRuntime {
         let dom = parse_html(html);
@@ -1998,7 +1998,7 @@ mod tests {
     }
 
     fn setup_runtime_with_cookies(html: &str) -> (ObscuraJsRuntime, std::sync::Arc<crate::obscura_net::CookieJar>) {
-        let dom = crate::obscura_dom::parse_html(html);
+        let dom = crate::diting_dom::parse_html(html);
         let jar = std::sync::Arc::new(crate::obscura_net::CookieJar::new());
         let rt = ObscuraJsRuntime::new();
         rt.set_dom(dom);

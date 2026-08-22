@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use crate::obscura_dom::{parse_html, DomTree};
+use crate::diting_dom::{parse_html, DomTree};
 use crate::obscura_js::runtime::ObscuraJsRuntime;
 use crate::obscura_net::{ObscuraHttpClient, ObscuraNetError, Response};
 use url::Url;

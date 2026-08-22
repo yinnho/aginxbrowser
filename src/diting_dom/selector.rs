@@ -12,7 +12,7 @@ use selectors::parser::{self, ParseRelative, SelectorParseErrorKind};
 use selectors::{Element, OpaqueElement, SelectorList};
 use selectors::visitor::SelectorVisitor;
 
-use crate::obscura_dom::tree::{DomTree, NodeData, NodeId};
+use crate::diting_dom::tree::{DomTree, NodeData, NodeId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObscuraSelector;
@@ -693,7 +693,7 @@ impl DomTree {
 
 #[cfg(test)]
 mod tests {
-    use crate::obscura_dom::tree_sink::parse_html;
+    use crate::diting_dom::tree_sink::parse_html;
 
     #[test]
     fn test_query_selector_tag() {
