@@ -29,7 +29,7 @@ mod screenshot;
 // Inlined Obscura engine (formerly external crates).
 mod diting_dom;
 mod diting_net;
-mod obscura_js;
+mod diting_js;
 mod obscura_browser;
 
 use server::{do_click, do_eval, do_fetch, do_search, SearchError};
@@ -457,7 +457,7 @@ async fn main() -> anyhow::Result<()> {
     // an isolate: the first isolate's JSDispatchTable init is not safe to race
     // from several threads (upstream obscura #430; construction itself is
     // serialized inside the runtime).
-    std::mem::drop(obscura_js::runtime::ObscuraJsRuntime::new());
+    std::mem::drop(diting_js::runtime::JsRuntime::new());
 
     // Check if running in MCP mode
     let args: Vec<String> = std::env::args().collect();

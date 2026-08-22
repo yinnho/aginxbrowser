@@ -4,7 +4,7 @@
 
 ## 一句话职责
 
-进程内 DOM 树:HTML 解析(html5ever)→ 树存储(slab + 链表指针)→ CSS 选择器查询(servo selectors)→ HTML 序列化。不带任何 JS 语义(JS 绑定在 obscura_js 侧包装)。
+进程内 DOM 树:HTML 解析(html5ever)→ 树存储(slab + 链表指针)→ CSS 选择器查询(servo selectors)→ HTML 序列化。不带任何 JS 语义(JS 绑定在 diting_js 侧包装)。
 
 ## 体量与文件
 
@@ -52,8 +52,8 @@ NodeData = Document | Doctype | Element{name,attrs,template_contents,...}
 
 | 消费方 | 用量 | 用了什么 |
 |---|---|---|
-| `obscura_js/ops.rs` | **最重** | DomTree/NodeId/query_selector/text_content/get_element_by_id/outer_html —— JS DOM API 的几乎全部地基 |
-| `obscura_js/runtime.rs` | 重 | DomTree/parse_html/query_selector/get_element_by_id |
+| `diting_js/ops.rs` | **最重** | DomTree/NodeId/query_selector/text_content/get_element_by_id/outer_html —— JS DOM API 的几乎全部地基 |
+| `diting_js/runtime.rs` | 重 | DomTree/parse_html/query_selector/get_element_by_id |
 | `obscura_browser/page.rs` | 中 | DomTree/parse_html/query_selector/text_content |
 | `src/page.rs`、`src/server.rs`、`src/screenshot.rs` | 薄 | query_selector/NodeId(经包装层) |
 | `src/render.rs`、`src/firecrawl_compat.rs` | 薄 | parse_html |
@@ -87,10 +87,10 @@ NodeData = Document | Doctype | Element{name,attrs,template_contents,...}
 - ~~setAttribute qualified name~~(2026-08-04)+ setAttributeNS 系列(2026-07-26)— 已吸收,Attribute 增加 qualified_name 匹配 + get/set/remove_attribute_ns
 - ~~:enabled/:disabled/:checked 真实状态~~(2026-07-03)— 已吸收,表单控件 + disabled/checked/selected 属性
 - ~~template contents 桥接~~(2026-07-22)— 已吸收 dom 侧:序列化走 contents 文档 + import 时重映射悬空 NodeId(#463,我们的旧代码 import template 后 contents 指向无关槽位,是真 bug)
-- `<head>` 内容在 documentElement.innerHTML 时保留(2026-08-04)— 未吸收,主战场在 js 侧(obscura_js 认领时处理)
+- `<head>` 内容在 documentElement.innerHTML 时保留(2026-08-04)— 未吸收,主战场在 js 侧(diting_js 认领时处理)
 - document.write 单输入流(2026-08-15)— 未吸收,js 侧
 
-另发现:fetch base64 解码测试在 main 上就挂着(与 dom 无关),列入 obscura_js 认领清单。
+另发现:fetch base64 解码测试在 main 上就挂着(与 dom 无关),列入 diting_js 认领清单。
 
 **C. 大特性,我们不跟(至少现在):**
 - Shadow DOM 全家桶(declarative shadow roots、tree scopes、slots,约 2026-07-30~08-04,10+ commits)——这是上游自研渲染引擎的地基,我们渲染走 blitz,暂不吸收

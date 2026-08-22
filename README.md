@@ -163,7 +163,7 @@ aginxbrowser/
     │
     ├── obscura_dom/         # HTML 解析、DOM 树、CSS 选择器
     ├── obscura_net/         # HTTP 客户端、Cookie、编码、代理
-    ├── obscura_js/          # V8 运行时、JS ops、模块加载
+    ├── diting_js/           # V8 运行时、JS ops、模块加载(原 obscura_js)
     └── obscura_browser/     # 页面导航、生命周期、浏览器上下文
 ```
 

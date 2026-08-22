@@ -65,7 +65,7 @@ pub struct ObscuraState {
     pub pending_binding_calls: Vec<(String, String)>,
     /// The document's input stream for `document.write()`, created on the
     /// first call. Why the calls share one parser is in `write_stream`.
-    pub(crate) write_stream: std::cell::RefCell<Option<crate::obscura_js::write_stream::DocumentWriteStream>>,
+    pub(crate) write_stream: std::cell::RefCell<Option<crate::diting_js::write_stream::DocumentWriteStream>>,
     /// HTML's per-script "already started" flag. This is native page state
     /// rather than wrapper state, because it must survive moves and clones and
     /// because fragment parsing can create nodes before a JS wrapper exists.
@@ -494,7 +494,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         // which also reports the mutation and runs written scripts.
         "document_write" => {
             let mut slot = gs.write_stream.borrow_mut();
-            let stream = slot.get_or_insert_with(crate::obscura_js::write_stream::DocumentWriteStream::new);
+            let stream = slot.get_or_insert_with(crate::diting_js::write_stream::DocumentWriteStream::new);
             let pairs: Vec<[i32; 2]> = stream
                 .write(&arg2, dom)
                 .iter()

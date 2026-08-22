@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use crate::diting_dom::{parse_html, DomTree};
-use crate::obscura_js::runtime::ObscuraJsRuntime;
+use crate::diting_js::runtime::JsRuntime;
 use crate::diting_net::{HttpClient, NetError, Response};
 use url::Url;
 
@@ -155,7 +155,7 @@ pub struct Page {
     pub frame_id: String,
     pub url: Option<Url>,
     pub dom: Option<DomTree>,
-    pub js: Option<ObscuraJsRuntime>,
+    pub js: Option<JsRuntime>,
     pub lifecycle: LifecycleState,
     pub http_client: Arc<HttpClient>,
     pub context: Arc<BrowserContext>,
@@ -179,7 +179,7 @@ pub struct Page {
     network_event_counter: u32,
     pub intercept_enabled: bool,
     pub intercept_block_patterns: Vec<String>,
-    intercept_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::obscura_js::ops::InterceptedRequest>>,
+    intercept_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::diting_js::ops::InterceptedRequest>>,
     // Scripts to execute in the page's JS context BEFORE any of the page's
     // own scripts run — the CDP `Page.addScriptToEvaluateOnNewDocument`
     // contract. Includes `Runtime.addBinding` shims so puppeteer's
@@ -299,7 +299,7 @@ impl Page {
         // and op_fetch_url so dynamic imports and JS fetch() honour the
         // configured upstream proxy (#139). When proxy_url is None this is
         // equivalent to with_base_url() (direct connection).
-        let mut rt = ObscuraJsRuntime::with_base_url_and_proxy(
+        let mut rt = JsRuntime::with_base_url_and_proxy(
             &self.url_string(),
             self.context.proxy_url.clone(),
         );
@@ -1289,7 +1289,7 @@ impl Page {
     /// Lets the CDP dispatcher arm a per-command watchdog (which bounds any one
     /// command so a hung page cannot hold the process-wide V8 lock forever)
     /// without taking `&mut self`.
-    pub fn isolate_handle(&self) -> Option<crate::obscura_js::runtime::IsolateHandle> {
+    pub fn isolate_handle(&self) -> Option<crate::diting_js::runtime::IsolateHandle> {
         self.js.as_ref().map(|js| js.isolate_handle())
     }
 
@@ -1349,7 +1349,7 @@ impl Page {
         expression: &str,
         return_by_value: bool,
         await_promise: bool,
-    ) -> crate::obscura_js::runtime::RemoteObjectInfo {
+    ) -> crate::diting_js::runtime::RemoteObjectInfo {
         if let Some(js) = &mut self.js {
             match js.evaluate_for_cdp(expression, return_by_value, await_promise).await {
                 Ok(info) => info,
@@ -1360,7 +1360,7 @@ impl Page {
                     // warn! so a wedged/degraded runtime is visible in logs.
                     let preview: String = expression.chars().take(120).collect();
                     tracing::warn!("evaluate_for_cdp error for '{}': {}", preview, e);
-                    crate::obscura_js::runtime::RemoteObjectInfo {
+                    crate::diting_js::runtime::RemoteObjectInfo {
                         js_type: "undefined".into(),
                         subtype: None,
                         class_name: String::new(),
@@ -1372,7 +1372,7 @@ impl Page {
             }
         } else {
             let val = self.evaluate(expression);
-            crate::obscura_js::runtime::RemoteObjectInfo {
+            crate::diting_js::runtime::RemoteObjectInfo {
                 js_type: match &val {
                     serde_json::Value::String(_) => "string".into(),
                     serde_json::Value::Number(_) => "number".into(),
@@ -1395,13 +1395,13 @@ impl Page {
         args: &[serde_json::Value],
         return_by_value: bool,
         await_promise: bool,
-    ) -> crate::obscura_js::runtime::RemoteObjectInfo {
+    ) -> crate::diting_js::runtime::RemoteObjectInfo {
         if let Some(js) = &mut self.js {
             match js.call_function_on_for_cdp(function_declaration, object_id, args, return_by_value, await_promise).await {
                 Ok(info) => info,
                 Err(e) => {
                     tracing::debug!("callFunctionOn error: {}", e);
-                    crate::obscura_js::runtime::RemoteObjectInfo {
+                    crate::diting_js::runtime::RemoteObjectInfo {
                         js_type: "undefined".into(),
                         subtype: None,
                         class_name: String::new(),
@@ -1412,7 +1412,7 @@ impl Page {
                 }
             }
         } else {
-            crate::obscura_js::runtime::RemoteObjectInfo {
+            crate::diting_js::runtime::RemoteObjectInfo {
                 js_type: "undefined".into(),
                 subtype: None,
                 class_name: String::new(),
@@ -1531,7 +1531,7 @@ impl Page {
         }
     }
 
-    pub fn set_intercept_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<crate::obscura_js::ops::InterceptedRequest>) {
+    pub fn set_intercept_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<crate::diting_js::ops::InterceptedRequest>) {
         self.intercept_tx = Some(tx.clone());
         if let Some(js) = &self.js {
             js.set_intercept_tx(tx);

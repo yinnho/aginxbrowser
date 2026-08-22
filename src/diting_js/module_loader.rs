@@ -73,7 +73,7 @@ impl ModuleLoader for ObscuraModuleLoader {
             // every chunk. The cache means the first import on a given
             // proxy pays the build cost once and every chunk after reuses
             // the same warm pool.
-            let client = crate::obscura_js::ops::cached_request_client(proxy_url.as_deref())
+            let client = crate::diting_js::ops::cached_request_client(proxy_url.as_deref())
                 .map_err(io_err)?;
 
             tracing::debug!(

@@ -1,6 +1,8 @@
-# obscura_js 摸底报告 — 认领 Phase 0
+# diting_js(原 obscura_js)摸底报告 — 认领 Phase 0/Phase 1
 
-> 2026-08-22 摸底盘点。这是四个模块里**最大、分歧最深**的一个:上游 runtime.rs 已从 2575 行涨到 16438 行(6.4 倍),233 个 commit。认领难度最高,放第三位(dom→net→**js**→browser)。
+> 2026-08-22 摸底盘点,2026-08-23 完成认领。这是四个模块里**最大、分歧最深**的一个:上游 runtime.rs 已从 2575 行涨到 16438 行(6.4 倍),233 个 commit。认领顺序 dom→net→**js**→browser。
+>
+> **Phase 1 完成(2026-08-23)**:A 组(已有等价)确认、B 组(~50 个同源 bug 修复)11 个主题全吸完(+47 特征测试,总 307 过)、模块改名 `obscura_js`→`diting_js`、`ObscuraJsRuntime`→`JsRuntime`(deno_core 同名类改全路径)。C 组大特性按条挂账见下。
 
 ## 一句话职责
 
@@ -10,7 +12,7 @@ V8 运行时 + JS↔DOM/Rust 桥:脚本执行、事件循环、watchdog 超时�
 
 | 文件 | 行数(我们/上游) | 逐行相同率 | 职责 |
 |---|---|---|---|
-| `runtime.rs` | 2575 / 16438 | 75% | `ObscuraJsRuntime`:V8 isolate 管理、evaluate、事件循环、watchdog、模块加载 |
+| `runtime.rs` | 2575 / 16438 | 75% | `JsRuntime`(原 ObscuraJsRuntime):V8 isolate 管理、evaluate、事件循环、watchdog、模块加载 |
 | `ops.rs` | 1262 / 5605 | 76% | 16 个 op:op_dom(DOM 桥)、op_fetch_url、cookie/navigate/sleep/subtle_digest/url/encoding |
 | `cdp_watchdog.rs` | 117 / 122 | 70% | CDP 求值 watchdog |
 | `module_loader.rs` | 115 / 286 | 80% | ES 模块加载 |
@@ -82,6 +84,57 @@ WatchdogToken = IsolateHandle + 超时线程,terminate_execution 兜底
    - **dc780d7(SHA-512/224、SHA-512/256,#314)**:op_subtle_digest 加 `sha2::Sha512_224`/`Sha512_256`(FIPS 180-4 截断变体,AWS WAF PoW worker 用),`_ => vec![]`。+1 测试:FIPS 180-4 向量 + MD5 抛 NotSupportedError。
    - **ed75730(真 SubtleCrypto 对称算法,#390)**:crypto.subtle 原来只有 digest,sign 返回固定 32 字节、verify 恒 true、encrypt/decrypt 抛、generateKey/importKey/deriveBits 给占位假数据——反 bot 探针/PKCE/客户端加密静默拿错结果。完整实现:**7 个新 Rust op**(op_subtle_hmac/aes_gcm/aes_cbc/aes_ctr/pbkdf2/hkdf + op_random_bytes CSPRNG)+ **8 个 RustCrypto 依赖**(hmac/aes/aes-gcm/cbc/ctr/pbkdf2/hkdf/getrandom,纯 Rust 无 CMake/OpenSSL)。bootstrap.js:crypto.subtle 重写为真实现 + 真 CryptoKey 类(keyMaterial WeakMap + makeKey/keyBytes)+ normalizeAlgo/normalizeHash/runOp 等。公钥算法(RSA/ECDSA/ECDH)与非对称 key 格式(pkcs8/spki)抛 NotSupportedError 不再给假数据。getRandomValues/randomUUID 从 Math.random 换 CSPRNG(顺带消除指纹暴露)。+4 测试:HAMC/AES-GCM/AES-CBC/PBKDF2 roundtrip(RFC 4231/RFC 6070 向量精确匹配)、CryptoKey 身份、CSPRNG。**顺带补齐 structuredClone 的 CryptoKey clone hook(a921668/8698afc)**。
    - **cfda91b(PBKDF2 DoS,#580)**:PBKDF2 迭代数与输出长度直接来自页面 JS、无上限,单线程 V8 会被 4294967295 次迭代钉死数小时、大 length 触发无界 `vec![0u8; length]` 分配。抽出 `pbkdf2_derive` helper,cap 迭代 ≤10M、输出 ≤1MiB(远超 OWASP ~600k 合法上限),越界抛 OperationError。+3 单测(迭代越界/长度越界/正常派生)。
+9. ✅ **DOM 遍历(TreeWalker/NodeIterator)组**(2026-08-22 完成,+5 测试):上游实际是**七连**(c3ae054/c12915a/1a5c27a/a8c0a19/ab3ca26/49d4b91/845abb9),本文档旧"六连"误把 scroll 的 1c7402d 算进来、漏了 c3ae054+1a5c27a;改为按上游 HEAD 最终态整体吸收而非逐条打补丁。
+   - **diting_dom/tree.rs**:新增 3 个遍历方法 + 1 个私有 helper(`climb_to_next_sibling`,带 `0..=nodes.len()` 上界防环)。`next_in_subtree`(first_child 优先,否则爬 next_sibling)/`next_after_subtree`(只爬 next_sibling,REJECT 剪子树用)/`prev_in_subtree`(逆文档序:prev_sibling 或 parent,否则 prev_sibling 的最深末后代)。
+   - **ops.rs**:op_dom_inner 加 3 个命令(`next_in_subtree`/`next_after_subtree`/`prev_in_subtree`,NodeId u32,空返回 "-1")。
+   - **bootstrap.js**:`createTreeWalker`/`createNodeIterator` 换上游最终版——**TreeWalker 的 nextNode/previousNode 永不返回 root**(指针语义);**NodeIterator 返回 root 第一**(指针在 root 之前),且 detach() 后 nextNode/previousNode 立即返 null(上游 a8c0a19:原实现 detach 后仍能用)。`_filter` 三值语义(1 ACCEPT/2 REJECT 剪子树/3 SKIP 下钻子节点)。补全 `NodeFilter` 常量集(SHOW_ELEMENT..SHOW_NOTATION + FILTER_ACCEPT/REJECT/SKIP),删除旧的残缺 NodeFilter 块。
+   - **5 个测试**:next 文档序 + REJECT 剪枝、previousNode 逆序、parentNode 不出 root、SKIP 下钻、NodeIterator 返 root + detach。前 3 个断言第一版按"直觉"写错了(TreeWalker 不返 root),按规范修正。
+10. ✅ **DOM 杂项组**(2026-08-22 完成,+16 测试):11 个 commit 全吸(注意 a2fd4d1 早在 documentElement.innerHTML 修复时已吸,见第 2 条)。
+    - **c4f545e(DocumentFragment 拍平)**:insertBefore/replaceChild 补 fragment 拍平(appendChild 已有),按 childNodes 顺序插入子节点并清空 fragment。
+    - **5177304(完整插入步骤)**:insertBefore/replaceChild 补 MutationObserver childList 报告(before/after/replaceWith 都走 insertBefore,原来全静默)。
+    - **a16e8d4(checkbox/radio 默认 "on")**:value getter 对无 value 属性的 checkbox/radio 返 "on"(原返空串);显式 value 属性仍赢。
+    - **25ce541(真 NodeList)**:`class NodeList extends Array` → 独立类型(Array.isArray false、`[object NodeList]`),带 item/forEach/entries/keys/values/迭代;childNodes 走 `_nodeList`。核对了内部所有 childNodes 用法(只 index/length/Array.from,兼容)。
+    - **b460b37(adoptNode/toggleAttribute)**:Document.adoptNode(返回节点,无第二 document 即本属自己)、Element.toggleAttribute(带 force 语义),都在 prototype 上 polyfill + 标 native。
+    - **491ecfb+90ed9af(cloneNode 结构化)**:元素 cloneNode 改用 Rust `dom.clone_node` op(tree.rs 新增,直接拷贝 NodeData 不序列化重解析,tr/td/option 不再被 div 上下文丢弃,保留元素类型/命名空间/template contents 独立重映射);非元素(文本/注释/fragment)走 `_shallowCloneNode` + 显式栈(防深嵌套爆 JS 栈)。**顺手抓到 ae438e1 的 JS 半侧缺口**:template_contents 桥我们只吸了 dom 半侧,`.content` getter 一直返回空假 fragment——补 `dom.template_contents`(按需分配 contents doc)+ op 命令 + getter 改从 Rust 取真实 contents 并按 nid 缓存保身份。
+    - **a663a15(insertAdjacentHTML 大小写不敏感 + SyntaxError)**:position 已小写化(旧代码),补未知 position 抛 SyntaxError;上下文解析我们已用 a2fd4d1 的 createElement(contextTag)+innerHTML 方案(等价于上游 wrapMap,且更直接),未引入 `_parseHTMLFragment`/`_wrapMap`。
+    - **ad7a7a9(dataset/style 的 in 与 Object.keys)**:dataset 半侧我们 ec05ed0 已完整(has/ownKeys/getOwnPropertyDescriptor 都有),跳过。style 半侧全吸:new CSSStyleDeclaration(dashed 名存储 + `_CSS_PROP_SET` 标准属性名单) + `_styleProxy` 加 has/ownKeys/getOwnPropertyDescriptor,`'gap' in el.style`/`Object.keys(el.style)` 与 camelCase↔dashed 同步、cssText 尾分号。核对了 `_obscuraFontBox` 与 getComputedStyle 两处直接读 `_props` 的消费者兼容。
+    - **80803cb(style 双向同步)**:CSSStyleDeclaration 挂 owner element,`_pull`(读时惰性拉 style 属性,未变跳过重解析)+ `_push`(每次 mutation 序列化回 style 属性);parsed inline style/setAttribute('style')/el.style.x 三向一致;无 owner 的声明(getComputedStyle 回落、样式表规则)纯内存不变。Element 构造 `new CSSStyleDeclaration(this)`。
+    - **41a8e1c(DOM 移动保 script 状态)**:核心全吸——ObscuraState 加 `already_started_scripts: RefCell<HashSet<NodeId>>`(原生 per-document 标志,活过 wrapper 换手/移动/cloneNode/fragment 解析)+ 两个 op(`op_script_mark_started`/`op_script_try_start` 原子认领)。bootstrap 抽 `__prepareInsertedScript`(先 try_start 门控,再走我们既有的 fetch/eval/module 执行逻辑)+ `__prepareInsertedSubtree`(树序收集 root+后代 script,isConnected 才准备),appendChild/insertBefore/replaceChild 改调它;set_inner_html 导入的子节点 `mark_script_subtree_started`(innerHTML script 惰性);clone_node op 后 `propagate_script_start_state`(克隆继承 started 状态)。**未吸收**:`__dynScriptQueue`/`__processDynScriptQueue` 串行队列(并发 import 重构,与本 bug 无关)、import-map 处理(C 组)、base[href] 解析、`set_fragment_html_executable`/Range.createContextualFragment 独立策略(我们没有该 API 通路)。
+    - **16 测试**:3 fragment 拍平 + 1 mutation 报告 + 1 checkbox + 1 NodeList + 1 adoptNode/toggleAttribute + 3 cloneNode(浅克隆属性隔离/深克隆表结构+template/深嵌套不爆栈)+ 1 style in/keys + 1 dataset in/keys + 1 style 双向同步 + 1 insertAdjacentHTML + 3 script 状态(移动不重跑/克隆不重跑/innerHTML 惰性)。
+11. ✅ **事件组**(2026-08-23 完成,+8 测试,改 1 个旧行为断言):9 个 commit 全查(旧清单把 2e3f5d8 误写成 2f3d5d8;3f820c4 只是 merge)。
+    - **af1e15f(Event/CustomEvent 构造器 WebIDL)**:无参构造抛 TypeError("1 argument required")、type 经 String() 强转(`new Event(123).type === "123"`)、CustomEvent.detail 默认 null(非 undefined)。子类经 super 继承全部。
+    - **776c915 + 0ff1ba0(PromiseRejectionEvent/StorageEvent)**:两个全局构造器补齐(core-js 靠前者探测环境,缺失会用破 polyfill 盖掉原生 Promise,Vue 渲染挂);PromiseRejectionEvent 的 promise 成员必填(缺失抛 TypeError,Chrome 同);StorageEvent 带 initStorageEvent legacy 路径。
+    - **7e6f403(createEvent 拒绝未知)**:未知接口名抛 DOMException NotSupportedError(原静默回落通用 Event,把调用方 typo 藏成"init* 方法全缺");补 DOM Level 2 legacy 别名(Event/Events/HTMLEvents/SVGEvents)与 hashchangeevent/messageevent 映射;promiserejectionevent 故意不进 map(Chrome 也拒)。旧行为测试 `test_create_event_unknown_type_returns_event` 断言已翻转。
+    - **2e3f5d8(iframe 事件)**:_IframeDocument 的 addEventListener/removeEventListener/dispatchEvent 从 no-op 换真实现(去重/移除/cancelable 返回值/on+type 属性);iframe load 从直接调 `el.onload()` 换成 `el.dispatchEvent(new Event('load'))`——我们的 Element.dispatchEvent 同时跑 on* 属性 + inline attr + addEventListener 监听器,旧直接调用路径全覆盖且不再漏监听器。
+    - **scroll 三连(29e20ae/f6ca133/1c7402d)**:按上游 HEAD 终态整体吸收。Element scrollTop/scrollLeft 从恒 0 换真偏移跟踪(无布局故意不设上限——合成上限会把 scrollTop 钉死在 0,懒加载死锁);scrollTo/scrollBy/scroll 三方法支持 (x,y) 与 ScrollToOptions 两种形参;直接赋值变化时发 scroll 事件、scroll 操作用 _scrollSuppress 把每轴事件合并成每操作一个;window 级 scrollTo/scrollBy/scroll 从空 stub 换真实现,偏移存在 scrollingElement(=documentElement)上——window.scrollY 与 scrollingElement.scrollTop 是同一个值的两面;scrollX/scrollY/pageXOffset/pageYOffset 从硬编码 0 数据属性换成只读 accessor;窗口滚动事件同时发到 document 和 window(Document.dispatchEvent 不传播,只发一边会漏一半监听器);无变化提前返回。**连带升级**:session.rs 的 MCP scroll 命令走 `window.scrollBy`,现在真的会移偏移+发事件,无限滚动页翻页从"只拿到一屏"变成能触发加载。
+    - **08c1f0d(React/Vue controlled input)**:已有等价且更优,不改动——on* 事件属性我们已有 accessor 版(bootstrap.js `_GLOBAL_EVENT_NAMES`,比上游 value:null 数据属性多了 JS 赋值存储 + inline content attribute 编译回落);两条 typing 路径(session.rs `input_by_index` 用 `_valueTracker.setValue('')` 重置 + prototype setter;firecrawl_compat.rs 直接 prototype setter)已等价实现"绕开 React value tracker 让 onChange 触发"。上游的 `__obscura_setFieldValue` 全局 helper 无新消费方,不引入。
+12. ✅ **计时器组**(2026-08-23 完成,+2 测试):3 个 commit 全吸。
+    - **452cc85(字符串 timer handler)**:我们的 setTimeout/setInterval 对字符串 handler 是**整个丢弃**(静默 no-op 还返回 timer id,比上游修复前的 new Function 还糟)——`setTimeout("loadMore()", 500)` 这种老式页面代码完全不跑。补 `_coerceTimerFn`:字符串包成 fire-time 间接 eval `() => { (0, eval)(src); }`,顶层 var/function 声明成为真全局(new Function 包裹会留在函数局部),语法错误在触发时抛而非调度时吞。
+    - **cdab919+d93ff51(performance.now 单调有界,按终态合并)**:我们的 now() 直接返回 `Date.now()` 原值——timeOrigin 被 init 设成 epoch 后 `performance.now()` 返回 ~1.7e12 而非"距导航起点毫秒数"(真浏览器是小值,指纹/计时探针可辨)。换终态实现:module 级 `_perfLast` 单调下限(同毫秒允许相等、不合成增量,紧循环不会跑赢真实流逝时间),timeOrigin 动态查找(字面量里初始为 0,init 构造后才赋真值,闭包捕获会拿错)。**跨导航重启语义我们天然更强**:每次导航整个重建 runtime(page.rs init_js,防跨页面状态攻击的安全决策),_perfLast 是新闭包,无需上游式 reset。
+13. ✅ **Location 组**(2026-08-23 完成,+2 测试):2 个实质 commit(旧清单的 7404366 是 7404362 merge 的笔误,内容即 fe26417)。
+    - **fe26417(导航值 String 强转)**:我们的 `_resolveUrl` 对 URL 对象调 `.startsWith` 直接抛 TypeError——`location.href = new URL(...)`/`assign`/`replace` 传 URL 对象全炸。首行补 `url = String(url)`(URL 对象 String() 得 href,命中绝对 URL 分支)。document.location setter 原有的 String() 包裹保留(belt-and-suspenders)。
+    - **1fc5a24(pushState/replaceState 缺省 url 保当前 URL)**:我们的 `resolveOrFallback` 同上游 bug——缺省 url 返回 undefined,applyVirtual 把 `__virtualUrl` 清空,`pushState({}, '', '/dashboard')` 后再 `replaceState({scroll:1})` 会把 location 弹回原 document URL。改为缺省返回 `__currentUrl()`(HTML 规范:缺省 url 保留当前文档 URL);初始 entry 的 url: undefined 语义不变。
+14. ✅ **脚本加载组**(2026-08-23 完成,+4 测试):6 个 commit 全吸(按上游 HEAD 终态,分 Rust 半侧与 bootstrap 半侧两次落地)。
+    - **d3a8b9a+be700f5(模块完成/失败传播)+ 4f6d256 半侧(重复求值)**,Rust 侧整体重写 `load_module`/`load_inline_module`:手动 fetch 入口保持我们的架构(上游 PreparedModule prepare/evaluate 拆分服务于我们没有的加载策略,不引入),但求值驱动抽出 `drive_module_eval`——deno_core 0.350 的 `mod_evaluate` 对同一模块重复调用会 panic("Module already evaluated"),用 `catch_unwind` 捕获后归一为 Ok;求值结果(`module_evaluations: HashMap<ModuleId, Result<(),String>>`)缓存,后续同模块加载直接命中,堆不再随重复 import 线性涨;事件循环驱动改为 pinned `select! biased`(event_loop 先驱完再 poll result,原来 result 先 ready 会把未跑完的微任务截断);加载图与求值都套 `timeout(budget_ms)`(调用方 page.rs 传 10s),非 2xx 模块响应现在报 "Module {} returned HTTP {}" 而非把错误页当代码求值。`loaded_module_specifiers` 跟踪不需要——我们的路径每次 from_code 全新 ModuleId,无上游"同 URL 复用已求值模块"的通路。
+    - **0c4740a+f841205(data: URL 脚本)**,bootstrap 侧:`op_fetch_url` 的 HTTP client 不支持 data: scheme,动态 `<script src="data:...">` 在我们这里整条死路。新增 `_decodeDataScriptUrl`(上游终态逐字节对齐:手写 data: 解析、base64 双重校验+padding 归一、`_hexv` 字节循环 percent-decode、非 ASCII 经 TextEncoder/TextDecoder UTF-8 往返),接进 `__prepareInsertedScript` classic 分支——data: 在 JS 侧解码,不进 HTTP client;MIME 无关(Chromium 对动态 data 脚本不校验 MIME)。hide list 是动态的(`_` 前缀自动隐),无需上游的静态名单登记。
+    - **f61493f(拒绝失败响应)**:classic 分支拿到 `parsed.status` 后,非 2xx 直接 throw('HTTP ' + status)——404/500 的诊断 HTML(常含可执行 JS 片段)永不成为脚本源。**顺手修了我们自己的缺口**:error 路径原来只调 `script.onerror` 属性、从不 `dispatchEvent(new Event('error'))`,纯 addEventListener 消费者收不到失败。
+    - **a6bb741(动态脚本 settle 延长)——不是 N/A,真吸了**:上游修的是"动态脚本 fetch 慢于 settle 500ms deadline 就被掐,onload 永远不 fire"。我们 settle loop 与上游修复前逐字相同,且动态脚本 fetch 走 ops 侧 `FETCH_CLIENT_CACHE`(独立 reqwest),page 级 `http_client.active_requests()` **根本看不见它在飞**。修法对齐上游语义:ObscuraState 加 `dynamic_script_fetches: Cell<u32>` + 两个 fast op(`op_dyn_script_fetch_begin/end`)从 bootstrap 网络分支 begin/finally-end 括号;runtime 暴露 `has_pending_dynamic_scripts()`;page.rs settle loop 保 500ms 快路径,deadline 到后仅当动态脚本在飞才续泵,硬上限 `OBSCURA_DYNAMIC_SCRIPT_SETTLE_MS`(默认 3s)+ watchdog 同步延长。普通页面与无关 XHR 不受影响(与上游注释的 fast-path 承诺一致)。
+    - **4 测试**:data: 全变体执行(空 MIME/percent-escape/非 ASCII UTF-8 往返/fragment/带填充与无填充 base64)+ 坏 base64 双变体只 error 不 eval + 404 body 永不执行(本地 server)+ 慢脚本 300ms 期间计数器可见为 pending、落盘后归零且脚本生效。
+15. ✅ **DOMParser XML 组**(2026-08-23 完成,+2 测试):4 个 commit 按上游 HEAD 终态整体吸收(53295fa regex 栈校验 → 6927f11 XML mime 才检查 → 869f700 self-closing 计完整元素 → 20c4628 化简;终态实际是**两层并存**:`_checkXmlWellFormed` regex 栈给具体错误消息 + `_xmlWellFormed` 手写状态机(引号感知 `>` 扫描/未终结 tag/严格单根 rootsClosed===1)兜底,后者会覆盖前者的输出成通用消息)。
+    - **两层校验全吸** + parseFromString 三段(isParserError 分支/HTML parse/状态机兜底覆盖)+ documentElement 在 parsererror 时返回 firstElementChild + querySelector 的 root 自匹配 fallback。regex 版剥注释/CDATA/PI/DOCTYPE;状态机版同样跳过且更严(纯文本输入=零根也是 malformed——regex 版漏这种)。
+    - **对上游的一处偏差(有意)**:上游用 `root.innerHTML = '<parsererror>...'` 构造,我们的 html5ever fragment 解析把未知元素路由进 `<head>`,firstElementChild(=documentElement)会是 HEAD 而非 parsererror。改为 `createElement('parsererror') + appendChild` 直接构造,可观察行为对齐 Chrome(documentElement 就是 parsererror,querySelector 命中)。
+    - **2 测试**:6 变体(mismatch×2/extra root/unclosed→E:PARSERERROR;well-formed/self-closing root→OK)+ 3 变体(纯文本零根兜底/HTML mime 完全不走校验/CDATA+注释+PI+DOCTYPE 噪声不误报)。
+16. ✅ **表单组**(2026-08-23 完成,+2 测试):5 个 commit 中 3 个全吸;6788996+c2b79b6(DOM.setFileInputFiles CDP 文件上传)挂账——我们没有 CDP DOM domain,MCP 会话也无文件上传命令入口,bootstrap 半侧(el.files/FileList/C:\fakepath)无消费方,未来加上传命令时照上游模式补。
+    - **7e2cabf(submit/requestSubmit 语义分裂)**:我们的 `submit()` 发 cancelable submit 事件——上游修的正是这个:页面的 submit listener preventDefault 后再调 `form.submit()`(invisible-reCAPTCHA data-callback 模式)会被自己的 listener 拦死,死循环。拆三方法:`submit()` 直通 `_navigateSubmit`(不发事件、listener 不可否决);`requestSubmit(submitter?)` 发 cancelable 事件,未取消才导航;`_navigateSubmit` 是原 body。新增 `_isSubmitButton` helper(button 排除 reset/button;input 只认 submit/image)。
+    - **ccfa5fb(requestSubmit submitter 校验)**:非 submit 按钮 → TypeError("not a submit button");submit 按钮但不属于本 form → DOMException NotFoundError("not owned by this form element");两个检查都在事件发出前跑。click() 的 submit-button 分支同上游改走 `form.requestSubmit(this)`(内部 click 永远不会递给它一个会被拒的 submitter;click 是"用户发起"要发事件)。
+    - **5308e04(select 三项)**:① `type` getter 补 IDL 固定类型——select-one/select-multiple/textarea(jQuery 的 select valHook 按 type 分标量/数组,空串让所有单选读成数组);② `selectedIndex` getter 单选 select 无选中隐式选第一项返 0,multiple 空选返 -1(原一律 -1);③ select 的 value 赋值不再发 change 事件(Puppeteer page.select 模式:赋值后自己在页面里补发 input/change;在 change handler 里赋值会无限自触发)。顺带吸 `select.add(option|optgroup, before?)`(数字 before 当索引,校验参数 TypeError)。
+    - **既有测试兼容**:`test_submit_button_click_handler_can_prevent_default_and_navigate` 走 click→requestSubmit 路径,事件照发、preventDefault 照拦,无需改。
+17. ✅ **杂项组**(2026-08-23 完成,+4 测试):5 个 commit 全吸。**B 组(~50 个同源 bug 修复)至此全部过完。**
+    - **a5a8de7+891d850(new Image() 真元素化)**:我们的 Image shim 正是上游修复前的 bare class(无 .style,addEventListener 是空函数,src 赋值只碰 onload 属性)。换终态:`Image` 改工厂函数,内部 `document.createElement('img')`(style/属性反射/事件派发全白拿),prototype 指到 HTMLImageElement.prototype(instanceof 成立);src setter 委托原型 accessor 后模拟解码成功——complete 翻转 + setTimeout(0) dispatchEvent('load')(onload 属性与 listener 都能收到,懒加载器不再挂死);Booking.com 式预定义 non-configurable own src 时跳过模拟不炸构造器。
+    - **fc9f524(NetworkInformation)**:我们的 `navigator.connection` 是纯数据对象,addEventListener 压根不存在(比上游修复前还裸)。补 NetworkInformation 类(downlink/downlinkMax/effectiveType/rtt/saveData/type + onchange/ontypechange 属性 + 三事件方法,dispatchEvent 也跑 on* handler)+ `_markNative`,connection 挂单例。
+    - **edb1785(document.referrer,全链路)**:我们完全没有 referrer。四层落地——ObscuraState.referrer 字段 + `document_referrer` op 命令(注意 bootstrap `_dom` 的 `_domStrA1` 名单要登记,否则无 nid 调用被"Illegal invocation"门控吞成空串,踩过)+ runtime `set_referrer` + page.rs `navigation_referrer`(strict-origin-when-cross-origin:同源发完整 URL 去 fragment/凭据,跨源只发 origin/,https→http 与非 HTTP(S) 空)+ 接线(automation 导航入口清空,JS 触发的导航链每跳按上一 URL 盖章,init_js 重建 runtime 时带入)。document.title setter 我们 5b4dc7a 已有且更强(带 Rust 侧 set_document_title op 同步,导航响应能用);DOMParser doc 补 title 空白折叠 + title setter + 空 referrer。
+    - **5c3d560(脚本错误隔离)**:test-only——上游加回归锁定 #147 已修行为(一个 inline script 抛错不断掉后续 script)。行为我们已有(pois-guard),照上游加锁定测试(execute_script s1/s2 throw/s3,__ran1 与 __ran3 都 true,错误消息透传)。
+    - **4 测试**:Image 真元素(style 赋值/instanceof/双路 load/劫持 createElement 后不炸且 width 保留)+ NetworkInformation(fc9f524 同款断言 + on* 属性双跑)+ referrer 语义(默认空/set_referrer 透出)+ 脚本错误隔离(5c3d560 同款)。
 
 ## 上游这两个月(233 commits)分类
 
@@ -91,16 +144,16 @@ WatchdogToken = IsolateHandle + 超时线程,terminate_execution 兜底
 - ~~**fetch/XHR**:4b90ec3 20 次重定向、3eb28da FormData multipart、260c4c0 Blob/ArrayBuffer body、b744b9b 跨域 credentials、ab6fa0e fetch 按 context 分 client、402de26 Blob-URL Worker race、bd39512 intercept 重写 SSRF 复检(安全)~~ ✅ 已吸(2026-08-22,bd39512 见安全组,其余见"已知坑"第 6 条)
 - ~~**structuredClone**:a921668 真实现、b2e4bb4 循环引用/cause、8698afc CryptoKey seen map~~ ✅ 核心已吸(2026-08-22,见"已知坑"第 7 条);CryptoKey clone hook 挂账到 WebCrypto 主题
 - ~~**WebCrypto**:ed75730 SubtleCrypto 对称算法、dc780d7 SHA-512 变体、edde67d 拒绝未知算法、cfda91b PBKDF2 上限(DoS)~~ ✅ 全吸(2026-08-22,见"已知坑"第 8 条)
-- **DOM 遍历**:TreeWalker/NodeIterator 六连修(ab3ca26/a8c0a19/1c7402d/49d4b91/c12915a/845abb9)
-- **DOM 杂项**:c4f545e DocumentFragment 拍平、491ecfb+90ed9af cloneNode 结构化、a663a15+a2fd4d1 insertAdjacentHTML 上下文、25ce541 真 NodeList、a16e8d4 checkbox 默认 "on"、b460b37 adoptNode/toggleAttribute、ad7a7a9 dataset/style 的 in 与 Object.keys、80803cb style 双向同步、41a8e1c DOM 移动保 script 状态、5177304 完整插入步骤
-- **事件**:0ff1ba0+af1e15f 构造器 WebIDL 语义、776c915 PromiseRejectionEvent/StorageEvent、7e6f403 createEvent 拒绝未知、2f3d5d8 iframe 事件、scroll 四连(1c7402d/29e20ae/f6ca133/3f820c4)、08c1f0d React/Vue controlled input
-- **计时器**:452cc85 字符串 handler 当脚本跑、cdab919 performance.now 单调、d93ff51 时钟有界
-- **Location**:fe26417/7404366 导航值强转、1fc5a24 pushState 缺省保 URL
-- **脚本加载**:d3a8b9a 模块完成才返回(Vite mount)、be700f5 模块失败传播、4f6d256 重复模块/堆耗尽、0c4740a+f841205 data: URL 脚本、f61493f 拒绝失败响应、a6bb741 动态脚本 settle
-- **DOMParser XML**:53295fa+6927f11+869f700+20c4628 parsererror
+- ~~**DOM 遍历**:TreeWalker/NodeIterator(c3ae054/c12915a/1a5c27a/a8c0a19/ab3ca26/49d4b91/845abb9 七连)~~ ✅ 已吸(2026-08-22,见"已知坑"第 9 条)
+- ~~**DOM 杂项**:c4f545e DocumentFragment 拍平、491ecfb+90ed9af cloneNode 结构化、a663a15+a2fd4d1 insertAdjacentHTML 上下文、25ce541 真 NodeList、a16e8d4 checkbox 默认 "on"、b460b37 adoptNode/toggleAttribute、ad7a7a9 dataset/style 的 in 与 Object.keys、80803cb style 双向同步、41a8e1c DOM 移动保 script 状态、5177304 完整插入步骤~~ ✅ 已吸(2026-08-22,见"已知坑"第 10 条)
+- ~~**事件**:0ff1ba0+af1e15f 构造器 WebIDL 语义、776c915 PromiseRejectionEvent/StorageEvent、7e6f403 createEvent 拒绝未知、2e3f5d8 iframe 事件、scroll 四连(1c7402d/29e20ae/f6ca133/3f820c4)、08c1f0d React/Vue controlled input~~ ✅ 已吸(2026-08-23,见"已知坑"第 11 条)
+- ~~**计时器**:452cc85 字符串 handler 当脚本跑、cdab919 performance.now 单调、d93ff51 时钟有界~~ ✅ 已吸(2026-08-23,见"已知坑"第 12 条)
+- ~~**Location**:fe26417/7404366 导航值强转、1fc5a24 pushState 缺省保 URL~~ ✅ 已吸(2026-08-23,见"已知坑"第 13 条)
+- ~~**脚本加载**:d3a8b9a 模块完成才返回(Vite mount)、be700f5 模块失败传播、4f6d256 重复模块/堆耗尽、0c4740a+f841205 data: URL 脚本、f61493f 拒绝失败响应、a6bb741 动态脚本 settle~~ ✅ 已吸(2026-08-23,见"已知坑"第 14 条)
+- ~~**DOMParser XML**:53295fa+6927f11+869f700+20c4628 parsererror~~ ✅ 已吸(2026-08-23,见"已知坑"第 15 条)
 - ~~**stealth/反射(与 Radar 对抗直接相关)**:4c33f6d/c7e7c70/846ed7d/a0e1ba5/ec05ed0/9dfc67a~~ ✅ 已吸(2026-08-22)
-- **表单**:7e2cabf submit 语义、ccfa5fb requestSubmit 校验、5308e04 select parity、6788996+c2b79b6 文件输入
-- **杂项**:a5a8de7 真 new Image()、891d850 img src configurable、5c3d560 脚本错误隔离、fc9f524 NetworkInformation 监听、edb1785 referrer 语义
+- ~~**表单**:7e2cabf submit 语义、ccfa5fb requestSubmit 校验、5308e04 select parity、6788996+c2b79b6 文件输入~~ ✅ 3/5 已吸(2026-08-23,见"已知坑"第 16 条);6788996+c2b79b6 挂账(无 CDP DOM domain/上传命令入口)
+- ~~**杂项**:a5a8de7 真 new Image()、891d850 img src configurable、5c3d560 脚本错误隔离、fc9f524 NetworkInformation 监听、edb1785 referrer 语义~~ ✅ 已吸(2026-08-23,见"已知坑"第 17 条)
 
 **C. 大特性/架构,不跟或挂账:**
 - **08-03/08-04 渲染浪潮(~60 commits)**:Shadow DOM、live CSSOM、Web Animations、Canvas2D paint、layout/geometry、PDF、响应式图片——服务上游自研渲染器,我们渲染走 blitz,不跟。
@@ -115,6 +168,6 @@ WatchdogToken = IsolateHandle + 超时线程,terminate_execution 兜底
 2. **修既有挂账**:fetch base64 测试、d0d8617(head)、0ca7ac0(document.write)。
 3. **安全优先**:bd39512(intercept SSRF)、cfda91b(PBKDF2 DoS)、4f6d256(堆耗尽)。
 4. ~~**stealth/反射组**(4c33f6d/c7e7c70/846ed7d/a0e1ba5/ec05ed0/9dfc67a)~~ ✅ 2026-08-22 完成(见"已知坑"第 5 条)。
-5. **fetch/DOM/事件组**按主题批量过,每组补特征测试。~~fetch/XHR 组~~ ✅、~~structuredClone 组~~ ✅、~~WebCrypto 组~~ ✅(2026-08-22,见"已知坑"第 6/7/8 条);剩 DOM 遍历、DOM 杂项、事件、计时器、Location、脚本加载、DOMParser XML、表单、杂项。
-6. **改名 `diting_js`**,类型 `ObscuraJsRuntime`→`JsRuntime`。
+5. **fetch/DOM/事件组**按主题批量过,每组补特征测试。~~fetch/XHR 组~~ ✅、~~structuredClone 组~~ ✅、~~WebCrypto 组~~ ✅、~~DOM 遍历组~~ ✅、~~DOM 杂项组~~ ✅、~~事件组~~ ✅(2026-08-22/23,见"已知坑"第 6/7/8/9/10/11 条);~~计时器组~~ ✅(2026-08-23,见"已知坑"第 12 条);~~Location 组~~ ✅(2026-08-23,见"已知坑"第 13 条);~~脚本加载组~~ ✅(2026-08-23,见"已知坑"第 14 条);~~DOMParser XML 组~~ ✅(2026-08-23,见"已知坑"第 15 条);~~表单组~~ ✅(2026-08-23,见"已知坑"第 16 条);~~杂项组~~ ✅(2026-08-23,见"已知坑"第 17 条)。**B 组全部完成。**
+6. ~~**改名 `diting_js`**,类型 `ObscuraJsRuntime`→`JsRuntime`~~ ✅ 2026-08-23 完成:目录 git mv、全 crate 引用替换、`ObscuraJsRuntime`→`JsRuntime`(与 deno_core 同名类撞名,deno_core 侧改 `deno_core::JsRuntime` 全路径;`ObscuraState` 内部类型暂保留原名,下次顺手)。Extension 名已是 `diting_dom`(dom 认领时改过)。
 7. **C 组挂账**:渲染浪潮不跟;iframe/并发架构读完写结论到本文档。

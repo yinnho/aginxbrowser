@@ -2,15 +2,15 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use deno_core::{v8, JsRuntime, RuntimeOptions};
+use deno_core::{v8, RuntimeOptions};
 use crate::diting_dom::DomTree;
 
 /// Re-exported so other crates (obscura-browser, obscura-cdp) can name the V8
 /// isolate handle without taking a direct dependency on deno_core.
 pub use deno_core::v8::IsolateHandle;
 
-use crate::obscura_js::module_loader::ObscuraModuleLoader;
-use crate::obscura_js::ops::{build_extension, ObscuraState};
+use crate::diting_js::module_loader::ObscuraModuleLoader;
+use crate::diting_js::ops::{build_extension, ObscuraState};
 
 static SNAPSHOT: &[u8] = include_bytes!(env!("OBSCURA_SNAPSHOT_PATH"));
 
@@ -41,7 +41,7 @@ struct HeapLimitState {
 /// would kill every session. The callback terminates the current script
 /// instead and lends the isolate just enough headroom to unwind.
 fn install_heap_limit_guard(
-    runtime: &mut JsRuntime,
+    runtime: &mut deno_core::JsRuntime,
     isolate_handle: IsolateHandle,
     state: std::sync::Arc<HeapLimitState>,
 ) {
@@ -58,8 +58,8 @@ fn install_heap_limit_guard(
     });
 }
 
-pub struct ObscuraJsRuntime {
-    runtime: JsRuntime,    state: Rc<RefCell<ObscuraState>>,
+pub struct JsRuntime {
+    runtime: deno_core::JsRuntime,    state: Rc<RefCell<ObscuraState>>,
     object_store: HashMap<String, String>,
     object_counter: u64,
     /// Thread-safe handle to this runtime's V8 isolate, captured at
@@ -84,7 +84,7 @@ pub struct ObscuraJsRuntime {
     module_evaluations: HashMap<deno_core::ModuleId, Result<(), String>>,
 }
 
-/// Handle to an armed V8 execution watchdog (see [`ObscuraJsRuntime::arm_watchdog`]).
+/// Handle to an armed V8 execution watchdog (see [`JsRuntime::arm_watchdog`]).
 /// Holds the cancel channel and the watchdog thread; pass it back to
 /// `disarm_watchdog` to stop the watchdog and learn whether it fired.
 pub struct WatchdogToken {
@@ -97,7 +97,7 @@ pub struct WatchdogToken {
 /// runtime borrow. The CDP dispatcher uses this to bound every command so a
 /// hung page cannot hold the process-wide V8 lock forever. Pair with
 /// [`WatchdogToken::stop`]; if `stop` returns true, clear the termination flag
-/// via [`ObscuraJsRuntime::cancel_termination`] before reusing the isolate.
+/// via [`JsRuntime::cancel_termination`] before reusing the isolate.
 pub fn spawn_watchdog(handle: IsolateHandle, budget: std::time::Duration) -> WatchdogToken {
     let pair = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -161,7 +161,7 @@ impl Drop for WatchdogToken {
 impl WatchdogToken {
     /// Stop the watchdog. Returns true if it had already fired (terminated the
     /// isolate). The caller must then clear the termination flag via
-    /// [`ObscuraJsRuntime::cancel_termination`] before the next eval.
+    /// [`JsRuntime::cancel_termination`] before the next eval.
     pub fn stop(mut self) -> bool {        {
             let (lock, cvar) = &*self.pair;
             *lock.lock().unwrap() = true;
@@ -193,7 +193,7 @@ fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-impl ObscuraJsRuntime {
+impl JsRuntime {
     pub fn new() -> Self {
         Self::with_base_url("about:blank")
     }
@@ -217,7 +217,7 @@ impl ObscuraJsRuntime {
         // (upstream obscura hit this under thread-per-connection, #430).
         let mut runtime = {
             let _construct_guard = ISOLATE_CONSTRUCT_LOCK.lock().unwrap();
-            JsRuntime::new(RuntimeOptions {
+            deno_core::JsRuntime::new(RuntimeOptions {
                 extensions: vec![build_extension()],
                 module_loader: Some(module_loader),
                 startup_snapshot: Some(SNAPSHOT),
@@ -238,7 +238,7 @@ impl ObscuraJsRuntime {
         let heap_limit_state = std::sync::Arc::new(HeapLimitState::default());
         install_heap_limit_guard(&mut runtime, isolate_handle.clone(), heap_limit_state.clone());
 
-        ObscuraJsRuntime {
+        JsRuntime {
             runtime,
             state,
             object_store: HashMap::new(),
@@ -309,7 +309,7 @@ impl ObscuraJsRuntime {
     /// and every navigation auto-enabled interception, which made
     /// `fetch()` from page JS hang forever waiting for a CDP client to
     /// answer Fetch.requestPaused events that the client never asked for.
-    pub fn set_intercept_tx(&self, tx: tokio::sync::mpsc::UnboundedSender<crate::obscura_js::ops::InterceptedRequest>) {
+    pub fn set_intercept_tx(&self, tx: tokio::sync::mpsc::UnboundedSender<crate::diting_js::ops::InterceptedRequest>) {
         let mut state = self.state.borrow_mut();
         state.intercept_tx = Some(tx);
     }
@@ -1472,7 +1472,7 @@ impl ObscuraJsRuntime {
     }
 }
 
-impl Default for ObscuraJsRuntime {
+impl Default for JsRuntime {
     fn default() -> Self {
         Self::new()
     }
@@ -1483,9 +1483,9 @@ mod tests {
     use super::*;
     use crate::diting_dom::parse_html;
 
-    fn setup_runtime(html: &str) -> ObscuraJsRuntime {
+    fn setup_runtime(html: &str) -> JsRuntime {
         let dom = parse_html(html);
-        let rt = ObscuraJsRuntime::new();
+        let rt = JsRuntime::new();
         rt.set_dom(dom);
         rt.set_url("http://example.com/test");
         rt.set_title("Test Page");
@@ -2675,7 +2675,7 @@ mod tests {
         drop(rt2);
 
         if let Some(dom) = dom1 {
-            let rt1b = ObscuraJsRuntime::new();
+            let rt1b = JsRuntime::new();
             rt1b.set_dom(dom);
             rt1b.set_url("http://example.com");
             rt1b.set_title("Page1");
@@ -2740,10 +2740,10 @@ mod tests {
         assert_eq!(result.value.unwrap().as_f64().unwrap() as i64, 84);
     }
 
-    fn setup_runtime_with_cookies(html: &str) -> (ObscuraJsRuntime, std::sync::Arc<crate::diting_net::CookieJar>) {
+    fn setup_runtime_with_cookies(html: &str) -> (JsRuntime, std::sync::Arc<crate::diting_net::CookieJar>) {
         let dom = crate::diting_dom::parse_html(html);
         let jar = std::sync::Arc::new(crate::diting_net::CookieJar::new());
-        let rt = ObscuraJsRuntime::new();
+        let rt = JsRuntime::new();
         rt.set_dom(dom);
         rt.set_url("http://example.com/test");
         rt.set_title("Test Page");
@@ -3074,7 +3074,7 @@ mod tests {
         // Answer every intercepted request with a rewrite to a loopback address.
         tokio::spawn(async move {
             while let Some(req) = rx.recv().await {
-                let _ = req.resolver.send(crate::obscura_js::ops::InterceptResolution::Continue {
+                let _ = req.resolver.send(crate::diting_js::ops::InterceptResolution::Continue {
                     url: Some("http://127.0.0.1:9/secret".to_string()),
                     method: None,
                     headers: None,
@@ -3664,7 +3664,7 @@ mod tests {
     fn test_html_to_markdown_headings() {
         let mut rt = setup_runtime("<html><body><h1>Title</h1><h2>Sub</h2><p>Body</p></body></html>");
         let md = rt
-            .evaluate(crate::obscura_js::HTML_TO_MARKDOWN_JS)
+            .evaluate(crate::diting_js::HTML_TO_MARKDOWN_JS)
             .unwrap()
             .as_str()
             .unwrap()
@@ -3680,7 +3680,7 @@ mod tests {
             r#"<html><body><p>Hello <strong>world</strong> <a href="https://x.test/">link</a> <em>em</em></p></body></html>"#,
         );
         let md = rt
-            .evaluate(crate::obscura_js::HTML_TO_MARKDOWN_JS)
+            .evaluate(crate::diting_js::HTML_TO_MARKDOWN_JS)
             .unwrap()
             .as_str()
             .unwrap()
@@ -3700,7 +3700,7 @@ mod tests {
             "<html><body><ul><li>A</li><li>B</li></ul><ol><li>X</li><li>Y</li></ol></body></html>",
         );
         let md = rt
-            .evaluate(crate::obscura_js::HTML_TO_MARKDOWN_JS)
+            .evaluate(crate::diting_js::HTML_TO_MARKDOWN_JS)
             .unwrap()
             .as_str()
             .unwrap()
@@ -3716,7 +3716,7 @@ mod tests {
             "<html><body><p>Text</p><script>alert(1)</script><style>body{color:red}</style></body></html>",
         );
         let md = rt
-            .evaluate(crate::obscura_js::HTML_TO_MARKDOWN_JS)
+            .evaluate(crate::diting_js::HTML_TO_MARKDOWN_JS)
             .unwrap()
             .as_str()
             .unwrap()
@@ -3815,7 +3815,7 @@ mod tests {
 
     #[test]
     fn module_loader_stores_proxy_for_dynamic_imports() {
-        use crate::obscura_js::module_loader::ObscuraModuleLoader;
+        use crate::diting_js::module_loader::ObscuraModuleLoader;
         let loader = ObscuraModuleLoader::with_proxy(
             "https://example.com/",
             Some("http://proxy.test:8080".to_string()),
@@ -3833,8 +3833,8 @@ mod tests {
         // Sanity-check the public ctor that page.rs uses to thread proxy
         // through to the module loader. Direct (None) and proxied paths
         // must both initialise the JS environment.
-        let _direct = ObscuraJsRuntime::with_base_url_and_proxy("https://example.com/", None);
-        let _proxied = ObscuraJsRuntime::with_base_url_and_proxy(
+        let _direct = JsRuntime::with_base_url_and_proxy("https://example.com/", None);
+        let _proxied = JsRuntime::with_base_url_and_proxy(
             "https://example.com/",
             Some("http://proxy.test:8080".to_string()),
         );
