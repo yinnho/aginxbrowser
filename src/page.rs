@@ -8,6 +8,13 @@ use serde_json::Value;
 
 use crate::error::Error;
 
+/// Watchdog budget for evaluates that dispatch into page event handlers
+/// (click/input). 10s is far beyond any legitimate synchronous handler; a
+/// page that exceeds it (infinite loop, MutationObserver storm) would
+/// otherwise pin the session thread inside V8 forever — unreachable by
+/// tokio timeouts, unclosable, leaking 100% CPU.
+pub(crate) const INTERACTION_EVAL_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Read a DOM node id from a JS `evaluate` result. obscura serializes JS numbers
 /// as f64, so `Value::as_u64` returns None for an integer-valued result; accept
 /// either an integer or a non-negative finite float. null / non-numbers -> None.
@@ -63,6 +70,16 @@ impl Page {
             .evaluate_for_cdp(expression, true, true)
             .await;
         info.value.unwrap_or(Value::Null)
+    }
+
+    /// Bounded evaluate for interaction dispatch (click/input). A runaway
+    /// event handler — or a MutationObserver microtask storm it triggers —
+    /// pins the session thread inside V8 where tokio timeouts cannot reach;
+    /// the watchdog terminates the isolate at `timeout` so the session's
+    /// command loop (including Close) regains control. Returns Null when
+    /// terminated.
+    pub fn evaluate_with_timeout(&mut self, expression: &str, timeout: Duration) -> Value {
+        self.inner.evaluate_with_timeout(expression, timeout)
     }
 
     /// Get page HTML content.
@@ -192,15 +209,21 @@ impl Element {
     pub fn click(&self) -> Result<(), Error> {
         let page = unsafe { &mut *(self.page as *mut Page) };
         // Scroll into view
-        page.evaluate(&format!(
-            "(function() {{ var el = globalThis._wrap && globalThis._wrap({}); if (el) el.scrollIntoView({{block:'center'}}); }})()",
-            self.node_id
-        ));
+        page.evaluate_with_timeout(
+            &format!(
+                "(function() {{ var el = globalThis._wrap && globalThis._wrap({}); if (el) el.scrollIntoView({{block:'center'}}); }})()",
+                self.node_id
+            ),
+            INTERACTION_EVAL_TIMEOUT,
+        );
         // Click
-        let result = page.evaluate(&format!(
-            "(function() {{ var el = globalThis._wrap && globalThis._wrap({}); if (el) {{ el.click(); return true; }} return false; }})()",
-            self.node_id
-        ));
+        let result = page.evaluate_with_timeout(
+            &format!(
+                "(function() {{ var el = globalThis._wrap && globalThis._wrap({}); if (el) {{ el.click(); return true; }} return false; }})()",
+                self.node_id
+            ),
+            INTERACTION_EVAL_TIMEOUT,
+        );
         if result.as_bool().unwrap_or(false) {
             Ok(())
         } else {

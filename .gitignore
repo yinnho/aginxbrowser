@@ -18,3 +18,6 @@
 .agents/
 .claude/
 skills-lock.json
+
+# Local publisher tooling binary
+mcp-publisher

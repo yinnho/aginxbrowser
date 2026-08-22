@@ -154,6 +154,15 @@ pub struct Page {
     // contract. Includes `Runtime.addBinding` shims so puppeteer's
     // `exposeFunction` bindings exist before inline `<script>` tags execute.
     preload_scripts: Vec<String>,
+    /// Storm backoff for the idle pump: when a pump slice ends in a watchdog
+    /// termination, the page's runaway loop (e.g. a MutationObserver that
+    /// mutates in its own callback) re-queues itself on every subsequent
+    /// pump, so re-entering immediately just re-feeds it at 100% CPU for the
+    /// session's life. Park until `storm_hot_until` instead; the backoff
+    /// doubles per termination (200ms floor, 5s ceiling) and resets on the
+    /// first clean idle settle.
+    storm_backoff_ms: u64,
+    storm_hot_until: Option<tokio::time::Instant>,
     #[cfg(feature = "stealth")]
     pub stealth_client: Option<Arc<StealthHttpClient>>,
 }
@@ -209,6 +218,8 @@ impl Page {
             intercept_block_patterns: Vec::new(),
             intercept_tx: None,
             preload_scripts: Vec::new(),
+            storm_backoff_ms: 0,
+            storm_hot_until: None,
             #[cfg(feature = "stealth")]
             stealth_client,
         }
@@ -773,7 +784,19 @@ impl Page {
             return true;
         }
         if let Some(js) = &mut self.js {
-            return js.run_event_loop_until_idle(max_ms).await;
+            let fired_before = js.watchdog_fired_total();
+            let idle = js.run_event_loop_until_idle(max_ms).await;
+            if js.watchdog_fired_total() > fired_before {
+                self.storm_backoff_ms = (self.storm_backoff_ms.max(200) * 2).min(5000);
+                self.storm_hot_until = Some(
+                    tokio::time::Instant::now()
+                        + tokio::time::Duration::from_millis(self.storm_backoff_ms),
+                );
+            } else if idle {
+                self.storm_backoff_ms = 0;
+                self.storm_hot_until = None;
+            }
+            return idle;
         }
         true
     }
@@ -793,6 +816,15 @@ impl Page {
             return;
         }
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(ms);
+        if let Some(hot_until) = self.storm_hot_until {
+            if hot_until > tokio::time::Instant::now() {
+                // Storming page (watchdog-terminated earlier): park instead
+                // of re-feeding the runaway loop. The session command loop
+                // races this park against command arrival via select!.
+                tokio::time::sleep_until(std::cmp::min(hot_until, deadline)).await;
+                return;
+            }
+        }
         loop {
             let now = tokio::time::Instant::now();
             if now >= deadline {

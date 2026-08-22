@@ -33,6 +33,11 @@ pub struct ObscuraJsRuntime {
     /// construction. Lets a watchdog be armed from `&self` (the CDP dispatcher
     /// only holds `&Page` on the hot path) and is stable for the isolate's life.
     isolate_handle: IsolateHandle,
+    /// How many times a watchdog had to terminate the isolate. Read before/after
+    /// an event-loop pump to detect that a page is storming (a terminated
+    /// microtask loop re-queues itself on the next pump, so pumping it again
+    /// just re-feeds the storm).
+    watchdog_fired_total: std::cell::Cell<u64>,
 }
 
 /// Handle to an armed V8 execution watchdog (see [`ObscuraJsRuntime::arm_watchdog`]).
@@ -168,6 +173,7 @@ impl ObscuraJsRuntime {
             object_store: HashMap::new(),
             object_counter: 0,
             isolate_handle,
+            watchdog_fired_total: std::cell::Cell::new(0),
         }
     }
 
@@ -829,9 +835,16 @@ impl ObscuraJsRuntime {
         let fired = token.stop();
         if fired {
             self.runtime.v8_isolate().cancel_terminate_execution();
+            self.watchdog_fired_total
+                .set(self.watchdog_fired_total.get() + 1);
             tracing::warn!("V8 watchdog fired: terminated a synchronous overrun");
         }
         fired
+    }
+
+    /// Total isolate terminations so far (see `watchdog_fired_total`).
+    pub fn watchdog_fired_total(&self) -> u64 {
+        self.watchdog_fired_total.get()
     }
 
     /// This runtime's V8 isolate handle (captured at construction, stable for

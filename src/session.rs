@@ -286,7 +286,7 @@ fn session_thread(
                                 ScrollDirection::Down => (amount as i32) * 100,
                             };
                             let js = format!("window.scrollBy(0, {})", dy);
-                            page.evaluate(&js);
+                            page.evaluate_with_timeout(&js, crate::page::INTERACTION_EVAL_TIMEOUT);
                             let _ = reply.send(Ok(true));
                         }
 
@@ -467,7 +467,7 @@ async fn click_by_index(
         "(function() {{ var el = globalThis._wrap && globalThis._wrap({}); if (el) {{ el.scrollIntoView({{block:'center'}}); el.click(); return true; }} return false; }})()",
         nid
     );
-    let result = page.evaluate(&js);
+    let result = page.evaluate_with_timeout(&js, crate::page::INTERACTION_EVAL_TIMEOUT);
     let clicked = result.as_bool().unwrap_or(false);
     // Drain any JS-initiated navigation the click started (location.href /
     // form.submit) so the returned URL reflects the post-click page — matches
@@ -502,6 +502,6 @@ fn input_by_index(
         "(function() {{ var el = globalThis._wrap && globalThis._wrap({}); if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {{ el.focus(); if (el._valueTracker) el._valueTracker.setValue(''); var p = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value') || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value'); if (p && p.set) p.set.call(el, '{}'); else el.value = '{}'; el.dispatchEvent(new Event('input', {{bubbles: true}})); el.dispatchEvent(new Event('change', {{bubbles: true}})); return true; }} return false; }})()",
         nid, escaped, escaped
     );
-    let result = page.evaluate(&js);
+    let result = page.evaluate_with_timeout(&js, crate::page::INTERACTION_EVAL_TIMEOUT);
     Ok(result.as_bool().unwrap_or(false))
 }
