@@ -56,7 +56,13 @@ pub enum SessionCommand {
     Cookies {
         reply: oneshot::Sender<Result<String, String>>,
     },
-    Close,
+    /// Acknowledged by the session thread right before it exits. The closer
+    /// waits on this to learn the thread actually stopped - without it, close
+    /// replies ok while the thread is still pinned inside V8 (a runaway eval)
+    /// and keeps burning CPU.
+    Close {
+        reply: oneshot::Sender<()>,
+    },
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -166,10 +172,32 @@ impl SessionManager {
         reply_rx.await.map_err(|_| "session thread died".to_string())?
     }
 
-    /// Close and remove a session.
+    /// Close and remove a session. Fire-and-forget; use [`Self::close_and_wait`]
+    /// when the caller needs to know the session thread actually stopped.
     pub fn close(&mut self, session_id: &str) {
         if let Some(session) = self.sessions.remove(session_id) {
-            let _ = session.cmd_tx.send(SessionCommand::Close);
+            let (tx, _rx) = oneshot::channel();
+            let _ = session.cmd_tx.send(SessionCommand::Close { reply: tx });
+        }
+    }
+
+    /// Close and wait (bounded) for the session thread to acknowledge. Returns
+    /// true if the thread exited (or was already dead); false means it did not
+    /// ack within the budget - the command stays queued and the thread will
+    /// exit when its current (watchdog-bounded) command finishes.
+    pub async fn close_and_wait(&mut self, session_id: &str) -> bool {
+        if let Some(session) = self.sessions.remove(session_id) {
+            let (tx, rx) = oneshot::channel();
+            if session.cmd_tx.send(SessionCommand::Close { reply: tx }).is_err() {
+                return true; // thread already gone
+            }
+            match tokio::time::timeout(std::time::Duration::from_secs(20), rx).await {
+                Ok(Ok(())) => true,
+                Ok(Err(_)) => true, // dropped sender = thread exiting
+                Err(_) => false,
+            }
+        } else {
+            false
         }
     }
 
@@ -312,7 +340,8 @@ fn session_thread(
                             let _ = reply.send(Ok(resp.to_string()));
                         }
 
-                        SessionCommand::Close => {
+                        SessionCommand::Close { reply } => {
+                            let _ = reply.send(());
                             break;
                         }
                     }

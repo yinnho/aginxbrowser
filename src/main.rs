@@ -845,8 +845,13 @@ async fn session_close_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let mut mgr = session::SESSIONS.lock().await;
-    mgr.close(&id);
-    Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
+    // Wait for the session thread's ack so `ok` is truthful - a runaway eval
+    // can pin the thread inside V8 for up to its watchdog budget.
+    let closed = mgr.close_and_wait(&id).await;
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({ "ok": closed })),
+    ))
 }
 
 fn spawn_blocking<F, R>(f: F) -> tokio::task::JoinHandle<R>

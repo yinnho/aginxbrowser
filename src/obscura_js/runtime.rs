@@ -129,6 +129,13 @@ impl WatchdogToken {
         }
         self.fired.load(std::sync::atomic::Ordering::SeqCst)
     }
+
+    /// Whether this watchdog has already terminated the isolate, without
+    /// stopping it. Lets a pump loop poll for termination between slices
+    /// while keeping the token alive for the final `stop()`.
+    pub fn fired(&self) -> bool {
+        self.fired.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 impl ObscuraJsRuntime {
@@ -295,7 +302,9 @@ impl ObscuraJsRuntime {
         await_promise: bool,
     ) -> Result<RemoteObjectInfo, String> {
         if !await_promise && return_by_value {
-            let val = self.evaluate(expression)?;
+            // Watchdog-bound like the await path below - a sync runaway
+            // expression must not pin the session thread.
+            let val = self.evaluate_with_timeout(expression, std::time::Duration::from_secs(10))?;
             return Ok(Self::info_from_json(&val));
         }
 
@@ -350,8 +359,28 @@ impl ObscuraJsRuntime {
             )
         };
 
+        // Watchdog-bound: a runaway expression (`while(1){}`) pins the thread
+        // inside V8 where the caller's tokio timeouts cannot reach. 10s is far
+        // beyond any legitimate synchronous eval; on fire, the termination is
+        // cancelled (isolate reusable) and surfaces as an eval error.
+        //
+        // NOT execute_script_retry_terminated: that helper clears the flag and
+        // retries once, which would just re-enter the spin - the watchdog
+        // becomes useless. Pre-clear any stray flag from an earlier watchdog
+        // instead, then run the plain one-shot execute.
+        self.runtime.v8_isolate().cancel_terminate_execution();
+        let eval_wd = self.arm_watchdog(std::time::Duration::from_secs(10));
         let result = self
-            .execute_script_retry_terminated("<eval-remote>", meta_code)?;
+            .runtime
+            .execute_script("<eval-remote>", meta_code);
+        let eval_fired = self.disarm_watchdog(eval_wd);
+        let result = if eval_fired {
+            let preview: String = expression.chars().take(80).collect();
+            tracing::warn!("eval terminated by watchdog (ran >10s): '{}'", preview);
+            return Err("eval timed out: script ran longer than 10s".to_string());
+        } else {
+            result.map_err(|e| format!("JS error: {}", e))?
+        };
 
         let meta_str = if await_promise {
             let __t0 = std::time::Instant::now();
@@ -952,12 +981,18 @@ impl ObscuraJsRuntime {
     {
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(max_total_ms);
         let mut tick_ms: u64 = 1;
+        // The tokio timeout below only fires between slices; a promise callback
+        // that spins synchronously (or a microtask storm) pins the thread
+        // INSIDE run_event_loop where the timeout cannot reach. Bound the
+        // whole wait with the V8 watchdog: on fire, exit early (disarm cancels
+        // the termination so the isolate stays usable).
+        let wd = self.arm_watchdog(std::time::Duration::from_millis(max_total_ms + 500));
         loop {
             if done_check(self) {
-                return;
+                break;
             }
             if tokio::time::Instant::now() >= deadline {
-                return;
+                break;
             }
             // Pump for a short slice. If the loop returns idle in <tick_ms,
             // run_event_loop returns Ok and we check the predicate again.
@@ -965,9 +1000,15 @@ impl ObscuraJsRuntime {
                 tokio::time::Duration::from_millis(tick_ms),
                 self.runtime.run_event_loop(deno_core::PollEventLoopOptions::default()),
             ).await;
+            if wd.fired() {
+                break;
+            }
             // Backoff so a hung promise doesn't burn CPU. Caps at 50ms;
             // worst case we miss the result by <50ms.
             if tick_ms < 50 { tick_ms = (tick_ms * 2).min(50); }
+        }
+        if self.disarm_watchdog(wd) {
+            tracing::warn!("promise wait terminated by watchdog (sync spin in event loop)");
         }
     }
     pub fn take_dom(&self) -> Option<DomTree> {
