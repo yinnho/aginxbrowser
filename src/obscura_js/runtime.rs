@@ -24,15 +24,52 @@ pub struct RemoteObjectInfo {
     pub value: Option<serde_json::Value>,
 }
 
+static ISOLATE_CONSTRUCT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// How much the near-heap-limit callback raises the limit so V8 can unwind
+/// the terminated script instead of aborting the process.
+const HEAP_LIMIT_RECOVERY_HEADROOM_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Default)]
+struct HeapLimitState {
+    tripped: std::sync::atomic::AtomicBool,
+    restore_limit: std::sync::atomic::AtomicUsize,
+}
+
+/// V8's default response to hitting the heap limit is to abort the whole
+/// process — with many sessions in one server, one page's allocation loop
+/// would kill every session. The callback terminates the current script
+/// instead and lends the isolate just enough headroom to unwind.
+fn install_heap_limit_guard(
+    runtime: &mut JsRuntime,
+    isolate_handle: IsolateHandle,
+    state: std::sync::Arc<HeapLimitState>,
+) {
+    runtime.add_near_heap_limit_callback(move |current_limit, _initial_limit| {
+        let _ = state.restore_limit.compare_exchange(
+            0,
+            current_limit,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        state.tripped.store(true, std::sync::atomic::Ordering::SeqCst);
+        isolate_handle.terminate_execution();
+        current_limit.saturating_add(HEAP_LIMIT_RECOVERY_HEADROOM_BYTES)
+    });
+}
+
 pub struct ObscuraJsRuntime {
-    runtime: JsRuntime,
-    state: Rc<RefCell<ObscuraState>>,
+    runtime: JsRuntime,    state: Rc<RefCell<ObscuraState>>,
     object_store: HashMap<String, String>,
     object_counter: u64,
     /// Thread-safe handle to this runtime's V8 isolate, captured at
     /// construction. Lets a watchdog be armed from `&self` (the CDP dispatcher
     /// only holds `&Page` on the hot path) and is stable for the isolate's life.
     isolate_handle: IsolateHandle,
+    /// Set by the near-heap-limit callback when it had to terminate a script.
+    /// The next V8 entry point recovers the isolate (cancel termination,
+    /// restore the real limit) before running more JS.
+    heap_limit_state: std::sync::Arc<HeapLimitState>,
     /// How many times a watchdog had to terminate the isolate. Read before/after
     /// an event-loop pump to detect that a page is storming (a terminated
     /// microtask loop re-queues itself on the next pump, so pumping it again
@@ -156,12 +193,19 @@ impl ObscuraJsRuntime {
 
         let module_loader = Rc::new(ObscuraModuleLoader::with_proxy(base_url, proxy_url));
 
-        let mut runtime = JsRuntime::new(RuntimeOptions {
-            extensions: vec![build_extension()],
-            module_loader: Some(module_loader),
-            startup_snapshot: Some(SNAPSHOT),
-            ..Default::default()
-        });
+        // Serialize isolate construction process-wide: V8's JSDispatchTable
+        // setup is not safe to run from several threads at once, and sessions
+        // plus one-shot ops each construct on their own thread concurrently
+        // (upstream obscura hit this under thread-per-connection, #430).
+        let mut runtime = {
+            let _construct_guard = ISOLATE_CONSTRUCT_LOCK.lock().unwrap();
+            JsRuntime::new(RuntimeOptions {
+                extensions: vec![build_extension()],
+                module_loader: Some(module_loader),
+                startup_snapshot: Some(SNAPSHOT),
+                ..Default::default()
+            })
+        };
 
         runtime.op_state().borrow_mut().put(state_clone);
 
@@ -173,6 +217,8 @@ impl ObscuraJsRuntime {
             .expect("init should not fail");
 
         let isolate_handle = runtime.v8_isolate().thread_safe_handle();
+        let heap_limit_state = std::sync::Arc::new(HeapLimitState::default());
+        install_heap_limit_guard(&mut runtime, isolate_handle.clone(), heap_limit_state.clone());
 
         ObscuraJsRuntime {
             runtime,
@@ -180,6 +226,7 @@ impl ObscuraJsRuntime {
             object_store: HashMap::new(),
             object_counter: 0,
             isolate_handle,
+            heap_limit_state,
             watchdog_fired_total: std::cell::Cell::new(0),
         }
     }
@@ -289,7 +336,34 @@ impl ObscuraJsRuntime {
         }
     }
 
+    /// If the heap-limit guard terminated the last script, recover the
+    /// isolate before new JS runs: cancel the termination and restore the
+    /// real heap limit (the callback had inflated it to let V8 unwind).
+    fn recover_heap_limit(&mut self) -> bool {
+        if !self
+            .heap_limit_state
+            .tripped
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return false;
+        }
+        self.runtime.v8_isolate().cancel_terminate_execution();
+        let restore_limit = self
+            .heap_limit_state
+            .restore_limit
+            .swap(0, std::sync::atomic::Ordering::SeqCst);
+        self.runtime.remove_near_heap_limit_callback(restore_limit);
+        install_heap_limit_guard(
+            &mut self.runtime,
+            self.isolate_handle.clone(),
+            self.heap_limit_state.clone(),
+        );
+        tracing::warn!("V8 heap limit reached: terminated the current JavaScript task");
+        true
+    }
+
     pub fn evaluate(&mut self, expression: &str) -> Result<serde_json::Value, String> {
+        self.recover_heap_limit();
         let wrapped = Self::wrap_expression(expression);
         let result = self.execute_script_retry_terminated("<eval>", wrapped)?;
         self.v8_to_json(result)
@@ -841,6 +915,7 @@ impl ObscuraJsRuntime {
     }
 
     pub async fn run_event_loop(&mut self) -> Result<(), String> {
+        self.recover_heap_limit();
         self.runtime
             .run_event_loop(deno_core::PollEventLoopOptions::default())
             .await
@@ -938,6 +1013,7 @@ impl ObscuraJsRuntime {
         if timeout.is_zero() {
             return self.evaluate(expression);
         }
+        self.recover_heap_limit();
         let wrapped = Self::wrap_expression(expression);
         let token = self.arm_watchdog(timeout);
         let result = self.runtime.execute_script("<eval>", wrapped);
@@ -2144,27 +2220,209 @@ mod tests {
         assert_eq!(result.as_str().unwrap(), "http://localhost:8080/dir/api.json");
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn test_fetch_url_input_decodes_binary_body_base64() {
+    // One stream per document. The tokenizer carries its state across the calls.
+    // https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-document-write
+    #[test]
+    fn document_write_joins_an_element_split_across_calls() {
         let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate(
+                r#"
+                var scriptTestSetup = true;
+                document.write('<di');
+                document.write('v id="split">');
+                document.write('content</div>');
+                const el = document.getElementById('split');
+                return el ? el.textContent : null;
+                "#,
+            )
+            .unwrap();
+        assert_eq!(result, serde_json::json!("content"));
+    }
+
+    #[test]
+    fn document_write_joins_a_tag_name_split_across_calls() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate(
+                r#"
+                var scriptTestSetup = true;
+                document.write('<spa');
+                document.write('n id="half">x</span>');
+                const el = document.getElementById('half');
+                return el ? el.tagName : null;
+                "#,
+            )
+            .unwrap();
+        assert_eq!(result, serde_json::json!("SPAN"));
+    }
+
+    // The shape the UI5 cachebuster writes: "<script", one per attribute, then ">".
+    #[test]
+    fn document_write_runs_a_script_split_across_calls() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate(
+                r#"
+                var scriptTestSetup = true;
+                globalThis.__splitScriptRan = false;
+                document.write('<scr' + 'ipt');
+                document.write(' id="split-script"');
+                document.write('>');
+                document.write('globalThis.__splitScriptRan = true;');
+                document.write('<\/scr' + 'ipt>');
+                return [!!document.getElementById('split-script'), globalThis.__splitScriptRan];
+                "#,
+            )
+            .unwrap();
+        assert_eq!(result, serde_json::json!([true, true]));
+    }
+
+    // A script in the <head> inserts behind itself, so that what it writes runs before what
+    // the parser saw after it.
+    #[test]
+    fn document_write_inserts_at_the_writing_scripts_position() {
+        let mut rt = setup_runtime(
+            r#"<html><head><script id="writer"></script></head><body><p id="existing">x</p></body></html>"#,
+        );
+        let result = rt
+            .evaluate(
+                r#"
+                var scriptTestSetup = true;
+                // What the production path sets while a script runs; bootstrap.js
+                // assigns __currentScriptNid around every script it prepares.
+                globalThis.__currentScriptNid = document.getElementById('writer')._nid;
+                document.write('<span id="written"></span>');
+                return JSON.stringify({
+                  head: Array.from(document.head.children).map(e => e.id || e.tagName),
+                  body: Array.from(document.body.children).map(e => e.id || e.tagName),
+                });
+                "#,
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!(r#"{"head":["writer","written"],"body":["existing"]}"#)
+        );
+    }
+
+    // Holding back until the close would lose everything written after it. It belongs inside.
+    #[test]
+    fn document_write_shows_an_element_that_is_never_closed() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate(
+                r#"
+                var scriptTestSetup = true;
+                document.write('<div id="unclosed">hello');
+                const el = document.getElementById('unclosed');
+                return el ? el.textContent : null;
+                "#,
+            )
+            .unwrap();
+        assert_eq!(result, serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn document_write_grows_an_open_element_across_calls() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate(
+                r#"
+                var scriptTestSetup = true;
+                document.write('<div id="wrap">');
+                document.write('<span id="inner">y</span>');
+                const inner = document.getElementById('inner');
+                return JSON.stringify({
+                  wrap: !!document.getElementById('wrap'),
+                  inner: !!inner,
+                  nested: !!(inner && inner.parentElement && inner.parentElement.id === 'wrap'),
+                });
+                "#,
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!(r#"{"wrap":true,"inner":true,"nested":true}"#)
+        );
+    }
+
+    #[test]
+    fn document_write_keeps_call_order_at_the_insertion_point() {
+        let mut rt = setup_runtime(
+            r#"<html><head><script id="writer"></script></head><body></body></html>"#,
+        );
+        let result = rt
+            .evaluate(
+                r#"
+                var scriptTestSetup = true;
+                globalThis.__currentScriptNid = document.getElementById('writer')._nid;
+                document.write('<span id="one"></span>');
+                document.write('<span id="two"></span>');
+                return Array.from(document.head.children).map(e => e.id).join(',');
+                "#,
+            )
+            .unwrap();
+        assert_eq!(result, serde_json::json!("writer,one,two"));
+    }
+
+    #[test]
+    fn document_write_reports_to_mutation_observers() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate(
+                r#"
+                var scriptTestSetup = true;
+                globalThis.__seen = [];
+                const observer = new MutationObserver((records) => {
+                  for (const record of records) {
+                    for (const node of record.addedNodes) globalThis.__seen.push(node.nodeName);
+                  }
+                });
+                observer.observe(document.body, { childList: true });
+                document.write('<span id="watched">z</span>');
+                observer.takeRecords().forEach((record) => {
+                  for (const node of record.addedNodes) globalThis.__seen.push(node.nodeName);
+                });
+                return globalThis.__seen.join(',');
+                "#,
+            )
+            .unwrap();
+        assert_eq!(result, serde_json::json!("SPAN"));
+    }
+
+    /// A Continue resolution that rewrites the request URL must pass the same
+    /// SSRF gate as the original request and as redirect hops — otherwise a
+    /// rewrite to an internal address bypasses validate_fetch_url entirely.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_intercept_url_rewrite_is_revalidated_against_ssrf() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        rt.set_intercept_tx(tx);
+        rt.set_intercept_enabled(true);
+
+        // Answer every intercepted request with a rewrite to a loopback address.
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                let _ = req.resolver.send(crate::obscura_js::ops::InterceptResolution::Continue {
+                    url: Some("http://127.0.0.1:9/secret".to_string()),
+                    method: None,
+                    headers: None,
+                    body: None,
+                });
+            }
+        });
+
         let result = rt.call_function_on_for_cdp(
             r#"async () => {
-                const originalFetchOp = Deno.core.ops.op_fetch_url;
                 try {
-                    Deno.core.ops.op_fetch_url = (url) => {
-                        globalThis.__capturedFetchUrl = url;
-                        return JSON.stringify({
-                            status: 200,
-                            headers: { "content-type": "application/wasm" },
-                            bodyBase64: "AGFzbQEAAAA=",
-                            url,
-                        });
-                    };
-                    const response = await fetch(new URL("/pkg/app_bg.wasm", document.URL));
-                    const bytes = Array.from(new Uint8Array(await response.arrayBuffer()));
-                    return { url: globalThis.__capturedFetchUrl, bytes };
-                } finally {
-                    Deno.core.ops.op_fetch_url = originalFetchOp;
+                    await fetch("http://example.com/data.json");
+                    return "not-blocked";
+                } catch (e) {
+                    return "blocked:" + (e && e.message);
                 }
             }"#,
             None,
@@ -2173,13 +2431,142 @@ mod tests {
             true,
         ).await.unwrap();
 
+        let v = result.value.unwrap();
+        assert_eq!(v, serde_json::json!("blocked:net::ERR_FAILED"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_fetch_url_input_decodes_binary_body_base64() {
+        // Serves a binary body from a real local server: the bootstrap deletes
+        // the `Deno` global (stealth), so the op cannot be monkey-patched from
+        // JS. URL-object input resolves against document.URL, and the binary
+        // body must reach JS intact via the op's base64 envelope.
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (path_tx, path_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]);
+            let path = request.lines().next().unwrap_or("").to_string();
+            let body = [0u8, 97, 115, 109, 1, 0, 0, 0];
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/wasm\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(&body).unwrap();
+            stream.flush().unwrap();
+            path_tx.send(path).unwrap();
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/test", port));
+        let result = rt.call_function_on_for_cdp(
+            r#"async () => {
+                const response = await fetch(new URL("/pkg/app_bg.wasm", document.URL));
+                return {
+                    status: response.status,
+                    bytes: Array.from(new Uint8Array(await response.arrayBuffer())),
+                };
+            }"#,
+            None,
+            &[],
+            true,
+            true,
+        ).await.unwrap();
+        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+
         assert_eq!(
             result.value.unwrap(),
             serde_json::json!({
-                "url": "http://example.com/pkg/app_bg.wasm",
+                "status": 200,
                 "bytes": [0, 97, 115, 109, 1, 0, 0, 0],
             })
         );
+        let request_line = path_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(
+            request_line.starts_with("GET /pkg/app_bg.wasm "),
+            "server should see the resolved URL path, got: {}",
+            request_line
+        );
+    }
+
+    /// Setting innerHTML on the <html> element parses in the "before head"
+    /// insertion mode, which synthesizes head and body. The importer must keep
+    /// both; it previously returned the synthesized body and dropped the head
+    /// (so a <title>/<meta> assigned this way vanished).
+    #[test]
+    fn documentelement_inner_html_keeps_head_and_body() {
+        let mut rt = setup_runtime("<html><head></head><body></body></html>");
+        let v = rt
+            .evaluate(
+                "(function(){ document.documentElement.innerHTML = '<head><title>T</title></head><body><p>hi</p></body>'; \
+                 var t = document.querySelector('title'); var p = document.querySelector('p'); \
+                 return (t ? t.textContent : 'no-title') + '|' + (p ? p.textContent : 'no-p'); })()",
+            )
+            .unwrap();
+        assert_eq!(v, serde_json::json!("T|hi"));
+    }
+
+    /// Regression guard: innerHTML on an ordinary element still imports the
+    /// parsed nodes directly (no head/body is synthesized for a div context),
+    /// so the fix above must not change the common case.
+    #[test]
+    fn ordinary_element_inner_html_imports_content_directly() {
+        let mut rt = setup_runtime("<html><body><div id=\"d\"></div></body></html>");
+        let v = rt
+            .evaluate(
+                "(function(){ var d=document.getElementById('d'); d.innerHTML='<span>a</span><span>b</span>'; \
+                 return d.children.length + '|' + d.textContent; })()",
+            )
+            .unwrap();
+        assert_eq!(v, serde_json::json!("2|ab"));
+    }
+
+    #[test]
+    fn insert_adjacent_html_keeps_leading_comments_in_table_contexts() {
+        let mut rt = setup_runtime(
+            r#"<html><body><table><tbody id="tb"><tr id="row"></tr></tbody></table></body></html>"#,
+        );
+        let out = rt
+            .evaluate(
+                "(function(){var tb=document.getElementById('tb');tb.insertAdjacentHTML('beforeend','<!--m--><tr><td>v</td></tr>');var row=document.getElementById('row');row.insertAdjacentHTML('beforeend','<!--n--><td>x</td>');return Array.from(tb.childNodes).map(function(n){return n.nodeName}).join('|')+';'+Array.from(row.childNodes).map(function(n){return n.nodeName}).join('|');})()",
+            )
+            .unwrap();
+        assert_eq!(out, serde_json::json!("TR|#comment|TR;#comment|TD"));
+    }
+
+    #[test]
+    fn insert_adjacent_html_uses_the_insertion_element_as_context() {
+        let mut rt = setup_runtime(
+            r#"<html><body><div id="d"></div><table id="table"><tbody id="tb"></tbody></table></body></html>"#,
+        );
+        let out = rt
+            .evaluate(
+                "(function(){var d=document.getElementById('d');d.insertAdjacentHTML('beforeend','<tr><td>v</td></tr>');var table=document.getElementById('table');table.insertAdjacentHTML('beforeend','<tr><td>x</td></tr>');var tb=document.getElementById('tb');tb.insertAdjacentHTML('beforeend','<tr><td>y</td></tr>tail');return d.firstChild.nodeName+':'+d.textContent+';'+table.lastElementChild.tagName+';'+Array.from(tb.childNodes).map(function(n){return n.nodeName+(n.data?':'+n.data:'')}).join('|');})()",
+            )
+            .unwrap();
+        assert_eq!(out, serde_json::json!("#text:v;TBODY;TR|#text:tail"));
+    }
+
+    /// tmp.childNodes is a LIVE list: indexing it while moving nodes into the
+    /// document skips every other node. Regression guard for the firstChild-pop
+    /// loop in insertAdjacentHTML.
+    #[test]
+    fn insert_adjacent_html_moves_all_sibling_nodes() {
+        let mut rt = setup_runtime(r#"<html><body><div id="d"></div></body></html>"#);
+        let out = rt
+            .evaluate(
+                "(function(){var d=document.getElementById('d');d.insertAdjacentHTML('beforeend','<span>a</span><span>b</span><span>c</span><span>d</span>');return d.children.length+'|'+d.textContent;})()",
+            )
+            .unwrap();
+        assert_eq!(out, serde_json::json!("4|abcd"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2571,5 +2958,159 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result, serde_json::json!(["menu", "true"]));
+    }
+
+    /// Upstream 846ed7d: the Function.prototype.toString override must have a
+    /// native function's shape — name, length, non-constructible, no own
+    /// `prototype` property.
+    #[test]
+    fn function_to_string_has_native_function_shape() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let v = rt
+            .evaluate(
+                r#"(() => {
+                    const fn = Function.prototype.toString;
+                    let constructible = true;
+                    try { Reflect.construct(function () {}, [], fn); } catch (e) { constructible = false; }
+                    return [fn.toString(), fn.name, fn.length,
+                            Object.prototype.hasOwnProperty.call(fn, "prototype"),
+                            constructible].join("|");
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!("function toString() { [native code] }|toString|0|false|false")
+        );
+    }
+
+    /// Upstream 4c33f6d (tamperedFunctions): JS-backed builtins — constructors,
+    /// prototype methods, and accessors — must all report [native code].
+    #[test]
+    fn builtin_members_report_native_code() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let v = rt
+            .evaluate(
+                r#"(() => {
+                    const nodeTypeGet = Object.getOwnPropertyDescriptor(Node.prototype, "nodeType").get;
+                    return [String(Element), String(Node),
+                            String(Element.prototype.getAttribute),
+                            String(nodeTypeGet)].join("|");
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!(
+                "function Element() { [native code] }|function Node() { [native code] }|function getAttribute() { [native code] }|function get nodeType() { [native code] }"
+            )
+        );
+    }
+
+    /// Upstream 4c33f6d (unusualWindowProperties): internal globals must not
+    /// surface through any reflection API on the global object.
+    #[test]
+    fn internal_globals_are_hidden_from_all_reflection_apis() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let v = rt
+            .evaluate(
+                r#"(() => {
+                    const bad = (a) => a.filter(n => typeof n === "string" &&
+                        (n[0] === "_" || n.includes("obscura") || n.includes("Obscura"))).length;
+                    const descs = Object.getOwnPropertyDescriptors(window);
+                    return [bad(Object.getOwnPropertyNames(window)),
+                            bad(Reflect.ownKeys(window)),
+                            bad(Object.keys(window)),
+                            bad(Object.keys(descs))].join("|");
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(v, serde_json::json!("0|0|0|0"));
+    }
+
+    /// Upstream c7e7c70: WebIDL interface globals are non-enumerable in a real
+    /// browser (and stay callable).
+    #[test]
+    fn webidl_interface_globals_are_non_enumerable() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let v = rt
+            .evaluate(
+                r#"(() => {
+                    const names = ["Node", "Element", "Document", "Window",
+                                   "CSSStyleDeclaration", "DOMStringMap"];
+                    const enumerable = names.filter(n => {
+                        const d = Object.getOwnPropertyDescriptor(window, n);
+                        return !d || d.enumerable !== false;
+                    });
+                    return [enumerable.length, Object.keys(window).includes("Node"),
+                            typeof Node, document.body instanceof Element].join("|");
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(v, serde_json::json!("0|false|function|true"));
+    }
+
+    /// Upstream a0e1ba5: CSSStyleDeclaration is a real global interface — the
+    /// type of element.style — not merely pre-declared.
+    #[test]
+    fn cssstyledeclaration_is_a_usable_global_interface() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let v = rt
+            .evaluate(
+                "(function(){var d=Object.getOwnPropertyDescriptor(window,'CSSStyleDeclaration');return (typeof window.CSSStyleDeclaration)+'|'+(document.body.style instanceof CSSStyleDeclaration)+'|'+(d?d.enumerable:'missing');})()",
+            )
+            .unwrap();
+        assert_eq!(v, serde_json::json!("function|true|false"));
+    }
+
+    /// Upstream ec05ed0: dataset is backed by a real DOMStringMap instance
+    /// while data-* reflection stays dynamic.
+    #[test]
+    fn dom_string_map_is_exposed_and_backs_dataset() {
+        let mut rt =
+            setup_runtime(r#"<html><body><div id="x" data-foo="bar"></div></body></html>"#);
+        let v = rt
+            .evaluate(
+                r#"(() => {
+                    const el = document.getElementById("x");
+                    const ds = el.dataset;
+                    const iface = window.DOMStringMap;
+                    const d = Object.getOwnPropertyDescriptor(window, "DOMStringMap");
+                    let illegal = false;
+                    try { new iface(); } catch (e) { illegal = e instanceof TypeError; }
+                    ds.newKey = "1";
+                    const reflected = el.getAttribute("data-new-key");
+                    delete ds.foo;
+                    return [typeof iface, ds instanceof iface,
+                            Object.getPrototypeOf(ds) === iface.prototype,
+                            ds.constructor === iface,
+                            Object.prototype.toString.call(ds),
+                            d ? d.enumerable : "missing", illegal, reflected,
+                            el.hasAttribute("data-foo"), ds === el.dataset].join("|");
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!(
+                "function|true|true|true|[object DOMStringMap]|false|true|1|false|true"
+            )
+        );
+    }
+
+    /// Upstream 9dfc67a: the global's constructor identity is Window, not the
+    /// inherited Object — framework environment gates check it directly.
+    #[test]
+    fn global_window_has_browser_constructor_identity() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let v = rt
+            .evaluate(
+                "(() => [window === self, self.constructor === Window, window instanceof Window, self.document === document, self.navigator === navigator])()",
+            )
+            .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!([true, true, true, true, true])
+        );
     }
 }

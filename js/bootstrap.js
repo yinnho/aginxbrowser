@@ -47,6 +47,7 @@ const _domStrA1 = new Set([
   "query_selector", "query_selector_all", "get_element_by_id",
   "document_node_id", "document_title", "set_document_title", "document_url", "document_encoding",
   "document_element", "document_doctype",
+  "document_write", "document_write_reset",
 ]);
 const _domNumA2 = new Set(["append_child", "insert_before", "compare_order"]);
 const _dom = (cmd, a1, a2) => {
@@ -62,12 +63,18 @@ const _dom = (cmd, a1, a2) => {
 
 const _nativeFns = new Set();
 const _origToString = Function.prototype.toString;
-Function.prototype.toString = function() {
-  if (_nativeFns.has(this)) {
-    return `function ${this.name || ''}() { [native code] }`;
-  }
-  return _origToString.call(this);
-};
+// Method syntax gives the override the native function's shape: name
+// "toString", length 0, non-constructible, and no own `prototype` property
+// (upstream 846ed7d). A plain `function() {}` assignment leaks all four.
+const _functionToString = {
+  toString() {
+    if (_nativeFns.has(this)) {
+      return `function ${this.name || ''}() { [native code] }`;
+    }
+    return _origToString.call(this);
+  },
+}.toString;
+Function.prototype.toString = _functionToString;
 function _markNative(fn) { if (typeof fn === 'function') _nativeFns.add(fn); return fn; }
 // Mark every method AND accessor on a shim prototype as native. Lie
 // detectors (fingerprintjs-style) verify `Function.prototype.toString.call(fn)`
@@ -85,7 +92,7 @@ function _markNativeProto(proto) {
     if (typeof d.set === 'function') _markNative(d.set);
   }
 }
-_nativeFns.add(Function.prototype.toString);
+_nativeFns.add(_functionToString);
 
 [Error, TypeError, ReferenceError, SyntaxError, RangeError, URIError, EvalError].forEach(E => {
   try {
@@ -392,6 +399,18 @@ for (const _m of ["setProperty", "getPropertyValue", "getPropertyPriority", "rem
 _markNative(CSS2Properties);
 _markNativeProto(CSSStyleDeclaration.prototype);
 _markNativeProto(CSS2Properties.prototype);
+
+// DOMStringMap backs Element.dataset. Chrome throws on `new DOMStringMap()`;
+// the construction key keeps instances engine-only (upstream ec05ed0).
+const _domStringMapKey = {};
+class DOMStringMap {
+  constructor(key) {
+    if (key !== _domStringMapKey) {
+      throw new TypeError("Failed to construct 'DOMStringMap': Illegal constructor");
+    }
+  }
+  get [Symbol.toStringTag]() { return "DOMStringMap"; }
+}
 
 const _styleProxy = (decl) => new Proxy(decl, {
   get(t, p) {
@@ -1182,19 +1201,32 @@ class Element extends Node {
     return null;
   }
   insertAdjacentHTML(position, html) {
+    // Parse in the insertion element's context so table/select content
+    // survives — a fixed <div> context makes the fragment parser drop
+    // <tr>/<td>/<option> (set_inner_html parses with the target as context).
+    const pos = String(position).toLowerCase();
     const parent = this.parentNode;
-    switch (position) {
+    const context = (pos === 'beforebegin' || pos === 'afterend') ? parent : this;
+    const tag = context && context.nodeType === 1 ? String(context.tagName || 'body').toLowerCase() : 'body';
+    const tmp = document.createElement(tag);
+    tmp.innerHTML = html;
+    // Pop firstChild repeatedly: tmp.childNodes is LIVE, so indexing it while
+    // moving nodes out skips every other node.
+    const nodes = [];
+    let child;
+    while ((child = tmp.firstChild)) nodes.push(tmp.removeChild(child));
+    switch (pos) {
       case 'beforebegin':
-        if (parent) { const tmp = document.createElement('div'); tmp.innerHTML = html; const children = tmp.childNodes; for (let i = 0; i < children.length; i++) parent.insertBefore(children[i], this); }
+        if (parent) { for (const n of nodes) parent.insertBefore(n, this); }
         break;
       case 'afterbegin':
-        { const tmp = document.createElement('div'); tmp.innerHTML = html; const children = tmp.childNodes; const first = this.firstChild; for (let i = children.length - 1; i >= 0; i--) this.insertBefore(children[i], first); }
+        { const first = this.firstChild; for (const n of nodes) this.insertBefore(n, first); }
         break;
       case 'beforeend':
-        { const tmp = document.createElement('div'); tmp.innerHTML = html; const children = tmp.childNodes; for (let i = 0; i < children.length; i++) this.appendChild(children[i]); }
+        for (const n of nodes) this.appendChild(n);
         break;
       case 'afterend':
-        if (parent) { const tmp = document.createElement('div'); tmp.innerHTML = html; const children = tmp.childNodes; const next = this.nextSibling; for (let i = 0; i < children.length; i++) parent.insertBefore(children[i], next); }
+        if (parent) { const next = this.nextSibling; for (const n of nodes) parent.insertBefore(n, next); }
         break;
     }
   }
@@ -1772,10 +1804,42 @@ class Element extends Node {
   }
   get dataset() {
     const el = this;
-    return new Proxy({}, {
-      get(_, k) { if(typeof k!=="string")return undefined; return el.getAttribute("data-"+k.replace(/([A-Z])/g,"-$1").toLowerCase()); },
-      set(_, k, v) { el.setAttribute("data-"+k.replace(/([A-Z])/g,"-$1").toLowerCase(), v); return true; },
+    if (el._dataset) return el._dataset;
+    const attrFor = (k) => "data-" + String(k).replace(/([A-Z])/g, "-$1").toLowerCase();
+    const camel = (n) => n.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+    const dataKeys = () => (_domParse("attribute_names", el._nid) || [])
+      .filter((n) => n.startsWith("data-"))
+      .map(camel);
+    // Proxy target is a real DOMStringMap so `dataset instanceof DOMStringMap`
+    // and the [object DOMStringMap] tag hold; data-* reflection stays dynamic
+    // (upstream ec05ed0).
+    el._dataset = new Proxy(new DOMStringMap(_domStringMapKey), {
+      get(target, k, receiver) {
+        if (typeof k === "string" && el.hasAttribute(attrFor(k))) return el.getAttribute(attrFor(k));
+        return Reflect.get(target, k, receiver);
+      },
+      set(target, k, v, receiver) {
+        if (typeof k !== "string") return Reflect.set(target, k, v, receiver);
+        el.setAttribute(attrFor(k), String(v));
+        return true;
+      },
+      has(target, k) {
+        return (typeof k === "string" && el.hasAttribute(attrFor(k))) || Reflect.has(target, k);
+      },
+      deleteProperty(target, k) {
+        if (typeof k !== "string") return Reflect.deleteProperty(target, k);
+        el.removeAttribute(attrFor(k));
+        return true;
+      },
+      ownKeys() { return dataKeys(); },
+      getOwnPropertyDescriptor(target, k) {
+        if (typeof k === "string" && el.hasAttribute(attrFor(k))) {
+          return { value: el.getAttribute(attrFor(k)), writable: true, enumerable: true, configurable: true };
+        }
+        return Reflect.getOwnPropertyDescriptor(target, k);
+      },
     });
+    return el._dataset;
   }
   get offsetWidth() {
     if (this._isViewportRoot()) return (globalThis.innerWidth || 1280);
@@ -2353,16 +2417,52 @@ class Document extends Node {
     if (!v) return;
     _OPS.op_set_cookie(v);
   }
+  // Inserts into the document's input stream, which the host keeps alive across calls.
+  // Parsing each call on its own would lose every construct that spans two of them — a
+  // tag may be split anywhere, even mid tag-name (SAP UI5's cachebuster writes exactly
+  // that way: one call for "<script", one per attribute, then ">").
+  // https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-document-write
   write(...args) {
     var html = args.join('');
     if (!html) return;
     var body = this.body;
     if (!body) return;
-    var temp = this.createElement('div');
-    temp.innerHTML = html;
-    var children = temp.childNodes;
-    for (var i = 0; i < children.length; i++) {
-      body.appendChild(children[i]);
+    // The host parses into the input stream and returns [[parent, node], …], parents first.
+    // The insertion stays here, because appendChild does more than append: it reports the
+    // mutation and runs a written script.
+    var placements = _domParse("document_write", "", html) || [];
+    // The insertion point is the position of the running script. What it writes belongs
+    // behind it, not at the end of the body. The point moves along with every node placed,
+    // even across calls, so a script's second call lands behind the first instead of
+    // directly behind the script again.
+    var scriptNid = globalThis.__currentScriptNid || 0;
+    var after = null;
+    if (scriptNid) {
+      var anchorNid = this._writeAnchorScript === scriptNid && this._writeAnchorNid
+        ? this._writeAnchorNid
+        : scriptNid;
+      var anchor = _wrap(anchorNid);
+      if (anchor && anchor.parentNode) after = anchor;
+    }
+    for (var i = 0; i < placements.length; i++) {
+      var parentNid = +placements[i][0];
+      var node = _wrap(+placements[i][1]);
+      if (!node) continue;
+      if (parentNid) {
+        var parent = _wrap(parentNid);
+        if (parent) parent.appendChild(node);
+        continue;
+      }
+      if (after) {
+        after.parentNode.insertBefore(node, after.nextSibling);
+        after = node;
+      } else {
+        body.appendChild(node);
+      }
+    }
+    if (scriptNid && after) {
+      this._writeAnchorScript = scriptNid;
+      this._writeAnchorNid = after._nid;
     }
   }
   writeln(...args) {
@@ -2371,6 +2471,10 @@ class Document extends Node {
   open() {
     var body = this.body;
     if (body) body.innerHTML = '';
+    // A new parse begins. Whatever the input stream still held is gone.
+    _dom("document_write_reset");
+    this._writeAnchorScript = 0;
+    this._writeAnchorNid = 0;
     return this;
   }
   close() {
@@ -2572,6 +2676,15 @@ globalThis.Window = globalThis.Window || function Window() {};
 Object.defineProperty(globalThis.Window, Symbol.hasInstance, {
   value(obj) { return obj === globalThis || (obj && obj.window === obj); },
   configurable: true,
+});
+// Framework environment gates (Ember's among them) check the direct identity
+// `self.constructor === Window`; the inherited Object constructor sends them
+// down their server-rendering path (upstream 9dfc67a).
+Object.defineProperty(globalThis, 'constructor', {
+  value: globalThis.Window,
+  writable: true,
+  configurable: true,
+  enumerable: false,
 });
 
 
@@ -5163,6 +5276,11 @@ globalThis.DocumentType = DocumentType;
 globalThis.Node = Node;
 globalThis.Element = Element;
 globalThis.Document = Document;
+// Type of element.style / getComputedStyle(); the class binding above is
+// lexical, so without this `window.CSSStyleDeclaration` was undefined and
+// `el.style instanceof CSSStyleDeclaration` threw (upstream a0e1ba5).
+globalThis.CSSStyleDeclaration = CSSStyleDeclaration;
+globalThis.DOMStringMap = DOMStringMap;
 // XMLDocument is a subclass of Document (DOMParser of an XML type and
 // implementation.createDocument produce one). The interface must exist globally.
 if (typeof XMLDocument === "undefined") globalThis.XMLDocument = class XMLDocument extends Document {};
@@ -7295,22 +7413,47 @@ globalThis.__obscura_init = function() {
   // Non-configurable function declarations above (the engine's `_`-prefixed
   // helpers and `__obscura*` bookkeeping) cannot be deleted, so hide them at
   // the enumeration boundary instead: Radar's windowFeatures collector
-  // hashes Object.getOwnPropertyNames(window). The wrapper only filters the
-  // global object — every other receiver sees the untouched native result —
-  // and is marked native so toString lie-detectors report [native code].
+  // hashes Object.getOwnPropertyNames(window), and fingerprinting scripts
+  // also enumerate with Reflect.ownKeys / Object.keys /
+  // Object.getOwnPropertyDescriptors (upstream 4c33f6d). The wrappers only
+  // filter the global object — every other receiver sees the untouched
+  // native result — and are marked native so toString lie-detectors report
+  // [native code].
   if (!globalThis.__obscura_gopn_patched) {
     // Pattern, not the static hide list: `__obscura_objects` & friends are
     // created by the Rust init AFTER the snapshot froze the list, so they'd
     // slip through a membership check against it.
-    const _isInternal = n => n.startsWith('_') || n.includes('obscura') || n.includes('Obscura') || n === '__bootstrap';
+    const _isInternal = n => typeof n === 'string' && (n.startsWith('_') || n.includes('obscura') || n.includes('Obscura') || n === '__bootstrap');
     const _gopn = Object.getOwnPropertyNames;
-    const _filtered = _markNative(function getOwnPropertyNames(o) {
+    const _ownKeys = Reflect.ownKeys;
+    const _keys = Object.keys;
+    const _gopds = Object.getOwnPropertyDescriptors;
+    const _patch = (obj, key, impl) => {
+      _markNative(impl);
+      try { Object.defineProperty(impl, 'name', { value: key }); } catch(e) {}
+      try { Object.defineProperty(obj, key, { value: impl, writable: true, enumerable: false, configurable: true }); } catch(e) {}
+    };
+    _patch(Object, 'getOwnPropertyNames', function(o) {
       const names = _gopn(o);
       if (o !== globalThis) return names;
       return names.filter(n => !_isInternal(n));
     });
-    try { Object.defineProperty(_filtered, 'name', { value: 'getOwnPropertyNames' }); } catch(e) {}
-    Object.getOwnPropertyNames = _filtered;
+    _patch(Reflect, 'ownKeys', function(o) {
+      const names = _ownKeys(o);
+      if (o !== globalThis) return names;
+      return names.filter(n => !_isInternal(n));
+    });
+    _patch(Object, 'keys', function(o) {
+      const names = _keys(o);
+      if (o !== globalThis) return names;
+      return names.filter(n => !_isInternal(n));
+    });
+    _patch(Object, 'getOwnPropertyDescriptors', function(o) {
+      const all = _gopds(o);
+      if (o !== globalThis) return all;
+      for (const n of _gopn(all)) { if (_isInternal(n)) delete all[n]; }
+      return all;
+    });
     globalThis.__obscura_gopn_patched = true;
   }
   delete globalThis.__obscura_init;
@@ -7321,7 +7464,10 @@ globalThis.__obscura_init = function() {
 // globals defined by bootstrap that we want to hide and stashes them
 // for __obscura_init to consume on every subsequent page. The snapshot
 // preserves the array as a regular global.
-globalThis.__obscura_hide_list = Object.keys(globalThis).filter(k =>
+// getOwnPropertyNames, not Object.keys: internals already made non-enumerable
+// before this line would be omitted by Object.keys and escape the per-page
+// hiding below (upstream 4c33f6d).
+globalThis.__obscura_hide_list = Object.getOwnPropertyNames(globalThis).filter(k =>
   k.startsWith('_') || k.includes('obscura') || k.includes('Obscura')
 );
 
@@ -7884,3 +8030,48 @@ globalThis.dispatchEvent = function(event) {
   }
   return _windowDispatch.call(this, event);
 };
+
+// tamperedFunctions: every builtin constructor reachable from the global
+// object gets its prototype methods AND accessors marked native, plus the
+// constructor itself (upstream 4c33f6d). The per-site _markNative calls above
+// miss accessors and several constructors; pixelscan's tamperedFunctions check
+// flags e.g. an Element.prototype.nodeType getter whose toString leaks JS
+// source. Runs once at snapshot build time; genuinely-native V8 builtins
+// already report native, so only JS-backed members change.
+(function _markBuiltinsNative() {
+  const seen = new Set();
+  function walk(ctor) {
+    if (typeof ctor !== 'function') return;
+    _markNative(ctor);
+    const proto = ctor.prototype;
+    if (!proto || seen.has(proto)) return;
+    seen.add(proto);
+    _markNativeProto(proto);
+  }
+  const names = Object.getOwnPropertyNames(globalThis);
+  for (let i = 0; i < names.length; i++) {
+    if (!/^[A-Z]/.test(names[i])) continue;
+    let val;
+    try { val = globalThis[names[i]]; } catch (e) { continue; }
+    walk(val);
+  }
+})();
+
+// WebIDL interface globals are non-enumerable in a real browser;
+// `globalThis.X = X` assignments default to enumerable:true, and one line
+// detects it: Object.getOwnPropertyDescriptor(window, 'Node').enumerable
+// (upstream c7e7c70). In Chrome every capitalized global (all interfaces and
+// JS builtins) is non-enumerable, so sweep by name shape. Runs at snapshot
+// build time, before any page code; configurable is preserved so `var Node`
+// pages still run.
+(function _interfaceGlobalsNonEnumerable() {
+  const names = Object.getOwnPropertyNames(globalThis);
+  for (let i = 0; i < names.length; i++) {
+    if (!/^[A-Z]/.test(names[i])) continue;
+    let d;
+    try { d = Object.getOwnPropertyDescriptor(globalThis, names[i]); } catch (e) { continue; }
+    if (!d || !d.configurable || d.enumerable === false) continue;
+    d.enumerable = false;
+    try { Object.defineProperty(globalThis, names[i], d); } catch (e) {}
+  }
+})();

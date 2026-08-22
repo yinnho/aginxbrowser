@@ -453,6 +453,12 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // Warm up V8 on the main thread before any session/blocking thread creates
+    // an isolate: the first isolate's JSDispatchTable init is not safe to race
+    // from several threads (upstream obscura #430; construction itself is
+    // serialized inside the runtime).
+    std::mem::drop(obscura_js::runtime::ObscuraJsRuntime::new());
+
     // Check if running in MCP mode
     let args: Vec<String> = std::env::args().collect();
     if args.contains(&"--mcp".to_string()) {

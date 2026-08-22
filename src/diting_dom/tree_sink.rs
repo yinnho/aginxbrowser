@@ -246,10 +246,19 @@ pub fn parse_html(html: &str) -> DomTree {
 }
 
 pub fn parse_fragment(html: &str) -> DomTree {
-    use html5ever::tendril::TendrilSink;
-    use html5ever::{parse_fragment, ParseOpts, QualName};
-
     let context_name = QualName::new(None, ns!(html), local_name!("body"));
+    parse_fragment_with_context(html, context_name)
+}
+
+/// Parse a fragment using the actual insertion element as html5ever's
+/// context. Table/select content (`<tr>`, `<td>`, `<option>`…) only survives
+/// parsing inside its proper ancestor context; a fixed `<body>` context drops
+/// it. Parsing in an `<html>` context runs the "before head" insertion mode
+/// and synthesizes both `<head>` and `<body>` (see `DomTree::fragment_root`).
+pub fn parse_fragment_with_context(html: &str, context_name: QualName) -> DomTree {
+    use html5ever::tendril::TendrilSink;
+    use html5ever::{parse_fragment, ParseOpts};
+
     let tree = DomTree::new();
     parse_fragment(tree, ParseOpts::default(), context_name, vec![])
         .from_utf8()

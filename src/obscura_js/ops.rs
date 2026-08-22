@@ -58,6 +58,9 @@ pub struct ObscuraState {
     // `op_binding_called` op. Drained by the CDP layer after each dispatch
     // and emitted as `Runtime.bindingCalled` events.
     pub pending_binding_calls: Vec<(String, String)>,
+    /// The document's input stream for `document.write()`, created on the
+    /// first call. Why the calls share one parser is in `write_stream`.
+    pub(crate) write_stream: std::cell::RefCell<Option<crate::obscura_js::write_stream::DocumentWriteStream>>,
 }
 
 impl ObscuraState {
@@ -75,6 +78,7 @@ impl ObscuraState {
             intercept_counter: 0,
             intercept_enabled: false,
             pending_binding_calls: Vec::new(),
+            write_stream: std::cell::RefCell::new(None),
         }
     }
 }
@@ -286,10 +290,46 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 dom.detach(child);
             }
             if !arg2.is_empty() {
-                let fragment = crate::diting_dom::parse_fragment(&arg2);
-                let import_root = fragment.find_body_or_root();
+                let context_name = dom
+                    .with_node(target, |node| match &node.data {
+                        NodeData::Element { name, .. } => Some(name.clone()),
+                        _ => None,
+                    })
+                    .flatten();
+                let fragment = match context_name {
+                    Some(name) => crate::diting_dom::parse_fragment_with_context(&arg2, name),
+                    None => crate::diting_dom::parse_fragment(&arg2),
+                };
+                let import_root = fragment.fragment_root();
                 dom.import_children_from(target, &fragment, import_root);
             }
+            "true".into()
+        }
+        // document.write() feeds the document's input stream, so the calls
+        // share one parser and one tokenizer state. Returns the nodes that
+        // became complete with this call as [[parent, node], …], parents
+        // before children; a `parent` of 0 means the node belongs at the
+        // insertion point, which the JS caller knows. Nothing is inserted
+        // here: insertion must go through Node.appendChild on the JS side,
+        // which also reports the mutation and runs written scripts.
+        "document_write" => {
+            let mut slot = gs.write_stream.borrow_mut();
+            let stream = slot.get_or_insert_with(crate::obscura_js::write_stream::DocumentWriteStream::new);
+            let pairs: Vec<[i32; 2]> = stream
+                .write(&arg2, dom)
+                .iter()
+                .map(|placement| {
+                    [
+                        placement.parent.map_or(0, |id| id.index() as i32),
+                        placement.node.index() as i32,
+                    ]
+                })
+                .collect();
+            serde_json::to_string(&pairs).unwrap_or("[]".into())
+        }
+        // document.open() discards what the input stream holds and starts over.
+        "document_write_reset" => {
+            *gs.write_stream.borrow_mut() = None;
             "true".into()
         }
         "set_text_content" => {
@@ -614,6 +654,10 @@ async fn op_fetch_url(
         (jar, in_flight, itx, proxy_url)
     };
 
+    let mut override_url: Option<String> = None;
+    let mut override_method: Option<String> = None;
+    let mut override_headers: Option<HashMap<String, String>> = None;
+    let mut override_body: Option<String> = None;
     if let Some((tx, request_id)) = intercept_tx {
         let custom_headers: HashMap<String, String> = serde_json::from_str(&headers_json).unwrap_or_default();
         let (resolve_tx, resolve_rx) = tokio::sync::oneshot::channel();
@@ -646,14 +690,45 @@ async fn op_fetch_url(
                         "error": reason,
                     }).to_string());
                 }
-                Ok(InterceptResolution::Continue { url: _new_url, method: _new_method, headers: _new_headers, body: _new_body }) => {
-                    tracing::debug!("Interception: continue request {}", url);
+                Ok(InterceptResolution::Continue { url: new_url, method: new_method, headers: new_headers, body: new_body }) => {
+                    override_url = new_url;
+                    override_method = new_method;
+                    override_headers = new_headers;
+                    override_body = new_body;
                 }
                 Err(_) => {
                 }
             }
         }
     }
+
+    // Apply interception overrides (shadow the params for the rest of the op).
+    // A Continue rewrite of the URL must pass the same SSRF / private-network
+    // gate as the original request (checked above) and as redirects (checked
+    // below). Without this re-validation a rewrite to an internal address would
+    // bypass validate_fetch_url entirely.
+    let url = if let Some(new_url) = override_url {
+        if let Ok(parsed) = url::Url::parse(&new_url) {
+            if let Err(reason) = validate_fetch_url(&parsed) {
+                return Ok(serde_json::json!({
+                    "status": 0,
+                    "body": "",
+                    "url": new_url,
+                    "blocked": true,
+                    "error": format!("Intercept rewrite to forbidden URL blocked: {}", reason),
+                }).to_string());
+            }
+        }
+        new_url
+    } else {
+        url
+    };
+    let method = override_method.unwrap_or(method);
+    let body = override_body.unwrap_or(body);
+    let headers_json = match override_headers {
+        Some(h) => serde_json::to_string(&h).unwrap_or(headers_json),
+        None => headers_json,
+    };
 
     let client = select_request_client(&url, proxy_url.as_deref())
         .await

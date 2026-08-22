@@ -740,18 +740,22 @@ impl DomTree {
         self.append_child(parent_id, text_id);
     }
 
-    pub fn find_body_or_root(&self) -> NodeId {
+    /// The node whose children are a parsed fragment's top-level nodes: the
+    /// synthetic root `<html>` element html5ever wraps a fragment in, or the
+    /// document if there is none. Importing this node's children reproduces the
+    /// fragment as written.
+    ///
+    /// This must NOT descend into a synthesized `<body>`. A `<body>` child of
+    /// the root only appears when the fragment is parsed in the `<html>`
+    /// context (documentElement.innerHTML), where html5ever's "before head"
+    /// mode synthesizes both `<head>` and `<body>`; returning the body there
+    /// dropped the head siblings. Every other element context leaves the
+    /// parsed content directly under the root, so it is unaffected.
+    pub fn fragment_root(&self) -> NodeId {
         let doc = self.document();
         for child in self.children(doc) {
             if let Some(n) = self.get_node(child) {
                 if n.as_element().map(|name| name.local.as_ref() == "html").unwrap_or(false) {
-                    for html_child in self.children(child) {
-                        if let Some(hc) = self.get_node(html_child) {
-                            if hc.as_element().map(|name| name.local.as_ref() == "body").unwrap_or(false) {
-                                return html_child;
-                            }
-                        }
-                    }
                     return child;
                 }
             }
@@ -762,14 +766,19 @@ impl DomTree {
     pub fn import_children_from(&self, parent_id: NodeId, source: &DomTree, source_node: NodeId) {
         let source_children = source.children(source_node);
         for source_child_id in source_children {
-            self.import_node_from(parent_id, source, source_child_id);
+            let _ = self.import_node_from(parent_id, source, source_child_id);
         }
     }
 
-    fn import_node_from(&self, parent_id: NodeId, source: &DomTree, source_node_id: NodeId) {
+    /// Copies a node together with its subtree from `source` and attaches it to
+    /// `parent_id`. Returns the copy of `source_node_id` itself, so a caller
+    /// that keeps parsing into `source` (the document.write input stream) can
+    /// map the source node to its copy.
+    pub fn import_node_from(&self, parent_id: NodeId, source: &DomTree, source_node_id: NodeId) -> Option<NodeId> {
         // Iterative DFS with an explicit (dest_parent, source_node) stack so a
         // deeply nested source tree cannot overflow the thread stack. Children
         // are pushed in reverse so they are appended in document order.
+        let mut imported_root = None;
         let mut stack = vec![(parent_id, source_node_id)];
         while let Some((dest_parent, src_id)) = stack.pop() {
             let node_data = {
@@ -782,6 +791,10 @@ impl DomTree {
 
             let new_id = self.new_node(node_data);
             self.append_child(dest_parent, new_id);
+            // The first node off the stack is source_node_id itself.
+            if imported_root.is_none() {
+                imported_root = Some(new_id);
+            }
 
             // A <template>'s children hang off a separate contents document, so
             // the child walk below never reaches them. Worse, the cloned data
@@ -818,6 +831,7 @@ impl DomTree {
                 stack.push((new_id, child_id));
             }
         }
+        imported_root
     }
 
     pub fn len(&self) -> usize {
