@@ -112,9 +112,14 @@ impl BrowserContext {
         if stealth {
             client.block_trackers = true;
         }
+        // Resolution chain: explicit per-context UA → AGINXBROWSER_UA → the
+        // fingerprint pool's stable default (macOS Chrome 145; pin or rotate
+        // via OBSCURA_PROFILE / OBSCURA_ROTATE_PROFILE — see profiles.rs).
         let resolved_ua = user_agent.unwrap_or_else(|| {
             std::env::var("AGINXBROWSER_UA").unwrap_or_else(|_| {
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36".to_string()
+                crate::obscura_browser::profiles::select_profile()
+                    .user_agent
+                    .to_string()
             })
         });
         // Sync the http client's UA at construction so navigation requests pick it

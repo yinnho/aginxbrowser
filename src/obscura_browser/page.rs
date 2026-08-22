@@ -185,6 +185,11 @@ pub struct Page {
     // contract. Includes `Runtime.addBinding` shims so puppeteer's
     // `exposeFunction` bindings exist before inline `<script>` tags execute.
     preload_scripts: Vec<String>,
+    /// Page-scoped navigation deadline override. `None` falls back to
+    /// `OBSCURA_NAV_TIMEOUT_MS` (default 30s); set via
+    /// `set_navigation_timeout` when an automation request carries an
+    /// explicit per-call timeout (upstream parity).
+    navigation_timeout_ms: Option<u64>,
     /// Storm backoff for the idle pump: when a pump slice ends in a watchdog
     /// termination, the page's runaway loop (e.g. a MutationObserver that
     /// mutates in its own callback) re-queues itself on every subsequent
@@ -250,6 +255,7 @@ impl Page {
             intercept_block_patterns: Vec::new(),
             intercept_tx: None,
             preload_scripts: Vec::new(),
+            navigation_timeout_ms: None,
             storm_backoff_ms: 0,
             storm_hot_until: None,
             #[cfg(feature = "stealth")]
@@ -771,7 +777,44 @@ impl Page {
         // Direct automation navigations carry no referrer (upstream edb1785:
         // only document-initiated navigations set one; the JS-triggered chain
         // inside the inner loop stamps each subsequent hop).
-        self.referrer = String::new();
+        self.navigate_with_wait_post_ref(url_str, wait_until, method, body, "")
+            .await
+    }
+
+    /// Page-scoped navigation deadline: `set_navigation_timeout` when the
+    /// automation request carries an explicit timeout, else
+    /// `OBSCURA_NAV_TIMEOUT_MS` (default 30s). Complements the env var the
+    /// way upstream does (structured field over process-wide default).
+    fn navigation_timeout(&self) -> tokio::time::Duration {
+        let ms = self.navigation_timeout_ms.unwrap_or_else(|| {
+            std::env::var("OBSCURA_NAV_TIMEOUT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30_000)
+        });
+        tokio::time::Duration::from_millis(ms)
+    }
+
+    /// Set a page-scoped navigation deadline in milliseconds; `None` restores
+    /// the process-wide default.
+    pub fn set_navigation_timeout(&mut self, ms: Option<u64>) {
+        self.navigation_timeout_ms = ms;
+    }
+
+    async fn navigate_with_wait_post_ref(
+        &mut self,
+        url_str: &str,
+        wait_until: crate::obscura_browser::lifecycle::WaitUntil,
+        method: &str,
+        body: &str,
+        initial_referrer: &str,
+    ) -> Result<(), PageError> {
+        // The initiating document's contribution to `document.referrer` on
+        // the first hop. Empty for direct automation navigations; the page's
+        // own pending navigation (process_pending_navigation) passes a
+        // strict-origin-when-cross-origin value here. Subsequent hops of a
+        // JS-triggered chain are stamped inside the inner loop.
+        self.referrer = initial_referrer.to_string();
         // Hard ceiling on a single end-to-end navigation. Without this a slow
         // primary fetch or a runaway settle loop can hold the V8 lock for
         // arbitrarily long (we've measured 60+ seconds on JS-heavy news
@@ -779,12 +822,10 @@ impl Page {
         // dispatcher holds the lock across the entire handler. 30 seconds
         // matches reqwest's default per-request timeout — the worst case is
         // one slow primary GET plus one slow JS-redirect chain step. Override
-        // with `OBSCURA_NAV_TIMEOUT_MS=NN`.
-        let nav_timeout_ms: u64 = std::env::var("OBSCURA_NAV_TIMEOUT_MS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(30_000);
-        let nav_timeout = tokio::time::Duration::from_millis(nav_timeout_ms);
+        // with `OBSCURA_NAV_TIMEOUT_MS=NN`, or set a page-scoped deadline when
+        // the automation request already has an explicit timeout.
+        let nav_timeout = self.navigation_timeout();
+        let nav_timeout_ms = nav_timeout.as_millis() as u64;
 
         let result = match tokio::time::timeout(
             nav_timeout,
@@ -1523,18 +1564,41 @@ impl Page {
         self.preload_scripts = scripts;
     }
 
+    /// Append one preload script, keeping any already registered (CDP
+    /// `Page.addScriptToEvaluateOnNewDocument` is additive; our
+    /// `set_preload_scripts` replaces the whole group).
+    pub fn add_preload_script(&mut self, script: String) {
+        self.preload_scripts.push(script);
+    }
+
     pub async fn process_pending_navigation(&mut self) -> Result<bool, PageError> {
         if let Some((url, method, body)) = self.take_pending_navigation() {
-            self.navigate_with_wait_post(
+            // A navigation the page asked for itself is document-initiated:
+            // the first hop carries a referrer per
+            // strict-origin-when-cross-origin, unlike direct automation
+            // navigations which send none (upstream parity).
+            let source_url = self
+                .url
+                .as_ref()
+                .and_then(|source| {
+                    Url::parse(&url)
+                        .ok()
+                        .map(|target| navigation_referrer(source, &target))
+                })
+                .unwrap_or_default();
+            self.navigate_with_wait_post_ref(
                 &url,
                 crate::obscura_browser::lifecycle::WaitUntil::Load,
                 &method,
                 &body,
+                &source_url,
             )
             .await?;
             Ok(true)
         } else {
-            Ok(false)
+            // A page that routed itself through history has still navigated
+            // (SPA pushState adoption — see fork_virtual_url.rs).
+            Ok(self.sync_virtual_url())
         }
     }
 
@@ -2027,5 +2091,116 @@ mod tests {
         assert!(p.has_js());
         assert_eq!(p.evaluate("window.__mark"), serde_json::Value::Null);
         assert_eq!(p.evaluate("document.title"), serde_json::json!("Carry"));
+    }
+
+    // ---- batch 1: fork_virtual_url + preload push + nav timeout -----------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn process_pending_navigation_adopts_spa_pushstate_route() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![(
+            "/app",
+            200,
+            "<html><body><script>window.__booted = 1;</script></body></html>".into(),
+        )]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/app")).await.unwrap();
+        // SPA click handler: renders in place, moves the URL via pushState.
+        // (evaluate wraps single expressions only — `return (a; b)` would be
+        // a SyntaxError — so the call and the probe run separately.)
+        p.evaluate("history.pushState(null, '', '/app/settings')");
+        assert_eq!(
+            p.evaluate("globalThis.__virtualUrl"),
+            serde_json::json!(format!("http://127.0.0.1:{port}/app/settings"))
+        );
+        // The session pump has no pending navigation to process, but the page
+        // still routed itself — that counts (fork_virtual_url.rs).
+        assert!(p.process_pending_navigation().await.unwrap());
+        assert!(p.url_string().ends_with("/app/settings"));
+        assert!(p.history.last().unwrap().ends_with("/app/settings"));
+        // Idempotent: adopting the same virtual URL again changes nothing.
+        assert!(!p.process_pending_navigation().await.unwrap());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn process_pending_navigation_without_route_returns_false() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![(
+            "/plain",
+            200,
+            "<html><body>no scripts</body></html>".into(),
+        )]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/plain")).await.unwrap();
+        assert!(!p.process_pending_navigation().await.unwrap());
+        assert!(p.url_string().ends_with("/plain"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn process_pending_navigation_carries_hop1_referrer() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![
+            (
+                "/sender",
+                200,
+                "<html><body>plain document</body></html>".into(),
+            ),
+            (
+                "/receiver",
+                200,
+                "<html><script>window.__ref = document.referrer;</script></html>".into(),
+            ),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/sender")).await.unwrap();
+        assert!(p.url_string().ends_with("/sender"));
+        // Queue a navigation AFTER navigate() returned, the way a click
+        // handler on a live page does — the inner chain is done, so only the
+        // session pump's process_pending_navigation can pick it up.
+        p.evaluate("setTimeout(() => { location.href = '/receiver'; }, 100)");
+        let _ = p.settle_until_idle(3_000).await;
+        assert!(p.process_pending_navigation().await.unwrap());
+        assert!(p.url_string().ends_with("/receiver"));
+        // The page asked for this navigation itself, so unlike direct
+        // automation navigations the first hop carries a referrer.
+        assert_eq!(
+            p.evaluate("window.__ref"),
+            serde_json::json!(format!("http://127.0.0.1:{port}/sender"))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn add_preload_script_appends_in_order() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![(
+            "/target",
+            200,
+            "<html><script>window.__pageRan = (window.__order || '') + 'P';</script></html>".into(),
+        )]);
+        let mut p = test_page();
+        p.add_preload_script(
+            "window.__order = (window.__order || '') + '1';".into(),
+        );
+        p.add_preload_script(
+            "window.__order = (window.__order || '') + '2';".into(),
+        );
+        p.navigate(&format!("http://127.0.0.1:{port}/target")).await.unwrap();
+        // Push semantics: both scripts ran, in registration order, before the
+        // page's own script.
+        assert_eq!(p.evaluate("window.__pageRan"), serde_json::json!("12P"));
+    }
+
+    #[test]
+    fn navigation_timeout_field_overrides_env_default() {
+        let mut p = test_page();
+        let env_or_default = std::env::var("OBSCURA_NAV_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(30_000);
+        assert_eq!(p.navigation_timeout().as_millis() as u64, env_or_default);
+        p.set_navigation_timeout(Some(1_500));
+        assert_eq!(p.navigation_timeout().as_millis() as u64, 1_500);
+        p.set_navigation_timeout(None);
+        assert_eq!(p.navigation_timeout().as_millis() as u64, env_or_default);
     }
 }

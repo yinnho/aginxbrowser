@@ -23,8 +23,8 @@ screenshot.rs / mcp.rs）。
 | lifecycle.rs | 42 | 42 |
 | mod.rs | 7 | lib.rs 22 |
 | pdf.rs | — | 1027（PDF 导出，依赖 obscura-render） |
-| profiles.rs | — | 103（UA/平台指纹池） |
-| fork_virtual_url.rs | — | 43（SPA pushState URL 采纳） |
+| profiles.rs | 165（批次 1 吸收） | 103 |
+| fork_virtual_url.rs | 44（批次 1 吸收） | 43 |
 | **合计** | **1828** | **8256** |
 
 2026-06-19 内联快照后，上游对该 crate 有 **68 个 commit**。差距不是「我们落后
@@ -214,8 +214,40 @@ AGINXBROWSER_* 产品化环境变量、`__obscura_css` 注入时点（先于脚�
    修复：从完整 URL clone 派生（保留 scheme/host/port）。生产 80/443 站点
    恰好无感，属 6-19 快照里的潜伏 bug；上游现行代码已是同款 clone+set_path
    写法（page.rs:2812），我们独立收敛到同一修法。
-2. **批次 1（吸收 B 组小件）**：fork_virtual_url.rs（前端已就绪）+ profiles.rs
-   + add_preload_script + 导航超时组。改动集中、风险低。
+2. **批次 1（吸收 B 组小件）✅ 2026-08-23**：307→337 测试。
+   - **fork_virtual_url.rs**：整文件吸收（上游 fork commit d7dca7a，逐行同源）。
+     调用点吸收上游同款：`process_pending_navigation` 的 else 分支——泵没有
+     待处理导航时，页面自己 pushState 路由过也算导航（`sync_virtual_url()`
+     采纳 `__virtualUrl` 进 `self.url` + history）。session.rs 的命令循环
+     泵自动获得 SPA URL 跟随。
+   - **hop-1 referrer**：`navigate_with_wait_post` 拆出私有
+     `_ref(…, initial_referrer)` 变体（对齐上游 inner 的第 5 参）。
+     直达自动化导航传 `""`（语义不变，测试锁定）；`process_pending_navigation`
+     对页面自己发起的导航传 `navigation_referrer(source, target)`——此前泵
+     路径第一跳 referrer 恒空，与上游语义对齐。
+   - **profiles.rs**：指纹池 8 条（Win/Mac × Chrome 143–146）全量吸收 +
+     `OBSCURA_PROFILE` 钉选 / `OBSCURA_ROTATE_PROFILE` 轮换。**默认钉
+     `PROFILES[6]`（macOS Chrome 145）而非上游的 `PROFILES[0]`（Windows）**
+     ——保持未配置部署一贯的人格，避免静默换脸。context 解析链变为：
+     参数 → `AGINXBROWSER_UA` → `select_profile()`。**平台三元组字段
+     （platform/ua_platform/ua_platform_version）不吸收**：我们 bootstrap.js
+     的 `__obscuraPlatformFromUA` 直接从 UA 串推导 navigator.platform（百度
+     文库修法），对任意 UA 覆盖（含 AGINXBROWSER_UA 自定义串）都一致；
+     上游的显式全局量只覆盖池内 UA。
+   - **add_preload_script**：push 语义（CDP addScriptToEvaluateOnNewDocument
+     是追加制），与整组替换的 `set_preload_scripts` 并存。
+   - **set_navigation_timeout/navigation_timeout**：Page 级结构化超时字段，
+     None 时回落 `OBSCURA_NAV_TIMEOUT_MS`（默认 30s），与上游并存策略一致。
+   - **明确不吸收**（记档）：`evaluate_for_cdp_with_timeout` /
+     `call_function_on_for_cdp_with_timeout` / `settle_for_duration` /
+     `run_autonomous_event_loop_turn`——服务层无消费者，我们的
+     settle/settle_until_idle/pump_event_loop_slice 家族已覆盖同职能；
+     CDP 层将来需要超时版 eval 时再回来拿。
+   - 测试基建新坑记档：①`Page::evaluate`/`wrap_expression` 只包单表达式，
+     多语句脚本会被包成 `return (a; b)` 语法错误、静默返回 Null——测试里
+     拆开多次 evaluate；②`navigate()` 自带的 settle 窗口会追掉窗口内触发的
+     timer 导航（inner 链直接消化），要测泵路径必须在 navigate 返回后再
+     注入 timer。
 3. **批次 2（网络回调组）**：on_request/on_response 注册表 + response body
    存储/流式取回 + sync_js_network_events。为服务层网络可见性铺路。
 4. **批次 3（读通 + 改名 + C 组清算）**：全文件逐段精读一遍（此时已吸收
