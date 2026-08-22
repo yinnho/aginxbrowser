@@ -986,17 +986,24 @@ impl Page {
         if self.context.obey_robots {
             if let Some(domain) = url.host_str() {
                 if self.context.robots_cache.is_allowed(domain, "/robots.txt") {
-                    let robots_url = format!("{}://{}/robots.txt", url.scheme(), domain);
-                    if let Ok(robots_url) = Url::parse(&robots_url) {
-                        if let Ok(resp) = self.http_client.fetch(&robots_url).await {
-                            if resp.status == 200 {
-                                let body = String::from_utf8_lossy(&resp.body);
-                                self.context.robots_cache.parse_and_store(
-                                    domain,
-                                    &body,
-                                    &self.context.user_agent,
-                                );
-                            }
+                    // Derive robots.txt from the full URL, not by re-splicing
+                    // scheme+host: Url::host_str() drops the port, so a site
+                    // served on a non-standard port (local test servers,
+                    // intranet services) previously had its robots.txt fetch
+                    // sent to :80 — the fetch failed, the cache stayed empty,
+                    // and every path was allowed.
+                    let mut robots_url = url.clone();
+                    robots_url.set_path("/robots.txt");
+                    robots_url.set_query(None);
+                    robots_url.set_fragment(None);
+                    if let Ok(resp) = self.http_client.fetch(&robots_url).await {
+                        if resp.status == 200 {
+                            let body = String::from_utf8_lossy(&resp.body);
+                            self.context.robots_cache.parse_and_store(
+                                domain,
+                                &body,
+                                &self.context.user_agent,
+                            );
                         }
                     }
                 }
@@ -1564,5 +1571,461 @@ pub enum PageError {
 impl From<NetError> for PageError {
     fn from(e: NetError) -> Self {
         PageError::NetworkError(e.to_string())
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Holds PRIVATE_NET_ENV_LOCK for the test's duration and clears
+    /// OBSCURA_ALLOW_PRIVATE_NETWORK on exit so the ambient env never leaks
+    /// into the next test (several diting_net tests assert on the unset
+    /// state).
+    struct NetGuard(std::sync::MutexGuard<'static, ()>);
+    impl Drop for NetGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+        }
+    }
+    fn net_test_guard() -> NetGuard {
+        let guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+        NetGuard(guard)
+    }
+
+    /// Multi-path local HTTP server on 127.0.0.1. Bodies are owned Strings so
+    /// a route can embed the port of another server (cross-origin tests).
+    /// Answers up to 64 requests: one navigation may pull the document plus
+    /// stylesheets and scripts. Unmatched paths get a 404.
+    fn local_http_server(routes: Vec<(&'static str, u16, String)>) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for _ in 0..64 {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let path = String::from_utf8_lossy(&buf[..n])
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_string();
+                let (status, body) = routes
+                    .iter()
+                    .find(|(p, _, _)| *p == path)
+                    .map(|(_, s, b)| (*s, b.clone()))
+                    .unwrap_or((404, String::new()));
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        port
+    }
+
+    fn test_page() -> Page {
+        let context = Arc::new(BrowserContext::with_storage_and_network(
+            "test".into(),
+            None,
+            false,
+            None,
+            None,
+            true, // allow_private_network: tests talk to 127.0.0.1
+            None,
+        ));
+        Page::new("page-test".into(), context)
+    }
+
+    // ---- pure functions -------------------------------------------------
+
+    #[test]
+    fn subresource_allowed_policy_matrix() {
+        let http_page = Url::parse("http://example.com/page").ok();
+        let file_page = Url::parse("file:///tmp/x.html").ok();
+        assert!(subresource_allowed(http_page.as_ref(), "https://cdn.example.com/a.js"));
+        assert!(subresource_allowed(http_page.as_ref(), "data:text/javascript,1"));
+        assert!(!subresource_allowed(http_page.as_ref(), "file:///etc/passwd"));
+        assert!(subresource_allowed(file_page.as_ref(), "file:///tmp/sibling.js"));
+        assert!(!subresource_allowed(http_page.as_ref(), "javascript:alert(1)"));
+        assert!(!subresource_allowed(http_page.as_ref(), "not a url"));
+        // No page URL yet (pre-navigation): http(s) is still fine — there is
+        // nothing origin-sensitive to protect yet — but file: stays blocked.
+        assert!(subresource_allowed(None, "https://example.com/a.js"));
+        assert!(!subresource_allowed(None, "file:///etc/passwd"));
+    }
+
+    #[test]
+    fn cross_scheme_to_file_matrix() {
+        assert!(cross_scheme_to_file("http://a.com/", "file:///etc/passwd"));
+        assert!(cross_scheme_to_file("https://a.com/", "FILE:///etc/passwd"));
+        assert!(!cross_scheme_to_file("file:///tmp/a", "file:///tmp/b"));
+        assert!(!cross_scheme_to_file("http://a.com/", "https://b.com/"));
+        // Unparseable source is treated as non-file: block.
+        assert!(cross_scheme_to_file("::not-a-url::", "file:///etc/passwd"));
+    }
+
+    #[test]
+    fn navigation_referrer_matrix() {
+        let same = |a: &str, b: &str| {
+            navigation_referrer(&Url::parse(a).unwrap(), &Url::parse(b).unwrap())
+        };
+        // Same-origin: full URL, fragment and credentials stripped.
+        assert_eq!(
+            same("http://example.com/a#frag", "http://example.com/b"),
+            "http://example.com/a"
+        );
+        assert_eq!(
+            same("http://user:pw@example.com/a", "http://example.com/b"),
+            "http://example.com/a"
+        );
+        // Cross-origin: origin + '/' only.
+        assert_eq!(
+            same("http://example.com/a/b?c=1", "http://other.com/d"),
+            "http://example.com/"
+        );
+        // Downgrade and non-HTTP schemes: nothing.
+        assert_eq!(same("https://example.com/a", "http://example.com/b"), "");
+        assert_eq!(same("file:///tmp/a", "http://example.com/b"), "");
+    }
+
+    #[test]
+    fn decode_data_uri_variants() {
+        assert_eq!(
+            decode_data_uri("data:text/html,%3Cp%3Ehi%3C/p%3E"),
+            Some(b"<p>hi</p>".to_vec())
+        );
+        assert_eq!(
+            decode_data_uri("data:application/js;base64,d2luZG93LmE9MQ=="),
+            Some(b"window.a=1".to_vec())
+        );
+        // Base64 with embedded whitespace is tolerated.
+        assert_eq!(decode_data_uri("data:;base64,\n aGk="), Some(b"hi".to_vec()));
+        assert_eq!(decode_data_uri("data:no-comma"), None);
+        assert_eq!(decode_data_uri("http://example.com/"), None);
+    }
+
+    #[test]
+    fn escape_for_js_template_literal_blocks_breakouts() {
+        // Exact escaped forms: every breakout character becomes a backslash
+        // escape, so no unescaped ` or ${ can terminate the literal early.
+        assert_eq!(escape_for_js_template_literal("a`b${c}"), "a\\`b\\${c}");
+        assert_eq!(escape_for_js_template_literal("x\u{2028}y\u{2029}"), "x\\u2028y\\u2029");
+        // \n has no dedicated arm; it falls through the generic <0x20 branch.
+        assert_eq!(escape_for_js_template_literal("\0\r\n"), "\\0\\r\\u000a");
+        assert_eq!(escape_for_js_template_literal("plain"), "plain");
+    }
+
+    // ---- history --------------------------------------------------------
+
+    #[test]
+    fn push_history_dedupes_consecutive_and_truncates_forward() {
+        let mut p = test_page();
+        p.push_history("http://a/1".into());
+        p.push_history("http://a/1".into()); // duplicate: ignored
+        assert_eq!(p.history, vec!["http://a/1"]);
+        p.push_history("http://a/2".into());
+        assert_eq!(p.history_index, 1);
+        p.set_history_index(0); // go back
+        p.push_history("http://a/3".into()); // clobbers forward entry
+        assert_eq!(p.history, vec!["http://a/1", "http://a/3"]);
+        assert_eq!(p.history_index, 1);
+        p.set_history_index(99); // out of bounds: no-op
+        assert_eq!(p.history_index, 1);
+    }
+
+    // ---- no-network navigations ------------------------------------------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn about_blank_initializes_realm_and_runs_preload_scripts() {
+        let mut p = test_page();
+        p.set_preload_scripts(vec!["window.__pre = 'yes';".into()]);
+        p.navigate("about:blank").await.unwrap();
+        assert_eq!(p.lifecycle, LifecycleState::Loaded);
+        assert_eq!(p.evaluate("window.__pre"), serde_json::json!("yes"));
+        assert_eq!(p.url_string(), "about:blank");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn data_uri_document_executes_script_and_sets_title() {
+        let mut p = test_page();
+        p.navigate("data:text/html,%3Cscript%3Ewindow.__x%3D'ran'%3C/script%3E%3Ctitle%3ET%3C/title%3E")
+            .await
+            .unwrap();
+        assert_eq!(p.evaluate("window.__x"), serde_json::json!("ran"));
+        assert_eq!(p.title, "T");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn navigate_blank_resets_state() {
+        let mut p = test_page();
+        p.title = "stale".into();
+        p.navigate_blank();
+        assert_eq!(p.url_string(), "about:blank");
+        assert_eq!(p.title, "");
+        assert_eq!(p.lifecycle, LifecycleState::Loaded);
+        assert!(p.js.is_none());
+    }
+
+    // ---- navigation chains over a local server ---------------------------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn js_triggered_navigation_chain_lands_on_final_page() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![
+            ("/a", 200, "<html><script>location.href = '/b';</script></html>".into()),
+            ("/b", 200, "<html><head><title>B-Landed</title></head><body><script>window.__here = document.URL;</script></body></html>".into()),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/a")).await.unwrap();
+        assert_eq!(p.url_string(), format!("http://127.0.0.1:{port}/b"));
+        assert_eq!(p.title, "B-Landed");
+        assert!(p.evaluate("window.__here").as_str().unwrap().ends_with("/b"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chain_hop_sets_same_origin_referrer() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![
+            ("/a", 200, "<html><script>location.href = '/b';</script></html>".into()),
+            ("/b", 200, "<html><script>window.__ref = document.referrer;</script></html>".into()),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/a")).await.unwrap();
+        assert_eq!(
+            p.evaluate("window.__ref"),
+            serde_json::json!(format!("http://127.0.0.1:{port}/a"))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cross_origin_chain_referrer_is_origin_only() {
+        let _g = net_test_guard();
+        // Different ports on 127.0.0.1 are different origins.
+        let port_b = local_http_server(vec![(
+            "/b",
+            200,
+            "<html><script>window.__ref = document.referrer;</script></html>".into(),
+        )]);
+        let port_a = local_http_server(vec![(
+            "/a",
+            200,
+            format!(
+                "<html><script>location.href = 'http://127.0.0.1:{port_b}/b';</script></html>"
+            ),
+        )]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port_a}/a")).await.unwrap();
+        assert_eq!(
+            p.evaluate("window.__ref"),
+            serde_json::json!(format!("http://127.0.0.1:{port_a}/"))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn direct_navigation_leaves_referrer_empty() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![(
+            "/a",
+            200,
+            "<html><script>window.__ref = document.referrer;</script></html>".into(),
+        )]);
+        let mut p = test_page();
+        // An earlier navigation must not leak into the next one's referrer.
+        p.navigate(&format!("http://127.0.0.1:{port}/a")).await.unwrap();
+        p.navigate(&format!("http://127.0.0.1:{port}/a")).await.unwrap();
+        assert_eq!(p.evaluate("window.__ref"), serde_json::json!(""));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sop_blocks_js_navigation_into_file_scheme() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![(
+            "/a",
+            200,
+            "<html><script>location.href = 'file:///etc/passwd';</script></html>".into(),
+        )]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/a")).await.unwrap();
+        // The chain loop breaks instead of navigating; we stay on /a.
+        assert_eq!(p.url_string(), format!("http://127.0.0.1:{port}/a"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn subresource_gate_blocks_file_script_src() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![(
+            "/a",
+            200,
+            "<html><body><script src=\"file:///tmp/evil.js\"></script><script>window.__pwned = 'inline-ran';</script></body></html>".into(),
+        )]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/a")).await.unwrap();
+        // The inline script after the file: src still ran, but nothing could
+        // have been loaded from file: — assert the page survived and no file
+        // fetch shows up in the network log.
+        assert_eq!(p.evaluate("window.__pwned"), serde_json::json!("inline-ran"));
+        assert!(p.network_events.iter().all(|e| !e.url.starts_with("file:")));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn js_chain_over_limit_reports_too_many_redirects() {
+        let _g = net_test_guard();
+        // Every /hopN page redirects to /hop{N+1}: an infinite JS chain that
+        // must stop at REDIRECT_LIMIT (10) with TooManyRedirects.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for _ in 0..64 {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let path = String::from_utf8_lossy(&buf[..n])
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/hop0")
+                    .to_string();
+                let next = match path.strip_prefix("/hop").and_then(|n| n.parse::<usize>().ok()) {
+                    Some(n) => format!("/hop{}", n + 1),
+                    None => "/hop0".to_string(),
+                };
+                let body = format!("<html><script>location.href = '{next}';</script></html>");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        let mut p = test_page();
+        let err = p
+            .navigate(&format!("http://127.0.0.1:{port}/hop0"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PageError::TooManyRedirects(10)), "got {err:?}");
+    }
+
+    // ---- wait semantics & network events ---------------------------------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn subresources_recorded_as_network_events() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![
+            ("/a", 200, "<html><head><link rel=\"stylesheet\" href=\"/s.css\"></head><body><script src=\"/x.js\"></script></body></html>".into()),
+            ("/s.css", 200, "body{color:red}".into()),
+            ("/x.js", 200, "window.__js = 'loaded';".into()),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/a")).await.unwrap();
+        assert_eq!(p.evaluate("window.__js"), serde_json::json!("loaded"));
+        let kinds: Vec<&str> = p.network_events.iter().map(|e| e.resource_type.as_str()).collect();
+        assert!(kinds.contains(&"Document"), "kinds: {kinds:?}");
+        assert!(kinds.contains(&"Stylesheet"), "kinds: {kinds:?}");
+        assert!(kinds.contains(&"Script"), "kinds: {kinds:?}");
+        // request_id is page-id scoped.
+        assert!(p
+            .network_events
+            .iter()
+            .all(|e| e.request_id.starts_with("page-test.")));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn domcontentloaded_wait_returns_after_scripts_execute() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![(
+            "/a",
+            200,
+            "<html><head><title>DCL</title></head><body><script>window.__ran = 'yes';</script></body></html>".into(),
+        )]);
+        let mut p = test_page();
+        p.navigate_with_wait(
+            &format!("http://127.0.0.1:{port}/a"),
+            crate::obscura_browser::lifecycle::WaitUntil::DomContentLoaded,
+        )
+        .await
+        .unwrap();
+        // DCL means DOM parsed AND scripts executed.
+        assert_eq!(p.evaluate("window.__ran"), serde_json::json!("yes"));
+        assert_eq!(p.lifecycle, LifecycleState::DomContentLoaded);
+    }
+
+    // ---- robots ------------------------------------------------------------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn obey_robots_blocks_disallowed_and_allows_rest() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![
+            ("/robots.txt", 200, "User-agent: *\nDisallow: /private\n".into()),
+            ("/public", 200, "<html><title>pub</title></html>".into()),
+            ("/private", 200, "<html><title>secret</title></html>".into()),
+        ]);
+        let mut context = BrowserContext::with_storage_and_network(
+            "robots".into(),
+            None,
+            false,
+            None,
+            None,
+            true,
+            None,
+        );
+        context.obey_robots = true;
+        let mut p = Page::new("p".into(), Arc::new(context));
+        let err = p
+            .navigate(&format!("http://127.0.0.1:{port}/private"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("robots"), "got {err:?}");
+        assert_eq!(p.lifecycle, LifecycleState::Failed);
+        p.navigate(&format!("http://127.0.0.1:{port}/public"))
+            .await
+            .unwrap();
+        assert_eq!(p.title, "pub");
+    }
+
+    // ---- suspend / resume ---------------------------------------------------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn suspend_resume_preserves_dom_and_rebuilds_realm() {
+        let mut p = test_page();
+        p.navigate("data:text/html,%3Cscript%3Ewindow.__mark%3D'old'%3C/script%3E%3Ctitle%3ECarry%3C/title%3E")
+            .await
+            .unwrap();
+        assert_eq!(p.evaluate("window.__mark"), serde_json::json!("old"));
+        p.suspend_js();
+        assert!(!p.has_js());
+        // DOM survives suspension and stays queryable.
+        let title = p
+            .with_dom(|dom| {
+                dom.query_selector("title")
+                    .ok()
+                    .flatten()
+                    .map(|nid| dom.text_content(nid))
+            })
+            .flatten();
+        assert_eq!(title.as_deref(), Some("Carry"));
+        // Static evaluate fallback with no runtime.
+        assert_eq!(p.evaluate("document.title"), serde_json::json!("Carry"));
+        assert_eq!(
+            p.evaluate("window.location.href"),
+            serde_json::json!(p.url_string())
+        );
+        assert_eq!(p.evaluate("1 + 1"), serde_json::Value::Null);
+        // Resume rebuilds the realm: page state (window.__mark) is gone —
+        // init_js never carries the old realm across.
+        p.resume_js();
+        assert!(p.has_js());
+        assert_eq!(p.evaluate("window.__mark"), serde_json::Value::Null);
+        assert_eq!(p.evaluate("document.title"), serde_json::json!("Carry"));
     }
 }
