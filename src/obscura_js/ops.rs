@@ -100,6 +100,14 @@ fn op_dom(state: &OpState, #[string] cmd: String, #[string] arg1: String, #[stri
 }
 
 fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> String {
+    // Title write goes to shared state (the getter reads gs.title), so it must
+    // happen before the immutable borrow below — and before the `gs.dom` early
+    // return, since a document always has a title even with an empty tree.
+    if cmd == "set_document_title" {
+        let gs = state.borrow::<SharedState>().clone();
+        gs.borrow_mut().title = arg1;
+        return "null".into();
+    }
     let gs = state.borrow::<SharedState>().clone();
     let gs = gs.borrow();
     let dom = match &gs.dom {

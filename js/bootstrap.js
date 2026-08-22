@@ -45,7 +45,7 @@ const _domStrA1 = new Set([
   "create_processing_instruction", "create_doctype",
   "create_document_fragment",
   "query_selector", "query_selector_all", "get_element_by_id",
-  "document_node_id", "document_title", "document_url", "document_encoding",
+  "document_node_id", "document_title", "set_document_title", "document_url", "document_encoding",
   "document_element", "document_doctype",
 ]);
 const _domNumA2 = new Set(["append_child", "insert_before", "compare_order"]);
@@ -2021,7 +2021,19 @@ class Document extends Node {
     return this._doctype;
   }
   get title() { return _domParse("document_title") ?? ""; }
-  set title(v) {}
+  // Spec: setting document.title updates the <title> element's text, creating
+  // one under <head> if missing. The op keeps the Rust-side title (used for
+  // navigation responses) in sync; the DOM write keeps querySelector('title')
+  // and outerHTML consistent with what the page set.
+  set title(v) {
+    v = String(v);
+    _dom("set_document_title", v);
+    const head = this.head;
+    if (!head) return;
+    let el = head.querySelector("title");
+    if (!el) { el = this.createElement("title"); head.appendChild(el); }
+    el.textContent = v;
+  }
   get URL() { return _domParse("document_url") ?? ""; }
   get documentURI() { return this.URL; }
   get location() { return globalThis.location; }
