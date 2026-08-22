@@ -218,7 +218,10 @@ impl TreeSink for DomTree {
         x == y
     }
 
-    fn set_quirks_mode(&self, _mode: QuirksMode) {
+    fn set_quirks_mode(&self, mode: QuirksMode) {
+        // Only full quirks mode makes CSS class/id selectors case-insensitive;
+        // limited-quirks behaves like no-quirks for selector matching.
+        self.set_quirks(mode == QuirksMode::Quirks);
     }
 
     fn is_mathml_annotation_xml_integration_point(&self, target: &NodeId) -> bool {

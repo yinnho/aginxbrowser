@@ -199,6 +199,37 @@ impl<'a> DomElement<'a> {
     pub fn new(tree: &'a DomTree, node_id: NodeId) -> Self {
         DomElement { tree, node_id }
     }
+
+    /// Is this a form control element that `:enabled`/`:disabled` apply to?
+    fn is_form_control(&self) -> bool {
+        self.tree
+            .with_node(self.node_id, |n| {
+                n.as_element()
+                    .map(|name| {
+                        matches!(
+                            name.local.as_ref(),
+                            "input"
+                                | "button"
+                                | "select"
+                                | "textarea"
+                                | "optgroup"
+                                | "option"
+                                | "fieldset"
+                        )
+                    })
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    }
+
+    /// A boolean HTML attribute's presence (its value does not matter: per
+    /// HTML, `disabled=""`, `disabled="disabled"`, and bare `disabled` are
+    /// all equally "set").
+    fn has_boolean_attr(&self, name: &str) -> bool {
+        self.tree
+            .with_node(self.node_id, |n| n.get_attribute(name).is_some())
+            .unwrap_or(false)
+    }
 }
 
 impl<'a> std::fmt::Debug for DomElement<'a> {
@@ -374,10 +405,26 @@ impl<'a> Element for DomElement<'a> {
 
     fn match_non_ts_pseudo_class(
         &self,
-        _pc: &PseudoClass,
+        pc: &PseudoClass,
         _context: &mut MatchingContext<'_, Self::Impl>,
     ) -> bool {
-        false
+        match pc {
+            // :enabled/:disabled/:checked reflect real, static DOM state (the
+            // disabled/checked/selected attributes), not live user interaction,
+            // so they resolve the same way against a static snapshot as they
+            // would in a browser that never received an input event. Component
+            // systems (Material, Bootstrap, ...) lean on :enabled for base
+            // styling, so treating it as unconditionally false made every such
+            // rule silently inert.
+            PseudoClass::Enabled => self.is_form_control() && !self.has_boolean_attr("disabled"),
+            PseudoClass::Disabled => self.is_form_control() && self.has_boolean_attr("disabled"),
+            PseudoClass::Checked => {
+                self.has_boolean_attr("checked") || self.has_boolean_attr("selected")
+            }
+            // Dynamic user-interaction pseudo-classes have no meaning against
+            // a static DOM snapshot with no live user input.
+            PseudoClass::Hover | PseudoClass::Active | PseudoClass::Focus => false,
+        }
     }
 
     fn match_pseudo_element(
@@ -560,16 +607,21 @@ impl DomTree {
         // Fast path: a bare "#id" selector resolves through the id index in O(1)
         // instead of scanning every descendant. The index holds the first element
         // in tree order per id, which is exactly what the full scan would return.
-        if let Some(id) = simple_id_selector(selector) {
-            match self.get_element_by_id(id) {
-                // querySelector matches strict descendants of root only, so the
-                // indexed element must have root among its ancestors.
-                Some(nid) if self.ancestors(nid).contains(&root) => return Ok(Some(nid)),
-                // No element has this id at all: a bare id selector cannot match.
-                None => return Ok(None),
-                // Indexed (first) element is not under a scoped root; a later
-                // duplicate could still be a descendant, so fall through to scan.
-                Some(_) => {}
+        // In quirks mode `#id` matches ASCII-case-insensitively, but the id index
+        // is keyed on the exact-case id, so skip the fast path and let the
+        // selector engine do the case-insensitive match.
+        if !self.is_quirks() {
+            if let Some(id) = simple_id_selector(selector) {
+                match self.get_element_by_id(id) {
+                    // querySelector matches strict descendants of root only, so the
+                    // indexed element must have root among its ancestors.
+                    Some(nid) if self.ancestors(nid).contains(&root) => return Ok(Some(nid)),
+                    // No element has this id at all: a bare id selector cannot match.
+                    None => return Ok(None),
+                    // Indexed (first) element is not under a scoped root; a later
+                    // duplicate could still be a descendant, so fall through to scan.
+                    Some(_) => {}
+                }
             }
         }
         let selector_list = parse_selector(selector)?;
@@ -578,7 +630,7 @@ impl DomTree {
             MatchingMode::Normal,
             None,
             &mut caches,
-            QuirksMode::NoQuirks,
+            self.selector_quirks_mode(),
             NeedsSelectorFlags::No,
             MatchingForInvalidation::No,
         );
@@ -599,6 +651,16 @@ impl DomTree {
         Ok(None)
     }
 
+    // Map the document's quirks flag onto the selector crate's QuirksMode. In
+    // quirks mode the crate matches class/id selectors ASCII-case-insensitively.
+    fn selector_quirks_mode(&self) -> QuirksMode {
+        if self.is_quirks() {
+            QuirksMode::Quirks
+        } else {
+            QuirksMode::NoQuirks
+        }
+    }
+
     pub fn query_selector_all_from(&self, root: NodeId, selector: &str) -> Result<Vec<NodeId>, String> {
         let selector_list = parse_selector(selector)?;
         let mut caches = selectors::context::SelectorCaches::default();
@@ -606,7 +668,7 @@ impl DomTree {
             MatchingMode::Normal,
             None,
             &mut caches,
-            QuirksMode::NoQuirks,
+            self.selector_quirks_mode(),
             NeedsSelectorFlags::No,
             MatchingForInvalidation::No,
         );
@@ -750,5 +812,49 @@ mod tests {
         assert!(tree.query_selector_from(root, ".x").unwrap().is_none());
         // `span` finds the child.
         assert!(tree.query_selector_from(root, "span").unwrap().is_some());
+    }
+
+    #[test]
+    fn test_quirks_mode_class_id_case_insensitive() {
+        // No doctype => full quirks mode: class and id selectors match
+        // ASCII-case-insensitively (legacy pages depend on this).
+        let quirks = parse_html(r#"<div class="Foo" id="Main">x</div>"#);
+        assert!(quirks.is_quirks(), "no-doctype document must parse as quirks");
+        assert!(quirks.query_selector(".foo").unwrap().is_some());
+        assert!(quirks.query_selector(".FOO").unwrap().is_some());
+        assert!(quirks.query_selector("#main").unwrap().is_some());
+
+        // With a doctype => no-quirks: class/id match case-sensitively.
+        let strict = parse_html(
+            r#"<!DOCTYPE html><html><body><div class="Foo" id="Main">x</div></body></html>"#,
+        );
+        assert!(!strict.is_quirks());
+        assert!(strict.query_selector(".Foo").unwrap().is_some());
+        assert!(strict.query_selector(".foo").unwrap().is_none());
+        assert!(strict.query_selector("#main").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_enabled_disabled_checked_match_dom_state() {
+        let tree = parse_html(
+            r#"<form>
+                <input type="text" name="a">
+                <input type="text" name="b" disabled>
+                <input type="checkbox" name="c" checked>
+                <button name="d">go</button>
+                <select name="e"><option selected>x</option><option>y</option></select>
+            </form>"#,
+        );
+
+        let enabled = tree.query_selector_all("input:enabled").unwrap();
+        assert_eq!(enabled.len(), 2, "two non-disabled inputs: {enabled:?}");
+        let disabled = tree.query_selector_all("input:disabled").unwrap();
+        assert_eq!(disabled.len(), 1);
+        let checked = tree.query_selector_all(":checked").unwrap();
+        assert_eq!(checked.len(), 2, "checkbox[checked] + option[selected]: {checked:?}");
+
+        // :enabled on a non-form-control never matches.
+        let tree2 = parse_html(r#"<div>plain</div>"#);
+        assert!(tree2.query_selector("div:enabled").unwrap().is_none());
     }
 }

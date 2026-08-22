@@ -37,6 +37,27 @@ pub struct Attribute {
     pub value: String,
 }
 
+impl Attribute {
+    pub fn qualified_name(&self) -> String {
+        match &self.name.prefix {
+            Some(prefix) => format!("{}:{}", prefix, self.name.local),
+            None => self.name.local.to_string(),
+        }
+    }
+
+    pub fn qualified_name_eq(&self, name: &str) -> bool {
+        match &self.name.prefix {
+            Some(prefix) => {
+                name.len() == prefix.len() + self.name.local.len() + 1
+                    && name.starts_with(prefix.as_ref())
+                    && name.as_bytes().get(prefix.len()) == Some(&b':')
+                    && &name[prefix.len() + 1..] == self.name.local.as_ref()
+            }
+            None => self.name.local.as_ref() == name,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum NodeData {
     Document,
@@ -110,7 +131,7 @@ impl Node {
 
     pub fn get_attribute(&self, name: &str) -> Option<&str> {
         self.attrs()?.iter().find_map(|a| {
-            if a.name.local.as_ref() == name {
+            if a.qualified_name_eq(name) {
                 Some(a.value.as_str())
             } else {
                 None
@@ -120,7 +141,10 @@ impl Node {
 
     pub fn set_attribute(&mut self, name: &str, value: String) {
         if let NodeData::Element { attrs, .. } = &mut self.data {
-            if let Some(attr) = attrs.iter_mut().find(|a| a.name.local.as_ref() == name) {
+            // Match by qualified name: a parsed namespaced attribute is stored
+            // with a separate prefix (xlink:href -> prefix="xlink", local="href"),
+            // so matching on local name alone would miss it and push a duplicate.
+            if let Some(attr) = attrs.iter_mut().find(|a| a.qualified_name_eq(name)) {
                 attr.value = value;
             } else {
                 attrs.push(Attribute {
@@ -128,6 +152,43 @@ impl Node {
                     value,
                 });
             }
+        }
+    }
+
+    pub fn get_attribute_ns(&self, ns: &str, local: &str) -> Option<&str> {
+        self.attrs()?.iter().find_map(|a| {
+            if a.name.ns.as_ref() == ns && a.name.local.as_ref() == local {
+                Some(a.value.as_str())
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn set_attribute_ns(&mut self, ns: &str, qualified: &str, value: String) {
+        if let NodeData::Element { attrs, .. } = &mut self.data {
+            let (prefix, local) = match qualified.split_once(':') {
+                Some((p, l)) => (Some(html5ever::Prefix::from(p)), l),
+                None => (None, qualified),
+            };
+            if let Some(attr) = attrs
+                .iter_mut()
+                .find(|a| a.name.ns.as_ref() == ns && a.name.local.as_ref() == local)
+            {
+                attr.name.prefix = prefix;
+                attr.value = value;
+            } else {
+                attrs.push(Attribute {
+                    name: QualName::new(prefix, Namespace::from(ns), LocalName::from(local)),
+                    value,
+                });
+            }
+        }
+    }
+
+    pub fn remove_attribute_ns(&mut self, ns: &str, local: &str) {
+        if let NodeData::Element { attrs, .. } = &mut self.data {
+            attrs.retain(|a| !(a.name.ns.as_ref() == ns && a.name.local.as_ref() == local));
         }
     }
 
@@ -148,6 +209,9 @@ pub(crate) struct DomTreeInner {
     pub(crate) free_list: Vec<u32>,
     pub(crate) document: NodeId,
     pub(crate) id_index: HashMap<String, NodeId>,
+    // Whether the document was parsed in (full) quirks mode; quirks makes CSS
+    // class/id selectors ASCII-case-insensitive.
+    pub(crate) quirks: bool,
 }
 
 impl DomTree {
@@ -167,12 +231,28 @@ impl DomTree {
                 free_list: Vec::new(),
                 document: NodeId(0),
                 id_index: HashMap::new(),
+                quirks: false,
             }),
         }
     }
 
     pub fn document(&self) -> NodeId {
         self.inner.borrow().document
+    }
+
+    pub fn set_quirks(&self, quirks: bool) {
+        self.inner.borrow_mut().quirks = quirks;
+    }
+
+    pub fn is_quirks(&self) -> bool {
+        self.inner.borrow().quirks
+    }
+
+    // Number of node slots (live plus freed). A well-formed subtree has at
+    // most this many nodes, so it is a safe ceiling for iterative walkers
+    // that need a cycle backstop.
+    pub(crate) fn node_slot_count(&self) -> usize {
+        self.inner.borrow().nodes.len()
     }
 
     pub(crate) fn borrow_inner(&self) -> std::cell::Ref<'_, DomTreeInner> {
@@ -474,12 +554,21 @@ impl DomTree {
             inner.id_index.remove(&id_str);
         }
 
+        // Only free slots that are currently live. Freeing an out-of-range id
+        // panics on direct indexing, and freeing an already-freed slot pushes it
+        // onto the free list a second time — later handing the same NodeId to
+        // two live nodes (aliasing). Double-remove and remove-after-remove are
+        // reachable from the JS DOM API, so treat them as no-ops here.
         for desc_id in descendants {
-            inner.nodes[desc_id.index()] = None;
-            inner.free_list.push(desc_id.0);
+            if matches!(inner.nodes.get(desc_id.index()), Some(Some(_))) {
+                inner.nodes[desc_id.index()] = None;
+                inner.free_list.push(desc_id.0);
+            }
         }
-        inner.nodes[node_id.index()] = None;
-        inner.free_list.push(node_id.0);
+        if matches!(inner.nodes.get(node_id.index()), Some(Some(_))) {
+            inner.nodes[node_id.index()] = None;
+            inner.free_list.push(node_id.0);
+        }
     }
 
     pub fn children(&self, node_id: NodeId) -> Vec<NodeId> {
@@ -490,6 +579,13 @@ impl DomTree {
             .and_then(|n| n.first_child);
         while let Some(child_id) = current {
             result.push(child_id);
+            // Defense in depth, same bound as descendants(): a valid sibling
+            // chain is at most nodes.len() long. Exceeding it means
+            // next_sibling forms a cycle; stop rather than loop forever.
+            if result.len() > inner.nodes.len() {
+                eprintln!("obscura: children() cap hit at node {} - cycle", node_id.index());
+                break;
+            }
             current = inner.nodes.get(child_id.index())
                 .and_then(|n| n.as_ref())
                 .and_then(|n| n.next_sibling);
@@ -566,6 +662,13 @@ impl DomTree {
             .and_then(|n| n.parent);
         while let Some(parent_id) = current {
             result.push(parent_id);
+            // Defense in depth: a valid parent chain is at most nodes.len()
+            // long. Exceeding it means parent forms a cycle; stop rather
+            // than loop forever.
+            if result.len() > inner.nodes.len() {
+                eprintln!("obscura: ancestors() cap hit at node {} - cycle", node_id.index());
+                break;
+            }
             current = inner.nodes.get(parent_id.index())
                 .and_then(|n| n.as_ref())
                 .and_then(|n| n.parent);
@@ -664,20 +767,56 @@ impl DomTree {
     }
 
     fn import_node_from(&self, parent_id: NodeId, source: &DomTree, source_node_id: NodeId) {
-        let node_data = {
-            let source_inner = source.inner.borrow();
-            match source_inner.nodes.get(source_node_id.index()) {
-                Some(Some(node)) => node.data.clone(),
-                _ => return,
+        // Iterative DFS with an explicit (dest_parent, source_node) stack so a
+        // deeply nested source tree cannot overflow the thread stack. Children
+        // are pushed in reverse so they are appended in document order.
+        let mut stack = vec![(parent_id, source_node_id)];
+        while let Some((dest_parent, src_id)) = stack.pop() {
+            let node_data = {
+                let source_inner = source.inner.borrow();
+                match source_inner.nodes.get(src_id.index()) {
+                    Some(Some(node)) => node.data.clone(),
+                    _ => continue,
+                }
+            };
+
+            let new_id = self.new_node(node_data);
+            self.append_child(dest_parent, new_id);
+
+            // A <template>'s children hang off a separate contents document, so
+            // the child walk below never reaches them. Worse, the cloned data
+            // carries the *source* tree's contents NodeId, which here indexes
+            // whatever unrelated node occupies that slot. Allocate a real
+            // contents node and queue the source contents' children into it, so
+            // the reference is remapped rather than left dangling.
+            let src_contents = {
+                let inner = self.inner.borrow();
+                match inner.nodes.get(new_id.index()).and_then(|n| n.as_ref()) {
+                    Some(node) => match &node.data {
+                        NodeData::Element { template_contents, .. } => *template_contents,
+                        _ => None,
+                    },
+                    None => None,
+                }
+            };
+            if let Some(src_contents) = src_contents {
+                let dest_contents = self.new_node(NodeData::Document);
+                {
+                    let mut inner = self.inner.borrow_mut();
+                    if let Some(Some(node)) = inner.nodes.get_mut(new_id.index()) {
+                        if let NodeData::Element { template_contents, .. } = &mut node.data {
+                            *template_contents = Some(dest_contents);
+                        }
+                    }
+                }
+                for child_id in source.children(src_contents).into_iter().rev() {
+                    stack.push((dest_contents, child_id));
+                }
             }
-        };
 
-        let new_id = self.new_node(node_data);
-        self.append_child(parent_id, new_id);
-
-        let children = source.children(source_node_id);
-        for child_id in children {
-            self.import_node_from(new_id, source, child_id);
+            for child_id in source.children(src_id).into_iter().rev() {
+                stack.push((new_id, child_id));
+            }
         }
     }
 
@@ -701,7 +840,28 @@ impl DomTree {
 }
 
 fn collect_text_inner(inner: &DomTreeInner, node_id: NodeId, buf: &mut String) {
-    if let Some(Some(node)) = inner.nodes.get(node_id.index()) {
+    // Iterative pre-order walk on an explicit heap stack. The recursive form
+    // overflowed the thread stack and aborted the process on deeply nested
+    // trees; descendants() is iterative + capped for the same reason. A valid
+    // subtree visits at most nodes.len() nodes, so exceeding that means the
+    // graph is cyclic (prevented by the append_child / insert_before guards);
+    // stop rather than spin forever.
+    let max_steps = inner.nodes.len().saturating_add(16);
+    let mut steps = 0usize;
+    let mut stack = vec![node_id];
+
+    while let Some(id) = stack.pop() {
+        steps += 1;
+        if steps > max_steps {
+            eprintln!("obscura: collect_text_inner cap hit - tree has a cycle");
+            break;
+        }
+
+        let node = match inner.nodes.get(id.index()) {
+            Some(Some(n)) => n,
+            _ => continue,
+        };
+
         match &node.data {
             NodeData::Text { contents } => buf.push_str(contents),
             // Comment and ProcessingInstruction are intentionally NOT
@@ -709,12 +869,22 @@ fn collect_text_inner(inner: &DomTreeInner, node_id: NodeId, buf: &mut String) {
             // on an Element only includes Text descendants. Direct
             // textContent on a Comment/PI is handled by the caller.
             _ => {
+                // Collect children, then push in reverse so they pop in
+                // document order.
+                let mut kids = Vec::new();
                 let mut child = node.first_child;
                 while let Some(child_id) = child {
-                    collect_text_inner(inner, child_id, buf);
+                    kids.push(child_id);
+                    if kids.len() > inner.nodes.len() {
+                        eprintln!("obscura: collect_text_inner sibling cap hit - cycle");
+                        break;
+                    }
                     child = inner.nodes.get(child_id.index())
                         .and_then(|n| n.as_ref())
                         .and_then(|n| n.next_sibling);
+                }
+                for child_id in kids.into_iter().rev() {
+                    stack.push(child_id);
                 }
             }
         }
@@ -937,5 +1107,165 @@ mod tests {
         assert_eq!(tree.len(), 3);
         tree.remove(div);
         assert_eq!(tree.len(), 1);
+    }
+
+    #[test]
+    fn test_double_remove_does_not_double_free() {
+        // Removing the same node twice must be a no-op the second time. The
+        // unguarded path pushed the slot onto the free list twice, so two later
+        // new_node() calls could be handed the SAME NodeId (aliasing).
+        let tree = DomTree::new();
+        let doc = tree.document();
+        let a = tree.new_node(NodeData::Text { contents: "a".into() });
+        tree.append_child(doc, a);
+
+        tree.remove(a);
+        tree.remove(a); // must not free the slot a second time
+
+        let b = tree.new_node(NodeData::Text { contents: "b".into() });
+        let c = tree.new_node(NodeData::Text { contents: "c".into() });
+        assert_ne!(b, c, "double-free handed the same slot to two live nodes");
+        assert_eq!(b, a, "first new node should reuse the freed slot");
+    }
+
+    #[test]
+    fn test_children_and_ancestors_survive_forced_cycles() {
+        // The tree guards make cycles unreachable via the public API, so force
+        // corrupt pointers directly: children()/ancestors() must terminate with
+        // a bounded result instead of looping forever.
+        let tree = DomTree::new();
+        let doc = tree.document();
+        let a = tree.new_node(NodeData::Text { contents: "a".into() });
+        let b = tree.new_node(NodeData::Text { contents: "b".into() });
+        tree.append_child(doc, a);
+        tree.append_child(doc, b);
+
+        // Sibling cycle: a <-> b.
+        tree.with_node_mut(a, |n| n.next_sibling = Some(b));
+        tree.with_node_mut(b, |n| n.prev_sibling = Some(a));
+        tree.with_node_mut(b, |n| n.next_sibling = Some(a));
+        tree.with_node_mut(a, |n| n.prev_sibling = Some(b));
+        let kids = tree.children(doc);
+        assert!(kids.len() <= tree.node_slot_count() + 1, "children() ran away: {}", kids.len());
+
+        // Parent cycle: a.parent = b, b.parent = a.
+        tree.with_node_mut(a, |n| n.parent = Some(b));
+        tree.with_node_mut(b, |n| n.parent = Some(a));
+        let anc = tree.ancestors(a);
+        assert!(anc.len() <= tree.node_slot_count() + 1, "ancestors() ran away: {}", anc.len());
+    }
+
+    #[test]
+    fn test_set_attribute_matches_qualified_name() {
+        // A parsed namespaced attribute stores prefix separately from the local
+        // name (xlink:href -> prefix="xlink", local="href"). set_attribute must
+        // match on the qualified name, or it silently pushes a duplicate.
+        let tree = crate::obscura_dom::tree_sink::parse_html(
+            r##"<svg><use xlink:href="#icon"/></svg>"##,
+        );
+        let use_el = tree.query_selector("use").unwrap().unwrap();
+
+        tree.with_node_mut(use_el, |n| n.set_attribute("xlink:href", "#other".into()));
+        tree.with_node(use_el, |n| {
+            let attrs = n.attrs().unwrap();
+            assert_eq!(attrs.len(), 1, "qualified-name set must update in place, got {attrs:?}");
+            assert_eq!(n.get_attribute("xlink:href"), Some("#other"));
+        });
+
+        // And a bare "href" must NOT match the namespaced "xlink:href".
+        tree.with_node_mut(use_el, |n| n.set_attribute("href", "#plain".into()));
+        tree.with_node(use_el, |n| {
+            assert_eq!(n.attrs().unwrap().len(), 2);
+            assert_eq!(n.get_attribute("href"), Some("#plain"));
+            assert_eq!(n.get_attribute("xlink:href"), Some("#other"));
+        });
+    }
+
+    #[test]
+    fn test_attribute_ns_roundtrip() {
+        let tree = DomTree::new();
+        let doc = tree.document();
+        let el = tree.new_node(NodeData::Element {
+            name: QualName::new(None, ns!(html), local_name!("div")),
+            attrs: vec![],
+            template_contents: None,
+            mathml_annotation_xml_integration_point: false,
+        });
+        tree.append_child(doc, el);
+
+        tree.with_node_mut(el, |n| {
+            n.set_attribute_ns("http://www.w3.org/1999/xlink", "xlink:href", "#a".into())
+        });
+        tree.with_node(el, |n| {
+            assert_eq!(n.get_attribute_ns("http://www.w3.org/1999/xlink", "href"), Some("#a"));
+            assert_eq!(n.get_attribute("xlink:href"), Some("#a"), "qualified-name lookup must find ns-set attrs");
+        });
+
+        // Update in place via NS API.
+        tree.with_node_mut(el, |n| {
+            n.set_attribute_ns("http://www.w3.org/1999/xlink", "xlink:href", "#b".into())
+        });
+        tree.with_node(el, |n| {
+            assert_eq!(n.attrs().unwrap().len(), 1);
+            assert_eq!(n.get_attribute("xlink:href"), Some("#b"));
+        });
+
+        tree.with_node_mut(el, |n| n.remove_attribute_ns("http://www.w3.org/1999/xlink", "href"));
+        tree.with_node(el, |n| assert!(n.attrs().unwrap().is_empty()));
+    }
+
+    #[test]
+    fn test_import_remaps_template_contents() {
+        // A cloned <template> carries the SOURCE tree's contents NodeId, which
+        // in the destination tree indexes an unrelated slot. The import must
+        // allocate a fresh contents document and remap the reference.
+        let source = crate::obscura_dom::tree_sink::parse_html(
+            r#"<div><template><span>tmpl</span></template></div>"#,
+        );
+        let dest = DomTree::new();
+        let host = dest.new_node(NodeData::Element {
+            name: QualName::new(None, ns!(html), local_name!("div")),
+            attrs: vec![],
+            template_contents: None,
+            mathml_annotation_xml_integration_point: false,
+        });
+        dest.append_child(dest.document(), host);
+
+        let src_div = source.query_selector("div").unwrap().unwrap();
+        dest.import_children_from(host, &source, src_div);
+
+        let imported_tmpl = dest.query_selector("template").unwrap().unwrap();
+        let contents = dest
+            .with_node(imported_tmpl, |n| match &n.data {
+                NodeData::Element { template_contents, .. } => *template_contents,
+                _ => None,
+            })
+            .flatten()
+            .expect("imported template must carry a contents document");
+        // The remapped contents node must live in DEST and hold the span.
+        let text = dest.text_content(contents);
+        assert_eq!(text, "tmpl");
+        assert!(
+            dest.with_node(contents, |n| n.is_document()).unwrap_or(false),
+            "contents must be a Document node in the destination tree"
+        );
+    }
+
+    #[test]
+    fn test_deep_nesting_does_not_overflow() {
+        // 20k nested divs: text_content and outer_html must complete without a
+        // stack overflow (the recursive forms aborted the whole process).
+        let depth = 20_000;
+        let mut html = String::with_capacity(depth * 11 + 5);
+        for _ in 0..depth {
+            html.push_str("<div>");
+        }
+        html.push('x');
+        let tree = crate::obscura_dom::tree_sink::parse_html(&html);
+
+        let text = tree.text_content(tree.document());
+        assert_eq!(text, "x");
+        let serialized = tree.outer_html(tree.document());
+        assert!(serialized.len() >= depth * 5, "serialized len {}", serialized.len());
     }
 }

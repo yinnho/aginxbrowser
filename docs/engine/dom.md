@@ -78,17 +78,19 @@ NodeData = Document | Doctype | Element{name,attrs,template_contents,...}
 
 **A. 我们已经带的(内联时就有):** descendants/append/insert 成环防护、id_index、selector 缓存。
 
-**B. 同源 bug 修复,我们大概率还带洞(认领时逐条吸收):**
-- children()/ancestors() 遍历上限(2026-08-08)
-- 注释序列化消毒 ×2(2026-07-01, 07-13)
-- serialize/textContent/import 迭代化防爆栈(2026-07-09)
-- `remove()` OOB/double-free 防护(2026-07-26)
-- quirks mode 选择器大小写(2026-07-26)
-- setAttribute qualified name(2026-08-04)+ setAttributeNS 系列(2026-07-26)
-- :enabled/:disabled/:checked 真实状态(2026-07-03)
-- `<head>` 内容在 documentElement.innerHTML 时保留(2026-08-04)
-- template contents 桥到 JS `.content`(2026-07-22)
-- document.write 单输入流(2026-08-15,js 侧为主)
+**B. 同源 bug 修复,我们大概率还带洞(认领时逐条吸收):** ✅ 2026-08-22 已全部吸收(读 diff 后手写,非 merge):
+- ~~children()/ancestors() 遍历上限~~(2026-08-08)— 已吸收,与 descendants() 同款 nodes.len() 封顶
+- ~~注释序列化消毒 ×2~~(2026-07-01, 07-13)— 已吸收,`>` 全量转义,四种终结形式一次封死
+- ~~serialize/textContent/import 迭代化防爆栈~~(2026-07-09)— 已吸收,显式堆栈 + 步数封顶;2 万层嵌套测试通过
+- ~~`remove()` OOB/double-free 防护~~(2026-07-26)— 已吸收,只回收存活槽位
+- ~~quirks mode 选择器大小写~~(2026-07-26)— 已吸收,DomTreeInner 存 quirks 标志透传 MatchingContext
+- ~~setAttribute qualified name~~(2026-08-04)+ setAttributeNS 系列(2026-07-26)— 已吸收,Attribute 增加 qualified_name 匹配 + get/set/remove_attribute_ns
+- ~~:enabled/:disabled/:checked 真实状态~~(2026-07-03)— 已吸收,表单控件 + disabled/checked/selected 属性
+- ~~template contents 桥接~~(2026-07-22)— 已吸收 dom 侧:序列化走 contents 文档 + import 时重映射悬空 NodeId(#463,我们的旧代码 import template 后 contents 指向无关槽位,是真 bug)
+- `<head>` 内容在 documentElement.innerHTML 时保留(2026-08-04)— 未吸收,主战场在 js 侧(obscura_js 认领时处理)
+- document.write 单输入流(2026-08-15)— 未吸收,js 侧
+
+另发现:fetch base64 解码测试在 main 上就挂着(与 dom 无关),列入 obscura_js 认领清单。
 
 **C. 大特性,我们不跟(至少现在):**
 - Shadow DOM 全家桶(declarative shadow roots、tree scopes、slots,约 2026-07-30~08-04,10+ commits)——这是上游自研渲染引擎的地基,我们渲染走 blitz,暂不吸收
@@ -99,7 +101,7 @@ NodeData = Document | Doctype | Element{name,attrs,template_contents,...}
 
 ## 认领建议(Phase 1 开工顺序)
 
-1. **先补特征测试**:现有 21 个单测之外,重点锁 query_selector 作用域行为、serialize 转义、id_index 重复 id 语义、template_contents——这些是服务层和 JS 层真正依赖的。
-2. **吸收 B 组修复**:每条先看上游 diff 理解为什么,再手写进我们代码(不 cherry-pick merge)。B 组全是小 diff,一天能过一半。
-3. **改名 `diting_dom`**:测试绿了之后做,纯机械重命名(mod.rs 的 re-export 保持不变,服务层只改 import 路径)。
+1. **先补特征测试** ✅ 2026-08-22 已补 10 个(成环/双删/命名空间属性/template 重映射/深嵌套/quirks/伪类),43 个 dom 测试全绿。
+2. **吸收 B 组修复** ✅ 已完成,见上表。
+3. **改名 `diting_dom`**:待做。纯机械重命名(mod.rs 的 re-export 不变,服务层只改 import 路径)。
 4. **C 组挂账**:Shadow DOM 和 :has() 记为"已知不支持",等渲染路线(Phase 2)再议。
