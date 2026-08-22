@@ -594,8 +594,67 @@ fn build_request_client(proxy_url: Option<&str>) -> Result<reqwest::Client, Stri
 }
 
 /// Cap on the number of redirect hops op_fetch_url will follow.
-/// Matches reqwest's default policy of 10.
-const FETCH_REDIRECT_LIMIT: usize = 10;
+///
+/// The Fetch standard fixes the number at 20: HTTP-redirect fetch returns a
+/// network error as soon as a request's redirect count *reaches* 20, so the
+/// twentieth hop still succeeds and the twenty-first fails.
+/// https://fetch.spec.whatwg.org/#http-redirect-fetch
+///
+/// The reqwest default of 10 does not apply here: redirects are followed by
+/// hand in this file, one hop per loop iteration, so each hop is re-checked
+/// against the SSRF rules (upstream 4b90ec3).
+const FETCH_REDIRECT_LIMIT: usize = 20;
+
+/// RequestCredentials from the Fetch standard: whether cookies may be sent to
+/// (and stored from) a request's URL (upstream b744b9b).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FetchCredentials {
+    Omit,
+    SameOrigin,
+    Include,
+}
+
+impl FetchCredentials {
+    fn parse(value: &str) -> Self {
+        match value {
+            "omit" => Self::Omit,
+            "include" => Self::Include,
+            _ => Self::SameOrigin,
+        }
+    }
+
+    fn allows(self, page_origin: &str, request_url: &str) -> bool {
+        match self {
+            Self::Omit => false,
+            Self::Include => true,
+            Self::SameOrigin => request_origin(request_url)
+                .map(|origin| origin == page_origin)
+                .unwrap_or(false),
+        }
+    }
+}
+
+fn request_origin(request_url: &str) -> Option<String> {
+    url::Url::parse(request_url)
+        .ok()
+        .map(|url| url.origin().ascii_serialization())
+}
+
+/// A CORS response (or preflight) must match the credentials mode:
+/// credentialed requests require the exact origin plus
+/// Access-Control-Allow-Credentials: true.
+fn cors_response_allows(
+    credentials: FetchCredentials,
+    page_origin: &str,
+    allowed_origin: &str,
+    allow_credentials: &str,
+) -> bool {
+    if credentials == FetchCredentials::Include {
+        allowed_origin == page_origin && allow_credentials == "true"
+    } else {
+        allowed_origin == "*" || allowed_origin == page_origin
+    }
+}
 
 #[op2(async)]
 #[string]
@@ -607,6 +666,7 @@ async fn op_fetch_url(
     #[string] body: String,
     #[string] origin: String,
     #[string] mode: String,
+    #[string] credentials: String,
 ) -> Result<String, deno_error::JsErrorBox> {
     tracing::debug!("op_fetch_url called: {} {} (intercept check pending)", method, url);
 
@@ -623,7 +683,7 @@ async fn op_fetch_url(
         }
     }
 
-    let (cookie_jar, in_flight, intercept_tx, proxy_url) = {
+    let (cookie_jar, in_flight, intercept_tx, proxy_url, http_client) = {
         let state_borrow = state.borrow();
         let gs = state_borrow.borrow::<SharedState>().clone();
         let mut gs = gs.borrow_mut();
@@ -651,7 +711,7 @@ async fn op_fetch_url(
         } else {
             None
         };
-        (jar, in_flight, itx, proxy_url)
+        (jar, in_flight, itx, proxy_url, gs.http_client.clone())
     };
 
     let mut override_url: Option<String> = None;
@@ -730,22 +790,23 @@ async fn op_fetch_url(
         None => headers_json,
     };
 
-    let client = select_request_client(&url, proxy_url.as_deref())
-        .await
-        .map_err(deno_error::JsErrorBox::generic)?;
+    // Pages use their context-scoped client so sequential runtimes never
+    // share an async connection pool (upstream ab6fa0e, #453). The
+    // process-wide cache remains the fallback for runtimes with no owning
+    // HttpClient (e.g. a bare module-loader runtime).
+    let client = match &http_client {
+        Some(client) => client.request_client().await,
+        None => select_request_client(&url, proxy_url.as_deref())
+            .await
+            .map_err(deno_error::JsErrorBox::generic)?,
+    };
 
-    let request_origin = url::Url::parse(&url)
-        .ok()
-        .map(|u| {
-            let host = u.host_str().unwrap_or("");
-            match u.port() {
-                Some(p) => format!("{}://{}:{}", u.scheme(), host, p),
-                None => format!("{}://{}", u.scheme(), host),
-            }
-        })
-        .unwrap_or_default();
-    let page_origin = if origin.is_empty() { request_origin.clone() } else { origin.clone() };
-    let is_cross_origin = !page_origin.is_empty() && request_origin != page_origin;
+    // url::Url::origin() normalizes default ports, so an explicit :443 still
+    // compares same-origin (the old hand-rolled form did not).
+    let initial_request_origin = request_origin(&url).unwrap_or_default();
+    let page_origin = if origin.is_empty() { initial_request_origin.clone() } else { origin.clone() };
+    let is_cross_origin = !page_origin.is_empty() && initial_request_origin != page_origin;
+    let credentials = FetchCredentials::parse(&credentials);
 
     let req_method: reqwest::Method = method.parse().unwrap_or(reqwest::Method::GET);
 
@@ -781,8 +842,13 @@ async fn op_fetch_url(
             .get("access-control-allow-origin")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
+        let allow_credentials = preflight
+            .headers()
+            .get("access-control-allow-credentials")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
 
-        if allowed_origin != "*" && allowed_origin != page_origin {
+        if !cors_response_allows(credentials, &page_origin, allowed_origin, allow_credentials) {
             return Err(deno_error::JsErrorBox::generic(format!(
                 "CORS preflight: Origin '{}' not allowed by Access-Control-Allow-Origin '{}'",
                 page_origin, allowed_origin
@@ -801,11 +867,17 @@ async fn op_fetch_url(
     let response = loop {
         let mut req = client.request(current_method.clone(), &current_url);
 
-        if is_cross_origin {
+        // Cross-origin and credentials are per-hop: a redirect can change
+        // either answer (upstream b744b9b).
+        let current_is_cross_origin = request_origin(&current_url)
+            .map(|o| o != page_origin)
+            .unwrap_or(false);
+        if current_is_cross_origin {
             req = req.header("Origin", &page_origin);
         }
 
-        if !is_cross_origin {
+        let credentials_allowed = credentials.allows(&page_origin, &current_url);
+        if credentials_allowed {
             if let Some(ref jar) = cookie_jar {
                 if let Ok(parsed_url) = url::Url::parse(&current_url) {
                     let cookie_header = jar.get_cookie_header(&parsed_url);
@@ -849,11 +921,13 @@ async fn op_fetch_url(
             counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
 
-        if let Some(ref jar) = cookie_jar {
-            if let Ok(parsed_url) = url::Url::parse(&current_url) {
-                for val in resp.headers().get_all(reqwest::header::SET_COOKIE) {
-                    if let Ok(s) = val.to_str() {
-                        jar.set_cookie(s, &parsed_url);
+        if credentials_allowed {
+            if let Some(ref jar) = cookie_jar {
+                if let Ok(parsed_url) = url::Url::parse(&current_url) {
+                    for val in resp.headers().get_all(reqwest::header::SET_COOKIE) {
+                        if let Ok(s) = val.to_str() {
+                            jar.set_cookie(s, &parsed_url);
+                        }
                     }
                 }
             }
@@ -927,20 +1001,31 @@ async fn op_fetch_url(
         .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
 
-    if is_cross_origin && mode == "cors" {
+    let final_is_cross_origin = request_origin(&current_url)
+        .map(|o| o != page_origin)
+        .unwrap_or(false);
+    if final_is_cross_origin && mode == "cors" {
         let allowed = resp_headers
             .get("access-control-allow-origin")
             .map(|s| s.as_str())
             .unwrap_or("");
+        let allow_credentials = resp_headers
+            .get("access-control-allow-credentials")
+            .map(|s| s.as_str())
+            .unwrap_or("");
 
-        if allowed != "*" && allowed != page_origin {
+        if !cors_response_allows(credentials, &page_origin, allowed, allow_credentials) {
             return Ok(serde_json::json!({
                 "status": 0,
                 "body": "",
                 "url": url,
                 "headers": {},
                 "corsBlocked": true,
-                "corsError": format!("CORS error: Origin '{}' not in Access-Control-Allow-Origin '{}'", page_origin, allowed),
+                "corsError": if credentials == FetchCredentials::Include {
+                    format!("CORS error: credentialed request requires Access-Control-Allow-Origin '{}' and Access-Control-Allow-Credentials 'true'", page_origin)
+                } else {
+                    format!("CORS error: Origin '{}' not in Access-Control-Allow-Origin '{}'", page_origin, allowed)
+                },
             })
             .to_string());
         }
@@ -1104,9 +1189,277 @@ fn op_subtle_digest(#[string] algorithm: &str, #[buffer] data: &[u8]) -> Vec<u8>
         "SHA-256" => sha2::Sha256::digest(data).to_vec(),
         "SHA-384" => sha2::Sha384::digest(data).to_vec(),
         "SHA-512" => sha2::Sha512::digest(data).to_vec(),
-        _ => sha2::Sha256::digest(data).to_vec(),
+        "SHA-512/224" => sha2::Sha512_224::digest(data).to_vec(),
+        "SHA-512/256" => sha2::Sha512_256::digest(data).to_vec(),
+        _ => vec![],
     }
 }
+
+// ---------------------------------------------------------------------------
+// WebCrypto (crypto.subtle) secret-key primitives.
+//
+// These ops are stateless. The JS shim in bootstrap.js owns the CryptoKey
+// objects and their raw key bytes; it hands the bytes plus normalized algorithm
+// parameters to these ops for each operation. Only secret-key algorithms live
+// here (HMAC, AES-GCM/CBC/CTR, PBKDF2, HKDF); public-key algorithms are rejected
+// in the shim. A fallible op returns a JsErrorBox that the shim turns into the
+// appropriate DOMException (OperationError for a bad tag or padding, etc.).
+// ---------------------------------------------------------------------------
+
+fn crypto_err(msg: impl std::fmt::Display) -> deno_error::JsErrorBox {
+    deno_error::JsErrorBox::generic(msg.to_string())
+}
+
+/// HMAC sign. `hash` is a normalized SubtleCrypto hash name; any key length is
+/// accepted (HMAC pads or hashes the key per RFC 2104). Returns the MAC bytes;
+/// the shim does the constant-time-insensitive compare for `verify`.
+#[op2]
+#[buffer]
+fn op_subtle_hmac(
+    #[string] hash: &str,
+    #[buffer] key: &[u8],
+    #[buffer] data: &[u8],
+) -> Result<Vec<u8>, deno_error::JsErrorBox> {
+    use hmac::{Hmac, Mac};
+    macro_rules! run {
+        ($d:ty) => {{
+            let mut mac = Hmac::<$d>::new_from_slice(key).map_err(crypto_err)?;
+            mac.update(data);
+            mac.finalize().into_bytes().to_vec()
+        }};
+    }
+    Ok(match hash {
+        "SHA-1" => run!(sha1::Sha1),
+        "SHA-256" => run!(sha2::Sha256),
+        "SHA-384" => run!(sha2::Sha384),
+        "SHA-512" => run!(sha2::Sha512),
+        _ => return Err(crypto_err("unsupported HMAC hash")),
+    })
+}
+
+/// AES-GCM encrypt/decrypt. WebCrypto's ciphertext carries the auth tag
+/// appended, which is exactly RustCrypto's combined form, so this maps 1:1.
+/// Restricted to a 96-bit IV and 128-bit tag (the WebCrypto defaults and the
+/// overwhelming majority of real usage); the shim rejects other tag lengths.
+#[op2]
+#[buffer]
+fn op_subtle_aes_gcm(
+    encrypt: bool,
+    #[buffer] key: &[u8],
+    #[buffer] iv: &[u8],
+    #[buffer] aad: &[u8],
+    #[buffer] data: &[u8],
+) -> Result<Vec<u8>, deno_error::JsErrorBox> {
+    use aes_gcm::aead::{Aead, KeyInit, Payload};
+    use aes_gcm::aes::{Aes192, Aes256};
+    use aes_gcm::{AesGcm, Nonce};
+    type Aes192Gcm = AesGcm<Aes192, aes_gcm::aead::consts::U12>;
+    type Aes256Gcm = AesGcm<Aes256, aes_gcm::aead::consts::U12>;
+
+    if iv.len() != 12 {
+        return Err(crypto_err("AES-GCM requires a 96-bit (12-byte) IV"));
+    }
+    let nonce = Nonce::from_slice(iv);
+    macro_rules! run {
+        ($ty:ty) => {{
+            let cipher = <$ty>::new_from_slice(key).map_err(crypto_err)?;
+            if encrypt {
+                cipher
+                    .encrypt(nonce, Payload { msg: data, aad })
+                    .map_err(|_| crypto_err("AES-GCM encryption failed"))?
+            } else {
+                cipher
+                    .decrypt(nonce, Payload { msg: data, aad })
+                    .map_err(|_| crypto_err("AES-GCM decryption failed: authentication tag mismatch"))?
+            }
+        }};
+    }
+    Ok(match key.len() {
+        16 => run!(aes_gcm::Aes128Gcm),
+        24 => run!(Aes192Gcm),
+        32 => run!(Aes256Gcm),
+        _ => return Err(crypto_err("AES-GCM key must be 128, 192, or 256 bits")),
+    })
+}
+
+/// AES-CBC encrypt/decrypt with PKCS#7 padding (the only padding WebCrypto
+/// AES-CBC uses) and a 16-byte IV.
+#[op2]
+#[buffer]
+fn op_subtle_aes_cbc(
+    encrypt: bool,
+    #[buffer] key: &[u8],
+    #[buffer] iv: &[u8],
+    #[buffer] data: &[u8],
+) -> Result<Vec<u8>, deno_error::JsErrorBox> {
+    use cbc::cipher::block_padding::Pkcs7;
+    use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+    use cbc::{Decryptor, Encryptor};
+
+    if iv.len() != 16 {
+        return Err(crypto_err("AES-CBC requires a 16-byte IV"));
+    }
+    macro_rules! run {
+        ($cipher:ty) => {{
+            if encrypt {
+                Encryptor::<$cipher>::new_from_slices(key, iv)
+                    .map_err(crypto_err)?
+                    .encrypt_padded_vec_mut::<Pkcs7>(data)
+            } else {
+                Decryptor::<$cipher>::new_from_slices(key, iv)
+                    .map_err(crypto_err)?
+                    .decrypt_padded_vec_mut::<Pkcs7>(data)
+                    .map_err(|_| crypto_err("AES-CBC decryption failed: invalid padding"))?
+            }
+        }};
+    }
+    Ok(match key.len() {
+        16 => run!(aes::Aes128),
+        24 => run!(aes::Aes192),
+        32 => run!(aes::Aes256),
+        _ => return Err(crypto_err("AES-CBC key must be 128, 192, or 256 bits")),
+    })
+}
+
+/// AES-CTR. Encrypt and decrypt are the same keystream XOR. `counter_length` is
+/// the WebCrypto counter width in bits; it selects the RustCrypto CTR flavor so
+/// only the low `counter_length` bits of the 16-byte block increment.
+#[op2]
+#[buffer]
+fn op_subtle_aes_ctr(
+    #[buffer] key: &[u8],
+    #[buffer] counter: &[u8],
+    counter_length: u32,
+    #[buffer] data: &[u8],
+) -> Result<Vec<u8>, deno_error::JsErrorBox> {
+    use ctr::cipher::{KeyIvInit, StreamCipher};
+
+    if counter.len() != 16 {
+        return Err(crypto_err("AES-CTR requires a 16-byte counter block"));
+    }
+    let mut buf = data.to_vec();
+    macro_rules! run {
+        ($ty:ty) => {{
+            <$ty>::new_from_slices(key, counter)
+                .map_err(crypto_err)?
+                .apply_keystream(&mut buf);
+        }};
+    }
+    macro_rules! by_key {
+        ($flavor:ident) => {
+            match key.len() {
+                16 => run!(ctr::$flavor<aes::Aes128>),
+                24 => run!(ctr::$flavor<aes::Aes192>),
+                32 => run!(ctr::$flavor<aes::Aes256>),
+                _ => return Err(crypto_err("AES-CTR key must be 128, 192, or 256 bits")),
+            }
+        };
+    }
+    match counter_length {
+        128 => by_key!(Ctr128BE),
+        64 => by_key!(Ctr64BE),
+        32 => by_key!(Ctr32BE),
+        _ => return Err(crypto_err("AES-CTR supports counter lengths of 32, 64, or 128 bits")),
+    }
+    Ok(buf)
+}
+
+/// Generous upper bounds on PBKDF2 parameters. WebCrypto imposes no limit, but
+/// page JS drives this op on the single-threaded runtime: an unbounded
+/// iteration count pins the V8 isolate (blocking every other CDP command on the
+/// connection) and a huge output length forces an unbounded `vec![0u8; length]`
+/// allocation. Both caps sit far above any legitimate use — OWASP recommends
+/// ~600k iterations and derived keys are tens of bytes.
+const PBKDF2_MAX_ITERATIONS: u32 = 10_000_000;
+const PBKDF2_MAX_OUTPUT_BYTES: u32 = 1024 * 1024;
+
+/// PBKDF2 key derivation with DoS guards. Split out from the op so the bounds
+/// are unit-testable without the `#[op2]` wrapper.
+fn pbkdf2_derive(
+    hash: &str,
+    password: &[u8],
+    salt: &[u8],
+    iterations: u32,
+    length: u32,
+) -> Result<Vec<u8>, deno_error::JsErrorBox> {
+    if iterations > PBKDF2_MAX_ITERATIONS {
+        return Err(crypto_err(format!(
+            "PBKDF2 iteration count {iterations} exceeds the supported maximum of {PBKDF2_MAX_ITERATIONS}"
+        )));
+    }
+    if length > PBKDF2_MAX_OUTPUT_BYTES {
+        return Err(crypto_err(format!(
+            "PBKDF2 output length {length} bytes exceeds the supported maximum of {PBKDF2_MAX_OUTPUT_BYTES}"
+        )));
+    }
+    use pbkdf2::pbkdf2_hmac;
+    let mut dk = vec![0u8; length as usize];
+    match hash {
+        "SHA-1" => pbkdf2_hmac::<sha1::Sha1>(password, salt, iterations, &mut dk),
+        "SHA-256" => pbkdf2_hmac::<sha2::Sha256>(password, salt, iterations, &mut dk),
+        "SHA-384" => pbkdf2_hmac::<sha2::Sha384>(password, salt, iterations, &mut dk),
+        "SHA-512" => pbkdf2_hmac::<sha2::Sha512>(password, salt, iterations, &mut dk),
+        _ => return Err(crypto_err("unsupported PBKDF2 hash")),
+    }
+    Ok(dk)
+}
+
+/// PBKDF2 key derivation. `length` is the derived-bits output in bytes.
+#[op2]
+#[buffer]
+fn op_subtle_pbkdf2(
+    #[string] hash: &str,
+    #[buffer] password: &[u8],
+    #[buffer] salt: &[u8],
+    iterations: u32,
+    length: u32,
+) -> Result<Vec<u8>, deno_error::JsErrorBox> {
+    pbkdf2_derive(hash, password, salt, iterations, length)
+}
+
+/// HKDF key derivation. `length` is the output length in bytes. An empty salt
+/// behaves as RFC 5869 specifies (HMAC zero-pads it to the block size, which is
+/// what browsers do).
+#[op2]
+#[buffer]
+fn op_subtle_hkdf(
+    #[string] hash: &str,
+    #[buffer] ikm: &[u8],
+    #[buffer] salt: &[u8],
+    #[buffer] info: &[u8],
+    length: u32,
+) -> Result<Vec<u8>, deno_error::JsErrorBox> {
+    use hkdf::Hkdf;
+    let mut okm = vec![0u8; length as usize];
+    macro_rules! run {
+        ($d:ty) => {
+            Hkdf::<$d>::new(Some(salt), ikm)
+                .expand(info, &mut okm)
+                .map_err(|_| crypto_err("HKDF: requested key length is too long"))?
+        };
+    }
+    match hash {
+        "SHA-1" => run!(sha1::Sha1),
+        "SHA-256" => run!(sha2::Sha256),
+        "SHA-384" => run!(sha2::Sha384),
+        "SHA-512" => run!(sha2::Sha512),
+        _ => return Err(crypto_err("unsupported HKDF hash")),
+    }
+    Ok(okm)
+}
+
+/// Fill `len` bytes from the OS CSPRNG. Backs `crypto.getRandomValues`,
+/// `crypto.randomUUID`, and `generateKey`, replacing the old Math.random shim
+/// (which was neither uniform across typed-array widths nor cryptographically
+/// random, and was a fingerprinting tell).
+#[op2]
+#[buffer]
+fn op_random_bytes(len: u32) -> Result<Vec<u8>, deno_error::JsErrorBox> {
+    let mut buf = vec![0u8; len as usize];
+    getrandom::getrandom(&mut buf).map_err(|e| crypto_err(format!("getrandom failed: {e}")))?;
+    Ok(buf)
+}
+
 
 /// Serialize a parsed URL into the WHATWG IDL component shape consumed by the
 /// `URL` class in bootstrap.js. Getters read these fields directly so no op
@@ -1325,6 +1678,13 @@ pub fn build_extension() -> Extension {
             op_sleep(),
             op_binding_called(),
             op_subtle_digest(),
+            op_subtle_hmac(),
+            op_subtle_aes_gcm(),
+            op_subtle_aes_cbc(),
+            op_subtle_aes_ctr(),
+            op_subtle_pbkdf2(),
+            op_subtle_hkdf(),
+            op_random_bytes(),
             op_url_parse(),
             op_url_set(),
             op_url_resolve(),
@@ -1333,5 +1693,75 @@ pub fn build_extension() -> Extension {
             op_url_encode_query(),
         ]),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cors_response_allows, FetchCredentials};
+    use super::{pbkdf2_derive, PBKDF2_MAX_ITERATIONS, PBKDF2_MAX_OUTPUT_BYTES};
+
+    // Upstream b744b9b.
+    #[test]
+    fn fetch_credentials_gate_cookies_per_request_origin() {
+        let page_origin = "https://www.example.com";
+        let same = "https://www.example.com/api";
+        let explicit_default_port = "https://www.example.com:443/api";
+        let cross = "https://api.example.com/data";
+
+        assert!(!FetchCredentials::Omit.allows(page_origin, same));
+        assert!(!FetchCredentials::Omit.allows(page_origin, cross));
+
+        assert!(FetchCredentials::SameOrigin.allows(page_origin, same));
+        assert!(FetchCredentials::SameOrigin.allows(page_origin, explicit_default_port));
+        assert!(!FetchCredentials::SameOrigin.allows(page_origin, cross));
+
+        assert!(FetchCredentials::Include.allows(page_origin, same));
+        assert!(FetchCredentials::Include.allows(page_origin, cross));
+    }
+
+    // Upstream b744b9b.
+    #[test]
+    fn credentialed_cors_requires_exact_origin_and_allow_credentials() {
+        let page_origin = "https://www.example.com";
+
+        assert!(cors_response_allows(FetchCredentials::SameOrigin, page_origin, "*", ""));
+        assert!(cors_response_allows(FetchCredentials::SameOrigin, page_origin, page_origin, ""));
+        assert!(!cors_response_allows(FetchCredentials::SameOrigin, page_origin, "https://other.example", ""));
+
+        assert!(cors_response_allows(FetchCredentials::Include, page_origin, page_origin, "true"));
+        assert!(!cors_response_allows(FetchCredentials::Include, page_origin, "*", ""));
+        assert!(!cors_response_allows(FetchCredentials::Include, page_origin, page_origin, ""));
+        assert!(!cors_response_allows(FetchCredentials::Include, page_origin, "https://other.example", "true"));
+    }
+
+    // Upstream cfda91b / #580 — PBKDF2 parameters arrive straight from page JS.
+    // Without caps, a huge iteration count pins the single-threaded runtime and
+    // a huge output length forces an unbounded allocation.
+    #[test]
+    fn pbkdf2_rejects_excessive_iterations() {
+        let err = pbkdf2_derive("SHA-256", b"pw", b"salt", PBKDF2_MAX_ITERATIONS + 1, 32)
+            .expect_err("iteration count above the cap must be rejected");
+        assert!(
+            err.to_string().contains("iteration"),
+            "error should name the iteration cap: {err}"
+        );
+    }
+
+    #[test]
+    fn pbkdf2_rejects_excessive_output_length() {
+        let err = pbkdf2_derive("SHA-256", b"pw", b"salt", 1_000, PBKDF2_MAX_OUTPUT_BYTES + 1)
+            .expect_err("output length above the cap must be rejected");
+        assert!(
+            err.to_string().contains("length"),
+            "error should name the length cap: {err}"
+        );
+    }
+
+    #[test]
+    fn pbkdf2_derives_within_limits() {
+        let dk = pbkdf2_derive("SHA-256", b"password", b"salt", 1_000, 32)
+            .expect("ordinary parameters must derive successfully");
+        assert_eq!(dk.len(), 32, "derived key must have the requested length");
     }
 }

@@ -543,7 +543,7 @@ class Node {
             if (isModule) {
               await import(fullUrl);
             } else {
-              const raw = await _OPS.op_fetch_url(fullUrl, "GET", "{}", "", pageOrigin, "no-cors");
+              const raw = await _OPS.op_fetch_url(fullUrl, "GET", "{}", "", pageOrigin, "no-cors", "same-origin");
               const parsed = JSON.parse(raw);
               if (parsed.body) {
                 globalThis.__currentScriptNid = c._nid;
@@ -2620,7 +2620,7 @@ function __currentUrl() {
 }
 globalThis.location = {
   get href() { return __currentUrl(); },
-  set href(url) { globalThis.__virtualUrl = null; _OPS.op_navigate(_resolveUrl(url), 'GET', ''); },
+  set href(url) { var r = _resolveUrl(url); globalThis.__virtualUrl = r; _OPS.op_navigate(r, 'GET', ''); },
   get origin() { try { return new URL(this.href).origin; } catch { return ""; } },
   get protocol() { try { return new URL(this.href).protocol; } catch { return ""; } },
   get host() { try { return new URL(this.href).host; } catch { return ""; } },
@@ -2630,14 +2630,14 @@ globalThis.location = {
   get hash() { try { return new URL(this.href).hash; } catch { return ""; } },
   get port() { try { return new URL(this.href).port; } catch { return ""; } },
   toString() { return this.href; },
-  assign(url) { globalThis.__virtualUrl = null; _OPS.op_navigate(_resolveUrl(url), 'GET', ''); },
-  reload() {},
-  replace(url) { globalThis.__virtualUrl = null; _OPS.op_navigate(_resolveUrl(url), 'GET', ''); },
+  assign(url) { var r = _resolveUrl(url); globalThis.__virtualUrl = r; _OPS.op_navigate(r, 'GET', ''); },
+  reload() { var r = _resolveUrl(this.href); globalThis.__virtualUrl = r; _OPS.op_navigate(r, 'GET', ''); },
+  replace(url) { var r = _resolveUrl(url); globalThis.__virtualUrl = r; _OPS.op_navigate(r, 'GET', ''); },
 };
 const _locationObj = globalThis.location;
 Object.defineProperty(globalThis, 'location', {
   get() { return _locationObj; },
-  set(url) { _OPS.op_navigate(_resolveUrl(String(url)), 'GET', ''); },
+  set(url) { var r = _resolveUrl(String(url)); globalThis.__virtualUrl = r; _OPS.op_navigate(r, 'GET', ''); },
   configurable: false,
   enumerable: true,
 });
@@ -3147,8 +3147,14 @@ function _bodyToUint8Array(body) {
   if (body instanceof Uint8Array) return body;
   if (body instanceof ArrayBuffer) return new Uint8Array(body);
   if (ArrayBuffer.isView(body)) return new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+  // obscura's Blob materializes its data into _bytes in the constructor.
+  if (body._bytes instanceof Uint8Array) return body._bytes;
   return new TextEncoder().encode(String(body));
 }
+
+// Latin-1 binary string: one char per byte, the form op_fetch_url's string
+// body channel carries (upstream 260c4c0).
+function _bytesToBinaryString(bytes) { let s = ""; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); return s; }
 
 function _arrayBufferFromBytes(bytes) {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
@@ -3194,7 +3200,14 @@ globalThis.fetch = async (input, init = {}) => {
       const boundary = "----obscuraFormBoundary" + Math.random().toString(16).slice(2) + Date.now().toString(16);
       const parts = [];
       for (const [k, v] of init.body.entries()) {
-        parts.push("--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + String(k).replace(/"/g, "%22") + "\"\r\n\r\n" + String(v) + "\r\n");
+        const name = String(k).replace(/"/g, "%22");
+        // Blob/File values become a filename part with their own Content-Type
+        // (upstream 3eb28da); plain String(v) would send "[object Blob]".
+        if (v != null && typeof v === "object" && v._bytes instanceof Uint8Array) {
+          parts.push("--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + name + "\"; filename=\"" + String(v.name || "blob").replace(/"/g, "%22") + "\"\r\nContent-Type: " + (v.type || "application/octet-stream") + "\r\n\r\n" + _bytesToBinaryString(v._bytes) + "\r\n");
+        } else {
+          parts.push("--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + name + "\"\r\n\r\n" + String(v) + "\r\n");
+        }
       }
       parts.push("--" + boundary + "--\r\n");
       body = parts.join("");
@@ -3206,14 +3219,28 @@ globalThis.fetch = async (input, init = {}) => {
       if (!Object.keys(hdrObj).some(h => h.toLowerCase() === "content-type")) {
         hdrObj["content-type"] = "application/x-www-form-urlencoded;charset=UTF-8";
       }
+    } else if (typeof Blob === "function" && init.body instanceof Blob) {
+      // Blob posts its bytes with its type (upstream 260c4c0).
+      if (init.body.type && !Object.keys(hdrObj).some(h => h.toLowerCase() === "content-type")) {
+        hdrObj["content-type"] = init.body.type;
+      }
+      body = _bytesToBinaryString(init.body._bytes);
+    } else if (init.body instanceof ArrayBuffer || ArrayBuffer.isView(init.body)) {
+      body = _bytesToBinaryString(_bodyToUint8Array(init.body));
     } else {
       body = String(init.body);
     }
   }
   const hdrs = JSON.stringify(hdrObj);
   const fetchMode = init.mode || (input instanceof Request ? input.mode : "cors");
+  const fetchCredentials = init.credentials !== undefined
+    ? String(init.credentials)
+    : (input instanceof Request ? input.credentials : "same-origin");
+  if (fetchCredentials !== "omit" && fetchCredentials !== "same-origin" && fetchCredentials !== "include") {
+    throw new TypeError("Failed to execute 'fetch': '" + fetchCredentials + "' is not a valid RequestCredentials value");
+  }
   const pageOrigin = (function() { try { const u = new URL(_domParse("document_url") || "about:blank"); return u.origin; } catch(e) { return ""; } })();
-  const raw = await _OPS.op_fetch_url(url, method, hdrs, body, pageOrigin, fetchMode);
+  const raw = await _OPS.op_fetch_url(url, method, hdrs, body, pageOrigin, fetchMode, fetchCredentials);
   const parsed = JSON.parse(raw);
   if (parsed.blocked) {
     const err = new TypeError('net::ERR_FAILED');
@@ -3375,6 +3402,7 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
       headers: this._headers,
       body: body || undefined,
       mode: 'cors',
+      credentials: this.withCredentials ? 'include' : 'same-origin',
     }).then(async (resp) => {
       if (xhr._aborted) return;
 
@@ -3596,21 +3624,39 @@ _markNative(globalThis.cancelIdleCallback);
 if (typeof Request === 'undefined') {
   globalThis.Request = class Request {
     constructor(input, init = {}) {
+      const inputRequest = input instanceof Request ? input : null;
       if (typeof input === 'string') { this.url = input; }
-      else if (input instanceof Request) { this.url = input.url; init = { ...input, ...init }; }
+      else if (inputRequest) { this.url = inputRequest.url; init = { ...inputRequest, ...init }; }
       else if (typeof URL === 'function' && input instanceof URL) { this.url = input.href; }
       else { this.url = input?.url || input?.href || String(input); }
       this.method = (init.method || 'GET').toUpperCase();
       this.headers = new Headers(init.headers);
       this.body = init.body || null;
       this.mode = init.mode || 'cors';
-      this.credentials = init.credentials || 'same-origin';
+      this.credentials = init.credentials !== undefined
+        ? String(init.credentials)
+        : (inputRequest ? inputRequest.credentials : 'same-origin');
+      if (this.credentials !== 'omit' && this.credentials !== 'same-origin' && this.credentials !== 'include') {
+        throw new TypeError("Failed to construct 'Request': '" + this.credentials + "' is not a valid RequestCredentials value");
+      }
       this.redirect = init.redirect || 'follow';
       this.referrer = init.referrer || '';
       this.signal = init.signal || { aborted: false, addEventListener(){}, removeEventListener(){} };
       this.cache = init.cache || 'default';
     }
-    clone() { return new Request(this.url, { method: this.method, headers: this.headers, body: this.body }); }
+    clone() {
+      return new Request(this.url, {
+        method: this.method,
+        headers: this.headers,
+        body: this.body,
+        mode: this.mode,
+        credentials: this.credentials,
+        redirect: this.redirect,
+        referrer: this.referrer,
+        signal: this.signal,
+        cache: this.cache,
+      });
+    }
     async text() { return this.body ? String(this.body) : ''; }
     async json() { return JSON.parse(await this.text()); }
     async arrayBuffer() { return new TextEncoder().encode(await this.text()).buffer; }
@@ -4715,8 +4761,28 @@ if (typeof FormData === "undefined") globalThis.FormData = class FormData {
     // The submitter's name/value is included (it is the clicked button).
     if (submitter && submitter.name) this._d.push([submitter.name, String(submitter.value ?? "")]);
   }
-  append(k,v){this._d.push([String(k),String(v)]);}
-  set(k,v){k=String(k);v=String(v);const i=this._d.findIndex(([a])=>a===k);if(i>=0)this._d[i]=[k,v];else this._d.push([k,v]);}
+  // Blob values stay objects (spec: append(name, blobValue, filename));
+  // everything else converts to USVString. Stringifying a File here used to
+  // turn uploads into the literal "[object File]" on the wire.
+  append(k, v, filename) {
+    k = String(k);
+    if (v != null && typeof v === "object" && typeof Blob === "function" && v instanceof Blob) {
+      if (filename !== undefined) v = new File([v], String(filename), { type: v.type });
+      this._d.push([k, v]);
+    } else {
+      this._d.push([k, String(v)]);
+    }
+  }
+  set(k, v, filename) {
+    k = String(k);
+    if (v != null && typeof v === "object" && typeof Blob === "function" && v instanceof Blob) {
+      if (filename !== undefined) v = new File([v], String(filename), { type: v.type });
+    } else {
+      v = String(v);
+    }
+    const i = this._d.findIndex(([a]) => a === k);
+    if (i >= 0) this._d[i] = [k, v]; else this._d.push([k, v]);
+  }
   delete(k){this._d=this._d.filter(([a])=>a!==k);}
   get(k){const e=this._d.find(([a])=>a===k);return e?e[1]:null;}
   getAll(k){return this._d.filter(([a])=>a===k).map(([,v])=>v);}
@@ -5059,8 +5125,139 @@ Object.defineProperty(Document.prototype, 'fonts', {
   },
   configurable: true,
 });
-globalThis.crypto = globalThis.crypto || { getRandomValues(arr) { for(let i=0;i<arr.length;i++) arr[i]=Math.floor(Math.random()*256); return arr; }, randomUUID(){ return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,c=>{const r=Math.random()*16|0;return(c==="x"?r:(r&3|8)).toString(16);}); } };
-globalThis.structuredClone = globalThis.structuredClone || ((v) => JSON.parse(JSON.stringify(v)));
+globalThis.crypto = globalThis.crypto || {
+  // Fill an integer TypedArray from the OS CSPRNG. Filling the underlying bytes
+  // (not per-element Math.random) keeps the distribution uniform across every
+  // typed-array width and is actually cryptographically random.
+  getRandomValues(arr) {
+    if (!ArrayBuffer.isView(arr) || arr instanceof DataView ||
+        arr instanceof Float32Array || arr instanceof Float64Array ||
+        (typeof Float16Array !== 'undefined' && arr instanceof Float16Array)) {
+      throw new DOMException("The provided ArrayBufferView is not an integer-typed array", "TypeMismatchError");
+    }
+    if (arr.byteLength > 65536) {
+      throw new DOMException("The requested length exceeds 65536 bytes", "QuotaExceededError");
+    }
+    const bytes = _OPS.op_random_bytes(arr.byteLength);
+    new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength).set(bytes);
+    return arr;
+  },
+  randomUUID() {
+    const b = _OPS.op_random_bytes(16);
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // variant 10xx
+    let s = "";
+    for (let i = 0; i < 16; i++) {
+      s += (b[i] + 0x100).toString(16).slice(1);
+      if (i === 3 || i === 5 || i === 7 || i === 9) s += "-";
+    }
+    return s;
+  },
+};
+// Real structured clone (not JSON). JSON.parse(JSON.stringify) silently drops
+// ArrayBuffer/TypedArray (they serialize to {}), so Cloudflare's turnstile
+// orchestrate loses every byte it tries to round-trip through postMessage and
+// the challenge never completes (issue #389). Clone buffers, typed arrays,
+// maps/sets, dates, errors, and plain objects recursively; platform objects
+// that register a clone hook (see crypto.subtle, registered in the WebCrypto
+// group) are routed there.
+function _structuredClone(value, seen) {
+  // Functions and symbols are not structured-cloneable (HTML structured clone,
+  // DataCloneError). This must run before the primitive early-return below,
+  // which would otherwise pass them through by reference.
+  if (typeof value === "function" || typeof value === "symbol") {
+    throw new DOMException("Failed to execute 'structuredClone': value could not be cloned.", "DataCloneError");
+  }
+  if (value === null || typeof value !== "object") return value;
+  if (seen.has(value)) return seen.get(value);
+  // Typed arrays: copy the underlying buffer slice. DataView has no .slice(),
+  // so slice its buffer over the view's range and wrap a fresh view.
+  if (ArrayBuffer.isView(value)) {
+    if (value instanceof DataView) {
+      const buf = value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+      const copy = new DataView(buf);
+      seen.set(value, copy);
+      return copy;
+    }
+    const Ctor = value.constructor;
+    const copy = new Ctor(value.slice());
+    seen.set(value, copy);
+    return copy;
+  }
+  if (value instanceof ArrayBuffer) {
+    const copy = value.slice(0);
+    seen.set(value, copy);
+    return copy;
+  }
+  if (typeof SharedArrayBuffer !== "undefined" && value instanceof SharedArrayBuffer) {
+    return value; // transferable, not copyable
+  }
+  if (value instanceof Date) return new Date(value.getTime());
+  if (value instanceof RegExp) return new RegExp(value.source, value.flags);
+  if (value instanceof Map) {
+    const m = new Map();
+    seen.set(value, m);
+    for (const [k, v] of value) m.set(_structuredClone(k, seen), _structuredClone(v, seen));
+    return m;
+  }
+  if (value instanceof Set) {
+    const s = new Set();
+    seen.set(value, s);
+    for (const v of value) s.add(_structuredClone(v, seen));
+    return s;
+  }
+  if (value instanceof Error) {
+    const Ctor = value.constructor || Error;
+    const e = new Ctor(value.message);
+    // Record the clone before recursing into `cause`, otherwise a cycle
+    // through the error (e.cause === e) recurses until the stack overflows.
+    seen.set(value, e);
+    if (value.name) e.name = value.name;
+    if (value.stack) e.stack = value.stack;
+    if (value.cause !== undefined) e.cause = _structuredClone(value.cause, seen);
+    return e;
+  }
+  // Platform objects that carry internal slots opt into cloning via a hook
+  // (CryptoKey re-registers its key material so the clone stays usable by
+  // crypto.subtle). Anything else with a registered hook takes that path.
+  if (typeof value[Symbol.toStringTag] === "string" && globalThis.__obscura_clone_hooks) {
+    const hook = globalThis.__obscura_clone_hooks[value[Symbol.toStringTag]];
+    if (typeof hook === "function") return hook(value, seen);
+  }
+  // Plain objects clone onto Object.prototype (like Chrome), not the source's
+  // prototype. Define each property instead of assigning it: a source with an
+  // own enumerable `__proto__` data prop (what JSON.parse('{"__proto__":…}')
+  // yields) would otherwise hit the inherited __proto__ setter and reparent
+  // the clone instead of copying the property.
+  const out = Array.isArray(value) ? [] : {};
+  seen.set(value, out);
+  for (const k in value) {
+    if (Object.prototype.hasOwnProperty.call(value, k)) {
+      const cloned = _structuredClone(value[k], seen);
+      // Only `__proto__` needs defineProperty: plain assignment would hit the
+      // inherited prototype setter and reparent the clone instead of adding an
+      // own data property. Every other key takes the fast assignment path.
+      if (k === "__proto__") {
+        Object.defineProperty(out, k, {
+          value: cloned,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        });
+      } else {
+        out[k] = cloned;
+      }
+    }
+  }
+  // Symbols are not enumerable via for-in; copy own symbol-keyed properties.
+  const syms = Object.getOwnPropertySymbols(value);
+  for (const s of syms) {
+    const d = Object.getOwnPropertyDescriptor(value, s);
+    if (d && "value" in d) out[s] = _structuredClone(d.value, seen);
+  }
+  return out;
+}
+globalThis.structuredClone = globalThis.structuredClone || ((v) => _structuredClone(v, new Map()));
 globalThis.reportError = globalThis.reportError || ((e) => console.error(e));
 
 // WHATWG Storage as a legacy platform object: a Proxy routes property access
@@ -6972,33 +7169,285 @@ if (typeof TransformStream === 'undefined') {
 
 if (!globalThis.crypto) globalThis.crypto = {};
 if (!globalThis.crypto.subtle) {
-  globalThis.crypto.subtle = {
+  // Real WebCrypto for the secret-key algorithms sites actually use: HMAC,
+  // AES-GCM/CBC/CTR, PBKDF2 and HKDF, plus raw/JWK-oct key handling. The crypto
+  // itself runs in Rust ops (RustCrypto); this shim only marshals bytes and
+  // normalizes algorithm parameters. Public-key algorithms (RSA*, ECDSA, ECDH)
+  // and non-symmetric key formats (pkcs8/spki) are not implemented and throw
+  // NotSupportedError rather than returning fake data.
+  const keyMaterial = new WeakMap();
+
+  class CryptoKey {
+    constructor() { throw new TypeError("Illegal constructor"); }
+    get [Symbol.toStringTag]() { return "CryptoKey"; }
+  }
+  function makeKey(type, extractable, algorithm, usages, bytes) {
+    const k = Object.create(CryptoKey.prototype);
+    Object.defineProperty(k, "type", { value: type, enumerable: true });
+    Object.defineProperty(k, "extractable", { value: !!extractable, enumerable: true });
+    Object.defineProperty(k, "algorithm", { value: algorithm, enumerable: true });
+    Object.defineProperty(k, "usages", { value: Object.freeze((usages || []).slice()), enumerable: true });
+    keyMaterial.set(k, bytes);
+    return k;
+  }
+  function keyBytes(key) {
+    if (!(key instanceof CryptoKey) || !keyMaterial.has(key)) {
+      throw new DOMException("Argument is not a valid CryptoKey", "InvalidAccessError");
+    }
+    return keyMaterial.get(key);
+  }
+
+  const toBytes = (data) => {
+    if (data instanceof ArrayBuffer) return new Uint8Array(data);
+    if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    return new Uint8Array(data || []);
+  };
+  const bufferOf = (u8) => new Uint8Array(u8).buffer;
+
+  const ALGO_CANON = {
+    "AES-CTR": "AES-CTR", "AES-CBC": "AES-CBC", "AES-GCM": "AES-GCM", "AES-KW": "AES-KW",
+    "HMAC": "HMAC", "PBKDF2": "PBKDF2", "HKDF": "HKDF",
+    "RSASSA-PKCS1-V1_5": "RSASSA-PKCS1-v1_5", "RSA-PSS": "RSA-PSS", "RSA-OAEP": "RSA-OAEP",
+    "ECDSA": "ECDSA", "ECDH": "ECDH",
+  };
+  function normalizeAlgo(algorithm) {
+    const a = typeof algorithm === "string" ? { name: algorithm } : (algorithm || {});
+    const upper = String(a.name || "").toUpperCase();
+    const name = ALGO_CANON[upper] || upper;
+    return Object.assign({}, a, { name });
+  }
+  // SubtleCrypto hashes for HMAC/PBKDF2/HKDF and digest (SHA-1/256/384/512).
+  function normalizeHash(h) {
+    const n = (typeof h === "string" ? h : (h && h.name) || "").toUpperCase().replace("_", "-");
+    if (n === "SHA-1" || n === "SHA-256" || n === "SHA-384" || n === "SHA-512") return n;
+    throw new DOMException("Unsupported hash algorithm: " + (h && (h.name || h)), "NotSupportedError");
+  }
+  const hashBlockSize = (hash) => (hash === "SHA-384" || hash === "SHA-512" ? 128 : 64);
+
+  function b64urlToBytes(s) {
+    s = String(s).replace(/-/g, "+").replace(/_/g, "/");
+    while (s.length % 4) s += "=";
+    const bin = atob(s);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  function bytesToB64url(bytes) {
+    let bin = "";
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
+  // Run an op, converting a Rust-side failure (bad GCM tag, bad CBC padding)
+  // into the OperationError the WebCrypto spec requires. DOMExceptions we raise
+  // ourselves pass through unchanged.
+  function runOp(fn) {
+    try { return fn(); }
+    catch (e) {
+      if (e instanceof DOMException) throw e;
+      throw new DOMException(String((e && e.message) || e), "OperationError");
+    }
+  }
+
+  function keyAlgorithmFor(alg, bytes) {
+    switch (alg.name) {
+      case "HMAC":
+        return { name: "HMAC", hash: { name: normalizeHash(alg.hash) }, length: bytes.length * 8 };
+      case "AES-CTR": case "AES-CBC": case "AES-GCM": case "AES-KW":
+        if (bytes.length !== 16 && bytes.length !== 24 && bytes.length !== 32) {
+          throw new DOMException("AES key data must be 128, 192, or 256 bits", "DataError");
+        }
+        return { name: alg.name, length: bytes.length * 8 };
+      case "PBKDF2": return { name: "PBKDF2" };
+      case "HKDF": return { name: "HKDF" };
+      default:
+        throw new DOMException("Unsupported key algorithm: " + alg.name, "NotSupportedError");
+    }
+  }
+
+  const subtle = {
     async digest(algorithm, data) {
-      // Real WebCrypto digest. Delegates to `op_subtle_digest` which runs
-      // the actual SHA-1/256/384/512 via Rust's `sha1` and `sha2` crates.
-      // The previous JS implementation was a custom FNV variant that
-      // produced bytes shaped like the hash but with wrong contents, so
-      // SRI checks, JWS signature verification, and OAuth PKCE silently
-      // accepted invalid input.
-      const name = (typeof algorithm === 'string' ? algorithm : algorithm?.name) || 'SHA-256';
-      let bytes;
-      if (data instanceof ArrayBuffer) bytes = new Uint8Array(data);
-      else if (ArrayBuffer.isView(data)) bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-      else bytes = new Uint8Array(data || []);
-      const out = _OPS.op_subtle_digest(name, bytes);
-      return new Uint8Array(out).buffer;
+      const name = (typeof algorithm === "string" ? algorithm : algorithm && algorithm.name || "").toUpperCase().replace("_", "-");
+      if (name !== "SHA-1" && name !== "SHA-256" && name !== "SHA-384" && name !== "SHA-512" &&
+          name !== "SHA-512/224" && name !== "SHA-512/256") {
+        throw new DOMException("Unrecognized algorithm name", "NotSupportedError");
+      }
+      return bufferOf(_OPS.op_subtle_digest(name, toBytes(data)));
     },
-    async encrypt() { throw new DOMException('NotSupportedError'); },
-    async decrypt() { throw new DOMException('NotSupportedError'); },
-    async sign() { return new ArrayBuffer(32); },
-    async verify() { return true; },
-    async generateKey() { return { type: 'secret', algorithm: {}, extractable: false, usages: [] }; },
-    async importKey() { return { type: 'secret', algorithm: {}, extractable: false, usages: [] }; },
-    async exportKey() { return new ArrayBuffer(32); },
-    async deriveBits() { return new ArrayBuffer(32); },
-    async deriveKey() { return { type: 'secret', algorithm: {}, extractable: false, usages: [] }; },
-    async wrapKey() { return new ArrayBuffer(32); },
-    async unwrapKey() { return { type: 'secret', algorithm: {}, extractable: false, usages: [] }; },
+
+    async importKey(format, keyData, algorithm, extractable, keyUsages) {
+      const alg = normalizeAlgo(algorithm);
+      let bytes;
+      if (format === "raw") {
+        bytes = toBytes(keyData);
+      } else if (format === "jwk") {
+        if (!keyData || keyData.kty !== "oct" || typeof keyData.k !== "string") {
+          throw new DOMException("Only symmetric 'oct' JWK keys are supported", "NotSupportedError");
+        }
+        bytes = b64urlToBytes(keyData.k);
+      } else {
+        throw new DOMException("Only 'raw' and symmetric 'jwk' key formats are supported", "NotSupportedError");
+      }
+      return makeKey("secret", extractable, keyAlgorithmFor(alg, bytes), keyUsages, bytes);
+    },
+
+    async exportKey(format, key) {
+      const bytes = keyBytes(key);
+      if (!key.extractable) throw new DOMException("Key is not extractable", "InvalidAccessError");
+      if (format === "raw") return bufferOf(bytes);
+      if (format === "jwk") {
+        const jwk = { kty: "oct", k: bytesToB64url(bytes), ext: key.extractable, key_ops: key.usages.slice() };
+        if (key.algorithm.name && key.algorithm.name.indexOf("AES-") === 0) {
+          jwk.alg = "A" + (bytes.length * 8) + key.algorithm.name.slice(4);
+        } else if (key.algorithm.name === "HMAC") {
+          jwk.alg = "HS" + key.algorithm.hash.name.slice(4);
+        }
+        return jwk;
+      }
+      throw new DOMException("Only 'raw' and 'jwk' export is supported", "NotSupportedError");
+    },
+
+    async generateKey(algorithm, extractable, keyUsages) {
+      const alg = normalizeAlgo(algorithm);
+      if (alg.name === "HMAC") {
+        const hash = normalizeHash(alg.hash);
+        const len = alg.length ? Math.ceil(alg.length / 8) : hashBlockSize(hash);
+        const bytes = _OPS.op_random_bytes(len);
+        return makeKey("secret", extractable, { name: "HMAC", hash: { name: hash }, length: len * 8 }, keyUsages, bytes);
+      }
+      if (alg.name === "AES-CTR" || alg.name === "AES-CBC" || alg.name === "AES-GCM" || alg.name === "AES-KW") {
+        if (alg.length !== 128 && alg.length !== 192 && alg.length !== 256) {
+          throw new DOMException("AES key length must be 128, 192, or 256 bits", "OperationError");
+        }
+        const bytes = _OPS.op_random_bytes(alg.length / 8);
+        return makeKey("secret", extractable, { name: alg.name, length: alg.length }, keyUsages, bytes);
+      }
+      throw new DOMException("generateKey does not support " + alg.name, "NotSupportedError");
+    },
+
+    async sign(algorithm, key, data) {
+      const alg = normalizeAlgo(algorithm);
+      const bytes = keyBytes(key);
+      if (alg.name === "HMAC") {
+        const hash = key.algorithm && key.algorithm.hash ? key.algorithm.hash.name : normalizeHash(alg.hash);
+        return bufferOf(runOp(() => _OPS.op_subtle_hmac(hash, bytes, toBytes(data))));
+      }
+      throw new DOMException("sign does not support " + alg.name, "NotSupportedError");
+    },
+
+    async verify(algorithm, key, signature, data) {
+      const alg = normalizeAlgo(algorithm);
+      const bytes = keyBytes(key);
+      if (alg.name === "HMAC") {
+        const hash = key.algorithm && key.algorithm.hash ? key.algorithm.hash.name : normalizeHash(alg.hash);
+        const mac = runOp(() => _OPS.op_subtle_hmac(hash, bytes, toBytes(data)));
+        const sig = toBytes(signature);
+        if (sig.length !== mac.length) return false;
+        let diff = 0;
+        for (let i = 0; i < mac.length; i++) diff |= mac[i] ^ sig[i];
+        return diff === 0;
+      }
+      throw new DOMException("verify does not support " + alg.name, "NotSupportedError");
+    },
+
+    async encrypt(algorithm, key, data) { return aesCipher(true, algorithm, key, data); },
+    async decrypt(algorithm, key, data) { return aesCipher(false, algorithm, key, data); },
+
+    async deriveBits(algorithm, baseKey, length) {
+      const alg = normalizeAlgo(algorithm);
+      const bytes = keyBytes(baseKey);
+      const lenBytes = Math.ceil((length || 0) / 8);
+      if (alg.name === "PBKDF2") {
+        const hash = normalizeHash(alg.hash);
+        const salt = toBytes(alg.salt);
+        const iterations = alg.iterations >>> 0;
+        return bufferOf(runOp(() => _OPS.op_subtle_pbkdf2(hash, bytes, salt, iterations, lenBytes)));
+      }
+      if (alg.name === "HKDF") {
+        const hash = normalizeHash(alg.hash);
+        const salt = alg.salt != null ? toBytes(alg.salt) : new Uint8Array(0);
+        const info = alg.info != null ? toBytes(alg.info) : new Uint8Array(0);
+        return bufferOf(runOp(() => _OPS.op_subtle_hkdf(hash, bytes, salt, info, lenBytes)));
+      }
+      throw new DOMException("deriveBits does not support " + alg.name, "NotSupportedError");
+    },
+
+    async deriveKey(algorithm, baseKey, derivedKeyAlgorithm, extractable, keyUsages) {
+      const dAlg = normalizeAlgo(derivedKeyAlgorithm);
+      let bits;
+      if (dAlg.name === "HMAC") {
+        bits = dAlg.length || hashBlockSize(normalizeHash(dAlg.hash)) * 8;
+      } else if (dAlg.name === "AES-CTR" || dAlg.name === "AES-CBC" || dAlg.name === "AES-GCM" || dAlg.name === "AES-KW") {
+        bits = dAlg.length;
+        if (bits !== 128 && bits !== 192 && bits !== 256) {
+          throw new DOMException("AES key length must be 128, 192, or 256 bits", "OperationError");
+        }
+      } else {
+        throw new DOMException("deriveKey does not support deriving " + dAlg.name, "NotSupportedError");
+      }
+      const derivedBits = await this.deriveBits(algorithm, baseKey, bits);
+      return this.importKey("raw", derivedBits, derivedKeyAlgorithm, extractable, keyUsages);
+    },
+
+    async wrapKey(format, key, wrappingKey, wrapAlgorithm) {
+      const exported = await this.exportKey(format, key);
+      const bytes = format === "jwk"
+        ? new TextEncoder().encode(JSON.stringify(exported))
+        : new Uint8Array(exported);
+      return this.encrypt(wrapAlgorithm, wrappingKey, bytes);
+    },
+
+    async unwrapKey(format, wrappedKey, unwrappingKey, unwrapAlgorithm, unwrappedKeyAlgorithm, extractable, keyUsages) {
+      const decrypted = await this.decrypt(unwrapAlgorithm, unwrappingKey, wrappedKey);
+      const keyData = format === "jwk"
+        ? JSON.parse(new TextDecoder().decode(new Uint8Array(decrypted)))
+        : decrypted;
+      return this.importKey(format, keyData, unwrappedKeyAlgorithm, extractable, keyUsages);
+    },
+  };
+
+  function aesCipher(encrypt, algorithm, key, data) {
+    const alg = normalizeAlgo(algorithm);
+    const bytes = keyBytes(key);
+    const input = toBytes(data);
+    if (alg.name === "AES-GCM") {
+      const iv = toBytes(alg.iv);
+      const aad = alg.additionalData != null ? toBytes(alg.additionalData) : new Uint8Array(0);
+      const tagLength = alg.tagLength == null ? 128 : alg.tagLength;
+      if (tagLength !== 128) {
+        throw new DOMException("Only a 128-bit AES-GCM tag length is supported", "NotSupportedError");
+      }
+      return bufferOf(runOp(() => _OPS.op_subtle_aes_gcm(encrypt, bytes, iv, aad, input)));
+    }
+    if (alg.name === "AES-CBC") {
+      const iv = toBytes(alg.iv);
+      return bufferOf(runOp(() => _OPS.op_subtle_aes_cbc(encrypt, bytes, iv, input)));
+    }
+    if (alg.name === "AES-CTR") {
+      const counter = toBytes(alg.counter);
+      const length = alg.length >>> 0;
+      return bufferOf(runOp(() => _OPS.op_subtle_aes_ctr(bytes, counter, length, input)));
+    }
+    throw new DOMException((encrypt ? "encrypt" : "decrypt") + " does not support " + alg.name, "NotSupportedError");
+  }
+
+  globalThis.CryptoKey = CryptoKey;
+  globalThis.SubtleCrypto = function SubtleCrypto() { throw new TypeError("Illegal constructor"); };
+  Object.setPrototypeOf(subtle, globalThis.SubtleCrypto.prototype);
+  globalThis.crypto.subtle = subtle;
+
+  // A CryptoKey cloned via structuredClone or postMessage is a different
+  // object, so the keyMaterial WeakMap lookup misses and crypto.subtle throws
+  // "Argument is not a valid CryptoKey". Rebuild the (cloned) key through
+  // makeKey so it re-enters the WeakMap and stays usable. `seen` is the clone
+  // memo _structuredClone hands every hook; populate it so one key reached
+  // twice in a graph clones to one shared object (upstream 8698afc).
+  globalThis.__obscura_clone_hooks = globalThis.__obscura_clone_hooks || {};
+  globalThis.__obscura_clone_hooks["CryptoKey"] = function (src, seen) {
+    if (seen && seen.has(src)) return seen.get(src);
+    const copy = makeKey(src.type, src.extractable, src.algorithm, src.usages, keyBytes(src));
+    if (seen) seen.set(src, copy);
+    return copy;
   };
 }
 
@@ -7375,6 +7824,10 @@ globalThis.__obscura_setPersona = function() {
 globalThis.__obscura_init = function() {
   _fpSeed = Date.now() ^ (Math.random() * 0xFFFFFFFF >>> 0);
   _fpCache = null;
+  // A real navigation just completed (this runs after set_url), so drop any
+  // URL a location setter previewed synchronously and let document_url drive
+  // location.href again, including any redirect target.
+  globalThis.__virtualUrl = null;
   _installWasmStreamingFallback();
 
   globalThis.__obscura_setPersona();

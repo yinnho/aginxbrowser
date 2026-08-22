@@ -73,6 +73,17 @@ deno_error = "0.6"
 base64 = "0.22"
 sha1 = "0.10"
 sha2 = "0.10"
+# WebCrypto (crypto.subtle) secret-key primitives. RustCrypto, pure Rust, no
+# CMake/OpenSSL, unify on the digest 0.10 / cipher 0.4 stack already in tree.
+hmac = "0.12"
+aes = "0.8"
+aes-gcm = "0.10"
+cbc = { version = "0.1", features = ["alloc"] }
+ctr = "0.9"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+hkdf = "0.12"
+# CSPRNG for getRandomValues / randomUUID (replaces Math.random).
+getrandom = "0.2"
 
 # --- stealth client (TLS fingerprint spoofing) ---
 # Pin exact versions: wreq/wreq-util are pre-release rc crates whose API shifts

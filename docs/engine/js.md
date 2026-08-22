@@ -66,15 +66,31 @@ WatchdogToken = IsolateHandle + 超时线程,terminate_execution 兜底
    - **a0e1ba5**:`globalThis.CSSStyleDeclaration` 补值(我们的类是词法绑定,window 上原本 undefined)。
    - **ec05ed0**:新增 DOMStringMap 类(Illegal constructor + toStringTag),dataset 代理目标换成真实例,补全 has/delete/ownKeys/getOwnPropertyDescriptor 陷阱;**顺手修了我们独有的两个缺陷**:旧 dataset 每次访问新建 Proxy(`el.dataset === el.dataset` 为 false)且无 delete/keys 反射。
    - **9dfc67a**:`self.constructor === Window` 身份(Ember 等框架环境门)。
+6. ✅ **fetch/XHR 组**(2026-08-22 完成,+3 测试 +1 reload 测试):
+   - **4b90ec3(20 次重定向)**:redirect limit 10→20(spec 说 20);`redirects_followed > LIMIT` 递增后判定(20 过、21 挂)。
+   - **3eb28da(FormData multipart)**:fetch body 序列化重写——FormData 分支处理 Blob/File 值(filename + Content-Type + bytes),`_bytesToBinaryString` Latin-1 转二进制;`FormData.append/set` 改 Blob 值保持对象(原 `String(v)` 全转字符串,File 变 "[object File]");补 `_bodyToUint8Array` 的 `_bytes` 短路。
+   - **260c4c0(Blob/ArrayBuffer body)**:Blob body 分支(content-type 取自 blob.type)、ArrayBuffer/view 分支。
+   - **b744b9b(跨域 credentials)**:新增 FetchCredentials(Omit/SameOrigin/Include)parse/allows + `request_origin`(url.origin().ascii_serialization() 规范化默认端口)+ `cors_response_allows`(Include 要求精确 ACAO + ACAC "true")。op_fetch_url 加第 8 参 credentials;cookie 发送与 set-cookie 存储都按 `credentials.allows(page_origin, current_url)` 门控(cookie 按 host 不按 origin/port,RFC 6265)。XHR withCredentials→include/same-origin。+2 op 单测 +1 三服务器 e2e。
+   - **ab6fa0e(fetch 按 context 分 client,#453)**:op_fetch_url 用页面 context-scoped `http_client.request_client()`(diting_net/client.rs 新加 accessor,reqwest::Client clone 廉价共享连接池),不再共享进程级 FETCH_CLIENT_CACHE,避免顺序 V8 runtime 共用 async 连接池;无 owning HttpClient 的 bare runtime 回落 select_request_client。
+   - **402de26(Blob-URL Worker race + location 同步)**:**Blob race 部分我们已有等价**——`__blobObjs` 同步存 Blob 对象(bootstrap.js:6833-6841),Worker resolveCode 先查 `__blobStore` 再落 `__blobObjs`(且我们 Blob.text() 同步),比上游只存 text 更全,不改动。location 部分全吸:href/assign/replace setter 改 `__virtualUrl = r` 同步预览(原 setter 前清 null,读回老 URL);**reload() 从 no-op 修成真导航**(挑战页 reload-after-token-cookie 场景);`__obscura_init` 清 `__virtualUrl = null` 让 document_url 重新驱动(含 redirect 目标)。+1 reload 测试。注:我们 op_navigate 本就同步更新 gs.url(ops.rs:1159),document_url 立即反映新 URL,所以同步预览对我们是 belt-and-suspenders,redirect 场景才真正靠它。
+7. ✅ **structuredClone 组**(2026-08-22 完成,+3 测试):
+   - **a921668(真 structuredClone,#389/#390)**:JSON.parse(JSON.stringify) 会把 ArrayBuffer/TypedArray 丢成 {},CF turnstile orchestrate 经 postMessage 回传字节全丢。替换为递归 `_structuredClone`:覆盖 ArrayBuffer/TypedArray/DataView(DataView 无 .slice(),按 view 区间切 buffer)/Map/Set/Date/RegExp/Error/普通对象,带 seen map 保循环引用与引用同一性、own symbol-keyed 属性;函数/symbol 抛 DataCloneError(放在 primitive 提前返回之前,否则被引用传递)。platform 对象经 `__obscura_clone_hooks[toStringTag]` 分发 hook。
+   - **b2e4bb4(Error.cause 循环 + own `__proto__`,#419/#420)**:Error 分支先把克隆写进 seen 再递归 cause(e.cause===e 不再爆栈);普通对象克隆到 Object.prototype(不取源原型),own `__proto__` 数据属性用 defineProperty 定义(普通赋值会命中继承的 __proto__ setter 把克隆重挂),其余 key 走赋值快路径。
+   - **挂账到 WebCrypto 主题(已解决,见第 8 条)**:a921668/8698afc 的 CryptoKey clone hook——WebCrypto 主题(ed75730)落地真 CryptoKey/keyMaterial 后已补齐。
+8. ✅ **WebCrypto 组**(2026-08-22 完成,+8 测试):
+   - **edde67d(拒绝未知算法,#314/#319)**:digest 对未知名(MD5 等)静默回落 SHA-256。bootstrap.js digest 先校验名字(SHA-1/256/384/512 + SHA-512/224 + SHA-512/256),不匹配抛 DOMException('NotSupportedError')。
+   - **dc780d7(SHA-512/224、SHA-512/256,#314)**:op_subtle_digest 加 `sha2::Sha512_224`/`Sha512_256`(FIPS 180-4 截断变体,AWS WAF PoW worker 用),`_ => vec![]`。+1 测试:FIPS 180-4 向量 + MD5 抛 NotSupportedError。
+   - **ed75730(真 SubtleCrypto 对称算法,#390)**:crypto.subtle 原来只有 digest,sign 返回固定 32 字节、verify 恒 true、encrypt/decrypt 抛、generateKey/importKey/deriveBits 给占位假数据——反 bot 探针/PKCE/客户端加密静默拿错结果。完整实现:**7 个新 Rust op**(op_subtle_hmac/aes_gcm/aes_cbc/aes_ctr/pbkdf2/hkdf + op_random_bytes CSPRNG)+ **8 个 RustCrypto 依赖**(hmac/aes/aes-gcm/cbc/ctr/pbkdf2/hkdf/getrandom,纯 Rust 无 CMake/OpenSSL)。bootstrap.js:crypto.subtle 重写为真实现 + 真 CryptoKey 类(keyMaterial WeakMap + makeKey/keyBytes)+ normalizeAlgo/normalizeHash/runOp 等。公钥算法(RSA/ECDSA/ECDH)与非对称 key 格式(pkcs8/spki)抛 NotSupportedError 不再给假数据。getRandomValues/randomUUID 从 Math.random 换 CSPRNG(顺带消除指纹暴露)。+4 测试:HAMC/AES-GCM/AES-CBC/PBKDF2 roundtrip(RFC 4231/RFC 6070 向量精确匹配)、CryptoKey 身份、CSPRNG。**顺带补齐 structuredClone 的 CryptoKey clone hook(a921668/8698afc)**。
+   - **cfda91b(PBKDF2 DoS,#580)**:PBKDF2 迭代数与输出长度直接来自页面 JS、无上限,单线程 V8 会被 4294967295 次迭代钉死数小时、大 length 触发无界 `vec![0u8; length]` 分配。抽出 `pbkdf2_derive` helper,cap 迭代 ≤10M、输出 ≤1MiB(远超 OWASP ~600k 合法上限),越界抛 OperationError。+3 单测(迭代越界/长度越界/正常派生)。
 
 ## 上游这两个月(233 commits)分类
 
 **A. 已有/自研等价(不用吸):** document.title setter(我们 5b4dc7a ≈ edb1785 的一半,referrer 语义没有)、Plugin/MimeType globals(a8358cc ≈ 我们 53d2a0f)、template contents 桥(ae438e1,dom 侧已吸)、setAttribute 命名空间(6314ecb/549,已吸)、stealth 指纹一致性(4309935,我们 d478bdb 自研)。
 
 **B. 同源 bug 修复,认领时逐条评估吸收(~50 个,按主题):**
-- **fetch/XHR**:4b90ec3 20 次重定向、3eb28da FormData multipart、260c4c0 Blob/ArrayBuffer body、b744b9b 跨域 credentials、ab6fa0e fetch 按 context 分 client、402de26 Blob-URL Worker race、**bd39512 intercept 重写 SSRF 复检(安全)**
-- **structuredClone**:a921668 真实现、b2e4bb4 循环引用/cause、8698afc CryptoKey seen map
-- **WebCrypto**:ed75730 SubtleCrypto 对称算法、dc780d7 SHA-512 变体、edde67d 拒绝未知算法、cfda91b PBKDF2 上限(DoS)
+- ~~**fetch/XHR**:4b90ec3 20 次重定向、3eb28da FormData multipart、260c4c0 Blob/ArrayBuffer body、b744b9b 跨域 credentials、ab6fa0e fetch 按 context 分 client、402de26 Blob-URL Worker race、bd39512 intercept 重写 SSRF 复检(安全)~~ ✅ 已吸(2026-08-22,bd39512 见安全组,其余见"已知坑"第 6 条)
+- ~~**structuredClone**:a921668 真实现、b2e4bb4 循环引用/cause、8698afc CryptoKey seen map~~ ✅ 核心已吸(2026-08-22,见"已知坑"第 7 条);CryptoKey clone hook 挂账到 WebCrypto 主题
+- ~~**WebCrypto**:ed75730 SubtleCrypto 对称算法、dc780d7 SHA-512 变体、edde67d 拒绝未知算法、cfda91b PBKDF2 上限(DoS)~~ ✅ 全吸(2026-08-22,见"已知坑"第 8 条)
 - **DOM 遍历**:TreeWalker/NodeIterator 六连修(ab3ca26/a8c0a19/1c7402d/49d4b91/c12915a/845abb9)
 - **DOM 杂项**:c4f545e DocumentFragment 拍平、491ecfb+90ed9af cloneNode 结构化、a663a15+a2fd4d1 insertAdjacentHTML 上下文、25ce541 真 NodeList、a16e8d4 checkbox 默认 "on"、b460b37 adoptNode/toggleAttribute、ad7a7a9 dataset/style 的 in 与 Object.keys、80803cb style 双向同步、41a8e1c DOM 移动保 script 状态、5177304 完整插入步骤
 - **事件**:0ff1ba0+af1e15f 构造器 WebIDL 语义、776c915 PromiseRejectionEvent/StorageEvent、7e6f403 createEvent 拒绝未知、2f3d5d8 iframe 事件、scroll 四连(1c7402d/29e20ae/f6ca133/3f820c4)、08c1f0d React/Vue controlled input
@@ -99,6 +115,6 @@ WatchdogToken = IsolateHandle + 超时线程,terminate_execution 兜底
 2. **修既有挂账**:fetch base64 测试、d0d8617(head)、0ca7ac0(document.write)。
 3. **安全优先**:bd39512(intercept SSRF)、cfda91b(PBKDF2 DoS)、4f6d256(堆耗尽)。
 4. ~~**stealth/反射组**(4c33f6d/c7e7c70/846ed7d/a0e1ba5/ec05ed0/9dfc67a)~~ ✅ 2026-08-22 完成(见"已知坑"第 5 条)。
-5. **fetch/DOM/事件组**按主题批量过,每组补特征测试。
+5. **fetch/DOM/事件组**按主题批量过,每组补特征测试。~~fetch/XHR 组~~ ✅、~~structuredClone 组~~ ✅、~~WebCrypto 组~~ ✅(2026-08-22,见"已知坑"第 6/7/8 条);剩 DOM 遍历、DOM 杂项、事件、计时器、Location、脚本加载、DOMParser XML、表单、杂项。
 6. **改名 `diting_js`**,类型 `ObscuraJsRuntime`→`JsRuntime`。
 7. **C 组挂账**:渲染浪潮不跟;iframe/并发架构读完写结论到本文档。

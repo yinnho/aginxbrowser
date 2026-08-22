@@ -1679,6 +1679,232 @@ mod tests {
     }
 
     #[test]
+    fn test_location_reload_triggers_navigation() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // reload() used to be a no-op, so a challenge that reloaded after
+        // setting a token cookie never re-fetched. It now navigates to the
+        // current href like assign/replace.
+        rt.evaluate("location.reload();").unwrap();
+        assert_eq!(
+            rt.take_pending_navigation(),
+            Some(("http://example.com/test".to_string(), "GET".to_string(), "".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_structured_clone_preserves_buffers_and_collections() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // The old JSON.parse(JSON.stringify) fallback dropped ArrayBuffer and
+        // TypedArray to {}. Real structuredClone keeps them intact.
+        let result = rt.evaluate(r#"
+            const ab = new ArrayBuffer(4);
+            new Uint8Array(ab).set([1, 2, 3, 4]);
+            const c = structuredClone({
+                buf: ab,
+                view: new Uint16Array([5, 6]),
+                map: new Map([["k", new Uint8Array([7])]]),
+                set: new Set([8]),
+                date: new Date(0),
+                re: /ab+c/gi,
+            });
+            return [
+                c.buf instanceof ArrayBuffer,
+                Array.from(new Uint8Array(c.buf)),
+                c.view instanceof Uint16Array,
+                Array.from(c.view),
+                Array.from(c.map.get("k")),
+                c.set.has(8),
+                c.date.getTime(),
+                c.re.source,
+                c.re.flags,
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([true, [1,2,3,4], true, [5,6], [7], true, 0, "ab+c", "gi"])
+        );
+    }
+
+    #[test]
+    fn test_structured_clone_handles_cycles_and_error_cause() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // Cycles preserve identity; an Error whose `cause` points back at
+        // itself must not recurse until stack overflow.
+        let result = rt.evaluate(r#"
+            const obj = { name: 'a' };
+            obj.self = obj;
+            const c = structuredClone(obj);
+            const cycleOk = c.self === c && c.name === 'a' && c !== obj;
+
+            const err = new Error('boom');
+            err.cause = err;
+            const ec = structuredClone(err);
+            const causeOk = ec.cause === ec && ec.message === 'boom';
+            return [cycleOk, causeOk];
+        "#).unwrap();
+        assert_eq!(result, serde_json::json!([true, true]));
+    }
+
+    #[test]
+    fn test_structured_clone_own_proto_and_function_rejection() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // An own enumerable `__proto__` data property (what JSON.parse yields)
+        // must clone as an own property, not reparent the clone. Functions are
+        // not structured-cloneable and must throw DataCloneError.
+        let result = rt.evaluate(r#"
+            const obj = JSON.parse('{"__proto__": {"x": 1}, "y": 2}');
+            const c = structuredClone(obj);
+            const protoOk = Object.getPrototypeOf(c) === Object.prototype
+                && c.y === 2
+                && c.__proto__.x === 1;
+
+            let threw = false;
+            try { structuredClone({ f: function() {} }); } catch (e) {
+                threw = e instanceof DOMException && e.name === "DataCloneError";
+            }
+            return [protoOk, threw];
+        "#).unwrap();
+        assert_eq!(result, serde_json::json!([true, true]));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_subtle_digest_variants_and_rejection() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // SHA-512/224 and SHA-512/256 were silently falling through to SHA-256,
+        // and unknown names (MD5) returned a SHA-256 hash with no error. Verify
+        // the FIPS 180-4 test vectors and the NotSupportedError rejection.
+        let script = r#"async () => {
+            const hex = (buf) => Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+            const enc = new TextEncoder();
+            const sha256 = hex(await crypto.subtle.digest('SHA-256', enc.encode('abc')));
+            const sha512_224 = hex(await crypto.subtle.digest('SHA-512/224', enc.encode('abc')));
+            const sha512_256 = hex(await crypto.subtle.digest('SHA-512/256', enc.encode('abc')));
+            let threw = false;
+            try { await crypto.subtle.digest('MD5', enc.encode('abc')); } catch (e) {
+                threw = e.name === 'NotSupportedError';
+            }
+            return [sha256, sha512_224, sha512_256, threw];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!([
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                "4634270f707b6a54daae7530460842e20e37ed265ceee9a43e8924aa",
+                "53048e2681941ef99b2e29b76b4c7dabe4c2d0c634fc6d46e0e2f13107e7af23",
+                true
+            ])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_webcrypto_secret_key_roundtrips() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // HMAC sign/verify, AES-GCM and AES-CBC encrypt/decrypt roundtrips, and
+        // PBKDF2/HKDF derivation all work through the RustCrypto ops (the old
+        // stubs returned fake data).
+        let script = r#"async () => {
+            const enc = new TextEncoder();
+            const dec = new TextDecoder();
+
+            // HMAC sign/verify (RFC 4231 key/data).
+            const hk = await crypto.subtle.importKey('raw', enc.encode('key'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);
+            const sig = await crypto.subtle.sign('HMAC', hk, enc.encode('The quick brown fox jumps over the lazy dog'));
+            const sigHex = Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
+            const verifyOk = await crypto.subtle.verify('HMAC', hk, sig, enc.encode('The quick brown fox jumps over the lazy dog'));
+            const verifyBad = await crypto.subtle.verify('HMAC', hk, sig, enc.encode('tampered'));
+
+            // AES-GCM roundtrip.
+            const gk = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
+            const giv = crypto.getRandomValues(new Uint8Array(12));
+            const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: giv }, gk, enc.encode('hello gcm'));
+            const pt = dec.decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: giv }, gk, ct));
+
+            // AES-CBC roundtrip.
+            const ck = await crypto.subtle.generateKey({ name: 'AES-CBC', length: 128 }, true, ['encrypt', 'decrypt']);
+            const civ = crypto.getRandomValues(new Uint8Array(16));
+            const cct = await crypto.subtle.encrypt({ name: 'AES-CBC', iv: civ }, ck, enc.encode('hello cbc'));
+            const cpt = dec.decode(await crypto.subtle.decrypt({ name: 'AES-CBC', iv: civ }, ck, cct));
+
+            // PBKDF2 derivation (RFC 6070 vector: PBKDF2-HMAC-SHA256, 1 iter).
+            const pk = await crypto.subtle.importKey('raw', enc.encode('password'), { name: 'PBKDF2' }, false, ['deriveBits']);
+            const dk = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: enc.encode('salt'), iterations: 1 }, pk, 256);
+            const dkHex = Array.from(new Uint8Array(dk)).map(b => b.toString(16).padStart(2, '0')).join('');
+
+            return [sigHex, verifyOk, !verifyBad, pt, cpt, dkHex];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        // RFC 4231 HMAC-SHA-256("key", "The quick brown fox...") =
+        //   f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8
+        // RFC 6070 PBKDF2-HMAC-SHA256("password", "salt", 1, 32) =
+        //   120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!([
+                "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8",
+                true, true, "hello gcm", "hello cbc",
+                "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"
+            ])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_webcrypto_pbkdf2_rejects_excessive_iterations() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // A page asking for 2^32 iterations must not pin the single-threaded
+        // runtime; the op rejects it with OperationError (upstream cfda91b).
+        let script = r#"async () => {
+            const enc = new TextEncoder();
+            const pk = await crypto.subtle.importKey('raw', enc.encode('password'), { name: 'PBKDF2' }, false, ['deriveBits']);
+            try {
+                await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: enc.encode('salt'), iterations: 4294967295 }, pk, 256);
+                return 'no-throw';
+            } catch (e) {
+                return e.name;
+            }
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(result.value.unwrap(), serde_json::json!("OperationError"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_structured_clone_preserves_cryptokey_identity() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // A CryptoKey reached twice in a graph must clone to one shared object
+        // that crypto.subtle still accepts (upstream 8698afc + a921668).
+        let script = r#"async () => {
+            const enc = new TextEncoder();
+            const key = await crypto.subtle.importKey('raw', enc.encode('k'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+            const c = structuredClone({ a: key, b: key });
+            const sameObject = c.a === c.b;
+            // The clone stays usable by crypto.subtle (key material re-registered).
+            const sig = await crypto.subtle.sign('HMAC', c.a, enc.encode('msg'));
+            return [sameObject, sig instanceof ArrayBuffer, c.a instanceof CryptoKey];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(result.value.unwrap(), serde_json::json!([true, true, true]));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_get_random_values_and_uuid_from_csprng() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // getRandomValues fills integer typed arrays, randomUUID returns a v4
+        // UUID shape, and both reject/fill sensibly.
+        let script = r#"() => {
+            const u8 = new Uint8Array(32);
+            crypto.getRandomValues(u8);
+            const nonZero = u8.some(b => b !== 0);
+            const uuid = crypto.randomUUID();
+            const uuidOk = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(uuid);
+            let typeErr = false;
+            try { crypto.getRandomValues(new Float64Array(4)); } catch (e) { typeErr = e.name === 'TypeMismatchError'; }
+            return [nonZero, uuidOk, typeErr];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, false).await.unwrap();
+        assert_eq!(result.value.unwrap(), serde_json::json!([true, true, true]));
+    }
+
+    #[test]
     fn test_submit_button_click_handler_can_prevent_default_and_navigate() {
         let mut rt = setup_runtime(r#"<form><button type="submit" id="submit">Submit</button></form>"#);
         let href = rt.evaluate(r#"
@@ -2495,6 +2721,274 @@ mod tests {
             "server should see the resolved URL path, got: {}",
             request_line
         );
+    }
+
+    /// The Fetch standard allows 20 redirect hops and rejects the 21st
+    /// (upstream 4b90ec3). A local chain of exactly 20 must arrive; one of 21
+    /// must fail.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_follows_twenty_redirects_and_rejects_twenty_one() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+
+        fn chain_server(hops: usize) -> u16 {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                for _ in 0..=hops {
+                    let Ok((mut stream, _)) = listener.accept() else { return };
+                    let mut buf = [0u8; 4096];
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let path = request
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap_or("/");
+                    let step: usize = path
+                        .trim_start_matches("/hop")
+                        .parse()
+                        .unwrap_or(0);
+                    let response = if step < hops {
+                        format!(
+                            "HTTP/1.1 302 Found\r\nlocation: /hop{}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                            step + 1
+                        )
+                    } else {
+                        "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok"
+                            .to_string()
+                    };
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.flush();
+                }
+            });
+            port
+        }
+
+        let fetch_status = |port: u16| {
+            let mut rt = setup_runtime("<html><body></body></html>");
+            rt.set_url(&format!("http://127.0.0.1:{}/", port));
+            rt
+        };
+        let script = r#"async () => {
+            try {
+                const r = await fetch("/hop0");
+                return "status:" + r.status;
+            } catch (e) {
+                return "error:" + (e && e.message);
+            }
+        }"#;
+
+        let port20 = chain_server(20);
+        let mut rt = fetch_status(port20);
+        let ok = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        assert_eq!(ok.value.unwrap(), serde_json::json!("status:200"));
+
+        let port21 = chain_server(21);
+        let mut rt = fetch_status(port21);
+        let err = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        assert_eq!(err.value.unwrap(), serde_json::json!("error:net::ERR_FAILED"));
+
+        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+    }
+
+    /// fetch() must serialize FormData (incl. File parts with filename and
+    /// Content-Type), Blob, and TypedArray bodies the way a browser does
+    /// (upstream 3eb28da / 260c4c0). String(body) used to send "[object Blob]".
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_serializes_formdata_blob_and_typed_bodies() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (req_tx, req_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for _ in 0..4 {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 4096];
+                // Read headers, then exactly content-length body bytes.
+                let mut header_end = None;
+                let mut content_len = 0usize;
+                loop {
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    if n == 0 { break; }
+                    raw.extend_from_slice(&buf[..n]);
+                    if header_end.is_none() {
+                        if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                            header_end = Some(pos + 4);
+                            let head = String::from_utf8_lossy(&raw[..pos]);
+                            for line in head.lines() {
+                                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                                    content_len = v.trim().parse().unwrap_or(0);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(end) = header_end {
+                        if raw.len() >= end + content_len { break; }
+                    }
+                }
+                req_tx.send(raw).unwrap();
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                );
+                let _ = stream.flush();
+            }
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/", port));
+        let result = rt.call_function_on_for_cdp(
+            r#"async (port) => {
+                const out = [];
+                const run = async (tag, fn) => { try { out.push(tag + ":" + (await fn()).status); } catch (e) { out.push(tag + "!:" + (e && (e.message || e.name))); } };
+                const fd = new FormData();
+                fd.append("field", "value");
+                fd.append("upload", new File([new Uint8Array([1, 2, 3])], "a.bin", { type: "application/octet-stream" }));
+                await run("plain", () => fetch("http://127.0.0.1:" + port + "/plain", { method: "POST", body: "x=1" }));
+                await run("fd", () => fetch("http://127.0.0.1:" + port + "/fd", { method: "POST", body: fd }));
+                await run("blob", () => fetch("http://127.0.0.1:" + port + "/blob", { method: "POST", body: new Blob(["hello"], { type: "text/plain" }) }));
+                await run("typed", () => fetch("http://127.0.0.1:" + port + "/typed", { method: "POST", body: new Uint8Array([65, 66, 67]) }));
+                return out.join("|");
+            }"#,
+            None,
+            &[serde_json::json!({ "value": port })],
+            true,
+            true,
+        ).await.unwrap();
+        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+        assert_eq!(result.value.unwrap(), serde_json::json!("plain:200|fd:200|blob:200|typed:200"));
+
+        let plain_raw = req_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(plain_raw.ends_with(b"x=1"), "plain body mismatch: {:?}", plain_raw);
+
+        let fd_req = String::from_utf8_lossy(&req_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap()).into_owned();
+        assert!(fd_req.contains("content-type: multipart/form-data; boundary="), "missing multipart header: {}", fd_req);
+        assert!(fd_req.contains("name=\"field\"\r\n\r\nvalue"), "missing field part: {}", fd_req);
+        assert!(fd_req.contains("filename=\"a.bin\""), "missing filename: {}", fd_req);
+        assert!(fd_req.contains("application/octet-stream"), "missing part content-type: {}", fd_req);
+
+        let blob_raw = req_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let blob_req = String::from_utf8_lossy(&blob_raw).into_owned();
+        assert!(blob_req.contains("content-type: text/plain"), "missing blob content-type: {}", blob_req);
+        assert!(blob_req.ends_with("hello"), "blob body mismatch: {}", blob_req);
+
+        let typed_raw = req_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(typed_raw.ends_with(b"ABC"), "typed body mismatch: {:?}", typed_raw);
+    }
+
+    /// RequestCredentials end-to-end (upstream b744b9b): same-origin (the
+    /// default) neither sends nor stores cookies cross-origin; "include" does
+    /// both, and a credentialed CORS response without Allow-Credentials +
+    /// exact origin is blocked.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_honors_request_credentials_across_origins() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+
+        use std::io::{Read, Write};
+        fn read_request(stream: &mut std::net::TcpStream) -> String {
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        }
+        fn cookie_header(req: &str) -> String {
+            req.lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("cookie:"))
+                .map(|l| l[7..].trim().to_string())
+                .unwrap_or_default()
+        }
+
+        // Page origin: stores a cookie so the same-origin store path runs.
+        let listener_a = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_a = listener_a.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener_a.accept().unwrap();
+            read_request(&mut stream);
+            stream.write_all(b"HTTP/1.1 200 OK\r\nset-cookie: a=1; Path=/\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok").unwrap();
+        });
+
+        // Cross origin B: mirrors CORS for the page origin, sets b=1 each time.
+        let listener_b = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_b = listener_b.local_addr().unwrap().port();
+        let (cookie_tx, cookie_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let origin = format!("http://127.0.0.1:{}", port_a);
+            for _ in 0..3 {
+                let Ok((mut stream, _)) = listener_b.accept() else { return };
+                let req = read_request(&mut stream);
+                cookie_tx.send(cookie_header(&req)).unwrap();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\naccess-control-allow-origin: {}\r\naccess-control-allow-credentials: true\r\nset-cookie: b=1; Path=/\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                    origin
+                );
+                stream.write_all(resp.as_bytes()).unwrap();
+            }
+        });
+
+        // Cross origin C: wildcard ACAO without Allow-Credentials — fine for
+        // non-credentialed, blocked for credentials:include.
+        let listener_c = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_c = listener_c.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener_c.accept().unwrap();
+            read_request(&mut stream);
+            stream.write_all(b"HTTP/1.1 200 OK\r\naccess-control-allow-origin: *\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok").unwrap();
+        });
+
+        let (mut rt, jar) = setup_runtime_with_cookies("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port_a));
+        let result = rt.call_function_on_for_cdp(
+            r#"async (pa, pb, pc) => {
+                const A = "http://127.0.0.1:" + pa, B = "http://127.0.0.1:" + pb, C = "http://127.0.0.1:" + pc;
+                const out = [];
+                await fetch(A + "/seed");
+                out.push("r1:" + (await fetch(B + "/x")).status);
+                out.push("r2:" + (await fetch(B + "/x", { credentials: "include" })).status);
+                out.push("r3:" + (await fetch(B + "/x", { credentials: "include" })).status);
+                try {
+                    await fetch(C + "/x", { credentials: "include" });
+                    out.push("c:ok");
+                } catch (e) {
+                    out.push("c:" + (e && e.message));
+                }
+                return out.join("|");
+            }"#,
+            None,
+            &[
+                serde_json::json!({ "value": port_a }),
+                serde_json::json!({ "value": port_b }),
+                serde_json::json!({ "value": port_c }),
+            ],
+            true,
+            true,
+        ).await.unwrap();
+        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+
+        let expected = format!(
+            "r1:200|r2:200|r3:200|c:Failed to fetch: CORS error: credentialed request requires Access-Control-Allow-Origin 'http://127.0.0.1:{}' and Access-Control-Allow-Credentials 'true'",
+            port_a
+        );
+        assert_eq!(result.value.unwrap(), serde_json::json!(expected));
+        let c1 = cookie_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let c2 = cookie_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let c3 = cookie_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        // Cookies are host-scoped (RFC 6265 ignores the port), so once
+        // credentials are allowed, B receives every 127.0.0.1 cookie.
+        assert_eq!((c1.as_str(), c2.as_str()), ("", "a=1"));
+        assert!(c3.split("; ").any(|c| c == "b=1"), "stored cookie missing: {}", c3);
+        let b_url = url::Url::parse(&format!("http://127.0.0.1:{}/", port_b)).unwrap();
+        assert!(jar.get_cookie_header(&b_url).split("; ").any(|c| c == "b=1"));
     }
 
     /// Setting innerHTML on the <html> element parses in the "before head"

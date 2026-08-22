@@ -367,6 +367,15 @@ impl HttpClient {
         self.proxy_url.as_deref()
     }
 
+    /// The reqwest client this request should use (context-scoped, tied to
+    /// this browser context). Cloning a `reqwest::Client` is cheap — it shares
+    /// the underlying connection pool — so callers that need an owned handle
+    /// (e.g. `op_fetch_url`, which builds a request and follows redirects
+    /// itself) can take one without copying the pool.
+    pub async fn request_client(&self) -> Client {
+        self.get_client_for().await.clone()
+    }
+
     pub async fn fetch(&self, url: &Url) -> Result<Response, NetError> {
         self.fetch_with_method(Method::GET, url, None).await
     }
