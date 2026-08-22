@@ -472,9 +472,10 @@ pub fn do_eval(req: EvalRequest) -> Result<EvalResponse> {
 /// Unlike /fetch (which can short-circuit to raw HTTP for static pages), this
 /// always drives the obscura browser so SPA/JS-rendered content is captured.
 /// The page's `document.documentElement.outerHTML` is then fed to Blitz for
-/// layout + paint — no Chromium, no sub-resource fetches (Blitz's DummyNetProvider
-/// is a no-op, and upstream #636's is_noop() gating stops head stylesheets from
-/// blocking paint forever).
+/// layout + paint — no Chromium. Sub-resources (images, head stylesheets) are
+/// pre-fetched through the page's own HTTP client (same cookies/UA/proxy, plus
+/// stealth TLS when enabled) and served to Blitz synchronously by
+/// PrefetchedNetProvider; misses answer empty so nothing blocks paint.
 #[cfg(feature = "screenshot")]
 pub fn do_screenshot(req: ScreenshotRequest) -> Result<ScreenshotResponse> {
     run_on_local_runtime(move |_rt| {
@@ -496,6 +497,8 @@ pub fn do_screenshot(req: ScreenshotRequest) -> Result<ScreenshotResponse> {
 
             // JS-rendered DOM — the same source /fetch uses for OutputFormat::Html.
             let html = page.content();
+            // Pre-fetch while the page (its cookie'd HTTP client) is still alive.
+            let resources = crate::screenshot::prefetch_render_resources(&page, &final_url, &html).await;
             drop(page);
             drop(browser);
 
@@ -510,6 +513,7 @@ pub fn do_screenshot(req: ScreenshotRequest) -> Result<ScreenshotResponse> {
                 req.full_page,
                 req.selector.as_deref(),
                 req.selector_all,
+                Some(&resources),
             )?;
 
             Ok(ScreenshotResponse {

@@ -3,10 +3,13 @@
 //!
 //! This module is the "paint what the agent already sees" layer - aginxbrowser's
 //! V8 path has already run the page's JS and produced the final DOM; we hand
-//! that DOM to Blitz purely for layout + rasterization. No sub-resource fetches
-//! happen here (Blitz's DummyNetProvider is a no-op, and upstream #636's
-//! `is_noop()` gating stops `<head>` stylesheets from blocking paint forever -
-//! see the `screenshot` feature note in Cargo.toml).
+//! that DOM to Blitz purely for layout + rasterization. Blitz itself does no
+//! networking: the caller pre-fetches the visible sub-resources (images, head
+//! stylesheets) over HTTP and hands them to [`PrefetchedNetProvider`], which
+//! serves them synchronously. Without a pre-fetch, the no-op DummyNetProvider
+//! applies and upstream #636's `is_noop()` gating stops `<head>` stylesheets
+//! from blocking paint forever (see the `screenshot` feature note in
+//! Cargo.toml).
 //!
 //! Element regions: after layout, every node carries a Taffy `final_layout`
 //! whose `location` is parent-relative. The absolute (page-relative) origin is
@@ -15,10 +18,15 @@
 //! x/y offsets are in scaled physical pixels, so a CSS-pixel rect is passed in
 //! as `rect * scale`.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
 use anyhow::Result;
 use blitz_dom::{BaseDocument, DocumentConfig, Point, util::Color};
 use blitz_html::HtmlDocument;
 use blitz_paint::paint_scene;
+use blitz_traits::net::{Bytes, NetHandler, NetProvider, Request as NetRequest};
 use blitz_traits::node_id::NodeId;
 use blitz_traits::shell::{ColorScheme, Viewport};
 use peniko::Fill;
@@ -50,13 +58,153 @@ pub struct RenderedScreenshot {
     pub rects: Vec<ElementRect>,
 }
 
+// ---------------------------------------------------------------------------
+// Pre-fetched sub-resources
+// ---------------------------------------------------------------------------
+
+/// Bodies of sub-resources (images, stylesheets) fetched over HTTP before
+/// rendering, keyed by absolute URL string. The key is the normalized
+/// `Url::as_str()` form — the same string Blitz produces by resolving
+/// `img src` / `link href` against `base_url` before calling the provider.
+pub type PrefetchedResources = HashMap<String, Arc<Vec<u8>>>;
+
+/// A [`NetProvider`] that answers synchronously from a pre-fetched map.
+///
+/// Requests are never left unanswered: a miss (unseen URL, too-big body,
+/// fetch failure) gets empty bytes. An unanswered `<head>` stylesheet would
+/// sit in `pending_critical_resources` forever and blank the paint; an
+/// answered-empty one parses to an empty sheet and clears the pending set —
+/// blitz's `load_resource` removes the request id before inspecting the
+/// result, so even decode failures clear it.
+struct PrefetchedNetProvider {
+    resources: PrefetchedResources,
+}
+
+impl NetProvider for PrefetchedNetProvider {
+    fn fetch(&self, _doc_id: usize, request: NetRequest, handler: Box<dyn NetHandler>) {
+        let url = request.url.as_str().to_string();
+        let bytes = match self.resources.get(&url) {
+            Some(body) => Bytes::from(body.as_ref().clone()),
+            None => Bytes::new(),
+        };
+        handler.bytes(url, bytes);
+    }
+    // is_noop() keeps its false default: we DO deliver (possibly empty)
+    // resources, so head stylesheets must go through resolve-and-clear
+    // rather than being skipped by the #636 gating.
+}
+
+/// Pre-fetch the sub-resources Blitz will request while rendering `html`:
+/// `<img src>` and `<link rel=stylesheet href>`, resolved against `base_url`.
+///
+/// Uses the page's own HTTP client — same UA, cookie jar (session cookies
+/// from the page load) and proxy the navigation used, plus the stealth TLS
+/// fingerprint when enabled. Bounded: ≤32 URLs, ≤2 MiB per body, 3s per
+/// request — this is fidelity polish for the screenshot, not a scrape.
+pub async fn prefetch_render_resources(
+    page: &crate::page::Page,
+    base_url: &str,
+    html: &str,
+) -> PrefetchedResources {
+    use scraper::{Html, Selector};
+
+    const MAX_RESOURCES: usize = 32;
+    const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+    const PER_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+
+    fn push_resolved(base: &url::Url, raw: &str, out: &mut Vec<url::Url>) {
+        let raw = raw.trim();
+        if raw.is_empty() || raw.starts_with("data:") || raw.starts_with("blob:") {
+            return;
+        }
+        if let Ok(u) = base.join(raw) {
+            if matches!(u.scheme(), "http" | "https") && !out.contains(&u) {
+                out.push(u);
+            }
+        }
+    }
+
+    // Route through the same client the page navigated with: stealth wreq
+    // when enabled, plain reqwest otherwise.
+    async fn fetch_via(
+        page: &crate::page::Page,
+        u: &url::Url,
+    ) -> Option<crate::obscura_net::Response> {
+        #[cfg(feature = "stealth")]
+        if let Some(ref stealth) = page.inner.stealth_client {
+            return stealth.fetch(u).await.ok();
+        }
+        page.inner.http_client.fetch(u).await.ok()
+    }
+
+    let mut urls: Vec<url::Url> = Vec::new();
+    let Ok(base) = url::Url::parse(base_url) else {
+        return PrefetchedResources::new();
+    };
+
+    let doc = Html::parse_document(html);
+    if let Ok(sel) = Selector::parse("img[src]") {
+        for el in doc.select(&sel) {
+            if urls.len() >= MAX_RESOURCES {
+                break;
+            }
+            if let Some(src) = el.value().attr("src") {
+                push_resolved(&base, src, &mut urls);
+            }
+        }
+    }
+    if let Ok(sel) = Selector::parse("link[href]") {
+        for el in doc.select(&sel) {
+            if urls.len() >= MAX_RESOURCES {
+                break;
+            }
+            let is_css = el
+                .value()
+                .attr("rel")
+                .map(|r| r.split_ascii_whitespace().any(|t| t.eq_ignore_ascii_case("stylesheet")))
+                .unwrap_or(false);
+            if is_css {
+                if let Some(href) = el.value().attr("href") {
+                    push_resolved(&base, href, &mut urls);
+                }
+            }
+        }
+    }
+    if urls.is_empty() {
+        return PrefetchedResources::new();
+    }
+    let requested = urls.len();
+
+    let futs = urls.into_iter().map(|u| async move {
+        let resp = tokio::time::timeout(PER_REQUEST_TIMEOUT, fetch_via(page, &u))
+            .await
+            .ok()
+            .flatten()?;
+        if resp.status != 200 || resp.body.is_empty() || resp.body.len() > MAX_BODY_BYTES {
+            return None;
+        }
+        Some((u.as_str().to_string(), Arc::new(resp.body)))
+    });
+    let map: PrefetchedResources = futures::future::join_all(futs).await.into_iter().flatten().collect();
+    tracing::debug!(
+        "screenshot prefetch: {}/{} sub-resources fetched",
+        map.len(),
+        requested
+    );
+    map
+}
+
 /// Render an HTML string to a PNG (RGBA bytes) plus element rects.
 ///
-/// `base_url` is used to resolve relative URLs in the document (mostly moot
-/// since we don't fetch sub-resources, but Blitz uses it for `<base>` etc.).
-/// When `full_page` is true, the render height tracks the document's computed
-/// content height (capped at 16000px to bound memory); otherwise the requested
-/// `height` is used (viewport-sized).
+/// `base_url` resolves relative URLs in the document (`<base>`, sub-resource
+/// hrefs when `resources` is given). When `full_page` is true, the render
+/// height tracks the document's computed content height (capped at 16000px to
+/// bound memory); otherwise the requested `height` is used (viewport-sized).
+///
+/// `resources`: pre-fetched sub-resource bodies (see
+/// [`prefetch_render_resources`]). `None` or empty renders resource-less via
+/// the no-op DummyNetProvider (#636 gating); a non-empty map activates
+/// [`PrefetchedNetProvider`] so images and head stylesheets actually paint.
 ///
 /// `selector`: when given (and `selector_all` is false), the image is cropped
 /// to the first matching element instead of the whole page - Blitz re-paints
@@ -73,20 +221,31 @@ pub fn render_html_to_png(
     full_page: bool,
     selector: Option<&str>,
     selector_all: bool,
+    resources: Option<&PrefetchedResources>,
 ) -> Result<RenderedScreenshot> {
     if html.is_empty() {
         anyhow::bail!("render_html_to_png: empty HTML (page content() returned nothing - navigation may have failed)");
     }
     let scale_f = scale.max(0.1) as f64;
 
-    // No net provider -> DummyNetProvider (no-op). Upstream #636's is_noop()
-    // gating ensures head stylesheets don't permanently block paint. We never
-    // fetch sub-resources here; the DOM is already JS-rendered by the V8 path.
+    // Sub-resource delivery: a non-empty pre-fetch map activates the sync
+    // provider (misses answer empty, so nothing pends forever). Without one,
+    // DummyNetProvider (no-op) + upstream #636's is_noop() gating keeps head
+    // stylesheets from blocking paint.
+    let has_resources = resources.is_some_and(|m| !m.is_empty());
+    let net_provider: Option<Arc<dyn NetProvider>> = if has_resources {
+        Some(Arc::new(PrefetchedNetProvider {
+            resources: resources.unwrap().clone(),
+        }))
+    } else {
+        None
+    };
+
     let mut document = HtmlDocument::from_html(
         html,
         DocumentConfig {
             base_url: Some(base_url.to_string()),
-            net_provider: None,
+            net_provider,
             viewport: Some(Viewport::new(
                 width * (scale as u32),
                 height * (scale as u32),
@@ -97,9 +256,11 @@ pub fn render_html_to_png(
         },
     );
 
-    // Drive Stylo style resolution + Taffy layout to completion. Without a net
-    // provider there are no deferred resource waits, so a few rounds suffice.
-    for _ in 0..4 {
+    // Drive Stylo style resolution + Taffy layout to completion. A delivered
+    // stylesheet is applied on the NEXT round (resolve drains the resource
+    // event queue first), so the provider path gets extra rounds.
+    let rounds = if has_resources { 8 } else { 4 };
+    for _ in 0..rounds {
         document.resolve(0.0);
     }
 
@@ -342,7 +503,7 @@ mod tests {
         </body></html>"##;
 
         // 1. Rect math: uncropped render (selector_all), selector reports the element rect.
-        let full = render_html_to_png(html, "https://example.com/", 800, 600, 1.0, false, Some("#target"), true)
+        let full = render_html_to_png(html, "https://example.com/", 800, 600, 1.0, false, Some("#target"), true, None)
             .expect("full render");
         assert_eq!(full.rects.len(), 1);
         let r = full.rects[0];
@@ -352,7 +513,7 @@ mod tests {
         assert!((r.height - 40.0).abs() <= 1.0, "height: {r:?}");
 
         // 2. Crop: rendered image is exactly the element, mostly red.
-        let crop = render_html_to_png(html, "https://example.com/", 800, 600, 1.0, false, Some("#target"), false)
+        let crop = render_html_to_png(html, "https://example.com/", 800, 600, 1.0, false, Some("#target"), false, None)
             .expect("crop render");
         assert_eq!((crop.pixel_width, crop.pixel_height), (60, 40));
         assert_eq!(crop.rects[0], r);
@@ -369,7 +530,7 @@ mod tests {
             <div class="it" style="position:absolute;left:10px;top:20px;width:30px;height:30px;background:#00ff00"></div>
             <div class="it" style="position:absolute;left:50px;top:60px;width:30px;height:30px;background:#0000ff"></div>
         </body></html>"##;
-        let all = render_html_to_png(html2, "https://example.com/", 200, 200, 1.0, false, Some(".it"), true)
+        let all = render_html_to_png(html2, "https://example.com/", 200, 200, 1.0, false, Some(".it"), true, None)
             .expect("all render");
         assert_eq!(all.rects.len(), 2);
         assert!((all.rects[0].x - 10.0).abs() <= 1.0);
@@ -377,8 +538,8 @@ mod tests {
         assert_eq!((all.pixel_width, all.pixel_height), (200, 200));
 
         // 4. No match is an error for crop mode, empty for all-mode.
-        assert!(render_html_to_png(html, "https://example.com/", 800, 600, 1.0, false, Some("#nope"), false).is_err());
-        let none = render_html_to_png(html, "https://example.com/", 800, 600, 1.0, false, Some("#nope"), true)
+        assert!(render_html_to_png(html, "https://example.com/", 800, 600, 1.0, false, Some("#nope"), false, None).is_err());
+        let none = render_html_to_png(html, "https://example.com/", 800, 600, 1.0, false, Some("#nope"), true, None)
             .expect("all-mode returns empty");
         assert!(none.rects.is_empty());
 
@@ -387,7 +548,7 @@ mod tests {
         let html3 = r##"<html><body style="margin:0">
             <a id="link" href="#"><div style="position:absolute;left:200px;top:250px;width:50px;height:70px;background:#ff0000"></div></a>
         </body></html>"##;
-        let inline = render_html_to_png(html3, "https://example.com/", 800, 600, 1.0, false, Some("#link"), true)
+        let inline = render_html_to_png(html3, "https://example.com/", 800, 600, 1.0, false, Some("#link"), true, None)
             .expect("inline render");
         assert_eq!(inline.rects.len(), 1);
         assert!((inline.rects[0].x - 200.0).abs() <= 1.0, "{:?}", inline.rects[0]);
@@ -396,8 +557,79 @@ mod tests {
 
         // 6. Pure-inline (text-only) element crops are rejected with a clear error.
         let html4 = r##"<html><body style="margin:0"><p><a id="textonly" href="#">just text</a></p></body></html>"##;
-        assert!(render_html_to_png(html4, "https://example.com/", 800, 600, 1.0, false, Some("#textonly"), false)
+        assert!(render_html_to_png(html4, "https://example.com/", 800, 600, 1.0, false, Some("#textonly"), false, None)
             .is_err());
+    }
+
+    /// PrefetchedNetProvider: served stylesheets and images actually paint;
+    /// a miss answers empty bytes and must NOT trip the pending-critical
+    /// guard (an unanswered head stylesheet would blank the paint).
+    #[test]
+    fn prefetched_resources_paint() {
+        // 1. Stylesheet hit: body background turns green via the served CSS.
+        let css_html = r##"<html><head><link rel="stylesheet" href="/s.css"></head><body style="margin:0"><p>hi</p></body></html>"##;
+        let mut hit = PrefetchedResources::new();
+        hit.insert(
+            "https://example.com/s.css".to_string(),
+            Arc::new(b"body { background: #00ff00 }".to_vec()),
+        );
+        let served =
+            render_html_to_png(css_html, "https://example.com/", 200, 150, 1.0, false, None, false, Some(&hit))
+                .expect("served render");
+        let green = count_color(&served.png, |(r, g, b)| g > 200 && r < 80 && b < 80);
+        assert!(
+            green > 200 * 150 * 9 / 10,
+            "expected green page, got {green}/{} green pixels",
+            200 * 150
+        );
+
+        // 2. Miss (unrelated key): the empty-bytes answer must clear the head
+        //    stylesheet's pending-critical entry instead of bailing on render.
+        let img_html = r##"<html><head><link rel="stylesheet" href="/s.css"></head><body style="margin:0">
+            <img src="https://cdn.example.com/dot.png" style="position:absolute;left:0;top:0;width:80px;height:60px">
+        </body></html>"##;
+        let mut miss = PrefetchedResources::new();
+        miss.insert(
+            "https://example.com/other.css".to_string(),
+            Arc::new(b"body{}".to_vec()),
+        );
+        let blank =
+            render_html_to_png(img_html, "https://example.com/", 200, 150, 1.0, false, None, false, Some(&miss))
+                .expect("miss render must not trip the pending-critical guard");
+        let green = count_color(&blank.png, |(r, g, b)| g > 200 && r < 80 && b < 80);
+        assert_eq!(green, 0, "unserved stylesheet must not apply");
+
+        // 3. Image hit: a solid-red 8x8 PNG served at the img's absolute URL
+        //    paints the 80x60 element red.
+        let mut img_hit = PrefetchedResources::new();
+        img_hit.insert(
+            "https://cdn.example.com/dot.png".to_string(),
+            Arc::new(solid_png(8, 8, 255, 0, 0)),
+        );
+        let painted =
+            render_html_to_png(img_html, "https://example.com/", 200, 150, 1.0, false, None, false, Some(&img_hit))
+                .expect("image render");
+        let red = count_color(&painted.png, |(r, g, b)| r > 200 && g < 80 && b < 80);
+        assert!(
+            red > 80 * 60 * 8 / 10,
+            "expected mostly red img, got {red}/{} red pixels",
+            80 * 60
+        );
+    }
+
+    /// Encode a solid-color RGBA PNG (w x h).
+    fn solid_png(w: u32, h: u32, r: u8, g: u8, b: u8) -> Vec<u8> {
+        use std::io::Cursor;
+        let mut out = Vec::new();
+        let mut encoder = png::Encoder::new(Cursor::new(&mut out), w, h);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        let row: Vec<u8> = std::iter::repeat([r, g, b, 255]).take(w as usize).flatten().collect();
+        let data: Vec<u8> = std::iter::repeat(row).take(h as usize).flatten().collect();
+        writer.write_image_data(&data).expect("png data");
+        writer.finish().expect("png finish");
+        out
     }
 
     /// Decode a small PNG and count pixels matching `pred`.
