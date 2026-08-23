@@ -108,8 +108,8 @@ pub fn decode_data_url_png(src: &str) -> Option<DecodedImage> {
 }
 
 /// Decode fetched image bytes by magic-number sniffing (batch 6d) —
-/// content-type headers are untrusted/absent in practice. PNG and JPEG
-/// share the `image` crate with blitz's decoder
+/// content-type headers are untrusted/absent in practice. PNG, JPEG and
+/// WebP share the `image` crate with blitz's decoder
 /// (blitz-dom/src/net.rs `ImageHandler::parse`, `with_guessed_format`),
 /// so RGBA output is bit-identical for both engines.
 pub fn decode_bytes(bytes: &[u8]) -> Option<DecodedImage> {
@@ -117,6 +117,8 @@ pub fn decode_bytes(bytes: &[u8]) -> Option<DecodedImage> {
         decode_png(bytes)
     } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
         decode_jpeg(bytes)
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        decode_webp(bytes)
     } else {
         None
     }
@@ -125,6 +127,14 @@ pub fn decode_bytes(bytes: &[u8]) -> Option<DecodedImage> {
 /// Decode JPEG bytes to RGBA8 via the same `image` crate path blitz uses.
 pub fn decode_jpeg(bytes: &[u8]) -> Option<DecodedImage> {
     let img = image::load_from_memory_with_format(bytes, image::ImageFormat::Jpeg).ok()?;
+    let rgba = img.to_rgba8().into_raw();
+    Some(DecodedImage::new(img.width(), img.height(), rgba))
+}
+
+/// Decode WebP bytes (lossy and lossless) via the same `image` crate path
+/// blitz uses (batch 7b).
+pub fn decode_webp(bytes: &[u8]) -> Option<DecodedImage> {
+    let img = image::load_from_memory_with_format(bytes, image::ImageFormat::WebP).ok()?;
     let rgba = img.to_rgba8().into_raw();
     Some(DecodedImage::new(img.width(), img.height(), rgba))
 }
@@ -292,5 +302,32 @@ mod tests {
         // through the byte table instead).
         let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes);
         assert!(decode_data_url_png(&format!("data:image/jpeg;base64,{b64}")).is_none());
+    }
+
+    /// WebP bodies decode through the RIFF/WEBP magic branch (batch 7b).
+    /// The lossless encoder keeps colors exact, so the decoded RGBA must
+    /// round-trip the source pixels bit-for-bit.
+    #[test]
+    fn webp_decodes_and_sniffs_by_magic() {
+        let mut rgba = Vec::new();
+        for y in 0..4u32 {
+            for x in 0..6u32 {
+                let red = (x < 3) ^ (y < 2);
+                rgba.extend_from_slice(if red { &[200, 40, 40, 255] } else { &[40, 40, 200, 255] });
+            }
+        }
+        let mut webp_bytes = Vec::new();
+        image::DynamicImage::from(image::RgbaImage::from_raw(6, 4, rgba.clone()).unwrap())
+            .write_to(&mut std::io::Cursor::new(&mut webp_bytes), image::ImageFormat::WebP)
+            .expect("encodes losslessly");
+        assert_eq!(&webp_bytes[0..4], b"RIFF", "RIFF magic");
+        assert_eq!(&webp_bytes[8..12], b"WEBP", "WEBP magic");
+
+        let decoded = decode_bytes(&webp_bytes).expect("sniffs and decodes WebP");
+        assert_eq!((decoded.width, decoded.height), (6, 4));
+        assert_eq!(decoded.rgba.as_slice(), rgba.as_slice(), "lossless round-trip");
+
+        // Truncated RIFF header declines rather than panicking.
+        assert!(decode_bytes(b"RIFF\x00\x00\x00\x00WEB").is_none());
     }
 }

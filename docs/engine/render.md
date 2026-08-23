@@ -1188,3 +1188,18 @@ border 布局 + px 尺寸加边宽（content-box 属性语义 + taffy border-box
 **测试**：435→436。挂账更新：inset 样式画法（现按 solid 画）、marquee/
 input file 的 border attr 映射、svg 内联元素。下一批候选：WebP 解码或
 per-corner radius。
+
+## 32. 批次 7b 完成（2026-08-23）：WebP 解码——RIFF 魔数分派
+
+**实现**：image.rs 加 `decode_webp`（`load_from_memory_with_format(WebP)`
+→ RGBA8，lossy/lossless 都走 image-webp）+ `decode_bytes` 第三分支：
+`RIFF....WEBP` 12 字节魔数。Cargo.toml 的 screenshot feature 加
+`image/webp`（image-webp 已在依赖图，零新增）。data:URL 仍 PNG-gated。
+
+**测试**：`webp_decodes_and_sniffs_by_magic`——lossless 编码双象限图 →
+sniff 解码尺寸对 + **RGBA 位级 round-trip**；截断 RIFF 头拒绝不 panic。
+436→437。
+
+**图片通路现状**：PNG（data:URL + 网络）/ JPEG / WebP 三格式，字节表
+注入式网络通路齐备。挂账剩余：GIF 动图取首帧、srcset/picture、HTTP
+缓存头层、渐进 JPEG 大图性能。下一批候选：per-corner radius 或 GIF。
