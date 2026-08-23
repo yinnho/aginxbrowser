@@ -31,7 +31,7 @@ use taffy::prelude::*;
 
 use crate::diting_css::{
     AlignMode, ComputedStyle, Display as CssDisplay, FlexDirection as CssFlexDirection,
-    FlexWrapMode, GridTrack, JustifyMode, PositionMode, TextAlign,
+    FlexWrapMode, GridTrack, JustifyMode, Overflow, PositionMode, TextAlign,
 };
 use crate::diting_dom::tree::{DomTree, NodeId};
 
@@ -591,7 +591,7 @@ fn build_element(
     }
     let mut direct: Vec<taffy::tree::NodeId> = Vec::new();
     let mut run: Vec<RunSeg> = Vec::new();
-    let mut flush_run = |run: &mut Vec<RunSeg>, direct: &mut Vec<taffy::tree::NodeId>, taffy_tree: &mut TaffyTree<TextLeaf>| {
+    let flush_run = |run: &mut Vec<RunSeg>, direct: &mut Vec<taffy::tree::NodeId>, taffy_tree: &mut TaffyTree<TextLeaf>| {
         if run.is_empty() {
             return;
         }
@@ -705,6 +705,12 @@ fn build_element(
 #[derive(Debug, Clone)]
 pub enum PaintItem {
     Bg { dom_id: NodeId, rect: Rect, color: [u8; 4] },
+    /// Begin clipping descendants to `rect` (the padding box of an
+    /// overflow-clipping element) until the matching [`PaintItem::PopClip`].
+    /// The flat item list carries the tree's clip structure in document
+    /// order; nesting is an intersection.
+    Clip { rect: Rect },
+    PopClip,
     /// A uniform solid border: four bands on the border-box edges, painted
     /// AFTER the element's Bg (background-clip: border-box draws the bg
     /// beneath the border) and before the subtree. Widths in CSS order
@@ -861,6 +867,7 @@ pub fn layout_dom_with_paint(
     ) {
         let Ok(layout) = taffy_tree.layout(node) else { return };
         let abs = (offset.0 + layout.location.x, offset.1 + layout.location.y);
+        let mut clips = false;
         if let Some(dom_id) = node_map.get(&node) {
             let rect = Rect { x: abs.0, y: abs.1, width: layout.size.width, height: layout.size.height };
             rects.insert(*dom_id, rect);
@@ -888,6 +895,32 @@ pub fn layout_dom_with_paint(
                     items.push(PaintItem::Border { dom_id: *dom_id, rect, widths, color });
                 }
             }
+            // A clipping element constrains its DESCENDANTS' paint (its own
+            // bg/border above are not clipped) to the padding box — the
+            // border box inset by the border widths. Text runs are taffy
+            // children here, so they land inside the clip pair too.
+            let style = styles.get(dom_id);
+            clips = style.is_some_and(|s| {
+                s.overflow.is_some_and(|o| o != Overflow::Visible)
+            });
+            if clips {
+                let st = style.expect("checked above");
+                let bline = st.border_style.is_some();
+                let (bt, br, bb, bl) = (
+                    if bline { side_px(st.border_width.top) } else { 0.0 },
+                    if bline { side_px(st.border_width.right) } else { 0.0 },
+                    if bline { side_px(st.border_width.bottom) } else { 0.0 },
+                    if bline { side_px(st.border_width.left) } else { 0.0 },
+                );
+                items.push(PaintItem::Clip {
+                    rect: Rect {
+                        x: rect.x + bl,
+                        y: rect.y + bt,
+                        width: (rect.width - bl - br).max(0.0),
+                        height: (rect.height - bt - bb).max(0.0),
+                    },
+                });
+            }
         }
         if let Some(TextLeaf::Run { text, font_size, bold, color }) = taffy_tree.get_node_context(node) {
             // The wrap width the containing block offered at measure time:
@@ -910,6 +943,9 @@ pub fn layout_dom_with_paint(
         }
         for child in taffy_tree.children(node).unwrap_or_default().iter().copied() {
             collect(taffy_tree, node_map, styles, rects, items, child, abs, viewport_width);
+        }
+        if clips {
+            items.push(PaintItem::PopClip);
         }
     }
     collect(&taffy_tree, &node_map, styles, &mut rects, &mut items, root_node, (0.0, 0.0), viewport_width);
@@ -2500,6 +2536,110 @@ mod bridge_cross_check {
                 (*o as i64 - *b as i64).abs() <= 2,
                 "ink band {i} top: ours={o} blitz={b}"
             );
+        }
+    }
+
+    /// Overflow clipping through pixels (batch 4c): a fixed-height
+    /// (2-line) bordered box holding a 3-line run. The padding box is the
+    /// clip rect — lines 1-2 visible, line 3 entirely beneath the clip,
+    /// on both engines.
+    #[test]
+    fn paint_overflow_hidden_clips_match_blitz() {
+        let html = r#"<body><div id="t">谛听引擎渲染测试文本行</div></body>"#;
+        let sheet = "body { margin: 0; } #t { width: 105px; height: 48px; overflow: hidden; background: rgb(198,40,40); border: 6px solid rgb(20,60,200); font-size: 20px; }";
+        // Border box 117×60 (content 105×48 + 2×6 border); clip = padding
+        // box (6,6)→(111,54); baselines 26/50/74 → line 3's ink starts
+        // ~57, fully under the clip.
+
+        let doc = blitz_doc(html, sheet);
+        let (w, h) = (200u32, 200u32);
+        let mut doc = doc;
+        let blitz = anyrender::render_to_buffer::<anyrender_vello_cpu::VelloCpuImageRenderer, _>(
+            |scene| {
+                use anyrender::PaintScene as _;
+                use peniko::kurbo::Rect;
+                scene.fill(
+                    peniko::Fill::NonZero,
+                    Default::default(),
+                    peniko::Color::WHITE,
+                    Default::default(),
+                    &Rect::new(0.0, 0.0, w as f64, h as f64),
+                );
+                blitz_paint::paint_scene(scene, &mut doc, 1.0, w, h, 0, 0);
+            },
+            w,
+            h,
+        );
+
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let fonts = fixture_fonts();
+        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW);
+        let mut ours = paint::Canvas::new_filled(w as usize, h as usize, [255, 255, 255, 255]);
+        paint::execute(&items, &fonts, &mut ours);
+        assert!(
+            items.iter().any(|i| matches!(i, PaintItem::Clip { .. })),
+            "overflow: hidden must emit a Clip item"
+        );
+
+        let is_ink = |p: &[u8]| p[0] < 110 && p[1] < 110 && p[2] < 110;
+        fn band_tops(buf: &[u8], w: usize, h: usize, hit: impl Fn(&[u8]) -> bool) -> Vec<usize> {
+            let mut tops = Vec::new();
+            let mut last_row: Option<usize> = None;
+            for y in 0..h {
+                let has = (0..w).any(|x| hit(&buf[(y * w + x) * 4..]));
+                if has && last_row.is_none_or(|p| y > p + 1) {
+                    tops.push(y);
+                }
+                if has {
+                    last_row = Some(y);
+                }
+            }
+            tops
+        }
+
+        // Line 3 is gone on both sides: two bands, tops aligned, and no ink
+        // anywhere at or below the clip's bottom edge (row 54).
+        let o_tops = band_tops(&ours.data, w as usize, h as usize, is_ink);
+        let b_tops = band_tops(&blitz, w as usize, h as usize, is_ink);
+        assert_eq!(o_tops.len(), 2, "our visible bands: {o_tops:?}");
+        assert_eq!(b_tops.len(), 2, "blitz visible bands: {b_tops:?}");
+        for (i, (o, b)) in o_tops.iter().zip(&b_tops).enumerate() {
+            assert!(
+                (*o as i64 - *b as i64).abs() <= 2,
+                "ink band {i} top: ours={o} blitz={b}"
+            );
+        }
+        for (name, buf) in [("ours", &ours.data), ("blitz", &blitz)] {
+            for y in 54..h as usize {
+                for x in 0..w as usize {
+                    assert!(
+                        !is_ink(&buf[(y * w as usize + x) * 4..]),
+                        "{name}: ink leaked below the clip at ({x},{y})"
+                    );
+                }
+            }
+        }
+
+        // The overflow must NOT clip the element's own box paint: the
+        // border and background still span the full 117×60 border box.
+        let is_border =
+            |p: &[u8]| (p[0] as i32 - 20).abs() < 30 && (p[1] as i32 - 60).abs() < 30 && (p[2] as i32 - 200).abs() < 30;
+        for (buf, name) in [(&ours.data, "ours"), (&blitz, "blitz")] {
+            let mut b: Option<(usize, usize, usize, usize)> = None;
+            for y in 0..h as usize {
+                for x in 0..w as usize {
+                    if is_border(&buf[(y * w as usize + x) * 4..]) {
+                        b = Some(match b {
+                            Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                            None => (x, y, x, y),
+                        });
+                    }
+                }
+            }
+            let b = b.unwrap_or_else(|| panic!("{name}: no border pixels"));
+            assert_eq!((b.2 - b.0 + 1, b.3 - b.1 + 1), (117, 60), "{name} border box");
         }
     }
 }

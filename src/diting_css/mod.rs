@@ -371,7 +371,7 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "margin-right", "margin-bottom", "margin-left", "padding", "padding-top",
         "padding-right", "padding-bottom", "padding-left", "font-size", "font-weight",
         "text-align", "border", "border-color", "border-width", "border-style",
-        "width", "height", "flex-direction", "gap",
+        "width", "height", "flex-direction", "gap", "overflow",
     ];
     if !SUPPORTED.contains(&name.to_ascii_lowercase().as_str()) {
         return false;
@@ -432,6 +432,10 @@ pub struct ComputedStyle {
     pub font_size: Option<f32>,
     pub font_weight: Option<u16>,
     pub text_align: Option<TextAlign>,
+    /// Overflow clipping (batch 4c), uniform for both axes. Any non-visible
+    /// value clips descendants' paint to the padding box; per-axis
+    /// overflow-x/y is a later batch.
+    pub overflow: Option<Overflow>,
     // --- flex/grid pass-through (batch 2c): px/fr-only, non-inherited ---
     pub flex_direction: Option<FlexDirection>,
     pub flex_wrap: Option<FlexWrapMode>,
@@ -488,6 +492,18 @@ enum BorderStyleKw {
     NotAStyle,
     NoBorder,
     Line(BorderStyle),
+}
+
+/// Overflow behavior. Paint-side only in this slice: non-visible values
+/// clip descendants to the padding box. (CSS also makes clipping boxes
+/// establish a BFC — margin-collapse/float containment is a later batch.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overflow {
+    Visible,
+    Hidden,
+    Clip,
+    Scroll,
+    Auto,
 }
 
 fn border_style_kw(v: &str) -> BorderStyleKw {
@@ -856,6 +872,17 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 "left" | "start" => Some(TextAlign::Left),
                 "center" => Some(TextAlign::Center),
                 "right" | "end" => Some(TextAlign::Right),
+                _ => return false,
+            };
+            true
+        }
+        "overflow" => {
+            style.overflow = match v {
+                "visible" => Some(Overflow::Visible),
+                "hidden" => Some(Overflow::Hidden),
+                "clip" => Some(Overflow::Clip),
+                "scroll" => Some(Overflow::Scroll),
+                "auto" => Some(Overflow::Auto),
                 _ => return false,
             };
             true

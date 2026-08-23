@@ -861,3 +861,33 @@ padding + 6px solid 蓝边红底三行中文。断言：蓝带 bbox==元素边�
 
 **测试**：414→416。挂账：radius/图案样式逐像素/per-side 边属性/
 box-sizing: border-box（现 subset 未建模，authored 一律 content-box）。
+
+## 21. 批次 4c 完成（2026-08-23）：overflow 裁剪——clip 栈
+
+**动机**：卡片/弹窗/文章摘要全是"定高盒子装不下内容"——overflow:hidden
+是真实页面第二常见的视觉约束（仅次于 bg/text/border 三原语），且它把
+paint 栈从"平铺列表"升级成"带结构状态的重放"。
+
+**diting_css**：`overflow: Option<Overflow>`（Visible/Hidden/Clip/Scroll/
+Auto，uniform 双轴；overflow-x/y per-axis 挂账）。非 visible 一律裁剪。
+
+**PaintItem::Clip{rect}/PopClip**：collect 在进入带 overflow 的元素时、
+推完该元素自己的 Bg/Border **之后**推 Clip（CSS：overflow 裁的是子孙，
+自己的背景边框不受裁），递归完子树推 PopClip——扁平 item 列表按文档序
+携带树的 clip 结构。clip rect=padding box（边盒 inset border 宽）。
+文本 run 是 taffy 子节点，天然落在 Clip 对内。
+
+**Canvas clip 栈**：`(x0,y0,x1,y1)` 右下开区间，`allowed()`=画布边界∩
+全部活动 clip；压栈即求交，**退化交集=(0,0,0,0) 全裁**；fill_rect/blit_
+text 逐像素过 clip。PopClip 弹栈。
+
+**对照（paint_overflow_hidden_clips_match_blitz）**：105×48 定高蓝边
+红底盒装 3 行文本——padding box (6,6)→(111,54) 为 clip，第 3 行墨顶
+~57 全没。断言：双侧可见带==2 且带顶 ±2；**clip 底边（行 54）以下零
+ink 逐像素**；元素自身 117×60 边框盒不被自己的 overflow 裁掉。一次过
+——blitz 同样在 padding box 裁剪，语义对齐。
+
+**挂账**：BFC（overflow 盒的 margin collapse/float 包含）；clip-path/
+border-radius 联动圆角裁剪；overflow-x/y 分轴；scrollbar 占位。
+
+**测试**：416→418（+clip 栈单测：相交/弹出/退化；+overflow 像素对照）。

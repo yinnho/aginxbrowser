@@ -22,6 +22,10 @@ pub struct Canvas {
     pub width: usize,
     pub height: usize,
     pub data: Vec<u8>,
+    /// Active clip stack (x0, y0, x1, y1) — exclusive right/bottom, in
+    /// canvas px. An empty intersection is the degenerate (0,0,0,0): it
+    /// clips everything beneath it.
+    clip: Vec<(i64, i64, i64, i64)>,
 }
 
 impl Canvas {
@@ -32,15 +36,43 @@ impl Canvas {
         for px in data.chunks_exact_mut(4) {
             px.copy_from_slice(&color);
         }
-        Self { width, height, data }
+        Self { width, height, data, clip: Vec::new() }
+    }
+
+    /// Rows [y0, y1) × cols [x0, x1) the next primitive may touch: the
+    /// canvas bounds intersected with every active clip.
+    fn allowed(&self) -> (i64, i64, i64, i64) {
+        let mut r = (0, 0, self.width as i64, self.height as i64);
+        for c in &self.clip {
+            r = (r.0.max(c.0), r.1.max(c.1), r.2.min(c.2), r.3.min(c.3));
+        }
+        if r.2 < r.0 || r.3 < r.1 {
+            (0, 0, 0, 0)
+        } else {
+            r
+        }
+    }
+
+    /// Pop the innermost clip.
+    fn pop_clip(&mut self) {
+        self.clip.pop();
+    }
+
+    /// Push a clip rect (intersected with the current one).
+    fn push_clip(&mut self, x0: i64, y0: i64, x1: i64, y1: i64) {
+        let (cx0, cy0, cx1, cy1) = self.allowed();
+        let r = (cx0.max(x0), cy0.max(y0), cx1.min(x1), cy1.min(y1));
+        self.clip
+            .push(if r.2 < r.0 || r.3 < r.1 { (0, 0, 0, 0) } else { r });
     }
 
     /// Source-over fill of an axis-aligned integer rect, clipped to the
-    /// canvas. Opaque colors overwrite, matching how vello_cpu paints a
-    /// solid blitz background over whatever is beneath.
+    /// canvas and the clip stack. Opaque colors overwrite, matching how
+    /// vello_cpu paints a solid blitz background over whatever is beneath.
     pub fn fill_rect(&mut self, x: i64, y: i64, w: i64, h: i64, color: [u8; 4]) {
-        for gy in y.max(0)..(y + h).min(self.height as i64) {
-            for gx in x.max(0)..(x + w).min(self.width as i64) {
+        let (ax0, ay0, ax1, ay1) = self.allowed();
+        for gy in (y.max(0)).max(ay0)..(y + h).min(self.height as i64).min(ay1) {
+            for gx in (x.max(0)).max(ax0)..(x + w).min(self.width as i64).min(ax1) {
                 let i = (gy as usize * self.width + gx as usize) * 4;
                 over(&mut self.data[i..i + 4], color);
             }
@@ -48,19 +80,20 @@ impl Canvas {
     }
 
     /// Source-over composite of a text tile's straight-alpha pixels at
-    /// integer offset `(x, y)`, clipped.
+    /// integer offset `(x, y)`, clipped to the canvas and the clip stack.
     pub fn blit_text(&mut self, r: &TextRaster, x: i64, y: i64) {
         if r.width == 0 || r.height == 0 {
             return;
         }
+        let (ax0, ay0, ax1, ay1) = self.allowed();
         for gy in 0..r.height as i64 {
             let ty = y + gy;
-            if ty < 0 || ty >= self.height as i64 {
+            if ty < ay0 || ty >= ay1 || ty < 0 || ty >= self.height as i64 {
                 continue;
             }
             for gx in 0..r.width as i64 {
                 let tx = x + gx;
-                if tx < 0 || tx >= self.width as i64 {
+                if tx < ax0 || tx >= ax1 || tx < 0 || tx >= self.width as i64 {
                     continue;
                 }
                 let a = r.data[(gy as usize * r.width + gx as usize) * 4 + 3];
@@ -100,6 +133,15 @@ fn over(dst: &mut [u8], src: [u8; 4]) {
 pub fn execute(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas) {
     for item in items {
         match item {
+            PaintItem::Clip { rect } => out.push_clip(
+                rect.x.round() as i64,
+                rect.y.round() as i64,
+                (rect.x + rect.width).round() as i64,
+                (rect.y + rect.height).round() as i64,
+            ),
+            PaintItem::PopClip => {
+                out.pop_clip();
+            }
             PaintItem::Bg { rect, color, .. } => out.fill_rect(
                 rect.x.round() as i64,
                 rect.y.round() as i64,
@@ -164,5 +206,32 @@ mod tests {
         assert_eq!(px(&c, 1, 1), [127, 127, 127, 255], "half-alpha black over white");
         assert_eq!(px(&c, 2, 1), [0, 0, 0, 255], "opaque black covers");
         assert_eq!(px(&c, 0, 0), [255, 255, 255, 255], "outside untouched");
+    }
+
+    /// The clip stack constrains fills, nesting intersects, and popping
+    /// restores — a degenerate intersection clips everything.
+    #[test]
+    fn clip_stack_constrains_and_pops() {
+        let mut c = Canvas::new_filled(10, 10, [255, 255, 255, 255]);
+        c.push_clip(2, 2, 6, 6);
+        c.fill_rect(0, 0, 10, 10, [200, 40, 40, 255]);
+        assert_eq!(px(&c, 0, 0), [255, 255, 255, 255], "outside clip untouched");
+        assert_eq!(px(&c, 5, 5), [200, 40, 40, 255], "inside clip painted");
+        assert_eq!(px(&c, 6, 5), [255, 255, 255, 255], "x1 exclusive");
+
+        // Nested clip intersects.
+        c.push_clip(4, 4, 8, 8);
+        c.fill_rect(0, 0, 10, 10, [0, 0, 0, 255]);
+        assert_eq!(px(&c, 3, 5), [200, 40, 40, 255], "inner clip keeps only [4,6)");
+        assert_eq!(px(&c, 5, 5), [0, 0, 0, 255]);
+        c.pop_clip();
+        c.pop_clip();
+        c.fill_rect(0, 0, 10, 10, [0, 255, 0, 255]);
+        assert_eq!(px(&c, 0, 0), [0, 255, 0, 255], "popped clips restore");
+
+        // Degenerate intersection clips everything beneath.
+        c.push_clip(8, 8, 2, 2);
+        c.fill_rect(0, 0, 10, 10, [255, 0, 0, 255]);
+        assert_eq!(px(&c, 9, 9), [0, 255, 0, 255], "degenerate clip paints nothing");
     }
 }
