@@ -108,33 +108,62 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
         s.flex_wrap = FlexWrap::Wrap;
         s.align_items = Some(AlignItems::FLEX_START);
     }
-    let side = |v: Option<u32>| v.map(|px| LengthPercentage::length(px as f32)).unwrap_or_else(|| LengthPercentage::length(0.0));
+    // Length mapping (batch 2e): px → resolved length, % → taffy percent
+    // (0..1 fraction). taffy's percent semantics match CSS — margins and
+    // paddings resolve against the containing-block width, insets per-axis
+    // — so percents pass straight through and resolve at layout time.
+    let lp = |v: Option<crate::diting_css::Length>| match v {
+        Some(crate::diting_css::Length::Px(px)) => LengthPercentage::length(px),
+        Some(crate::diting_css::Length::Percent(p)) => LengthPercentage::percent(p / 100.0),
+        None => LengthPercentage::length(0.0),
+    };
+    // Margin has an auto variant; unset margins are CSS `0`, not auto.
+    let lpa_zero = |v: Option<crate::diting_css::Length>| match v {
+        Some(crate::diting_css::Length::Px(px)) => LengthPercentageAuto::length(px),
+        Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
+        None => LengthPercentageAuto::length(0.0),
+    };
+    // Inset/clamp unset values are CSS `auto`.
+    let lpa_auto = |v: Option<crate::diting_css::Length>| match v {
+        Some(crate::diting_css::Length::Px(px)) => LengthPercentageAuto::length(px),
+        Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
+        None => LengthPercentageAuto::auto(),
+    };
     // taffy::geometry::Rect spelled in full — this module's own Rect shadows
     // the prelude name.
     s.margin = taffy::geometry::Rect {
-        top: LengthPercentageAuto::length(side_px(style.margin.top)),
-        right: LengthPercentageAuto::length(side_px(style.margin.right)),
-        bottom: LengthPercentageAuto::length(side_px(style.margin.bottom)),
-        left: LengthPercentageAuto::length(side_px(style.margin.left)),
+        top: lpa_zero(style.margin.top),
+        right: lpa_zero(style.margin.right),
+        bottom: lpa_zero(style.margin.bottom),
+        left: lpa_zero(style.margin.left),
     };
     s.padding = taffy::geometry::Rect {
-        top: side(style.padding.top),
-        right: side(style.padding.right),
-        bottom: side(style.padding.bottom),
-        left: side(style.padding.left),
+        top: lp(style.padding.top),
+        right: lp(style.padding.right),
+        bottom: lp(style.padding.bottom),
+        left: lp(style.padding.left),
     };
     // CSS's initial box-sizing is content-box while taffy sizes are
     // border-box; the subset has no authored box-sizing yet, so map authored
     // sizes over by the padding (border widths aren't modeled at all).
+    // Percent sizes pass through as percent — "percent + padding px" has no
+    // taffy Dimension shape, so a % size keeps its padding inside (border-box
+    // behavior); authored box-sizing is a later batch anyway.
     s.size = Size {
-        width: style
-            .width
-            .map(|w| Dimension::length(w + side_px(style.padding.left) + side_px(style.padding.right)))
-            .unwrap_or_else(auto),
-        height: style
-            .height
-            .map(|h| Dimension::length(h + side_px(style.padding.top) + side_px(style.padding.bottom)))
-            .unwrap_or_else(auto),
+        width: match style.width {
+            Some(crate::diting_css::Length::Px(w)) => Dimension::length(
+                w + side_px(style.padding.left) + side_px(style.padding.right),
+            ),
+            Some(crate::diting_css::Length::Percent(p)) => Dimension::percent(p / 100.0),
+            None => auto(),
+        },
+        height: match style.height {
+            Some(crate::diting_css::Length::Px(h)) => Dimension::length(
+                h + side_px(style.padding.top) + side_px(style.padding.bottom),
+            ),
+            Some(crate::diting_css::Length::Percent(p)) => Dimension::percent(p / 100.0),
+            None => auto(),
+        },
     };
 
     // --- flex/grid pass-through (batch 2c), mirroring upstream to_taffy_style ---
@@ -209,33 +238,45 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
     }
     if style.top.is_some() || style.right.is_some() || style.bottom.is_some() || style.left.is_some() {
         s.inset = taffy::geometry::Rect {
-            top: style.top.map(|v| LengthPercentageAuto::length(v)).unwrap_or_else(LengthPercentageAuto::auto),
-            right: style.right.map(|v| LengthPercentageAuto::length(v)).unwrap_or_else(LengthPercentageAuto::auto),
-            bottom: style.bottom.map(|v| LengthPercentageAuto::length(v)).unwrap_or_else(LengthPercentageAuto::auto),
-            left: style.left.map(|v| LengthPercentageAuto::length(v)).unwrap_or_else(LengthPercentageAuto::auto),
+            top: lpa_auto(style.top),
+            right: lpa_auto(style.right),
+            bottom: lpa_auto(style.bottom),
+            left: lpa_auto(style.left),
         };
     }
     // Clamps are content-box in CSS's initial box-sizing — same padding
-    // carry-over as the main sizes above.
+    // carry-over as the main sizes above (px only; % passes through).
     s.min_size = Size {
-        width: style
-            .min_width
-            .map(|w| LengthPercentageAuto::length(w + side_px(style.padding.left) + side_px(style.padding.right)))
-            .unwrap_or_else(LengthPercentageAuto::auto),
-        height: style
-            .min_height
-            .map(|h| LengthPercentageAuto::length(h + side_px(style.padding.top) + side_px(style.padding.bottom)))
-            .unwrap_or_else(LengthPercentageAuto::auto),
+        width: match style.min_width {
+            Some(crate::diting_css::Length::Px(w)) => LengthPercentageAuto::length(
+                w + side_px(style.padding.left) + side_px(style.padding.right),
+            ),
+            Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
+            None => LengthPercentageAuto::auto(),
+        },
+        height: match style.min_height {
+            Some(crate::diting_css::Length::Px(h)) => LengthPercentageAuto::length(
+                h + side_px(style.padding.top) + side_px(style.padding.bottom),
+            ),
+            Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
+            None => LengthPercentageAuto::auto(),
+        },
     };
     s.max_size = Size {
-        width: style
-            .max_width
-            .map(|w| LengthPercentageAuto::length(w + side_px(style.padding.left) + side_px(style.padding.right)))
-            .unwrap_or_else(LengthPercentageAuto::auto),
-        height: style
-            .max_height
-            .map(|h| LengthPercentageAuto::length(h + side_px(style.padding.top) + side_px(style.padding.bottom)))
-            .unwrap_or_else(LengthPercentageAuto::auto),
+        width: match style.max_width {
+            Some(crate::diting_css::Length::Px(w)) => LengthPercentageAuto::length(
+                w + side_px(style.padding.left) + side_px(style.padding.right),
+            ),
+            Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
+            None => LengthPercentageAuto::auto(),
+        },
+        height: match style.max_height {
+            Some(crate::diting_css::Length::Px(h)) => LengthPercentageAuto::length(
+                h + side_px(style.padding.top) + side_px(style.padding.bottom),
+            ),
+            Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
+            None => LengthPercentageAuto::auto(),
+        },
     };
     if let Some(ar) = style.aspect_ratio {
         if ar.is_finite() && ar > 0.0 {
@@ -262,28 +303,43 @@ fn to_grid_track(track: GridTrack) -> taffy::style::GridTemplateComponent<String
     }
 }
 
-fn side_px(v: Option<u32>) -> f32 {
-    v.map(|px| px as f32).unwrap_or(0.0)
+/// Padding contribution in px for the content-box→border-box carry-over
+/// (percent padding contributes nothing addable — see the % note in
+/// to_taffy_style).
+fn side_px(v: Option<crate::diting_css::Length>) -> f32 {
+    match v {
+        Some(crate::diting_css::Length::Px(px)) => px,
+        _ => 0.0,
+    }
 }
 
-/// Effective font context for a text leaf: nearest ancestor's declared
-/// font-size / weight (defaults 16px / 400).
+/// Effective font context for a text leaf: nearest ancestor's font-size /
+/// weight (defaults 16px / 400). Since batch 2e every cascaded element
+/// carries a resolved font-size, so the walk stops at the NEAREST value
+/// instead of relying on outer ancestors being None.
 fn font_context(tree: &DomTree, id: NodeId, styles: &HashMap<NodeId, ComputedStyle>) -> (f32, bool) {
-    let mut font_size = 16.0;
-    let mut bold = false;
+    let mut font_size: Option<f32> = None;
+    let mut bold: Option<bool> = None;
     let mut current = Some(id);
     while let Some(nid) = current {
         if let Some(style) = styles.get(&nid) {
-            if let Some(fs) = style.font_size {
-                font_size = fs;
+            if font_size.is_none() {
+                if let Some(fs) = style.font_size {
+                    font_size = Some(fs);
+                }
             }
-            if let Some(fw) = style.font_weight {
-                bold = fw >= 600;
+            if bold.is_none() {
+                if let Some(fw) = style.font_weight {
+                    bold = Some(fw >= 600);
+                }
+            }
+            if font_size.is_some() && bold.is_some() {
+                break;
             }
         }
         current = tree.with_node(nid, |n| n.parent).flatten();
     }
-    (font_size, bold)
+    (font_size.unwrap_or(16.0), bold.unwrap_or(false))
 }
 
 /// Split text into layout tokens. Whitespace runs collapse to a single space
@@ -391,9 +447,19 @@ fn build_replaced_leaf(
     s.item_is_replaced = true;
     s.aspect_ratio = Some(nat_w / nat_h);
     // CSS width/height win per axis; missing axis derives from the ratio.
+    // Percent CSS sizes pass through (the CB resolves them; the natural
+    // ratio only backfills auto axes).
     s.size = Size {
-        width: style.width.map(|w| Dimension::length(w)).unwrap_or_else(|| Dimension::length(nat_w)),
-        height: style.height.map(|h| Dimension::length(h)).unwrap_or_else(|| Dimension::length(nat_h)),
+        width: match style.width {
+            Some(crate::diting_css::Length::Px(w)) => Dimension::length(w),
+            Some(crate::diting_css::Length::Percent(p)) => Dimension::percent(p / 100.0),
+            None => Dimension::length(nat_w),
+        },
+        height: match style.height {
+            Some(crate::diting_css::Length::Px(h)) => Dimension::length(h),
+            Some(crate::diting_css::Length::Percent(p)) => Dimension::percent(p / 100.0),
+            None => Dimension::length(nat_h),
+        },
     };
 
     let node = taffy_tree.new_leaf(s).ok()?;
@@ -1070,12 +1136,15 @@ mod bridge_cross_check {
 
     /// Full cascade for every element, chaining parents (the same path
     /// screenshot::cross_check uses, inlined because that module is private).
+    /// The root element's computed font-size becomes the rem base for its
+    /// whole subtree (CSS root font-size semantics).
     fn our_styles(tree: &DomTree, rules: &[ParsedRule]) -> HashMap<NodeId, ComputedStyle> {
         fn visit(
             tree: &DomTree,
             rules: &[ParsedRule],
             nid: NodeId,
             parent: Option<&ComputedStyle>,
+            root_fs: f32,
             out: &mut HashMap<NodeId, ComputedStyle>,
         ) {
             let Some(tag) = tree
@@ -1098,15 +1167,35 @@ mod bridge_cross_check {
             let inline = tree
                 .with_node(nid, |n| n.get_attribute("style").map(|s| s.to_string()))
                 .flatten();
-            let cs = diting_css::cascade_element(&tag, tree, nid, &matched, parent, inline.as_deref());
+            let cs = diting_css::cascade_element(
+                &tag,
+                tree,
+                nid,
+                &matched,
+                parent,
+                inline.as_deref(),
+                root_fs,
+            );
+            let child_root_fs = if parent.is_none() {
+                cs.font_size.unwrap_or(diting_css::DEFAULT_ROOT_FONT_SIZE)
+            } else {
+                root_fs
+            };
             for child in tree.children(nid) {
-                visit(tree, rules, child, Some(&cs), out);
+                visit(tree, rules, child, Some(&cs), child_root_fs, out);
             }
             out.insert(nid, cs);
         }
         let mut out = HashMap::new();
         for child in tree.children(tree.document()) {
-            visit(tree, rules, child, None, &mut out);
+            visit(
+                tree,
+                rules,
+                child,
+                None,
+                diting_css::DEFAULT_ROOT_FONT_SIZE,
+                &mut out,
+            );
         }
         out
     }
@@ -1529,5 +1618,127 @@ mod bridge_cross_check {
         assert!((r("#mx").width - 100.0).abs() < EPS as f32, "max-width clamp");
         assert!((r("#ar").height - 50.0).abs() < EPS as f32, "ratio from width");
         assert!((r("#arn").width - 30.0).abs() < EPS as f32, "ratio from height");
+    }
+
+    /// em lengths fold against the element's own font-size — including the
+    /// font-size declared in the same rule (CSS computes font-size first).
+    #[test]
+    fn em_lengths_match_blitz() {
+        let html = r#"<body>
+            <div id="outer"><div id="inner"></div></div>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #outer { font-size: 24px; }
+            #inner { font-size: 2em; width: 5em; height: 1em; }
+        "#;
+        let (doc, tree, _styles, rects) = both_engines(html, sheet);
+        for selector in ["#inner"] {
+            let blitz_nid = doc.query_selector(selector).unwrap().expect(selector);
+            let our_nid = tree.query_selector(selector).unwrap().expect(selector);
+            let theirs = element_rect(&doc, blitz_nid);
+            let ours = *rects.get(&our_nid).unwrap_or(&Rect::default());
+            assert_close(&format!("{selector} width"), ours.width, theirs.width);
+            assert_close(&format!("{selector} height"), ours.height, theirs.height);
+        }
+        let inner = rects[&tree.query_selector("#inner").unwrap().unwrap()];
+        // inner fs = 2em × 24 = 48 → width 5em = 240, height 1em = 48.
+        assert!((inner.width - 240.0).abs() < EPS as f32, "5em of 48: {}", inner.width);
+        assert!((inner.height - 48.0).abs() < EPS as f32, "1em of 48: {}", inner.height);
+    }
+
+    /// rem folds against the root font-size — both the implicit 16px default
+    /// and an authored `html { font-size }` (our_styles threads the root
+    /// element's computed size as the rem base).
+    #[test]
+    fn rem_against_default_and_authored_root() {
+        let html = r#"<body><div id="plain"></div></body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #plain { width: 12.5rem; height: 10px; }
+        "#;
+        let (doc, tree, _styles, rects) = both_engines(html, sheet);
+        {
+            let blitz_nid = doc.query_selector("#plain").unwrap().expect("#plain");
+            let our_nid = tree.query_selector("#plain").unwrap().unwrap();
+            let theirs = element_rect(&doc, blitz_nid);
+            let ours = *rects.get(&our_nid).unwrap_or(&Rect::default());
+            assert_close("default-root width", ours.width, theirs.width);
+        }
+        assert!((rects[&tree.query_selector("#plain").unwrap().unwrap()].width - 200.0).abs() < EPS as f32);
+
+        let html2 = r#"<html><body><div id="scaled"></div></body></html>"#;
+        let sheet2 = r#"
+            body { margin: 0; }
+            html { font-size: 20px; }
+            #scaled { width: 10rem; height: 10px; }
+        "#;
+        let (_doc2, tree2, _styles2, rects2) = both_engines(html2, sheet2);
+        let scaled = rects2[&tree2.query_selector("#scaled").unwrap().unwrap()];
+        assert!((scaled.width - 200.0).abs() < EPS as f32, "10rem of authored root 20: {}", scaled.width);
+    }
+
+    /// Percent widths/margins resolve against the containing block at layout
+    /// time (taffy percent on both sides — cross-asserting checks our
+    /// pass-through mapping, taffy does the arithmetic identically).
+    #[test]
+    fn percent_box_model_match_blitz() {
+        let html = r#"<body><div id="host"><div id="kid"></div></div></body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #host { width: 400px; height: 100px; }
+            #kid { width: 50%; margin-left: 10%; height: 50%; margin-top: 5%; }
+        "#;
+        let (doc, tree, _styles, rects) = both_engines(html, sheet);
+        for selector in ["#kid"] {
+            let blitz_nid = doc.query_selector(selector).unwrap().expect(selector);
+            let our_nid = tree.query_selector(selector).unwrap().expect(selector);
+            let theirs = element_rect(&doc, blitz_nid);
+            let ours = *rects.get(&our_nid).unwrap_or(&Rect::default());
+            assert_close(&format!("{selector} x"), ours.x, theirs.x);
+            assert_close(&format!("{selector} y"), ours.y, theirs.y);
+            assert_close(&format!("{selector} width"), ours.width, theirs.width);
+            assert_close(&format!("{selector} height"), ours.height, theirs.height);
+        }
+        let kid = rects[&tree.query_selector("#kid").unwrap().unwrap()];
+        // CSS: margin % both axes against CB WIDTH: left 40, top 20; 50% sizes.
+        assert!((kid.x - 40.0).abs() < EPS as f32, "10% margin-left of 400: {}", kid.x);
+        assert!((kid.y - 20.0).abs() < EPS as f32, "5% margin-top of CB width 400: {}", kid.y);
+        assert!((kid.width - 200.0).abs() < EPS as f32, "50% width: {}", kid.width);
+        assert!((kid.height - 50.0).abs() < EPS as f32, "50% height: {}", kid.height);
+    }
+
+    /// Percent insets (left/top against CB width/height) and % clamps, on a
+    /// direct child of the positioned ancestor — the one abspos shape where
+    /// blitz's DOM-parent anchor coincides with the CSS containing block.
+    #[test]
+    fn percent_insets_and_clamps_match_blitz() {
+        let html = r#"<body>
+            <div id="gp"><div id="pin"></div></div>
+            <div id="host"><div id="clamp"></div></div>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #gp { position: relative; width: 300px; height: 200px; }
+            #pin { position: absolute; left: 10%; top: 25%; width: 40px; height: 20px; }
+            #host { width: 400px; }
+            #clamp { width: 100px; min-width: 60%; height: 10px; }
+        "#;
+        let (doc, tree, _styles, rects) = both_engines(html, sheet);
+        for selector in ["#pin", "#clamp"] {
+            let blitz_nid = doc.query_selector(selector).unwrap().expect(selector);
+            let our_nid = tree.query_selector(selector).unwrap().expect(selector);
+            let theirs = element_rect(&doc, blitz_nid);
+            let ours = *rects.get(&our_nid).unwrap_or(&Rect::default());
+            assert_close(&format!("{selector} x"), ours.x, theirs.x);
+            assert_close(&format!("{selector} y"), ours.y, theirs.y);
+            assert_close(&format!("{selector} width"), ours.width, theirs.width);
+            assert_close(&format!("{selector} height"), ours.height, theirs.height);
+        }
+        let pin = rects[&tree.query_selector("#pin").unwrap().unwrap()];
+        assert!((pin.x - 30.0).abs() < EPS as f32, "10% left of 300: {}", pin.x);
+        assert!((pin.y - 50.0).abs() < EPS as f32, "25% top of 200: {}", pin.y);
+        let clamp = rects[&tree.query_selector("#clamp").unwrap().unwrap()];
+        assert!((clamp.width - 240.0).abs() < EPS as f32, "60% min-width of 400: {}", clamp.width);
     }
 }

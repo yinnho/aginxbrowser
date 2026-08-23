@@ -868,16 +868,16 @@ mod cross_check {
         ));
 
         let margin = style.get_margin();
-        cs.margin.top = margin_enum_px(&margin.margin_top);
-        cs.margin.right = margin_enum_px(&margin.margin_right);
-        cs.margin.bottom = margin_enum_px(&margin.margin_bottom);
-        cs.margin.left = margin_enum_px(&margin.margin_left);
+        cs.margin.top = margin_enum_len(&margin.margin_top);
+        cs.margin.right = margin_enum_len(&margin.margin_right);
+        cs.margin.bottom = margin_enum_len(&margin.margin_bottom);
+        cs.margin.left = margin_enum_len(&margin.margin_left);
 
         let padding = style.get_padding();
-        cs.padding.top = nonnegative_px(&padding.padding_top);
-        cs.padding.right = nonnegative_px(&padding.padding_right);
-        cs.padding.bottom = nonnegative_px(&padding.padding_bottom);
-        cs.padding.left = nonnegative_px(&padding.padding_left);
+        cs.padding.top = nonnegative_len(&padding.padding_top);
+        cs.padding.right = nonnegative_len(&padding.padding_right);
+        cs.padding.bottom = nonnegative_len(&padding.padding_bottom);
+        cs.padding.left = nonnegative_len(&padding.padding_left);
 
         cs.font_size = Some(style.get_font().font_size.used_size.0.px());
         cs.font_weight = Some(style.get_font().font_weight.value() as u16);
@@ -895,12 +895,17 @@ mod cross_check {
         Some(cs)
     }
 
-    /// Extract a plain px length from a computed LengthPercentage; percentages
-    /// and calc() have no single px value here, so they read as None.
-    fn px_len(lp: &LengthPercentage) -> Option<u32> {
+    /// Map a computed LengthPercentage into our subset: px lengths come
+    /// through as `Length::Px`, percentages as `Length::Percent` (stylo keeps
+    /// them symbolic until used-value time, like us). calc() has no single
+    /// shape, so it reads as None.
+    fn px_len(lp: &LengthPercentage) -> Option<diting_css::Length> {
         match lp.unpack() {
             stylo_alias::values::computed::length_percentage::Unpacked::Length(l) => {
-                Some(l.px() as u32)
+                Some(diting_css::Length::Px(l.px() as f32))
+            }
+            stylo_alias::values::computed::length_percentage::Unpacked::Percentage(p) => {
+                Some(diting_css::Length::Percent(p.0 * 100.0))
             }
             _ => None,
         }
@@ -909,7 +914,7 @@ mod cross_check {
     /// Margin/padding longhands are `GenericMargin<LengthPercentage>` enums
     /// (LengthPercentage / Auto / anchor variants). Only the plain length
     /// case maps into our subset.
-    fn margin_enum_px(m: &stylo_alias::values::computed::Margin) -> Option<u32> {
+    fn margin_enum_len(m: &stylo_alias::values::computed::Margin) -> Option<diting_css::Length> {
         use stylo_alias::values::generics::length::GenericMargin;
         match m {
             GenericMargin::LengthPercentage(lp) => px_len(lp),
@@ -918,9 +923,9 @@ mod cross_check {
     }
 
     /// Padding longhands are `NonNegative<LengthPercentage>` (no auto).
-    fn nonnegative_px(
+    fn nonnegative_len(
         p: &stylo_alias::values::generics::NonNegative<LengthPercentage>,
-    ) -> Option<u32> {
+    ) -> Option<diting_css::Length> {
         px_len(&p.0)
     }
 
@@ -1088,6 +1093,6 @@ mod cross_check {
                 Some((rule, compiled.specificity()))
             })
             .collect();
-        diting_css::cascade_element(tag, tree, nid, &matched, parent, inline)
+        diting_css::cascade_element(tag, tree, nid, &matched, parent, inline, diting_css::DEFAULT_ROOT_FONT_SIZE)
     }
 }

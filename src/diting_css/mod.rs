@@ -396,7 +396,7 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
             || value.contains("gradient"),
         "text-align" => matches!(value, "left" | "start" | "center" | "right" | "end" | "justify"),
         "font-weight" => parse_font_weight(value).is_some(),
-        "font-size" => parse_font_size(value).is_some(),
+        "font-size" => parse_font_size_len(value).is_some(),
         _ => true, // remaining modeled properties accept any non-empty value here
     }
 }
@@ -416,9 +416,9 @@ pub struct ComputedStyle {
     /// Shorthand sides in CSS order (top right bottom left), already expanded.
     pub margin: Sides,
     pub padding: Sides,
-    /// Authored box size in px (non-inherited; px-only for this slice).
-    pub width: Option<f32>,
-    pub height: Option<f32>,
+    /// Authored box size (non-inherited): px (em/rem resolved) or %.
+    pub width: Option<Length>,
+    pub height: Option<Length>,
     /// Font size in px (absolute keywords/units resolved by the caller's sheet
     /// context; here we accept px/em/% where em resolves against parent).
     pub font_size: Option<f32>,
@@ -440,17 +440,17 @@ pub struct ComputedStyle {
     /// Track list (px / fr / auto). `None` = not declared.
     pub grid_template_columns: Option<Vec<GridTrack>>,
     pub grid_template_rows: Option<Vec<GridTrack>>,
-    // --- positioning + size clamps (batch 2d), px-only, non-inherited ---
+    // --- positioning + size clamps (batch 2d), non-inherited ---
     pub position: Option<PositionMode>,
-    /// Inset offsets (top/right/bottom/left), px.
-    pub top: Option<f32>,
-    pub right: Option<f32>,
-    pub bottom: Option<f32>,
-    pub left: Option<f32>,
-    pub min_width: Option<f32>,
-    pub max_width: Option<f32>,
-    pub min_height: Option<f32>,
-    pub max_height: Option<f32>,
+    /// Inset offsets (top/right/bottom/left): px or %.
+    pub top: Option<Length>,
+    pub right: Option<Length>,
+    pub bottom: Option<Length>,
+    pub left: Option<Length>,
+    pub min_width: Option<Length>,
+    pub max_width: Option<Length>,
+    pub min_height: Option<Length>,
+    pub max_height: Option<Length>,
     /// Declared aspect ratio (width/height); `auto` stays None.
     pub aspect_ratio: Option<f32>,
 }
@@ -522,12 +522,82 @@ impl Default for Display {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color(pub u8, pub u8, pub u8, pub u8);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// A computed length (batch 2e). `Px` is fully resolved — em/rem were folded
+/// in during the cascade (em against the element's own font-size, rem
+/// against the root font-size, matching CSS computed-value semantics).
+/// `Percent` stays symbolic here and resolves against the containing block
+/// in the layout engine (taffy's percent semantics match CSS: margins and
+/// paddings against CB width, insets per-axis).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Length {
+    Px(f32),
+    Percent(f32),
+}
+
+/// Declaration-level length: em/rem can't resolve until the font context is
+/// known, so parsing keeps them symbolic for the cascade to fold in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CssLength {
+    Px(f32),
+    Em(f32),
+    Rem(f32),
+    Percent(f32),
+}
+
+/// The initial / default root font size (CSS `medium`).
+pub const DEFAULT_ROOT_FONT_SIZE: f32 = 16.0;
+
+/// Font context a length resolves against. `own` is this element's computed
+/// font-size (font-size itself resolves em/% against the PARENT, per spec).
+#[derive(Debug, Clone, Copy)]
+pub struct FontCtx {
+    pub own: f32,
+    pub root: f32,
+}
+
+impl Default for FontCtx {
+    fn default() -> Self {
+        FontCtx { own: DEFAULT_ROOT_FONT_SIZE, root: DEFAULT_ROOT_FONT_SIZE }
+    }
+}
+
+fn resolve_len(l: CssLength, fonts: &FontCtx) -> Length {
+    match l {
+        CssLength::Px(x) => Length::Px(x),
+        CssLength::Em(n) => Length::Px(n * fonts.own),
+        CssLength::Rem(n) => Length::Px(n * fonts.root),
+        CssLength::Percent(p) => Length::Percent(p),
+    }
+}
+
+/// px / em / rem / % (unitless `0` is a legal length; `rem` before `em`
+/// because "rem" also ends in "em").
+fn parse_css_length(v: &str) -> Option<CssLength> {
+    let v = v.trim();
+    if v == "0" {
+        return Some(CssLength::Px(0.0));
+    }
+    if let Some(p) = v.strip_suffix('%') {
+        return p.parse::<f32>().ok().map(CssLength::Percent);
+    }
+    if let Some(r) = v.strip_suffix("rem") {
+        return r.parse::<f32>().ok().map(CssLength::Rem);
+    }
+    if let Some(e) = v.strip_suffix("em") {
+        return e.parse::<f32>().ok().map(CssLength::Em);
+    }
+    if let Some(px) = v.strip_suffix("px") {
+        return px.parse::<f32>().ok().map(CssLength::Px);
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Sides {
-    pub top: Option<u32>,
-    pub right: Option<u32>,
-    pub bottom: Option<u32>,
-    pub left: Option<u32>,
+    pub top: Option<Length>,
+    pub right: Option<Length>,
+    pub bottom: Option<Length>,
+    pub left: Option<Length>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -603,21 +673,33 @@ pub fn split_declarations(css: &str) -> Vec<(String, String)> {
 }
 
 /// Apply declarations to a computed style. Returns whether any recognized
-/// property was applied (the @supports leaf-probe contract).
+/// property was applied (the @supports leaf-probe contract). Uses the
+/// default font context — callers that know the element's font-size (the
+/// cascade) use `apply_declarations_with` so em/rem resolve correctly.
 pub fn apply_declarations(style: &mut ComputedStyle, declarations: &str) -> bool {
+    apply_declarations_with(style, declarations, &FontCtx::default())
+}
+
+pub fn apply_declarations_with(
+    style: &mut ComputedStyle,
+    declarations: &str,
+    fonts: &FontCtx,
+) -> bool {
     let mut applied = false;
     for (name, value) in split_declarations(declarations) {
         // !important wins later during cascade merge; here both streams apply
         // with important taking precedence per-property at the call site.
-        if apply_one(style, &name, &value) {
+        if apply_one(style, &name, &value, fonts) {
             applied = true;
         }
     }
     applied
 }
 
-fn apply_one(style: &mut ComputedStyle, name: &str, value: &str) -> bool {
+fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx) -> bool {
     let v = value.trim();
+    // Length arm helper: parse + fold em/rem against the font context.
+    let len = |val: &str| parse_css_length(val).map(|l| resolve_len(l, fonts));
     match name {
         "display" => {
             style.display = match v {
@@ -641,22 +723,29 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str) -> bool {
             parse_color(candidate).map(|c| style.background_color = Some(c)).is_some()
         }
         "margin" | "padding" => {
-            let sides = expand_sides(v);
+            let sides = expand_sides(v, fonts);
             let target = if name == "margin" { &mut style.margin } else { &mut style.padding };
             *target = sides;
             sides.top.is_some()
         }
         "margin-top" | "margin-right" | "margin-bottom" | "margin-left" => {
-            set_side(&mut style.margin, name, parse_length_px(v));
+            set_side(&mut style.margin, name, len(v));
             true
         }
         "padding-top" | "padding-right" | "padding-bottom" | "padding-left" => {
-            set_side(&mut style.padding, name, parse_length_px(v));
+            set_side(&mut style.padding, name, len(v));
             true
         }
-        "font-size" => parse_font_size(v).map(|px| style.font_size = Some(px)).is_some(),
-        "width" => parse_px_f32(v).map(|px| style.width = Some(px)).is_some(),
-        "height" => parse_px_f32(v).map(|px| style.height = Some(px)).is_some(),
+        "font-size" => {
+            // Resolved by the cascade's font-size pre-pass (em/% need the
+            // PARENT font-size); here only px/keywords can apply directly.
+            parse_font_size_len(v).map(|l| match l {
+                CssLength::Px(px) => style.font_size = Some(px),
+                _ => {} // em/rem/% handled by the pre-pass, not this arm
+            }).is_some()
+        }
+        "width" => len(v).map(|l| style.width = Some(l)).is_some(),
+        "height" => len(v).map(|l| style.height = Some(l)).is_some(),
         "font-weight" => {
             let weight = parse_font_weight(v);
             style.font_weight = weight;
@@ -766,35 +855,35 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str) -> bool {
             true
         }
         "top" => {
-            style.top = parse_px_f32(v);
+            style.top = len(v);
             style.top.is_some()
         }
         "right" => {
-            style.right = parse_px_f32(v);
+            style.right = len(v);
             style.right.is_some()
         }
         "bottom" => {
-            style.bottom = parse_px_f32(v);
+            style.bottom = len(v);
             style.bottom.is_some()
         }
         "left" => {
-            style.left = parse_px_f32(v);
+            style.left = len(v);
             style.left.is_some()
         }
         "min-width" => {
-            style.min_width = parse_px_f32(v);
+            style.min_width = len(v);
             style.min_width.is_some()
         }
         "max-width" => {
-            style.max_width = parse_px_f32(v);
+            style.max_width = len(v);
             style.max_width.is_some()
         }
         "min-height" => {
-            style.min_height = parse_px_f32(v);
+            style.min_height = len(v);
             style.min_height.is_some()
         }
         "max-height" => {
-            style.max_height = parse_px_f32(v);
+            style.max_height = len(v);
             style.max_height.is_some()
         }
         "aspect-ratio" => {
@@ -850,7 +939,7 @@ fn parse_grid_tracks(v: &str) -> Option<Vec<GridTrack>> {
     }
 }
 
-fn set_side(sides: &mut Sides, name: &str, value: Option<u32>) {
+fn set_side(sides: &mut Sides, name: &str, value: Option<Length>) {
     let slot = match name.rsplit_once('-').map(|(_, side)| side) {
         Some("top") => &mut sides.top,
         Some("right") => &mut sides.right,
@@ -861,11 +950,11 @@ fn set_side(sides: &mut Sides, name: &str, value: Option<u32>) {
     *slot = value;
 }
 
-/// CSS 1–4 value expansion (px-only for this slice; non-px lengths drop to None).
-fn expand_sides(value: &str) -> Sides {
-    let vals: Vec<Option<u32>> = value
+/// CSS 1–4 value expansion (px/em/rem/%; unknown units drop to None).
+fn expand_sides(value: &str, fonts: &FontCtx) -> Sides {
+    let vals: Vec<Option<Length>> = value
         .split_whitespace()
-        .map(parse_length_px)
+        .map(|tok| parse_css_length(tok).map(|l| resolve_len(l, fonts)))
         .collect();
     match vals.as_slice() {
         [one] => Sides { top: *one, right: *one, bottom: *one, left: *one },
@@ -876,15 +965,8 @@ fn expand_sides(value: &str) -> Sides {
     }
 }
 
-fn parse_length_px(v: &str) -> Option<u32> {
-    let v = v.trim();
-    if v == "0" {
-        return Some(0);
-    }
-    v.strip_suffix("px")?.parse::<u32>().ok()
-}
-
-/// px-only float length (width/height slice: fractional px is legal there).
+/// px-only float length (gaps, flex-basis, grid tracks: fractional px legal,
+/// units beyond px are later batches).
 fn parse_px_f32(v: &str) -> Option<f32> {
     let v = v.trim();
     if v == "0" {
@@ -893,21 +975,30 @@ fn parse_px_f32(v: &str) -> Option<f32> {
     v.strip_suffix("px")?.parse::<f32>().ok()
 }
 
-fn parse_font_size(v: &str) -> Option<f32> {
+/// font-size accepts px/em/rem/% and the common absolute keywords. em/%
+/// resolve against the PARENT font-size, rem against the root — done by the
+/// cascade's pre-pass via `font_size_px`.
+fn parse_font_size_len(v: &str) -> Option<CssLength> {
     let v = v.trim();
-    if let Some(px) = v.strip_suffix("px") {
-        return px.parse::<f32>().ok();
-    }
-    // em/% resolve during inheritance (they need the parent size).
-    if let Some(em) = v.strip_suffix("em") {
-        return em.parse::<f32>().ok().map(|n| n * 16.0);
+    if let Some(l) = parse_css_length(v) {
+        return Some(l);
     }
     match v {
-        "small" => Some(13.0),
-        "medium" => Some(16.0),
-        "large" => Some(18.0),
-        "x-large" => Some(24.0),
+        "small" => Some(CssLength::Px(13.0)),
+        "medium" => Some(CssLength::Px(16.0)),
+        "large" => Some(CssLength::Px(18.0)),
+        "x-large" => Some(CssLength::Px(24.0)),
         _ => None,
+    }
+}
+
+/// Fold a parsed font-size against its resolution bases.
+fn font_size_px(l: CssLength, parent_fs: f32, root_fs: f32) -> f32 {
+    match l {
+        CssLength::Px(x) => x,
+        CssLength::Em(n) => n * parent_fs,
+        CssLength::Rem(n) => n * root_fs,
+        CssLength::Percent(p) => p / 100.0 * parent_fs,
     }
 }
 
@@ -1002,6 +1093,7 @@ pub fn cascade_element(
     matched_rules: &[(&ParsedRule, u32)],
     parent: Option<&ComputedStyle>,
     inline_css: Option<&str>,
+    root_font_size: f32,
 ) -> ComputedStyle {
     let mut style = ComputedStyle {
         display: Some(ua_display(tag)),
@@ -1032,18 +1124,60 @@ pub fn cascade_element(
         .collect();
     candidates.sort_by_key(|c| (c.specificity, c.source_order));
 
+    // Font-size pre-pass: CSS computes font-size before every other
+    // property (regardless of declaration order within a block), because
+    // em lengths elsewhere resolve against it. Walk the same winning order
+    // (sorted candidates, then inline) and keep the last parseable
+    // declaration, then fold em/% against the PARENT size and rem against
+    // the root size.
+    let parent_fs = parent
+        .and_then(|p| p.font_size)
+        .unwrap_or(DEFAULT_ROOT_FONT_SIZE);
+    let mut fs_decl: Option<CssLength> = None;
+    for candidate in &candidates {
+        if let Some(d) = last_font_size_decl(candidate.declarations) {
+            fs_decl = Some(d);
+        }
+    }
+    if let Some(inline) = inline_css {
+        if let Some(d) = last_font_size_decl(inline) {
+            fs_decl = Some(d);
+        }
+    }
+    let own_fs = fs_decl
+        .map(|d| font_size_px(d, parent_fs, root_font_size))
+        .unwrap_or(parent_fs);
+    style.font_size = Some(own_fs);
+    let fonts = FontCtx { own: own_fs, root: root_font_size };
+
     let _ = tree;
     let _ = node_id;
     for candidate in &candidates {
-        apply_declarations(&mut style, candidate.declarations);
+        apply_declarations_with(&mut style, candidate.declarations, &fonts);
     }
 
-    // Inline style always last.
+    // Inline style always last (same font context: inline em resolves
+    // against the element's own font-size too).
     if let Some(inline) = inline_css {
-        apply_inline_declarations(&mut style, inline);
+        apply_declarations_with(&mut style, inline, &fonts);
     }
 
     style
+}
+
+/// The winning font-size declaration in one declaration block (last
+/// parseable wins, matching apply order). Caller folds candidate+inline in
+/// order to find the overall winner.
+fn last_font_size_decl(declarations: &str) -> Option<CssLength> {
+    let mut found = None;
+    for (name, value) in split_declarations(declarations) {
+        if name == "font-size" {
+            if let Some(d) = parse_font_size_len(&value) {
+                found = Some(d);
+            }
+        }
+    }
+    found
 }
 
 /// Inline styles use the same declaration grammar.
@@ -1174,22 +1308,22 @@ mod tests {
     fn shorthand_expansion_four_value_forms() {
         let mut s = ComputedStyle::default();
         apply_declarations(&mut s, "margin: 1px 2px 3px 4px; padding: 8px");
-        assert_eq!(s.margin.top, Some(1));
-        assert_eq!(s.margin.right, Some(2));
-        assert_eq!(s.margin.bottom, Some(3));
-        assert_eq!(s.margin.left, Some(4));
-        assert_eq!(s.padding.top, Some(8));
-        assert_eq!(s.padding.left, Some(8));
+        assert_eq!(s.margin.top, Some(Length::Px(1.0)));
+        assert_eq!(s.margin.right, Some(Length::Px(2.0)));
+        assert_eq!(s.margin.bottom, Some(Length::Px(3.0)));
+        assert_eq!(s.margin.left, Some(Length::Px(4.0)));
+        assert_eq!(s.padding.top, Some(Length::Px(8.0)));
+        assert_eq!(s.padding.left, Some(Length::Px(8.0)));
 
         let mut s = ComputedStyle::default();
         apply_declarations(&mut s, "margin: 5px 6px");
-        assert_eq!((s.margin.top, s.margin.bottom), (Some(5), Some(5)));
-        assert_eq!((s.margin.right, s.margin.left), (Some(6), Some(6)));
+        assert_eq!((s.margin.top, s.margin.bottom), (Some(Length::Px(5.0)), Some(Length::Px(5.0))));
+        assert_eq!((s.margin.right, s.margin.left), (Some(Length::Px(6.0)), Some(Length::Px(6.0))));
 
         let mut s = ComputedStyle::default();
         apply_declarations(&mut s, "margin: 7px 8px 9px");
-        assert_eq!(s.margin.bottom, Some(9));
-        assert_eq!(s.margin.left, Some(8), "3-value form mirrors right to left");
+        assert_eq!(s.margin.bottom, Some(Length::Px(9.0)));
+        assert_eq!(s.margin.left, Some(Length::Px(8.0)), "3-value form mirrors right to left");
     }
 
     #[test]
@@ -1205,9 +1339,9 @@ mod tests {
     fn unitless_nonzero_lengths_rejected() {
         let mut s = ComputedStyle::default();
         apply_declarations(&mut s, "margin-top: 0; margin-bottom: 12; padding-left: 3px");
-        assert_eq!(s.margin.top, Some(0), "zero is a valid unitless length");
+        assert_eq!(s.margin.top, Some(Length::Px(0.0)), "zero is a valid unitless length");
         assert_eq!(s.margin.bottom, None, "nonzero unitless length is invalid CSS");
-        assert_eq!(s.padding.left, Some(3));
+        assert_eq!(s.padding.left, Some(Length::Px(3.0)));
     }
 
     // ---- cascade ----
@@ -1234,7 +1368,7 @@ mod tests {
             .collect();
         assert_eq!(matched.len(), 3);
 
-        let computed = cascade_element("p", &tree, node, &matched, None, Some("background-color: #abcdef"));
+        let computed = cascade_element("p", &tree, node, &matched, None, Some("background-color: #abcdef"), DEFAULT_ROOT_FONT_SIZE);
         assert_eq!(
             computed.color,
             Some(Color(0x33, 0x33, 0x33, 0xff)),
@@ -1261,7 +1395,7 @@ mod tests {
             ..Default::default()
         };
         // No matched author rules for <em>: pure inheritance + UA defaults.
-        let child = cascade_element("em", &tree, em, &[], Some(&parent), None);
+        let child = cascade_element("em", &tree, em, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
         assert_eq!(child.color, parent.color, "color inherits");
         assert_eq!(child.font_size, parent.font_size, "font-size inherits");
         assert_eq!(child.text_align, parent.text_align, "text-align inherits");
@@ -1270,13 +1404,81 @@ mod tests {
         // Author rule on the child overrides the inherited color only.
         let rule = ParsedRule { selector: "em".into(), declarations: "color: red".into() };
         let spec = tree.compile_rule_selector("em").unwrap().specificity();
-        let overridden = cascade_element("em", &tree, em, &[(&rule, spec)], Some(&parent), None);
+        let overridden = cascade_element("em", &tree, em, &[(&rule, spec)], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
         assert_eq!(overridden.color, Some(Color(255, 0, 0, 255)));
         assert_eq!(overridden.font_size, parent.font_size, "unmentioned props still inherit");
 
         // Section itself: block UA default even with no author CSS.
-        let block = cascade_element("section", &tree, section, &[], None, None);
+        let block = cascade_element("section", &tree, section, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
         assert_eq!(block.display, Some(Display::Block));
+    }
+
+    // ---- batch 2e: em/rem/% lengths ----
+
+    #[test]
+    fn em_rem_and_percent_parse_and_resolve() {
+        let mut s = ComputedStyle::default();
+        let fonts = FontCtx { own: 20.0, root: 32.0 };
+        apply_declarations_with(&mut s, "width: 10em; height: 2.5rem; margin: 5% 1px", &fonts);
+        assert_eq!(s.width, Some(Length::Px(200.0)), "em folds against own fs");
+        assert_eq!(s.height, Some(Length::Px(80.0)), "rem folds against root fs");
+        assert_eq!(s.margin.top, Some(Length::Percent(5.0)), "% stays symbolic");
+        assert_eq!(s.margin.left, Some(Length::Px(1.0)));
+    }
+
+    #[test]
+    fn font_size_em_percent_against_parent_rem_against_root() {
+        let tree = diting_dom::tree_sink::parse_html(r#"<div><p>x</p></div>"#);
+        let p = tree.query_selector("p").unwrap().unwrap();
+        let parent = ComputedStyle { font_size: Some(20.0), ..Default::default() };
+
+        // 1.5em of 20 → 30; 150% of 20 → 30; 1.25rem of root 24 → 30.
+        let mk = |decl: &str, root: f32| {
+            cascade_element(
+                "p", &tree, p,
+                &[(&ParsedRule { selector: "p".into(), declarations: decl.into() }, 1)],
+                Some(&parent), None, root,
+            )
+        };
+        assert_eq!(mk("font-size: 1.5em", 16.0).font_size, Some(30.0), "em against parent");
+        assert_eq!(mk("font-size: 150%", 16.0).font_size, Some(30.0), "% against parent");
+        assert_eq!(mk("font-size: 1.25rem", 24.0).font_size, Some(30.0), "rem against root");
+        assert_eq!(mk("color: red", 16.0).font_size, Some(20.0), "inherits parent");
+    }
+
+    #[test]
+    fn font_size_computes_before_em_lengths_same_block() {
+        // Declaration order inside one block must not matter: font-size is
+        // computed first, then width's em folds against it (CSS spec order).
+        let tree = diting_dom::tree_sink::parse_html("<div><p>x</p></div>");
+        let p = tree.query_selector("p").unwrap().unwrap();
+        let cs = cascade_element(
+            "p", &tree, p,
+            &[(&ParsedRule { selector: "p".into(), declarations: "width: 10em; font-size: 24px".into() }, 1)],
+            None, None, DEFAULT_ROOT_FONT_SIZE,
+        );
+        assert_eq!(cs.font_size, Some(24.0));
+        assert_eq!(cs.width, Some(Length::Px(240.0)), "10em of the same block's font-size");
+    }
+
+    #[test]
+    fn cascade_font_size_wins_by_specificity_not_prepass_order() {
+        // The pre-pass must respect cascade order: the id rule's font-size
+        // beats the later-parsed class rule, and width's em folds against
+        // the WINNER.
+        let tree = diting_dom::tree_sink::parse_html(r#"<p id="m" class="c">x</p>"#);
+        let p = tree.get_element_by_id("m").unwrap();
+        let rules = vec![
+            ParsedRule { selector: "p.c".into(), declarations: "font-size: 10px; width: 2em".into() },
+            ParsedRule { selector: "#m".into(), declarations: "font-size: 30px".into() },
+        ];
+        let matched: Vec<(&ParsedRule, u32)> = rules
+            .iter()
+            .filter_map(|r| tree.compile_rule_selector(&r.selector).map(|c| (r, c.specificity())))
+            .collect();
+        let cs = cascade_element("p", &tree, p, &matched, None, None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(cs.font_size, Some(30.0), "id specificity wins font-size");
+        assert_eq!(cs.width, Some(Length::Px(60.0)), "2em of 30, not of 10");
     }
 
     #[test]
@@ -1320,7 +1522,7 @@ mod tests {
         // matches the <article> element, not its child .lead.
         assert_eq!(matched.len(), 1, "{matched:?}");
 
-        let computed = cascade_element("p", &tree, lead, &matched, None, None);
+        let computed = cascade_element("p", &tree, lead, &matched, None, None, DEFAULT_ROOT_FONT_SIZE);
         assert_eq!(computed.font_weight, Some(700), "author bold applies");
         assert_eq!(computed.text_align, None, ".menu a never touched .lead");
 
@@ -1340,7 +1542,7 @@ mod tests {
             })
             .collect();
         assert_eq!(art_matched.len(), 1, "{art_matched:?}");
-        let art_computed = cascade_element("article", &tree, article, &art_matched, None, None);
-        assert_eq!(art_computed.padding.top, Some(12), ":where(article) padding applies");
+        let art_computed = cascade_element("article", &tree, article, &art_matched, None, None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(art_computed.padding.top, Some(Length::Px(12.0)), ":where(article) padding applies");
     }
 }

@@ -581,3 +581,53 @@ dup），等修复进 release 后随 parley CJK 修复一起评估升 pin。产�
 **边界（下一批）**：em/rem/% 长度（值系统重构）、float（需 float_layout
 feature）、table/multicol、inline-block、absolute 无 inset 轴的 static
 position 回填（upstream StaticPositionCandidate 路径）、sticky。
+
+## 15. 批次 2e 完成（2026-08-23）：em/rem/% 长度——值系统重构
+
+**diting_css 值系统**：
+- 计算值 `Length { Px(f32), Percent(f32) }`——em/rem 在级联时折叠成 px
+  （CSS 计算值语义），% 保持符号交给布局引擎（used-value 期解析）。
+- 解析层私有 `CssLength { Px/Em/Rem/Percent }`（`parse_css_length`：
+  px/em/rem/%、无单位 `0`；**rem 在 em 之前判**——"rem" 也以 "em" 结尾）。
+- `FontCtx { own, root }`；`resolve_len` 折叠 em→own、rem→root。
+- 字段换型：margin/padding Sides、width/height、四 inset、四 min/max
+  → `Option<Length>`。gap/flex-basis/grid tracks 刻意仍 px-only（边界）。
+
+**font-size 预遍（本批核心机制）**：CSS 规定 font-size 先于其它一切属性
+计算（em 长度依赖它，与块内声明顺序无关）。cascade_element 在 apply 前
+按**同一胜出序**（specificity 排序 candidates + inline 最后）扫一遍
+font-size 声明，算出 own_fs：em/% 对**父** fs、rem 对根 fs。然后所有
+em 长度对 own_fs 折叠。cascade_element 签名 +`root_font_size` 参数。
+
+**root font-size 线程**：our_styles 把根元素（document 直接子元素）的
+计算值 fs 作为整个子树的 rem 基传下去——`html { font-size: 20px }` +
+`width: 10rem` → 200。screenshot.rs 的 cross_check 路径固定 16（其
+fixture 不设根 fs）。
+
+**桥映射**：lp / lpa_zero（margin 缺省=0）/ lpa_auto（inset·clamp 缺省
+=auto）三个闭包；% → `taffy LengthPercentage(Auto)::percent(p/100)` 直通。
+**taffy 的 % 语义与 CSS 一致**（block.rs:696/703 实证：margin-top/bottom
+% 对 `parent_size.width`；inset 按轴对 area_width/height；padding 对宽）
+——所以 % 交给 taffy 算，双侧同引擎对照即锁我方透传映射。
+
+**font_context 语义修正**：级联后每个元素都带 resolved fs（不再 None），
+祖先链查找从"最后命中"改为"**最近命中即停**"（否则 html 的 16 会盖掉
+#zh 的 20——cjk_wraps 测试当场抓到）。fs 与 weight 各自独立找最近。
+
+**stylo_view 投影**：px_len 双态化——stylo 的 computed LengthPercentage
+Unpacked::Percentage → `Length::Percent`（stylo 同样把 % 留到 used-value）。
+
+**对照结果**（4 新对照测试，401 全绿）：
+- em：`#outer{font-size:24px}` + `#inner{font-size:2em; width:5em;
+  height:1em}` → fs=48、240×48，双侧 ±0.51。
+- rem：默认根 16 → `12.5rem`=200 双侧；authored root 20 → `10rem`=200。
+- %：400×100 容器里 `width:50%; margin-left:10%; height:50%;
+  margin-top:5%` → (40,20) 200×50——**margin 双轴都对 CB 宽**，双侧。
+- % inset（positioned 父直子，blitz DOM-parent 锚恰好=CB 的形状）：
+  left:10%/top:25% → (30,50) 双侧；`width:100px; min-width:60%` → 240
+  （min-width 必须配显式小 width——block 自动拉伸会吞掉 floor）。
+
+**边界（挂账）**：% 尺寸+px padding 无混合形状（% 按 border-box 语义
+直通，不做 content-box 加算——authored box-sizing 本就是后续批次）；
+gap/flex-basis/grid tracks 的 em/%；line-height 仍固定 1.2 系数（真实
+LineHeight 模型=批次 3）；ch/ex/vw/vh 单位。
