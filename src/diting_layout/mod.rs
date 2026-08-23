@@ -1,4 +1,5 @@
-//! Taffy fork-delta classification (render claim batch 2a).
+//! Taffy fork-delta classification + minimal DOM→taffy layout bridge
+//! (render claim batch 2a / 2b).
 //!
 //! Upstream obscura vendors `taffy 0.12.1 + 11 fork commits` (~1.8k net lines:
 //! geometric float clearance, margin-collapse metadata in the measure cache,
@@ -15,6 +16,348 @@
 //! stock taffy absorbs the fix, the locked assertion here fails and names
 //! exactly what changed. See docs/engine/render.md §11 for the full
 //! eight-theme classification.
+//!
+//! The bridge below (batch 2b) is the minimal vertical slice of upstream
+//! dom.rs's DOM→taffy mapping: display roles, box-model px, text-align
+//! promotion, and deterministic word-leaf text. Not modeled yet (upstream
+//! has, we absorb in later batches): float/table/multicol, replaced elements,
+//! position:absolute, em/rem/% lengths, flex/grid property pass-through.
+//! Same engine both sides of the cross-check (stock taffy 0.13.0), so the
+//! rect comparison isolates the BRIDGE, not the layout algorithm.
+
+use std::collections::HashMap;
+
+use taffy::prelude::*;
+
+use crate::diting_css::{ComputedStyle, Display as CssDisplay, TextAlign};
+use crate::diting_dom::tree::{DomTree, NodeId};
+
+/// Absolute (page-relative) border-box rect of a DOM element after layout.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Deterministic text metrics for word leaves — upstream's no-paint fallback
+/// model (0.55em average per ASCII char, bold ×1.08), extended with a 1.0em
+/// CJK class because our pages are CJK-heavy and CJK glyph advance is one em.
+pub fn text_width(text: &str, font_size: f32, bold: bool) -> f32 {
+    let em: f32 = text
+        .chars()
+        .filter(|c| !c.is_control())
+        .map(|c| if is_cjk(c) { 1.0 } else { 0.55 })
+        .sum();
+    let w = em * font_size;
+    if bold { w * 1.08 } else { w }
+}
+
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x1100..=0x115F        // Hangul Jamo
+        | 0x2E80..=0x9FFF      // CJK Radicals .. CJK Unified
+        | 0xA960..=0xA97F      // Hangul Extended-A
+        | 0xAC00..=0xD7FF      // Hangul Syllables + Compatibility
+        | 0xF900..=0xFAFF      // CJK Compatibility Ideographs
+        | 0xFE30..=0xFE4F      // CJK Compatibility Forms
+        | 0xFF00..=0xFF60      // Fullwidth Forms
+        | 0xFFE0..=0xFFE6      // Fullwidth Signs
+    )
+}
+
+/// Approximate used line height for text leaves (upstream resolves a full
+/// LineHeight model; the slice takes the common `normal` ≈ 1.2 fallback).
+fn line_height(font_size: f32) -> f32 {
+    font_size * 1.2
+}
+
+/// Map a computed style onto a taffy style. Mirrors upstream `to_taffy_style`
+/// for the modeled subset, including the block→flex-column promotion that
+/// stands in for text alignment in a block formatting context.
+fn to_taffy_style(style: &ComputedStyle) -> Style {
+    let mut s = Style::default();
+    let display = style.display.unwrap_or(CssDisplay::Block);
+    // A block box with centered/right inline content needs a flex-column
+    // stand-in because taffy's native block algorithm has no line alignment
+    // (upstream to_taffy_style's promote_for_alignment).
+    let promote = display == CssDisplay::Block
+        && matches!(style.text_align, Some(TextAlign::Center) | Some(TextAlign::Right));
+    s.display = match display {
+        CssDisplay::Block if promote => Display::Flex,
+        CssDisplay::Block => Display::Block,
+        CssDisplay::Flex => Display::Flex,
+        CssDisplay::Grid => Display::Grid,
+        // The inline/IFC stand-in is a wrapping flex row (upstream model).
+        CssDisplay::Inline => Display::Flex,
+        CssDisplay::None => Display::None,
+    };
+    if promote {
+        s.flex_direction = FlexDirection::Column;
+        s.align_items = match style.text_align {
+            Some(TextAlign::Center) => Some(AlignItems::CENTER),
+            Some(TextAlign::Right) => Some(AlignItems::FLEX_END),
+            _ => None,
+        };
+    } else if display == CssDisplay::Inline {
+        s.flex_direction = FlexDirection::Row;
+        s.flex_wrap = FlexWrap::Wrap;
+        s.align_items = Some(AlignItems::FLEX_START);
+    }
+    let side = |v: Option<u32>| v.map(|px| LengthPercentage::length(px as f32)).unwrap_or_else(|| LengthPercentage::length(0.0));
+    // taffy::geometry::Rect spelled in full — this module's own Rect shadows
+    // the prelude name.
+    s.margin = taffy::geometry::Rect {
+        top: LengthPercentageAuto::length(side_px(style.margin.top)),
+        right: LengthPercentageAuto::length(side_px(style.margin.right)),
+        bottom: LengthPercentageAuto::length(side_px(style.margin.bottom)),
+        left: LengthPercentageAuto::length(side_px(style.margin.left)),
+    };
+    s.padding = taffy::geometry::Rect {
+        top: side(style.padding.top),
+        right: side(style.padding.right),
+        bottom: side(style.padding.bottom),
+        left: side(style.padding.left),
+    };
+    // CSS's initial box-sizing is content-box while taffy sizes are
+    // border-box; the subset has no authored box-sizing yet, so map authored
+    // sizes over by the padding (border widths aren't modeled at all).
+    s.size = Size {
+        width: style
+            .width
+            .map(|w| Dimension::length(w + side_px(style.padding.left) + side_px(style.padding.right)))
+            .unwrap_or_else(auto),
+        height: style
+            .height
+            .map(|h| Dimension::length(h + side_px(style.padding.top) + side_px(style.padding.bottom)))
+            .unwrap_or_else(auto),
+    };
+    s
+}
+
+fn side_px(v: Option<u32>) -> f32 {
+    v.map(|px| px as f32).unwrap_or(0.0)
+}
+
+/// Effective font context for a text leaf: nearest ancestor's declared
+/// font-size / weight (defaults 16px / 400).
+fn font_context(tree: &DomTree, id: NodeId, styles: &HashMap<NodeId, ComputedStyle>) -> (f32, bool) {
+    let mut font_size = 16.0;
+    let mut bold = false;
+    let mut current = Some(id);
+    while let Some(nid) = current {
+        if let Some(style) = styles.get(&nid) {
+            if let Some(fs) = style.font_size {
+                font_size = fs;
+            }
+            if let Some(fw) = style.font_weight {
+                bold = fw >= 600;
+            }
+        }
+        current = tree.with_node(nid, |n| n.parent).flatten();
+    }
+    (font_size, bold)
+}
+
+/// Split text into layout tokens. Whitespace runs collapse to a single space
+/// token (CSS text processing) that keeps its width but contributes no
+/// height; CJK chars break per-glyph — UAX#14 allows a break after every
+/// ideograph, and without this a CJK paragraph would be one unbreakable
+/// "word".
+fn tokenize(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut word = String::new();
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            if !word.is_empty() {
+                tokens.push(std::mem::take(&mut word));
+            }
+            tokens.push(" ".to_string());
+        } else if is_cjk(ch) {
+            if !word.is_empty() {
+                tokens.push(std::mem::take(&mut word));
+            }
+            tokens.push(ch.to_string());
+        } else {
+            word.push(ch);
+        }
+    }
+    if !word.is_empty() {
+        tokens.push(word);
+    }
+    tokens
+}
+
+/// One taffy leaf per word (upstream's per-word leaf model). Fixed intrinsic
+/// size from the deterministic metrics; wrapping happens in the enclosing
+/// flex-wrap run container.
+fn build_word_leaves(
+    text: &str,
+    font_size: f32,
+    bold: bool,
+    taffy_tree: &mut TaffyTree<()>,
+) -> Vec<taffy::tree::NodeId> {
+    tokenize(text)
+        .into_iter()
+        .filter_map(|token| {
+            let width = text_width(&token, font_size, bold);
+            // Pure-whitespace tokens contribute no height (they sit between
+            // block siblings without adding a spurious blank row).
+            let height = if token.trim().is_empty() { 0.0 } else { line_height(font_size) };
+            let style = Style {
+                size: Size {
+                    width: Dimension::length(width.max(0.0)),
+                    height: Dimension::length(height.max(0.0)),
+                },
+                ..Style::default()
+            };
+            taffy_tree.new_leaf(style).ok()
+        })
+        .collect()
+}
+
+/// The inline-formatting-context stand-in around a run of inline content:
+/// a wrapping flex row (upstream run_wrapper_style / outer_style model).
+fn run_wrapper_style() -> Style {
+    Style {
+        display: Display::Flex,
+        flex_direction: FlexDirection::Row,
+        flex_wrap: FlexWrap::Wrap,
+        align_items: Some(AlignItems::FLEX_START),
+        ..Style::default()
+    }
+}
+
+/// Build the taffy subtree for one element. Returns None for display:none
+/// (subtree skipped) and for the document node's non-element parts.
+fn build_element(
+    tree: &DomTree,
+    id: NodeId,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    taffy_tree: &mut TaffyTree<()>,
+    node_map: &mut HashMap<taffy::tree::NodeId, NodeId>,
+) -> Option<taffy::tree::NodeId> {
+    let style = styles.get(&id).cloned().unwrap_or_default();
+    if style.display == Some(CssDisplay::None) {
+        return None;
+    }
+
+    let child_ids: Vec<NodeId> = tree.children(id);
+
+    // Partition children into block-level elements (direct taffy children)
+    // and inline runs (text + inline elements, flattened into one wrapping
+    // flex row — upstream's anonymous-run model).
+    let mut direct: Vec<taffy::tree::NodeId> = Vec::new();
+    let mut run: Vec<taffy::tree::NodeId> = Vec::new();
+    let mut flush_run = |run: &mut Vec<taffy::tree::NodeId>, direct: &mut Vec<taffy::tree::NodeId>, taffy_tree: &mut TaffyTree<()>| {
+        if run.is_empty() {
+            return;
+        }
+        let leaves = std::mem::take(run);
+        if let Ok(wrapper) = taffy_tree.new_with_children(run_wrapper_style(), &leaves) {
+            direct.push(wrapper);
+        }
+    };
+
+    let (font_size, _bold) = font_context(tree, id, styles);
+    for child in child_ids {
+        let is_text = tree.with_node(child, |n| n.is_text()).unwrap_or(false);
+        let child_display = styles
+            .get(&child)
+            .and_then(|s| s.display)
+            .or(if is_text { Some(CssDisplay::Inline) } else { Some(CssDisplay::Block) });
+        let inline_level = matches!(child_display, Some(CssDisplay::Inline));
+        if is_text {
+            let text = tree.with_node(child, |n| n.text_content_of_text_node().unwrap_or("").to_string()).unwrap_or_default();
+            let (fs, b) = font_context(tree, child, styles);
+            let fs = if styles.get(&child).is_some() { fs } else { font_size };
+            run.extend(build_word_leaves(&text, fs, b, taffy_tree));
+        } else if inline_level {
+            // A plain inline wrapper flattens into the enclosing run (upstream
+            // is_flattenable_inline): the words wrap at the real block level.
+            let sub = build_element(tree, child, styles, taffy_tree, node_map);
+            if let Some(sub) = sub {
+                let sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
+                run.extend(sub_children);
+                let _ = taffy_tree.remove(sub);
+            }
+        } else {
+            flush_run(&mut run, &mut direct, taffy_tree);
+            if let Some(node) = build_element(tree, child, styles, taffy_tree, node_map) {
+                direct.push(node);
+            }
+        }
+    }
+    flush_run(&mut run, &mut direct, taffy_tree);
+
+    let taffy_style = to_taffy_style(&style);
+    let node = if direct.is_empty() {
+        taffy_tree.new_leaf(taffy_style).ok()?
+    } else {
+        taffy_tree.new_with_children(taffy_style, &direct).ok()?
+    };
+    node_map.insert(node, id);
+    Some(node)
+}
+
+/// Lay a DOM tree out at a fixed viewport width and return each element's
+/// absolute border-box rect. Elements are keyed by diting_dom NodeId; the
+/// root's containing block is the viewport.
+pub fn layout_dom(
+    tree: &DomTree,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    viewport_width: f32,
+) -> HashMap<NodeId, Rect> {
+    let mut taffy_tree = TaffyTree::new();
+    let mut node_map: HashMap<taffy::tree::NodeId, NodeId> = HashMap::new();
+
+    // The document node is not an element; lay out from the first element
+    // descendant (the <html> root), like upstream.
+    let root = tree
+        .children(tree.document())
+        .into_iter()
+        .find(|id| tree.with_node(*id, |n| n.is_element()).unwrap_or(false));
+
+    let mut rects = HashMap::new();
+    let Some(root_id) = root else { return rects };
+    let Some(root_node) = build_element(tree, root_id, styles, &mut taffy_tree, &mut node_map) else {
+        return rects;
+    };
+
+    let available = Size {
+        width: AvailableSpace::Definite(viewport_width),
+        height: AvailableSpace::MaxContent,
+    };
+    if taffy_tree.compute_layout(root_node, available).is_err() {
+        return rects;
+    }
+
+    // Accumulate locations down the taffy tree: child location already
+    // includes the parent's border+padding offset, so a plain sum is the
+    // absolute border-box origin (same accumulation blitz-paint performs).
+    fn collect(
+        taffy_tree: &TaffyTree<()>,
+        node_map: &HashMap<taffy::tree::NodeId, NodeId>,
+        rects: &mut HashMap<NodeId, Rect>,
+        node: taffy::tree::NodeId,
+        offset: (f32, f32),
+    ) {
+        let Ok(layout) = taffy_tree.layout(node) else { return };
+        let abs = (offset.0 + layout.location.x, offset.1 + layout.location.y);
+        if let Some(dom_id) = node_map.get(&node) {
+            rects.insert(
+                *dom_id,
+                Rect { x: abs.0, y: abs.1, width: layout.size.width, height: layout.size.height },
+            );
+        }
+        for child in taffy_tree.children(node).unwrap_or_default().iter().copied() {
+            collect(taffy_tree, node_map, rects, child, abs);
+        }
+    }
+    collect(&taffy_tree, &node_map, &mut rects, root_node, (0.0, 0.0));
+    rects
+}
 
 #[cfg(test)]
 mod fork_deltas {
@@ -442,5 +785,226 @@ mod fork_deltas {
         // the final main size). Stock 0.13.0 never transfers: the flat
         // measure's 10px stands.
         assert_eq!(size, Size { width: 300.0, height: 10.0 });
+    }
+}
+
+/// Batch 2b: the bridge against blitz's real layout. Same taffy on both
+/// sides, so every difference the assertions catch is bridge modeling, not
+/// layout math. Authored-geometry fixtures only for cross-engine asserts
+/// (text metrics are heuristic here, glyph-measured in blitz — those are
+/// locked as our-side structural tests instead).
+#[cfg(test)]
+mod bridge_cross_check {
+    use super::*;
+    use crate::diting_css::{self, ParsedRule};
+    use crate::screenshot::element_rect;
+
+    const VW: f32 = 800.0;
+    /// Half a device pixel: absorbs taffy's rounding-to-integer snap, nothing
+    /// else. A modeling error of ≥1px fails; float dust does not.
+    const EPS: f64 = 0.51;
+
+    /// Full cascade for every element, chaining parents (the same path
+    /// screenshot::cross_check uses, inlined because that module is private).
+    fn our_styles(tree: &DomTree, rules: &[ParsedRule]) -> HashMap<NodeId, ComputedStyle> {
+        fn visit(
+            tree: &DomTree,
+            rules: &[ParsedRule],
+            nid: NodeId,
+            parent: Option<&ComputedStyle>,
+            out: &mut HashMap<NodeId, ComputedStyle>,
+        ) {
+            let Some(tag) = tree
+                .with_node(nid, |n| n.as_element().map(|e| e.local.to_string()))
+                .flatten()
+            else {
+                return;
+            };
+            let matched: Vec<(&ParsedRule, u32)> = rules
+                .iter()
+                .filter_map(|rule| {
+                    let hits = tree.query_selector_all_from(tree.document(), &rule.selector).ok()?;
+                    if !hits.contains(&nid) {
+                        return None;
+                    }
+                    let compiled = tree.compile_rule_selector(&rule.selector)?;
+                    Some((rule, compiled.specificity()))
+                })
+                .collect();
+            let inline = tree
+                .with_node(nid, |n| n.get_attribute("style").map(|s| s.to_string()))
+                .flatten();
+            let cs = diting_css::cascade_element(&tag, tree, nid, &matched, parent, inline.as_deref());
+            for child in tree.children(nid) {
+                visit(tree, rules, child, Some(&cs), out);
+            }
+            out.insert(nid, cs);
+        }
+        let mut out = HashMap::new();
+        for child in tree.children(tree.document()) {
+            visit(tree, rules, child, None, &mut out);
+        }
+        out
+    }
+
+    /// Blitz side of the dual run: parse + style + layout at the test
+    /// viewport, then hand back the base document for element_rect.
+    fn blitz_doc(html: &str, stylesheet: &str) -> blitz_dom::BaseDocument {
+        use blitz_dom::{DocumentConfig, util::Color};
+        use blitz_traits::shell::{ColorScheme, Viewport};
+
+        let css_doc = format!("<style>{stylesheet}</style>{html}");
+        let mut doc = blitz_html::HtmlDocument::from_html(
+            &css_doc,
+            DocumentConfig {
+                base_url: Some("https://example.com/".to_string()),
+                net_provider: None,
+                viewport: Some(Viewport::new(VW as u32, 600, 1.0, ColorScheme::Light)),
+                ..Default::default()
+            },
+        );
+        for _ in 0..4 {
+            doc.resolve(0.0);
+        }
+        let _ = Color::WHITE;
+        doc.into_inner()
+    }
+
+    fn assert_close(what: &str, ours: f32, theirs: f64) {
+        assert!(
+            (ours as f64 - theirs).abs() <= EPS,
+            "{what}: bridge={ours} blitz={theirs} (diff {})",
+            (ours as f64 - theirs).abs()
+        );
+    }
+
+    fn both_engines(
+        html: &str,
+        stylesheet: &str,
+    ) -> (
+        blitz_dom::BaseDocument,
+        DomTree,
+        HashMap<NodeId, ComputedStyle>,
+        HashMap<NodeId, Rect>,
+    ) {
+        let doc = blitz_doc(html, stylesheet);
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(stylesheet);
+        let styles = our_styles(&tree, &rules);
+        let rects = layout_dom(&tree, &styles, VW);
+        (doc, tree, styles, rects)
+    }
+
+    /// Authored box geometry + block stacking: the part of layout both
+    /// engines must agree on exactly.
+    #[test]
+    fn authored_boxes_match_blitz() {
+        let html = r#"<body><div id="a">你好世界</div><div id="b">hello world</div><div id="c"></div></body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #a { width: 200px; height: 40px; font-size: 20px; }
+            #b { width: 300px; height: 50px; padding: 10px; }
+            #c { width: 120px; height: 30px; }
+        "#;
+        let (doc, tree, _styles, rects) = both_engines(html, sheet);
+
+        for selector in ["html", "body", "#a", "#b", "#c"] {
+            let blitz_nid = doc.query_selector(selector).unwrap().expect(selector);
+            let our_nid = tree.query_selector(selector).unwrap().expect(selector);
+            let theirs = element_rect(&doc, blitz_nid);
+            let ours = *rects.get(&our_nid).unwrap_or(&Rect::default());
+            assert_close(&format!("{selector} x"), ours.x, theirs.x);
+            assert_close(&format!("{selector} y"), ours.y, theirs.y);
+            assert_close(&format!("{selector} width"), ours.width, theirs.width);
+            assert_close(&format!("{selector} height"), ours.height, theirs.height);
+        }
+
+        // Content-box → border-box mapping spot check: #b is authored
+        // 300×50 content + 10px padding all around = 320×70 border box.
+        let our_b = tree.query_selector("#b").unwrap().unwrap();
+        let b = rects[&our_b];
+        assert!((b.width - 320.0).abs() < EPS as f32, "#b border-box width: {}", b.width);
+        assert!((b.height - 70.0).abs() < EPS as f32, "#b border-box height: {}", b.height);
+        // Block stacking: c starts exactly at b's bottom edge.
+        let our_c = tree.query_selector("#c").unwrap().unwrap();
+        let c = rects[&our_c];
+        assert!((c.y - (b.y + b.height)).abs() < EPS as f32, "stacking: c.y={} b.bottom={}", c.y, b.y + b.height);
+    }
+
+    /// display:none drops the subtree entirely; display:block on a default
+    /// inline (span) makes it a real box.
+    #[test]
+    fn display_none_skips_subtree() {
+        let html = r#"<body><div id="gone" style="display: none"><p id="inner">x</p></div><div id="kept">y</div></body>"#;
+        let sheet = "body { margin: 0; }";
+        let (doc, tree, _styles, rects) = both_engines(html, sheet);
+
+        let gone = tree.query_selector("#gone").unwrap().unwrap();
+        let inner = tree.query_selector("#inner").unwrap().unwrap();
+        let kept = tree.query_selector("#kept").unwrap().unwrap();
+        assert!(!rects.contains_key(&gone), "#gone must be absent");
+        assert!(!rects.contains_key(&inner), "#inner (inside display:none) must be absent");
+
+        // #kept stacks at the top: the removed box leaves no gap.
+        let ours = rects[&kept];
+        let blitz_nid = doc.query_selector("#kept").unwrap().unwrap();
+        let theirs = element_rect(&doc, blitz_nid);
+        assert_close("#kept x", ours.x, theirs.x);
+        assert_close("#kept y", ours.y, theirs.y);
+    }
+
+    /// CJK wrapping (our metrics model — blitz measures real glyphs, so this
+    /// is a structural lock, not a cross-engine compare): 12 ideographs at
+    /// 20px in a 200px box = 10 per line, 2 lines × 24px line height.
+    #[test]
+    fn cjk_wraps_per_glyph() {
+        let html = r#"<body><div id="zh">一二三四五六七八九十甲乙</div></body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #zh { width: 200px; font-size: 20px; }
+        "#;
+        let (_doc, tree, _styles, rects) = both_engines(html, sheet);
+        let zh = rects[&tree.query_selector("#zh").unwrap().unwrap()];
+        assert!((zh.width - 200.0).abs() < EPS as f32, "width: {}", zh.width);
+        // 2 lines × (20 × 1.2)
+        assert!((zh.height - 48.0).abs() < EPS as f32, "2 CJK lines: {}", zh.height);
+    }
+
+    /// Inline content of one block shares a single wrapping run: words from
+    /// text + flattened span children wrap together, and the span itself
+    /// owns no box.
+    #[test]
+    fn inline_run_is_one_wrapper() {
+        let html = r#"<body><p id="p">alpha <span id="s">beta gamma</span> delta</p></body>"#;
+        let sheet = "body { margin: 0; }";
+        let (_doc, tree, _styles, rects) = both_engines(html, sheet);
+        let p = rects[&tree.query_selector("#p").unwrap().unwrap()];
+        let s = tree.query_selector("#s").unwrap().unwrap();
+        assert!(!rects.contains_key(&s), "flattened span owns no box");
+        // One line of 16px text = 19.2 → 19 after taffy's rounding.
+        assert!((p.height - 19.2).abs() < EPS as f32, "one line: {}", p.height);
+    }
+
+    /// text-align promotion (upstream stand-in): the block becomes a
+    /// flex-column so its runs center. KNOWN DIVERGENCE vs real CSS (and
+    /// blitz): a BLOCK child of a centered block still stretches full width
+    /// in real CSS; in the flex-column stand-in it shrink-wraps and centers.
+    /// Locked here as our model's contract; inline content (the thing
+    /// text-align actually addresses) centers correctly.
+    #[test]
+    fn text_align_center_promotes() {
+        let html = r#"<body><div id="m"><div id="mi">hi</div></div></body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #m { width: 200px; height: 60px; text-align: center; }
+        "#;
+        let (_doc, tree, _styles, rects) = both_engines(html, sheet);
+        let m = rects[&tree.query_selector("#m").unwrap().unwrap()];
+        let mi = rects[&tree.query_selector("#mi").unwrap().unwrap()];
+        assert!((m.width - 200.0).abs() < EPS as f32, "container width: {}", m.width);
+        // "hi" = 2 × 0.55 × 16 = 17.6 → 18 after taffy's integer rounding;
+        // centered in 200 → x = (200 − 18) / 2.
+        assert!((mi.width - 17.6).abs() < EPS as f32, "run width: {}", mi.width);
+        assert!((mi.x - (200.0 - 18.0) / 2.0).abs() < EPS as f32, "centered x: {}", mi.x);
     }
 }

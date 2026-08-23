@@ -403,3 +403,64 @@ stock 0.13.0 基本没吸收。切换判据达成时若采用 obscura 渲染层�
 
 下一步=批次 2b：dom.rs 布局桥本体（8-pass 修复链、table→grid 外层协商、
 text-align block→flex-column 提升）的最小竖切 + 与 blitz rect 对照。
+
+## 12. 批次 2b 完成（2026-08-23）：布局桥最小竖切 + blitz rect 对照
+
+上游 dom.rs 的 DOM→taffy 映射抽成最小竖切，落在
+`src/diting_layout/mod.rs`（fork_deltas 测试模块之外的正式代码）：
+
+**桥本体**（约 230 行，全部只读侧——不接产品管线）：
+
+- `layout_dom(tree, styles, viewport_width) -> HashMap<NodeId, Rect>`：
+  从 `<html>` 起整树布局，rect=绝对 border-box 坐标。提取=DFS 沿 taffy 树
+  累加 location（子 location 已含父 border+padding 偏移，与 blitz-paint
+  同一累加语义）；rounding 保持 taffy 默认开（对齐 upstream + blitz）。
+- `to_taffy_style`：display 角色映射（Block/Flex/Grid/None 直译；
+  **Inline→flex-row-wrap** = IFC 替身，upstream 模型）；margin/padding px；
+  width/height 走 **content-box→border-box 换算**（CSS 初始 box-sizing 是
+  content-box，taffy 全 border-box，子集还没有 box-sizing 声明，先按初始值
+  把 padding 加回去——border 未建模）；`text_align: center/right` 把 block
+  提升 flex-column+align_items（upstream promote_for_alignment）。
+- 文本=确定性词叶（upstream build_word_leaves）：每词一个固定尺寸 taffy
+  leaf，`text_width`=0.55em/ASCII + **1.0em/CJK** + bold×1.08；line-height
+  =1.2em；空白 token 塌成单空格、高度 0；**CJK 逐字成 token**（UAX#14 每个
+  表意文字后可断行——upstream 按空白切，CJK 段落会成一个不可断的巨词，
+  这是我们对上游的刻意偏差）。
+- inline run 聚合：一个 block 的 text + 可展平 inline 子元素（span 等）
+  的词全部拼进**一个** flex-row-wrap wrapper；inline 元素本身不占盒。
+  display:none 整子树跳过。
+- `font_context` 沿祖先链取有效 font-size/weight（默认 16/400）。
+
+**对照测试**（`bridge_cross_check`，5 个）：blitz 侧复用 `element_rect`（已
+开 pub(crate)），我方侧 inline 复刻 cross_check 的全树 cascade（含 UA
+display/bold + 继承链）。双侧同 taffy（同一 lock 的 864b4fd），**断言差异
+只能来自桥建模，不是布局算法**：
+
+- `authored_boxes_match_blitz`（核心）：body{margin:0} + 全 authored 尺寸
+  页面，html/body/#a/#b/#c 五元素 x/y/w/h **双侧 ±0.51** 全对上——含
+  300×50 content + 10px padding = 320×70 border-box（验证 content-box 换算）
+  和块级堆叠。文本驱动尺寸（真实字形 vs 启发式）不做双侧比对，这是刻意
+  边界。
+- `display_none_skips_subtree`：子树消失不留间隙，与 blitz 位置一致。
+- `cjk_wraps_per_glyph`（我方结构锁）：200px 盒 12 个 20px 表意字 → 10/行
+  ×2 行 ×24px = 48 高。
+- `inline_run_is_one_wrapper`：span 展平无盒，p 高度=单行。
+- `text_align_center_promotes`：centered run x=(200−18)/2（17.6 取整 18）。
+  **已知偏差入档**：真 CSS 里 centered block 的 *block* 子元素仍拉满宽度，
+  flex-column 替身会 shrink-wrap 居中——inline 内容（text-align 真正管辖
+  的对象）行为正确，block 子元素是替身的已知局限，upstream 同款。
+
+**taffy 0.13.0 API 备忘**（批次 2b 踩坑）：`size: Size<Dimension>`（不是
+LengthPercentageAuto；word leaf 固定尺寸用 `Dimension::length`）；margin=
+`Rect<LengthPercentageAuto>`、padding=`Rect<LengthPercentage>`，但本模块自己
+的 `Rect` 会遮蔽 prelude 名，要写全 `taffy::geometry::Rect`；block_layout
+feature 下 Style 有原生 `text_align` 字段（LegacyLeft/Right/Center）但只对
+比容器窄的 block item 生效，不解决行内对齐，提升替身仍然必要。
+
+**验证**：`cargo test --features screenshot` 385 全绿（380+5）。附带事实：
+本机磁盘满了（Data 卷 100%，350Mi free），清了 target/debug/incremental
+（1.4G，纯加速缓存）才链得上。
+
+**边界（下一批吸收）**：float/table/multicol 修复链、replaced 元素
+（img/SVG/video）、position:absolute、em/rem/% 长度、flex/grid 属性透传
+（现在 flex/grid 容器只有 display 映射，没有 gap/flex-direction/track 等）。

@@ -416,6 +416,9 @@ pub struct ComputedStyle {
     /// Shorthand sides in CSS order (top right bottom left), already expanded.
     pub margin: Sides,
     pub padding: Sides,
+    /// Authored box size in px (non-inherited; px-only for this slice).
+    pub width: Option<f32>,
+    pub height: Option<f32>,
     /// Font size in px (absolute keywords/units resolved by the caller's sheet
     /// context; here we accept px/em/% where em resolves against parent).
     pub font_size: Option<f32>,
@@ -574,6 +577,8 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str) -> bool {
             true
         }
         "font-size" => parse_font_size(v).map(|px| style.font_size = Some(px)).is_some(),
+        "width" => parse_px_f32(v).map(|px| style.width = Some(px)).is_some(),
+        "height" => parse_px_f32(v).map(|px| style.height = Some(px)).is_some(),
         "font-weight" => {
             let weight = parse_font_weight(v);
             style.font_weight = weight;
@@ -624,6 +629,15 @@ fn parse_length_px(v: &str) -> Option<u32> {
         return Some(0);
     }
     v.strip_suffix("px")?.parse::<u32>().ok()
+}
+
+/// px-only float length (width/height slice: fractional px is legal there).
+fn parse_px_f32(v: &str) -> Option<f32> {
+    let v = v.trim();
+    if v == "0" {
+        return Some(0.0);
+    }
+    v.strip_suffix("px")?.parse::<f32>().ok()
 }
 
 fn parse_font_size(v: &str) -> Option<f32> {

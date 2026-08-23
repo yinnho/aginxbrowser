@@ -404,8 +404,7 @@ pub fn render_html_to_png(
 /// layout. As a fallback, union the element's element-descendant boxes (which
 /// covers mixed content like `<a><img></a>`); if that is still empty the
 /// caller gets the honest 0x0.
-fn element_rect(doc: &BaseDocument, node_id: NodeId) -> ElementRect {
-    let (x, y) = absolute_origin(doc, node_id);
+pub(crate) fn element_rect(doc: &BaseDocument, node_id: NodeId) -> ElementRect {    let (x, y) = absolute_origin(doc, node_id);
     let size = doc
         .get_node(node_id)
         .map(|n| n.final_layout().size)
