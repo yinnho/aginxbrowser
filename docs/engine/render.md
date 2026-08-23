@@ -630,4 +630,67 @@ Unpacked::Percentage → `Length::Percent`（stylo 同样把 % 留到 used-value
 **边界（挂账）**：% 尺寸+px padding 无混合形状（% 按 border-box 语义
 直通，不做 content-box 加算——authored box-sizing 本就是后续批次）；
 gap/flex-basis/grid tracks 的 em/%；line-height 仍固定 1.2 系数（真实
-LineHeight 模型=批次 3）；ch/ex/vw/vh 单位。
+LineHeight 模型=批次 3）；ch/ex/vh 单位。
+
+## 16. 批次 3a 完成（2026-08-23）：真实字形测量 + fixture 字体双侧钉死
+
+**问题**：批次 2b 的词叶模型用确定性猜测测宽（ASCII 0.55em/字、CJK
+1em/字、粗体 ×1.08）——结构对、数值假。文本派生 rect 对照 blitz 时，
+CJK 恰好 1em 全对，Latin 全差 1-2px（"hello world WebKit" 猜 140.8、
+blitz 142、真值 141.184）。要让对照测试有意义，测量必须是真字形。
+
+**等价链（先定性再动手）**：
+- blitz（rev 2fa6434d）的 parley 0.10 用 **harfrust**（Rust HarfBuzz
+  移植）整形；我们选 **swash**（上游 obscura-render 文本栈同款）。
+- uharfbuzz 权威验证：两 shaper 对 fixture 字体的 "hello world"@16
+  输出 **84.032px 浮点相等**（含 GPOS kern -7u/1000em）。CJK 无 kerning
+  → 按构造一致。测量侧不存在引擎差异，差异只在舍入模型（见下）。
+
+**blitz 文本宽度语义（探针 7/7 + 空白 3/3 定性）**：
+- 宽度 = **ceil(精确 advance 和)**——不是 taffy 的 round-to-nearest。
+  141.184 → blitz 给 142；frac<0.5 时两种舍入必差 1px，这就是旧模型
+  Latin 全差 1px 的根因。
+- run 首尾可折叠空白丢弃（`" "`→0 宽，`"hello "`→同 `"hello"`）；
+  断行点前导/行尾空格丢弃（CSS 尾随空白移除）。
+- 行高仍 1.2×fs（blitz-dom/src/layout/mod.rs:76 钉死，不从字体 metrics
+  推导）——parley 的 quantize 只影响垂直 metrics（ascent/descent
+  Chrome 式取整，line_break.rs:1108），不影响宽度。
+
+**fixture 字体双侧钉死**：Noto Sans SC（OFL）变量字体 instancer 出
+wght=400/700 两个静态实例，pyftsubset 到测试字符集（~139KB×2 入仓，
+`scripts/make_font_fixture.py` 可复现；测试用到字符集外的 CJK 会
+.notdef 当场炸——往脚本字符集加字重跑）。我侧 `FontBook`（text.rs，
+swash ShapeContext thread-local 复用）直接吃字节；blitz 侧
+`DocumentConfig.font_ctx` 注入 `system_fonts: false` 的 fontique
+Collection + `register_fonts(Blob, FontInfoOverride { family:
+"DitingFixture", weight })`——双侧同一份字节、同一 family，测试
+stylesheet 前置 `body { font-family: DitingFixture }`。无系统字体、
+无网络、无 @font-face。
+
+**模型重构（mod.rs）**：
+- `TextLeaf::Run { text, font_size, bold }`：**纯文本 run = 单个
+  measure 叶**，结构对齐 blitz 的"文本节点 = 一个 parley 测量的叶"。
+  `measure_text_leaf`：贪心断行（空格 pending、断点丢弃）、
+  min-content 返回最宽 token、宽度 ceil、高度 = 行数 × 1.2×fs。
+- 混合 run（文本 + inline 元素）**回退批次 2b 的 flex-row 词叶模型**
+  （已知边界：词叶各自 round 而非整 run ceil，挂账）。
+- 确定性 `text_width` 删除；`TaffyTree<()>` → `TaffyTree<TextLeaf>`。
+
+**taffy measure 闭包的坑（本批最贵的教训）**：
+`compute_layout_with_measure` 的闭包对**所有 childless 节点**触发
+——不只带 context 的。`None` 分支返回 HIDDEN 会把全部普通叶
+（replaced、空 div、词叶）清零，13 个测试同时炸。正确写法是
+`None => taffy::compute_leaf_layout(inputs, style, |_,_| 0.0, |_,_| Size::ZERO)`
+——即 stock `compute_layout` 内部用的同一个函数（taffy_tree.rs:906）。
+
+**对照结果**（4 新测试，405 全绿）：
+- CJK 四字 × 四字号 advance=fs±0.01（swash 直测）。
+- "hello world WebKit" shrink-wrap：ceil(141.184)=142 = blitz 142。
+- "加粗Bold文本"@20 w700：混排让宽度对面重敏感，ceil(125.32)=126 =
+  blitz 126（前置断言 bold_w > reg_w+1 防退化为合成加粗）。
+- 你好world测试engine渲染真实@200px/20px：断行后高度对照 blitz +
+  整数行数×24 结构锁。
+
+**边界（挂账）**：混合 run 的 flex-row 回退（见上）；ch/ex/vw/vh；
+line-height 真实 LineHeight 模型（仍 1.2 系数）；FontBook 单 family
+双 weight（500/800 snap 到近邻，也是 fixture 唯会触碰的范围）。

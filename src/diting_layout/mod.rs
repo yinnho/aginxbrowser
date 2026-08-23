@@ -35,6 +35,9 @@ use crate::diting_css::{
 };
 use crate::diting_dom::tree::{DomTree, NodeId};
 
+pub mod text;
+pub use text::FontBook;
+
 /// Absolute (page-relative) border-box rect of a DOM element after layout.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Rect {
@@ -44,19 +47,8 @@ pub struct Rect {
     pub height: f32,
 }
 
-/// Deterministic text metrics for word leaves — upstream's no-paint fallback
-/// model (0.55em average per ASCII char, bold ×1.08), extended with a 1.0em
-/// CJK class because our pages are CJK-heavy and CJK glyph advance is one em.
-pub fn text_width(text: &str, font_size: f32, bold: bool) -> f32 {
-    let em: f32 = text
-        .chars()
-        .filter(|c| !c.is_control())
-        .map(|c| if is_cjk(c) { 1.0 } else { 0.55 })
-        .sum();
-    let w = em * font_size;
-    if bold { w * 1.08 } else { w }
-}
-
+/// CJK classification for the tokenizer (per-glyph line breaks) — kept from
+/// the pre-3a deterministic metrics era; `is_cjk` no longer feeds widths.
 fn is_cjk(c: char) -> bool {
     matches!(c as u32,
         0x1100..=0x115F        // Hangul Jamo
@@ -70,8 +62,19 @@ fn is_cjk(c: char) -> bool {
     )
 }
 
-/// Approximate used line height for text leaves (upstream resolves a full
-/// LineHeight model; the slice takes the common `normal` ≈ 1.2 fallback).
+/// Node context for measured taffy leaves (batch 3a). A pure-text run is ONE
+/// leaf measured the way blitz measures its parley text nodes — see
+/// [`measure_text_leaf`]; mixed runs (text + inline elements) keep the
+/// flex-row-of-word-leaves fallback from batch 2b.
+#[derive(Clone)]
+enum TextLeaf {
+    Run { text: String, font_size: f32, bold: bool },
+}
+
+/// Approximate used line height for text leaves. Matches blitz exactly:
+/// blitz-dom maps CSS `line-height: normal` to `font_size * 1.2`
+/// (src/layout/mod.rs:76) rather than deriving from font metrics, and the
+/// cross-check asserts text-derived heights against it.
 fn line_height(font_size: f32) -> f32 {
     font_size * 1.2
 }
@@ -371,19 +374,20 @@ fn tokenize(text: &str) -> Vec<String> {
     tokens
 }
 
-/// One taffy leaf per word (upstream's per-word leaf model). Fixed intrinsic
-/// size from the deterministic metrics; wrapping happens in the enclosing
+/// One taffy leaf per word (upstream's per-word leaf model). Intrinsic size
+/// from real shaped advances (batch 3a); wrapping happens in the enclosing
 /// flex-wrap run container.
 fn build_word_leaves(
     text: &str,
     font_size: f32,
     bold: bool,
-    taffy_tree: &mut TaffyTree<()>,
+    fonts: &FontBook,
+    taffy_tree: &mut TaffyTree<TextLeaf>,
 ) -> Vec<taffy::tree::NodeId> {
     tokenize(text)
         .into_iter()
         .filter_map(|token| {
-            let width = text_width(&token, font_size, bold);
+            let width = fonts.advance_width(&token, font_size, bold);
             // Pure-whitespace tokens contribute no height (they sit between
             // block siblings without adding a spurious blank row).
             let height = if token.trim().is_empty() { 0.0 } else { line_height(font_size) };
@@ -399,10 +403,78 @@ fn build_word_leaves(
         .collect()
 }
 
+/// Taffy measure function for a pure-text run leaf (batch 3a). Reproduces
+/// the observable behavior of blitz's parley-measured text nodes:
+///
+/// - collapsible whitespace at run EDGES contributes nothing (probe:
+///   `"hello "` and `" hello"` both measure as `"hello"`, `" "` as zero);
+/// - greedy line breaking over exact shaped advances; a space before a
+///   break point is dropped (CSS trailing-whitespace removal);
+/// - the block's width is `ceil(max line advance)` — parley rounds the text
+///   run's size UP so nothing overflows the box, which taffy's own
+///   round-to-nearest would not reproduce (probe: "hello" 37.36 → 38);
+/// - height = line count × 1.2×fs (blitz's pinned `normal`, layout/mod.rs:76).
+fn measure_text_leaf(
+    text: &str,
+    font_size: f32,
+    bold: bool,
+    fonts: &FontBook,
+    inputs: &taffy::tree::LayoutInput,
+) -> taffy::tree::LayoutOutput {
+    let known = inputs.known_dimensions;
+    let lh = line_height(font_size);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return taffy::tree::LayoutOutput::HIDDEN;
+    }
+    // Token widths (word / single space / per-glyph CJK) with real advances.
+    let tokens: Vec<(f32, bool)> = tokenize(trimmed)
+        .into_iter()
+        .map(|t| {
+            let is_space = t.trim().is_empty();
+            (fonts.advance_width(&t, font_size, bold), is_space)
+        })
+        .collect();
+
+    let wrap_at = match inputs.available_space.width {
+        taffy::AvailableSpace::Definite(w) => Some(w),
+        _ => None,
+    };
+    // Greedy wrap. Spaces are held as pending and only committed with the
+    // word that follows them; a pending space at a break (or at the run's
+    // end) is dropped.
+    let mut lines: Vec<f32> = vec![0.0];
+    let mut pending_space = 0.0f32;
+    let mut widest_token = 0.0f32;
+    for (w, is_space) in tokens {
+        widest_token = widest_token.max(w);
+        if is_space {
+            pending_space += w;
+            continue;
+        }
+        let cur = lines.last_mut().expect("always one line");
+        if let Some(avail) = wrap_at {
+            if *cur > 0.0 && *cur + pending_space + w > avail {
+                lines.push(w);
+                pending_space = 0.0;
+                continue;
+            }
+        }
+        *cur += pending_space + w;
+        pending_space = 0.0;
+    }
+    let min_content = matches!(inputs.available_space.width, taffy::AvailableSpace::MinContent);
+    let max_line = if min_content { widest_token } else { lines.iter().copied().fold(0.0, f32::max) };
+    let size = taffy::geometry::Size {
+        width: known.width.unwrap_or(max_line.ceil()),
+        height: known.height.unwrap_or(lines.len() as f32 * lh),
+    };
+    taffy::tree::LayoutOutput::from_sizes(size, size)
+}
+
 /// The inline-formatting-context stand-in around a run of inline content:
 /// a wrapping flex row (upstream run_wrapper_style / outer_style model).
-fn run_wrapper_style() -> Style {
-    Style {
+fn run_wrapper_style() -> Style {    Style {
         display: Display::Flex,
         flex_direction: FlexDirection::Row,
         flex_wrap: FlexWrap::Wrap,
@@ -426,7 +498,7 @@ fn build_replaced_leaf(
     tree: &DomTree,
     id: NodeId,
     styles: &HashMap<NodeId, ComputedStyle>,
-    taffy_tree: &mut TaffyTree<()>,
+    taffy_tree: &mut TaffyTree<TextLeaf>,
     node_map: &mut HashMap<taffy::tree::NodeId, NodeId>,
 ) -> Option<taffy::tree::NodeId> {
     let style = styles.get(&id).cloned().unwrap_or_default();
@@ -473,7 +545,8 @@ fn build_element(
     tree: &DomTree,
     id: NodeId,
     styles: &HashMap<NodeId, ComputedStyle>,
-    taffy_tree: &mut TaffyTree<()>,
+    fonts: &FontBook,
+    taffy_tree: &mut TaffyTree<TextLeaf>,
     node_map: &mut HashMap<taffy::tree::NodeId, NodeId>,
 ) -> Option<taffy::tree::NodeId> {
     let style = styles.get(&id).cloned().unwrap_or_default();
@@ -498,15 +571,47 @@ fn build_element(
     let atomic_container = matches!(style.display, Some(CssDisplay::Flex) | Some(CssDisplay::Grid));
 
     // Partition children into block-level elements (direct taffy children)
-    // and inline runs (text + inline elements, flattened into one wrapping
-    // flex row — upstream's anonymous-run model).
+    // and inline runs (text + inline elements). A PURE-text run (only text
+    // nodes) becomes ONE measured leaf — the same shape blitz gives its
+    // parley text nodes, whose observable behavior (edge-whitespace collapse,
+    // greedy wrap, ceiled width) we reproduce in measure_text_leaf. Mixed
+    // runs fall back to the batch-2b wrapping flex row of word leaves.
+    enum RunSeg {
+        Text(String, f32, bool),
+        Nodes(Vec<taffy::tree::NodeId>),
+    }
     let mut direct: Vec<taffy::tree::NodeId> = Vec::new();
-    let mut run: Vec<taffy::tree::NodeId> = Vec::new();
-    let mut flush_run = |run: &mut Vec<taffy::tree::NodeId>, direct: &mut Vec<taffy::tree::NodeId>, taffy_tree: &mut TaffyTree<()>| {
+    let mut run: Vec<RunSeg> = Vec::new();
+    let mut flush_run = |run: &mut Vec<RunSeg>, direct: &mut Vec<taffy::tree::NodeId>, taffy_tree: &mut TaffyTree<TextLeaf>| {
         if run.is_empty() {
             return;
         }
-        let leaves = std::mem::take(run);
+        let segs = std::mem::take(run);
+        // All-text run → one measured leaf (adjacent DOM text nodes
+        // concatenate, which is also how CSS joins them).
+        if segs.iter().all(|s| matches!(s, RunSeg::Text(..))) {
+            let text = segs
+                .iter()
+                .map(|s| match s { RunSeg::Text(t, ..) => t.as_str(), _ => "" })
+                .collect::<String>();
+            let RunSeg::Text(_, fs, bold) = &segs[0] else { unreachable!() };
+            if let Ok(leaf) = taffy_tree.new_leaf_with_context(
+                Style::default(),
+                TextLeaf::Run { text, font_size: *fs, bold: *bold },
+            ) {
+                direct.push(leaf);
+                return;
+            }
+        }
+        let mut leaves: Vec<taffy::tree::NodeId> = Vec::new();
+        for seg in segs {
+            match seg {
+                RunSeg::Text(text, fs, bold) => {
+                    leaves.extend(build_word_leaves(&text, fs, bold, fonts, taffy_tree))
+                }
+                RunSeg::Nodes(nodes) => leaves.extend(nodes),
+            }
+        }
         if let Ok(wrapper) = taffy_tree.new_with_children(run_wrapper_style(), &leaves) {
             direct.push(wrapper);
         }
@@ -537,7 +642,7 @@ fn build_element(
             let leaf = build_replaced_leaf(tree, child, styles, taffy_tree, node_map);
             if let Some(leaf) = leaf {
                 if inline_level && !atomic_container && !out_of_flow {
-                    run.push(leaf);
+                    run.push(RunSeg::Nodes(vec![leaf]));
                 } else {
                     flush_run(&mut run, &mut direct, taffy_tree);
                     direct.push(leaf);
@@ -549,19 +654,19 @@ fn build_element(
             let text = tree.with_node(child, |n| n.text_content_of_text_node().unwrap_or("").to_string()).unwrap_or_default();
             let (fs, b) = font_context(tree, child, styles);
             let fs = if styles.get(&child).is_some() { fs } else { font_size };
-            run.extend(build_word_leaves(&text, fs, b, taffy_tree));
+            run.push(RunSeg::Text(text, fs, b));
         } else if inline_level && !atomic_container && !out_of_flow {
             // A plain inline wrapper flattens into the enclosing run (upstream
             // is_flattenable_inline): the words wrap at the real block level.
-            let sub = build_element(tree, child, styles, taffy_tree, node_map);
+            let sub = build_element(tree, child, styles, fonts, taffy_tree, node_map);
             if let Some(sub) = sub {
                 let sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
-                run.extend(sub_children);
+                run.push(RunSeg::Nodes(sub_children));
                 let _ = taffy_tree.remove(sub);
             }
         } else {
             flush_run(&mut run, &mut direct, taffy_tree);
-            if let Some(node) = build_element(tree, child, styles, taffy_tree, node_map) {
+            if let Some(node) = build_element(tree, child, styles, fonts, taffy_tree, node_map) {
                 direct.push(node);
             }
         }
@@ -584,6 +689,7 @@ fn build_element(
 pub fn layout_dom(
     tree: &DomTree,
     styles: &HashMap<NodeId, ComputedStyle>,
+    fonts: &FontBook,
     viewport_width: f32,
 ) -> HashMap<NodeId, Rect> {
     let mut taffy_tree = TaffyTree::new();
@@ -598,7 +704,7 @@ pub fn layout_dom(
 
     let mut rects = HashMap::new();
     let Some(root_id) = root else { return rects };
-    let Some(root_node) = build_element(tree, root_id, styles, &mut taffy_tree, &mut node_map) else {
+    let Some(root_node) = build_element(tree, root_id, styles, fonts, &mut taffy_tree, &mut node_map) else {
         return rects;
     };
 
@@ -659,15 +765,31 @@ pub fn layout_dom(
         width: AvailableSpace::Definite(viewport_width),
         height: AvailableSpace::MaxContent,
     };
-    if taffy_tree.compute_layout(root_node, available).is_err() {
+    // Measured-leaf dispatch (batch 3a): pure-text runs carry a TextLeaf
+    // context and measure through the FontBook; every other leaf must fall
+    // through to taffy's own style-based sizing — the closure fires for ALL
+    // childless nodes, so returning HIDDEN here would zero plain leaves
+    // (that's exactly what stock compute_layout does below via the same fn).
+    let measured = taffy_tree.compute_layout_with_measure(root_node, available, |inputs, _id, ctx, style| {
+        match ctx {
+            Some(TextLeaf::Run { text, font_size, bold }) => {
+                measure_text_leaf(text, *font_size, *bold, fonts, &inputs)
+            }
+            None => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
+        }
+    });
+    if measured.is_err() {
         return rects;
     }
+    // Both trees round to the pixel grid inside compute_layout (taffy's
+    // use_rounding defaults on; blitz rounds via the same path), so the
+    // rect comparisons assume integer edges on both sides.
 
     // Accumulate locations down the taffy tree: child location already
     // includes the parent's border+padding offset, so a plain sum is the
     // absolute border-box origin (same accumulation blitz-paint performs).
     fn collect(
-        taffy_tree: &TaffyTree<()>,
+        taffy_tree: &TaffyTree<TextLeaf>,
         node_map: &HashMap<taffy::tree::NodeId, NodeId>,
         rects: &mut HashMap<NodeId, Rect>,
         node: taffy::tree::NodeId,
@@ -1200,18 +1322,62 @@ mod bridge_cross_check {
         out
     }
 
+    /// Fixture bytes BOTH sides measure with: Noto Sans SC subset (OFL —
+    /// see fixtures/OFL.txt), instanced at wght 400/700. Regenerate via
+    /// scripts/make_font_fixture.py.
+    const FIXTURE_REGULAR: &[u8] = include_bytes!("fixtures/diting-fixture-regular.ttf");
+    const FIXTURE_BOLD: &[u8] = include_bytes!("fixtures/diting-fixture-bold.ttf");
+    const FIXTURE_FAMILY: &str = "DitingFixture";
+
+    fn fixture_fonts() -> FontBook {
+        FontBook::from_pairs(FIXTURE_REGULAR.to_vec(), FIXTURE_BOLD.to_vec())
+            .expect("fixture fonts parse")
+    }
+
+    /// parley FontContext holding ONLY the fixture fonts: system fonts off,
+    /// both weights registered under the pinned family name. Every blitz
+    /// text run resolves through this collection, so the cross-check's
+    /// text-derived rects are a function of the fixture glyphs — same bytes
+    /// our swash side shapes, no @font-face or network plumbing.
+    fn fixture_font_ctx() -> parley::FontContext {
+        use parley::fontique::{
+            Collection, CollectionOptions, FontInfoOverride, FontStyle, SourceCache,
+        };
+        let mut ctx = parley::FontContext {
+            source_cache: SourceCache::new_shared(),
+            collection: Collection::new(CollectionOptions {
+                shared: false,
+                system_fonts: false,
+            }),
+        };
+        for (bytes, weight) in [(FIXTURE_REGULAR, 400.0), (FIXTURE_BOLD, 700.0)] {
+            let blob = parley::fontique::Blob::new(std::sync::Arc::new(bytes.to_vec()));
+            let info = FontInfoOverride {
+                family_name: Some(FIXTURE_FAMILY),
+                weight: Some(parley::fontique::FontWeight::new(weight)),
+                style: Some(FontStyle::Normal),
+                ..Default::default()
+            };
+            ctx.collection.register_fonts(blob, Some(info));
+        }
+        ctx
+    }
+
     /// Blitz side of the dual run: parse + style + layout at the test
     /// viewport, then hand back the base document for element_rect.
     fn blitz_doc(html: &str, stylesheet: &str) -> blitz_dom::BaseDocument {
         use blitz_dom::{DocumentConfig, util::Color};
         use blitz_traits::shell::{ColorScheme, Viewport};
 
-        let css_doc = format!("<style>{stylesheet}</style>{html}");
+        // Pin the family so every text run hits the fixture collection.
+        let sheet = format!("body {{ font-family: {FIXTURE_FAMILY}; }}\n{stylesheet}");
+        let css_doc = format!("<style>{sheet}</style>{html}");
         let mut doc = blitz_html::HtmlDocument::from_html(
             &css_doc,
             DocumentConfig {
                 base_url: Some("https://example.com/".to_string()),
                 net_provider: None,
+                font_ctx: Some(fixture_font_ctx()),
                 viewport: Some(Viewport::new(VW as u32, 600, 1.0, ColorScheme::Light)),
                 ..Default::default()
             },
@@ -1244,7 +1410,7 @@ mod bridge_cross_check {
         let tree = crate::diting_dom::tree_sink::parse_html(html);
         let rules = diting_css::parse_stylesheet(stylesheet);
         let styles = our_styles(&tree, &rules);
-        let rects = layout_dom(&tree, &styles, VW);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW);
         (doc, tree, styles, rects)
     }
 
@@ -1355,10 +1521,12 @@ mod bridge_cross_check {
         let m = rects[&tree.query_selector("#m").unwrap().unwrap()];
         let mi = rects[&tree.query_selector("#mi").unwrap().unwrap()];
         assert!((m.width - 200.0).abs() < EPS as f32, "container width: {}", m.width);
-        // "hi" = 2 × 0.55 × 16 = 17.6 → 18 after taffy's integer rounding;
-        // centered in 200 → x = (200 − 18) / 2.
-        assert!((mi.width - 17.6).abs() < EPS as f32, "run width: {}", mi.width);
-        assert!((mi.x - (200.0 - 18.0) / 2.0).abs() < EPS as f32, "centered x: {}", mi.x);
+        // Run width = ceil(real shaped advance of "hi" at 16px in the fixture
+        // face) (batch 3a: 14.112 → 15 ceiled — the old deterministic model
+        // guessed 17.6).
+        let hi = fixture_fonts().advance_width("hi", 16.0, false).ceil();
+        assert!((mi.width - hi).abs() < EPS as f32, "run width: {} want {hi}", mi.width);
+        assert!((mi.x - (200.0 - mi.width) / 2.0).abs() < EPS as f32, "centered x: {}", mi.x);
     }
 
     /// Flex pass-through: row layout with gap, column layout, and
@@ -1740,5 +1908,103 @@ mod bridge_cross_check {
         assert!((pin.y - 50.0).abs() < EPS as f32, "25% top of 200: {}", pin.y);
         let clamp = rects[&tree.query_selector("#clamp").unwrap().unwrap()];
         assert!((clamp.width - 240.0).abs() < EPS as f32, "60% min-width of 400: {}", clamp.width);
+    }
+
+    // ---- batch 3a: real glyph measurement --------------------------------
+    //
+    // Both sides shape the SAME fixture bytes (Noto Sans SC subset): ours
+    // through swash, blitz's through parley/harfrust via the injected
+    // system-fonts-off FontContext. The old deterministic model guessed
+    // 0.55em/ASCII char and ×1.08 for bold — these tests pin the real thing.
+
+    /// CJK is the degenerate case that makes the per-word-leaf model exact:
+    /// one glyph per token, advance = exactly one em, no kerning.
+    #[test]
+    fn cjk_advance_is_one_em() {
+        let fonts = fixture_fonts();
+        for fs in [12.0, 16.0, 20.0, 24.0] {
+            for ch in ["你", "界", "测", "渲"] {
+                let w = fonts.advance_width(ch, fs, false);
+                assert!((w - fs).abs() < 0.01, "{ch} at {fs}px: {w} (want one em)");
+            }
+        }
+    }
+
+    /// ASCII shrink-wrap: a flex item sizes to its text's real proportional
+    /// advances — not the 0.55em guess, and identical to blitz's parley run.
+    #[test]
+    fn ascii_proportional_width_matches_blitz() {
+        let html = r#"<body><div id="row"><div id="w">hello world WebKit</div></div></body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #row { display: flex; }
+        "#;
+        let (doc, tree, _styles, rects) = both_engines(html, sheet);
+        let w = rects[&tree.query_selector("#w").unwrap().unwrap()];
+        // The model contract (batch 3a): the run's intrinsic width is
+        // ceil(shaped advance sum) — blitz rounds text runs UP so the box
+        // never under-fits its glyphs; taffy's round-to-nearest would.
+        let fonts = fixture_fonts();
+        let want = fonts.advance_width("hello world WebKit", 16.0, false).ceil();
+        assert!((w.width - want).abs() < EPS as f32, "ascii run: {} want {want}", w.width);
+        // Cross-assert against blitz's parley/harfrust shaping of the same
+        // bytes. Kerning differences between shapers stay inside EPS.
+        let blitz_nid = doc.query_selector("#w").unwrap().expect("#w");
+        let theirs = element_rect(&doc, blitz_nid);
+        assert_close("ascii run width vs blitz", w.width, theirs.width);
+        // And the guess is demonstrably wrong: the old model would say
+        // 16 chars × 0.55em × 16px = 140.8.
+        assert!((want - 140.8).abs() > 1.0, "model must beat the 0.55em guess (want={want})");
+    }
+
+    /// Bold resolves to the real wght=700 instance on BOTH sides (fontique
+    /// picks the registered 700 face; we pick the bold half of the FontBook)
+    /// — not a synthetic ×1.08 widening. Mixed text on purpose: CJK advance
+    /// is one em in BOTH faces, so only the Latin run makes the width
+    /// face-sensitive — a wrong face on either side breaks the cross-assert.
+    #[test]
+    fn bold_face_real_weight_matches_blitz() {
+        let html = r#"<body><div id="row"><div id="b">加粗Bold文本</div></div></body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #row { display: flex; }
+            #b { font-weight: 700; font-size: 20px; }
+        "#;
+        let (doc, tree, _styles, rects) = both_engines(html, sheet);
+        let b = rects[&tree.query_selector("#b").unwrap().unwrap()];
+        let fonts = fixture_fonts();
+        let bold_w = fonts.advance_width("加粗Bold文本", 20.0, true);
+        let reg_w = fonts.advance_width("加粗Bold文本", 20.0, false);
+        assert!(bold_w > reg_w + 1.0, "fixture faces must differ: bold={bold_w} reg={reg_w}");
+        assert!((b.width - bold_w.ceil()).abs() < EPS as f32, "bold run: {} want {}", b.width, bold_w.ceil());
+        assert!((b.width - reg_w).abs() > EPS as f32, "bold must not measure with the regular face");
+        let blitz_nid = doc.query_selector("#b").unwrap().expect("#b");
+        let theirs = element_rect(&doc, blitz_nid);
+        assert_close("bold run width vs blitz", b.width, theirs.width);
+    }
+
+    /// Mixed CJK+Latin wrapping in a fixed-width block: line breaks come
+    /// from real advances (UAX#14 classes only pick the candidates), so the
+    /// wrapped height — line count × 1.2×fs — matches blitz.
+    #[test]
+    fn mixed_cjk_latin_wrap_matches_blitz() {
+        let html = r#"<body><div id="t">你好world测试engine渲染真实</div></body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #t { width: 200px; font-size: 20px; }
+        "#;
+        let (doc, tree, _styles, rects) = both_engines(html, sheet);
+        let t = rects[&tree.query_selector("#t").unwrap().unwrap()];
+        // Expected lines from real advances: 你好 (40) + world (~60) fills
+        // line 1; 测试 (40) + engine (~62) line 2; 渲染真实 (80) line 3 —
+        // the assert is the cross-check, this comment just documents the
+        // arithmetic that makes 3 lines plausible.
+        let blitz_nid = doc.query_selector("#t").unwrap().expect("#t");
+        let theirs = element_rect(&doc, blitz_nid);
+        assert_close("mixed wrap height vs blitz", t.height, theirs.height);
+        // One line of 20px text is 24px; height must be a whole multiple.
+        let lines = (t.height / 24.0).round();
+        assert!(lines >= 2.0 && lines <= 4.0, "plausible line count: {lines} (h={})", t.height);
+        assert!((t.height - lines * 24.0).abs() < EPS as f32, "height = lines × 1.2×fs: {}", t.height);
     }
 }
