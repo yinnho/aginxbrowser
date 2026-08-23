@@ -1022,3 +1022,37 @@ collect 读 object_fit/object_position（缺省 fill/50%-50%）。
 挂账更新：object-position 多值语法（三值/四值带边锚定）；网络图路径的
 fit 生效（图晚到 relayout 挂账不变）；`image-rendering: pixelated` 采样
 策略（none/scale-down 已是 scale=1 不受影响）。
+
+## 26. 批次 6a 完成（2026-08-23）：z-index/stacking——paint 序重排
+
+**探底（blitz-dom damage.rs + node.rs）**：blitz 的 stacking 模型分两层。
+①每个父级把子级分两路：z≠0 且 positioned（或 flex/grid item）→ 提升到
+stacking context 按 z 稳定排序，画在 neg 带（先）/pos 带（后）；其余进
+`paint_children` 按 paint level 稳定排序——static=0、float=1、positioned
+z-auto=2（CSS 2.1 App. E step 8），同级保持文档序。②提升止于最近的
+**stacking context root**：fixed/sticky、relative|absolute 且 z≠auto、
+opacity<1、有 transform 等。
+
+**实现（最小竖切）**：diting_css 加 `z_index: Option<i32>`（None=auto，
+apply_one+@supports 同步）。collect 递归里 children 三桶重排：
+neg(z<0 positioned, 升序) → mid(paint level: static 0 / positioned-z-auto 2,
+稳定文档序) → pos(z>0 positioned, 升序)。static 上 z-index 无效（文档序）。
+嵌套 stacking context root 场景挂账（blitz 提升可跨层；我们单层——常见
+无 root 页面两者等价）。
+
+**顺手修的潜伏 bug（本批最有价值发现）**：abspos reparent 遍历
+`node_map.iter()`（HashMap 无序）后 `add_child` append——**reparent 后的
+taffy 兄弟序是 HashMap 序不是文档序**。此前 paint 对照全没多 absolute 兄弟
+所以从未暴露；Case A 首跑 ours 在 (25,25) 出红即此因。修法 = reparents
+按 DOM 前序 rank 排序后再执行。布局 rect 不受影响（absolute 定位与兄弟
+序无关），只有 paint 序受害。
+
+**对照（一测三案）** `paint_stacking_order_matches_blitz`：
+- A：文档中间的 relative z=2 蓝块盖过后面绿块（正 z 提升）
+- B：z=-1 红块沉到先前绿块之下；文档最后的 positioned z-auto 蓝块盖住
+  全部（level 2 > in-flow）
+- C：static 元素 z-index:9 无效——负 margin 重叠区后来绿在上
+
+**测试**：427→428。挂账更新：嵌套 stacking context root 跨层提升；
+flex/grid item 的 z-index；opacity/transform 建 root；float paint
+level 1（float 本身挂账中）。下一批候选：border-radius 或网络图通路。

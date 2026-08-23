@@ -372,7 +372,7 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "padding-right", "padding-bottom", "padding-left", "font-size", "font-weight",
         "text-align", "border", "border-color", "border-width", "border-style",
         "width", "height", "flex-direction", "gap", "overflow",
-        "object-fit", "object-position",
+        "object-fit", "object-position", "z-index",
     ];
     if !SUPPORTED.contains(&name.to_ascii_lowercase().as_str()) {
         return false;
@@ -409,6 +409,7 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
                 .split_whitespace()
                 .all(|s| matches!(s, "left" | "top" | "center" | "right" | "bottom") || part(s))
         }
+        "z-index" => value == "auto" || value.parse::<i32>().is_ok(),
         "font-weight" => parse_font_weight(value).is_some(),
         "font-size" => parse_font_size_len(value).is_some(),
         _ => true, // remaining modeled properties accept any non-empty value here
@@ -483,6 +484,9 @@ pub struct ComputedStyle {
     pub object_fit: Option<ObjectFit>,
     /// (x, y) object-position parts, non-inherited; initial 50%/50%.
     pub object_position: Option<(ObjectPositionPart, ObjectPositionPart)>,
+    /// `z-index` (batch 6a), non-inherited; None = auto. Only meaningful on
+    /// positioned elements (flex/grid-item support is a later batch).
+    pub z_index: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -942,6 +946,17 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 "none" => Some(ObjectFit::None),
                 "scale-down" => Some(ObjectFit::ScaleDown),
                 _ => return false,
+            };
+            true
+        }
+        "z-index" => {
+            // `auto` (the initial value) stays None.
+            style.z_index = match v {
+                "auto" => None,
+                _ => match v.parse::<i32>() {
+                    n @ Ok(_) => n.ok(),
+                    Err(_) => return false,
+                },
             };
             true
         }

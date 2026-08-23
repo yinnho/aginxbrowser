@@ -918,7 +918,7 @@ pub fn layout_dom_with_paint(
     {
         let dom_of: HashMap<NodeId, taffy::tree::NodeId> =
             node_map.iter().map(|(k, v)| (*v, *k)).collect();
-        let reparents: Vec<(taffy::tree::NodeId, taffy::tree::NodeId)> = node_map
+        let mut reparents: Vec<(taffy::tree::NodeId, taffy::tree::NodeId)> = node_map
             .iter()
             .filter_map(|(taffy_nid, dom_id)| {
                 let style = styles.get(dom_id)?;
@@ -955,6 +955,31 @@ pub fn layout_dom_with_paint(
                 }
             })
             .collect();
+        // Append order must be DOCUMENT order: node_map is a HashMap, and
+        // add_child appends — iterating it directly scrambles sibling order
+        // after reparenting (paint order then diverges from both blitz and
+        // the DOM). Sort the reparented nodes by their pre-order rank.
+        let mut rank: HashMap<NodeId, usize> = HashMap::new();
+        fn preorder(tree: &DomTree, id: NodeId, rank: &mut HashMap<NodeId, usize>, ctr: &mut usize) {
+            rank.insert(id, *ctr);
+            *ctr += 1;
+            for child in tree.children(id) {
+                preorder(tree, child, rank, ctr);
+            }
+        }
+        {
+            let mut ctr = 0usize;
+            if let Some(root_id) = root {
+                preorder(tree, root_id, &mut rank, &mut ctr);
+            }
+        }
+        reparents.sort_by_key(|(taffy_nid, _)| {
+            node_map
+                .get(taffy_nid)
+                .and_then(|d| rank.get(d))
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
         for (node, target) in reparents {
             if let Some(old) = taffy_tree.parent(node) {
                 let _ = taffy_tree.remove_child(old, node);
@@ -962,7 +987,6 @@ pub fn layout_dom_with_paint(
             let _ = taffy_tree.add_child(target, node);
         }
     }
-
     let available = Size {
         width: AvailableSpace::Definite(viewport_width),
         height: AvailableSpace::MaxContent,
@@ -1141,8 +1165,55 @@ pub fn layout_dom_with_paint(
                 wrap_at: layout.size.width,
             });
         }
-        for child in taffy_tree.children(node).unwrap_or_default().iter().copied() {
-            collect(tree, taffy_tree, node_map, styles, images, rects, items, child, abs, viewport_width);
+        // Stacking order (batch 6a), the blitz-dom damage.rs model per
+        // parent: children with z-index ≠ 0 that are positioned hoist out
+        // of document order into the negative band (painted first, sorted
+        // by z ascending) and the positive band (last, ascending); the rest
+        // paint between them in a stable sort by paint level — in-flow
+        // (static) first, positioned z-auto above (CSS 2.1 App. E step 8).
+        // Same-z ties keep tree order; text leaves are always in-flow.
+        let children = taffy_tree.children(node).unwrap_or_default().to_vec();
+        let mut neg: Vec<(i32, usize)> = Vec::new();
+        let mut mid: Vec<(i32, usize)> = Vec::new();
+        let mut pos: Vec<(i32, usize)> = Vec::new();
+        for (i, &child) in children.iter().enumerate() {
+            let positioned = node_map
+                .get(&child)
+                .and_then(|d| styles.get(d))
+                .is_some_and(|s| {
+                    matches!(
+                        s.position,
+                        Some(PositionMode::Relative)
+                            | Some(PositionMode::Absolute)
+                            | Some(PositionMode::Fixed)
+                    )
+                });
+            let z = node_map
+                .get(&child)
+                .and_then(|d| styles.get(d))
+                .and_then(|s| s.z_index)
+                .unwrap_or(0);
+            if z != 0 && positioned {
+                // Hoisted band: painted before (z<0) / after (z>0) the
+                // middle band, ascending within the band.
+                if z < 0 {
+                    neg.push((z, i));
+                } else {
+                    pos.push((z, i));
+                }
+            } else if positioned {
+                mid.push((2, i)); // paint level 2: above in-flow content
+            } else {
+                mid.push((0, i));
+            }
+        }
+        neg.sort_by_key(|(z, _)| *z);
+        mid.sort_by_key(|(lvl, _)| *lvl);
+        pos.sort_by_key(|(z, _)| *z);
+        for list in [neg, mid, pos] {
+            for (_, i) in list {
+                collect(tree, taffy_tree, node_map, styles, images, rects, items, children[i], abs, viewport_width);
+            }
         }
         if clips {
             items.push(PaintItem::PopClip);
@@ -3495,6 +3566,145 @@ mod bridge_cross_check {
             let b = &blitz[i..i + 4];
             assert_eq!(o[0] > 130, b[0] > 130, "cover class at ({x},{y}): ours={o:?} blitz={b:?}");
             assert_eq!(o[2] > 130, b[2] > 130, "cover class at ({x},{y}): ours={o:?} blitz={b:?}");
+        }
+    }
+
+    /// Stacking order (batch 6a): overlapping solid blocks, the top color
+    /// at each overlap read off both engines. Four scenarios:
+    /// positive z-index hoists above later siblings; negative sinks below
+    /// earlier ones; positioned z-auto paints above in-flow content even
+    /// when it comes first in the document; z-index on a STATIC element is
+    /// ignored (document order wins).
+    #[test]
+    fn paint_stacking_order_matches_blitz() {
+        let px = |buf: &[u8], w: u32, x: usize, y: usize| {
+            let i = (y * w as usize + x) * 4;
+            (buf[i], buf[i + 1], buf[i + 2])
+        };
+        let is_red = |c: (u8, u8, u8)| c.0 > 150 && c.1 < 100 && c.2 < 100;
+        let is_green = |c: (u8, u8, u8)| c.1 > 150 && c.0 < 100 && c.2 < 100;
+        let is_blue = |c: (u8, u8, u8)| c.2 > 150 && c.0 < 100 && c.1 < 100;
+
+        // Case A: #r (red) → #b blue z=2 relative → #g green. Document order
+        // would put green last; z=2 hoists BLUE above both.
+        let html = r#"<body>
+            <div id="r"></div><div id="b"></div><div id="g"></div>
+        </body>"#;
+        let sheet = "body { margin: 0; }
+            div { position: absolute; width: 100px; height: 100px; }
+            #r { left: 0px; top: 0px; background: rgb(200,40,40); }
+            #b { left: 50px; top: 0px; background: rgb(40,40,200); z-index: 2; }
+            #g { left: 0px; top: 0px; background: rgb(40,180,40); }";
+        let (w, h) = (200u32, 120u32);
+        let mut doc = blitz_doc_unresolved(html, sheet);
+        for _ in 0..4 {
+            doc.resolve(0.0);
+        }
+        let blitz = anyrender::render_to_buffer::<anyrender_vello_cpu::VelloCpuImageRenderer, _>(
+            |scene| {
+                use anyrender::PaintScene as _;
+                use peniko::kurbo::Rect;
+                scene.fill(
+                    peniko::Fill::NonZero,
+                    Default::default(),
+                    peniko::Color::WHITE,
+                    Default::default(),
+                    &Rect::new(0.0, 0.0, w as f64, h as f64),
+                );
+                blitz_paint::paint_scene(scene, &mut doc, 1.0, w, h, 0, 0);
+            },
+            w,
+            h,
+        );
+        let ours = our_render(html, sheet, w as usize, h as usize);
+        // (25,25): only red+green stack (green later in doc order → on top).
+        // (75,25): red/blue/green all overlap; blue's z=2 wins on BOTH.
+        for (name, buf) in [("ours", &ours.data), ("blitz", &blitz)] {
+            let c1 = px(buf, w, 25, 25);
+            let c2 = px(buf, w, 75, 25);
+            assert!(is_green(c1), "{name} green-on-top at (25,25): {c1:?}");
+            assert!(is_blue(c2), "{name} z=2 blue on top at (75,25): {c2:?}");
+            let _ = is_red;
+        }
+
+        // Case B: negative z-index sinks below an EARLIER sibling; and a
+        // positioned z-AUTO element still paints above in-flow content.
+        let html_b = r#"<body>
+            <div id="top"></div><div id="neg"></div><div id="auto"></div>
+        </body>"#;
+        let sheet_b = "body { margin: 0; }
+            div { position: absolute; width: 100px; height: 100px; }
+            #top { left: 0px; top: 0px; background: rgb(40,180,40); }
+            #neg { left: 0px; top: 0px; background: rgb(200,40,40); z-index: -1; }
+            #auto { left: 0px; top: 0px; background: rgb(40,40,200); }";
+        let mut doc = blitz_doc_unresolved(html_b, sheet_b);
+        for _ in 0..4 {
+            doc.resolve(0.0);
+        }
+        let blitz = anyrender::render_to_buffer::<anyrender_vello_cpu::VelloCpuImageRenderer, _>(
+            |scene| {
+                use anyrender::PaintScene as _;
+                use peniko::kurbo::Rect;
+                scene.fill(
+                    peniko::Fill::NonZero,
+                    Default::default(),
+                    peniko::Color::WHITE,
+                    Default::default(),
+                    &Rect::new(0.0, 0.0, w as f64, h as f64),
+                );
+                blitz_paint::paint_scene(scene, &mut doc, 1.0, w, h, 0, 0);
+            },
+            w,
+            h,
+        );
+        let ours = our_render(html_b, sheet_b, w as usize, h as usize);
+        // All three fully overlap at (25,25): neg(red) sinks below its
+        // earlier sibling green; auto(blue, LAST in document) covers green.
+        for (name, buf) in [("ours", &ours.data), ("blitz", &blitz)] {
+            let c = px(buf, w, 25, 25);
+            assert!(
+                is_blue(c),
+                "{name} doc-last z-auto blue on top at (25,25): {c:?}"
+            );
+        }
+
+        // Case C: z-index on a STATIC element is ignored — document order
+        // decides (later green over "z=9" red).
+        let html_c = r#"<body><div id="s"></div><div id="t"></div></body>"#;
+        let sheet_c = "body { margin: 0; }
+            div { width: 100px; height: 100px; margin-bottom: -50px; }
+            #s { background: rgb(200,40,40); z-index: 9; }
+            #t { background: rgb(40,180,40); }";
+        let (w2, h2) = (200u32, 160u32);
+        let mut doc = blitz_doc_unresolved(html_c, sheet_c);
+        for _ in 0..4 {
+            doc.resolve(0.0);
+        }
+        let blitz = anyrender::render_to_buffer::<anyrender_vello_cpu::VelloCpuImageRenderer, _>(
+            |scene| {
+                use anyrender::PaintScene as _;
+                use peniko::kurbo::Rect;
+                scene.fill(
+                    peniko::Fill::NonZero,
+                    Default::default(),
+                    peniko::Color::WHITE,
+                    Default::default(),
+                    &Rect::new(0.0, 0.0, w2 as f64, h2 as f64),
+                );
+                blitz_paint::paint_scene(scene, &mut doc, 1.0, w2, h2, 0, 0);
+            },
+            w2,
+            h2,
+        );
+        let ours = our_render(html_c, sheet_c, w2 as usize, h2 as usize);
+        for (name, buf) in [("ours", &ours.data), ("blitz", &blitz)] {
+            // Overlap zone is y∈[50,100) (the -50px pull-up); there the
+            // later green must cover the "z=9" static red.
+            let c = px(buf, w2, 25, 75);
+            assert!(
+                is_green(c),
+                "{name} static z-index ignored, later green on top: {c:?}"
+            );
         }
     }
 }
