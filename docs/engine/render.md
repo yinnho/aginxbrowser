@@ -511,3 +511,42 @@ CSS 匿名 flex item）。
 **边界（下一批）**：float/table/multicol（float 需 taffy float_layout feature，
 当前刻意不开——开了会动产品管线）、position:absolute/inset、em/rem/% 长度、
 min/max-width、minmax()/repeat()、CSS aspect-ratio 属性、inline-block。
+
+## 14. 批次 2d 完成（2026-08-23）：position:absolute + min/max + aspect-ratio
+
+**diting_css 增量**：position（static/relative/absolute/fixed）、
+top/right/bottom/left（px）、min/max-width/height（px）、aspect-ratio
+（`1.5` 或 `16 / 9`，auto→None）。
+
+**桥**：
+- to_taffy_style 透传：taffy 没有 static——in-flow 一律 Relative（它的
+  默认）；absolute/fixed→Absolute；inset 四边（未声明边 auto）；min/max
+  走 content-box 换算（+padding）；aspect-ratio 有限正数才透传。
+- **containing block reparent（upstream 的 fix-up 复刻）**：taffy 的
+  absolute 相对**直接 taffy 父级**解析（block.rs:987 静态位=父 content
+  box inset），CSS 语义是最近 positioned 祖先。桥在整树 build 后做一轮
+  reparent：每个 absolute 子盒 `remove_child`+`add_child` 到最近
+  position≠static 祖先的 taffy 节点；fixed / 无 positioned 祖先 → root
+  （ICB 替身）。out-of-flow 子元素不进 inline run（abspos blockification）。
+- rect 提取沿 reparent 后的 taffy 树累加，天然正确。
+
+**对照结果**（4 新测试，393 全绿）：
+- relative：偏移 (20,10)、后续兄弟占静态位 y=30——双侧 ±0.51。
+- absolute 双轴 inset stretch（top/bottom/left/right → 240×160 @ (20,10)）
+  ——双侧全对。
+- min/max-width（200px 容器内 min 300 → 300；auto stretch 800 → max 100）
+  + aspect-ratio（width+2/1→50 高；height+0.5→30 宽）——双侧全对。
+
+**重大发现（blitz 的 abspos 缺口）**：blitz 把 absolute/fixed 锚在**静态
+父级**上——`#abs { left:15 }` 在 margin-left:30 的静态父里落 x=45（=
+静态父偏移+inset），fixed top:8 会带上塌陷 margin 变 48。CSS/Chrome/本桥
+= 最近 positioned 祖先 / viewport（15/8）。即 **blitz（DioxusLabs）的
+taffy 桥没做 nearest-positioned-ancestor reparent**。对照测试里 abs/fixed
+位置只锁我方语义（不 cross-assert——锁别人的 bug 没意义），#gp/#mid 等
+in-flow 元素仍双侧对。这对产品 /screenshot 有实际含义：真实页面 overlay
+/modal（absolute/fixed）在 blitz 截图里可能偏移。值得给上游提 issue 或
+本地补丁（复刻我们这轮 reparent 逻辑到 blitz-dom）。
+
+**边界（下一批）**：em/rem/% 长度（值系统重构）、float（需 float_layout
+feature）、table/multicol、inline-block、absolute 无 inset 轴的 static
+position 回填（upstream StaticPositionCandidate 路径）、sticky。

@@ -440,6 +440,27 @@ pub struct ComputedStyle {
     /// Track list (px / fr / auto). `None` = not declared.
     pub grid_template_columns: Option<Vec<GridTrack>>,
     pub grid_template_rows: Option<Vec<GridTrack>>,
+    // --- positioning + size clamps (batch 2d), px-only, non-inherited ---
+    pub position: Option<PositionMode>,
+    /// Inset offsets (top/right/bottom/left), px.
+    pub top: Option<f32>,
+    pub right: Option<f32>,
+    pub bottom: Option<f32>,
+    pub left: Option<f32>,
+    pub min_width: Option<f32>,
+    pub max_width: Option<f32>,
+    pub min_height: Option<f32>,
+    pub max_height: Option<f32>,
+    /// Declared aspect ratio (width/height); `auto` stays None.
+    pub aspect_ratio: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositionMode {
+    Static,
+    Relative,
+    Absolute,
+    Fixed,
 }
 
 /// One grid track sizing. `1fr` / `100px` / `auto` — minmax() and repeat()
@@ -734,7 +755,71 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str) -> bool {
             style.grid_template_rows = parse_grid_tracks(v);
             style.grid_template_rows.is_some()
         }
+        "position" => {
+            style.position = match v {
+                "static" => Some(PositionMode::Static),
+                "relative" => Some(PositionMode::Relative),
+                "absolute" => Some(PositionMode::Absolute),
+                "fixed" => Some(PositionMode::Fixed),
+                _ => return false,
+            };
+            true
+        }
+        "top" => {
+            style.top = parse_px_f32(v);
+            style.top.is_some()
+        }
+        "right" => {
+            style.right = parse_px_f32(v);
+            style.right.is_some()
+        }
+        "bottom" => {
+            style.bottom = parse_px_f32(v);
+            style.bottom.is_some()
+        }
+        "left" => {
+            style.left = parse_px_f32(v);
+            style.left.is_some()
+        }
+        "min-width" => {
+            style.min_width = parse_px_f32(v);
+            style.min_width.is_some()
+        }
+        "max-width" => {
+            style.max_width = parse_px_f32(v);
+            style.max_width.is_some()
+        }
+        "min-height" => {
+            style.min_height = parse_px_f32(v);
+            style.min_height.is_some()
+        }
+        "max-height" => {
+            style.max_height = parse_px_f32(v);
+            style.max_height.is_some()
+        }
+        "aspect-ratio" => {
+            // `1.5` or `16 / 9`; `auto` and invalid ratios stay None.
+            style.aspect_ratio = parse_aspect_ratio(v);
+            style.aspect_ratio.is_some()
+        }
         _ => false,
+    }
+}
+
+/// `aspect-ratio: 1.5` or `16 / 9` (width / height).
+fn parse_aspect_ratio(v: &str) -> Option<f32> {
+    let v = v.trim();
+    if v == "auto" {
+        return None;
+    }
+    let (w, h) = match v.split_once('/') {
+        Some((w, h)) => (w.trim().parse::<f32>().ok()?, h.trim().parse::<f32>().ok()?),
+        None => (v.parse::<f32>().ok()?, 1.0),
+    };
+    if w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0 {
+        Some(w / h)
+    } else {
+        None
     }
 }
 

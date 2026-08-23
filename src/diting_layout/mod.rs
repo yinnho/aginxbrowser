@@ -31,7 +31,7 @@ use taffy::prelude::*;
 
 use crate::diting_css::{
     AlignMode, ComputedStyle, Display as CssDisplay, FlexDirection as CssFlexDirection,
-    FlexWrapMode, GridTrack, JustifyMode, TextAlign,
+    FlexWrapMode, GridTrack, JustifyMode, PositionMode, TextAlign,
 };
 use crate::diting_dom::tree::{DomTree, NodeId};
 
@@ -194,6 +194,52 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
         }
         if let Some(rows) = &style.grid_template_rows {
             s.grid_template_rows = rows.iter().map(|t| to_grid_track(*t)).collect();
+        }
+    }
+
+    // --- positioning + clamps (batch 2d) ---
+    if let Some(p) = style.position {
+        s.position = match p {
+            // taffy has no static: in-flow boxes are Relative (its default).
+            PositionMode::Static | PositionMode::Relative => Position::Relative,
+            // Fixed pins to the viewport; the nearest slice stands is the
+            // root as containing block (see the reparent pass in layout_dom).
+            PositionMode::Absolute | PositionMode::Fixed => Position::Absolute,
+        };
+    }
+    if style.top.is_some() || style.right.is_some() || style.bottom.is_some() || style.left.is_some() {
+        s.inset = taffy::geometry::Rect {
+            top: style.top.map(|v| LengthPercentageAuto::length(v)).unwrap_or_else(LengthPercentageAuto::auto),
+            right: style.right.map(|v| LengthPercentageAuto::length(v)).unwrap_or_else(LengthPercentageAuto::auto),
+            bottom: style.bottom.map(|v| LengthPercentageAuto::length(v)).unwrap_or_else(LengthPercentageAuto::auto),
+            left: style.left.map(|v| LengthPercentageAuto::length(v)).unwrap_or_else(LengthPercentageAuto::auto),
+        };
+    }
+    // Clamps are content-box in CSS's initial box-sizing — same padding
+    // carry-over as the main sizes above.
+    s.min_size = Size {
+        width: style
+            .min_width
+            .map(|w| LengthPercentageAuto::length(w + side_px(style.padding.left) + side_px(style.padding.right)))
+            .unwrap_or_else(LengthPercentageAuto::auto),
+        height: style
+            .min_height
+            .map(|h| LengthPercentageAuto::length(h + side_px(style.padding.top) + side_px(style.padding.bottom)))
+            .unwrap_or_else(LengthPercentageAuto::auto),
+    };
+    s.max_size = Size {
+        width: style
+            .max_width
+            .map(|w| LengthPercentageAuto::length(w + side_px(style.padding.left) + side_px(style.padding.right)))
+            .unwrap_or_else(LengthPercentageAuto::auto),
+        height: style
+            .max_height
+            .map(|h| LengthPercentageAuto::length(h + side_px(style.padding.top) + side_px(style.padding.bottom)))
+            .unwrap_or_else(LengthPercentageAuto::auto),
+    };
+    if let Some(ar) = style.aspect_ratio {
+        if ar.is_finite() && ar > 0.0 {
+            s.aspect_ratio = Some(ar);
         }
     }
     s
@@ -412,13 +458,19 @@ fn build_element(
             .and_then(|s| s.display)
             .or(if is_text { Some(CssDisplay::Inline) } else { Some(CssDisplay::Block) });
         let inline_level = matches!(child_display, Some(CssDisplay::Inline));
+        // Out-of-flow children (CSS blockification of abspos) never flatten
+        // into an inline run — the reparent pass in layout_dom will move them
+        // to their containing block anyway.
+        let out_of_flow = styles.get(&child).is_some_and(|s| {
+            matches!(s.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
+        });
         if !is_text && is_replaced_tag(&child_tag) {
             // Replaced elements are atomic: an inline-level box inside a run
             // (like a fat word), a direct item inside flex/grid or when the
             // UA/author made it block-level (our ua_display keeps img block).
             let leaf = build_replaced_leaf(tree, child, styles, taffy_tree, node_map);
             if let Some(leaf) = leaf {
-                if inline_level && !atomic_container {
+                if inline_level && !atomic_container && !out_of_flow {
                     run.push(leaf);
                 } else {
                     flush_run(&mut run, &mut direct, taffy_tree);
@@ -432,7 +484,7 @@ fn build_element(
             let (fs, b) = font_context(tree, child, styles);
             let fs = if styles.get(&child).is_some() { fs } else { font_size };
             run.extend(build_word_leaves(&text, fs, b, taffy_tree));
-        } else if inline_level && !atomic_container {
+        } else if inline_level && !atomic_container && !out_of_flow {
             // A plain inline wrapper flattens into the enclosing run (upstream
             // is_flattenable_inline): the words wrap at the real block level.
             let sub = build_element(tree, child, styles, taffy_tree, node_map);
@@ -483,6 +535,59 @@ pub fn layout_dom(
     let Some(root_node) = build_element(tree, root_id, styles, &mut taffy_tree, &mut node_map) else {
         return rects;
     };
+
+    // Absolute/fixed reparent pass (upstream's containing-block fix-up):
+    // taffy resolves an absolute child against its DIRECT taffy parent, so
+    // move each out-of-flow box to its CSS containing block — the nearest
+    // ancestor with position != static; fixed (and no positioned ancestor)
+    // resolves to the root = the initial containing block stand-in.
+    {
+        let dom_of: HashMap<NodeId, taffy::tree::NodeId> =
+            node_map.iter().map(|(k, v)| (*v, *k)).collect();
+        let reparents: Vec<(taffy::tree::NodeId, taffy::tree::NodeId)> = node_map
+            .iter()
+            .filter_map(|(taffy_nid, dom_id)| {
+                let style = styles.get(dom_id)?;
+                let fixed = style.position == Some(PositionMode::Fixed);
+                if style.position != Some(PositionMode::Absolute) && !fixed {
+                    return None;
+                }
+                let target_dom = if fixed {
+                    None
+                } else {
+                    let mut cur = tree.with_node(*dom_id, |n| n.parent).flatten();
+                    while let Some(nid) = cur {
+                        let positioned = styles.get(&nid).is_some_and(|s| {
+                            matches!(
+                                s.position,
+                                Some(PositionMode::Relative)
+                                    | Some(PositionMode::Absolute)
+                                    | Some(PositionMode::Fixed)
+                            )
+                        });
+                        if positioned {
+                            break;
+                        }
+                        cur = tree.with_node(nid, |n| n.parent).flatten();
+                    }
+                    cur
+                };
+                let target = target_dom.and_then(|d| dom_of.get(&d)).copied().unwrap_or(root_node);
+                let current = taffy_tree.parent(*taffy_nid)?;
+                if current != target {
+                    Some((*taffy_nid, target))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for (node, target) in reparents {
+            if let Some(old) = taffy_tree.parent(node) {
+                let _ = taffy_tree.remove_child(old, node);
+            }
+            let _ = taffy_tree.add_child(target, node);
+        }
+    }
 
     let available = Size {
         width: AvailableSpace::Definite(viewport_width),
@@ -1309,5 +1414,120 @@ mod bridge_cross_check {
         // (cssw is 100×200 — both axes declared, no ratio derivation).
         let nat = rects[&tree.query_selector("#nat").unwrap().unwrap()];
         assert!((none.y - (nat.y + nat.height + 200.0)).abs() < EPS as f32, "stacking");
+    }
+
+    /// position:relative offsets: in-flow box shifted by top/left; siblings
+    /// occupy the STATIC position (relative keeps its space).
+    #[test]
+    fn relative_offset_matches_blitz() {
+        let html = r#"<body><div id="wrap"><div id="rel"></div><div id="after"></div></div></body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #rel { position: relative; top: 10px; left: 20px; width: 50px; height: 30px; }
+            #after { width: 50px; height: 10px; }
+        "#;
+        let (doc, tree, _styles, rects) = both_engines(html, sheet);
+        for selector in ["#wrap", "#rel", "#after"] {
+            let blitz_nid = doc.query_selector(selector).unwrap().expect(selector);
+            let our_nid = tree.query_selector(selector).unwrap().expect(selector);
+            let theirs = element_rect(&doc, blitz_nid);
+            let ours = *rects.get(&our_nid).unwrap_or(&Rect::default());
+            assert_close(&format!("{selector} x"), ours.x, theirs.x);
+            assert_close(&format!("{selector} y"), ours.y, theirs.y);
+            assert_close(&format!("{selector} width"), ours.width, theirs.width);
+            assert_close(&format!("{selector} height"), ours.height, theirs.height);
+        }
+        let rel = rects[&tree.query_selector("#rel").unwrap().unwrap()];
+        assert!((rel.x - 20.0).abs() < EPS as f32 && (rel.y - 10.0).abs() < EPS as f32, "rel offset: {:?}", rel);
+        // #after sits at rel's STATIC bottom (y=30), not the shifted one.
+        let after = rects[&tree.query_selector("#after").unwrap().unwrap()];
+        assert!((after.y - 30.0).abs() < EPS as f32, "after static y: {}", after.y);
+    }
+
+    /// position:absolute with a positioned grandparent: the containing block
+    /// is the nearest positioned ancestor (the reparent pass), NOT the DOM
+    /// parent. No positioned ancestor → initial containing block (root).
+    #[test]
+    fn absolute_reparent_matches_blitz() {
+        let html = r#"<body>
+            <div id="gp"><div id="mid"><div id="abs"></div></div></div>
+            <div id="orphan" style="position: absolute; top: 5px; left: 10px; width: 30px; height: 20px;"></div>
+            <div id="fx" style="position: fixed; top: 8px; left: 12px; width: 26px; height: 14px;"></div>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #gp { position: relative; width: 300px; height: 200px; }
+            #mid { width: 200px; height: 100px; margin-top: 40px; margin-left: 30px; }
+            #abs { position: absolute; top: 5px; left: 15px; width: 40px; height: 20px; }
+        "#;
+        let (_doc, tree, _styles, rects) = both_engines(html, sheet);
+        // KNOWN MODELING DIVERGENCE (render.md §14): blitz anchors absolute
+        // and fixed boxes to the STATIC parent (its taffy bridge keeps the
+        // DOM parent, so #abs lands at mid.margin-left + left = 45 and the
+        // fixed box picks up the collapsed strut). CSS — and this bridge —
+        // resolve against the nearest positioned ancestor / the viewport.
+        // Cross-asserting positions against blitz would lock THEIR bug; the
+        // in-flow elements (#gp, #mid) do agree and are checked in other
+        // tests.
+        let abs = rects[&tree.query_selector("#abs").unwrap().unwrap()];
+        assert!((abs.x - 15.0).abs() < EPS as f32 && (abs.y - 45.0).abs() < EPS as f32, "abs in gp: {:?}", abs);
+        // No positioned ancestor → initial containing block (the root).
+        let orphan = rects[&tree.query_selector("#orphan").unwrap().unwrap()];
+        assert!((orphan.x - 10.0).abs() < EPS as f32 && (orphan.y - 5.0).abs() < EPS as f32, "orphan at ICB: {:?}", orphan);
+        // Fixed pins to the viewport regardless of the collapsed strut.
+        let fx = rects[&tree.query_selector("#fx").unwrap().unwrap()];
+        assert!((fx.x - 12.0).abs() < EPS as f32 && (fx.y - 8.0).abs() < EPS as f32, "fixed at viewport: {:?}", fx);
+    }
+
+    /// Absolute stretch between opposing insets.
+    #[test]
+    fn absolute_stretch_matches_blitz() {
+        let html = r#"<body><div id="gp"><div id="st"></div></div></body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #gp { position: relative; width: 300px; height: 200px; }
+            #st { position: absolute; top: 10px; bottom: 30px; left: 20px; right: 40px; }
+        "#;
+        let (doc, tree, _styles, rects) = both_engines(html, sheet);
+        for selector in ["#st"] {
+            let blitz_nid = doc.query_selector(selector).unwrap().expect(selector);
+            let our_nid = tree.query_selector(selector).unwrap().expect(selector);
+            let theirs = element_rect(&doc, blitz_nid);
+            let ours = *rects.get(&our_nid).unwrap_or(&Rect::default());
+            assert_close(&format!("{selector} x"), ours.x, theirs.x);
+            assert_close(&format!("{selector} y"), ours.y, theirs.y);
+            assert_close(&format!("{selector} width"), ours.width, theirs.width);
+            assert_close(&format!("{selector} height"), ours.height, theirs.height);
+        }
+        let st = rects[&tree.query_selector("#st").unwrap().unwrap()];
+        assert!((st.width - 240.0).abs() < EPS as f32, "stretch width: {}", st.width);
+        assert!((st.height - 160.0).abs() < EPS as f32, "stretch height: {}", st.height);
+    }
+
+    /// min/max-width clamps and the CSS aspect-ratio property.
+    #[test]
+    fn clamps_and_aspect_ratio_match_blitz() {
+        let html = r#"<body><div id="host" style="width: 200px"><div id="mn"></div></div><div id="mx"></div><div id="ar"></div><div id="arn"></div></body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #mn { min-width: 300px; height: 10px; }
+            #mx { max-width: 100px; height: 10px; }
+            #ar { width: 100px; aspect-ratio: 2 / 1; }
+            #arn { height: 60px; aspect-ratio: 0.5; }
+        "#;
+        let (doc, tree, _styles, rects) = both_engines(html, sheet);
+        for selector in ["#host", "#mn", "#mx", "#ar", "#arn"] {
+            let blitz_nid = doc.query_selector(selector).unwrap().expect(selector);
+            let our_nid = tree.query_selector(selector).unwrap().expect(selector);
+            let theirs = element_rect(&doc, blitz_nid);
+            let ours = *rects.get(&our_nid).unwrap_or(&Rect::default());
+            assert_close(&format!("{selector} width"), ours.width, theirs.width);
+            assert_close(&format!("{selector} height"), ours.height, theirs.height);
+        }
+        let r = |sel: &str| rects[&tree.query_selector(sel).unwrap().unwrap()];
+        assert!((r("#mn").width - 300.0).abs() < EPS as f32, "min-width floor");
+        assert!((r("#mx").width - 100.0).abs() < EPS as f32, "max-width clamp");
+        assert!((r("#ar").height - 50.0).abs() < EPS as f32, "ratio from width");
+        assert!((r("#arn").width - 30.0).abs() < EPS as f32, "ratio from height");
     }
 }
