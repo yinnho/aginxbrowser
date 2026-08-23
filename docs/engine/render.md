@@ -1056,3 +1056,35 @@ taffy 兄弟序是 HashMap 序不是文档序**。此前 paint 对照全没多 a
 **测试**：427→428。挂账更新：嵌套 stacking context root 跨层提升；
 flex/grid item 的 z-index；opacity/transform 建 root；float paint
 level 1（float 本身挂账中）。下一批候选：border-radius 或网络图通路。
+
+## 27. 批次 6b 完成（2026-08-23）：border-radius——bg 圆角裁剪
+
+**探底（blitz-paint css_box.rs）**：blitz 的圆角是 BezPath 四角 arc
+（`corner_arc`/`ellipse`），bg 裁剪用 `border_box_path()`（圆角 border
+box，background-clip: border-box）；border 用外圈/内圈两弧 annulus 填充。
+半径 per-corner (rx, ry) 从 Stylo 解析；**不做 CSS scale-down**（相邻角
+之和超盒时按规范要缩小，blitz 直接用、注释承认超半会 quirky）。
+
+**实现（最小竖切：单值圆形圆角 × bg 裁剪）**：diting_css 加
+`border_radius: Option<Length>`——只认 1 值语法 `border-radius: <px|%>`（%
+相对盒宽；多值语法 decline）。paint.rs 加 `Canvas::fill_rounded_rect`：
+逐像素判定，角带（edge×edge 带）内测像素中心到四角圆心距离 ≤ r，
+十字中带恒在内；r clamp 到短边一半（CSS scale-down 规则——我们做，
+对照场景留在合法区间所以不冲突）。Bg item 加 `radius: f32` 字段，
+collect 解析（% × rect.width），execute 分派 fill_rounded_rect。
+Border 圆角（annulus）挂账。
+
+**坑（本批自踩自抓）**：fill_rounded_rect 首版把「middle zone 恒在内」
+写成 `continue`——跳过了整个像素的绘制而非 inside 判定，中间区域全空，
+中心采样点当场红变白。修为 corner zone 判定 + match None=>true。
+
+**对照（一测两案）** `paint_border_radius_bg_matches_blitz`：
+- 20px 圆角方盒：中心+边中点填充、深角落白、对角线弧外点
+  （r−r/√2≈5.86 → 采 (4,4)）不填充——双侧一致（AA 弧线本身不在契约内，
+  硬边 vs vello AA）
+- `border-radius: 50%` 方盒 = 内切圆：中心/水平轴点填充、角落白、
+  对角线距心 ≈65 > r=50 不填充
+
+**测试**：428→429。挂账更新：per-corner/椭圆（rx ry `/` 两值组）半径、
+border 圆角 annulus、radius 与 overflow clip 的圆角裁剪联动、50% 非方盒
+椭圆。下一批候选：网络图通路 或 alt 溢出裁剪。

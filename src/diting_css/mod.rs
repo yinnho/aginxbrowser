@@ -372,7 +372,7 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "padding-right", "padding-bottom", "padding-left", "font-size", "font-weight",
         "text-align", "border", "border-color", "border-width", "border-style",
         "width", "height", "flex-direction", "gap", "overflow",
-        "object-fit", "object-position", "z-index",
+        "object-fit", "object-position", "z-index", "border-radius",
     ];
     if !SUPPORTED.contains(&name.to_ascii_lowercase().as_str()) {
         return false;
@@ -410,6 +410,15 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
                 .all(|s| matches!(s, "left" | "top" | "center" | "right" | "bottom") || part(s))
         }
         "z-index" => value == "auto" || value.parse::<i32>().is_ok(),
+        "border-radius" => {
+            // Single px/%/em value only (the 1-value circular syntax).
+            let mut parts = value.split_whitespace();
+            let (first, second) = (parts.next(), parts.next());
+            second.is_none()
+                && first.is_some_and(|s| {
+                    parse_css_length(s).is_some()
+                })
+        }
         "font-weight" => parse_font_weight(value).is_some(),
         "font-size" => parse_font_size_len(value).is_some(),
         _ => true, // remaining modeled properties accept any non-empty value here
@@ -487,6 +496,11 @@ pub struct ComputedStyle {
     /// `z-index` (batch 6a), non-inherited; None = auto. Only meaningful on
     /// positioned elements (flex/grid-item support is a later batch).
     pub z_index: Option<i32>,
+    /// Uniform circular `border-radius` (batch 6b): ONE length/percentage
+    /// applied to all four corners (the 1-value syntax — by far the most
+    /// common form). Percentages resolve against the box width. Per-corner
+    /// and elliptical (`rx ry`) radii are a later batch.
+    pub border_radius: Option<Length>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -959,6 +973,17 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 },
             };
             true
+        }
+        "border-radius" => {
+            // Single-value circular radius only; multi-value syntaxes are a
+            // later batch and decline here.
+            let mut parts = v.split_whitespace();
+            let (first, second) = (parts.next(), parts.next());
+            if second.is_some() {
+                return false;
+            }
+            style.border_radius = first.and_then(len);
+            style.border_radius.is_some()
         }
         "object-position" => {
             let part = |s: &str| -> Option<ObjectPositionPart> {

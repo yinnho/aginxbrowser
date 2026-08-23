@@ -780,13 +780,14 @@ fn build_element(
 
 /// One paint primitive in document order (batch 4a) — the minimal output
 /// contract between layout and paint. `Bg` is an element's solid
-/// background-color over its border-box; `Text` is a text run at its leaf
-/// origin, re-wrapped at the width its containing block gave it at measure
-/// time (mixed runs paint per-word leaves at their own boxes, batch 4d).
-/// Borders, images, shadows, and z-index don't exist yet in this slice.
+/// background-color over its border-box (rounded per border-radius, batch
+/// 6b); `Text` is a text run at its leaf origin, re-wrapped at the width
+/// its containing block gave it at measure time (mixed runs paint
+/// per-word leaves at their own boxes, batch 4d). Shadows and elliptical/
+/// per-corner radii don't exist yet in this slice.
 #[derive(Debug, Clone)]
 pub enum PaintItem {
-    Bg { dom_id: NodeId, rect: Rect, color: [u8; 4] },
+    Bg { dom_id: NodeId, rect: Rect, color: [u8; 4], radius: f32 },
     /// A decoded raster image blitted into the replaced box (batch 5b):
     /// sized per object-fit and offset per object-position (batch 5c) —
     /// see [`object_paint_rect`]. `rect` is the element box and doubles as
@@ -1041,7 +1042,19 @@ pub fn layout_dom_with_paint(
             rects.insert(*dom_id, rect);
             if let Some(c) = styles.get(dom_id).and_then(|s| s.background_color) {
                 if c.3 != 0 && rect.width > 0.0 && rect.height > 0.0 {
-                    items.push(PaintItem::Bg { dom_id: *dom_id, rect, color: [c.0, c.1, c.2, c.3] });
+                    // Uniform circular radius (batch 6b): px direct,
+                    // percentage against the box width.
+                    let radius = match styles.get(dom_id).and_then(|s| s.border_radius) {
+                        Some(crate::diting_css::Length::Px(r)) => r,
+                        Some(crate::diting_css::Length::Percent(p)) => p * rect.width / 100.0,
+                        None => 0.0,
+                    };
+                    items.push(PaintItem::Bg {
+                        dom_id: *dom_id,
+                        rect,
+                        color: [c.0, c.1, c.2, c.3],
+                        radius,
+                    });
                 }
             }
             // A border exists only with a line style; its color defaults to
@@ -3704,6 +3717,120 @@ mod bridge_cross_check {
             assert!(
                 is_green(c),
                 "{name} static z-index ignored, later green on top: {c:?}"
+            );
+        }
+    }
+
+    /// border-radius on a solid background (batch 6b): the bg clips to the
+    /// rounded border box. Rasterizers differ at the arc itself (vello AA
+    /// vs our hard edge), so the contract is: bbox == the full box (the
+    /// straight edges survive the corners), corner zones are background,
+    /// center and edge midpoints are fill — sampled well away from the arc.
+    #[test]
+    fn paint_border_radius_bg_matches_blitz() {
+        let html = r#"<body><div id="t"></div></body>"#;
+        let sheet = "body { margin: 0; } #t { width: 100px; height: 100px; background: rgb(200,40,40); border-radius: 20px; }";
+        let (w, h) = (200u32, 200u32);
+        let mut doc = blitz_doc_unresolved(html, sheet);
+        for _ in 0..4 {
+            doc.resolve(0.0);
+        }
+        let blitz = anyrender::render_to_buffer::<anyrender_vello_cpu::VelloCpuImageRenderer, _>(
+            |scene| {
+                use anyrender::PaintScene as _;
+                use peniko::kurbo::Rect;
+                scene.fill(
+                    peniko::Fill::NonZero,
+                    Default::default(),
+                    peniko::Color::WHITE,
+                    Default::default(),
+                    &Rect::new(0.0, 0.0, w as f64, h as f64),
+                );
+                blitz_paint::paint_scene(scene, &mut doc, 1.0, w, h, 0, 0);
+            },
+            w,
+            h,
+        );
+        let ours = our_render(html, sheet, w as usize, h as usize);
+
+        let px = |buf: &[u8], w: u32, x: usize, y: usize| {
+            let i = (y * w as usize + x) * 4;
+            (buf[i], buf[i + 1], buf[i + 2])
+        };
+        let is_red = |c: (u8, u8, u8)| c.0 > 150 && c.1 < 110 && c.2 < 110;
+        let is_white = |c: (u8, u8, u8)| c.0 > 240 && c.1 > 240 && c.2 > 240;
+
+        for (name, buf) in [("ours", &ours.data), ("blitz", &blitz)] {
+            // Center and edge midpoints: well inside the shape.
+            for (x, y) in [(50usize, 50usize), (50usize, 2usize), (2usize, 50usize)] {
+                assert!(
+                    is_red(px(buf, w, x, y)),
+                    "{name} rounded-bg fills ({x},{y}): {:?}",
+                    px(buf, w, x, y)
+                );
+            }
+            // Corner zone (deep inside the cut): background shows through.
+            assert!(
+                is_white(px(buf, w, 3, 3)),
+                "{name} corner (3,3) clipped to white: {:?}",
+                px(buf, w, 3, 3)
+            );            // Just outside the arc along the diagonal: for r=20 the arc
+            // crosses the diagonal at 20−20/√2 ≈ 5.86px from the corner,
+            // so pixel (4,4) (center 4.5) is outside and (7,7) inside.
+            let d = px(buf, w, 4, 4);
+            assert!(
+                !is_red(d),
+                "{name} just outside arc at (4,4) not filled: {d:?}"
+            );
+
+            // Structural: the Bg item carries the parsed radius.
+            let tree = crate::diting_dom::tree_sink::parse_html(html);
+            let rules = diting_css::parse_stylesheet(sheet);
+            let styles = our_styles(&tree, &rules);
+            let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fixture_fonts(), VW);
+            let radius = items.iter().find_map(|i| match i {
+                PaintItem::Bg { radius, .. } => Some(*radius),
+                _ => None,
+            });
+            assert_eq!(radius, Some(20.0), "{name}: radius flows into the Bg item");
+        }
+
+        // Percentage radius: `border-radius: 50%` on a square box = circle
+        // (r=50). Sampled points must classify identically across engines.
+        let sheet = "body { margin: 0; } #t { width: 100px; height: 100px; background: rgb(200,40,40); border-radius: 50%; }";
+        let mut doc = blitz_doc_unresolved(html, sheet);
+        for _ in 0..4 {
+            doc.resolve(0.0);
+        }
+        let blitz = anyrender::render_to_buffer::<anyrender_vello_cpu::VelloCpuImageRenderer, _>(
+            |scene| {
+                use anyrender::PaintScene as _;
+                use peniko::kurbo::Rect;
+                scene.fill(
+                    peniko::Fill::NonZero,
+                    Default::default(),
+                    peniko::Color::WHITE,
+                    Default::default(),
+                    &Rect::new(0.0, 0.0, w as f64, h as f64),
+                );
+                blitz_paint::paint_scene(scene, &mut doc, 1.0, w, h, 0, 0);
+            },
+            w,
+            h,
+        );
+        let ours = our_render(html, sheet, w as usize, h as usize);
+        for (name, buf) in [("ours", &ours.data), ("blitz", &blitz)] {
+            assert!(is_red(px(buf, w, 50, 50)), "{name} circle center filled");
+            assert!(is_red(px(buf, w, 10, 50)), "{name} circle left of center filled");
+            // Corner far outside the incircle.
+            assert!(is_white(px(buf, w, 4, 4)), "{name} square corner clipped");
+            // Diagonal point outside the incircle (distance from center
+            // ≈65 > r=50).
+            assert!(!is_red(px(buf, w, 4, 4)), "{name} corner not red");
+            let diag = px(buf, w, 12, 12);
+            assert!(
+                !is_red(diag),
+                "{name} diagonal outside incircle not filled: {diag:?}"
             );
         }
     }

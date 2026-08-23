@@ -119,6 +119,71 @@ impl Canvas {
         }
     }
 
+    /// Source-over fill of a rounded rectangle (batch 6b), clipped to the
+    /// canvas and the clip stack. `radius` is the uniform circular corner
+    /// radius in px (clamped to half the shorter side — the CSS scale-down
+    /// rule; upstream blitz skips it and distorts past half, so cross-check
+    /// cases stay within the legal range). Hard-edged rasterization: the
+    /// corner boundary is a step function, while vello antialiases it —
+    /// cross-checks sample well inside/outside, never on the arc.
+    pub fn fill_rounded_rect(
+        &mut self,
+        x: i64,
+        y: i64,
+        w: i64,
+        h: i64,
+        radius: f32,
+        color: [u8; 4],
+    ) {
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        let r = radius
+            .clamp(0.0, (w.min(h) as f32) / 2.0);
+        if r <= 0.0 {
+            self.fill_rect(x, y, w, h, color);
+            return;
+        }
+        let (ax0, ay0, ax1, ay1) = self.allowed();
+        // Pixel centers (px+0.5) test against the quarter-circle arcs.
+        let (fx, fy) = (x as f64, y as f64);
+        let (fw, fh) = (w as f64, h as f64);
+        let fr = r as f64;
+        for gy in y.max(0).max(ay0)..(y + h).min(self.height as i64).min(ay1) {
+            for gx in x.max(0).max(ax0)..(x + w).min(self.width as i64).min(ax1) {
+                let (cx, cy) = (gx as f64 + 0.5, gy as f64 + 0.5);
+                // A pixel is outside only when it sits in a corner zone
+                // (edge band × edge band) beyond its quarter-circle arc;
+                // the cross-shaped middle zone is always inside.
+                let (x_left, x_right) = (cx < fx + fr, cx >= fx + fw - fr);
+                let (y_top, y_bottom) = (cy < fy + fr, cy >= fy + fh - fr);
+                let corner = if x_left && y_top {
+                    Some((fx + fr, fy + fr))
+                } else if x_right && y_top {
+                    Some((fx + fw - fr, fy + fr))
+                } else if x_right && y_bottom {
+                    Some((fx + fw - fr, fy + fh - fr))
+                } else if x_left && y_bottom {
+                    Some((fx + fr, fy + fh - fr))
+                } else {
+                    None
+                };
+                let inside = match corner {
+                    Some((ccx, ccy)) => {
+                        let (dx, dy) = (cx - ccx, cy - ccy);
+                        dx * dx + dy * dy <= fr * fr
+                    }
+                    None => true,
+                };
+                if !inside {
+                    continue;
+                }
+                let i = (gy as usize * self.width + gx as usize) * 4;
+                over(&mut self.data[i..i + 4], color);
+            }
+        }
+    }
+
     /// Source-over composite of a text tile's straight-alpha pixels at
     /// integer offset `(x, y)`, clipped to the canvas and the clip stack.
     pub fn blit_text(&mut self, r: &TextRaster, x: i64, y: i64) {
@@ -182,11 +247,12 @@ pub fn execute(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas) {
             PaintItem::PopClip => {
                 out.pop_clip();
             }
-            PaintItem::Bg { rect, color, .. } => out.fill_rect(
+            PaintItem::Bg { rect, color, radius, .. } => out.fill_rounded_rect(
                 rect.x.round() as i64,
                 rect.y.round() as i64,
                 rect.width.round() as i64,
                 rect.height.round() as i64,
+                *radius,
                 *color,
             ),
             PaintItem::Border { rect, widths, color, .. } => {
