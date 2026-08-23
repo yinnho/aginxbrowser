@@ -349,3 +349,52 @@ Phase 1 完成（2026-08-23）：四个模块全部认领——每一行的存�
   不能改成复用 isolate。
 - 测试基建复用 diting_js 的 PRIVATE_NET_ENV_LOCK + 本地 TcpListener HTTP
   服务器模式；注意本仓 test target 是 bin（`cargo test -- <filter>`）。
+
+## 8. Phase 2 渲染决策输入（2026-08-23 核实）
+
+> 证据源：/tmp/obscura-upstream 最新 main（39fe4d2，fetch 后与认领时无新
+> 提交）。结论先行：**上游没有用 Blitz**，走的是自研 CPU 渲染器路线，
+> 已成熟，但零 CJK 字体。
+
+### 8.1 上游 obscura-render 是什么
+
+- 技术栈：taffy 布局 + **手写** css.rs/style.rs（无 Stylo）+ cosmic-text
+  0.14.2（rustybuzz 整形 + UAX#14 断行）+ swash 光栅 + tiny-skia CPU
+  绘制 + resvg（SVG）+ wuff（图片解码）。
+- 成熟度：2026-06-19 以来 render crate 独立 **240 commit**。近期仍在修：
+  嵌套滚动区的 sticky 几何、fixed/sticky 层叠上下文、透明度/变换动画的
+  绘制状态保留、webfont 图标 + 彩色 emoji、box-shadow 裁剪。
+- 接线面：obscura-cdp `render` feature = Page.captureScreenshot；
+  obscura-js `render` feature = 真实盒几何暴露给 JS（getBoundingClientRect
+  一族，即上文「渲染感知 Page 状态」的上游实现）。
+- 设计原则：**确定性渲染**——只捆内嵌字体（Liberance/DejaVu/Noto Color
+  Emoji），显式关掉系统字体扫描（inline.rs:993 注释：宿主字体集会让
+  布局不同）。跨宿主布局一致是卖点，代价见 8.2 第一行。
+
+### 8.2 与我们 Blitz 路线的对比
+
+| | obscura-render（自研） | 我们（Blitz，钉 2fa6434d） |
+|---|---|---|
+| CJK | **无字体，豆腐块** | 可用（baidu ~4s / 1533 色） |
+| CSS 引擎 | 手写 css.rs/style.rs | Stylo（Servo 正牌，cascade 正确性上限高） |
+| 布局 | taffy | taffy（blitz 内，同一库） |
+| 文本 | cosmic-text + swash | parley 0.10（0.11 CJK 挂死，linebender/parley#752） |
+| 光栅 | tiny-skia（CPU） | anyrender_vello_cpu |
+| 体积/依赖 | 小，crates.io 为主 | +30–40MB，blitz-* 只能走 git rev |
+| 管线状态 | 上游 CDP 截图 + JS 盒几何 | 我们 /screenshot 已上线（产品功能） |
+
+### 8.3 关键判断
+
+1. **obscura-render 不能直接换给我们**：零 CJK 字体是刻意设计；接中文
+   要自捆 Noto CJK（每字重 ~20MB）并验证 cosmic-text 的 CJK 断行长尾
+   ——那是我们在 parley 上踩过的同一类坑，换个栈不会消失。
+2. **它是「自研 CPU 渲染器可行」的存在证明 + 240 commit 的避坑图**：
+   sticky/层叠/动画/webfont/emoji 长尾清单现成，自研时照单核对。
+3. **CJK 是两条路线共同的必答题**：blitz 侧 = 等/绕 parley#752；自研侧
+   = 捆字体 + 断行验证。谁先解决谁就领先上游。
+4. **我们的既有资产被低估了**：screenshot.rs 已是 taffy 布局 + blitz
+   绘制的完整管线（含元素裁剪/全页/滚动）；diting_dom 自有；盒几何已
+   暴露。真要自研，「布局」层已在手里，缺的是 style（cascade）+ paint +
+   text 三层——正好对应上游 css.rs/style.rs + paint.rs + inline.rs。
+5. **宣传红线不变**：即使走自研，对外仍不说「自研浏览器引擎」；自主的
+   叙事点是确定性渲染 + CJK 质量 + 截图管线。
