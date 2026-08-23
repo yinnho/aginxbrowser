@@ -108,8 +108,8 @@ pub fn decode_data_url_png(src: &str) -> Option<DecodedImage> {
 }
 
 /// Decode fetched image bytes by magic-number sniffing (batch 6d) —
-/// content-type headers are untrusted/absent in practice. PNG, JPEG and
-/// WebP share the `image` crate with blitz's decoder
+/// content-type headers are untrusted/absent in practice. PNG, JPEG, WebP
+/// and GIF share the `image` crate with blitz's decoder
 /// (blitz-dom/src/net.rs `ImageHandler::parse`, `with_guessed_format`),
 /// so RGBA output is bit-identical for both engines.
 pub fn decode_bytes(bytes: &[u8]) -> Option<DecodedImage> {
@@ -119,6 +119,8 @@ pub fn decode_bytes(bytes: &[u8]) -> Option<DecodedImage> {
         decode_jpeg(bytes)
     } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         decode_webp(bytes)
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        decode_gif(bytes)
     } else {
         None
     }
@@ -135,6 +137,15 @@ pub fn decode_jpeg(bytes: &[u8]) -> Option<DecodedImage> {
 /// blitz uses (batch 7b).
 pub fn decode_webp(bytes: &[u8]) -> Option<DecodedImage> {
     let img = image::load_from_memory_with_format(bytes, image::ImageFormat::WebP).ok()?;
+    let rgba = img.to_rgba8().into_raw();
+    Some(DecodedImage::new(img.width(), img.height(), rgba))
+}
+
+/// Decode a GIF's FIRST frame (batch 7e): static rendering has no
+/// animation timeline, and the first frame is what both engines' decoders
+/// hand back for `decode()`.
+pub fn decode_gif(bytes: &[u8]) -> Option<DecodedImage> {
+    let img = image::load_from_memory_with_format(bytes, image::ImageFormat::Gif).ok()?;
     let rgba = img.to_rgba8().into_raw();
     Some(DecodedImage::new(img.width(), img.height(), rgba))
 }
@@ -329,5 +340,28 @@ mod tests {
 
         // Truncated RIFF header declines rather than panicking.
         assert!(decode_bytes(b"RIFF\x00\x00\x00\x00WEB").is_none());
+    }
+
+    /// GIF bodies decode to their FIRST frame (batch 7e). A real 2×1 GIF
+    /// (palette: index 0 = red, index 1 = blue; generated once with
+    /// Pillow's encoder) decodes through the magic branch to exactly those
+    /// pixels; a truncated header declines.
+    #[test]
+    fn gif_decodes_first_frame() {
+        #[rustfmt::skip]
+        let b: [u8; 44] = [
+            71, 73, 70, 56, 55, 97, 2, 0, 1, 0, 129, 0,
+            0, 200, 40, 40, 40, 40, 200, 0, 0, 0, 0, 0,
+            0, 44, 0, 0, 0, 0, 2, 0, 1, 0, 0, 8,
+            5, 0, 1, 4, 8, 8, 0, 59,
+        ];
+
+        let decoded = decode_bytes(&b).expect("decodes real GIF");
+        assert_eq!((decoded.width, decoded.height), (2, 1));
+        assert_eq!(&decoded.rgba[0..4], &[200, 40, 40, 255], "pixel 0 = red");
+        assert_eq!(&decoded.rgba[4..8], &[40, 40, 200, 255], "pixel 1 = blue");
+
+        // Truncated header declines rather than panicking.
+        assert!(decode_bytes(b"GIF89a-truncated").is_none());
     }
 }

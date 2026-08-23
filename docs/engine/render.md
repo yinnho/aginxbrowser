@@ -1249,3 +1249,18 @@ overflow:hidden + radius:30 盒内铺满蓝色 absolute 子块——直边中点
 radius/7d 圆角联动）。挂账剩余：GIF 首帧、srcset/picture、HTTP 缓存头、
 嵌套 stacking root 跨层提升、float 布局与 paint level 1、inset 样式画法。
 下一批候选：GIF 或转向 float/table 等布局大项。
+
+## 35. 批次 7e 完成（2026-08-24）：GIF 首帧解码
+
+**实现**：decode_bytes 第四分支 `GIF87a`/`GIF89a` 魔数 → `decode_gif`
+（image crate Gif feature，`decode()` 天然取首帧——静态渲染无动画时间
+线，两引擎同款语义）。screenshot feature 加 `image/gif`（gif crate 已在
+依赖图）。
+
+**测试**：`gif_decodes_first_frame`——Pillow 编码的真实 2×1 GIF 字节
+（palette red/blue）钉进测试，解码像素逐字节断言；截断头拒绝。
+439→440。
+
+**图片通路收官**：PNG/JPEG/WebP/GIF 四格式齐备（data:URL PNG + 网络字
+节表双通路），与 blitz 同一 image 解码器、RGBA 位相同。挂账剩余：
+srcset/picture、HTTP 缓存头层、动图多帧。下一批候选：float 布局大项。
