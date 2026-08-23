@@ -757,6 +757,203 @@ fn build_element(
     };
 
     let (font_size, _bold) = font_context(tree, id, styles);
+
+    // --- float zone (batch 8b): the single-float + flow-column shape ---
+    // A floated child is removed from normal flow and its following
+    // siblings wrap alongside it. taffy (as configured — float_layout is a
+    // non-default feature that must stay off) has no floats, so the zone is
+    // REIFIED as a flex row: [float box | anonymous flow column]. The flow
+    // column takes all remaining width (flex-grow 1, basis 0, min 0); the
+    // float keeps its authored margins/width. A `clear` sibling ends the
+    // zone and stays in normal flow after the row. Upstream
+    // obscura-render's `build_children_with_float_zone` strategy 1.
+    let is_float_child = |cid: &NodeId| -> bool {
+        styles
+            .get(cid)
+            .is_some_and(|s| s.float_side.is_some() && s.display != Some(CssDisplay::None))
+    };
+    if let Some(float_idx) = child_ids.iter().position(is_float_child) {
+        // Zone end: the first sibling that clears this float's side (the
+        // clearfix idiom), or the next float, or the container's end.
+        // Height-budget bounding (upstream estimate_float_height) is a
+        // later batch — an unbounded zone over-collects only when the
+        // float is taller than ALL remaining siblings, which reads as the
+        // common "content beside float" shape anyway.
+        let float_side = styles.get(&child_ids[float_idx]).and_then(|s| s.float_side);
+        let clears_this = |cid: &NodeId| -> bool {
+            styles.get(cid).and_then(|s| s.clear_side).is_some_and(|c| match c {
+                crate::diting_css::ClearSide::Both => true,
+                crate::diting_css::ClearSide::Left => float_side == Some(crate::diting_css::FloatSide::Left),
+                crate::diting_css::ClearSide::Right => float_side == Some(crate::diting_css::FloatSide::Right),
+            })
+        };
+        let mut zone_end = child_ids.len();
+        for (i, cid) in child_ids.iter().enumerate().skip(float_idx + 1) {
+            if clears_this(cid) || is_float_child(cid) {
+                zone_end = i;
+                break;
+            }
+        }
+        // Build the float itself (blockified into the row's first item).
+        let float_dom = child_ids[float_idx];
+        let float_taffy =
+            build_element(tree, float_dom, styles, images, fonts, taffy_tree, node_map);
+        // The flow column: an ANONYMOUS block wrapper around every in-zone
+        // sibling built normally inside it. Not in node_map — it has no DOM
+        // identity, so collect skips it and paints walk straight through to
+        // the real children.
+        let flow_dom = &child_ids[float_idx + 1..zone_end];
+        let mut flow_children: Vec<taffy::tree::NodeId> = Vec::new();
+        let mut run: Vec<RunSeg> = Vec::new();
+        for child in flow_dom.iter().copied() {
+            let is_text = tree.with_node(child, |n| n.is_text()).unwrap_or(false);
+            let child_tag = tree
+                .with_node(child, |n| n.as_element().map(|e| e.local.to_string()))
+                .flatten()
+                .unwrap_or_default();
+            let child_display = styles
+                .get(&child)
+                .and_then(|s| s.display)
+                .or(if is_text { Some(CssDisplay::Inline) } else { Some(CssDisplay::Block) });
+            let inline_level = matches!(child_display, Some(CssDisplay::Inline));
+            let out_of_flow = styles.get(&child).is_some_and(|s| {
+                matches!(s.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
+            });
+            if !is_text && is_replaced_tag(&child_tag) {
+                let leaf = build_replaced_leaf(tree, child, styles, images, taffy_tree, node_map);
+                if let Some(leaf) = leaf {
+                    if inline_level && !out_of_flow {
+                        run.push(RunSeg::Nodes(vec![leaf]));
+                    } else {
+                        flush_run(&mut run, &mut flow_children, taffy_tree);
+                        flow_children.push(leaf);
+                    }
+                }
+                continue;
+            }
+            if is_text {
+                let text = tree.with_node(child, |n| n.text_content_of_text_node().unwrap_or("").to_string()).unwrap_or_default();
+                let (fs, b) = font_context(tree, child, styles);
+                let fs = if styles.get(&child).is_some() { fs } else { font_size };
+                let col = color_context(tree, child, styles);
+                run.push(RunSeg::Text(text, fs, b, col));
+            } else if inline_level && !out_of_flow {
+                let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map);
+                if let Some(sub) = sub {
+                    let sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
+                    run.push(RunSeg::Nodes(sub_children));
+                    let _ = taffy_tree.remove(sub);
+                }
+            } else {
+                flush_run(&mut run, &mut flow_children, taffy_tree);
+                if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map) {
+                    flow_children.push(node);
+                }
+            }
+        }
+        flush_run(&mut run, &mut flow_children, taffy_tree);
+        let float_right = styles.get(&float_dom)
+            .and_then(|s| s.float_side)
+            == Some(crate::diting_css::FloatSide::Right);
+        let mut row_children: Vec<taffy::tree::NodeId> = Vec::new();
+        if !flow_children.is_empty() {
+            if let Ok(column) = taffy_tree.new_with_children(
+                Style {
+                    display: Display::Block,
+                    flex_grow: 1.0,
+                    flex_shrink: 1.0,
+                    flex_basis: Dimension::length(0.0),
+                    min_size: Size { width: LengthPercentageAuto::length(0.0), height: LengthPercentageAuto::auto() },
+                    ..Default::default()
+                },
+                &flow_children,
+            ) {
+                row_children.push(column);
+            }
+        }
+        // A right float hugs the container's right edge — the row's LAST
+        // item (CSS places right floats at the inline-end).
+        if float_right {
+            row_children.extend(float_taffy);
+        } else {
+            for f in float_taffy.into_iter().rev() {
+                row_children.insert(0, f);
+            }
+        }
+        let row_style = Style {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Row,
+            align_items: Some(AlignItems::FLEX_START),
+            size: Size { width: percent(1.0), height: auto() },
+            ..Default::default()
+        };
+        if let Ok(row) = taffy_tree.new_with_children(row_style, &row_children) {
+            direct.push(row);
+        }
+        // Siblings before the float keep their normal-flow positions;
+        // zone-external siblings (clear, later floats) recurse normally.
+        for child in child_ids[..float_idx]
+            .iter()
+            .chain(child_ids[zone_end..].iter())
+        {
+            let child = *child;
+            let is_text = tree.with_node(child, |n| n.is_text()).unwrap_or(false);
+            let child_tag = tree
+                .with_node(child, |n| n.as_element().map(|e| e.local.to_string()))
+                .flatten()
+                .unwrap_or_default();
+            let child_display = styles
+                .get(&child)
+                .and_then(|s| s.display)
+                .or(if is_text { Some(CssDisplay::Inline) } else { Some(CssDisplay::Block) });
+            let inline_level = matches!(child_display, Some(CssDisplay::Inline));
+            let out_of_flow = styles.get(&child).is_some_and(|s| {
+                matches!(s.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
+            });
+            if !is_text && is_replaced_tag(&child_tag) {
+                let leaf = build_replaced_leaf(tree, child, styles, images, taffy_tree, node_map);
+                if let Some(leaf) = leaf {
+                    if inline_level && !atomic_container && !out_of_flow {
+                        run.push(RunSeg::Nodes(vec![leaf]));
+                    } else {
+                        flush_run(&mut run, &mut direct, taffy_tree);
+                        direct.push(leaf);
+                    }
+                }
+                continue;
+            }
+            if is_text {
+                let text = tree.with_node(child, |n| n.text_content_of_text_node().unwrap_or("").to_string()).unwrap_or_default();
+                let (fs, b) = font_context(tree, child, styles);
+                let fs = if styles.get(&child).is_some() { fs } else { font_size };
+                let col = color_context(tree, child, styles);
+                run.push(RunSeg::Text(text, fs, b, col));
+            } else if inline_level && !atomic_container && !out_of_flow {
+                let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map);
+                if let Some(sub) = sub {
+                    let sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
+                    run.push(RunSeg::Nodes(sub_children));
+                    let _ = taffy_tree.remove(sub);
+                }
+            } else {
+                flush_run(&mut run, &mut direct, taffy_tree);
+                if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map) {
+                    direct.push(node);
+                }
+            }
+        }
+        flush_run(&mut run, &mut direct, taffy_tree);
+
+        let taffy_style = to_taffy_style(&style);
+        let node = if direct.is_empty() {
+            taffy_tree.new_leaf(taffy_style).ok()?
+        } else {
+            taffy_tree.new_with_children(taffy_style, &direct).ok()?
+        };
+        node_map.insert(node, id);
+        return Some(node);
+    }
+
     for child in child_ids {
         let is_text = tree.with_node(child, |n| n.is_text()).unwrap_or(false);
         let child_tag = tree
@@ -2000,6 +2197,92 @@ mod bridge_cross_check {
         let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW);
         (doc, tree, styles, rects)
     }
+
+    // ── Batch 8b: float zone reified as [float | flow-column] flex row ──────
+    //
+    // Blitz (pinned rev, default features) has NO float support — its
+    // `floats` feature is off and enabling it here would poison the product
+    // taffy via cargo feature unification. So this series cross-checks
+    // against hand-computed CSS expectations instead; the reference strategy
+    // is upstream obscura-render's build_children_with_float_zone.
+
+    /// The canonical shape: a floated box at the container's left edge with
+    /// following siblings wrapping alongside it. Hand-computed contract:
+    /// float at (0, 0) keeping its authored size/margins; the flow column's
+    /// left edge = float's right margin edge; column width = container minus
+    /// the float's margin box; a cleared sibling drops BELOW both and runs
+    /// full width again.
+    #[test]
+    fn float_left_wraps_following_siblings_into_flow_column() {
+        let html = r#"<body>
+            <div id="fl"></div>
+            <p id="p1">旁流文本</p>
+            <div id="after" style="clear: both"></div>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #fl { float: left; width: 200px; height: 300px; }
+            #p1 { margin: 0; font-size: 16px; height: 40px; }
+            #after { width: 500px; height: 20px; margin: 0; }
+        "#;
+
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW);
+
+        let fl = tree.query_selector("#fl").unwrap().unwrap();
+        let p1 = tree.query_selector("#p1").unwrap().unwrap();
+        let after = tree.query_selector("#after").unwrap().unwrap();
+
+        let f = rects[&fl];
+        assert!((f.x - 0.0).abs() < EPS as f32 && (f.y - 0.0).abs() < EPS as f32,
+            "float sits at the containing block's top-left: {f:?}");
+        assert!((f.width - 200.0).abs() < EPS as f32, "float keeps authored width: {f:?}");
+
+        let p = rects[&p1];
+        assert!((p.x - 200.0).abs() < EPS as f32,
+            "flow sibling starts at the float's right edge: {p:?}");
+        assert!((p.y - 0.0).abs() < EPS as f32, "first flow sibling is beside the float, not below");
+        let col_width = VW - 200.0;
+        assert!((p.width - col_width).abs() <= 2.0 * EPS as f32,
+            "column width = container − float: {} vs {col_width}", p.width);
+
+        let a = rects[&after];
+        assert!((a.x - 0.0).abs() < EPS as f32, "cleared sibling returns to full width: {a:?}");
+        assert!(a.y >= f.y + f.height - EPS as f32,
+            "clear:both moves below the float bottom: a.y={} float.bottom={}", a.y, f.y + f.height);
+    }
+
+    /// The right-float variant of the same zone: the float hugs the
+    /// container's RIGHT edge and the flow column takes the left remainder.
+    #[test]
+    fn float_right_hugs_container_right_edge() {
+        let html = r#"<body>
+            <div id="fr"></div>
+            <p id="p1">旁流文本</p>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #fr { float: right; width: 150px; height: 200px; }
+            #p1 { margin: 0; font-size: 16px; height: 40px; }
+        "#;
+
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW);
+
+        let fr = rects[&tree.query_selector("#fr").unwrap().unwrap()];
+        let p1 = rects[&tree.query_selector("#p1").unwrap().unwrap()];
+
+        assert!((fr.x - (VW - 150.0)).abs() < EPS as f32,
+            "right float at container right edge: x={} want {}", fr.x, VW - 150.0);
+        assert!((p1.x - 0.0).abs() < EPS as f32, "flow column starts at the left edge");
+        assert!((p1.width - (VW - 150.0)).abs() <= 2.0 * EPS as f32,
+            "column width excludes the right float: {} vs {}", p1.width, VW - 150.0);
+    }
+
 
     /// Authored box geometry + block stacking: the part of layout both
     /// engines must agree on exactly.

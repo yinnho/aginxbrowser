@@ -1293,3 +1293,26 @@ none→None）、`clear_side: Option<ClearSide>`（Left/Right/Both）；apply_on
 分发 `float`/`clear` 两属性；supports_declaration 探针同步。测试
 440→442：值解析（含显式 initial 值归 None、非法值整条丢弃）、探针语法
 （`0` 经既有 unitless-zero 通配放行，与所有关键字属性一致——记录在案）。
+
+## 37. 批次 8b 完成（2026-08-24）：单 float 旁流列——zone 物化为 flex 行
+
+**实现**：build_element 子分派前加 float zone 检测——存在 float 子节点
+时把 `[float | 匿名 flow column]` 物化成 flex row（上游策略①）：
+
+- float 盒 blockify 为行首项（右浮为行尾项——CSS 右浮贴 inline-end），
+  自身 margin/width 原样保留
+- flow column 是匿名 block 容器（flex-grow:1 / basis:0 / min-width:0），
+  装 zone 内全部 flow 兄弟；不进 node_map，collect 直穿到真实子级，
+  Bg/Text/Image 收集零改动
+- zone 终止：clear 该侧的兄弟（clearfix 惯用法）或下一个 float；
+  高度预算估算（上游 estimate_float_height）挂账后续批次
+- zone 外兄弟（float 前、clear 起）走原有正常流路径
+
+**测试**（442→444，手算期望——blitz 无 float 支持见 §36）：
+`float_left_wraps_following_siblings_into_flow_column`——左浮 (0,0) 保
+authored 尺寸；旁流列 x=200（浮右缘）、宽=容器−浮；clear:both 兄弟落
+浮底之下回到全宽。`float_right_hugs_container_right_edge`——右浮 x=
+VW−150 贴右缘、旁流列从左缘起宽 VW−150。
+
+**修 bug 一枚**：首版合成行固定 [float|column]，右浮落在 x=0——CSS
+语义右浮应贴行尾，改为按 float_side 决定 float 在行首还是行尾。
