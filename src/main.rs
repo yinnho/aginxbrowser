@@ -31,6 +31,9 @@ mod diting_dom;
 mod diting_net;
 mod diting_js;
 mod diting_browser;
+// Cascade layer absorbed from upstream obscura-render (read-only slice,
+// not yet wired to the product pipeline — see docs/engine/render.md).
+mod diting_css;
 
 use server::{do_click, do_eval, do_fetch, do_search, SearchError};
 use render::smart_fetch;

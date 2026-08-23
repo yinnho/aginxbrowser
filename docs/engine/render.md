@@ -266,3 +266,40 @@ rect 匹配（blitz 保留节点），box 为 0x0——基线锁的是这个诚�
 [[blitz-rendering-spike]] 历次部署记录），不入 CI。
 
 358 测试全绿（+4 基线 +1 stealth 组合下的 cfg_attr 修正）。
+
+## 9. 批次 1 完成（2026-08-23）：diting_css cascade 只读复刻（最小竖切）
+
+新建 `src/diting_css/mod.rs`（~800 行含测试，14 测试），从上游 css.rs/style.rs
+切出 cascade 层最小可用竖切。**未接产品管线**——模块级
+`#![cfg_attr(not(test), allow(dead_code))]` 就是其只读状态的诚实声明（批次 3
+三档政策的第 2 档）。
+
+**竖切范围**：
+- **Stylesheet 解析**：手写 tokenizer（注释/嵌套括号/引号感知）+ at-rule 分发
+  （@media/@supports/@layer 进规则体；@font-face/@import/@keyframes 丢弃）+
+  上游同款错误恢复（顶层杂散 `}` 重同步，remoteok.com 真实案例）。
+- **@media 求值**：逗号列表=OR（函数内逗号不分隔）、`not` 前缀取反、
+  `screen and (min-width: …)` 链、纯 feature 查询隐含 `all`（print 下也适用，
+  spec 行为已锁进测试）、宽度/高度四类 feature。Tailwind 断点形态全覆盖。
+- **@supports 求值**：not/and/or 组合（同级混用判无效，CSS Conditional 规则）+
+  声明探针（属性在支持集内且值合法；`(display: nonsense)` 正确 false）。
+- **ComputedStyle 最小子集**：display/color/background/margin/padding/
+  font-size/font-weight/text-align + CSS 1-4 值展开 + named/hex 色解析 +
+  unitless 非零长度拒绝（upstream 2c12b5a）+ UA 默认（inline 标签清单/b·strong
+  加粗）+ 继承语义（color/font-size/text-align 从父级，author 覆盖继承）。
+- **cascade_element**：UA ← author（specificity→source order 排序应用）← inline；
+  specificity 由我们自己的 diting_dom compile_rule_selector 提供。
+
+**与上游的差距（诚实清单）**：537 属性 vs 我们的 ~15；无 container query/
+keyframes/property 注册/层优先级/shadow scope/CSS Nesting denest（上游的
+denest 处理 Tailwind v4 嵌套，我们暂丢弃嵌套块）；颜色仅 named/hex 无 rgb()。
+
+**踩坑记档**：①测试初版断言「纯 feature 查询不适用于 print」——错，spec 规定
+隐含 all，已按 spec 锁行为；②`:where(article)` 匹配的是 article 元素而非其
+子元素——端到端测试语义修正；③`not print` 的 `not` 后不能 trim 字母（会把
+print 也吞掉变成空串误判 all）；④嵌套规则块 `&:hover{}` 会以 `(选择器, 体)`
+形式漏进声明对，需按 value 含 `{` 过滤。
+
+372 测试全绿（352→372），双构建 0 警告。下一步=批次 2（dom.rs 布局桥）或先
+把 diting_css 对接 screenshot.rs 做「双引擎对照」（Blitz Stylo vs diting_css
+在同一页面的 computed style diff），后者能提前暴露语义分歧。
