@@ -1264,3 +1264,32 @@ radius/7d 圆角联动）。挂账剩余：GIF 首帧、srcset/picture、HTTP �
 **图片通路收官**：PNG/JPEG/WebP/GIF 四格式齐备（data:URL PNG + 网络字
 节表双通路），与 blitz 同一 image 解码器、RGBA 位相同。挂账剩余：
 srcset/picture、HTTP 缓存头层、动图多帧。下一批候选：float 布局大项。
+
+## 36. 批次 8 探底 + 8a 完成（2026-08-24）：float/clear 解析
+
+**探底结论**（float 大项的参照契约必须先立）：
+
+1. **blitz 不能当 float 参照**——`floats` feature 不在 default（blitz-dom
+   Cargo.toml L32：`floats = ["taffy/float_layout", "stylo_taffy/floats"]`）。
+   钉的 rev 下 blitz 把 float 元素当普通盒（inline.rs 里
+   `#[cfg(not(feature = "floats"))] let is_floated = false`）。且开启会经
+   cargo 特性统一污染产品侧 taffy 行为（Cargo.toml taffy 注释明令禁止）。
+   → **本批系列改用结构测试 + 手算期望**，偏差来源记录在案。
+2. **taffy float_layout**（864b4fd compute/float.rs，777 行）：Segment
+   段算法，CSS2 浮动九规则注释齐全。实验性、未开。
+3. **上游 obscura-render 路线**：树构建期启发式重组
+   （`build_children_with_float_zone`）——识别 float 形状后合成 flex 行/
+   列表示，四套策略：①单 float+旁流列（flex row: float | flex:1 block
+   column）；②连续 float run 包裹行；③对侧 float space-between 行；
+   ④右浮导航条 [flow|reversed right-group]。zone 终止靠 clear 或高度预算
+   估算（estimate_float_height）。另有跨 BFC 二次 pass
+   （apply_float_continuations：首遍布局拿真实矩形→收窄后续相交块→终遍）。
+
+**批次拆解**：8a 解析（本批）→ 8b 单 float 旁流列核心形状 → 8c 连续
+float run → 8d 对侧 float 对。跨 BFC continuation 挂账。
+
+**8a 实现**：ComputedStyle 加 `float_side: Option<FloatSide>`（Left/Right，
+none→None）、`clear_side: Option<ClearSide>`（Left/Right/Both）；apply_one
+分发 `float`/`clear` 两属性；supports_declaration 探针同步。测试
+440→442：值解析（含显式 initial 值归 None、非法值整条丢弃）、探针语法
+（`0` 经既有 unitless-zero 通配放行，与所有关键字属性一致——记录在案）。

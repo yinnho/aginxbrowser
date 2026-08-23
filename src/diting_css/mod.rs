@@ -373,6 +373,7 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "text-align", "border", "border-color", "border-width", "border-style",
         "width", "height", "flex-direction", "gap", "overflow",
         "object-fit", "object-position", "z-index", "border-radius",
+        "float", "clear",
     ];
     if !SUPPORTED.contains(&name.to_ascii_lowercase().as_str()) {
         return false;
@@ -410,6 +411,8 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
                 .all(|s| matches!(s, "left" | "top" | "center" | "right" | "bottom") || part(s))
         }
         "z-index" => value == "auto" || value.parse::<i32>().is_ok(),
+        "float" => matches!(value, "left" | "right" | "none"),
+        "clear" => matches!(value, "left" | "right" | "both" | "none"),
         "border-radius" => {
             // 1-4 radii, optionally `/` plus 1-4 vertical radii.
             let (horiz, vert) = match value.split_once('/') {
@@ -512,6 +515,10 @@ pub struct ComputedStyle {
     /// `None` when no border-radius is declared; the uniform 1-value case
     /// fills all four pairs identically.
     pub corner_radii: Option<[(Length, Length); 4]>,
+    /// `float` (batch 8a), non-inherited; None = none (the initial value).
+    pub float_side: Option<FloatSide>,
+    /// `clear`, non-inherited; None = none.
+    pub clear_side: Option<ClearSide>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -520,6 +527,22 @@ pub enum PositionMode {
     Relative,
     Absolute,
     Fixed,
+}
+
+/// `float` keyword (batch 8a). `None` (the initial value) stays None on
+/// [`ComputedStyle`] — only floated boxes carry a side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatSide {
+    Left,
+    Right,
+}
+
+/// `clear` keyword: which side(s)' floats an element must move below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClearSide {
+    Left,
+    Right,
+    Both,
 }
 
 /// Border line style. Only `Solid` paints faithfully in this slice; the
@@ -1170,6 +1193,25 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             };
             true
         }
+        "float" => {
+            style.float_side = match v {
+                "left" => Some(FloatSide::Left),
+                "right" => Some(FloatSide::Right),
+                "none" => None,
+                _ => return false,
+            };
+            true
+        }
+        "clear" => {
+            style.clear_side = match v {
+                "left" => Some(ClearSide::Left),
+                "right" => Some(ClearSide::Right),
+                "both" => Some(ClearSide::Both),
+                "none" => None,
+                _ => return false,
+            };
+            true
+        }
         "top" => {
             style.top = len(v);
             style.top.is_some()
@@ -1540,6 +1582,44 @@ mod tests {
     use super::*;
 
     // ---- stylesheet parsing ----
+
+    #[test]
+    fn float_and_clear_parse_into_style() {
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "float: left");
+        assert_eq!(s.float_side, Some(FloatSide::Left));
+        assert_eq!(s.clear_side, None);
+
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "float: right; clear: both");
+        assert_eq!(s.float_side, Some(FloatSide::Right));
+        assert_eq!(s.clear_side, Some(ClearSide::Both));
+
+        // Explicit initial values compute to None.
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "float: none; clear: none");
+        assert_eq!(s.float_side, None);
+        assert_eq!(s.clear_side, None);
+
+        // Invalid values drop the declaration (style stays default).
+        let mut s = ComputedStyle::default();
+        assert!(!apply_declarations(&mut s, "float: top"));
+        assert!(!apply_declarations(&mut s, "clear: all"));
+        assert!(!apply_declarations(&mut s, "clear: inline-start"));
+        assert_eq!(s, ComputedStyle::default());
+    }
+
+    #[test]
+    fn float_clear_probe_matches_grammar() {
+        assert!(supports_declaration("float", "left"));
+        assert!(supports_declaration("float", "right"));
+        assert!(supports_declaration("float", "none"));
+        assert!(!supports_declaration("float", "top"));
+        assert!(supports_declaration("clear", "both"));
+        assert!(!supports_declaration("clear", "inline-start"), "not in our grammar yet");
+        // `0` passes the probe's shared unitless-zero gate (the same wildcard
+        // every keyword property gets); the value parser itself declines it.
+    }
 
     #[test]
     fn parse_color_rgb_function_forms() {
