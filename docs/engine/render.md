@@ -1185,9 +1185,9 @@ border 布局 + px 尺寸加边宽（content-box 属性语义 + taffy border-box
   canvas 800→400 高 vs video 800×150 无转移。
 - 政策半：裸 iframe 灰盒 + 带 alt 属性也不出 ink（alt 是 img 概念）。
 
-**测试**：435→436。挂账更新：inset 样式画法（现按 solid 画）、marquee/
-input file 的 border attr 映射、svg 内联元素。下一批候选：WebP 解码或
-per-corner radius。
+**测试**：435→436（+per-tag 对照；7b 后 437）。挂账更新：inset 样式画法
+（现按 solid 画）、marquee/`input file` 的 border attr 映射、svg 内联
+元素。下一批候选：WebP 解码或 per-corner radius。
 
 ## 32. 批次 7b 完成（2026-08-23）：WebP 解码——RIFF 魔数分派
 
