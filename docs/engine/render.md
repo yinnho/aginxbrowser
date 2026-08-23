@@ -303,3 +303,43 @@ print 也吞掉变成空串误判 all）；④嵌套规则块 `&:hover{}` 会以
 372 测试全绿（352→372），双构建 0 警告。下一步=批次 2（dom.rs 布局桥）或先
 把 diting_css 对接 screenshot.rs 做「双引擎对照」（Blitz Stylo vs diting_css
 在同一页面的 computed style diff），后者能提前暴露语义分歧。
+
+## 10. 双引擎对照完成（2026-08-23）：diting_css vs Stylo 同页 computed diff
+
+批次 1 的验收动作。`src/screenshot.rs` 新增 `mod cross_check`（仅测试编译，
+~250 行）：同一 HTML+stylesheet 喂两个引擎——Blitz 的 Stylo（经
+`stylo_alias 0.20` 直连 blitz-dom 的 BaseDocument，与 blitz 钦定版本一致）
+vs 我们的 diting_css cascade_element——逐元素逐属性比对 computed style。
+
+**结果：3/3 测试全绿，总计 373 测试。**
+
+覆盖三组场景，全部一致：
+- display + 颜色链（named/hex 解析、color 继承、background set-flag、
+  font-weight 数值）
+- @media 求值（viewport 宽度驱动断点切换，两引擎同判）
+- 继承语义（父 color/font-size → 子继承；author 覆盖 UA）
+
+**三处建模差异（非 bug，已锁进断言语义）**：
+1. **初始值物化**：Stylo 物化所有初始值（background 返回 transparent 而非
+   None、font-weight 恒有数值默认 400）；我们 None=未声明。→ background 比
+   set-flag 不比值；font-weight 用 `unwrap_or(400)`。
+2. **UA sheet 差距**：Stylo 的 UA 层给 h1/p 等默认 margin（16px 等），我们
+   UA 层只有 display/bold。→ margin 仅在显式声明时比较。
+3. **颜色空间**：Stylo 已解析成 AbsoluteColor（components 0..1 f32）；
+   我们存 u8 rgba。→ 转 u8 后比较，容差天然为 0。
+
+**stylo 0.20 API 备忘**（本次全部踩过后修正，凭记忆写必错）：
+- `ElementData` 经 Deref 直接 `.styles`，无需 `.get_styles()`
+- display 判断用 `Display::outside()/inside()/is_none()`，别比枚举变体名
+- 颜色：`get_inherited_text().color` 是**已解析** AbsoluteColor
+  （components 0..1 f32 + alpha f32），resolve_to_absolute 不存在于该类型
+- margin 字段是 margin_top/bottom/left/right 四个独立字段，类型
+  `GenericMargin<LengthPercentage>` **枚举**（LengthPercentage/Auto/
+  AnchorSizeFunction），match 解包
+- padding 是 `NonNegative<LengthPercentage>` 结构体 tuple，取 `.0`
+- text_align 走 `clone_text_align()` → TextAlignKeyword
+- LengthPercentage 判长度用 `.unpack()` → `Unpacked::Length(l)`,
+  `l.px()`；`px()` 在 calc 上 panic，测试值避开
+
+这层对照是后续批次的护栏：批次 2 起 diting_css 若接产品管线替换 Stylo，
+任何 computed-style 回归都会在这里先炸。

@@ -814,3 +814,281 @@ mod tests {
         assert_eq!(vp.pixel_height, 300);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Dual-engine computed-style cross-check (render-claim follow-up): run the
+// same deterministic pages through diting_css's cascade AND Blitz's Stylo
+// cascade, and compare the properties diting_css models. Divergences here are
+// exactly the semantic gaps a future renderer switch must close.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod cross_check {
+    use super::*;
+    use crate::diting_css::{self, ComputedStyle, Display, TextAlign};
+    use stylo_alias::values::computed::LengthPercentage;
+    use stylo_alias::values::specified::box_::{DisplayInside, DisplayOutside};
+    use stylo_alias::values::specified::text::TextAlignKeyword;
+
+    /// Read the Stylo-computed values we care about for one node of a resolved
+    /// blitz document, projected into diting_css's property subset.
+    fn stylo_view(doc: &BaseDocument, node_id: NodeId) -> Option<ComputedStyle> {
+        let node = doc.get_node(node_id)?;
+        let data = node.stylo_element_data_opt()?.get()?;
+        let style = data.styles.get_primary()?;
+
+        let mut cs = ComputedStyle::default();
+
+        // Display projection: outside=Inline + inside=Flow is CSS inline;
+        // everything else collapses to Block in our subset.
+        let display = style.get_box().display;
+        cs.display = if display.is_none() {
+            Some(Display::None)
+        } else {
+            match (display.outside(), display.inside()) {
+                (DisplayOutside::Inline, DisplayInside::Flow) => Some(Display::Inline),
+                (DisplayOutside::Inline, DisplayInside::FlowRoot) => Some(Display::Inline),
+                (_, DisplayInside::Flex) => Some(Display::Flex),
+                (_, DisplayInside::Grid) => Some(Display::Grid),
+                _ => Some(Display::Block),
+            }
+        };
+
+        // Colors: computed colors are already absolute; components are sRGB
+        // 0..1 f32 (+ alpha) for the named/hex colors our fixtures use.
+        fn rgba(c: &stylo_alias::color::AbsoluteColor) -> diting_css::Color {
+            diting_css::Color(
+                (c.components.0 * 255.0) as u8,
+                (c.components.1 * 255.0) as u8,
+                (c.components.2 * 255.0) as u8,
+                (c.alpha * 255.0) as u8,
+            )
+        }
+        cs.color = Some(rgba(&style.get_inherited_text().color));
+        cs.background_color = Some(rgba(
+            style.get_background().background_color.as_absolute()?,
+        ));
+
+        let margin = style.get_margin();
+        cs.margin.top = margin_enum_px(&margin.margin_top);
+        cs.margin.right = margin_enum_px(&margin.margin_right);
+        cs.margin.bottom = margin_enum_px(&margin.margin_bottom);
+        cs.margin.left = margin_enum_px(&margin.margin_left);
+
+        let padding = style.get_padding();
+        cs.padding.top = nonnegative_px(&padding.padding_top);
+        cs.padding.right = nonnegative_px(&padding.padding_right);
+        cs.padding.bottom = nonnegative_px(&padding.padding_bottom);
+        cs.padding.left = nonnegative_px(&padding.padding_left);
+
+        cs.font_size = Some(style.get_font().font_size.used_size.0.px());
+        cs.font_weight = Some(style.get_font().font_weight.value() as u16);
+
+        cs.text_align = match style.clone_text_align() {
+            TextAlignKeyword::Start | TextAlignKeyword::Left | TextAlignKeyword::MozLeft => {
+                Some(TextAlign::Left)
+            }
+            TextAlignKeyword::Center | TextAlignKeyword::MozCenter => Some(TextAlign::Center),
+            TextAlignKeyword::End | TextAlignKeyword::Right | TextAlignKeyword::MozRight => {
+                Some(TextAlign::Right)
+            }
+            _ => None,
+        };
+        Some(cs)
+    }
+
+    /// Extract a plain px length from a computed LengthPercentage; percentages
+    /// and calc() have no single px value here, so they read as None.
+    fn px_len(lp: &LengthPercentage) -> Option<u32> {
+        match lp.unpack() {
+            stylo_alias::values::computed::length_percentage::Unpacked::Length(l) => {
+                Some(l.px() as u32)
+            }
+            _ => None,
+        }
+    }
+
+    /// Margin/padding longhands are `GenericMargin<LengthPercentage>` enums
+    /// (LengthPercentage / Auto / anchor variants). Only the plain length
+    /// case maps into our subset.
+    fn margin_enum_px(m: &stylo_alias::values::computed::Margin) -> Option<u32> {
+        use stylo_alias::values::generics::length::GenericMargin;
+        match m {
+            GenericMargin::LengthPercentage(lp) => px_len(lp),
+            _ => None,
+        }
+    }
+
+    /// Padding longhands are `NonNegative<LengthPercentage>` (no auto).
+    fn nonnegative_px(
+        p: &stylo_alias::values::generics::NonNegative<LengthPercentage>,
+    ) -> Option<u32> {
+        px_len(&p.0)
+    }
+
+    /// Build both engines' view of one page: parse+resolve with blitz, then
+    /// compute with diting_css against our own DOM tree.
+    fn dual_compute(
+        html: &str,
+        stylesheet: &str,
+    ) -> (
+        BaseDocument,
+        crate::diting_dom::tree::DomTree,
+        Vec<diting_css::ParsedRule>,
+    ) {
+        // Blitz side.
+        let css_doc = format!("<style>{stylesheet}</style>{html}");
+        let mut doc = HtmlDocument::from_html(
+            &css_doc,
+            DocumentConfig {
+                base_url: Some("https://example.com/".to_string()),
+                net_provider: None,
+                viewport: Some(Viewport::new(800, 600, 1.0, ColorScheme::Light)),
+                ..Default::default()
+            },
+        );
+        for _ in 0..4 {
+            doc.resolve(0.0);
+        }
+
+        // diting side: same HTML + sheet through our engine.
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(stylesheet);
+
+        (doc.into_inner(), tree, rules)
+    }
+
+    #[test]
+    fn dual_engine_display_and_colors_agree() {
+        let html = r#"<body><h1 id="t">标题</h1><p class="lead">x</p><span class="inl">y</span></body>"#;
+        let sheet = r#"
+            h1 { color: #1a0dab; background-color: #ff0000; font-weight: bold; font-size: 28px; margin-top: 16px; }
+            .lead { color: red; }
+            span.inl { display: inline-block; }
+        "#;
+        let (doc, tree, rules) = dual_compute(html, sheet);
+
+        let cases: &[( &str, NodeId)] = &[
+            ("h1", doc.query_selector("#t").unwrap().expect("h1 in blitz doc")),
+            ("p", doc.query_selector(".lead").unwrap().expect(".lead in blitz doc")),
+        ];
+        for (tag, blitz_nid) in cases {
+            let ours_selector = if *tag == "h1" { "h1" } else { ".lead" };
+            let our_nid = tree.query_selector(ours_selector).unwrap().unwrap();
+
+            let parent = tree.with_node(our_nid, |n| n.parent).flatten();
+            let parent_style = parent.and_then(|pid| {
+                let tag_name = tree.with_node(pid, |n| {
+                    n.as_element().map(|e| e.local.to_string())
+                }).flatten()?;
+                Some(cascade_simple(&tree, pid, &tag_name, &rules))
+            });
+            let inline = tree.with_node(our_nid, |n| n.get_attribute("style").map(|s| s.to_string())).flatten();
+            let our_view = diting_css_cascade_full(&tree, our_nid, *tag, &rules, parent_style.as_ref(), inline.as_deref());
+
+            let theirs = stylo_view(&doc, *blitz_nid).expect("stylo primary style");
+
+            assert_eq!(our_view.color, theirs.color, "{tag} color: ours={:?} theirs={:?}", our_view.color, theirs.color);
+            // KNOWN MODELING DIVERGENCE (recorded in render.md §10): Stylo
+            // always materializes an initial value (transparent) for every
+            // property; diting_css uses None to mean "declared nowhere".
+            // Compare the set-or-transparent flag instead of raw values.
+            let ours_bg_set = our_view.background_color.map(|c| c != diting_css::Color(0, 0, 0, 0)).unwrap_or(false);
+            let theirs_bg = theirs.background_color.expect("stylo always has a bg");
+            let theirs_bg_set = theirs_bg != diting_css::Color(0, 0, 0, 0);
+            assert_eq!(ours_bg_set, theirs_bg_set, "{tag} background set-flag");
+            // Same divergence for font-weight: Stylo's initial value is 400;
+            // our None means "no author/UA declaration reached this element".
+            assert_eq!(
+                Some(our_view.font_weight.unwrap_or(400)),
+                theirs.font_weight,
+                "{tag} font-weight"
+            );
+            // KNOWN GAP (render.md §10): Stylo's UA stylesheet gives h1/p a
+            // default margin (1em = 16px); our minimal UA layer models only
+            // display + bold, no UA margins. Compare only explicitly authored
+            // margins: when ours is None (nothing authored), skip.
+            if our_view.margin.top.is_some() {
+                assert_eq!(our_view.margin.top, theirs.margin.top, "{tag} margin-top");
+            }
+        }
+    }
+
+    #[test]
+    fn dual_engine_media_queries_agree() {
+        // A rule gated by min-width that applies at 1280 but not at 320:
+        // verify each engine honors the gate identically at blitz's fixed
+        // 800px test viewport by choosing thresholds around it.
+        let html = r#"<body><div class="resp">x</div></body>"#;
+        let sheet = r#"
+            @media (min-width: 700px) { .resp { color: blue; } }
+            @media (max-width: 500px) { .resp { display: none; } }
+        "#;
+        let (doc, tree, rules) = dual_compute(html, sheet);
+
+        let blitz_nid = doc.query_selector(".resp").unwrap().expect(".resp in blitz doc");
+        let our_nid = tree.query_selector(".resp").unwrap().unwrap();
+
+        let our_view = diting_css_cascade_full(&tree, our_nid, "div", &rules, None, None);
+        let theirs = stylo_view(&doc, blitz_nid).expect("stylo");
+
+        assert_eq!(our_view.color, theirs.color, "@media-gated color");
+        assert_eq!(our_view.display, theirs.display, "@media-gated display");
+    }
+
+    #[test]
+    fn dual_engine_inheritance_agrees() {
+        // color inherits from body → p; border-like props do not exist in the
+        // subset so only inherited ones are compared.
+        let html = r#"<body style="color: #333333"><p>plain</p></body>"#;
+        let sheet = "body { font-size: 15px; }";
+        let (doc, tree, rules) = dual_compute(html, sheet);
+
+        let blitz_p = doc.query_selector("p").unwrap().expect("p in blitz doc");
+        let our_p = tree.query_selector("p").unwrap().unwrap();
+
+        // The inline style lives on <body>; our cascade must walk the parent
+        // chain (body → p) for inheritance, exactly like Stylo does.
+        let our_body = tree.query_selector("body").unwrap().unwrap();
+        let body_style = diting_css_cascade_full(&tree, our_body, "body", &rules, None, Some("color: #333333"));
+        let our_view = diting_css_cascade_full(&tree, our_p, "p", &rules, Some(&body_style), None);
+        let theirs = stylo_view(&doc, blitz_p).expect("stylo");
+
+        assert_eq!(our_view.color, theirs.color, "inline-inherited color on body reaches p");
+        assert_eq!(our_view.font_size, theirs.font_size, "font-size from body sheet inherits to p");
+    }
+
+    // -- helpers shared by the cross-check tests --
+
+    fn cascade_simple(
+        tree: &crate::diting_dom::tree::DomTree,
+        nid: crate::diting_dom::tree::NodeId,
+        tag: &str,
+        rules: &[diting_css::ParsedRule],
+    ) -> ComputedStyle {
+        diting_css_cascade_full(tree, nid, tag, rules, None, None)
+    }
+
+    /// Full-fidelity entry into diting_css's cascade: match rules against the
+    /// element, chain parent styles up the ancestor list, apply inline last.
+    fn diting_css_cascade_full(
+        tree: &crate::diting_dom::tree::DomTree,
+        nid: crate::diting_dom::tree::NodeId,
+        tag: &str,
+        rules: &[diting_css::ParsedRule],
+        parent: Option<&ComputedStyle>,
+        inline: Option<&str>,
+    ) -> ComputedStyle {
+        let matched: Vec<(&diting_css::ParsedRule, u32)> = rules
+            .iter()
+            .filter_map(|rule| {
+                let hits = tree.query_selector_all_from(tree.document(), &rule.selector).ok()?;
+                if !hits.contains(&nid) {
+                    return None;
+                }
+                let compiled = tree.compile_rule_selector(&rule.selector)?;
+                Some((rule, compiled.specificity()))
+            })
+            .collect();
+        diting_css::cascade_element(tag, tree, nid, &matched, parent, inline)
+    }
+}

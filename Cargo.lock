@@ -96,6 +96,7 @@ dependencies = [
  "servo_arc",
  "sha1",
  "sha2",
+ "stylo",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

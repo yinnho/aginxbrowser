@@ -23,9 +23,14 @@ screenshot = [
     "dep:anyrender_vello_cpu",
     "dep:peniko",
     "dep:png",
+    # Direct stylo handle for the dual-engine computed-style cross-check
+    # tests (diting_css vs Stylo) — must match the version blitz pins.
+    "dep:stylo_alias",
 ]
 
 [dependencies]
+# The alias is how blitz-dom names upstream stylo; same crate, same version.
+stylo_alias = { version = "0.20", package = "stylo", optional = true }
 # --- async runtime ---
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
