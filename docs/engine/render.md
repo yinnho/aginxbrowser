@@ -776,3 +776,54 @@ Noto，锁的色彩数/区域像素指标不敏感，无需重定。
 **边界（挂账）**：繁体/日文假名/韩文不在 GB2312（走系统兜底，无系统则
 豆腐）；subset 无 hinting（--no-hinting，与 fixture 同策略）；release
 二进制 +4.9MB（截图构建）；bold 只有 700（300-500 snap 近邻）。
+
+## 19. 批次 4a 完成（2026-08-23）：paint 最小竖切——diting 栈出第一幅图
+
+**动机**：批次 3 止于"测量+单行光栅"；4a 让 diting 栈从几何走向像素——
+背景填充 + 多行文本出图，对照契约从 rect/ink 轮廓升级到**整页像素结构**
+（bg bbox 精确 + ink 分带）。
+
+**共享断行（单一真相）**：measure 的贪心断行抽成 `text::greedy_wrap`
+（`tokens_of` 出 Token{text,width,is_space}）。measure_text_leaf 与
+rasterize_wrapped 消费同一函数——**测量与绘制所见即同一组行**，3a 锁的
+断言语义（边缘空白折叠、断点前空格丢弃、ceil 宽度）只剩一处定义。
+空间在断点持有 pending（随词提交），行尾/断点丢弃；paint 重建行串时
+kerning 差 ≤ 亚像素级，不影响 ±2px ink 契约。
+
+**多行光栅（text.rs rasterize_wrapped）**：wrap_at 复用测量时的可用宽
+（= 直接 taffy 父节点 content_box_width），baseline_i = round(i×lh) +
+baseline_offset（parley 量化模型），tile 高度覆盖全部行 metrics 跨度
+（±1px slack）。TextRaster 增 `top` 字段：tile 行 0 在行盒坐标的 y
+（CJK 负 leading 时 <0，墨溢出盒顶=blitz 同款观感）。blit 核心抽成
+`blit_line`（单行/多行共用 shaping→A8 max-blend→colorize）。
+
+**PaintItem + Canvas（paint.rs 新模块）**：layout_dom_with_paint 在原
+collect 预序遍历里顺带产出文档序 paint 项——`Bg{dom_id,rect,color}`
+（进入元素即推，天然父底子面）+ `Text{...,x,y,wrap_at}`（run 叶）。
+Canvas 直 alpha RGBA8：fill_rect（整数 rect、source-over、裁剪）+
+blit_text。execute 重放列表即成图。**mix run（行内元素混排）本批不绘**
+——它的 flex-row 词叶兜底无 run 上下文，挂账。z-index/border/图片/
+radius 同挂。
+
+**颜色链路**：cascade 里 color 本就继承，但文本节点无 ComputedStyle——
+`color_context` 与 font_context 同款最近祖先步进；run 取首段节点的
+color（与 fs/bold 同近似）。吸收 `rgb()/rgba()` 进 parse_color
+（逗号/空格分隔、百分比通道、0-1 alpha）——旧"out of slice scope"
+断言翻转为已吸收；真实页面最常见 bg 格式不再丢。
+
+**对照（bridge_cross_check::paint_bg_and_wrapped_text_match_blitz）**：
+105px 宽红底 div + 11 汉字（5/5/1 三行），双引擎同 fixture 字节整页渲染
+——blitz: vello_cpu paint_scene；ours: parse→cascade→layout_dom_with_paint
+→execute。断言：bg 四边精确（±1px，rect 契约穿透到像素）；ink 分带数
+==3 且各带顶 ±2px；ink bbox 四边 ±2px。**首跑即绿**（修掉测试自身
+band 计数 bug 后）——全链路（parse→cascade→taffy→断行→swash→合成）
+与 blitz（html5ever→style→taffy→parley→vello_cpu）像素级对齐。
+wrapped_raster_matches_measure_lines 锁测量/绘制 parity（band 数=行数、
+tile 几何推导重算）。
+
+**坑**：band 计数 fold 里拿"上一 band 顶"当"上一 ink 行"比较——每 2 行
+开新 band（8,10,12…），必须记 last_row。Canvas 在私有模块里 pub use
+未被消费会告警，等 screenshot 接线再 re-export。
+
+**测试**：409→414 全绿（+paint 两件、+wrapped parity、+blitz 像素对照、
++rgb() 解析）。

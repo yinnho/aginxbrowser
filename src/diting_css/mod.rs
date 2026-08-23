@@ -1016,6 +1016,33 @@ fn parse_font_weight(v: &str) -> Option<u16> {
 /// Named colors + #rgb/#rrggbbaa hex (the forms real sheets overwhelmingly use).
 pub fn parse_color(v: &str) -> Option<Color> {
     let v = v.trim().to_ascii_lowercase();
+    // rgb()/rgba() — channels as 0-255 or %, alpha 0-1 (batch 4a: the most
+    // common authored background format on real pages, and the one the
+    // paint cross-checks style backgrounds with).
+    if let Some(rest) = v
+        .strip_prefix("rgb(")
+        .or_else(|| v.strip_prefix("rgba("))
+        .and_then(|r| r.strip_suffix(')'))
+    {
+        let nums: Option<Vec<f32>> = rest
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|s| !s.is_empty())
+            .map(|tok| {
+                if let Some(pct) = tok.strip_suffix('%') {
+                    pct.parse::<f32>().ok().map(|p| p * 255.0 / 100.0)
+                } else {
+                    tok.parse::<f32>().ok()
+                }
+            })
+            .collect();
+        let nums = nums?;
+        if nums.len() != 3 && nums.len() != 4 {
+            return None;
+        }
+        let chan = |x: f32| x.round().clamp(0.0, 255.0) as u8;
+        let a = if nums.len() == 4 { (nums[3].clamp(0.0, 1.0) * 255.0).round() as u8 } else { 255 };
+        return Some(Color(chan(nums[0]), chan(nums[1]), chan(nums[2]), a));
+    }
     let named = match v.as_str() {
         "black" => Color(0, 0, 0, 255),
         "white" => Color(255, 255, 255, 255),
@@ -1192,6 +1219,15 @@ mod tests {
     // ---- stylesheet parsing ----
 
     #[test]
+    fn parse_color_rgb_function_forms() {
+        assert_eq!(parse_color("rgb(198, 40, 40)"), Some(Color(198, 40, 40, 255)));
+        assert_eq!(parse_color("rgb(198 40 40)"), Some(Color(198, 40, 40, 255)), "space-separated");
+        assert_eq!(parse_color("rgba(198,40,40,0.5)"), Some(Color(198, 40, 40, 128)));
+        assert_eq!(parse_color("RGB(50%, 0%, 0%)"), Some(Color(128, 0, 0, 255)), "percent + case-insensitive");
+        assert_eq!(parse_color("rgb(1,2)"), None, "wrong arity");
+    }
+
+    #[test]
     fn parse_rules_comments_and_nested_braces() {
         let css = r#"/* header */
             a { color: red; }
@@ -1332,7 +1368,8 @@ mod tests {
         assert_eq!(parse_color("#00ff00"), Some(Color(0, 255, 0, 255)));
         assert_eq!(parse_color("#f00"), Some(Color(255, 0, 0, 255)));
         assert_eq!(parse_color("#ff000080").map(|c| c.3), Some(128));
-        assert_eq!(parse_color("rgb(1,2,3)"), None, "functional colors out of slice scope");
+        // rgb()/rgba() absorbed in batch 4a (was "out of slice scope").
+        assert_eq!(parse_color("rgb(1,2,3)"), Some(Color(1, 2, 3, 255)));
     }
 
     #[test]

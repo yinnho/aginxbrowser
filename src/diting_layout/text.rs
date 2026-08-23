@@ -20,6 +20,11 @@
 //! Batch 3b adds the paint half: [`FontBook::rasterize`] turns a run into an
 //! RGBA tile (swash outline raster) with the baseline placed per parley 0.10's
 //! quantized Chrome-style metrics — see [`baseline_offset`].
+//!
+//! Batch 4a adds the wrapped painter: [`FontBook::rasterize_wrapped`] reuses
+//! the SAME greedy line breaker as the measure path ([`greedy_wrap`]) and
+//! composes the lines into one tile whose box is exactly the box the measure
+//! function reported — measure and paint share one wrap truth.
 
 use std::cell::RefCell;
 
@@ -106,13 +111,6 @@ impl FontBook {
     /// cross-checks against blitz stay within tolerance because both
     /// rasterizers cover the same outlines to within ~a pixel).
     pub fn rasterize(&self, text: &str, font_size: f32, bold: bool, color: [u8; 4]) -> TextRaster {
-        let bytes = self.face(bold);
-        let font = match FontRef::from_index(bytes, 0) {
-            Some(f) => f,
-            None => {
-                return TextRaster { width: 0, height: 0, baseline: 0.0, data: Vec::new() };
-            }
-        };
         let line_height = super::line_height(font_size);
         let m = self.metrics(font_size, bold).unwrap_or(ScaledMetrics {
             ascent: font_size,
@@ -124,11 +122,92 @@ impl FontBook {
         // Tile bounds: one px slack around the font's natural extent. With
         // the fixture's negative leading the baseline-anchored extent starts
         // above the line box, so anchor on baseline ± metrics, not the box.
-        let top = (baseline - m.ascent).floor() as i64 - 1;
-        let bottom = (baseline + m.descent).ceil() as i64 + 1;
-        let height = (bottom - top).max(1) as usize;
+        let top = (baseline - m.ascent).floor() - 1.0;
+        let bottom = (baseline + m.descent).ceil() + 1.0;
+        let height = (bottom - top).max(1.0) as usize;
         let width = self.advance_width(text, font_size, bold).ceil() as usize + 2;
-        let baseline_row = baseline - top as f32;
+
+        let mut alpha = vec![0u8; width * height];
+        self.blit_line(&mut alpha, width, height, text, font_size, bold, 0.0, baseline - top);
+        let data = colorize(&alpha, color);
+        TextRaster { width, height, baseline: baseline - top, top, data }
+    }
+
+    /// A wrapped, multi-line raster of a run (batch 4a) — the paint
+    /// counterpart of `measure_text_leaf`: the SAME [`greedy_wrap`] decides
+    /// the lines, each baseline sits at `round(i × lh) + baseline_offset`,
+    /// and the box height is `lines × lh` — the exact box the measure
+    /// function reported, so a compositor places this tile at the leaf's
+    /// layout origin and the geometry lines up with the layout tree.
+    pub fn rasterize_wrapped(
+        &self,
+        text: &str,
+        font_size: f32,
+        bold: bool,
+        color: [u8; 4],
+        wrap_at: f32,
+    ) -> TextRaster {
+        let empty = || TextRaster {
+            width: 0,
+            height: 0,
+            baseline: 0.0,
+            top: 0.0,
+            data: Vec::new(),
+        };
+        if text.trim().is_empty() {
+            return empty();
+        }
+        let tokens = tokens_of(text, font_size, bold, self);
+        let lines = greedy_wrap(&tokens, Some(wrap_at.max(0.0)));
+        if lines.iter().all(|l| l.width <= 0.0) {
+            return empty();
+        }
+
+        let line_height = super::line_height(font_size);
+        let m = self.metrics(font_size, bold).unwrap_or(ScaledMetrics {
+            ascent: font_size,
+            descent: font_size * 0.2,
+            line_gap: 0.0,
+        });
+        let b0 = baseline_offset(m.ascent, m.descent, line_height);
+        let baselines: Vec<f32> = (0..lines.len() as u32)
+            .map(|i| (i as f32 * line_height).round() + b0)
+            .collect();
+        let top = (baselines[0] - m.ascent).floor() - 1.0;
+        let bottom = (baselines[baselines.len() - 1] + m.descent).ceil() + 1.0;
+        let height = (bottom - top).max(1.0) as usize;
+        let width = lines.iter().map(|l| l.width).fold(0.0, f32::max).ceil() as usize + 2;
+
+        let mut alpha = vec![0u8; width * height];
+        for (line, baseline) in lines.iter().zip(&baselines) {
+            if line.token_idx.is_empty() {
+                continue;
+            }
+            let s: String =
+                line.token_idx.iter().map(|&i| tokens[i].text.as_str()).collect();
+            self.blit_line(&mut alpha, width, height, &s, font_size, bold, 0.0, baseline - top);
+        }
+        let data = colorize(&alpha, color);
+        TextRaster { width, height, baseline: baselines[0] - top, top, data }
+    }
+
+    /// Shape `text` and blit its glyphs into an A8 `alpha` buffer (max
+    /// blend) at pen origin `x0` with the baseline `baseline` rows from the
+    /// tile top — the shared raster core behind [`Self::rasterize`] and
+    /// [`Self::rasterize_wrapped`].
+    fn blit_line(
+        &self,
+        alpha: &mut [u8],
+        width: usize,
+        height: usize,
+        text: &str,
+        font_size: f32,
+        bold: bool,
+        x0: f32,
+        baseline: f32,
+    ) {
+        let bytes = self.face(bold);
+        let Some(font) = FontRef::from_index(bytes, 0) else { return };
 
         // Shape once: absolute x per glyph + y offset from the baseline.
         let mut glyphs: Vec<(f32, f32, GlyphId)> = Vec::new();
@@ -138,14 +217,12 @@ impl FontBook {
             let mut pen = 0.0f32;
             shaper.shape_with(|cluster| {
                 for g in cluster.glyphs {
-                    glyphs.push((pen + g.x, g.y, g.id));
+                    glyphs.push((x0 + pen + g.x, g.y, g.id));
                     pen += g.advance;
                 }
             });
         });
 
-        // Raster + composite into an A8 coverage buffer, then colorize.
-        let mut alpha = vec![0u8; width * height];
         SCALE_CTX.with_borrow_mut(|sctx| {
             let mut scaler = sctx.builder(font).size(font_size).build();
             let render = Render::new(&[Source::Outline]);
@@ -155,7 +232,7 @@ impl FontBook {
                 // blit y = pen_y - top (data rows are ordinary top-down).
                 let Some(img) = render.render(&mut scaler, gid) else { continue };
                 let ox = pen_x.round() as i64 + img.placement.left as i64;
-                let oy = (baseline_row + dy).round() as i64 - img.placement.top as i64;
+                let oy = (baseline + dy).round() as i64 - img.placement.top as i64;
                 for gy in 0..img.placement.height as i64 {
                     let Some(ty) = (oy + gy).checked_sub(0).and_then(|v| usize::try_from(v).ok())
                     else { continue };
@@ -174,16 +251,80 @@ impl FontBook {
                 }
             }
         });
+    }
+}
 
-        let mut data = vec![0u8; width * height * 4];
-        for (i, a) in alpha.into_iter().enumerate() {
-            if a == 0 {
+/// Colorize an A8 coverage buffer into straight-alpha RGBA8.
+fn colorize(alpha: &[u8], color: [u8; 4]) -> Vec<u8> {
+    let mut data = vec![0u8; alpha.len() * 4];
+    for (i, a) in alpha.iter().enumerate() {
+        if *a == 0 {
+            continue;
+        }
+        data[i * 4..i * 4 + 4].copy_from_slice(&[color[0], color[1], color[2], *a]);
+    }
+    data
+}
+
+/// One wrap token — a word, a single space, or a per-glyph CJK char — with
+/// its real shaped advance. The measure path reads `width`/`is_space`; the
+/// paint path (batch 4a) additionally reads `text` to rebuild each line.
+pub(crate) struct Token {
+    pub text: String,
+    pub width: f32,
+    pub is_space: bool,
+}
+
+/// Tokenize a run's trimmed text and shape every token (shared by
+/// `measure_text_leaf` and `rasterize_wrapped`).
+pub(crate) fn tokens_of(text: &str, font_size: f32, bold: bool, fonts: &FontBook) -> Vec<Token> {
+    super::tokenize(text.trim())
+        .into_iter()
+        .map(|t| Token {
+            is_space: t.trim().is_empty(),
+            width: fonts.advance_width(&t, font_size, bold),
+            text: t,
+        })
+        .collect()
+}
+
+/// One greedy-wrapped line: which tokens committed to it and the total
+/// advance. A space only commits together with the word that follows it;
+/// pending spaces at a break point (or at the run's end) are dropped.
+pub(crate) struct WrapLine {
+    pub token_idx: Vec<usize>,
+    pub width: f32,
+}
+
+/// The greedy line breaker — the single wrap truth shared by the measure
+/// path (`measure_text_leaf`) and the paint path (`rasterize_wrapped`),
+/// locked by the batch-3a probes: break before a token that would overflow
+/// `wrap_at`, drop the whitespace before every break.
+pub(crate) fn greedy_wrap(tokens: &[Token], wrap_at: Option<f32>) -> Vec<WrapLine> {
+    let mut lines = vec![WrapLine { token_idx: Vec::new(), width: 0.0 }];
+    let mut pending_space = 0.0f32;
+    let mut pending_idx: Vec<usize> = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if t.is_space {
+            pending_space += t.width;
+            pending_idx.push(i);
+            continue;
+        }
+        let cur = lines.last_mut().expect("always one line");
+        if let Some(avail) = wrap_at {
+            if cur.width > 0.0 && cur.width + pending_space + t.width > avail {
+                lines.push(WrapLine { token_idx: vec![i], width: t.width });
+                pending_space = 0.0;
+                pending_idx.clear();
                 continue;
             }
-            data[i * 4..i * 4 + 4].copy_from_slice(&[color[0], color[1], color[2], a]);
         }
-        TextRaster { width, height, baseline: baseline_row, data }
+        cur.width += pending_space + t.width;
+        cur.token_idx.extend(pending_idx.drain(..));
+        cur.token_idx.push(i);
+        pending_space = 0.0;
     }
+    lines
 }
 
 /// Font vertical metrics scaled to a given size, all in px. `ascent` is the
@@ -218,15 +359,20 @@ pub fn baseline_offset(ascent: f32, descent: f32, line_height: f32) -> f32 {
     a + above
 }
 
-/// A one-line raster of a text run (batch 3b): our minimal paint output.
-/// Straight-alpha RGBA8, row-major; `baseline` records where the baseline
-/// sits so a compositor can place the tile against layout geometry.
+/// A raster of a text run (batch 3b): our minimal paint output.
+/// Straight-alpha RGBA8, row-major. Single-line runs keep the baseline at
+/// [`baseline_offset`]; wrapped runs (batch 4a) place line i's baseline at
+/// `round(i × lh) + baseline_offset`. `top` is tile row 0's y in LINE-BOX
+/// coordinates (≤ 0 when ink overflows the cramped CJK box top): a
+/// compositor blits at `(box_x, box_y + top)`.
 #[derive(Debug)]
 pub struct TextRaster {
     pub width: usize,
     pub height: usize,
-    /// Distance from the tile's top edge to the text baseline, px.
+    /// Distance from the tile's top edge to the FIRST line's baseline, px.
     pub baseline: f32,
+    /// Tile row 0 relative to the line box top (usually ≤ 0), px.
+    pub top: f32,
     /// RGBA8, row-major, straight alpha.
     pub data: Vec<u8>,
 }

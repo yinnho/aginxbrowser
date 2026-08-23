@@ -35,6 +35,7 @@ use crate::diting_css::{
 };
 use crate::diting_dom::tree::{DomTree, NodeId};
 
+pub mod paint;
 pub mod text;
 pub use text::FontBook;
 
@@ -68,7 +69,7 @@ fn is_cjk(c: char) -> bool {
 /// flex-row-of-word-leaves fallback from batch 2b.
 #[derive(Clone)]
 enum TextLeaf {
-    Run { text: String, font_size: f32, bold: bool },
+    Run { text: String, font_size: f32, bold: bool, color: [u8; 4] },
 }
 
 /// Approximate used line height for text leaves. Matches blitz exactly:
@@ -345,12 +346,30 @@ fn font_context(tree: &DomTree, id: NodeId, styles: &HashMap<NodeId, ComputedSty
     (font_size.unwrap_or(16.0), bold.unwrap_or(false))
 }
 
+/// Inherited text color for a node — the same nearest-set ancestor walk as
+/// [`font_context`] (the cascade inherits `color`, but text NODES carry no
+/// ComputedStyle, so the paint side resolves it here). Defaults to black.
+fn color_context(
+    tree: &DomTree,
+    id: NodeId,
+    styles: &HashMap<NodeId, ComputedStyle>,
+) -> [u8; 4] {
+    let mut current = Some(id);
+    while let Some(nid) = current {
+        if let Some(c) = styles.get(&nid).and_then(|s| s.color) {
+            return [c.0, c.1, c.2, c.3];
+        }
+        current = tree.with_node(nid, |n| n.parent).flatten();
+    }
+    [0, 0, 0, 255]
+}
+
 /// Split text into layout tokens. Whitespace runs collapse to a single space
 /// token (CSS text processing) that keeps its width but contributes no
 /// height; CJK chars break per-glyph — UAX#14 allows a break after every
 /// ideograph, and without this a CJK paragraph would be one unbreakable
 /// "word".
-fn tokenize(text: &str) -> Vec<String> {
+pub(crate) fn tokenize(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut word = String::new();
     for ch in text.chars() {
@@ -428,43 +447,18 @@ fn measure_text_leaf(
         return taffy::tree::LayoutOutput::HIDDEN;
     }
     // Token widths (word / single space / per-glyph CJK) with real advances.
-    let tokens: Vec<(f32, bool)> = tokenize(trimmed)
-        .into_iter()
-        .map(|t| {
-            let is_space = t.trim().is_empty();
-            (fonts.advance_width(&t, font_size, bold), is_space)
-        })
-        .collect();
+    let tokens = text::tokens_of(text, font_size, bold, fonts);
+    let widest_token = tokens.iter().map(|t| t.width).fold(0.0, f32::max);
 
     let wrap_at = match inputs.available_space.width {
         taffy::AvailableSpace::Definite(w) => Some(w),
         _ => None,
     };
-    // Greedy wrap. Spaces are held as pending and only committed with the
-    // word that follows them; a pending space at a break (or at the run's
-    // end) is dropped.
-    let mut lines: Vec<f32> = vec![0.0];
-    let mut pending_space = 0.0f32;
-    let mut widest_token = 0.0f32;
-    for (w, is_space) in tokens {
-        widest_token = widest_token.max(w);
-        if is_space {
-            pending_space += w;
-            continue;
-        }
-        let cur = lines.last_mut().expect("always one line");
-        if let Some(avail) = wrap_at {
-            if *cur > 0.0 && *cur + pending_space + w > avail {
-                lines.push(w);
-                pending_space = 0.0;
-                continue;
-            }
-        }
-        *cur += pending_space + w;
-        pending_space = 0.0;
-    }
+    // Greedy wrap over the shared breaker (batch 4a): measure and paint see
+    // the same lines by construction.
+    let lines = text::greedy_wrap(&tokens, wrap_at);
     let min_content = matches!(inputs.available_space.width, taffy::AvailableSpace::MinContent);
-    let max_line = if min_content { widest_token } else { lines.iter().copied().fold(0.0, f32::max) };
+    let max_line = if min_content { widest_token } else { lines.iter().map(|l| l.width).fold(0.0, f32::max) };
     let size = taffy::geometry::Size {
         width: known.width.unwrap_or(max_line.ceil()),
         height: known.height.unwrap_or(lines.len() as f32 * lh),
@@ -577,7 +571,7 @@ fn build_element(
     // greedy wrap, ceiled width) we reproduce in measure_text_leaf. Mixed
     // runs fall back to the batch-2b wrapping flex row of word leaves.
     enum RunSeg {
-        Text(String, f32, bool),
+        Text(String, f32, bool, [u8; 4]),
         Nodes(Vec<taffy::tree::NodeId>),
     }
     let mut direct: Vec<taffy::tree::NodeId> = Vec::new();
@@ -594,10 +588,10 @@ fn build_element(
                 .iter()
                 .map(|s| match s { RunSeg::Text(t, ..) => t.as_str(), _ => "" })
                 .collect::<String>();
-            let RunSeg::Text(_, fs, bold) = &segs[0] else { unreachable!() };
+            let RunSeg::Text(_, fs, bold, color) = &segs[0] else { unreachable!() };
             if let Ok(leaf) = taffy_tree.new_leaf_with_context(
                 Style::default(),
-                TextLeaf::Run { text, font_size: *fs, bold: *bold },
+                TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color },
             ) {
                 direct.push(leaf);
                 return;
@@ -606,7 +600,7 @@ fn build_element(
         let mut leaves: Vec<taffy::tree::NodeId> = Vec::new();
         for seg in segs {
             match seg {
-                RunSeg::Text(text, fs, bold) => {
+                RunSeg::Text(text, fs, bold, _) => {
                     leaves.extend(build_word_leaves(&text, fs, bold, fonts, taffy_tree))
                 }
                 RunSeg::Nodes(nodes) => leaves.extend(nodes),
@@ -654,7 +648,10 @@ fn build_element(
             let text = tree.with_node(child, |n| n.text_content_of_text_node().unwrap_or("").to_string()).unwrap_or_default();
             let (fs, b) = font_context(tree, child, styles);
             let fs = if styles.get(&child).is_some() { fs } else { font_size };
-            run.push(RunSeg::Text(text, fs, b));
+            // First segment's node donates the whole run's color — the same
+            // first-segment approximation fs/bold already use.
+            let col = color_context(tree, child, styles);
+            run.push(RunSeg::Text(text, fs, b, col));
         } else if inline_level && !atomic_container && !out_of_flow {
             // A plain inline wrapper flattens into the enclosing run (upstream
             // is_flattenable_inline): the words wrap at the real block level.
@@ -683,6 +680,29 @@ fn build_element(
     Some(node)
 }
 
+/// One paint primitive in document order (batch 4a) — the minimal output
+/// contract between layout and paint. `Bg` is an element's solid
+/// background-color over its border-box; `Text` is a pure-text run at its
+/// leaf origin, re-wrapped at the width its containing block gave it at
+/// measure time. Borders, images, shadows, and z-index don't exist yet in
+/// this slice; mixed runs (inline elements inside text) still lay out but
+/// paint nothing — their word-leaf fallback carries no run context.
+#[derive(Debug, Clone)]
+pub enum PaintItem {
+    Bg { dom_id: NodeId, rect: Rect, color: [u8; 4] },
+    Text {
+        text: String,
+        font_size: f32,
+        bold: bool,
+        color: [u8; 4],
+        /// Leaf origin (line-box top-left), page px.
+        x: f32,
+        y: f32,
+        /// The wrap width the containing block offered at measure time.
+        wrap_at: f32,
+    },
+}
+
 /// Lay a DOM tree out at a fixed viewport width and return each element's
 /// absolute border-box rect. Elements are keyed by diting_dom NodeId; the
 /// root's containing block is the viewport.
@@ -692,6 +712,18 @@ pub fn layout_dom(
     fonts: &FontBook,
     viewport_width: f32,
 ) -> HashMap<NodeId, Rect> {
+    layout_dom_with_paint(tree, styles, fonts, viewport_width).0
+}
+
+/// [`layout_dom`] plus the paint item list in document order (an element's
+/// `Bg` precedes the items of its subtree, so a solid background lands
+/// under its descendants' ink).
+pub fn layout_dom_with_paint(
+    tree: &DomTree,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    fonts: &FontBook,
+    viewport_width: f32,
+) -> (HashMap<NodeId, Rect>, Vec<PaintItem>) {
     let mut taffy_tree = TaffyTree::new();
     let mut node_map: HashMap<taffy::tree::NodeId, NodeId> = HashMap::new();
 
@@ -703,9 +735,10 @@ pub fn layout_dom(
         .find(|id| tree.with_node(*id, |n| n.is_element()).unwrap_or(false));
 
     let mut rects = HashMap::new();
-    let Some(root_id) = root else { return rects };
+    let mut items: Vec<PaintItem> = Vec::new();
+    let Some(root_id) = root else { return (rects, items) };
     let Some(root_node) = build_element(tree, root_id, styles, fonts, &mut taffy_tree, &mut node_map) else {
-        return rects;
+        return (rects, items);
     };
 
     // Absolute/fixed reparent pass (upstream's containing-block fix-up):
@@ -772,14 +805,14 @@ pub fn layout_dom(
     // (that's exactly what stock compute_layout does below via the same fn).
     let measured = taffy_tree.compute_layout_with_measure(root_node, available, |inputs, _id, ctx, style| {
         match ctx {
-            Some(TextLeaf::Run { text, font_size, bold }) => {
+            Some(TextLeaf::Run { text, font_size, bold, .. }) => {
                 measure_text_leaf(text, *font_size, *bold, fonts, &inputs)
             }
             None => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
         }
     });
     if measured.is_err() {
-        return rects;
+        return (rects, items);
     }
     // Both trees round to the pixel grid inside compute_layout (taffy's
     // use_rounding defaults on; blitz rounds via the same path), so the
@@ -788,27 +821,55 @@ pub fn layout_dom(
     // Accumulate locations down the taffy tree: child location already
     // includes the parent's border+padding offset, so a plain sum is the
     // absolute border-box origin (same accumulation blitz-paint performs).
+    // The same pre-order walk emits paint items: an element's Bg when its
+    // box is recorded, a run's Text at its leaf — document order, parents
+    // before children.
     fn collect(
         taffy_tree: &TaffyTree<TextLeaf>,
         node_map: &HashMap<taffy::tree::NodeId, NodeId>,
+        styles: &HashMap<NodeId, ComputedStyle>,
         rects: &mut HashMap<NodeId, Rect>,
+        items: &mut Vec<PaintItem>,
         node: taffy::tree::NodeId,
         offset: (f32, f32),
+        viewport_width: f32,
     ) {
         let Ok(layout) = taffy_tree.layout(node) else { return };
         let abs = (offset.0 + layout.location.x, offset.1 + layout.location.y);
         if let Some(dom_id) = node_map.get(&node) {
-            rects.insert(
-                *dom_id,
-                Rect { x: abs.0, y: abs.1, width: layout.size.width, height: layout.size.height },
-            );
+            let rect = Rect { x: abs.0, y: abs.1, width: layout.size.width, height: layout.size.height };
+            rects.insert(*dom_id, rect);
+            if let Some(c) = styles.get(dom_id).and_then(|s| s.background_color) {
+                if c.3 != 0 && rect.width > 0.0 && rect.height > 0.0 {
+                    items.push(PaintItem::Bg { dom_id: *dom_id, rect, color: [c.0, c.1, c.2, c.3] });
+                }
+            }
+        }
+        if let Some(TextLeaf::Run { text, font_size, bold, color }) = taffy_tree.get_node_context(node) {
+            // The wrap width the containing block offered at measure time:
+            // the direct taffy parent's content box (the run wrapper for
+            // mixed runs, the block itself for pure runs — same width).
+            let wrap_at = taffy_tree
+                .parent(node)
+                .and_then(|p| taffy_tree.layout(p).ok())
+                .map(|l| l.content_box_width())
+                .unwrap_or(viewport_width);
+            items.push(PaintItem::Text {
+                text: text.clone(),
+                font_size: *font_size,
+                bold: *bold,
+                color: *color,
+                x: abs.0,
+                y: abs.1,
+                wrap_at,
+            });
         }
         for child in taffy_tree.children(node).unwrap_or_default().iter().copied() {
-            collect(taffy_tree, node_map, rects, child, abs);
+            collect(taffy_tree, node_map, styles, rects, items, child, abs, viewport_width);
         }
     }
-    collect(&taffy_tree, &node_map, &mut rects, root_node, (0.0, 0.0));
-    rects
+    collect(&taffy_tree, &node_map, styles, &mut rects, &mut items, root_node, (0.0, 0.0), viewport_width);
+    (rects, items)
 }
 
 #[cfg(test)]
@@ -2104,6 +2165,174 @@ mod bridge_cross_check {
             d("ink bottom below baseline", oy1 as f32 - raster.baseline, by1 as f32 - baseline);
             d("ink left", ox0 as f32, bx0 as f32);
             d("ink right", ox1 as f32, bx1 as f32);
+        }
+    }
+
+    /// Measure/paint wrap parity (batch 4a): the greedy breaker that sizes
+    /// the leaf must be the same one the wrapped raster paints. Locked via
+    /// the tile's ink-band structure, not internal counts — a band per
+    /// line, and the box the tile represents is exactly `lines × lh` tall.
+    #[test]
+    fn wrapped_raster_matches_measure_lines() {
+        use crate::diting_layout::text::baseline_offset;
+
+        let fonts = fixture_fonts();
+        let (text, fs, wrap_at) = ("谛听引擎渲染测试文本行", 20.0f32, 105.0f32);
+        let lh = line_height(fs);
+        let tokens = text::tokens_of(text, fs, false, &fonts);
+        let lines = text::greedy_wrap(&tokens, Some(wrap_at));
+        assert_eq!(lines.len(), 3, "5 glyphs per 105px line, 11 glyphs → 3 lines");
+        assert!((lines[0].width - 100.0).abs() < 0.05, "5 × 1em");
+
+        let r = fonts.rasterize_wrapped(text, fs, false, [0, 0, 0, 255], wrap_at);
+        // One ink band per wrapped line (band = maximal run of ink rows).
+        let band_tops: Vec<usize> = {
+            let mut tops = Vec::new();
+            let mut last_row: Option<usize> = None;
+            for y in 0..r.height {
+                let has_ink = (0..r.width).any(|x| r.data[(y * r.width + x) * 4 + 3] >= 128);
+                if has_ink && last_row.is_none_or(|p| y > p + 1) {
+                    tops.push(y);
+                }
+                if has_ink {
+                    last_row = Some(y);
+                }
+            }
+            tops
+        };
+        assert_eq!(band_tops.len(), 3, "ink bands: one per line, got {band_tops:?}");
+
+        // Tile geometry: first baseline at the model's offset from the box
+        // top, height spanning every line's metrics extent (with the ±1px
+        // slack), and the 3-line box itself (3 × lh) fits inside.
+        let m = fonts.metrics(fs, false).unwrap();
+        let b0 = baseline_offset(m.ascent, m.descent, lh);
+        assert!((r.baseline + r.top - b0).abs() < 0.51);
+        let last_baseline = (2.0 * lh).round() + b0;
+        let want_h =
+            ((last_baseline + m.descent).ceil() - (b0 - m.ascent).floor()) as usize + 2;
+        assert_eq!(r.height, want_h);
+        assert!(r.top <= 0.0 && r.top > -fs, "tile starts above/at the box top");
+    }
+
+    /// First pixels of the diting paint stack vs blitz (batch 4a): a solid
+    /// background block and a 3-line wrapped CJK run, both engines painting
+    /// the SAME fixture glyphs. Contract: background bbox exact (both fill
+    /// taffy-rounded integer rects), one ink band per line with tops within
+    /// the batch-3b ink tolerance, ink bbox edges within ±2px.
+    #[test]
+    fn paint_bg_and_wrapped_text_match_blitz() {
+        let html = r#"<body><div id="t">谛听引擎渲染测试文本行</div></body>"#;
+        let sheet = "body { margin: 0; } #t { width: 105px; background: rgb(198,40,40); font-size: 20px; }";
+
+        // Blitz side: white fill, then paint_scene (the screenshot path).
+        let doc = blitz_doc(html, sheet);
+        let (w, h) = (200u32, 160u32);
+        let mut doc = doc;
+        let blitz = anyrender::render_to_buffer::<anyrender_vello_cpu::VelloCpuImageRenderer, _>(
+            |scene| {
+                use anyrender::PaintScene as _;
+                use peniko::kurbo::Rect;
+                scene.fill(
+                    peniko::Fill::NonZero,
+                    Default::default(),
+                    peniko::Color::WHITE,
+                    Default::default(),
+                    &Rect::new(0.0, 0.0, w as f64, h as f64),
+                );
+                blitz_paint::paint_scene(scene, &mut doc, 1.0, w, h, 0, 0);
+            },
+            w,
+            h,
+        );
+
+        // Our side: the real production path — parse, cascade, layout with
+        // paint items, execute onto a white canvas.
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let fonts = fixture_fonts();
+        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW);
+        let mut ours = paint::Canvas::new_filled(w as usize, h as usize, [255, 255, 255, 255]);
+        paint::execute(&items, &fonts, &mut ours);
+        assert!(
+            items.iter().any(|i| matches!(i, PaintItem::Bg { .. })),
+            "the bg block must emit a Bg item"
+        );
+        assert_eq!(items.iter().filter(|i| matches!(i, PaintItem::Text { .. })).count(), 1);
+
+        // Same scans on both buffers: bg = red-ish, ink = dark (a 50/50 AA
+        // blend of black on red is (99,20,20) — still "dark" by this rule,
+        // and identically so on both sides).
+        let is_bg = |p: &[u8]| (p[0] as i32 - 198).abs() < 30 && (p[1] as i32 - 40).abs() < 30 && (p[2] as i32 - 40).abs() < 30;
+        let is_ink = |p: &[u8]| p[0] < 110 && p[1] < 110 && p[2] < 110;
+
+        fn bbox(buf: &[u8], w: usize, h: usize, hit: impl Fn(&[u8]) -> bool) -> Option<(usize, usize, usize, usize)> {
+            let mut b: Option<(usize, usize, usize, usize)> = None;
+            for y in 0..h {
+                for x in 0..w {
+                    if !hit(&buf[(y * w + x) * 4..]) {
+                        continue;
+                    }
+                    b = Some(match b {
+                        Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                        None => (x, y, x, y),
+                    });
+                }
+            }
+            b
+        }
+        /// Maximal runs of rows containing any hit pixel → their top rows.
+        fn band_tops(buf: &[u8], w: usize, h: usize, hit: impl Fn(&[u8]) -> bool) -> Vec<usize> {
+            let mut tops = Vec::new();
+            let mut last_row: Option<usize> = None;
+            for y in 0..h {
+                let has = (0..w).any(|x| hit(&buf[(y * w + x) * 4..]));
+                if has && last_row.is_none_or(|p| y > p + 1) {
+                    tops.push(y);
+                }
+                if has {
+                    last_row = Some(y);
+                }
+            }
+            tops
+        }
+
+        // Background: exact bbox through pixels (rects were exact in the
+        // batch-2 tests; paint must not lose that).
+        let (obx0, oby0, obx1, oby1) = bbox(&ours.data, w as usize, h as usize, is_bg).expect("our bg painted");
+        let (bbx0, bby0, bbx1, bby1) = bbox(&blitz, w as usize, h as usize, is_bg).expect("blitz bg painted");
+        for (what, o, b) in [
+            ("bg left", obx0, bbx0),
+            ("bg top", oby0, bby0),
+            ("bg right", obx1, bbx1),
+            ("bg bottom", oby1, bby1),
+        ] {
+            assert!((o as i64 - b as i64).abs() <= 1, "{what}: ours={o} blitz={b}");
+        }
+
+        // Ink bands: one per wrapped line, tops within tolerance.
+        let o_tops = band_tops(&ours.data, w as usize, h as usize, is_ink);
+        let b_tops = band_tops(&blitz, w as usize, h as usize, is_ink);
+        assert_eq!(o_tops.len(), 3, "our ink bands: {o_tops:?}");
+        assert_eq!(b_tops.len(), 3, "blitz ink bands: {b_tops:?}");
+        for (i, (o, b)) in o_tops.iter().zip(&b_tops).enumerate() {
+            assert!(
+                (*o as i64 - *b as i64).abs() <= 2,
+                "ink band {i} top: ours={o} blitz={b}"
+            );
+        }
+
+        // Ink bbox within the batch-3b ink tolerance.
+        let (oix0, oiy0, oix1, oiy1) = bbox(&ours.data, w as usize, h as usize, is_ink).expect("our ink painted");
+        let (bix0, biy0, bix1, biy1) = bbox(&blitz, w as usize, h as usize, is_ink).expect("blitz ink painted");
+        for (what, o, b) in [
+            ("ink left", oix0, bix0),
+            ("ink top", oiy0, biy0),
+            ("ink right", oix1, bix1),
+            ("ink bottom", oiy1, biy1),
+        ] {
+            assert!((o as i64 - b as i64).abs() <= 2, "{what}: ours={o} blitz={b}");
         }
     }
 }
