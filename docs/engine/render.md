@@ -547,6 +547,37 @@ in-flow 元素仍双侧对。这对产品 /screenshot 有实际含义：真实�
 /modal（absolute/fixed）在 blitz 截图里可能偏移。值得给上游提 issue 或
 本地补丁（复刻我们这轮 reparent 逻辑到 blitz-dom）。
 
+**定性完成（2026-08-23 续）**：确证为 blitz/taffy 的**真实布局缺口**，
+非我方测量伪影（`absolute_origin` 沿 layout_parent 链求和，与 blitz 自身
+布局自洽）。证据链四条：
+1. blitz 的 taffy 树就是 DOM 树——`BaseDocument` 直接实现
+   `taffy::CacheTree`，`child_ids()`（layout/mod.rs:346）返回
+   `node.layout_children`（`collect_layout_children` 从 DOM children 构建）；
+   全仓无 `add_child/set_children`（没有独立 taffy 树可 reparent）。
+2. `layout_parent` 无差别设成 DOM 递归父级（resolve.rs:278/304），absolute
+   无特判。
+3. taffy 语义（block.rs:725-742, 991-996）：`Position::Absolute` 子元素在
+   **taffy 父级**的布局函数内解析，锚定父级 padding box；静态位 fallback
+   = 父 content box inset。→ 最近 positioned 祖先解析归**建树方**。
+4. 探针实测（rev 2fa6434d，viewport 800×600）：positioned 祖父+静态中间父
+   → #abs blitz (45,6) vs CSS (15,5)；无作者 CSS 的默认页面
+   （UA `body{margin:8px}`）→ `fixed;top:0;left:0` blitz **(8,16)** vs
+   CSS (0,0)；静态父流起点恰为 0 时巧合正确（bug 隐身）。
+
+**上游现状**：DioxusLabs/taffy#212（2022 年至今 OPEN）——taffy 维护者定性
+为「未支持特性」：taffy 不建模 `position:static`，最近 positioned 祖先解析
+归建树方。DioxusLabs/blitz#690（krazyjakee 提，ICB 口味）被关成它的 dup。
+但 #690 的口径是「等 taffy 修」；**blitz 自己在建树时 reparent 即可修**
+（先例：obscura-render `reparent_inset_positioned_nodes` +
+`resolve_static_positions_and_reparent`，crates/obscura-render/src/dom.rs，
+两遍法=先在流内采集静态位再 reparent；reparent 后 layout_parent 必须跟随，
+否则 paint/hit-test 的 origin 走错链）。最新 main（d8e860a，#759 升级
+taffy）31 个新提交无 abspos 修复、代码结构未变。
+**处置（遵守不 fork 原则）**：不改 pin、不打本地补丁；向上游提 issue
+（草稿 /tmp/blitz-abspos-issue.md——新角度=blitz-dom 侧可修，非 taffy#212
+dup），等修复进 release 后随 parley CJK 修复一起评估升 pin。产品侧无
+本地缓解手段（布局在 blitz-dom 内部发生）。
+
 **边界（下一批）**：em/rem/% 长度（值系统重构）、float（需 float_layout
 feature）、table/multicol、inline-block、absolute 无 inset 轴的 static
 position 回填（upstream StaticPositionCandidate 路径）、sticky。
