@@ -1316,3 +1316,21 @@ VW−150 贴右缘、旁流列从左缘起宽 VW−150。
 
 **修 bug 一枚**：首版合成行固定 [float|column]，右浮落在 x=0——CSS
 语义右浮应贴行尾，改为按 float_side 决定 float 在行首还是行尾。
+
+## 38. 批次 8c 完成（2026-08-24）：连续同侧 float run 包裹行
+
+**实现**：8b 的 zone 分支升级为 run 感知——从首个 float 向后扫连续同侧
+float run（中间空白文本跳过）。run ≥ 2 → 一个 wrapping flex 行（float-grid
+惯用法，CSS 同侧 float 并排、行满换带）：float 按源序全进、`flex-wrap:
+wrap` + `width: 100%` 定宽（百分比 float 对真实容器折行，非 intrinsic 预
+估）；run 尾后兄弟递归走本分支（再一 float 开新 zone/run）。run = 1 走原
+8b 单 float zone。zone 外兄弟循环提取为 `build_normal_sibling` helper
+（run 内部 flush——zone 行穿插在兄弟之间，跨调用共享 pending run 会乱序）。
+
+**测试**（444→445）：`float_run_wraps_side_by_side_into_bands`——五个
+25% 左浮：band 一四格并排 x=0/200/400/600 同 y=0；第五个换带 y=50 回左缘。
+修正两次手算错误：①初版四格恰满一行无换行可断言（加第五格）；
+②引擎无 UA body margin，band 是满宽 VW 非 784。
+
+**挂账**：run 中夹对侧 float 的混合 run、trailing-right float 自动边距
+（上游策略②尾部特例）、高度预算估算终止 zone。

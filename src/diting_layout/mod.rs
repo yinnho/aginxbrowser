@@ -679,6 +679,88 @@ fn build_replaced_leaf(
 
 /// Build the taffy subtree for one element. Returns None for display:none
 /// (subtree skipped) and for the document node's non-element parts.
+/// Build one child into its parent's normal-flow child list — the same
+/// replaced/text/inline-run/block dispatch as build_element's main loop,
+/// factored out so the float-zone branches (8b/8c) can append zone-external
+/// siblings without duplicating the body. Runs are flushed internally (the
+/// float branches interleave zone rows between siblings, so a shared pending
+/// run across calls would misorder).
+#[allow(clippy::too_many_arguments)]
+fn build_normal_sibling(
+    child: NodeId,
+    tree: &DomTree,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    images: &HashMap<NodeId, DecodedImage>,
+    fonts: &FontBook,
+    taffy_tree: &mut TaffyTree<TextLeaf>,
+    node_map: &mut HashMap<taffy::tree::NodeId, NodeId>,
+    atomic_container: bool,
+    font_size: f32,
+    direct: &mut Vec<taffy::tree::NodeId>,
+) {
+    let is_text = tree.with_node(child, |n| n.is_text()).unwrap_or(false);
+    let child_tag = tree
+        .with_node(child, |n| n.as_element().map(|e| e.local.to_string()))
+        .flatten()
+        .unwrap_or_default();
+    let child_display = styles
+        .get(&child)
+        .and_then(|s| s.display)
+        .or(if is_text { Some(CssDisplay::Inline) } else { Some(CssDisplay::Block) });
+    let inline_level = matches!(child_display, Some(CssDisplay::Inline));
+    let out_of_flow = styles.get(&child).is_some_and(|s| {
+        matches!(s.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
+    });
+    if !is_text && is_replaced_tag(&child_tag) {
+        if inline_level && !atomic_container && !out_of_flow {
+            if let Some(leaf) = build_replaced_leaf(tree, child, styles, images, taffy_tree, node_map) {
+                // A lone inline atom still gets the wrapping-run stand-in so
+                // it lays out on the text baseline path like the main loop.
+                if let Ok(wrapper) =
+                    taffy_tree.new_with_children(run_wrapper_style(), &[leaf])
+                {
+                    direct.push(wrapper);
+                }
+            }
+        } else if let Some(leaf) = build_replaced_leaf(tree, child, styles, images, taffy_tree, node_map) {
+            direct.push(leaf);
+        }
+        return;
+    }
+    if is_text || (inline_level && !atomic_container && !out_of_flow) {
+        // Text and flattenable inlines become their own measured run here:
+        // single-segment runs are the overwhelmingly common case at
+        // zone boundaries, and build_word_leaves + the run wrapper reproduce
+        // the mixed-run path exactly.
+        let mut leaves: Vec<taffy::tree::NodeId> = Vec::new();
+        if is_text {
+            let text = tree
+                .with_node(child, |n| n.text_content_of_text_node().unwrap_or("").to_string())
+                .unwrap_or_default();
+            let (fs, b) = font_context(tree, child, styles);
+            let fs = if styles.get(&child).is_some() { fs } else { font_size };
+            let col = color_context(tree, child, styles);
+            leaves.extend(build_word_leaves(&text, fs, b, col, fonts, taffy_tree));
+        } else {
+            let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map);
+            if let Some(sub) = sub {
+                let sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
+                leaves.extend(sub_children);
+                let _ = taffy_tree.remove(sub);
+            }
+        }
+        if !leaves.is_empty() {
+            if let Ok(wrapper) = taffy_tree.new_with_children(run_wrapper_style(), &leaves) {
+                direct.push(wrapper);
+            }
+        }
+        return;
+    }
+    if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map) {
+        direct.push(node);
+    }
+}
+
 fn build_element(
     tree: &DomTree,
     id: NodeId,
@@ -758,35 +840,116 @@ fn build_element(
 
     let (font_size, _bold) = font_context(tree, id, styles);
 
-    // --- float zone (batch 8b): the single-float + flow-column shape ---
-    // A floated child is removed from normal flow and its following
-    // siblings wrap alongside it. taffy (as configured — float_layout is a
-    // non-default feature that must stay off) has no floats, so the zone is
-    // REIFIED as a flex row: [float box | anonymous flow column]. The flow
-    // column takes all remaining width (flex-grow 1, basis 0, min 0); the
-    // float keeps its authored margins/width. A `clear` sibling ends the
-    // zone and stays in normal flow after the row. Upstream
-    // obscura-render's `build_children_with_float_zone` strategy 1.
+    // --- float zone (batch 8b/8c): floats reified as synthetic flex rows ---
+    // taffy (as configured — float_layout is a non-default feature that must
+    // stay off) has no floats, so float shapes are REIFIED at tree-build
+    // time, following upstream obscura-render's
+    // build_children_with_float_zone:
+    //
+    // - A RUN of ≥2 consecutive same-side floats (the classic float-grid
+    //   idiom, whitespace between them allowed) becomes ONE wrapping flex
+    //   row — CSS places same-side floats side by side, wrapping to a new
+    //   band when the row fills (8c).
+    // - A single float plus following siblings becomes [float | anonymous
+    //   flow column]: the column takes the remaining width; the float keeps
+    //   its authored margins/size. Right floats sit at the row's inline-end.
+    //   (8b)
+    // - A `clear` sibling ends a zone and stays in normal flow after the
+    //   row. Siblings before the first float and after the zone recurse
+    //   normally.
     let is_float_child = |cid: &NodeId| -> bool {
         styles
             .get(cid)
             .is_some_and(|s| s.float_side.is_some() && s.display != Some(CssDisplay::None))
     };
     if let Some(float_idx) = child_ids.iter().position(is_float_child) {
+        let run_side = styles.get(&child_ids[float_idx]).and_then(|s| s.float_side);
+        let clears_this = |cid: &NodeId| -> bool {
+            styles.get(cid).and_then(|s| s.clear_side).is_some_and(|c| match c {
+                crate::diting_css::ClearSide::Both => true,
+                crate::diting_css::ClearSide::Left => run_side == Some(crate::diting_css::FloatSide::Left),
+                crate::diting_css::ClearSide::Right => run_side == Some(crate::diting_css::FloatSide::Right),
+            })
+        };
+        let is_whitespace_text =
+            |cid: &NodeId| -> bool { tree.with_node(*cid, |n| !n.is_element() && n.text_content_of_text_node().map_or(false, |t| t.trim().is_empty())).unwrap_or(false) };
+
+        // Extend the run across consecutive same-side floats, skipping
+        // formatting whitespace between them.
+        let mut run_end = float_idx + 1;
+        while run_end < child_ids.len() {
+            let cid = child_ids[run_end];
+            if is_float_child(&cid)
+                && styles.get(&cid).and_then(|s| s.float_side) == run_side
+            {
+                run_end += 1;
+            } else if is_whitespace_text(&cid) {
+                run_end += 1;
+            } else {
+                break;
+            }
+        }
+        let run_len = (float_idx..run_end).filter(|&i| is_float_child(&child_ids[i])).count();
+
+        if run_len >= 2 {
+            // --- 8c: the wrapping float-grid row -------------------------
+            let mut row_children: Vec<taffy::tree::NodeId> = Vec::new();
+            for i in float_idx..run_end {
+                if !is_float_child(&child_ids[i]) {
+                    continue;
+                }
+                if let Some(f) = build_element(tree, child_ids[i], styles, images, fonts, taffy_tree, node_map) {
+                    row_children.push(f);
+                }
+            }
+            let row_style = Style {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Row,
+                flex_wrap: FlexWrap::Wrap,
+                align_items: Some(AlignItems::FLEX_START),
+                // The row IS the band's inline size: definite width so
+                // percentage-width floats wrap against the real container,
+                // not an intrinsic pre-stretch guess.
+                size: Size { width: percent(1.0), height: auto() },
+                ..Default::default()
+            };
+            if let Ok(row) = taffy_tree.new_with_children(row_style, &row_children) {
+                direct.push(row);
+            }
+            // Everything after the run recurses through this same branch:
+            // another float starts its own zone/run, cleared or plain
+            // siblings take normal flow.
+            for child in child_ids[..float_idx].iter().chain(child_ids[run_end..].iter()) {
+                build_normal_sibling(
+                    *child,
+                    tree,
+                    styles,
+                    images,
+                    fonts,
+                    taffy_tree,
+                    node_map,
+                    atomic_container,
+                    font_size,
+                    &mut direct,
+                );
+            }
+            let taffy_style = to_taffy_style(&style);
+            let node = if direct.is_empty() {
+                taffy_tree.new_leaf(taffy_style).ok()?
+            } else {
+                taffy_tree.new_with_children(taffy_style, &direct).ok()?
+            };
+            node_map.insert(node, id);
+            return Some(node);
+        }
+
+        // --- 8b: single float + flow column ------------------------------
         // Zone end: the first sibling that clears this float's side (the
         // clearfix idiom), or the next float, or the container's end.
         // Height-budget bounding (upstream estimate_float_height) is a
         // later batch — an unbounded zone over-collects only when the
         // float is taller than ALL remaining siblings, which reads as the
         // common "content beside float" shape anyway.
-        let float_side = styles.get(&child_ids[float_idx]).and_then(|s| s.float_side);
-        let clears_this = |cid: &NodeId| -> bool {
-            styles.get(cid).and_then(|s| s.clear_side).is_some_and(|c| match c {
-                crate::diting_css::ClearSide::Both => true,
-                crate::diting_css::ClearSide::Left => float_side == Some(crate::diting_css::FloatSide::Left),
-                crate::diting_css::ClearSide::Right => float_side == Some(crate::diting_css::FloatSide::Right),
-            })
-        };
         let mut zone_end = child_ids.len();
         for (i, cid) in child_ids.iter().enumerate().skip(float_idx + 1) {
             if clears_this(cid) || is_float_child(cid) {
@@ -896,51 +1059,18 @@ fn build_element(
             .iter()
             .chain(child_ids[zone_end..].iter())
         {
-            let child = *child;
-            let is_text = tree.with_node(child, |n| n.is_text()).unwrap_or(false);
-            let child_tag = tree
-                .with_node(child, |n| n.as_element().map(|e| e.local.to_string()))
-                .flatten()
-                .unwrap_or_default();
-            let child_display = styles
-                .get(&child)
-                .and_then(|s| s.display)
-                .or(if is_text { Some(CssDisplay::Inline) } else { Some(CssDisplay::Block) });
-            let inline_level = matches!(child_display, Some(CssDisplay::Inline));
-            let out_of_flow = styles.get(&child).is_some_and(|s| {
-                matches!(s.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
-            });
-            if !is_text && is_replaced_tag(&child_tag) {
-                let leaf = build_replaced_leaf(tree, child, styles, images, taffy_tree, node_map);
-                if let Some(leaf) = leaf {
-                    if inline_level && !atomic_container && !out_of_flow {
-                        run.push(RunSeg::Nodes(vec![leaf]));
-                    } else {
-                        flush_run(&mut run, &mut direct, taffy_tree);
-                        direct.push(leaf);
-                    }
-                }
-                continue;
-            }
-            if is_text {
-                let text = tree.with_node(child, |n| n.text_content_of_text_node().unwrap_or("").to_string()).unwrap_or_default();
-                let (fs, b) = font_context(tree, child, styles);
-                let fs = if styles.get(&child).is_some() { fs } else { font_size };
-                let col = color_context(tree, child, styles);
-                run.push(RunSeg::Text(text, fs, b, col));
-            } else if inline_level && !atomic_container && !out_of_flow {
-                let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map);
-                if let Some(sub) = sub {
-                    let sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
-                    run.push(RunSeg::Nodes(sub_children));
-                    let _ = taffy_tree.remove(sub);
-                }
-            } else {
-                flush_run(&mut run, &mut direct, taffy_tree);
-                if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map) {
-                    direct.push(node);
-                }
-            }
+            build_normal_sibling(
+                *child,
+                tree,
+                styles,
+                images,
+                fonts,
+                taffy_tree,
+                node_map,
+                atomic_container,
+                font_size,
+                &mut direct,
+            );
         }
         flush_run(&mut run, &mut direct, taffy_tree);
 
@@ -2281,6 +2411,50 @@ mod bridge_cross_check {
         assert!((p1.x - 0.0).abs() < EPS as f32, "flow column starts at the left edge");
         assert!((p1.width - (VW - 150.0)).abs() <= 2.0 * EPS as f32,
             "column width excludes the right float: {} vs {}", p1.width, VW - 150.0);
+    }
+
+    /// The float-grid idiom (8c): consecutive same-side floats sit SIDE BY
+    /// SIDE on one band, wrapping to a new band when the row fills —
+    /// craigslist's `.box{float:left;width:23%}` directory shape. Hand
+    /// contract: three 25%-wide floats at x = 0 / 200 / 400 on the same y;
+    /// floats four and five wrap to the next band below the tallest
+    /// band-one sibling.
+    #[test]
+    fn float_run_wraps_side_by_side_into_bands() {
+        let html = r#"<body>
+            <div class="cell" id="c1"></div><div class="cell" id="c2"></div>
+            <div class="cell" id="c3"></div><div class="cell" id="c4" style="height: 30px"></div>
+            <div class="cell" id="c5"></div>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            .cell { float: left; width: 25%; height: 50px; }
+        "#;
+
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW);
+
+        let r = |sel: &str| rects[&tree.query_selector(sel).unwrap().unwrap()];
+        let (c1, c2, c3, c4, c5) = (r("#c1"), r("#c2"), r("#c3"), r("#c4"), r("#c5"));
+
+        // Our engine ships no UA body margin (every test sheet sets it
+        // explicitly; blitz's default.css does too but our subset starts
+        // at zero) — the band is the full viewport: four 200px cells fill
+        // band one exactly.
+        let cell_w = VW * 0.25;
+        for (name, cell, x) in
+            [("c1", c1, 0.0), ("c2", c2, cell_w), ("c3", c3, 2.0 * cell_w), ("c4", c4, 3.0 * cell_w)]
+        {
+            assert!((cell.x - x).abs() < EPS as f32, "{name} x: {} want {x}", cell.x);
+            assert!((cell.y - 0.0).abs() < EPS as f32, "{name} shares band one");
+            assert!((cell.width - cell_w).abs() < EPS as f32, "{name} is 25% of the band");
+        }
+        // Band two: below the tallest band-one sibling.
+        assert!((c5.y - 50.0).abs() < EPS as f32,
+            "fifth float wraps to band two: y={} want 50", c5.y);
+        assert!((c5.x - 0.0).abs() < EPS as f32, "wrapped float restarts at the left edge");
     }
 
 
