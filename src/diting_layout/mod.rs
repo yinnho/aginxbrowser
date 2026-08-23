@@ -70,6 +70,11 @@ fn is_cjk(c: char) -> bool {
 #[derive(Clone)]
 enum TextLeaf {
     Run { text: String, font_size: f32, bold: bool, color: [u8; 4] },
+    /// One word/glyph of a MIXED run (text around inline elements): the
+    /// batch-2b word-leaf fallback, now carrying paint context (batch 4d).
+    /// Layout is still style-driven — the measure closure passes Word
+    /// leaves straight through to taffy's own style sizing.
+    Word { text: String, font_size: f32, bold: bool, color: [u8; 4] },
 }
 
 /// Approximate used line height for text leaves. Matches blitz exactly:
@@ -410,11 +415,13 @@ pub(crate) fn tokenize(text: &str) -> Vec<String> {
 
 /// One taffy leaf per word (upstream's per-word leaf model). Intrinsic size
 /// from real shaped advances (batch 3a); wrapping happens in the enclosing
-/// flex-wrap run container.
+/// flex-wrap run container. Since batch 4d the leaf carries paint context —
+/// mixed runs paint their words.
 fn build_word_leaves(
     text: &str,
     font_size: f32,
     bold: bool,
+    color: [u8; 4],
     fonts: &FontBook,
     taffy_tree: &mut TaffyTree<TextLeaf>,
 ) -> Vec<taffy::tree::NodeId> {
@@ -432,7 +439,13 @@ fn build_word_leaves(
                 },
                 ..Style::default()
             };
-            taffy_tree.new_leaf(style).ok()
+            let leaf = TextLeaf::Word {
+                text: token.clone(),
+                font_size,
+                bold,
+                color,
+            };
+            taffy_tree.new_leaf_with_context(style, leaf).ok()
         })
         .collect()
 }
@@ -615,8 +628,8 @@ fn build_element(
         let mut leaves: Vec<taffy::tree::NodeId> = Vec::new();
         for seg in segs {
             match seg {
-                RunSeg::Text(text, fs, bold, _) => {
-                    leaves.extend(build_word_leaves(&text, fs, bold, fonts, taffy_tree))
+                RunSeg::Text(text, fs, bold, color) => {
+                    leaves.extend(build_word_leaves(&text, fs, bold, color, fonts, taffy_tree))
                 }
                 RunSeg::Nodes(nodes) => leaves.extend(nodes),
             }
@@ -697,11 +710,10 @@ fn build_element(
 
 /// One paint primitive in document order (batch 4a) — the minimal output
 /// contract between layout and paint. `Bg` is an element's solid
-/// background-color over its border-box; `Text` is a pure-text run at its
-/// leaf origin, re-wrapped at the width its containing block gave it at
-/// measure time. Borders, images, shadows, and z-index don't exist yet in
-/// this slice; mixed runs (inline elements inside text) still lay out but
-/// paint nothing — their word-leaf fallback carries no run context.
+/// background-color over its border-box; `Text` is a text run at its leaf
+/// origin, re-wrapped at the width its containing block gave it at measure
+/// time (mixed runs paint per-word leaves at their own boxes, batch 4d).
+/// Borders, images, shadows, and z-index don't exist yet in this slice.
 #[derive(Debug, Clone)]
 pub enum PaintItem {
     Bg { dom_id: NodeId, rect: Rect, color: [u8; 4] },
@@ -839,7 +851,11 @@ pub fn layout_dom_with_paint(
             Some(TextLeaf::Run { text, font_size, bold, .. }) => {
                 measure_text_leaf(text, *font_size, *bold, fonts, &inputs)
             }
-            None => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
+            // Word leaves keep their style-driven sizing (batch 4d only
+            // added paint context — zero layout change).
+            Some(TextLeaf::Word { .. }) | None => {
+                taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO)
+            }
         }
     });
     if measured.is_err() {
@@ -939,6 +955,20 @@ pub fn layout_dom_with_paint(
                 x: abs.0,
                 y: abs.1,
                 wrap_at,
+            });
+        }
+        if let Some(TextLeaf::Word { text, font_size, bold, color }) = taffy_tree.get_node_context(node) {
+            // A word leaf paints at its own box — the enclosing flex row
+            // already did the line breaking (leaf-level wrap). Single-token
+            // text can never break, so wrap_at just equals the leaf width.
+            items.push(PaintItem::Text {
+                text: text.clone(),
+                font_size: *font_size,
+                bold: *bold,
+                color: *color,
+                x: abs.0,
+                y: abs.1,
+                wrap_at: layout.size.width,
             });
         }
         for child in taffy_tree.children(node).unwrap_or_default().iter().copied() {
@@ -2640,6 +2670,111 @@ mod bridge_cross_check {
             }
             let b = b.unwrap_or_else(|| panic!("{name}: no border pixels"));
             assert_eq!((b.2 - b.0 + 1, b.3 - b.1 + 1), (117, 60), "{name} border box");
+        }
+    }
+
+    /// Mixed-run text paints (batch 4d): words around an inline element —
+    /// `汉字<b>加粗</b>混合` — the most common real-page text shape. The
+    /// div's own words paint from their word-leaf boxes, the <b>'s pure run
+    /// paints at its leaf; whole lines wrap in the flex row. Contract: one
+    /// line at full width, two bands when the wrapper forces a wrap, ink
+    /// extents within tolerance both times.
+    #[test]
+    fn paint_mixed_run_text_matches_blitz() {
+        let html = r#"<body><div id="t">汉字<b id="b">加粗</b>混合</div></body>"#;
+        for (width, want_bands) in [(800.0f32, 1usize), (80.0, 2)] {
+            let sheet = format!(
+                "body {{ margin: 0; }} #t {{ width: {width}px; font-size: 20px; }}"
+            );
+            let doc = blitz_doc(html, &sheet);
+            let (w, h) = (200u32, 200u32);
+            let mut doc = doc;
+            let blitz =
+                anyrender::render_to_buffer::<anyrender_vello_cpu::VelloCpuImageRenderer, _>(
+                    |scene| {
+                        use anyrender::PaintScene as _;
+                        use peniko::kurbo::Rect;
+                        scene.fill(
+                            peniko::Fill::NonZero,
+                            Default::default(),
+                            peniko::Color::WHITE,
+                            Default::default(),
+                            &Rect::new(0.0, 0.0, w as f64, h as f64),
+                        );
+                        blitz_paint::paint_scene(scene, &mut doc, 1.0, w, h, 0, 0);
+                    },
+                    w,
+                    h,
+                );
+
+            let tree = crate::diting_dom::tree_sink::parse_html(html);
+            let rules = diting_css::parse_stylesheet(&sheet);
+            let styles = our_styles(&tree, &rules);
+            let fonts = fixture_fonts();
+            let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW);
+            let mut ours = paint::Canvas::new_filled(w as usize, h as usize, [255, 255, 255, 255]);
+            paint::execute(&items, &fonts, &mut ours);
+            // 4 word leaves (汉字混合) + 1 run leaf (the <b>'s 加粗).
+            let text_items = items
+                .iter()
+                .filter(|i| matches!(i, PaintItem::Text { .. }))
+                .count();
+            assert_eq!(text_items, 5, "4 CJK word leaves + 1 bold run leaf");
+
+            let is_ink = |p: &[u8]| p[0] < 110 && p[1] < 110 && p[2] < 110;
+            fn bbox(buf: &[u8], w: usize, h: usize, hit: impl Fn(&[u8]) -> bool) -> (usize, usize, usize, usize) {
+                let mut b: Option<(usize, usize, usize, usize)> = None;
+                for y in 0..h {
+                    for x in 0..w {
+                        if hit(&buf[(y * w + x) * 4..]) {
+                            b = Some(match b {
+                                Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                                None => (x, y, x, y),
+                            });
+                        }
+                    }
+                }
+                b.expect("ink bbox: no hit pixels")
+            }
+            fn band_tops(buf: &[u8], w: usize, h: usize, hit: impl Fn(&[u8]) -> bool) -> Vec<usize> {
+                let mut tops = Vec::new();
+                let mut last_row: Option<usize> = None;
+                for y in 0..h {
+                    let has = (0..w).any(|x| hit(&buf[(y * w + x) * 4..]));
+                    if has && last_row.is_none_or(|p| y > p + 1) {
+                        tops.push(y);
+                    }
+                    if has {
+                        last_row = Some(y);
+                    }
+                }
+                tops
+            }
+
+            let o_tops = band_tops(&ours.data, w as usize, h as usize, is_ink);
+            let b_tops = band_tops(&blitz, w as usize, h as usize, is_ink);
+            assert_eq!(o_tops.len(), want_bands, "our bands @w{width}: {o_tops:?}");
+            assert_eq!(b_tops.len(), want_bands, "blitz bands @w{width}: {b_tops:?}");
+            for (i, (o, b)) in o_tops.iter().zip(&b_tops).enumerate() {
+                assert!(
+                    (*o as i64 - *b as i64).abs() <= 2,
+                    "band {i} top @w{width}: ours={o} blitz={b}"
+                );
+            }
+
+            let (ox0, oy0, ox1, oy1) = bbox(&ours.data, w as usize, h as usize, is_ink);
+            let (bx0, by0, bx1, by1) = bbox(&blitz, w as usize, h as usize, is_ink);
+            for (what, o, b) in [
+                ("ink left", ox0, bx0),
+                ("ink top", oy0, by0),
+                ("ink right", ox1, bx1),
+                ("ink bottom", oy1, by1),
+            ] {
+                assert!(
+                    (o as i64 - b as i64).abs() <= 2,
+                    "{what} @w{width}: ours={o} blitz={b}"
+                );
+            }
         }
     }
 }

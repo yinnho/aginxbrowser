@@ -891,3 +891,27 @@ ink 逐像素**；元素自身 117×60 边框盒不被自己的 overflow 裁掉�
 border-radius 联动圆角裁剪；overflow-x/y 分轴；scrollbar 占位。
 
 **测试**：416→418（+clip 栈单测：相交/弹出/退化；+overflow 像素对照）。
+
+## 22. 批次 4d 完成（2026-08-23）：混合 run 文本出图——词叶带 context
+
+**动机**：4a 挂账"mix run 不绘"。`汉字<b>加粗</b>混合` 是真实页面最常见
+的文本形态——纯 run 叶（b 内部）早就有 context 会绘，缺的是**词叶本身**
+（div 直属文字走 2b 词叶兜底，plain Style 叶无 paint 信息）。
+
+**做法**：TextLeaf 增 `Word{text,fs,bold,color}` 变体——build_word_leaves
+改 `new_leaf_with_context`，尺寸 Style 照旧；measure 闭包对 Word **透传
+compute_leaf_layout**（与 None 分支合流）——**布局零变化**，纯加 paint
+信息。collect 对 Word 叶推 `PaintItem::Text`：x/y=叶盒原点，wrap_at=叶宽
+（词叶=单 token，贪心断行永不触发，flex row 已在叶粒度换行）。颜色链：
+flush_run 把该段的 color 传给词叶；行内子元素的 run 在自己的 build_element
+里解析自身 color——`<span style="color:red">` 内嵌即红。
+
+**对照（paint_mixed_run_text_matches_blitz）**：双宽度——800px 单行
+1 带、80px 换行 2 带（汉字加粗/混合），带顶与 ink bbox 四边 ±2；结构断言
+Text item 数==5（4 词叶+1 b run 叶）。一次过——词叶位置 3a 已证与 blitz
+同模（上游同为 flex 词叶模型），本批只补上"画"。
+
+**测试**：418→419。挂账清一项；批次 4 至此：bg+text（4a）/border（4b）/
+clip（4c）/mix run（4d）——diting paint 栈与 blitz 的像素对照面覆盖
+真实页面的主体形态。仍挂：radius/图案样式/per-side 边属性/img 替换盒/
+渐变/z-index/BFC。

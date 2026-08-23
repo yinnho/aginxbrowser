@@ -8,10 +8,9 @@
 //! cross-check tests (background bbox exact, text ink extents and per-line
 //! band structure within the batch-3b ±2px ink tolerance).
 //!
-//! Not in this slice (tracked in docs/engine/render.md §20): border-radius,
+//! Not in this slice (tracked in docs/engine/render.md §22): border-radius,
 //! patterned border styles (dashed/dotted/double paint as solid), per-side
-//! border colors/styles, images, gradients, z-index/stacking contexts, and
-//! text from mixed inline runs.
+//! border colors/styles, images, gradients, z-index/stacking contexts.
 
 use super::text::TextRaster;
 use super::{FontBook, PaintItem};
