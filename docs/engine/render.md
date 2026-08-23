@@ -1372,3 +1372,20 @@ band 两端丢弃。任一侧退化（无 flow 或无右浮）回正常流。
 - 契约切换：blitz 无 float 支持，全部手算期望。
 - 挂账（后续批次）：跨 BFC float continuation 二次 pass、高度预算估算
   终止 zone、float 与 paint level 联动、clear 语义细化（inline-start/end）。
+
+## 41. 批次 8f 完成（2026-08-24）：float paint level 联动
+
+**实现**：collect 三桶排序给 float 元素 paint level 1——in-flow=0、
+float=1、positioned z-auto=2（CSS 2.1 App. E：float 画在本 band 的
+in-flow 内容之上、positioned 之下；与批次 6a 引入的 blitz damage.rs
+模型同构，blitz damage.rs 同样 float=1）。
+
+**测试**（447→448）：`float_paint_level_between_flow_and_positioned`
+像素探针——absolute 定位绿盒钉 (0,0) 盖住红 float（30,30 出绿证明
+float < positioned）；flow column 内蓝块完好（150,20 出蓝，旁流列
+几何不受 float ink 影响）；绿外 float 区出红（80,30）。修正两次探针
+设计错误：relative 无 inset 的盒 static position 在旁流列内不与
+float 重叠；(80,70) 在 60 高的 float 外。
+
+**8 系列挂账更新**：跨 BFC continuation 二次 pass、高度预算估算终止
+zone、clear inline-start/end 仍开放。

@@ -1899,34 +1899,31 @@ pub fn layout_dom_with_paint_and_images(
                 wrap_at: layout.size.width,
             });
         }
-        // Stacking order (batch 6a), the blitz-dom damage.rs model per
-        // parent: children with z-index ≠ 0 that are positioned hoist out
-        // of document order into the negative band (painted first, sorted
-        // by z ascending) and the positive band (last, ascending); the rest
-        // paint between them in a stable sort by paint level — in-flow
-        // (static) first, positioned z-auto above (CSS 2.1 App. E step 8).
-        // Same-z ties keep tree order; text leaves are always in-flow.
+        // Stacking order (batch 6a, float level in 8f), the blitz-dom
+        // damage.rs model per parent: children with z-index ≠ 0 that are
+        // positioned hoist out of document order into the negative band
+        // (painted first, sorted by z ascending) and the positive band
+        // (last, ascending); the rest paint between them in a stable sort
+        // by paint level — in-flow (static) 0 first, floats 1 (CSS 2.1
+        // App. E step 5: a float paints above the in-flow blocks and text
+        // of its own band), positioned z-auto 2 above. Same-z ties keep
+        // tree order; text leaves are always in-flow.
         let children = taffy_tree.children(node).unwrap_or_default().to_vec();
         let mut neg: Vec<(i32, usize)> = Vec::new();
         let mut mid: Vec<(i32, usize)> = Vec::new();
         let mut pos: Vec<(i32, usize)> = Vec::new();
         for (i, &child) in children.iter().enumerate() {
-            let positioned = node_map
-                .get(&child)
-                .and_then(|d| styles.get(d))
-                .is_some_and(|s| {
-                    matches!(
-                        s.position,
-                        Some(PositionMode::Relative)
-                            | Some(PositionMode::Absolute)
-                            | Some(PositionMode::Fixed)
-                    )
-                });
-            let z = node_map
-                .get(&child)
-                .and_then(|d| styles.get(d))
-                .and_then(|s| s.z_index)
-                .unwrap_or(0);
+            let child_style = node_map.get(&child).and_then(|d| styles.get(d));
+            let positioned = child_style.is_some_and(|s| {
+                matches!(
+                    s.position,
+                    Some(PositionMode::Relative)
+                        | Some(PositionMode::Absolute)
+                        | Some(PositionMode::Fixed)
+                )
+            });
+            let floated = child_style.is_some_and(|s| s.float_side.is_some());
+            let z = child_style.and_then(|s| s.z_index).unwrap_or(0);
             if z != 0 && positioned {
                 // Hoisted band: painted before (z<0) / after (z>0) the
                 // middle band, ascending within the band.
@@ -1937,6 +1934,8 @@ pub fn layout_dom_with_paint_and_images(
                 }
             } else if positioned {
                 mid.push((2, i)); // paint level 2: above in-flow content
+            } else if floated {
+                mid.push((1, i)); // paint level 1: above static, below positioned
             } else {
                 mid.push((0, i));
             }
@@ -4510,6 +4509,51 @@ mod bridge_cross_check {
         let mut canvas = paint::Canvas::new_filled(w, h, [255, 255, 255, 255]);
         paint::execute(&items, &fonts, &mut canvas);
         canvas
+    }
+
+    /// Float paint level (8f): a float paints ABOVE the in-flow content of
+    /// its band and BELOW positioned z-auto boxes (CSS 2.1 App. E — the
+    /// same damage.rs paint-level model as batch 6a, float = level 1).
+    /// The positioned probe is an absolutely-positioned box pinned over
+    /// the float's area (a relative box with no insets would take its
+    /// static position in the flow column and never overlap).
+    #[test]
+    fn float_paint_level_between_flow_and_positioned() {
+        let px = |buf: &[u8], w: u32, x: usize, y: usize| {
+            let i = (y * w as usize + x) * 4;
+            (buf[i], buf[i + 1], buf[i + 2])
+        };
+        let html = r#"<body>
+            <div id="fl"></div>
+            <div id="flow"></div>
+            <div id="pos"></div>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #fl { float: left; width: 100px; height: 60px; background: rgb(200,40,40); }
+            #flow { width: 150px; height: 40px; background: rgb(40,40,200); }
+            #pos { position: absolute; left: 0px; top: 0px; width: 60px; height: 80px; background: rgb(40,180,40); }
+        "#;
+        let (w, h) = (250u32, 120u32);
+        let ours = our_render(html, sheet, w as usize, h as usize);
+
+        // Green positioned box pinned at (0,0) covers the red float:
+        // green there proves floats sit below positioned z-auto.
+        let (r0, g0, b0) = px(&ours.data, w, 30, 30);
+        assert!(g0 > 150 && r0 < 100 && b0 < 100,
+            "positioned green paints over the float: got {r0},{g0},{b0}");
+
+        // Inside the flow column (beside the float), the wrapped #flow's
+        // blue stands where neither float nor positioned ink reaches.
+        let (r1, g1, b1) = px(&ours.data, w, 150, 20);
+        assert!(b1 > 150 && r1 < 100,
+            "in-flow column shows blue beside the float: got {r1},{g1},{b1}");
+
+        // Float area outside the green overlay shows RED — the float's
+        // own ink stands where the higher-level boxes don't reach.
+        let (r2, g2, b2) = px(&ours.data, w, 80, 30);
+        assert!(r2 > 150 && g2 < 100,
+            "float bg visible below the green overlay: got {r2},{g2},{b2}");
     }
 
     /// 1:1 image paint (batch 5b): the img box equals the image size, so
