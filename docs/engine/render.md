@@ -207,3 +207,38 @@ used 宽度；绘制在 paint_css_border（5476）。
 *摸底方法：两路并行探读代理（dom.rs 一路；paint+inline+border 一路）+
 主线程核实接线面/vendor fork/CJK 断行代码/selector 同源性。所有 file:line
 锚点均出自 /tmp/obscura-upstream main 39fe4d2。*
+
+## 7. 批次 −1 完成（2026-08-23）
+
+diting_dom/selector.rs 吸收上游差距（860→~1480 行），343→352 测试。**范围修正
+（记档）**：原计划的 shadow 匹配（`:host`/`::slotted`）依赖 tree.rs 整套 shadow
+原语（attach_shadow_root/is_shadow_root/assigned_slot，上游 tree.rs 独有约
+600 行）——那属于 frame realm C 组挂账，本批不吸收。实际吸收五件：
+
+1. **解析开关**：`parse_has()` + `parse_is_and_where()`——selectors 0.26 默认
+   关闭，导致 `a:has(p)` / Tailwind preflight 的 `:where(...)` 静默解析失败、
+   规则被丢弃。开启后匹配逻辑 crate 内建，无需额外代码。
+2. **opaque() 稳定性修复**：DomElement 是 Copy，栈地址每次遍历都变，
+   `OpaqueElement::new(self)` 对同一节点返回不同 id——`:has` 锚点匹配比较的
+   就是这个 id，必炸。改为取节点在 `borrow_inner().nodes` Vec 里的稳定槽位地址。
+3. **PseudoClass 扩充**：focus-visible/focus-within/link/visited（link|any-link
+   同义；visited 恒 false）。Bootstrap `.visually-hidden-focusable` 的
+   `:not(:focus):not(:focus-within)` 快照匹配解锁。
+4. **matches_selector 单元素 API** + **CompiledSelector 编译管线**
+   （specificity + AncestorHashes + SelectorKey 分桶）+ **Matcher**
+   （可复用 caches + 增量祖先 bloom 过滤器 + candidate 去重代数）+
+   subject_keys（Gecko 式保守分桶契约：`.control:is(button, #save)` 保
+   .control，`.control:is(#save, #cancel)` 用双 id 桶）。
+5. 测试 +8（:has 解析/深组合器/嵌套禁令、:is/:where 匹配、focus 家族快照、
+   :link、分桶覆盖不变量、Matcher+bloom、candidate 代数去重）。
+
+**踩坑记档**：测试初版写了 `section:has(article:has(li))`——selectors 0.26 按
+spec 禁止嵌套 :has（SelectorParsingState::DISALLOW_RELATIVE_SELECTOR →
+InvalidState），上游也没测这个形态。嵌套禁令已锁进我们的测试。
+
+shadow 匹配三钩子（parent_node_is_shadow_root/containing_shadow_host/
+matches_in_shadow_scope）随 frame realm 立项时一并吸收（tree.rs shadow 原语 +
+selector.rs 钩子 + css.rs scope cascade 三层联动）。
+
+cascade 复刻（批次 1）的前置依赖就此就位：CompiledSelector/Matcher 正是
+obscura-render/css.rs 构建样式表索引的原语。
