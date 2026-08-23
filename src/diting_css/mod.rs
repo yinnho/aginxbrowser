@@ -411,13 +411,18 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         }
         "z-index" => value == "auto" || value.parse::<i32>().is_ok(),
         "border-radius" => {
-            // Single px/%/em value only (the 1-value circular syntax).
-            let mut parts = value.split_whitespace();
-            let (first, second) = (parts.next(), parts.next());
-            second.is_none()
-                && first.is_some_and(|s| {
-                    parse_css_length(s).is_some()
-                })
+            // 1-4 radii, optionally `/` plus 1-4 vertical radii.
+            let (horiz, vert) = match value.split_once('/') {
+                Some((h, s)) => (h, Some(s)),
+                None => (value, None),
+            };
+            let ok_list =
+                |s: &str| -> bool {
+                    let vals: Vec<&str> = s.split_whitespace().collect();
+                    !vals.is_empty() && vals.len() <= 4 && vals.iter().all(|t| parse_css_length(t).is_some())
+                };
+            ok_list(horiz)
+                && vert.map(ok_list).unwrap_or(true)
         }
         "font-weight" => parse_font_weight(value).is_some(),
         "font-size" => parse_font_size_len(value).is_some(),
@@ -501,6 +506,12 @@ pub struct ComputedStyle {
     /// common form). Percentages resolve against the box width. Per-corner
     /// and elliptical (`rx ry`) radii are a later batch.
     pub border_radius: Option<Length>,
+    /// Per-corner radii (batch 7c), CSS corner order (top-left, top-right,
+    /// bottom-right, bottom-left), each an (rx, ry) pair — rx resolves
+    /// against the box width, ry against its height (the elliptical form).
+    /// `None` when no border-radius is declared; the uniform 1-value case
+    /// fills all four pairs identically.
+    pub corner_radii: Option<[(Length, Length); 4]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -987,15 +998,55 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             true
         }
         "border-radius" => {
-            // Single-value circular radius only; multi-value syntaxes are a
-            // later batch and decline here.
-            let mut parts = v.split_whitespace();
-            let (first, second) = (parts.next(), parts.next());
-            if second.is_some() {
-                return false;
+            // CSS syntax: 1-4 horizontal radii, optionally `/` plus 1-4
+            // vertical radii (the elliptical form). Corners fill in CSS
+            // order (TL TR BR BL) from however many values are given.
+            let (horiz, vert) = match v.split_once('/') {
+                Some((h, s)) => (h, Some(s)),
+                None => (v, None),
+            };
+            let parse_list = |s: &str| -> Option<Vec<Length>> {
+                let vals: Vec<Option<Length>> =
+                    s.split_whitespace().map(|t| len(t)).collect();
+                if vals.iter().any(|v| v.is_none()) || vals.is_empty() || vals.len() > 4 {
+                    return None;
+                }
+                Some(vals.into_iter().flatten().collect())
+            };
+            let Some(h) = parse_list(horiz) else { return false };
+            let vlist = match vert {
+                Some(s) => match parse_list(s) {
+                    Some(v) if v.len() == h.len() => v,
+                    _ => return false,
+                },
+                None => h.clone(),
+            };
+            // Expand n values to four corners per the CSS mirror rule.
+            let expand = |vals: &[Length]| -> [Length; 4] {
+                match vals {
+                    [a] => [*a, *a, *a, *a],
+                    [a, b] => [*a, *b, *a, *b],
+                    [a, b, c] => [*a, *b, *c, *b],
+                    vals => [vals[0], vals[1], vals[2], vals[3]],
+                }
+            };
+            let hc = expand(&h);
+            let vc = expand(&vlist);
+            style.corner_radii = Some([
+                (hc[0], vc[0]),
+                (hc[1], vc[1]),
+                (hc[2], vc[2]),
+                (hc[3], vc[3]),
+            ]);
+            // Keep the uniform shortcut in sync for the common 1-value case.
+            if matches!(&hc, [a, b, c, d] if a == b && b == c && c == d)
+                && hc[0] == vc[0]
+            {
+                style.border_radius = Some(hc[0]);
+            } else {
+                style.border_radius = None;
             }
-            style.border_radius = first.and_then(len);
-            style.border_radius.is_some()
+            true
         }
         "object-position" => {
             let part = |s: &str| -> Option<ObjectPositionPart> {

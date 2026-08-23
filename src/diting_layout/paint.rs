@@ -119,6 +119,95 @@ impl Canvas {
         }
     }
 
+    /// Source-over fill of a rectangle with per-corner elliptical radii
+    /// (batch 7c), clipped to the canvas and the clip stack. Radii are in
+    /// CSS corner order (top-left, top-right, bottom-right, bottom-left),
+    /// each `(rx, ry)` in px — rx already resolved against the box width
+    /// and ry against its height. Each corner radius clamps to half its
+    /// own box dimension (the CSS scale-down rule; upstream blitz skips it,
+    /// so cross-check cases stay within the legal range). Hard-edged
+    /// rasterization: vello antialiases the arc and we don't — cross-checks
+    /// sample well inside/outside, never on the curve.
+    pub fn fill_corner_rect(
+        &mut self,
+        x: i64,
+        y: i64,
+        w: i64,
+        h: i64,
+        radii: [(f32, f32); 4],
+        color: [u8; 4],
+    ) {
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        let uniform = |r: (f32, f32)| r.0 == radii[0].0 && r.1 == radii[0].1;
+        let degenerate = |r: (f32, f32)| r.0 <= 0.0 || r.1 <= 0.0;
+        if radii.iter().all(|&r| degenerate(r)) {
+            self.fill_rect(x, y, w, h, color);
+            return;
+        }
+        // A fully uniform circular radius takes the batch-6b fast path.
+        if radii.iter().all(|&r| uniform(r)) && !degenerate(radii[0]) {
+            self.fill_rounded_rect(x, y, w, h, radii[0].0, color);
+            return;
+        }
+        let (ax0, ay0, ax1, ay1) = self.allowed();
+        let (fx, fy) = (x as f64, y as f64);
+        let (fw, fh) = (w as f64, h as f64);
+        // Clamp per-corner: rx ≤ half width, ry ≤ half height.
+        let clamp_r = |r: (f32, f32)| {
+            (
+                r.0.clamp(0.0, w as f32 / 2.0) as f64,
+                r.1.clamp(0.0, h as f32 / 2.0) as f64,
+            )
+        };
+        // Corner circle/ellipse centers.
+        let centers: [(f64, f64); 4] = [
+            (fx + clamp_r(radii[0]).0, fy + clamp_r(radii[0]).1),
+            (fx + fw - clamp_r(radii[1]).0, fy + clamp_r(radii[1]).1),
+            (fx + fw - clamp_r(radii[2]).0, fy + fh - clamp_r(radii[2]).1),
+            (fx + clamp_r(radii[3]).0, fy + fh - clamp_r(radii[3]).1),
+        ];
+        for gy in y.max(0).max(ay0)..(y + h).min(self.height as i64).min(ay1) {
+            for gx in x.max(0).max(ax0)..(x + w).min(self.width as i64).min(ax1) {
+                let (cx, cy) = (gx as f64 + 0.5, gy as f64 + 0.5);
+                // Which corner zone does the pixel sit in (edge band × edge
+                // band)? The cross-shaped middle is always inside; a corner
+                // zone tests the (dx/rx)² + (dy/ry)² ≤ 1 ellipse equation.
+                let zone = if cx < centers[0].0 && cy < centers[0].1 {
+                    Some(0usize)
+                } else if cx > centers[1].0 && cy < centers[1].1 {
+                    Some(1)
+                } else if cx > centers[2].0 && cy > centers[2].1 {
+                    Some(2)
+                } else if cx < centers[3].0 && cy > centers[3].1 {
+                    Some(3)
+                } else {
+                    None
+                };
+                let inside = match zone {
+                    None => true,
+                    Some(i) => {
+                        let (rx, ry) = clamp_r(radii[i]);
+                        if rx <= 0.0 || ry <= 0.0 {
+                            true
+                        } else {
+                            let (ccx, ccy) = centers[i];
+                            let dx = (cx - ccx) / rx;
+                            let dy = (cy - ccy) / ry;
+                            dx * dx + dy * dy <= 1.0
+                        }
+                    }
+                };
+                if !inside {
+                    continue;
+                }
+                let i = (gy as usize * self.width + gx as usize) * 4;
+                over(&mut self.data[i..i + 4], color);
+            }
+        }
+    }
+
     /// Source-over fill of a rounded rectangle (batch 6b), clipped to the
     /// canvas and the clip stack. `radius` is the uniform circular corner
     /// radius in px (clamped to half the shorter side — the CSS scale-down
@@ -247,6 +336,14 @@ pub fn execute(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas) {
             PaintItem::PopClip => {
                 out.pop_clip();
             }
+            PaintItem::BgCorner { rect, color, radii, .. } => out.fill_corner_rect(
+                rect.x.round() as i64,
+                rect.y.round() as i64,
+                rect.width.round() as i64,
+                rect.height.round() as i64,
+                *radii,
+                *color,
+            ),
             PaintItem::Bg { rect, color, radius, .. } => out.fill_rounded_rect(
                 rect.x.round() as i64,
                 rect.y.round() as i64,

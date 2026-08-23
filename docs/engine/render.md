@@ -1203,3 +1203,27 @@ sniff 解码尺寸对 + **RGBA 位级 round-trip**；截断 RIFF 头拒绝不 pa
 **图片通路现状**：PNG（data:URL + 网络）/ JPEG / WebP 三格式，字节表
 注入式网络通路齐备。挂账剩余：GIF 动图取首帧、srcset/picture、HTTP
 缓存头层、渐进 JPEG 大图性能。下一批候选：per-corner radius 或 GIF。
+
+## 33. 批次 7c 完成（2026-08-23）：per-corner/椭圆 border-radius
+
+**CSS 侧**：`border-radius` 解析升级全语法——1-4 水平半径 + 可选
+`/` 后 1-4 垂直半径（椭圆形态），n 值按 CSS 镜像规则展开到四角
+（TL TR BR BL）：1→全同、2→对角、3→第三补左下、4→直给。ComputedStyle
+加 `corner_radii: Option<[(Length, Length); 4]>`；1 值圆形场景同时回填
+`border_radius` 旧字段（兼容 6b 快路径）。@supports 探针同步。
+
+**paint**：新 `PaintItem::BgCorner{radii: [(f32,f32);4]}` +
+`Canvas::fill_corner_rect`：每角 (rx, ry) 各自 clamp 到半宽/半高（我们
+做 CSS scale-down），像素按角带测椭圆方程 (dx/rx)²+(dy/ry)²≤1，十字中
+带恒在内；全同圆形自动走 6b 快路径。collect 里 rx 对盒宽、ry 对盒高
+解析。
+
+**对照（一测两案）** `paint_per_corner_radius_matches_blitz`：
+- `border-radius: 0 40px`（两值展开）：左角方角贴边填充、右角深切区
+  背景、右边中点直线段填充——双侧一致
+- `30px / 10px` 椭圆：椭圆方程内/外探针点双侧一致（(25,5) 内 ≈0.28<1、
+  (2,2) 外 >1）
+
+**测试**：437→438。挂账更新：相邻角半径和超盒的 scale-down 是 per-axis
+比例缩放（我们 clamp 到半边已覆盖常见情形，规范的全局等比缩放挂账）、
+radius 与 overflow clip 联动。下一批候选：GIF 或 radius+overflow 联动。

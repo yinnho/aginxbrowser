@@ -835,6 +835,9 @@ fn build_element(
 #[derive(Debug, Clone)]
 pub enum PaintItem {
     Bg { dom_id: NodeId, rect: Rect, color: [u8; 4], radius: f32 },
+    /// Per-corner radii variant of `Bg` (batch 7c): CSS corner order
+    /// (TL TR BR BL), each (rx, ry) already resolved to px.
+    BgCorner { dom_id: NodeId, rect: Rect, color: [u8; 4], radii: [(f32, f32); 4] },
     /// A decoded raster image blitted into the replaced box (batch 5b):
     /// sized per object-fit and offset per object-position (batch 5c) —
     /// see [`object_paint_rect`]. `rect` is the element box and doubles as
@@ -1108,19 +1111,47 @@ pub fn layout_dom_with_paint_and_images(
             rects.insert(*dom_id, rect);
             if let Some(c) = styles.get(dom_id).and_then(|s| s.background_color) {
                 if c.3 != 0 && rect.width > 0.0 && rect.height > 0.0 {
-                    // Uniform circular radius (batch 6b): px direct,
-                    // percentage against the box width.
-                    let radius = match styles.get(dom_id).and_then(|s| s.border_radius) {
-                        Some(crate::diting_css::Length::Px(r)) => r,
-                        Some(crate::diting_css::Length::Percent(p)) => p * rect.width / 100.0,
-                        None => 0.0,
+                    let color = [c.0, c.1, c.2, c.3];
+                    // Radii resolve per-axis: rx against the box width,
+                    // ry against its height (the elliptical form).
+                    let res = |l: &crate::diting_css::Length, basis: f32| match l {
+                        crate::diting_css::Length::Px(v) => *v,
+                        crate::diting_css::Length::Percent(p) => p * basis / 100.0,
                     };
-                    items.push(PaintItem::Bg {
-                        dom_id: *dom_id,
-                        rect,
-                        color: [c.0, c.1, c.2, c.3],
-                        radius,
-                    });
+                    match &styles.get(dom_id).and_then(|s| s.corner_radii.clone()) {
+                        Some(corners) => {
+                            let radii = corners
+                                .iter()
+                                .map(|(rx, ry)| {
+                                    (res(rx, rect.width), res(ry, rect.height))
+                                })
+                                .collect::<Vec<_>>();
+                            let uniform = radii.iter().all(|r| *r == radii[0]);
+                            if uniform {
+                                items.push(PaintItem::Bg {
+                                    dom_id: *dom_id,
+                                    rect,
+                                    color,
+                                    radius: radii[0].0,
+                                });
+                            } else {
+                                items.push(PaintItem::BgCorner {
+                                    dom_id: *dom_id,
+                                    rect,
+                                    color,
+                                    radii: [
+                                        radii[0], radii[1], radii[2], radii[3],
+                                    ],
+                                });
+                            }
+                        }
+                        None => items.push(PaintItem::Bg {
+                            dom_id: *dom_id,
+                            rect,
+                            color,
+                            radius: 0.0,
+                        }),
+                    }
                 }
             }
             // A border exists only with a line style; its color defaults to
@@ -3347,6 +3378,102 @@ mod bridge_cross_check {
             }
         }
         assert!(last_gray_row <= 29 + 1, "gray ends at the box bottom");
+    }
+
+    /// Per-corner + elliptical radii (batch 7c): `border-radius: 0 40px`
+    /// sharpens the left corners and rounds only the right pair; the
+    /// `rx ry` slash form makes true ellipses. Contract: pixel classes
+    /// (fill vs background) sampled well clear of the AA curves must match
+    /// blitz on every probe.
+    #[test]
+    fn paint_per_corner_radius_matches_blitz() {
+        let html = r#"<body><div id="t"></div></body>"#;
+        // Two-value expansion: TL/BR = 0, TR/BL = 40 → right side pill,
+        // left side square. Plus a separate elliptical case below.
+        let sheet = "body { margin: 0; } #t { width: 100px; height: 100px; background: rgb(200,40,40); border-radius: 0 40px; }";
+        let (w, h) = (200u32, 200u32);
+        let mut doc = blitz_doc_unresolved(html, sheet);
+        for _ in 0..4 {
+            doc.resolve(0.0);
+        }
+        let blitz = anyrender::render_to_buffer::<anyrender_vello_cpu::VelloCpuImageRenderer, _>(
+            |scene| {
+                use anyrender::PaintScene as _;
+                use peniko::kurbo::Rect;
+                scene.fill(
+                    peniko::Fill::NonZero,
+                    Default::default(),
+                    peniko::Color::WHITE,
+                    Default::default(),
+                    &Rect::new(0.0, 0.0, w as f64, h as f64),
+                );
+                blitz_paint::paint_scene(scene, &mut doc, 1.0, w, h, 0, 0);
+            },
+            w,
+            h,
+        );
+        let ours = our_render(html, sheet, w as usize, h as usize);
+
+        let px = |buf: &[u8], x: usize, y: usize| {
+            let i = (y * w as usize + x) * 4;
+            (buf[i], buf[i + 1], buf[i + 2])
+        };
+        let is_red = |c: (u8, u8, u8)| c.0 > 150 && c.1 < 110 && c.2 < 110;
+
+        for (name, buf) in [("ours", &ours.data), ("blitz", &blitz)] {
+            // Sharp left corners: filled right up to near the corner.
+            assert!(is_red(px(buf, 2, 2)), "{name} sharp TL corner filled: {:?}", px(buf, 2, 2));
+            // Rounded right corners: deep inside the 40px cut is background.
+            assert!(
+                !is_red(px(buf, 97, 3)),
+                "{name} rounded TR corner cut: {:?}",
+                px(buf, 97, 3)
+            );
+            // Right edge midpoint is on the straight part: filled.
+            assert!(is_red(px(buf, 97, 50)), "{name} right mid-edge filled");
+            // Center filled.
+            assert!(is_red(px(buf, 50, 50)), "{name} center filled");
+        }
+
+        // Elliptical: all four corners rx=30 ry=10 via the slash syntax.
+        let sheet = "body { margin: 0; } #t { width: 100px; height: 100px; background: rgb(200,40,40); border-radius: 30px / 10px; }";
+        let mut doc = blitz_doc_unresolved(html, sheet);
+        for _ in 0..4 {
+            doc.resolve(0.0);
+        }
+        let blitz = anyrender::render_to_buffer::<anyrender_vello_cpu::VelloCpuImageRenderer, _>(
+            |scene| {
+                use anyrender::PaintScene as _;
+                use peniko::kurbo::Rect;
+                scene.fill(
+                    peniko::Fill::NonZero,
+                    Default::default(),
+                    peniko::Color::WHITE,
+                    Default::default(),
+                    &Rect::new(0.0, 0.0, w as f64, h as f64),
+                );
+                blitz_paint::paint_scene(scene, &mut doc, 1.0, w, h, 0, 0);
+            },
+            w,
+            h,
+        );
+        let ours = our_render(html, sheet, w as usize, h as usize);
+        for (name, buf) in [("ours", &ours.data), ("blitz", &blitz)] {
+            // Inside the shallow ellipse near the top-left: point (25, 5)
+            // sits ((25-30)/30)²+((5-10)/10)² ≈ 0.03+0.25 < 1 → filled.
+            assert!(
+                is_red(px(buf, 25, 5)),
+                "{name} inside TL ellipse filled: {:?}",
+                px(buf, 25, 5)
+            );
+            // Outside it: (5,9): ((5-30)/30)²+((9-10)/10)² ≈ 0.7+0.01 —
+            // still inside; take (2,2): ≈0.756+0.64 > 1 → cut.
+            assert!(
+                !is_red(px(buf, 2, 2)),
+                "{name} outside TL ellipse cut: {:?}",
+                px(buf, 2, 2)
+            );
+        }
     }
 
     /// Per-tag replaced sizing (batch 7a), cross-checked against blitz's
