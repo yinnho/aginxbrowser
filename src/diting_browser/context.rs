@@ -14,6 +14,11 @@ pub struct BrowserContext {
     pub proxy_url: Option<String>,
     pub robots_cache: Arc<RobotsCache>,
     pub obey_robots: bool,
+    /// Persona flags: stealth gates tracker-blocking at HttpClient
+    /// construction and the lazy wreq client in page.rs. tls_fingerprint
+    /// selects the wreq Emulation for that client (stealth builds only),
+    /// so plain builds see both as unread.
+    #[cfg_attr(not(feature = "stealth"), allow(dead_code))]
     pub stealth: bool,
     /// When true, CDP-driven navigation to file:// URLs is permitted.
     /// Default is false: a remote CDP client cannot point the browser
@@ -36,6 +41,7 @@ pub struct BrowserContext {
     /// "firefox133", etc. None → Chrome145. Kept as a String (not the
     /// `Emulation` enum) so the field exists regardless of the `stealth`
     /// feature; parsed into an `Emulation` lazily in the stealth client.
+    #[cfg_attr(not(feature = "stealth"), allow(dead_code))]
     pub tls_fingerprint: Option<String>,
 }
 

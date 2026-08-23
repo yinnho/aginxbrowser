@@ -242,3 +242,27 @@ selector.rs 钩子 + css.rs scope cascade 三层联动）。
 
 cascade 复刻（批次 1）的前置依赖就此就位：CompiledSelector/Matcher 正是
 obscura-render/css.rs 构建样式表索引的原语。
+
+## 8. 批次 0 完成（2026-08-23）：基线图集
+
+screenshot.rs 新增 4 个基线测试（`baseline_*`），把 Blitz 管线在**确定性本地
+页面**上的输出锁成 parity 判据。全部无网络依赖，CI 可跑；服务器 CI 需装
+`fonts-noto-cjk`（与生产一致）。
+
+| 基线页 | 锁定指标 |
+|---|---|
+| SSR 中文文本 | 800×400 画布、色彩数>50、#1a0dab 标题字形>100px、正文墨色>200px、h1 rect 近顶 |
+| flex 行 + grid | 三色 cell 各>4000px；grid 六 cell rect 精确（60×40±1.5，行距≥40 不重叠） |
+| 表格 + display:none | 折叠边框灰系>150px、文字墨色>30px、隐藏元素 box=0x0 |
+| full_page 高度追踪 | 内容 1800px 时画布跟随 ≥1800；viewport 模式裁到 300 |
+
+**记档一个 API 真实行为**：display:none 元素在 selector_all 下仍报一条
+rect 匹配（blitz 保留节点），box 为 0x0——基线锁的是这个诚实行为，
+自研切换时若行为不同需显式说明。
+
+**用法**：将来任何渲染层变更（升级 blitz rev / 自研替换）跑这 4 页，
+色彩数或区域像素漂移 = 布局/绘制回归（或改进），必须逐项解释后才可切换。
+真实站抽样（baidu/github/people）继续走部署后人工验证流程（见
+[[blitz-rendering-spike]] 历次部署记录），不入 CI。
+
+358 测试全绿（+4 基线 +1 stealth 组合下的 cfg_attr 修正）。

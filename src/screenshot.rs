@@ -643,4 +643,174 @@ mod tests {
             .filter(|px| pred((px[0], px[1], px[2])))
             .count()
     }
+
+    // ------------------------------------------------------------------
+    // Baseline atlas (render-claim batch 0): deterministic local pages whose
+    // Blitz-pipeline outputs are locked here as the parity yardstick a future
+    // in-house renderer must match page-for-page. Metrics per page: distinct
+    // color count, key-region pixel counts, and layout rects. All fixtures
+    // are network-free so the atlas runs in CI unchanged.
+    //
+    // When the renderer under test changes, these are THE numbers to compare:
+    // a page whose color count or region counts drift has a layout/paint
+    // regression (or improvement) that must be explained before switching.
+    // ------------------------------------------------------------------
+
+    /// Distinct RGBA colors in a rendered PNG.
+    fn distinct_colors(png_bytes: &[u8]) -> usize {
+        let decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
+        let mut reader = decoder.read_info().expect("png read_info");
+        let mut buf = vec![0; reader.output_buffer_size().expect("png output buffer size")];
+        let info = reader.next_frame(&mut buf).expect("png decode");
+        use std::collections::HashSet;
+        buf[..info.buffer_size()]
+            .chunks(4)
+            .map(|px| [px[0], px[1], px[2], px[3]])
+            .collect::<HashSet<_>>()
+            .len()
+    }
+
+    #[test]
+    fn baseline_ssr_text_and_chinese() {
+        // Pure SSR page with CJK text — the case curl-fed Blitz failed at
+        // first (all-white) and the case any successor must keep green.
+        // System fonts provide the CJK glyphs on dev hosts; CI needs
+        // fonts-noto-cjk like the server.
+        let html = r#"<html><head><style>
+            body { margin: 0; font-family: sans-serif; background: #ffffff; }
+            h1 { color: #1a0dab; font-size: 28px; margin: 16px; }
+            p.item { color: #333333; font-size: 14px; margin: 16px; }
+        </style></head><body>
+            <h1>搜索引擎优化测试</h1>
+            <p class="item">第一段中文内容，用于验证 CJK 字形光栅与断行。</p>
+            <p class="item">Second paragraph mixing English with 中文内容.</p>
+        </body></html>"#;
+
+        let shot = render_html_to_png(html, "https://example.com/", 800, 400, 1.0, false, None, false, None)
+            .expect("SSR render");
+        assert_eq!((shot.pixel_width, shot.pixel_height), (800, 400));
+
+        let colors = distinct_colors(&shot.png);
+        assert!(colors > 50, "text+antialiasing should yield many colors, got {colors}");
+        // Blue heading glyphs present (#1a0dab ± antialiasing).
+        let blue = count_color(&shot.png, |(r, g, b)| b > 120 && r < 90 && g < 80);
+        assert!(blue > 100, "CJK heading glyphs missing: {blue} blue px");
+        // Dark body text present.
+        let dark = count_color(&shot.png, |(r, g, b)| r < 90 && g < 90 && b < 90);
+        assert!(dark > 200, "body text missing: {dark} dark px");
+
+        // Layout truth: h1 sits near the top of the document.
+        let h1 = render_html_to_png(html, "https://example.com/", 800, 400, 1.0, false, Some("h1"), true, None)
+            .expect("h1 rect");
+        assert_eq!(h1.rects.len(), 1);
+        assert!(h1.rects[0].y < 100.0, "h1 near top: {:?}", h1.rects[0]);
+    }
+
+    #[test]
+    fn baseline_flex_grid_layout() {
+        // Flexbox row + CSS grid: the two workhorse layouts of real sites.
+        let html = r#"<html><head><style>
+            body { margin: 0; }
+            .row { display: flex; gap: 10px; padding: 10px; }
+            .cell { width: 100px; height: 50px; }
+            .grid { display: grid; grid-template-columns: repeat(3, 60px); gap: 8px; padding: 10px; }
+            .g { height: 40px; background: #0066cc; }
+        </style></head><body>
+            <div class="row">
+                <div class="cell" style="background:#ff0000"></div>
+                <div class="cell" style="background:#00aa00"></div>
+                <div class="cell" style="background:#0000ff"></div>
+            </div>
+            <div class="grid">
+                <div class="g"></div><div class="g"></div><div class="g"></div>
+                <div class="g"></div><div class="g"></div><div class="g"></div>
+            </div>
+        </body></html>"#;
+
+        let shot = render_html_to_png(html, "https://example.com/", 600, 300, 1.0, false, None, false, None)
+            .expect("flex/grid render");
+        let red = count_color(&shot.png, |(r, g, b)| r > 200 && g < 80 && b < 80);
+        let green = count_color(&shot.png, |(r, g, b)| g > 140 && r < 70 && b < 70);
+        let blue = count_color(&shot.png, |(r, g, b)| b > 180 && r < 70 && g < 130);
+        // Each flex cell is 100x50 = 5000 px; allow rounding slack.
+        assert!(red > 4000, "flex red cell: {red}");
+        assert!(green > 4000, "flex green cell: {green}");
+        assert!(blue > 4000, "flex blue cell: {blue}");
+
+        // Grid: two rows of three 60x40 cells with 8px gaps — verify geometry
+        // via rects (gap math is exact) rather than pixel counts.
+        let all = render_html_to_png(html, "https://example.com/", 600, 300, 1.0, false, Some(".g"), true, None)
+            .expect("grid rects");
+        assert_eq!(all.rects.len(), 6, "grid must place all six cells");
+        let row1_max_y = all.rects.iter().take(3).map(|r| r.y).fold(0.0f64, f64::max);
+        let row2_min_y = all.rects.iter().skip(3).map(|r| r.y).fold(f64::MAX, f64::min);
+        assert!(
+            row2_min_y >= row1_max_y + 40.0,
+            "grid rows must not overlap: row1 maxY {row1_max_y}, row2 minY {row2_min_y}"
+        );
+        for r in &all.rects {
+            assert!((r.width - 60.0).abs() <= 1.5, "grid cell width: {r:?}");
+            assert!((r.height - 40.0).abs() <= 1.5, "grid cell height: {r:?}");
+        }
+    }
+
+    #[test]
+    fn baseline_table_and_display_none() {
+        // Authored table + display:none hiding: the exact pair that made
+        // curl-fed renders blank back in the Phase 0 spike.
+        let html = r#"<html><head><style>
+            table { border-collapse: collapse; }
+            td { border: 1px solid #999999; padding: 4px 12px; color: #222222; }
+            .hidden { display: none; }
+        </style></head><body>
+            <table><tr><td>A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr></table>
+            <div class="hidden">must not paint</div>
+        </body></html>"#;
+
+        let shot = render_html_to_png(html, "https://example.com/", 400, 300, 1.0, false, None, false, None)
+            .expect("table render");
+        // Gray borders from collapsed td edges.
+        let gray = count_color(&shot.png, |(r, g, b)| {
+            (r as i32 - g as i32).abs() < 12 && (g as i32 - b as i32).abs() < 12 && r > 110 && r < 190
+        });
+        assert!(gray > 150, "table borders missing: {gray} gray px");
+        // Text ink present.
+        let ink = count_color(&shot.png, |(r, g, b)| r < 80 && g < 80 && b < 80);
+        assert!(ink > 30, "table text missing: {ink}");
+
+        // display:none content paints nothing. selector_all still reports a
+        // match entry (blitz keeps the node), but its box is 0x0 — lock that
+        // honest behavior as the baseline.
+        let hidden = render_html_to_png(html, "https://example.com/", 400, 300, 1.0, false, Some(".hidden"), true, None)
+            .expect("hidden query");
+        for r in &hidden.rects {
+            assert!(
+                r.width < 0.5 && r.height < 0.5,
+                "display:none must have no visible box: {r:?}"
+            );
+        }
+
+        let colors = distinct_colors(&shot.png);
+        assert!(colors > 30, "border+text+antialias palette: {colors}");
+    }
+
+    #[test]
+    fn baseline_full_page_tracks_content_height() {
+        // full_page must grow the canvas to the content, not clip at viewport.
+        let html = r#"<html><head><style>body{margin:0}</style></head><body>
+            <div style="height:1800px;background:#123456"></div>
+        </body></html>"#;
+        let shot = render_html_to_png(html, "https://example.com/", 400, 300, 1.0, true, None, false, None)
+            .expect("full-page render");
+        assert!(
+            shot.pixel_height >= 1800,
+            "full_page must track content height, got {}",
+            shot.pixel_height
+        );
+
+        // Viewport-only render clips at 300px.
+        let vp = render_html_to_png(html, "https://example.com/", 400, 300, 1.0, false, None, false, None)
+            .expect("viewport render");
+        assert_eq!(vp.pixel_height, 300);
+    }
 }
