@@ -246,6 +246,10 @@ pub fn render_html_to_png(
         DocumentConfig {
             base_url: Some(base_url.to_string()),
             net_provider,
+            // Bundled CJK fonts (batch 3c): hoisted to the head of the Han
+            // fallback chain, system fonts kept as tail — CJK renders the
+            // same on every machine, no fonts-noto-cjk dependency.
+            font_ctx: Some(crate::diting_fonts::font_ctx()),
             viewport: Some(Viewport::new(
                 width * (scale as u32),
                 height * (scale as u32),

@@ -38,6 +38,10 @@ mod diting_css;
 // stock 0.13.0 our blitz pipeline pins) — docs/engine/render.md §11.
 #[cfg(feature = "screenshot")]
 mod diting_layout;
+// Bundled CJK font supply for /screenshot determinism (batch 3c) —
+// docs/engine/render.md §18.
+#[cfg(feature = "screenshot")]
+mod diting_fonts;
 
 use server::{do_click, do_eval, do_fetch, do_search, SearchError};
 use render::smart_fetch;

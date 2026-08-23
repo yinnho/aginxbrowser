@@ -739,3 +739,40 @@ make_font_fixture.py 注释：宽度断言不充分，字形级验证靠 ink；c
 组合，后续批次）；整像素 pen 无 subpixel（vello_cpu 亚像素，ink ±2px
 吸收）；无 color/bitmap 字形源（Source::Outline 单源）；无 faux bold
 （synthesis 只在 shaping 层，300-500 weight 仍 snap 双 weight）。
+
+## 18. 批次 3c 完成（2026-08-23）：CJK 字体捆入——/screenshot 确定性注入
+
+**动机**：/screenshot 此前依赖服务器装 fonts-noto-cjk（环境依赖=不确定性
+来源）；上游 obscura-render 确定性设计干脆零 CJK（中文全豆腐）——这是
+我们的产品差异点，批次 3c 把它落进产品。
+
+**bundle**：Noto Sans SC（OFL，notice 随行 diting_fonts/OFL.txt）变量字体
+instancer wght=400/700 → GB2312 全量（6763 字≈全部现代简体）+ASCII
+subset，2.43MB×2=+4.9MB（screenshot build 才编入，include_bytes 于
+src/diting_fonts/）。`scripts/make_font_bundle.py` 可复现。
+
+**接线（src/diting_fonts.rs）**：
+- 家族名用真名 "Noto Sans SC"——中文页常显式 style 该名，直接命中捆入
+  字节（诚实且实用）；
+- `set_fallbacks(FallbackKey::new(Script::Hani, None), ours.chain(existing))`
+  ——**set 是整体替换**，必须把内置链（系统 Noto 等）接回尾部：捆入
+  优先、系统兜底（GB2312 外罕字/日韩文走系统）；
+- `append_generic_families(SansSerif/Serif/Monospace)`——零字体机器上
+  无 style 的文本也能解析（generic 链尾部附加）；
+- system_fonts 保持 true。确定性优先、缺字优雅，fixture 全钉（双侧同
+  字节）与真实页面（系统兜底）之间的工程折中。
+
+**注入点**：screenshot.rs render_html_to_png 的 DocumentConfig.font_ctx。
+FontBook::bundled（diting_fonts::font_book）给 diting 栈产品路径备用。
+
+**验证**：`cjk_renders_without_system_fonts`——build_ctx(false)（生产
+接线只关系统尾）+ font-family:serif 的中文页 paint 出 >100 墨迹像素：
+**无任何系统字体 CJK 照样渲染**，这是 86quan 不装字体也能出图的证明。
+`bundle_cjk_coverage_paints`——抽样 GB2312 字 advance==1em **且 raster
+有墨**（3b 教训：advance 断言防不住 .notdef，ink 才咬合）。基线图集
+（本地页走同一 render 路径）409 全绿未扰动——字体从 PingFang 换到捆入
+Noto，锁的色彩数/区域像素指标不敏感，无需重定。
+
+**边界（挂账）**：繁体/日文假名/韩文不在 GB2312（走系统兜底，无系统则
+豆腐）；subset 无 hinting（--no-hinting，与 fixture 同策略）；release
+二进制 +4.9MB（截图构建）；bold 只有 700（300-500 snap 近邻）。
