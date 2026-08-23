@@ -1088,3 +1088,30 @@ Border 圆角（annulus）挂账。
 **测试**：428→429。挂账更新：per-corner/椭圆（rx ry `/` 两值组）半径、
 border 圆角 annulus、radius 与 overflow clip 的圆角裁剪联动、50% 非方盒
 椭圆。下一批候选：网络图通路 或 alt 溢出裁剪。
+
+## 28. 批次 6c 完成（2026-08-23）：网络图通路——字节注入 + 解码缓存
+
+**设计**：diting 侧不碰网络——fetch 是调用方的事（截图管线的
+`prefetch_render_resources` 已用页面自己的客户端拉过 img body），layout
+只消费字节。image.rs 加 `ImageCache<'net>`：`resolve(src)` 处理两种源——
+data:URL 首见解码后缓存；http(s) URL 查注入的字节表
+（绝对 URL → body）再 PNG 解码 + 缓存。表 miss 或非 PNG body → None，
+img 保持 5a 占位；无表时 http(s) 恒 None。
+
+**缓存语义**：解码结果 `Arc<DecodedImage>` 按 src 去重——同 src 的 N 个
+img 和 layout 重跑都共享同一 Arc（单测锁 `Arc::ptr_eq`），兑现 §24 挂账
+的"解码每 layout 重跑"。PNG 判定按字节签名 sniff，不信 Content-Type/URL
+后缀。
+
+**接线**：新入口 `layout_dom_with_paint_and_images(..., network_bytes:
+Option<&HashMap<String,Vec<u8>>>)`；原 `layout_dom_with_paint` 签名不变
+（传 None）。scan_images 改走 cache.resolve。产品接入点：未来 diting
+渲染接管截图时，把 PrefetchedResources map 直接递进来即可。
+
+**对照**：`paint_img_from_network_bytes_matches_blitz`——http src +
+字节表的 img 与 blitz 吃同一 RGBA 的 data:URL 版**逐像素相等**
+（1:1 尺寸）；结构断言 Image item 存在。
+
+**测试**：429→432（+2 image.rs 单测 +1 对照）。挂账更新：JPEG/WebP
+解码器；相对 URL 解析归一（现在要求调用方给绝对 URL key）；srcset/
+picture 源选择；HTTP 缓存头（ETag/max-age）层。

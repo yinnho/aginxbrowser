@@ -10,9 +10,16 @@
 //! base64 is the one encoding real pages use for inline images, and the
 //! unencoded (percent-encoded) form adds a decoder for zero real coverage.
 //! Non-PNG media and network URLs return `None` — the img keeps its batch-5a
-//! placeholder. Decoding runs per layout call; a decoded-image cache keyed
-//! by URL is deferred until a product path (diting_net fetch) needs it.
+//! placeholder.
+//!
+//! Batch 6c adds [`ImageCache`]: decoded images keyed by their `src`, so a
+//! layout re-run (or N imgs sharing one data: URL) decodes once, plus an
+//! injected byte table for `http(s)` sources — the caller (the screenshot
+//! prefetch path, over diting_net) fetches the bodies; the cache only ever
+//! sees bytes. PNG-only for now; JPEG/WebP are later batches.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -29,6 +36,58 @@ pub struct DecodedImage {
 impl DecodedImage {
     pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Self {
         Self { width, height, rgba: Arc::new(rgba) }
+    }
+}
+
+/// Decoded-image store shared across layouts (batch 6c). `resolve(src)`
+/// handles the two source forms the pipeline knows:
+///
+/// - `data:image/png;base64,…` — decoded on first sight, then cached.
+/// - `http(s)://…` — looked up in the injected byte table (populated by
+///   the caller's fetch pass) and PNG-decoded + cached. A miss stays a
+///   miss (the img keeps its 5a placeholder); nothing here touches the
+///   network.
+pub struct ImageCache<'a> {
+    network_bytes: Option<&'a HashMap<String, Vec<u8>>>,
+    cache: RefCell<HashMap<String, Arc<DecodedImage>>>,
+}
+
+impl Default for ImageCache<'_> {
+    fn default() -> Self {
+        Self { network_bytes: None, cache: RefCell::new(HashMap::new()) }
+    }
+}
+
+impl<'a> ImageCache<'a> {
+    /// A cache that also resolves http(s) sources against `bytes`
+    /// (absolute URL → response body).
+    pub fn with_network(bytes: &'a HashMap<String, Vec<u8>>) -> Self {
+        Self { network_bytes: Some(bytes), cache: RefCell::new(HashMap::new()) }
+    }
+
+    /// Decode (or recall from cache) the image behind an `<img src>`.
+    pub fn resolve(&self, src: &str) -> Option<Arc<DecodedImage>> {
+        if let Some(hit) = self.cache.borrow().get(src) {
+            return Some(Arc::clone(hit));
+        }
+        let decoded = self.decode_uncached(src)?;
+        self.cache.borrow_mut().insert(src.to_string(), Arc::clone(&decoded));
+        Some(decoded)
+    }
+
+    fn decode_uncached(&self, src: &str) -> Option<Arc<DecodedImage>> {
+        if let Some(rest) = src.strip_prefix("data:") {
+            return decode_data_url_png(&format!("data:{rest}")).map(Arc::new);
+        }
+        if (src.starts_with("http://") || src.starts_with("https://"))
+            && self.network_bytes.is_some()
+        {
+            // Content-type is untrusted/absent in practice; sniff the PNG
+            // signature instead of trusting the URL extension.
+            let bytes = self.network_bytes.unwrap().get(src)?;
+            return decode_png(bytes).map(Arc::new);
+        }
+        None
     }
 }
 
@@ -132,5 +191,59 @@ mod tests {
         assert!(decode_data_url_png("data:image/jpeg;base64,AAAA").is_none());
         assert!(decode_data_url_png("data:image/png,raw-not-supported").is_none());
         assert!(decode_data_url_png("data:image/png;base64,!!!not-b64!!!").is_none());
+    }
+
+    fn two_by_one_png() -> (Vec<u8>, DecodedImage) {
+        let rgba = vec![200u8, 40, 40, 255, 40, 40, 200, 255];
+        let mut png_bytes = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut png_bytes, 2, 1);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut writer = enc.write_header().unwrap();
+            writer.write_image_data(&rgba).unwrap();
+        }
+        (png_bytes, DecodedImage::new(2, 1, rgba))
+    }
+
+    /// The cache decodes each distinct src once: repeated resolves hand
+    /// back the SAME Arc, and two imgs sharing one data: URL share it too.
+    #[test]
+    fn cache_dedupes_decodes() {
+        let (png_bytes, img) = two_by_one_png();
+        let url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&png_bytes)
+        );
+        let cache = ImageCache::default();
+        let a = cache.resolve(&url).expect("data URL decodes");
+        let b = cache.resolve(&url).expect("cached");
+        assert!(Arc::ptr_eq(&a, &b), "second resolve is the cached Arc");
+        assert_eq!((a.width, a.height), (img.width, img.height));
+    }
+
+    /// http(s) sources decode from the injected byte table — the fetch is
+    /// the caller's job. Unknown URLs stay None (placeholder path); a
+    /// non-PNG body also declines.
+    #[test]
+    fn network_sources_resolve_from_injected_bytes() {
+        let (png_bytes, _img) = two_by_one_png();
+        let mut bytes = HashMap::new();
+        bytes.insert("https://example.com/a.png".to_string(), png_bytes.clone());
+        bytes.insert("https://example.com/bad.png".to_string(), b"not a png".to_vec());
+
+        let cache = ImageCache::with_network(&bytes);
+        let hit = cache.resolve("https://example.com/a.png").expect("fetched PNG decodes");
+        assert_eq!((hit.width, hit.height), (2, 1));
+        assert!(
+            cache.resolve("https://example.com/bad.png").is_none(),
+            "non-PNG body declines"
+        );
+        assert!(
+            cache.resolve("https://example.com/missing.png").is_none(),
+            "URL not in the table stays a placeholder"
+        );
+        // No network table at all: http(s) never resolves.
+        assert!(ImageCache::default().resolve("https://example.com/a.png").is_none());
     }
 }

@@ -863,6 +863,21 @@ pub fn layout_dom_with_paint(
     fonts: &FontBook,
     viewport_width: f32,
 ) -> (HashMap<NodeId, Rect>, Vec<PaintItem>) {
+    layout_dom_with_paint_and_images(tree, styles, fonts, viewport_width, None)
+}
+
+/// [`layout_dom_with_paint`] with an injected table of fetched image bodies
+/// (batch 6c): absolute `http(s)` URL → response body. `<img src>` entries
+/// pointing at those URLs decode like data: URLs (PNG only); misses keep
+/// the placeholder. The fetch itself is the caller's job — the screenshot
+/// prefetch pass fills this from diting_net.
+pub fn layout_dom_with_paint_and_images(
+    tree: &DomTree,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    fonts: &FontBook,
+    viewport_width: f32,
+    network_bytes: Option<&HashMap<String, Vec<u8>>>,
+) -> (HashMap<NodeId, Rect>, Vec<PaintItem>) {
     let mut taffy_tree = TaffyTree::new();
     let mut node_map: HashMap<taffy::tree::NodeId, NodeId> = HashMap::new();
 
@@ -873,13 +888,17 @@ pub fn layout_dom_with_paint(
         .into_iter()
         .find(|id| tree.with_node(*id, |n| n.is_element()).unwrap_or(false));
 
-    // Pre-pass (batch 5b): decode every img whose src is a self-contained
-    // data: PNG. Natural size AND paint pixels read the same decode; imgs
-    // without one keep the batch-5a placeholder.
+    // Pre-pass (batches 5b + 6c): resolve every img src through the
+    // ImageCache — data: URLs decode inline, http(s) URLs consult the
+    // fetched-byte table; results are cached so repeated srcs and layout
+    // re-runs decode once. Unresolvable imgs keep the batch-5a placeholder.
+    let empty: HashMap<String, Vec<u8>> = HashMap::new();
+    let cache = image::ImageCache::with_network(network_bytes.unwrap_or(&empty));
     let mut images: HashMap<NodeId, DecodedImage> = HashMap::new();
     fn scan_images(
         tree: &DomTree,
         id: NodeId,
+        cache: &image::ImageCache,
         images: &mut HashMap<NodeId, DecodedImage>,
     ) {
         let is_img = tree
@@ -890,16 +909,16 @@ pub fn layout_dom_with_paint(
             let src = tree
                 .with_node(id, |n| n.get_attribute("src").map(|v| v.to_string()))
                 .flatten();
-            if let Some(img) = src.as_deref().and_then(image::decode_data_url_png) {
-                images.insert(id, img);
+            if let Some(img) = src.as_deref().and_then(|s| cache.resolve(s)) {
+                images.insert(id, (*img).clone());
             }
         }
         for child in tree.children(id) {
-            scan_images(tree, child, images);
+            scan_images(tree, child, cache, images);
         }
     }
     if let Some(root_id) = &root {
-        scan_images(tree, *root_id, &mut images);
+        scan_images(tree, *root_id, &cache, &mut images);
     }
 
     let mut rects = HashMap::new();
@@ -3834,4 +3853,78 @@ mod bridge_cross_check {
             );
         }
     }
+
+    /// Network-image path (batch 6c): an `<img src="https://…">` whose body
+    /// sits in the injected byte table paints exactly like the blitz side
+    /// fed the same decoded bytes — pixel-exact at 1:1. The table is keyed
+    /// by absolute URL (the caller resolves relative srcs before fetching),
+    /// so this exercises the exact lookup the product prefetch would use.
+    #[test]
+    fn paint_img_from_network_bytes_matches_blitz() {
+        use base64::Engine as _;
+        let (w, h) = (200u32, 200u32);
+        let mut rgba = Vec::new();
+        for y in 0..50u32 {
+            for x in 0..100u32 {
+                let red = (x < 50) ^ (y < 25);
+                rgba.extend_from_slice(if red { &[200, 40, 40, 255] } else { &[40, 40, 200, 255] });
+            }
+        }
+        let mut png_bytes = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut png_bytes, 100, 50);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut writer = enc.write_header().unwrap();
+            writer.write_image_data(&rgba).unwrap();
+        }
+
+        // Ours: http(s) src resolved through the injected byte table.
+        let html = r#"<body><img id="t" src="https://cdn.example.com/hero.png" width="100" height="50"></body>"#;
+        let sheet = "body { margin: 0; }";
+        let mut net: HashMap<String, Vec<u8>> = HashMap::new();
+        net.insert("https://cdn.example.com/hero.png".to_string(), png_bytes);
+
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let (_rects, items) =
+            layout_dom_with_paint_and_images(&tree, &styles, &fixture_fonts(), VW, Some(&net));
+        assert!(
+            items.iter().any(|i| matches!(i, PaintItem::Image { .. })),
+            "network img resolves to an Image item"
+        );
+        let mut ours = paint::Canvas::new_filled(w as usize, h as usize, [255, 255, 255, 255]);
+        paint::execute(&items, &fixture_fonts(), &mut ours);
+
+        // Blitz side: same RGBA injected directly (its harness has no net
+        // layer) via the data: URL path — identical bytes, pixel-exact.
+        let mut png2 = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut png2, 100, 50);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut writer = enc.write_header().unwrap();
+            writer.write_image_data(&rgba).unwrap();
+        }
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&png2)
+        );
+        let html_blitz =
+            format!(r#"<body><img id="t" src="{data_url}" width="100" height="50"></body>"#);
+        let img = image::DecodedImage::new(100, 50, rgba.clone());
+        let blitz = blitz_render_with_image(&html_blitz, sheet, "#t", &img, w, h);
+        for y in 0..50usize {
+            for x in 0..100usize {
+                let i = (y * w as usize + x) * 4;
+                assert_eq!(
+                    ours.data[i..i + 4],
+                    blitz[i..i + 4],
+                    "network-img pixel ({x},{y}) differs"
+                );
+            }
+        }
+    }
+
 }
