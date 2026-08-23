@@ -1140,3 +1140,23 @@ decode_bytes。data:URL 路径保持 PNG-gated（真实页 inline 图唯一形�
 **挂账更新**：WebP/GIF（同款分派可扩）；渐进式 JPEG 大图性能（zune-jpeg
 已是快速实现）；srcset/picture；HTTP 缓存头层。下一批候选：alt 溢出裁剪
 或 iframe/video 占位形态。
+
+## 30. 批次 6e 完成（2026-08-23）：alt 溢出裁剪——占位 ink 裁到盒内
+
+**背景（5a 挂账兑现）**：损坏图的 alt run 在 paint 时光栅化 wrap 到盒宽，
+多行时 tile 高度超出盒底——此前直接 blit，ink 溢出盒外。浏览器行为是
+裁到盒（replaced 内容不外溢，同批次 5c 的图片裁剪语义）。
+
+**实现**：paint.rs `Replaced` 分支 alt 绘制包进
+`push_clip(盒)→blit_text→pop_clip`。灰盒本身按 rect 填充天然在盒内，
+无需处理；只有 alt ink 需要显式裁剪。
+
+**测试**：`paint_replaced_alt_clips_to_box`——120×30 短盒 + 三短语长
+alt：盒内有 ink（首行可见）、盒底之下零 ink、灰盒最后一行 ≤ 盒底。
+434→435。
+
+**批次 6 小结（paint 细节收尾）**：6a z-index/stacking、6b border-radius
+bg 圆角、6c 网络图字节注入+解码缓存、6d JPEG 魔数分派、6e alt 盒裁剪。
+挂账剩余：per-corner/椭圆 radius、border 圆角 annulus、WebP/GIF、srcset、
+iframe/video 占位形态、嵌套 stacking root 跨层提升、float 布局与 paint
+level 1。下一批候选：iframe/video 占位 或 WebP 解码。

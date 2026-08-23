@@ -3244,6 +3244,53 @@ mod bridge_cross_check {
         );
     }
 
+    /// Alt overflow clips at the box (batch 6e): a long alt on a SHORT box
+    /// wraps past the bottom and the excess ink is cut there — no ink below
+    /// the box edge, ink still present above it (the clip is the only thing
+    /// that changed vs pre-6e overflow).
+    #[test]
+    fn paint_replaced_alt_clips_to_box() {
+        let html = r#"<body><img id="t" src="https://example.invalid/x.png" width="120" height="30" alt="谛听辨真假 一行又一行 超出盒底"></body>"#;
+        let sheet = "body { margin: 0; }";
+
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let fonts = fixture_fonts();
+        let styles = our_styles(&tree, &rules);
+        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW);
+
+        let (w, h) = (200usize, 300usize);
+        let mut canvas = paint::Canvas::new_filled(w, h, [255, 255, 255, 255]);
+        paint::execute(&items, &fonts, &mut canvas);
+
+        let is_gray = |p: &[u8]| {
+            (p[0] as i32 - 224).abs() < 6
+                && (p[1] as i32 - 224).abs() < 6
+                && (p[2] as i32 - 224).abs() < 6
+        };
+        let is_ink = |p: &[u8]| p[0] < 110 && p[1] < 110 && p[2] < 110;
+
+        // Ink exists inside the box…
+        assert!(
+            (0..50 * w).any(|i| is_ink(&canvas.data[i * 4..])),
+            "clipped alt still shows its first lines inside the box"
+        );
+        // …and nowhere below the box bottom (y=30).
+        assert!(
+            !(50 * w..h * w).any(|i| is_ink(&canvas.data[i * 4..])),
+            "alt ink cut at the box bottom edge"
+        );
+        // The placeholder gray also stops at the box.
+        let mut last_gray_row = 0usize;
+        for y in (0..h).rev() {
+            if (0..w).any(|x| is_gray(&canvas.data[(y * w + x) * 4..])) {
+                last_gray_row = y;
+                break;
+            }
+        }
+        assert!(last_gray_row <= 29 + 1, "gray ends at the box bottom");
+    }
+
     /// A two-quadrant RGBA test image (red top-left/bottom-right, blue the
     /// others) as both a data: URL (our pipeline decodes the src attribute)
     /// and a decoded [`image::DecodedImage`] (the blitz side gets the same

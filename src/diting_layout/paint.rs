@@ -298,7 +298,11 @@ pub fn execute(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas) {
                     if !text.trim().is_empty() {
                         // The alt run wraps at the box width; the tile's
                         // `top` offsets ink above the box top exactly like
-                        // any other text tile (cramped-CJK leading).
+                        // any other text tile (cramped-CJK leading). The
+                        // ink clips to the box (batch 6e): a broken-image
+                        // alt that wraps past the bottom is cut there,
+                        // like every browser.
+                        out.push_clip(x, y, x + w, y + h);
                         let r = fonts.rasterize_wrapped(
                             text,
                             *font_size,
@@ -307,6 +311,7 @@ pub fn execute(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas) {
                             w.max(0) as f32,
                         );
                         out.blit_text(&r, x, (y as f32 + r.top).round() as i64);
+                        out.pop_clip();
                     }
                 }
             }
