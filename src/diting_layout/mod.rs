@@ -35,8 +35,10 @@ use crate::diting_css::{
 };
 use crate::diting_dom::tree::{DomTree, NodeId};
 
+pub mod image;
 pub mod paint;
 pub mod text;
+pub use image::DecodedImage;
 pub use text::FontBook;
 
 /// Absolute (page-relative) border-box rect of a DOM element after layout.
@@ -511,15 +513,17 @@ fn is_replaced_tag(tag: &str) -> bool {
     matches!(tag, "img" | "video" | "iframe" | "canvas" | "object" | "embed")
 }
 
-/// Build the taffy leaf for a replaced element. Natural size comes from the
-/// HTML width/height attributes (upstream's no-network fallback); the CSS
-/// authored size overrides per-axis, and the missing axis derives from the
-/// natural ratio. No attributes and no CSS → the CSS default replaced size
-/// 300×150 (ratio 2:1).
+/// Build the taffy leaf for a replaced element. Natural size comes from a
+/// decoded image when one is available (batch 5b), else the HTML width/
+/// height attributes (upstream's no-network fallback); the CSS authored
+/// size overrides per-axis, and the missing axis derives from the natural
+/// ratio. No image, no attributes and no CSS → the CSS default replaced
+/// size 300×150 (ratio 2:1).
 fn build_replaced_leaf(
     tree: &DomTree,
     id: NodeId,
     styles: &HashMap<NodeId, ComputedStyle>,
+    images: &HashMap<NodeId, DecodedImage>,
     taffy_tree: &mut TaffyTree<TextLeaf>,
     node_map: &mut HashMap<taffy::tree::NodeId, NodeId>,
 ) -> Option<taffy::tree::NodeId> {
@@ -530,10 +534,19 @@ fn build_replaced_leaf(
             .and_then(|v| v.parse::<f32>().ok())
     };
     let (aw, ah) = (attr("width"), attr("height"));
+    // Attrs are presentational size hints: they override the image per-axis,
+    // and a free axis derives from the IMAGE ratio when one decoded (the
+    // `aspect-ratio: auto w/h` of a loaded img), else the 2:1 stand-in.
+    let img_ratio = images.get(&id).map(|i| i.width as f32 / i.height as f32);
     let (nat_w, nat_h) = match (aw, ah) {
         (Some(w), Some(h)) if h > 0.0 => (w, h),
-        (Some(w), None) => (w, w / 2.0),
-        (None, Some(h)) => (h * 2.0, h),
+        (Some(w), None) => (w, w / img_ratio.unwrap_or(2.0)),
+        (None, Some(h)) => (h * img_ratio.unwrap_or(2.0), h),
+        (None, None) => images
+            .get(&id)
+            .map(|i| (i.width as f32, i.height as f32))
+            .unwrap_or((300.0, 150.0)),
+        // Degenerate attrs (e.g. height="0"): the CSS default replaced box.
         _ => (300.0, 150.0),
     };
 
@@ -567,6 +580,7 @@ fn build_element(
     tree: &DomTree,
     id: NodeId,
     styles: &HashMap<NodeId, ComputedStyle>,
+    images: &HashMap<NodeId, DecodedImage>,
     fonts: &FontBook,
     taffy_tree: &mut TaffyTree<TextLeaf>,
     node_map: &mut HashMap<taffy::tree::NodeId, NodeId>,
@@ -582,7 +596,7 @@ fn build_element(
     // Reached directly (root, or a replaced element someone recursed into):
     // replaced boxes own no layout children.
     if is_replaced_tag(&tag) {
-        return build_replaced_leaf(tree, id, styles, taffy_tree, node_map);
+        return build_replaced_leaf(tree, id, styles, images, taffy_tree, node_map);
     }
 
     let child_ids: Vec<NodeId> = tree.children(id);
@@ -661,7 +675,7 @@ fn build_element(
             // Replaced elements are atomic: an inline-level box inside a run
             // (like a fat word), a direct item inside flex/grid or when the
             // UA/author made it block-level (our ua_display keeps img block).
-            let leaf = build_replaced_leaf(tree, child, styles, taffy_tree, node_map);
+            let leaf = build_replaced_leaf(tree, child, styles, images, taffy_tree, node_map);
             if let Some(leaf) = leaf {
                 if inline_level && !atomic_container && !out_of_flow {
                     run.push(RunSeg::Nodes(vec![leaf]));
@@ -683,7 +697,7 @@ fn build_element(
         } else if inline_level && !atomic_container && !out_of_flow {
             // A plain inline wrapper flattens into the enclosing run (upstream
             // is_flattenable_inline): the words wrap at the real block level.
-            let sub = build_element(tree, child, styles, fonts, taffy_tree, node_map);
+            let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map);
             if let Some(sub) = sub {
                 let sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
                 run.push(RunSeg::Nodes(sub_children));
@@ -691,7 +705,7 @@ fn build_element(
             }
         } else {
             flush_run(&mut run, &mut direct, taffy_tree);
-            if let Some(node) = build_element(tree, child, styles, fonts, taffy_tree, node_map) {
+            if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map) {
                 direct.push(node);
             }
         }
@@ -717,6 +731,13 @@ fn build_element(
 #[derive(Debug, Clone)]
 pub enum PaintItem {
     Bg { dom_id: NodeId, rect: Rect, color: [u8; 4] },
+    /// A decoded raster image blitted into the replaced box (batch 5b):
+    /// object-fit: fill — stretched over the content box (which equals the
+    /// border box until replaced elements model border/padding, 挂账).
+    /// Upstream draws the same data at `content_box × compute_object_fit`
+    /// (blitz-paint/src/render.rs `draw_image`), so a 1:1-sized image is
+    /// pixel-comparable; scaled blits compare by bbox + sampled interior.
+    Image { rect: Rect, image: DecodedImage },
     /// A replaced element's placeholder (batch 5a): an optional gray box
     /// (skipped when the author styled a background — that already shows)
     /// plus the alt text run, already resolved to font/color context and
@@ -792,10 +813,41 @@ pub fn layout_dom_with_paint(
         .into_iter()
         .find(|id| tree.with_node(*id, |n| n.is_element()).unwrap_or(false));
 
+    // Pre-pass (batch 5b): decode every img whose src is a self-contained
+    // data: PNG. Natural size AND paint pixels read the same decode; imgs
+    // without one keep the batch-5a placeholder.
+    let mut images: HashMap<NodeId, DecodedImage> = HashMap::new();
+    fn scan_images(
+        tree: &DomTree,
+        id: NodeId,
+        images: &mut HashMap<NodeId, DecodedImage>,
+    ) {
+        let is_img = tree
+            .with_node(id, |n| n.as_element().map(|e| e.local.to_string() == "img"))
+            .flatten()
+            .unwrap_or(false);
+        if is_img {
+            let src = tree
+                .with_node(id, |n| n.get_attribute("src").map(|v| v.to_string()))
+                .flatten();
+            if let Some(img) = src.as_deref().and_then(image::decode_data_url_png) {
+                images.insert(id, img);
+            }
+        }
+        for child in tree.children(id) {
+            scan_images(tree, child, images);
+        }
+    }
+    if let Some(root_id) = &root {
+        scan_images(tree, *root_id, &mut images);
+    }
+
     let mut rects = HashMap::new();
     let mut items: Vec<PaintItem> = Vec::new();
     let Some(root_id) = root else { return (rects, items) };
-    let Some(root_node) = build_element(tree, root_id, styles, fonts, &mut taffy_tree, &mut node_map) else {
+    let Some(root_node) =
+        build_element(tree, root_id, styles, &images, fonts, &mut taffy_tree, &mut node_map)
+    else {
         return (rects, items);
     };
 
@@ -891,6 +943,7 @@ pub fn layout_dom_with_paint(
         taffy_tree: &TaffyTree<TextLeaf>,
         node_map: &HashMap<taffy::tree::NodeId, NodeId>,
         styles: &HashMap<NodeId, ComputedStyle>,
+        images: &HashMap<NodeId, DecodedImage>,
         rects: &mut HashMap<NodeId, Rect>,
         items: &mut Vec<PaintItem>,
         node: taffy::tree::NodeId,
@@ -927,28 +980,35 @@ pub fn layout_dom_with_paint(
                     items.push(PaintItem::Border { dom_id: *dom_id, rect, widths, color });
                 }
             }
-            // A replaced box paints its own placeholder over its bg/border
-            // (batch 5a). The alt run resolves against the img's inherited
-            // font/color context here so paint stays style-free.
+            // A replaced box paints either its decoded image (batch 5b,
+            // object-fit: fill over the content box — equals the border box
+            // until replaced elements model border/padding) or the batch-5a
+            // placeholder over its bg/border. The alt run resolves against
+            // the img's inherited font/color context here so paint stays
+            // style-free.
             let replaced = tree
                 .with_node(*dom_id, |n| n.as_element().map(|e| is_replaced_tag(&e.local)))
                 .flatten()
                 .unwrap_or(false);
             if replaced {
-                let alt = tree
-                    .with_node(*dom_id, |n| n.get_attribute("alt").map(|v| v.to_string()))
-                    .flatten()
-                    .map(|text| {
-                        let (font_size, bold) = font_context(tree, *dom_id, styles);
-                        (text, font_size, bold, color_context(tree, *dom_id, styles))
-                    });
-                // The gray box only when the author gave no visible
-                // background — an authored bg already reads as "box here".
-                let fill_placeholder = styles
-                    .get(dom_id)
-                    .and_then(|s| s.background_color)
-                    .is_none_or(|c| c.3 == 0);
-                items.push(PaintItem::Replaced { rect, alt, fill_placeholder });
+                if let Some(img) = images.get(dom_id) {
+                    items.push(PaintItem::Image { rect, image: img.clone() });
+                } else {
+                    let alt = tree
+                        .with_node(*dom_id, |n| n.get_attribute("alt").map(|v| v.to_string()))
+                        .flatten()
+                        .map(|text| {
+                            let (font_size, bold) = font_context(tree, *dom_id, styles);
+                            (text, font_size, bold, color_context(tree, *dom_id, styles))
+                        });
+                    // The gray box only when the author gave no visible
+                    // background — an authored bg already reads as "box here".
+                    let fill_placeholder = styles
+                        .get(dom_id)
+                        .and_then(|s| s.background_color)
+                        .is_none_or(|c| c.3 == 0);
+                    items.push(PaintItem::Replaced { rect, alt, fill_placeholder });
+                }
             }
             // A clipping element constrains its DESCENDANTS' paint (its own
             // bg/border above are not clipped) to the padding box — the
@@ -1011,7 +1071,7 @@ pub fn layout_dom_with_paint(
             });
         }
         for child in taffy_tree.children(node).unwrap_or_default().iter().copied() {
-            collect(tree, taffy_tree, node_map, styles, rects, items, child, abs, viewport_width);
+            collect(tree, taffy_tree, node_map, styles, images, rects, items, child, abs, viewport_width);
         }
         if clips {
             items.push(PaintItem::PopClip);
@@ -1022,6 +1082,7 @@ pub fn layout_dom_with_paint(
         &taffy_tree,
         &node_map,
         styles,
+        &images,
         &mut rects,
         &mut items,
         root_node,
@@ -1585,7 +1646,7 @@ mod bridge_cross_check {
 
     /// Blitz side of the dual run: parse + style + layout at the test
     /// viewport, then hand back the base document for element_rect.
-    fn blitz_doc(html: &str, stylesheet: &str) -> blitz_dom::BaseDocument {
+    fn blitz_doc_unresolved(html: &str, stylesheet: &str) -> blitz_dom::BaseDocument {
         use blitz_dom::{DocumentConfig, util::Color};
         use blitz_traits::shell::{ColorScheme, Viewport};
 
@@ -1602,11 +1663,16 @@ mod bridge_cross_check {
                 ..Default::default()
             },
         );
+        let _ = Color::WHITE;
+        doc.into_inner()
+    }
+
+    fn blitz_doc(html: &str, stylesheet: &str) -> blitz_dom::BaseDocument {
+        let mut doc = blitz_doc_unresolved(html, stylesheet);
         for _ in 0..4 {
             doc.resolve(0.0);
         }
-        let _ = Color::WHITE;
-        doc.into_inner()
+        doc
     }
 
     fn assert_close(what: &str, ours: f32, theirs: f64) {
@@ -3002,5 +3068,219 @@ mod bridge_cross_check {
             !(0..w * h).any(|i| is_ink(&canvas.data[i * 4..])),
             "alt=\"\" paints no text"
         );
+    }
+
+    /// A two-quadrant RGBA test image (red top-left/bottom-right, blue the
+    /// others) as both a data: URL (our pipeline decodes the src attribute)
+    /// and a decoded [`image::DecodedImage`] (the blitz side gets the same
+    /// bytes injected straight into its img node — upstream loads images
+    /// through the net layer, which the harness does not wire).
+    fn fixture_image_data_url(w: u32, h: u32) -> (String, image::DecodedImage) {
+        use base64::Engine as _;
+        let mut rgba = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let red = (x < w / 2) ^ (y < h / 2);
+                rgba.extend_from_slice(if red { &[200, 40, 40, 255] } else { &[40, 40, 200, 255] });
+            }
+        }
+        let mut png_bytes = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut png_bytes, w, h);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut writer = enc.write_header().unwrap();
+            writer.write_image_data(&rgba).unwrap();
+        }
+        let url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD
+                .encode(&png_bytes)
+        );
+        let img = image::DecodedImage::new(w, h, rgba);
+        (url, img)
+    }
+
+    /// Render the blitz side with `image` injected into the element matching
+    /// `selector` (before its layout pass, so natural size derives from the
+    /// same decoded dims ours does).
+    fn blitz_render_with_image(
+        html: &str,
+        sheet: &str,
+        selector: &str,
+        image: &image::DecodedImage,
+        w: u32,
+        h: u32,
+    ) -> Vec<u8> {
+        use blitz_dom::node::{ImageData, RasterImageData, SpecialElementData};
+        // Inject BEFORE the first resolve: the element's natural size
+        // derives from the image during layout (blitz-dom/src/layout/mod.rs
+        // reads SpecialElementData::Image), so the box comes out the same
+        // as ours. (The product path — image arriving after a first layout
+        // — needs damage-driven relayout, not modeled by the harness.)
+        let mut doc = blitz_doc_unresolved(html, sheet);
+        let img_id = doc
+            .query_selector(selector)
+            .expect("selector parses")
+            .expect("img node exists");
+        let node = doc.get_node_mut(img_id).expect("node");
+        node.element_data_mut()
+            .expect("img is an element")
+            .special_data = SpecialElementData::Image(Box::new(ImageData::Raster(
+            RasterImageData::new(
+                image.width,
+                image.height,
+                std::sync::Arc::new(image.rgba.as_ref().clone()),
+            ),
+        )));
+        for _ in 0..2 {
+            doc.resolve(0.0);
+        }
+
+        let mut doc = doc;
+        anyrender::render_to_buffer::<anyrender_vello_cpu::VelloCpuImageRenderer, _>(
+            |scene| {
+                use anyrender::PaintScene as _;
+                use peniko::kurbo::Rect;
+                scene.fill(
+                    peniko::Fill::NonZero,
+                    Default::default(),
+                    peniko::Color::WHITE,
+                    Default::default(),
+                    &Rect::new(0.0, 0.0, w as f64, h as f64),
+                );
+                blitz_paint::paint_scene(scene, &mut doc, 1.0, w, h, 0, 0);
+            },
+            w,
+            h,
+        )
+    }
+
+    fn our_render(html: &str, sheet: &str, w: usize, h: usize) -> paint::Canvas {
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let fonts = fixture_fonts();
+        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW);
+        let mut canvas = paint::Canvas::new_filled(w, h, [255, 255, 255, 255]);
+        paint::execute(&items, &fonts, &mut canvas);
+        canvas
+    }
+
+    /// 1:1 image paint (batch 5b): the img box equals the image size, so
+    /// both engines blit the same texels at the same positions — every
+    /// pixel over the box must match exactly.
+    #[test]
+    fn paint_img_data_url_1to1_matches_blitz() {
+        let (url, img) = fixture_image_data_url(100, 50);
+        let html = format!(r#"<body><img id="t" src="{url}" width="100" height="50"></body>"#);
+        let sheet = "body { margin: 0; }";
+        let (w, h) = (200u32, 200u32);
+
+        let blitz = blitz_render_with_image(&html, sheet, "#t", &img, w, h);
+        let ours = our_render(&html, sheet, w as usize, h as usize);
+
+        // Structural: the Image item (not the placeholder) at the img box.
+        let tree = crate::diting_dom::tree_sink::parse_html(&html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let (_r, items) = layout_dom_with_paint(&tree, &styles, &fixture_fonts(), VW);
+        let image_rect = items.iter().find_map(|i| match i {
+            PaintItem::Image { rect, .. } => Some(*rect),
+            _ => None,
+        });
+        assert!(
+            image_rect.is_some_and(|r| (r.width, r.height) == (100.0, 50.0)),
+            "Image item at the 100×50 box: {image_rect:?}"
+        );
+
+        for y in 0..50usize {
+            for x in 0..100usize {
+                let i = (y * w as usize + x) * 4;
+                assert_eq!(
+                    ours.data[i..i + 4],
+                    blitz[i..i + 4],
+                    "pixel ({x},{y}) differs"
+                );
+            }
+        }
+        // Outside the box: plain white on both.
+        let i = (60 * w as usize + 150) * 4;
+        assert_eq!(ours.data[i..i + 4], [255, 255, 255, 255]);
+    }
+
+    /// Scaled image (×2 stretch, object-fit: fill) and image-derived natural
+    /// size (no attrs/CSS → the box IS the image). Nearest-neighbor vs
+    /// vello's sampler diverge on edge rows, so the contract is bbox ±1
+    /// plus exact interior quadrant samples.
+    #[test]
+    fn paint_img_scaled_and_natural_size_match_blitz() {
+        let (url, img) = fixture_image_data_url(100, 50);
+
+        // Case A: CSS box 200×100, image 100×50 → ×2 stretch.
+        let html = format!(r#"<body><img id="t" src="{url}"></body>"#);
+        let sheet = "body { margin: 0; } #t { width: 200px; height: 100px; }";
+        let (w, h) = (300u32, 200u32);
+        let blitz = blitz_render_with_image(&html, sheet, "#t", &img, w, h);
+        let ours = our_render(&html, sheet, w as usize, h as usize);
+
+        let is_img_px = |p: &[u8]| {
+            (p[0] > 130 && p[1] < 110 && p[2] < 110) || (p[0] < 110 && p[1] < 110 && p[2] > 130)
+        };
+        fn bbox(buf: &[u8], w: usize, h: usize, hit: impl Fn(&[u8]) -> bool) -> (usize, usize, usize, usize) {
+            let mut b: Option<(usize, usize, usize, usize)> = None;
+            for y in 0..h {
+                for x in 0..w {
+                    if hit(&buf[(y * w + x) * 4..]) {
+                        b = Some(match b {
+                            Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                            None => (x, y, x, y),
+                        });
+                    }
+                }
+            }
+            b.expect("bbox: no hit pixels")
+        }
+        let (ox0, oy0, ox1, oy1) = bbox(&ours.data, w as usize, h as usize, is_img_px);
+        let (bx0, by0, bx1, by1) = bbox(&blitz, w as usize, h as usize, is_img_px);
+        for (what, o, b) in [
+            ("img left", ox0, bx0),
+            ("img top", oy0, by0),
+            ("img right", ox1, bx1),
+            ("img bottom", oy1, by1),
+        ] {
+            assert!((o as i64 - b as i64).abs() <= 1, "{what}: ours={o} blitz={b}");
+        }
+        // Interior quadrant centers: quadrant-exact colors on both engines.
+        // Pattern is `(x < w/2) ^ (y < h/2)` = red, so the anti-diagonal
+        // (right-top, left-bottom) quadrants are red.
+        for (x, y, red) in [(50, 25, false), (150, 25, true), (50, 75, true), (150, 75, false)] {
+            let i = (y * w as usize + x) * 4;
+            for (name, buf) in [("ours", &ours.data), ("blitz", &blitz)] {
+                let (r, g, b) = (buf[i], buf[i + 1], buf[i + 2]);
+                assert_eq!(
+                    (r > 130, b > 130),
+                    (red, !red),
+                    "{name} quadrant at ({x},{y}): rgb({r},{g},{b})"
+                );
+            }
+        }
+
+        // Case B: no attrs, no CSS → the box is the image's natural size.
+        let sheet = "body { margin: 0; }";
+        let (w, h) = (200u32, 200u32);
+        let blitz = blitz_render_with_image(&html, sheet, "#t", &img, w, h);
+        let ours = our_render(&html, sheet, w as usize, h as usize);
+        let (ox0, oy0, ox1, oy1) = bbox(&ours.data, w as usize, h as usize, is_img_px);
+        let (bx0, by0, bx1, by1) = bbox(&blitz, w as usize, h as usize, is_img_px);
+        for (what, o, b) in [
+            ("natural left", ox0, bx0),
+            ("natural top", oy0, by0),
+            ("natural right", ox1, bx1),
+            ("natural bottom", oy1, by1),
+        ] {
+            assert!((o as i64 - b as i64).abs() <= 1, "{what}: ours={o} blitz={b}");
+        }
+        assert_eq!((ox1 - ox0 + 1, oy1 - oy0 + 1), (100, 50), "natural box 100×50");
     }
 }

@@ -8,10 +8,10 @@
 //! cross-check tests (background bbox exact, text ink extents and per-line
 //! band structure within the batch-3b ±2px ink tolerance).
 //!
-//! Not in this slice (tracked in docs/engine/render.md §23): border-radius,
+//! Not in this slice (tracked in docs/engine/render.md §24): border-radius,
 //! patterned border styles (dashed/dotted/double paint as solid), per-side
-//! border colors/styles, real image decoding (unloaded replaced boxes get
-//! our gray-placeholder + alt-text policy, not a blitz-parity feature),
+//! border colors/styles, object-fit contain/cover + object-position (images
+//! always fill the box), network-loaded images (data: PNG only),
 //! gradients, z-index/stacking contexts.
 
 use super::text::TextRaster;
@@ -76,6 +76,47 @@ impl Canvas {
             for gx in (x.max(0)).max(ax0)..(x + w).min(self.width as i64).min(ax1) {
                 let i = (gy as usize * self.width + gx as usize) * 4;
                 over(&mut self.data[i..i + 4], color);
+            }
+        }
+    }
+
+    /// Nearest-neighbor blit of an RGBA image scaled into the rect
+    /// `(x, y, w, h)` (object-fit: fill), source-over per pixel, clipped to
+    /// the canvas and the clip stack. 1:1 sizes are exact texel copies;
+    /// scaled output is nearest-neighbor (vello samples bilinearly upstream,
+    /// so scaled-image cross-checks compare bbox + sampled interior, not
+    /// per-pixel).
+    pub fn blit_image(
+        &mut self,
+        image: &super::image::DecodedImage,
+        x: i64,
+        y: i64,
+        w: i64,
+        h: i64,
+    ) {
+        if w <= 0 || h <= 0 || image.width == 0 || image.height == 0 {
+            return;
+        }
+        let (ax0, ay0, ax1, ay1) = self.allowed();
+        let src = &image.rgba;
+        let (sw, sh) = (image.width as i64, image.height as i64);
+        for gy in 0..h {
+            let ty = y + gy;
+            if ty < ay0 || ty >= ay1 || ty < 0 || ty >= self.height as i64 {
+                continue;
+            }
+            // Sample the texel covering this destination row/column's center.
+            let sy = (((gy as f64 + 0.5) * sh as f64 / h as f64) as i64).min(sh - 1);
+            for gx in 0..w {
+                let tx = x + gx;
+                if tx < ax0 || tx >= ax1 || tx < 0 || tx >= self.width as i64 {
+                    continue;
+                }
+                let sx = (((gx as f64 + 0.5) * sw as f64 / w as f64) as i64).min(sw - 1);
+                let i = ((sy * sw + sx) * 4) as usize;
+                let src_px = [src[i], src[i + 1], src[i + 2], src[i + 3]];
+                let d = (ty as usize * self.width + tx as usize) * 4;
+                over(&mut self.data[d..d + 4], src_px);
             }
         }
     }
@@ -162,6 +203,15 @@ pub fn execute(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas) {
                 out.fill_rect(x, y + h - b as i64, w, b as i64, *color);
                 out.fill_rect(x, y + t as i64, l as i64, h - t as i64 - b as i64, *color);
                 out.fill_rect(x + w - r as i64, y + t as i64, r as i64, h - t as i64 - b as i64, *color);
+            }
+            PaintItem::Image { rect, image } => {
+                out.blit_image(
+                    image,
+                    rect.x.round() as i64,
+                    rect.y.round() as i64,
+                    rect.width.round() as i64,
+                    rect.height.round() as i64,
+                );
             }
             PaintItem::Replaced { rect, alt, fill_placeholder } => {
                 let (x, y) = (rect.x.round() as i64, rect.y.round() as i64);

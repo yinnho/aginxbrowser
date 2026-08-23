@@ -948,3 +948,41 @@ color)`（font_context/color_context 继承链，paint.rs 保持无样式访问�
 （image 解码/object-fit/object-position——blitz draw_image 已有 compute_
 object_fit 可抄）、alt 垂直溢出盒（多行 alt 目前允许溢出盒底，浏览器
 会裁）、iframe/video 专属占位形态。
+
+## 24. 批次 5b 完成（2026-08-23）：真图绘制——data:URL PNG 进 Canvas
+
+**通路**：`png` crate 本就在 screenshot feature（零新依赖），`base64` 亦在。
+新模块 `diting_layout/image.rs`：`decode_data_url_png(src)`——只认
+`data:image/png;base64,`（真实页面 inline 图的唯一形态；plain data URL 与
+其他媒体类型返回 None 走 5a 占位）；`decode_png` 归一化到 RGBA8（palette/
+sub-byte EXPAND、gray 提升、缺 alpha 补 255），与上游喂给 painter 的
+`RasterImageData` 同构。
+
+**布局**：`layout_dom_with_paint` 预扫全树 img → `HashMap<NodeId,
+DecodedImage>`，穿进 build_replaced_leaf/collect。natural size 语义对齐
+Chrome：attrs 是 presentational hints per-axis 覆盖，**缺轴从图 ratio 派生**
+（`aspect-ratio: auto w/h` 加载后语义），无 attrs 无 CSS → 盒=图尺寸；无图
+才退 2:1/300×150。
+
+**绘制**：`PaintItem::Image{rect, image}`——collect 在替换元素处优先于 5a
+占位（有解码图就画图，灰盒/alt 只在无图时）。object-fit 本批只做缺省
+**fill**（blitz `compute_object_fit` 的 Fill=container 分支）；rect=content
+box（=边盒，替换元素 border/padding 进布局仍挂账）。`Canvas::blit_image`：
+近邻采样、source-over、过 clip 栈。
+
+**对照（三测）**：blitz 侧 harness 注入 `SpecialElementData::Image(
+RasterImageData::new(同一字节))`——**注入必须先于首次 resolve**（布局期读
+它派生 natural size；布局后注入不触发 relayout，blitz 0 像素——已踩坑记
+档，产品路径的"图晚到"需要 damage 驱动 relayout，不在 harness 模拟）。
+- `paint_img_data_url_1to1_matches_blitz`：1:1 尺寸（盒==图 100×50）**逐像素
+  相等**——vello 恒等变换下采样即精确拷贝，近邻 blit 同。diting paint 栈
+  第一个逐像素对照。
+- `paint_img_scaled_and_natural_size_match_blitz` Case A：CSS 200×100 盒装
+  100×50 图 → ×2 拉伸，近邻 vs vello 双线性边缘不同 → bbox ±1 + 象限中心
+  采样精确（反 diagonal 红：`(x<w/2)^(y<h/2)`）。
+- Case B：无 attrs 无 CSS → 双侧盒=图 natural 100×50，bbox ±1。
+
+**测试**：422→426（+image.rs 单测 round-trip/拒绝、+两对照）。挂账更新：
+object-fit contain/cover/scale-down + object-position（blitz sizing.rs 可
+抄）；图晚到 relayout（damage 驱动）；网络图（diting_net fetch + 解码缓存
+——解码目前每次 layout 重跑）；`image-rendering: pixelated` 采样策略。
