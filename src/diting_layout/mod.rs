@@ -873,6 +873,37 @@ fn build_element(
         };
         let is_whitespace_text =
             |cid: &NodeId| -> bool { tree.with_node(*cid, |n| !n.is_element() && n.text_content_of_text_node().map_or(false, |t| t.trim().is_empty())).unwrap_or(false) };
+        // An empty bridge sibling (upstream is_empty_bridge): whitespace
+        // text OR an element with no authored size/margin/padding/border
+        // and no text content — the legacy compatibility boxes real pages
+        // park between the two header floats.
+        let is_empty_bridge = |cid: &NodeId| -> bool {
+            if is_whitespace_text(cid) {
+                return true;
+            }
+            let has_text = tree
+                .with_node(*cid, |n| {
+                    n.text_content_of_text_node().map(|t| !t.trim().is_empty()).unwrap_or(false)
+                        || n.first_child.is_some()
+                })
+                .unwrap_or(true);
+            if has_text {
+                return false;
+            }
+            styles.get(cid).is_some_and(|s| {
+                s.width.is_none()
+                    && s.height.is_none()
+                    && s.margin.top.is_none()
+                    && s.margin.right.is_none()
+                    && s.margin.bottom.is_none()
+                    && s.margin.left.is_none()
+                    && s.padding.top.is_none()
+                    && s.padding.right.is_none()
+                    && s.padding.bottom.is_none()
+                    && s.padding.left.is_none()
+                    && s.border_style.is_none()
+            })
+        };
 
         // Extend the run across consecutive same-side floats, skipping
         // formatting whitespace between them.
@@ -890,6 +921,99 @@ fn build_element(
             }
         }
         let run_len = (float_idx..run_end).filter(|&i| is_float_child(&child_ids[i])).count();
+
+        // --- 8d: opposing float pair on one band -------------------------
+        // The classic left-logo / right-tagline header: a float followed
+        // (possibly across empty bridge siblings) by an OPPOSITE-side float
+        // shares one band — the left float hugs the left edge, the right
+        // float the right edge. Reified as a space-between row; a multi-
+        // float run packs into an inner wrapping row first.
+        let opposite_side = match run_side {
+            Some(crate::diting_css::FloatSide::Left) => Some(crate::diting_css::FloatSide::Right),
+            Some(crate::diting_css::FloatSide::Right) => Some(crate::diting_css::FloatSide::Left),
+            None => None,
+        };
+        let mut bridge_end = run_end;
+        while bridge_end < child_ids.len() && is_empty_bridge(&child_ids[bridge_end]) {
+            bridge_end += 1;
+        }
+        let opposite_at = (bridge_end < child_ids.len()
+            && is_float_child(&child_ids[bridge_end])
+            && styles.get(&child_ids[bridge_end]).and_then(|s| s.float_side) == opposite_side)
+        .then_some(bridge_end);
+        if let Some(opp_idx) = opposite_at {
+            let mut pair_children: Vec<taffy::tree::NodeId> = Vec::new();
+            if run_len >= 2 {
+                let mut inner: Vec<taffy::tree::NodeId> = Vec::new();
+                for i in float_idx..run_end {
+                    if !is_float_child(&child_ids[i]) {
+                        continue;
+                    }
+                    if let Some(f) =
+                        build_element(tree, child_ids[i], styles, images, fonts, taffy_tree, node_map)
+                    {
+                        inner.push(f);
+                    }
+                }
+                let inner_style = Style {
+                    display: Display::Flex,
+                    flex_direction: FlexDirection::Row,
+                    align_items: Some(AlignItems::FLEX_START),
+                    ..Default::default()
+                };
+                if let Some(row) = taffy_tree.new_with_children(inner_style, &inner).ok() {
+                    pair_children.push(row);
+                }
+            } else if let Some(f) =
+                build_element(tree, child_ids[float_idx], styles, images, fonts, taffy_tree, node_map)
+            {
+                pair_children.push(f);
+            }
+            if let Some(o) =
+                build_element(tree, child_ids[opp_idx], styles, images, fonts, taffy_tree, node_map)
+            {
+                pair_children.push(o);
+            }
+            let pair_style = Style {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Row,
+                justify_content: Some(JustifyContent::SPACE_BETWEEN),
+                align_items: Some(AlignItems::FLEX_START),
+                size: Size { width: percent(1.0), height: auto() },
+                ..Default::default()
+            };
+            if let Ok(row) = taffy_tree.new_with_children(pair_style, &pair_children) {
+                direct.push(row);
+            }
+            // Pre-float and post-pair siblings take normal flow; another
+            // float after the pair recurses into this branch again.
+            for child in child_ids[..float_idx]
+                .iter()
+                .chain(child_ids[opp_idx + 1..].iter())
+            {
+                build_normal_sibling(
+                    *child,
+                    tree,
+                    styles,
+                    images,
+                    fonts,
+                    taffy_tree,
+                    node_map,
+                    atomic_container,
+                    font_size,
+                    &mut direct,
+                );
+            }
+            flush_run(&mut run, &mut direct, taffy_tree);
+            let taffy_style = to_taffy_style(&style);
+            let node = if direct.is_empty() {
+                taffy_tree.new_leaf(taffy_style).ok()?
+            } else {
+                taffy_tree.new_with_children(taffy_style, &direct).ok()?
+            };
+            node_map.insert(node, id);
+            return Some(node);
+        }
 
         if run_len >= 2 {
             // --- 8c: the wrapping float-grid row -------------------------
@@ -2455,6 +2579,44 @@ mod bridge_cross_check {
         assert!((c5.y - 50.0).abs() < EPS as f32,
             "fifth float wraps to band two: y={} want 50", c5.y);
         assert!((c5.x - 0.0).abs() < EPS as f32, "wrapped float restarts at the left edge");
+    }
+
+    /// The opposing-float header (8d): a left float and a right float
+    /// (across an empty bridge sibling) share ONE band — left hugs the
+    /// container's left edge, right hugs its right edge, both at band top.
+    /// Hand contract: logo at x=0, tagline at VW−150, both y=0; a following
+    /// sibling stacks below the taller float at full width.
+    #[test]
+    fn opposing_float_pair_shares_band_space_between() {
+        let html = r#"<body>
+            <div id="logo"></div><span></span><div id="tag"></div>
+            <div id="below"></div>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #logo { float: left; width: 200px; height: 60px; }
+            #tag { float: right; width: 150px; height: 40px; }
+            #below { width: 500px; height: 20px; }
+        "#;
+
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW);
+
+        let r = |sel: &str| rects[&tree.query_selector(sel).unwrap().unwrap()];
+        let (logo, tag, below) = (r("#logo"), r("#tag"), r("#below"));
+
+        assert!((logo.x - 0.0).abs() < EPS as f32 && (logo.y - 0.0).abs() < EPS as f32,
+            "left float at top-left: {logo:?}");
+        assert!((tag.x - (VW - 150.0)).abs() < EPS as f32,
+            "right float hugs the right edge: x={} want {}", tag.x, VW - 150.0);
+        assert!((tag.y - 0.0).abs() < EPS as f32, "same band: both floats start at y=0");
+        // The pair row's height is the max child height (60); the sibling
+        // below starts after it, full width again.
+        assert!((below.x - 0.0).abs() < EPS as f32, "following sibling back to full width");
+        assert!((below.y - 60.0).abs() <= 2.0 * EPS as f32,
+            "sibling below the band: y={} want 60", below.y);
     }
 
 

@@ -1334,3 +1334,22 @@ wrap` + `width: 100%` 定宽（百分比 float 对真实容器折行，非 intri
 
 **挂账**：run 中夹对侧 float 的混合 run、trailing-right float 自动边距
 （上游策略②尾部特例）、高度预算估算终止 zone。
+
+## 39. 批次 8d 完成（2026-08-24）：对侧 float 对——space-between 行
+
+**实现**（上游策略③，左 logo/右 tagline 头部形状）：run 扫描后检查 run
+尾下一个「空桥」兄弟之后是否为对侧 float——是则合成 `[首侧 | 对侧]`
+space-between 行：左浮贴左缘、右浮贴右缘、同 band 顶部。run ≥ 2 时首侧
+先打包成内部行再进对行。空桥判定照上游 `is_empty_bridge`：空白文本节点
+或无尺寸/边距/padding/border 且无内容的元素（真实页面停在两个头部
+float 之间的 legacy 兼容盒）。对行后兄弟走正常流；再一 float 递归本分支。
+
+**修 bug**：初版空桥只认空白文本节点——测试里的 `<span></span>` 空元素
+不匹配，右浮落 x=0（走了 8b zone 路径）。补齐元素桥判定后一次过。
+
+**测试**（445→446）：`opposing_float_pair_shares_band_space_between`——
+logo 左浮 200×60 x=0、tag 右浮 150×40 贴 VW−150、同 y=0（跨空 span 桥）；
+后随兄弟 y=60（行高=最高子项）回到全宽。
+
+**8 系列状态**：策略①②③已落。挂账：右浮导航条策略④、跨 BFC
+continuation 二次 pass、高度预算估算终止 zone。
