@@ -746,6 +746,9 @@ fn build_normal_sibling(
             if let Some(sub) = sub {
                 let sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
                 leaves.extend(sub_children);
+                // Flattening removes the sub's taffy node (invalidating its
+                // SlotMap key) — drop the stale node_map entry with it.
+                node_map.remove(&sub);
                 let _ = taffy_tree.remove(sub);
             }
         }
@@ -1193,16 +1196,119 @@ fn build_element(
 
         // --- 8b: single float + flow column ------------------------------
         // Zone end: the first sibling that clears this float's side (the
-        // clearfix idiom), or the next float, or the container's end.
-        // Height-budget bounding (upstream estimate_float_height) is a
-        // later batch — an unbounded zone over-collects only when the
-        // float is taller than ALL remaining siblings, which reads as the
-        // common "content beside float" shape anyway.
+        // clearfix idiom), or the next float, or the point where the flow
+        // siblings have already filled an ESTIMATE of the float's height —
+        // real float reflow ends when normal flow passes the float's bottom
+        // edge (8g; upstream estimate_float_height). Without the budget a
+        // short float drags every following section into the narrow column.
+        // The estimate is deliberately rough: explicit px heights when
+        // present, else one line per structural row (p/li/tr/hN) plus a
+        // character-count text estimate.
+        let float_height_budget = {
+            let fs = styles.get(&child_ids[float_idx]).and_then(|s| s.font_size).unwrap_or(16.0);
+            let mut est: f32 = styles
+                .get(&child_ids[float_idx])
+                .and_then(|s| s.height)
+                .map(|h| match h {
+                    crate::diting_css::Length::Px(v) => v,
+                    _ => 0.0,
+                })
+                .unwrap_or(0.0);
+            fn estimate_into(
+                tree: &DomTree,
+                id: NodeId,
+                styles: &HashMap<NodeId, ComputedStyle>,
+                est: &mut f32,
+            ) {
+                let tag = tree
+                    .with_node(id, |n| n.as_element().map(|e| e.local.to_string()))
+                    .flatten()
+                    .unwrap_or_default();
+                let st = styles.get(&id);
+                if let Some(h) = st.and_then(|s| s.height) {
+                    if let crate::diting_css::Length::Px(v) = h {
+                        *est += v;
+                        return;
+                    }
+                }
+                if matches!(tag.as_str(), "li" | "tr" | "dt" | "dd" | "p" | "figcaption" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
+                    *est += st.and_then(|s| s.font_size).unwrap_or(16.0) * 1.2;
+                }
+                let text_len = tree
+                    .with_node(id, |n| n.text_content_of_text_node().map(|t| t.chars().filter(|c| !c.is_whitespace()).count()).unwrap_or(0))
+                    .unwrap_or(0) as f32;
+                if text_len > 0.0 {
+                    let fsize = st.and_then(|s| s.font_size).unwrap_or(16.0);
+                    // ~0.55em average glyph advance at an assumed 280px band.
+                    let chars_per_line = (280.0 / (fsize * 0.55)).max(1.0);
+                    *est += (text_len / chars_per_line).ceil() * fsize * 1.2 + 16.0;
+                }
+                for child in tree.children(id) {
+                    estimate_into(tree, child, styles, est);
+                }
+            }
+            for child in tree.children(child_ids[float_idx]) {
+                estimate_into(tree, child, styles, &mut est);
+            }
+            // The 200px default only covers the no-information case (an
+            // empty/icon float); an explicit or content-derived estimate is
+            // almost always better than a generous floor.
+            if est <= 0.0 { est = 200.0; }
+            est
+        };
         let mut zone_end = child_ids.len();
-        for (i, cid) in child_ids.iter().enumerate().skip(float_idx + 1) {
-            if clears_this(cid) || is_float_child(cid) {
-                zone_end = i;
-                break;
+        {
+            let mut flow_estimate = 0.0f32;
+            const ASSUMED_FLOW_WIDTH: f32 = 500.0;
+            for (i, cid) in child_ids.iter().enumerate().skip(float_idx + 1) {
+                if clears_this(cid) || is_float_child(cid) {
+                    zone_end = i;
+                    break;
+                }
+                // Rough per-sibling height contribution at the assumed width:
+                // explicit px height wins, else structural-row lines plus a
+                // character-count wrap estimate (same heuristic as the float
+                // side).
+                let st = styles.get(cid);
+                // Whitespace-only text between blocks contributes nothing.
+                let ws_text = tree.with_node(*cid, |n| !n.is_element() && n.text_content_of_text_node().map_or(false, |t| t.trim().is_empty())).unwrap_or(false);
+                if ws_text {
+                    continue;
+                }
+                let mut contrib = st
+                    .and_then(|s| s.height)
+                    .map(|h| match h {
+                        crate::diting_css::Length::Px(v) => v.max(0.0),
+                        _ => 0.0,
+                    })
+                    .unwrap_or(0.0);
+                let fsize = st.and_then(|s| s.font_size).unwrap_or(16.0);
+                let mut chars = 0.0f32;
+                fn count_text(tree: &DomTree, id: NodeId, chars: &mut f32) {
+                    *chars += tree
+                        .with_node(id, |n| {
+                            n.text_content_of_text_node()
+                                .map(|t| t.chars().filter(|c| !c.is_whitespace()).count() as f32)
+                                .unwrap_or(0.0)
+                        })
+                        .unwrap_or(0.0);
+                    for c in tree.children(id) {
+                        count_text(tree, c, chars);
+                    }
+                }
+                count_text(tree, *cid, &mut chars);
+                if chars > 0.0 {
+                    let chars_per_line = (ASSUMED_FLOW_WIDTH / (fsize * 0.55)).max(1.0);
+                    contrib += (chars / chars_per_line).ceil() * fsize * 1.2;
+                }
+                if contrib <= 0.0 {
+                    contrib = fsize * 1.2;
+                }
+                flow_estimate += contrib;
+                if flow_estimate >= float_height_budget {
+                    zone_end = i + 1;
+                    break;
+                }
             }
         }
         // Build the float itself (blockified into the row's first item).
@@ -1253,6 +1359,7 @@ fn build_element(
                 if let Some(sub) = sub {
                     let sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
                     run.push(RunSeg::Nodes(sub_children));
+                    node_map.remove(&sub);
                     let _ = taffy_tree.remove(sub);
                 }
             } else {
@@ -1379,6 +1486,7 @@ fn build_element(
             if let Some(sub) = sub {
                 let sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
                 run.push(RunSeg::Nodes(sub_children));
+                node_map.remove(&sub);
                 let _ = taffy_tree.remove(sub);
             }
         } else {
@@ -1659,6 +1767,177 @@ pub fn layout_dom_with_paint_and_images(
     });
     if measured.is_err() {
         return (rects, items);
+    }
+
+    // --- float continuation (batch 8g) -----------------------------------
+    // A float excludes in-flow content not only among its DIRECT siblings:
+    // blocks further down the DOM (later siblings of its parent, and of
+    // grand-parents, up to the nearest block formatting context) must also
+    // shorten their lines where they intersect the float's band. The tree
+    // build can't know those rectangles yet, so — like upstream
+    // apply_float_continuations — this runs after a first layout: collect
+    // every float's real band, narrow the intersecting LATER blocks by
+    // clamping their max-width (left float: shrink the right side; right
+    // float: push the left edge past the float), then lay out again.
+    {
+        let dom_of: HashMap<NodeId, taffy::tree::NodeId> =
+            node_map.iter().map(|(k, v)| (*v, *k)).collect();
+        let mut rects_now: HashMap<taffy::tree::NodeId, Rect> = HashMap::new();
+        fn abs_rects(
+            taffy_tree: &TaffyTree<TextLeaf>,
+            node: taffy::tree::NodeId,
+            offset: (f32, f32),
+            out: &mut HashMap<taffy::tree::NodeId, Rect>,
+        ) {
+            let Ok(layout) = taffy_tree.layout(node) else { return };
+            let abs = (offset.0 + layout.location.x, offset.1 + layout.location.y);
+            out.insert(node, Rect { x: abs.0, y: abs.1, width: layout.size.width, height: layout.size.height });
+            for child in taffy_tree.children(node).unwrap_or_default() {
+                abs_rects(taffy_tree, child, abs, out);
+            }
+        }
+        abs_rects(&taffy_tree, root_node, (0.0, 0.0), &mut rects_now);
+
+        // Float bands with the DOM node that owns each float.
+        let mut bands: Vec<(NodeId, taffy::tree::NodeId, Rect)> = Vec::new();
+        for (tnid, dom_id) in node_map.iter() {
+            let is_float = styles.get(dom_id).is_some_and(|s| s.float_side.is_some());
+            if !is_float {
+                continue;
+            }
+            if let Some(r) = rects_now.get(tnid) {
+                bands.push((*dom_id, *tnid, *r));
+            }
+        }
+        if !bands.is_empty() {
+            let mut changed = false;
+            for (float_dom, fnode, fr) in &bands {
+                let side = styles.get(float_dom).and_then(|s| s.float_side).unwrap_or(crate::diting_css::FloatSide::Left);
+                let Some(parent_dom) = tree.with_node(*float_dom, |n| n.parent).flatten() else { continue };
+                let float_taffy_parent = taffy_tree.parent(*fnode);
+                // Walk from the float's parent upward; narrow every LATER
+                // sibling block until we hit a BFC stand-in. Blocks inside
+                // the float's OWN zone row (the 8b flow column) share the
+                // float's taffy parent — they are the content the float
+                // already excludes by construction, so skip them.
+                let mut cur = parent_dom;
+                loop {
+                    let Some(grand) = tree.with_node(cur, |n| n.parent).flatten() else { break };
+                    // cur's taffy box shares the float's taffy parent — both
+                    // sit inside the same synthetic 8b/8c/8d row, whose
+                    // contents the float already excludes. Stop climbing.
+                    if let Some(&cnid) = dom_of.get(&cur) {
+                        if taffy_tree.parent(cnid) == float_taffy_parent {
+                            break;
+                        }
+                    }
+                    let siblings = tree.children(cur);
+                    for sib in siblings {
+                        if sib == *float_dom {
+                            continue;
+                        }
+                        // Ancestors of the float (its parent chain up to the
+                        // BFC) are not "later content" — narrowing the body
+                        // itself would shrink the whole zone row.
+                        let mut is_ancestor = false;
+                        {
+                            let mut a = Some(*float_dom);
+                            while let Some(x) = a {
+                                if x == sib {
+                                    is_ancestor = true;
+                                    break;
+                                }
+                                a = tree.with_node(x, |n| n.parent).flatten();
+                            }
+                        }
+                        if is_ancestor {
+                            continue;
+                        }
+                        let Some(&snid) = dom_of.get(&sib) else { continue };
+                        // Anything whose taffy ANCESTRY runs through the
+                        // float's own synthetic row (the 8b flow column
+                        // wraps the zone's blocks) is content the float
+                        // already excludes — never narrow it.
+                        let mut anc = taffy_tree.parent(snid);
+                        let mut inside_zone_row = false;
+                        while let Some(a) = anc {
+                            if Some(a) == float_taffy_parent {
+                                inside_zone_row = true;
+                                break;
+                            }
+                            anc = taffy_tree.parent(a);
+                        }
+                        if inside_zone_row {
+                            continue;
+                        }
+                        let Some(sr) = rects_now.get(&snid) else { continue };
+                        // Intersect test against this float's vertical band.
+                        let overlaps_y = sr.y < fr.y + fr.height && sr.y + sr.height > fr.y;
+                        if !overlaps_y || sr.width <= 0.0 {
+                            continue;
+                        }
+                        let is_float_sib = styles.get(&sib).is_some_and(|s| s.float_side.is_some());
+                        if is_float_sib {
+                            continue;
+                        }
+                        // Out-of-flow boxes are never pushed by a float
+                        // (CSS: floats only displace in-flow content).
+                        let out_of_flow = styles.get(&sib).is_some_and(|s| {
+                            matches!(s.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
+                        });
+                        if out_of_flow {
+                            continue;
+                        }
+                        match side {
+                            crate::diting_css::FloatSide::Left => {
+                                let want_right = fr.x + fr.width;
+                                let inset = (want_right - sr.x).max(0.0);
+                                let avail = (sr.width - inset).max(0.0);
+                                if avail < sr.width - 0.5 {
+                                    if let Ok(mut st) = taffy_tree.style(snid).cloned() {
+                                        st.max_size.width =
+                                            LengthPercentageAuto::length(avail.max(0.0));
+                                        let _ = taffy_tree.set_style(snid, st);
+                                        changed = true;
+                                    }
+                                }
+                            }
+                            crate::diting_css::FloatSide::Right => {
+                                let float_left = fr.x;
+                                let inset = (sr.x + sr.width - float_left).max(0.0);
+                                let avail = (sr.width - inset).max(0.0);
+                                if avail < sr.width - 0.5 {
+                                    if let Ok(mut st) = taffy_tree.style(snid).cloned() {
+                                        st.margin.left =
+                                            LengthPercentageAuto::length(fr.x - sr.x);
+                                        st.max_size.width =
+                                            LengthPercentageAuto::length(avail.max(0.0));
+                                        let _ = taffy_tree.set_style(snid, st);
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    cur = grand;
+                }
+            }
+            if changed {
+                let re = taffy_tree.compute_layout_with_measure(
+                    root_node,
+                    available,
+                    |inputs, _id, ctx, style| match ctx {
+                        Some(TextLeaf::Run { text, font_size, bold, .. }) => {
+                            measure_text_leaf(text, *font_size, *bold, fonts, &inputs)
+                        }
+                        _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
+                    },
+                );
+                if re.is_err() {
+                    return (rects, items);
+                }
+            }
+        }
     }
     // Both trees round to the pixel grid inside compute_layout (taffy's
     // use_rounding defaults on; blitz rounds via the same path), so the
@@ -4554,6 +4833,70 @@ mod bridge_cross_check {
         let (r2, g2, b2) = px(&ours.data, w, 80, 30);
         assert!(r2 > 150 && g2 < 100,
             "float bg visible below the green overlay: got {r2},{g2},{b2}");
+    }
+
+    /// Float continuation (8g): a block DEEPER in the DOM — not a direct
+    /// sibling of the float — still shortens where it intersects the
+    /// float's band, and returns to full width below it. The Wikipedia
+    /// shape: floated infobox beside an article whose sections are nested
+    /// divs. Sections use AUTO width (the common case) so they fill
+    /// whatever their containing band allows.
+    #[test]
+    fn float_continuation_narrows_nested_blocks() {
+        let html = r#"<body>
+            <div id="box"></div>
+            <div id="section1"><p>第一段落文本</p></div>
+            <div id="section2"><p>第二段落</p></div>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #box { float: left; width: 200px; height: 100px; }
+            #section1 { height: 50px; }
+            #section2 { height: 30px; }
+        "#;
+
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW);
+
+        let r = |sel: &str| rects[&tree.query_selector(sel).unwrap().unwrap()];
+        let s1 = r("#section1");
+        let s2 = r("#section2");
+
+        // Both sections are zone content (direct siblings of the float):
+        // the 8b flow column places them beside the float at reduced
+        // width — the float's exclusion is by construction here.
+        assert!((s1.x - 200.0).abs() < EPS as f32,
+            "intersecting nested block starts at the float's right edge: x={}", s1.x);
+        assert!((s1.width - (VW - 200.0)).abs() <= 2.0 * EPS as f32,
+            "and takes the remaining width: {} vs {}", s1.width, VW - 200.0);
+        assert!((s2.x - 200.0).abs() < EPS as f32,
+            "second section also beside the float: x={}", s2.x);
+
+        // A block fully BELOW the float keeps full width. The float's zone
+        // ends at the spacer (a block sibling): everything after it is
+        // zone-external normal flow.
+        let html2 = r#"<body>
+            <div id="box"></div>
+            <div id="spacer"></div>
+            <div id="deep"><p>深处的全宽内容</p></div>
+        </body>"#;
+        let sheet2 = r#"
+            body { margin: 0; }
+            #box { float: left; width: 200px; height: 100px; }
+            #spacer { height: 120px; }
+            #deep { height: 20px; }
+        "#;
+        let tree2 = crate::diting_dom::tree_sink::parse_html(html2);
+        let rules2 = diting_css::parse_stylesheet(sheet2);
+        let styles2 = our_styles(&tree2, &rules2);
+        let rects2 = layout_dom(&tree2, &styles2, &fixture_fonts(), VW);
+        let deep = rects2[&tree2.query_selector("#deep").unwrap().unwrap()];
+        assert!(deep.y >= 100.0 - EPS as f32,
+            "deep block starts after the spacer (below the band): y={}", deep.y);
+        assert!((deep.x - 0.0).abs() < EPS as f32 && (deep.width - VW).abs() <= 2.0 * EPS as f32,
+            "content below the band runs full width: {deep:?}");
     }
 
     /// 1:1 image paint (batch 5b): the img box equals the image size, so

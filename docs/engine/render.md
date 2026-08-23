@@ -1389,3 +1389,30 @@ float 重叠；(80,70) 在 60 高的 float 外。
 
 **8 系列挂账更新**：跨 BFC continuation 二次 pass、高度预算估算终止
 zone、clear inline-start/end 仍开放。
+
+## 42. 批次 8g 完成（2026-08-24）：跨 BFC float continuation + 高度预算
+
+**实现**（两个联动机制）：
+
+1. **高度预算估算**（上游 estimate_float_height 移植）：8b zone 收集
+   flow 兄弟时按预算截断——float 高度 = 显式 px 高度，否则递归子树估算
+   （结构行 p/li/tr/hN ×1.2em + 字符数换行估算，280px 假定带宽）；无信息
+   时 200px 默认。flow 累计贡献 ≥ 预算即终止 zone。空白文本节点零贡献
+   （初版漏掉——19.2px/个的虚增把 s2 挤出 zone）。
+2. **二次 pass 收窄**（上游 apply_float_continuations）：首遍布局后收集
+   每个 float 的真实 band 矩形；沿 DOM 从 float 父级向上爬，收窄后续
+   兄弟块中与 band 相交者（左浮砍 max_width 到 float 右缘之后；右浮
+   margin.left 推过 float 左缘），重跑布局。排除项：float 祖先链
+   （body 被误砍会缩整个 zone 行）、zone 行内内容（taffy 祖先经过合成
+   行）、其他 float、out-of-flow 盒。
+
+**顺手修 bug**：inline 展平 `taffy_tree.remove(sub)` 使 SlotMap key 失效
+但 node_map 残留 stale 映射——8g pass 查 parent 时 panic（nav bar 测试
+抓出）。三处展平点补 `node_map.remove(&sub)`。
+
+**测试**（448→449）：`float_continuation_narrows_nested_blocks`——
+场景一：float(200×100) 旁两 section 在旁流列 x=200 宽 600；场景二：
+spacer(120) 后的 deep 块 y=120 全宽（预算截断 zone 生效）。修正测试设
+计：authored width:700 在列内溢出是 CSS 正确行为（改 auto 宽度）。
+
+**8 系列挂账**：clear inline-start/end、渐进 JPEG 性能。
