@@ -1353,3 +1353,22 @@ logo 左浮 200×60 x=0、tag 右浮 150×40 贴 VW−150、同 y=0（跨空 spa
 
 **8 系列状态**：策略①②③已落。挂账：右浮导航条策略④、跨 BFC
 continuation 二次 pass、高度预算估算终止 zone。
+
+## 40. 批次 8e 完成（2026-08-24）：右浮导航条——8 系列收官
+
+**实现**（上游策略④）：容器子级全为 inline-ish flow（float/空桥除外）
+且 ≥2 右浮、无左浮时 → `[flow 项 | 反序右浮组]` 包裹行：flow 按源序
+从左缘填；右浮组按源序**反序**排（CSS 右浮从 inline-end 向内放，视觉
+序=源序逆），组左 auto margin 吸收自由空间；空白 run 压缩成单代表节点、
+band 两端丢弃。任一侧退化（无 flow 或无右浮）回正常流。
+
+**测试**（446→447）：`right_float_nav_bar_reverses_source_order`——两个
+右浮 nav1(120)/nav2(100) 源序在前者贴最右缘 x=680、后者 x=580 左移堆叠，
+同 y=0。
+
+**8 系列总结**（float 大项核心收官）：
+- 8a 解析 → 8b 单 float zone 行 → 8c 同侧 run 包裹行 → 8d 对侧对
+  space-between 行 → 8e 右浮导航条。上游四套树构建期策略全落地。
+- 契约切换：blitz 无 float 支持，全部手算期望。
+- 挂账（后续批次）：跨 BFC float continuation 二次 pass、高度预算估算
+  终止 zone、float 与 paint level 联动、clear 语义细化（inline-start/end）。

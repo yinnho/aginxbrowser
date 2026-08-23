@@ -922,6 +922,130 @@ fn build_element(
         }
         let run_len = (float_idx..run_end).filter(|&i| is_float_child(&child_ids[i])).count();
 
+        // --- 8e: the right-float navigation bar --------------------------
+        // A container of inline-ish flow content plus >=2 RIGHT floats and
+        // no left float: right floats place from the inline-end inward, so
+        // their visual order is the REVERSE of source order, while ordinary
+        // content fills from the start of the same band. Serializing each
+        // float into its own row reverses the two groups and shrink-wraps
+        // the bar. Reified as [flow items | reversed right-float group],
+        // with an anonymous wrapping row at definite width (upstream
+        // strategy 4).
+        let all_right = run_side == Some(crate::diting_css::FloatSide::Right)
+            && !child_ids.iter().any(|cid| {
+                styles.get(cid).and_then(|s| s.float_side) == Some(crate::diting_css::FloatSide::Left)
+            });
+        let flow_is_inline = child_ids.iter().all(|cid| {
+            if is_float_child(cid) || is_empty_bridge(cid) {
+                return true;
+            }
+            styles
+                .get(cid)
+                .map_or(true, |s| s.display != Some(CssDisplay::Block))
+        });
+        let right_floats: Vec<NodeId> = child_ids
+            .iter()
+            .copied()
+            .filter(|cid| {
+                styles.get(cid).is_some_and(|s| {
+                    s.float_side == Some(crate::diting_css::FloatSide::Right) && s.display != Some(CssDisplay::None)
+                })
+            })
+            .collect();
+        if all_right && flow_is_inline && right_floats.len() >= 2 {
+            // Flow items in source order; runs of formatting whitespace
+            // collapse to one representative node and drop at band edges.
+            let mut flow_dom: Vec<NodeId> = Vec::new();
+            let mut pending_ws: Option<NodeId> = None;
+            let mut has_flow_content = false;
+            for &cid in &child_ids {
+                if is_float_child(&cid) {
+                    continue;
+                }
+                if is_whitespace_text(&cid) {
+                    if has_flow_content && pending_ws.is_none() {
+                        pending_ws = Some(cid);
+                    }
+                    continue;
+                }
+                if has_flow_content {
+                    if let Some(ws) = pending_ws.take() {
+                        flow_dom.push(ws);
+                    }
+                } else {
+                    pending_ws = None;
+                }
+                flow_dom.push(cid);
+                has_flow_content = true;
+            }
+            let mut row_children: Vec<taffy::tree::NodeId> = Vec::new();
+            for cid in flow_dom {
+                build_normal_sibling(
+                    cid,
+                    tree,
+                    styles,
+                    images,
+                    fonts,
+                    taffy_tree,
+                    node_map,
+                    atomic_container,
+                    font_size,
+                    &mut row_children,
+                );
+            }
+            // The right-float group in REVERSED source order (CSS places
+            // right floats inline-end first).
+            let mut right_children: Vec<taffy::tree::NodeId> = Vec::new();
+            for cid in right_floats.iter().rev() {
+                if let Some(f) = build_element(tree, *cid, styles, images, fonts, taffy_tree, node_map) {
+                    right_children.push(f);
+                }
+            }
+            if !row_children.is_empty() && !right_children.is_empty() {
+                let group_style = Style {
+                    display: Display::Flex,
+                    flex_direction: FlexDirection::Row,
+                    flex_wrap: FlexWrap::Wrap,
+                    margin: taffy::geometry::Rect {
+                        top: LengthPercentageAuto::length(0.0),
+                        right: LengthPercentageAuto::length(0.0),
+                        bottom: LengthPercentageAuto::length(0.0),
+                        left: LengthPercentageAuto::auto(),
+                    },
+                    ..Default::default()
+                };
+                if let Ok(group) = taffy_tree.new_with_children(group_style, &right_children) {
+                    row_children.push(group);
+                }
+                let bar_style = Style {
+                    display: Display::Flex,
+                    flex_direction: FlexDirection::Row,
+                    flex_wrap: FlexWrap::Wrap,
+                    align_items: Some(AlignItems::FLEX_START),
+                    size: Size { width: percent(1.0), height: auto() },
+                    ..Default::default()
+                };
+                if let Ok(bar) = taffy_tree.new_with_children(bar_style, &row_children) {
+                    direct.push(bar);
+                }
+            } else {
+                // Degenerate side empty: fall back to plain normal flow.
+                for n in row_children.drain(..) {
+                    direct.push(n);
+                }
+                for f in right_children.drain(..) {
+                    direct.push(f);
+                }
+            }
+            let taffy_style = to_taffy_style(&style);
+            let node = if direct.is_empty() {
+                taffy_tree.new_leaf(taffy_style).ok()?
+            } else {
+                taffy_tree.new_with_children(taffy_style, &direct).ok()?
+            };
+            node_map.insert(node, id);
+            return Some(node);
+        }
         // --- 8d: opposing float pair on one band -------------------------
         // The classic left-logo / right-tagline header: a float followed
         // (possibly across empty bridge siblings) by an OPPOSITE-side float
@@ -2617,6 +2741,42 @@ mod bridge_cross_check {
         assert!((below.x - 0.0).abs() < EPS as f32, "following sibling back to full width");
         assert!((below.y - 60.0).abs() <= 2.0 * EPS as f32,
             "sibling below the band: y={} want 60", below.y);
+    }
+
+    /// The right-float navigation bar (8e): inline flow content plus two
+    /// right floats on one band. Right floats place from the inline-end
+    /// INWARD, so the FIRST in source order hugs the right edge and later
+    /// ones stack leftward — visual order is source order reversed.
+    #[test]
+    fn right_float_nav_bar_reverses_source_order() {
+        let html = r#"<body>
+            <span id="brand">站点名</span>
+            <div id="nav1"></div>
+            <div id="nav2"></div>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #brand { font-size: 16px; }
+            #nav1 { float: right; width: 120px; height: 30px; }
+            #nav2 { float: right; width: 100px; height: 30px; }
+        "#;
+
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW);
+
+        let r = |sel: &str| rects[&tree.query_selector(sel).unwrap().unwrap()];
+        let (n1, n2) = (r("#nav1"), r("#nav2"));
+
+        // Source-first float at the far RIGHT edge; second sits to its
+        // LEFT (inline-end placement).
+        assert!((n1.x - (VW - 120.0)).abs() < EPS as f32,
+            "first right float hugs the right edge: x={} want {}", n1.x, VW - 120.0);
+        assert!((n2.x - (VW - 220.0)).abs() < EPS as f32,
+            "second right float stacks leftward: x={} want {}", n2.x, VW - 220.0);
+        assert!((n1.y - 0.0).abs() < EPS as f32 && (n2.y - 0.0).abs() < EPS as f32,
+            "both share band one");
     }
 
 
