@@ -21,10 +21,90 @@ pub struct Canvas {
     pub width: usize,
     pub height: usize,
     pub data: Vec<u8>,
-    /// Active clip stack (x0, y0, x1, y1) — exclusive right/bottom, in
-    /// canvas px. An empty intersection is the degenerate (0,0,0,0): it
-    /// clips everything beneath it.
-    clip: Vec<(i64, i64, i64, i64)>,
+    /// Active clip stack — exclusive right/bottom, in canvas px. A plain
+    /// rect clips by bounds; a rounded entry (batch 7d) additionally cuts
+    /// its corner zones with per-corner elliptical radii, so overflow
+    /// content inside a `border-radius` + non-visible overflow box follows
+    /// the curve like upstream's padding_box_path BezPath clip. An empty
+    /// intersection is the degenerate (0,0,0,0): it clips everything.
+    clip: Vec<ClipShape>,
+}
+
+/// One clip stack entry: an axis-aligned rect, optionally with per-corner
+/// radii (CSS order TL TR BR BL) resolved to px.
+#[derive(Clone, Copy, Debug)]
+enum ClipShape {
+    Rect(i64, i64, i64, i64),
+    Rounded {
+        x0: i64,
+        y0: i64,
+        x1: i64,
+        y1: i64,
+        radii: [(f32, f32); 4],
+    },
+}
+
+impl ClipShape {
+    fn bounds(&self) -> (i64, i64, i64, i64) {
+        match *self {
+            ClipShape::Rect(x0, y0, x1, y1)
+            | ClipShape::Rounded { x0, y0, x1, y1, .. } => (x0, y0, x1, y1),
+        }
+    }
+
+    /// Whether pixel center `(cx, cy)` passes this clip shape.
+    fn accepts(&self, cx: f64, cy: f64) -> bool {
+        match *self {
+            ClipShape::Rect(x0, y0, x1, y1) => cx >= x0 as f64 && cx < x1 as f64
+                && cy >= y0 as f64 && cy < y1 as f64,
+            ClipShape::Rounded { x0, y0, x1, y1, radii } => {
+                if !(cx >= x0 as f64 && cx < x1 as f64 && cy >= y0 as f64 && cy < y1 as f64) {
+                    return false;
+                }
+                let clamp = |r: (f32, f32), w: i64, h: i64| {
+                    (
+                        r.0.clamp(0.0, w as f32 / 2.0),
+                        r.1.clamp(0.0, h as f32 / 2.0),
+                    )
+                };
+                let (rx0, ry0) = clamp(radii[0], x1 - x0, y1 - y0);
+                let (rx1, ry1) = clamp(radii[1], x1 - x0, y1 - y0);
+                let (rx2, ry2) = clamp(radii[2], x1 - x0, y1 - y0);
+                let (rx3, ry3) = clamp(radii[3], x1 - x0, y1 - y0);
+                let centers = [
+                    (x0 as f64 + rx0 as f64, y0 as f64 + ry0 as f64),
+                    (x1 as f64 - rx1 as f64, y0 as f64 + ry1 as f64),
+                    (x1 as f64 - rx2 as f64, y1 as f64 - ry2 as f64),
+                    (x0 as f64 + rx3 as f64, y1 as f64 - ry3 as f64),
+                ];
+                let zone = if cx < centers[0].0 && cy < centers[0].1 {
+                    Some(0usize)
+                } else if cx > centers[1].0 && cy < centers[1].1 {
+                    Some(1)
+                } else if cx > centers[2].0 && cy > centers[2].1 {
+                    Some(2)
+                } else if cx < centers[3].0 && cy > centers[3].1 {
+                    Some(3)
+                } else {
+                    None
+                };
+                match zone {
+                    None => true,
+                    Some(i) => {
+                        let rxs = [rx0, rx1, rx2, rx3];
+                        let rys = [ry0, ry1, ry2, ry3];
+                        if rxs[i] <= 0.0 || rys[i] <= 0.0 {
+                            true
+                        } else {
+                            let dx = (cx - centers[i].0) / f64::from(rxs[i]);
+                            let dy = (cy - centers[i].1) / f64::from(rys[i]);
+                            dx * dx + dy * dy <= 1.0
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Canvas {
@@ -39,17 +119,25 @@ impl Canvas {
     }
 
     /// Rows [y0, y1) × cols [x0, x1) the next primitive may touch: the
-    /// canvas bounds intersected with every active clip.
+    /// canvas bounds intersected with the BOUNDS of every active clip
+    /// (rounded clips additionally cut pixels per-shape at draw time via
+    /// [`Canvas::clip_accepts`]).
     fn allowed(&self) -> (i64, i64, i64, i64) {
         let mut r = (0, 0, self.width as i64, self.height as i64);
         for c in &self.clip {
-            r = (r.0.max(c.0), r.1.max(c.1), r.2.min(c.2), r.3.min(c.3));
+            let b = c.bounds();
+            r = (r.0.max(b.0), r.1.max(b.1), r.2.min(b.2), r.3.min(b.3));
         }
         if r.2 < r.0 || r.3 < r.1 {
             (0, 0, 0, 0)
         } else {
             r
         }
+    }
+
+    /// Whether pixel center `(cx, cy)` passes every active clip.
+    fn clip_accepts(&self, cx: f64, cy: f64) -> bool {
+        self.clip.iter().all(|c| c.accepts(cx, cy))
     }
 
     /// Pop the innermost clip.
@@ -61,8 +149,23 @@ impl Canvas {
     fn push_clip(&mut self, x0: i64, y0: i64, x1: i64, y1: i64) {
         let (cx0, cy0, cx1, cy1) = self.allowed();
         let r = (cx0.max(x0), cy0.max(y0), cx1.min(x1), cy1.min(y1));
-        self.clip
-            .push(if r.2 < r.0 || r.3 < r.1 { (0, 0, 0, 0) } else { r });
+        self.clip.push(if r.2 < r.0 || r.3 < r.1 {
+            ClipShape::Rect(0, 0, 0, 0)
+        } else {
+            ClipShape::Rect(r.0, r.1, r.2, r.3)
+        });
+    }
+
+    /// Push a rounded clip: bounds intersect like a rect; the per-corner
+    /// radii cut the corner zones at draw time (batch 7d).
+    fn push_rounded_clip(&mut self, x0: i64, y0: i64, x1: i64, y1: i64, radii: [(f32, f32); 4]) {
+        let (cx0, cy0, cx1, cy1) = self.allowed();
+        let r = (cx0.max(x0), cy0.max(y0), cx1.min(x1), cy1.min(y1));
+        self.clip.push(if r.2 < r.0 || r.3 < r.1 {
+            ClipShape::Rect(0, 0, 0, 0)
+        } else {
+            ClipShape::Rounded { x0: r.0, y0: r.1, x1: r.2, y1: r.3, radii }
+        });
     }
 
     /// Source-over fill of an axis-aligned integer rect, clipped to the
@@ -72,6 +175,9 @@ impl Canvas {
         let (ax0, ay0, ax1, ay1) = self.allowed();
         for gy in (y.max(0)).max(ay0)..(y + h).min(self.height as i64).min(ay1) {
             for gx in (x.max(0)).max(ax0)..(x + w).min(self.width as i64).min(ax1) {
+                if !self.clip_accepts(gx as f64 + 0.5, gy as f64 + 0.5) {
+                    continue;
+                }
                 let i = (gy as usize * self.width + gx as usize) * 4;
                 over(&mut self.data[i..i + 4], color);
             }
@@ -108,6 +214,9 @@ impl Canvas {
             for gx in 0..w {
                 let tx = x + gx;
                 if tx < ax0 || tx >= ax1 || tx < 0 || tx >= self.width as i64 {
+                    continue;
+                }
+                if !self.clip_accepts(tx as f64 + 0.5, ty as f64 + 0.5) {
                     continue;
                 }
                 let sx = (((gx as f64 + 0.5) * sw as f64 / w as f64) as i64).min(sw - 1);
@@ -290,6 +399,9 @@ impl Canvas {
                 if tx < ax0 || tx >= ax1 || tx < 0 || tx >= self.width as i64 {
                     continue;
                 }
+                if !self.clip_accepts(tx as f64 + 0.5, ty as f64 + 0.5) {
+                    continue;
+                }
                 let a = r.data[(gy as usize * r.width + gx as usize) * 4 + 3];
                 if a == 0 {
                     continue;
@@ -332,6 +444,13 @@ pub fn execute(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas) {
                 rect.y.round() as i64,
                 (rect.x + rect.width).round() as i64,
                 (rect.y + rect.height).round() as i64,
+            ),
+            PaintItem::ClipRounded { rect, radii } => out.push_rounded_clip(
+                rect.x.round() as i64,
+                rect.y.round() as i64,
+                (rect.x + rect.width).round() as i64,
+                (rect.y + rect.height).round() as i64,
+                *radii,
             ),
             PaintItem::PopClip => {
                 out.pop_clip();

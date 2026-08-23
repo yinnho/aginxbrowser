@@ -868,6 +868,10 @@ pub enum PaintItem {
     /// The flat item list carries the tree's clip structure in document
     /// order; nesting is an intersection.
     Clip { rect: Rect },
+    /// Rounded variant of `Clip` (batch 7d): the clipping box's own radii
+    /// cut descendants' ink along the curve, like upstream's rounded
+    /// padding-box BezPath clip.
+    ClipRounded { rect: Rect, radii: [(f32, f32); 4] },
     PopClip,
     /// A uniform solid border: four bands on the border-box edges, painted
     /// AFTER the element's Bg (background-clip: border-box draws the bg
@@ -1243,14 +1247,48 @@ pub fn layout_dom_with_paint_and_images(
                     if bline { side_px(st.border_width.bottom) } else { 0.0 },
                     if bline { side_px(st.border_width.left) } else { 0.0 },
                 );
-                items.push(PaintItem::Clip {
-                    rect: Rect {
-                        x: rect.x + bl,
-                        y: rect.y + bt,
-                        width: (rect.width - bl - br).max(0.0),
-                        height: (rect.height - bt - bb).max(0.0),
+                // The clip rect is the padding box; the element's own radii
+                // ride along (batch 7d) so descendants cut at the curve —
+                // upstream clips through the rounded padding_box_path.
+                let res = |l: &crate::diting_css::Length, basis: f32| match l {
+                    crate::diting_css::Length::Px(v) => *v,
+                    crate::diting_css::Length::Percent(p) => p * basis / 100.0,
+                };
+                let pad_w = (rect.width - bl - br).max(0.0);
+                let pad_h = (rect.height - bt - bb).max(0.0);
+                let radii: Option<[(f32, f32); 4]> = st
+                    .corner_radii
+                    .clone()
+                    .map(|cs| {
+                        let mut out = [(0.0f32, 0.0f32); 4];
+                        for (slot, (rx, ry)) in out.iter_mut().zip(cs.iter()) {
+                            *slot = (res(rx, rect.width), res(ry, rect.height));
+                        }
+                        out
+                    })
+                    .or_else(|| {
+                        // Legacy uniform shortcut only when no per-corner
+                        // form was parsed at all.
+                        st.border_radius.map(|r| {
+                            let v = match r {
+                                crate::diting_css::Length::Px(v) => v,
+                                crate::diting_css::Length::Percent(p) => p * rect.width / 100.0,
+                            };
+                            [(v, v); 4]
+                        })
+                    });
+                let clip_item = match radii {
+                    Some(radii) if radii.iter().any(|r| r.0 > 0.0 && r.1 > 0.0) => {
+                        PaintItem::ClipRounded {
+                            rect: Rect { x: rect.x + bl, y: rect.y + bt, width: pad_w, height: pad_h },
+                            radii,
+                        }
+                    }
+                    _ => PaintItem::Clip {
+                        rect: Rect { x: rect.x + bl, y: rect.y + bt, width: pad_w, height: pad_h },
                     },
-                });
+                };
+                items.push(clip_item);
             }
         }
         if let Some(TextLeaf::Run { text, font_size, bold, color }) = taffy_tree.get_node_context(node) {
@@ -3473,6 +3511,62 @@ mod bridge_cross_check {
                 "{name} outside TL ellipse cut: {:?}",
                 px(buf, 2, 2)
             );
+        }
+    }
+
+    /// Rounded overflow clipping (batch 7d): an `overflow: hidden` +
+    /// `border-radius` box clips its DESCENDANTS along the curve — the
+    /// child's background fills the straight edges but is cut inside the
+    /// corner radius zone on both engines (upstream clips through the
+    /// rounded padding_box_path).
+    #[test]
+    fn paint_rounded_overflow_clip_matches_blitz() {
+        let html = r#"<body><div id="t"><div id="child"></div></div></body>"#;
+        let sheet = "body { margin: 0; }
+            #t { width: 100px; height: 100px; overflow: hidden; border-radius: 30px; position: relative; height: 100px; }
+            #child { position: absolute; left: 0px; top: 0px; width: 100px; height: 100px; background: rgb(40,140,200); }";
+        let (w, h) = (200u32, 200u32);
+        let mut doc = blitz_doc_unresolved(html, sheet);
+        for _ in 0..4 {
+            doc.resolve(0.0);
+        }
+        let blitz = anyrender::render_to_buffer::<anyrender_vello_cpu::VelloCpuImageRenderer, _>(
+            |scene| {
+                use anyrender::PaintScene as _;
+                use peniko::kurbo::Rect;
+                scene.fill(
+                    peniko::Fill::NonZero,
+                    Default::default(),
+                    peniko::Color::WHITE,
+                    Default::default(),
+                    &Rect::new(0.0, 0.0, w as f64, h as f64),
+                );
+                blitz_paint::paint_scene(scene, &mut doc, 1.0, w, h, 0, 0);
+            },
+            w,
+            h,
+        );
+        let ours = our_render(html, sheet, w as usize, h as usize);
+
+        let is_blue = |c: (u8, u8, u8)| c.2 > 130 && c.0 < 110 && c.1 < 190;
+
+        for (name, buf) in [("ours", &ours.data), ("blitz", &blitz)] {
+            let px = |x: usize, y: usize| {
+                let i = (y * w as usize + x) * 4;
+                (buf[i], buf[i + 1], buf[i + 2])
+            };
+            // Straight-edge midpoints survive the clip.
+            assert!(is_blue(px(50, 3)), "{name} top mid-edge blue: {:?}", px(50, 3));
+            assert!(is_blue(px(50, 96)), "{name} bottom mid-edge blue");
+            // Deep corner zones are clipped to white on BOTH engines.
+            assert!(
+                !is_blue(px(3, 3)),
+                "{name} TL corner cut by the curve: {:?}",
+                px(3, 3)
+            );
+            assert!(!is_blue(px(96, 3)), "{name} TR corner cut");
+            assert!(!is_blue(px(3, 96)), "{name} BL corner cut");
+            assert!(!is_blue(px(96, 96)), "{name} BR corner cut");
         }
     }
 

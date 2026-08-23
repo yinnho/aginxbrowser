@@ -1227,3 +1227,25 @@ sniff 解码尺寸对 + **RGBA 位级 round-trip**；截断 RIFF 头拒绝不 pa
 **测试**：437→438。挂账更新：相邻角半径和超盒的 scale-down 是 per-axis
 比例缩放（我们 clamp 到半边已覆盖常见情形，规范的全局等比缩放挂账）、
 radius 与 overflow clip 联动。下一批候选：GIF 或 radius+overflow 联动。
+
+## 34. 批次 7d 完成（2026-08-23）：圆角 overflow 联动——子孙裁进曲线
+
+**探底**：blitz 的 overflow 裁剪层用 `padding_box_path()`——css_box.rs
+的 `shape()` 在有 radius 时插 arc，即**圆角 BezPath 裁剪**。我们此前
+Clip 是轴对齐矩形，radius 盒的 overflow:hidden 子孙会顶出四角。
+
+**实现**：Canvas clip 栈元素从裸矩形升级为 `ClipShape::{Rect, Rounded}`：
+Rounded 保留边界盒（allowed() 快速剔除）+ 每角椭圆判定
+（`accepts(cx,cy)`，rx/ry 各自 clamp 半边）；fill_rect/blit_image/blit_text
+逐像素过 `clip_accepts`。PaintItem 加 `ClipRounded{rect, radii}`——collect
+在推 Clip 时读元素自身 corner_radii（或旧 uniform 字段回退），解析到 px
+随裁剪矩形下发。自身 Bg/Border 不受影响（Clip 推在其后，语义不变）。
+
+**对照（一测）** `paint_rounded_overflow_clip_matches_blitz`：100×100
+overflow:hidden + radius:30 盒内铺满蓝色 absolute 子块——直边中点蓝、
+四角深切区白，双侧一致一次过。
+
+**测试**：438→439。批次 7 收官（7a per-tag 尺寸/7b WebP/7c per-corner
+radius/7d 圆角联动）。挂账剩余：GIF 首帧、srcset/picture、HTTP 缓存头、
+嵌套 stacking root 跨层提升、float 布局与 paint level 1、inset 样式画法。
+下一批候选：GIF 或转向 float/table 等布局大项。
