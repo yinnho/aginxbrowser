@@ -1,8 +1,7 @@
-#![allow(dead_code)]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::obscura_browser::BrowserContext;
+use crate::diting_browser::BrowserContext;
 use crate::diting_net::CookieJar;
 
 use crate::config::BrowserConfig;
@@ -18,32 +17,16 @@ pub struct Browser {
 }
 
 impl Browser {
-    pub fn new() -> Result<Self, Error> {
-        Self::build(BrowserConfig::default())
-    }
-
     pub fn build(config: BrowserConfig) -> Result<Self, Error> {
-        let context = if let Some(ref dir) = config.storage_dir {
-            BrowserContext::with_storage_and_network(
-                "api".to_string(),
-                config.proxy,
-                config.stealth,
-                config.user_agent,
-                Some(dir.clone()),
-                false,
-                config.tls_fingerprint.clone(),
-            )
-        } else {
-            BrowserContext::with_storage_and_network(
-                "api".to_string(),
-                config.proxy,
-                config.stealth,
-                config.user_agent,
-                None,
-                false,
-                config.tls_fingerprint.clone(),
-            )
-        };
+        let context = BrowserContext::with_storage_and_network(
+            "api".to_string(),
+            config.proxy,
+            config.stealth,
+            config.user_agent,
+            config.storage_dir.clone(),
+            false,
+            config.tls_fingerprint.clone(),
+        );
 
         let context = Arc::new(context);
         let cookie_jar = context.cookie_jar.clone();
@@ -57,7 +40,7 @@ impl Browser {
 
     pub async fn new_page(&self) -> Result<Page, Error> {
         let id = NEXT_PAGE_ID.fetch_add(1, Ordering::Relaxed);
-        let page = crate::obscura_browser::Page::new(
+        let page = crate::diting_browser::Page::new(
             format!("page-{}", id),
             self.context.clone(),
         );
@@ -87,10 +70,16 @@ impl BrowserBuilder {
         self.config.stealth = stealth;
         self
     }
+    // Per-instance UA override (env AGINXBROWSER_UA covers the process-wide
+    // case) and the storage_dir cookie-persistence knob. No caller sets
+    // either today; parked with the persistence feature (see
+    // BrowserContext::save_cookies).
+    #[allow(dead_code)]
     pub fn user_agent(mut self, ua: impl Into<String>) -> Self {
         self.config.user_agent = Some(ua.into());
         self
     }
+    #[allow(dead_code)]
     pub fn storage_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.config.storage_dir = Some(dir.into());
         self

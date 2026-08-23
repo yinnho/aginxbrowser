@@ -56,7 +56,8 @@ pub struct RawSearchResult {
     /// Cookies needed to fetch this URL (e.g. sogou session cookies for
     /// /link redirect URLs). Passed to the obscura browser during fetch.
     pub cookies: Vec<String>,
-    /// Result of evaluating `js_extract_script()` on this result's page.
+    /// Reserved structured-extraction payload for this result. No engine
+    /// populates it today; kept in the API shape for the extraction tier.
     pub js_extract_result: Option<serde_json::Value>,
     /// Present only for `images`-category results. None for general results.
     pub image: Option<ImageResult>,
@@ -88,12 +89,6 @@ pub trait SearchEngine: Send + Sync {
     /// whose anti-spider cooldown requires a longer minimum suspension.
     fn base_captcha_suspend(&self) -> Duration {
         Duration::from_secs(300)
-    }
-    /// Optional JS expression to extract structured data from search result
-    /// pages. If Some, the engine's fetch_top results will use V8-based
-    /// extraction. Default: None (use HTTP-only).
-    fn js_extract_script(&self) -> Option<&str> {
-        None
     }
     /// Execute a search. The engine must handle its own HTTP client selection
     /// (stealth wreq vs plain reqwest) internally.

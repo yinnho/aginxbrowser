@@ -13,7 +13,7 @@
 
 use url::Url;
 
-use crate::obscura_browser::page::Page;
+use crate::diting_browser::page::Page;
 
 impl Page {
     /// Adopt a URL the page routed to itself, without fetching anything.

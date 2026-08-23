@@ -67,6 +67,7 @@ pub enum ScrapeAction {
     Screenshot {
         /// Capture the full scrolled page height (can be large) instead of just
         /// the viewport. Default false — viewport-only keeps buffers bounded.
+        #[cfg_attr(not(feature = "screenshot"), allow(dead_code))] // read only by the screenshot-feature path
         #[serde(default, rename = "fullPage")]
         full_page: bool,
     },

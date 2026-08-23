@@ -49,7 +49,11 @@ pub struct CaptchaSolverConfig {
     pub default_timeout_secs: u64,
 }
 
-/// Result from attempting to auto-solve a CAPTCHA.
+/// Result from attempting to auto-solve a CAPTCHA. The token / reason
+/// payloads are consumed by the injection step that submits the solution —
+/// wired when a solver is configured (hosted runs keep
+/// CAPTCHA_SOLVER_API_KEY unset and always get NotAttempted).
+#[allow(dead_code)]
 pub enum CaptchaSolveResult {
     Solved { token: String },
     Failed { reason: String },

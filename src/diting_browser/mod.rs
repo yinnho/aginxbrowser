@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 pub mod page;
 pub mod context;
 pub mod lifecycle;

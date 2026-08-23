@@ -4,6 +4,9 @@ use std::sync::Arc;
 use crate::diting_net::{CookieJar, HttpClient, RobotsCache};
 
 pub struct BrowserContext {
+    /// Context label (upstream names contexts for CDP Target.setAutoAttach
+    /// events; ours is per-request "api" and nothing reads it back yet).
+    #[allow(dead_code)]
     pub id: String,
     pub cookie_jar: Arc<CookieJar>,
     pub http_client: Arc<HttpClient>,
@@ -19,6 +22,7 @@ pub struct BrowserContext {
     /// local-HTML testing workflows. The CLI's own `obscura fetch
     /// file://...` path is unaffected because it does not go through
     /// the CDP server.
+    #[allow(dead_code)] // read by the CDP file:// guard, which is not absorbed
     pub allow_file_access: bool,
     pub storage_dir: Option<PathBuf>,
     /// When true, the http client allows fetching localhost / RFC1918 /
@@ -26,6 +30,7 @@ pub struct BrowserContext {
     /// Independent of `allow_file_access` because they cover different threat
     /// models: file:// is a local file-system read, while private-network is
     /// the broader SSRF gate from issue #4.
+    #[allow(dead_code)] // gate is enforced at HttpClient construction; field kept for introspection
     pub allow_private_network: bool,
     /// TLS fingerprint name override (stealth mode only): "chrome145",
     /// "firefox133", etc. None → Chrome145. Kept as a String (not the
@@ -35,31 +40,6 @@ pub struct BrowserContext {
 }
 
 impl BrowserContext {
-    pub fn new(id: String) -> Self {
-        Self::_new_inner(id, None, false, None, None, false, None)
-    }
-
-    /// Create a BrowserContext with an optional storage directory.
-    /// When `storage_dir` is set, cookies are automatically loaded from
-    /// `{storage_dir}/cookies.json` on creation.
-    pub fn with_storage(
-        id: String,
-        storage_dir: Option<PathBuf>,
-    ) -> Self {
-        Self::_new_inner(id, None, false, None, storage_dir, false, None)
-    }
-
-    /// Create a BrowserContext with full options including storage_dir.
-    pub fn with_storage_full(
-        id: String,
-        proxy_url: Option<String>,
-        stealth: bool,
-        user_agent: Option<String>,
-        storage_dir: Option<PathBuf>,
-    ) -> Self {
-        Self::_new_inner(id, proxy_url, stealth, user_agent, storage_dir, false, None)
-    }
-
     /// Variant that also accepts the `allow_private_network` opt-in and a TLS
     /// fingerprint override. All pre-existing constructors default
     /// `allow_private_network` to `false` and `tls_fingerprint` to None; callers
@@ -117,7 +97,7 @@ impl BrowserContext {
         // via OBSCURA_PROFILE / OBSCURA_ROTATE_PROFILE — see profiles.rs).
         let resolved_ua = user_agent.unwrap_or_else(|| {
             std::env::var("AGINXBROWSER_UA").unwrap_or_else(|_| {
-                crate::obscura_browser::profiles::select_profile()
+                crate::diting_browser::profiles::select_profile()
                     .user_agent
                     .to_string()
             })
@@ -145,10 +125,16 @@ impl BrowserContext {
         }
     }
 
-    pub fn with_options(id: String, proxy_url: Option<String>, stealth: bool) -> Self {
+    #[cfg_attr(not(test), allow(dead_code))] // constructor-matrix coverage lives in this file's tests
+    pub fn with_options(
+        id: String,
+        proxy_url: Option<String>,
+        stealth: bool,
+    ) -> Self {
         Self::with_full_options(id, proxy_url, stealth, None)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // constructor-matrix coverage lives in this file's tests
     pub fn with_full_options(
         id: String,
         proxy_url: Option<String>,
@@ -158,12 +144,12 @@ impl BrowserContext {
         Self::_new_inner(id, proxy_url, stealth, user_agent, None, false, None)
     }
 
-    pub fn with_proxy(id: String, proxy_url: Option<String>) -> Self {
-        Self::with_options(id, proxy_url, false)
-    }
-
-    /// Persist cookies to disk if storage_dir is configured.
-    /// Called during graceful shutdown.
+    /// Persist cookies to disk if storage_dir is configured. Currently
+    /// unwired: the server builds a fresh Browser per request and never
+    /// passes a storage_dir, so no shutdown moment owns the jar. Parked
+    /// until session persistence lands (the load half in `_new_inner`
+    /// already works).
+    #[allow(dead_code)]
     pub fn save_cookies(&self) {
         if let Some(ref dir) = self.storage_dir {
             let _ = std::fs::create_dir_all(dir);

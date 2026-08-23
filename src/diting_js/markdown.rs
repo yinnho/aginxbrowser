@@ -4,6 +4,7 @@
 
 /// JS expression that walks `document.body` and returns a markdown string.
 /// Must be evaluated against a Page that has a fully-bootstrapped JS runtime.
+#[cfg_attr(not(test), allow(dead_code))] // runtime tests are the sole consumer
 pub const HTML_TO_MARKDOWN_JS: &str = r#"
 (function() {
     function toMd(el, depth) {

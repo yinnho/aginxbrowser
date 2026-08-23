@@ -1,13 +1,14 @@
-# obscura_browser 摸底报告 — 认领 Phase 0
+# diting_browser 摸底报告 — 认领 Phase 0（Phase 1 已完成）
 
 > 2026-08-23。引擎认领第四个（最后一个）模块。前三：`diting_dom`（43 测试）、
 > `diting_net`（60 测试）、`diting_js`（307 测试，Phase 1 完成）。
 > 本报告为 Phase 0 摸底：先读懂现有 1828 行，再量化与上游的 6400 行差距，
-> 最后给出 Phase 1 分批认领建议。
+> 最后给出 Phase 1 分批认领建议。Phase 1（批次 0–3）已全部完成，模块
+> 已改名 `diting_browser`，343 测试。
 
 ## 0. 一句话定位
 
-obscura_browser 是「没有渲染的浏览器」：**Page**（一个标签页 = DOM + JS realm +
+diting_browser（认领前名 obscura_browser）是「没有渲染的浏览器」：**Page**（一个标签页 = DOM + JS realm +
 导航历史 + 网络事件）+ **BrowserContext**（配置聚合：cookie/代理/UA/stealth）+
 **lifecycle**（Load/DCL/NetworkIdle 等待语义）。真正的浏览器外壳——CDP 协议层、
 截图、PDF、多 frame——上游放在别的 crate（obscura-cdp / obscura-render）或
@@ -35,18 +36,21 @@ Blitz 路线战略分歧）②frame realm 架构（8 commit）③可吸收的同
 ## 2. 文件清单与职责
 
 ### context.rs (211) — 配置聚合体
-`BrowserContext` 12 个 pub 字段：`cookie_jar / http_client / user_agent /
+`BrowserContext` pub 字段：`cookie_jar / http_client / user_agent /
 proxy_url / robots_cache+obey_robots / stealth / allow_file_access /
 storage_dir / allow_private_network / tls_fingerprint`。全部字段为 pub 直接
 读写——没有封装，Page 与服务层共享 `Arc<BrowserContext>`。
-5 个构造函数（new / with_storage / with_storage_full / with_storage_and_network
-/ with_options 系）全部坍缩到 `_new_inner`：建 CookieJar → 从
+构造函数坍缩到 `_new_inner`：建 CookieJar → 从
 `{storage_dir}/cookies.json` 恢复 → 建 HttpClient（with_full_options）→
-UA 解析链（参数 → `AGINXBROWSER_UA` 环境变量 → Chrome/macOS 默认）→ UA
-同步进 http_client。
+UA 解析链（参数 → `AGINXBROWSER_UA` 环境变量 → 指纹池默认）→ UA
+同步进 http_client。批次 3 删除了无消费者的 new/with_storage/
+with_storage_full/with_proxy，留 with_storage_and_network（服务层唯一
+入口）、with_full_options/with_options（测试矩阵）。
 安全开关成对且注释明确威胁模型：`allow_file_access`（file:// 读）与
 `allow_private_network`（SSRF 私网门）相互独立。
-`save_cookies()` 关停时落盘。
+`save_cookies()` 落盘——**批次 3 记档：未接线**（服务层每请求新建
+Browser 且不传 storage_dir，无拥有 jar 的关停时刻；加载半边已工作，
+会话持久化立项时再接）。
 **依赖点：diting_net 三件套（CookieJar/HttpClient/RobotsCache）——net 认领
 完成后此文件已是薄壳。**
 
@@ -58,12 +62,12 @@ playwright 双方拼写）。与上游逐行相同。
 ### page.rs (1568) — 核心，见 §4。
 
 ### mod.rs (7)
-`pub use page::Page; pub use context::BrowserContext;` + `#![allow(dead_code)]`
-（服务层没用到全部 API，Phase 1 结束后应能摘掉）。
+`pub use page::Page; pub use context::BrowserContext;`。批次 3 摘掉了
+`#![allow(dead_code)]`——全部死项已按三档处置（见批次 3 记录）。
 
 ## 3. 服务层依赖点（认领时不能碰断的线）
 
-服务层**全部**通过包装层访问内核，无一文件直接 `use crate::obscura_browser::Page`：
+服务层**全部**通过包装层访问内核，无一文件直接 `use crate::diting_browser::Page`：
 
 ```
 src/browser.rs (107)  Browser = Arc<BrowserContext> 工厂；new_page() 发号 page-N
@@ -283,14 +287,55 @@ AGINXBROWSER_* 产品化环境变量、`__obscura_css` 注入时点（先于脚�
    - 记档：**服务层尚无 network_events 消费者**——本批把内核管道铺通，
      `/network` 接口或 MCP 网络可见性是产品侧后续立项；届时消费点自行
      调 `sync_js_network_events`（pump 里不预调，避免无读者时白攒事件）。
-4. **批次 3（读通 + 改名 + C 组清算）**：全文件逐段精读一遍（此时已吸收
-   B 组，剩余 diff 只剩渲染段与 frame 段，均为「明确不吸收+有理由」）→
-   `obscura_browser` → `diting_browser`（Page/BrowserContext 名字保留，
-   与 deno 无撞名）→ mod.rs 摘 `#![allow(dead_code)]`（死 API 要么删要么
-   转正）→ js.md 式逐 commit 记账归档。
+4. **批次 3（读通 + 改名 + 摘 allow）✅ 2026-08-23**：344→343 测试（-1 是
+   encoding.rs 重复 `#[test]` 合并，非删测）。四件事：
+   - **摘 `#![allow(dead_code)]` 三处**（diting_browser/mod.rs、包装层
+     src/page.rs、src/browser.rs），`cargo check`（bin）与 `--tests` 双模式
+     全部清零警告。死项按三档处置，每处一行注释写明理由：
+     ①**删**（全无消费者）：PageError::ParseError（零构造零匹配）、
+     wrapper `wait_for_selector` + `Element::text/attribute`（服务层用
+     原生 evaluate）、BrowserContext::with_proxy、Browser::new、
+     diting_js `InterceptCallback` 类型别名（批次 2 被 CallbackRegistry
+     取代的旧设计）、SearchEngine::js_extract_script（半拉子 feature，
+     无引擎实现它）、encoding.rs 重复 `#[test]`。
+     ②**cfg_attr(not(test), allow(dead_code))**（测试在用、bin 无消费者）：
+     set_navigation_timeout / set_history_index / with_dom / 网络回调与
+     响应体全家（批次 2 内核，/network 接口是待立消费者）/ preload 注册
+     对 / suspend·resume·has_js / take_dom / runtime 侧 get·clear·take
+     网络三件 / HTML_TO_MARKDOWN_JS / module_loader::new / with_options /
+     with_full_options / RemoteObjectInfo 元数据字段 / firecrawl
+     full_page（仅 screenshot feature 路径读）。
+     ③**#[allow(dead_code)] + 注释**（上游 parity、消费者是未来的 CDP 层）：
+     CDP 对象存储五件（store_object/store_object_with_meta/release_object/
+     release_object_group/dom_ref）、isolate_handle+cancel_termination
+     （per-command watchdog 管道，CDP server 本体未吸收）、
+     call_function_on_for_cdp、set_blocked_urls、take_pending_binding_calls、
+     set_intercept_tx+enable_intercept（Fetch 域拦截内核）、
+     InterceptResolution::Fulfill/Fail（CDP 客户端才会发的线格式）、
+     InterceptedRequest 字段、NetworkEvent 字段（/network 待立）、
+     frame_id（frame realm 挂账）、captcha token/reason（求解器注入步）、
+     BrowserProfile 平台三元组（persona 契约，bootstrap 运行时推导）、
+     save_cookies（会话持久化立项再接）、BrowserBuilder user_agent/
+     storage_dir。
+   - **决策修正**：一度删掉 WaitUntil::NetworkIdle0/2 + from_str，读
+     page.rs 时发现 navigate_single 的 network-idle 等待块（500ms 静默窗
+     + 阈值 0/2，puppeteer 语义）在消费它们——变体与等待块是一体单元，
+     恢复 from_str 并打 allow（firecrawl 兼容 waitUntil 入参是天然消费者）。
+   - **wrapper 收敛**：goto 改走 `.navigate()`（Load 便捷入口转正）；
+     browser.rs build() 的 if/else 坍缩成单调用。
+   - **读通完成**：settle/settle_until_idle/pump_event_loop_slice（风暴
+     退避 200ms→5s、热窗内 park 而非续喂）、charset 双路径（HTML
+     Content-Type→meta 嗅探 1KB→UTF-8；CSS decode_non_html）、CSS 注入
+     `__obscura_css` 的 U+2028/2029 转义、redirect 链 cross_scheme_to_file
+     SOP 门——全部有理由能复述。
+   - **改名**：`git mv` + 全仓 sed，`crate::obscura_browser` →
+     `crate::diting_browser`，main.rs mod 声明与 RUST_LOG 过滤串同步；
+     Page/BrowserContext 类型名保留（deno 无撞名）；JS 全局量
+     `__obscura_*` 按计划不动（JS 面契约）。
 
-Phase 1 完成后四个模块全部认领，Phase 2（渲染决策：blitz vs 自研）才有
-资格开题——browser 认领的「渲染感知 Page 状态」一节正是那个决策的输入。
+Phase 1 完成（2026-08-23）：四个模块全部认领——每一行的存在理由都在本报告
+与 js.md/net.md/dom.md 里。Phase 2（渲染决策：blitz vs 自研）现在有资格
+开题——browser 认领的「渲染感知 Page 状态」一节正是那个决策的输入。
 
 ## 7. 已知风险与坑
 

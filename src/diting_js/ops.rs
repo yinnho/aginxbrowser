@@ -10,10 +10,11 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use crate::diting_dom::{DomTree, NodeData, NodeId};
 use html5ever::namespace_url;
 use crate::diting_net::{CookieJar, HttpClient};
-use tokio::sync::Mutex;
 
-pub type InterceptCallback = Arc<Mutex<Option<Box<dyn Fn(String, String, String) -> Option<(u16, String, String)> + Send + Sync>>>>;
-
+/// CDP Fetch-domain resolution: what a client answers a paused request with.
+/// Only `Continue` is ever produced today (by tests); `Fulfill` / `Fail` are
+/// the wire shapes a CDP client would send — no CDP client exists yet.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum InterceptResolution {
     Continue {
@@ -30,6 +31,11 @@ pub enum InterceptResolution {
     Fail { reason: String },
 }
 
+/// A paused request surfaced to the interception channel (CDP
+/// `Fetch.requestPaused` shape). The resolver answers with an
+/// `InterceptResolution`. Field readers are the CDP layer, which is not
+/// absorbed; ops code only moves the struct through the channel.
+#[allow(dead_code)]
 pub struct InterceptedRequest {
     pub request_id: String,
     pub url: String,
@@ -100,6 +106,7 @@ pub struct ObscuraState {
 /// navigation subresources go through Page::record_network_event; this is
 /// the parallel channel for script-initiated requests, which run in the V8
 /// op layer and would otherwise never surface as Network events (#406).
+#[cfg_attr(not(test), allow(dead_code))] // tests assert every field; /network endpoint is the pending reader
 #[derive(Debug, Clone)]
 pub struct JsNetworkEvent {
     /// Matches the `fetch-{N}` id under which the body is stored, so CDP
@@ -115,6 +122,7 @@ pub struct JsNetworkEvent {
 
 /// A response body retained for `Network.getResponseBody`. Text bodies are
 /// stored lossy-UTF-8 (`base64_encoded = false`); binary bodies base64.
+#[cfg_attr(not(test), allow(dead_code))] // tests read both fields; CDP consumer pending
 #[derive(Debug, Clone)]
 pub struct StoredNetworkResponseBody {
     pub body: String,

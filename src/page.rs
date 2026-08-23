@@ -1,9 +1,7 @@
-#![allow(dead_code)]
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::obscura_browser::lifecycle::WaitUntil;
-use crate::obscura_browser::{BrowserContext, Page as InnerPage};
+use crate::diting_browser::{BrowserContext, Page as InnerPage};
 use serde_json::Value;
 
 use crate::error::Error;
@@ -33,7 +31,7 @@ impl Page {
     /// Navigate to URL and wait for load.
     pub async fn goto(&mut self, url: &str) -> Result<(), Error> {
         self.inner
-            .navigate_with_wait(url, WaitUntil::Load)
+            .navigate(url)
             .await
             .map_err(|e| Error::Navigation(e.to_string()))
     }
@@ -99,34 +97,6 @@ impl Page {
         nid_from_value(&val).map(|nid| Element { node_id: nid, page: self as *const Page })
     }
 
-    /// Wait for CSS selector to appear (polls every 100ms).
-    pub async fn wait_for_selector(
-        &mut self,
-        selector: &str,
-        timeout: Duration,
-    ) -> Result<Element, Error> {
-        let start = std::time::Instant::now();
-        let escaped = selector.replace('\\', "\\\\").replace('\'', "\\'");
-        loop {
-            let js = format!(
-                "(function() {{ var el = document.querySelector('{}'); return el ? el._nid : null; }})()",
-                escaped
-            );
-            let val = self.evaluate(&js);
-            if let Some(nid) = nid_from_value(&val) {
-                return Ok(Element { node_id: nid, page: self as *const Page });
-            }
-            if start.elapsed() > timeout {
-                return Err(Error::Timeout(format!(
-                    "wait_for_selector({}) timed out after {}ms",
-                    selector,
-                    timeout.as_millis()
-                )));
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    }
-
     /// Wait for a named cookie to appear (polls every 200ms).
     pub async fn wait_for_cookie(&self, name: &str, timeout: Duration) -> Result<(), Error> {
         let start = std::time::Instant::now();
@@ -159,13 +129,13 @@ impl Page {
     }
 
     /// Drive the JS event loop until quiescent, capped at `max_ms`. See
-    /// [`crate::obscura_browser::Page::settle_until_idle`].
+    /// [`crate::diting_browser::Page::settle_until_idle`].
     pub async fn settle_until_idle(&mut self, max_ms: u64) -> bool {
         self.inner.settle_until_idle(max_ms).await
     }
 
     /// One background event-loop slice (pump, then park when quiescent).
-    /// See [`crate::obscura_browser::Page::pump_event_loop_slice`].
+    /// See [`crate::diting_browser::Page::pump_event_loop_slice`].
     pub async fn pump_event_loop_slice(&mut self, ms: u64) {
         self.inner.pump_event_loop_slice(ms).await
     }
@@ -178,33 +148,13 @@ impl Page {
 
 /// Handle to a DOM element.
 ///
-/// Created via [`Page::query_selector`] or [`Page::wait_for_selector`].
+/// Created via [`Page::query_selector`].
 pub struct Element {
     node_id: u64,
     page: *const Page,
 }
 
 impl Element {
-    /// Get text content of this element.
-    pub fn text(&self) -> String {
-        let page = unsafe { &mut *(self.page as *mut Page) };
-        let val = page.evaluate(&format!(
-            "(function() {{ var el = globalThis._wrap && globalThis._wrap({}); return el ? el.textContent : ''; }})()",
-            self.node_id
-        ));
-        val.as_str().unwrap_or("").to_string()
-    }
-
-    /// Get an attribute value.
-    pub fn attribute(&self, name: &str) -> Option<String> {
-        let page = unsafe { &mut *(self.page as *mut Page) };
-        let val = page.evaluate(&format!(
-            "(function() {{ var el = globalThis._wrap && globalThis._wrap({}); return el ? el.getAttribute('{}') : null; }})()",
-            self.node_id, name
-        ));
-        if val.is_null() { None } else { Some(val.as_str().unwrap_or("").to_string()) }
-    }
-
     /// Click this element.
     pub fn click(&self) -> Result<(), Error> {
         let page = unsafe { &mut *(self.page as *mut Page) };

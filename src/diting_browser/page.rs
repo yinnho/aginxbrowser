@@ -6,8 +6,8 @@ use crate::diting_js::runtime::JsRuntime;
 use crate::diting_net::{HttpClient, NetError, Response};
 use url::Url;
 
-use crate::obscura_browser::context::BrowserContext;
-use crate::obscura_browser::lifecycle::LifecycleState;
+use crate::diting_browser::context::BrowserContext;
+use crate::diting_browser::lifecycle::LifecycleState;
 
 fn decode_data_uri(uri: &str) -> Option<Vec<u8>> {
     let rest = uri.strip_prefix("data:")?;
@@ -111,6 +111,11 @@ fn escape_for_js_template_literal(input: &str) -> String {
     out
 }
 
+/// One recorded network exchange (CDP `Network.requestWillBeSent` /
+/// `responseReceived` shape). Recorded for every document + subresource
+/// fetch; no reader beyond tests exists yet — the /network service endpoint
+/// is the intended consumer.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct NetworkEvent {
     pub request_id: String,
@@ -127,6 +132,7 @@ pub struct NetworkEvent {
 /// A response body retained for `get_response_body` (upstream #360). Text
 /// bodies are stored lossy-UTF-8 (`base64_encoded = false`); binary bodies
 /// base64 so `take_response_body_raw` is byte-exact.
+#[cfg_attr(not(test), allow(dead_code))] // read by tests; CDP getResponseBody consumer pending
 #[derive(Debug, Clone)]
 pub struct StoredResponseBody {
     pub body: String,
@@ -196,6 +202,10 @@ fn navigation_referrer(source: &Url, target: &Url) -> String {
 
 pub struct Page {
     pub id: String,
+    /// Upstream frame-realm identifier: one Page can host sub-frame realms
+    /// keyed by frame id. We run a single realm per page, so nothing reads
+    /// it yet (frame-realm absorption is parked — see docs/engine/browser.md).
+    #[allow(dead_code)]
     pub frame_id: String,
     pub url: Option<Url>,
     pub dom: Option<DomTree>,
@@ -829,13 +839,13 @@ impl Page {
     }
 
     pub async fn navigate(&mut self, url_str: &str) -> Result<(), PageError> {
-        self.navigate_with_wait(url_str, crate::obscura_browser::lifecycle::WaitUntil::Load).await
+        self.navigate_with_wait(url_str, crate::diting_browser::lifecycle::WaitUntil::Load).await
     }
 
     pub async fn navigate_with_wait(
         &mut self,
         url_str: &str,
-        wait_until: crate::obscura_browser::lifecycle::WaitUntil,
+        wait_until: crate::diting_browser::lifecycle::WaitUntil,
     ) -> Result<(), PageError> {
         self.navigate_with_wait_post(url_str, wait_until, "GET", "").await
     }
@@ -843,7 +853,7 @@ impl Page {
     pub async fn navigate_with_wait_post(
         &mut self,
         url_str: &str,
-        wait_until: crate::obscura_browser::lifecycle::WaitUntil,
+        wait_until: crate::diting_browser::lifecycle::WaitUntil,
         method: &str,
         body: &str,
     ) -> Result<(), PageError> {
@@ -870,6 +880,7 @@ impl Page {
 
     /// Set a page-scoped navigation deadline in milliseconds; `None` restores
     /// the process-wide default.
+    #[cfg_attr(not(test), allow(dead_code))] // batch-1 upstream parity; wire when per-request nav timeout becomes an API input
     pub fn set_navigation_timeout(&mut self, ms: Option<u64>) {
         self.navigation_timeout_ms = ms;
     }
@@ -877,7 +888,7 @@ impl Page {
     async fn navigate_with_wait_post_ref(
         &mut self,
         url_str: &str,
-        wait_until: crate::obscura_browser::lifecycle::WaitUntil,
+        wait_until: crate::diting_browser::lifecycle::WaitUntil,
         method: &str,
         body: &str,
         initial_referrer: &str,
@@ -908,7 +919,7 @@ impl Page {
         {
             Ok(r) => r,
             Err(_) => {
-                self.lifecycle = crate::obscura_browser::lifecycle::LifecycleState::Failed;
+                self.lifecycle = crate::diting_browser::lifecycle::LifecycleState::Failed;
                 Err(PageError::NetworkError(format!(
                     "navigation exceeded {nav_timeout_ms}ms deadline"
                 )))
@@ -1026,6 +1037,7 @@ impl Page {
 
     /// Move the history cursor without re-navigating; used by
     /// Page.navigateToHistoryEntry which then drives the actual fetch.
+    #[cfg_attr(not(test), allow(dead_code))] // exercised by the history tests below
     pub fn set_history_index(&mut self, idx: usize) {
         if idx < self.history.len() {
             self.history_index = idx;
@@ -1035,7 +1047,7 @@ impl Page {
     async fn navigate_with_wait_post_inner(
         &mut self,
         url_str: &str,
-        wait_until: crate::obscura_browser::lifecycle::WaitUntil,
+        wait_until: crate::diting_browser::lifecycle::WaitUntil,
         method: &str,
         body: &str,
     ) -> Result<(), PageError> {
@@ -1087,7 +1099,7 @@ impl Page {
     async fn navigate_single(
         &mut self,
         url_str: &str,
-        wait_until: crate::obscura_browser::lifecycle::WaitUntil,
+        wait_until: crate::diting_browser::lifecycle::WaitUntil,
         method: &str,
         body: &str,
     ) -> Result<(), PageError> {
@@ -1312,7 +1324,7 @@ impl Page {
 
         self.lifecycle = LifecycleState::DomContentLoaded;
 
-        if wait_until == crate::obscura_browser::lifecycle::WaitUntil::DomContentLoaded {
+        if wait_until == crate::diting_browser::lifecycle::WaitUntil::DomContentLoaded {
             return Ok(());
         }
 
@@ -1328,11 +1340,11 @@ impl Page {
 
         if matches!(
             wait_until,
-            crate::obscura_browser::lifecycle::WaitUntil::NetworkIdle0 | crate::obscura_browser::lifecycle::WaitUntil::NetworkIdle2
+            crate::diting_browser::lifecycle::WaitUntil::NetworkIdle0 | crate::diting_browser::lifecycle::WaitUntil::NetworkIdle2
         ) {
             let threshold = match wait_until {
-                crate::obscura_browser::lifecycle::WaitUntil::NetworkIdle0 => 0,
-                crate::obscura_browser::lifecycle::WaitUntil::NetworkIdle2 => 2,
+                crate::diting_browser::lifecycle::WaitUntil::NetworkIdle0 => 0,
+                crate::diting_browser::lifecycle::WaitUntil::NetworkIdle2 => 2,
                 _ => 0,
             };
 
@@ -1402,6 +1414,7 @@ impl Page {
             .unwrap_or_else(|| "about:blank".to_string())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // snapshot helper exercised by tests; DOM consumers read via evaluate
     pub fn with_dom<R>(&self, f: impl FnOnce(&DomTree) -> R) -> Option<R> {
         if let Some(js) = &self.js {
             return js.with_dom(f);
@@ -1409,6 +1422,7 @@ impl Page {
         self.dom.as_ref().map(f)
     }
 
+    #[allow(dead_code)] // CDP DOM.getFlattenedDocument parity — no CDP client to serve it yet
     pub fn dom(&self) -> Option<&DomTree> {
         self.dom.as_ref()
     }
@@ -1417,12 +1431,14 @@ impl Page {
     /// Lets the CDP dispatcher arm a per-command watchdog (which bounds any one
     /// command so a hung page cannot hold the process-wide V8 lock forever)
     /// without taking `&mut self`.
+    #[allow(dead_code)] // CDP per-command-watchdog plumbing — the CDP server itself is not absorbed
     pub fn isolate_handle(&self) -> Option<crate::diting_js::runtime::IsolateHandle> {
         self.js.as_ref().map(|js| js.isolate_handle())
     }
 
     /// Clear a V8 termination left by a per-command watchdog so the next command
     /// on this page can run. No-op if the runtime is absent or not terminating.
+    #[allow(dead_code)] // ditto — watchdog-clearing half of the CDP plumbing above
     pub fn cancel_v8_termination(&mut self) {
         if let Some(js) = self.js.as_mut() {
             js.cancel_termination();
@@ -1516,6 +1532,7 @@ impl Page {
         }
     }
 
+    #[allow(dead_code)] // CDP Runtime.callFunctionOn parity; our eval path goes through evaluate_for_cdp
     pub async fn call_function_on_for_cdp(
         &mut self,
         function_declaration: &str,
@@ -1551,12 +1568,14 @@ impl Page {
         }
     }
 
+    #[allow(dead_code)] // CDP Network.setBlockedURLs parity — no CDP client to call it yet
     pub fn set_blocked_urls(&mut self, patterns: Vec<String>) {
         if let Some(js) = &self.js {
             js.set_blocked_urls(patterns);
         }
     }
 
+    #[allow(dead_code)] // CDP Runtime.releaseObject parity — object-store ids are never handed out
     pub fn release_object(&mut self, object_id: &str) {
         if let Some(js) = &mut self.js {
             js.release_object(object_id);
@@ -1646,6 +1665,7 @@ impl Page {
 
     /// Body stored for a request id: page-side (`{page}.{N}`) or
     /// script-initiated (`fetch-{N}`, retained in the JS runtime).
+    #[cfg_attr(not(test), allow(dead_code))] // batch-2 kernel; /network endpoint is the pending consumer
     pub fn get_response_body(&self, request_id: &str) -> Option<StoredResponseBody> {
         self.response_bodies.get(request_id).cloned().or_else(|| {
             self.js
@@ -1666,6 +1686,7 @@ impl Page {
     /// (byte-exact); text bodies return their UTF-8 bytes. Returns None if
     /// the body was never cached (e.g. it exceeded
     /// OBSCURA_NETWORK_BODY_BUFFER_BYTES) or the id is unknown.
+    #[cfg_attr(not(test), allow(dead_code))] // batch-2 kernel; CDP stream-take consumer pending
     pub fn take_response_body_raw(&mut self, request_id: &str) -> Option<Vec<u8>> {
         let stored = if let Some(body) = self.response_bodies.remove(request_id) {
             self.response_body_order.retain(|id| id != request_id);
@@ -1691,6 +1712,7 @@ impl Page {
     /// but the CDP layer reports it with the navigation's loaderId as the
     /// requestId (Chrome's `requestId === loaderId` convention). Without this
     /// alias, `Network.getResponseBody(loaderId)` misses (upstream #340).
+    #[cfg_attr(not(test), allow(dead_code))] // batch-2 kernel; pairs with get_response_body
     pub fn alias_response_body(&mut self, from_id: &str, to_id: &str) {
         if from_id == to_id || self.response_bodies.contains_key(to_id) {
             return;
@@ -1701,6 +1723,7 @@ impl Page {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // batch-2 kernel; frees the LRU caches between sessions
     pub fn clear_response_bodies(&mut self) {
         self.response_bodies.clear();
         self.response_body_order.clear();
@@ -1714,6 +1737,7 @@ impl Page {
     /// the CDP layer emits Network.requestWillBeSent / responseReceived for
     /// them (upstream #406). Idempotent: the runtime's queue is drained. The
     /// `fetch-{N}` request id is preserved so get_response_body resolves.
+    #[cfg_attr(not(test), allow(dead_code))] // batch-2 kernel; the /network consumer will call this itself
     pub fn sync_js_network_events(&mut self) {
         let events = match self.js.as_ref() {
             Some(js) => js.take_js_network_events(),
@@ -1740,6 +1764,7 @@ impl Page {
     /// `enable_interception` to mutate or block. Returns a stable id; pass it
     /// to `off_request` to detach (upstream #408). Scoped to this page: it
     /// never sees sibling pages' requests and dies with the page.
+    #[cfg_attr(not(test), allow(dead_code))] // batch-2 kernel; wire at session init when /network lands
     pub fn on_request(&mut self, cb: crate::diting_net::RequestCallback) -> u64 {
         self.callbacks.add_request(cb)
     }
@@ -1748,21 +1773,25 @@ impl Page {
     /// receives, including its body. Non-blocking. The main path for crawlers
     /// that need to capture API response payloads. Returns a stable id for
     /// `off_response`. Page-scoped like `on_request`.
+    #[cfg_attr(not(test), allow(dead_code))] // batch-2 kernel; wire at session init when /network lands
     pub fn on_response(&mut self, cb: crate::diting_net::ResponseCallback) -> u64 {
         self.callbacks.add_response(cb)
     }
 
     /// Detach a request observer registered with `on_request`. Returns true
     /// if one was removed.
+    #[cfg_attr(not(test), allow(dead_code))] // pair-unregister for on_request
     pub fn off_request(&mut self, id: u64) -> bool {
         self.callbacks.remove_request(id)
     }
 
     /// Detach a response observer registered with `on_response`.
+    #[allow(dead_code)] // pair-unregister for on_response (tests unregister requests, not responses)
     pub fn off_response(&mut self, id: u64) -> bool {
         self.callbacks.remove_response(id)
     }
 
+    #[allow(dead_code)] // manual hook; navigations run preloads themselves (init_js)
     pub fn execute_preload_script(&mut self, source: &str) -> Result<(), String> {
         if let Some(js) = &mut self.js {
             js.execute_script("<preload>", source)
@@ -1771,6 +1800,7 @@ impl Page {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // storm control: park the realm between microtask bursts
     pub fn suspend_js(&mut self) {
         if let Some(js) = &self.js {
             if let Some(dom) = js.take_dom() {
@@ -1780,6 +1810,7 @@ impl Page {
         self.js = None;
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // storm control: re-arm after suspend_js
     pub fn resume_js(&mut self) {
         if self.js.is_some() {
             return;
@@ -1787,10 +1818,12 @@ impl Page {
         self.init_js();
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // tests assert on the suspend/resume lifecycle
     pub fn has_js(&self) -> bool {
         self.js.is_some()
     }
 
+    #[allow(dead_code)] // CDP Runtime.releaseObjectGroup parity
     pub fn release_object_group(&mut self) {
         if let Some(js) = &mut self.js {
             js.release_object_group();
@@ -1805,6 +1838,7 @@ impl Page {
         }
     }
 
+    #[allow(dead_code)] // CDP Runtime.addBinding parity — drained as bindingCalled events
     pub fn take_pending_binding_calls(&self) -> Vec<(String, String)> {
         if let Some(js) = &self.js {
             js.take_pending_binding_calls()
@@ -1813,6 +1847,7 @@ impl Page {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // engine path is live (init_js runs these); no bin caller registers one yet
     pub fn set_preload_scripts(&mut self, scripts: Vec<String>) {
         self.preload_scripts = scripts;
     }
@@ -1820,6 +1855,7 @@ impl Page {
     /// Append one preload script, keeping any already registered (CDP
     /// `Page.addScriptToEvaluateOnNewDocument` is additive; our
     /// `set_preload_scripts` replaces the whole group).
+    #[cfg_attr(not(test), allow(dead_code))] // batch-1 absorption; wire at session init when a preload need lands
     pub fn add_preload_script(&mut self, script: String) {
         self.preload_scripts.push(script);
     }
@@ -1841,7 +1877,7 @@ impl Page {
                 .unwrap_or_default();
             self.navigate_with_wait_post_ref(
                 &url,
-                crate::obscura_browser::lifecycle::WaitUntil::Load,
+                crate::diting_browser::lifecycle::WaitUntil::Load,
                 &method,
                 &body,
                 &source_url,
@@ -1855,6 +1891,7 @@ impl Page {
         }
     }
 
+    #[allow(dead_code)] // Fetch-domain intercept kernel (requestPaused channel); no CDP client to answer pauses yet
     pub fn set_intercept_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<crate::diting_js::ops::InterceptedRequest>) {
         self.intercept_tx = Some(tx.clone());
         if let Some(js) = &self.js {
@@ -1862,6 +1899,7 @@ impl Page {
         }
     }
 
+    #[allow(dead_code)] // toggles the kernel above; kept separate so fetch() never auto-pauses
     pub fn enable_intercept(&mut self, enabled: bool) {
         self.intercept_enabled = enabled;
         if let Some(js) = &self.js {
@@ -1877,9 +1915,6 @@ pub enum PageError {
 
     #[error("Network error: {0}")]
     NetworkError(String),
-
-    #[error("Parse error: {0}")]
-    ParseError(String),
 
     #[error("Too many redirects (limit {0})")]
     TooManyRedirects(usize),
@@ -1899,7 +1934,8 @@ mod tests {
     /// Holds PRIVATE_NET_ENV_LOCK for the test's duration and clears
     /// OBSCURA_ALLOW_PRIVATE_NETWORK on exit so the ambient env never leaks
     /// into the next test (several diting_net tests assert on the unset
-    /// state).
+    /// state). The field is the point: holding the guard is what locks.
+    #[allow(dead_code)]
     struct NetGuard(std::sync::MutexGuard<'static, ()>);
     impl Drop for NetGuard {
         fn drop(&mut self) {
@@ -2280,7 +2316,7 @@ mod tests {
         let mut p = test_page();
         p.navigate_with_wait(
             &format!("http://127.0.0.1:{port}/a"),
-            crate::obscura_browser::lifecycle::WaitUntil::DomContentLoaded,
+            crate::diting_browser::lifecycle::WaitUntil::DomContentLoaded,
         )
         .await
         .unwrap();

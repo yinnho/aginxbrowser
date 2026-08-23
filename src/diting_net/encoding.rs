@@ -349,7 +349,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn unrelated_meta_attributes_do_not_declare_a_charset() {
         for bytes in [
             &b"<meta name=\"description\" content=\"charset=gbk\">"[..],

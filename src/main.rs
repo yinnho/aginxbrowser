@@ -30,7 +30,7 @@ mod screenshot;
 mod diting_dom;
 mod diting_net;
 mod diting_js;
-mod obscura_browser;
+mod diting_browser;
 
 use server::{do_click, do_eval, do_fetch, do_search, SearchError};
 use render::smart_fetch;
@@ -447,7 +447,7 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| {
                     tracing_subscriber::EnvFilter::new(
-                        "aginxbrowser=info,obscura_browser::page=warn,diting_net::wreq_client=warn,diting::console=error",
+                        "aginxbrowser=info,diting_browser::page=warn,diting_net::wreq_client=warn,diting::console=error",
                     )
                 }),
         )

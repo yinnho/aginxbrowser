@@ -14,11 +14,17 @@ use crate::diting_js::ops::{build_extension, ObscuraState};
 
 static SNAPSHOT: &[u8] = include_bytes!(env!("OBSCURA_SNAPSHOT_PATH"));
 
+/// CDP `Runtime.RemoteObject` shape returned by evaluate paths. Our HTTP
+/// surface only reads `value`; the rest is the CDP serialization contract
+/// (kept so a CDP consumer can adopt it without reshaping).
+#[cfg_attr(not(test), allow(dead_code))] // tests cross-check the type metadata
 #[derive(Debug, Clone)]
 pub struct RemoteObjectInfo {
     pub js_type: String,
     pub subtype: Option<String>,
     pub class_name: String,
+    /// CDP preview text ("Object" / "Array(3)" …). Nothing renders it yet.
+    #[allow(dead_code)]
     pub description: String,
     pub object_id: Option<String>,
     pub value: Option<serde_json::Value>,
@@ -283,6 +289,7 @@ impl JsRuntime {
         self.state.borrow_mut().referrer = referrer.to_string();
     }
 
+    #[allow(dead_code)] // CDP Network.setBlockedURLs parity — no CDP client yet
     pub fn set_blocked_urls(&self, patterns: Vec<String>) {
         self.state.borrow_mut().blocked_urls = patterns;
     }
@@ -300,6 +307,7 @@ impl JsRuntime {
         self.state.borrow().dynamic_script_fetches.get() > 0
     }
 
+    #[allow(dead_code)] // CDP Runtime.addBinding drain — emitted as bindingCalled events
     pub fn take_pending_binding_calls(&self) -> Vec<(String, String)> {
         std::mem::take(&mut self.state.borrow_mut().pending_binding_calls)
     }
@@ -314,6 +322,7 @@ impl JsRuntime {
         state.intercept_tx = Some(tx);
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // tests cover the auto-enable hang regression
     pub fn set_intercept_enabled(&self, enabled: bool) {
         let mut state = self.state.borrow_mut();
         state.intercept_enabled = enabled;
@@ -328,6 +337,7 @@ impl JsRuntime {
 
     /// Retained response body for a script-initiated request, keyed by its
     /// `fetch-{N}` id. See `ObscuraState::network_response_bodies`.
+    #[cfg_attr(not(test), allow(dead_code))] // batch-2 kernel; /network endpoint is the pending consumer
     pub fn get_network_response_body(
         &self,
         request_id: &str,
@@ -339,6 +349,7 @@ impl JsRuntime {
             .cloned()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // frees the fetch-{N} LRU between sessions
     pub fn clear_network_response_bodies(&self) {
         let mut state = self.state.borrow_mut();
         state.network_response_bodies.clear();
@@ -348,6 +359,7 @@ impl JsRuntime {
     /// Drain network events recorded for script-initiated requests into the
     /// owning Page's event list. Idempotent (the queue is taken), so calling
     /// repeatedly never duplicates events.
+    #[cfg_attr(not(test), allow(dead_code))] // drained by Page::sync_js_network_events; consumer pending
     pub fn take_js_network_events(&self) -> Vec<crate::diting_js::ops::JsNetworkEvent> {
         std::mem::take(&mut self.state.borrow_mut().js_network_events)
     }
@@ -579,6 +591,7 @@ impl JsRuntime {
         Ok(Self::info_from_meta(&meta_json, Some(oid)))
     }
 
+    #[allow(dead_code)] // CDP Runtime.callFunctionOn parity; Page-level wrapper carries the allow note
     pub async fn call_function_on_for_cdp(
         &mut self,
         function_declaration: &str,
@@ -728,6 +741,7 @@ impl JsRuntime {
         );
         Ok(Self::info_from_meta(&meta_json, Some(oid)))
     }
+    #[cfg_attr(not(test), allow(dead_code))] // exercised via tests; CDP consumer pending
     pub async fn call_function_on(
         &mut self,
         function_declaration: &str,
@@ -737,6 +751,7 @@ impl JsRuntime {
     ) -> Result<RemoteObjectInfo, String> {
         self.call_function_on_for_cdp(function_declaration, object_id, arguments, return_by_value, false).await
     }
+    #[allow(dead_code)] // CDP Runtime.evaluate-by-object-id half of the object store
     pub fn store_object(&mut self, js_expression: &str) -> Result<String, String> {
         self.object_counter += 1;
         let oid = self.make_oid(self.object_counter);
@@ -754,6 +769,7 @@ impl JsRuntime {
         Ok(oid)
     }
 
+    #[allow(dead_code)] // ditto — store plus RemoteObject metadata extraction
     pub fn store_object_with_meta(
         &mut self,
         js_expression: &str,
@@ -787,6 +803,7 @@ impl JsRuntime {
         Ok(Self::info_from_meta(&meta_json, Some(oid)))
     }
 
+    #[allow(dead_code)] // CDP Runtime.releaseObject parity
     pub fn release_object(&mut self, object_id: &str) {
         if self.object_store.remove(object_id).is_some() {
             let code = format!(
@@ -797,6 +814,7 @@ impl JsRuntime {
         }
     }
 
+    #[allow(dead_code)] // CDP Runtime.releaseObjectGroup parity
     pub fn release_object_group(&mut self) {
         let _ = self.runtime.execute_script(
             "<releaseGroup>",
@@ -1089,6 +1107,7 @@ impl JsRuntime {
     /// This runtime's V8 isolate handle (captured at construction, stable for
     /// the isolate's life). Lets the CDP dispatcher arm a per-command watchdog
     /// from `&self`.
+    #[allow(dead_code)] // CDP per-command watchdog plumbing — the CDP server itself is not absorbed
     pub fn isolate_handle(&self) -> IsolateHandle {
         self.isolate_handle.clone()
     }
@@ -1096,6 +1115,7 @@ impl JsRuntime {
     /// Clear V8's termination flag after a watchdog armed externally (via the
     /// isolate handle) fired, so the isolate is usable for the next command.
     /// No-op when the isolate is not terminating.
+    #[allow(dead_code)] // ditto — the watchdog-clearing half
     pub fn cancel_termination(&mut self) {
         self.runtime.v8_isolate().cancel_terminate_execution();
     }
@@ -1167,6 +1187,7 @@ impl JsRuntime {
         }
     }
 
+    #[allow(dead_code)] // generic promise settle; evaluate paths settle through their own bounded loops
     pub async fn resolve_promises(&mut self) {
         // Default settle: just pump until idle or 5s.
         let _ = tokio::time::timeout(
@@ -1222,6 +1243,7 @@ impl JsRuntime {
             tracing::warn!("promise wait terminated by watchdog (sync spin in event loop)");
         }
     }
+    #[cfg_attr(not(test), allow(dead_code))] // used by suspend_js/resume_js lifecycle tests
     pub fn take_dom(&self) -> Option<DomTree> {
         self.state.borrow_mut().dom.take()
     }
@@ -1231,6 +1253,7 @@ impl JsRuntime {
         state.dom.as_ref().map(f)
     }
 
+    #[allow(dead_code)] // borrow-preserving DOM read; with_dom covers current callers
     pub fn dom_ref(&self) -> Option<std::cell::Ref<'_, Option<DomTree>>> {
         let r = self.state.borrow();
         if r.dom.is_some() {
@@ -1312,6 +1335,7 @@ impl JsRuntime {
         )
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // helper of call_function_on (test-exercised)
     fn resolve_this(&self, object_id: Option<&str>) -> String {
         match object_id {
             Some(oid) => {
@@ -1336,6 +1360,7 @@ impl JsRuntime {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // helper of call_function_on (test-exercised)
     fn build_args(&self, arguments: &[serde_json::Value]) -> (String, String) {
         let mut setup_lines = Vec::new();
         let mut arg_names = Vec::new();
@@ -3241,7 +3266,7 @@ mod tests {
         }
 
         let fetch_status = |port: u16| {
-            let mut rt = setup_runtime("<html><body></body></html>");
+            let rt = setup_runtime("<html><body></body></html>");
             rt.set_url(&format!("http://127.0.0.1:{}/", port));
             rt
         };
