@@ -424,6 +424,63 @@ pub struct ComputedStyle {
     pub font_size: Option<f32>,
     pub font_weight: Option<u16>,
     pub text_align: Option<TextAlign>,
+    // --- flex/grid pass-through (batch 2c): px/fr-only, non-inherited ---
+    pub flex_direction: Option<FlexDirection>,
+    pub flex_wrap: Option<FlexWrapMode>,
+    /// Real flex/grid alignment — separate from `text_align`, which only
+    /// addresses inline content (upstream keeps them distinct too).
+    pub justify_content: Option<JustifyMode>,
+    pub align_items: Option<AlignMode>,
+    pub flex_grow: Option<f32>,
+    pub flex_shrink: Option<f32>,
+    /// px only (`auto` stays None — the initial value).
+    pub flex_basis: Option<f32>,
+    pub column_gap: Option<f32>,
+    pub row_gap: Option<f32>,
+    /// Track list (px / fr / auto). `None` = not declared.
+    pub grid_template_columns: Option<Vec<GridTrack>>,
+    pub grid_template_rows: Option<Vec<GridTrack>>,
+}
+
+/// One grid track sizing. `1fr` / `100px` / `auto` — minmax() and repeat()
+/// are later batches.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GridTrack {
+    Fr(f32),
+    Px(f32),
+    Auto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlexDirection {
+    Row,
+    RowReverse,
+    Column,
+    ColumnReverse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlexWrapMode {
+    NoWrap,
+    Wrap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JustifyMode {
+    FlexStart,
+    Center,
+    FlexEnd,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignMode {
+    Stretch,
+    FlexStart,
+    Center,
+    FlexEnd,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -593,7 +650,118 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str) -> bool {
             };
             true
         }
+        "flex-direction" => {
+            style.flex_direction = match v {
+                "row" => Some(FlexDirection::Row),
+                "row-reverse" => Some(FlexDirection::RowReverse),
+                "column" => Some(FlexDirection::Column),
+                "column-reverse" => Some(FlexDirection::ColumnReverse),
+                _ => return false,
+            };
+            true
+        }
+        "flex-wrap" => {
+            style.flex_wrap = match v {
+                "nowrap" => Some(FlexWrapMode::NoWrap),
+                "wrap" => Some(FlexWrapMode::Wrap),
+                _ => return false,
+            };
+            true
+        }
+        "justify-content" => {
+            style.justify_content = match v {
+                "flex-start" | "start" => Some(JustifyMode::FlexStart),
+                "center" => Some(JustifyMode::Center),
+                "flex-end" | "end" => Some(JustifyMode::FlexEnd),
+                "space-between" => Some(JustifyMode::SpaceBetween),
+                "space-around" => Some(JustifyMode::SpaceAround),
+                "space-evenly" => Some(JustifyMode::SpaceEvenly),
+                _ => return false,
+            };
+            true
+        }
+        "align-items" => {
+            style.align_items = match v {
+                "stretch" => Some(AlignMode::Stretch),
+                "flex-start" | "start" => Some(AlignMode::FlexStart),
+                "center" => Some(AlignMode::Center),
+                "flex-end" | "end" => Some(AlignMode::FlexEnd),
+                _ => return false,
+            };
+            true
+        }
+        "flex-grow" => {
+            style.flex_grow = parse_num_f32(v);
+            style.flex_grow.is_some()
+        }
+        "flex-shrink" => {
+            style.flex_shrink = parse_num_f32(v);
+            style.flex_shrink.is_some()
+        }
+        "flex-basis" => {
+            // px only; `auto` (the initial value) stays None.
+            style.flex_basis = parse_px_f32(v);
+            style.flex_basis.is_some()
+        }
+        "gap" => {
+            let vals: Vec<Option<f32>> = v.split_whitespace().map(parse_px_f32).collect();
+            match vals.as_slice() {
+                [one] => {
+                    style.column_gap = *one;
+                    style.row_gap = *one;
+                }
+                [c, r] => {
+                    style.column_gap = *c;
+                    style.row_gap = *r;
+                }
+                _ => return false,
+            };
+            true
+        }
+        "column-gap" => {
+            style.column_gap = parse_px_f32(v);
+            style.column_gap.is_some()
+        }
+        "row-gap" => {
+            style.row_gap = parse_px_f32(v);
+            style.row_gap.is_some()
+        }
+        "grid-template-columns" => {
+            style.grid_template_columns = parse_grid_tracks(v);
+            style.grid_template_columns.is_some()
+        }
+        "grid-template-rows" => {
+            style.grid_template_rows = parse_grid_tracks(v);
+            style.grid_template_rows.is_some()
+        }
         _ => false,
+    }
+}
+
+/// Plain number (flex-grow: 1).
+fn parse_num_f32(v: &str) -> Option<f32> {
+    v.parse::<f32>().ok()
+}
+
+/// Whitespace-separated track list: `1fr 2fr 100px auto`. Unknown tokens
+/// abort the whole declaration (browsers drop it entirely).
+fn parse_grid_tracks(v: &str) -> Option<Vec<GridTrack>> {
+    let mut tracks = Vec::new();
+    for token in v.split_whitespace() {
+        if token == "auto" {
+            tracks.push(GridTrack::Auto);
+        } else if let Some(fr) = token.strip_suffix("fr") {
+            tracks.push(GridTrack::Fr(fr.parse::<f32>().ok()?));
+        } else if let Some(px) = parse_px_f32(token) {
+            tracks.push(GridTrack::Px(px));
+        } else {
+            return None;
+        }
+    }
+    if tracks.is_empty() {
+        None
+    } else {
+        Some(tracks)
     }
 }
 

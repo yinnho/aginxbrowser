@@ -464,3 +464,50 @@ feature 下 Style 有原生 `text_align` 字段（LegacyLeft/Right/Center）但�
 **边界（下一批吸收）**：float/table/multicol 修复链、replaced 元素
 （img/SVG/video）、position:absolute、em/rem/% 长度、flex/grid 属性透传
 （现在 flex/grid 容器只有 display 映射，没有 gap/flex-direction/track 等）。
+
+## 13. 批次 2c 完成（2026-08-23）：flex/grid 透传 + replaced 元素
+
+**diting_css 属性增量**（全非继承，px/fr-only）：flex-direction / flex-wrap
+（nowrap|wrap）/ justify-content（6 值）/ align-items（4 值）/ flex-grow /
+flex-shrink / flex-basis（px）/ gap（长短手）/ grid-template-columns|rows
+（`1fr 2fr 100px auto` 词表解析；minmax/repeat 记边界）。关键设计：**真
+align-items 与 text_align 分离**（upstream 同款——text-align 声明永不改变
+flex 子元素尺寸；桥里 align/justify 只在 Flex/Grid 容器上生效，Block 上
+无效）。
+
+**桥透传**（to_taffy_style）：直译到 taffy 枚举（AlignItems::STRETCH 等
+legacy 常量）；gap 默认 0；grid track 映射 `1fr`→minmax(auto,fr)（FromFr）、
+px→定长（FromLength）、auto→AUTO const，`.into()` GridTemplateComponent。
+
+**flex/grid 子元素分类修正**：Flex/Grid 容器是 atomic_container——每个元素
+子级 blockify 成独立 item（CSS flex-item blockification），inline 展平只在
+block/inline 格式化上下文发生；连续裸文本仍聚成一个匿名 run wrapper（=
+CSS 匿名 flex item）。
+
+**replaced 元素**（img/video/iframe/canvas/object/embed）：
+- natural size = HTML width/height 属性；无属性 → CSS 默认 object size
+  300×150。CSS width/height 逐轴覆写。
+- **语义发现（探针实证）**：属性=presentational hint 声明——CSS `width:100px`
+  + `height=200` 属性 → **100×200 不是 100×50**（两轴都 declared，ratio 不
+  推导）。双侧一致。
+- taffy 侧 `item_is_replaced=true` + `aspect_ratio=nat_w/nat_h`（属性自洽，
+  无覆写冲突）。
+- inline-level（UA/author 声明 inline）时进 run 当原子 token（像个肥词）；
+  block-level（我们 ua_display 的 img 默认）/ flex-grid item 时直接子级。
+
+**对照结果**（4 新测试，389 全绿）：
+- flex row+gap / column+gap / justify-content:space-between：13 元素 xywh
+  双侧 ±0.51 全对。
+- flex-grow 分配（200/100）+ align-items:center 交叉轴居中：双侧对上。
+- grid 1fr 2fr 行列 + 二行回绕：双侧对上（track 数学=同 taffy）。
+- img 属性尺寸 200×100、CSS 覆写 100×200：**尺寸双侧一致**。
+
+**入档偏差**：
+1. img 位置不 cross-assert：我们 UA 把 img 建模为 block-level（y=0 堆叠），
+   真 CSS/blitz 是 inline-level 坐文本基线（strut ~2px 偏移，x 也有词间隙）。
+2. 无尺寸 img：我们 300×150（CSS 默认 object size），blitz 无网络时 0×0
+   （无 intrinsic size 可用；真页面图加载了就有）。两侧都自洽，不比。
+
+**边界（下一批）**：float/table/multicol（float 需 taffy float_layout feature，
+当前刻意不开——开了会动产品管线）、position:absolute/inset、em/rem/% 长度、
+min/max-width、minmax()/repeat()、CSS aspect-ratio 属性、inline-block。

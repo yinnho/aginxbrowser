@@ -29,7 +29,10 @@ use std::collections::HashMap;
 
 use taffy::prelude::*;
 
-use crate::diting_css::{ComputedStyle, Display as CssDisplay, TextAlign};
+use crate::diting_css::{
+    AlignMode, ComputedStyle, Display as CssDisplay, FlexDirection as CssFlexDirection,
+    FlexWrapMode, GridTrack, JustifyMode, TextAlign,
+};
 use crate::diting_dom::tree::{DomTree, NodeId};
 
 /// Absolute (page-relative) border-box rect of a DOM element after layout.
@@ -133,7 +136,84 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
             .map(|h| Dimension::length(h + side_px(style.padding.top) + side_px(style.padding.bottom)))
             .unwrap_or_else(auto),
     };
+
+    // --- flex/grid pass-through (batch 2c), mirroring upstream to_taffy_style ---
+    if let Some(fd) = style.flex_direction {
+        s.flex_direction = match fd {
+            CssFlexDirection::Row => FlexDirection::Row,
+            CssFlexDirection::RowReverse => FlexDirection::RowReverse,
+            CssFlexDirection::Column => FlexDirection::Column,
+            CssFlexDirection::ColumnReverse => FlexDirection::ColumnReverse,
+        };
+    }
+    if let Some(fw) = style.flex_wrap {
+        s.flex_wrap = match fw {
+            FlexWrapMode::NoWrap => FlexWrap::NoWrap,
+            FlexWrapMode::Wrap => FlexWrap::Wrap,
+        };
+    }
+    // Real alignment only reaches flex/grid containers; on a block formatting
+    // context align-items has no effect (and text_align promotion above is a
+    // separate concern, like upstream keeps them).
+    if matches!(display, CssDisplay::Flex | CssDisplay::Grid) {
+        if let Some(ai) = style.align_items {
+            s.align_items = Some(match ai {
+                AlignMode::Stretch => AlignItems::STRETCH,
+                AlignMode::FlexStart => AlignItems::FLEX_START,
+                AlignMode::Center => AlignItems::CENTER,
+                AlignMode::FlexEnd => AlignItems::FLEX_END,
+            });
+        }
+        if let Some(jc) = style.justify_content {
+            s.justify_content = Some(match jc {
+                JustifyMode::FlexStart => JustifyContent::FLEX_START,
+                JustifyMode::Center => JustifyContent::CENTER,
+                JustifyMode::FlexEnd => JustifyContent::FLEX_END,
+                JustifyMode::SpaceBetween => JustifyContent::SPACE_BETWEEN,
+                JustifyMode::SpaceAround => JustifyContent::SPACE_AROUND,
+                JustifyMode::SpaceEvenly => JustifyContent::SPACE_EVENLY,
+            });
+        }
+    }
+    if let Some(fg) = style.flex_grow {
+        s.flex_grow = fg;
+    }
+    if let Some(fs) = style.flex_shrink {
+        s.flex_shrink = fs;
+    }
+    if let Some(fb) = style.flex_basis {
+        s.flex_basis = Dimension::length(fb);
+    }
+    s.gap = Size {
+        width: LengthPercentage::length(style.column_gap.unwrap_or(0.0)),
+        height: LengthPercentage::length(style.row_gap.unwrap_or(0.0)),
+    };
+    if display == CssDisplay::Grid {
+        if let Some(cols) = &style.grid_template_columns {
+            s.grid_template_columns = cols.iter().map(|t| to_grid_track(*t)).collect();
+        }
+        if let Some(rows) = &style.grid_template_rows {
+            s.grid_template_rows = rows.iter().map(|t| to_grid_track(*t)).collect();
+        }
+    }
     s
+}
+
+/// diting_css track → taffy track: `1fr` maps to minmax(auto, 1fr), a px
+/// track is fixed, `auto` sizes to content.
+fn to_grid_track(track: GridTrack) -> taffy::style::GridTemplateComponent<String> {
+    use taffy::style::TrackSizingFunction;
+    match track {
+        GridTrack::Fr(f) => {
+            let tsf: TrackSizingFunction = fr(f);
+            tsf.into()
+        }
+        GridTrack::Px(px) => {
+            let tsf: TrackSizingFunction = length(px);
+            tsf.into()
+        }
+        GridTrack::Auto => TrackSizingFunction::AUTO.into(),
+    }
 }
 
 fn side_px(v: Option<u32>) -> f32 {
@@ -229,6 +309,52 @@ fn run_wrapper_style() -> Style {
     }
 }
 
+/// Tags whose layout box is a replaced leaf: intrinsic size + aspect ratio,
+/// no children in the layout tree.
+fn is_replaced_tag(tag: &str) -> bool {
+    matches!(tag, "img" | "video" | "iframe" | "canvas" | "object" | "embed")
+}
+
+/// Build the taffy leaf for a replaced element. Natural size comes from the
+/// HTML width/height attributes (upstream's no-network fallback); the CSS
+/// authored size overrides per-axis, and the missing axis derives from the
+/// natural ratio. No attributes and no CSS → the CSS default replaced size
+/// 300×150 (ratio 2:1).
+fn build_replaced_leaf(
+    tree: &DomTree,
+    id: NodeId,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    taffy_tree: &mut TaffyTree<()>,
+    node_map: &mut HashMap<taffy::tree::NodeId, NodeId>,
+) -> Option<taffy::tree::NodeId> {
+    let style = styles.get(&id).cloned().unwrap_or_default();
+    let attr = |name: &str| {
+        tree.with_node(id, |n| n.get_attribute(name).map(|v| v.to_string()))
+            .flatten()
+            .and_then(|v| v.parse::<f32>().ok())
+    };
+    let (aw, ah) = (attr("width"), attr("height"));
+    let (nat_w, nat_h) = match (aw, ah) {
+        (Some(w), Some(h)) if h > 0.0 => (w, h),
+        (Some(w), None) => (w, w / 2.0),
+        (None, Some(h)) => (h * 2.0, h),
+        _ => (300.0, 150.0),
+    };
+
+    let mut s = Style::default();
+    s.item_is_replaced = true;
+    s.aspect_ratio = Some(nat_w / nat_h);
+    // CSS width/height win per axis; missing axis derives from the ratio.
+    s.size = Size {
+        width: style.width.map(|w| Dimension::length(w)).unwrap_or_else(|| Dimension::length(nat_w)),
+        height: style.height.map(|h| Dimension::length(h)).unwrap_or_else(|| Dimension::length(nat_h)),
+    };
+
+    let node = taffy_tree.new_leaf(s).ok()?;
+    node_map.insert(node, id);
+    Some(node)
+}
+
 /// Build the taffy subtree for one element. Returns None for display:none
 /// (subtree skipped) and for the document node's non-element parts.
 fn build_element(
@@ -242,8 +368,22 @@ fn build_element(
     if style.display == Some(CssDisplay::None) {
         return None;
     }
+    let tag = tree
+        .with_node(id, |n| n.as_element().map(|e| e.local.to_string()))
+        .flatten()
+        .unwrap_or_default();
+    // Reached directly (root, or a replaced element someone recursed into):
+    // replaced boxes own no layout children.
+    if is_replaced_tag(&tag) {
+        return build_replaced_leaf(tree, id, styles, taffy_tree, node_map);
+    }
 
     let child_ids: Vec<NodeId> = tree.children(id);
+
+    // In a flex/grid container every element child is blockified into its own
+    // item (CSS flex-item blockification); runs only form in block/inline
+    // formatting contexts.
+    let atomic_container = matches!(style.display, Some(CssDisplay::Flex) | Some(CssDisplay::Grid));
 
     // Partition children into block-level elements (direct taffy children)
     // and inline runs (text + inline elements, flattened into one wrapping
@@ -263,17 +403,36 @@ fn build_element(
     let (font_size, _bold) = font_context(tree, id, styles);
     for child in child_ids {
         let is_text = tree.with_node(child, |n| n.is_text()).unwrap_or(false);
+        let child_tag = tree
+            .with_node(child, |n| n.as_element().map(|e| e.local.to_string()))
+            .flatten()
+            .unwrap_or_default();
         let child_display = styles
             .get(&child)
             .and_then(|s| s.display)
             .or(if is_text { Some(CssDisplay::Inline) } else { Some(CssDisplay::Block) });
         let inline_level = matches!(child_display, Some(CssDisplay::Inline));
+        if !is_text && is_replaced_tag(&child_tag) {
+            // Replaced elements are atomic: an inline-level box inside a run
+            // (like a fat word), a direct item inside flex/grid or when the
+            // UA/author made it block-level (our ua_display keeps img block).
+            let leaf = build_replaced_leaf(tree, child, styles, taffy_tree, node_map);
+            if let Some(leaf) = leaf {
+                if inline_level && !atomic_container {
+                    run.push(leaf);
+                } else {
+                    flush_run(&mut run, &mut direct, taffy_tree);
+                    direct.push(leaf);
+                }
+            }
+            continue;
+        }
         if is_text {
             let text = tree.with_node(child, |n| n.text_content_of_text_node().unwrap_or("").to_string()).unwrap_or_default();
             let (fs, b) = font_context(tree, child, styles);
             let fs = if styles.get(&child).is_some() { fs } else { font_size };
             run.extend(build_word_leaves(&text, fs, b, taffy_tree));
-        } else if inline_level {
+        } else if inline_level && !atomic_container {
             // A plain inline wrapper flattens into the enclosing run (upstream
             // is_flattenable_inline): the words wrap at the real block level.
             let sub = build_element(tree, child, styles, taffy_tree, node_map);
@@ -1006,5 +1165,149 @@ mod bridge_cross_check {
         // centered in 200 → x = (200 − 18) / 2.
         assert!((mi.width - 17.6).abs() < EPS as f32, "run width: {}", mi.width);
         assert!((mi.x - (200.0 - 18.0) / 2.0).abs() < EPS as f32, "centered x: {}", mi.x);
+    }
+
+    /// Flex pass-through: row layout with gap, column layout, and
+    /// justify-content distribution — all authored sizes, so both engines'
+    /// rects must agree exactly.
+    #[test]
+    fn flex_passthrough_matches_blitz() {
+        let html = r#"<body>
+            <div id="row"><div id="r1"></div><div id="r2"></div><div id="r3"></div></div>
+            <div id="col"><div id="c1"></div><div id="c2"></div></div>
+            <div id="sp"><div id="s1"></div><div id="s2"></div><div id="s3"></div></div>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #row { display: flex; gap: 10px; width: 320px; height: 40px; }
+            #row > div { width: 100px; height: 30px; }
+            #col { display: flex; flex-direction: column; gap: 6px; width: 200px; height: 106px; margin-top: 20px; }
+            #col > div { width: 50px; height: 50px; }
+            #sp { display: flex; justify-content: space-between; width: 300px; height: 20px; margin-top: 20px; }
+            #sp > div { width: 60px; height: 10px; }
+        "#;
+        let (doc, tree, _styles, rects) = both_engines(html, sheet);
+
+        for selector in ["#row", "#r1", "#r2", "#r3", "#col", "#c1", "#c2", "#sp", "#s1", "#s2", "#s3"] {
+            let blitz_nid = doc.query_selector(selector).unwrap().expect(selector);
+            let our_nid = tree.query_selector(selector).unwrap().expect(selector);
+            let theirs = element_rect(&doc, blitz_nid);
+            let ours = *rects.get(&our_nid).unwrap_or(&Rect::default());
+            assert_close(&format!("{selector} x"), ours.x, theirs.x);
+            assert_close(&format!("{selector} y"), ours.y, theirs.y);
+            assert_close(&format!("{selector} width"), ours.width, theirs.width);
+            assert_close(&format!("{selector} height"), ours.height, theirs.height);
+        }
+
+        // Structural spot checks of the flex math itself: row items at
+        // 0 / 110 / 220 (100px + 10px gap), space-between edges flush and the
+        // middle item centered (300−3×60)/2 = 60 apart.
+        let r = |sel: &str| rects[&tree.query_selector(sel).unwrap().unwrap()];
+        assert!((r("#r2").x - 110.0).abs() < EPS as f32, "row gap: {}", r("#r2").x);
+        assert!((r("#c2").y - r("#c1").y - 56.0).abs() < EPS as f32, "column gap");
+        assert!((r("#s2").x - 120.0).abs() < EPS as f32, "space-between middle: {}", r("#s2").x);
+        assert!((r("#s3").x - 240.0).abs() < EPS as f32, "space-between end: {}", r("#s3").x);
+    }
+
+    /// flex-grow distribution and cross-axis align-items centering.
+    #[test]
+    fn flex_grow_and_align_match_blitz() {
+        let html = r#"<body>
+            <div id="fx"><div id="g1"></div><div id="g2"></div></div>
+            <div id="ac"><div id="a1"></div></div>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #fx { display: flex; width: 300px; height: 40px; }
+            #g1 { flex-grow: 1; height: 20px; }
+            #g2 { width: 100px; height: 20px; }
+            #ac { display: flex; align-items: center; width: 200px; height: 50px; margin-top: 20px; }
+            #a1 { width: 40px; height: 10px; }
+        "#;
+        let (doc, tree, _styles, rects) = both_engines(html, sheet);
+        for selector in ["#fx", "#g1", "#g2", "#ac", "#a1"] {
+            let blitz_nid = doc.query_selector(selector).unwrap().expect(selector);
+            let our_nid = tree.query_selector(selector).unwrap().expect(selector);
+            let theirs = element_rect(&doc, blitz_nid);
+            let ours = *rects.get(&our_nid).unwrap_or(&Rect::default());
+            assert_close(&format!("{selector} x"), ours.x, theirs.x);
+            assert_close(&format!("{selector} y"), ours.y, theirs.y);
+            assert_close(&format!("{selector} width"), ours.width, theirs.width);
+            assert_close(&format!("{selector} height"), ours.height, theirs.height);
+        }
+        // g1 grows into 300−100 = 200 wide; a1 centers vertically in its
+        // container: y offset = (50−10)/2 = 20.
+        let g1 = rects[&tree.query_selector("#g1").unwrap().unwrap()];
+        let ac = rects[&tree.query_selector("#ac").unwrap().unwrap()];
+        let a1 = rects[&tree.query_selector("#a1").unwrap().unwrap()];
+        assert!((g1.width - 200.0).abs() < EPS as f32, "grow width: {}", g1.width);
+        assert!((a1.y - ac.y - 20.0).abs() < EPS as f32, "align center y: {}", a1.y - ac.y);
+    }
+
+    /// Grid tracks: fr distribution, px track, gap between tracks.
+    #[test]
+    fn grid_tracks_match_blitz() {
+        let html = r#"<body>
+            <div id="gr"><div id="t1"></div><div id="t2"></div><div id="t3"></div><div id="t4"></div></div>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #gr { display: grid; grid-template-columns: 1fr 2fr; grid-template-rows: 30px 40px; width: 300px; }
+            #gr > div { }
+        "#;
+        let (doc, tree, _styles, rects) = both_engines(html, sheet);
+        for selector in ["#gr", "#t1", "#t2", "#t3", "#t4"] {
+            let blitz_nid = doc.query_selector(selector).unwrap().expect(selector);
+            let our_nid = tree.query_selector(selector).unwrap().expect(selector);
+            let theirs = element_rect(&doc, blitz_nid);
+            let ours = *rects.get(&our_nid).unwrap_or(&Rect::default());
+            assert_close(&format!("{selector} x"), ours.x, theirs.x);
+            assert_close(&format!("{selector} y"), ours.y, theirs.y);
+            assert_close(&format!("{selector} width"), ours.width, theirs.width);
+            assert_close(&format!("{selector} height"), ours.height, theirs.height);
+        }
+        // 1fr 2fr of 300 → 100/200 columns; rows 30/40. Item 3 wraps to row 2.
+        let t3 = rects[&tree.query_selector("#t3").unwrap().unwrap()];
+        assert!((t3.x - 0.0).abs() < EPS as f32 && (t3.y - 30.0).abs() < EPS as f32, "t3 position: {:?}", t3);
+        let t2 = rects[&tree.query_selector("#t2").unwrap().unwrap()];
+        assert!((t2.x - 100.0).abs() < EPS as f32 && (t2.width - 200.0).abs() < EPS as f32, "t2 track: {:?}", t2);
+    }
+
+    /// Replaced img: HTML width/height attributes map to definite sizes both
+    /// engines honor; a CSS axis override wins per-axis with NO ratio
+    /// derivation (attrs are presentational-hint declarations, so both axes
+    /// are declared → 100×200, not 100×50). Position is NOT cross-asserted:
+    /// our UA models img block-level while real CSS (and blitz) makes it an
+    /// inline-level box on a text baseline (~2px strut offsets).
+    #[test]
+    fn replaced_img_matches_blitz() {
+        let html = r#"<body>
+            <img id="nat" width="200" height="100">
+            <img id="cssw" width="400" height="200" style="width: 100px">
+            <img id="none">
+        </body>"#;
+        let sheet = "body { margin: 0; }";
+        let (doc, tree, _styles, rects) = both_engines(html, sheet);
+        for selector in ["#nat", "#cssw"] {
+            let blitz_nid = doc.query_selector(selector).unwrap().expect(selector);
+            let our_nid = tree.query_selector(selector).unwrap().expect(selector);
+            let theirs = element_rect(&doc, blitz_nid);
+            let ours = *rects.get(&our_nid).unwrap_or(&Rect::default());
+            assert_close(&format!("{selector} width"), ours.width, theirs.width);
+            assert_close(&format!("{selector} height"), ours.height, theirs.height);
+        }
+
+        // No dimensions at all: our model uses the CSS default object size
+        // 300×150. KNOWN DIVERGENCE (recorded in render.md §13): blitz gives
+        // 0×0 for an unloaded img (net_provider is None → no intrinsic size;
+        // a real page with the image loaded would have one).
+        let none = rects[&tree.query_selector("#none").unwrap().unwrap()];
+        assert!((none.width - 300.0).abs() < EPS as f32, "default width: {}", none.width);
+        assert!((none.height - 150.0).abs() < EPS as f32, "default height: {}", none.height);
+
+        // Block stacking of our model: none starts at nat.bottom + cssw.height
+        // (cssw is 100×200 — both axes declared, no ratio derivation).
+        let nat = rects[&tree.query_selector("#nat").unwrap().unwrap()];
+        assert!((none.y - (nat.y + nat.height + 200.0)).abs() < EPS as f32, "stacking");
     }
 }
