@@ -367,7 +367,7 @@ Phase 1 完成（2026-08-23）：四个模块全部认领——每一行的存�
 - 接线面：obscura-cdp `render` feature = Page.captureScreenshot；
   obscura-js `render` feature = 真实盒几何暴露给 JS（getBoundingClientRect
   一族，即上文「渲染感知 Page 状态」的上游实现）。
-- 设计原则：**确定性渲染**——只捆内嵌字体（Liberance/DejaVu/Noto Color
+- 设计原则：**确定性渲染**——只捆内嵌字体（Liberation/DejaVu/Noto Color
   Emoji），显式关掉系统字体扫描（inline.rs:993 注释：宿主字体集会让
   布局不同）。跨宿主布局一致是卖点，代价见 8.2 第一行。
 
@@ -398,3 +398,12 @@ Phase 1 完成（2026-08-23）：四个模块全部认领——每一行的存�
    text 三层——正好对应上游 css.rs/style.rs + paint.rs + inline.rs。
 5. **宣传红线不变**：即使走自研，对外仍不说「自研浏览器引擎」；自主的
    叙事点是确定性渲染 + CJK 质量 + 截图管线。
+
+### 8.4 决策（2026-08-23，用户确认）
+
+**双轨**：Blitz 钉 rev 继续跑 /screenshot（产品不受伤，盯 parley#752 作
+升级跟进条件）；并行开「渲染认领」慢线——Phase 0 先摸底 obscura-render
+（css.rs/style.rs/paint.rs/inline.rs 四件 + 240 commit 避坑清单，产出
+render.md），再按摸底结论定自研批次节奏（style/paint/text 三层）。
+**切换硬条件**：真实页面截图质量达 Blitz parity 且 CJK 验证通过；届时
+Blitz 降为回退路径。
