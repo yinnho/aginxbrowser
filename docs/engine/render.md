@@ -1160,3 +1160,31 @@ bg 圆角、6c 网络图字节注入+解码缓存、6d JPEG 魔数分派、6e al
 挂账剩余：per-corner/椭圆 radius、border 圆角 annulus、WebP/GIF、srcset、
 iframe/video 占位形态、嵌套 stacking root 跨层提升、float 布局与 paint
 level 1。下一批候选：iframe/video 占位 或 WebP 解码。
+
+## 31. 批次 7a 完成（2026-08-23）：iframe/video/canvas 占位——per-tag 尺寸语义
+
+**探底（blitz-dom layout/mod.rs `default_object_size` + assets/default.css）**：
+blitz 的替换元素按标签分三档——①img/svg 无图 = 0×0；②canvas = attrs
+（缺省 300×150）**且带 ratio**；③video/iframe/embed/object = attrs 缺省
+300×150 **无 ratio**（`<video width=600>` → 600×150，高度不回推）。另发现
+UA stylesheet 有 **`iframe { border: 2px inset }`**——attr width=600 实际
+边盒 604×154，真浏览器同款规则。
+
+**实现**：build_replaced_leaf 重写为 per-tag 分派：canvas ratio=true、
+video/iframe/embed/object ratio=false、img 走原 5b 三级语义。ratio=false
+时 taffy aspect_ratio 不设（缺轴不转移）。alt 语义收窄为 img-only
+（collect 里 video/iframe 的 Replaced item 不再携带 alt run）。UA border：
+diting_css 加 `ua_border(tag)`（iframe → 2px），cascade_element 注入；
+build_replaced_leaf 自己构造 taffy style（不走 to_taffy_style），补上
+border 布局 + px 尺寸加边宽（content-box 属性语义 + taffy border-box 的
+换算）。
+
+**对照（一测两半）** `replaced_per_tag_sizes_match_blitz`：
+- 可对照半（rect 双侧 ±EPS）：video 600×150 / iframe **604×154**（UA
+  border）/ canvas attr 自身定比（600×150）、CSS 单轴 ratio 转移
+  canvas 800→400 高 vs video 800×150 无转移。
+- 政策半：裸 iframe 灰盒 + 带 alt 属性也不出 ink（alt 是 img 概念）。
+
+**测试**：435→436。挂账更新：inset 样式画法（现按 solid 画）、marquee/
+input file 的 border attr 映射、svg 内联元素。下一批候选：WebP 解码或
+per-corner radius。

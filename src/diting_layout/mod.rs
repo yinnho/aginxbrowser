@@ -569,12 +569,17 @@ pub fn object_paint_rect(
     }
 }
 
-/// Build the taffy leaf for a replaced element. Natural size comes from a
-/// decoded image when one is available (batch 5b), else the HTML width/
-/// height attributes (upstream's no-network fallback); the CSS authored
-/// size overrides per-axis, and the missing axis derives from the natural
-/// ratio. No image, no attributes and no CSS → the CSS default replaced
-/// size 300×150 (ratio 2:1).
+/// Build the taffy leaf for a replaced element. Per-tag natural-size
+/// semantics (batch 7a), mirroring blitz-dom layout/mod.rs:
+///
+/// - `img`: a decoded image gives the natural size/ratio; attributes are
+///   presentational hints overriding per-axis with the image ratio
+///   back-filling; nothing at all → the CSS default replaced box 300×150.
+/// - `canvas`: its width/height attributes ARE the intrinsic size
+///   (defaulting 300×150) and it carries an aspect RATIO — a missing axis
+///   transfers through it.
+/// - `video`/`iframe`/`embed`: attribute-or-300×150 per axis, NO ratio —
+///   `<video width=600>` lays out 600×150, height does not transfer.
 fn build_replaced_leaf(
     tree: &DomTree,
     id: NodeId,
@@ -584,44 +589,86 @@ fn build_replaced_leaf(
     node_map: &mut HashMap<taffy::tree::NodeId, NodeId>,
 ) -> Option<taffy::tree::NodeId> {
     let style = styles.get(&id).cloned().unwrap_or_default();
+    let tag = tree
+        .with_node(id, |n| n.as_element().map(|e| e.local.to_string()))
+        .flatten()
+        .unwrap_or_default();
     let attr = |name: &str| {
         tree.with_node(id, |n| n.get_attribute(name).map(|v| v.to_string()))
             .flatten()
             .and_then(|v| v.parse::<f32>().ok())
     };
     let (aw, ah) = (attr("width"), attr("height"));
-    // Attrs are presentational size hints: they override the image per-axis,
-    // and a free axis derives from the IMAGE ratio when one decoded (the
-    // `aspect-ratio: auto w/h` of a loaded img), else the 2:1 stand-in.
-    let img_ratio = images.get(&id).map(|i| i.width as f32 / i.height as f32);
-    let (nat_w, nat_h) = match (aw, ah) {
-        (Some(w), Some(h)) if h > 0.0 => (w, h),
-        (Some(w), None) => (w, w / img_ratio.unwrap_or(2.0)),
-        (None, Some(h)) => (h * img_ratio.unwrap_or(2.0), h),
-        (None, None) => images
-            .get(&id)
-            .map(|i| (i.width as f32, i.height as f32))
-            .unwrap_or((300.0, 150.0)),
-        // Degenerate attrs (e.g. height="0"): the CSS default replaced box.
-        _ => (300.0, 150.0),
+    // Natural size AND whether a missing axis derives from the ratio.
+    let (nat_w, nat_h, ratio_transfer) = match tag.as_str() {
+        t if t == "canvas" => (
+            aw.unwrap_or(300.0),
+            ah.unwrap_or(150.0),
+            true,
+        ),
+        t if t == "video" || t == "iframe" || t == "embed" || t == "object" => {
+            (aw.unwrap_or(300.0), ah.unwrap_or(150.0), false)
+        }
+        // img: attrs override the decoded image per-axis, the image ratio
+        // back-fills a free axis; with nothing at all, 300×150.
+        _ => {
+            let img_ratio = images.get(&id).map(|i| i.width as f32 / i.height as f32);
+            let (w, h) = match (aw, ah) {
+                (Some(w), Some(h)) if h > 0.0 => (w, h),
+                (Some(w), None) => (w, w / img_ratio.unwrap_or(2.0)),
+                (None, Some(h)) => (h * img_ratio.unwrap_or(2.0), h),
+                (None, None) => images
+                    .get(&id)
+                    .map(|i| (i.width as f32, i.height as f32))
+                    .unwrap_or((300.0, 150.0)),
+                // Degenerate attrs (e.g. height="0"): the CSS default box.
+                _ => (300.0, 150.0),
+            };
+            (w, h, true)
+        }
     };
 
     let mut s = Style::default();
     s.item_is_replaced = true;
-    s.aspect_ratio = Some(nat_w / nat_h);
+    // UA/author border lays out on replaced boxes too (batch 7a): the
+    // iframe's UA `2px inset` makes a width=600 attr box come out 604.
+    // taffy sizes are border-box, so the attr/CSS size gets the widths
+    // added (content-box semantics of the HTML attributes).
+    let bline = style.border_style.is_some();
+    let bw = |which: f32| -> LengthPercentage {
+        LengthPercentage::length(if bline { which } else { 0.0 })
+    };
+    let (bt, br, bb, bl) = (
+        side_px(style.border_width.top),
+        side_px(style.border_width.right),
+        side_px(style.border_width.bottom),
+        side_px(style.border_width.left),
+    );
+    s.border = taffy::geometry::Rect {
+        top: bw(bt),
+        right: bw(br),
+        bottom: bw(bb),
+        left: bw(bl),
+    };
+    s.aspect_ratio = ratio_transfer.then(|| nat_w / nat_h);
     // CSS width/height win per axis; missing axis derives from the ratio.
     // Percent CSS sizes pass through (the CB resolves them; the natural
-    // ratio only backfills auto axes).
+    // ratio only backfills auto axes). Px sizes are content-box per the
+    // attribute semantics, so border widths ride on top.
     s.size = Size {
         width: match style.width {
-            Some(crate::diting_css::Length::Px(w)) => Dimension::length(w),
+            Some(crate::diting_css::Length::Px(w)) => {
+                Dimension::length(w + if bline { bl + br } else { 0.0 })
+            }
             Some(crate::diting_css::Length::Percent(p)) => Dimension::percent(p / 100.0),
-            None => Dimension::length(nat_w),
+            None => Dimension::length(nat_w + if bline { bl + br } else { 0.0 }),
         },
         height: match style.height {
-            Some(crate::diting_css::Length::Px(h)) => Dimension::length(h),
+            Some(crate::diting_css::Length::Px(h)) => {
+                Dimension::length(h + if bline { bt + bb } else { 0.0 })
+            }
             Some(crate::diting_css::Length::Percent(p)) => Dimension::percent(p / 100.0),
-            None => Dimension::length(nat_h),
+            None => Dimension::length(nat_h + if bline { bt + bb } else { 0.0 }),
         },
     };
 
@@ -1121,13 +1168,24 @@ pub fn layout_dom_with_paint_and_images(
                     let paint_rect = object_paint_rect(rect, img.width as f32, img.height as f32, fit, pos);
                     items.push(PaintItem::Image { rect, paint_rect, image: img.clone() });
                 } else {
-                    let alt = tree
-                        .with_node(*dom_id, |n| n.get_attribute("alt").map(|v| v.to_string()))
+                    // Alt text is an <img> concept only (batch 7a): video/
+                    // iframe/canvas placeholders are the bare box.
+                    let is_img = tree
+                        .with_node(*dom_id, |n| {
+                            n.as_element().map(|e| e.local.to_string() == "img")
+                        })
                         .flatten()
-                        .map(|text| {
-                            let (font_size, bold) = font_context(tree, *dom_id, styles);
-                            (text, font_size, bold, color_context(tree, *dom_id, styles))
-                        });
+                        .unwrap_or(false);
+                    let alt = if is_img {
+                        tree.with_node(*dom_id, |n| n.get_attribute("alt").map(|v| v.to_string()))
+                            .flatten()
+                            .map(|text| {
+                                let (font_size, bold) = font_context(tree, *dom_id, styles);
+                                (text, font_size, bold, color_context(tree, *dom_id, styles))
+                            })
+                    } else {
+                        None
+                    };
                     // The gray box only when the author gave no visible
                     // background — an authored bg already reads as "box here".
                     let fill_placeholder = styles
@@ -3289,6 +3347,72 @@ mod bridge_cross_check {
             }
         }
         assert!(last_gray_row <= 29 + 1, "gray ends at the box bottom");
+    }
+
+    /// Per-tag replaced sizing (batch 7a), cross-checked against blitz's
+    /// rects. video/iframe carry NO intrinsic ratio while canvas DOES
+    /// (ratio computed from the attribute-or-default size). The ratio only
+    /// diverges when ONE axis is set and the other transfers: a CSS-width
+    /// canvas derives its height at the attr ratio (2:1 default), a CSS-
+    /// width video keeps the 150px default height. iframe adds its UA
+    /// `2px inset` border to every authored dimension.
+    #[test]
+    fn replaced_per_tag_sizes_match_blitz() {
+        let html = r#"<body>
+            <video id="v" width="600"></video>
+            <iframe id="f" width="600"></iframe>
+            <canvas id="c" width="600"></canvas>
+            <video id="vd"></video>
+            <canvas id="c2" style="width: 800px;"></canvas>
+            <video id="v2" style="width: 800px;"></video>
+        </body>"#;
+        let sheet = "body { margin: 0; }";
+        let (doc, tree, _styles, rects) = both_engines(html, sheet);
+
+        let expect: &[(&str, f32, f32)] = &[
+            // video: no ratio → 600×150.
+            ("#v", 600.0, 150.0),
+            // iframe: UA `2px inset` border wraps the attr size → 604×154
+            // (blitz default.css carries the same rule; browsers do too).
+            ("#f", 604.0, 154.0),
+            // canvas ratio = 600/150 from the attrs themselves, so the
+            // "missing" height transfers right back to 150.
+            ("#c", 600.0, 150.0),
+            ("#vd", 300.0, 150.0),
+            // Ratio transfer through a CSS axis: canvas 800 wide → 400 tall;
+            // video has no ratio → stays at the 150 default height.
+            ("#c2", 800.0, 400.0),
+            ("#v2", 800.0, 150.0),
+        ];
+        for (sel, ew, eh) in expect {
+            let blitz_nid = doc.query_selector(sel).unwrap().expect(sel);
+            let our_nid = tree.query_selector(sel).unwrap().expect(sel);
+            let theirs = element_rect(&doc, blitz_nid);
+            let ours = rects[&our_nid];
+            assert_close(&format!("{sel} w"), ours.width, theirs.width as f64);
+            assert_close(&format!("{sel} h"), ours.height, theirs.height as f64);
+            assert_eq!(ours.width, *ew, "{sel} expected width");
+            assert_eq!(ours.height, *eh, "{sel} expected height");
+        }
+
+        // Policy half: a bare <iframe> placeholder paints the gray box and
+        // NO alt ink even with an alt attribute (alt is img-only).
+        let html =
+            r#"<body><iframe id="f" width="100" height="50" alt="not-an-img"></iframe></body>"#;
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let fonts = fixture_fonts();
+        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW);
+        let replaced = items.iter().find_map(|i| match i {
+            PaintItem::Replaced { alt, fill_placeholder, .. } => {
+                Some((*fill_placeholder, alt.clone()))
+            }
+            _ => None,
+        });
+        let (fill, alt) = replaced.expect("iframe emits a Replaced item");
+        assert!(fill, "unstyled iframe paints the gray placeholder");
+        assert!(alt.is_none(), "alt is img-only — iframe ignores the attribute");
     }
 
     /// A two-quadrant RGBA test image (red top-left/bottom-right, blue the

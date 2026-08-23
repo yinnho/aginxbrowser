@@ -744,6 +744,18 @@ pub fn ua_font_weight(tag: &str) -> Option<u16> {
     }
 }
 
+/// UA `border: 2px inset` on iframes (batch 7a) — the classic embedded
+/// document frame, same rule blitz's assets/default.css carries (and every
+/// real browser). The border lays out (600 attr width → 604 border box)
+/// and paints as our uniform solid band; the `inset` style distinction is
+/// a later batch.
+pub fn ua_border(tag: &str) -> Option<(f32, BorderStyle)> {
+    match tag {
+        "iframe" => Some((2.0, BorderStyle::Solid)),
+        _ => None,
+    }
+}
+
 /// Split a declaration block into (name, value) pairs. Quote- and paren-aware;
 /// nested `{}` blocks become one dropped chunk rather than leaking into the
 /// parent rule (upstream split_declarations semantics).
@@ -1380,6 +1392,13 @@ pub fn cascade_element(
         font_weight: ua_font_weight(tag),
         ..Default::default()
     };
+    if let Some((px, line)) = ua_border(tag) {
+        style.border_width.top = Some(Length::Px(px));
+        style.border_width.right = Some(Length::Px(px));
+        style.border_width.bottom = Some(Length::Px(px));
+        style.border_width.left = Some(Length::Px(px));
+        style.border_style = Some(line);
+    }
 
     // Inherited defaults from parent BEFORE author rules (author overrides).
     if let Some(parent) = parent {
