@@ -26,11 +26,31 @@ screenshot = [
     # Direct stylo handle for the dual-engine computed-style cross-check
     # tests (diting_css vs Stylo) — must match the version blitz pins.
     "dep:stylo_alias",
+    # Direct taffy handle for the fork-delta classification tests — same
+    # git rev blitz pins, and crucially the same feature set (see below).
+    "dep:taffy",
 ]
 
 [dependencies]
 # The alias is how blitz-dom names upstream stylo; same crate, same version.
 stylo_alias = { version = "0.20", package = "stylo", optional = true }
+# Stock taffy 0.13.0 as pinned by blitz. Features must EXACTLY mirror blitz's
+# workspace declaration (default-features = false, no float_layout): cargo
+# unifies features across the graph, so any extra feature here would silently
+# change the product pipeline's layout behavior (float_layout alters block
+# layout). taffy_tree is additionally listed because the unified graph already
+# enables it (Cargo.lock shows taffy pulling slotmap) — an explicit no-op.
+# Used by diting_layout fork-delta tests — see docs/engine/render.md.
+taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "864b4fd02e344bf9676f653e945161011cf93c0d", optional = true, default-features = false, features = [
+    "std",
+    "taffy_tree",
+    "flexbox",
+    "grid",
+    "block_layout",
+    "content_size",
+    "calc",
+    "detailed_layout_info",
+] }
 # --- async runtime ---
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"

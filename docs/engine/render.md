@@ -343,3 +343,63 @@ vs 我们的 diting_css cascade_element——逐元素逐属性比对 computed s
 
 这层对照是后续批次的护栏：批次 2 起 diting_css 若接产品管线替换 Stylo，
 任何 computed-style 回归都会在这里先炸。
+
+## 11. 批次 2a 完成（2026-08-23）：taffy fork 净变更提取 + 分类
+
+批次 2（布局桥）的第一刀：把上游 vendor/taffy 的 fork 工作吃透并对照
+我们产品管线钉的 stock taffy 0.13.0（blitz 864b4fd）。
+
+**提取方法**：crates.io 拉 pristine 0.12.1 与 vendor/taffy diff 得**净变更
+1796 行 / 12 文件**。git 补丁链有 24k 行（11 commits，2026-07-26 → 08-04），
+说明这些 commit 是同一批代码的反复迭代——按净 diff 理解比按 commit 逐个读
+高效得多。
+
+**八主题分类**（全部对照 0.13.0 逐标记物+语义验证）：
+
+| # | 主题 | 文件 | 0.13.0 状态 |
+|---|---|---|---|
+| 1 | float clearance 几何化：`last_float_top`（源序不上升）+ `lowest_float_bottoms[2]` 替代段索引 high-water-mark；段细分不再破坏 clearance | float.rs | **部分**：0.13.0 有 `clear_bottoms` 但保留索引式 `last_placed_floats`/`update_last_placed_float`，源序约束仍靠段索引 |
+| 2 | margin-collapsing 元数据进 ComputeSize 输出与测量缓存（MeasureOutput + vertical-margin 上下文键） | block.rs, cache.rs | **无**：measure cache 仍存裸 `Size<f32>` |
+| 3 | 首选宽高比传递：box-sizing 感知 adjustment、`item_aspect_ratio_is_intrinsic`（固有比例恒 content-box）、flex 最终主尺寸重传递（Flexbox 9.4） | flexbox.rs, grid_item.rs, alignment.rs | **无**（matrix 测试 5/8 格分歧） |
+| 4 | `normal` 对齐关键词（新枚举变体+parse/serde）：布局模式相关默认值的来源保留 | alignment.rs, flexbox.rs, grid/mod.rs | **无**（枚举里没有 Normal） |
+| 5 | grid auto margin → fit-content（min-content floor + available clamp）+ 溢出时 auto margin 压过 unsafe self-alignment | grid/alignment.rs | **无**（breakable 矩阵 7/7 分歧） |
+| 6 | track 分发上限：已到限 track 跳过（含 item_incurred_increase） | track_sizing.rs | **无**（未运行时验证，代码级确认） |
+| 7 | grid item 固有尺寸遏制（per-axis `intrinsic_size_containment`） | grid_item.rs, style/ | **无** |
+| 8 | calc() resolver 注入：`set_calc_resolver(fn(*const (), f32) -> f32)`——taffy 视句柄为不透明，宿主注入求值（render.md §2.1 的「calc 经 resolver 注入」即此） | taffy_tree.rs | **无**（0.13.0 `resolve_calc_value` 仍是返回 0.0 的桩） |
+
+**运行时分类**（`src/diting_layout/mod.rs`，7 测试全绿，380 总数）：fork 自带
+的回归场景移植到 stock 0.13.0 公开 API（measure 签名 0.12→0.13 从五参闭包
+变为 LayoutInput/LayoutOutput，已适配）。每条断言锁 stock 实际行为，fork 期望
+在注释里——**上游 taffy 哪天吸收了某个修复，对应断言即失败并精确命名变化**。
+
+分歧清单（stock ← → fork）：
+- replaced 元素 natural 100x50 ← → stretch 300x150（`normal` 语义缺失）
+- ratio+stretch 矩阵：8 格中 4 格分歧；最戏剧的是 justify START + align 默认
+  → stock 塌回 natural 100x50（fork 400x200）
+- 显式 block stretch + ratio：stock 忽略 stretch（300x150 ← → 400x200）；
+  双轴 definite 时 stock 仍用 ratio 覆写高度（300x150 ← → 300x200）
+- definite inline 120 + block stretch：stock 留 ratio 推导的 60 ← → 200；
+  definite block 80 + inline stretch：stock 推导 160 ← → 300
+- **fit-content（最尖锐）**：breakable（min100/max600）在 300px track，7 种
+  auto-margin/非 stretch 组合 stock 全部 600（原始 max-content 直出，无
+  available clamp）← → fork 全部 300；author min-width 350 时 stock 600
+  ← → fork 350
+- flex 主尺寸 ratio 重传递：auto cross size 下 stock 用 measure 的 10px
+  ← → fork 用最终主尺寸 300/2=150
+- 一致项：unbreakable min-content floor（600 溢出保留 + 无 auto margin 时
+  stretch 300）、author max 250、content-box 边缘 290——stock 的 max-content
+  直出路径在这些场景恰好同值
+
+**feature 合并护栏（关键坑）**：taffy 直依赖必须精确镜像 blitz workspace
+声明（`default-features = false`，**无 float_layout**）——cargo 全图统一
+feature，多开任何 feature 都会静默改变产品管线布局。`taffy_tree` 已在统一图
+中（lock 里 taffy 带 slotmap），显式列出是 no-op。380 全绿（含基线图集）
+证明零扰动。
+
+**对路线的意义**：fork 是一整包 CSS 正确性修复（Blink/Gecko 对齐语义），
+stock 0.13.0 基本没吸收。切换判据达成时若采用 obscura 渲染层，vendor taffy
+（0.12.1+fork）随行；若维持 blitz，这份分类清单就是「上游 taffy 哪天该重新
+评估」的活探针。
+
+下一步=批次 2b：dom.rs 布局桥本体（8-pass 修复链、table→grid 外层协商、
+text-align block→flex-column 提升）的最小竖切 + 与 blitz rect 对照。

@@ -34,6 +34,10 @@ mod diting_browser;
 // Cascade layer absorbed from upstream obscura-render (read-only slice,
 // not yet wired to the product pipeline — see docs/engine/render.md).
 mod diting_css;
+// Taffy fork-delta classification tests (obscura's vendored taffy vs the
+// stock 0.13.0 our blitz pipeline pins) — docs/engine/render.md §11.
+#[cfg(feature = "screenshot")]
+mod diting_layout;
 
 use server::{do_click, do_eval, do_fetch, do_search, SearchError};
 use render::smart_fetch;

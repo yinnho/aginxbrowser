@@ -97,6 +97,7 @@ dependencies = [
  "sha1",
  "sha2",
  "stylo",
+ "taffy",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
