@@ -81,6 +81,7 @@ dependencies = [
  "html2md",
  "html5ever 0.29.1",
  "http-body-util",
+ "image",
  "markup5ever 0.14.1",
  "parley",
  "pbkdf2",

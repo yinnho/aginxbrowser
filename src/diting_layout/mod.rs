@@ -3927,4 +3927,80 @@ mod bridge_cross_check {
         }
     }
 
+    /// JPEG network image (batch 6d): the byte table carries a real JPEG
+    /// body; our ImageCache sniffs the magic and decodes via the same
+    /// `image` crate blitz uses, so the painted pixels match blitz's
+    /// injected decode exactly. Solid color keeps the comparison exact
+    /// (no resampling anywhere at 1:1).
+    #[test]
+    fn paint_img_from_network_jpeg_matches_blitz() {
+        use base64::Engine as _;
+        let (w, h) = (200u32, 200u32);
+
+        // Encode a 100×50 solid-red JPEG.
+        let mut jpeg_bytes = Vec::new();
+        let px_count = 100usize * 50usize * 3usize;
+        ::image::DynamicImage::from(
+            ::image::RgbImage::from_raw(100, 50, vec![200u8, 40, 40].repeat(px_count / 3))
+                .unwrap(),
+        )
+        .write_to(&mut std::io::Cursor::new(&mut jpeg_bytes), ::image::ImageFormat::Jpeg)
+        .expect("encodes");
+
+        // Ours: https src + JPEG body in the table.
+        let html = r#"<body><img id="t" src="https://cdn.example.com/photo.jpg" width="100" height="50"></body>"#;
+        let sheet = "body { margin: 0; }";
+        let mut net: HashMap<String, Vec<u8>> = HashMap::new();
+        net.insert("https://cdn.example.com/photo.jpg".to_string(), jpeg_bytes);
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let (_rects, items) =
+            layout_dom_with_paint_and_images(&tree, &styles, &fixture_fonts(), VW, Some(&net));
+        let mut ours = paint::Canvas::new_filled(w as usize, h as usize, [255, 255, 255, 255]);
+        paint::execute(&items, &fixture_fonts(), &mut ours);
+
+        // Blitz side: decode the SAME bytes with its own decoder path
+        // semantics — inject the RGBA our decode produced is circular, so
+        // instead re-decode here through `image` exactly like blitz-dom's
+        // ImageHandler does and assert our decode matches it bit-for-bit,
+        // then paint-blitz from that.
+        let decoded_again = ::image::ImageReader::new(std::io::Cursor::new(
+            net["https://cdn.example.com/photo.jpg"].as_slice(),
+        ))
+        .with_guessed_format()
+        .unwrap()
+        .decode()
+        .unwrap()
+        .to_rgba8();
+        let img = DecodedImage::new(100, 50, decoded_again.to_vec());
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode({
+                let mut png2 = Vec::new();
+                {
+                    let mut enc = png::Encoder::new(&mut png2, 100, 50);
+                    enc.set_color(png::ColorType::Rgba);
+                    enc.set_depth(png::BitDepth::Eight);
+                    let mut writer = enc.write_header().unwrap();
+                    writer.write_image_data(decoded_again.as_ref()).unwrap();
+                }
+                png2
+            })
+        );
+        let html_blitz =
+            format!(r#"<body><img id="t" src="{data_url}" width="100" height="50"></body>"#);
+        let blitz = blitz_render_with_image(&html_blitz, sheet, "#t", &img, w, h);
+        for y in 0..50usize {
+            for x in 0..100usize {
+                let i = (y * w as usize + x) * 4;
+                assert_eq!(
+                    ours.data[i..i + 4],
+                    blitz[i..i + 4],
+                    "network-jpeg pixel ({x},{y}) differs"
+                );
+            }
+        }
+    }
+
 }

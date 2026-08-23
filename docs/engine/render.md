@@ -1115,3 +1115,28 @@ Option<&HashMap<String,Vec<u8>>>)`；原 `layout_dom_with_paint` 签名不变
 **测试**：429→432（+2 image.rs 单测 +1 对照）。挂账更新：JPEG/WebP
 解码器；相对 URL 解析归一（现在要求调用方给绝对 URL key）；srcset/
 picture 源选择；HTTP 缓存头（ETag/max-age）层。
+
+## 29. 批次 6d 完成（2026-08-23）：JPEG 解码——魔数分派进 ImageCache
+
+**探底（blitz-dom net.rs `ImageHandler::parse`）**：blitz 解码走
+`image::ImageReader::with_guessed_format().decode() → into_rgba8()`——
+image crate 0.25 全格式。`image` 0.25 已在我们依赖图里
+（blitz-dom/anyrender_svg 拉入），加 direct optional dep
+（default-features=false, features=["jpeg"]）零新增编译负担。
+
+**实现**：image.rs 加 `decode_jpeg`（`load_from_memory_with_format(Jpeg)`
+→ RGBA8）+ `decode_bytes` 魔数分派：PNG 签名 `\x89PNG` → decode_png，
+JPEG `FF D8 FF` → decode_jpeg，其他 None；ImageCache 的 http(s) 路径改走
+decode_bytes。data:URL 路径保持 PNG-gated（真实页 inline 图唯一形态；
+网络 JPEG 走字节表）。两引擎同一解码器 → RGBA 位相同。
+
+**对照/单测（+2 到 434）**：
+- `jpeg_decodes_and_sniffs_by_magic`：编码实 JPEG → sniff 解码尺寸对、
+  GIF 魔数拒绝、`image/jpeg` data URL 恒拒（路径分工）
+- `paint_img_from_network_jpeg_matches_blitz`：https src + JPEG body 进
+  字节表 → 我们绘制 vs blitz 用同款 image 解码再注入——**逐像素相等**
+  （纯色图规避重采样）
+
+**挂账更新**：WebP/GIF（同款分派可扩）；渐进式 JPEG 大图性能（zune-jpeg
+已是快速实现）；srcset/picture；HTTP 缓存头层。下一批候选：alt 溢出裁剪
+或 iframe/video 占位形态。

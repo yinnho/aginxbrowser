@@ -16,7 +16,10 @@
 //! layout re-run (or N imgs sharing one data: URL) decodes once, plus an
 //! injected byte table for `http(s)` sources — the caller (the screenshot
 //! prefetch path, over diting_net) fetches the bodies; the cache only ever
-//! sees bytes. PNG-only for now; JPEG/WebP are later batches.
+//! sees bytes. Batch 6d adds [`decode_jpeg`] and magic-byte dispatch in
+//! [`decode_bytes`] (JPEG is the dominant photo format on real pages);
+//! both engines decode through the same `image` crate so RGBA output is
+//! bit-identical.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -44,7 +47,7 @@ impl DecodedImage {
 ///
 /// - `data:image/png;base64,…` — decoded on first sight, then cached.
 /// - `http(s)://…` — looked up in the injected byte table (populated by
-///   the caller's fetch pass) and PNG-decoded + cached. A miss stays a
+///   the caller's fetch pass) and decoded + cached. A miss stays a
 ///   miss (the img keeps its 5a placeholder); nothing here touches the
 ///   network.
 pub struct ImageCache<'a> {
@@ -82,10 +85,8 @@ impl<'a> ImageCache<'a> {
         if (src.starts_with("http://") || src.starts_with("https://"))
             && self.network_bytes.is_some()
         {
-            // Content-type is untrusted/absent in practice; sniff the PNG
-            // signature instead of trusting the URL extension.
             let bytes = self.network_bytes.unwrap().get(src)?;
-            return decode_png(bytes).map(Arc::new);
+            return decode_bytes(bytes).map(Arc::new);
         }
         None
     }
@@ -104,6 +105,28 @@ pub fn decode_data_url_png(src: &str) -> Option<DecodedImage> {
     }
     let bytes = base64::engine::general_purpose::STANDARD.decode(payload).ok()?;
     decode_png(&bytes)
+}
+
+/// Decode fetched image bytes by magic-number sniffing (batch 6d) —
+/// content-type headers are untrusted/absent in practice. PNG and JPEG
+/// share the `image` crate with blitz's decoder
+/// (blitz-dom/src/net.rs `ImageHandler::parse`, `with_guessed_format`),
+/// so RGBA output is bit-identical for both engines.
+pub fn decode_bytes(bytes: &[u8]) -> Option<DecodedImage> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        decode_png(bytes)
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        decode_jpeg(bytes)
+    } else {
+        None
+    }
+}
+
+/// Decode JPEG bytes to RGBA8 via the same `image` crate path blitz uses.
+pub fn decode_jpeg(bytes: &[u8]) -> Option<DecodedImage> {
+    let img = image::load_from_memory_with_format(bytes, image::ImageFormat::Jpeg).ok()?;
+    let rgba = img.to_rgba8().into_raw();
+    Some(DecodedImage::new(img.width(), img.height(), rgba))
 }
 
 /// Decode PNG bytes to RGBA8 (palette and sub-byte formats expanded, gray
@@ -245,5 +268,29 @@ mod tests {
         );
         // No network table at all: http(s) never resolves.
         assert!(ImageCache::default().resolve("https://example.com/a.png").is_none());
+    }
+
+    /// JPEG bodies decode through the same `image` crate blitz uses, so
+    /// RGBA output is bit-identical: encode a solid JPEG, decode it via
+    /// `decode_bytes` (magic sniff) and via the data: URL path.
+    #[test]
+    fn jpeg_decodes_and_sniffs_by_magic() {
+        let mut jpeg_bytes = Vec::new();
+        image::DynamicImage::from(image::RgbImage::from_raw(4, 2, vec![204u8; 4 * 2 * 3]).unwrap())
+            .write_to(&mut std::io::Cursor::new(&mut jpeg_bytes), image::ImageFormat::Jpeg)
+            .expect("encodes");
+        assert!(jpeg_bytes.starts_with(&[0xFF, 0xD8, 0xFF]), "JPEG magic");
+
+        let decoded = decode_bytes(&jpeg_bytes).expect("sniffs and decodes JPEG");
+        assert_eq!((decoded.width, decoded.height), (4, 2));
+
+        // Garbage with no known magic declines.
+        assert!(decode_bytes(b"GIF89a-nope").is_none());
+
+        // The data: URL path stays PNG-gated (image/jpeg data URLs decline
+        // — inline images on real pages are PNG/base64; network JPEG comes
+        // through the byte table instead).
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes);
+        assert!(decode_data_url_png(&format!("data:image/jpeg;base64,{b64}")).is_none());
     }
 }

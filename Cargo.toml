@@ -23,6 +23,10 @@ screenshot = [
     "dep:anyrender_vello_cpu",
     "dep:peniko",
     "dep:png",
+    # JPEG decode for diting_layout's ImageCache (batch 6d). Same `image`
+    # crate version blitz-dom decodes with, so RGBA output is identical.
+    "dep:image",
+    "image/jpeg",
     # Direct stylo handle for the dual-engine computed-style cross-check
     # tests (diting_css vs Stylo) — must match the version blitz pins.
     "dep:stylo_alias",
@@ -164,6 +168,8 @@ anyrender = { version = "0.13", optional = true }
 anyrender_vello_cpu = { version = "0.16", optional = true, features = ["multithreading"] }
 peniko = { version = "0.6", optional = true }
 png = { version = "0.18", optional = true }
+# Same version blitz-dom pins (0.25.x); jpeg is the only feature we need.
+image = { version = "0.25", optional = true, default-features = false, features = ["jpeg"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 wreq = { version = "=6.0.0-rc.28", optional = true, features = ["prefix-symbols", "socks", "gzip", "brotli", "deflate", "zstd"] }
