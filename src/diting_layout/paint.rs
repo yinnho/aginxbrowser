@@ -8,10 +8,8 @@
 //! cross-check tests (background bbox exact, text ink extents and per-line
 //! band structure within the batch-3b ±2px ink tolerance).
 //!
-//! Not in this slice (tracked in docs/engine/render.md §24): border-radius,
-//! patterned border styles (dashed/dotted/double paint as solid), per-side
-//! border colors/styles, object-fit contain/cover + object-position (images
-//! always fill the box), network-loaded images (data: PNG only),
+//! Not in this slice (tracked in docs/engine/render.md §25): border-radius,
+//! per-side border colors/styles, network-loaded images (data: PNG only),
 //! gradients, z-index/stacking contexts.
 
 use super::text::TextRaster;
@@ -204,14 +202,25 @@ pub fn execute(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas) {
                 out.fill_rect(x, y + t as i64, l as i64, h - t as i64 - b as i64, *color);
                 out.fill_rect(x + w - r as i64, y + t as i64, r as i64, h - t as i64 - b as i64, *color);
             }
-            PaintItem::Image { rect, image } => {
-                out.blit_image(
-                    image,
+            PaintItem::Image { rect, paint_rect, image } => {
+                // Replaced content is always clipped to the element box
+                // (upstream clips image elements regardless of overflow);
+                // object-fit cover/object-position can push paint_rect past
+                // `rect`, so clip the blit to the box.
+                out.push_clip(
                     rect.x.round() as i64,
                     rect.y.round() as i64,
-                    rect.width.round() as i64,
-                    rect.height.round() as i64,
+                    (rect.x + rect.width).round() as i64,
+                    (rect.y + rect.height).round() as i64,
                 );
+                out.blit_image(
+                    image,
+                    paint_rect.x.round() as i64,
+                    paint_rect.y.round() as i64,
+                    paint_rect.width.round() as i64,
+                    paint_rect.height.round() as i64,
+                );
+                out.pop_clip();
             }
             PaintItem::Replaced { rect, alt, fill_placeholder } => {
                 let (x, y) = (rect.x.round() as i64, rect.y.round() as i64);

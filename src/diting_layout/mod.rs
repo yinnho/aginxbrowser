@@ -31,7 +31,8 @@ use taffy::prelude::*;
 
 use crate::diting_css::{
     AlignMode, ComputedStyle, Display as CssDisplay, FlexDirection as CssFlexDirection,
-    FlexWrapMode, GridTrack, JustifyMode, Overflow, PositionMode, TextAlign,
+    FlexWrapMode, GridTrack, JustifyMode, ObjectFit, ObjectPositionPart, Overflow, PositionMode,
+    TextAlign,
 };
 use crate::diting_dom::tree::{DomTree, NodeId};
 
@@ -513,6 +514,61 @@ fn is_replaced_tag(tag: &str) -> bool {
     matches!(tag, "img" | "video" | "iframe" | "canvas" | "object" | "embed")
 }
 
+/// The rect replaced content paints into, per object-fit/object-position
+/// (batch 5c) — the port of blitz-paint's sizing.rs + render.rs draw_image
+/// offset math. `box_rect` is the content box, (nw, nh) the natural size:
+///
+/// - Fill: the whole box (the pre-5c behavior).
+/// - Contain / Cover: scale by min/max of the two axis ratios; blitz's
+///   four-arm `(x<1, y<1)` match reduces to exactly that.
+/// - None: natural size. ScaleDown: Contain unless natural is already
+///   smaller than the contain result on width (then natural).
+/// - Offset: each object-position part resolves against the free space
+///   `box − paint` — percentages scale it, px lengths use it directly;
+///   the initial 50%/50% centers. Cover offsets go negative (overflow).
+pub fn object_paint_rect(
+    box_rect: Rect,
+    nw: f32,
+    nh: f32,
+    fit: ObjectFit,
+    pos: (ObjectPositionPart, ObjectPositionPart),
+) -> Rect {
+    let (bw, bh) = (box_rect.width, box_rect.height);
+    let paint = |w: f32, h: f32| Rect { x: 0.0, y: 0.0, width: w, height: h };
+    let size = if nw <= 0.0 || nh <= 0.0 || bw <= 0.0 || bh <= 0.0 {
+        match fit {
+            ObjectFit::None => paint(nw, nh),
+            _ => paint(bw, bh),
+        }
+    } else {
+        let (xr, yr) = (bw / nw, bh / nh);
+        match fit {
+            ObjectFit::Fill => paint(bw, bh),
+            ObjectFit::Contain => paint(nw * xr.min(yr), nh * xr.min(yr)),
+            ObjectFit::Cover => paint(nw * xr.max(yr), nh * xr.max(yr)),
+            ObjectFit::None => paint(nw, nh),
+            ObjectFit::ScaleDown => {
+                let (cw, ch) = (nw * xr.min(yr), nh * xr.min(yr));
+                if nw < cw {
+                    paint(nw, nh)
+                } else {
+                    paint(cw, ch)
+                }
+            }
+        }
+    };
+    let resolve = |part: ObjectPositionPart, free: f32| match part {
+        ObjectPositionPart::Percent(p) => free * p / 100.0,
+        ObjectPositionPart::Px(x) => x,
+    };
+    Rect {
+        x: box_rect.x + resolve(pos.0, bw - size.width),
+        y: box_rect.y + resolve(pos.1, bh - size.height),
+        width: size.width,
+        height: size.height,
+    }
+}
+
 /// Build the taffy leaf for a replaced element. Natural size comes from a
 /// decoded image when one is available (batch 5b), else the HTML width/
 /// height attributes (upstream's no-network fallback); the CSS authored
@@ -732,12 +788,15 @@ fn build_element(
 pub enum PaintItem {
     Bg { dom_id: NodeId, rect: Rect, color: [u8; 4] },
     /// A decoded raster image blitted into the replaced box (batch 5b):
-    /// object-fit: fill — stretched over the content box (which equals the
-    /// border box until replaced elements model border/padding, 挂账).
-    /// Upstream draws the same data at `content_box × compute_object_fit`
-    /// (blitz-paint/src/render.rs `draw_image`), so a 1:1-sized image is
-    /// pixel-comparable; scaled blits compare by bbox + sampled interior.
-    Image { rect: Rect, image: DecodedImage },
+    /// sized per object-fit and offset per object-position (batch 5c) —
+    /// see [`object_paint_rect`]. `rect` is the element box and doubles as
+    /// the clip (replaced content never escapes it); `paint_rect` is the
+    /// computed blit destination.
+    Image {
+        rect: Rect,
+        paint_rect: Rect,
+        image: DecodedImage,
+    },
     /// A replaced element's placeholder (batch 5a): an optional gray box
     /// (skipped when the author styled a background — that already shows)
     /// plus the alt text run, already resolved to font/color context and
@@ -992,7 +1051,19 @@ pub fn layout_dom_with_paint(
                 .unwrap_or(false);
             if replaced {
                 if let Some(img) = images.get(dom_id) {
-                    items.push(PaintItem::Image { rect, image: img.clone() });
+                    let st = styles.get(dom_id);
+                    let fit = st.and_then(|s| s.object_fit).unwrap_or(ObjectFit::Fill);
+                    let pos = st
+                        .and_then(|s| s.object_position)
+                        .unwrap_or((
+                            ObjectPositionPart::Percent(50.0),
+                            ObjectPositionPart::Percent(50.0),
+                        ));
+                    // The blit destination per object-fit/position (batch
+                    // 5c); `rect` stays the element box for callers that
+                    // want it.
+                    let paint_rect = object_paint_rect(rect, img.width as f32, img.height as f32, fit, pos);
+                    items.push(PaintItem::Image { rect, paint_rect, image: img.clone() });
                 } else {
                     let alt = tree
                         .with_node(*dom_id, |n| n.get_attribute("alt").map(|v| v.to_string()))
@@ -3186,7 +3257,7 @@ mod bridge_cross_check {
         let styles = our_styles(&tree, &rules);
         let (_r, items) = layout_dom_with_paint(&tree, &styles, &fixture_fonts(), VW);
         let image_rect = items.iter().find_map(|i| match i {
-            PaintItem::Image { rect, .. } => Some(*rect),
+            PaintItem::Image { paint_rect, .. } => Some(*paint_rect),
             _ => None,
         });
         assert!(
@@ -3282,5 +3353,148 @@ mod bridge_cross_check {
             assert!((o as i64 - b as i64).abs() <= 1, "{what}: ours={o} blitz={b}");
         }
         assert_eq!((ox1 - ox0 + 1, oy1 - oy0 + 1), (100, 50), "natural box 100×50");
+    }
+
+    /// object-fit: none + scale-down (batch 5c): both paint the image at
+    /// NATURAL size (no resampling), so the only new variable vs the 5b 1:1
+    /// test is the object-position offset — every pixel must match exactly.
+    #[test]
+    fn paint_object_fit_none_and_scale_down_pixel_exact() {
+        let (url, img) = fixture_image_data_url(100, 50);
+        let (w, h) = (300u32, 200u32);
+
+        // none, default position (50% 50%): paints at ((300-100)/2,
+        // (200-50)/2) = (100, 75), natural 100×50.
+        let html = format!(r#"<body><img id="t" src="{url}"></body>"#);
+        let sheet = "body { margin: 0; } #t { width: 300px; height: 200px; object-fit: none; }";
+        let blitz = blitz_render_with_image(&html, sheet, "#t", &img, w, h);
+        let ours = our_render(&html, sheet, w as usize, h as usize);
+        for i in 0..w as usize * h as usize {
+            assert_eq!(
+                ours.data[i * 4..i * 4 + 4],
+                blitz[i * 4..i * 4 + 4],
+                "none@center pixel ({},{})",
+                i % w as usize,
+                i / w as usize
+            );
+        }
+
+        // scale-down on a box BIGGER than the image: contain would be
+        // 300×150 but natural 100×50 is smaller → natural size, centered.
+        let sheet = "body { margin: 0; } #t { width: 300px; height: 200px; object-fit: scale-down; }";
+        let blitz = blitz_render_with_image(&html, sheet, "#t", &img, w, h);
+        let ours = our_render(&html, sheet, w as usize, h as usize);
+        for i in 0..w as usize * h as usize {
+            assert_eq!(
+                ours.data[i * 4..i * 4 + 4],
+                blitz[i * 4..i * 4 + 4],
+                "scale-down@center pixel ({},{})",
+                i % w as usize,
+                i / w as usize
+            );
+        }
+
+        // px offsets: object-position 10px 20px pins the top-left corner —
+        // offset math independent of centering.
+        let sheet =
+            "body { margin: 0; } #t { width: 300px; height: 200px; object-fit: none; object-position: 10px 20px; }";
+        let blitz = blitz_render_with_image(&html, sheet, "#t", &img, w, h);
+        let ours = our_render(&html, sheet, w as usize, h as usize);
+        for i in 0..w as usize * h as usize {
+            assert_eq!(
+                ours.data[i * 4..i * 4 + 4],
+                blitz[i * 4..i * 4 + 4],
+                "none@10,20 pixel ({},{})",
+                i % w as usize,
+                i / w as usize
+            );
+        }
+    }
+
+    /// contain/cover sizing (batch 5c). Both resample (scale ≠ 1) so the
+    /// contract is bbox ±1 against blitz plus quadrant-center samples:
+    ///
+    /// - contain in a square box letterboxes vertically (min ratio),
+    /// - cover in a square box OVERFLOWS horizontally (max ratio) and —
+    ///   verified here against upstream itself — is NOT clipped under the
+    ///   default overflow: visible; the painted ink extends past the img
+    ///   box symmetrically (offset goes negative).
+    #[test]
+    fn paint_object_fit_contain_cover_match_blitz() {
+        let (url, img) = fixture_image_data_url(100, 50);
+
+        // contain: box 200×200, image 100×50 → min(2, 4) = 2 → 200×100,
+        // centered vertically at y=(200-100)/2=50.
+        let html = format!(r#"<body><img id="t" src="{url}"></body>"#);
+        let sheet = "body { margin: 0; } #t { width: 200px; height: 200px; object-fit: contain; }";
+        let (w, h) = (300u32, 300u32);
+        let blitz = blitz_render_with_image(&html, sheet, "#t", &img, w, h);
+        let ours = our_render(&html, sheet, w as usize, h as usize);
+
+        let is_img_px = |p: &[u8]| {
+            (p[0] > 130 && p[1] < 110 && p[2] < 110) || (p[0] < 110 && p[1] < 110 && p[2] > 130)
+        };
+        fn bbox(buf: &[u8], w: usize, h: usize, hit: impl Fn(&[u8]) -> bool) -> (usize, usize, usize, usize) {
+            let mut b: Option<(usize, usize, usize, usize)> = None;
+            for y in 0..h {
+                for x in 0..w {
+                    if hit(&buf[(y * w + x) * 4..]) {
+                        b = Some(match b {
+                            Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                            None => (x, y, x, y),
+                        });
+                    }
+                }
+            }
+            b.expect("bbox: no hit pixels")
+        }
+        let (ox0, oy0, ox1, oy1) = bbox(&ours.data, w as usize, h as usize, is_img_px);
+        let (bx0, by0, bx1, by1) = bbox(&blitz, w as usize, h as usize, is_img_px);
+        for (what, o, b, expect) in [
+            ("contain left", ox0, bx0, 0.0),
+            ("contain top", oy0, by0, 50.0),
+            ("contain right", ox1, bx1, 199.0),
+            ("contain bottom", oy1, by1, 149.0),
+        ] {
+            assert!(
+                (o as f64 - expect).abs() <= 1.0 && (b as f64 - expect).abs() <= 1.0,
+                "{what}: ours={o} blitz={b} expected≈{expect}"
+            );
+        }
+
+        // cover: square box 100×100, wide image 100×50 → max(1, 2) = 2 →
+        // 200×100 centered at x=-50 relative to the box. Upstream ALWAYS
+        // clips image elements to the padding box (`is_image ||` in
+        // should_clip — independent of overflow), so the ink is cut at the
+        // box edges: visible spans x [0, 100], y [0, 100] on BOTH engines.
+        let sheet = "body { margin: 0; } #t { width: 100px; height: 100px; object-fit: cover; }";
+        let (w, h) = (300u32, 300u32);
+        let blitz = blitz_render_with_image(&html, sheet, "#t", &img, w, h);
+        let ours = our_render(&html, sheet, w as usize, h as usize);
+        let (ox0, oy0, ox1, oy1) = bbox(&ours.data, w as usize, h as usize, is_img_px);
+        let (bx0, by0, bx1, by1) = bbox(&blitz, w as usize, h as usize, is_img_px);
+        for (what, o, b, expect) in [
+            ("cover left", ox0, bx0, 0.0),
+            ("cover top", oy0, by0, 0.0),
+            ("cover right", ox1, bx1, 99.0),
+            ("cover bottom", oy1, by1, 99.0),
+        ] {
+            assert!(
+                (o as f64 - expect).abs() <= 1.0 && (b as f64 - expect).abs() <= 1.0,
+                "{what}: ours={o} blitz={b} expected≈{expect}"
+            );
+        }
+        // Interior solid samples inside the box: left half of the VISIBLE
+        // region maps to image-space x∈[25,75) (paint starts at image x=25
+        // after the -50px offset + ×2 scale)... concretely the pattern's
+        // red/blue class must AGREE across engines at two off-boundary
+        // points (one per half).
+        for (x, y) in [(20usize, 25usize), (80usize, 75usize)] {
+            let i = (y * w as usize + x) * 4;
+            let o = &ours.data[i..i + 4];
+            let b = &blitz[i..i + 4];
+            assert_eq!(o[0] > 130, b[0] > 130, "cover class at ({x},{y}): ours={o:?} blitz={b:?}");
+            assert_eq!(o[2] > 130, b[2] > 130, "cover class at ({x},{y}): ours={o:?} blitz={b:?}");
+        }
     }
 }

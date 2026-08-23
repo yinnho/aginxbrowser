@@ -372,6 +372,7 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "padding-right", "padding-bottom", "padding-left", "font-size", "font-weight",
         "text-align", "border", "border-color", "border-width", "border-style",
         "width", "height", "flex-direction", "gap", "overflow",
+        "object-fit", "object-position",
     ];
     if !SUPPORTED.contains(&name.to_ascii_lowercase().as_str()) {
         return false;
@@ -395,6 +396,19 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
             || value.starts_with("url(")
             || value.contains("gradient"),
         "text-align" => matches!(value, "left" | "start" | "center" | "right" | "end" | "justify"),
+        "object-fit" => matches!(
+            value,
+            "fill" | "contain" | "cover" | "none" | "scale-down"
+        ),
+        "object-position" => {
+            let part = |s: &str| {
+                s.ends_with('%') && s[..s.len() - 1].parse::<f32>().is_ok()
+                    || s.ends_with("px") && s[..s.len() - 2].parse::<f32>().is_ok()
+            };
+            value
+                .split_whitespace()
+                .all(|s| matches!(s, "left" | "top" | "center" | "right" | "bottom") || part(s))
+        }
         "font-weight" => parse_font_weight(value).is_some(),
         "font-size" => parse_font_size_len(value).is_some(),
         _ => true, // remaining modeled properties accept any non-empty value here
@@ -465,6 +479,10 @@ pub struct ComputedStyle {
     pub max_height: Option<Length>,
     /// Declared aspect ratio (width/height); `auto` stays None.
     pub aspect_ratio: Option<f32>,
+    /// Replaced-content fit (batch 5c), non-inherited; initial Fill.
+    pub object_fit: Option<ObjectFit>,
+    /// (x, y) object-position parts, non-inherited; initial 50%/50%.
+    pub object_position: Option<(ObjectPositionPart, ObjectPositionPart)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -504,6 +522,35 @@ pub enum Overflow {
     Clip,
     Scroll,
     Auto,
+}
+
+/// `object-fit` (batch 5c): how replaced content maps into its box. The
+/// math mirrors blitz-paint/src/sizing.rs `compute_object_fit` — Fill
+/// stretches, Contain/Cover pick min/max of the per-axis scale ratios,
+/// None uses the natural size, ScaleDown is Contain unless the natural
+/// size is already smaller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectFit {
+    Fill,
+    Contain,
+    Cover,
+    None,
+    ScaleDown,
+}
+
+impl Default for ObjectFit {
+    fn default() -> Self {
+        ObjectFit::Fill
+    }
+}
+
+/// One axis of `object-position` (batch 5c): a percentage of the free
+/// space (box − painted object) or an absolute px offset. The initial
+/// value is 50% both axes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ObjectPositionPart {
+    Percent(f32),
+    Px(f32),
 }
 
 fn border_style_kw(v: &str) -> BorderStyleKw {
@@ -885,6 +932,45 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 "auto" => Some(Overflow::Auto),
                 _ => return false,
             };
+            true
+        }
+        "object-fit" => {
+            style.object_fit = match v {
+                "fill" => Some(ObjectFit::Fill),
+                "contain" => Some(ObjectFit::Contain),
+                "cover" => Some(ObjectFit::Cover),
+                "none" => Some(ObjectFit::None),
+                "scale-down" => Some(ObjectFit::ScaleDown),
+                _ => return false,
+            };
+            true
+        }
+        "object-position" => {
+            let part = |s: &str| -> Option<ObjectPositionPart> {
+                match s {
+                    // Keyword positions are their percentage equivalents.
+                    "left" | "top" => Some(ObjectPositionPart::Percent(0.0)),
+                    "center" => Some(ObjectPositionPart::Percent(50.0)),
+                    "right" | "bottom" => Some(ObjectPositionPart::Percent(100.0)),
+                    _ => {
+                        let num = s.strip_suffix('%').map(|n| n.parse::<f32>().ok()).flatten();
+                        if let Some(p) = num {
+                            return Some(ObjectPositionPart::Percent(p));
+                        }
+                        parse_px_f32(s).map(ObjectPositionPart::Px)
+                    }
+                }
+            };
+            let vals: Vec<ObjectPositionPart> = v.split_whitespace().filter_map(part).collect();
+            match vals.as_slice() {
+                [x] => {
+                    style.object_position = Some((*x, ObjectPositionPart::Percent(50.0)));
+                }
+                [x, y] => {
+                    style.object_position = Some((*x, *y));
+                }
+                _ => return false,
+            }
             true
         }
         "flex-direction" => {

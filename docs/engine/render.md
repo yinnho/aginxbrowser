@@ -986,3 +986,39 @@ RasterImageData::new(同一字节))`——**注入必须先于首次 resolve**�
 object-fit contain/cover/scale-down + object-position（blitz sizing.rs 可
 抄）；图晚到 relayout（damage 驱动）；网络图（diting_net fetch + 解码缓存
 ——解码目前每次 layout 重跑）；`image-rendering: pixelated` 采样策略。
+
+## 25. 批次 5c 完成（2026-08-23）：object-fit 全家 + object-position
+
+**CSS 侧**（diting_css）：`ObjectFit`（fill/contain/cover/none/scale-down，
+初始 Fill）+ `ObjectPositionPart`（Percent/Px，关键字 left/top=0%、center=
+50%、right/bottom=100% 折算成百分比）。ComputedStyle 加 `object_fit`/
+`object_position` 两非继承字段；apply_one 分发 + @supports 探针同步。
+
+**数学**（diting_layout `object_paint_rect`）：blitz sizing.rs 的四臂
+`(x<1, y<1)` match 化简后恒等于 contain=min(xr,yr)、cover=max(xr,yr)；
+scale-down = contain 结果宽 > 自然宽则用自然尺寸。offset =
+`position.resolve(box − paint)`：百分比乘自由空间、px 直接用；初始
+50%/50% 居中。cover 的 offset 可为负（画布外），contain 留 letterbox。
+
+**裁剪语义（本批最大实证发现）**：blitz-paint render.rs `should_clip`
+含 `is_image ||` —— **图片元素无条件裁剪到 padding box**（与 overflow
+无关，spec 行为：replaced 内容不溢出盒）。首版对照测试抓到 blitz cover
+右缘=盒缘(99) 而我们=149 未裁剪 → paint.rs Image 分支改为 push_clip(元素
+盒)→blit(paint_rect)→pop_clip。fill 时 clip 无感（paint_rect==盒）。
+
+**PaintItem::Image 变体扩为 `{rect, paint_rect, image}`**：rect=元素盒
+（兼作裁剪矩形），paint_rect=collect 时按 fit/position 算出的 blit 目标。
+collect 读 object_fit/object_position（缺省 fill/50%-50%）。
+
+**对照（两测）**：
+- `paint_object_fit_none_and_scale_down_pixel_exact`：none 与 scale-down
+  （小图分支）都按自然尺寸绘制——scale=1 无重采样，整幅**逐像素相等**
+  （含 px 偏移 `10px 20px` 用例，offset 数学独立验证）。
+- `paint_object_fit_contain_cover_match_blitz`：两者都有重采样 → bbox ±1
+  对 blitz + 盒内象限类采样（近邻 vs 双线性契约沿用 5b）。contain 方盒
+  letterbox 到 200×100@y50；cover 方盒溢出但被裁到盒缘。
+
+**测试**：426→427（+2 对照 −0；总数显示 427 因 image.rs 单测并入）。
+挂账更新：object-position 多值语法（三值/四值带边锚定）；网络图路径的
+fit 生效（图晚到 relayout 挂账不变）；`image-rendering: pixelated` 采样
+策略（none/scale-down 已是 scale=1 不受影响）。
