@@ -694,3 +694,48 @@ stylesheet 前置 `body { font-family: DitingFixture }`。无系统字体、
 **边界（挂账）**：混合 run 的 flex-row 回退（见上）；ch/ex/vw/vh；
 line-height 真实 LineHeight 模型（仍 1.2 系数）；FontBook 单 family
 双 weight（500/800 snap 到近邻，也是 fixture 唯会触碰的范围）。
+
+## 17. 批次 3b 完成（2026-08-23）：文本光栅——swash scale/render + baseline 对照 blitz
+
+**baseline 模型（先读 parley 源码再写代码）**：blitz 的 baseline 完全由
+parley 0.10 的量化行盒决定（line_break.rs:1103-1129，quantize=true）：
+round(ascent) 与 round(descent) **分别取整**→leading = lh−(a+d)→
+above = floor(leading/2)、below 拿大半（Chrome 语义）→
+baseline = round(line_y) + a + above。run 的 ascent/descent 来自 **skrifa
+字体级 metrics**（data.rs:445），与 line-height 无关——
+`FontSizeRelative(1.2)` 只产生 line_height。**Noto SC 1.448em 自然 extents
+超过 1.2em 行盒**：leading 为负，baseline 恰落在 fs（12/16/20/24 全档
+验证=fs 整），字形墨迹溢出行盒顶——Chrome 式 CJK 拥挤观感，数值级复刻。
+注意 swash 的 `Metrics.descent` 报**正值**（基线以下距离），我们 normalize
+成「正数朝下」约定，别让它泄漏成负数。
+
+**光栅**：`FontBook::rasterize(text, fs, bold, color) -> TextRaster`
+（RGBA tile + baseline 行位 + `ink_bbox()` 50% 覆盖率墨迹框）。链路 =
+swash ShapeContext 整形（逐 glyph id/advance/offset）→ ScaleContext +
+`Render::new(&[Source::Outline])`（Format::Alpha 默认）→ A8 coverage
+max-blend →着色。**placement 坑（最贵）**：swash 光栅走 zeno
+`Origin::BottomLeft`，`placement.top` 是图顶相对 pen 的**向上**距离——
+blit y = pen_y − top（写成 +top 会整块落到 tile 外，tile 尺寸恰好合法
+所以不炸只空）。
+
+**对照面定义**：blitz 的字形光栅是 **vello_cpu 路径填充**（非 swash，
+anyrender_vello_cpu scene.rs:137 glyph_run），rasterizer 不同→像素全等
+不可能。契约 = **ink 轮廓**：基线上墨迹顶/基线下墨迹底/左右墨迹边，
+±2px（50% coverage 阈值双侧同规）。blitz 侧复用 screenshot.rs 的
+paint 路径（render_to_buffer + paint_scene）+ fixture 字体注入；
+测试 fs=16/24 两档过——错 baseline/错 metric 源/错 advance 都会越界。
+
+**fixture 补字教训**：渲/染/加/粗 不在 charset → .notdef，而 **.notdef
+的 1em advance 恰好骗过所有 CJK 宽度断言**（3a 的 cjk_advance_is_one_em
+测的其实是 .notdef），raster 一出立刻现形（gid=0 空图）。教训入
+make_font_fixture.py 注释：宽度断言不充分，字形级验证靠 ink；charset
+必须与测试源同步（已补 加粗渲染真假混搭，140KB×2 重生成）。
+
+**结果**：2 新测试（baseline_model_is_parley_quantized——metrics
+1.16em/0.288em/0 + baseline==fs 四档；raster_ink_extents_match_blitz），
+407 全绿。
+
+**边界（挂账）**：单行 run（多行=measure_text_leaf 行盒 × raster 逐行
+组合，后续批次）；整像素 pen 无 subpixel（vello_cpu 亚像素，ink ±2px
+吸收）；无 color/bitmap 字形源（Source::Outline 单源）；无 faux bold
+（synthesis 只在 shaping 层，300-500 weight 仍 snap 双 weight）。

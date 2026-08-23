@@ -2007,4 +2007,103 @@ mod bridge_cross_check {
         assert!(lines >= 2.0 && lines <= 4.0, "plausible line count: {lines} (h={})", t.height);
         assert!((t.height - lines * 24.0).abs() < EPS as f32, "height = lines × 1.2×fs: {}", t.height);
     }
+
+    /// Baseline placement model (batch 3b): parley 0.10 quantized Chrome-style
+    /// metrics — round(ascent)/round(descent) separately, below keeps the
+    /// larger leading half. The Noto SC fixture's natural extent (1.448em)
+    /// exceeds the 1.2em line box, so leading is NEGATIVE and the baseline
+    /// lands at exactly fs below the line top for 12/16/20/24px — the cramped
+    /// CJK look, locked numerically.
+    #[test]
+    fn baseline_model_is_parley_quantized() {
+        use crate::diting_layout::text::baseline_offset;
+
+        let fonts = fixture_fonts();
+        for fs in [12.0f32, 16.0, 20.0, 24.0] {
+            let m = fonts.metrics(fs, false).expect("metrics");
+            // Noto Sans SC: ascender 1.16em, descender 0.288em (positive,
+            // below-baseline), line gap 0.
+            assert!((m.ascent - fs * 1.16).abs() < 0.05, "ascent@{fs}: {}", m.ascent);
+            assert!((m.descent - fs * 0.288).abs() < 0.05, "descent@{fs}: {}", m.descent);
+            assert!(m.line_gap.abs() < 0.05, "line_gap@{fs}: {}", m.line_gap);
+            let b = baseline_offset(m.ascent, m.descent, line_height(fs));
+            assert!((b - fs).abs() < 1e-6, "baseline@{fs}: {b} (want exactly fs)");
+        }
+    }
+
+    /// The paint half (batch 3b): our swash-rasterized tile vs blitz's
+    /// parley+vello_cpu painting of the same fixture run. Rasterizers differ
+    /// (zeno alpha raster vs vello path AA) so the contract is INK EXTENTS,
+    /// not pixels: the ink box above/below the baseline and its x extent
+    /// must agree within 2px — enough to catch a wrong baseline model,
+    /// wrong metric source, or wrong glyph advances; tight enough to be a
+    /// real parity claim.
+    #[test]
+    fn raster_ink_extents_match_blitz() {
+        use crate::diting_layout::text::baseline_offset;
+
+        let html = r#"<body><div id="t">你好gapa渲染</div></body>"#;
+        for fs in [16.0f32, 24.0] {
+            let sheet = format!("body {{ margin: 0; }} #t {{ font-size: {fs}px; }}");
+            let doc = blitz_doc(html, &sheet);
+
+            // Paint the blitz doc: white fill then paint_scene (same path as
+            // screenshot::render_html_to_png).
+            let (w, h) = (400u32, 80u32);
+            let mut doc = doc;
+            let buffer = anyrender::render_to_buffer::<anyrender_vello_cpu::VelloCpuImageRenderer, _>(
+                |scene| {
+                    use anyrender::PaintScene as _;
+                    use peniko::kurbo::Rect;
+                    scene.fill(
+                        peniko::Fill::NonZero,
+                        Default::default(),
+                        peniko::Color::WHITE,
+                        Default::default(),
+                        &Rect::new(0.0, 0.0, w as f64, h as f64),
+                    );
+                    blitz_paint::paint_scene(scene, &mut doc, 1.0, w, h, 0, 0);
+                },
+                w,
+                h,
+            );
+
+            // Ink bbox in the blitz image (black text on white, 50% coverage).
+            let ink = |px: &[u8]| px[0] < 128 && px[1] < 128 && px[2] < 128;
+            let mut bbox: Option<(u32, u32, u32, u32)> = None;
+            for y in 0..h {
+                for x in 0..w {
+                    if !ink(&buffer[((y * w + x) * 4) as usize..]) {
+                        continue;
+                    }
+                    bbox = Some(match bbox {
+                        Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                        None => (x, y, x, y),
+                    });
+                }
+            }
+            let (bx0, by0, bx1, by1) = bbox.expect("blitz painted some ink");
+
+            // Our tile: same text, same fixture bytes, baseline per the model.
+            let raster = fixture_fonts().rasterize("你好gapa渲染", fs, false, [0, 0, 0, 255]);
+            let (ox0, oy0, ox1, oy1) = raster.ink_bbox().expect("our raster has ink");
+            let fonts = fixture_fonts();
+            let m = fonts.metrics(fs, false).unwrap();
+            let baseline = baseline_offset(m.ascent, m.descent, line_height(fs));
+
+            // Line 1's box top is y=0 in the page (body margin 0), so blitz's
+            // ink distances decode against `baseline` directly.
+            let d = |what: &str, ours: f32, theirs: f32| {
+                assert!(
+                    (ours - theirs).abs() <= 2.0,
+                    "{what}@{fs}px: ours={ours} blitz={theirs} (diff {})",
+                    (ours - theirs).abs()
+                );
+            };
+            d("ink top above baseline", raster.baseline - oy0 as f32, baseline - by0 as f32);
+            d("ink bottom below baseline", oy1 as f32 - raster.baseline, by1 as f32 - baseline);
+            d("ink left", ox0 as f32, bx0 as f32);
+            d("ink right", ox1 as f32, bx1 as f32);
+        }
+    }
 }

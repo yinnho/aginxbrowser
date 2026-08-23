@@ -29,9 +29,9 @@ screenshot = [
     # Direct taffy handle for the fork-delta classification tests — same
     # git rev blitz pins, and crucially the same feature set (see below).
     "dep:taffy",
-    # Real glyph measurement for the diting_layout word-leaf model (render
-    # claim batch 3a). Measurement only: no scale/render (outlines are the
-    # paint batch's business).
+    # Real glyph measurement + rasterization for diting_layout text leaves
+    # (render claim batches 3a/3b). Same stack upstream obscura-render builds
+    # on. scale/render are the outline raster features (3b paint).
     "dep:swash",
     # Direct parley handle to build a fixture FontContext for the blitz side
     # of the 3a text cross-check (DocumentConfig.font_ctx injection with
@@ -59,10 +59,15 @@ taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "864b4fd02e344bf967
     "calc",
     "detailed_layout_info",
 ] }
-# Shaped advances + font metrics for diting_layout text leaves (batch 3a).
-# Same stack upstream obscura-render builds on. default-features=false drops
-# the scale/render (outline raster) features — measurement doesn't need them.
-swash = { version = "0.2", optional = true, default-features = false, features = ["std"] }
+# Shaped advances + font metrics (batch 3a) and glyph rasterization (3b) for
+# diting_layout text leaves. Same stack upstream obscura-render builds on.
+# default-features=false + explicit std/scale/render: no variations/simd knob
+# we don't use (default set is std+scale+render anyway — pin it explicitly).
+swash = { version = "0.2", optional = true, default-features = false, features = [
+    "std",
+    "scale",
+    "render",
+] }
 # Fixture FontContext construction for the blitz side of the 3a text
 # cross-check. Mirrors blitz's own declaration exactly (default-features
 # false, std) so the unified graph can't drift blitz's parley behavior.

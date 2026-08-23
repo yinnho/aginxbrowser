@@ -28,6 +28,10 @@ import fontTools.subset as subset
 CJK = (
     # in use by existing fixtures (harvested from the test sources)
     "。一七三与世中乙九二于五优你光八六内化十四好字容引形搜擎文断栅标段测用甲界第索行证试题验，"
+    # in use by batch-3 tests (加粗/渲染 etc. — a char missing here renders as
+    # .notdef, whose 1em advance silently passes CJK width asserts while the
+    # RASTER comes out empty; keep this list in sync with the test sources)
+    "加粗渲染真假混搭"
     # headroom for batch-3 tests: layout/text vocabulary
     "上下左右大小高矮宽窄内外前后个只条张片亿万千百数字号码号名称本末首尾行列表排列版面页张段落"
     "真假实虚确定形符图样貌英文中文混搭合体独立单独整体部分全部各类别种样点线框边"
