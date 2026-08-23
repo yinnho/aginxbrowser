@@ -147,23 +147,38 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
         bottom: lp(style.padding.bottom),
         left: lp(style.padding.left),
     };
+    // Border widths (batch 4b): taffy insets the content box by them, like
+    // blitz does. A `none`/unset style computes the widths to 0.
+    let bline = style.border_style.is_some();
+    let (bt, br, bb, bl) = (
+        if bline { side_px(style.border_width.top) } else { 0.0 },
+        if bline { side_px(style.border_width.right) } else { 0.0 },
+        if bline { side_px(style.border_width.bottom) } else { 0.0 },
+        if bline { side_px(style.border_width.left) } else { 0.0 },
+    );
+    s.border = taffy::geometry::Rect {
+        top: LengthPercentage::length(bt),
+        right: LengthPercentage::length(br),
+        bottom: LengthPercentage::length(bb),
+        left: LengthPercentage::length(bl),
+    };
     // CSS's initial box-sizing is content-box while taffy sizes are
     // border-box; the subset has no authored box-sizing yet, so map authored
-    // sizes over by the padding (border widths aren't modeled at all).
+    // sizes over by the padding + border widths.
     // Percent sizes pass through as percent — "percent + padding px" has no
     // taffy Dimension shape, so a % size keeps its padding inside (border-box
     // behavior); authored box-sizing is a later batch anyway.
     s.size = Size {
         width: match style.width {
             Some(crate::diting_css::Length::Px(w)) => Dimension::length(
-                w + side_px(style.padding.left) + side_px(style.padding.right),
+                w + side_px(style.padding.left) + side_px(style.padding.right) + bl + br,
             ),
             Some(crate::diting_css::Length::Percent(p)) => Dimension::percent(p / 100.0),
             None => auto(),
         },
         height: match style.height {
             Some(crate::diting_css::Length::Px(h)) => Dimension::length(
-                h + side_px(style.padding.top) + side_px(style.padding.bottom),
+                h + side_px(style.padding.top) + side_px(style.padding.bottom) + bt + bb,
             ),
             Some(crate::diting_css::Length::Percent(p)) => Dimension::percent(p / 100.0),
             None => auto(),
@@ -248,19 +263,19 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
             left: lpa_auto(style.left),
         };
     }
-    // Clamps are content-box in CSS's initial box-sizing — same padding
-    // carry-over as the main sizes above (px only; % passes through).
+    // Clamps are content-box in CSS's initial box-sizing — same padding +
+    // border carry-over as the main sizes above (px only; % passes through).
     s.min_size = Size {
         width: match style.min_width {
             Some(crate::diting_css::Length::Px(w)) => LengthPercentageAuto::length(
-                w + side_px(style.padding.left) + side_px(style.padding.right),
+                w + side_px(style.padding.left) + side_px(style.padding.right) + bl + br,
             ),
             Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
             None => LengthPercentageAuto::auto(),
         },
         height: match style.min_height {
             Some(crate::diting_css::Length::Px(h)) => LengthPercentageAuto::length(
-                h + side_px(style.padding.top) + side_px(style.padding.bottom),
+                h + side_px(style.padding.top) + side_px(style.padding.bottom) + bt + bb,
             ),
             Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
             None => LengthPercentageAuto::auto(),
@@ -269,14 +284,14 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
     s.max_size = Size {
         width: match style.max_width {
             Some(crate::diting_css::Length::Px(w)) => LengthPercentageAuto::length(
-                w + side_px(style.padding.left) + side_px(style.padding.right),
+                w + side_px(style.padding.left) + side_px(style.padding.right) + bl + br,
             ),
             Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
             None => LengthPercentageAuto::auto(),
         },
         height: match style.max_height {
             Some(crate::diting_css::Length::Px(h)) => LengthPercentageAuto::length(
-                h + side_px(style.padding.top) + side_px(style.padding.bottom),
+                h + side_px(style.padding.top) + side_px(style.padding.bottom) + bt + bb,
             ),
             Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
             None => LengthPercentageAuto::auto(),
@@ -690,6 +705,16 @@ fn build_element(
 #[derive(Debug, Clone)]
 pub enum PaintItem {
     Bg { dom_id: NodeId, rect: Rect, color: [u8; 4] },
+    /// A uniform solid border: four bands on the border-box edges, painted
+    /// AFTER the element's Bg (background-clip: border-box draws the bg
+    /// beneath the border) and before the subtree. Widths in CSS order
+    /// (top right bottom left), px.
+    Border {
+        dom_id: NodeId,
+        rect: Rect,
+        widths: [f32; 4],
+        color: [u8; 4],
+    },
     Text {
         text: String,
         font_size: f32,
@@ -842,6 +867,25 @@ pub fn layout_dom_with_paint(
             if let Some(c) = styles.get(dom_id).and_then(|s| s.background_color) {
                 if c.3 != 0 && rect.width > 0.0 && rect.height > 0.0 {
                     items.push(PaintItem::Bg { dom_id: *dom_id, rect, color: [c.0, c.1, c.2, c.3] });
+                }
+            }
+            // A border exists only with a line style; its color defaults to
+            // currentColor = the element's own computed (inherited) color.
+            let st = styles.get(dom_id);
+            if let Some(style) = st.filter(|s| s.border_style.is_some()) {
+                let widths = [
+                    side_px(style.border_width.top),
+                    side_px(style.border_width.right),
+                    side_px(style.border_width.bottom),
+                    side_px(style.border_width.left),
+                ];
+                if widths.iter().any(|w| *w > 0.0) {
+                    let color = style
+                        .border_color
+                        .or(style.color)
+                        .map(|c| [c.0, c.1, c.2, c.3])
+                        .unwrap_or([0, 0, 0, 255]);
+                    items.push(PaintItem::Border { dom_id: *dom_id, rect, widths, color });
                 }
             }
         }
@@ -2333,6 +2377,129 @@ mod bridge_cross_check {
             ("ink bottom", oiy1, biy1),
         ] {
             assert!((o as i64 - b as i64).abs() <= 2, "{what}: ours={o} blitz={b}");
+        }
+    }
+
+    /// Border + padding through pixels (batch 4b): a 6px solid border and
+    /// 8px padding around the same 3-line run. The border eats into the
+    /// layout (authored width stays content-box, wrap width unchanged at
+    /// 105px, border-box grows to 133×100) and paints as four bands over
+    /// the background. Contract: blue band bbox == the element rect exactly,
+    /// visible red interior inset by the border, ink bands unchanged in
+    /// count and shifted by border+padding.
+    #[test]
+    fn paint_border_and_padding_match_blitz() {
+        let html = r#"<body><div id="t">谛听引擎渲染测试文本行</div></body>"#;
+        let sheet = "body { margin: 0; } #t { width: 105px; padding: 8px; border: 6px solid rgb(20,60,200); background: rgb(198,40,40); font-size: 20px; }";
+
+        let doc = blitz_doc(html, sheet);
+        let (w, h) = (200u32, 200u32);
+        let mut doc = doc;
+        let blitz = anyrender::render_to_buffer::<anyrender_vello_cpu::VelloCpuImageRenderer, _>(
+            |scene| {
+                use anyrender::PaintScene as _;
+                use peniko::kurbo::Rect;
+                scene.fill(
+                    peniko::Fill::NonZero,
+                    Default::default(),
+                    peniko::Color::WHITE,
+                    Default::default(),
+                    &Rect::new(0.0, 0.0, w as f64, h as f64),
+                );
+                blitz_paint::paint_scene(scene, &mut doc, 1.0, w, h, 0, 0);
+            },
+            w,
+            h,
+        );
+
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let fonts = fixture_fonts();
+        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW);
+        let mut ours = paint::Canvas::new_filled(w as usize, h as usize, [255, 255, 255, 255]);
+        paint::execute(&items, &fonts, &mut ours);
+        assert!(
+            items.iter().any(|i| matches!(i, PaintItem::Border { .. })),
+            "the border must emit a Border item"
+        );
+
+        let is_border =
+            |p: &[u8]| (p[0] as i32 - 20).abs() < 30 && (p[1] as i32 - 60).abs() < 30 && (p[2] as i32 - 200).abs() < 30;
+        let is_bg = |p: &[u8]| {
+            (p[0] as i32 - 198).abs() < 30 && (p[1] as i32 - 40).abs() < 30 && (p[2] as i32 - 40).abs() < 30
+        };
+        let is_ink = |p: &[u8]| p[0] < 110 && p[1] < 110 && p[2] < 110;
+
+        fn bbox(buf: &[u8], w: usize, h: usize, hit: impl Fn(&[u8]) -> bool) -> (usize, usize, usize, usize) {
+            let mut b: Option<(usize, usize, usize, usize)> = None;
+            for y in 0..h {
+                for x in 0..w {
+                    if !hit(&buf[(y * w + x) * 4..]) {
+                        continue;
+                    }
+                    b = Some(match b {
+                        Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                        None => (x, y, x, y),
+                    });
+                }
+            }
+            b.expect("bbox: no hit pixels")
+        }
+        fn band_tops(buf: &[u8], w: usize, h: usize, hit: impl Fn(&[u8]) -> bool) -> Vec<usize> {
+            let mut tops = Vec::new();
+            let mut last_row: Option<usize> = None;
+            for y in 0..h {
+                let has = (0..w).any(|x| hit(&buf[(y * w + x) * 4..]));
+                if has && last_row.is_none_or(|p| y > p + 1) {
+                    tops.push(y);
+                }
+                if has {
+                    last_row = Some(y);
+                }
+            }
+            tops
+        }
+
+        // Border bands span the border-box: exact outer edges.
+        let (obx0, oby0, obx1, oby1) = bbox(&ours.data, w as usize, h as usize, is_border);
+        let (bbx0, bby0, bbx1, bby1) = bbox(&blitz, w as usize, h as usize, is_border);
+        for (what, o, b) in [
+            ("border left", obx0, bbx0),
+            ("border top", oby0, bby0),
+            ("border right", obx1, bbx1),
+            ("border bottom", oby1, bby1),
+        ] {
+            assert!((o as i64 - b as i64).abs() <= 1, "{what}: ours={o} blitz={b}");
+        }
+        // And the border-box itself is 133×100: content 105 + 2×(6+8) wide,
+        // 3×24 + 2×(6+8) tall.
+        assert_eq!((obx1 - obx0 + 1, oby1 - oby0 + 1), (133, 100), "our border box");
+
+        // The visible red interior is the border-box inset by the 6px bands.
+        let (orx0, ory0, orx1, ory1) = bbox(&ours.data, w as usize, h as usize, is_bg);
+        let (brx0, bry0, brx1, bry1) = bbox(&blitz, w as usize, h as usize, is_bg);
+        for (what, o, b) in [
+            ("red left", orx0, brx0),
+            ("red top", ory0, bry0),
+            ("red right", orx1, brx1),
+            ("red bottom", ory1, bry1),
+        ] {
+            assert!((o as i64 - b as i64).abs() <= 1, "{what}: ours={o} blitz={b}");
+        }
+        assert_eq!((orx0, ory0), (6, 6), "our red interior inset by the border");
+
+        // Ink: still 3 bands (wrap width unchanged), tops shifted by
+        // border+padding, matching blitz within the ink tolerance.
+        let o_tops = band_tops(&ours.data, w as usize, h as usize, is_ink);
+        let b_tops = band_tops(&blitz, w as usize, h as usize, is_ink);
+        assert_eq!(o_tops.len(), 3, "our ink bands: {o_tops:?}");
+        assert_eq!(b_tops.len(), 3, "blitz ink bands: {b_tops:?}");
+        for (i, (o, b)) in o_tops.iter().zip(&b_tops).enumerate() {
+            assert!(
+                (*o as i64 - *b as i64).abs() <= 2,
+                "ink band {i} top: ours={o} blitz={b}"
+            );
         }
     }
 }

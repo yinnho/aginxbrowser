@@ -8,9 +8,10 @@
 //! cross-check tests (background bbox exact, text ink extents and per-line
 //! band structure within the batch-3b ±2px ink tolerance).
 //!
-//! Not in this slice (tracked in docs/engine/render.md §19): borders,
-//! border-radius, images, gradients, z-index/stacking contexts, and text
-//! from mixed inline runs.
+//! Not in this slice (tracked in docs/engine/render.md §20): border-radius,
+//! patterned border styles (dashed/dotted/double paint as solid), per-side
+//! border colors/styles, images, gradients, z-index/stacking contexts, and
+//! text from mixed inline runs.
 
 use super::text::TextRaster;
 use super::{FontBook, PaintItem};
@@ -106,6 +107,19 @@ pub fn execute(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas) {
                 rect.height.round() as i64,
                 *color,
             ),
+            PaintItem::Border { rect, widths, color, .. } => {
+                // Four bands, square corners: top/bottom span the full
+                // border-box width (they own the corners), left/right inset
+                // by the top/bottom widths — the classic rectangular-border
+                // paint browsers produce with radius 0.
+                let [t, r, b, l] = *widths;
+                let (x, y) = (rect.x.round() as i64, rect.y.round() as i64);
+                let (w, h) = (rect.width.round() as i64, rect.height.round() as i64);
+                out.fill_rect(x, y, w, t as i64, *color);
+                out.fill_rect(x, y + h - b as i64, w, b as i64, *color);
+                out.fill_rect(x, y + t as i64, l as i64, h - t as i64 - b as i64, *color);
+                out.fill_rect(x + w - r as i64, y + t as i64, r as i64, h - t as i64 - b as i64, *color);
+            }
             PaintItem::Text { text, font_size, bold, color, x, y, wrap_at } => {
                 let r = fonts.rasterize_wrapped(text, *font_size, *bold, *color, *wrap_at);
                 // Tile row 0 sits `top` px above the leaf's line-box top.

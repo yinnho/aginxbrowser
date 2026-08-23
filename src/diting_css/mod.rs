@@ -416,6 +416,14 @@ pub struct ComputedStyle {
     /// Shorthand sides in CSS order (top right bottom left), already expanded.
     pub margin: Sides,
     pub padding: Sides,
+    /// Uniform border (batch 4b): per-side widths, ONE color and ONE style
+    /// for all sides — per-side colors/styles are later batches. A border
+    /// lays out (content inset) and paints only when `border_style` is set
+    /// to a line style; `none`/`hidden` (or unset, the CSS initial) mean no
+    /// border. Widths accept the keywords thin/medium/thick (1/3/5px).
+    pub border_width: Sides,
+    pub border_color: Option<Color>,
+    pub border_style: Option<BorderStyle>,
     /// Authored box size (non-inherited): px (em/rem resolved) or %.
     pub width: Option<Length>,
     pub height: Option<Length>,
@@ -461,6 +469,36 @@ pub enum PositionMode {
     Relative,
     Absolute,
     Fixed,
+}
+
+/// Border line style. Only `Solid` paints faithfully in this slice; the
+/// patterned styles occupy the same layout space but paint as solid
+/// (documented approximation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BorderStyle {
+    Solid,
+    Dashed,
+    Dotted,
+    Double,
+}
+
+/// What a border-style token means: not a style keyword at all, an explicit
+/// no-border, or a line style.
+enum BorderStyleKw {
+    NotAStyle,
+    NoBorder,
+    Line(BorderStyle),
+}
+
+fn border_style_kw(v: &str) -> BorderStyleKw {
+    match v {
+        "solid" => BorderStyleKw::Line(BorderStyle::Solid),
+        "dashed" => BorderStyleKw::Line(BorderStyle::Dashed),
+        "dotted" => BorderStyleKw::Line(BorderStyle::Dotted),
+        "double" => BorderStyleKw::Line(BorderStyle::Double),
+        "none" | "hidden" => BorderStyleKw::NoBorder,
+        _ => BorderStyleKw::NotAStyle,
+    }
 }
 
 /// One grid track sizing. `1fr` / `100px` / `auto` — minmax() and repeat()
@@ -736,6 +774,68 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             set_side(&mut style.padding, name, len(v));
             true
         }
+        "border" => {
+            // <border-width> || <border-style> || <color>, any order. Parse
+            // everything first and only then apply: an unparseable token
+            // drops the WHOLE declaration (CSS invalid-declaration recovery),
+            // with no partial side effects.
+            let mut width: Option<Length> = None;
+            let mut line: Option<Option<BorderStyle>> = None; // Some(None) = explicit none
+            let mut color: Option<Color> = None;
+            for tok in v.split_whitespace() {
+                let w = len(tok).or_else(|| match tok {
+                    "thin" => Some(Length::Px(1.0)),
+                    "medium" => Some(Length::Px(3.0)),
+                    "thick" => Some(Length::Px(5.0)),
+                    _ => None,
+                });
+                if let Some(l) = w {
+                    width = Some(l);
+                    continue;
+                }
+                match border_style_kw(tok) {
+                    BorderStyleKw::Line(bs) => line = Some(Some(bs)),
+                    BorderStyleKw::NoBorder => line = Some(None),
+                    BorderStyleKw::NotAStyle => match parse_color(tok) {
+                        Some(c) => color = Some(c),
+                        None => return false,
+                    },
+                }
+            }
+            if let Some(l) = width {
+                style.border_width =
+                    Sides { top: Some(l), right: Some(l), bottom: Some(l), left: Some(l) };
+            }
+            match line {
+                Some(Some(bs)) => style.border_style = Some(bs),
+                Some(None) => style.border_style = None,
+                None => {}
+            }
+            if let Some(c) = color {
+                style.border_color = Some(c);
+            }
+            width.is_some() || line.is_some() || color.is_some()
+        }
+        "border-width" => {
+            let sides = expand_sides(v, fonts);
+            style.border_width = sides;
+            sides.top.is_some()
+        }
+        "border-style" => {
+            // Uniform keyword only (per-side style lists are later batches).
+            match border_style_kw(v) {
+                BorderStyleKw::Line(bs) => {
+                    style.border_style = Some(bs);
+                    true
+                }
+                BorderStyleKw::NoBorder => {
+                    style.border_style = None;
+                    true
+                }
+                BorderStyleKw::NotAStyle => false,
+            }
+        }
+        "border-color" => parse_color(v).map(|c| style.border_color = Some(c)).is_some(),
         "font-size" => {
             // Resolved by the cascade's font-size pre-pass (em/% need the
             // PARENT font-size); here only px/keywords can apply directly.
@@ -1225,6 +1325,40 @@ mod tests {
         assert_eq!(parse_color("rgba(198,40,40,0.5)"), Some(Color(198, 40, 40, 128)));
         assert_eq!(parse_color("RGB(50%, 0%, 0%)"), Some(Color(128, 0, 0, 255)), "percent + case-insensitive");
         assert_eq!(parse_color("rgb(1,2)"), None, "wrong arity");
+    }
+
+    #[test]
+    fn border_shorthand_and_longhands_parse() {
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "border: 6px solid rgb(20,60,200)");
+        assert_eq!(s.border_width.top, Some(Length::Px(6.0)));
+        assert_eq!(s.border_width.left, Some(Length::Px(6.0)));
+        assert_eq!(s.border_style, Some(BorderStyle::Solid));
+        assert_eq!(s.border_color, Some(Color(20, 60, 200, 255)));
+
+        // Order-free shorthand + width keywords.
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "border: red thin dashed");
+        assert_eq!(s.border_width.left, Some(Length::Px(1.0)));
+        assert_eq!(s.border_color, Some(Color(255, 0, 0, 255)));
+        assert_eq!(s.border_style, Some(BorderStyle::Dashed));
+
+        // Longhands, incl. the 2-value side expansion.
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "border-width: 2px 4px; border-style: solid; border-color: blue");
+        assert_eq!(s.border_width.top, Some(Length::Px(2.0)));
+        assert_eq!(s.border_width.left, Some(Length::Px(4.0)));
+        assert_eq!(s.border_style, Some(BorderStyle::Solid));
+        assert_eq!(s.border_color, Some(Color(0, 0, 255, 255)));
+
+        // `none` computes any widths away (CSS initial style).
+        apply_declarations(&mut s, "border-style: none");
+        assert_eq!(s.border_style, None);
+
+        // Garbage token drops the whole shorthand declaration.
+        let mut s = ComputedStyle::default();
+        assert!(!apply_declarations(&mut s, "border: solid wat"));
+        assert_eq!(s.border_style, None);
     }
 
     #[test]

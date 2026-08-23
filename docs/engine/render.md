@@ -827,3 +827,37 @@ tile 几何推导重算）。
 
 **测试**：409→414 全绿（+paint 两件、+wrapped parity、+blitz 像素对照、
 +rgb() 解析）。
+
+## 20. 批次 4b 完成（2026-08-23）：border 盒绘制——第二 paint 原语
+
+**动机**：4a 只有 bg+text；真实页面盒模型的一半是 border（卡片、表格、
+分隔线全是它），且它**同时吃布局**（content inset）——双侧一起认领。
+
+**diting_css 建模**：`border_width: Sides`（1-4 值展开复用 expand_sides，
+thin/medium/thick=1/3/5px）+ `border_color`（单一色）+ `border_style`
+（Solid/Dashed/Dotted/Double；**none/hidden=CSS initial→宽归零**，无
+style 不设 border——`border-width: 3px` 单独写不画也不占位，与 CSS
+computed 语义一致）。shorthand `border: <w> <s> <c>` 任意顺序，**先解析
+进局部、全过再落地**（invalid-declaration recovery 不留部分副作用——
+直接 return false 会漏写已解析分量，测试抓到）。per-side 色/样式挂账；
+非 solid 样式按 solid 画（渐进近似，布局占位与 CSS 一致）。
+
+**布局**：to_taffy_style 补 `s.border = Rect<LengthPercentage>`（taffy
+0.13 border 是 LengthPercentage 非 f32）；authored size 的 content-box→
+border-box 换算（size/min/max）从 +padding 扩成 +padding+border——
+`width: 105px` + 6px border + 8px padding → 边盒 133。wrap_at 取
+content_box_width 自动扣除 border。
+
+**paint**：`PaintItem::Border{rect, widths[TRBL], color}`——collect 里
+紧随 Bg 之后推（background-clip: border-box=bg 画在 border 之下），先于
+子树。色缺省 currentColor=元素自身 computed color。execute 四带填充：
+**top/bottom 通栏（拥有角），left/right 垂直内缩**——radius 0 的经典
+矩形边框画法。
+
+**对照（paint_border_and_padding_match_blitz）**：105px 内容宽 + 8px
+padding + 6px solid 蓝边红底三行中文。断言：蓝带 bbox==元素边盒**精确
+±1** 且尺寸恰 133×100；可见红内缩=边盒 inset 6px（±1）；ink 仍 3 带
+（wrap 宽不变）、带顶随 border+padding 平移后 ±2 对齐 blitz。一次过。
+
+**测试**：414→416。挂账：radius/图案样式逐像素/per-side 边属性/
+box-sizing: border-box（现 subset 未建模，authored 一律 content-box）。
