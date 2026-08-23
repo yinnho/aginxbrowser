@@ -717,6 +717,21 @@ fn build_element(
 #[derive(Debug, Clone)]
 pub enum PaintItem {
     Bg { dom_id: NodeId, rect: Rect, color: [u8; 4] },
+    /// A replaced element's placeholder (batch 5a): an optional gray box
+    /// (skipped when the author styled a background — that already shows)
+    /// plus the alt text run, already resolved to font/color context and
+    /// wrapped inside the box at paint time. Upstream blitz paints
+    /// nothing for an unloaded img (`draw_image` is a no-op without
+    /// raster data), so the placeholder is OUR no-network product policy,
+    /// locked by structural tests; the cross-checked part is the shared
+    /// box geometry (batch 2 rects) and the img's own CSS background.
+    Replaced {
+        rect: Rect,
+        /// (text, font_size, bold, color) of the alt run; None without an
+        /// alt attribute (present-but-empty paints box-only, like alt="").
+        alt: Option<(String, f32, bool, [u8; 4])>,
+        fill_placeholder: bool,
+    },
     /// Begin clipping descendants to `rect` (the padding box of an
     /// overflow-clipping element) until the matching [`PaintItem::PopClip`].
     /// The flat item list carries the tree's clip structure in document
@@ -872,6 +887,7 @@ pub fn layout_dom_with_paint(
     // box is recorded, a run's Text at its leaf — document order, parents
     // before children.
     fn collect(
+        tree: &DomTree,
         taffy_tree: &TaffyTree<TextLeaf>,
         node_map: &HashMap<taffy::tree::NodeId, NodeId>,
         styles: &HashMap<NodeId, ComputedStyle>,
@@ -910,6 +926,29 @@ pub fn layout_dom_with_paint(
                         .unwrap_or([0, 0, 0, 255]);
                     items.push(PaintItem::Border { dom_id: *dom_id, rect, widths, color });
                 }
+            }
+            // A replaced box paints its own placeholder over its bg/border
+            // (batch 5a). The alt run resolves against the img's inherited
+            // font/color context here so paint stays style-free.
+            let replaced = tree
+                .with_node(*dom_id, |n| n.as_element().map(|e| is_replaced_tag(&e.local)))
+                .flatten()
+                .unwrap_or(false);
+            if replaced {
+                let alt = tree
+                    .with_node(*dom_id, |n| n.get_attribute("alt").map(|v| v.to_string()))
+                    .flatten()
+                    .map(|text| {
+                        let (font_size, bold) = font_context(tree, *dom_id, styles);
+                        (text, font_size, bold, color_context(tree, *dom_id, styles))
+                    });
+                // The gray box only when the author gave no visible
+                // background — an authored bg already reads as "box here".
+                let fill_placeholder = styles
+                    .get(dom_id)
+                    .and_then(|s| s.background_color)
+                    .is_none_or(|c| c.3 == 0);
+                items.push(PaintItem::Replaced { rect, alt, fill_placeholder });
             }
             // A clipping element constrains its DESCENDANTS' paint (its own
             // bg/border above are not clipped) to the padding box — the
@@ -972,13 +1011,23 @@ pub fn layout_dom_with_paint(
             });
         }
         for child in taffy_tree.children(node).unwrap_or_default().iter().copied() {
-            collect(taffy_tree, node_map, styles, rects, items, child, abs, viewport_width);
+            collect(tree, taffy_tree, node_map, styles, rects, items, child, abs, viewport_width);
         }
         if clips {
             items.push(PaintItem::PopClip);
         }
     }
-    collect(&taffy_tree, &node_map, styles, &mut rects, &mut items, root_node, (0.0, 0.0), viewport_width);
+    collect(
+        tree,
+        &taffy_tree,
+        &node_map,
+        styles,
+        &mut rects,
+        &mut items,
+        root_node,
+        (0.0, 0.0),
+        viewport_width,
+    );
     (rects, items)
 }
 
@@ -2776,5 +2825,182 @@ mod bridge_cross_check {
                 );
             }
         }
+    }
+
+    /// Replaced-box paint, cross-checkable half (batch 5a): an unloaded
+    /// img's own CSS background IS a shared paint item — blitz paints it
+    /// for the element just like any box, we paint it via the same Bg
+    /// path (the img taffy leaf is in node_map). With no alt there is no
+    /// ink on either side: blitz's draw_image is a no-op without raster
+    /// data, and we paint neither placeholder (author bg present) nor
+    /// text. Background bbox exact ±1.
+    #[test]
+    fn paint_img_background_match_blitz() {
+        let html = r#"<body><img id="t" src="https://example.invalid/x.png" width="100" height="50"></body>"#;
+        let sheet = "body { margin: 0; } #t { background: rgb(198,40,40); }";
+
+        let doc = blitz_doc(html, sheet);
+        let (w, h) = (200u32, 200u32);
+        let mut doc = doc;
+        let blitz = anyrender::render_to_buffer::<anyrender_vello_cpu::VelloCpuImageRenderer, _>(
+            |scene| {
+                use anyrender::PaintScene as _;
+                use peniko::kurbo::Rect;
+                scene.fill(
+                    peniko::Fill::NonZero,
+                    Default::default(),
+                    peniko::Color::WHITE,
+                    Default::default(),
+                    &Rect::new(0.0, 0.0, w as f64, h as f64),
+                );
+                blitz_paint::paint_scene(scene, &mut doc, 1.0, w, h, 0, 0);
+            },
+            w,
+            h,
+        );
+
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let fonts = fixture_fonts();
+        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW);
+        let mut ours = paint::Canvas::new_filled(w as usize, h as usize, [255, 255, 255, 255]);
+        paint::execute(&items, &fonts, &mut ours);
+
+        // Policy bookkeeping: the Replaced item is there but suppressed to
+        // box-less (author background already reads as the box).
+        let replaced = items
+            .iter()
+            .find_map(|i| match i {
+                PaintItem::Replaced { fill_placeholder, .. } => Some(*fill_placeholder),
+                _ => None,
+            })
+            .expect("img must emit a Replaced item");
+        assert!(!replaced, "authored background suppresses the gray placeholder");
+
+        let is_bg = |p: &[u8]| p[0] > 130 && p[1] < 110 && p[2] < 110;
+        let is_ink = |p: &[u8]| p[0] < 110 && p[1] < 110 && p[2] < 110;
+        fn bbox(buf: &[u8], w: usize, h: usize, hit: impl Fn(&[u8]) -> bool) -> (usize, usize, usize, usize) {
+            let mut b: Option<(usize, usize, usize, usize)> = None;
+            for y in 0..h {
+                for x in 0..w {
+                    if hit(&buf[(y * w + x) * 4..]) {
+                        b = Some(match b {
+                            Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                            None => (x, y, x, y),
+                        });
+                    }
+                }
+            }
+            b.expect("bbox: no hit pixels")
+        }
+        let (ox0, oy0, ox1, oy1) = bbox(&ours.data, w as usize, h as usize, is_bg);
+        let (bx0, by0, bx1, by1) = bbox(&blitz, w as usize, h as usize, is_bg);
+        for (what, o, b) in [
+            ("bg left", ox0, bx0),
+            ("bg top", oy0, by0),
+            ("bg right", ox1, bx1),
+            ("bg bottom", oy1, by1),
+        ] {
+            assert!((o as i64 - b as i64).abs() <= 1, "{what}: ours={o} blitz={b}");
+        }
+        for (name, buf) in [("ours", &ours.data), ("blitz", &blitz)] {
+            assert!(
+                !(0..w as usize * h as usize).any(|i| is_ink(&buf[i * 4..])),
+                "{name}: no ink without an alt on an unloaded img"
+            );
+        }
+    }
+
+    /// Replaced-box placeholder, OUR policy half (batch 5a): upstream blitz
+    /// paints nothing for an unloaded img, so the gray box + alt run are
+    /// locked structurally — placeholder bbox == the img rect exactly
+    /// (geometry itself is the batch-2 cross-checked part), alt ink lives
+    /// inside the box, alt="" degrades to box-only, and the box honors the
+    /// attribute-derived aspect ratio.
+    #[test]
+    fn paint_replaced_placeholder_structural() {
+        let html = r#"<body><img id="t" src="https://example.invalid/x.png" width="100" alt="谛听图"></body>"#;
+        let sheet = "body { margin: 0; }";
+        // width=100 with no height → ratio 2:1 → 100×50 at (0,0).
+
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let fonts = fixture_fonts();
+        let (rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW);
+        let img_rect = rects[&tree.query_selector("#t").unwrap().unwrap()];
+        assert_eq!((img_rect.width, img_rect.height), (100.0, 50.0), "aspect-ratio derived box");
+
+        let (replaced_rect, alt, fill) = items
+            .iter()
+            .find_map(|i| match i {
+                PaintItem::Replaced { rect, alt, fill_placeholder } => {
+                    Some((*rect, alt.clone(), *fill_placeholder))
+                }
+                _ => None,
+            })
+            .expect("img must emit a Replaced item");
+        assert!(fill, "no authored background → gray placeholder shows");
+        assert!(alt.is_some(), "alt attribute resolves to a run");
+        assert_eq!(
+            (
+                replaced_rect.x.round(),
+                replaced_rect.y.round(),
+                replaced_rect.width.round(),
+                replaced_rect.height.round()
+            ),
+            (
+                img_rect.x.round(),
+                img_rect.y.round(),
+                img_rect.width.round(),
+                img_rect.height.round()
+            ),
+            "placeholder covers exactly the img border box"
+        );
+
+        // Pixels: gray box exactly on the rect, dark alt ink inside it.
+        let (w, h) = (200usize, 200usize);
+        let mut ours = paint::Canvas::new_filled(w, h, [255, 255, 255, 255]);
+        paint::execute(&items, &fonts, &mut ours);
+        let is_gray = |p: &[u8]| {
+            (p[0] as i32 - 224).abs() < 6
+                && (p[1] as i32 - 224).abs() < 6
+                && (p[2] as i32 - 224).abs() < 6
+        };
+        let is_ink = |p: &[u8]| p[0] < 110 && p[1] < 110 && p[2] < 110;
+        let bbox = |hit: &dyn Fn(&[u8]) -> bool| -> (usize, usize, usize, usize) {
+            let mut b: Option<(usize, usize, usize, usize)> = None;
+            for y in 0..h {
+                for x in 0..w {
+                    if hit(&ours.data[(y * w + x) * 4..]) {
+                        b = Some(match b {
+                            Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                            None => (x, y, x, y),
+                        });
+                    }
+                }
+            }
+            b.expect("bbox: no hit pixels")
+        };
+        assert_eq!(bbox(&is_gray), (0, 0, 99, 49), "gray box covers the 100×50 rect");
+        let (ix0, iy0, ix1, iy1) = bbox(&is_ink);
+        assert!(
+            ix1 <= 99 && iy1 <= 49,
+            "alt ink inside the box: ({ix0},{iy0})-({ix1},{iy1})"
+        );
+
+        // alt="" is decorative: box only, zero ink.
+        let html = r#"<body><img id="t" src="https://example.invalid/x.png" width="100" alt=""></body>"#;
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let styles = our_styles(&tree, &rules);
+        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW);
+        let mut canvas = paint::Canvas::new_filled(w, h, [255, 255, 255, 255]);
+        paint::execute(&items, &fonts, &mut canvas);
+        assert_eq!(bbox(&is_gray), (0, 0, 99, 49), "empty alt still boxes");
+        assert!(
+            !(0..w * h).any(|i| is_ink(&canvas.data[i * 4..])),
+            "alt=\"\" paints no text"
+        );
     }
 }

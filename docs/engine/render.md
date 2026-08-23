@@ -915,3 +915,36 @@ Text item 数==5（4 词叶+1 b run 叶）。一次过——词叶位置 3a 已�
 clip（4c）/mix run（4d）——diting paint 栈与 blitz 的像素对照面覆盖
 真实页面的主体形态。仍挂：radius/图案样式/per-side 边属性/img 替换盒/
 渐变/z-index/BFC。
+
+## 23. 批次 5a 完成（2026-08-23）：替换盒占位——img 灰盒 + alt
+
+**契约探底**：blitz 无网络模式下 img 画什么？`blitz-paint/src/render.rs`
+`draw_image` 以 `if let Some(image) = self.element.raster_image_data()`
+开头、无数据整函数 no-op——**无占位、无 alt、无假边框**，元素只剩 CSS
+给的 bg/border。所以本批拆两半：**可对照半**（img 的 CSS 背景是双引擎
+共享 paint 面，像素对照）；**政策半**（灰盒+alt 是 diting 栈自己的无网
+占位行为，blitz 没有，锁结构断言）。
+
+**PaintItem::Replaced{rect, alt, fill_placeholder}**：collect 在替换元素
+（img/video/iframe/canvas/object/embed——复用 is_replaced_tag）处、Bg/
+Border 之后推 Replaced。alt run 在 collect 解析齐 `(text, fs, bold,
+color)`（font_context/color_context 继承链，paint.rs 保持无样式访问）；
+`fill_placeholder` = 作者没给可见 background_color 才填灰——有 bg 的盒
+子已经"看得见"，灰盒反而盖掉作者样式。alt=""（存在但空）→ 只画盒不画
+字（CSS 装饰图语义）。
+
+**paint.rs**：Replaced 分支——`fill_placeholder` 时整边盒填 rgb(224,224,
+224)；alt 非空时 `rasterize_wrapped(alt, …, wrap_at=盒宽)`，blit 于
+`(盒x, 盒y + r.top)`（与其他 Text tile 同一套 cramped-CJK 顶部偏移）。
+
+**对照（paint_img_background_match_blitz）**：100×50 img 带 rgb(198,40,40)
+背景、无 alt——bg bbox 双侧精确 ±1；双侧零 ink（blitz 不画 alt，我们
+有 bg 不画灰盒）。**结构（paint_replaced_placeholder_structural）**：
+`width=100 alt="谛听图"`（无 height→ratio 2:1→100×50，batch 2 已证的
+几何）；灰盒 bbox==(0,0,99,49) 逐像素精确；alt ink 落盒内；alt="" 降级
+盒-only 零 ink。
+
+**测试**：419→422（+img bg 像素对照、+占位结构）。挂账更新：真图绘制
+（image 解码/object-fit/object-position——blitz draw_image 已有 compute_
+object_fit 可抄）、alt 垂直溢出盒（多行 alt 目前允许溢出盒底，浏览器
+会裁）、iframe/video 专属占位形态。

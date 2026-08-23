@@ -8,9 +8,11 @@
 //! cross-check tests (background bbox exact, text ink extents and per-line
 //! band structure within the batch-3b ±2px ink tolerance).
 //!
-//! Not in this slice (tracked in docs/engine/render.md §22): border-radius,
+//! Not in this slice (tracked in docs/engine/render.md §23): border-radius,
 //! patterned border styles (dashed/dotted/double paint as solid), per-side
-//! border colors/styles, images, gradients, z-index/stacking contexts.
+//! border colors/styles, real image decoding (unloaded replaced boxes get
+//! our gray-placeholder + alt-text policy, not a blitz-parity feature),
+//! gradients, z-index/stacking contexts.
 
 use super::text::TextRaster;
 use super::{FontBook, PaintItem};
@@ -160,6 +162,28 @@ pub fn execute(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas) {
                 out.fill_rect(x, y + h - b as i64, w, b as i64, *color);
                 out.fill_rect(x, y + t as i64, l as i64, h - t as i64 - b as i64, *color);
                 out.fill_rect(x + w - r as i64, y + t as i64, r as i64, h - t as i64 - b as i64, *color);
+            }
+            PaintItem::Replaced { rect, alt, fill_placeholder } => {
+                let (x, y) = (rect.x.round() as i64, rect.y.round() as i64);
+                let (w, h) = (rect.width.round() as i64, rect.height.round() as i64);
+                if *fill_placeholder && w > 0 && h > 0 {
+                    out.fill_rect(x, y, w, h, [224, 224, 224, 255]);
+                }
+                if let Some((text, font_size, bold, color)) = alt {
+                    if !text.trim().is_empty() {
+                        // The alt run wraps at the box width; the tile's
+                        // `top` offsets ink above the box top exactly like
+                        // any other text tile (cramped-CJK leading).
+                        let r = fonts.rasterize_wrapped(
+                            text,
+                            *font_size,
+                            *bold,
+                            *color,
+                            w.max(0) as f32,
+                        );
+                        out.blit_text(&r, x, (y as f32 + r.top).round() as i64);
+                    }
+                }
             }
             PaintItem::Text { text, font_size, bold, color, x, y, wrap_at } => {
                 let r = fonts.rasterize_wrapped(text, *font_size, *bold, *color, *wrap_at);
