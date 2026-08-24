@@ -1774,6 +1774,73 @@ pub fn layout_dom_with_paint_and_images(
         return (rects, items);
     };
 
+    let available = Size {
+        width: AvailableSpace::Definite(viewport_width),
+        height: AvailableSpace::MaxContent,
+    };
+
+    // --- static-position harvest (blitz#764 review point) ----------------
+    // An out-of-flow box with BOTH insets auto on an axis resolves at its
+    // static position: where it would have been in its original flow. The
+    // reparent pass below moves the box to its containing block first, and
+    // taffy's auto-inset fallback then uses the flow position inside its
+    // CURRENT taffy parent - the CB - so the box lands after the CB's last
+    // in-flow child instead of at its DOM-parent flow spot. Harvest by
+    // laying the tree out once BEFORE reparenting: with the boxes still
+    // absolute children of their DOM parents, taffy's auto-inset fallback
+    // IS the CSS static position (its flow spot among the original
+    // siblings, which per CSS is computed with every OTHER out-of-flow box
+    // still out of flow - exactly what an absolute child sees). No style
+    // mutation, so the main layout below starts from a clean cache.
+    let mut static_pos: HashMap<NodeId, (f32, f32)> = HashMap::new();
+    {
+        let needs_static: Vec<(taffy::tree::NodeId, NodeId)> = node_map
+            .iter()
+            .filter(|(_, dom_id)| {
+                styles.get(*dom_id).is_some_and(|s| {
+                    matches!(s.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
+                        && ((s.left.is_none() && s.right.is_none())
+                            || (s.top.is_none() && s.bottom.is_none()))
+                })
+            })
+            .map(|(t, d)| (*t, *d))
+            .collect();
+        if !needs_static.is_empty() {
+            let laid_out = taffy_tree
+                .compute_layout_with_measure(root_node, available, |inputs, _id, ctx, style| {
+                    match ctx {
+                        Some(TextLeaf::Run { text, font_size, bold, .. }) => {
+                            measure_text_leaf(text, *font_size, *bold, fonts, &inputs)
+                        }
+                        _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
+                    }
+                })
+                .is_ok();
+            if laid_out {
+                fn abs_rects(
+                    taffy_tree: &TaffyTree<TextLeaf>,
+                    node: taffy::tree::NodeId,
+                    offset: (f32, f32),
+                    out: &mut HashMap<taffy::tree::NodeId, Rect>,
+                ) {
+                    let Ok(layout) = taffy_tree.layout(node) else { return };
+                    let abs = (offset.0 + layout.location.x, offset.1 + layout.location.y);
+                    out.insert(node, Rect { x: abs.0, y: abs.1, width: layout.size.width, height: layout.size.height });
+                    for child in taffy_tree.children(node).unwrap_or_default() {
+                        abs_rects(taffy_tree, child, abs, out);
+                    }
+                }
+                let mut now: HashMap<taffy::tree::NodeId, Rect> = HashMap::new();
+                abs_rects(&taffy_tree, root_node, (0.0, 0.0), &mut now);
+                for (tnid, dom_id) in &needs_static {
+                    if let Some(r) = now.get(tnid) {
+                        static_pos.insert(*dom_id, (r.x, r.y));
+                    }
+                }
+            }
+        }
+    }
+
     // Absolute/fixed reparent pass (upstream's containing-block fix-up):
     // taffy resolves an absolute child against its DIRECT taffy parent, so
     // move each out-of-flow box to its CSS containing block — the nearest
@@ -1851,10 +1918,6 @@ pub fn layout_dom_with_paint_and_images(
             let _ = taffy_tree.add_child(target, node);
         }
     }
-    let available = Size {
-        width: AvailableSpace::Definite(viewport_width),
-        height: AvailableSpace::MaxContent,
-    };
     // Measured-leaf dispatch (batch 3a): pure-text runs carry a TextLeaf
     // context and measure through the FontBook; every other leaf must fall
     // through to taffy's own style-based sizing — the closure fires for ALL
@@ -2062,6 +2125,7 @@ pub fn layout_dom_with_paint_and_images(
         node_map: &HashMap<taffy::tree::NodeId, NodeId>,
         styles: &HashMap<NodeId, ComputedStyle>,
         images: &HashMap<NodeId, DecodedImage>,
+        static_pos: &HashMap<NodeId, (f32, f32)>,
         rects: &mut HashMap<NodeId, Rect>,
         items: &mut Vec<PaintItem>,
         node: taffy::tree::NodeId,
@@ -2072,7 +2136,23 @@ pub fn layout_dom_with_paint_and_images(
         let abs = (offset.0 + layout.location.x, offset.1 + layout.location.y);
         let mut clips = false;
         if let Some(dom_id) = node_map.get(&node) {
-            let rect = Rect { x: abs.0, y: abs.1, width: layout.size.width, height: layout.size.height };
+            let mut rect = Rect { x: abs.0, y: abs.1, width: layout.size.width, height: layout.size.height };
+            // Static-position override (the harvest pass above): a
+            // both-auto axis of an out-of-flow box takes its ORIGINAL flow
+            // coordinate, not the post-reparent CB flow tail taffy fell
+            // back to. Sizes stay taffy's (shrink-to-fit against the CB is
+            // correct per CSS).
+            if let Some((sx, sy)) = static_pos.get(dom_id) {
+                let s = styles.get(dom_id);
+                let x_auto = s.is_none_or(|s| s.left.is_none() && s.right.is_none());
+                let y_auto = s.is_none_or(|s| s.top.is_none() && s.bottom.is_none());
+                if x_auto {
+                    rect.x = *sx;
+                }
+                if y_auto {
+                    rect.y = *sy;
+                }
+            }
             rects.insert(*dom_id, rect);
             if let Some(c) = styles.get(dom_id).and_then(|s| s.background_color) {
                 if c.3 != 0 && rect.width > 0.0 && rect.height > 0.0 {
@@ -2331,7 +2411,7 @@ pub fn layout_dom_with_paint_and_images(
         pos.sort_by_key(|(z, _)| *z);
         for list in [neg, mid, pos] {
             for (_, i) in list {
-                collect(tree, taffy_tree, node_map, styles, images, rects, items, children[i], abs, viewport_width);
+                collect(tree, taffy_tree, node_map, styles, images, static_pos, rects, items, children[i], abs, viewport_width);
             }
         }
         if clips {
@@ -2344,6 +2424,7 @@ pub fn layout_dom_with_paint_and_images(
         &node_map,
         styles,
         &images,
+        &static_pos,
         &mut rects,
         &mut items,
         root_node,
@@ -3500,10 +3581,77 @@ mod bridge_cross_check {
         assert!((fx.x - 12.0).abs() < EPS as f32 && (fx.y - 8.0).abs() < EPS as f32, "fixed at viewport: {:?}", fx);
     }
 
+    /// nicoburns' blitz#764 review point: after reparenting, the static-
+    /// position fallback (auto insets) must come from the ORIGINAL flow
+    /// parent. An inset-less absolute box inside a margin-offset static
+    /// parent sits at its would-be flow spot (#mid's content origin), not
+    /// at the containing block's padding edge (#gp's).
+    #[test]
+    fn absolute_auto_insets_use_original_flow_static_position() {
+        let html = r#"<body>
+            <div id="gp"><div id="mid"><div id="abs">x</div></div></div>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #gp { position: relative; width: 300px; height: 200px; }
+            #mid { width: 200px; height: 100px; margin-top: 40px; margin-left: 30px; }
+            #abs { position: absolute; width: 40px; height: 20px; }
+        "#;
+        // Hand-computed (no blitz cross-assert — see the divergence note in
+        // absolute_reparent_matches_blitz): #mid's margin-top:40 escapes
+        // through #gp, so #mid's border-box origin is (30, 40) and the abs
+        // box's static spot is #mid's content origin = (30, 40). Anchoring
+        // at the CB's padding edge instead would give (0, 40).
+        let (_doc, tree, _styles, rects) = both_engines(html, sheet);
+        let abs = rects[&tree.query_selector("#abs").unwrap().unwrap()];
+        assert!(
+            (abs.x - 30.0).abs() < EPS as f32 && (abs.y - 40.0).abs() < EPS as f32,
+            "inset-less abs keeps its ORIGINAL flow position: {:?}",
+            abs
+        );
+    }
+
+    /// Mixed axes: top inset set, left/right auto — y comes from the inset
+    /// against the CB (taffy), x from the harvested static position. And a
+    /// fixed box with both axes auto also resolves at its flow spot.
+    #[test]
+    fn absolute_one_axis_inset_takes_static_only_on_auto_axis() {
+        let html = r#"<body>
+            <div id="gp"><div id="mid"><div id="mix"></div><div id="fx"></div></div></div>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #gp { position: relative; width: 300px; height: 200px; }
+            #mid { width: 200px; height: 100px; margin-top: 40px; margin-left: 30px; }
+            #mix { position: absolute; top: 5px; width: 40px; height: 20px; }
+            #fx { position: fixed; width: 26px; height: 14px; }
+        "#;
+        let (_doc, tree, _styles, rects) = both_engines(html, sheet);
+        // Margin note: #mid's margin-top:40 escapes through #gp (position:
+        // relative doesn't establish a BFC), so #gp's own border box lands
+        // at (0, 40) and #mid's content origin at (30, 40).
+        // #mix: y = CB (#gp) padding edge 40 + top inset 5; x = static
+        // (#mid's content origin 30) — NOT taffy's CB-flow fallback x=0.
+        let mix = rects[&tree.query_selector("#mix").unwrap().unwrap()];
+        assert!(
+            (mix.x - 30.0).abs() < EPS as f32 && (mix.y - 45.0).abs() < EPS as f32,
+            "top inset + auto left: y from CB, x from static: {:?}",
+            mix
+        );
+        // #fx's hypothetical flow spot: #mix is out of flow, so #fx would be
+        // the FIRST in-flow child of #mid — its content origin, not one line
+        // down.
+        let fx = rects[&tree.query_selector("#fx").unwrap().unwrap()];
+        assert!(
+            (fx.x - 30.0).abs() < EPS as f32 && (fx.y - 40.0).abs() < EPS as f32,
+            "inset-less fixed at its flow spot: {:?}",
+            fx
+        );
+    }
+
     /// Absolute stretch between opposing insets.
     #[test]
-    fn absolute_stretch_matches_blitz() {
-        let html = r#"<body><div id="gp"><div id="st"></div></div></body>"#;
+    fn absolute_stretch_matches_blitz() {        let html = r#"<body><div id="gp"><div id="st"></div></div></body>"#;
         let sheet = r#"
             body { margin: 0; }
             #gp { position: relative; width: 300px; height: 200px; }

@@ -1507,3 +1507,39 @@ fixture 一致）；blitz 无 floats 特性逐行堆叠 y=0/80/160/240，差异�
 **测试** +4（总 459）：密度最近 1x / 宽度最大适配+全超兜底 /
 picture 三景（desktop 命中、窄视口跳到 tablet、无 media 首个赢、
 全不匹配回落 img src）/ 坏描述符隔离与无描述符当 1x。
+
+## 47. abspos 静态位置：reparent 后回填原流位（2026-08-24，blitz#764 评审联动）
+
+nicoburns 在 blitz#764（我们自己提的 issue）回复点名：**"just reparenting
+the node is wrong. You also need to track its actual parent for computing
+the static position."** 自查证实 reparent pass 恰有这半缺陷——§14 挂账项落地。
+
+**语义**：双 auto 轴（如 left/right 都未设）的 abspos 盒按 CSS 2.2 §10.6.4
+解析到**静态位置**——"假设自己在流内的落点"（其它 abspos 仍出流）。reparent
+到 CB 后，taffy 的 auto-inset fallback 改用**当前 taffy 父级（=CB）的流尾**，
+盒落到 CB 最后一个流内子级之后而非原 DOM 父级内容顶——探针实测差 100px+。
+
+**修复（diting_layout/mod.rs）**：reparent 之前加一趟 **static-position
+harvest**——
+
+1. 扫 `needs_static`：position 为 absolute/fixed 且至少一轴双 auto 的节点
+2. 用同一 measure closure 跑一次 `compute_layout_with_measure`（此刻盒仍是
+   DOM 父级下的 absolute 子级，**taffy 的 auto-inset fallback 恰好就是 CSS
+   静态位置**：原兄弟间的流落点，且天然满足"其它出流盒不占位"）
+3. `abs_rects` 递归采集页绝对坐标存 `static_pos: HashMap<NodeId,(f32,f32)>`
+4. reparent + 主布局后，collect 阶段对双 auto 轴覆盖 x/y
+
+**关键教训（两次踩坑）**：
+- 首版把盒临时翻 `Position::Relative` 采集再恢复——但翻样式的 `set_style`
+  只是写了内存副本忘了应用（bug），而**不翻恰好更对**：absolute-in-
+  original-parent 的 fallback 本就是静态位，零样式变更、零缓存污染
+- 诊断期的 y=145 假象正是那组 set_style dirty 缓存污染所致；采集趟完全不动
+  样式后，taffy 对 inset-set 轴本来就正确锚 CB padding edge + inset
+  （margin 逃逸把 #gp 推到 y=40，`top:5px` → 45 = 40+5，CSS 正确值）
+
+**覆盖逻辑**只动双 auto 轴，inset-set 轴信任 taffy。margin collapsing 顺带
+定性：relative 不建 BFC，子级 margin-top 穿透父级（旧测试 y=45 之谜即此）。
+
+**测试** +2（总 461）：无 inset abs 落原流位 (30,40) 非 CB (0,40)；
+混合轴（top:5 + 双 auto 左右）y=CB+inset=45、x=静态=30；无 inset fixed
+同样落静态位。多趟布局模式与 float continuation（§42）同款。
