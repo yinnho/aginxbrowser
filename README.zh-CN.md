@@ -21,7 +21,7 @@
 |---|---|---|---|---|
 | 为谁设计 | **Agent-first** | 人调试 | 抓取服务 | LLM 套壳 |
 | 依赖 | 单二进制，无 Chromium | Chromium ~500MB | Docker ~1GB | Chromium |
-| 看得见（截图） | ✅ 内置 Blitz 渲染 | 需 Chromium | ❌ | 需 Chromium |
+| 看得见（截图） | ✅ 内置 diting 渲染引擎 | 需 Chromium | ❌ | 需 Chromium |
 | 读得懂 | markdown + js_extract | 要自己写 | markdown | 要自己写 |
 | 找得到（搜索） | ✅ 5 引擎聚合 | ❌ | ❌ | ❌ |
 | 操得了 | session 索引化交互 | DevTools | ❌ | LLM 驱动 |
@@ -32,7 +32,7 @@
 
 Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操得了、跑得动。** 一个二进制全包，systemd 守护，MCP 直连 Claude/Cursor，零依赖启动即服务。
 
-**核心优势：不依赖 Chromium。** AginxBrowser 内联了 Obscura 浏览器内核（V8 + 自研 HTTP 栈 + 内置 Blitz 渲染栈），不需要 Puppeteer、不需要 Chrome、不需要 Docker。一个 Rust 二进制，systemd 守护，就是 agent 的浏览器基础设施。
+**核心优势：不依赖 Chromium。** AginxBrowser 内联了完整的浏览器引擎（V8 + Rust HTTP 栈 + 自有的 diting CSS/布局/绘制渲染引擎，以 Blitz/Stylo/Taffy 谱系为参照实现），不需要 Puppeteer、不需要 Chrome、不需要 Docker。一个 Rust 二进制，systemd 守护，就是 agent 的浏览器基础设施。
 
 ## 三件套：反爬 + 长会话 + MCP 原生
 
@@ -54,7 +54,7 @@ Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操
 - **交互式 Session**：持久化浏览器会话，索引化交互（state/click/input/scroll/eval），AI Agent 像人一样浏览网页
 - **CAPTCHA 自动解决**：检测验证码类型，可选 2captcha 自动解决，搜索不再卡死
 - **JS 数据提取**：`js_extract` 参数，从 SPA 提取 `window.__INITIAL_STATE__` 等结构化数据
-- **截图渲染**：`/screenshot` 端点（`--features screenshot`），JS 渲染后的 DOM 喂给内置 Blitz 渲染栈（Stylo/Taffy/vello_cpu，纯 CPU，无 Chromium）出 PNG，agent 的视觉输入
+- **截图渲染**：`/screenshot` 端点（`--features screenshot`），JS 渲染后的 DOM 用自有的 diting 渲染引擎出 PNG——纯 CPU，无 Chromium，agent 的视觉输入
 - **Cloudflare 自动绕过**：检测 "Just a moment..." 挑战页，自动等待 `cf_clearance`
 - **TLS 指纹伪装**：stealth 模式模拟 Chrome145/Firefox133/Safari/Edge，可按请求切换
 - **MCP Server**：`--mcp` 模式暴露 13 个工具（fetch/eval/click/search + 9 个 session 工具），Claude Code / Claude Desktop / Cursor 直接调用
@@ -147,7 +147,7 @@ aginxbrowser/
     ├── server.rs            # 业务层（fetch/click/eval/search）
     ├── session.rs           # 交互式浏览器会话
     ├── captcha.rs           # CAPTCHA 检测与自动解决
-    ├── render.rs            # 分层渲染（HTTP 直取 → obscura 浏览器）
+    ├── render.rs            # 分层渲染（HTTP 直取 → diting 浏览器引擎）
     ├── mcp.rs               # MCP Server（13 个工具）
     ├── firecrawl_compat.rs  # Firecrawl 兼容 /v1/scrape 端点
     ├── browser.rs           # 顶层 API：Browser、BrowserBuilder
@@ -163,10 +163,10 @@ aginxbrowser/
     │   ├── sogou_wechat.rs  #   搜狗微信（HTML 解析，plain reqwest + /link 解析）
     │   └── google.rs        #   Google（HTML 解析，wreq stealth + proxy）
     │
-    ├── obscura_dom/         # HTML 解析、DOM 树、CSS 选择器
-    ├── obscura_net/         # HTTP 客户端、Cookie、编码、代理
-    ├── diting_js/           # V8 运行时、JS ops、模块加载(原 obscura_js)
-    └── obscura_browser/     # 页面导航、生命周期、浏览器上下文
+    ├── diting_dom/          # HTML 解析、DOM 树、CSS 选择器
+    ├── diting_net/          # HTTP 客户端、Cookie、编码、代理
+    ├── diting_js/           # V8 运行时、JS ops、模块加载
+    └── diting_browser/      # 页面导航、生命周期、浏览器上下文
 ```
 
 ## 构建
@@ -178,7 +178,7 @@ cargo build --release
 # 含 stealth（需 go + cmake + C++ 工具链，启用 TLS 指纹伪装）
 cargo build --release --features stealth
 
-# 含截图渲染（启用 /screenshot，拉入内置 Blitz 渲染栈，二进制 +30-40MB）
+# 含截图渲染（启用 /screenshot，加入渲染栈，二进制 +30-40MB）
 cargo build --release --features screenshot
 
 # 全功能（推荐生产部署）
@@ -220,7 +220,7 @@ AginxBrowser 定位是**纯外挂基础设施**——像真实浏览器一样作
 
 ## 已知限制
 
-1. **截图需 opt-in feature**：`/screenshot` 需 `cargo build --release --features screenshot` 启用（拉入内置 Blitz 渲染栈，二进制 +30-40MB）。内置 Blitz 是 beta，复杂站点 CSS 渲染近似（非 Chromium 像素级精准），图片子资源不单独拉取
+1. **截图需 opt-in feature**：`/screenshot` 需 `cargo build --release --features screenshot` 启用（加入渲染栈，二进制 +30-40MB）。默认渲染管线为 Blitz 谱系（Stylo/Taffy/vello_cpu）；传 `engine: "diting"` 切到自有 CSS+布局+绘制栈。两者对复杂站点 CSS 均为近似渲染（非 Chromium 像素级精准）
 2. **元素坐标已支持（块级）**：`/screenshot` 带 `selector` 返回元素页面坐标（`selector_rects`，CSS px），`selector`+默认模式直接截该元素区域；坐标与截图同源（Blitz `final_layout`）。纯行内元素（`<a>文字</a>`）无独立盒子，选块级祖先
 3. **JS 交互已大幅可用，重指纹页仍可能失败**：React/Vue 事件委托已正常（`src`/`href` 等 URL 反射属性解析绝对 URL 后，Next.js/webpack 能完成 hydration，点击可触发 handler）。但 WorkOS/Cloudflare 认证页等重指纹站点会检测 `navigator.plugins`、WebGL canvas 等 API，在 stealth 指纹补齐前仍可能崩溃
 4. **代理支持**：HTTP/HTTPS/SOCKS5，通过 `OBSCURA_PROXY` 传入

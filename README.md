@@ -23,7 +23,7 @@ Existing "browser automation" was built for humans or for one-shot scraping — 
 |---|---|---|---|---|
 | Designed for | **Agents first** | Human debugging | Scraping service | LLM wrapper |
 | Dependencies | Single binary, no Chromium | Chromium ~500MB | Docker ~1GB | Chromium |
-| Sees (screenshots) | ✅ built-in Blitz rendering | Needs Chromium | ❌ | Needs Chromium |
+| Sees (screenshots) | ✅ built-in diting rendering engine | Needs Chromium | ❌ | Needs Chromium |
 | Reads | markdown + js_extract | DIY | markdown | DIY |
 | Finds (search) | ✅ 5-engine meta-search | ❌ | ❌ | ❌ |
 | Acts | indexed session interaction | DevTools API | ❌ | LLM-driven |
@@ -34,7 +34,7 @@ Existing "browser automation" was built for humans or for one-shot scraping — 
 
 An agent needs five things from a browser: **see, read, find, act, deploy.** One binary covers them all — systemd-friendly, MCP-native for Claude/Cursor, zero dependencies.
 
-**Core advantage: no Chromium.** AginxBrowser inlines a full browser engine (V8 + Rust HTTP stack + the Blitz rendering stack). No Puppeteer, no Chrome, no Docker. One Rust binary under systemd is your agent browsing infrastructure.
+**Core advantage: no Chromium.** AginxBrowser inlines a full browser engine (V8 + Rust HTTP stack + our own diting CSS/layout/paint rendering engine, with the Blitz/Stylo/Taffy lineage as its reference implementation). No Puppeteer, no Chrome, no Docker. One Rust binary under systemd is your agent browsing infrastructure.
 
 ## Three Things Stateless Renderers Can't Do
 
@@ -56,7 +56,7 @@ Apache-2.0 open source, single binary — self-host today, no cloud lock-in.
 - **Interactive sessions**: persistent browser sessions with indexed interaction (`state/click/input/scroll/eval`) — agents browse like humans do
 - **CAPTCHA auto-solve**: type detection with optional 2captcha integration — search never stalls on verification pages
 - **JS data extraction**: `js_extract` pulls `window.__INITIAL_STATE__` and other structured data out of SPAs
-- **Screenshot rendering**: `/screenshot` endpoint (opt-in `--features screenshot`) paints the JS-rendered DOM via the embedded Blitz stack (Stylo/Taffy/vello_cpu, pure CPU, no Chromium) to PNG — vision input for agents
+- **Screenshot rendering**: `/screenshot` endpoint (opt-in `--features screenshot`) paints the JS-rendered DOM with our own diting rendering engine — pure CPU, no Chromium — to PNG. Vision input for agents
 - **Cloudflare auto-wait**: detects "Just a moment..." challenge pages and waits out `cf_clearance`
 - **TLS fingerprint spoofing**: stealth mode impersonates Chrome145/Firefox133/Safari/Edge, switchable per request
 - **MCP server**: `--mcp` mode exposes 13 tools (fetch/eval/click/search + 9 session tools) — Claude Code / Claude Desktop / Cursor call them directly
@@ -180,7 +180,7 @@ cargo build --release
 # With stealth (requires go + cmake + C++ toolchain; enables TLS fingerprint spoofing)
 cargo build --release --features stealth
 
-# With screenshot rendering (enables /screenshot; pulls in the Blitz rendering stack, +30-40MB)
+# With screenshot rendering (enables /screenshot; adds the rendering stack, +30-40MB)
 cargo build --release --features screenshot
 
 # Full featured (recommended for production)
@@ -221,8 +221,8 @@ Integration: read the environment variable `AGINXBROWSER_URL=http://127.0.0.1:80
 
 ## Known Limitations
 
-1. **Screenshots are opt-in**: `/screenshot` requires `cargo build --release --features screenshot` (pulls in the Blitz rendering stack, +30-40MB). Embedded Blitz is beta-level: complex-site CSS is approximate (not pixel-perfect like Chromium), and image subresources beyond the prefetched set aren't fetched individually
-2. **Element coordinates supported (block-level)**: `/screenshot` with `selector` returns element page coordinates (`selector_rects`, CSS px); `selector` alone crops directly to that element. Coordinates share provenance with the screenshot (Blitz `final_layout`). Pure inline elements (`<a>text</a>`) have no independent box — pick a block ancestor
+1. **Screenshots are opt-in**: `/screenshot` requires `cargo build --release --features screenshot` (adds the rendering stack, +30-40MB). The default render pipeline is Blitz-lineage (Stylo/Taffy/vello_cpu); pass `engine: "diting"` for our own CSS+layout+paint stack. Complex-site CSS is approximate on both (not pixel-perfect like Chromium)
+2. **Element coordinates supported (block-level)**: `/screenshot` with `selector` returns element page coordinates (`selector_rects`, CSS px); `selector` alone crops directly to that element. Pure inline elements (`<a>text</a>`) have no independent box — pick a block ancestor
 3. **JS interaction broadly works; heavy-fingerprint pages may still fail**: React/Vue event delegation works normally (URL-reflection attributes like `src`/`href` resolve to absolute URLs so Next.js/webpack hydrate and clicks trigger handlers). Heavy-fingerprint auth pages (WorkOS/Cloudflare) probing `navigator.plugins`, WebGL canvas etc. may still break until stealth fingerprint coverage completes
 4. **Proxy support**: HTTP/HTTPS/SOCKS5 via `OBSCURA_PROXY`
 5. **Hard risk-controlled sites**: Baidu Wenku unsupported; Zhihu articles need a valid `__zse_ck`

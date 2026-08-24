@@ -1,33 +1,35 @@
-# 安装 AginxBrowser
+[English](install.md) | [中文](install.zh-CN.md)
 
-> 这份文档是写给 **AI Agent 自己读**的。用户把下面这句话丢给 Agent，Agent 读完后能自己完成接入：
+# Install AginxBrowser
+
+> This document is written **for AI Agents to read themselves**. A user pastes the sentence below to their Agent; after reading this document, the Agent can complete the setup on its own:
 >
 > ```
-> 帮我安装 AginxBrowser：https://raw.githubusercontent.com/yinnho/aginxbrowser/main/docs/install.md
+> Help me install AginxBrowser: https://raw.githubusercontent.com/yinnho/aginxbrowser/main/docs/install.md
 > ```
 
-AginxBrowser 是为 AI Agent 设计的浏览器引擎。一个 Rust 二进制，内置 V8，不依赖 Chromium。能读网页、搜全网、截图、交互（点击/输入/滚动）。
+AginxBrowser is a browser engine built for AI agents. One Rust binary with V8 built in — no Chromium dependency. It can read web pages, search the whole web, take screenshots, and interact (click / type / scroll).
 
-**本项目运行着一个公网托管实例**，绝大多数情况你不需要自己部署--一行命令接上即可。
-
----
-
-## 0. 前置
-
-- 一个支持 MCP HTTP transport 的客户端：Claude Code / Claude Desktop / Cursor / Windsurf 等。
-- 能访问 `https://browser.aginx.net`（公网）。
-
-不需要 Node、Chromium、Docker，也不需要 API Key。
+**This project runs a public hosted instance**, so in most cases you don't need to deploy anything yourself — one command connects you.
 
 ---
 
-## 1. 一行接入（托管实例，推荐）
+## 0. Prerequisites
+
+- An MCP client with HTTP transport support: Claude Code / Claude Desktop / Cursor / Windsurf, etc.
+- Reachable access to `https://browser.aginx.net` (public internet).
+
+No Node, no Chromium, no Docker, and no API key needed.
+
+---
+
+## 1. One-line setup (hosted instance, recommended)
 
 ```bash
 claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
 ```
 
-如果是其他客户端，等价配置（写入对应的 settings 文件）：
+For other clients, the equivalent config (write it into the corresponding settings file):
 
 ```json
 {
@@ -42,33 +44,33 @@ claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
 
 ---
 
-## 2. 验证
+## 2. Verify
 
 ```bash
-# 看到 aginxbrowser 在列表里
+# Confirm aginxbrowser appears in the list
 claude mcp list
 
-# 看托管实例的能力清单（不触发网络抓取，秒回）
+# Get the hosted instance's capability list (no network fetch triggered, instant reply)
 curl -sS https://browser.aginx.net/doctor | jq .
 
-# 想确认抓取链路真的通？跑一次真实探活（会抓一次 example.com）
+# Want to confirm the fetch pipeline actually works? Run a live probe (fetches example.com once)
 curl -sS 'https://browser.aginx.net/doctor?probe=true' | jq .
 ```
 
-`/doctor` 返回 `capabilities`（screenshot / stealth / captcha_solver 是否可用）、`search_engines`、`endpoints`。`?probe=true` 额外跑一次真实 fetch，报 `ok` / `latency_ms`。
+`/doctor` returns `capabilities` (whether screenshot / stealth / captcha_solver are available), `search_engines`, and `endpoints`. With `?probe=true` it additionally performs one real fetch and reports `ok` / `latency_ms`.
 
 ---
 
-## 3. 首次调用
+## 3. First calls
 
-接上 MCP 后，直接让 Agent 用自然语言调，或显式调工具：
+Once MCP is connected, just ask the Agent in natural language, or call the tools explicitly:
 
-- "帮我读一下这个网页：https://example.com" → `fetch`
-- "搜一下 macbook 价格" → `search`
-- "截个图看看这个页面长啥样" → `screenshot`（需托管实例开了 screenshot feature；`/doctor` 会告诉你）
-- "帮我登录这个网站并翻到第二页" → `session_create` + `session_state` + `session_click`/`session_input`
+- "Read this web page for me: https://example.com" → `fetch`
+- "Search for macbook prices" → `search`
+- "Take a screenshot so I can see what this page looks like" → `screenshot` (requires the hosted instance to have the screenshot feature enabled; `/doctor` will tell you)
+- "Log into this website and paginate to page two" → `session_create` + `session_state` + `session_click`/`session_input`
 
-HTTP API 也能直接调（不走 MCP）：
+The HTTP API works when called directly too (without going through MCP):
 
 ```bash
 curl -sS -X POST https://browser.aginx.net/fetch \
@@ -78,9 +80,9 @@ curl -sS -X POST https://browser.aginx.net/fetch \
 
 ---
 
-## 4.（可选）装 SKILL.md，让 Agent 主动触发
+## 4. (Optional) Install SKILL.md so the Agent triggers it proactively
 
-MCP 接上后工具就可用，但 Agent 不一定知道**何时**该用。把仓库根的 `SKILL.md` 放进 skills 目录，Agent 就会在"读网页/搜索/截图/交互"类任务上主动调用：
+After MCP is connected the tools are available, but the Agent doesn't necessarily know **when** to reach for them. Drop the repo-root `SKILL.md` into the skills directory and the Agent will proactively invoke it on tasks like "read a web page / search / screenshot / interact":
 
 ```bash
 mkdir -p ~/.claude/skills/aginxbrowser
@@ -90,51 +92,51 @@ curl -sS https://raw.githubusercontent.com/yinnho/aginxbrowser/main/SKILL.md \
 
 ---
 
-## 5.（可选）自己部署
+## 5. (Optional) Self-hosting
 
-托管实例够用就跳过这步。要自部署：
+If the hosted instance covers your needs, skip this step. To self-deploy:
 
 ```bash
 git clone https://github.com/yinnho/aginxbrowser.git
 cd aginxbrowser
-cargo build --release --features stealth,screenshot   # 约 4 分钟
-./target/release/aginxbrowser                          # 默认监听 0.0.0.0:8089
+cargo build --release --features stealth,screenshot   # ~4 minutes
+./target/release/aginxbrowser                          # listens on 0.0.0.0:8089 by default
 ```
 
-环境变量：
+Environment variables:
 
-| 变量 | 默认 | 说明 |
+| Variable | Default | Description |
 |------|------|------|
-| `AGINXBROWSER_BIND` | `0.0.0.0:8089` | 监听地址（公网部署建议绑 127.0.0.1 + nginx 反代） |
-| `OBSCURA_PROXY` | 无 | 代理地址（`use_proxy:true` 时用，抓国外站） |
-| `CAPTCHA_SOLVER_API_KEY` | 无 | 2captcha Key，设了自动解验证码 |
-| `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 缓存 TTL（秒），`0` 禁用 |
+| `AGINXBROWSER_BIND` | `0.0.0.0:8089` | Listen address (for public deployments, bind 127.0.0.1 behind an nginx reverse proxy instead) |
+| `OBSCURA_PROXY` | none | Proxy address (used when `use_proxy:true`, for fetching sites from other regions) |
+| `CAPTCHA_SOLVER_API_KEY` | none | 2captcha key; when set, CAPTCHAs are solved automatically |
+| `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL (seconds); `0` disables caching |
 
 ---
 
-## 能力清单（13 个 MCP 工具）
+## Capability list (13 MCP tools)
 
-| 工具 | 用途 |
+| Tool | Purpose |
 |------|------|
-| `fetch` | 读网页 → markdown/html/text（分层渲染、stealth、js_extract） |
-| `search` | 多引擎聚合搜索（百度/Bing/搜狗/搜狗微信/Google），可图搜 |
-| `eval` | 在页面执行 JS（支持 async/Promise） |
-| `click` | 加载页面并点击 CSS 选择器 |
-| `session_create` | 创建持久交互会话（多步登录/填表/翻页），支持 `cookies` 注入登录态 |
-| `session_navigate` / `session_state` / `session_click` / `session_input` / `session_scroll` / `session_eval` / `session_cookies` / `session_close` | 会话操作（`session_cookies` 导出登录态复用） |
+| `fetch` | Read a web page → markdown/html/text (tiered rendering, stealth, js_extract) |
+| `search` | Multi-engine aggregated search (Baidu/Bing/Sogou/Sogou WeChat/Google), image search supported |
+| `eval` | Execute JS on the page (async/Promise supported) |
+| `click` | Load a page and click a CSS selector |
+| `session_create` | Create a persistent interactive session (multi-step login / form filling / pagination); supports `cookies` injection to carry a logged-in state |
+| `session_navigate` / `session_state` / `session_click` / `session_input` / `session_scroll` / `session_eval` / `session_cookies` / `session_close` | Session operations (`session_cookies` exports logged-in state for reuse) |
 
-完整字段说明见 [API.md](https://github.com/yinnho/aginxbrowser/blob/main/docs/API.md)。
-
----
-
-## 故障排查
-
-- **工具调不通**：先 `curl https://browser.aginx.net/doctor?probe=true`，看 `probe.ok` 和 `probe.error`。
-- **截图不可用**：`/doctor` 的 `capabilities.screenshot` 为 false，说明托管实例没开 screenshot feature；用 `fetch` 或 `/v1/scrape` 代替。
-- **国外站读不到**：`fetch` / `search` 传 `use_proxy: true`。
-- **被 Cloudflare 拦**：默认自动绕；仍被拦可换 `tls_fingerprint`（firefox133 / safari18 等）。
-- **登录墙后的内容**：`fetch` 传 `cookies: ["name=value", ...]` 注入会话 cookie。
+Full field reference: [API.md](https://github.com/yinnho/aginxbrowser/blob/main/docs/API.md).
 
 ---
 
-© 2026 OpenCarrier · Apache-2.0 开源 · 托管于 browser.aginx.net
+## Troubleshooting
+
+- **Tools won't respond**: Start with `curl https://browser.aginx.net/doctor?probe=true` and check `probe.ok` and `probe.error`.
+- **Screenshot unavailable**: `/doctor` reports `capabilities.screenshot` as false — the hosted instance doesn't have the screenshot feature enabled; use `fetch` or `/v1/scrape` instead.
+- **Sites in other regions unreadable**: Pass `use_proxy: true` to `fetch` / `search`.
+- **Blocked by Cloudflare**: Bypassed automatically by default; if still blocked, try a different `tls_fingerprint` (firefox133 / safari18, etc.).
+- **Content behind a login wall**: Pass `cookies: ["name=value", ...]` to `fetch` to inject session cookies.
+
+---
+
+© 2026 OpenCarrier · Apache-2.0 open source · hosted at browser.aginx.net
