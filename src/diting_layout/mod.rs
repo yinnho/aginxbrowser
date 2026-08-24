@@ -2605,6 +2605,7 @@ pub fn layout_dom_with_paint_and_images(
     (rects, items)
 }
 
+
 /// Compute every element's cascade result for a parsed tree + stylesheet:
 /// the production style-resolution pass feeding [`layout_dom`]. Walks the
 /// tree once; each element matches the full rule set (O(rules × elements) —
@@ -2618,6 +2619,7 @@ pub fn compute_styles(
     fn visit(
         tree: &DomTree,
         rules: &[crate::diting_css::ParsedRule],
+        rule_matches: &HashMap<usize, Vec<usize>>,
         nid: NodeId,
         parent: Option<&crate::diting_css::ComputedStyle>,
         root_fs: f32,
@@ -2631,9 +2633,15 @@ pub fn compute_styles(
         };
         let matched: Vec<(&crate::diting_css::ParsedRule, u32)> = rules
             .iter()
-            .filter_map(|rule| {
-                let hits = tree.query_selector_all_from(tree.document(), &rule.selector).ok()?;
-                if !hits.contains(&nid) {
+            .enumerate()
+            .filter_map(|(ri, rule)| {
+                // Per-rule document match sets are precomputed once (below);
+                // matching here PER ELEMENT made one compute_styles pass
+                // O(elements x rules x docsize) — the baidu SERP hang: a page
+                // script's first geometry read re-resolved every rule against
+                // every element for minutes.
+                let hits = rule_matches.get(&ri)?;
+                if !hits.contains(&nid.index()) {
                     return None;
                 }
                 let compiled = tree.compile_rule_selector(&rule.selector)?;
@@ -2658,15 +2666,28 @@ pub fn compute_styles(
             root_fs
         };
         for child in tree.children(nid) {
-            visit(tree, rules, child, Some(&cs), child_root_fs, out);
+            visit(tree, rules, rule_matches, child, Some(&cs), child_root_fs, out);
         }
         out.insert(nid, cs);
     }
+    // One querySelectorAll per RULE over the whole document, sorted for the
+    // binary search in visit. This replaces the per-element-per-rule full-doc
+    // scan that made style resolution quadratic-cubic on real pages.
+    let rule_matches: HashMap<usize, Vec<usize>> = rules
+        .iter()
+        .enumerate()
+        .filter_map(|(ri, rule)| {
+            let hits = tree.query_selector_all_from(tree.document(), &rule.selector).ok()?;
+            Some((ri, hits.into_iter().map(|n| n.index()).collect()))
+        })
+        .collect();
+
     let mut out = HashMap::new();
     for child in tree.children(tree.document()) {
         visit(
             tree,
             rules,
+            &rule_matches,
             child,
             None,
             crate::diting_css::DEFAULT_ROOT_FONT_SIZE,

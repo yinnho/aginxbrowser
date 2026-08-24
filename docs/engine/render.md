@@ -1675,3 +1675,34 @@ collapse_to_max 及其 border 反例）；本地 CJK 页双引擎带结构逐带
 - 本地服务器端口由 `AGINXBROWSER_BIND` 控制（serve 子命令无 --port；
   默认 8089）。
 - cargo test 吞 stderr，探针 panic 打印比 eprintln 可靠。
+
+## 51. baidu SERP 挂死根因：compute_styles 复杂度爆炸（2026-08-25，469 绿）
+
+§49 记录的"805KB all_async_search 脚本执行阶段硬挂死"定位到真凶——**不是
+JS 死循环，是原生 Rust 样式解析的复杂度爆炸**。
+
+**定位路径**：session navigate 挂住 → `sample` 抓栈 → 线程卡在
+`op_dom`（同步 op）→ `layout_rects_all` → `compute_styles::visit` 的深层
+递归帧。V8 watchdog 杀不掉它：线程在原生栈里，V8 interrupt 检查永远轮不
+到。离线单测喂同一脚本秒退（jQuery 缺 document）——挂死需要"脚本触发几何
+读取 + 真实 DOM 规模"的组合，纯脚本复现不出来。
+
+**根因**：`compute_styles::visit` 对每个元素×每条规则都跑一次
+`query_selector_all_from` 全文档扫描——O(elements × rules × docsize)。
+baidu SERP 数千元素×数十规则，页面脚本第一次读 `getBoundingClientRect`
+（op_dom→layout_rects_all→compute_styles）就是分钟级；脚本反复触达则永不
+返回。all_async_search.js 本身无辜：它只是第一个大规模触发几何读取的页面。
+
+**修复**：按规则预计算全文档匹配集（每规则一次 querySelectorAll，node
+index 排序存表），visit 内查表 O(1)。复杂度降为
+O(rules × docsize + elements × rules)。同时确认了既有安全网全部生效：
+10s 脚本 deadline、V8 watchdog terminate、settle 有界循环——现在
+all_async_search 烧完自己的预算被正常终止，渲染照常完成。
+
+**实测**：baidu SERP diting 渲染 >4min 无响应（挂死）→ **36.5s 出全高
+5986px 截图**（136 带 vs blitz 129 带结构相当；剩余耗时 = 页面抓取
+~15s + all_async 两趟各烧满 10s 预算后被终止——后者是有界行为，与 SPA
+反爬忙循环的处理一致）。
+
+**坑**：`sample <pid>` 对挂死的原生线程比日志/断点有效得多——V8 watchdog
+只管 JS 字节码里的中断检查，native op 卡死它无能为力。
