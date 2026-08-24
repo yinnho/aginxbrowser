@@ -5074,4 +5074,75 @@ mod tests {
             "inserting a 30px block above #b must push it down"
         );
     }
+
+    /// Upstream obscura #704: postMessage's targetOrigin argument must gate
+    /// delivery — '*' or a matching origin delivers, a mismatched origin
+    /// drops silently (browsers never throw), '/' requires same-origin with
+    /// the calling document. The pre-fix wrappers delivered unconditionally,
+    /// leaking caller-restricted payloads to whatever frame was targeted.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_post_message_target_origin_gates_delivery() {
+        let mut rt = setup_runtime(
+            "<html><body><iframe src=\"https://frame.example/widget\"></iframe></body></html>",
+        );
+
+        // One async eval drives all three gates: mismatched targetOrigin
+        // drops silently (iframe origin is frame.example; the caller
+        // restricted delivery to trusted.example), matching origin delivers,
+        // '*' wildcard delivers.
+        let result = rt.evaluate_for_cdp(
+            "(async function(){ \
+                window.__leak = []; \
+                window.addEventListener('message', function(e){ window.__leak.push(e.data) }); \
+                const w = document.querySelector('iframe').contentWindow; \
+                w.postMessage('secret', 'https://trusted.example'); \
+                await new Promise(r => setTimeout(r, 20)); \
+                const afterMismatch = window.__leak.slice(); \
+                w.postMessage('hello', 'https://frame.example'); \
+                await new Promise(r => setTimeout(r, 20)); \
+                const afterMatch = window.__leak.slice(); \
+                w.postMessage('wild', '*'); \
+                await new Promise(r => setTimeout(r, 20)); \
+                return [afterMismatch, afterMatch, window.__leak.slice()]; \
+            })()",
+            true,
+            true,
+        ).await.unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!([
+                [],
+                ["hello"],
+                ["hello", "wild"],
+            ])
+        );
+    }
+
+    /// Same-origin '/' targetOrigin delivers on a same-origin frame and the
+    /// self-targeted window.postMessage(path) honors the same gate.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_post_message_same_origin_slash_and_self_gate() {
+        let mut rt = setup_runtime(
+            "<html><body><iframe src=\"http://example.com/frame\"></iframe></body></html>",
+        );
+        rt.set_url("http://example.com/test");
+
+        // '/': iframe origin equals page origin → deliver. Self-targeted
+        // with mismatched explicit origin → drop. Self-targeted matching
+        // origin → deliver.
+        rt.evaluate(
+            "(function(){ window.__got = []; window.addEventListener('message', function(e){ window.__got.push(e.data) }); document.querySelector('iframe').contentWindow.postMessage('same-origin', '/'); postMessage('self-mismatch', 'https://other.example'); postMessage('self-ok', 'http://example.com'); })()",
+        )
+        .unwrap();
+
+        let got = rt.evaluate_for_cdp(
+            "new Promise(r => setTimeout(() => r(window.__got), 50))",
+            true,
+            true,
+        ).await.unwrap();
+        assert_eq!(
+            got.value.unwrap(),
+            serde_json::json!(["same-origin", "self-ok"])
+        );
+    }
 }

@@ -2127,8 +2127,13 @@ class Element extends Node {
       return null; // Cross-origin: blocked
     }
     if (!this._iframeDoc) {
-      this._iframeDoc = new _IframeDocument('<!DOCTYPE html><html><head></head><body></body></html>', 'about:blank', this);
-      this._iframeWin = new _IframeWindow(this._iframeDoc, 'about:blank');
+      // Lazy creation before any load: derive the browsing context's URL
+      // from the src attribute when present (browsers do this at context
+      // creation), so contentWindow.location.origin and postMessage
+      // targetOrigin checks see the authored origin, not about:blank.
+      const lazyUrl = (this.src && this.src.includes('://')) ? this.src : 'about:blank';
+      this._iframeDoc = new _IframeDocument('<!DOCTYPE html><html><head></head><body></body></html>', lazyUrl, this);
+      this._iframeWin = new _IframeWindow(this._iframeDoc, lazyUrl);
     }
     return this._iframeDoc;
   }
@@ -6928,7 +6933,27 @@ class _IframeWindow {
     }
   }
 
-  postMessage(data, origin) {
+  postMessage(data, targetOrigin) {
+    // HTML spec: delivery happens only when targetOrigin is undefined/'*',
+    // '/' (same-origin as the calling document), or matches THIS target
+    // window's origin. Upstream obscura discarded the argument entirely
+    // (#704): a caller restricting delivery to a trusted origin still had
+    // the message delivered to whatever frame happened to be there — a
+    // cross-origin data leak. Mismatches drop silently, like browsers.
+    let t = targetOrigin;
+    if (t === undefined || t === null) t = '*';
+    if (typeof t !== 'string' || t === '') return;
+    if (t !== '*') {
+      const selfOrigin = this.location.origin || '';
+      if (t === '/') {
+        const pageOrigin = (function() { try { return new URL(_domParse("document_url") || "about:blank").origin; } catch(e) { return ''; } })();
+        if (pageOrigin === '' || pageOrigin !== selfOrigin) return;
+      } else {
+        let tOrigin = '';
+        try { tOrigin = new URL(t).origin; } catch(e) {}
+        if (tOrigin === '' || tOrigin !== selfOrigin) return;
+      }
+    }
     const event = new MessageEvent('message', {
       data: data,
       origin: this.location.origin,
@@ -8037,7 +8062,26 @@ globalThis.prompt = function() { return null; };
 globalThis.open = function() { return null; };
 globalThis.close = function() {};
 globalThis.stop = function() {};
-globalThis.postMessage = function() {};
+globalThis.postMessage = function(message, targetOrigin) {
+  // Self-targeted postMessage (spec: window.postMessage to itself). Honor
+  // the targetOrigin gate like the iframe path: '*'/'/'/matching origin
+  // delivers; anything else drops silently (#704).
+  let t = targetOrigin;
+  if (t === undefined || t === null) t = '*';
+  if (typeof t !== 'string' || t === '') return;
+  if (t !== '*' && t !== '/') {
+    const selfOrigin = (function() { try { return new URL(globalThis.location?.href || 'about:blank').origin; } catch(e) { return ''; } })();
+    let tOrigin = '';
+    try { tOrigin = new URL(t).origin; } catch(e) {}
+    if (tOrigin === '' || tOrigin !== selfOrigin) return;
+  }
+  const event = new MessageEvent('message', {
+    data: message,
+    origin: (function() { try { return new URL(globalThis.location?.href || 'about:blank').origin; } catch(e) { return ''; } })(),
+    source: globalThis,
+  });
+  Promise.resolve().then(() => { globalThis.dispatchEvent?.(event); });
+};
 globalThis.requestIdleCallback = globalThis.requestIdleCallback || function(cb) { return setTimeout(cb, 0); };
 globalThis.cancelIdleCallback = globalThis.cancelIdleCallback || function(id) { clearTimeout(id); };
 if (typeof ReadableStream === 'undefined') {
