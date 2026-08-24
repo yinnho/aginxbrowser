@@ -15,7 +15,8 @@ V8 运行时 + JS↔DOM/Rust 桥:脚本执行、事件循环、watchdog 超时�
 | `runtime.rs` | 2575 / 16438 | 75% | `JsRuntime`(原 ObscuraJsRuntime):V8 isolate 管理、evaluate、事件循环、watchdog、模块加载 |
 | `ops.rs` | 1262 / 5605 | 76% | 16 个 op:op_dom(DOM 桥)、op_fetch_url、cookie/navigate/sleep/subtle_digest/url/encoding |
 | `cdp_watchdog.rs` | 117 / 122 | 70% | CDP 求值 watchdog |
-| `module_loader.rs` | 115 / 286 | 80% | ES 模块加载 |
+| `module_loader.rs` | 145 / 286 | 80% | ES 模块加载(import map 解析接线) |
+| `import_map.rs` | 463 / 455 | ~95%(port) | HTML import maps(34373c3 吸收,见"已知坑"第 19 条) |
 | `markdown.rs` | 71 / 71 | 100% | HTML→Markdown JS 片段 |
 | `v8_flags.rs` | 37 / 37 | 100% | V8 启动 flags |
 | `v8_lock.rs` | 27 / —(上游无此文件) | — | 全局 V8 锁(自研) |
@@ -136,6 +137,7 @@ WatchdogToken = IsolateHandle + 超时线程,terminate_execution 兜底
     - **5c3d560(脚本错误隔离)**:test-only——上游加回归锁定 #147 已修行为(一个 inline script 抛错不断掉后续 script)。行为我们已有(pois-guard),照上游加锁定测试(execute_script s1/s2 throw/s3,__ran1 与 __ran3 都 true,错误消息透传)。
     - **4 测试**:Image 真元素(style 赋值/instanceof/双路 load/劫持 createElement 后不炸且 width 保留)+ NetworkInformation(fc9f524 同款断言 + on* 属性双跑)+ referrer 语义(默认空/set_referrer 透出)+ 脚本错误隔离(5c3d560 同款)。
 18. ✅ **getBoundingClientRect 真布局接线**(2026-08-24 完成,+2 测试,自研非吸收):V8 路径的 rect 从合成散点(12 列伪网格,nid 哈希定 (x,y),为 Playwright hit-testing 设计,issue #45)换成 diting_css + diting_layout 全管线的真几何。三层落地——`DomTree::epoch()`(nodes.len<<8 | free_list.len&0xFF,树形变即失效)+ JsState `layout_cache`(epoch 键控 memo,op 侧新命令 `layout_rect(nid)` 返回 `[x,y,w,h]`;computed styles 不缓存——style/class 属性写不 bump epoch,每次重算级联防陈旧几何;`#[cfg(feature="screenshot")]` 门控,diting_layout 的 taffy/swash 重依赖不进无渲染构建,无 feature 时命令返 null)+ bootstrap.js getBoundingClientRect 先查真 rect(命中构造 DOMRect 形状含 top/right/bottom/left/toJSON),null/异常回落合成网格保 Playwright 兼容。viewport 定宽 1920(与 bootstrap innerWidth persona 一致)。**连带行为升级**:elementFromPoint 从"合成散点碰运气"变真命中测试((10,10) 现在正确落在全宽 h1 上,原测试期望 BODY 是合成网格下的错误行为,已更新)。session_state 的 indexed rect 与 /eval 的 getBoundingClientRect 同源同真。冒烟:两 button 页 #b x=20 是自身 margin-left:20px 的真实效果,width:50% div 出 960=1920/2。
+19. ✅ **import maps(34373c3)**(2026-08-25 完成,+10 测试):C 组大特性里唯一纯 JS 吸收项。新文件 `diting_js/import_map.rs`(455 行,port 上游 SGavrl 实现):HTML import map 算法全量——exact/prefix 双匹配、scopes 最长前缀优先、多 map merge(已观测 (referrer,specifier) 解析冻结,新规则不得改写;unrelated 新规则保留)、prefix 回溯检测、integrity 成员形状校验(完整性执行归 fetch 层,形状错则整张 map 作废)。五处接线:(a) `DitingModuleLoader::resolve` 走 `ImportMap::resolve`,deno_core 合成 "." referrer(load_side_es_module 根)直通 base_url 不进 map——`<script type=module src>` 根 URL 是资源 URL,map 不得重映射;(b) JsState 加 `import_map: Rc<RefCell<ImportMap>>`,runtime 构造时 clone 同一 Rc 给 loader+state,parser/dynamic/loader 三方共见一张 map;(c) op `op_add_import_map(source, base_url)→error string`;(d) bootstrap.js `__prepareInsertedScript` 认 `type=importmap`:动态插入的 map 在插入点注册(用 live baseURI),src 版报"External import maps are not supported",解析失败 console.error + microtask 派发 error 事件;(e) page.rs `execute_scripts` ScriptKind::{Classic,Module,ImportMap} 三分类 + per-script base_url(树走一遍跟踪 `<base href>` 遇见序,later base 不 rebase earlier map)+ importmap 相位先于模块图启动统一注册。**未吸收**(同 commit 的调度重构,与本特性正交):PreparedModule fetch/evaluate 两段式、encounter-order 统一调度、execute_classic_script 真 URL referrer(deno_core execute_script 只收 &'static str name)。我们保持 classic(regular→deferred→async)后接模块相位的既有顺序——对标准页面(map 在 head、module 在后)语义等价。外部 import map(`<script type=importmap src>`)与 multiple-maps-per-document 全量规范仍不跟(上游也不支持 src 版)。
 
 ## 上游这两个月(233 commits)分类
 
@@ -160,7 +162,7 @@ WatchdogToken = IsolateHandle + 超时线程,terminate_execution 兜底
 - **08-03/08-04 渲染浪潮(~60 commits)**:Shadow DOM、live CSSOM、Web Animations、Canvas2D paint、layout/geometry、PDF、响应式图片——服务上游自研渲染器,我们渲染走 blitz,不跟。
 - **iframe realm 架构**(frame.rs 新文件:6a4683d/964bace/a954149/49e5605/3db9c60 postMessage)——真实站点兼容需要,但牵动架构,挂账到 browser 认领时评估。
 - **V8 并发架构**(76fc3b9 每连接独立线程、9065f38 lock 分片、9d2f9f2 watchdog slot)——我们是全局锁单 isolate 模型,改架构风险大,先读懂再定。
-- import maps(34373c3)、custom elements 构造器升级(9bacacc)、模块图抓取(b1aec0c/1d2dc4e,配 net 的 subresource)。
+- ~~import maps(34373c3)~~ ✅ 已吸(2026-08-25,见"已知坑"第 18 条)、custom elements 构造器升级(9bacacc,挂账)、模块图抓取(b1aec0c/1d2dc4e,配 net 的 subresource,挂账)。
 - ~~⚠️ 319c603 revert cancellation-safe~~ 已解决:revert 针对的是手写 poll 泵,与我们无关;线程封闭我们已有,缺的构造序列化+主线程预热已补(见"核心结构"节)。
 
 ## 认领建议(Phase 1 开工顺序)

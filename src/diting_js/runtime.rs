@@ -214,8 +214,13 @@ impl JsRuntime {
     pub fn with_base_url_and_proxy(base_url: &str, proxy_url: Option<String>) -> Self {
         let state = Rc::new(RefCell::new(JsState::new()));
         let state_clone = state.clone();
+        let import_map = state.borrow().import_map.clone();
 
-        let module_loader = Rc::new(DitingModuleLoader::with_proxy(base_url, proxy_url));
+        let module_loader = Rc::new(DitingModuleLoader::with_proxy_and_import_map(
+            base_url,
+            proxy_url,
+            import_map.clone(),
+        ));
 
         // Serialize isolate construction process-wide: V8's JSDispatchTable
         // setup is not safe to run from several threads at once, and sessions
@@ -258,6 +263,21 @@ impl JsRuntime {
 
     pub fn set_cookie_jar(&self, jar: std::sync::Arc<crate::diting_net::CookieJar>) {
         self.state.borrow_mut().cookie_jar = Some(jar);
+    }
+
+    /// Parse and merge an inline document import map (upstream 34373c3).
+    /// Rules which would alter already-observed module resolutions are
+    /// discarded while unrelated new rules remain available, matching
+    /// Chromium's multiple-map model.
+    pub fn add_import_map(&self, source: &str, base_url: &str) -> Result<(), String> {
+        let map = crate::diting_js::import_map::ImportMap::parse(source, base_url)?;
+        self.state
+            .borrow()
+            .import_map
+            .try_borrow_mut()
+            .map_err(|_| "Import map is already borrowed".to_string())?
+            .merge(map);
+        Ok(())
     }
 
     pub fn set_http_client(&self, client: std::sync::Arc<crate::diting_net::HttpClient>) {

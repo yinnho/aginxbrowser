@@ -76,6 +76,9 @@ pub struct JsState {
     /// rather than wrapper state, because it must survive moves and clones and
     /// because fragment parsing can create nodes before a JS wrapper exists.
     pub(crate) already_started_scripts: RefCell<HashSet<NodeId>>,
+    /// Window-global import-map state shared by parser-discovered scripts,
+    /// dynamically inserted import maps, and the module loader.
+    pub(crate) import_map: Rc<RefCell<crate::diting_js::import_map::ImportMap>>,
     /// In-flight dynamic `<script src>` fetches. Dynamic scripts fetch via the
     /// op-level reqwest client, invisible to the page-level http_client's
     /// active_requests() counter — without this, the post-script settle loop
@@ -193,6 +196,7 @@ impl JsState {
             pending_binding_calls: Vec::new(),
             write_stream: std::cell::RefCell::new(None),
             already_started_scripts: RefCell::new(HashSet::new()),
+            import_map: Rc::new(RefCell::new(crate::diting_js::import_map::ImportMap::default())),
             dynamic_script_fetches: std::cell::Cell::new(0),
             callbacks: None,
             network_response_bodies: std::collections::HashMap::new(),
@@ -2118,6 +2122,32 @@ fn op_url_resolve(#[string] href: &str, #[string] base: &str) -> String {
     .unwrap_or_default()
 }
 
+/// Parse and merge an inline document import map (upstream 34373c3). Returns
+/// "" on success or the parse/merge error message, so the bootstrap caller can
+/// surface it as a script error event without a rejected-op round-trip.
+#[op2]
+#[string]
+fn op_add_import_map(
+    state: &OpState,
+    #[string] source: String,
+    #[string] base_url: String,
+) -> String {
+    let shared = state.borrow::<SharedState>().clone();
+    let import_map = shared.borrow().import_map.clone();
+    let parsed = match crate::diting_js::import_map::ImportMap::parse(&source, &base_url) {
+        Ok(map) => map,
+        Err(error) => return error,
+    };
+    let result = match import_map.try_borrow_mut() {
+        Ok(mut current) => {
+            current.merge(parsed);
+            String::new()
+        }
+        Err(_) => "Import map is already borrowed".to_string(),
+    };
+    result
+}
+
 /// Canonical (lowercased) WHATWG name for a TextDecoder label, or "" if the
 /// label is unknown (the JS constructor turns "" into a RangeError).
 #[op2]
@@ -2177,6 +2207,7 @@ pub fn build_extension() -> Extension {
             op_url_parse(),
             op_url_set(),
             op_url_resolve(),
+            op_add_import_map(),
             op_encoding_for_label(),
             op_text_decode(),
             op_url_encode_query(),

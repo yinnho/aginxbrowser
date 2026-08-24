@@ -474,37 +474,82 @@ impl Page {
             .as_mut()
             .map(|js| js.arm_watchdog(std::time::Duration::from_millis(script_deadline_ms + 1000)));
 
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum ScriptKind {
+            Classic,
+            Module,
+            ImportMap,
+        }
+
         #[derive(Debug)]
         struct ScriptInfo {
             src: Option<String>,
             inline: String,
             is_defer: bool,
             is_async: bool,
-            is_module: bool,
+            kind: ScriptKind,
             nid: u32,
+            /// Document base URL at this element's parser encounter point.
+            /// A later <base href> must not rebase an earlier import map
+            /// (upstream 34373c3 temporal-base semantics).
+            base_url: String,
         }
 
         let all_scripts = match &self.js {
             Some(js) => {
+                let document_url = self.url_string();
                 js.with_dom(|dom| {
                     let script_ids = dom.query_selector_all("script").unwrap_or_default();
+                    // Walk the tree once tracking the <base href> in effect at
+                    // each script's encounter position.
+                    let mut bases_at_script = std::collections::HashMap::new();
+                    let mut active_base = Url::parse(&document_url).ok();
+                    let mut found_base = false;
+                    if let Some(root) = Some(dom.document()) {
+                        for nid in dom.descendants(root) {
+                            let Some(node) = dom.get_node(nid) else { continue };
+                            let Some(name) = node.as_element() else { continue };
+                            if name.local.as_ref() == "base" && !found_base {
+                                if let Some(href) = node.get_attribute("href") {
+                                    found_base = true;
+                                    if let Some(resolved) = active_base
+                                        .as_ref()
+                                        .and_then(|base| base.join(&href).ok())
+                                    {
+                                        active_base = Some(resolved);
+                                    }
+                                }
+                            } else if name.local.as_ref() == "script" {
+                                bases_at_script.insert(
+                                    nid.raw(),
+                                    active_base
+                                        .as_ref()
+                                        .map(ToString::to_string)
+                                        .unwrap_or_else(|| document_url.clone()),
+                                );
+                            }
+                        }
+                    }
                     let mut scripts = Vec::new();
 
                     for sid in script_ids {
                         if let Some(node) = dom.get_node(sid) {
                             let src = node.get_attribute("src").map(|s| s.to_string());
-                            let script_type = node.get_attribute("type").unwrap_or("").to_string();
+                            let script_type = node
+                                .get_attribute("type")
+                                .unwrap_or("")
+                                .trim()
+                                .to_ascii_lowercase();
                             let is_defer = node.get_attribute("defer").is_some();
                             let is_async = node.get_attribute("async").is_some();
-                            let is_module = script_type == "module";
-
-                            if !script_type.is_empty()
-                                && script_type != "text/javascript"
-                                && script_type != "application/javascript"
-                                && script_type != "module"
-                            {
-                                continue;
-                            }
+                            let kind = match script_type.as_str() {
+                                "module" => ScriptKind::Module,
+                                "importmap" => ScriptKind::ImportMap,
+                                "" | "text/javascript" | "application/javascript" => {
+                                    ScriptKind::Classic
+                                }
+                                _ => continue,
+                            };
 
                             let inline_code = if src.is_none() {
                                 dom.text_content(sid)
@@ -512,14 +557,21 @@ impl Page {
                                 String::new()
                             };
 
-                            if src.is_some() || !inline_code.trim().is_empty() {
+                            if matches!(kind, ScriptKind::ImportMap)
+                                || src.is_some()
+                                || !inline_code.trim().is_empty()
+                            {
                                 scripts.push(ScriptInfo {
                                     src,
                                     inline: inline_code,
                                     is_defer,
                                     is_async,
-                                    is_module,
+                                    kind,
                                     nid: sid.raw(),
+                                    base_url: bases_at_script
+                                        .get(&sid.raw())
+                                        .cloned()
+                                        .unwrap_or_else(|| document_url.clone()),
                                 });
                             }
                         }
@@ -530,23 +582,43 @@ impl Page {
             None => return,
         };
 
+        // Import maps register before any module graph starts (upstream
+        // 34373c3). Parser-discovered maps merge in encounter order using the
+        // base URL in effect at each element; a later map cannot rebind a
+        // specifier an earlier resolution already observed.
+        for script in &all_scripts {
+            if script.kind == ScriptKind::ImportMap {
+                if script.src.is_some() {
+                    tracing::warn!("External import maps are not supported");
+                    continue;
+                }
+                if let Some(js) = &self.js {
+                    if let Err(error) = js.add_import_map(&script.inline, &script.base_url) {
+                        tracing::warn!("Ignoring invalid import map: {}", error);
+                    }
+                }
+            }
+        }
+
         let mut regular = Vec::new();
         let mut deferred = Vec::new();
         let mut async_scripts = Vec::new();
 
-        let mut module_scripts = Vec::new();
+        let mut module_scripts: Vec<ScriptInfo> = Vec::new();
 
         for script in all_scripts {
-            if script.is_module {
-                module_scripts.push(script);
-                continue;
-            }
-            if script.is_defer {
-                deferred.push(script);
-            } else if script.is_async {
-                async_scripts.push(script);
-            } else {
-                regular.push(script);
+            match script.kind {
+                ScriptKind::Module => module_scripts.push(script),
+                ScriptKind::ImportMap => continue,
+                ScriptKind::Classic => {
+                    if script.is_defer {
+                        deferred.push(script);
+                    } else if script.is_async {
+                        async_scripts.push(script);
+                    } else {
+                        regular.push(script);
+                    }
+                }
             }
         }
 
@@ -728,12 +800,14 @@ impl Page {
                 break;
             }
             if let Some(ref src) = module_script.src {
-                let full_url = if src.starts_with("http://") || src.starts_with("https://") {
+                let full_url = if src.starts_with("http://") || src.starts_with("https://") || src.starts_with("data:") {
                     src.clone()
-                } else if let Some(base) = &document_base {
-                    base.join(src).map(|u| u.to_string()).unwrap_or_else(|_| src.clone())
                 } else {
-                    src.clone()
+                    Url::parse(&module_script.base_url)
+                        .ok()
+                        .and_then(|base| base.join(src).ok())
+                        .map(|u| u.to_string())
+                        .unwrap_or_else(|| src.clone())
                 };
 
                 tracing::info!("Loading ES module: {}", full_url);
@@ -749,7 +823,7 @@ impl Page {
                     }
                 }
             } else if !module_script.inline.is_empty() {
-                let base = self.url_string();
+                let base = module_script.base_url.clone();
                 if let Some(js) = &mut self.js {
                     if let Err(e) = js.load_inline_module(&module_script.inline, &base, 10_000).await {
                         tracing::warn!("Inline ES module error: {}", e);
@@ -2767,5 +2841,118 @@ mod tests {
         p.clear_response_bodies();
         assert!(p.get_response_body(&doc_rid).is_none());
         assert!(p.get_response_body(&fetch_rid).is_none());
+    }
+
+    // ---- import maps (upstream 34373c3) ----------------------------------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parser_import_map_before_first_module_controls_resolution() {
+        let _g = net_test_guard();
+        let port = local_http_server_typed(vec![
+            ("/app/index.html", 200, "text/html",
+             r#"<html><head>
+                <script type="importmap">{"imports":{"ordered":"./before.js"}}</script>
+                <script type="module">
+                    import { value } from "ordered";
+                    globalThis.__parser_import_map_value = value;
+                </script>
+                <script type="importmap">{"imports":{"ordered":"./after.js"}}</script>
+            </head><body></body></html>"#.into()),
+            ("/app/before.js", 200, "application/javascript", "export const value = 'before-first-module';".into()),
+            ("/app/after.js", 200, "application/javascript", "export const value = 'later-map';".into()),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/app/index.html")).await.unwrap();
+        assert_eq!(
+            p.evaluate("globalThis.__parser_import_map_value"),
+            serde_json::json!("before-first-module")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn later_import_map_adds_unrelated_rule_without_rebinding_resolved_rule() {
+        let _g = net_test_guard();
+        let port = local_http_server_typed(vec![
+            ("/app/index.html", 200, "text/html",
+             r#"<html><head>
+                <script type="importmap">{"imports":{"fixed":"./before.js"}}</script>
+                <script type="module">
+                    import { value } from "fixed";
+                    globalThis.__first_map_value = value;
+                </script>
+                <script type="importmap">{"imports":{"fixed":"./after.js","later":"./later.js"}}</script>
+                <script type="module">
+                    import { value as fixed } from "fixed";
+                    import { value as later } from "later";
+                    globalThis.__later_map_values = [fixed, later];
+                </script>
+            </head><body></body></html>"#.into()),
+            ("/app/before.js", 200, "application/javascript", "export const value = 'before-first-module';".into()),
+            ("/app/later.js", 200, "application/javascript", "export const value = 'later-map';".into()),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/app/index.html")).await.unwrap();
+        assert_eq!(
+            p.evaluate("globalThis.__first_map_value"),
+            serde_json::json!("before-first-module")
+        );
+        assert_eq!(
+            p.evaluate("globalThis.__later_map_values"),
+            serde_json::json!(["before-first-module", "later-map"])
+        );
+        // after.js must never have been fetched: the second map's rebind of
+        // "fixed" was discarded because the first module already resolved it.
+        let urls: Vec<&str> = p.network_events.iter().map(|e| e.url.as_str()).collect();
+        assert!(!urls.iter().any(|u| u.ends_with("/after.js")), "urls: {urls:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dynamically_inserted_import_map_controls_later_dynamic_import() {
+        let _g = net_test_guard();
+        let port = local_http_server_typed(vec![
+            ("/app/index.html", 200, "text/html",
+             r#"<html><head></head><body>
+                <script>
+                    const map = document.createElement("script");
+                    map.type = "importmap";
+                    map.textContent = JSON.stringify({imports:{dynamicName:"./later.js"}});
+                    document.head.appendChild(map);
+                    import("dynamicName")
+                        .then(module => globalThis.__dynamic_map_value = module.value)
+                        .catch(error => globalThis.__dynamic_map_value = error.message);
+                </script>
+            </body></html>"#.into()),
+            ("/app/later.js", 200, "application/javascript", "export const value = 'later-map';".into()),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/app/index.html")).await.unwrap();
+        assert_eq!(
+            p.evaluate("globalThis.__dynamic_map_value"),
+            serde_json::json!("later-map")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn later_base_element_does_not_rebase_an_earlier_import_map() {
+        let _g = net_test_guard();
+        let port = local_http_server_typed(vec![
+            ("/app/index.html", 200, "text/html",
+             r#"<html><head>
+                <script type="importmap">{"imports":{"fixed":"./before.js"}}</script>
+                <base href="/assets/">
+                <script type="module">
+                    import { value } from "fixed";
+                    globalThis.__temporal_base_value = value;
+                </script>
+            </head><body></body></html>"#.into()),
+            ("/assets/before.js", 200, "application/javascript", "export const value = 'wrong-base';".into()),
+            ("/app/before.js", 200, "application/javascript", "export const value = 'before-first-module';".into()),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/app/index.html")).await.unwrap();
+        assert_eq!(
+            p.evaluate("globalThis.__temporal_base_value"),
+            serde_json::json!("before-first-module")
+        );
     }
 }

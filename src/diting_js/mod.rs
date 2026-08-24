@@ -1,6 +1,7 @@
 pub mod module_loader;
 pub mod runtime;
 pub mod ops;
+mod import_map;
 pub mod markdown;
 mod write_stream;
 

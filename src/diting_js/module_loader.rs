@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::pin::Pin;
+use std::rc::Rc;
 
 use deno_core::error::ModuleLoaderError;
 use deno_core::ModuleLoadResponse;
@@ -8,12 +10,17 @@ use deno_core::ModuleSourceCode;
 use deno_core::ModuleSpecifier;
 use deno_core::RequestedModuleType;
 
+use crate::diting_js::import_map::ImportMap;
+
 pub struct DitingModuleLoader {
     pub base_url: String,
     /// Proxy URL threaded through to every dynamic ES-module fetch (#139).
     /// `None` keeps the pre-#139 direct-connection behaviour for callers
     /// that haven't been updated.
     pub proxy_url: Option<String>,
+    /// Document import maps, shared with JsState and the runtime so parser
+    /// scripts, dynamically inserted maps and this loader all see one map.
+    pub import_map: Rc<RefCell<ImportMap>>,
 }
 
 impl DitingModuleLoader {
@@ -23,9 +30,19 @@ impl DitingModuleLoader {
     }
 
     pub fn with_proxy(base_url: &str, proxy_url: Option<String>) -> Self {
+        let import_map = Rc::new(RefCell::new(ImportMap::default()));
+        Self::with_proxy_and_import_map(base_url, proxy_url, import_map)
+    }
+
+    pub fn with_proxy_and_import_map(
+        base_url: &str,
+        proxy_url: Option<String>,
+        import_map: Rc<RefCell<ImportMap>>,
+    ) -> Self {
         DitingModuleLoader {
             base_url: base_url.to_string(),
             proxy_url,
+            import_map,
         }
     }
 }
@@ -41,17 +58,29 @@ impl ModuleLoader for DitingModuleLoader {
         referrer: &str,
         _kind: deno_core::ResolutionKind,
     ) -> Result<ModuleSpecifier, ModuleLoaderError> {
-        let base = if referrer.is_empty()
-            || referrer.starts_with('<')
-            || referrer == "."
-            || referrer == "about:blank"
+        // deno_core represents the root passed to load_side_es_module with a
+        // synthetic "." referrer. A browser resolves <script type=module src>
+        // as a resource URL before it starts a graph; the document import map
+        // must not remap that root URL.
+        if referrer == "." {
+            return deno_core::resolve_import(specifier, &self.base_url)
+                .map_err(|error| error.into());
+        }
+
+        let base = if referrer.is_empty() || referrer.starts_with('<') || referrer == "about:blank"
         {
             &self.base_url
         } else {
             referrer
         };
 
-        deno_core::resolve_import(specifier, base).map_err(|e| e.into())
+        let base = ModuleSpecifier::parse(base)
+            .map_err(|e| io_err(format!("Invalid module referrer {}: {}", base, e)))?;
+        self.import_map
+            .try_borrow_mut()
+            .map_err(|_| io_err("Import map is already borrowed".to_string()))?
+            .resolve(specifier, &base)
+            .map_err(io_err)
     }
 
     fn load(

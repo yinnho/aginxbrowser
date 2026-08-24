@@ -693,6 +693,33 @@ function __prepareInsertedScript(script) {
   if (!_OPS.op_script_try_start(script._nid)) return;
   const scriptType = (script.getAttribute('type') || '').trim().toLowerCase();
   const isModule = scriptType === 'module';
+  const isImportMap = scriptType === 'importmap';
+  if (isImportMap) {
+    // Upstream 34373c3: a dynamically inserted import map registers at its
+    // insertion point, using the live document base URL. External import
+    // maps are not supported (matching this engine's module pipeline).
+    const src = script.getAttribute('src');
+    let error = '';
+    if (src) {
+      error = 'External import maps are not supported';
+    } else {
+      const base = script.baseURI
+        || globalThis.location?.href
+        || 'about:blank';
+      try {
+        error = _OPS.op_add_import_map(script.textContent || '', base) || '';
+      } catch (e) {
+        error = e && e.message ? e.message : String(e);
+      }
+    }
+    if (error) {
+      console.error('Import map error:', error);
+      queueMicrotask(() => {
+        try { script.dispatchEvent(new Event('error')); } catch (_) {}
+      });
+    }
+    return;
+  }
   if (scriptType && !isModule && scriptType !== 'text/javascript' && scriptType !== 'application/javascript') {
     return;
   }
