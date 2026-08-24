@@ -1,12 +1,29 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AginxBrowser - Agent 的浏览器。看世界，和世界交互。</title>
-<meta name="description" content="AginxBrowser - 为 AI Agent 设计的浏览器。Rust 二进制，内置 V8，不依赖 Chromium。实时抓当下的活页面，广度覆盖任意 URL，能读能搜能截图能交互。">
-<meta property="og:title" content="AginxBrowser - Agent 的浏览器">
-<meta property="og:description" content="看世界，和世界交互。实时、广度、可交互--给 Agent 的浏览器，不是搜索索引。">
+<title>AginxBrowser — The Browser for AI Agents. Headless Browser + MCP Server, No Chromium.</title>
+<meta name="description" content="AginxBrowser is a browser built for AI agents: fetch live pages as markdown, render JS-heavy SPAs, take screenshots, search across 5 engines, and drive interactive login sessions — one Rust binary with built-in V8, no Chromium, MCP native for Claude Code and Cursor.">
+<meta name="keywords" content="browser for AI agents, agent browser, headless browser, MCP server, Model Context Protocol browser, web scraping API, markdown scraping, screenshot API without Chromium, stealth TLS fingerprint, Cloudflare bypass, anti-bot bypass, Claude Code tools, Cursor MCP, AI web automation, V8 server-side rendering, Rust headless browser">
+<meta property="og:title" content="AginxBrowser — The Browser for AI Agents">
+<meta property="og:description" content="See the live web and interact with it. Real-time pages, any URL, clickable sessions — a browser for agents, not a search index. One Rust binary, built-in V8, no Chromium.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://browser.aginx.net/">
+<link rel="canonical" href="https://browser.aginx.net/">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "AginxBrowser",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Linux, macOS",
+  "description": "Browser built for AI agents: live page fetching, JS rendering, screenshots, aggregated search and interactive sessions in one Rust binary with built-in V8 — no Chromium required.",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "license": "https://www.apache.org/licenses/LICENSE-2.0",
+  "url": "https://browser.aginx.net/"
+}
+</script>
 <style>
 :root {
   --bg: #0a0e14;
@@ -24,8 +41,8 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html { scroll-behavior: smooth; }
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
   background: var(--bg);
   color: var(--text);
   line-height: 1.7;
@@ -78,85 +95,82 @@ nav {
 }
 .copy-btn:hover { border-color: var(--accent); background: #162234; }
 .copy-btn.copied { color: var(--accent-2); border-color: var(--accent-2); }
-.install-hint { text-align: center; margin-top: 12px; font-size: 13.5px; color: var(--text-dim); }
-.hero .stats { margin-top: 40px; display: flex; gap: 40px; justify-content: center; flex-wrap: wrap; color: var(--text-dim); font-size: 14px; }
-.hero .stats b { display: block; color: var(--text); font-size: 26px; font-weight: 700; }
+.install-hint { margin-top: 10px; font-size: 13px; color: var(--text-dim); text-align: center; }
+
+/* ---------- stats ---------- */
+.stats { display: flex; justify-content: center; gap: 42px; margin-top: 40px; flex-wrap: wrap; }
+.stats div { color: var(--text-dim); font-size: 14px; }
+.stats b { display: block; font-size: 26px; color: var(--text); }
 
 /* ---------- sections ---------- */
-section { padding: 68px 0; }
-.section-title { text-align: center; font-size: 32px; font-weight: 800; letter-spacing: -0.5px; margin-bottom: 12px; }
-.section-desc { text-align: center; color: var(--text-dim); max-width: 640px; margin: 0 auto 44px; font-size: 16px; }
+section { padding: 64px 0; }
+section:nth-of-type(even) { background: var(--bg-soft); }
+.section-title { text-align: center; font-size: 30px; font-weight: 800; letter-spacing: -0.5px; }
+.section-desc { text-align: center; color: var(--text-dim); max-width: 720px; margin: 12px auto 40px; font-size: 16px; }
 
-/* ---------- pain ---------- */
-.pain { background: var(--bg-soft); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
-.pain-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 16px; }
-.pain-card {
-  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
-  padding: 22px; border-left: 3px solid var(--warn);
-}
-.pain-card .h { font-weight: 700; font-size: 15px; margin-bottom: 6px; color: var(--warn); }
-.pain-card p { color: var(--text-dim); font-size: 14px; }
-.pain-card .fix { margin-top: 10px; font-size: 13px; color: var(--accent-2); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* ---------- pain grid ---------- */
+.pain-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; }
+.pain-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px; }
+.pain-card .h { font-weight: 700; margin-bottom: 6px; }
+.pain-card p { color: var(--text-dim); font-size: 14.5px; }
+.pain-card .fix { margin-top: 10px; color: var(--accent-2); font-size: 13.5px; font-weight: 600; }
 
-/* ---------- why browser (not search) ---------- */
-.why-browser { border-top: 1px solid var(--border); }
-.wb-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; margin-bottom: 40px; }
-.wb-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 26px; border-top: 3px solid var(--accent); }
-.wb-card h3 { font-size: 18px; margin-bottom: 10px; }
+/* ---------- why browser ---------- */
+.wb-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }
+.wb-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px; }
+.wb-card h3 { font-size: 17px; margin-bottom: 8px; }
 .wb-card p { color: var(--text-dim); font-size: 14.5px; }
-.wb-card strong { color: var(--text); }
-.perf-row { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
-.perf { background: var(--bg-soft); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 28px; text-align: center; min-width: 140px; }
-.perf b { display: block; font-size: 28px; font-weight: 800; color: var(--accent); }
-.perf span { font-size: 13px; color: var(--text-dim); }
-.perf-note { width: 100%; text-align: center; margin-top: 16px; font-size: 12.5px; color: #5b6f85; }
+.perf-row { display: flex; gap: 30px; justify-content: center; margin-top: 36px; flex-wrap: wrap; }
+.perf { text-align: center; }
+.perf b { font-size: 26px; color: var(--accent); display: block; }
+.perf span { color: var(--text-dim); font-size: 13px; }
+.perf-note { text-align: center; color: #5b6f85; font-size: 12.5px; margin-top: 14px; }
 
-/* ---------- five senses ---------- */
-.senses { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; }
-.sense {
-  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
-  padding: 26px; transition: border-color 0.15s ease, transform 0.15s ease;
-}
-.sense:hover { border-color: var(--accent); transform: translateY(-2px); }
+/* ---------- capabilities / senses ---------- */
+.senses { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 16px; }
+.sense { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; text-align: center; }
 .sense .icon { font-size: 28px; }
-.sense h3 { margin: 14px 0 8px; font-size: 18px; }
-.sense p { color: var(--text-dim); font-size: 14.5px; }
-.sense .tag { display: inline-block; margin-top: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; color: var(--accent-2); }
+.sense h3 { font-size: 16px; margin: 8px 0 6px; }
+.sense p { color: var(--text-dim); font-size: 13.5px; }
+.sense .tag {
+  display: inline-block; margin-top: 10px; font-family: ui-monospace, Menlo, monospace;
+  font-size: 11.5px; color: var(--accent); border: 1px solid var(--border);
+  border-radius: 999px; padding: 3px 10px; background: var(--code-bg);
+}
 
-/* ---------- security & privacy ---------- */
-.secpriv { background: var(--bg-soft); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
-.secpriv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 18px; }
-.sp-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px; }
-.sp-card h4 { font-size: 15.5px; margin-bottom: 8px; }
+/* ---------- security ---------- */
+.secpriv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }
+.sp-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+.sp-card h4 { font-size: 15.5px; margin-bottom: 6px; }
 .sp-card p { color: var(--text-dim); font-size: 14px; }
 
-/* ---------- tiers ---------- */
+/* ---------- tiers table ---------- */
 .tiers-table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
-.tiers-table th, .tiers-table td { padding: 16px 20px; text-align: left; border-bottom: 1px solid var(--border); font-size: 14.5px; vertical-align: top; }
-.tiers-table th { background: #0d1421; color: var(--text-dim); font-size: 13px; font-weight: 600; }
+.tiers-table th, .tiers-table td { padding: 16px 18px; text-align: left; border-bottom: 1px solid var(--border); font-size: 14.5px; vertical-align: top; }
+.tiers-table th { color: var(--text-dim); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.6px; }
 .tiers-table tr:last-child td { border-bottom: none; }
-.tiers-table .tier-name { font-weight: 700; color: var(--accent); white-space: nowrap; }
-.tiers-table .tier-now { color: var(--accent-2); font-size: 13px; }
+.tier-name { font-weight: 700; white-space: nowrap; }
+.tier-now { color: var(--accent-2); font-weight: 600; }
 
-/* ---------- quickstart ---------- */
-.quickstart pre {
-  background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--radius);
-  padding: 22px 24px; overflow-x: auto; font-size: 13.5px; line-height: 1.65;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #c9e2ff;
-}
-.quickstart pre .c { color: var(--text-dim); }
-.quickstart pre .k { color: var(--accent-2); }
-.step { max-width: 760px; margin: 0 auto 28px; }
-.step .h { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-weight: 700; }
+/* ---------- quickstart steps ---------- */
+.step { max-width: 760px; margin: 0 auto 26px; }
+.step .h { font-weight: 700; margin-bottom: 10px; }
 .step .num {
-  width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: #04121f;
-  display: inline-flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 800;
+  display: inline-flex; width: 24px; height: 24px; align-items: center; justify-content: center;
+  background: var(--accent); color: #06222f; border-radius: 50%;
+  font-weight: 800; font-size: 13px; margin-right: 8px;
 }
+.step pre {
+  background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px;
+  padding: 16px 18px; overflow-x: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px; line-height: 1.75; color: #c9e2ff;
+}
+.step .c { color: #5b7f95; }
+.step .k { color: var(--accent); }
 
-/* ---------- footer ---------- */
-footer { border-top: 1px solid var(--border); padding: 44px 0 60px; text-align: center; color: var(--text-dim); font-size: 14px; }
-footer .brand { justify-content: center; margin-bottom: 12px; font-size: 15px; color: var(--text); }
-footer p { margin-top: 6px; }
+footer { border-top: 1px solid var(--border); padding: 44px 0 56px; text-align: center; color: var(--text-dim); font-size: 14px; }
+footer .brand { justify-content: center; display: flex; margin-bottom: 12px; }
+footer a { color: var(--accent); }
 
 @media (max-width: 640px) {
   .hero h1 { font-size: 32px; }
@@ -171,13 +185,13 @@ footer p { margin-top: 6px; }
   <div class="nav-inner">
     <div class="brand"><span class="dot"></span>AginxBrowser</div>
     <div class="nav-links">
-      <a href="#pain">痛点</a>
-      <a href="#why-browser">为什么是浏览器</a>
-      <a href="#capabilities">能力</a>
-      <a href="#usecases">场景</a>
-      <a href="#secpriv">安全</a>
-      <a href="#tiers">用法</a>
-      <a href="/blog/">博客</a>
+      <a href="#pain">Pain Points</a>
+      <a href="#why-browser">Why a Browser</a>
+      <a href="#capabilities">Capabilities</a>
+      <a href="#usecases">Use Cases</a>
+      <a href="#secpriv">Security</a>
+      <a href="#tiers">Tiers</a>
+      <a href="/blog/en.html">Blog</a>
       <a href="https://github.com/yinnho/aginxbrowser">GitHub</a>
     </div>
   </div>
@@ -185,63 +199,63 @@ footer p { margin-top: 6px; }
 
 <header class="hero">
   <div class="container">
-    <span class="badge">为 AI Agent 而生 · 不依赖 Chromium</span>
-    <h1>Agent 的浏览器。<br><span class="accent">看世界，和世界交互。</span></h1>
-    <p class="sub">不是搜索索引里的快照，是当下抓回来的活页面。不是只能读，是能点、能填、能截图、能登录。一个 Rust 二进制，内置 V8，不依赖 Chromium。</p>
-    <p class="tagline">人有 Chrome，Agent 有 AginxBrowser。</p>
+    <span class="badge">Built for AI Agents · No Chromium Required</span>
+    <h1>The Browser for Agents.<br><span class="accent">See the live web. Interact with it.</span></h1>
+    <p class="sub">Not a snapshot from a search index — the live page, fetched now. Not read-only — click, fill, screenshot, log in. One Rust binary with built-in V8, no Chromium required.</p>
+    <p class="tagline">Humans have Chrome. Agents have AginxBrowser.</p>
 
     <div class="install-box">
-      <div class="install-label">一行接入 Claude Code（公网托管，无需部署）</div>
+      <div class="install-label">One line to connect Claude Code (public hosted instance, nothing to deploy)</div>
       <div class="install-cmd">
         <code id="install-cmd">claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp</code>
-        <button class="copy-btn" onclick="copyInstall()" id="copy-btn">复制</button>
+        <button class="copy-btn" onclick="copyInstall()" id="copy-btn">Copy</button>
       </div>
-      <div class="install-hint">或一键装 skill + MCP：<a href="https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh">curl skill.sh | bash</a> · <a href="https://www.skills.sh">skills.sh 目录</a> · <a href="#quickstart">HTTP 直接调</a> · <a href="#tiers">自己部署</a></div>
+      <div class="install-hint">Or one-command skill + MCP install: <a href="https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh">curl skill.sh | bash</a> · <a href="https://www.skills.sh">skills.sh directory</a> · <a href="#quickstart">call HTTP directly</a> · <a href="#tiers">self-host</a></div>
     </div>
 
     <div class="stats">
-      <div><b>1</b> 个 Rust 二进制</div>
-      <div><b>0</b> 依赖 Chromium</div>
-      <div><b>13</b> 个 MCP 工具</div>
-      <div><b>~1s</b> 抓一个活页面</div>
+      <div><b>1</b> Rust binary</div>
+      <div><b>0</b> Chromium dependency</div>
+      <div><b>13</b> MCP tools</div>
+      <div><b>~1s</b> per live page fetch</div>
     </div>
   </div>
 </header>
 
 <section id="pain" class="pain">
   <div class="container">
-    <h2 class="section-title">Agent 上网，现在抓瞎</h2>
-    <p class="section-desc">Agent 已经能写代码、改文档、管项目--但你让它去网上看看，它就抓瞎了。通用工具每一个都差一口气。</p>
+    <h2 class="section-title">Agents Are Blind on the Web Today</h2>
+    <p class="section-desc">Agents can write code, edit documents, manage projects — but ask one to go look something up on the web and it stumbles. Every general-purpose tool falls short somewhere.</p>
     <div class="pain-grid">
       <div class="pain-card">
-        <div class="h">JS 渲染页读不到</div>
-        <p>SPA、数据接口页抓回来一堆空壳 HTML，正文是 JS 填进去的，纯 HTTP 拿不到。</p>
-        <div class="fix">-> 内置 V8，真渲染 + js_extract 抠结构化数据</div>
+        <div class="h">JS-rendered pages come back empty</div>
+        <p>SPAs and data-endpoint pages return skeleton HTML — the content is filled in by JavaScript that plain HTTP never sees.</p>
+        <div class="fix">→ Built-in V8 renders for real + js_extract pulls structured data</div>
       </div>
       <div class="pain-card">
-        <div class="h">Cloudflare / 反爬拦截</div>
-        <p>服务器 IP 被 403，或卡在 "Just a moment..." 挑战页，流程直接断。</p>
-        <div class="fix">-> 自动绕过 Turnstile + stealth TLS 指纹切换</div>
+        <div class="h">Cloudflare / anti-bot walls</div>
+        <p>Your server IP gets 403s, or hangs on "Just a moment..." challenge pages. The workflow dies right there.</p>
+        <div class="fix">→ Automatic Turnstile waiting + switchable stealth TLS fingerprints</div>
       </div>
       <div class="pain-card">
-        <div class="h">只读不会动</div>
-        <p>能抓页面但不能点击、填表、登录、翻页。遇到要交互的就废。</p>
-        <div class="fix">-> 持久会话，索引化 click/input，像人一样浏览</div>
+        <div class="h">Read-only can't act</div>
+        <p>Fetching pages is not browsing. The moment a flow needs clicks, forms, login or pagination, scrapers are done.</p>
+        <div class="fix">→ Persistent sessions with indexed click/input — browse like a human</div>
       </div>
       <div class="pain-card">
-        <div class="h">搜索给的是旧快照</div>
-        <p>搜索引擎返回索引里的结果，可能几天前的。价格、库存、状态早变了。</p>
-        <div class="fix">-> 直接抓当下的活页面，不是索引快照</div>
+        <div class="h">Search returns stale snapshots</div>
+        <p>Search engines serve indexed results from days ago. Prices, stock levels and statuses have already moved.</p>
+        <div class="fix">→ Fetches the live page as it is now, not an index snapshot</div>
       </div>
       <div class="pain-card">
-        <div class="h">截图要 Chromium</div>
-        <p>给 Agent 当视觉输入要截图，但 Puppeteer/Playwright 要装整个 Chromium，服务器扛不住。</p>
-        <div class="fix">-> 内置 Blitz 渲染栈，纯 CPU，无 Chromium</div>
+        <div class="h">Screenshots require Chromium</div>
+        <p>Vision input needs screenshots, but Puppeteer/Playwright drag in all of Chromium — too heavy for most servers.</p>
+        <div class="fix">→ Built-in Blitz rendering stack, pure CPU, zero Chromium</div>
       </div>
       <div class="pain-card">
-        <div class="h">抓回来一堆标签</div>
-        <p>通用爬虫返回原始 HTML，Agent 根本没法读，还得自己清洗。</p>
-        <div class="fix">-> 直接返回 markdown，Agent 拿来就能用</div>
+        <div class="h">Raw HTML nobody can read</div>
+        <p>Generic crawlers return raw tag soup. The agent can't use it directly — someone has to clean it first.</p>
+        <div class="fix">→ Returns clean markdown, ready for the agent to consume</div>
       </div>
     </div>
   </div>
@@ -249,65 +263,65 @@ footer p { margin-top: 6px; }
 
 <section id="why-browser" class="why-browser">
   <div class="container">
-    <h2 class="section-title">为什么是浏览器，不是搜索</h2>
-    <p class="section-desc">搜索产品给你索引里的快照。浏览器给你当下的活页面。Agent 要的是世界现在的样子，不是搜索引擎上周存的样子。</p>
+    <h2 class="section-title">A Browser, Not a Search Engine</h2>
+    <p class="section-desc">Search products give you snapshots from their index. A browser gives you the live page. An agent needs the world as it is now — not as a crawler stored it last week.</p>
     <div class="wb-grid">
       <div class="wb-card">
-        <h3>⚡ 实时</h3>
-        <p>搜索索引可能滞后几天。我们直接抓<strong>当前</strong>的活页面--价格、库存、状态、最新动态，变了就抓新的。给 Agent 的不该是昨天的世界。</p>
+        <h3>⚡ Real-time</h3>
+        <p>Search indexes lag by days. We fetch the <strong>current</strong> page directly — prices, stock, statuses, latest posts. When the world changes, fetch again. Agents shouldn't see yesterday's web.</p>
       </div>
       <div class="wb-card">
-        <h3>🌐 广度</h3>
-        <p>搜索只覆盖被索引的页。浏览器能去<strong>任意 URL</strong>--登录后的页面、JS 渲染的 SPA、需要点击翻页的、要截图的。搜索够不着的地方，浏览器能去。</p>
+        <h3>🌐 Unlimited reach</h3>
+        <p>Search only covers what got indexed. A browser reaches <strong>any URL</strong> — pages behind login, JS-rendered SPAs, paginated dashboards, anything needing a screenshot. Where search can't go, a browser can.</p>
       </div>
       <div class="wb-card">
-        <h3>🤝 能交互</h3>
-        <p>搜索只能读结果摘要。浏览器能登录、填表、提交、翻页、点穿--像人一样操作页面，拿到搜索给不了的过程性结果。</p>
+        <h3>🤝 Interactive</h3>
+        <p>Search reads summaries. A browser logs in, fills forms, submits, paginates, clicks through — operating the page like a person to get results search will never surface.</p>
       </div>
     </div>
     <div class="perf-row">
-      <div class="perf"><b>~1s</b><span>读活页面（首次）</span></div>
-      <div class="perf"><b>~100ms</b><span>同页再读（缓存）</span></div>
-      <div class="perf"><b>~1s</b><span>JS 渲染截图</span></div>
-      <div class="perf"><b>~0.3s</b><span>5 引擎聚合搜索</span></div>
-      <div class="perf-note">实测于 browser.aginx.net 托管实例，非实验室理想值。首次含 V8 冷启动；缓存命中走纯 HTTP。</div>
+      <div class="perf"><b>~1s</b><span>live page fetch (first hit)</span></div>
+      <div class="perf"><b>~100ms</b><span>repeat fetch (cached)</span></div>
+      <div class="perf"><b>~1s</b><span>JS-rendered screenshot</span></div>
+      <div class="perf"><b>~0.3s</b><span>5-engine meta search</span></div>
+      <div class="perf-note">Measured on the hosted instance at browser.aginx.net — production numbers, not lab benchmarks. First hits include V8 cold start; cache hits run on plain HTTP.</div>
     </div>
   </div>
 </section>
 
 <section id="capabilities">
   <div class="container">
-    <h2 class="section-title">Agent 用浏览器，只要五件事</h2>
-    <p class="section-desc">现在的主流方案要么是为调试而生（Puppeteer），要么只读不会动（Firecrawl）。AginxBrowser 从第一行代码就想清楚：Agent 到底要什么。</p>
+    <h2 class="section-title">Five Things an Agent Wants From a Browser</h2>
+    <p class="section-desc">Today's options were built for debugging (Puppeteer) or are read-only (Firecrawl). AginxBrowser was designed around what agents actually need.</p>
     <div class="senses">
       <div class="sense">
         <div class="icon">👁️</div>
-        <h3>看得见</h3>
-        <p>内置 Blitz 渲染栈（Stylo / Taffy / vello_cpu，纯 CPU），把 JS 渲染后的页面画成 PNG，作为 Agent 的视觉输入。服务器无显存也能跑。</p>
+        <h3>See</h3>
+        <p>Built-in Blitz rendering stack (Stylo / Taffy / vello_cpu, pure CPU) paints the JS-rendered page to PNG — visual input for agents, no GPU needed.</p>
         <span class="tag">POST /screenshot</span>
       </div>
       <div class="sense">
         <div class="icon">📖</div>
-        <h3>读得懂</h3>
-        <p>页面自动转 markdown，SPA 用 js_extract 直接抠结构化数据。分层渲染：静态页纯 HTTP ~100ms，需要 JS 才启动 V8，80% 页面加速 10 倍。</p>
+        <h3>Read</h3>
+        <p>Pages convert to clean markdown automatically; js_extract pulls structured data out of SPAs. Tiered rendering: static pages on plain HTTP ~100ms, V8 spins up only when JS is required — 10x faster on ~80% of pages.</p>
         <span class="tag">POST /fetch</span>
       </div>
       <div class="sense">
         <div class="icon">🔎</div>
-        <h3>找得到</h3>
-        <p>百度 / Bing / 搜狗 / 搜狗微信 / Google 并发聚合去重，还能图搜返回图片直链。Agent 一步完成「搜 -> 读」，不用人喂 URL。</p>
+        <h3>Find</h3>
+        <p>Concurrent meta-search across Baidu / Bing / Sogou / Sogou WeChat / Google, merged and deduplicated, plus image search returning direct image URLs. Search → read in one step, no human feeding URLs.</p>
         <span class="tag">POST /search</span>
       </div>
       <div class="sense">
         <div class="icon">🖐️</div>
-        <h3>操得了</h3>
-        <p>持久化浏览器会话，索引化交互--不用猜屏幕坐标，click index:3 就点登录。CAPTCHA 自动解决，Cloudflare 自动绕过，登录态可复用。</p>
+        <h3>Act</h3>
+        <p>Persistent browser sessions with indexed interaction — no guessing pixel coordinates; <code>click index:3</code> presses the button. CAPTCHA auto-solve, Cloudflare auto-wait, reusable login state.</p>
         <span class="tag">POST /session/create</span>
       </div>
       <div class="sense">
         <div class="icon">⚡</div>
-        <h3>跑得动</h3>
-        <p>一个二进制 ~70MB（含截图 ~104MB），不需要 Node、不需要 Chromium、不需要 Docker。systemd 守护，就是基础设施。</p>
+        <h3>Deploy</h3>
+        <p>One binary ~70MB (~104MB with screenshots). No Node, no Chromium, no Docker. Run it under systemd and it's infrastructure.</p>
         <span class="tag">HTTP API + MCP</span>
       </div>
     </div>
@@ -316,54 +330,54 @@ footer p { margin-top: 6px; }
 
 <section id="wedge" class="pain">
   <div class="container">
-    <h2 class="section-title">别的 agent 浏览器碰反爬就废</h2>
-    <p class="section-desc">新冒出来的 agent 浏览器大多是<strong>无状态、无指纹</strong>的一次性引擎——抓公开页很轻，碰上 Cloudflare 防护或要登录的站就退出。AginxBrowser 走相反的路，专啃它们干不了的三件事。</p>
+    <h2 class="section-title">Where Other Agent Browsers Hit a Wall</h2>
+    <p class="section-desc">Most new "agent browsers" are <strong>stateless, fingerprint-less</strong> one-shot renderers — fine for public pages, useless against Cloudflare or anything requiring login. AginxBrowser goes the other way and focuses on the three things they can't do.</p>
     <div class="wb-grid">
       <div class="wb-card">
-        <h3>🔐 真实 TLS 指纹</h3>
-        <p>stealth 模式用 BoringSSL 复刻 <strong>Chrome145 / Firefox133 / Safari / Edge</strong> 的完整 TLS 握手（不是只改 UA），按请求切换；Cloudflare Turnstile 自动等待 <code>cf_clearance</code>。无指纹引擎碰反爬就是 403，我们穿过去。</p>
+        <h3>🔐 Real TLS fingerprints</h3>
+        <p>Stealth mode uses BoringSSL to replicate the <strong>complete Chrome145 / Firefox133 / Safari / Edge</strong> TLS handshakes (not just a UA swap), switchable per request; Cloudflare Turnstile challenges wait automatically for <code>cf_clearance</code>. Fingerprint-less engines eat 403s — we get through.</p>
       </div>
       <div class="wb-card">
-        <h3>🤝 有状态长会话</h3>
-        <p>持久化 session（8 分钟保活），登录态<strong>注入即用、导出可复用</strong>（<code>session_create(cookies=...)</code> ↔ <code>session_cookies</code>）。登录 → 翻页 → 操作不断流。一次性引擎抓完即弃，做不了多步。</p>
+        <h3>🤝 Stateful long sessions</h3>
+        <p>Persistent sessions (8-minute idle keep-alive), login state <strong>injectable and exportable</strong> (<code>session_create(cookies=...)</code> ↔ <code>session_cookies</code>). Login → paginate → act, unbroken. One-shot engines discard state and can't do multi-step flows.</p>
       </div>
       <div class="wb-card">
-        <h3>🔌 MCP 原生</h3>
-        <p>13 个工具是一等公民，<strong>不是 CDP 套壳</strong>。Claude Code / Cursor 一行接入，不用先学 DevTools 协议。HTTP + MCP 双协议，agent 拿来就能用。</p>
+        <h3>🔌 MCP native</h3>
+        <p>All 13 tools are first-class citizens, <strong>not a CDP shim</strong>. One line connects Claude Code / Cursor — no DevTools protocol to learn first. HTTP + MCP dual protocol, usable as-is.</p>
       </div>
     </div>
-    <p class="perf-note">参照：Cloudflare Kitesurf 官方明确不做真实 TLS 指纹协商、不做持久认证会话——反爬与登录正是 AginxBrowser 的地盘。</p>
+    <p class="perf-note">Reference point: Cloudflare's Kitesurf explicitly ships neither real TLS-fingerprint negotiation nor persistent auth sessions — anti-bot and login territory is exactly where AginxBrowser plays.</p>
   </div>
 </section>
 
 <section id="usecases">
   <div class="container">
-    <h2 class="section-title">拿来干什么</h2>
-    <p class="section-desc">不是 demo，是真实有人在用 agent 浏览器干的事。</p>
+    <h2 class="section-title">What People Do With It</h2>
+    <p class="section-desc">Not demos — real jobs agent browsers are doing today.</p>
     <div class="pain-grid">
       <div class="pain-card">
-        <div class="h">啃烂后台</div>
-        <p>AWS、App Store Connect、Google Play——点穿几十层菜单才干完一件事。让 agent 代你点，到要授权时回来确认。</p>
+        <div class="h">Grind through admin consoles</div>
+        <p>AWS, App Store Connect, Google Play — dozens of menu layers per task. Let the agent do the clicking and come back to you only when authorization is needed.</p>
       </div>
       <div class="pain-card">
-        <div class="h">登录后批量操作</div>
-        <p>往购物车加一打商品、翻历史订单找小票、查只对登录态开放的页面。注入 cookie 即用，操作完导出复用。</p>
+        <div class="h">Batch actions behind login</div>
+        <p>Add a dozen items to a cart, dig through order history for receipts, check pages that only render while logged in. Inject cookies, operate, export the session for reuse.</p>
       </div>
       <div class="pain-card">
-        <div class="h">穿反爬站点</div>
-        <p>Cloudflare 防护、Turnstile 挑战、TLS 指纹检测。stealth 模式硬穿，不是碰 403 就退。</p>
+        <div class="h">Get past anti-bot walls</div>
+        <p>Cloudflare protection, Turnstile challenges, TLS fingerprint checks. Stealth mode pushes through instead of retreating at the first 403.</p>
       </div>
       <div class="pain-card">
-        <div class="h">中国互联网</div>
-        <p>百度 / 搜狗 / 微信公众号 5 引擎聚合搜索，中文页正确渲染。不只懂英文 web。</p>
+        <div class="h">The Chinese internet</div>
+        <p>Meta-search across Baidu / Sogou / Sogou WeChat / Bing / Google, with correct rendering of Chinese pages. Not English-web-only.</p>
       </div>
       <div class="pain-card">
-        <div class="h">现场写脚本</div>
-        <p>让 agent 看页面、写 JS、eval 执行——高亮对比表、重排内容、按隐藏参数过滤商品。GreaseMonkey-on-steroids。</p>
+        <div class="h">Write scripts on the spot</div>
+        <p>Have the agent read the page, write JS, and eval it — highlight comparison tables, reflow content, filter products by hidden parameters. GreaseMonkey-on-steroids.</p>
       </div>
       <div class="pain-card">
-        <div class="h">多模态视觉</div>
-        <p>截图当视觉输入，做「看图判断」的流程——找好座位、辨认页面布局、确认渲染对不对。</p>
+        <div class="h">Multimodal vision input</div>
+        <p>Screenshots as vision input for "look and judge" flows — picking seats, recognizing page layouts, verifying that rendering looks right.</p>
       </div>
     </div>
   </div>
@@ -371,32 +385,32 @@ footer p { margin-top: 6px; }
 
 <section id="secpriv" class="secpriv">
   <div class="container">
-    <h2 class="section-title">安全 &amp; 隐私</h2>
-    <p class="section-desc">你给 Agent 的浏览器要碰你的 cookie、走你的登录态。它不该是个监控你的黑盒，也不该把内网暴露给 agent。</p>
+    <h2 class="section-title">Security &amp; Privacy</h2>
+    <p class="section-desc">An agent's browser touches your cookies and your logged-in state. It shouldn't be a black box watching you, and it shouldn't expose your internal network to the agent.</p>
     <div class="secpriv-grid">
       <div class="sp-card">
-        <h4>🚫 cookie / 会话不落盘</h4>
-        <p>注入的 cookie 和交互会话只在内存里，8 分钟空闲自动回收。托管实例不持久化你的任何登录态--会话结束即清。</p>
+        <h4>🚫 No cookie / session persistence</h4>
+        <p>Injected cookies and interactive sessions live in memory only, reclaimed after 8 minutes idle. The hosted instance persists none of your login state — gone when the session ends.</p>
       </div>
       <div class="sp-card">
-        <h4>🛡️ SSRF + DNS 重绑定防护</h4>
-        <p>拦截非 http(s) scheme、私网/loopback IP，解析后再校验。agent 拿不到内网东西，也防 DNS 重绑定攻击。</p>
+        <h4>🛡️ SSRF + DNS rebinding protection</h4>
+        <p>Non-http(s) schemes blocked, private/loopback IPs rejected, re-validation after every DNS resolution. The agent can't reach your intranet, and DNS rebinding doesn't work either.</p>
       </div>
       <div class="sp-card">
-        <h4>🔒 MCP 公网安全</h4>
-        <p>MCP over HTTP 默认只收可信 Host，走公网也安全。streamable HTTP + SSE，Claude Code / Cursor 原生支持。</p>
+        <h4>🔒 MCP safe on the public internet</h4>
+        <p>MCP over HTTP only accepts trusted hosts by default — safe exposed to the public internet. Streamable HTTP + SSE, natively supported by Claude Code / Cursor.</p>
       </div>
       <div class="sp-card">
-        <h4>👁️ 完全开源</h4>
-        <p>Apache-2.0，代码透明可审查。不放心托管？自己部署，全部能力本地跑，数据不出你的机器。</p>
+        <h4>👁️ Fully open source</h4>
+        <p>Apache-2.0, transparent and auditable. Don't trust the hosted instance? Self-host everything locally — your data never leaves your machine.</p>
       </div>
       <div class="sp-card">
-        <h4>🧩 CAPTCHA 自动解决</h4>
-        <p>检测验证码类型，可选 2captcha 自动解决。搜索不再因为验证码卡死。</p>
+        <h4>🧩 CAPTCHA auto-solve</h4>
+        <p>CAPTCHA type detection with optional 2captcha solving. Search flows stop dying on verification pages.</p>
       </div>
       <div class="sp-card">
-        <h4>☁️ Cloudflare 自动绕过</h4>
-        <p>检测 "Just a moment..." 挑战页，自动等待 cf_clearance，不打断 Agent 流程。</p>
+        <h4>☁️ Cloudflare auto-wait</h4>
+        <p>Detects "Just a moment..." challenge pages and waits out cf_clearance automatically, without breaking the agent's flow.</p>
       </div>
     </div>
   </div>
@@ -404,27 +418,27 @@ footer p { margin-top: 6px; }
 
 <section id="tiers">
   <div class="container">
-    <h2 class="section-title">三种用法</h2>
-    <p class="section-desc">从「一行接入立刻能用」到「私有部署全开」。能力是否可用，<a href="https://browser.aginx.net/doctor">/doctor</a> 一查便知。</p>
+    <h2 class="section-title">Three Ways to Use It</h2>
+    <p class="section-desc">From "one line and you're running" to "private deployment, everything enabled". Check what's live anytime via <a href="https://browser.aginx.net/doctor">/doctor</a>.</p>
     <table class="tiers-table">
       <thead>
-        <tr><th>层</th><th>包含</th><th>现状</th></tr>
+        <tr><th>Tier</th><th>Includes</th><th>Status</th></tr>
       </thead>
       <tbody>
         <tr>
-          <td class="tier-name">🆓 零配置<br><span style="font-weight:400;font-size:12px;color:var(--text-dim)">公网托管</span></td>
-          <td>fetch / search / eval / click / session 全部交互能力，13 个 MCP 工具开箱即用</td>
-          <td class="tier-now">免费可用，一行接入</td>
+          <td class="tier-name">🆓 Zero-config<br><span style="font-weight:400;font-size:12px;color:var(--text-dim)">Hosted, free</span></td>
+          <td>fetch / search / eval / click / session — full interaction suite, 13 MCP tools out of the box</td>
+          <td class="tier-now">Free, one line to connect</td>
         </tr>
         <tr>
-          <td class="tier-name">⚡ 进阶<br><span style="font-weight:400;font-size:12px;color:var(--text-dim)">能力开关</span></td>
-          <td>screenshot 截图 / stealth TLS 指纹 / CAPTCHA 自动解决 / 高速率</td>
-          <td class="tier-now">托管实例按 feature 开（<a href="https://browser.aginx.net/doctor">/doctor</a> 可查）；自部署 <code>--features stealth,screenshot</code> 全开</td>
+          <td class="tier-name">⚡ Advanced<br><span style="font-weight:400;font-size:12px;color:var(--text-dim)">Feature flags</span></td>
+          <td>screenshot rendering / stealth TLS fingerprints / CAPTCHA auto-solve / higher rate limits</td>
+          <td class="tier-now">Enabled per feature on the hosted instance (check <a href="https://browser.aginx.net/doctor">/doctor</a>); self-hosted enables everything with <code>--features stealth,screenshot</code></td>
         </tr>
         <tr>
-          <td class="tier-name">🏗 自部署<br><span style="font-weight:400;font-size:12px;color:var(--text-dim)">开源私有</span></td>
-          <td>全部能力 + 私有网络 + 自定义代理 + 不限流 + 合规可控</td>
-          <td class="tier-now">开源 Apache-2.0，单二进制 systemd 守护</td>
+          <td class="tier-name">🏗 Self-hosted<br><span style="font-weight:400;font-size:12px;color:var(--text-dim)">Open source, private</span></td>
+          <td>Everything + private networks + custom proxies + no rate limits + full compliance control</td>
+          <td class="tier-now">Apache-2.0 open source, single binary under systemd</td>
         </tr>
       </tbody>
     </table>
@@ -433,41 +447,41 @@ footer p { margin-top: 6px; }
 
 <section id="quickstart" class="quickstart">
   <div class="container">
-    <h2 class="section-title">接入你的 Agent</h2>
-    <p class="section-desc">MCP 或 HTTP 任选。Claude Code / Claude Desktop / Cursor 配一行就能用。</p>
+    <h2 class="section-title">Connect Your Agent</h2>
+    <p class="section-desc">MCP or HTTP, your pick. Claude Code / Claude Desktop / Cursor work with one line of config.</p>
 
     <div class="step">
-      <div class="h"><span class="num">1</span> MCP 一键接入（Claude Code）</div>
-      <pre><span class="c"># 托管实例，直接连公网端点：</span>
+      <div class="h"><span class="num">1</span> One-line MCP setup (Claude Code)</div>
+      <pre><span class="c"># Hosted instance — connect straight to the public endpoint:</span>
 claude mcp add aginxbrowser \
   --transport http https://<span class="k">browser.aginx.net/mcp</span>
 
-<span class="c"># 或一键装 skill + MCP（让 agent 主动触发）：</span>
+<span class="c"># Or one-command skill + MCP install (lets the agent trigger it itself):</span>
 curl -fsSL https://<span class="k">raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh</span> | bash
 
-<span class="c"># 或通过 skills.sh 目录装触发面（Vercel agent skills 目录；MCP 仍需上面注册）：</span>
+<span class="c"># Or install the skill trigger surface via skills.sh (MCP still registers separately):</span>
 npx skills add <span class="k">yinnho/aginxbrowser</span></pre>
     </div>
 
     <div class="step">
-      <div class="h"><span class="num">2</span> HTTP API 直接调用</div>
-      <pre><span class="c"># 抓取当下活页面 -> markdown</span>
+      <div class="h"><span class="num">2</span> Call the HTTP API directly</div>
+      <pre><span class="c"># Fetch a live page -> markdown</span>
 curl -sS -X POST https://<span class="k">browser.aginx.net/fetch</span> \
   -H "Content-Type: application/json" \
   -d '{"url":"https://example.com"}'
 
-<span class="c"># 搜索 -> 聚合去重</span>
+<span class="c"># Search -> merged and deduplicated</span>
 curl -sS -X POST https://<span class="k">browser.aginx.net/search</span> \
   -H "Content-Type: application/json" \
-  -d '{"q":"macbook 价格","max_results":5}'
+  -d '{"q":"macbook price","max_results":5}'
 
-<span class="c"># 看能力清单（不抓网，秒回）</span>
+<span class="c"># Capability listing (no fetching, instant)</span>
 curl -sS https://<span class="k">browser.aginx.net/doctor</span> | jq .</pre>
     </div>
 
     <div class="step">
-      <div class="h"><span class="num">3</span> 自己部署</div>
-      <pre><span class="c"># 单二进制，零依赖，systemd 守护</span>
+      <div class="h"><span class="num">3</span> Self-host</div>
+      <pre><span class="c"># Single binary, zero dependencies, systemd-friendly</span>
 cargo build --release --features stealth,screenshot
 ./target/release/aginxbrowser</pre>
     </div>
@@ -477,10 +491,10 @@ cargo build --release --features stealth,screenshot
 <footer>
   <div class="container">
     <div class="brand"><span class="dot"></span>AginxBrowser</div>
-    <p>Agent 互联网正在成形。Agent 要互相协作、要访问世界、要被人访问。</p>
-    <p>AginxBrowser 是其中「看世界」这一层--给每一个 Agent 装上眼睛和手。</p>
-    <p style="margin-top:14px;"><a href="https://github.com/yinnho/aginxbrowser">GitHub</a> · <a href="/blog/">博客</a> · <a href="https://github.com/yinnho/aginxbrowser/blob/main/docs/API.md">API 文档</a> · <a href="https://github.com/yinnho/aginxbrowser/blob/main/docs/install.md">安装指南</a> · <a href="https://github.com/yinnho/aginxbrowser/blob/main/SKILL.md">SKILL.md</a> · <a href="https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh">skill.sh</a></p>
-    <p style="margin-top:18px; font-size:13px; color:#5b6f85;">© 2026 OpenCarrier · Apache-2.0 开源 · 托管于 browser.aginx.net</p>
+    <p>The agent internet is taking shape. Agents need to collaborate with each other, access the world, and be accessible in turn.</p>
+    <p>AginxBrowser is the "see the world" layer — eyes and hands for every agent.</p>
+    <p style="margin-top:14px;"><a href="https://github.com/yinnho/aginxbrowser">GitHub</a> · <a href="/blog/en.html">Blog</a> · <a href="https://github.com/yinnho/aginxbrowser/blob/main/docs/API.md">API docs</a> · <a href="https://github.com/yinnho/aginxbrowser/blob/main/docs/install.md">Install guide</a> · <a href="https://github.com/yinnho/aginxbrowser/blob/main/SKILL.md">SKILL.md</a> · <a href="https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh">skill.sh</a></p>
+    <p style="margin-top:18px; font-size:13px; color:#5b6f85;">© 2026 OpenCarrier · Apache-2.0 open source · hosted at browser.aginx.net</p>
   </div>
 </footer>
 
@@ -489,14 +503,14 @@ function copyInstall() {
   var cmd = document.getElementById('install-cmd').textContent;
   var btn = document.getElementById('copy-btn');
   navigator.clipboard.writeText(cmd).then(function() {
-    btn.textContent = '已复制';
+    btn.textContent = 'Copied';
     btn.classList.add('copied');
-    setTimeout(function() { btn.textContent = '复制'; btn.classList.remove('copied'); }, 1800);
+    setTimeout(function() { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1800);
   }).catch(function() {
     var ta = document.createElement('textarea');
     ta.value = cmd; document.body.appendChild(ta); ta.select();
-    try { document.execCommand('copy'); btn.textContent = '已复制'; btn.classList.add('copied');
-      setTimeout(function() { btn.textContent = '复制'; btn.classList.remove('copied'); }, 1800);
+    try { document.execCommand('copy'); btn.textContent = 'Copied'; btn.classList.add('copied');
+      setTimeout(function() { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1800);
     } catch(e) {}
     document.body.removeChild(ta);
   });
