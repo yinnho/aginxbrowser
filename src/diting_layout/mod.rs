@@ -4966,6 +4966,97 @@ mod bridge_cross_check {
         }
     }
 
+    /// Real-site shape validation (8c with MARGINS): sfbay.craigslist.org's
+    /// homepage directory grid — `.box { float:left; width:23%;
+    /// margin-right:2% }` tiles four boxes per band exactly (each outer
+    /// step is 25% of the band), and the fifth wraps. The live page blocks
+    /// scripted fetches, so this is a structure-faithful excerpt of the
+    /// documented grid shape; the hand contract at VW=800 exercises what
+    /// the no-margin run test cannot: per-float margin participating in
+    /// the wrap arithmetic (width 184 + gap 16 = 200 pitch).
+    #[test]
+    fn craigslist_float_grid_margins_tile_four_per_band() {
+        let html = r#"<body>
+            <div class="box" id="b1"></div><div class="box" id="b2"></div>
+            <div class="box" id="b3"></div><div class="box" id="b4"></div>
+            <div class="box" id="b5"></div>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            .box { float: left; width: 23%; margin-right: 2%; height: 80px; }
+        "#;
+
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW);
+
+        let r = |sel: &str| rects[&tree.query_selector(sel).unwrap().unwrap()];
+        let (b1, b2, b3, b4, b5) = (r("#b1"), r("#b2"), r("#b3"), r("#b4"), r("#b5"));
+
+        let cell_w = VW * 0.23;
+        let gap = VW * 0.02;
+        let pitch = cell_w + gap;
+        for (name, cell, x) in
+            [("b1", b1, 0.0), ("b2", b2, pitch), ("b3", b3, 2.0 * pitch), ("b4", b4, 3.0 * pitch)]
+        {
+            assert!((cell.x - x).abs() < EPS as f32,
+                "{name} sits one 23%-plus-gap step over: x={} want {x}", cell.x);
+            assert!((cell.y - 0.0).abs() < EPS as f32, "{name} shares band one");
+            assert!((cell.width - cell_w).abs() < EPS as f32,
+                "{name} is 23% of the band (the 2% is margin): {}", cell.width);
+        }
+        // Four outer steps of exactly 25% fill the band; the fifth wraps.
+        assert!(pitch * 4.0 - VW <= EPS as f32 && pitch * 5.0 > VW as f32,
+            "four boxes tile exactly, five overflow");
+        assert!((b5.y - 80.0).abs() < EPS as f32,
+            "fifth box wraps below band one: y={} want 80", b5.y);
+        assert!((b5.x - 0.0).abs() < EPS as f32, "wrapped box restarts at the left edge");
+    }
+
+    /// Real-site shape validation (8e with MARGINS): a top navigation bar —
+    /// inline brand text plus two right-floated link boxes, each carrying a
+    /// left margin (the spacing idiom between floated links). Hand contract
+    /// at VW=800: source-first link hugs the RIGHT edge, second stacks to
+    /// its LEFT separated by its own 10px margin, and both margins push the
+    /// pair's total footprint to 180 so nothing overlaps the brand.
+    #[test]
+    fn nav_bar_right_floated_links_with_margins_stack_inward() {
+        let html = r#"<body>
+            <span id="brand">站点名</span>
+            <div class="lnk" id="l1"></div>
+            <div class="lnk" id="l2"></div>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #brand { font-size: 16px; }
+            .lnk { float: right; width: 80px; height: 30px; margin-left: 10px; }
+        "#;
+
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW);
+
+        let r = |sel: &str| rects[&tree.query_selector(sel).unwrap().unwrap()];
+        let (l1, l2) = (r("#l1"), r("#l2"));
+
+        // Group footprint: two links × (80 wide + 10 left margin) = 180,
+        // pushed flush right by the group's auto margin. Within it, source-
+        // first l1 lands at the far right edge (620 + 10 + 80 + 10 = 720),
+        // l2 one full link-plus-margin inboard (620 + 10 = 630).
+        assert!((l1.x - (VW - 80.0)).abs() < EPS as f32,
+            "first right float still hugs the right edge through its margin: x={} want {}",
+            l1.x, VW - 80.0);
+        assert!((l2.x - (VW - 170.0)).abs() < EPS as f32,
+            "second link stacks leftward past l1's margin: x={} want {}",
+            l2.x, VW - 170.0);
+        assert!((l1.y - 0.0).abs() < EPS as f32 && (l2.y - 0.0).abs() < EPS as f32,
+            "both share band one");
+        // The inline brand is flattened into a text run (no own rect); the
+        // link stack starting at 630 leaves the full left side to it.
+    }
+
     /// 1:1 image paint (batch 5b): the img box equals the image size, so
     /// both engines blit the same texels at the same positions — every
     /// pixel over the box must match exactly.

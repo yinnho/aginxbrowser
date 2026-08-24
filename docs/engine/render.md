@@ -1432,3 +1432,26 @@ margin）、正文在旁流列、全部 rect 不越视口、无 panic。
 **结论**：8 系列（zone/run/pair/nav/预算/continuation）在真实
 Wikipedia DOM 形状上一次通过（仅测试期望手算错一处）。float 大项达到
 「真实站点 parity」验证门槛的第一块证据。
+
+## 44. 真实站点形状扩展：margin 参与 float 几何（2026-08-24）
+
+craigslist 抓取被挡（直连 403、socks 代理空响应、wayback 限流）——改走
+结构保真路线：`.box{float:left;width:23%;margin-right:2%}` 是稳定已知
+目录网格模式，fixture 按文档形状构造（Wikipedia 先例本就允许手工保真）。
+
+**两个 fixture 测试**（450→452），增量都是「per-float margin 参与几何」
+——此前 8 系列测试全部零 margin：
+
+- `craigslist_float_grid_margins_tile_four_per_band`（8c）：23%+2%=25%
+  步距恰好四格填满 800 带，第五格换带。margin-right 进 flex 主轴累计，
+  wrap 算术首次被 margin 验证。
+- `nav_bar_right_floated_links_with_margins_stack_inward`(8e)：右浮链接
+  各带 margin-left:10px——组足迹 (80+10)×2=180 贴右缘，l1 x=720（贴边
+  不受自身 margin 影响）、l2 x=630（多退一个 link+margin 步长）。
+
+**教训**：inline 展平节点（#brand 文本）无独立 rect——真实形状测试断
+言要选有 taffy 身份的节点（float 盒永远有）。
+
+craigslist grid 一次通过；nav bar 初版断言了 brand 的 rect（key miss）
+改为只锚 float 盒后通过。8 系列 margin 几何在两种真实模式下无实现改动
+直接通过。
