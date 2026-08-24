@@ -1097,6 +1097,13 @@ fn build_element(
         let clears_this = |cid: &NodeId| -> bool {
             styles.get(cid).and_then(|s| s.clear_side).is_some_and(|c| match c {
                 crate::diting_css::ClearSide::Both => true,
+                // Logical keywords resolve against this engine's LTR-only mode.
+                crate::diting_css::ClearSide::InlineStart => {
+                    run_side == Some(crate::diting_css::FloatSide::Left)
+                }
+                crate::diting_css::ClearSide::InlineEnd => {
+                    run_side == Some(crate::diting_css::FloatSide::Right)
+                }
                 crate::diting_css::ClearSide::Left => run_side == Some(crate::diting_css::FloatSide::Left),
                 crate::diting_css::ClearSide::Right => run_side == Some(crate::diting_css::FloatSide::Right),
             })
@@ -3302,6 +3309,41 @@ mod bridge_cross_check {
         assert!((a.x - 0.0).abs() < EPS as f32, "cleared sibling returns to full width: {a:?}");
         assert!(a.y >= f.y + f.height - EPS as f32,
             "clear:both moves below the float bottom: a.y={} float.bottom={}", a.y, f.y + f.height);
+    }
+
+    /// Logical clear keywords resolve against LTR: inline-start clears a
+    /// left float, inline-end a right float.
+    #[test]
+    fn logical_clear_keywords_clear_matching_float_side() {
+        for (keyword, float_sel) in [("inline-start", "#fl"), ("inline-end", "#fr")] {
+            let html = format!(
+                r#"<body>
+                    <div id="fl"></div>
+                    <div id="fr" style="float: right; width: 120px; height: 80px;"></div>
+                    <div id="after" style="clear: {keyword}"></div>
+                </body>"#
+            );
+            let sheet = r#"
+                body { margin: 0; }
+                #fl { float: left; width: 200px; height: 300px; }
+                #after { width: 500px; height: 20px; margin: 0; }
+            "#;
+            let tree = crate::diting_dom::tree_sink::parse_html(&html);
+            let rules = diting_css::parse_stylesheet(sheet);
+            let styles = our_styles(&tree, &rules);
+            let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW, VH);
+            let after = tree.query_selector("#after").unwrap().unwrap();
+            let a = rects[&after];
+            let fl = rects[&tree.query_selector("#fl").unwrap().unwrap()];
+            let fr = rects[&tree.query_selector("#fr").unwrap().unwrap()];
+            if float_sel == "#fl" {
+                assert!(a.y >= fl.y + fl.height - EPS as f32,
+                    "{keyword} clears the left float: a.y={} left.bottom={}", a.y, fl.y + fl.height);
+            } else {
+                assert!(a.y >= fr.y + fr.height - EPS as f32,
+                    "{keyword} clears the right float: a.y={} right.bottom={}", a.y, fr.y + fr.height);
+            }
+        }
     }
 
     /// The right-float variant of the same zone: the float hugs the

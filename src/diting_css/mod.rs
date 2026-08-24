@@ -418,7 +418,7 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         }
         "z-index" => value == "auto" || value.parse::<i32>().is_ok(),
         "float" => matches!(value, "left" | "right" | "none"),
-        "clear" => matches!(value, "left" | "right" | "both" | "none"),
+        "clear" => matches!(value, "left" | "right" | "both" | "inline-start" | "inline-end" | "none"),
         "border-radius" => {
             // 1-4 radii, optionally `/` plus 1-4 vertical radii.
             let (horiz, vert) = match value.split_once('/') {
@@ -551,6 +551,10 @@ pub enum ClearSide {
     Left,
     Right,
     Both,
+    /// Logical keywords (CSS Logical Properties): inline-start/end resolve to
+    /// left/right in this engine's LTR-only writing mode.
+    InlineStart,
+    InlineEnd,
 }
 
 /// Border line style. Only `Solid` paints faithfully in this slice; the
@@ -1371,6 +1375,8 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 "left" => Some(ClearSide::Left),
                 "right" => Some(ClearSide::Right),
                 "both" => Some(ClearSide::Both),
+                "inline-start" => Some(ClearSide::InlineStart),
+                "inline-end" => Some(ClearSide::InlineEnd),
                 "none" => None,
                 _ => return false,
             };
@@ -1788,11 +1794,19 @@ mod tests {
         assert_eq!(s.float_side, None);
         assert_eq!(s.clear_side, None);
 
+        // Logical keywords (CSS Logical Properties) parse; layout resolves
+        // them against LTR (inline-start = left).
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "clear: inline-start");
+        assert_eq!(s.clear_side, Some(ClearSide::InlineStart));
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "clear: inline-end");
+        assert_eq!(s.clear_side, Some(ClearSide::InlineEnd));
+
         // Invalid values drop the declaration (style stays default).
         let mut s = ComputedStyle::default();
         assert!(!apply_declarations(&mut s, "float: top"));
         assert!(!apply_declarations(&mut s, "clear: all"));
-        assert!(!apply_declarations(&mut s, "clear: inline-start"));
         assert_eq!(s, ComputedStyle::default());
     }
 
@@ -1803,7 +1817,8 @@ mod tests {
         assert!(supports_declaration("float", "none"));
         assert!(!supports_declaration("float", "top"));
         assert!(supports_declaration("clear", "both"));
-        assert!(!supports_declaration("clear", "inline-start"), "not in our grammar yet");
+        assert!(supports_declaration("clear", "inline-start"), "logical keyword (LTR-resolved)");
+        assert!(supports_declaration("clear", "inline-end"));
         // `0` passes the probe's shared unitless-zero gate (the same wildcard
         // every keyword property gets); the value parser itself declines it.
     }

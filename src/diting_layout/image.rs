@@ -386,6 +386,17 @@ mod tests {
     /// RGBA output is bit-identical: encode a solid JPEG, decode it via
     /// `decode_bytes` (magic sniff) and via the data: URL path.
     #[test]
+    // Progressive JPEG (SOF2): zune-jpeg decodes it like baseline. Real
+    // pages ship plenty of these; a decode failure would render the
+    // placeholder instead of the image.
+    #[test]
+    fn progressive_jpeg_decodes() {
+        let bytes = include_bytes!("fixtures/progressive.jpg");
+        assert!(bytes.starts_with(&[0xFF, 0xD8, 0xFF]), "JPEG magic");
+        let decoded = decode_bytes(bytes).expect("progressive JPEG decodes");
+        assert_eq!((decoded.width, decoded.height), (60, 40));
+    }
+
     fn jpeg_decodes_and_sniffs_by_magic() {
         let mut jpeg_bytes = Vec::new();
         image::DynamicImage::from(image::RgbImage::from_raw(4, 2, vec![204u8; 4 * 2 * 3]).unwrap())

@@ -1706,3 +1706,16 @@ all_async_search 烧完自己的预算被正常终止，渲染照常完成。
 
 **坑**：`sample <pid>` 对挂死的原生线程比日志/断点有效得多——V8 watchdog
 只管 JS 字节码里的中断检查，native op 卡死它无能为力。
+
+## 52. 小项批次：clear 逻辑关键字 + 渐进 JPEG 钉测试（2026-08-25，471 绿）
+
+- **`clear: inline-start / inline-end`**：CSS 逻辑关键字入语法（探针 +
+  解析 + 布局）。引擎 LTR-only，inline-start=left、inline-end=right，
+  `ClearSide::InlineStart/InlineEnd` 在 float-zone 的 clears_this 匹配中
+  直接解到对应物理边。布局级测试：左浮动被 inline-start 清除、右浮动被
+  inline-end 清除。
+- **渐进 JPEG**：image 0.25（zune-jpeg）本来就解 SOF2——挂账时不确定，
+  现在用 fixture（60×40 渐进编码）钉死为回归测试。无代码改动。
+- **parley pin 不动**：crates.io 最新仍是 0.11.1（带 CJK 挂死 bug 的那
+  版，linebender/parley#752）；0.11.2 未发。2fa6434d pin 继续等。
+
