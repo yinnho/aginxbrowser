@@ -5145,4 +5145,79 @@ mod tests {
             serde_json::json!(["same-origin", "self-ok"])
         );
     }
+
+    /// Upstream obscura #658: relative URL resolution (anchor href, form
+    /// action, fetch/XHR input) must resolve against the document BASE url —
+    /// the document URL with <base href> folded in — while document.URL
+    /// itself stays the plain document URL.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_relative_urls_resolve_against_base_href() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+        let mut rt = setup_runtime(
+            "<html><head><base href=\"/assets/\"></head><body>\
+             <a id=\"a\" href=\"page.html\">x</a><form id=\"f\" action=\"submit\"></form></body></html>",
+        );
+        rt.set_url("https://example.com/app/index");
+
+        // Anchor href resolves against /assets/.
+        assert_eq!(
+            rt.evaluate("document.getElementById('a').href").unwrap(),
+            serde_json::json!("https://example.com/assets/page.html")
+        );
+        // Form action likewise.
+        assert_eq!(
+            rt.evaluate("document.getElementById('f').action").unwrap(),
+            serde_json::json!("https://example.com/assets/submit")
+        );
+        // fetch() input resolution uses the base as well: a real local server
+        // records the path the runtime actually requests.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (path_tx, path_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]);
+            let path = request
+                .lines()
+                .next()
+                .and_then(|l| l.split_whitespace().nth(1))
+                .unwrap_or("")
+                .to_string();
+            let body = b"{}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(body);
+            let _ = stream.flush();
+            path_tx.send(path).unwrap();
+        });
+        rt.set_url(&format!("https://example.com/app/index"));
+        // Point <base href> at the local server so the resolved fetch lands
+        // there (the page URL itself is non-fetchable https).
+        rt.evaluate(&format!(
+            "document.querySelector('base').setAttribute('href', 'http://127.0.0.1:{}/assets/')", port
+        ))
+        .unwrap();
+        let _ = rt.evaluate_for_cdp(
+            "(async function(){ try { await fetch('data.json'); } catch(e) {} })()",
+            true,
+            true,
+        )
+        .await;
+        let seen = path_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap_or_default();
+        assert_eq!(seen, "/assets/data.json");
+        // Identity surfaces stay on the plain document URL.
+        assert_eq!(
+            rt.evaluate("document.URL").unwrap(),
+            serde_json::json!("https://example.com/app/index")
+        );
+    }
 }

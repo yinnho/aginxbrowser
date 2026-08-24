@@ -409,6 +409,29 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         "document_title" => serde_json::to_string(&gs.title).unwrap_or("\"\"".into()),
         "document_referrer" => serde_json::to_string(&gs.referrer).unwrap_or("\"\"".into()),
         "document_url" => serde_json::to_string(&gs.url).unwrap_or("\"\"".into()),
+        // Document BASE url (HTML §document-base-url): the document URL with
+        // the first <base href> folded in. This is what relative URL
+        // resolution (anchor/area href, form action, iframe src, fetch) must
+        // resolve against — upstream obscura #658. document.URL and origin
+        // checks stay on the plain "document_url".
+        "document_base_url" => {
+            let base = dom
+                .query_selector("base[href]")
+                .ok()
+                .flatten()
+                .and_then(|nid| {
+                    dom.get_node(nid)
+                        .and_then(|n| n.get_attribute("href").map(|v| v.to_string()))
+                });
+            let folded = base.and_then(|href| {
+                url::Url::parse(&gs.url)
+                    .ok()
+                    .and_then(|doc| doc.join(&href).ok())
+                    .map(|u| u.to_string())
+            });
+            serde_json::to_string(&folded.unwrap_or_else(|| gs.url.clone()))
+                .unwrap_or("\"\"".into())
+        }
         "document_encoding" => serde_json::to_string(&gs.encoding).unwrap_or("\"UTF-8\"".into()),
         "document_element" => {
             for cid in dom.children(dom.document()) {

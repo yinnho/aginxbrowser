@@ -45,7 +45,7 @@ const _domStrA1 = new Set([
   "create_processing_instruction", "create_doctype",
   "create_document_fragment",
   "query_selector", "query_selector_all", "get_element_by_id",
-  "document_node_id", "document_title", "set_document_title", "document_referrer", "document_url", "document_encoding",
+  "document_node_id", "document_title", "set_document_title", "document_referrer", "document_url", "document_base_url", "document_encoding",
   "document_element", "document_doctype",
   "document_write", "document_write_reset",
 ]);
@@ -1283,7 +1283,10 @@ function _applyDocQueryEncoding(u) {
 // HTMLHyperlinkElementUtils helpers (the <a>/<area> URL-decomposition members).
 // The element's href attribute is parsed against the document base URL via the
 // WHATWG url op; component getters read it, setters rewrite the href attribute.
-function _anchorBase() { return _domParse("document_url") || "about:blank"; }
+// Base = document URL with <base href> folded in (upstream #658); identity and
+// origin checks keep using the plain document URL.
+function _docBase() { return _domParse("document_base_url") || _domParse("document_url") || "about:blank"; }
+function _anchorBase() { return _docBase(); }
 function _elemHrefURL(el) {
   const raw = el.getAttribute('href');
   if (raw === null || raw === undefined) return null;
@@ -2092,7 +2095,7 @@ class Element extends Node {
   _loadIframeSrc(url) {
     let fullUrl = url;
     if (!url.includes('://')) {
-      try { fullUrl = new URL(url, _domParse("document_url") || "about:blank").href; } catch(e) {}
+      try { fullUrl = new URL(url, _docBase()).href; } catch(e) {}
     }
     const el = this;
     fetch(fullUrl, {mode: 'no-cors'}).then(async resp => {
@@ -2145,8 +2148,8 @@ class Element extends Node {
     return this._iframeWin;
   }
   get action() {
-    const action = this.getAttribute("action") || _domParse("document_url") || "";
-    try { return new URL(action, _domParse("document_url") || "about:blank").href; } catch(e) { return action; }
+    const action = this.getAttribute("action") || _docBase();
+    try { return new URL(action, _docBase()).href; } catch(e) { return action; }
   }
   set action(v) { this.setAttribute("action", v); }
   get method() { return this.getAttribute("method") || "get"; }
@@ -3275,7 +3278,7 @@ function _resolveUrl(url) {
   url = String(url);
   if (!url) return url;
   if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('about:')) return url;
-  try { return new URL(url, _domParse("document_url") || "about:blank").href; } catch(e) { return url; }
+  try { return new URL(url, _docBase()).href; } catch(e) { return url; }
 }
 // `__virtualUrl` is set by `history.pushState`/`replaceState` (and cleared by
 // any real navigation). When set, `location.href` and friends read it instead
@@ -3895,7 +3898,7 @@ globalThis.fetch = async (input, init = {}) => {
       : ((typeof URL === 'function' && input instanceof URL) ? input.href : (input?.url || input?.href || String(input || ""))));
   if (url && !url.includes('://')) {
     try {
-      const base = _domParse("document_url") || "about:blank";
+      const base = _docBase();
       url = new URL(url, base).href;
     } catch(e) { /* keep as-is if URL resolution fails */ }
   }
@@ -4100,7 +4103,7 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     let url = this._url;
     if (url && !url.includes('://')) {
       try {
-        const base = _domParse("document_url") || "about:blank";
+        const base = _docBase();
         url = new URL(url, base).href;
       } catch(e) {}
     }
