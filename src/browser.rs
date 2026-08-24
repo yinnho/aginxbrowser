@@ -18,15 +18,27 @@ pub struct Browser {
 
 impl Browser {
     pub fn build(config: BrowserConfig) -> Result<Self, Error> {
-        let context = BrowserContext::with_storage_and_network(
-            "api".to_string(),
-            config.proxy,
-            config.stealth,
-            config.user_agent,
-            config.storage_dir.clone(),
-            false,
-            config.tls_fingerprint.clone(),
-        );
+        let context = match config.shared_cookie_jar.clone() {
+            Some(jar) => BrowserContext::with_shared_cookie_jar(
+                "api".to_string(),
+                config.proxy,
+                config.stealth,
+                config.user_agent,
+                config.storage_dir.clone(),
+                false,
+                config.tls_fingerprint.clone(),
+                jar,
+            ),
+            None => BrowserContext::with_storage_and_network(
+                "api".to_string(),
+                config.proxy,
+                config.stealth,
+                config.user_agent,
+                config.storage_dir.clone(),
+                false,
+                config.tls_fingerprint.clone(),
+            ),
+        };
 
         let context = Arc::new(context);
         let cookie_jar = context.cookie_jar.clone();
@@ -88,6 +100,11 @@ impl BrowserBuilder {
     /// "chrome145", "firefox133", "safari17_5", "edge145".
     pub fn tls_fingerprint(mut self, fp: impl Into<String>) -> Self {
         self.config.tls_fingerprint = Some(fp.into());
+        self
+    }
+    /// Share a process-global cookie jar across browser instances.
+    pub fn shared_cookie_jar(mut self, jar: Arc<CookieJar>) -> Self {
+        self.config.shared_cookie_jar = Some(jar);
         self
     }
     pub fn build(self) -> Result<Browser, Error> {

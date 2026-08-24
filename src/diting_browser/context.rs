@@ -72,7 +72,38 @@ impl BrowserContext {
         allow_private_network: bool,
         tls_fingerprint: Option<String>,
     ) -> Self {
-        let cookie_jar = Arc::new(CookieJar::new());
+        Self::_new_with_jar(id, proxy_url, stealth, user_agent, storage_dir, allow_private_network, tls_fingerprint, None)
+    }
+
+    /// Like `_new_inner` but reuses a caller-owned cookie jar instead of
+    /// creating a fresh one. The stateless HTTP handlers share one
+    /// process-global jar this way so repeat visits to a site look like the
+    /// same returning client rather than a brand-new incognito profile on
+    /// every request (fresh profiles maximize anti-bot CAPTCHA triggers).
+    pub fn with_shared_cookie_jar(
+        id: String,
+        proxy_url: Option<String>,
+        stealth: bool,
+        user_agent: Option<String>,
+        storage_dir: Option<PathBuf>,
+        allow_private_network: bool,
+        tls_fingerprint: Option<String>,
+        cookie_jar: Arc<CookieJar>,
+    ) -> Self {
+        Self::_new_with_jar(id, proxy_url, stealth, user_agent, storage_dir, allow_private_network, tls_fingerprint, Some(cookie_jar))
+    }
+
+    fn _new_with_jar(
+        id: String,
+        proxy_url: Option<String>,
+        stealth: bool,
+        user_agent: Option<String>,
+        storage_dir: Option<PathBuf>,
+        allow_private_network: bool,
+        tls_fingerprint: Option<String>,
+        cookie_jar: Option<Arc<CookieJar>>,
+    ) -> Self {
+        let cookie_jar = cookie_jar.unwrap_or_else(|| Arc::new(CookieJar::new()));
 
         // Restore cookies from disk if storage_dir is configured
         if let Some(ref dir) = storage_dir {

@@ -5,7 +5,9 @@ use crate::{
 #[cfg(feature = "screenshot")]
 use crate::{ScreenshotRequest, ScreenshotResponse};
 use crate::browser::Browser;
+use crate::diting_net::CookieJar;
 use anyhow::{Context, Result};
+use std::sync::Arc;
 
 /// Error type for /search (separate from anyhow so we can map to HTTP status).
 #[derive(Debug)]
@@ -62,10 +64,55 @@ pub fn should_auto_proxy(url: &str) -> bool {
 /// Auto-detection: if the target URL matches a known blocked domain, proxy is
 /// used regardless of `use_proxy` flag (the site is unreachable without proxy).
 pub fn build_browser(use_proxy: bool, url: &str, tls_fingerprint: Option<&str>) -> Result<Browser> {
+    build_browser_with_jar(use_proxy, url, tls_fingerprint, true)
+}
+
+/// Process-global cookie jar shared by every stateless request handler. A
+/// fresh incognito profile per request is a CAPTCHA magnet — anti-bot
+/// systems score "first-ever visitor" traffic hardest, so reusing cookies
+/// from prior visits (baidu/wappass tokens, cf_clearance-style grants)
+/// measurably cuts challenge rates on repeat URLs.
+static SHARED_COOKIE_JAR: std::sync::LazyLock<Arc<CookieJar>> =
+    std::sync::LazyLock::new(|| {
+        let jar = Arc::new(CookieJar::new());
+        let path = cookie_store_path();
+        if let Ok(n) = jar.load_from_file(&path) {
+            if n > 0 {
+                tracing::info!("restored {} cookies from {}", n, path.display());
+            }
+        }
+        jar
+    });
+
+fn cookie_store_path() -> std::path::PathBuf {
+    let dir = std::env::var("AGINXBROWSER_COOKIE_STORE_DIR")
+        .unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(dir).join("cookie-store.json")
+}
+
+/// Persist the shared jar (best-effort; called after stateless requests).
+pub fn persist_shared_cookies() {
+    let path = cookie_store_path();
+    if let Err(e) = SHARED_COOKIE_JAR.save_to_file(&path) {
+        tracing::warn!("cookie store save failed: {}", e);
+    }
+}
+
+/// [`build_browser`] variant that can opt out of the shared cookie jar
+/// (isolation-sensitive flows pass `false`).
+pub fn build_browser_with_jar(
+    use_proxy: bool,
+    url: &str,
+    tls_fingerprint: Option<&str>,
+    share_cookies: bool,
+) -> Result<Browser> {
     // Stealth defaults on; disable via AGINXBROWSER_STEALTH=0 (diagnostic / when
     // the wreq stealth client misbehaves on a given site).
     let stealth = !matches!(std::env::var("AGINXBROWSER_STEALTH").ok().as_deref(), Some("0"));
     let mut builder = Browser::builder().stealth(stealth);
+    if share_cookies {
+        builder = builder.shared_cookie_jar(SHARED_COOKIE_JAR.clone());
+    }
     if let Some(fp) = tls_fingerprint {
         builder = builder.tls_fingerprint(fp);
     }
@@ -638,4 +685,34 @@ pub async fn do_search(req: SearchRequest) -> Result<SearchResponse, SearchError
         results: items,
         captcha_events,
     })
+}
+
+#[cfg(test)]
+mod shared_jar_tests {
+    use super::*;
+    use crate::browser::Browser;
+
+    /// The stateless handlers' CAPTCHA mitigation: two browsers built from
+    /// the same shared jar observe each other's cookies, so a repeat visit
+    /// to a site presents the first visit's grants (wappass tokens etc.)
+    /// instead of looking like a brand-new visitor.
+    #[tokio::test]
+    async fn shared_cookie_jar_spans_browser_instances() {
+        let jar = Arc::new(CookieJar::new());
+        let mk = || {
+            Browser::builder()
+                .stealth(false)
+                .shared_cookie_jar(jar.clone())
+                .build()
+                .unwrap()
+        };
+        let b1 = mk();
+        let url = url::Url::parse("https://www.example.com/").unwrap();
+        b1.cookies().set("sid=abc123", "https://www.example.com/").unwrap();
+
+        let b2 = mk();
+        let got = b2.cookies().get_for_url("https://www.example.com/").unwrap();
+        let names: Vec<&str> = got.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"sid"), "second browser sees the cookie: {names:?}");
+    }
 }

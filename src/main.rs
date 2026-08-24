@@ -521,6 +521,18 @@ async fn main() -> anyhow::Result<()> {
     let bind_addr = std::env::var("AGINXBROWSER_BIND").unwrap_or_else(|_| "0.0.0.0:8089".to_string());
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     tracing::info!("aginxbrowser listening on {}", listener.local_addr()?);
+
+    // Periodically persist the process-global shared cookie jar (stateless
+    // handlers mutate it in place; a crash shouldn't cost returning-client
+    // cookies that keep anti-bot CAPTCHA rates down).
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            server::persist_shared_cookies();
+        }
+    });
+
     axum::serve(listener, app.with_state(mcp::mcp_http_service())).await?;
     Ok(())
 }

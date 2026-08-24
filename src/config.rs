@@ -1,5 +1,8 @@
 #![allow(dead_code)]
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::diting_net::CookieJar;
 
 /// Configuration for launching a Browser instance.
 pub struct BrowserConfig {
@@ -14,6 +17,9 @@ pub struct BrowserConfig {
     /// TLS fingerprint override (stealth mode only): "chrome145", "firefox133",
     /// "safari17_5", "edge145", etc. None → Chrome145 default.
     pub tls_fingerprint: Option<String>,
+    /// Caller-owned cookie jar shared across browser instances (the stateless
+    /// HTTP handlers pass the process-global jar here).
+    pub shared_cookie_jar: Option<Arc<CookieJar>>,
 }
 
 impl Default for BrowserConfig {
@@ -24,6 +30,7 @@ impl Default for BrowserConfig {
             user_agent: None,
             storage_dir: None,
             tls_fingerprint: None,
+            shared_cookie_jar: None,
         }
     }
 }

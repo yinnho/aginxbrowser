@@ -1719,3 +1719,27 @@ all_async_search 烧完自己的预算被正常终止，渲染照常完成。
 - **parley pin 不动**：crates.io 最新仍是 0.11.1（带 CJK 挂死 bug 的那
   版，linebender/parley#752）；0.11.2 未发。2fa6434d pin 继续等。
 
+
+## 53. 共享 cookie jar：无状态请求的 CAPTCHA 免费缓解（2026-08-25，472 绿）
+
+**背景**：托管实例的 real=0 flicker 真因是搜索引擎 CAPTCHA 挂起级联（§49/
+memory aginxbrowser-hosted-captcha-flicker）。付费修法（2captcha key）之外，
+免费杠杆 = 别让每个请求看起来都是"首次访客"——反爬系统对全新 profile 的
+评分最狠。
+
+**改动**：
+- `BrowserConfig.shared_cookie_jar` + `BrowserBuilder::shared_cookie_jar` +
+  `BrowserContext::with_shared_cookie_jar`（jar 注入先于 HttpClient 构造，
+  导航/子资源/XHR 全走同一 jar）。
+- server.rs 进程级 `SHARED_COOKIE_JAR`（LazyLock），启动时从
+  `AGINXBROWSER_COOKIE_STORE_DIR/cookie-store.json` 恢复；main 起一个 60s
+  周期任务落盘（best-effort）。所有 stateless 处理器（fetch/click/eval/
+  screenshot/scrape）经 `build_browser` 自动共享。
+- 会话（session/*）不受影响——session 本来就有自己的持久 context。
+- 测试 `shared_cookie_jar_spans_browser_instances`：两个 Browser 实例经共
+  享 jar 互见 cookie。E2E：httpbin response-headers set-cookie → jar 捕获 →
+  60s tick 后落盘验证。
+
+**预期效果**：同站二次访问带上首次的 wappass/cf 类授权 cookie，CAPTCHA 触发
+率下降；配合 workload 侧已有的 URL 缓存（2026-08-10 验证过），构成无 key
+缓解组合。效果依赖站点行为，无法离线断言——观察线上 flicker 频率变化。
