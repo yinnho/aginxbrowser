@@ -1557,14 +1557,19 @@ fn glob_match(pattern: &str, url: &str) -> bool {
 
 fn validate_fetch_url(url: &url::Url) -> Result<(), String> {
     let scheme = url.scheme();
-    if scheme != "http" && scheme != "https" && scheme != "file" {
+    // file:// is rejected up front for page-reachable fetch/XHR, matching the
+    // deny-by-default navigation posture (upstream obscura #708: the old gate
+    // allowed the scheme through and short-circuited the SSRF checks; the
+    // transports couldn't actually fetch it, but the inconsistency leaked an
+    // "allowed" signal to probing scripts).
+    if scheme != "http" && scheme != "https" {
         return Err(format!(
-            "Forbidden URL scheme '{}' - only http, https, and file are allowed",
+            "Forbidden URL scheme '{}' - only http and https are allowed",
             scheme
         ));
     }
 
-    if scheme == "file" || crate::diting_net::env_allows_private_network() {
+    if crate::diting_net::env_allows_private_network() {
         return Ok(());
     }
 
@@ -2218,8 +2223,24 @@ pub fn build_extension() -> Extension {
 
 #[cfg(test)]
 mod tests {
-    use super::{cors_response_allows, FetchCredentials};
+    use super::{cors_response_allows, validate_fetch_url, FetchCredentials};
     use super::{pbkdf2_derive, PBKDF2_MAX_ITERATIONS, PBKDF2_MAX_OUTPUT_BYTES};
+
+    // Upstream obscura #708: file:// must be rejected up front for
+    // page-reachable fetch/XHR (deny-by-default, matching navigation),
+    // not allowed through the scheme gate to short-circuit SSRF checks.
+    #[test]
+    fn fetch_scheme_gate_rejects_file_up_front() {
+        let file_url = url::Url::parse("file:///etc/passwd").unwrap();
+        let err = validate_fetch_url(&file_url).unwrap_err();
+        assert!(err.contains("Forbidden URL scheme 'file'"), "got: {err}");
+
+        let ftp = url::Url::parse("ftp://example.com/x").unwrap();
+        assert!(validate_fetch_url(&ftp).is_err());
+
+        let https = url::Url::parse("https://example.com/x").unwrap();
+        assert!(validate_fetch_url(&https).is_ok());
+    }
 
     // Upstream b744b9b.
     #[test]
