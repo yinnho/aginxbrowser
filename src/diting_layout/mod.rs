@@ -4899,6 +4899,73 @@ mod bridge_cross_check {
             "content below the band runs full width: {deep:?}");
     }
 
+    /// Real-site shape validation (8 series smoke): zh.wikipedia's CSS
+    /// article infobox — `float:right; clear:right; width:22em`, an 8-row
+    /// table with caption/th/td rows, followed by two lead paragraphs and a
+    /// later section. Hand contract at VW=800: the infobox hugs the right
+    /// edge (22em = 352px → x=448), lead text fills the flow column beside
+    /// it; nothing panics and every box stays inside the viewport.
+    #[test]
+    fn wikipedia_infobox_shape_lays_out_without_panicking() {
+        // Structure-faithful excerpt of
+        // https://zh.wikipedia.org/wiki/CSS (2026-08-24): infobox table +
+        // lead paragraphs + one later section.
+        let html = r#"<body>
+            <table class="infobox"><caption>CSS</caption>
+                <tr><th colspan="2">层叠样式表</th></tr>
+                <tr><td colspan="2">2024年全新启用之官方标识</td></tr>
+                <tr><th>扩展名</th><td>.css</td></tr>
+                <tr><th>互联网媒体类型</th><td>text/css</td></tr>
+                <tr><th>开发者</th><td>哈肯·維姆·萊、伯特·波斯、全球資訊網協會</td></tr>
+                <tr><th>首次发布</th><td>1996年12月17日，29年前</td></tr>
+                <tr><th>格式类型</th><td>样式表语言</td></tr>
+                <tr><th>标准</th><td>第一版、第二版、第三版各模組規格</td></tr>
+            </table>
+            <p id="lead1">階層式樣式表（英語：Cascading Style Sheets，缩写CSS）是一种用来为结构化文档添加样式的计算机语言，由W3C定义和维护。CSS3現在已被大部分現代瀏覽器支援。</p>
+            <p id="lead2">CSS不仅可以静态地修饰网页，还可以配合各种脚本语言动态地对网页各元素进行格式化。CSS 能够对网页中元素位置的排版进行像素级精确控制。</p>
+            <h2 id="hist">歷史</h2>
+            <p id="later">CSS最早的提案是在1994年提出的。</p>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; font-size: 16px; }
+            .infobox { float: right; clear: right; width: 352px; border: 1px solid rgb(200,200,200); background: rgb(248,249,250); margin: 0 0 16px 16px; }
+            p { margin: 0 0 12px 0; }
+        "#;
+
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        // The real product entry: paint items + rects must come out without
+        // panicking on this shape.
+        let (rects, items) = layout_dom_with_paint(&tree, &styles, &fixture_fonts(), VW);
+
+        assert!(!rects.is_empty(), "rects produced");
+        assert!(items.iter().any(|i| matches!(i, PaintItem::Bg { .. })), "infobox bg emitted");
+
+        let ib = rects[&tree.query_selector(".infobox").unwrap().unwrap()];
+        // CSS float semantics: the float's MARGIN box hugs the container's
+        // right edge. Margin box = left-margin(16) + border-box(354) = 370,
+        // so the border box starts at 800 − 370 + 16 = 446.
+        assert!((ib.x - 446.0).abs() <= 2.0 * EPS as f32,
+            "infobox border box at the margin-box right-edge stop: x={} want 446", ib.x);
+        assert!((ib.width - 354.0).abs() <= 2.0 * EPS as f32,
+            "width:22em content + 1px border per side: {}", ib.width);
+
+        let l1 = rects[&tree.query_selector("#lead1").unwrap().unwrap()];
+        assert!((l1.x - 0.0).abs() < EPS as f32,
+            "first paragraph starts at the container's left edge");
+        assert!(l1.width < VW - 368.0 + 2.0,
+            "paragraph wraps in the flow column beside the infobox: {}", l1.width);
+
+        // Every reported rect stays inside the viewport bounds.
+        for (dom_id, r) in rects.iter() {
+            assert!(
+                r.x >= -EPS as f32 && r.x + r.width <= VW as f32 + 2.0,
+                "rect for {dom_id:?} escapes the viewport horizontally: {r:?}"
+            );
+        }
+    }
+
     /// 1:1 image paint (batch 5b): the img box equals the image size, so
     /// both engines blit the same texels at the same positions — every
     /// pixel over the box must match exactly.

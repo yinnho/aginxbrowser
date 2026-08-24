@@ -1416,3 +1416,19 @@ spacer(120) 后的 deep 块 y=120 全宽（预算截断 zone 生效）。修正�
 计：authored width:700 在列内溢出是 CSS 正确行为（改 auto 宽度）。
 
 **8 系列挂账**：clear inline-start/end、渐进 JPEG 性能。
+
+## 43. 真实站点 float 形状验证（2026-08-24 每日维护）
+
+zh.wikipedia.org/wiki/CSS 抓取（经 socks 代理）实证：infobox =
+`.infobox { margin-left:1em; float:right; clear:right; width:22em }`，
+8 行 table（caption/th/td），正文两段 + 后续 section。
+
+**fixture 测试**（449→450）：
+`wikipedia_infobox_shape_lays_out_without_panicking`——结构保真摘录跑
+`layout_dom_with_paint` 产品入口：infobox 贴右缘（margin-box 语义：border
+box x = 800−(354+16)+16 = **446**，手算期望初版漏了 margin box 含左侧
+margin）、正文在旁流列、全部 rect 不越视口、无 panic。
+
+**结论**：8 系列（zone/run/pair/nav/预算/continuation）在真实
+Wikipedia DOM 形状上一次通过（仅测试期望手算错一处）。float 大项达到
+「真实站点 parity」验证门槛的第一块证据。
