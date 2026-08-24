@@ -146,7 +146,7 @@ pub async fn scrape_handler(
 }
 
 /// Fast path: plain scrape with no interactive actions. Uses the layered
-/// renderer (HTTP direct when the page is static, obscura when JS is needed).
+/// renderer (HTTP direct when the page is static, browser when JS is needed).
 async fn scrape_with_fetch(
     req: &ScrapeRequest,
     wants_html: bool,

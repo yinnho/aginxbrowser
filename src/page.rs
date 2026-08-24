@@ -13,7 +13,7 @@ use crate::error::Error;
 /// tokio timeouts, unclosable, leaking 100% CPU.
 pub(crate) const INTERACTION_EVAL_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Read a DOM node id from a JS `evaluate` result. obscura serializes JS numbers
+/// Read a DOM node id from a JS `evaluate` result. the engine serializes JS numbers
 /// as f64, so `Value::as_u64` returns None for an integer-valued result; accept
 /// either an integer or a non-negative finite float. null / non-numbers -> None.
 fn nid_from_value(v: &Value) -> Option<u64> {

@@ -1,6 +1,6 @@
 //! Charset detection and decoding for HTTP response bodies.
 //!
-//! Issue #113: obscura used to call `String::from_utf8_lossy` on every
+//! Issue #113: upstream used to call `String::from_utf8_lossy` on every
 //! response body, which silently corrupts every non-UTF-8 page (GBK, Big5,
 //! Shift-JIS, Windows-125x, EUC-KR, ISO-8859-x). Picking the right decoder
 //! is required for scraping non-Latin sites at all.

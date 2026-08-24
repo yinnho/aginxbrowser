@@ -138,7 +138,7 @@ mod tests {
     fn test_parse_basic_robots() {
         let body = "User-agent: *\nDisallow: /private/\nDisallow: /admin\nAllow: /admin/public\n";
         let cache = RobotsCache::new();
-        cache.parse_and_store("example.com", body, "Obscura");
+        cache.parse_and_store("example.com", body, "Diting");
         assert!(cache.is_allowed("example.com", "/"));
         assert!(cache.is_allowed("example.com", "/page"));
         assert!(!cache.is_allowed("example.com", "/private/secret"));
@@ -156,7 +156,7 @@ mod tests {
     fn test_disallow_all() {
         let body = "User-agent: *\nDisallow: /\n";
         let cache = RobotsCache::new();
-        cache.parse_and_store("blocked.com", body, "Obscura");
+        cache.parse_and_store("blocked.com", body, "Diting");
         assert!(!cache.is_allowed("blocked.com", "/"));
         assert!(!cache.is_allowed("blocked.com", "/page"));
     }

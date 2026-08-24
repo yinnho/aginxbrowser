@@ -4,7 +4,7 @@
 //! One entry is a *consistent* persona: the UA string, `navigator.platform`,
 //! and the userAgentData platform/version triple all describe the same
 //! device. Our `bootstrap.js` derives `navigator.platform` from the UA string
-//! itself (`__obscuraPlatformFromUA`, the Baidu Wenku mismatch fix), so on
+//! itself (`__ditingPlatformFromUA`, the Baidu Wenku mismatch fix), so on
 //! this side the pool is only consumed for its UA strings — but the table
 //! keeps the platform columns both for upstream parity and as the source of
 //! truth the bootstrap derivation is checked against.

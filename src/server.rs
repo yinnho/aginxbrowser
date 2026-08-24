@@ -77,9 +77,9 @@ pub fn build_browser(use_proxy: bool, url: &str, tls_fingerprint: Option<&str>) 
     Ok(builder.build()?)
 }
 
-/// Run an Obscura operation on a dedicated single-threaded runtime.
+/// Run a browser operation on a dedicated single-threaded runtime.
 ///
-/// Obscura's V8 runtime holds `Rc<RefCell<…>>` state, which is `!Send`, so a
+/// The V8 runtime holds `Rc<RefCell<…>>` state, which is `!Send`, so a
 /// `Page` cannot be held across `.await` points on Tokio's multi-threaded
 /// runtime. We spin up a current-thread runtime on a blocking thread and drive
 /// the whole navigation there — the V8 isolate stays on one thread for its
@@ -187,7 +187,7 @@ pub(crate) async fn maybe_bypass_challenge(page: &mut crate::page::Page) -> Resu
 /// whole body. This reflects JS-filled content (WeChat/SPA), unlike parsing
 /// the initial HTML snapshot.
 ///
-/// Obscura's innerText does NOT exclude script/style text (unlike a real
+/// Our innerText does NOT exclude script/style text (unlike a real
 /// browser), so we blank those elements' textContent on the live DOM first.
 /// This mutates the page, but do_fetch discards it right after.
 fn rendered_text(page: &mut crate::page::Page, selector: Option<&str>) -> String {
@@ -470,7 +470,7 @@ pub fn do_eval(req: EvalRequest) -> Result<EvalResponse> {
 /// /screenshot: render the JS-rendered DOM of a page to a PNG via inlined Blitz.
 ///
 /// Unlike /fetch (which can short-circuit to raw HTTP for static pages), this
-/// always drives the obscura browser so SPA/JS-rendered content is captured.
+/// always drives the diting browser so SPA/JS-rendered content is captured.
 /// The page's `document.documentElement.outerHTML` is then fed to Blitz for
 /// layout + paint — no Chromium. Sub-resources (images, head stylesheets) are
 /// pre-fetched through the page's own HTTP client (same cookies/UA/proxy, plus
@@ -577,7 +577,7 @@ pub async fn do_search(req: SearchRequest) -> Result<SearchResponse, SearchError
     // Each fetch runs in its own blocking thread + current-thread runtime
     // (V8 is !Send), so spawn_blocking gives natural isolation + concurrency.
     // Cookies from the search session (e.g. sogou WeChat) are passed through
-    // so the obscura browser can authenticate redirect URLs.
+    // so the diting browser can authenticate redirect URLs.
     let n = req.fetch_top.min(items.len());
     if n > 0 {
         let mut handles = Vec::with_capacity(n);

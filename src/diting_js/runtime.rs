@@ -9,8 +9,8 @@ use crate::diting_dom::DomTree;
 /// isolate handle without taking a direct dependency on deno_core.
 pub use deno_core::v8::IsolateHandle;
 
-use crate::diting_js::module_loader::ObscuraModuleLoader;
-use crate::diting_js::ops::{build_extension, ObscuraState};
+use crate::diting_js::module_loader::DitingModuleLoader;
+use crate::diting_js::ops::{build_extension, JsState};
 
 static SNAPSHOT: &[u8] = include_bytes!(env!("OBSCURA_SNAPSHOT_PATH"));
 
@@ -65,7 +65,7 @@ fn install_heap_limit_guard(
 }
 
 pub struct JsRuntime {
-    runtime: deno_core::JsRuntime,    state: Rc<RefCell<ObscuraState>>,
+    runtime: deno_core::JsRuntime,    state: Rc<RefCell<JsState>>,
     object_store: HashMap<String, String>,
     object_counter: u64,
     /// Thread-safe handle to this runtime's V8 isolate, captured at
@@ -212,10 +212,10 @@ impl JsRuntime {
     /// through `proxy_url` (#139). `None` is equivalent to `with_base_url`
     /// (direct connection).
     pub fn with_base_url_and_proxy(base_url: &str, proxy_url: Option<String>) -> Self {
-        let state = Rc::new(RefCell::new(ObscuraState::new()));
+        let state = Rc::new(RefCell::new(JsState::new()));
         let state_clone = state.clone();
 
-        let module_loader = Rc::new(ObscuraModuleLoader::with_proxy(base_url, proxy_url));
+        let module_loader = Rc::new(DitingModuleLoader::with_proxy(base_url, proxy_url));
 
         // Serialize isolate construction process-wide: V8's JSDispatchTable
         // setup is not safe to run from several threads at once, and sessions
@@ -236,7 +236,7 @@ impl JsRuntime {
         runtime
             .execute_script(
                 "<diting:init>",
-                "globalThis.__obscura_objects = {}; globalThis.__obscura_oid = 0; globalThis.__obscura_init();".to_string(),
+                "globalThis.__diting_objects = {}; globalThis.__diting_oid = 0; globalThis.__diting_init();".to_string(),
             )
             .expect("init should not fail");
 
@@ -336,7 +336,7 @@ impl JsRuntime {
     }
 
     /// Retained response body for a script-initiated request, keyed by its
-    /// `fetch-{N}` id. See `ObscuraState::network_response_bodies`.
+    /// `fetch-{N}` id. See `JsState::network_response_bodies`.
     #[cfg_attr(not(test), allow(dead_code))] // batch-2 kernel; /network endpoint is the pending consumer
     pub fn get_network_response_body(
         &self,
@@ -367,15 +367,15 @@ impl JsRuntime {
     pub fn set_user_agent(&mut self, ua: &str) {
         let escaped = ua.replace('\\', "\\\\").replace('\'', "\\'");
         // After the UA lands, refresh the platform persona (GPU pool, screen,
-        // dpr, hw/memory). The runtime constructor ran __obscura_init before
+        // dpr, hw/memory). The runtime constructor ran __diting_init before
         // any UA was known, so the persona materialized from the linux
         // default — leaving Mesa GL strings behind a macOS UA.
         let _ = self.runtime.execute_script(
             "<set-ua>",
             format!(
-                "globalThis.__obscura_ua = '{}'; \
-                 globalThis._fpCache = null; globalThis.__obscura_hw_plat = undefined; \
-                 globalThis.__obscura_setPersona();",
+                "globalThis.__diting_ua = '{}'; \
+                 globalThis._fpCache = null; globalThis.__diting_hw_plat = undefined; \
+                 globalThis.__diting_setPersona();",
                 escaped
             ),
         );
@@ -384,7 +384,7 @@ impl JsRuntime {
         let escaped = lang.replace('\\', "\\\\").replace('\'', "\\'");
         let _ = self.runtime.execute_script(
             "<set-lang>",
-            format!("globalThis.__obscura_lang = '{}';", escaped),
+            format!("globalThis.__diting_lang = '{}';", escaped),
         );
     }
     /// `execute_script` that self-heals from a stray V8 termination. A
@@ -482,15 +482,15 @@ impl JsRuntime {
                 "(async function() {{\n\
                     try {{\n\
                         var __result = await (\n{expr}\n);\n\
-                        globalThis.__obscura_objects['{oid}'] = __result;\n\
-                        globalThis.__obscura_await_meta = {meta_fn};\n\
-                        globalThis.__obscura_await_rejected = false;\n\
+                        globalThis.__diting_objects['{oid}'] = __result;\n\
+                        globalThis.__diting_await_meta = {meta_fn};\n\
+                        globalThis.__diting_await_rejected = false;\n\
                     }} catch(e) {{\n\
-                        globalThis.__obscura_objects['{oid}'] = e;\n\
-                        globalThis.__obscura_await_meta = {err_meta_fn};\n\
-                        globalThis.__obscura_await_rejected = true;\n\
+                        globalThis.__diting_objects['{oid}'] = e;\n\
+                        globalThis.__diting_await_meta = {err_meta_fn};\n\
+                        globalThis.__diting_await_rejected = true;\n\
                     }}\n\
-                    globalThis.__obscura_done_{done_counter} = true;\n\
+                    globalThis.__diting_done_{done_counter} = true;\n\
                 }})()",
                 expr = cleaned_expr,
                 oid = oid,
@@ -503,7 +503,7 @@ impl JsRuntime {
                 "(function() {{\n\
                     var __result;\n\
                     try {{ __result = (\n{expr}\n); }} catch(e) {{ __result = undefined; }}\n\
-                    globalThis.__obscura_objects['{oid}'] = __result;\n\
+                    globalThis.__diting_objects['{oid}'] = __result;\n\
                     return {meta_fn};\n\
                 }})()",
                 expr = cleaned_expr,
@@ -537,7 +537,7 @@ impl JsRuntime {
 
         let meta_str = if await_promise {
             let __t0 = std::time::Instant::now();
-            let sentinel = format!("globalThis.__obscura_done_{done_counter} === true");
+            let sentinel = format!("globalThis.__diting_done_{done_counter} === true");
             self.resolve_promises_until(
                 |rt| rt.runtime.execute_script("<done?>", sentinel.clone())
                     .ok()
@@ -558,14 +558,14 @@ impl JsRuntime {
                     __dt.as_millis(), preview,
                 );
             }
-            let rejected = self.runtime.execute_script("<readRejected>", "globalThis.__obscura_await_rejected".to_string())
+            let rejected = self.runtime.execute_script("<readRejected>", "globalThis.__diting_await_rejected".to_string())
                 .map_err(|e| format!("JS error: {}", e))?;
             if self.v8_to_json(rejected)?.as_bool().unwrap_or(false) {
-                let err = self.runtime.execute_script("<readError>", format!("String(globalThis.__obscura_objects['{0}'] && (globalThis.__obscura_objects['{0}'].message || globalThis.__obscura_objects['{0}']))", oid))
+                let err = self.runtime.execute_script("<readError>", format!("String(globalThis.__diting_objects['{0}'] && (globalThis.__diting_objects['{0}'].message || globalThis.__diting_objects['{0}']))", oid))
                     .map_err(|e| format!("JS error: {}", e))?;
                 return Err(format!("Promise rejected: {}", self.v8_to_json(err)?.as_str().unwrap_or("")));
             }
-            self.runtime.execute_script("<readMeta>", "globalThis.__obscura_await_meta".to_string())
+            self.runtime.execute_script("<readMeta>", "globalThis.__diting_await_meta".to_string())
                 .map_err(|e| format!("JS error: {}", e))?
         } else {
             result
@@ -578,11 +578,11 @@ impl JsRuntime {
         };
         self.object_store.insert(
             oid.clone(),
-            format!("globalThis.__obscura_objects['{}']", oid),
+            format!("globalThis.__diting_objects['{}']", oid),
         );
 
         if await_promise && return_by_value {
-            let read = self.runtime.execute_script("<readResult>", format!("globalThis.__obscura_objects['{}']", oid))
+            let read = self.runtime.execute_script("<readResult>", format!("globalThis.__diting_objects['{}']", oid))
                 .map_err(|e| format!("JS error: {}", e))?;
             let json_val = self.v8_to_json(read)?;
             return Ok(Self::info_from_json(&json_val));
@@ -617,14 +617,14 @@ impl JsRuntime {
                     var __result;\n\
                     try {{\n\
                         __result = await __fn.call(__this, {args});\n\
-                        globalThis.__obscura_objects['{oid}'] = __result;\n\
-                        globalThis.__obscura_await_meta = {meta_fn};\n\
+                        globalThis.__diting_objects['{oid}'] = __result;\n\
+                        globalThis.__diting_await_meta = {meta_fn};\n\
                     }} catch(e) {{\n\
                         __result = e;\n\
-                        globalThis.__obscura_objects['{oid}'] = e;\n\
-                        globalThis.__obscura_await_meta = {err_meta_fn};\n\
+                        globalThis.__diting_objects['{oid}'] = e;\n\
+                        globalThis.__diting_await_meta = {err_meta_fn};\n\
                     }} finally {{\n\
-                        globalThis.__obscura_done_{done_counter} = true;\n\
+                        globalThis.__diting_done_{done_counter} = true;\n\
                     }}\n\
                 }})()",
                 setup = setup,
@@ -642,7 +642,7 @@ impl JsRuntime {
                 .map_err(|e| format!("JS error: {}", e))?;
 
             let __t0 = std::time::Instant::now();
-            let sentinel = format!("globalThis.__obscura_done_{done_counter} === true");
+            let sentinel = format!("globalThis.__diting_done_{done_counter} === true");
             self.resolve_promises_until(
                 |rt| rt.runtime.execute_script("<done?>", sentinel.clone())
                     .ok()
@@ -667,7 +667,7 @@ impl JsRuntime {
             if return_by_value {
                 let read = self.runtime.execute_script(
                     "<readResult>",
-                    format!("globalThis.__obscura_objects['{}']", oid),
+                    format!("globalThis.__diting_objects['{}']", oid),
                 ).map_err(|e| format!("JS error: {}", e))?;
                 let json_val = self.v8_to_json(read)?;
                 return Ok(Self::info_from_json(&json_val));
@@ -675,7 +675,7 @@ impl JsRuntime {
 
             let meta_result = self.runtime.execute_script(
                 "<readMeta>",
-                "globalThis.__obscura_await_meta".to_string(),
+                "globalThis.__diting_await_meta".to_string(),
             ).map_err(|e| format!("JS error: {}", e))?;
             let meta_str = self.v8_to_json(meta_result)?;
             let meta_json = if let serde_json::Value::String(s) = &meta_str {
@@ -685,7 +685,7 @@ impl JsRuntime {
             };
             self.object_store.insert(
                 oid.clone(),
-                format!("globalThis.__obscura_objects['{}']", oid),
+                format!("globalThis.__diting_objects['{}']", oid),
             );
             return Ok(Self::info_from_meta(&meta_json, Some(oid)));
         }
@@ -716,7 +716,7 @@ impl JsRuntime {
                 var __fn = ({fn_decl});\n\
                 var __this = ({this_expr});\n\
                 var __result = __fn.call(__this, {args});\n\
-                globalThis.__obscura_objects['{oid}'] = __result;\n\
+                globalThis.__diting_objects['{oid}'] = __result;\n\
                 return {meta_fn};\n\
             }})()",
             setup = setup,
@@ -737,7 +737,7 @@ impl JsRuntime {
         };
         self.object_store.insert(
             oid.clone(),
-            format!("globalThis.__obscura_objects['{}']", oid),
+            format!("globalThis.__diting_objects['{}']", oid),
         );
         Ok(Self::info_from_meta(&meta_json, Some(oid)))
     }
@@ -756,7 +756,7 @@ impl JsRuntime {
         self.object_counter += 1;
         let oid = self.make_oid(self.object_counter);
         let code = format!(
-            "globalThis.__obscura_objects['{}'] = ({});",
+            "globalThis.__diting_objects['{}'] = ({});",
             oid, js_expression,
         );
         self.runtime
@@ -764,7 +764,7 @@ impl JsRuntime {
             .map_err(|e| format!("Store error: {}", e))?;
         self.object_store.insert(
             oid.clone(),
-            format!("globalThis.__obscura_objects['{}']", oid),
+            format!("globalThis.__diting_objects['{}']", oid),
         );
         Ok(oid)
     }
@@ -779,7 +779,7 @@ impl JsRuntime {
         let code = format!(
             "(function() {{\n\
                 var __result = (\n{expr}\n);\n\
-                globalThis.__obscura_objects['{oid}'] = __result;\n\
+                globalThis.__diting_objects['{oid}'] = __result;\n\
                 return {meta_fn};\n\
             }})()",
             expr = js_expression,
@@ -798,7 +798,7 @@ impl JsRuntime {
         };
         self.object_store.insert(
             oid.clone(),
-            format!("globalThis.__obscura_objects['{}']", oid),
+            format!("globalThis.__diting_objects['{}']", oid),
         );
         Ok(Self::info_from_meta(&meta_json, Some(oid)))
     }
@@ -807,7 +807,7 @@ impl JsRuntime {
     pub fn release_object(&mut self, object_id: &str) {
         if self.object_store.remove(object_id).is_some() {
             let code = format!(
-                "delete globalThis.__obscura_objects['{}'];",
+                "delete globalThis.__diting_objects['{}'];",
                 object_id,
             );
             let _ = self.runtime.execute_script("<release>", code);
@@ -818,7 +818,7 @@ impl JsRuntime {
     pub fn release_object_group(&mut self) {
         let _ = self.runtime.execute_script(
             "<releaseGroup>",
-            "globalThis.__obscura_objects = {};".to_string(),
+            "globalThis.__diting_objects = {};".to_string(),
         );
         self.object_store.clear();
     }
@@ -3873,8 +3873,8 @@ mod tests {
 
     #[test]
     fn module_loader_stores_proxy_for_dynamic_imports() {
-        use crate::diting_js::module_loader::ObscuraModuleLoader;
-        let loader = ObscuraModuleLoader::with_proxy(
+        use crate::diting_js::module_loader::DitingModuleLoader;
+        let loader = DitingModuleLoader::with_proxy(
             "https://example.com/",
             Some("http://proxy.test:8080".to_string()),
         );
@@ -3882,7 +3882,7 @@ mod tests {
         assert_eq!(loader.base_url, "https://example.com/");
 
         // Default constructor must keep the historical "no proxy" behaviour.
-        let direct = ObscuraModuleLoader::new("https://example.com/");
+        let direct = DitingModuleLoader::new("https://example.com/");
         assert_eq!(direct.proxy_url, None);
     }
 
@@ -4017,7 +4017,7 @@ mod tests {
             .evaluate(
                 r#"(() => {
                     const bad = (a) => a.filter(n => typeof n === "string" &&
-                        (n[0] === "_" || n.includes("obscura") || n.includes("Obscura"))).length;
+                        (n[0] === "_" || n.includes("obscura") || n.includes("Obscura") || n.includes("diting") || n.includes("Diting"))).length;
                     const descs = Object.getOwnPropertyDescriptors(window);
                     return [bad(Object.getOwnPropertyNames(window)),
                             bad(Reflect.ownKeys(window)),

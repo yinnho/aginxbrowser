@@ -45,7 +45,7 @@ pub struct InterceptedRequest {
     pub resolver: tokio::sync::oneshot::Sender<InterceptResolution>,
 }
 
-pub struct ObscuraState {
+pub struct JsState {
     pub dom: Option<DomTree>,
     pub url: String,
     /// WHATWG canonical name of the document's character encoding (e.g.
@@ -165,9 +165,9 @@ fn text_like_content_type(content_type: Option<&str>) -> bool {
         || ct.ends_with("+xml")
 }
 
-impl ObscuraState {
+impl JsState {
     pub fn new() -> Self {
-        ObscuraState {
+        JsState {
             dom: None,
             url: "about:blank".to_string(),
             encoding: "UTF-8".to_string(),
@@ -193,7 +193,7 @@ impl ObscuraState {
     }
 }
 
-pub type SharedState = Rc<RefCell<ObscuraState>>;
+pub type SharedState = Rc<RefCell<JsState>>;
 
 pub(crate) fn node_is_script(dom: &DomTree, node_id: NodeId) -> bool {
     dom.with_node(node_id, |node| {
@@ -228,7 +228,7 @@ fn script_nodes_including_template_contents(dom: &DomTree, root: NodeId) -> Vec<
     scripts
 }
 
-pub(crate) fn mark_script_subtree_started(state: &ObscuraState, root: NodeId) {
+pub(crate) fn mark_script_subtree_started(state: &JsState, root: NodeId) {
     let Some(dom) = state.dom.as_ref() else {
         return;
     };
@@ -822,7 +822,7 @@ static FETCH_CLIENT_CACHE: std::sync::OnceLock<
     std::sync::RwLock<std::collections::HashMap<String, reqwest::Client>>,
 > = std::sync::OnceLock::new();
 
-/// Shared HTTP client cache for any code in obscura-js that needs a
+/// Shared HTTP client cache for any code in diting-js that needs a
 /// reqwest::Client (op_fetch_url for JS-side fetch/XHR, the ES module
 /// loader for dynamic imports). Keyed by proxy URL ("" = direct).
 /// One client per distinct proxy, reused for every request, so the

@@ -2476,7 +2476,7 @@ mod fork_deltas {
 
     // ── Theme 4: `normal` alignment provenance ─────────────────────────────
 
-    /// obscura fork expects the replaced item at its natural 100x50 (normal
+    /// upstream fork expects the replaced item at its natural 100x50 (normal
     /// resolves to start for compressible replaced elements) while the
     /// ordinary item stretches to 300x150 (normal + aspect-ratio matrix).
     /// Stock 0.13.0 has no `normal` keyword: the legacy default logic treats

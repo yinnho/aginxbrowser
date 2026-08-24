@@ -26,7 +26,7 @@ mod session;
 #[cfg(feature = "screenshot")]
 mod screenshot;
 
-// Inlined Obscura engine (formerly external crates).
+// Inlined Diting engine (formerly external crates).
 mod diting_dom;
 mod diting_net;
 mod diting_js;
@@ -74,7 +74,7 @@ pub struct FetchRequest {
     pub auto_bypass_challenge: bool,
     /// Rendering strategy. `auto` (default): try fast HTTP-direct first, fall
     /// back to the JS browser only if the page needs rendering. `http`: force
-    /// HTTP-only (fastest, no JS). `obscura`: always use the full browser.
+    /// HTTP-only (fastest, no JS). `browser`: always use the full browser.
     #[serde(default)]
     pub render_tier: RenderTier,
     /// TLS fingerprint override (stealth mode only): "chrome145", "firefox133",
@@ -108,12 +108,12 @@ fn default_js_extract_timeout_ms() -> u64 {
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum RenderTier {
-    /// HTTP-direct first, fall back to obscura browser. (default)
+    /// HTTP-direct first, fall back to diting browser. (default)
     #[default]
     Auto,
     /// Pure HTTP, no V8/JS. Fastest; misses JS-rendered content.
     Http,
-    /// Always use the obscura browser (current behaviour pre-tiering).
+    /// Always use the diting browser (current behaviour pre-tiering).
     Obscura,
 }
 

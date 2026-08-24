@@ -22,9 +22,9 @@ pub struct BrowserContext {
     pub stealth: bool,
     /// When true, CDP-driven navigation to file:// URLs is permitted.
     /// Default is false: a remote CDP client cannot point the browser
-    /// at /etc/shadow even if Obscura is running as a privileged user.
-    /// Flip on via `obscura serve --allow-file-access` for legitimate
-    /// local-HTML testing workflows. The CLI's own `obscura fetch
+    /// at /etc/shadow even if the engine is running as a privileged user.
+    /// Flip on via the CLI `serve --allow-file-access` for legitimate
+    /// local-HTML testing workflows. The CLI's own `fetch
     /// file://...` path is unaffected because it does not go through
     /// the CDP server.
     #[allow(dead_code)] // read by the CDP file:// guard, which is not absorbed

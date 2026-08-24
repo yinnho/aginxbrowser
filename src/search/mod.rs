@@ -54,7 +54,7 @@ pub struct RawSearchResult {
     /// Position-based score: N - position (0-indexed).
     pub score: f64,
     /// Cookies needed to fetch this URL (e.g. sogou session cookies for
-    /// /link redirect URLs). Passed to the obscura browser during fetch.
+    /// /link redirect URLs). Passed to the diting browser during fetch.
     pub cookies: Vec<String>,
     /// Reserved structured-extraction payload for this result. No engine
     /// populates it today; kept in the API shape for the extraction tier.

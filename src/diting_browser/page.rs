@@ -1294,7 +1294,7 @@ impl Page {
 
         // Inject CSS as a global so getComputedStyle and any CSS-aware shim
         // can read it. Has to happen before scripts run, regardless of
-        // waitUntil, so handlers that read window.__obscura_css see it.
+        // waitUntil, so handlers that read window.__diting_css see it.
         if !css_sources.is_empty() {
             if let Some(js) = &mut self.js {
                 let combined_css = css_sources.join("\n");
@@ -1305,7 +1305,7 @@ impl Page {
                 // U+2028 break out of the template literal and run
                 // arbitrary JS in the page's V8 realm.
                 let escaped = escape_for_js_template_literal(&combined_css);
-                let code = format!("globalThis.__obscura_css = `{}`;", escaped);
+                let code = format!("globalThis.__diting_css = `{}`;", escaped);
                 let _ = js.execute_script("<css>", &code);
             }
         }

@@ -1,12 +1,12 @@
 "use strict";
 
-globalThis.__obscura_errors = [];
+globalThis.__diting_errors = [];
 
 globalThis.addEventListener = globalThis.addEventListener || function(){};
 globalThis.onunhandledrejection = function(e) { if (e?.preventDefault) e.preventDefault(); };
 
 globalThis.onerror = function(msg, src, line, col, error) {
-  globalThis.__obscura_errors.push({msg: String(msg), src: String(src||""), line, error: String(error||"")});
+  globalThis.__diting_errors.push({msg: String(msg), src: String(src||""), line, error: String(error||"")});
 };
 globalThis.__windowListeners = {};
 globalThis.addEventListener = function(type, fn) {
@@ -33,7 +33,7 @@ globalThis.dispatchEvent = function(event) {
 // DOCUMENT — and e.g. set_inner_html wiped the whole page. Commands not in
 // _domStrA1 take a numeric node id as a1; reject anything else.
 // Script-scoped capture of the deno op table. All runtime op calls go
-// through this binding (not the `Deno` global) so __obscura_init can DELETE
+// through this binding (not the `Deno` global) so __diting_init can DELETE
 // globalThis.Deno / __bootstrap per page: a `Deno` property on window is the
 // canonical marker of a deno-based runtime, and anti-bot collectors
 // (WorkOS Radar) hash window property names. A top-level `const` creates a
@@ -131,7 +131,7 @@ var _fpCache = null;
 // single-pool randomization produced) is a geographic/hardware
 // impossibility that risk engines (Castle) score immediately.
 function _fpPlatform() {
-  const ua = globalThis.__obscura_ua || '';
+  const ua = globalThis.__diting_ua || '';
   if (ua.indexOf('Windows') !== -1) return 'win';
   if (ua.indexOf('Macintosh') !== -1 || ua.indexOf('Mac OS X') !== -1) return 'mac';
   if (ua.indexOf('Android') !== -1) return 'linux';
@@ -140,7 +140,7 @@ function _fpPlatform() {
 function _getFp() {
   // The cache is keyed by platform: during the V8 snapshot build no UA is
   // configured yet, so the first materialization defaults to the linux
-  // persona. Once __obscura_ua is set (per context, before __obscura_init),
+  // persona. Once __diting_ua is set (per context, before __diting_init),
   // the cache rebuilds for the real platform instead of serving the frozen
   // snapshot-time one (which put Mesa GL strings behind a macOS UA).
   if (_fpCache && _fpCache.platform === _fpPlatform()) return _fpCache;
@@ -286,8 +286,8 @@ const _consoleFn = (level, args) => {
   }).join(" ")); } catch {}
   if (level === "error") {
     try {
-      globalThis.__obscura_errors = globalThis.__obscura_errors || [];
-      globalThis.__obscura_errors.push({msg: args.map(a => {
+      globalThis.__diting_errors = globalThis.__diting_errors || [];
+      globalThis.__diting_errors.push({msg: args.map(a => {
         if (a && a.stack) return a.stack;
         if (a && a.message) return a.message;
         return String(a);
@@ -1696,8 +1696,8 @@ class Element extends Node {
       }
     }
   }
-  focus() { globalThis.__obscura_focused = this; globalThis.__obscura_click_target = this; }
-  blur() { if (globalThis.__obscura_focused === this) globalThis.__obscura_focused = null; }
+  focus() { globalThis.__diting_focused = this; globalThis.__diting_click_target = this; }
+  blur() { if (globalThis.__diting_focused === this) globalThis.__diting_focused = null; }
 
   // --- Popover API (HTML "popover") ---------------------------------------
   // Read the popover content attribute case-insensitively. The HTML parser
@@ -2323,7 +2323,7 @@ class Element extends Node {
     if (changed && !this._scrollSuppress) this._fireScroll();
   }
   getBoundingClientRect() {
-    globalThis.__obscura_click_target = this;
+    globalThis.__diting_click_target = this;
     // documentElement and body span the full viewport. Without this every
     // hit test against them clips down to a 100x20 synthetic cell and
     // Document.elementFromPoint can never recurse into their children.
@@ -2378,7 +2378,7 @@ class Element extends Node {
   set ariaHidden(v) { if (v == null) this.removeAttribute('aria-hidden'); else this.setAttribute('aria-hidden', String(v)); }
   get ariaSelected() { return this.getAttribute('aria-selected'); }
   set ariaSelected(v) { if (v == null) this.removeAttribute('aria-selected'); else this.setAttribute('aria-selected', String(v)); }
-  scrollIntoView() { globalThis.__obscura_click_target = this; }
+  scrollIntoView() { globalThis.__diting_click_target = this; }
   // scrollTo/scrollBy/scroll accept either (x, y) or a ScrollToOptions object.
   // Without layout the offset cannot be clamped to a real max, but updating it
   // and firing a scroll event lets scroll-driven lazy loaders advance instead
@@ -2959,7 +2959,7 @@ class Document extends Node {
     };
   }
   getSelection() { return this.defaultView ? _selectionFor(this) : null; }
-  get activeElement() { return globalThis.__obscura_focused || this.body; }
+  get activeElement() { return globalThis.__diting_focused || this.body; }
   // The element that scrolls the viewport, and where the page offset lives.
   // Standards mode, so documentElement — quirks mode would be body, but we
   // never parse in quirks mode (upstream #468).
@@ -3196,7 +3196,7 @@ globalThis.self = globalThis;
 
 // `document` is a lazy accessor: at snapshot/bootstrap time there is no DOM
 // yet (ObscuraState.dom is None until Page::init_js calls set_dom after the
-// runtime constructor ran __obscura_init), so the document node id cannot be
+// runtime constructor ran __diting_init), so the document node id cannot be
 // resolved eagerly. Resolving on first access also guarantees identity: the
 // global document IS `_wrap(documentNid)` — the same cached instance that
 // parentNode bubbling reaches. A separate `new Document(...)` here meant
@@ -3354,16 +3354,16 @@ function _nodeInDocument(node) {
 // Derive navigator.platform / userAgentData.platform from the UA so the JS
 // layer's claimed OS matches the HTTP-layer UA. Mismatches (macOS UA +
 // "Linux" platform) are a strong anti-bot signal (Baidu Wenku 安全验证).
-function __obscuraPlatformFromUA() {
-  const ua = globalThis.__obscura_ua || "";
+function __ditingPlatformFromUA() {
+  const ua = globalThis.__diting_ua || "";
   if (ua.indexOf("Windows") !== -1) return "Windows";
   if (ua.indexOf("Macintosh") !== -1 || ua.indexOf("Mac OS X") !== -1) return "MacIntel";
   if (ua.indexOf("iPhone") !== -1 || ua.indexOf("iPad") !== -1) return "iPhone";
   if (ua.indexOf("Android") !== -1) return "Linux armv8l";
   return "Linux x86_64";
 }
-function __obscuraUADataPlatformFromUA() {
-  const ua = globalThis.__obscura_ua || "";
+function __ditingUADataPlatformFromUA() {
+  const ua = globalThis.__diting_ua || "";
   if (ua.indexOf("Windows") !== -1) return "Windows";
   if (ua.indexOf("Macintosh") !== -1 || ua.indexOf("Mac OS X") !== -1) return "macOS";
   if (ua.indexOf("Android") !== -1) return "Android";
@@ -3380,7 +3380,7 @@ function __obscuraUADataPlatformFromUA() {
 // Consolas) are absent on macOS and vice versa (Menlo, Monaco), so the
 // detected set stays coherent with the UA persona.
 const _OBSCURA_FONT_PLATFORM = () => {
-  const p = __obscuraPlatformFromUA();
+  const p = __ditingPlatformFromUA();
   if (p === "Windows") return "win";
   if (p === "MacIntel" || p === "iPhone") return "mac";
   return "linux";
@@ -3536,11 +3536,11 @@ class NetworkInformation {
 _markNative(NetworkInformation);
 
 globalThis.navigator = {
-  get userAgent() { return globalThis.__obscura_ua || "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"; },
+  get userAgent() { return globalThis.__diting_ua || "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"; },
   get appVersion() { return this.userAgent.replace('Mozilla/', ''); },
-  get platform() { return __obscuraPlatformFromUA(); },
-  get language() { return __obscuraLangList()[0]; },
-  get languages() { return __obscuraLangList().slice(); },
+  get platform() { return __ditingPlatformFromUA(); },
+  get language() { return __ditingLangList()[0]; },
+  get languages() { return __ditingLangList().slice(); },
   onLine: true, cookieEnabled: true, hardwareConcurrency: 8,
   maxTouchPoints: 0,
   vendor: "Google Inc.", product: "Gecko", productSub: "20030107",
@@ -3577,9 +3577,9 @@ globalThis.navigator = {
       {brand: "Not=A?Brand", version: "24"},
     ],
     mobile: false,
-    get platform() { return __obscuraUADataPlatformFromUA(); },
+    get platform() { return __ditingUADataPlatformFromUA(); },
     getHighEntropyValues(hints) {
-      const plat = __obscuraUADataPlatformFromUA();
+      const plat = __ditingUADataPlatformFromUA();
       return Promise.resolve({
         architecture: "x86",
         bitness: "64",
@@ -3820,7 +3820,7 @@ function _arrayBufferFromBytes(bytes) {
 
 function _installWasmStreamingFallback() {
   if (typeof WebAssembly === 'undefined') return;
-  if (WebAssembly.instantiateStreaming && WebAssembly.instantiateStreaming.__obscuraFallback) return;
+  if (WebAssembly.instantiateStreaming && WebAssembly.instantiateStreaming.__ditingFallback) return;
   const nativeInstantiateStreaming = WebAssembly.instantiateStreaming;
   const fallback = async function instantiateStreaming(source, imports) {
     const response = await source;
@@ -3832,7 +3832,7 @@ function _installWasmStreamingFallback() {
     }
     return WebAssembly.instantiate(response, imports);
   };
-  fallback.__obscuraFallback = true;
+  fallback.__ditingFallback = true;
   WebAssembly.instantiateStreaming = fallback;
 }
 _installWasmStreamingFallback();
@@ -4216,7 +4216,7 @@ function _urlResolveOp(href, base) {
     return r ? r : null;
   } catch (e) { return null; }
 }
-if (typeof URL === 'undefined' || !URL.prototype || !URL.__obscura) {
+if (typeof URL === 'undefined' || !URL.prototype || !URL.__diting) {
   const _URL = class URL {
     constructor(url, base) {
       const c = _urlParseOp(url, base);
@@ -4262,7 +4262,7 @@ if (typeof URL === 'undefined' || !URL.prototype || !URL.__obscura) {
     static parse(url, base) { const c = _urlParseOp(url, base); if (!c) return null; const u = Object.create(_URL.prototype); u._c = c; u._sp = null; return u; }
     static canParse(url, base) { return _urlParseOp(url, base) !== null; }
   };
-  _URL.__obscura = true;
+  _URL.__diting = true;
   globalThis.URL = _URL;
 }
 
@@ -4954,7 +4954,7 @@ Object.defineProperty(globalThis.ShadowRoot.prototype, 'adoptedStyleSheets', {
   set(sheets) { this._adoptedStyleSheets = sheets; },
   configurable: true,
 });
-globalThis.__obscura_shadowHostNames = new Set(['article','aside','blockquote','body','div','footer','h1','h2','h3','h4','h5','h6','header','main','nav','p','section','span']);
+globalThis.__diting_shadowHostNames = new Set(['article','aside','blockquote','body','div','footer','h1','h2','h3','h4','h5','h6','header','main','nav','p','section','span']);
 function _isConstructorCE(v) {
   if (typeof v !== 'function') return false;
   try { Reflect.construct(function () {}, [], v); return true; } catch (e) { return false; }
@@ -5888,7 +5888,7 @@ globalThis.XMLSerializer = class XMLSerializer {
 // allowed and no synthetic per-call increment keeps tight loops from running
 // the clock ahead of real elapsed time (upstream d93ff51). timeOrigin is read
 // dynamically because the object literal defines it as 0 below and
-// __obscura_init assigns the real navigation timestamp after construction.
+// __diting_init assigns the real navigation timestamp after construction.
 // Each navigation rebuilds the whole runtime (page.rs init_js), so the floor
 // starts fresh per document like a real browser's per-navigation clock.
 var _perfLast = -Infinity;
@@ -6113,8 +6113,8 @@ function _structuredClone(value, seen) {
   // Platform objects that carry internal slots opt into cloning via a hook
   // (CryptoKey re-registers its key material so the clone stays usable by
   // crypto.subtle). Anything else with a registered hook takes that path.
-  if (typeof value[Symbol.toStringTag] === "string" && globalThis.__obscura_clone_hooks) {
-    const hook = globalThis.__obscura_clone_hooks[value[Symbol.toStringTag]];
+  if (typeof value[Symbol.toStringTag] === "string" && globalThis.__diting_clone_hooks) {
+    const hook = globalThis.__diting_clone_hooks[value[Symbol.toStringTag]];
     if (typeof hook === "function") return hook(value, seen);
   }
   // Plain objects clone onto Object.prototype (like Chrome), not the source's
@@ -7228,7 +7228,7 @@ Element.prototype.attachShadow = function attachShadow(opts) {
     throw new TypeError('Failed to execute attachShadow on Element: the mode value is not a valid ShadowRootMode.');
   }
   var _ln = (this.localName || '').toLowerCase();
-  if (!globalThis.__obscura_shadowHostNames.has(_ln) && _ln.indexOf('-') === -1) {
+  if (!globalThis.__diting_shadowHostNames.has(_ln) && _ln.indexOf('-') === -1) {
     throw new DOMException('Failed to execute attachShadow on Element: this element does not support attachShadow', 'NotSupportedError');
   }
   if (this._shadowRoot) {
@@ -7688,15 +7688,15 @@ const _OrigDateTimeFormat = Intl.DateTimeFormat;
 // Accept-Language may arrive as a raw header ("zh-CN,zh;q=0.9,en;q=0.8").
 // navigator.language must be a single BCP-47 tag and navigator.languages a
 // tag list — a q-weighted string in either is a hard headless tell.
-function __obscuraLangList() {
-  const raw = String(globalThis.__obscura_lang || 'zh-CN');
+function __ditingLangList() {
+  const raw = String(globalThis.__diting_lang || 'zh-CN');
   const tags = raw.split(',').map((s) => s.split(';')[0].trim()).filter(Boolean);
   const out = tags.length ? tags : ['zh-CN'];
   if (out.length === 1 && out[0].indexOf('-') !== -1) out.push(out[0].split('-')[0]);
   return out;
 }
-function __obscuraTZFromLang() {
-  const lang = __obscuraLangList()[0].toLowerCase();
+function __ditingTZFromLang() {
+  const lang = __ditingLangList()[0].toLowerCase();
   const map = {
     'zh': 'Asia/Shanghai', 'ja': 'Asia/Tokyo', 'ko': 'Asia/Seoul',
     'en': 'America/New_York', 'de': 'Europe/Berlin', 'fr': 'Europe/Paris',
@@ -7710,7 +7710,7 @@ function __obscuraTZFromLang() {
 }
 Intl.DateTimeFormat = function(locales, options) {
   if (!options) options = {};
-  if (!options.timeZone) options.timeZone = __obscuraTZFromLang();
+  if (!options.timeZone) options.timeZone = __ditingTZFromLang();
   return new _OrigDateTimeFormat(locales, options);
 };
 Intl.DateTimeFormat.prototype = _OrigDateTimeFormat.prototype;
@@ -7718,7 +7718,7 @@ Intl.DateTimeFormat.supportedLocalesOf = _OrigDateTimeFormat.supportedLocalesOf;
 const _origResolved = _OrigDateTimeFormat.prototype.resolvedOptions;
 _OrigDateTimeFormat.prototype.resolvedOptions = function() {
   const r = _origResolved.call(this);
-  if (r.timeZone === 'UTC') r.timeZone = __obscuraTZFromLang();
+  if (r.timeZone === 'UTC') r.timeZone = __ditingTZFromLang();
   return r;
 };
 
@@ -8444,8 +8444,8 @@ if (!globalThis.crypto.subtle) {
   // makeKey so it re-enters the WeakMap and stays usable. `seen` is the clone
   // memo _structuredClone hands every hook; populate it so one key reached
   // twice in a graph clones to one shared object (upstream 8698afc).
-  globalThis.__obscura_clone_hooks = globalThis.__obscura_clone_hooks || {};
-  globalThis.__obscura_clone_hooks["CryptoKey"] = function (src, seen) {
+  globalThis.__diting_clone_hooks = globalThis.__diting_clone_hooks || {};
+  globalThis.__diting_clone_hooks["CryptoKey"] = function (src, seen) {
     if (seen && seen.has(src)) return seen.get(src);
     const copy = makeKey(src.type, src.extractable, src.algorithm, src.usages, keyBytes(src));
     if (seen) seen.set(src, copy);
@@ -8844,10 +8844,10 @@ if (typeof ShadowRoot !== 'undefined' && !ShadowRoot.prototype.elementFromPoint)
 }
 
 // (Re)apply the platform persona: screen, dpr, hardwareConcurrency,
-// deviceMemory. Called from __obscura_init AND again from Rust's
+// deviceMemory. Called from __diting_init AND again from Rust's
 // set_user_agent — the runtime constructor runs init before the context's
 // UA is known, so the persona must refresh once the real UA lands.
-globalThis.__obscura_setPersona = function() {
+globalThis.__diting_setPersona = function() {
   const scr = _fp('screen');
   const sw = scr[0], sh = scr[1];
   globalThis.screen = { width:sw, height:sh, availWidth:sw, availHeight:sh-40, colorDepth:24, pixelDepth:24, availTop:0, availLeft:0, orientation:{type:"landscape-primary",angle:0,addEventListener(){},removeEventListener(){},dispatchEvent(){return true;}} };
@@ -8863,20 +8863,20 @@ globalThis.__obscura_setPersona = function() {
   // automation tell. Values are platform-plausible pairs: Chrome caps
   // deviceMemory at 8, and 16-thread machines never report 2 GB.
   const plat = _fpPlatform();
-  if (globalThis.__obscura_hw === undefined || globalThis.__obscura_hw_plat !== plat) {
+  if (globalThis.__diting_hw === undefined || globalThis.__diting_hw_plat !== plat) {
     let hws, mems;
     if (plat === 'mac') { hws = [8, 10, 12]; mems = [8]; }
     else if (plat === 'win') { hws = [4, 6, 8, 12, 16, 20, 24]; mems = [4, 8]; }
     else { hws = [4, 6, 8, 12, 16]; mems = [4, 8]; }
-    globalThis.__obscura_hw = hws[Math.floor(_fpRand(400) * hws.length)];
-    globalThis.__obscura_mem = mems[Math.floor(_fpRand(401) * mems.length)];
-    globalThis.__obscura_hw_plat = plat;
+    globalThis.__diting_hw = hws[Math.floor(_fpRand(400) * hws.length)];
+    globalThis.__diting_mem = mems[Math.floor(_fpRand(401) * mems.length)];
+    globalThis.__diting_hw_plat = plat;
   }
-  globalThis.navigator.hardwareConcurrency = globalThis.__obscura_hw;
-  globalThis.navigator.deviceMemory = globalThis.__obscura_mem;
+  globalThis.navigator.hardwareConcurrency = globalThis.__diting_hw;
+  globalThis.navigator.deviceMemory = globalThis.__diting_mem;
 };
 
-globalThis.__obscura_init = function() {
+globalThis.__diting_init = function() {
   _fpSeed = Date.now() ^ (Math.random() * 0xFFFFFFFF >>> 0);
   _fpCache = null;
   // A real navigation just completed (this runs after set_url), so drop any
@@ -8885,7 +8885,7 @@ globalThis.__obscura_init = function() {
   globalThis.__virtualUrl = null;
   _installWasmStreamingFallback();
 
-  globalThis.__obscura_setPersona();
+  globalThis.__diting_setPersona();
 
   const t0 = Date.now() + Math.floor(_fpRand(641) * 100) - 50;
   globalThis.performance.timeOrigin = t0;
@@ -8902,7 +8902,7 @@ globalThis.__obscura_init = function() {
   // function definition) and reuse it on every page init. Was an
   // Object.keys + filter on every navigation, ~5-40ms per page on
   // SPAs that load 1000+ globals.
-  const toHide = globalThis.__obscura_hide_list || [];
+  const toHide = globalThis.__diting_hide_list || [];
   for (let i = 0; i < toHide.length; i++) {
     try { Object.defineProperty(globalThis, toHide[i], { enumerable: false }); } catch(e) {}
   }
@@ -8919,7 +8919,7 @@ globalThis.__obscura_init = function() {
   try { delete globalThis.__bootstrap; } catch(e) {}
 
   // Non-configurable function declarations above (the engine's `_`-prefixed
-  // helpers and `__obscura*` bookkeeping) cannot be deleted, so hide them at
+  // helpers and `__diting*` bookkeeping) cannot be deleted, so hide them at
   // the enumeration boundary instead: Radar's windowFeatures collector
   // hashes Object.getOwnPropertyNames(window), and fingerprinting scripts
   // also enumerate with Reflect.ownKeys / Object.keys /
@@ -8927,8 +8927,8 @@ globalThis.__obscura_init = function() {
   // filter the global object — every other receiver sees the untouched
   // native result — and are marked native so toString lie-detectors report
   // [native code].
-  if (!globalThis.__obscura_gopn_patched) {
-    // Pattern, not the static hide list: `__obscura_objects` & friends are
+  if (!globalThis.__diting_gopn_patched) {
+    // Pattern, not the static hide list: `__diting_objects` & friends are
     // created by the Rust init AFTER the snapshot froze the list, so they'd
     // slip through a membership check against it.
     const _isInternal = n => typeof n === 'string' && (n.startsWith('_') || n.includes('obscura') || n.includes('Obscura') || n === '__bootstrap');
@@ -8962,20 +8962,20 @@ globalThis.__obscura_init = function() {
       for (const n of _gopn(all)) { if (_isInternal(n)) delete all[n]; }
       return all;
     });
-    globalThis.__obscura_gopn_patched = true;
+    globalThis.__diting_gopn_patched = true;
   }
-  delete globalThis.__obscura_init;
+  delete globalThis.__diting_init;
 };
 
 // Snapshot-time pre-computation of the hide list. Bootstrap.js runs once
 // during the V8 snapshot build (build.rs); this line captures the set of
 // globals defined by bootstrap that we want to hide and stashes them
-// for __obscura_init to consume on every subsequent page. The snapshot
+// for __diting_init to consume on every subsequent page. The snapshot
 // preserves the array as a regular global.
 // getOwnPropertyNames, not Object.keys: internals already made non-enumerable
 // before this line would be omitted by Object.keys and escape the per-page
 // hiding below (upstream 4c33f6d).
-globalThis.__obscura_hide_list = Object.getOwnPropertyNames(globalThis).filter(k =>
+globalThis.__diting_hide_list = Object.getOwnPropertyNames(globalThis).filter(k =>
   k.startsWith('_') || k.includes('obscura') || k.includes('Obscura')
 );
 

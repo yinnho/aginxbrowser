@@ -8,7 +8,7 @@ use deno_core::ModuleSourceCode;
 use deno_core::ModuleSpecifier;
 use deno_core::RequestedModuleType;
 
-pub struct ObscuraModuleLoader {
+pub struct DitingModuleLoader {
     pub base_url: String,
     /// Proxy URL threaded through to every dynamic ES-module fetch (#139).
     /// `None` keeps the pre-#139 direct-connection behaviour for callers
@@ -16,14 +16,14 @@ pub struct ObscuraModuleLoader {
     pub proxy_url: Option<String>,
 }
 
-impl ObscuraModuleLoader {
+impl DitingModuleLoader {
     #[cfg_attr(not(test), allow(dead_code))] // direct-connection shorthand; runtime.rs uses with_proxy
     pub fn new(base_url: &str) -> Self {
         Self::with_proxy(base_url, None)
     }
 
     pub fn with_proxy(base_url: &str, proxy_url: Option<String>) -> Self {
-        ObscuraModuleLoader {
+        DitingModuleLoader {
             base_url: base_url.to_string(),
             proxy_url,
         }
@@ -34,7 +34,7 @@ fn io_err(msg: String) -> ModuleLoaderError {
     std::io::Error::new(std::io::ErrorKind::Other, msg).into()
 }
 
-impl ModuleLoader for ObscuraModuleLoader {
+impl ModuleLoader for DitingModuleLoader {
     fn resolve(
         &self,
         specifier: &str,

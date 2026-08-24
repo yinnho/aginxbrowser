@@ -15,9 +15,9 @@ use selectors::visitor::SelectorVisitor;
 use crate::diting_dom::tree::{DomTree, NodeData, NodeId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ObscuraSelector;
+pub struct DitingSelector;
 
-impl parser::SelectorImpl for ObscuraSelector {
+impl parser::SelectorImpl for DitingSelector {
     type ExtraMatchingData<'a> = ();
     type AttrValue = CssString;
     type Identifier = CssString;
@@ -112,7 +112,7 @@ pub enum PseudoClass {
 }
 
 impl parser::NonTSPseudoClass for PseudoClass {
-    type Impl = ObscuraSelector;
+    type Impl = DitingSelector;
 
     fn is_active_or_hover(&self) -> bool {
         matches!(self, PseudoClass::Hover | PseudoClass::Active)
@@ -161,7 +161,7 @@ pub enum PseudoElement {
 }
 
 impl parser::PseudoElement for PseudoElement {
-    type Impl = ObscuraSelector;
+    type Impl = DitingSelector;
 }
 
 impl ToCss for PseudoElement {
@@ -173,10 +173,10 @@ impl ToCss for PseudoElement {
     }
 }
 
-pub struct ObscuraSelectorParser;
+pub struct DitingSelectorParser;
 
-impl<'i> parser::Parser<'i> for ObscuraSelectorParser {
-    type Impl = ObscuraSelector;
+impl<'i> parser::Parser<'i> for DitingSelectorParser {
+    type Impl = DitingSelector;
     type Error = SelectorParseErrorKind<'i>;
 
     // Allow `:has()`. The selectors crate gates relative-selector parsing on
@@ -283,7 +283,7 @@ impl<'a> PartialEq for DomElement<'a> {
 impl<'a> Eq for DomElement<'a> {}
 
 impl<'a> Element for DomElement<'a> {
-    type Impl = ObscuraSelector;
+    type Impl = DitingSelector;
 
     fn opaque(&self) -> OpaqueElement {
         // Must be stable per node. DomElement is Copy and gets a fresh stack
@@ -599,19 +599,19 @@ impl<'a> Element for DomElement<'a> {
 // selectors without unbounded memory growth.
 thread_local! {
     static SELECTOR_CACHE: std::cell::RefCell<
-        std::collections::HashMap<String, std::sync::Arc<SelectorList<ObscuraSelector>>>,
+        std::collections::HashMap<String, std::sync::Arc<SelectorList<DitingSelector>>>,
     > = std::cell::RefCell::new(std::collections::HashMap::with_capacity(64));
 }
 const SELECTOR_CACHE_CAP: usize = 256;
 
-fn parse_selector_uncached(selector: &str) -> Result<SelectorList<ObscuraSelector>, String> {
+fn parse_selector_uncached(selector: &str) -> Result<SelectorList<DitingSelector>, String> {
     let mut parser_input = cssparser::ParserInput::new(selector);
     let mut parser = cssparser::Parser::new(&mut parser_input);
-    SelectorList::parse(&ObscuraSelectorParser, &mut parser, ParseRelative::No)
+    SelectorList::parse(&DitingSelectorParser, &mut parser, ParseRelative::No)
         .map_err(|e| format!("Failed to parse selector '{}': {:?}", selector, e))
 }
 
-pub fn parse_selector(selector: &str) -> Result<SelectorList<ObscuraSelector>, String> {
+pub fn parse_selector(selector: &str) -> Result<SelectorList<DitingSelector>, String> {
     // Hot path: cached. Cold path: parse + insert.
     if let Some(cached) = SELECTOR_CACHE.with(|c| c.borrow().get(selector).cloned()) {
         return Ok((*cached).clone());
@@ -975,7 +975,7 @@ pub enum SelectorKey {
 
 /// A parsed selector plus its cached specificity and subject key.
 pub struct CompiledSelector {
-    sel: parser::Selector<ObscuraSelector>,
+    sel: parser::Selector<DitingSelector>,
     specificity: u32,
     keys: SubjectKeys,
     hashes: parser::AncestorHashes,
@@ -1054,7 +1054,7 @@ fn push_unique_key(keys: &mut Vec<SelectorKey>, key: SelectorKey) {
 /// conservative contract as Gecko's `SelectorMap::find_bucket`: for
 /// `.control:is(button, #save)` keep `.control`, while
 /// `.control:is(#save, #cancel)` may use the two id buckets.
-fn subject_keys(sel: &parser::Selector<ObscuraSelector>) -> Vec<SelectorKey> {
+fn subject_keys(sel: &parser::Selector<DitingSelector>) -> Vec<SelectorKey> {
     use parser::Component;
     let mut local: Option<String> = None;
     let mut attribute: Option<String> = None;

@@ -1,10 +1,10 @@
 //! Tiered rendering strategy: try cheap HTTP-direct first, fall back to the
-//! obscura browser only when the page needs JS rendering.
+//! diting browser only when the page needs JS rendering.
 //!
 //! - Tier 1 (`http_fetch`): pure `HttpClient`, no V8. ~100ms. Works for
 //!   static HTML. Returns `None` when the content looks insufficient (SPA shell,
 //!   antispider redirect, non-200) so the caller upgrades to Tier 2.
-//! - Tier 2 (`do_fetch` in `server.rs`): full obscura browser with V8/JS.
+//! - Tier 2 (`do_fetch` in `server.rs`): full diting browser with V8/JS.
 //!   ~1-2s. Handles SPAs, Cloudflare, JS-rendered content.
 
 use std::sync::Arc;
@@ -287,7 +287,7 @@ fn tier1_eligible(req: &crate::FetchRequest) -> bool {
 /// declines (returns `None`) do we fall back to Tier 2, which spins up the
 /// current-thread runtime for V8.
 pub async fn smart_fetch(req: crate::FetchRequest) -> Result<FetchResponse, anyhow::Error> {
-    // Tier 1: HTTP direct (only when not forced to obscura).
+    // Tier 1: HTTP direct (only when not forced to the browser).
     if tier1_eligible(&req) {
         let proxy_url = std::env::var("OBSCURA_PROXY").ok();
         match http_fetch(
@@ -316,10 +316,10 @@ pub async fn smart_fetch(req: crate::FetchRequest) -> Result<FetchResponse, anyh
         }
     }
 
-    // Tier 2: obscura browser (existing do_fetch logic, runs on a dedicated
+    // Tier 2: diting browser (existing do_fetch logic, runs on a dedicated
     // current-thread runtime via spawn_blocking because V8 is !Send — calling
     // run_on_local_runtime directly from an async context panics).
-    tracing::info!("smart_fetch: Tier 2 (obscura) for {}", req.url);
+    tracing::info!("smart_fetch: Tier 2 (browser) for {}", req.url);
     match tokio::task::spawn_blocking(move || crate::server::do_fetch(req)).await {
         Ok(res) => res.map_err(Into::into),
         Err(e) => Err(anyhow::anyhow!("Tier 2 fetch task panicked: {}", e)),
