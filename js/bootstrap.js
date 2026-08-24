@@ -8875,6 +8875,10 @@ globalThis.__diting_setPersona = function() {
   globalThis.devicePixelRatio = _fp('dpr') || (sw >= 2560 ? 2 : 1);
   globalThis.innerWidth = sw; globalThis.innerHeight = sh - 80;
   globalThis.outerWidth = sw; globalThis.outerHeight = sh;
+  // Publish the persona viewport to the Rust layout layer so
+  // getBoundingClientRect / element rects anchor the initial containing
+  // block to the same window scripts see (not the pre-persona default).
+  try { _domRaw("set_viewport", String(sw), String(sh - 80)); } catch (e) {}
 
   // Stable for the life of the process (drawn once), not per navigation —
   // hardwareConcurrency flipping between pages of one visit is its own

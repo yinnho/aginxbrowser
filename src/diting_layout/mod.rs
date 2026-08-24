@@ -1687,16 +1687,19 @@ pub enum PaintItem {
     },
 }
 
-/// Lay a DOM tree out at a fixed viewport width and return each element's
+/// Lay a DOM tree out at a fixed viewport size and return each element's
 /// absolute border-box rect. Elements are keyed by diting_dom NodeId; the
-/// root's containing block is the viewport.
+/// root's containing block is the viewport (a definite-sized root taffy
+/// node, so bottom/percentage insets on fixed boxes resolve against it —
+/// obscura#675 lineage fix).
 pub fn layout_dom(
     tree: &DomTree,
     styles: &HashMap<NodeId, ComputedStyle>,
     fonts: &FontBook,
     viewport_width: f32,
+    viewport_height: f32,
 ) -> HashMap<NodeId, Rect> {
-    layout_dom_with_paint(tree, styles, fonts, viewport_width).0
+    layout_dom_with_paint(tree, styles, fonts, viewport_width, viewport_height).0
 }
 
 /// [`layout_dom`] plus the paint item list in document order (an element's
@@ -1707,8 +1710,9 @@ pub fn layout_dom_with_paint(
     styles: &HashMap<NodeId, ComputedStyle>,
     fonts: &FontBook,
     viewport_width: f32,
+    viewport_height: f32,
 ) -> (HashMap<NodeId, Rect>, Vec<PaintItem>) {
-    layout_dom_with_paint_and_images(tree, styles, fonts, viewport_width, None)
+    layout_dom_with_paint_and_images(tree, styles, fonts, viewport_width, viewport_height, None)
 }
 
 /// [`layout_dom_with_paint`] with an injected table of fetched image bodies
@@ -1721,6 +1725,7 @@ pub fn layout_dom_with_paint_and_images(
     styles: &HashMap<NodeId, ComputedStyle>,
     fonts: &FontBook,
     viewport_width: f32,
+    viewport_height: f32,
     network_bytes: Option<&HashMap<String, Vec<u8>>>,
 ) -> (HashMap<NodeId, Rect>, Vec<PaintItem>) {
     let mut taffy_tree = TaffyTree::new();
@@ -1774,6 +1779,32 @@ pub fn layout_dom_with_paint_and_images(
         return (rects, items);
     };
 
+    // The initial containing block (obscura#675 lineage fix): CSS anchors a
+    // fixed box's insets — and every percentage that bottoms out at the root
+    // — to the VIEWPORT, a notional box DISTINCT from the root element's own
+    // content-driven box (blitz keeps html at content height too; conflating
+    // the two made the cross-check read html=600 vs blitz=140). Wrap the
+    // root element in a synthetic definite viewport-sized taffy node; the
+    // reparent pass below lands fixed boxes — and ancestor-less absolutes,
+    // whose containing block is also the ICB — on it, so taffy's inset math
+    // has a real viewport to resolve against. The wrapper has no DOM node,
+    // so collect/paint walks keyed by node_map skip it. Children taller
+    // than the viewport overflow visibly; taffy doesn't clip.
+    let icb_node = taffy_tree
+        .new_leaf(Style {
+            // Block, not taffy's Flex default: the root element must stay a
+            // stretching BLOCK child (a flex item would shrink html to
+            // max-content — probe: 500px child → html=500 instead of VW).
+            display: Display::Block,
+            size: Size {
+                width: taffy::style::Dimension::length(viewport_width),
+                height: taffy::style::Dimension::length(viewport_height),
+            },
+            ..Default::default()
+        })
+        .expect("synthetic ICB node");
+    let _ = taffy_tree.add_child(icb_node, root_node);
+
     let available = Size {
         width: AvailableSpace::Definite(viewport_width),
         height: AvailableSpace::MaxContent,
@@ -1807,7 +1838,7 @@ pub fn layout_dom_with_paint_and_images(
             .collect();
         if !needs_static.is_empty() {
             let laid_out = taffy_tree
-                .compute_layout_with_measure(root_node, available, |inputs, _id, ctx, style| {
+                .compute_layout_with_measure(icb_node, available, |inputs, _id, ctx, style| {
                     match ctx {
                         Some(TextLeaf::Run { text, font_size, bold, .. }) => {
                             measure_text_leaf(text, *font_size, *bold, fonts, &inputs)
@@ -1831,7 +1862,7 @@ pub fn layout_dom_with_paint_and_images(
                     }
                 }
                 let mut now: HashMap<taffy::tree::NodeId, Rect> = HashMap::new();
-                abs_rects(&taffy_tree, root_node, (0.0, 0.0), &mut now);
+                abs_rects(&taffy_tree, icb_node, (0.0, 0.0), &mut now);
                 for (tnid, dom_id) in &needs_static {
                     if let Some(r) = now.get(tnid) {
                         static_pos.insert(*dom_id, (r.x, r.y));
@@ -1877,7 +1908,7 @@ pub fn layout_dom_with_paint_and_images(
                     }
                     cur
                 };
-                let target = target_dom.and_then(|d| dom_of.get(&d)).copied().unwrap_or(root_node);
+                let target = target_dom.and_then(|d| dom_of.get(&d)).copied().unwrap_or(icb_node);
                 let current = taffy_tree.parent(*taffy_nid)?;
                 if current != target {
                     Some((*taffy_nid, target))
@@ -1923,7 +1954,7 @@ pub fn layout_dom_with_paint_and_images(
     // through to taffy's own style-based sizing — the closure fires for ALL
     // childless nodes, so returning HIDDEN here would zero plain leaves
     // (that's exactly what stock compute_layout does below via the same fn).
-    let measured = taffy_tree.compute_layout_with_measure(root_node, available, |inputs, _id, ctx, style| {
+    let measured = taffy_tree.compute_layout_with_measure(icb_node, available, |inputs, _id, ctx, style| {
         match ctx {
             Some(TextLeaf::Run { text, font_size, bold, .. }) => {
                 measure_text_leaf(text, *font_size, *bold, fonts, &inputs)
@@ -1966,7 +1997,7 @@ pub fn layout_dom_with_paint_and_images(
                 abs_rects(taffy_tree, child, abs, out);
             }
         }
-        abs_rects(&taffy_tree, root_node, (0.0, 0.0), &mut rects_now);
+        abs_rects(&taffy_tree, icb_node, (0.0, 0.0), &mut rects_now);
 
         // Float bands with the DOM node that owns each float.
         let mut bands: Vec<(NodeId, taffy::tree::NodeId, Rect)> = Vec::new();
@@ -2094,7 +2125,7 @@ pub fn layout_dom_with_paint_and_images(
             }
             if changed {
                 let re = taffy_tree.compute_layout_with_measure(
-                    root_node,
+                    icb_node,
                     available,
                     |inputs, _id, ctx, style| match ctx {
                         Some(TextLeaf::Run { text, font_size, bold, .. }) => {
@@ -2427,7 +2458,7 @@ pub fn layout_dom_with_paint_and_images(
         &static_pos,
         &mut rects,
         &mut items,
-        root_node,
+        icb_node,
         (0.0, 0.0),
         viewport_width,
     );
@@ -2946,6 +2977,7 @@ mod bridge_cross_check {
     use crate::screenshot::element_rect;
 
     const VW: f32 = 800.0;
+    const VH: f32 = 600.0;
     /// Half a device pixel: absorbs taffy's rounding-to-integer snap, nothing
     /// else. A modeling error of ≥1px fails; float dust does not.
     const EPS: f64 = 0.51;
@@ -3051,7 +3083,7 @@ mod bridge_cross_check {
         let tree = crate::diting_dom::tree_sink::parse_html(html);
         let rules = diting_css::parse_stylesheet(stylesheet);
         let styles = our_styles(&tree, &rules);
-        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW, VH);
         (doc, tree, styles, rects)
     }
 
@@ -3086,7 +3118,7 @@ mod bridge_cross_check {
         let tree = crate::diting_dom::tree_sink::parse_html(html);
         let rules = diting_css::parse_stylesheet(sheet);
         let styles = our_styles(&tree, &rules);
-        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW, VH);
 
         let fl = tree.query_selector("#fl").unwrap().unwrap();
         let p1 = tree.query_selector("#p1").unwrap().unwrap();
@@ -3128,7 +3160,7 @@ mod bridge_cross_check {
         let tree = crate::diting_dom::tree_sink::parse_html(html);
         let rules = diting_css::parse_stylesheet(sheet);
         let styles = our_styles(&tree, &rules);
-        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW, VH);
 
         let fr = rects[&tree.query_selector("#fr").unwrap().unwrap()];
         let p1 = rects[&tree.query_selector("#p1").unwrap().unwrap()];
@@ -3161,7 +3193,7 @@ mod bridge_cross_check {
         let tree = crate::diting_dom::tree_sink::parse_html(html);
         let rules = diting_css::parse_stylesheet(sheet);
         let styles = our_styles(&tree, &rules);
-        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW, VH);
 
         let r = |sel: &str| rects[&tree.query_selector(sel).unwrap().unwrap()];
         let (c1, c2, c3, c4, c5) = (r("#c1"), r("#c2"), r("#c3"), r("#c4"), r("#c5"));
@@ -3205,7 +3237,7 @@ mod bridge_cross_check {
         let tree = crate::diting_dom::tree_sink::parse_html(html);
         let rules = diting_css::parse_stylesheet(sheet);
         let styles = our_styles(&tree, &rules);
-        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW, VH);
 
         let r = |sel: &str| rects[&tree.query_selector(sel).unwrap().unwrap()];
         let (logo, tag, below) = (r("#logo"), r("#tag"), r("#below"));
@@ -3243,7 +3275,7 @@ mod bridge_cross_check {
         let tree = crate::diting_dom::tree_sink::parse_html(html);
         let rules = diting_css::parse_stylesheet(sheet);
         let styles = our_styles(&tree, &rules);
-        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW, VH);
 
         let r = |sel: &str| rects[&tree.query_selector(sel).unwrap().unwrap()];
         let (n1, n2) = (r("#nav1"), r("#nav2"));
@@ -3646,6 +3678,67 @@ mod bridge_cross_check {
             (fx.x - 30.0).abs() < EPS as f32 && (fx.y - 40.0).abs() < EPS as f32,
             "inset-less fixed at its flow spot: {:?}",
             fx
+        );
+    }
+
+    /// obscura#675 lineage: a fixed box's insets resolve against the initial
+    /// containing block — the VIEWPORT — not the root element's
+    /// content-driven height. Before the fix, `bottom:0` anchored against
+    /// the root's ~content height so every fixed overlay collapsed to the
+    /// top of the page (hosted-instance probe: bottom:0 → y=47 on a 902px
+    /// viewport, 50% → 34, 10% → 40). The root taffy node now carries the
+    /// definite viewport size, so bottom and percentage insets have a real
+    /// ICB to resolve against.
+    #[test]
+    fn fixed_bottom_and_percent_insets_anchor_viewport() {
+        let html = r#"<body>
+            <div id="b0"></div><div id="t50"></div><div id="b10"></div>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #b0 { position: fixed; bottom: 0; left: 0; width: 50px; height: 20px; }
+            #t50 { position: fixed; top: 50%; left: 0; width: 50px; height: 20px; }
+            #b10 { position: fixed; bottom: 10%; left: 0; width: 50px; height: 20px; }
+        "#;
+        let (_doc, tree, _styles, rects) = both_engines(html, sheet);
+        // VH = 600.
+        let b0 = rects[&tree.query_selector("#b0").unwrap().unwrap()];
+        assert!(
+            (b0.y - 580.0).abs() < EPS as f32,
+            "bottom:0 pins to the viewport bottom edge: {:?}",
+            b0
+        );
+        let t50 = rects[&tree.query_selector("#t50").unwrap().unwrap()];
+        assert!(
+            (t50.y - 300.0).abs() < EPS as f32,
+            "top:50% is half the VIEWPORT height: {:?}",
+            t50
+        );
+        let b10 = rects[&tree.query_selector("#b10").unwrap().unwrap()];
+        assert!(
+            (b10.y - 520.0).abs() < EPS as f32,
+            "bottom:10% measures from the viewport bottom: {:?}",
+            b10
+        );
+    }
+
+    /// bottom-only inset (top auto) anchors the box's bottom margin edge to
+    /// the CB's bottom padding edge — single-axis counterpart of the
+    /// opposing-inset stretch test.
+    #[test]
+    fn absolute_bottom_only_inset_anchors_cb_height() {
+        let html = r#"<body><div id="gp"><div id="ab"></div></div></body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #gp { position: relative; width: 300px; height: 200px; }
+            #ab { position: absolute; bottom: 10px; left: 0; width: 40px; height: 20px; }
+        "#;
+        let (_doc, tree, _styles, rects) = both_engines(html, sheet);
+        let ab = rects[&tree.query_selector("#ab").unwrap().unwrap()];
+        assert!(
+            (ab.y - 170.0).abs() < EPS as f32,
+            "bottom:10 on a 200px CB → y = 200 - 10 - 20: {:?}",
+            ab
         );
     }
 
@@ -4103,7 +4196,7 @@ mod bridge_cross_check {
         let rules = diting_css::parse_stylesheet(sheet);
         let styles = our_styles(&tree, &rules);
         let fonts = fixture_fonts();
-        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW);
+        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW, VH);
         let mut ours = paint::Canvas::new_filled(w as usize, h as usize, [255, 255, 255, 255]);
         paint::execute(&items, &fonts, &mut ours);
         assert!(
@@ -4223,7 +4316,7 @@ mod bridge_cross_check {
         let rules = diting_css::parse_stylesheet(sheet);
         let styles = our_styles(&tree, &rules);
         let fonts = fixture_fonts();
-        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW);
+        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW, VH);
         let mut ours = paint::Canvas::new_filled(w as usize, h as usize, [255, 255, 255, 255]);
         paint::execute(&items, &fonts, &mut ours);
         assert!(
@@ -4346,7 +4439,7 @@ mod bridge_cross_check {
         let rules = diting_css::parse_stylesheet(sheet);
         let styles = our_styles(&tree, &rules);
         let fonts = fixture_fonts();
-        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW);
+        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW, VH);
         let mut ours = paint::Canvas::new_filled(w as usize, h as usize, [255, 255, 255, 255]);
         paint::execute(&items, &fonts, &mut ours);
         assert!(
@@ -4452,7 +4545,7 @@ mod bridge_cross_check {
             let rules = diting_css::parse_stylesheet(&sheet);
             let styles = our_styles(&tree, &rules);
             let fonts = fixture_fonts();
-            let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW);
+            let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW, VH);
             let mut ours = paint::Canvas::new_filled(w as usize, h as usize, [255, 255, 255, 255]);
             paint::execute(&items, &fonts, &mut ours);
             // 4 word leaves (汉字混合) + 1 run leaf (the <b>'s 加粗).
@@ -4555,7 +4648,7 @@ mod bridge_cross_check {
         let rules = diting_css::parse_stylesheet(sheet);
         let styles = our_styles(&tree, &rules);
         let fonts = fixture_fonts();
-        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW);
+        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW, VH);
         let mut ours = paint::Canvas::new_filled(w as usize, h as usize, [255, 255, 255, 255]);
         paint::execute(&items, &fonts, &mut ours);
 
@@ -4620,7 +4713,7 @@ mod bridge_cross_check {
         let rules = diting_css::parse_stylesheet(sheet);
         let styles = our_styles(&tree, &rules);
         let fonts = fixture_fonts();
-        let (rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW);
+        let (rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW, VH);
         let img_rect = rects[&tree.query_selector("#t").unwrap().unwrap()];
         assert_eq!((img_rect.width, img_rect.height), (100.0, 50.0), "aspect-ratio derived box");
 
@@ -4686,7 +4779,7 @@ mod bridge_cross_check {
         let html = r#"<body><img id="t" src="https://example.invalid/x.png" width="100" alt=""></body>"#;
         let tree = crate::diting_dom::tree_sink::parse_html(html);
         let styles = our_styles(&tree, &rules);
-        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW);
+        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW, VH);
         let mut canvas = paint::Canvas::new_filled(w, h, [255, 255, 255, 255]);
         paint::execute(&items, &fonts, &mut canvas);
         assert_eq!(bbox(&is_gray), (0, 0, 99, 49), "empty alt still boxes");
@@ -4709,7 +4802,7 @@ mod bridge_cross_check {
         let rules = diting_css::parse_stylesheet(sheet);
         let fonts = fixture_fonts();
         let styles = our_styles(&tree, &rules);
-        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW);
+        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW, VH);
 
         let (w, h) = (200usize, 300usize);
         let mut canvas = paint::Canvas::new_filled(w, h, [255, 255, 255, 255]);
@@ -4949,7 +5042,7 @@ mod bridge_cross_check {
         let rules = diting_css::parse_stylesheet(sheet);
         let styles = our_styles(&tree, &rules);
         let fonts = fixture_fonts();
-        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW);
+        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW, VH);
         let replaced = items.iter().find_map(|i| match i {
             PaintItem::Replaced { alt, fill_placeholder, .. } => {
                 Some((*fill_placeholder, alt.clone()))
@@ -5052,7 +5145,7 @@ mod bridge_cross_check {
         let rules = diting_css::parse_stylesheet(sheet);
         let styles = our_styles(&tree, &rules);
         let fonts = fixture_fonts();
-        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW);
+        let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fonts, VW, VH);
         let mut canvas = paint::Canvas::new_filled(w, h, [255, 255, 255, 255]);
         paint::execute(&items, &fonts, &mut canvas);
         canvas
@@ -5126,7 +5219,7 @@ mod bridge_cross_check {
         let tree = crate::diting_dom::tree_sink::parse_html(html);
         let rules = diting_css::parse_stylesheet(sheet);
         let styles = our_styles(&tree, &rules);
-        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW, VH);
 
         let r = |sel: &str| rects[&tree.query_selector(sel).unwrap().unwrap()];
         let s1 = r("#section1");
@@ -5159,7 +5252,7 @@ mod bridge_cross_check {
         let tree2 = crate::diting_dom::tree_sink::parse_html(html2);
         let rules2 = diting_css::parse_stylesheet(sheet2);
         let styles2 = our_styles(&tree2, &rules2);
-        let rects2 = layout_dom(&tree2, &styles2, &fixture_fonts(), VW);
+        let rects2 = layout_dom(&tree2, &styles2, &fixture_fonts(), VW, VH);
         let deep = rects2[&tree2.query_selector("#deep").unwrap().unwrap()];
         assert!(deep.y >= 100.0 - EPS as f32,
             "deep block starts after the spacer (below the band): y={}", deep.y);
@@ -5205,7 +5298,7 @@ mod bridge_cross_check {
         let styles = our_styles(&tree, &rules);
         // The real product entry: paint items + rects must come out without
         // panicking on this shape.
-        let (rects, items) = layout_dom_with_paint(&tree, &styles, &fixture_fonts(), VW);
+        let (rects, items) = layout_dom_with_paint(&tree, &styles, &fixture_fonts(), VW, VH);
 
         assert!(!rects.is_empty(), "rects produced");
         assert!(items.iter().any(|i| matches!(i, PaintItem::Bg { .. })), "infobox bg emitted");
@@ -5257,7 +5350,7 @@ mod bridge_cross_check {
         let tree = crate::diting_dom::tree_sink::parse_html(html);
         let rules = diting_css::parse_stylesheet(sheet);
         let styles = our_styles(&tree, &rules);
-        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW, VH);
 
         let r = |sel: &str| rects[&tree.query_selector(sel).unwrap().unwrap()];
         let (b1, b2, b3, b4, b5) = (r("#b1"), r("#b2"), r("#b3"), r("#b4"), r("#b5"));
@@ -5304,7 +5397,7 @@ mod bridge_cross_check {
         let tree = crate::diting_dom::tree_sink::parse_html(html);
         let rules = diting_css::parse_stylesheet(sheet);
         let styles = our_styles(&tree, &rules);
-        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW, VH);
 
         let r = |sel: &str| rects[&tree.query_selector(sel).unwrap().unwrap()];
         let (l1, l2) = (r("#l1"), r("#l2"));
@@ -5342,7 +5435,7 @@ mod bridge_cross_check {
         let tree = crate::diting_dom::tree_sink::parse_html(&html);
         let rules = diting_css::parse_stylesheet(sheet);
         let styles = our_styles(&tree, &rules);
-        let (_r, items) = layout_dom_with_paint(&tree, &styles, &fixture_fonts(), VW);
+        let (_r, items) = layout_dom_with_paint(&tree, &styles, &fixture_fonts(), VW, VH);
         let image_rect = items.iter().find_map(|i| match i {
             PaintItem::Image { paint_rect, .. } => Some(*paint_rect),
             _ => None,
@@ -5790,7 +5883,7 @@ mod bridge_cross_check {
             let tree = crate::diting_dom::tree_sink::parse_html(html);
             let rules = diting_css::parse_stylesheet(sheet);
             let styles = our_styles(&tree, &rules);
-            let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fixture_fonts(), VW);
+            let (_rects, items) = layout_dom_with_paint(&tree, &styles, &fixture_fonts(), VW, VH);
             let radius = items.iter().find_map(|i| match i {
                 PaintItem::Bg { radius, .. } => Some(*radius),
                 _ => None,
@@ -5873,7 +5966,7 @@ mod bridge_cross_check {
         let rules = diting_css::parse_stylesheet(sheet);
         let styles = our_styles(&tree, &rules);
         let (_rects, items) =
-            layout_dom_with_paint_and_images(&tree, &styles, &fixture_fonts(), VW, Some(&net));
+            layout_dom_with_paint_and_images(&tree, &styles, &fixture_fonts(), VW, VH, Some(&net));
         assert!(
             items.iter().any(|i| matches!(i, PaintItem::Image { .. })),
             "network img resolves to an Image item"
@@ -5940,7 +6033,7 @@ mod bridge_cross_check {
         let rules = diting_css::parse_stylesheet(sheet);
         let styles = our_styles(&tree, &rules);
         let (_rects, items) =
-            layout_dom_with_paint_and_images(&tree, &styles, &fixture_fonts(), VW, Some(&net));
+            layout_dom_with_paint_and_images(&tree, &styles, &fixture_fonts(), VW, VH, Some(&net));
         let mut ours = paint::Canvas::new_filled(w as usize, h as usize, [255, 255, 255, 255]);
         paint::execute(&items, &fixture_fonts(), &mut ours);
 

@@ -534,6 +534,7 @@ pub fn do_screenshot(req: ScreenshotRequest) -> Result<ScreenshotResponse> {
                         sel,
                         req.selector_all,
                         req.width as f32,
+                        req.height as f32,
                         // External <link> sheet bodies the prefetch pass already
                         // fetched — feed them to diting so its cascade sees what
                         // Blitz saw. Inline <style> blocks come from the HTML.

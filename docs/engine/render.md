@@ -1543,3 +1543,41 @@ harvest**——
 **测试** +2（总 461）：无 inset abs 落原流位 (30,40) 非 CB (0,40)；
 混合轴（top:5 + 双 auto 左右）y=CB+inset=45、x=静态=30；无 inset fixed
 同样落静态位。多趟布局模式与 float continuation（§42）同款。
+
+## 48. ICB 正名：fixed/abs 的 bottom 与百分比 inset 锚视口（2026-08-24，obscura#675 联动）
+
+推广线联动自查发现的同族 bug：obscura#675（"ICB 是 root 元素盒不是视口，
+fixed/abs 的 bottom 与百分比 inset 解析到错误高度"）。**先实测再评论**——托管
+实例 eval 三连探针实锤：viewport 902 高下 `bottom:0`→y=47、`top:50%`→34、
+`bottom:10%`→40，全部锚到了 root 节点的**内容高 ~67px**（67-20=47 ✓、
+50%·68=34 ✓、68-6.8-20≈40 ✓）。
+
+**修复（合成 ICB 包装节点）**：html 元素盒 ≠ ICB（blitz 侧 html 仍内容高，
+交叉验证第一版直接钉 root 尺寸被 `authored_boxes_match_blitz` 抓包：html
+600 vs blitz 140）。正解是 CSS 本义——ICB 是独立概念盒：
+
+- root taffy 节点外包一层合成节点，definite 尺寸 = (viewport_width,
+  viewport_height)，`Display::Block`（Flex 默认会把 html 变 flex item 收缩到
+  max-content，探针实证 500px 子级 → html=500 非 800）
+- 三趟布局（harvest/主/float 重排）根、reparent 兜底目标、collect 走树根
+  全部换到 ICB 节点；无 DOM NodeId，node_map 键控的采集/绘制自然跳过
+- fixed 与无定位祖先的 absolute 的 CB 都落 ICB → bottom/百分比 inset 有了
+  真视口可解析；html `height:100%` 现在也正确解析到视口高
+
+**入口签名**：`layout_dom*` 三入口加 `viewport_height` 参数（ICB 需要输入，
+不可推导）。
+
+**视口单一真相（JS↔Rust 对齐）**：persona 把 innerWidth/innerHeight 定在
+随机屏（如 1366×688），而 ops `layout_rects_all` 硬编码 1920×1440——gBCR
+与 `window.innerWidth` 各说各话。新增 `set_viewport` op，bootstrap
+`__diting_setPersona` 回传 persona 视口存 JsState（默认 1920×1000，变更时
+作废 layout_cache），`layout_rects_all` 与 media query 解析统一用它。
+连带修复：media query 高度参数从 `width*0.75` 占位改为真视口高。
+
+**测试** +3（总 464）：fixed bottom:0/top:50%/bottom:10% 锚 600 视口
+（580/300/520）；absolute bottom-only 锚 CB 高（170）；gBCR 宽度动态对齐
+persona innerWidth（旧断言 1920 在窄屏 persona 下翻车，改为 `=== innerWidth`）。
+
+**方法论存档**：先部署实例上做区分性探针（静态 margin 元素 y=267 精确 =
+真布局非合成网格；set px inset 精确）排除 gBCR 回落假象，再定位锚定盒。
+上游开放 issue 是免费 bug 清单+可信度素材：实测复现→修→带修复前后数字回评。

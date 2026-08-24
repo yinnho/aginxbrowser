@@ -460,6 +460,7 @@ pub fn element_rects_diting(
     selector: &str,
     selector_all: bool,
     viewport_width: f32,
+    viewport_height: f32,
     extra_css: Option<&str>,
 ) -> Result<Vec<ElementRect>> {
     use crate::diting_dom::tree_sink::parse_html;
@@ -480,7 +481,7 @@ pub fn element_rects_diting(
 
     let rules = crate::diting_css::parse_stylesheet_for(
         &css,
-        (viewport_width, viewport_width * 0.75),
+        (viewport_width, viewport_height),
         crate::diting_css::CssMediaType::Screen,
     );
     let styles = crate::diting_layout::compute_styles(&tree, &rules);
@@ -494,7 +495,7 @@ pub fn element_rects_diting(
         matched.into_iter().take(1).collect()
     };
 
-    let rects = crate::diting_layout::layout_dom(&tree, &styles, &crate::diting_fonts::font_book(), viewport_width);
+    let rects = crate::diting_layout::layout_dom(&tree, &styles, &crate::diting_fonts::font_book(), viewport_width, viewport_height);
     Ok(ids
         .iter()
         .filter_map(|id| rects.get(id).map(|r| ElementRect {
@@ -593,7 +594,7 @@ mod tests {
         </body></html>"##;
 
         // First match only.
-        let one = element_rects_diting(html, "#target", false, 800.0, None).expect("rects");
+        let one = element_rects_diting(html, "#target", false, 800.0, 600.0, None).expect("rects");
         assert_eq!(one.len(), 1);
         assert!((one[0].x - 100.0).abs() <= 1.0 && (one[0].y - 150.0).abs() <= 1.0,
             "absolute box at its authored position: {:?}", one[0]);
@@ -601,21 +602,21 @@ mod tests {
             "authored size: {:?}", one[0]);
 
         // selector_all: document order.
-        let all = element_rects_diting(html, ".it", true, 800.0, None).expect("all");
+        let all = element_rects_diting(html, ".it", true, 800.0, 600.0, None).expect("all");
         assert_eq!(all.len(), 2);
         assert!((all[0].x - 10.0).abs() <= 1.0 && (all[1].x - 50.0).abs() <= 1.0);
 
         // No match is empty; an invalid selector errors.
-        assert!(element_rects_diting(html, "#nope", true, 800.0, None)
+        assert!(element_rects_diting(html, "#nope", true, 800.0, 600.0, None)
             .expect("empty ok").is_empty());
-        assert!(element_rects_diting(html, "###", true, 800.0, None).is_err());
+        assert!(element_rects_diting(html, "###", true, 800.0, 600.0, None).is_err());
 
         // extra_css participates in the cascade with correct specificity:
         // an id rule (from the extra sheet) overrides the class rule's
         // height — while #a's inline style keeps winning on left, exactly
         // the CSS cascade order (inline > id > class).
         let overridden =
-            element_rects_diting(html, "#a", false, 800.0, Some("#a { height: 90px; }"))
+            element_rects_diting(html, "#a", false, 800.0, 600.0, Some("#a { height: 90px; }"))
                 .expect("extra css");
         assert_eq!(overridden.len(), 1);
         assert!((overridden[0].x - 10.0).abs() <= 1.0,

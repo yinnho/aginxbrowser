@@ -5013,12 +5013,16 @@ mod tests {
         let result = rt.evaluate(r#"
             const a = document.getElementById("a").getBoundingClientRect();
             const b = document.getElementById("b").getBoundingClientRect();
-            return [a.x, a.y, a.width, a.height, b.y > a.y + a.height - 1, b.x === a.x];
+            return [a.x, a.y, a.width, a.height, b.y > a.y + a.height - 1, b.x === a.x,
+                    a.width === innerWidth];
         "#).unwrap();
         let parts = result.as_array().expect("array result");
         assert_eq!(parts[0], serde_json::json!(0), "block x pinned to content edge");
         assert_eq!(parts[1], serde_json::json!(0), "first block at top");
-        assert_eq!(parts[2], serde_json::json!(1920), "block spans viewport width");
+        // Width agrees with the PERSONA viewport (set_viewport publishes it
+        // to the layout layer; the old hard-coded 1920 broke whenever the
+        // persona pool drew a narrower screen).
+        assert_eq!(parts[6], serde_json::json!(true), "block spans the persona viewport width");
         assert_eq!(parts[4], serde_json::json!(true), "second block stacks below first");
         assert_eq!(parts[5], serde_json::json!(true), "siblings share left edge");
     }

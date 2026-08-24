@@ -104,6 +104,12 @@ pub struct JsState {
     /// the tree's epoch (see DomTree::epoch). Filled on the first
     /// `layout_rect` op after each mutation; backs getBoundingClientRect.
     layout_cache: std::cell::RefCell<Option<(u64, HashMap<NodeId, [f32; 4]>)>>,
+    /// Viewport the layout pipeline should anchor the initial containing
+    /// block to, published by the JS persona (`__diting_setPersona`) so
+    /// getBoundingClientRect agrees with window.innerWidth/innerHeight.
+    /// Defaults to the bootstrap's pre-persona 1920x1000.
+    #[cfg(feature = "screenshot")]
+    pub(crate) viewport: (f32, f32),
 }
 
 /// A script-initiated request as a CDP-shaped network event. Static
@@ -197,6 +203,8 @@ impl JsState {
             // the tree's epoch (see DomTree::epoch). Filled on the first
             // `layout_rect` op after each mutation; backs getBoundingClientRect.
             layout_cache: std::cell::RefCell::new(None),
+            #[cfg(feature = "screenshot")]
+            viewport: (1920.0, 1000.0),
         }
     }
 }
@@ -363,6 +371,21 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         let gs = state.borrow::<SharedState>().clone();
         gs.borrow_mut().title = arg1;
         return "null".into();
+    }
+    // Persona viewport: needs a mutable borrow, so it runs before the main
+    // read-only `gs` alias below (same pattern as set_document_title).
+    #[cfg(feature = "screenshot")]
+    if cmd == "set_viewport" {
+        let gs = state.borrow::<SharedState>().clone();
+        let w = arg1.parse::<f32>().unwrap_or(1920.0);
+        let h = arg2.parse::<f32>().unwrap_or(1000.0);
+        if w.is_finite() && w > 0.0 && h.is_finite() && h > 0.0 {
+            let mut gs = gs.borrow_mut();
+            gs.viewport = (w, h);
+            // Any rects memoized under the old ICB are stale now.
+            *gs.layout_cache.borrow_mut() = None;
+        }
+        return "ok".into();
     }
     let gs = state.borrow::<SharedState>().clone();
     let gs = gs.borrow();
@@ -759,7 +782,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             let rect = match cache_hit {
                 Some(r) => Some(r),
                 None => {
-                    let rects = layout_rects_all(dom);
+                    let rects = layout_rects_all(&gs, dom);
                     let r = rects.get(&nid).copied();
                     *gs.layout_cache.borrow_mut() = Some((epoch, rects));
                     r
@@ -781,8 +804,11 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
 /// attribute-level mutations (style/class writes) don't bump the tree epoch,
 /// so memoizing computed styles alongside the rects would serve stale geometry.
 #[cfg(feature = "screenshot")]
-fn layout_rects_all(dom: &DomTree) -> HashMap<NodeId, [f32; 4]> {
-    let viewport_width: f32 = 1920.0;
+fn layout_rects_all(gs: &JsState, dom: &DomTree) -> HashMap<NodeId, [f32; 4]> {
+    // Same viewport the persona publishes to window.innerWidth/innerHeight,
+    // so geometry agrees with what scripts read off `window` (and the ICB
+    // has a definite size for fixed-box inset resolution — obscura#675).
+    let (viewport_width, viewport_height) = gs.viewport;
     let mut css = String::new();
     if let Ok(style_els) = dom.query_selector_all("style") {
         for el in style_els {
@@ -792,12 +818,12 @@ fn layout_rects_all(dom: &DomTree) -> HashMap<NodeId, [f32; 4]> {
     }
     let rules = crate::diting_css::parse_stylesheet_for(
         &css,
-        (viewport_width, viewport_width * 0.75),
+        (viewport_width, viewport_height),
         crate::diting_css::CssMediaType::Screen,
     );
     let styles = crate::diting_layout::compute_styles(dom, &rules);
     let fonts = crate::diting_fonts::font_book();
-    crate::diting_layout::layout_dom(dom, &styles, &fonts, viewport_width)
+    crate::diting_layout::layout_dom(dom, &styles, &fonts, viewport_width, viewport_height)
         .into_iter()
         .map(|(id, r)| (id, [r.x, r.y, r.width, r.height]))
         .collect()
