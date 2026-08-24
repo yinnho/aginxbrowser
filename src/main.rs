@@ -234,6 +234,13 @@ pub struct ScreenshotRequest {
     /// cross-check of the Blitz pipeline). Default false.
     #[serde(default)]
     pub diting_rects: bool,
+    /// Render engine: "blitz" (default — Stylo+Taffy+vello_cpu via the
+    /// pinned blitz rev) or "diting" (our own css+layout+paint stack, no
+    /// Stylo/vello/parley in the path). The diting engine is the render-
+    /// claim line: narrower CSS coverage, no parley 0.11 CJK hang, and the
+    /// gap is measured per-request on real pages.
+    #[serde(default)]
+    pub engine: Option<String>,
     /// Route through OBSCURA_PROXY. Default false (direct).
     #[serde(default)]
     pub use_proxy: bool,

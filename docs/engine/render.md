@@ -1581,3 +1581,52 @@ persona innerWidth（旧断言 1920 在窄屏 persona 下翻车，改为 `=== in
 **方法论存档**：先部署实例上做区分性探针（静态 margin 元素 y=267 精确 =
 真布局非合成网格；set px inset 精确）排除 gBCR 回落假象，再定位锚定盒。
 上游开放 issue 是免费 bug 清单+可信度素材：实测复现→修→带修复前后数字回评。
+
+## 49. /screenshot 双引擎：diting 全栈首次出真实 PNG（2026-08-24，零 parley）
+
+用户定方向"渲染自己写，不要用 parley"。落地为开关而非替换：
+`screenshot` 请求加 `engine: "blitz"（默认）|"diting"` 字段——diting 路径
+全程不碰 Stylo/vello/parley，文字链路 = diting_css → taffy 布局 → swash
+直连光栅，parley 只活在 blitz 内部与本仓交叉验证 harness 里。
+
+**diting 渲染路径**（`render_html_to_png_diting`）：parse_html → CSS 收集
+（style 块 + 预取 .css 正文拼接，顺序同 element_rects_diting）→
+parse_stylesheet_for((w,h)) → compute_styles → 非样式资源走 network_bytes →
+`layout_dom_with_paint_and_images` → 内容高 = rects max(y+h) →
+`paint::Canvas::new_filled` 白底 + `paint::execute` → PNG。selector /
+selector_all 裁剪 = RGBA 窗口拷贝（非 PNG round-trip，快且无损）；scale 暂
+1:1 CSS px；inline 无盒 fallback = 后代盒并集（镜像 blitz element_rect）。
+
+**首批实测数据**：
+
+| 页面 | 引擎 | 尺寸 | 体积 | 耗时 |
+|---|---|---|---|---|
+| example.com | diting | 1280×800 | 15168 B | 1.655s |
+| example.com | blitz | 1280×800 | 18325 B | 1.139s |
+| 本地 CJK 测试页 | diting | 800×600 | 39347 B | — |
+| 本地 CJK 测试页 | blitz | 800×600 | 44409 B | — |
+
+CJK 页结构全对：标题/两段/带边框背景 box，汉字假名 shaping 正常（视觉复核
+全部文本可读无豆腐块），heading 蓝 #1a73e8、bold 红 #d93025、box 底
+#e8f0fe 全对，box 高度两引擎一致（53px 含 2px 边框）。
+
+**像素级对比挖出的四个差距**（下一批 bug 清单，均已量化）：
+
+1. **Hangul 字形不绘制但 advance 占位正常**——box 尾部句号位置与 blitz
+   精确一致（尾部 120px 墨量同为 94），但 Korean 区 ~130px 零墨量（blitz
+   同区 375）。汉字/假名正常 → 字体覆盖或 swash cmap 命中问题，非 shaping。
+2. **line-height 系数未生效**：行距 pitch 20px vs blitz 25.6px（1.6×16），
+   回落到自然行高 ~1.25。
+3. **块间距塌缩**：h1→p 间隔 6px vs blitz 33px（UA 默认 margin 未生效或
+   未按浏览器值）。注意 blitz 的 33px 本身也无 margin collapse，离 Chrome
+   （21px 塌缩后）也有距离——两引擎都要修。
+4. **笔墨偏轻**：heading 墨量 0.71×、box 文本 0.80×（swash vs parley 光栅
+   风格差，可读但笔画细）。
+
+**已知挂死（非渲染问题）**：baidu 搜索页 805KB `all_async_search` 脚本在
+diting_js 执行阶段硬挂死（>3min 无进展，渲染路径未到达）——记录在案，
+属 JS 引擎坑。
+
+**测试** +1：`diting_engine_renders_png_end_to_end`（SSR 页出 PNG，断言
+尺寸/banner/target 色数/ink>20/selector 裁剪/selector_all 不裁剪），总 464
+全绿。

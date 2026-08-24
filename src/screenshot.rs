@@ -411,6 +411,233 @@ pub fn render_html_to_png(
     })
 }
 
+// ---------------------------------------------------------------------------
+// diting engine render: our own stack paints the PNG (no Stylo/vello/parley)
+// ---------------------------------------------------------------------------
+
+/// Full-page screenshot on the diting stack: diting_css cascade →
+/// diting_layout (taffy + swash) → diting paint Canvas → PNG.
+///
+/// The engine-claim endpoint of the render line: unlike
+/// [`render_html_to_png`] there is no Stylo, no vello_cpu and no parley in
+/// the path, so the parley 0.11 CJK hang (linebender/parley#752, which pins
+/// our blitz dependency at 2fa6434d) cannot bite here. Coverage is narrower
+/// than Blitz — tables, shadows, transforms and mixed-run line layout are
+/// still being claimed (docs/engine/render.md); `/screenshot` picks the
+/// engine per request via its `engine` field, so the gap is measured on
+/// real traffic rather than guessed.
+///
+/// `scale` renders 1:1 CSS px (retina resample lands with the canvas
+/// upscale batch). `full_page` tracks content height from the laid-out
+/// rects, capped at 16000 like the Blitz path; a `selector` crop is an
+/// RGBA window copy out of the full-page canvas (no PNG round-trip).
+#[allow(clippy::too_many_arguments)]
+pub fn render_html_to_png_diting(
+    html: &str,
+    _base_url: &str, // relative img-URL normalization is still 挂账 in ImageCache
+    width: u32,
+    height: u32,
+    _scale: f32,
+    full_page: bool,
+    selector: Option<&str>,
+    selector_all: bool,
+    resources: Option<&PrefetchedResources>,
+) -> Result<RenderedScreenshot> {
+    use crate::diting_layout::{paint, Rect as DitingRect};
+
+    if html.is_empty() {
+        anyhow::bail!("render_html_to_png_diting: empty HTML (page content() returned nothing - navigation may have failed)");
+    }
+
+    let tree = crate::diting_dom::tree_sink::parse_html(html);
+
+    // Cascade input: inline <style> blocks, then the external sheet bodies
+    // the prefetch pass already fetched (same join order as
+    // element_rects_diting, so both engines see the same rules).
+    let mut css = String::new();
+    if let Ok(style_els) = tree.query_selector_all("style") {
+        for el in style_els {
+            css.push_str(&tree.text_content(el));
+            css.push('\n');
+        }
+    }
+    if let Some(res) = resources {
+        for (k, v) in res {
+            if k.ends_with(".css") && !v.is_empty() {
+                css.push_str(&String::from_utf8_lossy(v));
+                css.push('\n');
+            }
+        }
+    }
+    let rules = crate::diting_css::parse_stylesheet_for(
+        &css,
+        (width as f32, height as f32),
+        crate::diting_css::CssMediaType::Screen,
+    );
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let fonts = crate::diting_fonts::font_book();
+
+    // Image bytes: everything non-CSS the prefetch pass fetched (already
+    // keyed by absolute URL, which is what ImageCache looks up).
+    let network_bytes: HashMap<String, Vec<u8>> = resources
+        .map(|res| {
+            res.iter()
+                .filter(|(k, v)| !k.ends_with(".css") && !v.is_empty())
+                .map(|(k, v)| (k.clone(), v.as_ref().clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let net_ref = (!network_bytes.is_empty()).then_some(&network_bytes);
+    let (rects, items) = crate::diting_layout::layout_dom_with_paint_and_images(
+        &tree,
+        &styles,
+        &fonts,
+        width as f32,
+        height as f32,
+        net_ref,
+    );
+
+    // Content height for full_page: the deepest laid-out bottom edge.
+    let content_h = rects.values().map(|r| r.y + r.height).fold(0.0_f32, f32::max);
+
+    // Selector resolution. Inline elements carry no box of their own (their
+    // content belongs to the host block's inline layout) — fall back to the
+    // union of descendant boxes, mirroring the Blitz path's element_rect.
+    fn diting_rect(
+        tree: &crate::diting_dom::DomTree,
+        rects: &HashMap<crate::diting_dom::NodeId, DitingRect>,
+        id: crate::diting_dom::NodeId,
+    ) -> Option<ElementRect> {
+        if let Some(r) = rects.get(&id) {
+            return Some(ElementRect { x: r.x as f64, y: r.y as f64, width: r.width as f64, height: r.height as f64 });
+        }
+        fn union_into(
+            tree: &crate::diting_dom::DomTree,
+            rects: &HashMap<crate::diting_dom::NodeId, DitingRect>,
+            id: crate::diting_dom::NodeId,
+            acc: &mut Option<ElementRect>,
+        ) {
+            if let Some(r) = rects.get(&id) {
+                let b = ElementRect { x: r.x as f64, y: r.y as f64, width: r.width as f64, height: r.height as f64 };
+                *acc = Some(match acc.take() {
+                    None => b,
+                    Some(a) => ElementRect {
+                        x: a.x.min(b.x),
+                        y: a.y.min(b.y),
+                        width: (a.x + a.width).max(b.x + b.width) - a.x.min(b.x),
+                        height: (a.y + a.height).max(b.y + b.height) - a.y.min(b.y),
+                    },
+                });
+            }
+            for c in tree.children(id) {
+                union_into(tree, rects, c, acc);
+            }
+        }
+        let mut acc = None;
+        union_into(tree, rects, id, &mut acc);
+        acc
+    }
+
+    let mut out_rects: Vec<ElementRect> = Vec::new();
+    let mut crop: Option<(f32, f32, f32, f32)> = None; // CSS px x, y, w, h
+    if let Some(sel) = selector {
+        let matched = tree
+            .query_selector_all(sel)
+            .map_err(|e| anyhow::anyhow!("invalid selector {sel:?}: {e}"))?;
+        if selector_all {
+            out_rects = matched.iter().filter_map(|&id| diting_rect(&tree, &rects, id)).collect();
+        } else {
+            let id = matched
+                .first()
+                .copied()
+                .ok_or_else(|| anyhow::anyhow!("selector {sel:?} matched no element"))?;
+            let r = diting_rect(&tree, &rects, id).ok_or_else(|| {
+                anyhow::anyhow!("selector {sel:?} matched an element with no layout box")
+            })?;
+            if r.width < 0.5 || r.height < 0.5 {
+                anyhow::bail!(
+                    "selector {sel:?} matched an element with no layout box ({}x{}). \
+                     Inline elements (bare <a>/<span> with text) carry no box - \
+                     target a block ancestor instead",
+                    r.width, r.height
+                );
+            }
+            let (w, h) = (r.width.min(16000.0), r.height.min(16000.0));
+            crop = Some((r.x.max(0.0) as f32, r.y.max(0.0) as f32, w as f32, h as f32));
+            out_rects.push(r);
+        }
+    }
+
+    // One full-page canvas, then an RGBA window copy when cropping.
+    let page_h = if full_page {
+        content_h.max(height as f32).min(16000.0)
+    } else {
+        height as f32
+    };
+    let canvas_h = match crop {
+        Some((_, cy, _, ch)) => page_h.max(cy + ch),
+        None => page_h,
+    }
+    .max(1.0) as usize;
+    let canvas_w = width.max(1) as usize;
+    let mut canvas = paint::Canvas::new_filled(canvas_w, canvas_h, [255, 255, 255, 255]);
+    paint::execute(&items, &fonts, &mut canvas);
+
+    let (out_w, out_h, buffer): (u32, u32, Vec<u8>) = match crop {
+        Some((cx, cy, cw, ch)) => {
+            let (x0, y0) = (cx.max(0.0) as usize, cy.max(0.0) as usize);
+            let (x1, y1) = (
+                (x0 + cw as usize).min(canvas.width),
+                (y0 + ch as usize).min(canvas.height),
+            );
+            let (w, h) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
+            let mut out = Vec::with_capacity(w * h * 4);
+            for row in y0..y1 {
+                let start = (row * canvas.width + x0) * 4;
+                out.extend_from_slice(&canvas.data[start..start + w * 4]);
+            }
+            (w as u32, h as u32, out)
+        }
+        None => (canvas.width as u32, canvas.height as u32, canvas.data),
+    };
+
+    if out_w == 0 || out_h == 0 {
+        anyhow::bail!(
+            "render_html_to_png_diting: zero-sized output ({}x{}; content_height={})",
+            out_w, out_h, content_h
+        );
+    }
+
+    let mut png_bytes = Vec::with_capacity((out_w * out_h) as usize);
+    {
+        use std::io::Cursor;
+        let mut encoder = png::Encoder::new(Cursor::new(&mut png_bytes), out_w, out_h);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| anyhow::anyhow!("png encode header: {e}"))?;
+        writer
+            .write_image_data(&buffer)
+            .map_err(|e| anyhow::anyhow!("png encode data: {e}"))?;
+        writer
+            .finish()
+            .map_err(|e| anyhow::anyhow!("png encode finish: {e}"))?;
+    }
+
+    tracing::debug!(
+        "screenshot(diting): {}x{} -> {} PNG bytes (content_height={}, rects={})",
+        out_w, out_h, png_bytes.len(), content_h, out_rects.len()
+    );
+
+    Ok(RenderedScreenshot {
+        png: png_bytes,
+        pixel_width: out_w,
+        pixel_height: out_h,
+        rects: out_rects,
+    })
+}
+
 /// The absolute (page-relative) border-box rect of a laid-out element.
 ///
 /// Taffy only sizes block-level boxes; pure inline elements (`<a>text</a>`)
@@ -583,6 +810,55 @@ mod tests {
     /// an invalid selector is an Err. Extra CSS (external sheet bodies)
     /// participates in the cascade.
     #[test]
+    /// End-to-end render on the diting stack (no Stylo/vello/parley): a
+    /// simple SSR page must come back as a decodable PNG with the right
+    /// dimensions, real ink (text + backgrounds), a full_page height that
+    /// tracks content, and a selector crop that is exactly the element's
+    /// window of the same canvas.
+    #[test]
+    fn diting_engine_renders_png_end_to_end() {
+        let html = r##"<html><head><style>
+            body { margin: 0; }
+            #banner { width: 300px; height: 60px; background: #2a5fd0; }
+            #target { width: 120px; height: 50px; background: #ff0000; }
+            p { margin: 0; font-size: 16px; color: #111111; }
+        </style></head><body>
+            <div id="banner"></div>
+            <div id="target"></div>
+            <p>谛听渲染第一图</p>
+        </body></html>"##;
+
+        let full = render_html_to_png_diting(html, "https://example.com/", 300, 200, 1.0, true, None, false, None)
+            .expect("diting full render");
+        assert_eq!(full.pixel_width, 300, "viewport width");
+        // banner 60 + target 50 + one 16px line ≈ 78-80px of content: full_page
+        // must track past the 200px floor? No — content < viewport floor keeps
+        // the floor (same max() semantics as the blitz path).
+        assert_eq!(full.pixel_height, 200, "full_page floors at viewport height");
+
+        let banner = count_color(&full.png, |(r, g, b)| r < 100 && g > 60 && g < 140 && b > 150);
+        assert!(banner > 300 * 55, "banner blue dominates its band: {banner}");
+        let red = count_color(&full.png, |(r, g, b)| r > 200 && g < 80 && b < 80);
+        assert!(red > 110 * 45, "target red fills its box: {red}");
+        let ink = count_color(&full.png, |(r, g, b)| r < 80 && g < 80 && b < 80);
+        assert!(ink > 20, "CJK text paints visible ink: {ink}");
+
+        // Selector crop: a 120x50 window whose pixels are all red (the
+        // #target box), proving the crop is the element's own canvas region.
+        let cropped = render_html_to_png_diting(html, "https://example.com/", 300, 200, 1.0, false, Some("#target"), false, None)
+            .expect("diting crop");
+        assert_eq!((cropped.pixel_width, cropped.pixel_height), (120, 50), "crop = element box");
+        assert_eq!(cropped.rects.len(), 1);
+        let all_red = count_color(&cropped.png, |(r, g, b)| r > 200 && g < 80 && b < 80);
+        assert_eq!(all_red, 120 * 50, "every cropped pixel is the target's red");
+
+        // selector_all: no crop, rects for every match.
+        let rects = render_html_to_png_diting(html, "https://example.com/", 300, 200, 1.0, false, Some("div"), true, None)
+            .expect("diting selector_all");
+        assert_eq!(rects.pixel_width, 300, "selector_all does not crop");
+        assert_eq!(rects.rects.len(), 2, "both divs match in document order");
+    }
+
     fn diting_element_rects_from_html() {
         let html = r##"<html><head><style>
             #target { position: absolute; left: 100px; top: 150px; width: 60px; height: 40px; }
