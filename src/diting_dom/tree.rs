@@ -240,6 +240,15 @@ impl DomTree {
         self.inner.borrow().document
     }
 
+    // Document generation stamp: bumps on every allocation/free, so a layout
+    // cache keyed to it invalidates whenever the tree mutates. Cheap (one
+    // usize read); not a mutation counter (attribute writes don't bump), which
+    // is fine for consumers whose cache only needs "tree shape changed".
+    pub fn epoch(&self) -> u64 {
+        let inner = self.inner.borrow();
+        (inner.nodes.len() as u64) << 8 | ((inner.free_list.len() as u64) & 0xFF)
+    }
+
     pub fn set_quirks(&self, quirks: bool) {
         self.inner.borrow_mut().quirks = quirks;
     }

@@ -2336,6 +2336,24 @@ class Element extends Node {
         toJSON() { return this; },
       };
     }
+    // Real layout first: the diting_css + diting_layout pipeline computes
+    // actual geometry for this tree (memoized per tree epoch in the op
+    // layer). Falls back to the synthetic grid when the layout feature is
+    // compiled out or the element has no box (display:none subtree, etc.).
+    if (this._nid != null) {
+      try {
+        const raw = _domRaw("layout_rect", String(this._nid | 0), "");
+        const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (Array.isArray(arr) && arr.length === 4 && Number.isFinite(arr[0])) {
+          const [x, y, w, h] = arr;
+          return {
+            x, y, width: w, height: h,
+            top: y, right: x + w, bottom: y + h, left: x,
+            toJSON() { return this; },
+          };
+        }
+      } catch (e) { /* fall through to synthetic */ }
+    }
     // No layout engine, but Playwright's actionability polling needs each
     // element to occupy a stable, distinct rect so hit-testing can pick the
     // right one (issue #45). Synthesize a deterministic position from the

@@ -100,6 +100,10 @@ pub struct JsState {
     /// `Page::sync_js_network_events` so the CDP layer emits
     /// requestWillBeSent / responseReceived for them (upstream #406).
     pub(crate) js_network_events: Vec<JsNetworkEvent>,
+    /// Memoized diting-layout rects for the live DOM tree, keyed by
+    /// the tree's epoch (see DomTree::epoch). Filled on the first
+    /// `layout_rect` op after each mutation; backs getBoundingClientRect.
+    layout_cache: std::cell::RefCell<Option<(u64, HashMap<NodeId, [f32; 4]>)>>,
 }
 
 /// A script-initiated request as a CDP-shaped network event. Static
@@ -189,6 +193,10 @@ impl JsState {
             network_response_body_order: std::collections::VecDeque::new(),
             network_response_body_counter: 0,
             js_network_events: Vec::new(),
+            // Memoized diting-layout rects for the live DOM tree, keyed by
+            // the tree's epoch (see DomTree::epoch). Filled on the first
+            // `layout_rect` op after each mutation; backs getBoundingClientRect.
+            layout_cache: std::cell::RefCell::new(None),
         }
     }
 }
@@ -735,8 +743,64 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             }
             cur.index().to_string()
         }
+        // Real layout geometry for one element, from the diting_css +
+        // diting_layout pipeline. Memoized per tree epoch; a stale epoch
+        // (any node allocation/free since the last run) re-lays-out. Returns
+        // "[x,y,width,height]" or "null". Gated behind the screenshot
+        // feature because diting_layout pulls taffy/swash; without it the
+        // bootstrap falls back to its synthetic hit-test grid.
+        #[cfg(feature = "screenshot")]
+        "layout_rect" => {
+            let nid = match parse_nid(&arg1) { Some(id) => id, None => return "null".into() };
+            let epoch = dom.epoch();
+            let cache_hit = gs.layout_cache.borrow().as_ref().and_then(|(e, m)| {
+                if *e == epoch { m.get(&nid).copied() } else { None }
+            });
+            let rect = match cache_hit {
+                Some(r) => Some(r),
+                None => {
+                    let rects = layout_rects_all(dom);
+                    let r = rects.get(&nid).copied();
+                    *gs.layout_cache.borrow_mut() = Some((epoch, rects));
+                    r
+                }
+            };
+            match rect {
+                Some([x, y, w, h]) => format!("[{},{},{},{}]", x, y, w, h),
+                None => "null".into(),
+            }
+        }
+        #[cfg(not(feature = "screenshot"))]
+        "layout_rect" => "null".into(),
         _ => "null".into(),
     }
+}
+
+/// Run the full diting style + layout pipeline over the live DOM tree and
+/// return every element's border-box rect. Styles are re-collected each run:
+/// attribute-level mutations (style/class writes) don't bump the tree epoch,
+/// so memoizing computed styles alongside the rects would serve stale geometry.
+#[cfg(feature = "screenshot")]
+fn layout_rects_all(dom: &DomTree) -> HashMap<NodeId, [f32; 4]> {
+    let viewport_width: f32 = 1920.0;
+    let mut css = String::new();
+    if let Ok(style_els) = dom.query_selector_all("style") {
+        for el in style_els {
+            css.push_str(&dom.text_content(el));
+            css.push('\n');
+        }
+    }
+    let rules = crate::diting_css::parse_stylesheet_for(
+        &css,
+        (viewport_width, viewport_width * 0.75),
+        crate::diting_css::CssMediaType::Screen,
+    );
+    let styles = crate::diting_layout::compute_styles(dom, &rules);
+    let fonts = crate::diting_fonts::font_book();
+    crate::diting_layout::layout_dom(dom, &styles, &fonts, viewport_width)
+        .into_iter()
+        .map(|(id, r)| (id, [r.x, r.y, r.width, r.height]))
+        .collect()
 }
 
 /// Index of `n` among its parent's children (0-based).

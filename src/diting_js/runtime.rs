@@ -3808,8 +3808,14 @@ mod tests {
     #[test]
     fn test_element_from_point_in_viewport_returns_body() {
         let mut rt = setup_runtime("<html><body><h1>Hi</h1></body></html>");
+        // With diting-layout rects backing getBoundingClientRect, hit testing
+        // is real: the h1 block spans the viewport top, so (10,10) lands on
+        // it (was BODY under the synthetic grid).
         let tag = rt.evaluate("document.elementFromPoint(10, 10)?.tagName").unwrap();
-        assert_eq!(tag, serde_json::json!("BODY"));
+        assert_eq!(tag, serde_json::json!("H1"));
+        // Below the h1's line box the point falls through to the body.
+        let below = rt.evaluate("document.elementFromPoint(10, 500)?.tagName").unwrap();
+        assert_eq!(below, serde_json::json!("BODY"));
     }
 
     #[test]
@@ -4992,5 +4998,53 @@ mod tests {
             return [afterReplace, afterPush];
         "#).unwrap();
         assert_eq!(result, serde_json::json!(["/dashboard", "/a"]));
+    }
+
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn test_layout_rect_returns_real_geometry_through_get_bounding_client_rect() {
+        // Task #108: getBoundingClientRect serves diting-layout geometry, not
+        // the synthetic hit-test grid. Two block siblings must land at
+        // distinct stacked y positions with full-content width — the grid
+        // scatter would give them unrelated (x, y) cells of 100x20.
+        let mut rt = setup_runtime(
+            "<html><body><div id=\"a\">alpha</div><div id=\"b\">bravo</div></body></html>",
+        );
+        let result = rt.evaluate(r#"
+            const a = document.getElementById("a").getBoundingClientRect();
+            const b = document.getElementById("b").getBoundingClientRect();
+            return [a.x, a.y, a.width, a.height, b.y > a.y + a.height - 1, b.x === a.x];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        assert_eq!(parts[0], serde_json::json!(0), "block x pinned to content edge");
+        assert_eq!(parts[1], serde_json::json!(0), "first block at top");
+        assert_eq!(parts[2], serde_json::json!(1920), "block spans viewport width");
+        assert_eq!(parts[4], serde_json::json!(true), "second block stacks below first");
+        assert_eq!(parts[5], serde_json::json!(true), "siblings share left edge");
+    }
+
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn test_layout_rect_cache_invalidates_on_mutation() {
+        // A node allocation bumps the tree epoch; the next rect read must
+        // reflect the mutated tree (the inserted sibling pushes #b down),
+        // not the memoized pre-insert layout.
+        let mut rt = setup_runtime(
+            "<html><body><div id=\"a\" style=\"height:50px\">a</div><div id=\"b\">b</div></body></html>",
+        );
+        let before = rt
+            .evaluate("document.getElementById('b').getBoundingClientRect().y")
+            .unwrap();
+        rt.evaluate(
+            "const d = document.createElement('div'); d.style.height = '30px'; document.body.insertBefore(d, document.getElementById('b'))",
+        )
+        .unwrap();
+        let after = rt
+            .evaluate("document.getElementById('b').getBoundingClientRect().y")
+            .unwrap();
+        assert_ne!(
+            before, after,
+            "inserting a 30px block above #b must push it down"
+        );
     }
 }
