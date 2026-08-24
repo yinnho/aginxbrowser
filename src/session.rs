@@ -382,10 +382,13 @@ const STATE_SCRIPT: &str = r#"
         var el = interactive[i];
         var style = el.offsetWidth === 0 && el.offsetHeight === 0;
         if (style) continue;
+        var box = el.getBoundingClientRect();
         var info = {
             index: idx,
             tag: el.tagName.toLowerCase(),
             text: (el.innerText || '').trim().substring(0, 100),
+            x: Math.round(box.x), y: Math.round(box.y),
+            w: Math.round(box.width), h: Math.round(box.height),
             attrs: {}
         };
         var attrNames = ['id', 'class', 'href', 'type', 'name', 'value',
@@ -401,7 +404,9 @@ const STATE_SCRIPT: &str = r#"
         idx++;
     }
     window.__session_element_map = indexMap;
-    return JSON.stringify({url: location.href, title: document.title, elements: elements});
+    return JSON.stringify({url: location.href, title: document.title,
+                           viewport: {w: window.innerWidth, h: window.innerHeight},
+                           elements: elements});
 })()
 "#;
 
@@ -436,7 +441,18 @@ fn extract_indexed_state(
     let title = parsed.get("title").and_then(|v| v.as_str()).unwrap_or("");
     let mut out = String::new();
     out.push_str(&format!("url={}\n", url));
-    out.push_str(&format!("title={}\n\n", title));
+    out.push_str(&format!("title={}\n", title));
+    // Viewport size so the agent can tell which rects are on-screen
+    // (scroll down / scroll to element before clicking off-viewport ones).
+    if let Some(vp) = parsed.get("viewport") {
+        out.push_str(&format!(
+            "viewport={}x{}\n\n",
+            vp.get("w").and_then(|v| v.as_i64()).unwrap_or(0),
+            vp.get("h").and_then(|v| v.as_i64()).unwrap_or(0)
+        ));
+    } else {
+        out.push('\n');
+    }
 
     if let Some(elements) = parsed.get("elements").and_then(|v| v.as_array()) {
         for el in elements {
@@ -464,9 +480,19 @@ fn extract_indexed_state(
             } else {
                 format!(" {}", attr_parts.join(" "))
             };
+            // Page-relative rect (viewport coords: y is relative to the
+            // current scroll position) — lets the agent "see where it is"
+            // before clicking or scrolling.
+            let rect = format!(
+                " rect=[{},{},{}x{}]",
+                el.get("x").and_then(|v| v.as_i64()).unwrap_or(0),
+                el.get("y").and_then(|v| v.as_i64()).unwrap_or(0),
+                el.get("w").and_then(|v| v.as_i64()).unwrap_or(0),
+                el.get("h").and_then(|v| v.as_i64()).unwrap_or(0)
+            );
 
             if text.is_empty() {
-                out.push_str(&format!("[{}] <{}{} />\n", idx, tag, attr_str));
+                out.push_str(&format!("[{}] <{}{}{} />\n", idx, tag, attr_str, rect));
             } else {
                 let display_text = if text.chars().count() > 80 {
                     let t: String = text.chars().take(80).collect();
@@ -474,7 +500,7 @@ fn extract_indexed_state(
                 } else {
                     text.to_string()
                 };
-                out.push_str(&format!("[{}] <{}{}>{}</{}>\n", idx, tag, attr_str, display_text, tag));
+                out.push_str(&format!("[{}] <{}{}{}>{}</{}>\n", idx, tag, attr_str, rect, display_text, tag));
             }
         }
     }

@@ -529,15 +529,16 @@ curl -sS -X POST http://127.0.0.1:8089/screenshot \
 ```
 url=https://example.com/login
 title=Login
+viewport=1280x800
 
-[0] <a href="/home">Home</a>
-[1] <input type=email placeholder=Email />
-[2] <input type=password placeholder=Password />
-[3] <button id=submit>Sign In</button>
-[4] <a href="/forgot">Forgot password?</a>
+[0] <a href="/home" rect=[24,16,52x19]>Home</a>
+[1] <input type=email placeholder=Email rect=[24,60,232x22] />
+[2] <input type=password placeholder=Password rect=[24,100,232x22] />
+[3] <button id=submit rect=[24,140,88x28]>Sign In</button>
+[4] <a href="/forgot" rect=[120,144,110x19]>Forgot password?</a>
 ```
 
-索引号 `[N]` 用于 `click` / `input` 操作。
+索引号 `[N]` 用于 `click` / `input` 操作。`rect=[x,y,w,h]` 是元素相对当前视口的坐标（y 随滚动变化）——用它判断元素是否在视口内、需要先 `scroll` 再 `click`。
 
 ### POST /session/{id}/click
 
