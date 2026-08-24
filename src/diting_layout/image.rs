@@ -188,6 +188,97 @@ pub fn decode_png(bytes: &[u8]) -> Option<DecodedImage> {
     Some(DecodedImage::new(w, h, rgba))
 }
 
+/// One parsed `srcset` candidate: the URL plus its descriptor.
+#[derive(Debug, PartialEq)]
+pub struct SrcsetCandidate {
+    pub url: String,
+    /// Pixel-density descriptor (`2x`); `None` when the candidate uses a
+    /// width descriptor or no descriptor at all.
+    pub density: Option<f32>,
+    /// Intrinsic-width descriptor (`640w`), in CSS px.
+    pub width: Option<f32>,
+}
+
+/// Parse a `srcset` attribute into its candidates (HTML §4.8.4.3.9,
+/// simplified): comma-separated entries of `url [descriptor]`, where the URL
+/// ends at the first whitespace (URLs with spaces must be percent-encoded —
+/// same rule browsers apply) and the descriptor is either `Nx` (float) or
+/// `W` (integer). Entries that parse to nothing (trailing comma, empty
+/// descriptors) are skipped rather than poisoning their neighbors.
+pub fn parse_srcset(srcset: &str) -> Vec<SrcsetCandidate> {
+    let mut out = Vec::new();
+    // A comma inside a URL is legal (data: payloads), so split only on
+    // commas that terminate an entry: one followed by whitespace/end. The
+    // common real-world form is ", " between entries.
+    for part in split_srcset_entries(srcset) {
+        let mut tokens = part.split_whitespace();
+        let Some(url) = tokens.next() else { continue };
+        let mut density = None;
+        let mut width = None;
+        if let Some(desc) = tokens.next() {
+            if let Some(n) = desc.strip_suffix('w') {
+                width = n.parse::<f32>().ok().filter(|w| *w > 0.0);
+            } else if let Some(n) = desc.strip_suffix('x') {
+                density = n.parse::<f32>().ok().filter(|d| *d > 0.0);
+            } else {
+                continue; // unknown descriptor unit → entry invalid per spec
+            }
+        }
+        // A bare-URL candidate means 1x.
+        out.push(SrcsetCandidate { url: url.to_string(), density: Some(density.unwrap_or(1.0)).filter(|_| density.is_some()), width });
+    }
+    out
+}
+
+fn split_srcset_entries(srcset: &str) -> Vec<String> {
+    let mut entries = Vec::new();
+    let mut cur = String::new();
+    let chars: Vec<char> = srcset.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == ',' {
+            let rest_empty_or_ws = chars[i + 1..].first().is_none_or(|n| n.is_whitespace());
+            if rest_empty_or_ws || cur.contains(char::is_whitespace) {
+                entries.push(std::mem::take(&mut cur));
+                i += 1;
+                continue;
+            }
+        }
+        cur.push(c);
+        i += 1;
+    }
+    if !cur.trim().is_empty() {
+        entries.push(cur);
+    }
+    entries
+}
+
+/// Pick the winning srcset candidate for a viewport (HTML selection rules,
+/// product-simplified): prefer the smallest density ≥ 1x (we render at dpr 1);
+/// otherwise, among width-descriptor candidates, the largest that fits the
+/// viewport; when none fit, the smallest available. No candidates → None.
+pub fn select_srcset_candidate(candidates: &[SrcsetCandidate], viewport_width: f32) -> Option<&SrcsetCandidate> {
+    if candidates.is_empty() {
+        return None;
+    }
+    // Density-based selection (no width descriptors anywhere).
+    if candidates.iter().all(|c| c.width.is_none()) {
+        return candidates
+            .iter()
+            .filter(|c| c.density.unwrap_or(1.0) >= 1.0)
+            .min_by(|a, b| a.density.partial_cmp(&b.density).unwrap_or(std::cmp::Ordering::Equal))
+            .or_else(|| candidates.iter().min_by(|a, b| a.density.partial_cmp(&b.density).unwrap_or(std::cmp::Ordering::Equal)));
+    }
+    // Width-based selection.
+    let fitting: Vec<_> = candidates.iter().filter(|c| c.width.map(|w| w <= viewport_width).unwrap_or(false)).collect();
+    match fitting.iter().max_by_key(|c| c.width.unwrap_or(0.0) as u32) {
+        Some(c) => Some(c),
+        // Nothing fits: the smallest candidate keeps the box bounded.
+        None => candidates.iter().min_by_key(|c| c.width.unwrap_or(f32::MAX) as u32),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

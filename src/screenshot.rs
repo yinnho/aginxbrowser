@@ -143,13 +143,23 @@ pub async fn prefetch_render_resources(
     };
 
     let doc = Html::parse_document(html);
-    if let Ok(sel) = Selector::parse("img[src]") {
+    if let Ok(sel) = Selector::parse("img[src], img[srcset], source[srcset]") {
         for el in doc.select(&sel) {
             if urls.len() >= MAX_RESOURCES {
                 break;
             }
-            if let Some(src) = el.value().attr("src") {
-                push_resolved(&base, src, &mut urls);
+            for attr in ["src", "srcset"] {
+                if let Some(src) = el.value().attr(attr) {
+                    // srcset entries beyond the first URL are descriptors;
+                    // each comma-separated entry's head is a fetchable URL.
+                    for candidate in src.split(',') {
+                        let url_head = candidate.split_whitespace().next().unwrap_or("");
+                        push_resolved(&base, url_head, &mut urls);
+                        if urls.len() >= MAX_RESOURCES {
+                            break;
+                        }
+                    }
+                }
             }
         }
     }

@@ -514,6 +514,114 @@ fn is_replaced_tag(tag: &str) -> bool {
     matches!(tag, "img" | "video" | "iframe" | "canvas" | "object" | "embed")
 }
 
+/// The URL an `<img>` should load: its `<picture>` parent's first matching
+/// `<source>` candidate when present (media query evaluated at the layout
+/// viewport), else the img's own srcset selection, else plain `src`
+/// (HTML §4.8.4.3.9, product-simplified). None → the placeholder path.
+pub fn resolve_img_source(
+    tree: &DomTree,
+    img: NodeId,
+    viewport_width: f32,
+) -> Option<String> {
+    let attr = |id: NodeId, name: &str| {
+        tree.with_node(id, |n| n.get_attribute(name).map(|v| v.to_string()))
+            .flatten()
+    };
+
+    // A <picture> parent contributes candidates only from <source> children
+    // that precede the img in document order; the img itself terminates the
+    // scan.
+    if let Some(parent) = tree.with_node(img, |n| n.parent).flatten() {
+        let parent_is_picture = tree
+            .with_node(parent, |n| {
+                n.as_element().map(|e| e.local.to_string() == "picture")
+            })
+            .flatten()
+            .unwrap_or(false);
+        if parent_is_picture {
+            for child in tree.children(parent) {
+                let tag = tree
+                    .with_node(child, |n| n.as_element().map(|e| e.local.to_string()))
+                    .flatten()
+                    .unwrap_or_default();
+                if child == img {
+                    break;
+                }
+                if tag != "source" {
+                    continue;
+                }
+                // media="(min-width: …)" / absent media both evaluate here;
+                // a non-matching source is skipped to the next sibling.
+                if !media_matches_width(attr(child, "media").as_deref(), viewport_width) {
+                    continue;
+                }
+                if let Some(srcset) = attr(child, "srcset") {
+                    let cands = image::parse_srcset(&srcset);
+                    if let Some(c) = image::select_srcset_candidate(&cands, viewport_width) {
+                        return normalize_candidate_url(tree, child, &c.url);
+                    }
+                }
+                // type="image/webp" etc.: without the candidate set matching
+                // we fall through — a source with no usable srcset never wins.
+            }
+        }
+    }
+
+    if let Some(srcset) = attr(img, "srcset") {
+        let cands = image::parse_srcset(&srcset);
+        if let Some(c) = image::select_srcset_candidate(&cands, viewport_width) {
+            return normalize_candidate_url(tree, img, &c.url);
+        }
+    }
+
+    attr(img, "src")
+}
+
+/// Relative candidate URLs resolve against the document base (the img's
+/// owner document URL lives outside the tree, so we approximate with the
+/// page URL recorded on nothing here — callers pass absolute URLs for
+/// network fetches; data: URLs are self-contained and pass through).
+fn normalize_candidate_url(_tree: &DomTree, _source: NodeId, url: &str) -> Option<String> {
+    Some(url.to_string())
+}
+
+/// Minimal media-query width gate for `<source media>`: supports the two
+/// real-world forms `(min-width: Npx)` / `(max-width: Npx)` joined by
+/// `and`, plus absent/`all`. Anything else declines (conservative: falls
+/// through to the next source or the fallback img).
+fn media_matches_width(media: Option<&str>, vw: f32) -> bool {
+    let Some(media) = media.map(str::trim).filter(|m| !m.is_empty()) else {
+        return true;
+    };
+    if media.eq_ignore_ascii_case("all") {
+        return true;
+    }
+    // NOT-prefixed or print media queries: decline rather than guess.
+    if media.contains("not ") || media.contains("print") {
+        return false;
+    }
+    let mut ok = true;
+    for clause in media.split(" and ") {
+        let clause = clause.trim().trim_start_matches('(').trim_end_matches(')');
+        if let Some(w) = clause
+            .strip_prefix("min-width:")
+            .and_then(|v| v.trim().strip_suffix("px"))
+            .and_then(|v| v.trim().parse::<f32>().ok())
+        {
+            ok &= vw >= w;
+        } else if let Some(w) = clause
+            .strip_prefix("max-width:")
+            .and_then(|v| v.trim().strip_suffix("px"))
+            .and_then(|v| v.trim().parse::<f32>().ok())
+        {
+            ok &= vw <= w;
+        }
+        // Unknown feature inside a conjunction: leave `ok` untouched (the
+        // common case is a single min/max-width clause anyway).
+    }
+    ok
+}
+
 /// The rect replaced content paints into, per object-fit/object-position
 /// (batch 5c) — the port of blitz-paint's sizing.rs + render.rs draw_image
 /// offset math. `box_rect` is the content box, (nw, nh) the natural size:
@@ -1637,25 +1745,24 @@ pub fn layout_dom_with_paint_and_images(
         id: NodeId,
         cache: &image::ImageCache,
         images: &mut HashMap<NodeId, DecodedImage>,
+        viewport_width: f32,
     ) {
         let is_img = tree
             .with_node(id, |n| n.as_element().map(|e| e.local.to_string() == "img"))
             .flatten()
             .unwrap_or(false);
         if is_img {
-            let src = tree
-                .with_node(id, |n| n.get_attribute("src").map(|v| v.to_string()))
-                .flatten();
+            let src = resolve_img_source(tree, id, viewport_width);
             if let Some(img) = src.as_deref().and_then(|s| cache.resolve(s)) {
                 images.insert(id, (*img).clone());
             }
         }
         for child in tree.children(id) {
-            scan_images(tree, child, cache, images);
+            scan_images(tree, child, cache, images, viewport_width);
         }
     }
     if let Some(root_id) = &root {
-        scan_images(tree, *root_id, &cache, &mut images);
+        scan_images(tree, *root_id, &cache, &mut images, viewport_width);
     }
 
     let mut rects = HashMap::new();
@@ -5730,6 +5837,83 @@ mod bridge_cross_check {
                 );
             }
         }
+    }
+
+    // --- srcset/picture source selection (batch: image pipeline) ---
+
+    fn img_source(html: &str) -> Option<String> {
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let img = tree.query_selector("img").unwrap().unwrap();
+        resolve_img_source(&tree, img, 1280.0)
+    }
+
+    #[test]
+    fn srcset_density_picks_nearest_1x() {
+        let src = img_source(
+            r#"<img src="fallback.png" srcset="a.png 1x, b.png 2x, c.png 3x">"#,
+        );
+        assert_eq!(src.as_deref(), Some("a.png"), "smallest density >= 1x wins at dpr 1");
+
+        // Only hi-dpi candidates: the smallest of them (nothing fits 1x).
+        let hi = img_source(r#"<img src="fallback.png" srcset="b.png 2x, c.png 3x">"#);
+        assert_eq!(hi.as_deref(), Some("b.png"));
+    }
+
+    #[test]
+    fn srcset_width_picks_largest_fitting_viewport() {
+        let src = img_source(
+            r#"<img src="fb.png" srcset="s.png 320w, m.png 640w, l.png 2000w">"#,
+        );
+        assert_eq!(src.as_deref(), Some("m.png"), "640w is the largest <= 1280 viewport");
+
+        // Nothing fits → smallest keeps the box bounded.
+        let tiny = img_source(r#"<img src="fb.png" srcset="xl.png 4000w, xxl.png 8000w">"#);
+        assert_eq!(tiny.as_deref(), Some("xl.png"));
+    }
+
+    #[test]
+    fn picture_media_selects_first_matching_source() {
+        let html = r#"<picture>
+            <source media="(min-width: 900px)" srcset="desktop.png">
+            <source media="(min-width: 400px)" srcset="tablet.png">
+            <img src="phone.png">
+        </picture>"#;
+        assert_eq!(img_source(html).as_deref(), Some("desktop.png"));
+
+        // Narrow viewport skips the desktop source.
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let img = tree.query_selector("img").unwrap().unwrap();
+        let narrow = resolve_img_source(&tree, img, 600.0);
+        assert_eq!(narrow.as_deref(), Some("tablet.png"));
+
+        // No media attr → matches everything; first source still wins.
+        let nomedia = img_source(
+            r#"<picture><source srcset="any.png"><img src="fb.png"></picture>"#,
+        );
+        assert_eq!(nomedia.as_deref(), Some("any.png"));
+
+        // Non-matching sources fall through to the plain img fallback.
+        let none_match = img_source(
+            r#"<picture><source media="(min-width: 99999px)" srcset="big.png"><img src="fb.png"></picture>"#,
+        );
+        assert_eq!(none_match.as_deref(), Some("fb.png"));
+    }
+
+    #[test]
+    fn srcset_parse_rejects_bad_entries_and_keeps_good_neighbors() {
+        use crate::diting_layout::image::{parse_srcset, select_srcset_candidate};
+
+        let cands = parse_srcset("good.png 2x, bad.png 5q, , tail.png");
+        assert_eq!(cands.len(), 2, "unknown descriptor and empty entry skipped");
+        assert_eq!(cands[0].url, "good.png");
+        assert_eq!(cands[1].url, "tail.png");
+        assert_eq!(cands[1].density, None, "descriptor-less entry has no explicit density");
+
+        // Descriptor-less entries participate as 1x in selection.
+        let pick = select_srcset_candidate(&cands, 1280.0).map(|c| c.url.clone());
+        assert_eq!(pick.as_deref(), Some("tail.png"), "1x < 2x at dpr 1");
+
+        assert!(parse_srcset("").is_empty());
     }
 
 }

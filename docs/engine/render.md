@@ -1480,3 +1480,30 @@ fixture 一致）；blitz 无 floats 特性逐行堆叠 y=0/80/160/240，差异�
 呈现。hero absolute 两引擎完全一致 (40,30,300,120)。
 
 453 全绿。
+
+## 46. 图片管线：srcset/picture 源选择（2026-08-24）
+
+挂账清单核实后的实际剩余项。**WebP（7b）/GIF 首帧（7e）此前已完成**，
+本批只剩源选择。
+
+**diting 侧独立增强（有意超越 blitz）**：blitz-dom 全仓无 srcset/picture
+处理（grep 证实），两边都只读 `src`——`<img srcset>` 无 src 的真实页面
+图全落占位符。diting 布局 pre-pass 新增 `resolve_img_source`：
+
+- `<picture>` 父级下按文档序扫前置 `<source>` 兄弟，第一个 media 匹配且
+  有可用 srcset 候选者赢；img 自身终止扫描
+- `parse_srcset`（HTML §4.8.4.3.9 简化版）：逗号分项、URL 止于首个空白
+  （含逗号 URL 保护——仅当逗号后是空白/结尾才切分）、描述符认 `Nx`/`W`
+  两形，未知单位整项丢弃不毒邻居
+- `select_srcset_candidate`：密度候选取 ≥1x 最小者（产品 dpr=1）；
+  宽度候选取 ≤viewport 最大者，全超则最小者兜底
+- `media_matches_width`：支持 `(min-width:Npx)`/`(max-width:Npx)` 以
+  `and` 连接 + 缺省/all；not/print 及未知特性保守拒绝
+
+**prefetch 联动**：screenshot 资源预取从 `img[src]` 扩为
+`img[src], img[srcset], source[srcset]`，srcset 逐候选拆头 URL 入队
+（MAX_RESOURCES 上限不变）。布局侧选中候选后经 network_bytes 字节表命中。
+
+**测试** +4（总 459）：密度最近 1x / 宽度最大适配+全超兜底 /
+picture 三景（desktop 命中、窄视口跳到 tablet、无 media 首个赢、
+全不匹配回落 img src）/ 坏描述符隔离与无描述符当 1x。
