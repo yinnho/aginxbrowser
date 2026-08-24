@@ -510,7 +510,7 @@ pub fn execute(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas) {
                 if *fill_placeholder && w > 0 && h > 0 {
                     out.fill_rect(x, y, w, h, [224, 224, 224, 255]);
                 }
-                if let Some((text, font_size, bold, color)) = alt {
+                if let Some((text, font_size, bold, line_height, color)) = alt {
                     if !text.trim().is_empty() {
                         // The alt run wraps at the box width; the tile's
                         // `top` offsets ink above the box top exactly like
@@ -525,14 +525,15 @@ pub fn execute(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas) {
                             *bold,
                             *color,
                             w.max(0) as f32,
+                            *line_height,
                         );
                         out.blit_text(&r, x, (y as f32 + r.top).round() as i64);
                         out.pop_clip();
                     }
                 }
             }
-            PaintItem::Text { text, font_size, bold, color, x, y, wrap_at } => {
-                let r = fonts.rasterize_wrapped(text, *font_size, *bold, *color, *wrap_at);
+            PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at } => {
+                let r = fonts.rasterize_wrapped(text, *font_size, *bold, *color, *wrap_at, *line_height);
                 // Tile row 0 sits `top` px above the leaf's line-box top.
                 out.blit_text(&r, x.round() as i64, (*y + r.top).round() as i64);
             }

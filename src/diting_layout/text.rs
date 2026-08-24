@@ -110,8 +110,7 @@ impl FontBook {
     /// rounded to whole pixels (no subpixel placement — ink-extent
     /// cross-checks against blitz stay within tolerance because both
     /// rasterizers cover the same outlines to within ~a pixel).
-    pub fn rasterize(&self, text: &str, font_size: f32, bold: bool, color: [u8; 4]) -> TextRaster {
-        let line_height = super::line_height(font_size);
+    pub fn rasterize(&self, text: &str, font_size: f32, bold: bool, color: [u8; 4], line_height: f32) -> TextRaster {
         let m = self.metrics(font_size, bold).unwrap_or(ScaledMetrics {
             ascent: font_size,
             descent: font_size * 0.2,
@@ -146,6 +145,7 @@ impl FontBook {
         bold: bool,
         color: [u8; 4],
         wrap_at: f32,
+        line_height: f32,
     ) -> TextRaster {
         let empty = || TextRaster {
             width: 0,
@@ -163,7 +163,6 @@ impl FontBook {
             return empty();
         }
 
-        let line_height = super::line_height(font_size);
         let m = self.metrics(font_size, bold).unwrap_or(ScaledMetrics {
             ascent: font_size,
             descent: font_size * 0.2,

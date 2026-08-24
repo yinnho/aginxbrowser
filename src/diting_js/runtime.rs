@@ -3809,10 +3809,13 @@ mod tests {
     fn test_element_from_point_in_viewport_returns_body() {
         let mut rt = setup_runtime("<html><body><h1>Hi</h1></body></html>");
         // With diting-layout rects backing getBoundingClientRect, hit testing
-        // is real: the h1 block spans the viewport top, so (10,10) lands on
-        // it (was BODY under the synthetic grid).
-        let tag = rt.evaluate("document.elementFromPoint(10, 10)?.tagName").unwrap();
+        // is real. The h1's UA box (body 8px margin + h1 .67em margin-top,
+        // then the 2em line box) starts around y≈30, so (10,40) lands on it;
+        // (10,10) sits in the h1's margin — body territory, like Chrome.
+        let tag = rt.evaluate("document.elementFromPoint(10, 40)?.tagName").unwrap();
         assert_eq!(tag, serde_json::json!("H1"));
+        let margin_area = rt.evaluate("document.elementFromPoint(10, 10)?.tagName").unwrap();
+        assert_eq!(margin_area, serde_json::json!("BODY"));
         // Below the h1's line box the point falls through to the body.
         let below = rt.evaluate("document.elementFromPoint(10, 500)?.tagName").unwrap();
         assert_eq!(below, serde_json::json!("BODY"));
@@ -5014,15 +5017,15 @@ mod tests {
             const a = document.getElementById("a").getBoundingClientRect();
             const b = document.getElementById("b").getBoundingClientRect();
             return [a.x, a.y, a.width, a.height, b.y > a.y + a.height - 1, b.x === a.x,
-                    a.width === innerWidth];
+                    a.width === innerWidth - 16];
         "#).unwrap();
         let parts = result.as_array().expect("array result");
-        assert_eq!(parts[0], serde_json::json!(0), "block x pinned to content edge");
-        assert_eq!(parts[1], serde_json::json!(0), "first block at top");
-        // Width agrees with the PERSONA viewport (set_viewport publishes it
-        // to the layout layer; the old hard-coded 1920 broke whenever the
-        // persona pool drew a narrower screen).
-        assert_eq!(parts[6], serde_json::json!(true), "block spans the persona viewport width");
+        assert_eq!(parts[0], serde_json::json!(8), "block x at body's 8px UA content edge");
+        assert_eq!(parts[1], serde_json::json!(8), "first block at body content top");
+        // Width agrees with the PERSONA viewport minus body's 8px UA margins
+        // (set_viewport publishes it to the layout layer; the old hard-coded
+        // 1920 broke whenever the persona pool drew a narrower screen).
+        assert_eq!(parts[6], serde_json::json!(true), "block spans viewport width minus body margins");
         assert_eq!(parts[4], serde_json::json!(true), "second block stacks below first");
         assert_eq!(parts[5], serde_json::json!(true), "siblings share left edge");
     }

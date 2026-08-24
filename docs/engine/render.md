@@ -1630,3 +1630,48 @@ diting_js 执行阶段硬挂死（>3min 无进展，渲染路径未到达）—�
 **测试** +1：`diting_engine_renders_png_end_to_end`（SSR 页出 PNG，断言
 尺寸/banner/target 色数/ink>20/selector 裁剪/selector_all 不裁剪），总 464
 全绿。
+
+## 50. 塌缩批次：四差距全闭环 + 空白盒丢弃（2026-08-25，469 绿）
+
+§49 挖出的四个差距逐项收口，收尾时 CJK 测试页两引擎 **0 像素差**。
+
+**1. line-height 生效**（§49 #2）：`LineHeightSpec{Normal,Number,Px}` 进
+ComputedStyle；无单位数字按 CSS 计算值语义存数字本身、继承给后代按各自
+font-size 再解；em/rem 解析期折算 px、% 折算 Number。文本测量/光栅/词叶全链
+携带使用行高。测试 `declared_line_height_scales_paragraph_pitch`。
+
+**2. UA stylesheet 基准 + margin collapse**（§49 #3）：
+- UA 层从 blitz default.css@2fa6434 提真值表：body 8px margin、h1-h6 字号
+  2/.1.5/1.17/1/0.83/0.67em + bold、各块级 1em margins（h1 的 .67em×2em=
+  21.44px 与 Chrome 一致）、ul/ol padding-inline-start 40px。作者规则逐边胜出。
+- border 四边简写补齐（此前只有全边简写——失败测试暴露）。
+- **塌缩真相**：主路径容器是 taffy 原生 `Display::Block`，兄弟塌缩由 taffy
+  原生做（max 合并）；但 taffy 864b4fd **没实现"border/padding 分隔则求和"
+  规则**（`has_styles_preventing_being_collapsed_through` 只管自身穿透塌
+  缩）。修法 = 统一重编码：干净边 → `[prev.bottom=0 | next.top=max]`；
+  被分隔边 → `[0 | sum]`（taffy 无条件 max 对单边求和恒等；flex stand-in
+  父容器求和语义同样命中）。挂到所有 5 个容器构建点。
+- **空白盒丢弃**（真实页面才暴露的关键坑）：块间换行空白文本节点原本生成
+  零尺寸 run wrapper taffy 兄弟，物理隔断 margin 邻接（探针：有空白 gap=37
+  求和、无空白 21.44 塌缩）。CSS 格式空白不生成盒子——flush_run 全空白
+  run 与 build_normal_sibling 单空白文本直接不产出。修复后真实页塌缩正确。
+
+**3. Hangul 不绘制**（§49 #1）：本批不复现（hangul/hangul2/hangul3 三页
+含 PingFang 栈下均 0 diff）——§49 记录的零墨区大概率是 heading 缺 bold 时
+的连带观察误差或当时基线问题，当前 swash cmap 回退正常。
+
+**4. 笔墨偏轻**（§49 #4）：同上消失——根因是 h1 没有 UA bold（swash 以
+400 weight 光栅标题字，笔画细 30%）。UA font-weight:700 落地后墨量比
+1.000。
+
+**验证**：单元 469 全绿（+line_height_parses_all_forms_and_inherits_as_
+number、ua_box_defaults_match_browser_sheet、adjacent_block_margins_
+collapse_to_max 及其 border 反例）；本地 CJK 页双引擎带结构逐带一致 +
+总墨量相等 + **逐像素 0 diff**；Hangul 三页 0 diff。
+
+**坑**：
+- rect 是整数栅格化坐标（taffy rounding），跨两个取整边界的 gap 断言容差
+  要放到 1px（EPS=0.51 不够：37.44 实测 38）。
+- 本地服务器端口由 `AGINXBROWSER_BIND` 控制（serve 子命令无 --port；
+  默认 8089）。
+- cargo test 吞 stderr，探针 panic 打印比 eprintln 可靠。

@@ -370,7 +370,9 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "display", "color", "background", "background-color", "margin", "margin-top",
         "margin-right", "margin-bottom", "margin-left", "padding", "padding-top",
         "padding-right", "padding-bottom", "padding-left", "font-size", "font-weight",
-        "text-align", "border", "border-color", "border-width", "border-style",
+        "line-height",
+        "text-align", "border", "border-top", "border-right", "border-bottom", "border-left",
+        "border-color", "border-width", "border-style",
         "width", "height", "flex-direction", "gap", "overflow",
         "object-fit", "object-position", "z-index", "border-radius",
         "float", "clear",
@@ -378,9 +380,12 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
     if !SUPPORTED.contains(&name.to_ascii_lowercase().as_str()) {
         return false;
     }
-    // Unitless nonzero lengths are invalid everywhere (upstream 2c12b5a).
-    if let Ok(num) = value.parse::<f64>() {
-        return num == 0.0;
+    // Unitless nonzero lengths are invalid everywhere (upstream 2c12b5a) —
+    // EXCEPT line-height, where a bare number is the canonical form.
+    if !name.eq_ignore_ascii_case("line-height") {
+        if let Ok(num) = value.parse::<f64>() {
+            return num == 0.0;
+        }
     }
     if value.is_empty() {
         return false;
@@ -397,6 +402,7 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
             || value.starts_with("url(")
             || value.contains("gradient"),
         "text-align" => matches!(value, "left" | "start" | "center" | "right" | "end" | "justify"),
+        "line-height" => parse_line_height(value).is_some(),
         "object-fit" => matches!(
             value,
             "fill" | "contain" | "cover" | "none" | "scale-down"
@@ -463,6 +469,8 @@ pub struct ComputedStyle {
     /// context; here we accept px/em/% where em resolves against parent).
     pub font_size: Option<f32>,
     pub font_weight: Option<u16>,
+    /// Inherited: nearest ancestor's declared value, `None` = `normal`.
+    pub line_height: Option<LineHeightSpec>,
     pub text_align: Option<TextAlign>,
     /// Overflow clipping (batch 4c), uniform for both axes. Any non-visible
     /// value clips descendants' paint to the padding box; per-axis
@@ -690,11 +698,46 @@ pub enum Length {
 /// Declaration-level length: em/rem can't resolve until the font context is
 /// known, so parsing keeps them symbolic for the cascade to fold in.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum CssLength {
+pub enum CssLength {
     Px(f32),
     Em(f32),
     Rem(f32),
     Percent(f32),
+}
+
+/// `line-height` computed value. Inherited as-is: the number form keeps its
+/// multiplier (spec: computed value of a unitless line-height IS the number,
+/// resolved against each descendant's own font-size), lengths are already
+/// absolute px. `Normal` is the initial value (layout maps it to the same
+/// `font-size * 1.2` blitz pins for `normal`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LineHeightSpec {
+    Normal,
+    /// Unitless multiplier (and `%`, folded at parse time — a percentage
+    /// resolves against the element's own font-size, exactly like a number).
+    Number(f32),
+    Px(f32),
+}
+
+/// Shape-level parse for @supports probing and cascade application; em/rem
+/// fold to px later against the element's FontCtx.
+enum LineHeightRaw {
+    Normal,
+    Number(f32),
+    Len(CssLength),
+}
+
+fn parse_line_height(v: &str) -> Option<LineHeightRaw> {
+    let v = v.trim();
+    if v.eq_ignore_ascii_case("normal") {
+        return Some(LineHeightRaw::Normal);
+    }
+    // Unitless numbers are legal ONLY for line-height (line-height: 1.6).
+    if let Ok(n) = v.parse::<f32>() {
+        let numeric_shape = v.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-');
+        return (n.is_finite() && n > 0.0 && numeric_shape).then_some(LineHeightRaw::Number(n));
+    }
+    parse_css_length(v).map(LineHeightRaw::Len)
 }
 
 /// The initial / default root font size (CSS `medium`).
@@ -780,6 +823,59 @@ pub fn ua_display(tag: &str) -> Display {
 pub fn ua_font_weight(tag: &str) -> Option<u16> {
     match tag {
         "b" | "strong" | "th" => Some(700),
+        // Every browser UA sheet (blitz default.css included) bolds the
+        // heading levels; our ua_font_weight only fed b/strong before,
+        // so unstyled <h1> painted regular weight.
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => Some(700),
+        _ => None,
+    }
+}
+
+/// UA heading font-sizes (blitz default.css / HTML rendering spec). Expressed
+/// as em so the cascade's font-size pre-pass folds them against the PARENT
+/// font-size, where author declarations override.
+pub fn ua_font_size(tag: &str) -> Option<CssLength> {
+    match tag {
+        "h1" => Some(CssLength::Em(2.0)),
+        "h2" => Some(CssLength::Em(1.5)),
+        "h3" => Some(CssLength::Em(1.17)),
+        "h4" => Some(CssLength::Em(1.0)),
+        "h5" => Some(CssLength::Em(0.83)),
+        "h6" => Some(CssLength::Em(0.67)),
+        _ => None,
+    }
+}
+
+/// UA margins in CSS order (top right bottom left), from the same blitz
+/// default.css block every other browser UA sheet mirrors. Em folds against
+/// the element's OWN font-size at cascade time (h1's .67em × its 2em size).
+pub fn ua_margin(tag: &str) -> Option<[CssLength; 4]> {
+    let em = |n: f32| CssLength::Em(n);
+    let px = |n: f32| CssLength::Px(n);
+    match tag {
+        "body" => Some([px(8.0), px(8.0), px(8.0), px(8.0)]),
+        "p" | "dl" | "multicol" | "search" => Some([em(1.0), px(0.0), em(1.0), px(0.0)]),
+        "blockquote" | "figure" => Some([em(1.0), px(40.0), em(1.0), px(40.0)]),
+        "dd" => Some([px(0.0), px(0.0), px(0.0), px(40.0)]),
+        "ul" | "ol" | "menu" | "dir" => Some([em(1.0), px(0.0), em(1.0), px(0.0)]),
+        "pre" | "xmp" | "listing" | "plaintext" => Some([em(1.0), px(0.0), em(1.0), px(0.0)]),
+        "h1" => Some([em(0.67), px(0.0), em(0.67), px(0.0)]),
+        "h2" => Some([em(0.83), px(0.0), em(0.83), px(0.0)]),
+        "h3" => Some([em(1.0), px(0.0), em(1.0), px(0.0)]),
+        "h4" => Some([em(1.33), px(0.0), em(1.33), px(0.0)]),
+        "h5" => Some([em(1.67), px(0.0), em(1.67), px(0.0)]),
+        "h6" => Some([em(2.33), px(0.0), em(2.33), px(0.0)]),
+        _ => None,
+    }
+}
+
+/// UA paddings (list indentation): the classic 40px inline-start of nested
+/// list containers, same source as the margin table.
+pub fn ua_padding(tag: &str) -> Option<[CssLength; 4]> {
+    match tag {
+        "ul" | "ol" | "menu" | "dir" => {
+            Some([CssLength::Px(0.0), CssLength::Px(0.0), CssLength::Px(0.0), CssLength::Px(40.0)])
+        }
         _ => None,
     }
 }
@@ -949,6 +1045,54 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             }
             width.is_some() || line.is_some() || color.is_some()
         }
+        // Per-side shorthands (`border-top: 2px solid red`, …): same
+        // triple grammar as `border`, width applied to the named side only.
+        // border_style/border_color stay uniform-for-all-sides in this model
+        // (documented approximation), so a side shorthand's style/color
+        // applies globally.
+        "border-top" | "border-right" | "border-bottom" | "border-left" => {
+            let mut width: Option<Length> = None;
+            let mut line: Option<Option<BorderStyle>> = None;
+            let mut color: Option<Color> = None;
+            for tok in v.split_whitespace() {
+                let w = len(tok).or_else(|| match tok {
+                    "thin" => Some(Length::Px(1.0)),
+                    "medium" => Some(Length::Px(3.0)),
+                    "thick" => Some(Length::Px(5.0)),
+                    _ => None,
+                });
+                if let Some(l) = w {
+                    width = Some(l);
+                    continue;
+                }
+                match border_style_kw(tok) {
+                    BorderStyleKw::Line(bs) => line = Some(Some(bs)),
+                    BorderStyleKw::NoBorder => line = Some(None),
+                    BorderStyleKw::NotAStyle => match parse_color(tok) {
+                        Some(c) => color = Some(c),
+                        None => return false,
+                    },
+                }
+            }
+            if let Some(l) = width {
+                match name {
+                    "border-top" => style.border_width.top = Some(l),
+                    "border-right" => style.border_width.right = Some(l),
+                    "border-bottom" => style.border_width.bottom = Some(l),
+                    "border-left" => style.border_width.left = Some(l),
+                    _ => unreachable!(),
+                }
+            }
+            match line {
+                Some(Some(bs)) => style.border_style = Some(bs),
+                Some(None) => style.border_style = None,
+                None => {}
+            }
+            if let Some(c) = color {
+                style.border_color = Some(c);
+            }
+            width.is_some() || line.is_some() || color.is_some()
+        }
         "border-width" => {
             let sides = expand_sides(v, fonts);
             style.border_width = sides;
@@ -984,6 +1128,20 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             style.font_weight = weight;
             weight.is_some()
         }
+        "line-height" => parse_line_height(v)
+            .map(|raw| {
+                style.line_height = Some(match raw {
+                    LineHeightRaw::Normal => LineHeightSpec::Normal,
+                    LineHeightRaw::Number(n) => LineHeightSpec::Number(n),
+                    LineHeightRaw::Len(CssLength::Px(px)) => LineHeightSpec::Px(px),
+                    // em/rem fold against the element's OWN font-size (the
+                    // cascade's FontCtx carries it); % behaves like a number.
+                    LineHeightRaw::Len(CssLength::Em(n)) => LineHeightSpec::Px(n * fonts.own),
+                    LineHeightRaw::Len(CssLength::Rem(n)) => LineHeightSpec::Px(n * fonts.root),
+                    LineHeightRaw::Len(CssLength::Percent(p)) => LineHeightSpec::Number(p / 100.0),
+                })
+            })
+            .is_some(),
         "text-align" => {
             style.text_align = match v {
                 "left" | "start" => Some(TextAlign::Left),
@@ -1505,6 +1663,9 @@ pub fn cascade_element(
         style.font_size = parent.font_size;
         style.font_weight = style.font_weight.or(parent.font_weight);
         style.text_align = parent.text_align;
+        // Number keeps its multiplier for descendants (spec computed value);
+        // Px inherits as absolute px — both copy straight through.
+        style.line_height = parent.line_height;
     }
 
     // Author rules: sort by (specificity, source order) ascending, apply in
@@ -1527,7 +1688,8 @@ pub fn cascade_element(
     // em lengths elsewhere resolve against it. Walk the same winning order
     // (sorted candidates, then inline) and keep the last parseable
     // declaration, then fold em/% against the PARENT size and rem against
-    // the root size.
+    // the root size. The UA heading size (h1 2em …) is the lowest-priority
+    // candidate — author declarations win over it.
     let parent_fs = parent
         .and_then(|p| p.font_size)
         .unwrap_or(DEFAULT_ROOT_FONT_SIZE);
@@ -1542,11 +1704,30 @@ pub fn cascade_element(
             fs_decl = Some(d);
         }
     }
+    let fs_decl = fs_decl.or_else(|| ua_font_size(tag));
     let own_fs = fs_decl
         .map(|d| font_size_px(d, parent_fs, root_font_size))
         .unwrap_or(parent_fs);
     style.font_size = Some(own_fs);
     let fonts = FontCtx { own: own_fs, root: root_font_size };
+
+    // UA box defaults AFTER the fs pre-pass (em margins resolve against the
+    // element's OWN font-size — h1's .67em × its 2em size) and BEFORE author
+    // rules, so authored margin/padding overrides per side.
+    if let Some(m) = ua_margin(tag) {
+        let [t, r, b, l] = m.map(|side| resolve_len(side, &fonts));
+        style.margin.top = style.margin.top.or(Some(t));
+        style.margin.right = style.margin.right.or(Some(r));
+        style.margin.bottom = style.margin.bottom.or(Some(b));
+        style.margin.left = style.margin.left.or(Some(l));
+    }
+    if let Some(p) = ua_padding(tag) {
+        let [t, r, b, l] = p.map(|side| resolve_len(side, &fonts));
+        style.padding.top = style.padding.top.or(Some(t));
+        style.padding.right = style.padding.right.or(Some(r));
+        style.padding.bottom = style.padding.bottom.or(Some(b));
+        style.padding.left = style.padding.left.or(Some(l));
+    }
 
     let _ = tree;
     let _ = node_id;
@@ -1891,6 +2072,88 @@ mod tests {
         // Section itself: block UA default even with no author CSS.
         let block = cascade_element("section", &tree, section, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
         assert_eq!(block.display, Some(Display::Block));
+    }
+
+    // ---- line-height + UA box defaults (§49 parity fixes) ----
+
+    #[test]
+    fn line_height_parses_all_forms_and_inherits_as_number() {
+        let tree = diting_dom::tree_sink::parse_html(r#"<div id="outer"><div id="inner">x</div></div>"#);
+        let outer = tree.query_selector("#outer").unwrap().unwrap();
+        let inner = tree.query_selector("#inner").unwrap().unwrap();
+
+        let rule = ParsedRule {
+            selector: "#outer".into(),
+            declarations: "line-height: 1.6".into(),
+        };
+        let spec = tree.compile_rule_selector("#outer").unwrap().specificity();
+        let parent = cascade_element("div", &tree, outer, &[(&rule, spec)], None, None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(parent.line_height, Some(LineHeightSpec::Number(1.6)));
+
+        // The child inherits the NUMBER (spec computed value) — it scales
+        // against whichever font-size the text actually uses.
+        let child = cascade_element("div", &tree, inner, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(child.line_height, Some(LineHeightSpec::Number(1.6)));
+
+        // Length forms collapse to absolute px (em against own font-size).
+        let px_rule = ParsedRule {
+            selector: "#inner".into(),
+            declarations: "font-size: 20px; line-height: 1.5em".into(),
+        };
+        let spec2 = tree.compile_rule_selector("#inner").unwrap().specificity();
+        let sized = cascade_element("div", &tree, inner, &[(&px_rule, spec2)], None, None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(sized.line_height, Some(LineHeightSpec::Px(30.0)));
+        assert_eq!(sized.font_size, Some(20.0));
+
+        // `normal` and percentages fold to their canonical forms.
+        let mut s = ComputedStyle::default();
+        assert!(apply_one(&mut s, "line-height", "normal", &FontCtx::default()));
+        assert_eq!(s.line_height, Some(LineHeightSpec::Normal));
+        assert!(apply_one(&mut s, "line-height", "150%", &FontCtx::default()));
+        assert_eq!(s.line_height, Some(LineHeightSpec::Number(1.5)));
+        assert!(!apply_one(&mut s, "line-height", "nonsense", &FontCtx::default()));
+        // Unitless numbers are legal ONLY here: `1.6` parses, `1.6px`-shaped
+        // junk and negative values don't.
+        assert!(apply_one(&mut s, "line-height", "1.6", &FontCtx::default()));
+        assert!(!apply_one(&mut s, "line-height", "-1.2", &FontCtx::default()));
+    }
+
+    #[test]
+    fn ua_box_defaults_match_browser_sheet() {
+        let tree = diting_dom::tree_sink::parse_html(
+            r#"<body><h1>t</h1><p>p</p><ul><li>l</li></ul></body>"#,
+        );
+        let body = tree.query_selector("body").unwrap().unwrap();
+        let h1 = tree.query_selector("h1").unwrap().unwrap();
+        let p = tree.query_selector("p").unwrap().unwrap();
+        let ul = tree.query_selector("ul").unwrap().unwrap();
+
+        let body_style = cascade_element("body", &tree, body, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
+        for side in [body_style.margin.top, body_style.margin.right, body_style.margin.bottom, body_style.margin.left] {
+            assert_eq!(side, Some(Length::Px(8.0)), "body 8px UA margin");
+        }
+
+        // h1: 2em font-size + bold + .67em margins AGAINST ITS OWN 2em size.
+        let h1_style = cascade_element("h1", &tree, h1, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(h1_style.font_size, Some(32.0), "h1 UA size 2em of 16");
+        assert_eq!(h1_style.font_weight, Some(700), "h1 UA bold");
+        let em67 = Length::Px((0.67f32 * 32.0 * 100.0).round() / 100.0);
+        assert_eq!(h1_style.margin.top, Some(em67), "h1 .67em of its own 2em size");
+        assert_eq!(h1_style.margin.bottom, Some(em67));
+
+        let p_style = cascade_element("p", &tree, p, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(p_style.margin.top, Some(Length::Px(16.0)), "p 1em block margin");
+
+        let ul_style = cascade_element("ul", &tree, ul, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(ul_style.margin.top, Some(Length::Px(16.0)), "ul 1em block margin");
+        assert_eq!(ul_style.padding.left, Some(Length::Px(40.0)), "ul 40px inline-start padding");
+
+        // Author margin overrides per side.
+        let rule = ParsedRule { selector: "p".into(), declarations: "margin-top: 0".into() };
+        let spec = tree.compile_rule_selector("p").unwrap().specificity();
+        let authored = cascade_element("p", &tree, p, &[(&rule, spec)], None, None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(authored.margin.top, Some(Length::Px(0.0)), "author margin-top wins");
+        assert_eq!(authored.margin.bottom, Some(Length::Px(16.0)), "UA bottom margin survives");
     }
 
     // ---- batch 2e: em/rem/% lengths ----

@@ -96,7 +96,7 @@ mod tests {
             let w = book.advance_width(&ch.to_string(), 20.0, false);
             assert!((w - 20.0).abs() < 0.05, "{ch}: advance {w} (want one em)");
         }
-        let raster = book.rasterize("汉字渲染", 24.0, false, [0, 0, 0, 255]);
+        let raster = book.rasterize("汉字渲染", 24.0, false, [0, 0, 0, 255], 24.0 * 1.2);
         assert!(raster.ink_bbox().is_some(), "bundle raster must have ink");
     }
 

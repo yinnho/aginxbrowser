@@ -72,12 +72,12 @@ fn is_cjk(c: char) -> bool {
 /// flex-row-of-word-leaves fallback from batch 2b.
 #[derive(Clone)]
 enum TextLeaf {
-    Run { text: String, font_size: f32, bold: bool, color: [u8; 4] },
+    Run { text: String, font_size: f32, bold: bool, color: [u8; 4], line_height: f32 },
     /// One word/glyph of a MIXED run (text around inline elements): the
     /// batch-2b word-leaf fallback, now carrying paint context (batch 4d).
     /// Layout is still style-driven — the measure closure passes Word
     /// leaves straight through to taffy's own style sizing.
-    Word { text: String, font_size: f32, bold: bool, color: [u8; 4] },
+    Word { text: String, font_size: f32, bold: bool, color: [u8; 4], line_height: f32 },
 }
 
 /// Approximate used line height for text leaves. Matches blitz exactly:
@@ -86,6 +86,17 @@ enum TextLeaf {
 /// cross-check asserts text-derived heights against it.
 fn line_height(font_size: f32) -> f32 {
     font_size * 1.2
+}
+
+/// Used line height for a text run: the element's declared `line-height`
+/// (unitless multiplier against its own font-size, or absolute px) with
+/// `normal`/unset falling back to the same `font_size * 1.2` blitz pins.
+fn effective_line_height(spec: Option<&crate::diting_css::LineHeightSpec>, font_size: f32) -> f32 {
+    match spec {
+        Some(crate::diting_css::LineHeightSpec::Number(n)) => font_size * n,
+        Some(crate::diting_css::LineHeightSpec::Px(px)) => *px,
+        Some(crate::diting_css::LineHeightSpec::Normal) | None => line_height(font_size),
+    }
 }
 
 /// Map a computed style onto a taffy style. Mirrors upstream `to_taffy_style`
@@ -341,12 +352,20 @@ fn side_px(v: Option<crate::diting_css::Length>) -> f32 {
 }
 
 /// Effective font context for a text leaf: nearest ancestor's font-size /
-/// weight (defaults 16px / 400). Since batch 2e every cascaded element
-/// carries a resolved font-size, so the walk stops at the NEAREST value
-/// instead of relying on outer ancestors being None.
-fn font_context(tree: &DomTree, id: NodeId, styles: &HashMap<NodeId, ComputedStyle>) -> (f32, bool) {
+/// weight / line-height spec (defaults 16px / 400 / normal). Since batch 2e
+/// every cascaded element carries a resolved font-size, so the walk stops at
+/// the NEAREST value instead of relying on outer ancestors being None.
+/// Returns (font_size, bold, used_line_height): a Number spec multiplies the
+/// RUN's font-size (CSS computed-value semantics — the multiplier applies to
+/// whichever font-size the text actually uses), px passes through absolute.
+fn font_context(
+    tree: &DomTree,
+    id: NodeId,
+    styles: &HashMap<NodeId, ComputedStyle>,
+) -> (f32, bool, f32) {
     let mut font_size: Option<f32> = None;
     let mut bold: Option<bool> = None;
+    let mut lh_spec: Option<crate::diting_css::LineHeightSpec> = None;
     let mut current = Some(id);
     while let Some(nid) = current {
         if let Some(style) = styles.get(&nid) {
@@ -360,13 +379,17 @@ fn font_context(tree: &DomTree, id: NodeId, styles: &HashMap<NodeId, ComputedSty
                     bold = Some(fw >= 600);
                 }
             }
-            if font_size.is_some() && bold.is_some() {
+            if lh_spec.is_none() {
+                lh_spec = style.line_height;
+            }
+            if font_size.is_some() && bold.is_some() && lh_spec.is_some() {
                 break;
             }
         }
         current = tree.with_node(nid, |n| n.parent).flatten();
     }
-    (font_size.unwrap_or(16.0), bold.unwrap_or(false))
+    let fs = font_size.unwrap_or(16.0);
+    (fs, bold.unwrap_or(false), effective_line_height(lh_spec.as_ref(), fs))
 }
 
 /// Inherited text color for a node — the same nearest-set ancestor walk as
@@ -416,15 +439,95 @@ pub(crate) fn tokenize(text: &str) -> Vec<String> {
     tokens
 }
 
+/// Adjacent-sibling margin collapse (CSS 2.1 §8.3.1). Two regimes coexist in
+/// the bridge:
+///
+/// - Taffy's native BLOCK layout already collapses sibling margins to max —
+///   but unconditionally, WITHOUT the "border/padding on the touching edges
+///   separates the boxes" rule (its `has_styles_preventing_being_collapsed_
+///   through` only gates a node collapsing through ITSELF, not the pair).
+/// - Flex/grid containers SUM margins.
+///
+/// This pass runs over the built child list and rewrites the pair so BOTH
+/// engines land on the CSS geometry: touching edges clean → encode the
+/// collapsed max (zeroing prev.bottom, inflating next.top) for flex/grid
+/// parents, and leave block parents' native collapse alone; separated edges
+/// → encode the SUM (prev.bottom=0, next.top=a+b), which makes taffy's
+/// unconditional block-side max a no-op (max(a+b applied once)) while giving
+/// flex/grid the correct sum.
+///
+/// Out of scope (documented approximations): %-margin pairs (taffy resolves
+/// them against the CB width at layout time; the max is unknowable at build
+/// time — such pairs keep whatever the engine does), collapse-through of
+/// empty self-collapsing blocks, and first/last-child collapse with the
+/// parent.
+fn collapse_adjacent_sibling_margins(
+    taffy_tree: &mut TaffyTree<TextLeaf>,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    node_map: &HashMap<taffy::tree::NodeId, NodeId>,
+    direct: &[taffy::tree::NodeId],
+) {
+    let px = |v: Option<crate::diting_css::Length>| match v {
+        Some(crate::diting_css::Length::Px(px)) => Some(px),
+        _ => None,
+    };
+    for pair in direct.windows(2) {
+        let (prev, next) = (pair[0], pair[1]);
+        let (Some(&dprev), Some(&dnext)) = (node_map.get(&prev), node_map.get(&next)) else {
+            continue; // run wrapper / synthetic node — not an element pair
+        };
+        let (Some(sp), Some(sn)) = (styles.get(&dprev), styles.get(&dnext)) else { continue };
+        // Both in-flow block-level: flex/grid containers, floats, and
+        // positioned boxes never collapse (CSS §8.3.1).
+        if !matches!(sp.display, Some(CssDisplay::Block) | None)
+            || !matches!(sn.display, Some(CssDisplay::Block) | None)
+        {
+            continue;
+        }
+        let out_of_flow = |s: &ComputedStyle| {
+            matches!(s.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
+        };
+        if out_of_flow(sp) || out_of_flow(sn) || sp.float_side.is_some() || sn.float_side.is_some() {
+            continue;
+        }
+        let (Some(mp), Some(mn)) = (px(sp.margin.bottom), px(sn.margin.top)) else {
+            continue; // % margins: keep the summed gap (approximation above)
+        };
+        if mp == 0.0 && mn == 0.0 {
+            continue;
+        }
+        // Border/padding on the touching edges separates the boxes: the
+        // margins stop adjoining and SUM instead of collapsing to max
+        // (CSS §8.3.1). Either way the pair is re-encoded as
+        // [prev.bottom=0 | next.top=gap] — see the doc comment for why
+        // both engine regimes land on `gap`.
+        let separated = (sp.border_style.is_some() && side_px(sp.border_width.bottom) > 0.0)
+            || side_px(sp.padding.bottom) > 0.0
+            || (sn.border_style.is_some() && side_px(sn.border_width.top) > 0.0)
+            || side_px(sn.padding.top) > 0.0;
+        let gap = if separated { mp + mn } else { mp.max(mn) };
+        if let (Ok(mut prev_style), Ok(mut next_style)) =
+            (taffy_tree.style(prev).cloned(), taffy_tree.style(next).cloned())
+        {
+            prev_style.margin.bottom = taffy::style::LengthPercentageAuto::length(0.0);
+            next_style.margin.top = taffy::style::LengthPercentageAuto::length(gap);
+            let _ = taffy_tree.set_style(prev, prev_style);
+            let _ = taffy_tree.set_style(next, next_style);
+        }
+    }
+}
+
 /// One taffy leaf per word (upstream's per-word leaf model). Intrinsic size
 /// from real shaped advances (batch 3a); wrapping happens in the enclosing
 /// flex-wrap run container. Since batch 4d the leaf carries paint context —
 /// mixed runs paint their words.
 fn build_word_leaves(
+
     text: &str,
     font_size: f32,
     bold: bool,
     color: [u8; 4],
+    line_height: f32,
     fonts: &FontBook,
     taffy_tree: &mut TaffyTree<TextLeaf>,
 ) -> Vec<taffy::tree::NodeId> {
@@ -434,7 +537,7 @@ fn build_word_leaves(
             let width = fonts.advance_width(&token, font_size, bold);
             // Pure-whitespace tokens contribute no height (they sit between
             // block siblings without adding a spurious blank row).
-            let height = if token.trim().is_empty() { 0.0 } else { line_height(font_size) };
+            let height = if token.trim().is_empty() { 0.0 } else { line_height };
             let style = Style {
                 size: Size {
                     width: Dimension::length(width.max(0.0)),
@@ -447,6 +550,7 @@ fn build_word_leaves(
                 font_size,
                 bold,
                 color,
+                line_height,
             };
             taffy_tree.new_leaf_with_context(style, leaf).ok()
         })
@@ -463,16 +567,18 @@ fn build_word_leaves(
 /// - the block's width is `ceil(max line advance)` — parley rounds the text
 ///   run's size UP so nothing overflows the box, which taffy's own
 ///   round-to-nearest would not reproduce (probe: "hello" 37.36 → 38);
-/// - height = line count × 1.2×fs (blitz's pinned `normal`, layout/mod.rs:76).
+/// - height = line count × used line-height (blitz pins `normal` at
+///   1.2×fs; declared values arrive with the leaf).
 fn measure_text_leaf(
     text: &str,
     font_size: f32,
     bold: bool,
+    line_height: f32,
     fonts: &FontBook,
     inputs: &taffy::tree::LayoutInput,
 ) -> taffy::tree::LayoutOutput {
     let known = inputs.known_dimensions;
-    let lh = line_height(font_size);
+    let lh = line_height;
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return taffy::tree::LayoutOutput::HIDDEN;
@@ -804,6 +910,7 @@ fn build_normal_sibling(
     node_map: &mut HashMap<taffy::tree::NodeId, NodeId>,
     atomic_container: bool,
     font_size: f32,
+    line_height: f32,
     direct: &mut Vec<taffy::tree::NodeId>,
 ) {
     let is_text = tree.with_node(child, |n| n.is_text()).unwrap_or(false);
@@ -845,10 +952,16 @@ fn build_normal_sibling(
             let text = tree
                 .with_node(child, |n| n.text_content_of_text_node().unwrap_or("").to_string())
                 .unwrap_or_default();
-            let (fs, b) = font_context(tree, child, styles);
+            // Formatting-whitespace-only text generates no box (CSS white-
+            // space processing — keeps adjoining block margins adjacent).
+            if text.trim().is_empty() {
+                return;
+            }
+            let (fs, b, lh) = font_context(tree, child, styles);
             let fs = if styles.get(&child).is_some() { fs } else { font_size };
+            let lh = if styles.get(&child).is_some() { lh } else { line_height };
             let col = color_context(tree, child, styles);
-            leaves.extend(build_word_leaves(&text, fs, b, col, fonts, taffy_tree));
+            leaves.extend(build_word_leaves(&text, fs, b, col, lh, fonts, taffy_tree));
         } else {
             let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map);
             if let Some(sub) = sub {
@@ -909,7 +1022,7 @@ fn build_element(
     // greedy wrap, ceiled width) we reproduce in measure_text_leaf. Mixed
     // runs fall back to the batch-2b wrapping flex row of word leaves.
     enum RunSeg {
-        Text(String, f32, bool, [u8; 4]),
+        Text(String, f32, bool, [u8; 4], f32),
         Nodes(Vec<taffy::tree::NodeId>),
     }
     let mut direct: Vec<taffy::tree::NodeId> = Vec::new();
@@ -920,16 +1033,22 @@ fn build_element(
         }
         let segs = std::mem::take(run);
         // All-text run → one measured leaf (adjacent DOM text nodes
-        // concatenate, which is also how CSS joins them).
+        // concatenate, which is also how CSS joins them). A run that is
+        // ONLY formatting whitespace generates no box at all (CSS white-
+        // space processing: it would otherwise sit between two blocks and
+        // physically separate their adjoining margins, breaking collapse).
         if segs.iter().all(|s| matches!(s, RunSeg::Text(..))) {
             let text = segs
                 .iter()
                 .map(|s| match s { RunSeg::Text(t, ..) => t.as_str(), _ => "" })
                 .collect::<String>();
-            let RunSeg::Text(_, fs, bold, color) = &segs[0] else { unreachable!() };
+            if text.trim().is_empty() {
+                return;
+            }
+            let RunSeg::Text(_, fs, bold, color, lh) = &segs[0] else { unreachable!() };
             if let Ok(leaf) = taffy_tree.new_leaf_with_context(
                 Style::default(),
-                TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color },
+                TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh },
             ) {
                 direct.push(leaf);
                 return;
@@ -938,8 +1057,8 @@ fn build_element(
         let mut leaves: Vec<taffy::tree::NodeId> = Vec::new();
         for seg in segs {
             match seg {
-                RunSeg::Text(text, fs, bold, color) => {
-                    leaves.extend(build_word_leaves(&text, fs, bold, color, fonts, taffy_tree))
+                RunSeg::Text(text, fs, bold, color, lh) => {
+                    leaves.extend(build_word_leaves(&text, fs, bold, color, lh, fonts, taffy_tree))
                 }
                 RunSeg::Nodes(nodes) => leaves.extend(nodes),
             }
@@ -949,7 +1068,7 @@ fn build_element(
         }
     };
 
-    let (font_size, _bold) = font_context(tree, id, styles);
+    let (font_size, _bold, lh_elem) = font_context(tree, id, styles);
 
     // --- float zone (batch 8b/8c): floats reified as synthetic flex rows ---
     // taffy (as configured — float_layout is a non-default feature that must
@@ -1101,6 +1220,7 @@ fn build_element(
                     node_map,
                     atomic_container,
                     font_size,
+                    lh_elem,
                     &mut row_children,
                 );
             }
@@ -1148,6 +1268,7 @@ fn build_element(
                     direct.push(f);
                 }
             }
+            collapse_adjacent_sibling_margins(taffy_tree, styles, node_map, &direct);
             let taffy_style = to_taffy_style(&style);
             let node = if direct.is_empty() {
                 taffy_tree.new_leaf(taffy_style).ok()?
@@ -1236,10 +1357,12 @@ fn build_element(
                     node_map,
                     atomic_container,
                     font_size,
+                    lh_elem,
                     &mut direct,
                 );
             }
             flush_run(&mut run, &mut direct, taffy_tree);
+            collapse_adjacent_sibling_margins(taffy_tree, styles, node_map, &direct);
             let taffy_style = to_taffy_style(&style);
             let node = if direct.is_empty() {
                 taffy_tree.new_leaf(taffy_style).ok()?
@@ -1289,9 +1412,11 @@ fn build_element(
                     node_map,
                     atomic_container,
                     font_size,
+                    lh_elem,
                     &mut direct,
                 );
             }
+            collapse_adjacent_sibling_margins(taffy_tree, styles, node_map, &direct);
             let taffy_style = to_taffy_style(&style);
             let node = if direct.is_empty() {
                 taffy_tree.new_leaf(taffy_style).ok()?
@@ -1458,10 +1583,11 @@ fn build_element(
             }
             if is_text {
                 let text = tree.with_node(child, |n| n.text_content_of_text_node().unwrap_or("").to_string()).unwrap_or_default();
-                let (fs, b) = font_context(tree, child, styles);
+                let (fs, b, lh) = font_context(tree, child, styles);
                 let fs = if styles.get(&child).is_some() { fs } else { font_size };
+                let lh = if styles.get(&child).is_some() { lh } else { lh_elem };
                 let col = color_context(tree, child, styles);
-                run.push(RunSeg::Text(text, fs, b, col));
+                run.push(RunSeg::Text(text, fs, b, col, lh));
             } else if inline_level && !out_of_flow {
                 let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map);
                 if let Some(sub) = sub {
@@ -1532,10 +1658,12 @@ fn build_element(
                 node_map,
                 atomic_container,
                 font_size,
+                lh_elem,
                 &mut direct,
             );
         }
         flush_run(&mut run, &mut direct, taffy_tree);
+        collapse_adjacent_sibling_margins(taffy_tree, styles, node_map, &direct);
 
         let taffy_style = to_taffy_style(&style);
         let node = if direct.is_empty() {
@@ -1581,12 +1709,13 @@ fn build_element(
         }
         if is_text {
             let text = tree.with_node(child, |n| n.text_content_of_text_node().unwrap_or("").to_string()).unwrap_or_default();
-            let (fs, b) = font_context(tree, child, styles);
+            let (fs, b, lh) = font_context(tree, child, styles);
             let fs = if styles.get(&child).is_some() { fs } else { font_size };
+            let lh = if styles.get(&child).is_some() { lh } else { lh_elem };
             // First segment's node donates the whole run's color — the same
             // first-segment approximation fs/bold already use.
             let col = color_context(tree, child, styles);
-            run.push(RunSeg::Text(text, fs, b, col));
+            run.push(RunSeg::Text(text, fs, b, col, lh));
         } else if inline_level && !atomic_container && !out_of_flow {
             // A plain inline wrapper flattens into the enclosing run (upstream
             // is_flattenable_inline): the words wrap at the real block level.
@@ -1605,6 +1734,11 @@ fn build_element(
         }
     }
     flush_run(&mut run, &mut direct, taffy_tree);
+    // Sibling margin normalization runs over the FINAL child list of every
+    // container (see collapse_adjacent_sibling_margins: fixes the
+    // border/padding separation rule taffy's native block collapse lacks,
+    // and supplies collapsing for flex stand-in parents).
+    collapse_adjacent_sibling_margins(taffy_tree, styles, node_map, &direct);
 
     let taffy_style = to_taffy_style(&style);
     let node = if direct.is_empty() {
@@ -1649,9 +1783,10 @@ pub enum PaintItem {
     /// box geometry (batch 2 rects) and the img's own CSS background.
     Replaced {
         rect: Rect,
-        /// (text, font_size, bold, color) of the alt run; None without an
-        /// alt attribute (present-but-empty paints box-only, like alt="").
-        alt: Option<(String, f32, bool, [u8; 4])>,
+        /// (text, font_size, bold, line_height, color) of the alt run; None
+        /// without an alt attribute (present-but-empty paints box-only, like
+        /// alt="").
+        alt: Option<(String, f32, bool, f32, [u8; 4])>,
         fill_placeholder: bool,
     },
     /// Begin clipping descendants to `rect` (the padding box of an
@@ -1679,6 +1814,9 @@ pub enum PaintItem {
         font_size: f32,
         bold: bool,
         color: [u8; 4],
+        /// Used line-height (px) — the leaf's own measure-time value, so the
+        /// paint baselines land exactly where layout placed the line boxes.
+        line_height: f32,
         /// Leaf origin (line-box top-left), page px.
         x: f32,
         y: f32,
@@ -1840,8 +1978,8 @@ pub fn layout_dom_with_paint_and_images(
             let laid_out = taffy_tree
                 .compute_layout_with_measure(icb_node, available, |inputs, _id, ctx, style| {
                     match ctx {
-                        Some(TextLeaf::Run { text, font_size, bold, .. }) => {
-                            measure_text_leaf(text, *font_size, *bold, fonts, &inputs)
+                        Some(TextLeaf::Run { text, font_size, bold, line_height, .. }) => {
+                            measure_text_leaf(text, *font_size, *bold, *line_height, fonts, &inputs)
                         }
                         _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
                     }
@@ -1956,8 +2094,8 @@ pub fn layout_dom_with_paint_and_images(
     // (that's exactly what stock compute_layout does below via the same fn).
     let measured = taffy_tree.compute_layout_with_measure(icb_node, available, |inputs, _id, ctx, style| {
         match ctx {
-            Some(TextLeaf::Run { text, font_size, bold, .. }) => {
-                measure_text_leaf(text, *font_size, *bold, fonts, &inputs)
+            Some(TextLeaf::Run { text, font_size, bold, line_height, .. }) => {
+                measure_text_leaf(text, *font_size, *bold, *line_height, fonts, &inputs)
             }
             // Word leaves keep their style-driven sizing (batch 4d only
             // added paint context — zero layout change).
@@ -2128,8 +2266,8 @@ pub fn layout_dom_with_paint_and_images(
                     icb_node,
                     available,
                     |inputs, _id, ctx, style| match ctx {
-                        Some(TextLeaf::Run { text, font_size, bold, .. }) => {
-                            measure_text_leaf(text, *font_size, *bold, fonts, &inputs)
+                        Some(TextLeaf::Run { text, font_size, bold, line_height, .. }) => {
+                            measure_text_leaf(text, *font_size, *bold, *line_height, fonts, &inputs)
                         }
                         _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
                     },
@@ -2287,8 +2425,8 @@ pub fn layout_dom_with_paint_and_images(
                         tree.with_node(*dom_id, |n| n.get_attribute("alt").map(|v| v.to_string()))
                             .flatten()
                             .map(|text| {
-                                let (font_size, bold) = font_context(tree, *dom_id, styles);
-                                (text, font_size, bold, color_context(tree, *dom_id, styles))
+                                let (font_size, bold, lh) = font_context(tree, *dom_id, styles);
+                                (text, font_size, bold, lh, color_context(tree, *dom_id, styles))
                             })
                     } else {
                         None
@@ -2363,7 +2501,7 @@ pub fn layout_dom_with_paint_and_images(
                 items.push(clip_item);
             }
         }
-        if let Some(TextLeaf::Run { text, font_size, bold, color }) = taffy_tree.get_node_context(node) {
+        if let Some(TextLeaf::Run { text, font_size, bold, color, line_height }) = taffy_tree.get_node_context(node) {
             // The wrap width the containing block offered at measure time:
             // the direct taffy parent's content box (the run wrapper for
             // mixed runs, the block itself for pure runs — same width).
@@ -2377,12 +2515,13 @@ pub fn layout_dom_with_paint_and_images(
                 font_size: *font_size,
                 bold: *bold,
                 color: *color,
+                line_height: *line_height,
                 x: abs.0,
                 y: abs.1,
                 wrap_at,
             });
         }
-        if let Some(TextLeaf::Word { text, font_size, bold, color }) = taffy_tree.get_node_context(node) {
+        if let Some(TextLeaf::Word { text, font_size, bold, color, line_height }) = taffy_tree.get_node_context(node) {
             // A word leaf paints at its own box — the enclosing flex row
             // already did the line breaking (leaf-level wrap). Single-token
             // text can never break, so wrap_at just equals the leaf width.
@@ -2391,6 +2530,7 @@ pub fn layout_dom_with_paint_and_images(
                 font_size: *font_size,
                 bold: *bold,
                 color: *color,
+                line_height: *line_height,
                 x: abs.0,
                 y: abs.1,
                 wrap_at: layout.size.width,
@@ -3690,6 +3830,79 @@ mod bridge_cross_check {
     /// definite viewport size, so bottom and percentage insets have a real
     /// ICB to resolve against.
     #[test]
+    #[test]
+    fn declared_line_height_scales_paragraph_pitch() {
+        // §49 parity fix 2: `line-height: 1.6` must move the used line
+        // height (was pinned to normal = 1.2×fs). Two paragraphs of the
+        // same wrapping text differ only in line-height → the 1.6 box is
+        // exactly (1.6 − 1.2) × fs × lines taller per line of wrap.
+        let html = r#"<body>
+            <p id="lorem">谛听引擎中文渲染测试文本一行</p>
+            <p id="wide" style="line-height: 1.6">谛听引擎中文渲染测试文本一行</p>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            p { margin: 0; width: 160px; font-size: 16px; }
+        "#;
+        let (_doc, tree, _styles, rects) = both_engines(html, sheet);
+        let fonts = fixture_fonts();
+        let text = "谛听引擎中文渲染测试文本一行";
+        let tokens = text::tokens_of(text, 16.0, false, &fonts);
+        let lines = text::greedy_wrap(&tokens, Some(160.0)).len() as f32;
+        assert!(lines >= 2.0, "the fixture must wrap to ≥2 lines");
+
+        let normal = rects[&tree.query_selector("#lorem").unwrap().unwrap()];
+        let wide = rects[&tree.query_selector("#wide").unwrap().unwrap()];
+        let expect_normal = lines * 16.0 * 1.2;
+        let expect_wide = lines * 16.0 * 1.6;
+        assert!(
+            (normal.height - expect_normal).abs() < 1.5,
+            "normal line-height 1.2×fs × {lines} lines: {:?}",
+            normal
+        );
+        assert!(
+            (wide.height - expect_wide).abs() < 1.5,
+            "declared 1.6 × fs × {lines} lines: {:?}",
+            wide
+        );
+    }
+
+    #[test]
+    fn adjacent_block_margins_collapse_to_max() {
+        // CSS 2.1 §8.3.1: h1's .67em-bottom (of its 2em size → 21.44) meets
+        // p's 1em-top (16) → one collapsed 21.44 gap, NOT the 37.44 sum
+        // taffy would produce. A border on the touching edge re-separates
+        // the boxes and the margins sum again (the border itself lives
+        // INSIDE p2's border-box, so it adds nothing to the rect gap).
+        let html = r#"<body>
+            <h1 id="h">T</h1><p id="p1">x</p><h1 id="h2">T</h1><p id="p2">x</p>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            h1 { margin: .67em; }
+            p { margin: 1em; }
+            #p2 { border-top: 2px solid black; }
+        "#;
+        let (_doc, tree, _styles, rects) = both_engines(html, sheet);
+        let h = rects[&tree.query_selector("#h").unwrap().unwrap()];
+        let p1 = rects[&tree.query_selector("#p1").unwrap().unwrap()];
+        let h2 = rects[&tree.query_selector("#h2").unwrap().unwrap()];
+        let p2 = rects[&tree.query_selector("#p2").unwrap().unwrap()];
+        let collapsed_gap = p1.y - (h.y + h.height);
+        assert!(
+            (collapsed_gap - 21.44).abs() < EPS as f32,
+            "h1-bottom + p-top collapse to max: {collapsed_gap}"
+        );
+        let summed_gap = p2.y - (h2.y + h2.height);
+        // Rects are pixel-grid-rounded at both ends of the gap; the sum
+        // crosses two rounding boundaries so the tolerance is a full pixel.
+        assert!(
+            (summed_gap - (21.44 + 16.0)).abs() < 1.01,
+            "bordered edge separates the boxes: margins sum again: {summed_gap}"
+        );
+    }
+
+    #[test]
     fn fixed_bottom_and_percent_insets_anchor_viewport() {
         let html = r#"<body>
             <div id="b0"></div><div id="t50"></div><div id="b10"></div>
@@ -4090,7 +4303,7 @@ mod bridge_cross_check {
             let (bx0, by0, bx1, by1) = bbox.expect("blitz painted some ink");
 
             // Our tile: same text, same fixture bytes, baseline per the model.
-            let raster = fixture_fonts().rasterize("你好gapa渲染", fs, false, [0, 0, 0, 255]);
+            let raster = fixture_fonts().rasterize("你好gapa渲染", fs, false, [0, 0, 0, 255], line_height(fs));
             let (ox0, oy0, ox1, oy1) = raster.ink_bbox().expect("our raster has ink");
             let fonts = fixture_fonts();
             let m = fonts.metrics(fs, false).unwrap();
@@ -4128,7 +4341,7 @@ mod bridge_cross_check {
         assert_eq!(lines.len(), 3, "5 glyphs per 105px line, 11 glyphs → 3 lines");
         assert!((lines[0].width - 100.0).abs() < 0.05, "5 × 1em");
 
-        let r = fonts.rasterize_wrapped(text, fs, false, [0, 0, 0, 255], wrap_at);
+        let r = fonts.rasterize_wrapped(text, fs, false, [0, 0, 0, 255], wrap_at, lh);
         // One ink band per wrapped line (band = maximal run of ink rows).
         let band_tops: Vec<usize> = {
             let mut tops = Vec::new();
