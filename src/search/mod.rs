@@ -2,9 +2,13 @@ pub mod baidu;
 pub mod baidu_images;
 pub mod bing;
 pub mod bing_images;
+pub mod github_repos;
 pub mod google;
+pub mod arxiv;
+pub mod meilisearch;
 pub mod sogou;
 pub mod sogou_wechat;
+pub mod stackexchange;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -143,6 +147,13 @@ impl SearchEngineRegistry {
         registry.register(sogou::SogouEngine::new());
         registry.register(sogou_wechat::SogouWechatEngine::new());
         registry.register(google::GoogleEngine::new());
+        registry.register(stackexchange::StackExchangeEngine::new());
+        registry.register(github_repos::GithubEngine::new());
+        registry.register(arxiv::ArxivEngine::new());
+        if let Some(meili) = meilisearch::MeilisearchEngine::from_env() {
+            tracing::info!("search: registered engine meilisearch (private index)");
+            registry.register(meili);
+        }
 
         registry
     }
