@@ -156,9 +156,13 @@ wreq-util = { version = "=3.0.0-rc.10", optional = true }
 # BreakLines::break_remaining under blitz compute_inline_layout). Bisected:
 # #724 renders baidu in ~4s / 1533 colors; #726 (parley 0.11.1) still spinning
 # at 150s. Reported upstream as linebender/parley#752 (repro minimized to a
-# 1.4KB baidu IME-menu fragment + page CSS; not CJK-text-dependent). Bump past
-# this rev only after that lands; doing so also unblocks #726–#735 (taffy
-# sizing + spurious horizontal-scroll fixes).
+# 1.4KB baidu IME-menu fragment + page CSS; not CJK-text-dependent).
+#
+# NOTE (2026-08-25): this pin is a REFERENCE-engine constraint only — the
+# default /screenshot engine is diting, which has zero parley. Bump past
+# 2fa6434d only if/when blitz is upgraded again AND parley#752 has landed
+# upstream; doing so also unblocks #726–#735 (taffy sizing + spurious
+# horizontal-scroll fixes).
 #
 # crates.io's blitz 0.3.0-beta.1 is a stale snapshot and upstream pins taffy to
 # an unreleased git rev, so blitz-* must come from git. anyrender 0.13 /
