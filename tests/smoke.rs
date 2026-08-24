@@ -87,7 +87,7 @@ fn health_endpoint() {
     };
     let body = http_get_json(&server.url("/health")).expect("GET /health");
     assert!(body.contains(r#""status":"ok""#), "health body: {body}");
-    assert!(body.contains("obscura"));
+    assert!(body.contains("diting"));
 }
 
 #[test]

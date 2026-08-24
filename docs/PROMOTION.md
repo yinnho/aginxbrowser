@@ -142,7 +142,7 @@ npx skills add yinnho/aginxbrowser
 
 # 或直接调 HTTP API
 curl https://browser.aginx.net/health
-# → {"status":"ok","engine":"obscura","version":"...","capabilities":{...}}
+# → {"status":"ok","engine":"diting","version":"...","capabilities":{...}}
 ```
 
 **让 Agent 自己装**——把这句话丢给你的 Agent，它读完文档自己完成接入：

@@ -107,7 +107,7 @@ cargo build --release
 
 # 验证
 curl http://127.0.0.1:8089/health
-# → {"status":"ok","engine":"obscura"}
+# → {"status":"ok","engine":"diting"}
 
 # 抓取页面
 curl -sS -X POST http://127.0.0.1:8089/fetch \

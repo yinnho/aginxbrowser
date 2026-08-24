@@ -524,7 +524,7 @@ async fn health_handler() -> impl IntoResponse {
     // single cheap call (no network probe - see /doctor for that).
     Json(serde_json::json!({
         "status": "ok",
-        "engine": "obscura",
+        "engine": "diting",
         "version": env!("CARGO_PKG_VERSION"),
         "capabilities": {
             "screenshot": cfg!(feature = "screenshot"),
@@ -605,7 +605,7 @@ async fn doctor_handler(Query(params): Query<DoctorParams>) -> impl IntoResponse
 
     Json(serde_json::json!({
         "status": "ok",
-        "engine": "obscura",
+        "engine": "diting",
         "version": env!("CARGO_PKG_VERSION"),
         "capabilities": capabilities,
         "search_engines": [
