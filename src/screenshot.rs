@@ -408,7 +408,8 @@ pub fn render_html_to_png(
 /// layout. As a fallback, union the element's element-descendant boxes (which
 /// covers mixed content like `<a><img></a>`); if that is still empty the
 /// caller gets the honest 0x0.
-pub(crate) fn element_rect(doc: &BaseDocument, node_id: NodeId) -> ElementRect {    let (x, y) = absolute_origin(doc, node_id);
+pub(crate) fn element_rect(doc: &BaseDocument, node_id: NodeId) -> ElementRect {
+    let (x, y) = absolute_origin(doc, node_id);
     let size = doc
         .get_node(node_id)
         .map(|n| n.final_layout().size)
@@ -425,6 +426,74 @@ pub(crate) fn element_rect(doc: &BaseDocument, node_id: NodeId) -> ElementRect {
         }
     }
     rect
+}
+
+// ---------------------------------------------------------------------------
+// diting engine rects: our own layout pipeline answering selector_rects
+// ---------------------------------------------------------------------------
+
+/// Element rects computed by the DITING pipeline (diting_dom + diting_css +
+/// diting_layout), independent of Blitz/Stylo. The page HTML carries its CSS
+/// in `<style>` blocks and `style` attributes; external `<link>` sheets are
+/// not consulted here — the caller can pass their bodies via `extra_css`
+/// (joined after the inline blocks, so link rules win ties).
+///
+/// Returns one [`ElementRect`] per match of `selector` (document order),
+/// or just the first when `selector_all` is false. An invalid selector or a
+/// parse failure is an Err; an empty match list is Ok(vec![]).
+///
+/// This is the Phase-2 claim of the element-coordinate API on our own stack:
+/// same wire shape as Blitz's `selector_rects`, keyed by the same CSS-pixel
+/// page-relative contract, so callers can compare engines or migrate.
+pub fn element_rects_diting(
+    html: &str,
+    selector: &str,
+    selector_all: bool,
+    viewport_width: f32,
+    extra_css: Option<&str>,
+) -> Result<Vec<ElementRect>> {
+    use crate::diting_dom::tree_sink::parse_html;
+
+    // Concatenate every <style> block's text in document order.
+    let tree = parse_html(html);
+    let mut css = String::new();
+    if let Ok(style_els) = tree.query_selector_all("style") {
+        for el in style_els {
+            let text = tree.text_content(el);
+            css.push_str(&text);
+            css.push('\n');
+        }
+    }
+    if let Some(extra) = extra_css {
+        css.push_str(extra);
+    }
+
+    let rules = crate::diting_css::parse_stylesheet_for(
+        &css,
+        (viewport_width, viewport_width * 0.75),
+        crate::diting_css::CssMediaType::Screen,
+    );
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+
+    let matched = tree
+        .query_selector_all(selector)
+        .map_err(|e| anyhow::anyhow!("invalid selector {selector:?}: {e}"))?;
+    let ids: Vec<_> = if selector_all {
+        matched
+    } else {
+        matched.into_iter().take(1).collect()
+    };
+
+    let rects = crate::diting_layout::layout_dom(&tree, &styles, &crate::diting_fonts::font_book(), viewport_width);
+    Ok(ids
+        .iter()
+        .filter_map(|id| rects.get(id).map(|r| ElementRect {
+            x: r.x as f64,
+            y: r.y as f64,
+            width: r.width as f64,
+            height: r.height as f64,
+        }))
+        .collect())
 }
 
 /// Union of the absolute rects of every element descendant of `node_id`
@@ -496,6 +565,54 @@ use anyrender::PaintScene as _;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The diting element-coordinate entry answers the same wire shape as
+    /// Blitz's selector_rects: a `<style>`-driven absolute box lands at its
+    /// authored rect, `selector_all=false` returns just the first match, and
+    /// an invalid selector is an Err. Extra CSS (external sheet bodies)
+    /// participates in the cascade.
+    #[test]
+    fn diting_element_rects_from_html() {
+        let html = r##"<html><head><style>
+            #target { position: absolute; left: 100px; top: 150px; width: 60px; height: 40px; }
+            .it { position: absolute; width: 30px; height: 30px; }
+        </style></head><body style="margin:0">
+            <div id="target"></div>
+            <div class="it" id="a" style="left:10px;top:20px"></div>
+            <div class="it" id="b" style="left:50px;top:60px"></div>
+        </body></html>"##;
+
+        // First match only.
+        let one = element_rects_diting(html, "#target", false, 800.0, None).expect("rects");
+        assert_eq!(one.len(), 1);
+        assert!((one[0].x - 100.0).abs() <= 1.0 && (one[0].y - 150.0).abs() <= 1.0,
+            "absolute box at its authored position: {:?}", one[0]);
+        assert!((one[0].width - 60.0).abs() <= 1.0 && (one[0].height - 40.0).abs() <= 1.0,
+            "authored size: {:?}", one[0]);
+
+        // selector_all: document order.
+        let all = element_rects_diting(html, ".it", true, 800.0, None).expect("all");
+        assert_eq!(all.len(), 2);
+        assert!((all[0].x - 10.0).abs() <= 1.0 && (all[1].x - 50.0).abs() <= 1.0);
+
+        // No match is empty; an invalid selector errors.
+        assert!(element_rects_diting(html, "#nope", true, 800.0, None)
+            .expect("empty ok").is_empty());
+        assert!(element_rects_diting(html, "###", true, 800.0, None).is_err());
+
+        // extra_css participates in the cascade with correct specificity:
+        // an id rule (from the extra sheet) overrides the class rule's
+        // height — while #a's inline style keeps winning on left, exactly
+        // the CSS cascade order (inline > id > class).
+        let overridden =
+            element_rects_diting(html, "#a", false, 800.0, Some("#a { height: 90px; }"))
+                .expect("extra css");
+        assert_eq!(overridden.len(), 1);
+        assert!((overridden[0].x - 10.0).abs() <= 1.0,
+            "inline left survives: {:?}", overridden[0]);
+        assert!((overridden[0].height - 90.0).abs() <= 1.0,
+            "id rule beats class rule for height: {:?}", overridden[0]);
+    }
 
     /// Deterministic layout check: an absolutely-positioned element must report
     /// its CSS rect, and a selector crop must contain (only) that element.

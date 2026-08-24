@@ -229,6 +229,11 @@ pub struct ScreenshotRequest {
     /// the first. Default false.
     #[serde(default)]
     pub selector_all: bool,
+    /// With `selector`: also run the diting layout engine over the page HTML
+    /// and return its rects in `selector_rects_diting` (an independent
+    /// cross-check of the Blitz pipeline). Default false.
+    #[serde(default)]
+    pub diting_rects: bool,
     /// Route through OBSCURA_PROXY. Default false (direct).
     #[serde(default)]
     pub use_proxy: bool,
@@ -268,6 +273,12 @@ pub struct ScreenshotResponse {
     /// only when a selector was given. Single match = the cropped region.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selector_rects: Option<Vec<crate::screenshot::ElementRect>>,
+    /// The same rects computed by the diting engine (diting_dom/css/layout)
+    /// as an independent pass over the page HTML — the Blitz/Stylo pipeline's
+    /// cross-check. Present only when a selector was given and the request
+    /// opted in with `diting_rects`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selector_rects_diting: Option<Vec<crate::screenshot::ElementRect>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

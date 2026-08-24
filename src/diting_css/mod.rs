@@ -767,6 +767,12 @@ pub fn ua_display(tag: &str) -> Display {
     match tag {
         "span" | "a" | "b" | "i" | "strong" | "em" | "code" | "small" | "sub" | "sup"
         | "label" | "time" | "abbr" => Display::Inline,
+        // Non-visual metadata elements: every browser's UA stylesheet sets
+        // display:none on these (blitz assets/default.css included). Without
+        // it a page's <head>/<style> blocks lay out as empty boxes and push
+        // the whole body down the page.
+        "head" | "style" | "script" | "meta" | "link" | "title" | "noscript"
+        | "template" | "base" => Display::None,
         _ => Display::Block,
     }
 }

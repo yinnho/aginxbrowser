@@ -1455,3 +1455,28 @@ craigslist 抓取被挡（直连 403、socks 代理空响应、wayback 限流）
 craigslist grid 一次通过；nav bar 初版断言了 brand 的 rect（key miss）
 改为只锚 float 盒后通过。8 系列 margin 几何在两种真实模式下无实现改动
 直接通过。
+
+## 45. Phase 2 元素坐标：diting rects 接入产品 API（2026-08-24）
+
+**接线**（三件套）：
+- `diting_layout::compute_styles(tree, rules)`——`our_styles` 测试
+  helper 提为生产入口（全树单遍、O(rules×elements)）。
+- `screenshot::element_rects_diting(html, selector, selector_all, vw,
+  extra_css)`——抽 `<style>` 块 + 调用方注入的外部 sheet 文本，跑
+  diting 全管线，输出与 blitz 同形 `Vec<ElementRect>`。
+- `/screenshot` 请求加 `diting_rects:true` 开关，响应加
+  `selector_rects_diting` 对照字段；外部 `<link>` sheet 用 prefetch
+  已取的字节喂 cascade。
+
+**顺手修真 bug**：UA 层没有 head/style/script/meta/link/title/noscript/
+template/base 的 display:none——产品 HTML 一进管线 `<head>`+`<style>`
+就布局成空盒把 body 推下 38px。修在 `ua_display`（对齐 blitz
+default.css）。测试 fixture 从不带 head 所以从未暴露；端到端冒烟
+（file:// 页 + HTTP /screenshot）抓出。
+
+**端到端验证**：本地起服，`.card{float:left;width:23%;margin-right:2%}
+×4` 页面双引擎对照——diting x=0/200/400/600 y=0（8c run 行几何与
+fixture 一致）；blitz 无 floats 特性逐行堆叠 y=0/80/160/240，差异如实
+呈现。hero absolute 两引擎完全一致 (40,30,300,120)。
+
+453 全绿。

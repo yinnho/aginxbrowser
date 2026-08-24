@@ -2246,6 +2246,77 @@ pub fn layout_dom_with_paint_and_images(
     (rects, items)
 }
 
+/// Compute every element's cascade result for a parsed tree + stylesheet:
+/// the production style-resolution pass feeding [`layout_dom`]. Walks the
+/// tree once; each element matches the full rule set (O(rules × elements) —
+/// fine for page-sized inputs, a matching index is future work), chains
+/// inherited properties from the parent's computed style, and applies the
+/// inline `style` attribute last.
+pub fn compute_styles(
+    tree: &DomTree,
+    rules: &[crate::diting_css::ParsedRule],
+) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
+    fn visit(
+        tree: &DomTree,
+        rules: &[crate::diting_css::ParsedRule],
+        nid: NodeId,
+        parent: Option<&crate::diting_css::ComputedStyle>,
+        root_fs: f32,
+        out: &mut HashMap<NodeId, crate::diting_css::ComputedStyle>,
+    ) {
+        let Some(tag) = tree
+            .with_node(nid, |n| n.as_element().map(|e| e.local.to_string()))
+            .flatten()
+        else {
+            return;
+        };
+        let matched: Vec<(&crate::diting_css::ParsedRule, u32)> = rules
+            .iter()
+            .filter_map(|rule| {
+                let hits = tree.query_selector_all_from(tree.document(), &rule.selector).ok()?;
+                if !hits.contains(&nid) {
+                    return None;
+                }
+                let compiled = tree.compile_rule_selector(&rule.selector)?;
+                Some((rule, compiled.specificity()))
+            })
+            .collect();
+        let inline = tree
+            .with_node(nid, |n| n.get_attribute("style").map(|s| s.to_string()))
+            .flatten();
+        let cs = crate::diting_css::cascade_element(
+            &tag,
+            tree,
+            nid,
+            &matched,
+            parent,
+            inline.as_deref(),
+            root_fs,
+        );
+        let child_root_fs = if parent.is_none() {
+            cs.font_size.unwrap_or(crate::diting_css::DEFAULT_ROOT_FONT_SIZE)
+        } else {
+            root_fs
+        };
+        for child in tree.children(nid) {
+            visit(tree, rules, child, Some(&cs), child_root_fs, out);
+        }
+        out.insert(nid, cs);
+    }
+    let mut out = HashMap::new();
+    for child in tree.children(tree.document()) {
+        visit(
+            tree,
+            rules,
+            child,
+            None,
+            crate::diting_css::DEFAULT_ROOT_FONT_SIZE,
+            &mut out,
+        );
+    }
+    out
+}
+
 #[cfg(test)]
 mod fork_deltas {
     use taffy::geometry::Point;
@@ -2696,65 +2767,7 @@ mod bridge_cross_check {
     /// The root element's computed font-size becomes the rem base for its
     /// whole subtree (CSS root font-size semantics).
     fn our_styles(tree: &DomTree, rules: &[ParsedRule]) -> HashMap<NodeId, ComputedStyle> {
-        fn visit(
-            tree: &DomTree,
-            rules: &[ParsedRule],
-            nid: NodeId,
-            parent: Option<&ComputedStyle>,
-            root_fs: f32,
-            out: &mut HashMap<NodeId, ComputedStyle>,
-        ) {
-            let Some(tag) = tree
-                .with_node(nid, |n| n.as_element().map(|e| e.local.to_string()))
-                .flatten()
-            else {
-                return;
-            };
-            let matched: Vec<(&ParsedRule, u32)> = rules
-                .iter()
-                .filter_map(|rule| {
-                    let hits = tree.query_selector_all_from(tree.document(), &rule.selector).ok()?;
-                    if !hits.contains(&nid) {
-                        return None;
-                    }
-                    let compiled = tree.compile_rule_selector(&rule.selector)?;
-                    Some((rule, compiled.specificity()))
-                })
-                .collect();
-            let inline = tree
-                .with_node(nid, |n| n.get_attribute("style").map(|s| s.to_string()))
-                .flatten();
-            let cs = diting_css::cascade_element(
-                &tag,
-                tree,
-                nid,
-                &matched,
-                parent,
-                inline.as_deref(),
-                root_fs,
-            );
-            let child_root_fs = if parent.is_none() {
-                cs.font_size.unwrap_or(diting_css::DEFAULT_ROOT_FONT_SIZE)
-            } else {
-                root_fs
-            };
-            for child in tree.children(nid) {
-                visit(tree, rules, child, Some(&cs), child_root_fs, out);
-            }
-            out.insert(nid, cs);
-        }
-        let mut out = HashMap::new();
-        for child in tree.children(tree.document()) {
-            visit(
-                tree,
-                rules,
-                child,
-                None,
-                diting_css::DEFAULT_ROOT_FONT_SIZE,
-                &mut out,
-            );
-        }
-        out
+        compute_styles(tree, rules)
     }
 
     /// Fixture bytes BOTH sides measure with: Noto Sans SC subset (OFL —

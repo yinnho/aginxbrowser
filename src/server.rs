@@ -528,6 +528,24 @@ pub fn do_screenshot(req: ScreenshotRequest) -> Result<ScreenshotResponse> {
                 } else {
                     None
                 },
+                selector_rects_diting: match req.selector.as_deref().filter(|_| req.diting_rects) {
+                    Some(sel) => crate::screenshot::element_rects_diting(
+                        &html,
+                        sel,
+                        req.selector_all,
+                        req.width as f32,
+                        // External <link> sheet bodies the prefetch pass already
+                        // fetched — feed them to diting so its cascade sees what
+                        // Blitz saw. Inline <style> blocks come from the HTML.
+                        Some(&resources
+                            .iter()
+                            .filter(|(k, v)| k.ends_with(".css") && !v.is_empty())
+                            .map(|(_, v)| String::from_utf8_lossy(v.as_ref()).into_owned())
+                            .collect::<Vec<_>>()
+                            .join("\n")),
+                    ).ok(),
+                    None => None,
+                },
             })
         })
     })
