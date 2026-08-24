@@ -51,7 +51,7 @@ Apache-2.0 open source, single binary — self-host today, no cloud lock-in.
 ## Capabilities
 
 - **Tiered rendering**: static pages over plain HTTP (~100ms); V8 spins up only when JS rendering is needed (~1-2s) — 10x faster on ~80% of pages
-- **5-engine meta-search**: Baidu / Bing / Sogou / Sogou WeChat / Google queried concurrently, merged and deduplicated, with optional content extraction — search → read in one step
+- **Multi-engine meta-search**: Baidu / Bing / Sogou / Sogou WeChat / Google for the general web, plus code sources (Stack Overflow, GitHub) and academic sources (arXiv) — queried concurrently, merged and deduplicated, with optional content extraction. Operators can plug a private Meilisearch index into the same `/search`. Search → read in one step
 - **Image search**: `categories=images` hits Baidu/Bing image indexes and returns direct binary `image_url` links (downloadable straight to jpg/png) plus `source_url` provenance
 - **Interactive sessions**: persistent browser sessions with indexed interaction (`state/click/input/scroll/eval`) — agents browse like humans do
 - **CAPTCHA auto-solve**: type detection with optional 2captcha integration — search never stalls on verification pages
@@ -163,7 +163,11 @@ aginxbrowser/
     │   ├── bing.rs          #   Bing (HTML parsing, plain reqwest)
     │   ├── sogou.rs         #   Sogou web (HTML parsing, plain reqwest)
     │   ├── sogou_wechat.rs  #   Sogou WeChat (HTML parsing + /link resolution)
-    │   └── google.rs        #   Google (HTML parsing, wreq stealth + proxy)
+    │   ├── google.rs        #   Google (HTML parsing, wreq stealth + proxy)
+    │   ├── stackexchange.rs #   Stack Overflow (SE API v2.3, code category)
+    │   ├── github_repos.rs  #   GitHub repos (api.github.com, code category)
+    │   ├── arxiv.rs         #   arXiv (Atom API, academic category)
+    │   └── meilisearch.rs   #   Private-index adapter (env-configured)
     │
     ├── diting_dom/          # HTML parsing, DOM tree, CSS selectors
     ├── diting_net/          # HTTP client, cookies, encoding, proxies
@@ -201,6 +205,9 @@ Requirements: Rust 1.78+; the V8 static library downloads automatically on first
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL, `0` disables |
 | `CAPTCHA_SOLVER_API_KEY` | none | 2captcha API key; enables CAPTCHA auto-solving |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | CAPTCHA solving provider |
+| `AGINXBROWSER_MEILI_URL` | none | Meilisearch base URL; set to enable the private-index engine |
+| `AGINXBROWSER_MEILI_INDEX` | none | Meilisearch index uid to query |
+| `AGINXBROWSER_MEILI_KEY` | none | Optional Bearer key for the Meilisearch instance |
 
 ## API Documentation
 

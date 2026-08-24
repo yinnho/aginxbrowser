@@ -23,7 +23,7 @@
 | 依赖 | 单二进制，无 Chromium | Chromium ~500MB | Docker ~1GB | Chromium |
 | 看得见（截图） | ✅ 内置 diting 渲染引擎 | 需 Chromium | ❌ | 需 Chromium |
 | 读得懂 | markdown + js_extract | 要自己写 | markdown | 要自己写 |
-| 找得到（搜索） | ✅ 5 引擎聚合 | ❌ | ❌ | ❌ |
+| 找得到（搜索） | ✅ 多引擎聚合（网页/代码/学术） | ❌ | ❌ | ❌ |
 | 操得了 | session 索引化交互 | DevTools | ❌ | LLM 驱动 |
 | 协议 | HTTP + MCP 原生 | Node API | HTTP | Python |
 | TLS 指纹 | ✅ Chrome/Firefox/Safari | 需插件 | ❌ | 需插件 |
@@ -49,7 +49,7 @@ Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操
 ## 核心能力
 
 - **分层渲染**：静态页面纯 HTTP 直取（~100ms），需要 JS 渲染时才启动 V8（~1-2s），80% 页面加速 10x
-- **5 引擎聚合搜索**：百度/Bing/搜狗/搜狗微信/Google 并发查询，合并去重，可选自动抓正文，Agent 一步完成"搜→读"
+- **多引擎聚合搜索**：通用网页走百度/Bing/搜狗/搜狗微信/Google，代码类接 Stack Overflow/GitHub，学术类接 arXiv——并发查询、合并去重、可选自动抓正文；运维还可把私有 Meilisearch 索引接入同一 `/search`。Agent 一步完成"搜→读"
 - **图片搜索**：`categories=images` 接百度图片/必应图片，返回 `image_url` 二进制直链（`curl -o` 可直接下成 jpg/png）+ `source_url` 溯源，Agent 自主补真实素材
 - **交互式 Session**：持久化浏览器会话，索引化交互（state/click/input/scroll/eval），AI Agent 像人一样浏览网页
 - **CAPTCHA 自动解决**：检测验证码类型，可选 2captcha 自动解决，搜索不再卡死
@@ -161,7 +161,11 @@ aginxbrowser/
     │   ├── bing.rs          #   Bing（HTML 解析，plain reqwest）
     │   ├── sogou.rs         #   搜狗通用（HTML 解析，plain reqwest）
     │   ├── sogou_wechat.rs  #   搜狗微信（HTML 解析，plain reqwest + /link 解析）
-    │   └── google.rs        #   Google（HTML 解析，wreq stealth + proxy）
+    │   ├── google.rs        #   Google（HTML 解析，wreq stealth + proxy）
+    │   ├── stackexchange.rs #   Stack Overflow（SE API v2.3，code 类）
+    │   ├── github_repos.rs  #   GitHub 仓库（api.github.com，code 类）
+    │   ├── arxiv.rs         #   arXiv（Atom API，academic 类）
+    │   └── meilisearch.rs   #   私有索引适配器（env 配置）
     │
     ├── diting_dom/          # HTML 解析、DOM 树、CSS 选择器
     ├── diting_net/          # HTTP 客户端、Cookie、编码、代理
@@ -199,6 +203,9 @@ cargo build --release --features stealth,screenshot
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 缓存 TTL，`0` 禁用 |
 | `CAPTCHA_SOLVER_API_KEY` | 无 | 2captcha API Key，设置后自动解决验证码 |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | 验证码解决服务 |
+| `AGINXBROWSER_MEILI_URL` | 无 | Meilisearch 地址；设置后启用私有索引引擎 |
+| `AGINXBROWSER_MEILI_INDEX` | 无 | 要查询的 Meilisearch index |
+| `AGINXBROWSER_MEILI_KEY` | 无 | 可选 Bearer key |
 
 ## API 文档
 
