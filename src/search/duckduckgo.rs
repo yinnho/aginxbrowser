@@ -198,4 +198,24 @@ mod tests {
     fn unwrap_passthrough_protocol_relative() {
         assert_eq!(unwrap_ddg_redirect("//example.com/x"), "https://example.com/x");
     }
+
+    /// Firecrawl #4375 parity: a malformed percent escape in one result URL
+    /// must not poison the page. `urlencoding::decode` is lossy (never
+    /// throws), so the bad URL survives as-is and siblings still parse.
+    #[test]
+    fn malformed_percent_escape_does_not_poison_the_page() {
+        let body = r#"<html><body>
+<div class="result">
+  <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fok.example%2F&amp;rut=a">Good</a>
+</div>
+<div class="result">
+  <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fbad.example%2F%ZZ&rut=b">Bad escape</a>
+</div>
+</body></html>"#;
+        let results = parse_ddg_html(body).unwrap();
+        assert_eq!(results.len(), 2);
+        // The malformed escape decodes lossily instead of aborting the page.
+        assert_eq!(results[0].url, "https://ok.example/");
+        assert!(results[1].url.contains("bad.example"));
+    }
 }
