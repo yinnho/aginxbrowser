@@ -210,6 +210,14 @@ pub struct Page {
     pub url: Option<Url>,
     pub dom: Option<DomTree>,
     pub js: Option<JsRuntime>,
+    /// sessionStorage snapshot for the CURRENT document, as `(origin, entries)`.
+    /// sessionStorage is per-tab-per-origin: it survives a same-origin
+    /// navigation (like a reload) but a cross-origin one discards it. The realm
+    /// is rebuilt on every navigation (`init_js`) and parked on target switch
+    /// (`suspend_js`/`resume_js`), so we snapshot before teardown and re-seed
+    /// after rebuild — otherwise a same-origin navigation or a second target's
+    /// evaluate wipes the store (upstream #678).
+    session_storage: Option<(String, std::collections::HashMap<String, String>)>,
     pub lifecycle: LifecycleState,
     pub http_client: Arc<HttpClient>,
     pub context: Arc<BrowserContext>,
@@ -316,6 +324,7 @@ impl Page {
             history_index: 0,
             network_events: Vec::new(),
             network_event_counter: 0,
+            session_storage: None,
             callbacks: Arc::new(crate::diting_net::CallbackRegistry::new()),
             response_bodies: std::collections::HashMap::new(),
             response_body_order: std::collections::VecDeque::new(),
@@ -371,6 +380,7 @@ impl Page {
         // page in place. That made it possible for a page to set
         // attacker-controlled state, trigger a navigation, and then
         // run code in the next document's context.
+        self.snapshot_session_storage();
         if self.js.is_some() {
             let _ = self.js.take();
         }
@@ -425,6 +435,73 @@ impl Page {
         }
 
         self.js = Some(rt);
+        self.restore_session_storage();
+    }
+
+    /// Capture the live realm's `sessionStorage` into `self.session_storage`
+    /// before the realm is dropped (navigation teardown or target switch).
+    /// Runs one synchronous round-trip reading `location.origin` + every entry.
+    fn snapshot_session_storage(&mut self) {
+        let js = match self.js.as_mut() {
+            Some(js) => js,
+            None => return,
+        };
+        let expr = "(function(){ var o={}; var ks=Object.keys(sessionStorage); for (var i=0;i<ks.length;i++){ o[ks[i]]=sessionStorage.getItem(ks[i]); } return { origin: location.origin, entries: o }; })()";
+        let val = match js.evaluate(expr) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let mut map = match val {
+            serde_json::Value::Object(m) => m,
+            _ => return,
+        };
+        let entries = map.remove("entries");
+        let origin = match map.get("origin").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => return,
+        };
+        let entries = match entries {
+            Some(serde_json::Value::Object(e)) => e,
+            _ => return,
+        };
+        let mut store = std::collections::HashMap::new();
+        for (k, v) in entries {
+            if let Some(s) = v.as_str() {
+                store.insert(k, s.to_string());
+            }
+        }
+        self.session_storage = Some((origin, store));
+    }
+
+    /// Re-seed `sessionStorage` into the freshly rebuilt realm if its origin
+    /// matches the snapshot's origin (same-origin navigation, or resume after
+    /// a target switch). A cross-origin navigation leaves the snapshot behind
+    /// and gets a fresh empty store, matching the per-tab-per-origin spec.
+    fn restore_session_storage(&mut self) {
+        let Some((origin, entries)) = self.session_storage.take() else {
+            return;
+        };
+        let js = match self.js.as_mut() {
+            Some(js) => js,
+            None => return,
+        };
+        let new_origin = match js.evaluate("location.origin") {
+            Ok(serde_json::Value::String(s)) => s,
+            _ => return,
+        };
+        if new_origin != origin {
+            return;
+        }
+        let mut seed = String::from("(function(){");
+        for (k, v) in &entries {
+            seed.push_str("sessionStorage.setItem(");
+            seed.push_str(&serde_json::to_string(k).unwrap_or_else(|_| "null".to_string()));
+            seed.push(',');
+            seed.push_str(&serde_json::to_string(v).unwrap_or_else(|_| "null".to_string()));
+            seed.push_str(");");
+        }
+        seed.push_str("})()");
+        let _ = js.evaluate(&seed);
     }
 
     /// Resolve the document base URL per HTML spec:
@@ -1474,6 +1551,7 @@ impl Page {
     }
 
     pub fn navigate_blank(&mut self) {
+        self.snapshot_session_storage();
         self.js = None;
         self.url = Some(Url::parse("about:blank").unwrap());
         self.dom = Some(parse_html("<!DOCTYPE html><html><head></head><body></body></html>"));
@@ -1980,6 +2058,7 @@ impl Page {
 
     #[cfg_attr(not(test), allow(dead_code))] // storm control: park the realm between microtask bursts
     pub fn suspend_js(&mut self) {
+        self.snapshot_session_storage();
         if let Some(js) = &self.js {
             if let Some(dom) = js.take_dom() {
                 self.dom = Some(dom);
@@ -2579,6 +2658,97 @@ mod tests {
         assert!(p.has_js());
         assert_eq!(p.evaluate("window.__mark"), serde_json::Value::Null);
         assert_eq!(p.evaluate("document.title"), serde_json::json!("Carry"));
+    }
+
+    // ---- sessionStorage persistence (#678) ---------------------------------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_storage_survives_same_origin_navigation() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![
+            ("/a", 200, "<html><title>A</title></html>".into()),
+            ("/b", 200, "<html><title>B</title></html>".into()),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/a"))
+            .await
+            .unwrap();
+        p.evaluate("sessionStorage.setItem('k', 'v1')");
+        assert_eq!(
+            p.evaluate("sessionStorage.getItem('k')"),
+            serde_json::json!("v1")
+        );
+        // Same-origin navigation must preserve sessionStorage (reload-like).
+        p.navigate(&format!("http://127.0.0.1:{port}/b"))
+            .await
+            .unwrap();
+        assert_eq!(
+            p.evaluate("sessionStorage.getItem('k')"),
+            serde_json::json!("v1")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_storage_survives_suspend_resume() {
+        let mut p = test_page();
+        p.navigate("data:text/html,<html><title>S</title></html>")
+            .await
+            .unwrap();
+        p.evaluate("sessionStorage.setItem('foo', 'bar')");
+        assert_eq!(
+            p.evaluate("sessionStorage.getItem('foo')"),
+            serde_json::json!("bar")
+        );
+        // A second target's evaluate parks this realm (suspend_js) and later
+        // resumes it via init_js; sessionStorage must survive the round-trip.
+        p.suspend_js();
+        p.resume_js();
+        assert_eq!(
+            p.evaluate("sessionStorage.getItem('foo')"),
+            serde_json::json!("bar")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_storage_survives_data_url_navigation() {
+        let mut p = test_page();
+        p.navigate("data:text/html,<html><title>one</title></html>")
+            .await
+            .unwrap();
+        p.evaluate("sessionStorage.setItem('ticket', 'abc-123')");
+        assert_eq!(
+            p.evaluate("sessionStorage.getItem('ticket')"),
+            serde_json::json!("abc-123")
+        );
+        p.navigate("data:text/html,<html><title>two</title></html>")
+            .await
+            .unwrap();
+        assert_eq!(
+            p.evaluate("sessionStorage.getItem('ticket')"),
+            serde_json::json!("abc-123"),
+            "data: URL same-origin (opaque) navigation must preserve sessionStorage"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_storage_cleared_on_cross_origin_navigation() {
+        let _g = net_test_guard();
+        let port_a = local_http_server(vec![("/a", 200, "<html><title>A</title></html>".into())]);
+        let port_b = local_http_server(vec![("/b", 200, "<html><title>B</title></html>".into())]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port_a}/a"))
+            .await
+            .unwrap();
+        p.evaluate("sessionStorage.setItem('k', 'v1')");
+        // Different port = different origin: the old store must be discarded,
+        // matching per-tab-per-origin semantics.
+        p.navigate(&format!("http://127.0.0.1:{port_b}/b"))
+            .await
+            .unwrap();
+        assert_eq!(
+            p.evaluate("sessionStorage.getItem('k')"),
+            serde_json::Value::Null
+        );
     }
 
     // ---- batch 1: fork_virtual_url + preload push + nav timeout -----------
