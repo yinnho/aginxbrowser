@@ -582,4 +582,97 @@ mod tests {
             "Error: kaboom"
         );
     }
+
+    // The click-navigation branch of Input.dispatchMouseEvent emits
+    // Page.frameNavigated through frame_json(), so it must carry the same
+    // required Frame fields the Page.navigate path does — a previous version
+    // inlined the frame here and dropped loaderId + secureContextType +
+    // crossOriginIsolatedContextType + gatedAPIFeatures (obscura#703 follow-up).
+    #[tokio::test(flavor = "current_thread")]
+    async fn input_click_navigation_emits_full_frame_json() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = ctx.create_page();
+        let session_id = "sess-click".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        // A link whose href is a second data URL, so clicking it navigates.
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({
+                "url": "data:text/html,<a id=\"go\" href=\"data:text/html,%3Ch1%3Etwo%3C/h1%3E\">go</a>"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        // elementFromPoint has no layout in a data: page, so pre-point the
+        // click target at the link (the same fallback mousePressed uses).
+        let set_target = CdpRequest {
+            id: 2,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "globalThis.__diting_click_target = document.getElementById('go')"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&set_target, &mut ctx).await.error.is_none());
+
+        // Drop the initial-load navigation events so only the click's remain.
+        // No Runtime.evaluate may run between the two mouse events: its
+        // post-eval drain would consume the pending navigation and route the
+        // frameNavigated through the Page.navigate path instead of this one.
+        ctx.pending_events.clear();
+
+        for (i, ty) in ["mousePressed", "mouseReleased"].iter().enumerate() {
+            let req = CdpRequest {
+                id: 3 + i as u64,
+                method: "Input.dispatchMouseEvent".to_string(),
+                // Out-of-viewport coords make elementFromPoint return null (its
+                // stub returns <body> for in-viewport hits), so the click-target
+                // resolution falls through to __diting_click_target — the same
+                // fallback the engine relies on for layout-less pages.
+                params: json!({
+                    "type": ty,
+                    "x": -1,
+                    "y": -1,
+                    "button": "left",
+                    "clickCount": 1,
+                }),
+                session_id: Some(session_id.clone()),
+            };
+            assert!(
+                dispatch(&req, &mut ctx).await.error.is_none(),
+                "dispatchMouseEvent {ty} failed"
+            );
+        }
+
+        let ev = ctx
+            .pending_events
+            .iter()
+            .find(|e| e.method == "Page.frameNavigated")
+            .unwrap_or_else(|| {
+                let methods: Vec<_> = ctx.pending_events.iter().map(|e| e.method.clone()).collect();
+                panic!("click navigation emits Page.frameNavigated; got {methods:?}")
+            });
+        let frame = &ev.params["frame"];
+        assert!(
+            frame.get("loaderId").is_some(),
+            "frame carries loaderId: {frame}"
+        );
+        assert_eq!(frame["secureContextType"], "Secure", "frame: {frame}");
+        assert_eq!(
+            frame["crossOriginIsolatedContextType"],
+            "NotIsolated",
+            "frame: {frame}"
+        );
+        assert!(frame["gatedAPIFeatures"].is_array(), "frame: {frame}");
+        assert!(
+            frame["url"]
+                .as_str()
+                .map(|u| u.contains("two"))
+                .unwrap_or(false),
+            "click navigated to the second URL: {frame}"
+        );
+    }
 }

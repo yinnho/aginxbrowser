@@ -32,7 +32,7 @@ fn now_epoch_seconds() -> f64 {
 }
 
 /// The CDP `Frame` wire shape for the single main frame of a page.
-fn frame_json(frame_id: &str, loader_id: &str, url: &str) -> Value {
+pub(crate) fn frame_json(frame_id: &str, loader_id: &str, url: &str) -> Value {
     json!({
         "id": frame_id,
         "loaderId": loader_id,

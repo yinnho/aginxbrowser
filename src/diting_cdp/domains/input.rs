@@ -12,7 +12,11 @@ use crate::diting_cdp::dispatch::CdpContext;
 /// returns true unconditionally; once bootstrap absorbs the #303 WeakSet, this
 /// same helper name becomes the real marker and the Input domain needs no
 /// change.
-pub(crate) const INPUT_HELPERS: &str = r#"
+/// Wrapped in an IIFE: `Page.evaluate` treats its argument as a single
+/// expression unless it starts with var/let/const/if/for/while/return, so the
+/// bare multi-statement form parsed as `return (a; b; c)` — a SyntaxError —
+/// and every helper stayed undefined, silently killing all mouse input.
+pub(crate) const INPUT_HELPERS: &str = r#"(function() {
 globalThis.__diting_markTrusted = globalThis.__diting_markTrusted || function(ev) { return ev; };
 globalThis.__diting_setFieldValue = globalThis.__diting_setFieldValue || function(el, field, value) {
   try {
@@ -51,6 +55,7 @@ globalThis.__diting_setInputFiles = function(el, specs) {
   try { el.dispatchEvent(new Event("input", { bubbles: true })); } catch (_e) {}
   try { el.dispatchEvent(new Event("change", { bubbles: true })); } catch (_e) {}
 };
+})();
 "#;
 
 // Insert `text` at the caret, replacing any non-collapsed selection the way a
@@ -250,17 +255,20 @@ pub async fn handle(
                     if moved {
                         let url = page.url_string();
                         let frame_id = page.frame_id.clone();
+                        let page_id = page.id.clone();
+                        let loader_id = ctx
+                            .current_loader_ids
+                            .get(&page_id)
+                            .cloned()
+                            .unwrap_or_else(|| format!("loader-{}", page_id));
                         ctx.pending_events.push(crate::diting_cdp::types::CdpEvent {
                             method: "Page.frameNavigated".into(),
                             params: json!({
-                                "frame": {
-                                    "id": frame_id,
-                                    "url": url,
-                                    "domainAndRegistry": "",
-                                    "securityOrigin": "",
-                                    "mimeType": "text/html",
-                                    "adFrameStatus": { "adFrameType": "none" },
-                                },
+                                "frame": crate::diting_cdp::domains::page::frame_json(
+                                    &frame_id,
+                                    &loader_id,
+                                    &url,
+                                ),
                                 "type": "Navigation",
                             }),
                             session_id: Some(session_id.clone().unwrap_or_default()),
