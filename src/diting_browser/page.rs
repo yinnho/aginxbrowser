@@ -161,14 +161,14 @@ fn is_text_like_content_type(content_type: Option<&str>) -> bool {
 }
 
 fn response_body_entry_limit() -> usize {
-    std::env::var("OBSCURA_NETWORK_BODY_BUFFER_ENTRIES")
+    std::env::var("AGINXBROWSER_NETWORK_BODY_BUFFER_ENTRIES")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(128)
 }
 
 fn response_body_byte_limit() -> usize {
-    std::env::var("OBSCURA_NETWORK_BODY_BUFFER_BYTES")
+    std::env::var("AGINXBROWSER_NETWORK_BODY_BUFFER_BYTES")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(2 * 1024 * 1024)
@@ -251,7 +251,7 @@ pub struct Page {
     // `exposeFunction` bindings exist before inline `<script>` tags execute.
     preload_scripts: Vec<String>,
     /// Page-scoped navigation deadline override. `None` falls back to
-    /// `OBSCURA_NAV_TIMEOUT_MS` (default 30s); set via
+    /// `AGINXBROWSER_NAV_TIMEOUT_MS` (default 30s); set via
     /// `set_navigation_timeout` when an automation request carries an
     /// explicit per-call timeout (upstream parity).
     navigation_timeout_ms: Option<u64>,
@@ -455,8 +455,8 @@ impl Page {
         // Soft deadline on the entire script-execution phase. Heavy SPAs
         // (GitHub, Linear, CodeSandbox) ship 50+ scripts and our serial
         // fetch + execute loop can blow past a 25s Puppeteer goto timeout.
-        // Override via OBSCURA_SCRIPT_DEADLINE_MS for slow networks.
-        let script_deadline_ms: u64 = std::env::var("OBSCURA_SCRIPT_DEADLINE_MS")
+        // Override via AGINXBROWSER_SCRIPT_DEADLINE_MS for slow networks.
+        let script_deadline_ms: u64 = std::env::var("AGINXBROWSER_SCRIPT_DEADLINE_MS")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(10_000);
@@ -862,7 +862,7 @@ impl Page {
             // pumping only while such a fetch is pending, up to a separate
             // bounded budget, so normal pages and unrelated fetches retain the
             // fast path (upstream a6bb741).
-            let dynamic_settle_ms = std::env::var("OBSCURA_DYNAMIC_SCRIPT_SETTLE_MS")
+            let dynamic_settle_ms = std::env::var("AGINXBROWSER_DYNAMIC_SCRIPT_SETTLE_MS")
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(3_000)
@@ -940,11 +940,11 @@ impl Page {
 
     /// Page-scoped navigation deadline: `set_navigation_timeout` when the
     /// automation request carries an explicit timeout, else
-    /// `OBSCURA_NAV_TIMEOUT_MS` (default 30s). Complements the env var the
+    /// `AGINXBROWSER_NAV_TIMEOUT_MS` (default 30s). Complements the env var the
     /// way upstream does (structured field over process-wide default).
     fn navigation_timeout(&self) -> tokio::time::Duration {
         let ms = self.navigation_timeout_ms.unwrap_or_else(|| {
-            std::env::var("OBSCURA_NAV_TIMEOUT_MS")
+            std::env::var("AGINXBROWSER_NAV_TIMEOUT_MS")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(30_000)
@@ -980,7 +980,7 @@ impl Page {
         // dispatcher holds the lock across the entire handler. 30 seconds
         // matches reqwest's default per-request timeout — the worst case is
         // one slow primary GET plus one slow JS-redirect chain step. Override
-        // with `OBSCURA_NAV_TIMEOUT_MS=NN`, or set a page-scoped deadline when
+        // with `AGINXBROWSER_NAV_TIMEOUT_MS=NN`, or set a page-scoped deadline when
         // the automation request already has an explicit timeout.
         let nav_timeout = self.navigation_timeout();
         let nav_timeout_ms = nav_timeout.as_millis() as u64;
@@ -1759,7 +1759,7 @@ impl Page {
     /// long-running process (upstream #360). Binary bodies are stored base64
     /// (byte-exact); text bodies return their UTF-8 bytes. Returns None if
     /// the body was never cached (e.g. it exceeded
-    /// OBSCURA_NETWORK_BODY_BUFFER_BYTES) or the id is unknown.
+    /// AGINXBROWSER_NETWORK_BODY_BUFFER_BYTES) or the id is unknown.
     #[cfg_attr(not(test), allow(dead_code))] // batch-2 kernel; CDP stream-take consumer pending
     pub fn take_response_body_raw(&mut self, request_id: &str) -> Option<Vec<u8>> {
         let stored = if let Some(body) = self.response_bodies.remove(request_id) {
@@ -2006,19 +2006,19 @@ mod tests {
     use super::*;
 
     /// Holds PRIVATE_NET_ENV_LOCK for the test's duration and clears
-    /// OBSCURA_ALLOW_PRIVATE_NETWORK on exit so the ambient env never leaks
+    /// AGINXBROWSER_ALLOW_PRIVATE_NETWORK on exit so the ambient env never leaks
     /// into the next test (several diting_net tests assert on the unset
     /// state). The field is the point: holding the guard is what locks.
     #[allow(dead_code)]
     struct NetGuard(std::sync::MutexGuard<'static, ()>);
     impl Drop for NetGuard {
         fn drop(&mut self) {
-            std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+            std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
         }
     }
     fn net_test_guard() -> NetGuard {
         let guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
-        std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
         NetGuard(guard)
     }
 
@@ -2568,7 +2568,7 @@ mod tests {
     #[test]
     fn navigation_timeout_field_overrides_env_default() {
         let mut p = test_page();
-        let env_or_default = std::env::var("OBSCURA_NAV_TIMEOUT_MS")
+        let env_or_default = std::env::var("AGINXBROWSER_NAV_TIMEOUT_MS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(30_000);

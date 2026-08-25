@@ -212,7 +212,7 @@ pub(crate) fn custom_cert_store_requested(
 
 pub fn env_allows_private_network() -> bool {
     matches!(
-        std::env::var("OBSCURA_ALLOW_PRIVATE_NETWORK")
+        std::env::var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK")
             .ok()
             .as_deref()
             .map(str::trim)
@@ -264,7 +264,7 @@ pub fn is_forbidden_ip(ip: IpAddr) -> bool {
 /// resolves to 127.0.0.1 / 169.254.169.254 / an RFC1918 address is blocked at
 /// connect time, using the very addresses reqwest will dial. When private
 /// access is permitted (`--allow-private-network` or
-/// `OBSCURA_ALLOW_PRIVATE_NETWORK`) the lookup passes through unfiltered.
+/// `AGINXBROWSER_ALLOW_PRIVATE_NETWORK`) the lookup passes through unfiltered.
 pub struct SsrfGuardResolver {
     allow_private: bool,
 }
@@ -398,7 +398,7 @@ pub struct HttpClient {
     pub in_flight: Arc<std::sync::atomic::AtomicU32>,
     pub block_trackers: bool,
     /// When true, `validate_url` lets localhost / RFC1918 / link-local addresses
-    /// through in addition to the `OBSCURA_ALLOW_PRIVATE_NETWORK` env var.
+    /// through in addition to the `AGINXBROWSER_ALLOW_PRIVATE_NETWORK` env var.
     /// Set via `--allow-private-network` on the CLI (issue #33).
     pub allow_private_network: bool,
 }
@@ -919,12 +919,12 @@ mod tests {
         assert!(ch_ua.contains(r#""Chromium";v="145""#));
     }
 
-    // Env-sensitive: OBSCURA_ALLOW_PRIVATE_NETWORK overrides rejection, so this
+    // Env-sensitive: AGINXBROWSER_ALLOW_PRIVATE_NETWORK overrides rejection, so this
     // runs under the crate-wide env lock with the variable cleared.
     #[tokio::test]
     async fn validate_url_ssrf_rules() {
         let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
-        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
 
         for bad in [
             "http://127.0.0.1/",
@@ -967,7 +967,7 @@ mod tests {
     #[tokio::test]
     async fn ssrf_guard_resolver_blocks_loopback_resolution() {
         let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
-        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
 
         let guarded = SsrfGuardResolver::new(false);
         assert!(

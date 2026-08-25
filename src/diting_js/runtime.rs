@@ -12,7 +12,7 @@ pub use deno_core::v8::IsolateHandle;
 use crate::diting_js::module_loader::DitingModuleLoader;
 use crate::diting_js::ops::{build_extension, JsState};
 
-static SNAPSHOT: &[u8] = include_bytes!(env!("OBSCURA_SNAPSHOT_PATH"));
+static SNAPSHOT: &[u8] = include_bytes!(env!("AGINXBROWSER_SNAPSHOT_PATH"));
 
 /// CDP `Runtime.RemoteObject` shape returned by evaluate paths. Our HTTP
 /// surface only reads `value`; the rest is the CDP serialization contract
@@ -3142,7 +3142,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_intercept_url_rewrite_is_revalidated_against_ssrf() {
         let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
-        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
 
         let mut rt = setup_runtime("<html><body></body></html>");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3187,7 +3187,7 @@ mod tests {
         // JS. URL-object input resolves against document.URL, and the binary
         // body must reach JS intact via the op's base64 envelope.
         let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
-        std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -3225,7 +3225,7 @@ mod tests {
             true,
             true,
         ).await.unwrap();
-        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
 
         assert_eq!(
             result.value.unwrap(),
@@ -3248,7 +3248,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_follows_twenty_redirects_and_rejects_twenty_one() {
         let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
-        std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
 
         fn chain_server(hops: usize) -> u16 {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3315,7 +3315,7 @@ mod tests {
             .unwrap();
         assert_eq!(err.value.unwrap(), serde_json::json!("error:net::ERR_FAILED"));
 
-        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
     }
 
     /// fetch() must serialize FormData (incl. File parts with filename and
@@ -3324,7 +3324,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_serializes_formdata_blob_and_typed_bodies() {
         let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
-        std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -3385,7 +3385,7 @@ mod tests {
             true,
             true,
         ).await.unwrap();
-        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
         assert_eq!(result.value.unwrap(), serde_json::json!("plain:200|fd:200|blob:200|typed:200"));
 
         let plain_raw = req_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
@@ -3413,7 +3413,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_honors_request_credentials_across_origins() {
         let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
-        std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
 
         use std::io::{Read, Write};
         fn read_request(stream: &mut std::net::TcpStream) -> String {
@@ -3492,7 +3492,7 @@ mod tests {
             true,
             true,
         ).await.unwrap();
-        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
 
         let expected = format!(
             "r1:200|r2:200|r3:200|c:Failed to fetch: CORS error: credentialed request requires Access-Control-Allow-Origin 'http://127.0.0.1:{}' and Access-Control-Allow-Credentials 'true'",
@@ -4360,7 +4360,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_dynamic_script_non_2xx_body_not_evaluated() {
         let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
-        std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -4392,7 +4392,7 @@ mod tests {
             return [errors, loads, window.__leak === undefined];
         }}"#);
         let result = rt.call_function_on_for_cdp(&script, None, &[], true, true).await.unwrap();
-        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
 
         assert_eq!(result.value.unwrap(), serde_json::json!([1, 0, true]));
     }
@@ -4405,7 +4405,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_slow_dynamic_script_visible_as_pending_until_lands() {
         let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
-        std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -4454,7 +4454,7 @@ mod tests {
                 break;
             }
         }
-        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
 
         assert!(saw_pending, "slow dynamic script fetch should be observable as pending");
         assert!(!rt.has_pending_dynamic_scripts(), "counter must drain after the fetch lands");
@@ -5153,7 +5153,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_relative_urls_resolve_against_base_href() {
         let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
-        std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
         let mut rt = setup_runtime(
             "<html><head><base href=\"/assets/\"></head><body>\
              <a id=\"a\" href=\"page.html\">x</a><form id=\"f\" action=\"submit\"></form></body></html>",

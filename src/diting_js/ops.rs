@@ -143,14 +143,14 @@ pub struct StoredNetworkResponseBody {
 }
 
 fn response_body_entry_limit() -> usize {
-    std::env::var("OBSCURA_NETWORK_BODY_BUFFER_ENTRIES")
+    std::env::var("AGINXBROWSER_NETWORK_BODY_BUFFER_ENTRIES")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(128)
 }
 
 fn response_body_byte_limit() -> usize {
-    std::env::var("OBSCURA_NETWORK_BODY_BUFFER_BYTES")
+    std::env::var("AGINXBROWSER_NETWORK_BODY_BUFFER_BYTES")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(2 * 1024 * 1024)
@@ -979,8 +979,8 @@ fn build_request_client(proxy_url: Option<&str>) -> Result<reqwest::Client, Stri
     // completion event (which stranded Angular HttpClient). On timeout reqwest's
     // send().await errors, which op_fetch_url propagates and the fetch shim turns
     // into an XHR `error`/`loadend`. 30s matches the other clients in the
-    // workspace; OBSCURA_FETCH_TIMEOUT_MS overrides it for tighter cloud limits.
-    let timeout_ms: u64 = std::env::var("OBSCURA_FETCH_TIMEOUT_MS")
+    // workspace; AGINXBROWSER_FETCH_TIMEOUT_MS overrides it for tighter cloud limits.
+    let timeout_ms: u64 = std::env::var("AGINXBROWSER_FETCH_TIMEOUT_MS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(30_000);

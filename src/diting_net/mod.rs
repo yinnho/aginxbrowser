@@ -20,7 +20,7 @@ pub use robots::RobotsCache;
 #[cfg(feature = "stealth")]
 pub use wreq_client::{StealthHttpClient, STEALTH_USER_AGENT, parse_tls_fingerprint};
 
-/// Serializes tests that read or mutate `OBSCURA_ALLOW_PRIVATE_NETWORK`,
+/// Serializes tests that read or mutate `AGINXBROWSER_ALLOW_PRIVATE_NETWORK`,
 /// since process env is shared across parallel test threads.
 #[cfg(test)]
 pub(crate) static PRIVATE_NET_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

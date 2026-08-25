@@ -28,7 +28,7 @@ fn main() {
 
     std::fs::write(&snapshot_path, &*output.output).expect("Failed to write snapshot");
     println!(
-        "cargo:rustc-env=OBSCURA_SNAPSHOT_PATH={}",
+        "cargo:rustc-env=AGINXBROWSER_SNAPSHOT_PATH={}",
         snapshot_path.display()
     );
 

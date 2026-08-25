@@ -398,16 +398,16 @@ mod tests {
     // The emulation profile advertises gzip, so origins compress. Without the
     // decoder the raw gzip bytes reach the HTML parser as document text.
     // The fixture is on loopback, so this runs under the env lock with
-    // OBSCURA_ALLOW_PRIVATE_NETWORK set, then restores it.
+    // AGINXBROWSER_ALLOW_PRIVATE_NETWORK set, then restores it.
     #[tokio::test]
     async fn stealth_client_decodes_gzip_response() {
         let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
-        std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
         let port = gzip_fixture().await;
         let client = StealthHttpClient::new(Arc::new(CookieJar::new()));
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
         let result = client.fetch(&url).await;
-        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
         let resp = result.unwrap();
         assert_eq!(resp.text(), PLAIN_BODY, "gzip body must be decompressed");
     }
@@ -416,7 +416,7 @@ mod tests {
     #[tokio::test]
     async fn stealth_fetch_rejects_loopback() {
         let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
-        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
         let client = StealthHttpClient::new(Arc::new(CookieJar::new()));
         let url = Url::parse("http://127.0.0.1:1/").unwrap();
         assert!(client.fetch(&url).await.is_err(), "loopback must be rejected");

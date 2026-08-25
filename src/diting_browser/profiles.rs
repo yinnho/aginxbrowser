@@ -93,10 +93,10 @@ pub fn random_profile() -> &'static BrowserProfile {
 /// identities from one address is itself a bot signal (a real address maps to
 /// a stable device), and the rotated profile does not yet carry a matching
 /// TLS or timezone fingerprint, so rotation is opt-in:
-///   OBSCURA_PROFILE=<index>   pin a specific profile from PROFILES
-///   OBSCURA_ROTATE_PROFILE=1  pick a random profile per context
+///   AGINXBROWSER_PROFILE=<index>   pin a specific profile from PROFILES
+///   AGINXBROWSER_ROTATE_PROFILE=1  pick a random profile per context
 pub fn select_profile() -> &'static BrowserProfile {
-    if let Some(idx) = std::env::var("OBSCURA_PROFILE")
+    if let Some(idx) = std::env::var("AGINXBROWSER_PROFILE")
         .ok()
         .as_deref()
         .map(str::trim)
@@ -106,7 +106,7 @@ pub fn select_profile() -> &'static BrowserProfile {
             return &PROFILES[idx];
         }
     }
-    if env_enabled("OBSCURA_ROTATE_PROFILE") {
+    if env_enabled("AGINXBROWSER_ROTATE_PROFILE") {
         return random_profile();
     }
     &PROFILES[DEFAULT_PROFILE_INDEX]
