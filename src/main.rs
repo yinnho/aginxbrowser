@@ -628,7 +628,9 @@ async fn doctor_handler(Query(params): Query<DoctorParams>) -> impl IntoResponse
         "version": env!("CARGO_PKG_VERSION"),
         "capabilities": capabilities,
         "search_engines": [
-            "baidu", "bing", "sogou", "sogou_wechat", "google",
+            "baidu", "bing", "sogou", "sogou_wechat", "duckduckgo",
+            "stackexchange", "github", "arxiv",
+            "bing_news", "huggingface", "npm", "pypi",
             "baidu_images", "bing_images"
         ],
         "endpoints": [

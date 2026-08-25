@@ -3,8 +3,8 @@ pub mod baidu_images;
 pub mod bing;
 pub mod bing_images;
 pub mod bing_news;
+pub mod duckduckgo;
 pub mod github_repos;
-pub mod google;
 pub mod arxiv;
 pub mod huggingface;
 pub mod meilisearch;
@@ -150,7 +150,7 @@ impl SearchEngineRegistry {
         registry.register(bing_images::BingImagesEngine::new());
         registry.register(sogou::SogouEngine::new());
         registry.register(sogou_wechat::SogouWechatEngine::new());
-        registry.register(google::GoogleEngine::new());
+        registry.register(duckduckgo::DuckDuckGoEngine::new());
         registry.register(stackexchange::StackExchangeEngine::new());
         registry.register(github_repos::GithubEngine::new());
         registry.register(arxiv::ArxivEngine::new());
