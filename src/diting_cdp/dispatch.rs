@@ -528,3 +528,58 @@ async fn dispatch_send_message_to_target(req: &CdpRequest, ctx: &mut CdpContext)
 
     CdpResponse::success(req.id, json!({}), req.session_id.clone())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diting_cdp::types::CdpRequest;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_evaluate_reports_exception_thrown_and_details() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = ctx.create_page();
+        let session_id = "sess-1".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        // A real document initializes the V8 isolate (create_page blanks it),
+        // so the evaluate below actually runs in a live runtime.
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": "data:text/html,<html><body>hi</body></html>" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        let req = CdpRequest {
+            id: 2,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "(() => { throw new Error('kaboom') })()",
+                "returnByValue": true,
+                "awaitPromise": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&req, &mut ctx).await;
+        assert!(resp.error.is_none(), "unexpected CDP error: {:?}", resp.error);
+        let result = resp.result.expect("result");
+        let details = result
+            .get("exceptionDetails")
+            .expect("response carries exceptionDetails");
+        assert_eq!(details["text"], "Uncaught (in promise)");
+        assert_eq!(details["exception"]["description"], "Error: kaboom");
+        assert_eq!(details["exception"]["subtype"], "error");
+
+        let thrown = ctx
+            .pending_events
+            .iter()
+            .find(|e| e.method == "Runtime.exceptionThrown")
+            .expect("Runtime.exceptionThrown event queued");
+        assert_eq!(thrown.session_id.as_deref(), Some(session_id.as_str()));
+        assert_eq!(
+            thrown.params["exceptionDetails"]["exception"]["description"],
+            "Error: kaboom"
+        );
+    }
+}

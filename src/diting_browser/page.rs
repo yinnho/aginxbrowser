@@ -1642,6 +1642,110 @@ impl Page {
         }
     }
 
+    /// Exception-preserving variant of [`evaluate_for_cdp`]: a thrown/rejected
+    /// expression comes back as an `EvalOutcome` exception so the CDP layer can
+    /// emit `Runtime.exceptionThrown` + `exceptionDetails` instead of collapsing
+    /// the throw to `undefined`.
+    pub async fn evaluate_for_cdp_outcome(
+        &mut self,
+        expression: &str,
+        return_by_value: bool,
+        await_promise: bool,
+    ) -> crate::diting_js::runtime::EvalOutcome {
+        if let Some(js) = &mut self.js {
+            match js
+                .evaluate_for_cdp_outcome(expression, return_by_value, await_promise)
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    let preview: String = expression.chars().take(120).collect();
+                    tracing::warn!("evaluate_for_cdp error for '{}': {}", preview, e);
+                    crate::diting_js::runtime::EvalOutcome {
+                        info: crate::diting_js::runtime::RemoteObjectInfo {
+                            js_type: "undefined".into(),
+                            subtype: None,
+                            class_name: String::new(),
+                            description: String::new(),
+                            object_id: None,
+                            value: None,
+                        },
+                        exception: None,
+                    }
+                }
+            }
+        } else {
+            let val = self.evaluate(expression);
+            crate::diting_js::runtime::EvalOutcome {
+                info: crate::diting_js::runtime::RemoteObjectInfo {
+                    js_type: match &val {
+                        serde_json::Value::String(_) => "string".into(),
+                        serde_json::Value::Number(_) => "number".into(),
+                        serde_json::Value::Bool(_) => "boolean".into(),
+                        _ => "undefined".into(),
+                    },
+                    subtype: None,
+                    class_name: String::new(),
+                    description: String::new(),
+                    object_id: None,
+                    value: Some(val),
+                },
+                exception: None,
+            }
+        }
+    }
+
+    /// Exception-preserving variant of [`call_function_on_for_cdp`].
+    pub async fn call_function_on_for_cdp_outcome(
+        &mut self,
+        function_declaration: &str,
+        object_id: Option<&str>,
+        args: &[serde_json::Value],
+        return_by_value: bool,
+        await_promise: bool,
+    ) -> crate::diting_js::runtime::EvalOutcome {
+        if let Some(js) = &mut self.js {
+            match js
+                .call_function_on_for_cdp_outcome(
+                    function_declaration,
+                    object_id,
+                    args,
+                    return_by_value,
+                    await_promise,
+                )
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    tracing::debug!("callFunctionOn error: {}", e);
+                    crate::diting_js::runtime::EvalOutcome {
+                        info: crate::diting_js::runtime::RemoteObjectInfo {
+                            js_type: "undefined".into(),
+                            subtype: None,
+                            class_name: String::new(),
+                            description: String::new(),
+                            object_id: None,
+                            value: None,
+                        },
+                        exception: None,
+                    }
+                }
+            }
+        } else {
+            crate::diting_js::runtime::EvalOutcome {
+                info: crate::diting_js::runtime::RemoteObjectInfo {
+                    js_type: "undefined".into(),
+                    subtype: None,
+                    class_name: String::new(),
+                    description: String::new(),
+                    object_id: None,
+                    value: None,
+                },
+                exception: None,
+            }
+        }
+    }
+
     #[allow(dead_code)] // CDP Network.setBlockedURLs parity — no CDP client to call it yet
     pub fn set_blocked_urls(&mut self, patterns: Vec<String>) {
         if let Some(js) = &self.js {

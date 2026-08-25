@@ -30,6 +30,30 @@ pub struct RemoteObjectInfo {
     pub value: Option<serde_json::Value>,
 }
 
+/// Outcome of a CDP evaluate / callFunctionOn: the remote object plus any
+/// thrown (or rejected) exception. Captured separately so the CDP layer can
+/// emit `Runtime.exceptionThrown` + `exceptionDetails` instead of collapsing a
+/// throw into a plain `undefined`/`null` result.
+#[derive(Debug, Clone)]
+pub struct EvalOutcome {
+    pub info: RemoteObjectInfo,
+    pub exception: Option<ExceptionInfo>,
+}
+
+/// Details of a sync-thrown or awaited-rejection exception, enough to
+/// synthesize CDP `Runtime.exceptionThrown` and `exceptionDetails`.
+#[derive(Debug, Clone)]
+pub struct ExceptionInfo {
+    /// "Uncaught" for a sync throw, "Uncaught (in promise)" for a rejection.
+    pub text: String,
+    /// Human-readable message, e.g. "Error: boom".
+    pub description: String,
+    /// Error constructor name, e.g. "Error" / "TypeError".
+    pub class_name: String,
+    /// Object-store id of the error object, when one was allocated.
+    pub object_id: Option<String>,
+}
+
 static ISOLATE_CONSTRUCT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// How much the near-heap-limit callback raises the limit so V8 can unwind
@@ -480,13 +504,48 @@ impl JsRuntime {
         return_by_value: bool,
         await_promise: bool,
     ) -> Result<RemoteObjectInfo, String> {
-        if !await_promise && return_by_value {
-            // Watchdog-bound like the await path below - a sync runaway
-            // expression must not pin the session thread.
-            let val = self.evaluate_with_timeout(expression, std::time::Duration::from_secs(10))?;
-            return Ok(Self::info_from_json(&val));
+        match self
+            .evaluate_for_cdp_outcome(expression, return_by_value, await_promise)
+            .await?
+        {
+            EvalOutcome {
+                info,
+                exception: None,
+            } => Ok(info),
+            EvalOutcome {
+                exception: Some(exc),
+                ..
+            } => {
+                if await_promise {
+                    Err(format!("Promise rejected: {}", exc.description))
+                } else {
+                    // Pre-exceptionThrown behavior: a sync throw was swallowed
+                    // to `undefined` so callers couldn't distinguish it from a
+                    // genuine `undefined` return.
+                    Ok(RemoteObjectInfo {
+                        js_type: "undefined".into(),
+                        subtype: None,
+                        class_name: String::new(),
+                        description: String::new(),
+                        object_id: None,
+                        value: None,
+                    })
+                }
+            }
         }
+    }
 
+    /// Like [`evaluate_for_cdp`], but a thrown/rejected expression comes back
+    /// as an `EvalOutcome` carrying the exception instead of being collapsed
+    /// into `Err("Promise rejected: …")` (await) or `undefined` (sync). The
+    /// CDP Runtime domain consumes this to emit `Runtime.exceptionThrown` +
+    /// `exceptionDetails`.
+    pub async fn evaluate_for_cdp_outcome(
+        &mut self,
+        expression: &str,
+        return_by_value: bool,
+        await_promise: bool,
+    ) -> Result<EvalOutcome, String> {
         self.object_counter += 1;
         let oid = self.make_oid(self.object_counter);
 
@@ -503,6 +562,10 @@ impl JsRuntime {
         // before the `)` terminates any trailing line comment so the
         // parens close on their own line.
         let done_counter = self.object_counter;
+        let exc_meta_fn = Self::exception_meta_extract_js("e");
+        // Both paths set __diting_await_meta + __diting_await_rejected so the
+        // read-back after the IIFE is uniform whether the expression was
+        // awaited or run synchronously.
         let meta_code = if await_promise {
             format!(
                 "(async function() {{\n\
@@ -513,7 +576,7 @@ impl JsRuntime {
                         globalThis.__diting_await_rejected = false;\n\
                     }} catch(e) {{\n\
                         globalThis.__diting_objects['{oid}'] = e;\n\
-                        globalThis.__diting_await_meta = {err_meta_fn};\n\
+                        globalThis.__diting_await_meta = {exc_meta_fn};\n\
                         globalThis.__diting_await_rejected = true;\n\
                     }}\n\
                     globalThis.__diting_done_{done_counter} = true;\n\
@@ -521,20 +584,28 @@ impl JsRuntime {
                 expr = cleaned_expr,
                 oid = oid,
                 meta_fn = Self::meta_extract_js("__result"),
-                err_meta_fn = Self::meta_extract_js("e"),
+                exc_meta_fn = exc_meta_fn,
                 done_counter = done_counter,
             )
         } else {
             format!(
                 "(function() {{\n\
                     var __result;\n\
-                    try {{ __result = (\n{expr}\n); }} catch(e) {{ __result = undefined; }}\n\
-                    globalThis.__diting_objects['{oid}'] = __result;\n\
-                    return {meta_fn};\n\
+                    try {{\n\
+                        __result = (\n{expr}\n);\n\
+                        globalThis.__diting_objects['{oid}'] = __result;\n\
+                        globalThis.__diting_await_meta = {meta_fn};\n\
+                        globalThis.__diting_await_rejected = false;\n\
+                    }} catch(e) {{\n\
+                        globalThis.__diting_objects['{oid}'] = e;\n\
+                        globalThis.__diting_await_meta = {exc_meta_fn};\n\
+                        globalThis.__diting_await_rejected = true;\n\
+                    }}\n\
                 }})()",
                 expr = cleaned_expr,
                 oid = oid,
                 meta_fn = Self::meta_extract_js("__result"),
+                exc_meta_fn = exc_meta_fn,
             )
         };
 
@@ -553,15 +624,14 @@ impl JsRuntime {
             .runtime
             .execute_script("<eval-remote>", meta_code);
         let eval_fired = self.disarm_watchdog(eval_wd);
-        let result = if eval_fired {
+        if eval_fired {
             let preview: String = expression.chars().take(80).collect();
             tracing::warn!("eval terminated by watchdog (ran >10s): '{}'", preview);
             return Err("eval timed out: script ran longer than 10s".to_string());
-        } else {
-            result.map_err(|e| format!("JS error: {}", e))?
-        };
+        }
+        result.map_err(|e| format!("JS error: {}", e))?;
 
-        let meta_str = if await_promise {
+        if await_promise {
             let __t0 = std::time::Instant::now();
             let sentinel = format!("globalThis.__diting_done_{done_counter} === true");
             self.resolve_promises_until(
@@ -584,37 +654,46 @@ impl JsRuntime {
                     __dt.as_millis(), preview,
                 );
             }
-            let rejected = self.runtime.execute_script("<readRejected>", "globalThis.__diting_await_rejected".to_string())
+        }
+
+        let rejected = self
+            .runtime
+            .execute_script("<readRejected>", "globalThis.__diting_await_rejected".to_string())
+            .map_err(|e| format!("JS error: {}", e))?;
+        let rejected = self.v8_to_json(rejected)?.as_bool().unwrap_or(false);
+
+        if rejected {
+            return self.exception_outcome(&oid, await_promise);
+        }
+
+        let info = if return_by_value {
+            let read = self
+                .runtime
+                .execute_script("<readResult>", format!("globalThis.__diting_objects['{}']", oid))
                 .map_err(|e| format!("JS error: {}", e))?;
-            if self.v8_to_json(rejected)?.as_bool().unwrap_or(false) {
-                let err = self.runtime.execute_script("<readError>", format!("String(globalThis.__diting_objects['{0}'] && (globalThis.__diting_objects['{0}'].message || globalThis.__diting_objects['{0}']))", oid))
-                    .map_err(|e| format!("JS error: {}", e))?;
-                return Err(format!("Promise rejected: {}", self.v8_to_json(err)?.as_str().unwrap_or("")));
-            }
-            self.runtime.execute_script("<readMeta>", "globalThis.__diting_await_meta".to_string())
-                .map_err(|e| format!("JS error: {}", e))?
+            let json_val = self.v8_to_json(read)?;
+            Self::info_from_json(&json_val)
         } else {
-            result
-        };
-        let meta_str = self.v8_to_json(meta_str)?;
-        let meta_json = if let serde_json::Value::String(s) = &meta_str {
-            serde_json::from_str(s).unwrap_or(meta_str)
-        } else {
-            meta_str
+            let meta = self
+                .runtime
+                .execute_script("<readMeta>", "globalThis.__diting_await_meta".to_string())
+                .map_err(|e| format!("JS error: {}", e))?;
+            let meta_str = self.v8_to_json(meta)?;
+            let meta_json = if let serde_json::Value::String(s) = &meta_str {
+                serde_json::from_str(s).unwrap_or(meta_str)
+            } else {
+                meta_str
+            };
+            Self::info_from_meta(&meta_json, Some(oid.clone()))
         };
         self.object_store.insert(
             oid.clone(),
             format!("globalThis.__diting_objects['{}']", oid),
         );
-
-        if await_promise && return_by_value {
-            let read = self.runtime.execute_script("<readResult>", format!("globalThis.__diting_objects['{}']", oid))
-                .map_err(|e| format!("JS error: {}", e))?;
-            let json_val = self.v8_to_json(read)?;
-            return Ok(Self::info_from_json(&json_val));
-        }
-
-        Ok(Self::info_from_meta(&meta_json, Some(oid)))
+        Ok(EvalOutcome {
+            info,
+            exception: None,
+        })
     }
 
     #[allow(dead_code)] // CDP Runtime.callFunctionOn parity; Page-level wrapper carries the allow note
@@ -626,15 +705,114 @@ impl JsRuntime {
         return_by_value: bool,
         await_promise: bool,
     ) -> Result<RemoteObjectInfo, String> {
+        match self
+            .call_function_on_for_cdp_outcome(
+                function_declaration,
+                object_id,
+                arguments,
+                return_by_value,
+                await_promise,
+            )
+            .await?
+        {
+            EvalOutcome {
+                info,
+                exception: None,
+            } => Ok(info),
+            EvalOutcome {
+                exception: Some(exc),
+                ..
+            } => {
+                if await_promise {
+                    Err(format!("Promise rejected: {}", exc.description))
+                } else {
+                    Ok(RemoteObjectInfo {
+                        js_type: "undefined".into(),
+                        subtype: None,
+                        class_name: String::new(),
+                        description: String::new(),
+                        object_id: None,
+                        value: None,
+                    })
+                }
+            }
+        }
+    }
+
+    /// Read the exception object + meta a throwing IIFE left in the globals
+    /// and turn it into an `EvalOutcome` carrying the exception.
+    fn exception_outcome(&mut self, oid: &str, await_promise: bool) -> Result<EvalOutcome, String> {
+        let exc_meta = self
+            .runtime
+            .execute_script("<readExcMeta>", "globalThis.__diting_await_meta".to_string())
+            .map_err(|e| format!("JS error: {}", e))?;
+        let exc_meta = self.v8_to_json(exc_meta)?;
+        let exc_meta = if let serde_json::Value::String(s) = &exc_meta {
+            serde_json::from_str(s).unwrap_or(exc_meta)
+        } else {
+            exc_meta
+        };
+        let class_name = exc_meta
+            .get("className")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let description = exc_meta
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        self.object_store.insert(
+            oid.to_string(),
+            format!("globalThis.__diting_objects['{}']", oid),
+        );
+
+        let text = if await_promise {
+            "Uncaught (in promise)"
+        } else {
+            "Uncaught"
+        }
+        .to_string();
+        let info = RemoteObjectInfo {
+            js_type: "object".into(),
+            subtype: Some("error".into()),
+            class_name: class_name.clone(),
+            description: description.clone(),
+            object_id: Some(oid.to_string()),
+            value: None,
+        };
+        Ok(EvalOutcome {
+            info,
+            exception: Some(ExceptionInfo {
+                text,
+                description,
+                class_name,
+                object_id: Some(oid.to_string()),
+            }),
+        })
+    }
+
+    /// Like [`call_function_on_for_cdp`], but a throwing/rejecting function is
+    /// reported as an `EvalOutcome` exception instead of being collapsed into
+    /// `Err("Promise rejected: …")` or a bare `undefined`.
+    pub async fn call_function_on_for_cdp_outcome(
+        &mut self,
+        function_declaration: &str,
+        object_id: Option<&str>,
+        arguments: &[serde_json::Value],
+        return_by_value: bool,
+        await_promise: bool,
+    ) -> Result<EvalOutcome, String> {
         let this_expr = self.resolve_this(object_id);
         let (setup, args_list) = self.build_args(arguments);
 
         self.object_counter += 1;
         let oid = self.make_oid(self.object_counter);
+        let exc_meta_fn = Self::exception_meta_extract_js("e");
 
         if await_promise {
             let done_counter = self.object_counter;
-            let err_meta_fn = Self::meta_extract_js("__result");
             let code = format!(
                 "(async function() {{\n\
                     {setup}\n\
@@ -645,10 +823,11 @@ impl JsRuntime {
                         __result = await __fn.call(__this, {args});\n\
                         globalThis.__diting_objects['{oid}'] = __result;\n\
                         globalThis.__diting_await_meta = {meta_fn};\n\
+                        globalThis.__diting_await_rejected = false;\n\
                     }} catch(e) {{\n\
-                        __result = e;\n\
                         globalThis.__diting_objects['{oid}'] = e;\n\
-                        globalThis.__diting_await_meta = {err_meta_fn};\n\
+                        globalThis.__diting_await_meta = {exc_meta_fn};\n\
+                        globalThis.__diting_await_rejected = true;\n\
                     }} finally {{\n\
                         globalThis.__diting_done_{done_counter} = true;\n\
                     }}\n\
@@ -659,7 +838,7 @@ impl JsRuntime {
                 args = args_list,
                 oid = oid,
                 meta_fn = Self::meta_extract_js("__result"),
-                err_meta_fn = err_meta_fn,
+                exc_meta_fn = exc_meta_fn,
                 done_counter = done_counter,
             );
 
@@ -667,7 +846,6 @@ impl JsRuntime {
                 .execute_script("<callFnAsync>", code)
                 .map_err(|e| format!("JS error: {}", e))?;
 
-            let __t0 = std::time::Instant::now();
             let sentinel = format!("globalThis.__diting_done_{done_counter} === true");
             self.resolve_promises_until(
                 |rt| rt.runtime.execute_script("<done?>", sentinel.clone())
@@ -677,43 +855,43 @@ impl JsRuntime {
                     .unwrap_or(false),
                 5000,
             ).await;
-            let __dt = __t0.elapsed();
-            if __dt > std::time::Duration::from_secs(1) {
-                let preview: String = function_declaration
-                    .chars()
-                    .take(300)
-                    .map(|c| if c == '\n' || c == '\t' { ' ' } else { c })
-                    .collect();
-                tracing::debug!(
-                    "Runtime.callFunctionOn awaitPromise took {}ms; fn={}",
-                    __dt.as_millis(), preview,
-                );
+
+            let rejected = self
+                .runtime
+                .execute_script("<readRejected>", "globalThis.__diting_await_rejected".to_string())
+                .map_err(|e| format!("JS error: {}", e))?;
+            if self.v8_to_json(rejected)?.as_bool().unwrap_or(false) {
+                return self.exception_outcome(&oid, true);
             }
 
-            if return_by_value {
-                let read = self.runtime.execute_script(
-                    "<readResult>",
-                    format!("globalThis.__diting_objects['{}']", oid),
-                ).map_err(|e| format!("JS error: {}", e))?;
+            let info = if return_by_value {
+                let read = self
+                    .runtime
+                    .execute_script("<readResult>", format!("globalThis.__diting_objects['{}']", oid))
+                    .map_err(|e| format!("JS error: {}", e))?;
                 let json_val = self.v8_to_json(read)?;
-                return Ok(Self::info_from_json(&json_val));
-            }
-
-            let meta_result = self.runtime.execute_script(
-                "<readMeta>",
-                "globalThis.__diting_await_meta".to_string(),
-            ).map_err(|e| format!("JS error: {}", e))?;
-            let meta_str = self.v8_to_json(meta_result)?;
-            let meta_json = if let serde_json::Value::String(s) = &meta_str {
-                serde_json::from_str(s).unwrap_or(meta_str.clone())
+                Self::info_from_json(&json_val)
             } else {
-                meta_str
+                let meta_result = self
+                    .runtime
+                    .execute_script("<readMeta>", "globalThis.__diting_await_meta".to_string())
+                    .map_err(|e| format!("JS error: {}", e))?;
+                let meta_str = self.v8_to_json(meta_result)?;
+                let meta_json = if let serde_json::Value::String(s) = &meta_str {
+                    serde_json::from_str(s).unwrap_or(meta_str.clone())
+                } else {
+                    meta_str
+                };
+                Self::info_from_meta(&meta_json, Some(oid.clone()))
             };
             self.object_store.insert(
                 oid.clone(),
                 format!("globalThis.__diting_objects['{}']", oid),
             );
-            return Ok(Self::info_from_meta(&meta_json, Some(oid)));
+            return Ok(EvalOutcome {
+                info,
+                exception: None,
+            });
         }
 
         if return_by_value {
@@ -722,18 +900,39 @@ impl JsRuntime {
                     {setup}\n\
                     var __fn = ({fn_decl});\n\
                     var __this = ({this_expr});\n\
-                    return __fn.call(__this, {args});\n\
+                    globalThis.__diting_await_rejected = false;\n\
+                    try {{\n\
+                        return __fn.call(__this, {args});\n\
+                    }} catch(e) {{\n\
+                        globalThis.__diting_objects['{oid}'] = e;\n\
+                        globalThis.__diting_await_meta = {exc_meta_fn};\n\
+                        globalThis.__diting_await_rejected = true;\n\
+                        return undefined;\n\
+                    }}\n\
                 }})()",
                 setup = setup,
                 fn_decl = function_declaration,
                 this_expr = this_expr,
                 args = args_list,
+                oid = oid,
+                exc_meta_fn = exc_meta_fn,
             );
-            let result = self.runtime
+            let result = self
+                .runtime
                 .execute_script("<callFnByValue>", code)
                 .map_err(|e| format!("JS error: {}", e))?;
+            let rejected = self
+                .runtime
+                .execute_script("<readRejected>", "globalThis.__diting_await_rejected".to_string())
+                .map_err(|e| format!("JS error: {}", e))?;
+            if self.v8_to_json(rejected)?.as_bool().unwrap_or(false) {
+                return self.exception_outcome(&oid, false);
+            }
             let json_val = self.v8_to_json(result)?;
-            return Ok(Self::info_from_json(&json_val));
+            return Ok(EvalOutcome {
+                info: Self::info_from_json(&json_val),
+                exception: None,
+            });
         }
 
         let code = format!(
@@ -741,9 +940,17 @@ impl JsRuntime {
                 {setup}\n\
                 var __fn = ({fn_decl});\n\
                 var __this = ({this_expr});\n\
-                var __result = __fn.call(__this, {args});\n\
-                globalThis.__diting_objects['{oid}'] = __result;\n\
-                return {meta_fn};\n\
+                var __result;\n\
+                try {{\n\
+                    __result = __fn.call(__this, {args});\n\
+                    globalThis.__diting_objects['{oid}'] = __result;\n\
+                    globalThis.__diting_await_meta = {meta_fn};\n\
+                    globalThis.__diting_await_rejected = false;\n\
+                }} catch(e) {{\n\
+                    globalThis.__diting_objects['{oid}'] = e;\n\
+                    globalThis.__diting_await_meta = {exc_meta_fn};\n\
+                    globalThis.__diting_await_rejected = true;\n\
+                }}\n\
             }})()",
             setup = setup,
             fn_decl = function_declaration,
@@ -751,10 +958,19 @@ impl JsRuntime {
             args = args_list,
             oid = oid,
             meta_fn = Self::meta_extract_js("__result"),
+            exc_meta_fn = exc_meta_fn,
         );
-        let result = self.runtime
+        let result = self
+            .runtime
             .execute_script("<callFnRemote>", code)
             .map_err(|e| format!("JS error: {}", e))?;
+        let rejected = self
+            .runtime
+            .execute_script("<readRejected>", "globalThis.__diting_await_rejected".to_string())
+            .map_err(|e| format!("JS error: {}", e))?;
+        if self.v8_to_json(rejected)?.as_bool().unwrap_or(false) {
+            return self.exception_outcome(&oid, false);
+        }
         let meta_str = self.v8_to_json(result)?;
         let meta_json = if let serde_json::Value::String(s) = &meta_str {
             serde_json::from_str(s).unwrap_or(meta_str.clone())
@@ -765,7 +981,10 @@ impl JsRuntime {
             oid.clone(),
             format!("globalThis.__diting_objects['{}']", oid),
         );
-        Ok(Self::info_from_meta(&meta_json, Some(oid)))
+        Ok(EvalOutcome {
+            info: Self::info_from_meta(&meta_json, Some(oid)),
+            exception: None,
+        })
     }
     #[cfg_attr(not(test), allow(dead_code))] // exercised via tests; CDP consumer pending
     pub async fn call_function_on(
@@ -1356,6 +1575,32 @@ impl JsRuntime {
                 }}
                 else {{ desc = String(v); }}
                 return JSON.stringify({{type:t,subtype:st,className:cn,description:desc}});
+            }})({var_name})"#,
+            var_name = var_name,
+        )
+    }
+
+    /// Extract an exception's constructor name + message as a JSON blob, the
+    /// same shape `info_from_meta` reads. `meta_extract_js` stops at the
+    /// constructor name ("Error") — it never pulls the message, so a thrown
+    /// `new Error('boom')` would otherwise surface as description "Error"
+    /// instead of "Error: boom", which is what Chrome's `exceptionDetails`
+    /// reports.
+    fn exception_meta_extract_js(var_name: &str) -> String {
+        format!(
+            r#"(function(e) {{
+                var name = '', msg = '', desc = '';
+                if (e !== null && e !== undefined) {{
+                    if (typeof e === 'object' || typeof e === 'function') {{
+                        name = e.name || (e.constructor && e.constructor.name) || '';
+                        if (typeof e.message === 'string') msg = e.message;
+                    }} else {{
+                        try {{ msg = String(e); }} catch (_) {{}}
+                    }}
+                }}
+                if (msg) {{ desc = name ? (name + ': ' + msg) : msg; }}
+                else {{ desc = name || msg || 'Uncaught exception'; }}
+                return JSON.stringify({{className:name, description:desc}});
             }})({var_name})"#,
             var_name = var_name,
         )
@@ -2680,6 +2925,83 @@ mod tests {
         let mut rt = setup_runtime("<html><body></body></html>");
         let err = rt.evaluate_for_cdp("Promise.reject(new Error('boom'))", true, true).await.unwrap_err();
         assert!(err.contains("boom"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_evaluate_outcome_reports_sync_throw() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let outcome = rt
+            .evaluate_for_cdp_outcome("(() => { throw new Error('sync-boom') })()", false, false)
+            .await
+            .unwrap();
+        let exc = outcome.exception.expect("expected exception");
+        assert_eq!(exc.text, "Uncaught");
+        assert_eq!(exc.description, "Error: sync-boom");
+        assert_eq!(exc.class_name, "Error");
+        assert_eq!(outcome.info.subtype.as_deref(), Some("error"));
+        assert!(outcome.info.object_id.is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_evaluate_outcome_reports_sync_throw_by_value() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let outcome = rt
+            .evaluate_for_cdp_outcome("(() => { throw new Error('bv-boom') })()", true, false)
+            .await
+            .unwrap();
+        let exc = outcome.exception.expect("expected exception");
+        assert_eq!(exc.text, "Uncaught");
+        assert_eq!(exc.description, "Error: bv-boom");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_evaluate_outcome_reports_await_rejection() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let outcome = rt
+            .evaluate_for_cdp_outcome("Promise.reject(new Error('boom'))", true, true)
+            .await
+            .unwrap();
+        let exc = outcome.exception.expect("expected exception");
+        assert_eq!(exc.text, "Uncaught (in promise)");
+        assert_eq!(exc.description, "Error: boom");
+        assert_eq!(exc.class_name, "Error");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_call_function_outcome_reports_throw() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let outcome = rt
+            .call_function_on_for_cdp_outcome(
+                "() => { throw new Error('fn-boom') }",
+                None,
+                &[],
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+        let exc = outcome.exception.expect("expected exception");
+        assert_eq!(exc.text, "Uncaught");
+        assert_eq!(exc.description, "Error: fn-boom");
+        assert_eq!(exc.class_name, "Error");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_call_function_outcome_reports_await_rejection() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let outcome = rt
+            .call_function_on_for_cdp_outcome(
+                "() => Promise.reject(new Error('async-fn-boom'))",
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let exc = outcome.exception.expect("expected exception");
+        assert_eq!(exc.text, "Uncaught (in promise)");
+        assert_eq!(exc.description, "Error: async-fn-boom");
     }
 
     #[tokio::test(flavor = "current_thread")]

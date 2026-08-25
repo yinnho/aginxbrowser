@@ -1,8 +1,9 @@
 use crate::diting_browser::lifecycle::LifecycleState;
-use crate::diting_js::runtime::RemoteObjectInfo;
+use crate::diting_js::runtime::{EvalOutcome, ExceptionInfo, RemoteObjectInfo};
 use serde_json::{json, Value};
 
 use crate::diting_cdp::dispatch::CdpContext;
+use crate::diting_cdp::types::CdpEvent;
 
 /// Whether a binding name is a plain JS identifier and therefore safe to
 /// interpolate into the generated shim / teardown scripts. Chromium bindings
@@ -52,6 +53,54 @@ async fn emit_post_eval_nav(
         reached_idle,
     );
     Ok(())
+}
+
+fn exception_details_json(exc: &ExceptionInfo) -> Value {
+    let mut exception = json!({
+        "type": "object",
+        "subtype": "error",
+        "className": exc.class_name,
+        "description": exc.description,
+    });
+    if let Some(oid) = &exc.object_id {
+        exception["objectId"] = json!(oid);
+    }
+    json!({
+        "exceptionId": 1,
+        "text": exc.text,
+        "lineNumber": 0,
+        "columnNumber": 0,
+        "exception": exception,
+        "executionContextId": 1,
+    })
+}
+
+/// Shape a Runtime.evaluate / callFunctionOn response from an `EvalOutcome`.
+/// A thrown expression returns `result` as the error object AND carries
+/// `exceptionDetails`, and additionally emits `Runtime.exceptionThrown` so
+/// `page.on('pageerror')` listeners fire — matching real Chrome.
+fn evaluate_response(
+    outcome: EvalOutcome,
+    ctx: &mut CdpContext,
+    session_id: &Option<String>,
+) -> Value {
+    let result = remote_object_from_info(&outcome.info);
+    match outcome.exception {
+        None => json!({ "result": result }),
+        Some(exc) => {
+            let details = exception_details_json(&exc);
+            let ts_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as f64)
+                .unwrap_or(0.0);
+            ctx.pending_events.push(CdpEvent {
+                method: "Runtime.exceptionThrown".into(),
+                params: json!({ "timestamp": ts_ms, "exceptionDetails": details.clone() }),
+                session_id: session_id.clone(),
+            });
+            json!({ "result": result, "exceptionDetails": details })
+        }
+    }
 }
 
 pub async fn handle(
@@ -112,15 +161,15 @@ pub async fn handle(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(30_000);
 
-            let info = {
+            let outcome = {
                 let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
                 match tokio::time::timeout(
                     std::time::Duration::from_millis(timeout_ms),
-                    page.evaluate_for_cdp(expression, return_by_value, await_promise),
+                    page.evaluate_for_cdp_outcome(expression, return_by_value, await_promise),
                 )
                 .await
                 {
-                    Ok(info) => info,
+                    Ok(outcome) => outcome,
                     Err(_) => {
                         return Err(format!("Runtime.evaluate exceeded {timeout_ms}ms timeout"));
                     }
@@ -128,7 +177,7 @@ pub async fn handle(
             };
             emit_post_eval_nav(ctx, session_id).await?;
 
-            Ok(json!({ "result": remote_object_from_info(&info) }))
+            Ok(evaluate_response(outcome, ctx, session_id))
         }
         "callFunctionOn" => {
             let function_declaration = params
@@ -157,11 +206,11 @@ pub async fn handle(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(30_000);
 
-            let info = {
+            let outcome = {
                 let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
                 match tokio::time::timeout(
                     std::time::Duration::from_millis(timeout_ms),
-                    page.call_function_on_for_cdp(
+                    page.call_function_on_for_cdp_outcome(
                         function_declaration,
                         object_id,
                         &arguments,
@@ -171,7 +220,7 @@ pub async fn handle(
                 )
                 .await
                 {
-                    Ok(info) => info,
+                    Ok(outcome) => outcome,
                     Err(_) => {
                         return Err(format!(
                             "Runtime.callFunctionOn exceeded {timeout_ms}ms timeout"
@@ -181,7 +230,7 @@ pub async fn handle(
             };
             emit_post_eval_nav(ctx, session_id).await?;
 
-            Ok(json!({ "result": remote_object_from_info(&info) }))
+            Ok(evaluate_response(outcome, ctx, session_id))
         }
         "getProperties" => {
             // Puppeteer's $$() flow: evaluate querySelectorAll → handle for the
