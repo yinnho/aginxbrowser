@@ -13,6 +13,7 @@
 
 # Logs / runtime
 *.log
+cookie-store.json
 
 # Local npx skills install artifacts / session state
 .agents/

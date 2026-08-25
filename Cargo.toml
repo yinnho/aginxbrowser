@@ -85,8 +85,12 @@ futures = "0.3"
 async-trait = "0.1"
 
 # --- web framework ---
-axum = "0.7"
+# `ws` enables axum's WebSocket extractor — the CDP bridge endpoint
+# (diting_cdp) upgrades /devtools/* requests to raw WebSocket frames.
+axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["cors"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+uuid = { version = "1", features = ["v4"] }
 
 # --- MCP (Model Context Protocol) ---
 rmcp = { version = "1.7", features = ["server", "transport-io", "transport-streamable-http-server"] }

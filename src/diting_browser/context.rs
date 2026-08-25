@@ -5,8 +5,7 @@ use crate::diting_net::{CookieJar, HttpClient, RobotsCache};
 
 pub struct BrowserContext {
     /// Context label (upstream names contexts for CDP Target.setAutoAttach
-    /// events; ours is per-request "api" and nothing reads it back yet).
-    #[allow(dead_code)]
+    /// events; the CDP bridge reads it for browserContextId fields).
     pub id: String,
     pub cookie_jar: Arc<CookieJar>,
     pub http_client: Arc<HttpClient>,
@@ -23,11 +22,6 @@ pub struct BrowserContext {
     /// When true, CDP-driven navigation to file:// URLs is permitted.
     /// Default is false: a remote CDP client cannot point the browser
     /// at /etc/shadow even if the engine is running as a privileged user.
-    /// Flip on via the CLI `serve --allow-file-access` for legitimate
-    /// local-HTML testing workflows. The CLI's own `fetch
-    /// file://...` path is unaffected because it does not go through
-    /// the CDP server.
-    #[allow(dead_code)] // read by the CDP file:// guard, which is not absorbed
     pub allow_file_access: bool,
     pub storage_dir: Option<PathBuf>,
     /// When true, the http client allows fetching localhost / RFC1918 /
@@ -179,6 +173,46 @@ impl BrowserContext {
         user_agent: Option<String>,
     ) -> Self {
         Self::_new_inner(id, proxy_url, stealth, user_agent, None, false, None)
+    }
+
+    /// Create a context with the same browser configuration but independent
+    /// mutable network state (claimed from upstream obscura-browser). Persistent
+    /// copies start with the template's current cookies; incognito copies start
+    /// empty and never write to the template's storage directory. Used by the
+    /// CDP bridge for `Target.createBrowserContext` and per-connection
+    /// isolation.
+    pub fn isolated_copy(&self, id: String, persistent: bool) -> Self {
+        let cookie_jar = Arc::new(CookieJar::new());
+        if persistent {
+            cookie_jar.set_cookies_from_cdp(self.cookie_jar.get_all_cookies());
+        }
+
+        let mut client = HttpClient::with_full_options(
+            cookie_jar.clone(),
+            self.proxy_url.as_deref(),
+            self.allow_private_network,
+        );
+        if self.stealth {
+            client.block_trackers = true;
+        }
+        if let Ok(mut guard) = client.user_agent.try_write() {
+            *guard = self.user_agent.clone();
+        }
+
+        BrowserContext {
+            id,
+            cookie_jar,
+            http_client: Arc::new(client),
+            user_agent: self.user_agent.clone(),
+            proxy_url: self.proxy_url.clone(),
+            robots_cache: Arc::new(RobotsCache::new()),
+            obey_robots: self.obey_robots,
+            stealth: self.stealth,
+            allow_file_access: self.allow_file_access,
+            storage_dir: persistent.then(|| self.storage_dir.clone()).flatten(),
+            allow_private_network: self.allow_private_network,
+            tls_fingerprint: self.tls_fingerprint.clone(),
+        }
     }
 
     /// Persist cookies to disk if storage_dir is configured. Currently

@@ -31,6 +31,7 @@ mod diting_dom;
 mod diting_net;
 mod diting_js;
 mod diting_browser;
+mod diting_cdp;
 // Cascade layer absorbed from upstream obscura-render (read-only slice,
 // not yet wired to the product pipeline — see docs/engine/render.md).
 mod diting_css;
@@ -511,7 +512,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/session/:id/scroll", post(session_scroll_handler))
         .route("/session/:id/eval", post(session_eval_handler))
         .route("/session/:id/close", post(session_close_handler))
-        .route("/mcp", get(mcp_handler).post(mcp_handler));
+        .route("/mcp", get(mcp_handler).post(mcp_handler))
+        // CDP bridge — Playwright connectOverCDP / Puppeteer connect surface.
+        .route("/json/version", get(diting_cdp::http::json_version))
+        .route("/json/version/", get(diting_cdp::http::json_version))
+        .route("/json/list", get(diting_cdp::http::json_list))
+        .route("/json/list/", get(diting_cdp::http::json_list))
+        .route("/devtools/:kind/:id", get(diting_cdp::http::devtools_ws));
 
     #[cfg(feature = "screenshot")]
     let app = app.route("/screenshot", post(screenshot_handler));
