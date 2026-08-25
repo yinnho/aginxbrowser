@@ -232,7 +232,7 @@ Integration: read the environment variable `AGINXBROWSER_URL=http://127.0.0.1:80
 
 ## Known Limitations
 
-1. **Screenshots are opt-in**: `/screenshot` requires `cargo build --release --features screenshot` (adds the rendering stack, +30-40MB). The default render pipeline is Blitz-lineage (Stylo/Taffy/vello_cpu); pass `engine: "diting"` for our own CSS+layout+paint stack. Complex-site CSS is approximate on both (not pixel-perfect like Chromium)
+1. **Screenshots are opt-in**: `/screenshot` requires `cargo build --release --features screenshot` (adds the rendering stack, +30-40MB). Default render engine is diting (our own CSS+layout+paint stack); pass `engine: "blitz"` to opt back into the Blitz reference pipeline. Complex-site CSS is approximate on both (not pixel-perfect like Chromium)
 2. **Element coordinates supported (block-level)**: `/screenshot` with `selector` returns element page coordinates (`selector_rects`, CSS px); `selector` alone crops directly to that element. Pure inline elements (`<a>text</a>`) have no independent box — pick a block ancestor
 3. **JS interaction broadly works; heavy-fingerprint pages may still fail**: React/Vue event delegation works normally (URL-reflection attributes like `src`/`href` resolve to absolute URLs so Next.js/webpack hydrate and clicks trigger handlers). Heavy-fingerprint auth pages (WorkOS/Cloudflare) probing `navigator.plugins`, WebGL canvas etc. may still break until stealth fingerprint coverage completes
 4. **Proxy support**: HTTP/HTTPS/SOCKS5 via `AGINXBROWSER_PROXY`

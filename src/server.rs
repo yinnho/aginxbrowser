@@ -549,12 +549,13 @@ pub fn do_screenshot(req: ScreenshotRequest) -> Result<ScreenshotResponse> {
             drop(page);
             drop(browser);
 
-            // Render off-thread-ish: Blitz layout/paint is sync and CPU-bound.
+            // Render off-thread-ish: layout/paint is sync and CPU-bound.
             // We're already on a blocking runtime thread, so just call it directly.
-            // engine=diting swaps in our own css+layout+paint stack (no
-            // Stylo/vello/parley — the render-claim line).
-            let rendered = if req.engine.as_deref() == Some("diting") {
-                crate::screenshot::render_html_to_png_diting(
+            // Default engine is diting — our own css+layout+paint stack (no
+            // Stylo/vello/parley in the path). engine=blitz opts back into
+            // the Blitz reference pipeline for comparison renders.
+            let rendered = if req.engine.as_deref() == Some("blitz") {
+                crate::screenshot::render_html_to_png(
                     &html,
                     &final_url,
                     req.width,
@@ -566,7 +567,7 @@ pub fn do_screenshot(req: ScreenshotRequest) -> Result<ScreenshotResponse> {
                     Some(&resources),
                 )?
             } else {
-                crate::screenshot::render_html_to_png(
+                crate::screenshot::render_html_to_png_diting(
                     &html,
                     &final_url,
                     req.width,

@@ -231,7 +231,7 @@ AginxBrowser 定位是**纯外挂基础设施**——像真实浏览器一样作
 
 ## 已知限制
 
-1. **截图需 opt-in feature**：`/screenshot` 需 `cargo build --release --features screenshot` 启用（加入渲染栈，二进制 +30-40MB）。默认渲染管线为 Blitz 谱系（Stylo/Taffy/vello_cpu）；传 `engine: "diting"` 切到自有 CSS+布局+绘制栈。两者对复杂站点 CSS 均为近似渲染（非 Chromium 像素级精准）
+1. **截图需 opt-in feature**：`/screenshot` 需 `cargo build --release --features screenshot` 启用（加入渲染栈，二进制 +30-40MB）。默认渲染引擎为 diting（自有 CSS+布局+绘制栈）；传 `engine: "blitz"` 可切回 Blitz 参照管线。两者对复杂站点 CSS 均为近似渲染（非 Chromium 像素级精准）
 2. **元素坐标已支持（块级）**：`/screenshot` 带 `selector` 返回元素页面坐标（`selector_rects`，CSS px），`selector`+默认模式直接截该元素区域；坐标与截图同源（Blitz `final_layout`）。纯行内元素（`<a>文字</a>`）无独立盒子，选块级祖先
 3. **JS 交互已大幅可用，重指纹页仍可能失败**：React/Vue 事件委托已正常（`src`/`href` 等 URL 反射属性解析绝对 URL 后，Next.js/webpack 能完成 hydration，点击可触发 handler）。但 WorkOS/Cloudflare 认证页等重指纹站点会检测 `navigator.plugins`、WebGL canvas 等 API，在 stealth 指纹补齐前仍可能崩溃
 4. **代理支持**：HTTP/HTTPS/SOCKS5，通过 `AGINXBROWSER_PROXY` 传入
