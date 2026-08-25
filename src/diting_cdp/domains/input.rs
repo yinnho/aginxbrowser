@@ -229,6 +229,15 @@ pub async fn handle(
                                 try {{ clickTarget.dispatchEvent(globalThis.__diting_markTrusted(new Event('change', {{bubbles:true}}))); }} catch(e) {{}}\
                                 return;\
                             }}\
+                            var labelHost = (clickTarget.matches && !clickTarget.matches('button,input:not([type=hidden]),meter,output,progress,select,textarea,a')) ? (tag === 'LABEL' ? clickTarget : (clickTarget.closest ? clickTarget.closest('label') : null)) : null;\
+                            if (labelHost) {{\
+                                var lblFor = labelHost.getAttribute('for');\
+                                var ctl = null;\
+                                if (lblFor !== null && lblFor !== undefined) ctl = lblFor === '' ? null : document.getElementById(lblFor);\
+                                else if (labelHost.querySelector) ctl = labelHost.querySelector('button,input:not([type=hidden]),meter,output,progress,select,textarea');\
+                                if (ctl && !(ctl.matches && ctl.matches('button,input:not([type=hidden]),meter,output,progress,select,textarea'))) ctl = null;\
+                                if (ctl && ctl !== clickTarget && !ctl.disabled && !ctl.hasAttribute('disabled')) {{ ctl.click(); return; }}\
+                            }}\
                             var link = clickTarget.closest ? clickTarget.closest('a[href]') : null;\
                             if (!link && tag === 'A' && clickTarget.getAttribute('href')) link = clickTarget;\
                             if (link) {{\

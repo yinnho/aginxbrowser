@@ -689,6 +689,25 @@ function _isSubmitButton(el) {
   return false;
 }
 
+// Labelable elements per the HTML spec: button, input (except type=hidden),
+// meter, output, progress, select, textarea. A <label> activates its labeled
+// control: the element referenced by `for`, else the first labelable descendant.
+const _LABELABLE = 'button,input:not([type=hidden]),meter,output,progress,select,textarea';
+function _labeledControl(label) {
+  if (!label || label.tagName !== 'LABEL') return null;
+  // A present `for` attribute means association by id only; an empty value
+  // associates nothing (no fallback to a descendant).
+  const forId = label.getAttribute ? label.getAttribute('for') : null;
+  if (forId !== null && forId !== undefined) {
+    if (forId === '') return null;
+    const doc = label.ownerDocument || globalThis.document;
+    const el = doc && doc.getElementById ? doc.getElementById(forId) : null;
+    if (!el) return null;
+    return el.matches && el.matches(_LABELABLE) ? el : null;
+  }
+  return label.querySelector ? label.querySelector(_LABELABLE) : null;
+}
+
 function __prepareInsertedScript(script) {
   if (!_OPS.op_script_try_start(script._nid)) return;
   const scriptType = (script.getAttribute('type') || '').trim().toLowerCase();
@@ -1699,9 +1718,67 @@ class Element extends Node {
     return cache[name];
   }
   click() {
-    const cancelled = !this.dispatchEvent(new MouseEvent("click", {bubbles: true, cancelable: true}));
-    if (!cancelled) {
-      const link = this.tagName === 'A' ? this : (this.closest ? this.closest('a[href]') : null);
+    // "Click in progress" flag per spec, checked BEFORE any pre-activation
+    // step: a nested .click() on an element whose click is still running must
+    // be a full no-op, not a second state flip. This also stops a control's
+    // handler clicking its own label from bouncing the click back.
+    if (this._ditingClickInProgress) return;
+    this._ditingClickInProgress = true;
+    try {
+      // Pre-click activation steps (HTML spec): a checkbox/radio flips BEFORE the
+      // click event dispatches, so listeners observe the new state, and the flip
+      // reverts if the event is cancelled. Radio groups uncheck same-name peers
+      // up front; a cancel restores every prior state.
+      const tag = this.tagName;
+      const type = (this.getAttribute('type') || '').toLowerCase();
+      const checkable = tag === 'INPUT' && (type === 'checkbox' || type === 'radio');
+      let oldChecked = false, radioStates = null;
+      if (checkable) {
+        oldChecked = !!this.checked;
+        if (type === 'radio') {
+          const name = this.getAttribute('name') || '';
+          if (name) {
+            radioStates = [];
+            const all = (this.ownerDocument || globalThis.document).querySelectorAll('input');
+            for (let i = 0; i < all.length; i++) {
+              const r = all[i];
+              if ((r.getAttribute('type') || '').toLowerCase() !== 'radio') continue;
+              if ((r.getAttribute('name') || '') !== name || r.form !== this.form) continue;
+              radioStates.push([r, !!r.checked]);
+              if (r !== this) r.checked = false;
+            }
+          }
+          this.checked = true;
+        } else {
+          this.checked = !oldChecked;
+        }
+      }
+      const cancelled = !this.dispatchEvent(new MouseEvent("click", {bubbles: true, cancelable: true}));
+      if (cancelled) {
+        if (radioStates) { for (let i = 0; i < radioStates.length; i++) radioStates[i][0].checked = radioStates[i][1]; }
+        else if (checkable) this.checked = oldChecked;
+        return;
+      }
+      if (checkable && this.checked !== oldChecked) {
+        try { this.dispatchEvent(new Event('input', {bubbles: true})); } catch (e) {}
+        try { this.dispatchEvent(new Event('change', {bubbles: true})); } catch (e) {}
+        return;
+      }
+      // Label activation behaviour (HTML spec): activating a label runs a
+      // synthetic click on its labeled control. Interactive elements keep
+      // their own activation, so a control nested inside a label toggles
+      // once instead of forwarding through the label and firing twice.
+      const selfInteractive = this.matches && this.matches(_LABELABLE + ',a');
+      const labelHost = selfInteractive ? null : (tag === 'LABEL' ? this : (this.closest ? this.closest('label') : null));
+      if (labelHost) {
+        const control = _labeledControl(labelHost);
+        // A disabled control has no activation behaviour.
+        if (control && control !== this && !control.disabled && !(control.hasAttribute && control.hasAttribute('disabled'))) {
+          control.click();
+          return;
+        }
+      }
+      const link = tag === 'A' ? this : (this.closest ? this.closest('a[href]') : null);
       if (link) {
         const href = link.getAttribute('href');
         if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
@@ -1709,21 +1786,18 @@ class Element extends Node {
           return;
         }
       }
-      const type = (this.getAttribute('type') || '').toLowerCase();
-      if (type === 'submit' || (this.localName === 'button' && type !== 'button' && type !== 'reset')) {
-        // Same predicate requestSubmit validates against, so an internal
-        // click can never hand it a submitter it would reject. A real
-        // submit-button click fires the cancelable submit event, so use
-        // requestSubmit() — the plain submit() method now bypasses it.
-        if (_isSubmitButton(this)) {
-          const form = this.closest ? this.closest('form') : null;
-          if (form && typeof form.requestSubmit === 'function') {
+      if (_isSubmitButton(this)) {
+        const form = this.closest ? this.closest('form') : null;
+        if (form) {
+          if (typeof form.requestSubmit === 'function') {
             form.requestSubmit(this);
-          } else if (form && typeof form.submit === 'function') {
+          } else if (typeof form.submit === 'function') {
             form.submit(this);
           }
         }
       }
+    } finally {
+      this._ditingClickInProgress = false;
     }
   }
   focus() { globalThis.__diting_focused = this; globalThis.__diting_click_target = this; }

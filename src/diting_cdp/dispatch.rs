@@ -675,4 +675,75 @@ mod tests {
             "click navigated to the second URL: {frame}"
         );
     }
+
+    // A CDP mouse click on a <label for=...> must activate its labeled
+    // control (checkbox flips, input+change fire) — the same activation the
+    // HTMLElement.click() path implements. Without forwarding, Puppeteer's
+    // label.click() on Webflow-style checkbox markup silently no-ops.
+    #[tokio::test(flavor = "current_thread")]
+    async fn input_mouse_click_on_label_activates_control() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = ctx.create_page();
+        let session_id = "sess-label".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({
+                "url": "data:text/html,<label for=c>toggle</label><input type=checkbox id=c>"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        // Point the click at the label (elementFromPoint has no layout in a
+        // data: page; mousePressed falls back to __diting_click_target).
+        let set_target = CdpRequest {
+            id: 2,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "globalThis.__diting_click_target = document.querySelector('label')"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&set_target, &mut ctx).await.error.is_none());
+        ctx.pending_events.clear();
+
+        for (i, ty) in ["mousePressed", "mouseReleased"].iter().enumerate() {
+            let req = CdpRequest {
+                id: 3 + i as u64,
+                method: "Input.dispatchMouseEvent".to_string(),
+                params: json!({
+                    "type": ty,
+                    "x": -1,
+                    "y": -1,
+                    "button": "left",
+                    "clickCount": 1,
+                }),
+                session_id: Some(session_id.clone()),
+            };
+            assert!(
+                dispatch(&req, &mut ctx).await.error.is_none(),
+                "dispatchMouseEvent {ty} failed"
+            );
+        }
+
+        // No Runtime.evaluate after the click either — read state via a fresh
+        // evaluate only once the click has fully landed.
+        let check = CdpRequest {
+            id: 5,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "(function(){var c=document.getElementById('c');return 'checked='+c.checked;})()",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&check, &mut ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        let result = resp.result.expect("result");
+        let value = result["result"]["value"].as_str().expect("string value");
+        assert_eq!(value, "checked=true", "label click activated the checkbox");
+    }
 }
