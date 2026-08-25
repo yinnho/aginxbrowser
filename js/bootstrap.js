@@ -3863,9 +3863,32 @@ function _bodyToUint8Array(body) {
   return new TextEncoder().encode(String(body));
 }
 
-// Latin-1 binary string: one char per byte, the form op_fetch_url's string
-// body channel carries (upstream 260c4c0).
+// Latin-1 binary string: one char per byte (kept for callers that need the
+// legacy form).
 function _bytesToBinaryString(bytes) { let s = ""; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); return s; }
+
+// Base64 of raw bytes — the wire form for request bodies. The old Latin-1
+// binary string corrupted non-UTF-8 byte sequences on the deno #[string]
+// boundary ([0,128,255] became [0,194,128,195,191], upstream obscura #716);
+// base64 is byte-exact across that boundary.
+function _bytesToBase64(bytes) {
+  const c="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let r="";
+  for(let i=0;i<bytes.length;i+=3){
+    const a=bytes[i],b=bytes[i+1],d=bytes[i+2];
+    r+=c[a>>2]+c[((a&3)<<4)|((b??0)>>4)]+(i+1<bytes.length?c[((b&15)<<2)|((d??0)>>6)]:"=")+(i+2<bytes.length?c[d&63]:"=");
+  }
+  return r;
+}
+
+function _concatBytes(arrays) {
+  let total = 0;
+  for (let i = 0; i < arrays.length; i++) total += arrays[i].length;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (let i = 0; i < arrays.length; i++) { out.set(arrays[i], off); off += arrays[i].length; }
+  return out;
+}
 
 function _arrayBufferFromBytes(bytes) {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
@@ -3904,24 +3927,35 @@ globalThis.fetch = async (input, init = {}) => {
   }
   const method = init.method || (input instanceof Request ? input.method : "GET");
   const hdrObj = init.headers instanceof Headers ? Object.fromEntries(init.headers.entries()) : Object.assign({}, init.headers || {});
+  // fetch(request) with no explicit init.body inherits the Request's body
+  // (upstream #716 split, item: "A Request object's inherited body is also
+  // dropped when fetch(request) has no explicit init.body").
+  if (init.body == null && input instanceof Request && input.body != null) {
+    init = { ...init, body: input.body };
+  }
   let body = "";
+  let bodyIsBase64 = false;
   if (init.body != null) {
     if (typeof FormData === "function" && init.body instanceof FormData) {
       // multipart/form-data with a generated boundary, like a real browser.
-      const boundary = "----obscuraFormBoundary" + Math.random().toString(16).slice(2) + Date.now().toString(16);
-      const parts = [];
+      const boundary = "----ditingFormBoundary" + Math.random().toString(16).slice(2) + Date.now().toString(16);
+      const chunks = [];
+      const str = (s) => new TextEncoder().encode(s);
       for (const [k, v] of init.body.entries()) {
         const name = String(k).replace(/"/g, "%22");
         // Blob/File values become a filename part with their own Content-Type
         // (upstream 3eb28da); plain String(v) would send "[object Blob]".
         if (v != null && typeof v === "object" && v._bytes instanceof Uint8Array) {
-          parts.push("--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + name + "\"; filename=\"" + String(v.name || "blob").replace(/"/g, "%22") + "\"\r\nContent-Type: " + (v.type || "application/octet-stream") + "\r\n\r\n" + _bytesToBinaryString(v._bytes) + "\r\n");
+          chunks.push(str("--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + name + "\"; filename=\"" + String(v.name || "blob").replace(/"/g, "%22") + "\"\r\nContent-Type: " + (v.type || "application/octet-stream") + "\r\n\r\n"));
+          chunks.push(v._bytes);
+          chunks.push(str("\r\n"));
         } else {
-          parts.push("--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + name + "\"\r\n\r\n" + String(v) + "\r\n");
+          chunks.push(str("--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + name + "\"\r\n\r\n" + String(v) + "\r\n"));
         }
       }
-      parts.push("--" + boundary + "--\r\n");
-      body = parts.join("");
+      chunks.push(str("--" + boundary + "--\r\n"));
+      body = _bytesToBase64(_concatBytes(chunks));
+      bodyIsBase64 = true;
       if (!Object.keys(hdrObj).some(h => h.toLowerCase() === "content-type")) {
         hdrObj["content-type"] = "multipart/form-data; boundary=" + boundary;
       }
@@ -3935,13 +3969,16 @@ globalThis.fetch = async (input, init = {}) => {
       if (init.body.type && !Object.keys(hdrObj).some(h => h.toLowerCase() === "content-type")) {
         hdrObj["content-type"] = init.body.type;
       }
-      body = _bytesToBinaryString(init.body._bytes);
+      body = _bytesToBase64(init.body._bytes);
+      bodyIsBase64 = true;
     } else if (init.body instanceof ArrayBuffer || ArrayBuffer.isView(init.body)) {
-      body = _bytesToBinaryString(_bodyToUint8Array(init.body));
+      body = _bytesToBase64(_bodyToUint8Array(init.body));
+      bodyIsBase64 = true;
     } else {
       body = String(init.body);
     }
   }
+  if (bodyIsBase64 && body.length) hdrObj["__diting_body_b64"] = "1";
   const hdrs = JSON.stringify(hdrObj);
   const fetchMode = init.mode || (input instanceof Request ? input.mode : "cors");
   const fetchCredentials = init.credentials !== undefined

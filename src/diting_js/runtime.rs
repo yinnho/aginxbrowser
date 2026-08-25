@@ -3406,6 +3406,95 @@ mod tests {
         assert!(typed_raw.ends_with(b"ABC"), "typed body mismatch: {:?}", typed_raw);
     }
 
+    /// Binary request bodies must arrive byte-exact. The deno `#[string]`
+    /// boundary used to UTF-8-encode the Latin-1 binary-string body channel,
+    /// corrupting `[0,128,255]` into `[0,194,128,195,191]` (upstream obscura
+    /// #716). Bodies are now base64-encoded in the JS shim (ASCII-safe across
+    /// that boundary) and decoded in `op_fetch_url`, so non-ASCII bytes survive
+    /// intact across the typed-array, Blob and multipart File paths.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_binary_bodies_are_byte_exact() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (req_tx, req_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for _ in 0..3 {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 4096];
+                let mut header_end = None;
+                let mut content_len = 0usize;
+                loop {
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    if n == 0 { break; }
+                    raw.extend_from_slice(&buf[..n]);
+                    if header_end.is_none() {
+                        if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                            header_end = Some(pos + 4);
+                            let head = String::from_utf8_lossy(&raw[..pos]);
+                            for line in head.lines() {
+                                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                                    content_len = v.trim().parse().unwrap_or(0);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(end) = header_end {
+                        if raw.len() >= end + content_len { break; }
+                    }
+                }
+                req_tx.send(raw).unwrap();
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                );
+                let _ = stream.flush();
+            }
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/", port));
+        let result = rt.call_function_on_for_cdp(
+            r#"async (port) => {
+                const u8 = new Uint8Array([0, 128, 255, 16]);
+                await fetch("http://127.0.0.1:" + port + "/typed", { method: "POST", body: u8 });
+                await fetch("http://127.0.0.1:" + port + "/blob", { method: "POST", body: new Blob([u8]) });
+                const fd = new FormData();
+                fd.append("f", new File([u8], "b.bin", { type: "application/octet-stream" }));
+                await fetch("http://127.0.0.1:" + port + "/fd", { method: "POST", body: fd });
+                return "ok";
+            }"#,
+            None,
+            &[serde_json::json!({ "value": port })],
+            true,
+            true,
+        ).await.unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+        assert_eq!(result.value.unwrap(), serde_json::json!("ok"));
+
+        let body_bytes = |raw: &[u8]| -> Vec<u8> {
+            let pos = raw.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4).unwrap_or(0);
+            raw[pos..].to_vec()
+        };
+
+        let typed = req_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(body_bytes(&typed), vec![0, 128, 255, 16], "typed array body corrupted: {:?}", &typed[typed.len().saturating_sub(16)..]);
+
+        let blob = req_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(body_bytes(&blob), vec![0, 128, 255, 16], "blob body corrupted");
+
+        let fd = req_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let needle = [0u8, 128, 255, 16];
+        assert!(
+            fd.windows(4).any(|w| w == needle),
+            "multipart file part corrupted: {:?}",
+            &fd[fd.len().saturating_sub(48)..]
+        );
+    }
+
     /// RequestCredentials end-to-end (upstream b744b9b): same-origin (the
     /// default) neither sends nor stores cookies cross-origin; "include" does
     /// both, and a credentialed CORS response without Allow-Credentials +

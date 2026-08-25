@@ -1096,6 +1096,19 @@ async fn op_fetch_url(
         }
     }
 
+    // The JS shim sets this out-of-band header to signal that `body` is
+    // base64-encoded raw bytes (upstream obscura #716). Detected from the
+    // original headers_json, before any interception rewrite, since a
+    // Continue rewrite supplies a plain-text body, never the base64 wire form.
+    let body_is_base64 = serde_json::from_str::<serde_json::Value>(&headers_json)
+        .ok()
+        .and_then(|v| {
+            v.get("__diting_body_b64")
+                .and_then(|x| x.as_str())
+                .map(|s| s == "1")
+        })
+        .unwrap_or(false);
+
     let (cookie_jar, in_flight, intercept_tx, proxy_url, http_client, callbacks) = {
         let state_borrow = state.borrow();
         let gs = state_borrow.borrow::<SharedState>().clone();
@@ -1197,7 +1210,17 @@ async fn op_fetch_url(
         url
     };
     let method = override_method.unwrap_or(method);
-    let body = override_body.unwrap_or(body);
+    // An interception Continue rewrite supplies a plain-text body, never the
+    // base64 wire form, so the base64 flag applies only to the original body.
+    let (body, body_is_base64) = match override_body {
+        Some(b) => (b, false),
+        None => (body, body_is_base64),
+    };
+    let body_bytes: Vec<u8> = if body_is_base64 {
+        BASE64.decode(&body).unwrap_or_default()
+    } else {
+        body.into_bytes()
+    };
     let headers_json = match override_headers {
         Some(h) => serde_json::to_string(&h).unwrap_or(headers_json),
         None => headers_json,
@@ -1223,8 +1246,11 @@ async fn op_fetch_url(
 
     let req_method: reqwest::Method = method.parse().unwrap_or(reqwest::Method::GET);
 
-    let custom_headers: std::collections::HashMap<String, String> =
+    let mut custom_headers: std::collections::HashMap<String, String> =
         serde_json::from_str(&headers_json).unwrap_or_default();
+    // The out-of-band base64 marker must not leak to the wire or into the
+    // preflight Access-Control-Request-Headers list.
+    custom_headers.remove("__diting_body_b64");
 
     let needs_preflight = is_cross_origin
         && mode == "cors"
@@ -1275,7 +1301,7 @@ async fn op_fetch_url(
     // (GHSA-8v6v-g4rh-jmcm).
     let mut current_url = url.clone();
     let mut current_method = req_method;
-    let mut current_body = body;
+    let mut current_body = body_bytes;
     let mut redirects_followed: usize = 0;
 
     // Passive on_request observers (upstream #408): fire with the request as
