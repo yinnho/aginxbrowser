@@ -51,7 +51,7 @@ Apache-2.0 open source, single binary — self-host today, no cloud lock-in.
 ## Capabilities
 
 - **Tiered rendering**: static pages over plain HTTP (~100ms); V8 spins up only when JS rendering is needed (~1-2s) — 10x faster on ~80% of pages
-- **Multi-engine meta-search**: Baidu / Bing / Sogou / Sogou WeChat / Google for the general web, plus code sources (Stack Overflow, GitHub) and academic sources (arXiv) — queried concurrently, merged and deduplicated, with optional content extraction. Operators can plug a private Meilisearch index into the same `/search`. Search → read in one step
+- **Multi-engine meta-search**: general web (Baidu / Bing / Sogou / WeChat / Google), news (Bing News), code (Stack Overflow, GitHub), packages (npm, PyPI), academic (arXiv), AI models (Hugging Face) — queried concurrently, merged and deduplicated. Operators can plug a private Meilisearch index into the same `/search`. Search → read in one step
 - **Image search**: `categories=images` hits Baidu/Bing image indexes and returns direct binary `image_url` links (downloadable straight to jpg/png) plus `source_url` provenance
 - **Interactive sessions**: persistent browser sessions with indexed interaction (`state/click/input/scroll/eval`) — agents browse like humans do
 - **CAPTCHA auto-solve**: type detection with optional 2captcha integration — search never stalls on verification pages
@@ -167,6 +167,10 @@ aginxbrowser/
     │   ├── stackexchange.rs #   Stack Overflow (SE API v2.3, code category)
     │   ├── github_repos.rs  #   GitHub repos (api.github.com, code category)
     │   ├── arxiv.rs         #   arXiv (Atom API, academic category)
+    │   ├── bing_news.rs     #   Bing News RSS (news category; proxy-first)
+    │   ├── huggingface.rs   #   HF Hub models/datasets/spaces (ai category)
+    │   ├── npm.rs           #   npm packages (npms.io API, packages category)
+    │   ├── pypi.rs          #   PyPI name resolution (JSON API, packages)
     │   └── meilisearch.rs   #   Private-index adapter (env-configured)
     │
     ├── diting_dom/          # HTML parsing, DOM tree, CSS selectors

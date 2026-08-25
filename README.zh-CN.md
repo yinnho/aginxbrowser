@@ -49,7 +49,7 @@ Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操
 ## 核心能力
 
 - **分层渲染**：静态页面纯 HTTP 直取（~100ms），需要 JS 渲染时才启动 V8（~1-2s），80% 页面加速 10x
-- **多引擎聚合搜索**：通用网页走百度/Bing/搜狗/搜狗微信/Google，代码类接 Stack Overflow/GitHub，学术类接 arXiv——并发查询、合并去重、可选自动抓正文；运维还可把私有 Meilisearch 索引接入同一 `/search`。Agent 一步完成"搜→读"
+- **多引擎聚合搜索**：通用网页（百度/Bing/搜狗/搜狗微信/Google）、新闻（Bing News）、代码（Stack Overflow/GitHub）、包（npm/PyPI）、学术（arXiv）、AI 模型（Hugging Face）——并发查询、合并去重、可选自动抓正文；运维还可把私有 Meilisearch 索引接入同一 `/search`。Agent 一步完成"搜→读"
 - **图片搜索**：`categories=images` 接百度图片/必应图片，返回 `image_url` 二进制直链（`curl -o` 可直接下成 jpg/png）+ `source_url` 溯源，Agent 自主补真实素材
 - **交互式 Session**：持久化浏览器会话，索引化交互（state/click/input/scroll/eval），AI Agent 像人一样浏览网页
 - **CAPTCHA 自动解决**：检测验证码类型，可选 2captcha 自动解决，搜索不再卡死
@@ -165,6 +165,10 @@ aginxbrowser/
     │   ├── stackexchange.rs #   Stack Overflow（SE API v2.3，code 类）
     │   ├── github_repos.rs  #   GitHub 仓库（api.github.com，code 类）
     │   ├── arxiv.rs         #   arXiv（Atom API，academic 类）
+    │   ├── bing_news.rs     #   必应新闻 RSS（news 类；走代理）
+    │   ├── huggingface.rs   #   HF 模型/数据集/Spaces（ai 类）
+    │   ├── npm.rs           #   npm 包（npms.io API，packages 类）
+    │   ├── pypi.rs          #   PyPI 包名解析（JSON API，packages 类）
     │   └── meilisearch.rs   #   私有索引适配器（env 配置）
     │
     ├── diting_dom/          # HTML 解析、DOM 树、CSS 选择器
