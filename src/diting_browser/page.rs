@@ -1921,6 +1921,15 @@ impl Page {
         }
     }
 
+    /// Drain queued console calls (level, message) for CDP `Runtime.consoleAPICalled`.
+    pub fn take_pending_console_calls(&self) -> Vec<(String, String)> {
+        if let Some(js) = &self.js {
+            js.take_pending_console_calls()
+        } else {
+            Vec::new()
+        }
+    }
+
     #[cfg_attr(not(test), allow(dead_code))] // engine path is live (init_js runs these); no bin caller registers one yet
     pub fn set_preload_scripts(&mut self, scripts: Vec<String>) {
         self.preload_scripts = scripts;

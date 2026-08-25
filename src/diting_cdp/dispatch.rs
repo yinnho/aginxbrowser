@@ -327,6 +327,7 @@ pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
     };
 
     drain_binding_calls(ctx);
+    drain_console_calls(ctx);
 
     match result {
         Ok(value) => CdpResponse::success(req.id, value, req.session_id.clone()),
@@ -392,13 +393,75 @@ pub(crate) fn drain_binding_calls(ctx: &mut CdpContext) {
             for session_id in targets {
                 events.push(CdpEvent {
                     method: "Runtime.bindingCalled".into(),
-                    // Use executionContextId=2: the default main-frame context
-                    // emitted post-navigation. Puppeteer matches on session_id
-                    // + binding name and tolerates any registered context id.
+                    // Use executionContextId=1: the default main-frame context
+                    // emitted by Runtime.enable and post-navigation. Playwright's
+                    // _onBindingCalled only fires for a registered context id, so
+                    // a bogus id silently drops the callback.
                     params: json!({
                         "name": name,
                         "payload": payload,
-                        "executionContextId": 2,
+                        "executionContextId": 1,
+                    }),
+                    session_id: Some(session_id.to_string()),
+                });
+            }
+        }
+    }
+    ctx.pending_events.extend(events);
+}
+
+// Drain every page's console-call queue (filled when page JS calls
+// `console.log`/`warn`/`error`, which the bootstrap shim routes through
+// `op_console_msg`) and turn each into a `Runtime.consoleAPICalled` CDP event.
+// Called after every dispatch, right after `drain_binding_calls`, so console
+// output produced during a CDP handler becomes visible to the client on the
+// same turn.
+pub(crate) fn drain_console_calls(ctx: &mut CdpContext) {
+    let mut page_to_sessions: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (session_id, page_id) in &ctx.sessions {
+        page_to_sessions
+            .entry(page_id.as_str())
+            .or_default()
+            .push(session_id.as_str());
+    }
+    for sessions in page_to_sessions.values_mut() {
+        sessions.sort_unstable();
+    }
+
+    let ts_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(0.0);
+
+    let mut events: Vec<CdpEvent> = Vec::new();
+    for page in &mut ctx.pages {
+        let calls = page.take_pending_console_calls();
+        if calls.is_empty() {
+            continue;
+        }
+        let Some(page_sessions) = page_to_sessions.get(page.id.as_str()) else {
+            continue;
+        };
+        for (level, msg) in calls {
+            let cdp_type = match level.as_str() {
+                "warn" => "warning",
+                "error" => "error",
+                _ => "log",
+            };
+            for session_id in page_sessions {
+                events.push(CdpEvent {
+                    method: "Runtime.consoleAPICalled".into(),
+                    params: json!({
+                        "type": cdp_type,
+                        // The bootstrap shim stringifies each argument before
+                        // handing it to op_console_msg, so a console.log(a, b)
+                        // arrives here as one joined string. Emit it as a single
+                        // string RemoteObject — enough for a client to show the
+                        // line, matching the engine's pre-existing arg handling.
+                        "args": [{ "type": "string", "value": msg }],
+                        "executionContextId": 1,
+                        "timestamp": ts_ms,
+                        "stackTrace": { "callFrames": [] },
                     }),
                     session_id: Some(session_id.to_string()),
                 });

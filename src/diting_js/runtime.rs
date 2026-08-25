@@ -332,6 +332,12 @@ impl JsRuntime {
         std::mem::take(&mut self.state.borrow_mut().pending_binding_calls)
     }
 
+    /// Drain queued console calls (level, message) captured by `op_console_msg`.
+    /// The CDP layer turns each into a `Runtime.consoleAPICalled` event.
+    pub fn take_pending_console_calls(&self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.state.borrow_mut().pending_console_calls)
+    }
+
     /// Wire up the interception channel without enabling interception.
     /// Use set_intercept_enabled separately. The two were entangled before
     /// and every navigation auto-enabled interception, which made
@@ -1813,6 +1819,27 @@ mod tests {
     fn test_console_log() {
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script("test", "console.log('Hello from V8!')").unwrap();
+    }
+
+    #[test]
+    fn test_console_calls_are_queued_for_cdp() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.execute_script(
+            "test",
+            "console.log('hello'); console.warn('careful'); console.error('boom')",
+        )
+        .unwrap();
+        assert_eq!(
+            rt.take_pending_console_calls(),
+            vec![
+                ("log".to_string(), "hello".to_string()),
+                ("warn".to_string(), "careful".to_string()),
+                ("error".to_string(), "boom".to_string()),
+            ]
+        );
+        // take() drains: a second take sees nothing, so the CDP layer can't
+        // re-emit the same console line on the next dispatch.
+        assert!(rt.take_pending_console_calls().is_empty());
     }
 
     #[test]

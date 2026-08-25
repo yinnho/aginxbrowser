@@ -69,6 +69,11 @@ pub struct JsState {
     // `op_binding_called` op. Drained by the CDP layer after each dispatch
     // and emitted as `Runtime.bindingCalled` events.
     pub pending_binding_calls: Vec<(String, String)>,
+    // Queue of (level, message) console calls made by page JS via the
+    // `op_console_msg` op. Drained by the CDP layer after each dispatch and
+    // emitted as `Runtime.consoleAPICalled` events so console output is
+    // visible to Playwright/Puppeteer instead of only the tracing log.
+    pub pending_console_calls: Vec<(String, String)>,
     /// The document's input stream for `document.write()`, created on the
     /// first call. Why the calls share one parser is in `write_stream`.
     pub(crate) write_stream: std::cell::RefCell<Option<crate::diting_js::write_stream::DocumentWriteStream>>,
@@ -194,6 +199,7 @@ impl JsState {
             intercept_counter: 0,
             intercept_enabled: false,
             pending_binding_calls: Vec::new(),
+            pending_console_calls: Vec::new(),
             write_stream: std::cell::RefCell::new(None),
             already_started_scripts: RefCell::new(HashSet::new()),
             import_map: Rc::new(RefCell::new(crate::diting_js::import_map::ImportMap::default())),
@@ -909,12 +915,15 @@ fn compare_node_order(dom: &DomTree, a: NodeId, b: NodeId) -> i32 {
 
 #[op2(fast)]
 fn op_console_msg(state: &OpState, #[string] level: &str, #[string] msg: &str) {
-    let _ = state;
     match level {
         "warn" => tracing::warn!(target: "diting::console", "{}", msg),
         "error" => tracing::error!(target: "diting::console", "{}", msg),
         _ => tracing::info!(target: "diting::console", "{}", msg),
     }
+    let gs = state.borrow::<SharedState>().clone();
+    let mut gs = gs.borrow_mut();
+    gs.pending_console_calls
+        .push((level.to_string(), msg.to_string()));
 }
 
 // op_fetch_url backs JS-level `fetch()` and XHR. Pre-#139 it used a
