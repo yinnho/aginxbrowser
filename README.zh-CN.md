@@ -203,7 +203,7 @@ cargo build --release --features stealth,screenshot
 | `AGINXBROWSER_STEALTH` | 启用 | `0` 关闭 stealth（诊断用） |
 | `AGINXBROWSER_UA` | Linux Chrome145 | 伪装 UA |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language |
-| `AGINXBROWSER_PROXY` | 无 | 代理地址，`use_proxy:true` 时使用 |
+| `AGINXBROWSER_PROXY` | 无 | 可选回退代理。被墙源引擎（Google/Bing News/Hugging Face）先直连、失败才走此代理——海外部署无需配置；单次请求也可传 `use_proxy:true` 走代理 |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 缓存 TTL，`0` 禁用 |
 | `CAPTCHA_SOLVER_API_KEY` | 无 | 2captcha API Key，设置后自动解决验证码 |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | 验证码解决服务 |

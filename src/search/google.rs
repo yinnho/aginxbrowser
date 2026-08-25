@@ -15,7 +15,9 @@ pub struct GoogleEngine {
 
 impl GoogleEngine {
     pub fn new() -> Self {
-        // Google needs proxy; build reqwest client with SOCKS5h proxy.
+        // The proxied client is only used as a fallback (see search()); the
+        // primary path is a plain direct connection — overseas deployments
+        // never need a proxy at all.
         let proxy_url = crate::config::proxy_from_env();
         let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
@@ -70,17 +72,45 @@ impl SearchEngine for GoogleEngine {
 
         // Use GSA (Google Search App) User-Agent — Google returns server-rendered
         // HTML for GSA requests. The "NSTNWV" suffix is critical (SearXNG trick).
-        let resp = self.client.get(&url)
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.9869.1911 Mobile Safari/537.36 NSTNWV")
-            .header("Accept", "*/*")
-            .header("Accept-Encoding", "gzip, deflate")
-            .header("Accept-Language", "en,en-US;q=0.7,en;q=0.3")
-            .header("Cache-Control", "no-cache")
-            .header("DNT", "1")
-            .header("Cookie", "CONSENT=YES+")
-            .send()
-            .await
-            .map_err(|e| SearchEngineError::Transient(format!("fetch error: {e}")))?;
+        // Direct first; on a transport-level failure (blocked target) retry once
+        // through the proxied client when AGINXBROWSER_PROXY is configured.
+        let gsa_headers = [
+            ("User-Agent", "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.9869.1911 Mobile Safari/537.36 NSTNWV"),
+            ("Accept", "*/*"),
+            ("Accept-Encoding", "gzip, deflate"),
+            ("Accept-Language", "en,en-US;q=0.7,en;q=0.3"),
+            ("Cache-Control", "no-cache"),
+            ("DNT", "1"),
+            ("Cookie", "CONSENT=YES+"),
+        ];
+        let mut last_err = String::new();
+        let resp = {
+            let mut attempt = self.client.get(&url);
+            for (k, v) in &gsa_headers {
+                attempt = attempt.header(*k, *v);
+            }
+            match attempt.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err = format!("direct: {e}");
+                    let mut builder = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(15))
+                        .redirect(reqwest::redirect::Policy::none());
+                    if let Some(proxy) = crate::config::proxy_from_env() {
+                        let proxy_str = if proxy.starts_with("socks5://") && !proxy.starts_with("socks5h://") { format!("socks5h{}", &proxy[7..]) } else { proxy };
+                        if let Ok(p) = reqwest::Proxy::all(&proxy_str) { builder = builder.proxy(p); }
+                    }
+                    let fallback = builder.build().map_err(|e| SearchEngineError::Transient(format!("proxy client build: {e}")))?;
+                    let mut attempt = fallback.get(&url);
+                    for (k, v) in &gsa_headers {
+                        attempt = attempt.header(*k, *v);
+                    }
+                    attempt.send().await.map_err(|e| {
+                        SearchEngineError::Transient(format!("{last_err} + proxy: {e}"))
+                    })?
+                }
+            }
+        };
 
         let status = resp.status();
         if status.is_redirection() {

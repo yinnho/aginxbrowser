@@ -782,3 +782,100 @@ mod tests {
         assert_eq!(merged[0].cookies, vec!["session=abc"]);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Direct-first proxy fallback (auto mode)
+// ---------------------------------------------------------------------------
+
+/// Fetch `url` with GET, **direct first**; retry through the proxy when the
+/// direct attempt fails at transport level (connect/timeout — the signature
+/// of a blocked target) OR when the returned body fails `body_ok` (the
+/// signature of a geo-substituted page, e.g. Bing News redirecting CN users
+/// to a portal). HTTP-level outcomes are otherwise not retried.
+///
+/// This makes blocked-source engines work for both deployment classes:
+/// overseas operators never configure a proxy and everything connects
+/// directly; CN operators set AGINXBROWSER_PROXY once and blocked targets
+/// automatically fall through to it. No per-request use_proxy flag needed.
+pub async fn get_direct_first<F>(
+    url: &str,
+    headers: &[(&str, &str)],
+    build_proxied_client: F,
+) -> Result<String, SearchEngineError>
+where
+    F: FnOnce() -> Option<reqwest::Client>,
+{
+    get_direct_first_if(url, headers, build_proxied_client, |_| true).await
+}
+
+/// Same as [`get_direct_first`] with a body-validity predicate: when the
+/// direct response's body fails `body_ok`, the proxy retry runs even though
+/// the HTTP layer succeeded.
+pub async fn get_direct_first_if<F>(
+    url: &str,
+    headers: &[(&str, &str)],
+    build_proxied_client: F,
+    body_ok: impl Fn(&str) -> bool,
+) -> Result<String, SearchEngineError>
+where
+    F: FnOnce() -> Option<reqwest::Client>,
+{
+    let plain = build_plain_client(12);
+    let mut last_err = String::new();
+
+    // Attempt 1: direct.
+    let mut req = plain.get(url);
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let direct_body: Option<String> = match req.send().await {
+        Ok(resp) => match resp.text().await {
+            Ok(body) => {
+                if body_ok(&body) {
+                    return Ok(body);
+                }
+                last_err = "direct: body failed validation (geo-substituted?)".into();
+                None
+            }
+            Err(_) => {
+                last_err = "direct: read body failed".into();
+                None
+            }
+        },
+        Err(e) => {
+            last_err = format!("direct: {e}");
+            None
+        }
+    };
+    if let Some(body) = direct_body {
+        return Ok(body);
+    }
+
+    // Attempt 2: proxied retry, only when a proxy is configured.
+    if let Some(proxied) = build_proxied_client() {
+        tracing::info!(
+            "search: direct fetch of {} unusable ({}); retrying via proxy",
+            url,
+            last_err
+        );
+        let mut req = proxied.get(url);
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        return match req.send().await {
+            Ok(resp) => resp.text().await.map_err(|e| {
+                SearchEngineError::Transient(format!("proxy: read body failed: {e}"))
+            }),
+            Err(e) => Err(SearchEngineError::Transient(format!(
+                "direct ({last_err}) + proxy: {e}"
+            ))),
+        };
+    }
+
+    // No proxy configured — hand back whatever the direct attempt produced
+    // so engines can distinguish "wrong content" from "no connection".
+    match direct_body {
+        Some(body) => Ok(body),
+        None => Err(SearchEngineError::Transient(last_err)),
+    }
+}

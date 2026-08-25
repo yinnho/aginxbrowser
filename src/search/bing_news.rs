@@ -5,42 +5,44 @@ use super::{SearchParams, RawSearchResult, SearchEngine, SearchEngineError};
 /// Bing News via the RSS output format (`format=RSS`) — the same route
 /// SearXNG's bing_news engine effectively serves when HTML scraping breaks.
 ///
-/// Geo reality: from China, www.bing.com 302s to cn.bing.com, which kills the
-/// news vertical (302 to /). So this engine is **proxy-first**: it builds an
-/// AGINXBROWSER_PROXY-routed client like google.rs does. Without a proxy configured
-/// from a CN network every request lands on the portal page and surfaces as a
-/// Transient error — the registry skips it for that call and other engines
-/// cover the query.
-pub struct BingNewsEngine {
-    client: reqwest::Client,
-}
+/// Connectivity is auto-sensed per request, not bound at startup: direct
+/// first; on a geo-redirect (www.bing.com → cn.bing.com, which kills the
+/// news vertical) or a transport failure, retry once through
+/// AGINXBROWSER_PROXY when configured. Overseas deployments connect
+/// directly with no proxy at all; CN deployments set it once and blocked
+/// targets fall through automatically.
+pub struct BingNewsEngine;
 
 impl BingNewsEngine {
     pub fn new() -> Self {
-        let proxy_url = crate::config::proxy_from_env();
-        let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(12))
-            .redirect(reqwest::redirect::Policy::none());
+        BingNewsEngine
+    }
 
-        if let Some(proxy) = proxy_url {
+    fn proxied_client() -> Option<reqwest::Client> {
+        crate::config::proxy_from_env().map(|proxy| {
             let proxy_str = if proxy.starts_with("socks5://") && !proxy.starts_with("socks5h://") {
                 format!("socks5h{}", &proxy[7..])
             } else {
                 proxy
             };
+            let mut builder = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(12))
+                .redirect(reqwest::redirect::Policy::none());
             match reqwest::Proxy::all(&proxy_str) {
                 Ok(p) => builder = builder.proxy(p),
                 Err(e) => tracing::warn!("bing_news proxy '{}' ignored: {}", proxy_str, e),
             }
-        }
-
-        BingNewsEngine {
-            client: builder
+            builder
                 .build()
-                .expect("failed to build reqwest client for bing_news"),
-        }
+                .expect("failed to build proxied reqwest client for bing_news")
+        })
     }
 }
+
+const BN_HEADERS: &[(&str, &str)] = &[(
+    "User-Agent",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+)];
 
 #[async_trait]
 impl SearchEngine for BingNewsEngine {
@@ -65,30 +67,15 @@ impl SearchEngine for BingNewsEngine {
             first,
         );
 
-        let resp = self
-            .client
-            .get(&url)
-            .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
-            .send()
-            .await
-            .map_err(|e| SearchEngineError::Transient(format!("fetch error: {e}")))?;
-
-        if resp.status().is_redirection() {
-            // Geo-redirect to cn.bing.com = no proxy or proxy exit in CN.
-            return Err(SearchEngineError::Transient(
-                "bing news geo-redirected (needs non-CN proxy exit)".into(),
-            ));
+        // Direct first. The CN geo-302 chain lands on an HTML portal page —
+        // an HTTP-level success transport errors can't flag. body_ok makes
+        // the helper retry through the proxy whenever the direct body isn't
+        // RSS (the blocked-target signature for this engine).
+        fn is_rss(body: &str) -> bool {
+            body.contains("<rss") || body.contains("<item>")
         }
-        if !resp.status().is_success() {
-            return Err(SearchEngineError::Transient(format!(
-                "HTTP {} from bing news",
-                resp.status()
-            )));
-        }
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| SearchEngineError::Transient(format!("read error: {e}")))?;
+        let body =
+            super::get_direct_first_if(&url, BN_HEADERS, Self::proxied_client, is_rss).await?;
         parse_bing_news_rss(&body)
     }
 }

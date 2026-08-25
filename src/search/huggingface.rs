@@ -6,12 +6,14 @@ use super::{SearchParams, RawSearchResult, SearchEngine, SearchEngineError};
 /// keyless). "ai" category source: models/datasets for agents that need to
 /// pick a checkpoint, a dataset, or a Space.
 ///
-/// huggingface.co is unreachable from CN networks directly — like google.rs,
-/// the client routes through AGINXBROWSER_PROXY when set (socks5h for remote DNS).
-/// Without a proxy from a blocked network every call times out as Transient
-/// and the engine is simply skipped for that query.
+/// Connectivity is auto-sensed per request, not bound at startup: the fetch
+/// goes **direct first** and falls back to AGINXBROWSER_PROXY only when the
+/// direct attempt fails at transport level (the signature of a blocked
+/// target). Overseas deployments never configure a proxy and connect
+/// directly; CN deployments set it once and blocked targets fall through
+/// automatically. Without any proxy on a blocked network every call times
+/// out as Transient and the engine is simply skipped for that query.
 pub struct HuggingFaceEngine {
-    client: reqwest::Client,
     endpoint: String,
 }
 
@@ -22,31 +24,39 @@ impl HuggingFaceEngine {
 
     /// `models` | `datasets` | `spaces` — same API shape, different hub path.
     pub fn with_endpoint(endpoint: &str) -> Self {
-        let proxy_url = crate::config::proxy_from_env();
-        let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(12))
-            .redirect(reqwest::redirect::Policy::none());
+        HuggingFaceEngine {
+            endpoint: endpoint.to_string(),
+        }
+    }
 
-        if let Some(proxy) = proxy_url {
+    fn proxied_client() -> Option<reqwest::Client> {
+        crate::config::proxy_from_env().map(|proxy| {
             let proxy_str = if proxy.starts_with("socks5://") && !proxy.starts_with("socks5h://") {
                 format!("socks5h{}", &proxy[7..])
             } else {
                 proxy
             };
+            let mut builder = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(12))
+                .redirect(reqwest::redirect::Policy::none());
             match reqwest::Proxy::all(&proxy_str) {
                 Ok(p) => builder = builder.proxy(p),
                 Err(e) => tracing::warn!("huggingface proxy '{}' ignored: {}", proxy_str, e),
             }
-        }
-
-        HuggingFaceEngine {
-            client: builder
+            builder
                 .build()
-                .expect("failed to build reqwest client for huggingface"),
-            endpoint: endpoint.to_string(),
-        }
+                .expect("failed to build proxied reqwest client for huggingface")
+        })
     }
 }
+
+const HF_HEADERS: &[(&str, &str)] = &[
+    ("Accept", "application/json"),
+    (
+        "User-Agent",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+    ),
+];
 
 #[async_trait]
 impl SearchEngine for HuggingFaceEngine {
@@ -78,28 +88,7 @@ impl SearchEngine for HuggingFaceEngine {
             urlencoding::encode(query),
         );
 
-        let resp = self
-            .client
-            .get(&url)
-            .header("Accept", "application/json")
-            .header(
-                "User-Agent",
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-            )
-            .send()
-            .await
-            .map_err(|e| SearchEngineError::Transient(format!("fetch error: {e}")))?;
-
-        if !resp.status().is_success() {
-            return Err(SearchEngineError::Transient(format!(
-                "HTTP {} from huggingface.co",
-                resp.status()
-            )));
-        }
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| SearchEngineError::Transient(format!("read error: {e}")))?;
+        let body = super::get_direct_first(&url, HF_HEADERS, Self::proxied_client).await?;
         parse_huggingface_json(&body, &self.endpoint)
     }
 }
