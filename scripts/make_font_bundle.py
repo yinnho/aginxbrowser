@@ -7,8 +7,10 @@ installed (render claim batch 3c) — the determinism gap upstream obscura-rende
 leaves by design (zero CJK).
 
 Source: Noto Sans SC (OFL) variable font, instanced at wght=400/700, subset to
-full GB2312 (6763 chars — effectively all modern simplified Chinese) + ASCII.
-~2.4MB per weight; rare chars outside GB2312 fall through to system fonts
+full GB2312 (6763 chars — effectively all modern simplified Chinese) + ASCII +
+the common non-GB2312 symbol blocks (Latin-1, General Punctuation, Arrows,
+Geometric/Misc Symbols, Dingbats — the ·/—/✓ tail GB2312's codec omits).
+~2.5MB per weight; rare chars outside that still fall through to system fonts
 (the injected fontique collection keeps system_fonts on as a tail fallback).
 
     python3 scripts/make_font_bundle.py /tmp/NotoSansSC-var.ttf
@@ -33,6 +35,24 @@ def gb2312_charset() -> str:
                 chars.add(bytes([hi, lo]).decode("gb2312"))
             except UnicodeDecodeError:
                 pass
+    # The GB2312 codec's symbol row omits several common punctuation/symbol
+    # glyphs (· U+00B7, — U+2014, ✓ U+2713, →, ●, …) that real pages use — see
+    # diting-font-fallback-gap. Pull the whole Latin-1 + General-Punctuation +
+    # Arrows + Geometric/Misc-Symbols + Dingbats ranges straight from Noto Sans
+    # SC's coverage. fontTools.subset silently drops any codepoint the source
+    # lacks, so the extra ranges are a no-op where Noto has no glyph.
+    for lo in range(0x00A0, 0x0100):  # Latin-1 Supplement
+        chars.add(chr(lo))
+    for lo in range(0x2000, 0x2070):  # General Punctuation
+        chars.add(chr(lo))
+    for lo in range(0x2190, 0x2200):  # Arrows
+        chars.add(chr(lo))
+    for lo in range(0x25A0, 0x2600):  # Geometric Shapes
+        chars.add(chr(lo))
+    for lo in range(0x2600, 0x2700):  # Miscellaneous Symbols
+        chars.add(chr(lo))
+    for lo in range(0x2700, 0x27C0):  # Dingbats
+        chars.add(chr(lo))
     return "".join(sorted(chars))
 
 
@@ -69,7 +89,7 @@ def main() -> None:
         )
     OUT.mkdir(parents=True, exist_ok=True)
     charset = gb2312_charset()
-    print(f"charset: {len(charset)} chars (GB2312 + ASCII)")
+    print(f"charset: {len(charset)} chars (GB2312 + ASCII + symbol blocks)")
     build(src, 400, charset, OUT / "diting-cjk-regular.ttf")
     build(src, 700, charset, OUT / "diting-cjk-bold.ttf")
 

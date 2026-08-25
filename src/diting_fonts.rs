@@ -3,8 +3,10 @@
 //! `/screenshot` used to depend on the server having `fonts-noto-cjk`
 //! installed — same environment dependency that leaves upstream
 //! obscura-render unable to draw Chinese at all. This module embeds a
-//! GB2312-complete (6763 chars) Noto Sans SC subset (OFL — see
-//! diting_fonts/OFL.txt) at wght 400/700 and feeds BOTH engines:
+//! Noto Sans SC subset (OFL — see diting_fonts/OFL.txt) at wght 400/700
+//! covering full GB2312 (6763 Han) + ASCII + the common non-GB2312 symbol
+//! blocks (Latin-1, General Punctuation, Arrows, Geometric/Misc Symbols,
+//! Dingbats — the ·/—/✓ tail GB2312's codec omits), and feeds BOTH engines:
 //!
 //! - the blitz pipeline via [`font_ctx`] — registered under the real family
 //!   name, hoisted to the head of fontique's Han script fallback so CJK text
@@ -98,6 +100,25 @@ mod tests {
         }
         let raster = book.rasterize("汉字渲染", 24.0, false, [0, 0, 0, 255], 24.0 * 1.2);
         assert!(raster.ink_bbox().is_some(), "bundle raster must have ink");
+    }
+
+    /// Symbol-coverage counterpart of [`bundle_cjk_coverage_paints`]: the
+    /// non-GB2312 punctuation/symbol tail (·/—/✓/→/●/★/…) that GB2312's codec
+    /// omits — the diting-font-fallback-gap. Each must paint real ink, not
+    /// .notdef (whose empty raster is what a coverage miss would produce; the
+    /// 1em-advance check is blind to it, so ink is the test that bites).
+    #[test]
+    fn bundle_symbol_coverage_paints() {
+        let book = font_book();
+        let sample = "·—–…✓→←↑↓●○◆◇■□▲△▼▽★☆";
+        for ch in sample.chars() {
+            let raster = book.rasterize(&ch.to_string(), 24.0, false, [0, 0, 0, 255], 24.0 * 1.2);
+            assert!(
+                raster.ink_bbox().is_some(),
+                "{ch} (U+{:04X}) must have ink",
+                ch as u32
+            );
+        }
     }
 
     /// The product claim: CJK text renders with the bundled collection and
