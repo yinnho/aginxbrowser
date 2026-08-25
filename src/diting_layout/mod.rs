@@ -3753,6 +3753,32 @@ mod bridge_cross_check {
         assert!((none.y - (nat.y + nat.height + 200.0)).abs() < EPS as f32, "stacking");
     }
 
+    /// obscura #698: `<img width=1024 height=572 style="width:100%">` inside a
+    /// content-sized flex item. width:100% against an auto inline size is a
+    /// cyclic percentage; obscura's taffy fork defers it to 0 (collapsing the
+    /// box so it's never painted) and STOCK taffy (blitz, our pinned ref)
+    /// collapses it to 0×572 too. Our replaced-leaf model sets a definite
+    /// height (from the attr) + aspect ratio, so the cyclic width transfers
+    /// through the ratio to the natural 1024 — matching Chrome, not blitz.
+    /// This is a known divergence: assert the immune side, don't cross-check.
+    #[test]
+    fn cyclic_percentage_image_resolves_to_natural_size() {
+        let html = r#"<body>
+            <div id="row" style="display:flex">
+                <div id="item">
+                    <img id="hero" width="1024" height="572" style="width:100%">
+                </div>
+            </div>
+        </body>"#;
+        let sheet = "body { margin: 0; }";
+        let (_doc, tree, _styles, rects) = both_engines(html, sheet);
+        let hero = rects[&tree.query_selector("#hero").unwrap().unwrap()];
+        assert!(
+            (hero.width - 1024.0).abs() < EPS as f32 && (hero.height - 572.0).abs() < EPS as f32,
+            "cyclic % image should resolve to natural size, got {hero:?}"
+        );
+    }
+
     /// position:relative offsets: in-flow box shifted by top/left; siblings
     /// occupy the STATIC position (relative keeps its space).
     #[test]
