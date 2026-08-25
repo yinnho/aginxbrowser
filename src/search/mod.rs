@@ -2,10 +2,14 @@ pub mod baidu;
 pub mod baidu_images;
 pub mod bing;
 pub mod bing_images;
+pub mod bing_news;
 pub mod github_repos;
 pub mod google;
 pub mod arxiv;
+pub mod huggingface;
 pub mod meilisearch;
+pub mod npm;
+pub mod pypi;
 pub mod sogou;
 pub mod sogou_wechat;
 pub mod stackexchange;
@@ -150,6 +154,10 @@ impl SearchEngineRegistry {
         registry.register(stackexchange::StackExchangeEngine::new());
         registry.register(github_repos::GithubEngine::new());
         registry.register(arxiv::ArxivEngine::new());
+        registry.register(bing_news::BingNewsEngine::new());
+        registry.register(huggingface::HuggingFaceEngine::new());
+        registry.register(npm::NpmEngine::new());
+        registry.register(pypi::PypiEngine::new());
         if let Some(meili) = meilisearch::MeilisearchEngine::from_env() {
             tracing::info!("search: registered engine meilisearch (private index)");
             registry.register(meili);
