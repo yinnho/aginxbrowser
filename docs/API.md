@@ -60,7 +60,7 @@ Fetch a page and return its content. Supports tiered rendering, automatic Cloudf
 | format | string | | `"markdown"` | Output format: `markdown` / `html` / `text` |
 | selector | string | | `null` | CSS selector; only extract the matching region |
 | wait_secs | u64 | | `null` | Extra seconds to wait after page load (let JS rendering finish) |
-| use_proxy | bool | | `false` | Route through the `OBSCURA_PROXY` proxy. Set `true` for overseas sites |
+| use_proxy | bool | | `false` | Route through the `AGINXBROWSER_PROXY` proxy. Set `true` for overseas sites |
 | cookies | string[] | | `[]` | Cookies injected before navigation, format `["name=value", ...]` |
 | max_chars | usize | | `50000` | Truncate `content` to this many characters. `0` = unlimited |
 | auto_bypass_challenge | bool | | `true` | Automatically detect and bypass Cloudflare Turnstile challenges |
@@ -360,7 +360,7 @@ Does not use `/fetch`'s tiered rendering — it always drives the obscura browse
 | wait_secs | u64 | | `null` | Extra seconds to wait after load (for JS rendering) |
 | selector | string | | `null` | CSS selector; capture the **specified element region** instead of the full page (see below) |
 | selector_all | bool | | `false` | Used with `selector`: skip cropping and return coordinates of **all matches** |
-| use_proxy | bool | | `false` | Route through the `OBSCURA_PROXY` proxy |
+| use_proxy | bool | | `false` | Route through the `AGINXBROWSER_PROXY` proxy |
 | cookies | string[] | | `[]` | Cookies injected before navigation |
 | tls_fingerprint | string | | `null` | TLS fingerprint (stealth mode) |
 
@@ -888,7 +888,7 @@ If AginxBrowser is deployed on a remote server, connect through an SSH tunnel:
 | `AGINXBROWSER_UA` | Linux Chrome145 | Spoofed User-Agent |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language header |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL (seconds); `0` disables |
-| `OBSCURA_PROXY` | None | Proxy address (used when `use_proxy:true`) |
+| `AGINXBROWSER_PROXY` | None | Proxy address (used when `use_proxy:true`) |
 | `CAPTCHA_SOLVER_API_KEY` | None | 2captcha API key; enables automatic CAPTCHA solving when set |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | CAPTCHA solving service |
 

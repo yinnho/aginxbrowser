@@ -7,7 +7,7 @@ use super::{SearchParams, RawSearchResult, SearchEngine, SearchEngineError};
 /// pick a checkpoint, a dataset, or a Space.
 ///
 /// huggingface.co is unreachable from CN networks directly — like google.rs,
-/// the client routes through OBSCURA_PROXY when set (socks5h for remote DNS).
+/// the client routes through AGINXBROWSER_PROXY when set (socks5h for remote DNS).
 /// Without a proxy from a blocked network every call times out as Transient
 /// and the engine is simply skipped for that query.
 pub struct HuggingFaceEngine {
@@ -22,7 +22,7 @@ impl HuggingFaceEngine {
 
     /// `models` | `datasets` | `spaces` — same API shape, different hub path.
     pub fn with_endpoint(endpoint: &str) -> Self {
-        let proxy_url = std::env::var("OBSCURA_PROXY").ok();
+        let proxy_url = crate::config::proxy_from_env();
         let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(12))
             .redirect(reqwest::redirect::Policy::none());

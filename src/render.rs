@@ -146,7 +146,7 @@ fn strip_html_tags(html: &str) -> String {
 /// errors returns `Some(Err)` so the caller can surface it instead of silently
 /// falling through to the slower path.
 ///
-/// `proxy_url`: the `OBSCURA_PROXY` value, applied when `use_proxy` is set or
+/// `proxy_url`: the `AGINXBROWSER_PROXY` value, applied when `use_proxy` is set or
 /// the domain is known-blocked (mirrors `build_browser` in server.rs).
 pub async fn http_fetch(
     url: &str,
@@ -289,7 +289,7 @@ fn tier1_eligible(req: &crate::FetchRequest) -> bool {
 pub async fn smart_fetch(req: crate::FetchRequest) -> Result<FetchResponse, anyhow::Error> {
     // Tier 1: HTTP direct (only when not forced to the browser).
     if tier1_eligible(&req) {
-        let proxy_url = std::env::var("OBSCURA_PROXY").ok();
+        let proxy_url = crate::config::proxy_from_env();
         match http_fetch(
             &req.url,
             req.use_proxy,

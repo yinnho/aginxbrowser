@@ -108,7 +108,7 @@ cargo build --release --features stealth,screenshot   # 约 4 分钟
 | 变量 | 默认 | 说明 |
 |------|------|------|
 | `AGINXBROWSER_BIND` | `0.0.0.0:8089` | 监听地址（公网部署建议绑 127.0.0.1 + nginx 反代） |
-| `OBSCURA_PROXY` | 无 | 代理地址（`use_proxy:true` 时用，抓国外站） |
+| `AGINXBROWSER_PROXY` | 无 | 代理地址（`use_proxy:true` 时用，抓国外站） |
 | `CAPTCHA_SOLVER_API_KEY` | 无 | 2captcha Key，设了自动解验证码 |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 缓存 TTL（秒），`0` 禁用 |
 

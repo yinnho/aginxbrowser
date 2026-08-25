@@ -515,14 +515,14 @@ pub fn build_plain_client(timeout_secs: u64) -> reqwest::Client {
 }
 
 /// Build a stealth wreq client. Returns None if the "stealth" feature is not
-/// enabled. The client is configured with proxy if OBSCURA_PROXY is set and
+/// enabled. The client is configured with proxy if AGINXBROWSER_PROXY is set and
 /// `use_proxy` is true.
 #[cfg(feature = "stealth")]
 pub fn build_stealth_client(
     use_proxy: bool,
 ) -> Arc<crate::diting_net::wreq_client::StealthHttpClient> {
     let proxy_url = if use_proxy {
-        std::env::var("OBSCURA_PROXY").ok()
+        crate::config::proxy_from_env()
     } else {
         None
     };
@@ -548,7 +548,7 @@ pub fn build_android_stealth_client(
     use_proxy: bool,
 ) -> Arc<crate::diting_net::wreq_client::StealthHttpClient> {
     let proxy_url = if use_proxy {
-        std::env::var("OBSCURA_PROXY").ok()
+        crate::config::proxy_from_env()
     } else {
         None
     };

@@ -108,7 +108,7 @@ Environment variables:
 | Variable | Default | Description |
 |------|------|------|
 | `AGINXBROWSER_BIND` | `0.0.0.0:8089` | Listen address (for public deployments, bind 127.0.0.1 behind an nginx reverse proxy instead) |
-| `OBSCURA_PROXY` | none | Proxy address (used when `use_proxy:true`, for fetching sites from other regions) |
+| `AGINXBROWSER_PROXY` | none | Proxy address (used when `use_proxy:true`, for fetching sites from other regions) |
 | `CAPTCHA_SOLVER_API_KEY` | none | 2captcha key; when set, CAPTCHAs are solved automatically |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL (seconds); `0` disables caching |
 

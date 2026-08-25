@@ -16,7 +16,7 @@ pub struct GoogleEngine {
 impl GoogleEngine {
     pub fn new() -> Self {
         // Google needs proxy; build reqwest client with SOCKS5h proxy.
-        let proxy_url = std::env::var("OBSCURA_PROXY").ok();
+        let proxy_url = crate::config::proxy_from_env();
         let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .redirect(reqwest::redirect::Policy::none());

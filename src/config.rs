@@ -1,8 +1,17 @@
 #![allow(dead_code)]
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::diting_net::CookieJar;
+
+/// The upstream proxy URL, read once per call site from the environment:
+/// `AGINXBROWSER_PROXY`.
+pub fn proxy_from_env() -> Option<String> {
+    std::env::var("AGINXBROWSER_PROXY")
+        .ok()
+        .filter(|p| !p.is_empty())
+}
 
 /// Configuration for launching a Browser instance.
 pub struct BrowserConfig {

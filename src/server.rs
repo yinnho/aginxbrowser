@@ -57,7 +57,7 @@ pub fn should_auto_proxy(url: &str) -> bool {
 }
 
 /// Build a browser instance.
-/// `use_proxy` decides whether the upstream `OBSCURA_PROXY` is applied. Domestic
+/// `use_proxy` decides whether the upstream `AGINXBROWSER_PROXY` is applied. Domestic
 /// sites should pass `false` (direct is faster and SOCKS5 often times out);
 /// foreign sites that are blocked/unreachable directly pass `true`.
 ///
@@ -117,7 +117,7 @@ pub fn build_browser_with_jar(
         builder = builder.tls_fingerprint(fp);
     }
     if should_auto_proxy(url) || use_proxy {
-        if let Ok(proxy) = std::env::var("OBSCURA_PROXY") {
+        if let Some(proxy) = crate::config::proxy_from_env() {
             builder = builder.proxy(&proxy);
         }
     }

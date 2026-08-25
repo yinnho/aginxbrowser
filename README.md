@@ -205,7 +205,7 @@ Requirements: Rust 1.78+; the V8 static library downloads automatically on first
 | `AGINXBROWSER_STEALTH` | enabled | `0` disables stealth (for diagnostics) |
 | `AGINXBROWSER_UA` | Linux Chrome145 | Spoofed User-Agent |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language header |
-| `OBSCURA_PROXY` | none | Proxy URL, used when `use_proxy:true` |
+| `AGINXBROWSER_PROXY` | none | Proxy URL, used when `use_proxy:true` |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL, `0` disables |
 | `CAPTCHA_SOLVER_API_KEY` | none | 2captcha API key; enables CAPTCHA auto-solving |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | CAPTCHA solving provider |
@@ -235,7 +235,7 @@ Integration: read the environment variable `AGINXBROWSER_URL=http://127.0.0.1:80
 1. **Screenshots are opt-in**: `/screenshot` requires `cargo build --release --features screenshot` (adds the rendering stack, +30-40MB). The default render pipeline is Blitz-lineage (Stylo/Taffy/vello_cpu); pass `engine: "diting"` for our own CSS+layout+paint stack. Complex-site CSS is approximate on both (not pixel-perfect like Chromium)
 2. **Element coordinates supported (block-level)**: `/screenshot` with `selector` returns element page coordinates (`selector_rects`, CSS px); `selector` alone crops directly to that element. Pure inline elements (`<a>text</a>`) have no independent box — pick a block ancestor
 3. **JS interaction broadly works; heavy-fingerprint pages may still fail**: React/Vue event delegation works normally (URL-reflection attributes like `src`/`href` resolve to absolute URLs so Next.js/webpack hydrate and clicks trigger handlers). Heavy-fingerprint auth pages (WorkOS/Cloudflare) probing `navigator.plugins`, WebGL canvas etc. may still break until stealth fingerprint coverage completes
-4. **Proxy support**: HTTP/HTTPS/SOCKS5 via `OBSCURA_PROXY`
+4. **Proxy support**: HTTP/HTTPS/SOCKS5 via `AGINXBROWSER_PROXY`
 5. **Hard risk-controlled sites**: Baidu Wenku unsupported; Zhihu articles need a valid `__zse_ck`
 
 ## License

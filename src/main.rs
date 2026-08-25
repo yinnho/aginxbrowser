@@ -55,7 +55,7 @@ pub struct FetchRequest {
     pub selector: Option<String>,
     #[serde(default)]
     pub wait_secs: Option<u64>,
-    /// Route through OBSCURA_PROXY. Default false (direct) — set true for
+    /// Route through AGINXBROWSER_PROXY. Default false (direct) — set true for
     /// foreign sites that are blocked or slow without a proxy.
     #[serde(default)]
     pub use_proxy: bool,
@@ -140,7 +140,7 @@ pub struct ClickRequest {
     pub selector: String,
     #[serde(default)]
     pub wait_secs: Option<u64>,
-    /// Route through OBSCURA_PROXY. Default false (direct).
+    /// Route through AGINXBROWSER_PROXY. Default false (direct).
     #[serde(default)]
     pub use_proxy: bool,
     /// Cookies to inject before navigation.
@@ -157,7 +157,7 @@ pub struct EvalRequest {
     pub script: String,
     #[serde(default)]
     pub wait_secs: Option<u64>,
-    /// Route through OBSCURA_PROXY. Default false (direct).
+    /// Route through AGINXBROWSER_PROXY. Default false (direct).
     #[serde(default)]
     pub use_proxy: bool,
     /// Cookies to inject before navigation.
@@ -241,7 +241,7 @@ pub struct ScreenshotRequest {
     /// gap is measured per-request on real pages.
     #[serde(default)]
     pub engine: Option<String>,
-    /// Route through OBSCURA_PROXY. Default false (direct).
+    /// Route through AGINXBROWSER_PROXY. Default false (direct).
     #[serde(default)]
     pub use_proxy: bool,
     /// Cookies to inject before navigation.

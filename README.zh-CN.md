@@ -203,7 +203,7 @@ cargo build --release --features stealth,screenshot
 | `AGINXBROWSER_STEALTH` | 启用 | `0` 关闭 stealth（诊断用） |
 | `AGINXBROWSER_UA` | Linux Chrome145 | 伪装 UA |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language |
-| `OBSCURA_PROXY` | 无 | 代理地址，`use_proxy:true` 时使用 |
+| `AGINXBROWSER_PROXY` | 无 | 代理地址，`use_proxy:true` 时使用 |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 缓存 TTL，`0` 禁用 |
 | `CAPTCHA_SOLVER_API_KEY` | 无 | 2captcha API Key，设置后自动解决验证码 |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | 验证码解决服务 |
@@ -234,7 +234,7 @@ AginxBrowser 定位是**纯外挂基础设施**——像真实浏览器一样作
 1. **截图需 opt-in feature**：`/screenshot` 需 `cargo build --release --features screenshot` 启用（加入渲染栈，二进制 +30-40MB）。默认渲染管线为 Blitz 谱系（Stylo/Taffy/vello_cpu）；传 `engine: "diting"` 切到自有 CSS+布局+绘制栈。两者对复杂站点 CSS 均为近似渲染（非 Chromium 像素级精准）
 2. **元素坐标已支持（块级）**：`/screenshot` 带 `selector` 返回元素页面坐标（`selector_rects`，CSS px），`selector`+默认模式直接截该元素区域；坐标与截图同源（Blitz `final_layout`）。纯行内元素（`<a>文字</a>`）无独立盒子，选块级祖先
 3. **JS 交互已大幅可用，重指纹页仍可能失败**：React/Vue 事件委托已正常（`src`/`href` 等 URL 反射属性解析绝对 URL 后，Next.js/webpack 能完成 hydration，点击可触发 handler）。但 WorkOS/Cloudflare 认证页等重指纹站点会检测 `navigator.plugins`、WebGL canvas 等 API，在 stealth 指纹补齐前仍可能崩溃
-4. **代理支持**：HTTP/HTTPS/SOCKS5，通过 `OBSCURA_PROXY` 传入
+4. **代理支持**：HTTP/HTTPS/SOCKS5，通过 `AGINXBROWSER_PROXY` 传入
 5. **强风控站点**：百度文库暂不支持；知乎专栏需有效 `__zse_ck`
 
 ## 许可证

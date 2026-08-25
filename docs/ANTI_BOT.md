@@ -29,7 +29,7 @@ AginxBrowser 的定位（V8 + 内联 Obscura 自研 DOM + wreq stealth）覆盖 
 | HTTP/2 指纹 | wreq emulation 内置 | ✅ |
 | HTTP header | `ObscuraHttpClient`/`StealthHttpClient` 注入 Chrome sec-ch-ua / sec-fetch | ✅ |
 | JS navigator | `bootstrap.js` 的 `userAgent`/`platform`/`language` 从 `__obscura_ua` 动态推导 | ✅ |
-| 代理 | per-call `use_proxy`（国内直连、国外走 `OBSCURA_PROXY`） | ✅ |
+| 代理 | per-call `use_proxy`（国内直连、国外走 `AGINXBROWSER_PROXY`） | ✅ |
 | Cookie | per-call `cookies` 注入 + CookieJar 自动 Set-Cookie | ✅ |
 | DOM | Obscura 自研 DOM 子集（**不完整**，重 SPA 会崩） | ⚠️ 限制 |
 

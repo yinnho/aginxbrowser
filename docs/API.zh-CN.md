@@ -60,7 +60,7 @@ curl http://127.0.0.1:8089/health
 | format | string | | `"markdown"` | 输出格式：`markdown` / `html` / `text` |
 | selector | string | | `null` | CSS 选择器，仅提取匹配区域 |
 | wait_secs | u64 | | `null` | 页面加载后额外等待秒数（等 JS 渲染完成） |
-| use_proxy | bool | | `false` | 走 `OBSCURA_PROXY` 代理。国外站点设 `true` |
+| use_proxy | bool | | `false` | 走 `AGINXBROWSER_PROXY` 代理。国外站点设 `true` |
 | cookies | string[] | | `[]` | 导航前注入的 cookie，格式 `["name=value", ...]` |
 | max_chars | usize | | `50000` | 截断 `content` 到指定字符数。`0` 不限 |
 | auto_bypass_challenge | bool | | `true` | 自动检测并绕过 Cloudflare Turnstile 挑战 |
@@ -360,7 +360,7 @@ curl -sL -o cabin_ref.jpg "<image_url>"
 | wait_secs | u64 | | `null` | 加载后额外等待秒数（等 JS 渲染） |
 | selector | string | | `null` | CSS 选择器，截**指定元素区域**而非整页（见下） |
 | selector_all | bool | | `false` | 配合 `selector`：不裁剪，返回**所有匹配**的坐标 |
-| use_proxy | bool | | `false` | 走 `OBSCURA_PROXY` 代理 |
+| use_proxy | bool | | `false` | 走 `AGINXBROWSER_PROXY` 代理 |
 | cookies | string[] | | `[]` | 导航前注入的 cookie |
 | tls_fingerprint | string | | `null` | TLS 指纹（stealth 模式） |
 
@@ -888,7 +888,7 @@ claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
 | `AGINXBROWSER_UA` | Linux Chrome145 | 伪装 UA |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 缓存 TTL（秒），`0` 禁用 |
-| `OBSCURA_PROXY` | 无 | 代理地址（`use_proxy:true` 时使用） |
+| `AGINXBROWSER_PROXY` | 无 | 代理地址（`use_proxy:true` 时使用） |
 | `CAPTCHA_SOLVER_API_KEY` | 无 | 2captcha API Key，设置后自动解决验证码 |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | 验证码解决服务 |
 

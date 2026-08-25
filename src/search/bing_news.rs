@@ -7,7 +7,7 @@ use super::{SearchParams, RawSearchResult, SearchEngine, SearchEngineError};
 ///
 /// Geo reality: from China, www.bing.com 302s to cn.bing.com, which kills the
 /// news vertical (302 to /). So this engine is **proxy-first**: it builds an
-/// OBSCURA_PROXY-routed client like google.rs does. Without a proxy configured
+/// AGINXBROWSER_PROXY-routed client like google.rs does. Without a proxy configured
 /// from a CN network every request lands on the portal page and surfaces as a
 /// Transient error — the registry skips it for that call and other engines
 /// cover the query.
@@ -17,7 +17,7 @@ pub struct BingNewsEngine {
 
 impl BingNewsEngine {
     pub fn new() -> Self {
-        let proxy_url = std::env::var("OBSCURA_PROXY").ok();
+        let proxy_url = crate::config::proxy_from_env();
         let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(12))
             .redirect(reqwest::redirect::Policy::none());
