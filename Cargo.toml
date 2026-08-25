@@ -199,3 +199,4 @@ ureq = { version = "2", features = ["json"] }
 # aborting the process. panic="abort" turns every catchable op panic into a crash.
 [profile.release]
 panic = "unwind"
+strip = true
