@@ -863,9 +863,15 @@ where
             req = req.header(*k, *v);
         }
         return match req.send().await {
-            Ok(resp) => resp.text().await.map_err(|e| {
-                SearchEngineError::Transient(format!("proxy: read body failed: {e}"))
-            }),
+            Ok(resp) => match resp.text().await {
+                Ok(body) if body_ok(&body) => Ok(body),
+                Ok(_) => Err(SearchEngineError::Transient(
+                    "proxy: body failed validation too (challenge/portal on both paths)".into(),
+                )),
+                Err(e) => Err(SearchEngineError::Transient(format!(
+                    "proxy: read body failed: {e}"
+                ))),
+            },
             Err(e) => Err(SearchEngineError::Transient(format!(
                 "direct ({last_err}) + proxy: {e}"
             ))),

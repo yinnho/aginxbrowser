@@ -72,6 +72,12 @@ impl SearchEngine for DuckDuckGoEngine {
         }
         let body = super::get_direct_first_if(&url, DDG_HEADERS, Self::proxied_client, has_results)
             .await?;
+        if body.contains("anomaly") && !body.contains("result__a") {
+            return Err(SearchEngineError::Captcha {
+                url: url.clone(),
+                captcha_type: Some(crate::captcha::CaptchaType::Unknown),
+            });
+        }
         parse_ddg_html(&body)
     }
 }
