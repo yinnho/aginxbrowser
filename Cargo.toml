@@ -1,6 +1,6 @@
 [package]
 name = "aginxbrowser"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["OpenCarrier Team"]
 description = "Pure server-side browser engine with built-in V8. HTTP API for scraping, search, and interactive browsing. No Chromium required."
