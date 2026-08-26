@@ -3658,6 +3658,66 @@ mod tests {
         );
     }
 
+    /// Browsers send Origin on every non-GET/HEAD request, including
+    /// same-origin POSTs (SolidStart server functions 403 without it).
+    /// Regression: we only set Origin cross-origin, so a same-origin POST
+    /// reached the wire bare and got rejected.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_same_origin_post_sends_origin_header() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (hdr_tx, hdr_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]);
+            let origin_line = request
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("origin:"))
+                .unwrap_or("").to_string();
+            let body = b"{}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+            stream.flush().unwrap();
+            hdr_tx.send(origin_line).unwrap();
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/submit", port));
+        let result = rt.call_function_on_for_cdp(
+            r#"async () => {
+                const r = await fetch(new URL("/_serverFn/x", document.URL), {
+                    method: "POST",
+                    headers: { "_h": "{\"x-tsr-serverfn\":\"true\"}" },
+                    body: JSON.stringify({ _d: [["name", "AginxBrowser"]] }),
+                });
+                return { status: r.status };
+            }"#,
+            None,
+            &[],
+            true,
+            true,
+        ).await.unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        assert_eq!(result.value.unwrap(), serde_json::json!({ "status": 200 }));
+        let origin_line = hdr_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(
+            origin_line.to_ascii_lowercase().starts_with("origin: http://127.0.0.1:"),
+            "same-origin POST must carry Origin, got: {:?}",
+            origin_line
+        );
+    }
+
     /// The Fetch standard allows 20 redirect hops and rejects the 21st
     /// (upstream 4b90ec3). A local chain of exactly 20 must arrive; one of 21
     /// must fail.

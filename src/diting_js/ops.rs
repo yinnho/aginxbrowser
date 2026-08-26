@@ -1335,11 +1335,15 @@ async fn op_fetch_url(
         let mut req = client.request(current_method.clone(), &current_url);
 
         // Cross-origin and credentials are per-hop: a redirect can change
-        // either answer (upstream b744b9b).
+        // either answer (upstream b744b9b). Browsers send Origin on every
+        // non-GET/HEAD request too — same-origin POSTs carry it (SolidStart
+        // server functions 403 without it), so gate on method, not just domain.
         let current_is_cross_origin = request_origin(&current_url)
             .map(|o| o != page_origin)
             .unwrap_or(false);
-        if current_is_cross_origin {
+        let method_needs_origin = current_method != reqwest::Method::GET
+            && current_method != reqwest::Method::HEAD;
+        if method_needs_origin || current_is_cross_origin {
             req = req.header("Origin", &page_origin);
         }
 
