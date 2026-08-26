@@ -47,8 +47,8 @@ jobs:
 
   # Mirror to Docker Hub when DOCKERHUB_USERNAME/TOKEN secrets are set
   # (steps skip — not fail — otherwise). Copies the GHCR tags over, so no
-  # second full build. secrets context is step-level only, so the gate lives
-  # on each step rather than the job.
+  # second full build. The secrets context can't be referenced in `if:`,
+  # so each gated step mirrors the secrets into env and tests that.
   dockerhub:
     runs-on: ubuntu-latest
     needs: build-push
@@ -65,14 +65,20 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Login Docker Hub
-        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        env:
+          DH_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        if: ${{ env.DH_USERNAME != '' && env.DH_TOKEN != '' }}
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Copy GHCR tags to Docker Hub
-        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        env:
+          DH_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        if: ${{ env.DH_USERNAME != '' && env.DH_TOKEN != '' }}
         run: |
           for tag in ${{ steps.meta.outputs.tags }}; do
             name="${tag#docker.io/}"
