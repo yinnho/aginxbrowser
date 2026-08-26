@@ -110,7 +110,7 @@ Self-hosting:
 brew install yinnho/aginxbrowser/aginxbrowser
 aginxbrowser doctor   # features + fonts + egress self-check
 
-# Docker
+# Docker (Docker Hub, mirrored on GHCR)
 docker run -p 8089:8089 yinnho/aginxbrowser:latest
 # (or ghcr.io/yinnho/aginxbrowser:latest)
 

@@ -111,6 +111,8 @@ docker run -d -p 8089:8089 yinnho/aginxbrowser:latest
 curl -sS http://127.0.0.1:8089/health
 ```
 
+Also mirrored on GHCR: `ghcr.io/yinnho/aginxbrowser:latest`.
+
 ### Option C: One-line installer
 
 ```bash

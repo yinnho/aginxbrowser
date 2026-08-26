@@ -111,6 +111,8 @@ docker run -d -p 8089:8089 yinnho/aginxbrowser:latest
 curl -sS http://127.0.0.1:8089/health
 ```
 
+GHCR 同步镜像：`ghcr.io/yinnho/aginxbrowser:latest`。
+
 ### 方式 C：一行安装器（最快）
 
 ```bash
