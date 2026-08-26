@@ -3,6 +3,12 @@
 FROM rust:1.94-bookworm AS build
 WORKDIR /src
 
+# boring-sys2 (stealth/BoringSSL) needs cmake + a C/C++ toolchain beyond the
+# rust image defaults; pkg-config/libssl-dev for the plain-reqwest path.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends cmake clang llvm-dev libclang-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
 # Dependency layer: copy manifests first so Docker layer caching survives
 # source edits.
 COPY Cargo.toml Cargo.lock ./
