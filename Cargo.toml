@@ -5,6 +5,11 @@ edition = "2021"
 authors = ["OpenCarrier Team"]
 description = "Pure server-side browser engine with built-in V8. HTTP API for scraping, search, and interactive browsing. No Chromium required."
 license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/yinnho/aginxbrowser"
+homepage = "https://browser.aginx.net"
+keywords = ["browser", "mcp", "web-scraping", "headless", "automation"]
+categories = ["web-programming", "network-programming", "command-line-utilities", "development-tools"]
 
 [features]
 default = []
