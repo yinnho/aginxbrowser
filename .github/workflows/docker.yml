@@ -81,7 +81,7 @@ jobs:
         if: ${{ env.DH_USERNAME != '' && env.DH_TOKEN != '' }}
         run: |
           for tag in ${{ steps.meta.outputs.tags }}; do
-            name="${tag#docker.io/}"
+            name="${tag##*:}"
             echo "→ docker.io/yinnho/aginxbrowser:$name (from ghcr.io/yinnho/aginxbrowser:$name)"
             docker buildx imagetools create \
               --tag "docker.io/yinnho/aginxbrowser:$name" \
