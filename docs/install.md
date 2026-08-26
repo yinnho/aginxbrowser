@@ -68,6 +68,7 @@ Once MCP is connected, just ask the Agent in natural language, or call the tools
 - "Read this web page for me: https://example.com" → `fetch`
 - "Search for macbook prices" → `search`
 - "Take a screenshot so I can see what this page looks like" → `screenshot` (requires the hosted instance to have the screenshot feature enabled; `/doctor` will tell you)
+| `download` | Stream a file to disk (SHA-256 verified, resumable) — binaries, archives, datasets |
 - "Log into this website and paginate to page two" → `session_create` + `session_state` + `session_click`/`session_input`
 
 The HTTP API works when called directly too (without going through MCP):
@@ -94,7 +95,30 @@ curl -sS https://raw.githubusercontent.com/yinnho/aginxbrowser/main/SKILL.md \
 
 ## 5. (Optional) Self-hosting
 
-If the hosted instance covers your needs, skip this step. To self-deploy:
+If the hosted instance covers your needs, skip this step.
+
+### Option A: Download a prebuilt binary (fastest)
+
+Prebuilt binaries for v0.2.0 (macOS Apple Silicon / macOS Intel / Linux x86_64):
+
+```bash
+VER=v0.2.0
+OS=$(uname -s); ARCH=$(uname -m)
+case "$OS-$ARCH" in
+  Darwin-arm64) T=aarch64-apple-darwin ;;
+  Darwin-x86_64) T=x86_64-apple-darwin ;;
+  Linux-x86_64) T=x86_64-unknown-linux-gnu ;;
+  *) echo "unsupported: $OS-$ARCH"; exit 1 ;;
+esac
+curl -fsSL -o aginxbrowser.tar.gz \
+  "https://github.com/yinnho/aginxbrowser/releases/download/${VER}/aginxbrowser-${VER#v}-${T}.tar.gz"
+tar xzf aginxbrowser.tar.gz && cd aginxbrowser-${VER#v}-${T}
+./aginxbrowser   # serves the HTTP API on 0.0.0.0:8089 by default
+```
+
+Verify the download with the matching `.sha256` file in the same release.
+
+### Option B: Build from source
 
 ```bash
 git clone https://github.com/yinnho/aginxbrowser.git
@@ -114,7 +138,7 @@ Environment variables:
 
 ---
 
-## Capability list (13 MCP tools)
+## Capability list (14 MCP tools)
 
 | Tool | Purpose |
 |------|------|

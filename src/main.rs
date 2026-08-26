@@ -15,6 +15,7 @@ mod browser;
 mod captcha;
 mod config;
 mod cookie;
+mod download;
 mod error;
 mod firecrawl_compat;
 mod mcp;
@@ -502,6 +503,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/click", post(click_handler))
         .route("/eval", post(eval_handler))
         .route("/search", post(search_handler))
+        .route("/download", post(download_handler))
         .route("/v1/scrape", post(firecrawl_compat::scrape_handler))
         .route("/session/create", post(session_create_handler))
         .route("/session/:id/navigate", post(session_navigate_handler))
@@ -640,7 +642,7 @@ async fn doctor_handler(Query(params): Query<DoctorParams>) -> impl IntoResponse
         ],
         "endpoints": [
             "/health", "/doctor", "/fetch", "/click", "/eval", "/search",
-            "/v1/scrape", "/session/create", "/mcp"
+            "/download", "/v1/scrape", "/session/create", "/mcp"
         ],
         "probe": probe,
     }))
@@ -793,6 +795,12 @@ async fn search_handler(Json(req): Json<SearchRequest>) -> Result<impl IntoRespo
     let resp = do_search(req).await.map_err(|e| match e {
         SearchError::Other(msg) => AppError::Internal(msg),
     })?;
+    Ok((StatusCode::OK, Json(resp)))
+}
+
+async fn download_handler(Json(req): Json<download::DownloadRequest>) -> Result<impl IntoResponse, AppError> {
+    let resp = download::do_download(req).await?;
+    server::persist_shared_cookies();
     Ok((StatusCode::OK, Json(resp)))
 }
 

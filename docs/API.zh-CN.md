@@ -342,6 +342,48 @@ curl -sL -o cabin_ref.jpg "<image_url>"
 
 ---
 
+### POST /download
+
+把文件从 URL 流式下载到磁盘。与 `/fetch`（返回可读的页面内容）不同，`/download` 保存原始字节——适用于二进制、压缩包、数据集、文档。响应体逐 chunk 落盘（不占内存缓冲），SHA-256 同步增量计算，一次调用即可校验完整性。
+
+**请求字段：**
+
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| url | string | ✅ | — | 文件 URL（仅 `http`/`https`） |
+| filename | string | | 自动 | 输出文件名。自动解析顺序：`Content-Disposition` 头 → URL 路径尾段 → `"download"` |
+| resume | bool | | `false` | 本地存在未完成文件时续传。通过 `Range: bytes=N-` 探测服务端支持：`206` 追加，`200` 重下 |
+| use_proxy | bool | | `false` | 走代理（github.com 等已知被墙域名自动启用） |
+| cookies | string[] | | `[]` | 随请求发送的 cookie（`["name=value", ...]`），用于登录态下载 |
+
+**响应字段：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| url | string | 重定向后的最终 URL |
+| path | string | 完成文件的绝对路径 |
+| filename | string | 解析出的文件名 |
+| size_bytes | u64 | 本次调用写入的字节数（追加只计追加部分） |
+| content_type | string? | 响应 Content-Type |
+| sha256 | string | 完整文件内容的 SHA-256 |
+| resumed | bool | 是否通过 Range/206 续传了已有部分文件 |
+
+**行为说明：**
+
+- 文件落在 `AGINXBROWSER_DOWNLOAD_DIR`（默认当前目录）。下载中数据写入 `<filename>.part`，成功后重命名。
+- 与 `/fetch` 相同的 SSRF 策略：环回/私网/链路本地目标默认拒绝，需 `AGINXBROWSER_ALLOW_PRIVATE_NETWORK=1` 放行。
+- 重定向最多跟 20 跳，每跳重新过 SSRF 校验。
+- 30 秒无数据即中止（防死连接挂起）。单次调用硬上限 4 GB。
+- 文件名经过清洗（剥离路径穿越、限长）。
+
+**示例 —— 下载并校验：**
+
+```bash
+curl -sS -X POST http://127.0.0.1:8089/download \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://github.com/obsidianmd/obsidian-releases/releases/download/v1.5.3/Obsidian-1.5.3-macOS.dmg","resume":true}'
+```
+
 ### POST /screenshot
 
 把页面 JS 渲染后的 DOM 渲染成 PNG 截图（base64 返回）。**需 `--features screenshot` 构建**（默认不含，见构建章节）。
@@ -727,7 +769,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 
 `--mcp` 模式走 stdio 协议，不启动 HTTP 服务器，通过 stdin/stdout 与 MCP 客户端通信。
 
-### 提供的工具（13 个）
+### 提供的工具（14 个）
 
 #### 基础工具
 
@@ -737,6 +779,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 | `eval` | 在页面上执行 JavaScript（支持 async/Promise） |
 | `click` | 点击页面元素（CSS 选择器） |
 | `search` | 多引擎聚合搜索（百度/Bing/搜狗/搜狗微信/Google） |
+| `download` | 流式下载文件到磁盘（SHA-256 校验、断点续传） |
 
 #### Session 工具
 
@@ -888,6 +931,7 @@ claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
 | `AGINXBROWSER_UA` | Linux Chrome145 | 伪装 UA |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 缓存 TTL（秒），`0` 禁用 |
+| `AGINXBROWSER_DOWNLOAD_DIR` | `.` | `/download` 落盘目录 |
 | `AGINXBROWSER_PROXY` | 无 | 代理地址（`use_proxy:true` 时使用） |
 | `CAPTCHA_SOLVER_API_KEY` | 无 | 2captcha API Key，设置后自动解决验证码 |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | 验证码解决服务 |

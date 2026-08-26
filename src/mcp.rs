@@ -102,6 +102,24 @@ pub struct SearchParams {
     pub max_chars_per: usize,
 }
 
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DownloadParams {
+    /// URL of the file to download (http/https)
+    pub url: String,
+    /// Explicit output filename. When omitted: Content-Disposition → URL tail → "download"
+    #[serde(default)]
+    pub filename: Option<String>,
+    /// Resume an interrupted download when a local partial file exists
+    #[serde(default)]
+    pub resume: bool,
+    /// Route through proxy (default: false; auto-enabled for known blocked domains)
+    #[serde(default)]
+    pub use_proxy: bool,
+    /// Cookies to send with the request (["name=value", ...]) for gated downloads
+    #[serde(default)]
+    pub cookies: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Session tool parameter structs
 // ---------------------------------------------------------------------------
@@ -346,6 +364,34 @@ impl AginxBrowserMcp {
             })
             .to_string(),
             Err(e) => json!({ "error": format!("{:?}", e) }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Download a file over HTTP(S) with streaming to disk (no memory buffering), SHA-256 integrity hash, and optional resume of interrupted transfers. Filename resolution: explicit param → Content-Disposition → URL tail. Use for binaries, archives, datasets, documents - anything where the agent wants the FILE saved, not its text content read.",
+        annotations(title = "Download File")
+    )]
+    async fn download(&self, Parameters(params): Parameters<DownloadParams>) -> String {
+        match crate::download::do_download(crate::download::DownloadRequest {
+            url: params.url,
+            filename: params.filename,
+            resume: params.resume,
+            use_proxy: params.use_proxy,
+            cookies: params.cookies,
+        })
+        .await
+        {
+            Ok(resp) => json!({
+                "url": resp.url,
+                "path": resp.path,
+                "filename": resp.filename,
+                "size_bytes": resp.size_bytes,
+                "content_type": resp.content_type,
+                "sha256": resp.sha256,
+                "resumed": resp.resumed,
+            })
+            .to_string(),
+            Err(e) => json!({ "error": format!("{e:#}") }).to_string(),
         }
     }
 

@@ -68,6 +68,7 @@ curl -sS 'https://browser.aginx.net/doctor?probe=true' | jq .
 - "帮我读一下这个网页：https://example.com" → `fetch`
 - "搜一下 macbook 价格" → `search`
 - "截个图看看这个页面长啥样" → `screenshot`（需托管实例开了 screenshot feature；`/doctor` 会告诉你）
+| `download` | 流式下载文件到磁盘（SHA-256 校验、断点续传）— 二进制/压缩包/数据集 |
 - "帮我登录这个网站并翻到第二页" → `session_create` + `session_state` + `session_click`/`session_input`
 
 HTTP API 也能直接调（不走 MCP）：
@@ -94,7 +95,30 @@ curl -sS https://raw.githubusercontent.com/yinnho/aginxbrowser/main/SKILL.md \
 
 ## 5.（可选）自己部署
 
-托管实例够用就跳过这步。要自部署：
+托管实例够用就跳过这步。
+
+### 方式 A：下载预编译二进制（最快）
+
+v0.2.0 提供三平台预编译二进制（macOS Apple Silicon / macOS Intel / Linux x86_64）：
+
+```bash
+VER=v0.2.0
+OS=$(uname -s); ARCH=$(uname -m)
+case "$OS-$ARCH" in
+  Darwin-arm64) T=aarch64-apple-darwin ;;
+  Darwin-x86_64) T=x86_64-apple-darwin ;;
+  Linux-x86_64) T=x86_64-unknown-linux-gnu ;;
+  *) echo "unsupported: $OS-$ARCH"; exit 1 ;;
+esac
+curl -fsSL -o aginxbrowser.tar.gz \
+  "https://github.com/yinnho/aginxbrowser/releases/download/${VER}/aginxbrowser-${VER#v}-${T}.tar.gz"
+tar xzf aginxbrowser.tar.gz && cd aginxbrowser-${VER#v}-${T}
+./aginxbrowser   # 默认监听 0.0.0.0:8089
+```
+
+同一 release 下有对应 `.sha256` 文件可校验下载完整性。
+
+### 方式 B：源码构建
 
 ```bash
 git clone https://github.com/yinnho/aginxbrowser.git
@@ -114,7 +138,7 @@ cargo build --release --features stealth,screenshot   # 约 4 分钟
 
 ---
 
-## 能力清单（13 个 MCP 工具）
+## 能力清单（14 个 MCP 工具）
 
 | 工具 | 用途 |
 |------|------|

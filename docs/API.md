@@ -342,6 +342,50 @@ curl -sL -o cabin_ref.jpg "<image_url>"
 
 ---
 
+### POST /download
+
+Stream a file from a URL to disk. Unlike `/fetch` (which returns page content for reading), `/download` saves the raw bytes — use it for binaries, archives, datasets, documents. The body streams chunk-by-chunk to disk (never buffered in memory), with SHA-256 computed incrementally so integrity is verifiable in one call.
+
+**Request fields:**
+
+| Field | Type | Required | Default | Description |
+|------|------|------|------|------|
+| url | string | ✅ | — | File URL (`http`/`https` only) |
+| filename | string | | auto | Output filename. Auto resolution: `Content-Disposition` header → URL path tail → `"download"` |
+| resume | bool | | `false` | Continue an interrupted download when a local partial file exists. Server support is probed via `Range: bytes=N-`: `206` appends, `200` restarts |
+| use_proxy | bool | | `false` | Route through proxy (auto-enabled for known blocked domains like github.com) |
+| cookies | string[] | | `[]` | Cookies to send (`["name=value", ...]`) for gated downloads |
+
+**Response fields:**
+
+| Field | Type | Description |
+|------|------|------|
+| url | string | Final URL after redirects |
+| path | string | Absolute path of the completed file on disk |
+| filename | string | Resolved filename |
+| size_bytes | u64 | Bytes written by this call (append counts only appended portion) |
+| content_type | string? | Response Content-Type |
+| sha256 | string | SHA-256 over the complete file content |
+| resumed | bool | Whether an existing partial file was continued via Range/206 |
+
+**Behavior notes:**
+
+- Files land in `AGINXBROWSER_DOWNLOAD_DIR` (default: current working directory). In-flight data is written to `<filename>.part`, then renamed on success.
+- Same SSRF policy as `/fetch`: loopback / private / link-local targets are rejected unless `AGINXBROWSER_ALLOW_PRIVATE_NETWORK=1`.
+- Redirects are followed (up to 20 hops), each hop re-validated against SSRF.
+- A 30s stall timeout aborts if no bytes arrive (dead connection instead of hang). Hard cap: 4 GB per call.
+- Filenames are sanitized (path traversal stripped, length capped).
+
+**Example — download and verify:**
+
+```bash
+curl -sS -X POST http://127.0.0.1:8089/download \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://github.com/obsidianmd/obsidian-releases/releases/download/v1.5.3/Obsidian-1.5.3-macOS.dmg","resume":true}'
+```
+
+---
+
 ### POST /screenshot
 
 Render the page's post-JS DOM into a PNG screenshot (returned as base64). **Requires building with `--features screenshot`** (not included by default; see the build section).
@@ -727,7 +771,7 @@ The HTTP server ships a `/mcp` endpoint speaking the MCP Streamable HTTP protoco
 
 `--mcp` mode speaks the stdio protocol, does not start an HTTP server, and communicates with MCP clients over stdin/stdout.
 
-### Provided Tools (13)
+### Provided Tools (14)
 
 #### Core Tools
 
@@ -737,6 +781,7 @@ The HTTP server ships a `/mcp` endpoint speaking the MCP Streamable HTTP protoco
 | `eval` | Execute JavaScript on the page (async/Promise supported) |
 | `click` | Click a page element (CSS selector) |
 | `search` | Multi-engine aggregated search (Baidu/Bing/Sogou/Sogou WeChat/Google) |
+| `download` | Stream a file to disk with SHA-256 and resume support |
 
 #### Session Tools
 
@@ -888,6 +933,7 @@ If AginxBrowser is deployed on a remote server, connect through an SSH tunnel:
 | `AGINXBROWSER_UA` | Linux Chrome145 | Spoofed User-Agent |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language header |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL (seconds); `0` disables |
+| `AGINXBROWSER_DOWNLOAD_DIR` | `.` | Directory where `/download` saves files |
 | `AGINXBROWSER_PROXY` | None | Proxy address (used when `use_proxy:true`) |
 | `CAPTCHA_SOLVER_API_KEY` | None | 2captcha API key; enables automatic CAPTCHA solving when set |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | CAPTCHA solving service |

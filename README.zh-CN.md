@@ -40,7 +40,7 @@ Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操
 
 - **🔐 真实 TLS 指纹** — stealth 模式用 BoringSSL 复刻 Chrome145 / Firefox133 / Safari / Edge 的完整 TLS 握手（不是只改 UA），可按请求切换；Cloudflare Turnstile 挑战页自动等待 `cf_clearance`。无指纹引擎碰反爬就是 403，我们穿过去。
 - **🤝 有状态交互 Session** — 持久化浏览器会话（8 分钟空闲保活），登录态可注入可导出（`session_create(cookies=...)` ↔ `session_cookies`），跨页面、跨翻页、跨多步流程不断。一次性引擎抓完即弃，做不了「登录 → 操作 → 再操作」。
-- **🔌 MCP 原生** — 13 个工具是一等公民（不是 CDP 套壳），Claude Code / Cursor / Claude Desktop 一行接入。HTTP + MCP 双协议，agent 不用先学一套 DevTools 协议就能上手。
+- **🔌 MCP 原生** — 14 个工具是一等公民（不是 CDP 套壳），Claude Code / Cursor / Claude Desktop 一行接入。HTTP + MCP 双协议，agent 不用先学一套 DevTools 协议就能上手。
 
 > 参照：Cloudflare Kitesurf 官方明确不做真实 TLS 指纹协商、不做需要持久状态的认证会话——反爬与登录正是 AginxBrowser 的地盘。
 
@@ -57,7 +57,7 @@ Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操
 - **截图渲染**：`/screenshot` 端点（`--features screenshot`），JS 渲染后的 DOM 用自有的 diting 渲染引擎出 PNG——纯 CPU，无 Chromium，agent 的视觉输入
 - **Cloudflare 自动绕过**：检测 "Just a moment..." 挑战页，自动等待 `cf_clearance`
 - **TLS 指纹伪装**：stealth 模式模拟 Chrome145/Firefox133/Safari/Edge，可按请求切换
-- **MCP Server**：`--mcp` 模式暴露 13 个工具（fetch/eval/click/search + 9 个 session 工具），Claude Code / Claude Desktop / Cursor 直接调用
+- **MCP Server**：`--mcp` 模式暴露 14 个工具（fetch/eval/click/search/download + 9 个 session 工具），Claude Code / Claude Desktop / Cursor 直接调用
 - **Firecrawl 兼容**：`/v1/scrape` 端点，现有 Firecrawl 客户端改 base URL 即可迁移
 - **DNS 重绑定防护**：内置 SSRF 防护 + DNS 解析后 IP 校验
 
@@ -148,7 +148,7 @@ aginxbrowser/
     ├── session.rs           # 交互式浏览器会话
     ├── captcha.rs           # CAPTCHA 检测与自动解决
     ├── render.rs            # 分层渲染（HTTP 直取 → diting 浏览器引擎）
-    ├── mcp.rs               # MCP Server（13 个工具）
+    ├── mcp.rs               # MCP Server（14 个工具）
     ├── firecrawl_compat.rs  # Firecrawl 兼容 /v1/scrape 端点
     ├── browser.rs           # 顶层 API：Browser、BrowserBuilder
     ├── page.rs              # 顶层 API：Page、Element
@@ -218,7 +218,7 @@ cargo build --release --features stealth,screenshot
 
 包含：
 - 所有 HTTP 端点（`/fetch`、`/click`、`/eval`、`/search`、`/v1/scrape`、8 个 Session 端点）
-- MCP Server 的 13 个工具及参数
+- MCP Server 的 14 个工具及参数
 - Claude Code / Claude Desktop / Cursor 客户端配置
 - 远程服务器 SSH 接入方式
 - 环境变量、错误码、站点抓取示例

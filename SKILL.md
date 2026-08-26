@@ -5,30 +5,31 @@ description: >
   pages as clean markdown, run 5-engine aggregated web search (Baidu, Bing,
   Sogou, WeChat, Google), take screenshots as visual input, extract
   structured data from SPAs, and drive multi-step interactions (click, type,
-  fill forms, login, paginate) through indexed sessions. 13 MCP tools over a
+  fill forms, login, paginate) through indexed sessions. 14 MCP tools over a
   single Rust binary — no Chromium. Use when the agent needs to read a web
   page, scrape or extract content from a URL, search the web, screenshot a
   page, log in or fill a form, or click through interactive content. Triggers
   include user requests to "read this page", "open this link", "what does
   this site say", "search the web", "take a screenshot", "scrape this page",
+  "download this file / this zip / this pdf",
   "log in and do X", "fill out this form", "click through this", "bypass
   Cloudflare", and Chinese equivalents (打开这个网页/看看这个网站/搜一下/
   截图/登录/填表/翻页). Trigger words: scrape, fetch, read this page, open
   this link, web search, look up, screenshot, headless browser, browser
   automation, Cloudflare bypass, CAPTCHA, login, fill form, paginate,
-  抓取/读取/搜索/截图/登录/填表/翻页.
+  抓取/读取/搜索/截图/登录/填表/翻页/下载.
 ---
 
 # AginxBrowser — a browser engine for agents
 
-13 tools cover everything an agent needs on the web: read, search, screenshot,
-and interact. When a task involves reading/searching/screenshotting a web page
-or driving a multi-step interaction, prefer this skill's tools over hand-rolled
-`curl` + HTML parsing.
+14 tools cover everything an agent needs on the web: read, search,
+screenshot, download files, and interact. When a task involves
+reading/searching/screenshotting a web page or driving a multi-step
+interaction, prefer this skill's tools over hand-rolled `curl` + HTML parsing.
 
 ## Setup: register the MCP server (one-time)
 
-The 13 tools run over an MCP server (`browser.aginx.net`). If not yet
+The 14 tools run over an MCP server (`browser.aginx.net`). If not yet
 registered, run once (or ask the user to):
 
 ```bash
@@ -121,7 +122,7 @@ curl -sS -X POST https://browser.aginx.net/search \
   web is first-class, not an afterthought
 - Stateful sessions (8-min idle keep-alive) with cookie inject/export for
   logged-in workflows
-- 13 MCP tools over HTTP + MCP dual protocol — Claude Code, Cursor, Claude
+- 14 MCP tools over HTTP + MCP dual protocol — Claude Code, Cursor, Claude
   Desktop, and any MCP client
 - Screenshots and element coordinates from a pure-CPU Rust renderer, no GPU
 
@@ -139,7 +140,9 @@ curl -sS -X POST https://browser.aginx.net/search \
 - **`/search` CAPTCHAs**: engines back off progressively
   (5min→10min→30min→1h). Set `CAPTCHA_SOLVER_API_KEY` to solve automatically.
 - **SSRF protection**: non-http(s) schemes and private/loopback IPs are
-  blocked. Not for scanning internal networks.
+  blocked. Not for scanning internal networks. `download` follows the same
+  policy and saves files to the server's working directory (not the
+  client's machine).
 - **Chinese web**: Baidu/Sogou/WeChat 5-engine aggregation + correct CJK
   rendering is a first-class feature, not an afterthought.
 
