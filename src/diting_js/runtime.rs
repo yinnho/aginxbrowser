@@ -2750,10 +2750,16 @@ mod tests {
     fn test_checkbox_click_clears_indeterminate_and_cancel_restores() {
         // Checkbox activation clears `indeterminate` before the event fires
         // (a listener sees the cleared state); a cancelled click restores
-        // both `checked` and `indeterminate` (obscura#721 edge matrix).
-        let mut rt = setup_runtime(r#"<input type=checkbox id=plain><input type=checkbox id=cxl>"#);
+        // both `checked` and `indeterminate`. `indeterminate` is a real IDL
+        // property on the prototype, not an expando — `'indeterminate' in el`
+        // is true and fresh elements default to false (obscura#721 edge matrix;
+        // upstream deliberately skipped this because stock has no property).
+        let mut rt = setup_runtime(r#"<input type=checkbox id=plain><input type=checkbox id=cxl><input type=checkbox id=fresh>"#);
         let result = rt.evaluate(r#"
             const plain = document.getElementById('plain'), cxl = document.getElementById('cxl');
+            const propReal = ['indeterminate' in plain,
+                              Object.getOwnPropertyNames(Object.getPrototypeOf(plain)).includes('indeterminate'),
+                              document.getElementById('fresh').indeterminate];
             plain.indeterminate = true;
             let seen = null;
             plain.addEventListener('click', () => { seen = [plain.checked, plain.indeterminate]; });
@@ -2762,14 +2768,15 @@ mod tests {
             cxl.indeterminate = true;
             cxl.addEventListener('click', (e) => e.preventDefault());
             cxl.click();
-            return [seen, plainAfter, [cxl.checked, cxl.indeterminate]];
+            return [propReal, seen, plainAfter, [cxl.checked, cxl.indeterminate]];
         "#).unwrap();
         assert_eq!(
             result,
             serde_json::json!([
-                [true, false], // handler observes the flip AND the cleared indeterminate
-                [true, false], // uncancelled click keeps the cleared state
-                [false, true], // cancelled click restores checked AND indeterminate
+                [true, true, false], // real prototype property; defaults false
+                [true, false],       // handler observes the flip AND the cleared indeterminate
+                [true, false],       // uncancelled click keeps the cleared state
+                [false, true],       // cancelled click restores checked AND indeterminate
             ])
         );
     }

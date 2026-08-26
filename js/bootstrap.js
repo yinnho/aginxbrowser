@@ -232,9 +232,11 @@ function _fp(key) { return _getFp()[key]; }
 globalThis._eventRegistry = globalThis._eventRegistry || {};
 globalThis._formValues = globalThis._formValues || {};
 globalThis._formChecked = globalThis._formChecked || {};
+globalThis._formIndeterminate = globalThis._formIndeterminate || {};
 const _eventRegistry = globalThis._eventRegistry;
 const _formValues = globalThis._formValues;
 const _formChecked = globalThis._formChecked;
+const _formIndeterminate = globalThis._formIndeterminate;
 const _domParse = (cmd, a1, a2) => { try { return JSON.parse(_dom(cmd, a1, a2)); } catch { return null; } };
 
 // HTML "ASCII whitespace": U+0009 TAB, U+000A LF, U+000C FF, U+000D CR, U+0020 SPACE.
@@ -2132,6 +2134,11 @@ class Element extends Node {
     return this.hasAttribute("checked");
   }
   set checked(v) { _formChecked[this._nid] = !!v; }
+  // Real IDL property (not an expando): `in` checks, Object.keys enumeration,
+  // and prototype introspection must all see it, and the click activation
+  // steps clear/restore it as real state.
+  get indeterminate() { return !!_formIndeterminate[this._nid]; }
+  set indeterminate(v) { _formIndeterminate[this._nid] = !!v; }
   get selected() {
     if (this._selected !== undefined) return this._selected;
     return this.hasAttribute("selected");
