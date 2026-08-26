@@ -107,7 +107,7 @@ aginxbrowser doctor   # features + fonts + egress self-check
 ### Option B: Docker
 
 ```bash
-docker run -d -p 8089:8089 ghcr.io/yinnho/aginxbrowser:latest
+docker run -d -p 8089:8089 yinnho/aginxbrowser:latest
 curl -sS http://127.0.0.1:8089/health
 ```
 
