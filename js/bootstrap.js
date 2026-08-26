@@ -7945,10 +7945,23 @@ function __ditingTZFromLang() {
   }
   return 'Asia/Shanghai';
 }
+// Intl's *default* locale comes from the process locale (V8/ICU follows
+// LANG), not from the configured language — so on a host running under
+// LANG=en_US, navigator.language says zh-CN while
+// Intl.DateTimeFormat().resolvedOptions().locale says en-US. Same class of
+// mismatch as the timezone one above, and an equally hard headless tell.
+// The Rust side pins ICU's default for fresh isolates, but V8 caches the
+// resolved default per-isolate after first Intl use, so the authoritative
+// fix lives here: bind undefined/null locale args to the configured
+// language. Explicit locales pass through untouched.
+function __ditingLocaleArg(locales) {
+  if (locales === undefined || locales === null) return __ditingLangList()[0];
+  return locales;
+}
 Intl.DateTimeFormat = function(locales, options) {
   if (!options) options = {};
   if (!options.timeZone) options.timeZone = __ditingTZFromLang();
-  return new _OrigDateTimeFormat(locales, options);
+  return new _OrigDateTimeFormat(__ditingLocaleArg(locales), options);
 };
 Intl.DateTimeFormat.prototype = _OrigDateTimeFormat.prototype;
 Intl.DateTimeFormat.supportedLocalesOf = _OrigDateTimeFormat.supportedLocalesOf;
@@ -7958,6 +7971,25 @@ _OrigDateTimeFormat.prototype.resolvedOptions = function() {
   if (r.timeZone === 'UTC') r.timeZone = __ditingTZFromLang();
   return r;
 };
+// The remaining (locales, options) Intl constructors get the same
+// default-locale binding via a generic wrapper. prototype + static
+// carried over so instanceof and supportedLocalesOf keep working.
+(function() {
+  const names = ['NumberFormat', 'Collator', 'PluralRules', 'RelativeTimeFormat',
+                 'ListFormat', 'DisplayNames', 'Segmenter'];
+  for (const n of names) {
+    const Orig = Intl[n];
+    if (typeof Orig !== 'function' || !Orig.prototype) continue;
+    const Wrapped = function(locales, options) {
+      return new Orig(__ditingLocaleArg(locales), options);
+    };
+    Wrapped.prototype = Orig.prototype;
+    if (typeof Orig.supportedLocalesOf === 'function') {
+      Wrapped.supportedLocalesOf = Orig.supportedLocalesOf;
+    }
+    Intl[n] = Wrapped;
+  }
+})();
 
 if (typeof PointerEvent === 'undefined') {
   globalThis.PointerEvent = class PointerEvent extends MouseEvent {

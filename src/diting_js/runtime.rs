@@ -436,6 +436,22 @@ impl JsRuntime {
             "<set-lang>",
             format!("globalThis.__diting_lang = '{}';", escaped),
         );
+        // Pin ICU's default locale to the SAME source (obscura#734 lineage):
+        // V8's Intl follows the process locale otherwise, so a non-matching
+        // LANG leaves Intl.DateTimeFormat().resolvedOptions().locale (and
+        // every Intl default) disagreeing with navigator.language and the
+        // Accept-Language header the net layer sends - a three-way locale
+        // mismatch that's a hard headless tell. Take the first q-weights-
+        // stripped BCP-47 tag (the same fold __ditingLangList does for
+        // navigator.language).
+        let first_tag = lang
+            .split(',')
+            .next()
+            .and_then(|t| t.split(';').next())
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .unwrap_or("zh-CN");
+        deno_core::v8::icu::set_default_locale(first_tag);
     }
     /// `execute_script` that self-heals from a stray V8 termination. A
     /// watchdog that fired without a paired disarm (the pre-Drop-token
@@ -1826,6 +1842,37 @@ mod tests {
         let mut rt = setup_runtime("<html><head><title>Test</title></head><body></body></html>");
         let title = rt.evaluate("document.title").unwrap();
         assert_eq!(title, serde_json::json!("Test Page"));
+    }
+
+    /// obscura#734 lineage: Intl's default locale must follow the configured
+    /// language source, not the process locale. Two layers keep them agreed:
+    /// set_language pins ICU's default (fresh isolates), and bootstrap.js
+    /// binds undefined locale args to `__diting_lang` per call (V8 caches the
+    /// resolved default per-isolate after first Intl use, so a re-pin alone
+    /// can't refresh an existing isolate). A three-way (Intl / navigator /
+    /// Accept-Language) mismatch is a hard headless tell.
+    #[test]
+    fn set_language_keeps_intl_and_navigator_locale_agreed() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_language("zh-CN,zh;q=0.9,en;q=0.8");
+        let locale = rt
+            .evaluate("Intl.DateTimeFormat().resolvedOptions().locale")
+            .unwrap();
+        assert_eq!(locale, serde_json::json!("zh-CN"), "Intl follows the configured language");
+        let nav = rt.evaluate("navigator.language").unwrap();
+        assert_eq!(nav, serde_json::json!("zh-CN"), "navigator.language agrees with Intl");
+        let num = rt.evaluate("Intl.NumberFormat().resolvedOptions().locale").unwrap();
+        assert_eq!(num, serde_json::json!("zh-CN"), "generic Intl wrappers bind too");
+        // And back the other way on the SAME isolate: the bootstrap binding
+        // reads `__diting_lang` per call, so this flips even though V8 has
+        // already cached an ICU default for the isolate.
+        rt.set_language("en-US,en;q=0.9");
+        let locale = rt
+            .evaluate("Intl.DateTimeFormat().resolvedOptions().locale")
+            .unwrap();
+        assert_eq!(locale, serde_json::json!("en-US"));
+        let nav = rt.evaluate("navigator.language").unwrap();
+        assert_eq!(nav, serde_json::json!("en-US"));
     }
 
     #[test]
