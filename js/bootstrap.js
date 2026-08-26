@@ -708,6 +708,41 @@ function _labeledControl(label) {
   return label.querySelector ? label.querySelector(_LABELABLE) : null;
 }
 
+// The first <legend> child of a fieldset — the only legend whose descendants
+// a disabled fieldset does NOT disable (HTML spec: "the first legend child").
+function _firstLegend(fieldset) {
+  const kids = fieldset.children;
+  for (let i = 0; i < kids.length; i++) if (kids[i].tagName === 'LEGEND') return kids[i];
+  return null;
+}
+
+// A control inside <fieldset disabled> is disabled unless the path from it to
+// the fieldset crosses that fieldset's first <legend>. Walk ancestors; at each
+// disabled fieldset on the path, the child we came through must be its first
+// legend or the control is fieldset-disabled.
+function _fieldsetDisabled(el) {
+  let node = el;
+  while (node) {
+    const p = node.parentNode;
+    if (!p || !p.tagName) break;
+    if (p.tagName === 'FIELDSET' && p.hasAttribute && p.hasAttribute('disabled')) {
+      if (!(node.tagName === 'LEGEND' && node === _firstLegend(p))) return true;
+    }
+    node = p;
+  }
+  return false;
+}
+
+// Actually-disabled per spec: a form control with its own disabled attribute,
+// or any form control disabled by an ancestor fieldset. Disabled controls have
+// no activation behaviour and dispatch no click event at all.
+function _isFormControlDisabled(el) {
+  const t = el.tagName;
+  if (t !== 'INPUT' && t !== 'BUTTON' && t !== 'SELECT' && t !== 'TEXTAREA') return false;
+  if ((el.hasAttribute && el.hasAttribute('disabled')) || el.disabled) return true;
+  return _fieldsetDisabled(el);
+}
+
 function __prepareInsertedScript(script) {
   if (!_OPS.op_script_try_start(script._nid)) return;
   const scriptType = (script.getAttribute('type') || '').trim().toLowerCase();
@@ -1718,6 +1753,10 @@ class Element extends Node {
     return cache[name];
   }
   click() {
+    // Disabled form controls have no activation behaviour and dispatch no
+    // click event at all — own disabled attribute or disabled by an ancestor
+    // <fieldset disabled> (first <legend> exempt).
+    if (_isFormControlDisabled(this)) return;
     // "Click in progress" flag per spec, checked BEFORE any pre-activation
     // step: a nested .click() on an element whose click is still running must
     // be a full no-op, not a second state flip. This also stops a control's
@@ -1728,11 +1767,12 @@ class Element extends Node {
       // Pre-click activation steps (HTML spec): a checkbox/radio flips BEFORE the
       // click event dispatches, so listeners observe the new state, and the flip
       // reverts if the event is cancelled. Radio groups uncheck same-name peers
-      // up front; a cancel restores every prior state.
+      // up front; a cancel restores every prior state. Checkbox activation also
+      // clears `indeterminate`; a cancel restores it along with `checked`.
       const tag = this.tagName;
       const type = (this.getAttribute('type') || '').toLowerCase();
       const checkable = tag === 'INPUT' && (type === 'checkbox' || type === 'radio');
-      let oldChecked = false, radioStates = null;
+      let oldChecked = false, oldIndeterminate = false, radioStates = null;
       if (checkable) {
         oldChecked = !!this.checked;
         if (type === 'radio') {
@@ -1751,12 +1791,17 @@ class Element extends Node {
           this.checked = true;
         } else {
           this.checked = !oldChecked;
+          oldIndeterminate = !!this.indeterminate;
+          this.indeterminate = false;
         }
       }
       const cancelled = !this.dispatchEvent(new MouseEvent("click", {bubbles: true, cancelable: true}));
       if (cancelled) {
         if (radioStates) { for (let i = 0; i < radioStates.length; i++) radioStates[i][0].checked = radioStates[i][1]; }
-        else if (checkable) this.checked = oldChecked;
+        else if (checkable) {
+          this.checked = oldChecked;
+          if (type === 'checkbox') this.indeterminate = oldIndeterminate;
+        }
         return;
       }
       if (checkable && this.checked !== oldChecked) {
@@ -1772,8 +1817,9 @@ class Element extends Node {
       const labelHost = selfInteractive ? null : (tag === 'LABEL' ? this : (this.closest ? this.closest('label') : null));
       if (labelHost) {
         const control = _labeledControl(labelHost);
-        // A disabled control has no activation behaviour.
-        if (control && control !== this && !control.disabled && !(control.hasAttribute && control.hasAttribute('disabled'))) {
+        // A disabled control has no activation behaviour — own attribute or
+        // disabled through an ancestor fieldset both count.
+        if (control && control !== this && !_isFormControlDisabled(control)) {
           control.click();
           return;
         }

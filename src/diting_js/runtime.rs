@@ -2715,6 +2715,66 @@ mod tests {
     }
 
     #[test]
+    fn test_click_fieldset_disabled_controls_do_not_activate() {
+        // <fieldset disabled> disables its descendant controls — no toggle and
+        // no click event at all — except descendants of its FIRST <legend>
+        // (HTML spec actually-disabled semantics; obscura#721 edge matrix).
+        let mut rt = setup_runtime(r#"<form><fieldset disabled>
+            <legend><input type=checkbox id=first></legend>
+            <legend><input type=checkbox id=second></legend>
+            <input type=checkbox id=body>
+            </fieldset><input type=checkbox id=outside></form>"#);
+        let result = rt.evaluate(r#"
+            const hits = [];
+            for (const id of ['first','second','body','outside']) {
+                const el = document.getElementById(id);
+                el.addEventListener('click', () => hits.push(id));
+                el.click();
+            }
+            return [document.getElementById('first').checked,
+                    document.getElementById('second').checked,
+                    document.getElementById('body').checked,
+                    document.getElementById('outside').checked,
+                    hits];
+        "#).unwrap();
+        // First-legend control activates; second-legend and fieldset-body
+        // controls are actually-disabled (no toggle, no event); outside is
+        // unaffected.
+        assert_eq!(
+            result,
+            serde_json::json!([true, false, false, true, ["first", "outside"]])
+        );
+    }
+
+    #[test]
+    fn test_checkbox_click_clears_indeterminate_and_cancel_restores() {
+        // Checkbox activation clears `indeterminate` before the event fires
+        // (a listener sees the cleared state); a cancelled click restores
+        // both `checked` and `indeterminate` (obscura#721 edge matrix).
+        let mut rt = setup_runtime(r#"<input type=checkbox id=plain><input type=checkbox id=cxl>"#);
+        let result = rt.evaluate(r#"
+            const plain = document.getElementById('plain'), cxl = document.getElementById('cxl');
+            plain.indeterminate = true;
+            let seen = null;
+            plain.addEventListener('click', () => { seen = [plain.checked, plain.indeterminate]; });
+            plain.click();
+            const plainAfter = [plain.checked, plain.indeterminate];
+            cxl.indeterminate = true;
+            cxl.addEventListener('click', (e) => e.preventDefault());
+            cxl.click();
+            return [seen, plainAfter, [cxl.checked, cxl.indeterminate]];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                [true, false], // handler observes the flip AND the cleared indeterminate
+                [true, false], // uncancelled click keeps the cleared state
+                [false, true], // cancelled click restores checked AND indeterminate
+            ])
+        );
+    }
+
+    #[test]
     fn test_url_reflection_src_and_href_resolve_absolute() {
         // Next.js/Turbopack webpack runtime does `new URL(x, document.currentScript.src)`
         // to derive its chunk base. If src/href return the raw relative attribute,
