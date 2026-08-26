@@ -38,6 +38,9 @@ jobs:
           CC_x86_64_unknown_linux_musl: musl-gcc
           CXX_x86_64_unknown_linux_musl: musl-g++
           AR_x86_64_unknown_linux_musl: ar
+          # fontique→yeslogic-fontconfig-sys: skip pkg-config cross-compile,
+          # dlopen libfontconfig at runtime instead (musl static binaries support this)
+          RUST_FONTCONFIG_DLOPEN: 1
       - name: Package
         run: |
           dir=aginxbrowser-v${GITHUB_REF_NAME#v}-${{ matrix.target }}
