@@ -68,7 +68,7 @@ Once MCP is connected, just ask the Agent in natural language, or call the tools
 - "Read this web page for me: https://example.com" → `fetch`
 - "Search for macbook prices" → `search`
 - "Take a screenshot so I can see what this page looks like" → `screenshot` (requires the hosted instance to have the screenshot feature enabled; `/doctor` will tell you)
-| `download` | Stream a file to disk (SHA-256 verified, resumable) — binaries, archives, datasets |
+- "Download this zip / this pdf and save it" → `download` (streams to disk, SHA-256 verified, resumable)
 - "Log into this website and paginate to page two" → `session_create` + `session_state` + `session_click`/`session_input`
 
 The HTTP API works when called directly too (without going through MCP):
@@ -97,7 +97,22 @@ curl -sS https://raw.githubusercontent.com/yinnho/aginxbrowser/main/SKILL.md \
 
 If the hosted instance covers your needs, skip this step.
 
-### Option A: Download a prebuilt binary (fastest)
+### Option A: One-line installer (fastest)
+
+```bash
+# Download, review, then run — never blind-pipe a network script
+curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/install.sh -o install.sh
+less install.sh
+bash install.sh
+```
+
+Detects your platform, downloads the prebuilt v0.2.0+ binary, verifies the SHA-256, installs to `~/.local/bin` (override with `PREFIX=...`, pin with `VERSION=v0.2.0`), and finishes with a self-check:
+
+```bash
+aginxbrowser doctor   # features + bundled fonts + env posture + one egress probe
+```
+
+### Option A′: Manual prebuilt download
 
 Prebuilt binaries for v0.2.0 (macOS Apple Silicon / macOS Intel / Linux x86_64):
 
@@ -111,8 +126,8 @@ case "$OS-$ARCH" in
   *) echo "unsupported: $OS-$ARCH"; exit 1 ;;
 esac
 curl -fsSL -o aginxbrowser.tar.gz \
-  "https://github.com/yinnho/aginxbrowser/releases/download/${VER}/aginxbrowser-${VER#v}-${T}.tar.gz"
-tar xzf aginxbrowser.tar.gz && cd aginxbrowser-${VER#v}-${T}
+  "https://github.com/yinnho/aginxbrowser/releases/download/${VER}/aginxbrowser-${VER}-${T}.tar.gz"
+tar xzf aginxbrowser.tar.gz && cd aginxbrowser-${VER}-${T}
 ./aginxbrowser   # serves the HTTP API on 0.0.0.0:8089 by default
 ```
 
@@ -146,6 +161,7 @@ Environment variables:
 | `search` | Multi-engine aggregated search (Baidu/Bing/Sogou/Sogou WeChat/Google), image search supported |
 | `eval` | Execute JS on the page (async/Promise supported) |
 | `click` | Load a page and click a CSS selector |
+| `download` | Stream a file to disk over HTTP(S) (SHA-256 verified, resumable) — binaries, archives, datasets |
 | `session_create` | Create a persistent interactive session (multi-step login / form filling / pagination); supports `cookies` injection to carry a logged-in state |
 | `session_navigate` / `session_state` / `session_click` / `session_input` / `session_scroll` / `session_eval` / `session_cookies` / `session_close` | Session operations (`session_cookies` exports logged-in state for reuse) |
 

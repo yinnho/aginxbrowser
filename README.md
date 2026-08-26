@@ -102,8 +102,13 @@ npx skills add yinnho/aginxbrowser
 Self-hosting:
 
 ```bash
-# Build
-cargo build --release
+# Prebuilt binary (one-line installer: platform detect + sha256 + self-check)
+curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/install.sh -o install.sh
+less install.sh && bash install.sh
+aginxbrowser doctor   # features + fonts + egress self-check
+
+# Or build from source (--features stealth,screenshot or you lose both)
+cargo build --release --features stealth,screenshot
 
 # Start the service
 ./target/release/aginxbrowser
@@ -195,7 +200,7 @@ cargo build --release --features screenshot
 cargo build --release --features stealth,screenshot
 ```
 
-Requirements: Rust 1.78+; the V8 static library downloads automatically on first build. The stealth feature additionally needs `go`, `cmake`, and a C++ compiler. The screenshot feature needs CJK fonts installed on the server (`fonts-noto-cjk`) for correct Chinese rendering.
+Requirements: Rust 1.78+; the V8 static library downloads automatically on first build. The stealth feature additionally needs `go`, `cmake`, and a C++ compiler. The screenshot feature ships with a bundled CJK font subset (GB2312 + common symbols) — no system fonts required for correct Chinese rendering.
 
 ## Runtime Environment Variables
 

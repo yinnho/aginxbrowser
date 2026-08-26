@@ -68,7 +68,7 @@ curl -sS 'https://browser.aginx.net/doctor?probe=true' | jq .
 - "帮我读一下这个网页：https://example.com" → `fetch`
 - "搜一下 macbook 价格" → `search`
 - "截个图看看这个页面长啥样" → `screenshot`（需托管实例开了 screenshot feature；`/doctor` 会告诉你）
-| `download` | 流式下载文件到磁盘（SHA-256 校验、断点续传）— 二进制/压缩包/数据集 |
+- "把这个 zip / 这个 pdf 下载保存" → `download`（流式写盘、SHA-256 校验、断点续传）
 - "帮我登录这个网站并翻到第二页" → `session_create` + `session_state` + `session_click`/`session_input`
 
 HTTP API 也能直接调（不走 MCP）：
@@ -97,7 +97,22 @@ curl -sS https://raw.githubusercontent.com/yinnho/aginxbrowser/main/SKILL.md \
 
 托管实例够用就跳过这步。
 
-### 方式 A：下载预编译二进制（最快）
+### 方式 A：一行安装器（最快）
+
+```bash
+# 先下载审查再执行——不要盲管道跑网络脚本
+curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/install.sh -o install.sh
+less install.sh
+bash install.sh
+```
+
+自动识别平台、下载 v0.2.0+ 预编译二进制、SHA-256 校验、装到 `~/.local/bin`（`PREFIX=...` 改路径、`VERSION=v0.2.0` 钉版本），收尾跑一次自检：
+
+```bash
+aginxbrowser doctor   # 编译特性 + 内置字体 + 环境态势 + 一次出口探针
+```
+
+### 方式 A′：手动下载预编译二进制
 
 v0.2.0 提供三平台预编译二进制（macOS Apple Silicon / macOS Intel / Linux x86_64）：
 
@@ -111,8 +126,8 @@ case "$OS-$ARCH" in
   *) echo "unsupported: $OS-$ARCH"; exit 1 ;;
 esac
 curl -fsSL -o aginxbrowser.tar.gz \
-  "https://github.com/yinnho/aginxbrowser/releases/download/${VER}/aginxbrowser-${VER#v}-${T}.tar.gz"
-tar xzf aginxbrowser.tar.gz && cd aginxbrowser-${VER#v}-${T}
+  "https://github.com/yinnho/aginxbrowser/releases/download/${VER}/aginxbrowser-${VER}-${T}.tar.gz"
+tar xzf aginxbrowser.tar.gz && cd aginxbrowser-${VER}-${T}
 ./aginxbrowser   # 默认监听 0.0.0.0:8089
 ```
 
@@ -146,6 +161,7 @@ cargo build --release --features stealth,screenshot   # 约 4 分钟
 | `search` | 多引擎聚合搜索（百度/Bing/搜狗/搜狗微信/Google），可图搜 |
 | `eval` | 在页面执行 JS（支持 async/Promise） |
 | `click` | 加载页面并点击 CSS 选择器 |
+| `download` | HTTP(S) 流式下载到磁盘（SHA-256 校验、断点续传）— 二进制/压缩包/数据集 |
 | `session_create` | 创建持久交互会话（多步登录/填表/翻页），支持 `cookies` 注入登录态 |
 | `session_navigate` / `session_state` / `session_click` / `session_input` / `session_scroll` / `session_eval` / `session_cookies` / `session_close` | 会话操作（`session_cookies` 导出登录态复用） |
 

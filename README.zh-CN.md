@@ -100,8 +100,13 @@ npx skills add yinnho/aginxbrowser
 下面是自己部署的方式：
 
 ```bash
-# 构建
-cargo build --release
+# 预编译二进制（一行安装器：平台识别 + sha256 校验 + 自检）
+curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/install.sh -o install.sh
+less install.sh && bash install.sh
+aginxbrowser doctor   # 特性 + 字体 + 出口自检
+
+# 或源码构建（--features stealth,screenshot，不带会掉这两项能力）
+cargo build --release --features stealth,screenshot
 
 # 启动服务
 ./target/release/aginxbrowser
@@ -193,7 +198,7 @@ cargo build --release --features screenshot
 cargo build --release --features stealth,screenshot
 ```
 
-依赖：Rust 1.78+，首次编译自动下载 V8 静态库（需网络）。启用 stealth 需额外 `go`、`cmake`、C++ 编译器。启用 screenshot 需服务器装 CJK 字体（`fonts-noto-cjk`）以正确渲染中文。
+依赖：Rust 1.78+，首次编译自动下载 V8 静态库（需网络）。启用 stealth 需额外 `go`、`cmake`、C++ 编译器。启用 screenshot 自带 CJK 字体子集（GB2312 + 常用符号）——正确渲染中文无需服务器装任何字体。
 
 ## 运行时环境变量
 
