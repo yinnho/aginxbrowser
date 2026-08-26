@@ -697,6 +697,12 @@ pub struct Color(pub u8, pub u8, pub u8, pub u8);
 pub enum Length {
     Px(f32),
     Percent(f32),
+    /// CSS `auto` - legal ONLY for margins (the horizontal centering idiom
+    /// and the abspos §10.3.3 centering pattern). Padding and borders reject
+    /// it at parse time; layout maps it to taffy's
+    /// `LengthPercentageAuto::auto()`, which implements both the in-flow
+    /// auto-margin expansion and abspos auto-margin resolution.
+    Auto,
 }
 
 /// Declaration-level length: em/rem can't resolve until the font context is
@@ -993,17 +999,37 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             };
             parse_color(candidate).map(|c| style.background_color = Some(c)).is_some()
         }
-        "margin" | "padding" => {
+        "margin" => {
             let sides = expand_sides(v, fonts);
-            let target = if name == "margin" { &mut style.margin } else { &mut style.padding };
-            *target = sides;
-            sides.top.is_some()
+            style.margin = sides;
+            true
+        }
+        "padding" => {
+            // `auto` is illegal for padding: drop the declaration entirely
+            // (CSS invalid-declaration recovery).
+            let sides = expand_sides(v, fonts);
+            match sides_no_auto(&sides) {
+                Some(clean) => {
+                    style.padding = clean;
+                    true
+                }
+                None => false,
+            }
         }
         "margin-top" | "margin-right" | "margin-bottom" | "margin-left" => {
-            set_side(&mut style.margin, name, len(v));
+            let len = if v.eq_ignore_ascii_case("auto") {
+                Some(Length::Auto)
+            } else {
+                len(v)
+            };
+            set_side(&mut style.margin, name, len);
             true
         }
         "padding-top" | "padding-right" | "padding-bottom" | "padding-left" => {
+            // padding: auto is illegal - drop the declaration.
+            if v.eq_ignore_ascii_case("auto") {
+                return false;
+            }
             set_side(&mut style.padding, name, len(v));
             true
         }
@@ -1479,10 +1505,18 @@ fn set_side(sides: &mut Sides, name: &str, value: Option<Length>) {
 }
 
 /// CSS 1–4 value expansion (px/em/rem/%; unknown units drop to None).
+/// `auto` tokens pass through as `Length::Auto` (margin centering) - the
+/// padding/border call sites reject them by dropping the declaration.
 fn expand_sides(value: &str, fonts: &FontCtx) -> Sides {
     let vals: Vec<Option<Length>> = value
         .split_whitespace()
-        .map(|tok| parse_css_length(tok).map(|l| resolve_len(l, fonts)))
+        .map(|tok| {
+            if tok.eq_ignore_ascii_case("auto") {
+                Some(Length::Auto)
+            } else {
+                parse_css_length(tok).map(|l| resolve_len(l, fonts))
+            }
+        })
         .collect();
     match vals.as_slice() {
         [one] => Sides { top: *one, right: *one, bottom: *one, left: *one },
@@ -1491,6 +1525,16 @@ fn expand_sides(value: &str, fonts: &FontCtx) -> Sides {
         [t, r, b, l] => Sides { top: *t, right: *r, bottom: *b, left: *l },
         _ => Sides::default(),
     }
+}
+
+/// Reject `Length::Auto` entries (padding/border grammar: auto is illegal
+/// there, CSS drops the whole declaration). Returns None if any side is auto.
+fn sides_no_auto(s: &Sides) -> Option<Sides> {
+    let ok = |v: Option<Length>| match v {
+        Some(Length::Auto) => None,
+        v => Some(v),
+    };
+    Some(Sides { top: ok(s.top)?, right: ok(s.right)?, bottom: ok(s.bottom)?, left: ok(s.left)? })
 }
 
 /// px-only float length (gaps, flex-basis, grid tracks: fractional px legal,

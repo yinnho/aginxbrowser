@@ -138,18 +138,27 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
     let lp = |v: Option<crate::diting_css::Length>| match v {
         Some(crate::diting_css::Length::Px(px)) => LengthPercentage::length(px),
         Some(crate::diting_css::Length::Percent(p)) => LengthPercentage::percent(p / 100.0),
+        // Auto can only reach margins (parser rejects it elsewhere) - a
+        // padding/border slot never holds it, but treat it as 0 defensively.
+        Some(crate::diting_css::Length::Auto) => LengthPercentage::length(0.0),
         None => LengthPercentage::length(0.0),
     };
     // Margin has an auto variant; unset margins are CSS `0`, not auto.
+    // `Length::Auto` (margin:auto) maps to taffy's auto - taffy's block
+    // algorithm implements both the in-flow horizontal auto-margin
+    // expansion (CSS §10.3.3 centering) and the abspos auto-margin
+    // resolution (§abs-non-replaced-width).
     let lpa_zero = |v: Option<crate::diting_css::Length>| match v {
         Some(crate::diting_css::Length::Px(px)) => LengthPercentageAuto::length(px),
         Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
+        Some(crate::diting_css::Length::Auto) => LengthPercentageAuto::auto(),
         None => LengthPercentageAuto::length(0.0),
     };
     // Inset/clamp unset values are CSS `auto`.
     let lpa_auto = |v: Option<crate::diting_css::Length>| match v {
         Some(crate::diting_css::Length::Px(px)) => LengthPercentageAuto::length(px),
         Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
+        Some(crate::diting_css::Length::Auto) => LengthPercentageAuto::auto(),
         None => LengthPercentageAuto::auto(),
     };
     // taffy::geometry::Rect spelled in full — this module's own Rect shadows
@@ -193,14 +202,15 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
                 w + side_px(style.padding.left) + side_px(style.padding.right) + bl + br,
             ),
             Some(crate::diting_css::Length::Percent(p)) => Dimension::percent(p / 100.0),
-            None => auto(),
+            // width/min/max: auto is the CSS initial value = unset.
+            Some(crate::diting_css::Length::Auto) | None => auto(),
         },
         height: match style.height {
             Some(crate::diting_css::Length::Px(h)) => Dimension::length(
                 h + side_px(style.padding.top) + side_px(style.padding.bottom) + bt + bb,
             ),
             Some(crate::diting_css::Length::Percent(p)) => Dimension::percent(p / 100.0),
-            None => auto(),
+            Some(crate::diting_css::Length::Auto) | None => auto(),
         },
     };
 
@@ -290,14 +300,14 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
                 w + side_px(style.padding.left) + side_px(style.padding.right) + bl + br,
             ),
             Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
-            None => LengthPercentageAuto::auto(),
+            Some(crate::diting_css::Length::Auto) | None => LengthPercentageAuto::auto(),
         },
         height: match style.min_height {
             Some(crate::diting_css::Length::Px(h)) => LengthPercentageAuto::length(
                 h + side_px(style.padding.top) + side_px(style.padding.bottom) + bt + bb,
             ),
             Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
-            None => LengthPercentageAuto::auto(),
+            Some(crate::diting_css::Length::Auto) | None => LengthPercentageAuto::auto(),
         },
     };
     s.max_size = Size {
@@ -306,14 +316,14 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
                 w + side_px(style.padding.left) + side_px(style.padding.right) + bl + br,
             ),
             Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
-            None => LengthPercentageAuto::auto(),
+            Some(crate::diting_css::Length::Auto) | None => LengthPercentageAuto::auto(),
         },
         height: match style.max_height {
             Some(crate::diting_css::Length::Px(h)) => LengthPercentageAuto::length(
                 h + side_px(style.padding.top) + side_px(style.padding.bottom) + bt + bb,
             ),
             Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
-            None => LengthPercentageAuto::auto(),
+            Some(crate::diting_css::Length::Auto) | None => LengthPercentageAuto::auto(),
         },
     };
     if let Some(ar) = style.aspect_ratio {
@@ -875,14 +885,14 @@ fn build_replaced_leaf(
                 Dimension::length(w + if bline { bl + br } else { 0.0 })
             }
             Some(crate::diting_css::Length::Percent(p)) => Dimension::percent(p / 100.0),
-            None => Dimension::length(nat_w + if bline { bl + br } else { 0.0 }),
+            Some(crate::diting_css::Length::Auto) | None => Dimension::length(nat_w + if bline { bl + br } else { 0.0 }),
         },
         height: match style.height {
             Some(crate::diting_css::Length::Px(h)) => {
                 Dimension::length(h + if bline { bt + bb } else { 0.0 })
             }
             Some(crate::diting_css::Length::Percent(p)) => Dimension::percent(p / 100.0),
-            None => Dimension::length(nat_h + if bline { bt + bb } else { 0.0 }),
+            Some(crate::diting_css::Length::Auto) | None => Dimension::length(nat_h + if bline { bt + bb } else { 0.0 }),
         },
     };
 
@@ -2379,6 +2389,7 @@ pub fn layout_dom_with_paint_and_images(
                     let res = |l: &crate::diting_css::Length, basis: f32| match l {
                         crate::diting_css::Length::Px(v) => *v,
                         crate::diting_css::Length::Percent(p) => p * basis / 100.0,
+                        crate::diting_css::Length::Auto => 0.0,
                     };
                     match &styles.get(dom_id).and_then(|s| s.corner_radii.clone()) {
                         Some(corners) => {
@@ -2511,6 +2522,7 @@ pub fn layout_dom_with_paint_and_images(
                 let res = |l: &crate::diting_css::Length, basis: f32| match l {
                     crate::diting_css::Length::Px(v) => *v,
                     crate::diting_css::Length::Percent(p) => p * basis / 100.0,
+                    crate::diting_css::Length::Auto => 0.0,
                 };
                 let pad_w = (rect.width - bl - br).max(0.0);
                 let pad_h = (rect.height - bt - bb).max(0.0);
@@ -2531,6 +2543,7 @@ pub fn layout_dom_with_paint_and_images(
                             let v = match r {
                                 crate::diting_css::Length::Px(v) => v,
                                 crate::diting_css::Length::Percent(p) => p * rect.width / 100.0,
+                                crate::diting_css::Length::Auto => 0.0,
                             };
                             [(v, v); 4]
                         })
@@ -3995,6 +4008,88 @@ mod bridge_cross_check {
         );
     }
 
+    /// `margin: 0 auto` (in-flow block horizontal centering, CSS §8.3 /
+    /// §10.3.3): the widest idiom on the web - every centered page layout.
+    /// Length gained an `Auto` variant; taffy's block algorithm expands
+    /// auto margins against the containing width. Pre-fix the auto token
+    /// silently parsed to None -> 0, so the box pinned left.
+    #[test]
+    fn block_margin_auto_centers_against_containing_width() {
+        let html = r#"<body>
+            <div id="narrow"></div>
+            <div id="wide"></div>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #narrow { width: 200px; height: 40px; margin: 0 auto; }
+            #wide { width: 700px; height: 10px; margin-left: auto; margin-right: auto; }
+        "#;
+        let (_doc, tree, _styles, rects) = both_engines(html, sheet);
+        let narrow = rects[&tree.query_selector("#narrow").unwrap().unwrap()];
+        assert!(
+            (narrow.x - 300.0).abs() < EPS as f32,
+            "200px block centered in 800px viewport: {:?}",
+            narrow
+        );
+        let wide = rects[&tree.query_selector("#wide").unwrap().unwrap()];
+        assert!(
+            (wide.x - 50.0).abs() < EPS as f32 && (wide.y - 40.0).abs() < EPS as f32,
+            "700px block centered, stacked below: {:?}",
+            wide
+        );
+    }
+
+    /// The abspos auto-margin centering idiom (taffy#923's exact repro,
+    /// CSS §10.3.3 over-constrained resolution): `left:0; right:0;
+    /// margin-left/right: auto` centers against the containing block's
+    /// padding box. Nested two deep - each box centers inside its own CB.
+    #[test]
+    fn absolute_auto_margin_centers_in_containing_block() {
+        let html = r#"<body>
+            <div id="root"><div id="outer"><div id="inner"></div></div></div>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #root { position: relative; width: 300px; height: 200px; }
+            #outer {
+                position: absolute; left: 0; right: 0; top: 20px;
+                width: 120px; height: 80px; margin-left: auto; margin-right: auto;
+            }
+            #inner {
+                position: absolute; top: 0; bottom: 0; left: 0; right: 0;
+                width: 40px; height: 30px; margin: auto;
+            }
+        "#;
+        // Hand-computed: #root border box 300x200 at (0,0) (both_engines
+        // body margin 0). #outer's CB = root padding box = (0,0) 300x200;
+        // 120 wide centered -> x=90, y=20 (top inset). #inner's CB = outer
+        // padding box = (90,20) 120x80; 40x30 centered -> (130, 45).
+        let (_doc, tree, _styles, rects) = both_engines(html, sheet);
+        let outer = rects[&tree.query_selector("#outer").unwrap().unwrap()];
+        assert!(
+            (outer.x - 90.0).abs() < EPS as f32 && (outer.y - 20.0).abs() < EPS as f32,
+            "outer centered in root CB: {:?}",
+            outer
+        );
+        let inner = rects[&tree.query_selector("#inner").unwrap().unwrap()];
+        assert!(
+            (inner.x - 130.0).abs() < EPS as f32 && (inner.y - 45.0).abs() < EPS as f32,
+            "inner centered in outer CB (both axes, margin:auto + inset:0): {:?}",
+            inner
+        );
+    }
+
+    /// `padding: auto` is illegal CSS: the declaration drops entirely
+    /// (invalid-declaration recovery) - padding stays unset, never a
+    /// half-applied state.
+    #[test]
+    fn padding_auto_drops_declaration() {
+        let html = r#"<body><div id="p" style="padding: auto">x</div></body>"#;
+        let (_doc, tree, styles, _rects) = both_engines(html, "");
+        let st = styles.get(&tree.query_selector("#p").unwrap().unwrap()).unwrap();
+        assert!(st.padding.top.is_none(), "padding:auto dropped: {:?}", st.padding);
+    }
+
     /// obscura#675 lineage: a fixed box's insets resolve against the initial
     /// containing block — the VIEWPORT — not the root element's
     /// content-driven height. Before the fix, `bottom:0` anchored against
@@ -4003,7 +4098,6 @@ mod bridge_cross_check {
     /// viewport, 50% → 34, 10% → 40). The root taffy node now carries the
     /// definite viewport size, so bottom and percentage insets have a real
     /// ICB to resolve against.
-    #[test]
     #[test]
     fn declared_line_height_scales_paragraph_pitch() {
         // §49 parity fix 2: `line-height: 1.6` must move the used line
