@@ -1359,14 +1359,44 @@ async fn op_fetch_url(
             }
         }
 
-        // Send a default User-Agent on fetch()/XHR requests (the navigation path
-        // sets one, but this op did not, so scripted requests went out with no UA
-        // and UA-gated servers rejected them). Honor an explicit override.
-        if !custom_headers.keys().any(|k| k.eq_ignore_ascii_case("user-agent")) {
-            req = req.header(
-                "User-Agent",
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
-            );
+        // Send browser-default headers on fetch()/XHR requests. The navigation
+        // path sets these, but this op did not: scripted requests went out bare
+        // (no UA, no Accept, no Fetch-Metadata / client-hint headers) and WAFs
+        // that key on `sec-fetch-site: same-origin` (mcpservers.org /submit
+        // 403s without it) rejected them. Honor explicit overrides.
+        const DEFAULT_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
+        let ua_override = custom_headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+            .map(|(_, v)| v.clone());
+        let effective_ua = ua_override.clone().unwrap_or_else(|| DEFAULT_UA.to_string());
+        let (sec_ch_ua, sec_ch_ua_platform) =
+            crate::diting_net::client::derive_client_hints(&effective_ua);
+        if ua_override.is_none() {
+            req = req.header("User-Agent", &effective_ua);
+        }
+        for (name, value) in [
+            ("sec-ch-ua", sec_ch_ua),
+            ("sec-ch-ua-mobile", "?0".to_string()),
+            ("sec-ch-ua-platform", sec_ch_ua_platform),
+            ("accept", "*/*".to_string()),
+        ] {
+            if !custom_headers.keys().any(|k| k.eq_ignore_ascii_case(name)) {
+                req = req.header(name, value);
+            }
+        }
+        // Fetch Metadata: derived per-hop because a redirect can change
+        // same/cross-site. fetch()/XHR are always dest "empty".
+        let sec_fetch_site = if current_is_cross_origin { "cross-site" } else { "same-origin" };
+        let sec_fetch_mode = if mode.is_empty() { "cors" } else { mode.as_str() };
+        for (name, value) in [
+            ("sec-fetch-site", sec_fetch_site.to_string()),
+            ("sec-fetch-mode", sec_fetch_mode.to_string()),
+            ("sec-fetch-dest", "empty".to_string()),
+        ] {
+            if !custom_headers.keys().any(|k| k.eq_ignore_ascii_case(name)) {
+                req = req.header(name, value);
+            }
         }
 
         for (k, v) in &custom_headers {

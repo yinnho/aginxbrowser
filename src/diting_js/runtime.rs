@@ -3718,6 +3718,82 @@ mod tests {
         );
     }
 
+    /// Browsers send Fetch-Metadata (sec-fetch-*) and client-hint headers on
+    /// scripted requests; WAFs key on `sec-fetch-site: same-origin` and 403
+    /// requests without them. Regression: op_fetch_url only set User-Agent.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_same_origin_post_sends_fetch_metadata_headers() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (hdr_tx, hdr_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]);
+            let lower = request.to_ascii_lowercase();
+            let hdrs = [
+                "sec-fetch-site",
+                "sec-fetch-mode",
+                "sec-fetch-dest",
+                "sec-ch-ua",
+                "sec-ch-ua-mobile",
+                "sec-ch-ua-platform",
+                "accept",
+            ].iter().map(|h| {
+                let v = lower.lines().find(|l| l.starts_with(&format!("{}:", h)))
+                    .unwrap_or("").trim().to_string();
+                (h.to_string(), v)
+            }).collect::<std::collections::HashMap<_, _>>();
+            let body = b"{}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+            stream.flush().unwrap();
+            hdr_tx.send(hdrs).unwrap();
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/submit", port));
+        let result = rt.call_function_on_for_cdp(
+            r#"async () => {
+                const r = await fetch(new URL("/api", document.URL), {
+                    method: "POST",
+                    body: "{}",
+                });
+                return { status: r.status };
+            }"#,
+            None,
+            &[],
+            true,
+            true,
+        ).await.unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        assert_eq!(result.value.unwrap(), serde_json::json!({ "status": 200 }));
+        let hdrs = hdr_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(hdrs.get("sec-fetch-site").map(String::as_str), Some("sec-fetch-site: same-origin"));
+        assert_eq!(hdrs.get("sec-fetch-mode").map(String::as_str), Some("sec-fetch-mode: cors"));
+        assert_eq!(hdrs.get("sec-fetch-dest").map(String::as_str), Some("sec-fetch-dest: empty"));
+        assert_eq!(hdrs.get("sec-ch-ua-mobile").map(String::as_str), Some("sec-ch-ua-mobile: ?0"));
+        assert!(
+            hdrs.get("sec-ch-ua").map(|s| {
+                let l = s.to_ascii_lowercase();
+                l.contains("chromium") && l.contains("google chrome")
+            }).unwrap_or(false),
+            "sec-ch-ua missing, got: {:?}",
+            hdrs.get("sec-ch-ua")
+        );
+        assert!(hdrs.get("accept").map(|s| s.contains("*/*")).unwrap_or(false));
+    }
+
     /// The Fetch standard allows 20 redirect hops and rejects the 21st
     /// (upstream 4b90ec3). A local chain of exactly 20 must arrive; one of 21
     /// must fail.
