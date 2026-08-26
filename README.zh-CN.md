@@ -13,6 +13,10 @@
 
 一个二进制，零依赖，启动即服务。HTTP API + MCP，Agent 拿来就能用。
 
+*下面这些真实页面，都是 AginxBrowser 的 diting 引擎渲染的（无 Chromium）——Wikipedia、本仓库、Rust 官网。想亲自截图？[看这里](docs/API.md#screenshot)*
+
+![AginxBrowser 渲染真实页面](docs/demo.gif)
+
 ## 为什么 Agent 需要专属浏览器
 
 现有的"浏览器自动化"方案都是为人或为抓取设计的，不是为 Agent：

@@ -159,6 +159,7 @@ pub async fn run() -> i32 {
     checks.push(egress_check().await);
     let code = if checks.iter().any(|c| c.status == Status::Fail) { 1 } else { 0 };
     print!("{}", render(&checks));
+    println!("Like it? ⭐ Star us → https://github.com/yinnho/aginxbrowser");
     code
 }
 

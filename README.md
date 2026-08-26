@@ -15,6 +15,10 @@ A browser built for agents from the first line of code — not a human browser b
 
 One binary, zero dependencies, instant service. HTTP API + native MCP — agents plug in and go.
 
+*Real pages rendered by AginxBrowser's diting engine (no Chromium) — Wikipedia, this repo, Rust. [Screenshot it yourself →](docs/API.md#screenshot)*
+
+![AginxBrowser rendering real pages](docs/demo.gif)
+
 ## Why Agents Need Their Own Browser
 
 Existing "browser automation" was built for humans or for one-shot scraping — not for agents:
