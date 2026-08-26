@@ -106,6 +106,9 @@ Self-hosting:
 brew install yinnho/aginxbrowser/aginxbrowser
 aginxbrowser doctor   # features + fonts + egress self-check
 
+# Docker
+docker run -p 8089:8089 ghcr.io/yinnho/aginxbrowser:latest
+
 # Or the prebuilt binary (one-line installer: platform detect + sha256 + self-check)
 curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/install.sh -o install.sh
 less install.sh && bash install.sh

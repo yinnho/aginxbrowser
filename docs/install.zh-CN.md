@@ -104,7 +104,14 @@ brew install yinnho/aginxbrowser/aginxbrowser
 aginxbrowser doctor   # 特性 + 字体 + 出网自检
 ```
 
-### 方式 B：一行安装器（最快）
+### 方式 B：Docker
+
+```bash
+docker run -d -p 8089:8089 ghcr.io/yinnho/aginxbrowser:latest
+curl -sS http://127.0.0.1:8089/health
+```
+
+### 方式 C：一行安装器（最快）
 
 ```bash
 # 先下载审查再执行——不要盲管道跑网络脚本
@@ -119,7 +126,7 @@ bash install.sh
 aginxbrowser doctor   # 编译特性 + 内置字体 + 环境态势 + 一次出口探针
 ```
 
-### 方式 B′：手动下载预编译二进制
+### 方式 C′：手动下载预编译二进制
 
 v0.2.0 提供三平台预编译二进制（macOS Apple Silicon / macOS Intel / Linux x86_64）：
 
@@ -140,7 +147,7 @@ tar xzf aginxbrowser.tar.gz && cd aginxbrowser-${VER}-${T}
 
 同一 release 下有对应 `.sha256` 文件可校验下载完整性。
 
-### 方式 C：源码构建
+### 方式 D：源码构建
 
 ```bash
 git clone https://github.com/yinnho/aginxbrowser.git

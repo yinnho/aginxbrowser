@@ -104,7 +104,14 @@ brew install yinnho/aginxbrowser/aginxbrowser
 aginxbrowser doctor   # features + fonts + egress self-check
 ```
 
-### Option B: One-line installer
+### Option B: Docker
+
+```bash
+docker run -d -p 8089:8089 ghcr.io/yinnho/aginxbrowser:latest
+curl -sS http://127.0.0.1:8089/health
+```
+
+### Option C: One-line installer
 
 ```bash
 # Download, review, then run — never blind-pipe a network script
@@ -119,7 +126,7 @@ Detects your platform, downloads the prebuilt v0.2.0+ binary, verifies the SHA-2
 aginxbrowser doctor   # features + bundled fonts + env posture + one egress probe
 ```
 
-### Option B′: Manual prebuilt download
+### Option C′: Manual prebuilt download
 
 Prebuilt binaries for v0.2.0 (macOS Apple Silicon / macOS Intel / Linux x86_64):
 
@@ -140,7 +147,7 @@ tar xzf aginxbrowser.tar.gz && cd aginxbrowser-${VER}-${T}
 
 Verify the download with the matching `.sha256` file in the same release.
 
-### Option C: Build from source
+### Option D: Build from source
 
 ```bash
 git clone https://github.com/yinnho/aginxbrowser.git
