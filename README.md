@@ -102,7 +102,11 @@ npx skills add yinnho/aginxbrowser
 Self-hosting:
 
 ```bash
-# Prebuilt binary (one-line installer: platform detect + sha256 + self-check)
+# macOS / Linux via Homebrew
+brew install yinnho/aginxbrowser/aginxbrowser
+aginxbrowser doctor   # features + fonts + egress self-check
+
+# Or the prebuilt binary (one-line installer: platform detect + sha256 + self-check)
 curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/install.sh -o install.sh
 less install.sh && bash install.sh
 aginxbrowser doctor   # features + fonts + egress self-check
