@@ -908,6 +908,7 @@ fn build_normal_sibling(
     fonts: &FontBook,
     taffy_tree: &mut TaffyTree<TextLeaf>,
     node_map: &mut HashMap<taffy::tree::NodeId, NodeId>,
+    flattened: &mut HashMap<NodeId, Vec<taffy::tree::NodeId>>,
     atomic_container: bool,
     font_size: f32,
     line_height: f32,
@@ -963,14 +964,19 @@ fn build_normal_sibling(
             let col = color_context(tree, child, styles);
             leaves.extend(build_word_leaves(&text, fs, b, col, lh, fonts, taffy_tree));
         } else {
-            let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map);
+            let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened);
             if let Some(sub) = sub {
                 let sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
-                leaves.extend(sub_children);
+                leaves.extend(sub_children.clone());
                 // Flattening removes the sub's taffy node (invalidating its
                 // SlotMap key) — drop the stale node_map entry with it.
                 node_map.remove(&sub);
                 let _ = taffy_tree.remove(sub);
+                // The element keeps its DOM identity boxless — the union
+                // pass after the collect walk rebuilds a rect from the kids.
+                if !sub_children.is_empty() {
+                    flattened.insert(child, sub_children);
+                }
             }
         }
         if !leaves.is_empty() {
@@ -980,7 +986,7 @@ fn build_normal_sibling(
         }
         return;
     }
-    if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map) {
+    if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened) {
         direct.push(node);
     }
 }
@@ -993,6 +999,7 @@ fn build_element(
     fonts: &FontBook,
     taffy_tree: &mut TaffyTree<TextLeaf>,
     node_map: &mut HashMap<taffy::tree::NodeId, NodeId>,
+    flattened: &mut HashMap<NodeId, Vec<taffy::tree::NodeId>>,
 ) -> Option<taffy::tree::NodeId> {
     let style = styles.get(&id).cloned().unwrap_or_default();
     if style.display == Some(CssDisplay::None) {
@@ -1225,6 +1232,7 @@ fn build_element(
                     fonts,
                     taffy_tree,
                     node_map,
+                    flattened,
                     atomic_container,
                     font_size,
                     lh_elem,
@@ -1235,7 +1243,7 @@ fn build_element(
             // right floats inline-end first).
             let mut right_children: Vec<taffy::tree::NodeId> = Vec::new();
             for cid in right_floats.iter().rev() {
-                if let Some(f) = build_element(tree, *cid, styles, images, fonts, taffy_tree, node_map) {
+                if let Some(f) = build_element(tree, *cid, styles, images, fonts, taffy_tree, node_map, flattened) {
                     right_children.push(f);
                 }
             }
@@ -1313,7 +1321,7 @@ fn build_element(
                         continue;
                     }
                     if let Some(f) =
-                        build_element(tree, child_ids[i], styles, images, fonts, taffy_tree, node_map)
+                        build_element(tree, child_ids[i], styles, images, fonts, taffy_tree, node_map, flattened)
                     {
                         inner.push(f);
                     }
@@ -1328,12 +1336,12 @@ fn build_element(
                     pair_children.push(row);
                 }
             } else if let Some(f) =
-                build_element(tree, child_ids[float_idx], styles, images, fonts, taffy_tree, node_map)
+                build_element(tree, child_ids[float_idx], styles, images, fonts, taffy_tree, node_map, flattened)
             {
                 pair_children.push(f);
             }
             if let Some(o) =
-                build_element(tree, child_ids[opp_idx], styles, images, fonts, taffy_tree, node_map)
+                build_element(tree, child_ids[opp_idx], styles, images, fonts, taffy_tree, node_map, flattened)
             {
                 pair_children.push(o);
             }
@@ -1362,6 +1370,7 @@ fn build_element(
                     fonts,
                     taffy_tree,
                     node_map,
+                    flattened,
                     atomic_container,
                     font_size,
                     lh_elem,
@@ -1387,7 +1396,7 @@ fn build_element(
                 if !is_float_child(&child_ids[i]) {
                     continue;
                 }
-                if let Some(f) = build_element(tree, child_ids[i], styles, images, fonts, taffy_tree, node_map) {
+                if let Some(f) = build_element(tree, child_ids[i], styles, images, fonts, taffy_tree, node_map, flattened) {
                     row_children.push(f);
                 }
             }
@@ -1417,6 +1426,7 @@ fn build_element(
                     fonts,
                     taffy_tree,
                     node_map,
+                    flattened,
                     atomic_container,
                     font_size,
                     lh_elem,
@@ -1554,7 +1564,7 @@ fn build_element(
         // Build the float itself (blockified into the row's first item).
         let float_dom = child_ids[float_idx];
         let float_taffy =
-            build_element(tree, float_dom, styles, images, fonts, taffy_tree, node_map);
+            build_element(tree, float_dom, styles, images, fonts, taffy_tree, node_map, flattened);
         // The flow column: an ANONYMOUS block wrapper around every in-zone
         // sibling built normally inside it. Not in node_map — it has no DOM
         // identity, so collect skips it and paints walk straight through to
@@ -1596,16 +1606,20 @@ fn build_element(
                 let col = color_context(tree, child, styles);
                 run.push(RunSeg::Text(text, fs, b, col, lh));
             } else if inline_level && !out_of_flow {
-                let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map);
+                let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened);
                 if let Some(sub) = sub {
                     let sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
-                    run.push(RunSeg::Nodes(sub_children));
+                    run.push(RunSeg::Nodes(sub_children.clone()));
                     node_map.remove(&sub);
                     let _ = taffy_tree.remove(sub);
+                    // Boxless after hoisting — union pass rebuilds the rect.
+                    if !sub_children.is_empty() {
+                        flattened.insert(child, sub_children);
+                    }
                 }
             } else {
                 flush_run(&mut run, &mut flow_children, taffy_tree);
-                if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map) {
+                if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened) {
                     flow_children.push(node);
                 }
             }
@@ -1663,6 +1677,7 @@ fn build_element(
                 fonts,
                 taffy_tree,
                 node_map,
+                flattened,
                 atomic_container,
                 font_size,
                 lh_elem,
@@ -1726,16 +1741,20 @@ fn build_element(
         } else if inline_level && !atomic_container && !out_of_flow {
             // A plain inline wrapper flattens into the enclosing run (upstream
             // is_flattenable_inline): the words wrap at the real block level.
-            let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map);
+            let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened);
             if let Some(sub) = sub {
                 let sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
-                run.push(RunSeg::Nodes(sub_children));
+                run.push(RunSeg::Nodes(sub_children.clone()));
                 node_map.remove(&sub);
                 let _ = taffy_tree.remove(sub);
+                // Boxless after hoisting — union pass rebuilds the rect.
+                if !sub_children.is_empty() {
+                    flattened.insert(child, sub_children);
+                }
             }
         } else {
             flush_run(&mut run, &mut direct, taffy_tree);
-            if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map) {
+            if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened) {
                 direct.push(node);
             }
         }
@@ -1917,10 +1936,20 @@ pub fn layout_dom_with_paint_and_images(
 
     let mut rects = HashMap::new();
     let mut items: Vec<PaintItem> = Vec::new();
+    // Flattened inline wrappers (see build_element) recorded as
+    // dom id → hoisted taffy children, for the union pass after the walk.
+    let mut flattened: HashMap<NodeId, Vec<taffy::tree::NodeId>> = HashMap::new();
     let Some(root_id) = root else { return (rects, items) };
-    let Some(root_node) =
-        build_element(tree, root_id, styles, &images, fonts, &mut taffy_tree, &mut node_map)
-    else {
+    let Some(root_node) = build_element(
+        tree,
+        root_id,
+        styles,
+        &images,
+        fonts,
+        &mut taffy_tree,
+        &mut node_map,
+        &mut flattened,
+    ) else {
         return (rects, items);
     };
 
@@ -2303,6 +2332,7 @@ pub fn layout_dom_with_paint_and_images(
         images: &HashMap<NodeId, DecodedImage>,
         static_pos: &HashMap<NodeId, (f32, f32)>,
         rects: &mut HashMap<NodeId, Rect>,
+        abs_by_node: &mut HashMap<taffy::tree::NodeId, Rect>,
         items: &mut Vec<PaintItem>,
         node: taffy::tree::NodeId,
         offset: (f32, f32),
@@ -2310,6 +2340,17 @@ pub fn layout_dom_with_paint_and_images(
     ) {
         let Ok(layout) = taffy_tree.layout(node) else { return };
         let abs = (offset.0 + layout.location.x, offset.1 + layout.location.y);
+        // Every visited node's absolute border box — the union pass after
+        // the walk rebuilds rects for flattened inline wrappers from kids.
+        abs_by_node.insert(
+            node,
+            Rect {
+                x: abs.0,
+                y: abs.1,
+                width: layout.size.width,
+                height: layout.size.height,
+            },
+        );
         let mut clips = false;
         if let Some(dom_id) = node_map.get(&node) {
             let mut rect = Rect { x: abs.0, y: abs.1, width: layout.size.width, height: layout.size.height };
@@ -2589,13 +2630,14 @@ pub fn layout_dom_with_paint_and_images(
         pos.sort_by_key(|(z, _)| *z);
         for list in [neg, mid, pos] {
             for (_, i) in list {
-                collect(tree, taffy_tree, node_map, styles, images, static_pos, rects, items, children[i], abs, viewport_width);
+                collect(tree, taffy_tree, node_map, styles, images, static_pos, rects, abs_by_node, items, children[i], abs, viewport_width);
             }
         }
         if clips {
             items.push(PaintItem::PopClip);
         }
     }
+    let mut abs_by_node: HashMap<taffy::tree::NodeId, Rect> = HashMap::new();
     collect(
         tree,
         &taffy_tree,
@@ -2604,11 +2646,46 @@ pub fn layout_dom_with_paint_and_images(
         &images,
         &static_pos,
         &mut rects,
+        &mut abs_by_node,
         &mut items,
         icb_node,
         (0.0, 0.0),
         viewport_width,
     );
+    // Flattened inline wrappers (span/label/a/… — obscura#722 lineage) own no
+    // taffy box: the run hoisted their children. getBoundingClientRect still
+    // owes them a rect, so union the hoisted kids' absolute boxes into one
+    // bounding box. CSS unions the element's own fragments; kids approximate
+    // that closely for text content (exact for the common cases).
+    for (dom, kids) in &flattened {
+        if rects.contains_key(dom) {
+            continue;
+        }
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+        let mut any = false;
+        for k in kids {
+            let Some(r) = abs_by_node.get(k) else { continue };
+            any = true;
+            min_x = min_x.min(r.x);
+            min_y = min_y.min(r.y);
+            max_x = max_x.max(r.x + r.width);
+            max_y = max_y.max(r.y + r.height);
+        }
+        if any {
+            rects.insert(
+                *dom,
+                Rect {
+                    x: min_x,
+                    y: min_y,
+                    width: max_x - min_x,
+                    height: max_y - min_y,
+                },
+            );
+        }
+    }
     (rects, items)
 }
 
@@ -3570,18 +3647,26 @@ mod bridge_cross_check {
     }
 
     /// Inline content of one block shares a single wrapping run: words from
-    /// text + flattened span children wrap together, and the span itself
-    /// owns no box.
+    /// text + flattened span children wrap together (one line), and since the
+    /// obscura#722 fix the span keeps a synthesized bounding-box rect from
+    /// its hoisted children (it owns no taffy box of its own).
     #[test]
     fn inline_run_is_one_wrapper() {
         let html = r#"<body><p id="p">alpha <span id="s">beta gamma</span> delta</p></body>"#;
         let sheet = "body { margin: 0; }";
         let (_doc, tree, _styles, rects) = both_engines(html, sheet);
         let p = rects[&tree.query_selector("#p").unwrap().unwrap()];
-        let s = tree.query_selector("#s").unwrap().unwrap();
-        assert!(!rects.contains_key(&s), "flattened span owns no box");
+        let s_id = tree.query_selector("#s").unwrap().unwrap();
+        let s = rects
+            .get(&s_id)
+            .expect("flattened span keeps a synthesized rect");
         // One line of 16px text = 19.2 → 19 after taffy's rounding.
         assert!((p.height - 19.2).abs() < EPS as f32, "one line: {}", p.height);
+        // The span's rect hugs "beta gamma": starts after "alpha ", same
+        // line box height as p, inside p's bounds.
+        assert!(s.x > 0.0, "span starts after leading text: {:?}", s);
+        assert!((s.height - p.height).abs() <= 1.0, "span is one line: {:?}", s);
+        assert!(s.y >= p.y - EPS as f32 && s.y + s.height <= p.y + p.height + EPS as f32, "span inside p: s={:?} p={:?}", s, p);
     }
 
     /// text-align promotion (upstream stand-in): the block becomes a
@@ -6457,6 +6542,46 @@ mod bridge_cross_check {
         assert_eq!(pick.as_deref(), Some("tail.png"), "1x < 2x at dpr 1");
 
         assert!(parse_srcset("").is_empty());
+    }
+
+    /// Flattened inline wrappers (span/label/a — obscura#722 lineage) must
+    /// still report a rect: the union pass rebuilds it from the hoisted
+    /// run children. Before the fix these elements owned no taffy box at
+    /// all, so getBoundingClientRect fell back to a synthetic grid cell —
+    /// breaking coordinate-based clicking on inline content.
+    #[test]
+    fn inline_elements_keep_real_rects_after_flatten() {
+        let html = r##"<body>
+            <p id="p">before <span id="s">spanned</span> after</p>
+            <label id="l">toggle</label>
+            <a id="a" href="#">link</a>
+        </body>"##;
+        let sheet = "body { margin: 0; } #p { margin: 0; font-size: 16px; }";
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW, VH);
+
+        for sel in ["#p", "#s", "#l", "#a"] {
+            let id = tree.query_selector(sel).unwrap().unwrap();
+            eprintln!("{} -> {:?}", sel, rects.get(&id));
+        }
+
+        let s = tree.query_selector("#s").unwrap().unwrap();
+        let l = tree.query_selector("#l").unwrap().unwrap();
+        let a = tree.query_selector("#a").unwrap().unwrap();
+        let s_rect = rects.get(&s).expect("span keeps a rect after flatten");
+        let l_rect = rects.get(&l).expect("label keeps a rect after flatten");
+        let a_rect = rects.get(&a).expect("anchor keeps a rect after flatten");
+        // Real geometry, not a synthetic grid cell: nonzero size, inside the
+        // viewport, on the first text line (~16px font, ~19px line box).
+        for r in [s_rect, l_rect, a_rect] {
+            assert!(r.width > 0.0 && r.height > 0.0, "inline rect {r:?} has size");
+            assert!(r.x >= 0.0 && r.y >= 0.0 && r.y < VH, "inline rect {r:?} is in-flow");
+            assert!(r.height < 60.0, "inline rect {r:?} is a line box, not a grid cell");
+        }
+        // The span sits after the "before " text: not at the line's start.
+        assert!(s_rect.x > 0.0, "span starts after leading text, got {:?}", s_rect);
     }
 
 }
