@@ -523,6 +523,17 @@ impl AginxBrowserMcp {
     }
 
     #[tool(
+        description = "List live browser sessions with idle age and the time left before auto-eviction. Use to discover a session to reuse instead of creating a new one; sessions expire after 8 min idle.",
+        annotations(title = "List Browser Sessions", read_only_hint = true)
+    )]
+    async fn session_list(&self) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        mgr.evict_expired();
+        let sessions = mgr.list();
+        json!({ "count": sessions.len(), "sessions": sessions }).to_string()
+    }
+
+    #[tool(
         description = "Close a browser session and free its resources.",
         annotations(title = "Session Close")
     )]
@@ -557,11 +568,25 @@ pub async fn run_mcp_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sy
 /// `allowed_hosts` (defaults to loopback only) to prevent DNS rebinding, so a
 /// public deployment must list its own hostname.
 pub fn mcp_http_service() -> StreamableHttpService<AginxBrowserMcp, LocalSessionManager> {
-    let config = StreamableHttpServerConfig::default().with_allowed_hosts(vec![
+    let mut hosts = vec![
         "browser.aginx.net".to_string(),
         "localhost".to_string(),
         "127.0.0.1".to_string(),
-    ]);
+    ];
+    // rmcp's Host-header guard (DNS-rebinding protection) defaults to
+    // loopback only, so an instance reached over a LAN IP or a docker
+    // hostname would have /mcp rejected. Operators extend the allowlist
+    // with a comma-separated list instead of rebuilding.
+    if let Ok(extra) = std::env::var("AGINXBROWSER_MCP_ALLOWED_HOSTS") {
+        hosts.extend(
+            extra
+                .split(',')
+                .map(str::trim)
+                .filter(|h| !h.is_empty())
+                .map(String::from),
+        );
+    }
+    let config = StreamableHttpServerConfig::default().with_allowed_hosts(hosts);
     StreamableHttpService::new(
         || Ok(AginxBrowserMcp),
         Arc::new(LocalSessionManager::default()),

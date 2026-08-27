@@ -61,7 +61,7 @@ Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操
 - **截图渲染**：`/screenshot` 端点（`--features screenshot`），JS 渲染后的 DOM 用自有的 diting 渲染引擎出 PNG——纯 CPU，无 Chromium，agent 的视觉输入
 - **Cloudflare 自动绕过**：检测 "Just a moment..." 挑战页，自动等待 `cf_clearance`
 - **TLS 指纹伪装**：stealth 模式模拟 Chrome145/Firefox133/Safari/Edge，可按请求切换
-- **MCP Server**：`--mcp` 模式暴露 14 个工具（fetch/eval/click/search/download + 9 个 session 工具），Claude Code / Claude Desktop / Cursor 直接调用
+- **MCP Server**：`--mcp` 模式暴露 15 个工具（fetch/eval/click/search/download + 10 个 session 工具），Claude Code / Claude Desktop / Cursor 直接调用
 - **Firecrawl 兼容**：`/v1/scrape` 端点，现有 Firecrawl 客户端改 base URL 即可迁移
 - **DNS 重绑定防护**：内置 SSRF 防护 + DNS 解析后 IP 校验
 
@@ -157,7 +157,7 @@ aginxbrowser/
     ├── session.rs           # 交互式浏览器会话
     ├── captcha.rs           # CAPTCHA 检测与自动解决
     ├── render.rs            # 分层渲染（HTTP 直取 → diting 浏览器引擎）
-    ├── mcp.rs               # MCP Server（14 个工具）
+    ├── mcp.rs               # MCP Server（15 个工具）
     ├── firecrawl_compat.rs  # Firecrawl 兼容 /v1/scrape 端点
     ├── browser.rs           # 顶层 API：Browser、BrowserBuilder
     ├── page.rs              # 顶层 API：Page、Element
@@ -214,6 +214,7 @@ cargo build --release --features stealth,screenshot
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language |
 | `AGINXBROWSER_PROXY` | 无 | 可选回退代理。被墙源引擎（Google/Bing News/Hugging Face）先直连、失败才走此代理——海外部署无需配置；单次请求也可传 `use_proxy:true` 走代理 |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 缓存 TTL，`0` 禁用 |
+| `AGINXBROWSER_MCP_ALLOWED_HOSTS` | 无 | `/mcp` 额外放行的 `Host`（逗号分隔）。传输层的 DNS 重绑定防护默认只认回环地址，局域网 IP 或 Docker 主机名调用本实例时需加上 |
 | `CAPTCHA_SOLVER_API_KEY` | 无 | 2captcha API Key，设置后自动解决验证码 |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | 验证码解决服务 |
 | `AGINXBROWSER_MEILI_URL` | 无 | Meilisearch 地址；设置后启用私有索引引擎 |
@@ -226,8 +227,8 @@ cargo build --release --features stealth,screenshot
 **安全审计说明** → [`docs/skills-sh-audit.md`](docs/skills-sh-audit.md) — 为什么 skills.sh 上显示 Critical Risk，每条告警对应的真实产品功能
 
 包含：
-- 所有 HTTP 端点（`/fetch`、`/click`、`/eval`、`/search`、`/v1/scrape`、8 个 Session 端点）
-- MCP Server 的 14 个工具及参数
+- 所有 HTTP 端点（`/fetch`、`/click`、`/eval`、`/search`、`/v1/scrape`、9 个 Session 端点）
+- MCP Server 的 15 个工具及参数
 - Claude Code / Claude Desktop / Cursor 客户端配置
 - 远程服务器 SSH 接入方式
 - 环境变量、错误码、站点抓取示例

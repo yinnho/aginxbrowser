@@ -46,7 +46,7 @@ Most new "agent browsers" are stateless, fingerprint-less one-shot renderers —
 
 - **🔐 Real TLS fingerprints** — stealth mode replicates the complete Chrome145 / Firefox133 / Safari / Edge TLS handshakes via BoringSSL (not just a UA string), switchable per request; Cloudflare Turnstile challenges wait automatically for `cf_clearance`. Fingerprint-less engines eat 403s — we get through.
 - **🤝 Stateful interactive sessions** — persistent sessions (8-minute idle keep-alive), login state injectable and exportable (`session_create(cookies=...)` ↔ `session_cookies`), surviving pagination and multi-step flows. One-shot engines throw state away.
-- **🔌 MCP native** — 14 tools as first-class citizens (not a CDP shim). Claude Code / Cursor / Claude Desktop connect in one line. HTTP + MCP dual protocol.
+- **🔌 MCP native** — 15 tools as first-class citizens (not a CDP shim). Claude Code / Cursor / Claude Desktop connect in one line. HTTP + MCP dual protocol.
 
 > Reference point: Cloudflare's Kitesurf explicitly ships neither real TLS-fingerprint negotiation nor persistent auth sessions — anti-bot and login territory is exactly where AginxBrowser plays.
 
@@ -63,7 +63,7 @@ Apache-2.0 open source, single binary — self-host today, no cloud lock-in.
 - **Screenshot rendering**: `/screenshot` endpoint (opt-in `--features screenshot`) paints the JS-rendered DOM with our own diting rendering engine — pure CPU, no Chromium — to PNG. Vision input for agents
 - **Cloudflare auto-wait**: detects "Just a moment..." challenge pages and waits out `cf_clearance`
 - **TLS fingerprint spoofing**: stealth mode impersonates Chrome145/Firefox133/Safari/Edge, switchable per request
-- **MCP server**: `--mcp` mode exposes 14 tools (fetch/eval/click/search/download + 9 session tools) — Claude Code / Claude Desktop / Cursor call them directly
+- **MCP server**: `--mcp` mode exposes 15 tools (fetch/eval/click/search/download + 10 session tools) — Claude Code / Claude Desktop / Cursor call them directly
 - **Firecrawl compatible**: `/v1/scrape` endpoint — existing Firecrawl clients migrate by changing the base URL
 - **DNS rebinding protection**: built-in SSRF guard + post-resolution IP validation
 
@@ -171,7 +171,7 @@ aginxbrowser/
     ├── session.rs           # Interactive browser sessions
     ├── captcha.rs           # CAPTCHA detection & auto-solve
     ├── render.rs            # Tiered rendering (HTTP direct → diting browser engine)
-    ├── mcp.rs               # MCP server (14 tools)
+    ├── mcp.rs               # MCP server (15 tools)
     ├── firecrawl_compat.rs  # Firecrawl-compatible /v1/scrape endpoint
     ├── browser.rs           # Top-level API: Browser, BrowserBuilder
     ├── page.rs              # Top-level API: Page, Element
@@ -230,6 +230,7 @@ Requirements: Rust 1.78+; the V8 static library downloads automatically on first
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL, `0` disables |
 | `AGINXBROWSER_IGNORE_ROBOTS` | unset | robots.txt is honored by default on `/fetch`, `/screenshot`, `/download` and MCP tools; set `1` to skip checks (operator opt-out) |
 | `AGINXBROWSER_ROBOTS_TTL_SECS` | `3600` | Per-host robots.txt policy cache TTL |
+| `AGINXBROWSER_MCP_ALLOWED_HOSTS` | unset | Extra `Host` values accepted by `/mcp` (comma-separated) — the transport's DNS-rebinding guard defaults to loopback, so add your LAN IP or Docker hostname when other machines call the instance |
 | `CAPTCHA_SOLVER_API_KEY` | none | 2captcha API key; enables CAPTCHA auto-solving |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | CAPTCHA solving provider |
 | `AGINXBROWSER_MEILI_URL` | none | Meilisearch base URL; set to enable the private-index engine |
@@ -242,8 +243,8 @@ Requirements: Rust 1.78+; the V8 static library downloads automatically on first
 **Security audit notes** → [`docs/skills-sh-audit.md`](docs/skills-sh-audit.md) — why skills.sh shows "Critical Risk", and which real product feature each warning corresponds to
 
 Covers:
-- All HTTP endpoints (`/fetch`, `/click`, `/eval`, `/search`, `/v1/scrape`, 8 session endpoints)
-- All 14 MCP server tools and their parameters
+- All HTTP endpoints (`/fetch`, `/click`, `/eval`, `/search`, `/v1/scrape`, 9 session endpoints)
+- All 15 MCP server tools and their parameters
 - Claude Code / Claude Desktop / Cursor client configuration
 - Environment variables, error codes, per-site scraping examples
 

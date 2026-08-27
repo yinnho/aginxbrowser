@@ -88,6 +88,16 @@ pub struct SessionClickResponse {
     pub clicked: bool,
 }
 
+/// One live session, as reported by [`SessionManager::list`].
+#[derive(Debug, Serialize)]
+pub struct SessionListEntry {
+    pub session_id: String,
+    /// Seconds since the session last answered a command.
+    pub idle_secs: u64,
+    /// Idle budget left before auto-eviction.
+    pub expires_in_secs: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Session handle
 // ---------------------------------------------------------------------------
@@ -216,6 +226,25 @@ impl SessionManager {
         for id in expired {
             self.close(&id);
         }
+    }
+
+    /// Snapshot of live sessions — id + idle age only, most recently active
+    /// first. The page URL lives inside the session thread; fetching it per
+    /// entry would round-trip a State command per session, too heavy for a
+    /// listing. Call [`Self::evict_expired`] first if the list must not
+    /// include idle-but-not-yet-evicted sessions.
+    pub fn list(&self) -> Vec<SessionListEntry> {
+        let mut out: Vec<SessionListEntry> = self
+            .sessions
+            .iter()
+            .map(|(id, s)| SessionListEntry {
+                session_id: id.clone(),
+                idle_secs: s.last_active.elapsed().as_secs(),
+                expires_in_secs: SESSION_TIMEOUT.saturating_sub(s.last_active.elapsed()).as_secs(),
+            })
+            .collect();
+        out.sort_by_key(|e| e.idle_secs);
+        out
     }
 
     /// Live session count (call [`Self::evict_expired`] first if the number
@@ -625,5 +654,28 @@ mod tests {
         assert!(timeout, "setTimeout must fire during the idle gap");
         assert!(micro, "promise chain must settle during the idle gap");
         assert!(ticks >= 3, "interval must keep firing while idle, got {ticks} ticks");
+    }
+
+    /// list() reports every live session with an expiry budget, most recently
+    /// active first, and drops to empty once sessions close.
+    #[tokio::test]
+    async fn list_reports_live_sessions_and_goes_empty_after_close() {
+        let mut mgr = SessionManager::new();
+        let a = mgr.create(Some("about:blank"), false, vec![]);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let b = mgr.create(Some("about:blank"), false, vec![]);
+
+        let entries = mgr.list();
+        assert_eq!(entries.len(), 2);
+        let ids: Vec<&str> = entries.iter().map(|e| e.session_id.as_str()).collect();
+        assert!(ids.contains(&a.as_str()) && ids.contains(&b.as_str()));
+        assert!(entries[0].idle_secs <= entries[1].idle_secs, "most recent first");
+        for e in &entries {
+            assert!(e.expires_in_secs <= 480, "expiry budget caps at the 8 min timeout");
+        }
+
+        assert!(mgr.close_and_wait(&a).await);
+        assert!(mgr.close_and_wait(&b).await);
+        assert!(mgr.list().is_empty());
     }
 }

@@ -550,6 +550,18 @@ Create an interactive browser session.
 {"session_id": "s_1", "url": "https://example.com/"}
 ```
 
+### GET /session/list
+
+List live sessions — the discovery twin of `/session/create` (reuse an idle session instead of spawning a fresh V8 thread per step). Entries carry idle age and the eviction budget; most recently active first.
+
+**Response:**
+
+```json
+{"count": 1, "sessions": [{"session_id": "s_1", "idle_secs": 19, "expires_in_secs": 460}]}
+```
+
+Sessions are process-global and shared across callers (HTTP and MCP alike) — that's what makes "one instance per machine, every agent shares it" work.
+
 ### POST /session/{id}/navigate
 
 Navigate to a new URL.
@@ -806,7 +818,17 @@ The HTTP server ships a `/mcp` endpoint speaking the MCP Streamable HTTP protoco
 
 `--mcp` mode speaks the stdio protocol, does not start an HTTP server, and communicates with MCP clients over stdin/stdout.
 
-### Provided Tools (14)
+### Session Semantics (`Mcp-Session-Id`)
+
+The streamable HTTP transport follows the protocol's dual session semantics — this is the *MCP-layer* session (the JSON-RPC conversation), separate from browser sessions:
+
+- **Header absent** on `initialize`: the server creates a new isolated MCP session and returns the ID in the `Mcp-Session-Id` response header. A client that never sends the header back gets a fresh session per connection — sessions don't leak into each other.
+- **Header present**: the request continues the identified session. An unknown or expired ID returns `404` — clients re-initialize.
+- **HTTP `DELETE`** with the header terminates that MCP session.
+
+Browser sessions (`session_create` & co.) are shared across MCP sessions by design: two MCP clients on the same server can list (`session_list`) and reuse the same browser session IDs, which is what makes "one instance per machine, every agent shares it" work. For a self-hosted instance reached over a LAN IP or a Docker hostname (not `localhost`/`127.0.0.1`), add the hostname to `AGINXBROWSER_MCP_ALLOWED_HOSTS` — the transport validates the `Host` header as DNS-rebinding protection and rejects unlisted hosts with `403`.
+
+### Provided Tools (15)
 
 #### Core Tools
 
@@ -823,6 +845,7 @@ The HTTP server ships a `/mcp` endpoint speaking the MCP Streamable HTTP protoco
 | Tool | Description |
 |------|------|
 | `session_create` | Create an interactive browser session |
+| `session_list` | List live sessions with idle age and time left before auto-eviction (discover one to reuse) |
 | `session_navigate` | Navigate to a new URL within a session |
 | `session_state` | Get the indexed page state |
 | `session_cookies` | Export the session's current cookies (`["name=value",...]`, for login-state reuse) |
@@ -968,6 +991,7 @@ If AginxBrowser is deployed on a remote server, connect through an SSH tunnel:
 | `AGINXBROWSER_UA` | Linux Chrome145 | Spoofed User-Agent |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language header |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL (seconds); `0` disables |
+| `AGINXBROWSER_MCP_ALLOWED_HOSTS` | unset | Extra `Host` values accepted by `/mcp` (comma-separated) — the DNS-rebinding guard defaults to loopback; add your LAN IP / Docker hostname when other machines call the instance |
 | `AGINXBROWSER_DOWNLOAD_DIR` | `.` | Directory where `/download` saves files |
 | `AGINXBROWSER_PROXY` | None | Proxy address (used when `use_proxy:true`) |
 | `CAPTCHA_SOLVER_API_KEY` | None | 2captcha API key; enables automatic CAPTCHA solving when set |

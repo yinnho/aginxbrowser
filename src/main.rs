@@ -519,6 +519,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/download", post(download_handler))
         .route("/v1/scrape", post(firecrawl_compat::scrape_handler))
         .route("/session/create", post(session_create_handler))
+        .route("/session/list", get(session_list_handler))
         .route("/session/:id/navigate", post(session_navigate_handler))
         .route("/session/:id/state", post(session_state_handler))
         .route("/session/:id/cookies", get(session_cookies_handler))
@@ -771,7 +772,7 @@ async fn doctor_handler(Query(params): Query<DoctorParams>) -> impl IntoResponse
         ],
         "endpoints": [
             "/health", "/doctor", "/fetch", "/click", "/eval", "/search",
-            "/download", "/v1/scrape", "/session/create", "/mcp"
+            "/download", "/v1/scrape", "/session/create", "/session/list", "/mcp"
         ],
         "probe": probe,
     }))
@@ -951,6 +952,16 @@ async fn session_create_handler(Json(req): Json<SessionCreateRequest>) -> Result
         session_id: id,
         url: req.url,
     })))
+}
+
+/// Live sessions with idle age and time left before auto-eviction — the
+/// discovery twin of /session/create (reuse instead of spawning a fresh V8
+/// thread per step).
+async fn session_list_handler() -> impl IntoResponse {
+    let mut mgr = session::SESSIONS.lock().await;
+    mgr.evict_expired();
+    let sessions = mgr.list();
+    axum::Json(serde_json::json!({ "count": sessions.len(), "sessions": sessions }))
 }
 
 async fn session_navigate_handler(
