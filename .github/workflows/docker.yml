@@ -78,9 +78,14 @@ jobs:
         env:
           DH_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          # Multi-line output: interpolating it directly into the script
+          # text splits mid-line into raw shell syntax (the v0.2.2 release
+          # run died on `syntax error near unexpected token`). Route through
+          # env so the split happens at word-splitting, not in the source.
+          DH_TAGS: ${{ steps.meta.outputs.tags }}
         if: ${{ env.DH_USERNAME != '' && env.DH_TOKEN != '' }}
         run: |
-          for tag in ${{ steps.meta.outputs.tags }}; do
+          for tag in $DH_TAGS; do
             name="${tag##*:}"
             echo "→ docker.io/yinnho/aginxbrowser:$name (from ghcr.io/yinnho/aginxbrowser:$name)"
             docker buildx imagetools create \
