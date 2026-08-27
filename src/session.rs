@@ -564,3 +564,60 @@ fn input_by_index(
     let result = page.evaluate_with_timeout(&js, crate::page::INTERACTION_EVAL_TIMEOUT);
     Ok(result.as_bool().unwrap_or(false))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression (WorkOS Radar collector frozen 31s; the same bug class the
+    /// upstream engine fixed as v0.2.1 "MCP pumps the page task queue between
+    /// tool calls"): while a session sits idle between commands, its page's
+    /// timers, microtasks and interval callbacks must keep firing like a real
+    /// browser's main thread. Arms a timer, a promise chain and an interval,
+    /// stays idle well past their deadlines with no command in flight, then
+    /// reads the markers back. A session that parks on a blocking recv()
+    /// instead of pumping 200ms slices leaves all three markers unset.
+    #[tokio::test]
+    async fn idle_session_keeps_timers_and_microtasks_firing() {
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(Some("about:blank"), false, vec![]);
+
+        let armed = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: r#"(function() {
+                    window.__marks = {timeout: false, micro: false, ticks: 0};
+                    setTimeout(function() { window.__marks.timeout = true; }, 400);
+                    Promise.resolve().then(function() { window.__marks.micro = true; });
+                    setInterval(function() { window.__marks.ticks++; }, 200);
+                    return 'armed';
+                })()"#
+                    .to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(armed.as_str().unwrap_or(""), "armed");
+
+        // Idle gap: no command sent for well past the 400ms timer deadline.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        let state = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "JSON.stringify(window.__marks)".to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert!(mgr.close_and_wait(&sid).await, "session thread must ack close");
+
+        let json: Value = serde_json::from_str(state.as_str().unwrap_or("null")).unwrap_or(Value::Null);
+        let timeout = json.get("timeout").and_then(|v| v.as_bool()).unwrap_or(false);
+        let micro = json.get("micro").and_then(|v| v.as_bool()).unwrap_or(false);
+        let ticks = json.get("ticks").and_then(|v| v.as_i64()).unwrap_or(0);
+        // 1.5s idle at a 200ms interval ≈ 7 ticks; 3 is a safe floor that
+        // still proves sustained pumping (one post-command drain gives 0-1).
+        assert!(timeout, "setTimeout must fire during the idle gap");
+        assert!(micro, "promise chain must settle during the idle gap");
+        assert!(ticks >= 3, "interval must keep firing while idle, got {ticks} ticks");
+    }
+}
