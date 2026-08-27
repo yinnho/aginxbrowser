@@ -917,6 +917,24 @@ impl Page {
                  try { document.dispatchEvent(new Event('DOMContentLoaded', {bubbles:false,cancelable:false})); } catch(e) {}\n\
                  try { window.dispatchEvent(new Event('DOMContentLoaded', {bubbles:false,cancelable:false})); } catch(e) {}\n\
                  if (typeof window.onload === 'function') { try { window.onload(); } catch(e) {} }\n\
+                 // HTML spec: event handler content attributes on <body> for
+                 // window-evented names (onload & friends) are exposed as the
+                 // matching Window handler. `<body onload=\"...\">` therefore
+                 // runs when window's load fires — not only when the load
+                 // event is dispatched on the body itself. Byte-WAF challenge
+                 // pages (juejin.cn class) drive their whole PoW from
+                 // `<body onload=\"readygo()\">`, so without this forwarding
+                 // the challenge never starts and the page hangs on
+                 // \"Please wait...\" forever.
+                 try {\n\
+                     (function() {\n\
+                         var b = document.body;\n\
+                         if (!b) return;\n\
+                         var h = b.onload;\n\
+                         if (typeof h !== 'function' && b._resolveInlineHandler) h = b._resolveInlineHandler('onload');\n\
+                         if (typeof h === 'function' && h !== window.onload) h.call(b, new Event('load'));\n\
+                     })();\n\
+                 } catch(e) {}\n\
                  globalThis.__documentReadyState__ = 'complete';\n\
                  try { window.dispatchEvent(new Event('load', {bubbles:false,cancelable:false})); } catch(e) {}");
         }
@@ -2589,6 +2607,155 @@ mod tests {
         // DCL means DOM parsed AND scripts executed.
         assert_eq!(p.evaluate("window.__ran"), serde_json::json!("yes"));
         assert_eq!(p.lifecycle, LifecycleState::DomContentLoaded);
+    }
+
+    // ---- body onload forwarding (byte-WAF challenge prerequisite) ----------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn body_onload_attribute_handler_runs_on_window_load() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![(
+            "/a",
+            200,
+            // `<body onload="...">` is a Window-level handler per HTML spec;
+            // the load event fires on window, so the content attribute must
+            // be forwarded there or the handler never runs.
+            "<html><head></head><body onload=\"window.__bodyOnloadRan = 'yes'\">x</body></html>".into(),
+        )]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/a")).await.unwrap();
+        assert_eq!(p.evaluate("window.__bodyOnloadRan"), serde_json::json!("yes"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn window_load_paths_all_fire() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![(
+            "/a",
+            200,
+            "<html><head></head><body><script>\
+             window.__viaListener = 'no';\
+             window.addEventListener('load', function() { window.__viaListener = 'yes'; });\
+             window.onload = function() { window.__viaProperty = 'yes'; };\
+             </script></body></html>"
+                .into(),
+        )]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/a")).await.unwrap();
+        assert_eq!(p.evaluate("window.__viaListener"), serde_json::json!("yes"));
+        assert_eq!(p.evaluate("window.__viaProperty"), serde_json::json!("yes"));
+    }
+
+    /// Byte-WAF JS challenge (juejin.cn class) auto-solves end to end:
+    /// `<body onload="readygo()">` drives a setInterval PoW over the inline
+    /// SHA-256 helpers, sets the `_wafchallengeid` answer cookie, and
+    /// `location.reload()` re-requests with it fast enough to beat the
+    /// Max-Age=1 window. The local server plays the WAF: no cookie ->
+    /// challenge page, valid answer -> real page.
+    #[tokio::test(flavor = "current_thread")]
+    async fn byte_waf_js_challenge_autosolves() {
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
+        let _g = net_test_guard();
+
+        let prefix: Vec<u8> = (0u8..32).collect();
+        let secret = 7u64; // solution lives at i=7
+        let expect: Vec<u8> = {
+            let mut m = prefix.clone();
+            m.extend_from_slice(secret.to_string().as_bytes());
+            Sha256::digest(&m).to_vec()
+        };
+        let cs = serde_json::json!({
+            "v": {
+                "a": base64::engine::general_purpose::STANDARD.encode(&prefix),
+                "b": 1787795373i64,
+                "c": base64::engine::general_purpose::STANDARD.encode(&expect),
+            },
+            "s": base64::engine::general_purpose::STANDARD.encode([9u8; 32]),
+        })
+        .to_string();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut served_real = false;
+        let mut challenge_hits = 0u32;
+        let log = std::sync::Arc::new(std::sync::Mutex::new((served_real, challenge_hits)));
+        let log2 = log.clone();
+        let prefix2 = prefix.clone();
+        let expect2 = expect.clone();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut served_real, mut challenge_hits) = *log2.lock().unwrap();
+            while let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 16384];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let cookie_hdr = req
+                    .lines()
+                    .find(|l| l.to_ascii_lowercase().starts_with("cookie:"))
+                    .map(|l| l.to_string())
+                    .unwrap_or_default();
+                let passed = cookie_hdr
+                    .split("_wafchallengeid=")
+                    .nth(1)
+                    .and_then(|v| v.split(';').next())
+                    .map(str::trim)
+                    .and_then(|v| {
+                        base64::engine::general_purpose::STANDARD.decode(v).ok()
+                    })
+                    .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+                    .and_then(|c| {
+                        c.get("d")
+                            .and_then(|d| d.as_str())
+                            .and_then(|d| {
+                                base64::engine::general_purpose::STANDARD.decode(d).ok()
+                            })
+                            .map(|answer| {
+                                let mut m = prefix2.clone();
+                                m.extend_from_slice(&answer);
+                                Sha256::digest(&m).to_vec() == expect2
+                            })
+                    })
+                    .unwrap_or(false);
+                let body = if passed {
+                    served_real = true;
+                    "<html><head><title>Real Page</title></head><body>unlocked</body></html>".to_string()
+                } else {
+                    challenge_hits += 1;
+                    format!(
+                        "<html><head><title>challenge</title></head><body onload=\"readygo()\">\
+                         <script>window.WAFJS = function(){{}};</script>\
+                         <script>{helpers}</script>\
+                         <script>function readygo(){{var wci=\"_wafchallengeid\",cs=\"{cs}\",c=JSON.parse(atob(cs)),\
+                         prefix=b64tou8a(c.v.a),expect=b64tohex(c.v.c),i=0,\
+                         iid=setInterval(function(){{expect===s256(prefix,\"\"+i)&&\
+                         (c.d=btoa(\"\"+i),clearInterval(iid),\
+                         document.cookie=wci+\"=\"+btoa(JSON.stringify(c))+\"; Max-Age=1\",\
+                         window.location.reload()),i++,i>1e6&&clearInterval(iid)}},1)}}</script>\
+                         Please wait...</body></html>",
+                        helpers = include_str!("../../tests/waf_sha256_helpers.js"),
+                        cs = base64::engine::general_purpose::STANDARD.encode(cs.as_bytes()),
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+                *log2.lock().unwrap() = (served_real, challenge_hits);
+            }
+        });
+
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/")).await.unwrap();
+        // The challenge page must have auto-passed: readygo ran from the body
+        // onload attribute, solved the PoW, and reloaded with the answer.
+        assert_eq!(p.evaluate("document.title"), serde_json::json!("Real Page"));
+        let (served_real, challenge_hits) = *log.lock().unwrap();
+        assert!(served_real, "server never served the real page");
+        assert!(challenge_hits >= 1, "challenge was never issued");
     }
 
     // ---- robots ------------------------------------------------------------

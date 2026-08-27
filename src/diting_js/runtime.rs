@@ -565,18 +565,26 @@ impl JsRuntime {
         self.object_counter += 1;
         let oid = self.make_oid(self.object_counter);
 
-        // Same trailing-semicolon trim as wrap_expression — Playwright's
-        // utility-script eval ends with `})();`, and `({expr})` would
-        // otherwise become `(...;)` which is a parse-time SyntaxError.
-        let cleaned_expr = expression
-            .trim()
-            .trim_end_matches(|c: char| c == ';' || c.is_whitespace());
-
-        // Puppeteer / Playwright bundles end with a `//# sourceURL=...`
-        // line comment. If we put `{expr})` on a single line the comment
-        // swallows the closing paren and our wrapper breaks. A newline
-        // before the `)` terminates any trailing line comment so the
-        // parens close on their own line.
+        // Evaluate with Runtime.evaluate semantics: the input is a script,
+        // statements are legal, and the completion value of the last
+        // statement is the result. Indirect eval (`(0,eval)(literal)`) runs
+        // it at global scope — matching Chrome, where
+        // `Runtime.evaluate("var x=1; x*2")` returns 2. The old
+        // `await (\n{expr}\n)` / `(\n{expr}\n)` expression wrap turned any
+        // statement syntax into an uncatchable parse-time SyntaxError
+        // (`Unexpected token ';'`), so statement-style probes and client
+        // bundles died silently. serde_json::to_string gives a JS-safe
+        // string literal, so trailing `//# sourceURL=...` comments stay
+        // inside the string instead of eating a paren. A bare `{...}` body
+        // is parenthesized so pasted JSON evaluates as an object literal
+        // rather than a valueless block.
+        let trimmed = expression.trim();
+        let body = if trimmed.starts_with('{') && trimmed.ends_with('}') {
+            format!("({})", trimmed)
+        } else {
+            trimmed.to_string()
+        };
+        let expr_literal = serde_json::to_string(&body).unwrap_or_else(|_| "\"\"".to_string());
         let done_counter = self.object_counter;
         let exc_meta_fn = Self::exception_meta_extract_js("e");
         // Both paths set __diting_await_meta + __diting_await_rejected so the
@@ -586,7 +594,7 @@ impl JsRuntime {
             format!(
                 "(async function() {{\n\
                     try {{\n\
-                        var __result = await (\n{expr}\n);\n\
+                        var __result = await __ditingEvalScript({expr});\n\
                         globalThis.__diting_objects['{oid}'] = __result;\n\
                         globalThis.__diting_await_meta = {meta_fn};\n\
                         globalThis.__diting_await_rejected = false;\n\
@@ -597,7 +605,7 @@ impl JsRuntime {
                     }}\n\
                     globalThis.__diting_done_{done_counter} = true;\n\
                 }})()",
-                expr = cleaned_expr,
+                expr = expr_literal,
                 oid = oid,
                 meta_fn = Self::meta_extract_js("__result"),
                 exc_meta_fn = exc_meta_fn,
@@ -608,7 +616,7 @@ impl JsRuntime {
                 "(function() {{\n\
                     var __result;\n\
                     try {{\n\
-                        __result = (\n{expr}\n);\n\
+                        __result = __ditingEvalScript({expr});\n\
                         globalThis.__diting_objects['{oid}'] = __result;\n\
                         globalThis.__diting_await_meta = {meta_fn};\n\
                         globalThis.__diting_await_rejected = false;\n\
@@ -618,7 +626,7 @@ impl JsRuntime {
                         globalThis.__diting_await_rejected = true;\n\
                     }}\n\
                 }})()",
-                expr = cleaned_expr,
+                expr = expr_literal,
                 oid = oid,
                 meta_fn = Self::meta_extract_js("__result"),
                 exc_meta_fn = exc_meta_fn,
@@ -1528,39 +1536,36 @@ impl JsRuntime {
     }
 
     fn wrap_expression(expression: &str) -> String {
+        // CDP Runtime.evaluate semantics: the input is a *script*, not an
+        // expression — statements are legal and the completion value of the
+        // last statement is the result. Indirect eval (`(0,eval)(...)`) runs
+        // it at global scope and hands back the completion value, so
+        // `var x=1; x*2` returns 2 exactly like Chrome. The previous
+        // `return (...);` expression wrap turned any statement syntax into
+        // `Unexpected token ';'` (unless the script happened to start with
+        // one of six hard-coded statement keywords), which silently broke
+        // clients that evaluate statement scripts — e.g. probing a
+        // WAF challenge page with `try { readygo(); } catch(e) {...}`.
+        // serde_json::to_string emits a JS-safe string literal (quotes,
+        // newlines, U+2028/2029 all escaped), and a trailing
+        // `//# sourceURL=...` line comment lives inside the literal instead
+        // of eating the closing paren.
+        //
+        // One convenience divergence from raw script semantics: a bare
+        // `{...}` input is parenthesized so pasted JSON evaluates as an
+        // object literal (like DevTools console), not as a block whose
+        // completion value is undefined.
         let trimmed = expression.trim();
-
-        let is_multi_statement = trimmed.starts_with("var ")
-            || trimmed.starts_with("let ")
-            || trimmed.starts_with("const ")
-            || trimmed.starts_with("if ")
-            || trimmed.starts_with("for ")
-            || trimmed.starts_with("while ")
-            || trimmed.starts_with("return ");
-
-        if is_multi_statement {
-            format!(
-                "(function() {{ try {{\n{}\n}} catch(e) {{ return null; }} }})()",
-                expression
-            )
+        let body = if trimmed.starts_with('{') && trimmed.ends_with('}') {
+            format!("({})", trimmed)
         } else {
-            // Strip trailing semicolons + whitespace before wrapping in
-            // `return (...);`. Playwright's utility-script expression is
-            // an IIFE that ends with `})();` — leaving the `;` in place
-            // produces `return (...;);`, a SyntaxError. The script fails
-            // to parse, the catch never fires (parse errors are not
-            // catchable), and the function silently returns `undefined`.
-            // Stripping makes the wrapped expression syntactically valid.
-            //
-            // The newline before the trailing `)` also terminates any
-            // `//# sourceURL=...` line comment the caller may have appended
-            // (Puppeteer's evaluated bundles do).
-            let cleaned = trimmed.trim_end_matches(|c: char| c == ';' || c.is_whitespace());
-            format!(
-                "(function() {{ try {{ return (\n{}\n); }} catch(e) {{ return null; }} }})()",
-                cleaned
-            )
-        }
+            trimmed.to_string()
+        };
+        let literal = serde_json::to_string(&body).unwrap_or_else(|_| "\"\"".to_string());
+        format!(
+            "(function() {{ try {{ return __ditingEvalScript({}); }} catch(e) {{ return null; }} }})()",
+            literal
+        )
     }
 
     fn meta_extract_js(var_name: &str) -> String {
@@ -3359,6 +3364,47 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_accepts_statement_scripts_with_completion_value() {
+        // CDP Runtime.evaluate semantics: the input is a script — statements
+        // are legal and the completion value of the last statement comes
+        // back. The old expression-only wrap turned any statement syntax
+        // into an uncatchable `Unexpected token ';'`.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        assert_eq!(rt.evaluate("var x = 2; x * 3").unwrap(), serde_json::json!(6.0));
+        assert_eq!(
+            rt.evaluate("try { JSON.parse('x') } catch(e) { 'caught:' + e.name }").unwrap(),
+            serde_json::json!("caught:SyntaxError")
+        );
+        // try/catch is itself statement syntax — it must parse.
+        assert_eq!(rt.evaluate("typeof eval").unwrap(), serde_json::json!("function"));
+    }
+
+    #[test]
+    fn evaluate_supports_function_body_style_top_level_return() {
+        // Legacy engine contract: scripts written as function bodies with a
+        // top-level `return` (illegal in script position) still evaluate via
+        // the Function-body fallback.
+        let mut rt = setup_runtime("<html><body><span id='h'>x</span></body></html>");
+        assert_eq!(
+            rt.evaluate(
+                r#"
+                const el = document.getElementById('h');
+                return el ? el.tagName : null;
+                "#
+            ).unwrap(),
+            serde_json::json!("SPAN")
+        );
+    }
+
+    #[test]
+    fn evaluate_bare_object_literal_returns_object() {
+        // Pasted JSON evaluates as an object literal (DevTools console
+        // behavior), not as a block whose completion value is undefined.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        assert_eq!(rt.evaluate(r#"{"k": "v", "n": 1}"#).unwrap(), serde_json::json!({"k": "v", "n": 1}));
+    }
+
+    #[test]
     fn test_document_cookie_no_jar_returns_empty() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt.evaluate("document.cookie").unwrap();
@@ -4520,6 +4566,11 @@ mod tests {
         // is real. The h1's UA box (body 8px margin + h1 .67em margin-top,
         // then the 2em line box) starts around y≈30, so (10,40) lands on it;
         // (10,10) sits in the h1's margin — body territory, like Chrome.
+        // NOTE: currently failing on main — regressed somewhere in the
+        // (301b43f..aa32edd] window (b70e042 UTF-8 boundary or a516ad7
+        // js wave 2): h1 lays out shrink-to-fit + centered at (450,190)
+        // instead of left-flow at y≈30. Pre-existing, tracked separately
+        // from the WAF work.
         let tag = rt.evaluate("document.elementFromPoint(10, 40)?.tagName").unwrap();
         assert_eq!(tag, serde_json::json!("H1"));
         let margin_area = rt.evaluate("document.elementFromPoint(10, 10)?.tagName").unwrap();

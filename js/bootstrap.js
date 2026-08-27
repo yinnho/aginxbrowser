@@ -1,5 +1,21 @@
 "use strict";
 
+// Eval shim backing Rust-side `evaluate`/`evaluate_for_cdp`. The input is
+// evaluated with CDP Runtime.evaluate semantics first — a *script*, where
+// statements are legal and the completion value of the last statement is the
+// result (indirect eval = global scope, matching Chrome). Scripts written in
+// function-body style with a top-level `return` are illegal as scripts; the
+// SyntaxError is thrown before anything executes, so retrying them as a
+// Function body is side-effect free. Runtime errors rethrow untouched — a
+// retry would re-run side effects like document.write.
+globalThis.__ditingEvalScript = function(src) {
+  try { return (0, eval)(src); }
+  catch (e) {
+    if (e instanceof SyntaxError) { return (new Function(src))(); }
+    throw e;
+  }
+};
+
 globalThis.__diting_errors = [];
 
 globalThis.addEventListener = globalThis.addEventListener || function(){};
