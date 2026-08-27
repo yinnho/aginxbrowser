@@ -6120,31 +6120,194 @@ globalThis.XMLSerializer = class XMLSerializer {
 // would otherwise run it backwards, upstream #497) — but equal readings are
 // allowed and no synthetic per-call increment keeps tight loops from running
 // the clock ahead of real elapsed time (upstream d93ff51). timeOrigin is read
-// dynamically because the object literal defines it as 0 below and
-// __diting_init assigns the real navigation timestamp after construction.
+// dynamically because the constructor sets it to 0 below and __diting_init
+// assigns the real navigation timestamp after construction.
 // Each navigation rebuilds the whole runtime (page.rs init_js), so the floor
 // starts fresh per document like a real browser's per-navigation clock.
 var _perfLast = -Infinity;
-globalThis.performance = globalThis.performance || {
-  now: function() {
-    var ms = Date.now() - (globalThis.performance.timeOrigin || 0);
+// PerformanceEntry with prototype accessors (same lie-detector posture as
+// FontFace above): name/entryType/startTime/duration on the prototype, backed
+// by private slots, all reporting [native code].
+class PerformanceEntry {
+  constructor(name, entryType, startTime, duration) {
+    this._peName = name; this._peType = entryType;
+    this._peStart = startTime; this._peDur = duration;
+    this._peDetail = null;
+  }
+  get name() { return this._peName; }
+  get entryType() { return this._peType; }
+  get startTime() { return this._peStart; }
+  get duration() { return this._peDur; }
+  toJSON() {
+    const o = { name: this._peName, entryType: this._peType,
+                startTime: this._peStart, duration: this._peDur };
+    if (this._peDetail !== null) o.detail = this._peDetail;
+    return o;
+  }
+}
+_markNativeProto(PerformanceEntry.prototype);
+class _Performance {
+  constructor() {
+    this._marks = []; this._measures = [];
+    this._navEntry = null; this._paintEntries = null;
+    this.timeOrigin = 0;
+    this.timing = { navigationStart: 0, domContentLoadedEventEnd: 0, loadEventEnd: 0 };
+    this.navigation = { type: 0, redirectCount: 0 };
+    this.memory = {
+      jsHeapSizeLimit: 2172649472,
+      totalJSHeapSize: 19321856,
+      usedJSHeapSize: 16781520,
+    };
+  }
+  now() {
+    var ms = Date.now() - (this.timeOrigin || 0);
     if (ms < _perfLast) return _perfLast;
     _perfLast = ms;
     return _perfLast;
-  },
-  mark(){}, measure(){},
-  clearMarks(){}, clearMeasures(){}, clearResourceTimings(){},
-  getEntries(){return [];}, getEntriesByName(){return [];}, getEntriesByType(){return [];},
-  setResourceTimingBufferSize(){},
-  timeOrigin: 0,
-  timing: { navigationStart: 0, domContentLoadedEventEnd: 0, loadEventEnd: 0 },
-  navigation: { type: 0, redirectCount: 0 },
-  memory: {
-    jsHeapSizeLimit: 2172649472,
-    totalJSHeapSize: 19321856,
-    usedJSHeapSize: 16781520,
-  },
-};
+  }
+  // User-timing marks/measures are recorded for real — analytics bundles
+  // (Sentry, web-vitals wrappers) read them back and an always-empty buffer
+  // pushes them into fallback/error branches. Capped so a mark loop can't
+  // grow the buffer unbounded.
+  mark(name, options) {
+    if (arguments.length === 0) {
+      throw new TypeError("Failed to execute 'mark' on 'Performance': 1 argument required, but only 0 present.");
+    }
+    const o = options || {};
+    const t = typeof o.startTime === 'number' && isFinite(o.startTime) ? o.startTime : this.now();
+    const e = new PerformanceEntry(String(name), 'mark', t, 0);
+    if ('detail' in o) e._peDetail = o.detail;
+    this._marks.push(e);
+    if (this._marks.length > 500) this._marks.shift();
+    return e;
+  }
+  measure(name, start, end) {
+    if (arguments.length === 0) {
+      throw new TypeError("Failed to execute 'measure' on 'Performance': 1 argument required, but only 0 present.");
+    }
+    var startTime = 0, endTime = this.now();
+    if (start !== undefined && start !== null) {
+      if (typeof start === 'string') {
+        const m = this._lastMark(start);
+        if (!m) throw new SyntaxError("Failed to execute 'measure' on 'Performance': The mark '" + start + "' does not exist.");
+        startTime = m.startTime;
+      } else if (typeof start === 'number' && isFinite(start)) {
+        startTime = start;
+      }
+    }
+    if (end !== undefined && end !== null) {
+      if (typeof end === 'string') {
+        const m = this._lastMark(end);
+        if (!m) throw new SyntaxError("Failed to execute 'measure' on 'Performance': The mark '" + end + "' does not exist.");
+        endTime = m.startTime;
+      } else if (typeof end === 'number' && isFinite(end)) {
+        endTime = end;
+      }
+    }
+    // Chrome allows a negative duration when end < start; keep that.
+    const e = new PerformanceEntry(String(name), 'measure', startTime, endTime - startTime);
+    this._measures.push(e);
+    if (this._measures.length > 500) this._measures.shift();
+    return e;
+  }
+  _lastMark(name) {
+    for (let i = this._marks.length - 1; i >= 0; i--) {
+      if (this._marks[i].name === name) return this._marks[i];
+    }
+    return null;
+  }
+  // Derived NavigationTiming: one entry, startTime 0, duration = load offset,
+  // carrying the Level-2 fields analytics actually read (domContentLoadedEventEnd,
+  // loadEventEnd, responseStart, type...). Own data props — Chrome puts these
+  // on PerformanceNavigationTiming.prototype, but we don't expose that
+  // constructor so detectors can't diff the descriptor; the entry surface
+  // itself is what libraries consume.
+  _navTiming() {
+    if (this._navEntry) return this._navEntry;
+    const t = this.timing || {};
+    const nav0 = t.navigationStart || this.timeOrigin;
+    if (!nav0) return null;
+    const rel = (v) => (typeof v === 'number' && v > 0 ? Math.max(0, v - nav0) : 0);
+    const loadEnd = t.loadEventEnd || t.navigationStart;
+    const e = new PerformanceEntry(
+      (globalThis.location && globalThis.location.href) || '',
+      'navigation', 0, Math.max(0, loadEnd - nav0));
+    const extra = {
+      initiatorType: 'navigation', nextHopProtocol: '',
+      type: 'navigate', redirectCount: 0,
+      unloadEventStart: 0, unloadEventEnd: 0,
+      fetchStart: rel(t.fetchStart) || 1,
+      domainLookupStart: rel(t.domainLookupStart), domainLookupEnd: rel(t.domainLookupEnd),
+      connectStart: rel(t.connectStart), connectEnd: rel(t.connectEnd),
+      secureConnectionStart: rel(t.secureConnectionStart),
+      requestStart: rel(t.requestStart), responseStart: rel(t.responseStart), responseEnd: rel(t.responseEnd),
+      transferSize: 0, encodedBodySize: 0, decodedBodySize: 0,
+      domInteractive: rel(t.domInteractive),
+      domContentLoadedEventStart: rel(t.domContentLoadedEventStart),
+      domContentLoadedEventEnd: rel(t.domContentLoadedEventEnd),
+      domComplete: rel(t.domComplete),
+      loadEventStart: rel(t.loadEventStart), loadEventEnd: rel(t.loadEventEnd),
+    };
+    Object.assign(e, extra);
+    e.toJSON = function() {
+      return Object.assign(PerformanceEntry.prototype.toJSON.call(this), extra);
+    };
+    _markNative(e.toJSON);
+    this._navEntry = e;
+    return e;
+  }
+  // Paint timings derived from the (simulated) DCL offset: FP lands before
+  // FCP, both before domContentLoadedEventEnd. Generated once per navigation.
+  _paintTimings() {
+    if (this._paintEntries) return this._paintEntries;
+    const t = this.timing || {};
+    const nav0 = t.navigationStart;
+    const dcl = (nav0 && t.domContentLoadedEventEnd) ? Math.max(1, t.domContentLoadedEventEnd - nav0) : 300;
+    const fp = Math.max(1, Math.floor(dcl * (0.55 + _fpRand(644) * 0.25)));
+    const fcp = Math.max(fp + 1, Math.floor(dcl * (0.78 + _fpRand(645) * 0.2)));
+    this._paintEntries = [
+      new PerformanceEntry('first-paint', 'paint', fp, 0),
+      new PerformanceEntry('first-contentful-paint', 'paint', fcp, 0),
+    ];
+    return this._paintEntries;
+  }
+  _all() {
+    const nav = this._navTiming();
+    const list = (nav ? [nav] : []).concat(this._paintTimings(), this._marks, this._measures);
+    return list.sort((a, b) => a.startTime - b.startTime);
+  }
+  getEntries() { return this._all().slice(); }
+  getEntriesByName(name, type) {
+    name = String(name);
+    return this._all().filter(
+      (e) => e.name === name && (type === undefined || e.entryType === String(type)));
+  }
+  getEntriesByType(type) {
+    type = String(type);
+    if (type === 'navigation') { const n = this._navTiming(); return n ? [n] : []; }
+    if (type === 'paint') return this._paintTimings().slice();
+    if (type === 'mark') return this._marks.slice();
+    if (type === 'measure') return this._measures.slice();
+    // 'resource' stays honestly empty: we have no per-request network
+    // timings, and a fabricated waterfall would be a lying telemetry
+    // surface (worse than absent). Unknown types return [] like Chrome.
+    return [];
+  }
+  clearMarks(name) {
+    if (name === undefined) { this._marks = []; return; }
+    this._marks = this._marks.filter((e) => e.name !== String(name));
+  }
+  clearMeasures(name) {
+    if (name === undefined) { this._measures = []; return; }
+    this._measures = this._measures.filter((e) => e.name !== String(name));
+  }
+  setResourceTimingBufferSize() {}
+  clearResourceTimings() {}
+  // Per-navigation cache reset, called from __diting_init after timing lands.
+  _resetDerived() { this._navEntry = null; this._paintEntries = null; }
+}
+_markNativeProto(_Performance.prototype);
+globalThis.performance = globalThis.performance || new _Performance();
 
 var _commonFonts = [
   'Arial', 'Arial Black', 'Arial Narrow',
@@ -9250,8 +9413,25 @@ globalThis.__diting_init = function() {
   globalThis.__diting_setPersona();
 
   const t0 = Date.now() + Math.floor(_fpRand(641) * 100) - 50;
+  // NavigationTiming offsets: DCL 60–600ms after navigationStart, load
+  // DCL+40–800ms after that, with a plausible connect/response chain ahead
+  // of domInteractive. All-equal epoch stamps (the old shape) made every
+  // derived duration 0 — telemetry reading getEntriesByType('navigation')
+  // got a zero-duration page, which is its own automation tell.
+  const dcl = 60 + Math.floor(_fpRand(642) * 540);
+  const load = dcl + 40 + Math.floor(_fpRand(643) * 760);
   globalThis.performance.timeOrigin = t0;
-  globalThis.performance.timing = { navigationStart: t0, domContentLoadedEventEnd: t0, loadEventEnd: t0 };
+  globalThis.performance.timing = {
+    navigationStart: t0,
+    fetchStart: t0 + 1, domainLookupStart: t0 + 2, domainLookupEnd: t0 + 12,
+    connectStart: t0 + 12, connectEnd: t0 + 48, secureConnectionStart: t0 + 18,
+    requestStart: t0 + 50, responseStart: t0 + 85, responseEnd: t0 + 130,
+    domInteractive: t0 + Math.floor(dcl * 0.8),
+    domContentLoadedEventStart: t0 + dcl - 4, domContentLoadedEventEnd: t0 + dcl,
+    domComplete: t0 + load, loadEventStart: t0 + load, loadEventEnd: t0 + load,
+  };
+  // Derived entries (navigation/paint) are cached per navigation.
+  if (globalThis.performance._resetDerived) globalThis.performance._resetDerived();
   globalThis.performance.memory = {
     jsHeapSizeLimit: 2172649472,
     totalJSHeapSize: 15000000 + Math.floor(_fpRand(620) * 85000000),

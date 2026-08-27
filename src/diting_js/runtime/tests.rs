@@ -3942,6 +3942,45 @@
     }
 
     #[test]
+    fn test_performance_timeline_mark_measure_navigation_paint() {
+        // User-timing marks/measures are recorded and queryable; navigation
+        // and paint entries are derived from performance.timing (upstream
+        // v0.2.1 landed the same surface). mark()/measure() argument
+        // validation matches Chrome's TypeError/SyntaxError.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt.evaluate(r#"
+            performance.mark('a');
+            performance.mark('b');
+            const m = performance.measure('ab', 'a', 'b');
+            const marks = performance.getEntriesByType('mark').map(e => e.name);
+            const measures = performance.getEntriesByType('measure').map(e => e.name);
+            const nav = performance.getEntriesByType('navigation')[0];
+            const paint = performance.getEntriesByType('paint').map(e => e.name);
+            const dcl = nav.domContentLoadedEventEnd, loadEnd = nav.loadEventEnd;
+            performance.clearMarks('a');
+            const afterClear = performance.getEntriesByType('mark').map(e => e.name);
+            const byName = performance.getEntriesByName('b', 'mark').length;
+            const sum = performance.getEntries().length;
+            let errName = 'no-throw';
+            try { performance.measure('x', 'nope'); } catch (e) { errName = e.name; }
+            return [marks, measures, paint,
+                    nav.entryType, nav.startTime === 0, nav.type,
+                    dcl > 0, loadEnd >= dcl, nav.duration >= loadEnd,
+                    m.duration >= 0, m.startTime > -100,
+                    afterClear, byName, sum >= 5, errName,
+                    performance.getEntriesByType('resource').length];
+        "#).unwrap();
+        assert_eq!(result, serde_json::json!([
+            ["a", "b"], ["ab"], ["first-paint", "first-contentful-paint"],
+            "navigation", true, "navigate",
+            true, true, true,
+            true, true,
+            ["b"], 1, true, "SyntaxError",
+            0
+        ]));
+    }
+
+    #[test]
     fn test_location_navigation_coerces_url_objects() {
         // Upstream fe26417: a URL object passed to location.href/assign/replace
         // must coerce to its href string (our _resolveUrl called .startsWith on
