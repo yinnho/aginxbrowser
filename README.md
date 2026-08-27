@@ -116,10 +116,10 @@ docker run -p 8089:8089 yinnho/aginxbrowser:latest
 
 # Or the prebuilt binary (platform detect + sha256 + mirror fallback + doctor self-check)
 # Cautious: download -> inspect -> run (never blind-run network scripts)
-curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/install.sh -o install.sh
+curl -fsSL https://browser.aginx.net/install.sh -o install.sh
 less install.sh && bash install.sh
 # Or straight in, if you trust the repo:
-#   curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/install.sh | sh
+#   curl -fsSL https://browser.aginx.net/install.sh | sh
 # GitHub slow/blocked? AGINXBROWSER_GH_PROXY=https://ghfast.top/ bash install.sh
 aginxbrowser doctor   # features + fonts + egress self-check
 

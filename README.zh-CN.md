@@ -105,7 +105,7 @@ npx skills add yinnho/aginxbrowser
 
 ```bash
 # 预编译二进制（一行安装器：平台识别 + sha256 校验 + 自检）
-curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/install.sh -o install.sh
+curl -fsSL https://browser.aginx.net/install.sh -o install.sh
 less install.sh && bash install.sh
 aginxbrowser doctor   # 特性 + 字体 + 出口自检
 

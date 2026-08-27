@@ -1,7 +1,7 @@
 #!/bin/sh
 # aginxbrowser installer — the one-liner entry point:
 #   curl -fsSL https://browser.aginx.net/install.sh | sh
-# (raw mirror until the domain alias is up:
+# (GitHub raw works as a mirror:
 #   curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/install.sh | sh)
 #
 # Downloads the release binary for the running OS/arch, verifies its sha256
