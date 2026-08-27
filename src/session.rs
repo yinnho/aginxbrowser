@@ -217,6 +217,12 @@ impl SessionManager {
             self.close(&id);
         }
     }
+
+    /// Live session count (call [`Self::evict_expired`] first if the number
+    /// must not include idle-but-not-yet-evicted sessions).
+    pub fn session_count(&self) -> usize {
+        self.sessions.len()
+    }
 }
 
 // ---------------------------------------------------------------------------

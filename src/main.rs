@@ -505,6 +505,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let app = Router::new()
+        .route("/", get(status_handler))
+        .route("/status", get(status_handler))
         .route("/health", get(health_handler))
         .route("/doctor", get(doctor_handler))
         .route("/fetch", post(fetch_handler))
@@ -566,6 +568,118 @@ async fn health_handler() -> impl IntoResponse {
             "captcha_solver": std::env::var("CAPTCHA_SOLVER_API_KEY").is_ok(),
         }
     }))
+}
+
+/// Process start, for the status page's uptime readout.
+static STARTED: std::sync::LazyLock<std::time::Instant> =
+    std::sync::LazyLock::new(std::time::Instant::now);
+
+fn fmt_uptime(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    let (days, rest) = (secs / 86400, secs % 86400);
+    let (hours, mins) = (rest / 3600, (rest % 3600) / 60);
+    match (days, hours) {
+        (0, 0) => format!("{mins}m"),
+        (0, _) => format!("{hours}h {mins}m"),
+        _ => format!("{days}d {hours}h {mins}m"),
+    }
+}
+
+/// Human-facing status page at `/`. Umbrel (and any self-hoster poking the
+/// port) needs a page the browser can open after install; agents keep using
+/// /health and /doctor. Everything is server-rendered — no client JS, no
+/// external assets, works on an offline LAN box.
+async fn status_handler() -> axum::response::Html<String> {
+    let (sessions, uptime) = {
+        let mut mgr = session::SESSIONS.lock().await;
+        mgr.evict_expired();
+        (mgr.session_count(), STARTED.elapsed())
+    };
+    let version = env!("CARGO_PKG_VERSION");
+    let caps = [
+        ("screenshot", cfg!(feature = "screenshot")),
+        ("stealth", cfg!(feature = "stealth")),
+        (
+            "captcha-solver",
+            std::env::var("CAPTCHA_SOLVER_API_KEY").is_ok(),
+        ),
+    ]
+    .map(|(name, on)| {
+        if on {
+            format!(r#"<span class="cap on">{name}</span>"#)
+        } else {
+            format!(r#"<span class="cap">{name}</span>"#)
+        }
+    })
+    .join("");
+
+    let html = format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aginxbrowser</title>
+<style>
+  :root {{ color-scheme: light dark; }}
+  body {{ font: 16px/1.6 ui-sans-serif, system-ui, sans-serif; margin: 0;
+         display: flex; justify-content: center; min-height: 100vh;
+         background: Canvas; color: CanvasText; }}
+  main {{ max-width: 40rem; padding: 3rem 1.5rem 4rem; }}
+  h1 {{ font-size: 1.4rem; margin: 0 0 .25rem; }}
+  p.tag {{ margin: 0 0 2rem; opacity: .7; }}
+  .ok {{ color: #1a7f37; }}
+  dl {{ display: grid; grid-template-columns: max-content 1fr; gap: .4rem 1.5rem;
+        margin: 0 0 2rem; }}
+  dt {{ opacity: .7; }}
+  dd {{ margin: 0; font-variant-numeric: tabular-nums; }}
+  .cap {{ display: inline-block; border: 1px solid; border-radius: 1em;
+          padding: .05rem .7rem; margin: 0 .35rem .35rem 0; opacity: .55; }}
+  .cap.on {{ opacity: 1; border-color: #1a7f37; color: #1a7f37; }}
+  table {{ border-collapse: collapse; width: 100%; font: .9rem/1.5 ui-monospace, monospace; }}
+  td {{ padding: .3rem .6rem .3rem 0; vertical-align: top; }}
+  td:first-child {{ opacity: .7; white-space: nowrap; }}
+  footer {{ margin-top: 2.5rem; font-size: .85rem; opacity: .7; }}
+  a {{ color: inherit; }}
+</style>
+</head>
+<body>
+<main>
+  <h1>aginxbrowser <small style="font-weight:400">v{version}</small></h1>
+  <p class="tag">server-side browser for AI agents &mdash; one Rust binary, no Chromium</p>
+
+  <dl>
+    <dt>status</dt><dd><span class="ok">&#9679; running</span></dd>
+    <dt>uptime</dt><dd>{}</dd>
+    <dt>active sessions</dt><dd>{sessions}</dd>
+    <dt>engine</dt><dd>diting</dd>
+  </dl>
+
+  <p style="margin-bottom:.5rem">capabilities</p>
+  <p style="margin:0 0 2rem">{caps}</p>
+
+  <table>
+    <tr><td>GET&nbsp;&nbsp;/health</td><td>liveness + capabilities (JSON)</td></tr>
+    <tr><td>GET&nbsp;&nbsp;/doctor</td><td>deep self-report, <code>?probe=true</code> for a live fetch</td></tr>
+    <tr><td>POST&nbsp;/fetch</td><td>fetch a URL, render JS, return markdown/HTML</td></tr>
+    <tr><td>POST&nbsp;/search</td><td>multi-engine meta-search</td></tr>
+    <tr><td>POST&nbsp;/screenshot</td><td>render a page to PNG (CPU)</td></tr>
+    <tr><td>POST&nbsp;/download</td><td>streaming file download</td></tr>
+    <tr><td>GET&nbsp;&nbsp;/mcp</td><td>MCP endpoint (streamable HTTP)</td></tr>
+  </table>
+
+  <footer>
+    <a href="https://github.com/yinnho/aginxbrowser">github.com/yinnho/aginxbrowser</a>
+    &middot; <a href="https://github.com/yinnho/aginxbrowser/blob/main/docs/API.md">API reference</a>
+    &middot; Apache-2.0
+  </footer>
+</main>
+</body>
+</html>"#,
+        fmt_uptime(uptime)
+    );
+
+    axum::response::Html(html)
 }
 
 /// Query params for /doctor.

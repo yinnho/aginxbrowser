@@ -90,6 +90,35 @@ fn health_endpoint() {
     assert!(body.contains("diting"));
 }
 
+/// The human-facing status page: Umbrel (and self-hosters poking the port)
+/// require a page the browser can open at the app root. No network involved —
+/// pure server-side render.
+#[test]
+fn status_page_serves_html_at_root() {
+    let server = match ServerGuard::spawn() {
+        Some(s) => s,
+        None => {
+            eprintln!("smoke: could not spawn server, skipping");
+            return;
+        }
+    };
+    let resp = ureq::get(&server.url("/"))
+        .timeout(Duration::from_secs(15))
+        .call()
+        .expect("GET /");
+    assert!(resp.content_type().starts_with("text/html"));
+    let body = resp.into_string().expect("read body");
+    assert!(body.contains("<!doctype html>"), "doctype: {body}");
+    assert!(
+        body.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))),
+        "version readout: {body}"
+    );
+    assert!(body.contains("active sessions"), "stats: {body}");
+    // /status is the canonical alias (agents and monitors may prefer it).
+    let alias = http_get_json(&server.url("/status")).expect("GET /status");
+    assert!(alias.contains("<!doctype html>"), "alias body: {alias}");
+}
+
 #[test]
 #[ignore] // requires network to example.com
 fn fetch_tier_http_example_com() {
