@@ -229,6 +229,64 @@ pub(crate) async fn maybe_bypass_challenge(page: &mut crate::page::Page) -> Resu
     Ok(())
 }
 
+/// Check if the current page is a bytedance WAF JS challenge (juejin.cn
+/// class): a tiny stub whose `<body onload="readygo()">` brute-forces a
+/// SHA256 PoW over 1ms ticks and reloads with a `_wafchallengeid` answer
+/// cookie. Signature: a global `readygo` function + almost no visible text
+/// (real pages don't define that global; challenge stubs carry no content).
+fn is_byte_waf_challenge(page: &mut crate::page::Page) -> bool {
+    let val = page.evaluate(
+        "(function() {\
+            try {\
+                if (!document.body) return false;\
+                var text = (document.body.innerText || '').replace(/\\s+/g, '');\
+                return text.length < 100 && typeof window.readygo === 'function';\
+            } catch (e) { return false; }\
+        })()",
+    );
+    val.as_bool().unwrap_or(false)
+}
+
+/// After goto(), ride out the bytedance WAF JS challenge. The challenge
+/// solves itself in-page — readygo() sets the answer cookie, then calls
+/// location.reload() — but the reload is recorded as a pending JS
+/// navigation that nobody in the stateless fetch path drains (sessions
+/// have a command-loop pump; do_fetch doesn't), and the PoW ticks need
+/// event-loop pumping that the caller's default 0s settle never gives.
+/// So: pump, drain the reload, settle the real page.
+pub(crate) async fn maybe_bypass_byte_waf(page: &mut crate::page::Page) -> Result<()> {
+    if !is_byte_waf_challenge(page) {
+        return Ok(());
+    }
+    let url = page.url();
+    tracing::info!("byte-WAF challenge detected at {}, waiting for PoW + reload", url);
+
+    // Pump so readygo's 1ms interval ticks (the PoW is trivially small —
+    // observed answers are single/low double digits) and the reload lands
+    // in pending_navigation.
+    page.settle(2000).await;
+
+    // Drain the JS-initiated reload; the re-navigation runs load events
+    // again, this time with the answer cookie attached by the client.
+    match page.process_pending_navigation().await {
+        Ok(true) => {
+            page.settle(1500).await;
+        }
+        Ok(false) => {
+            // No reload recorded — either it fired inside settle's own
+            // navigation handling or the solver failed. Re-check below.
+        }
+        Err(e) => {
+            tracing::warn!("byte-WAF reload navigation failed: {}", e);
+        }
+    }
+
+    if is_byte_waf_challenge(page) {
+        tracing::warn!("byte-WAF challenge at {} still present after settle", url);
+    }
+    Ok(())
+}
+
 /// Read the rendered text content from the live DOM (after JS has run).
 /// When `selector` is given, return that element's innerText; otherwise the
 /// whole body. This reflects JS-filled content (WeChat/SPA), unlike parsing
@@ -288,6 +346,9 @@ fn fetch_url_text_with_cookies(
 
             // Auto-bypass Cloudflare Turnstile challenge if detected.
             maybe_bypass_challenge(&mut page).await?;
+
+            // Ride out bytedance WAF JS challenges (juejin.cn class).
+            maybe_bypass_byte_waf(&mut page).await?;
 
             if wait_secs > 0 {
                 page.settle(wait_secs * 1000).await;
@@ -368,6 +429,10 @@ pub fn do_fetch(req: FetchRequest) -> Result<FetchResponse> {
             if req.auto_bypass_challenge {
                 maybe_bypass_challenge(&mut page).await?;
             }
+
+            // Ride out bytedance WAF JS challenges (juejin.cn class) —
+            // unconditional, like the Cloudflare path in search fetches.
+            maybe_bypass_byte_waf(&mut page).await?;
 
             if let Some(wait) = req.wait_secs {
                 page.settle(wait * 1000).await;

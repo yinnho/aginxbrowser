@@ -140,6 +140,14 @@ fn strip_html_tags(html: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Bytedance WAF JS challenge stub (juejin.cn class)? Detected by signature:
+/// the stub must reference the `_wafchallengeid` answer cookie and its
+/// `readygo` driver. Size-based deferral misses it because the inline PoW
+/// script's text inflates the visible-text heuristic past the bar.
+fn is_byte_waf_challenge_html(html: &str) -> bool {
+    html.contains("_wafchallengeid") && html.contains("readygo")
+}
+
 /// Tier 1: fetch via plain HTTP and return if the content is sufficient.
 ///
 /// Returns `None` when the page needs JS rendering (Tier 2). On hard network
@@ -209,6 +217,12 @@ pub async fn http_fetch(
     }
 
     let html = resp.text();
+
+    // Bytedance WAF JS challenge stub → defer (Tier 2 rides out the PoW).
+    if is_byte_waf_challenge_html(&html) {
+        tracing::debug!("http_fetch: byte-WAF challenge stub for {}, deferring to Tier 2", url);
+        return Ok(None);
+    }
 
     // Insufficient (SPA shell / too short) → defer to JS rendering.
     if !is_content_sufficient(&html) {
@@ -383,6 +397,32 @@ mod tests {
     fn normal_url_not_antispider() {
         assert!(!is_antispider_url("https://example.com/"));
         assert!(!is_antispider_url("https://mp.weixin.qq.com/s/article"));
+    }
+
+    // ---- is_byte_waf_challenge_html ----
+
+    #[test]
+    fn byte_waf_stub_detected_by_signature() {
+        // Realistic challenge stub: inline PoW script text far exceeds the
+        // 64-char visible-text bar, so size heuristics alone would keep it.
+        let html = r#"<html><head><meta charset="utf-8"><title>challenge</title></head>
+            <body onload="readygo()"><script src="https://lf3-short.ibytedapm.com/slardar.js"></script>
+            <script>var cs="eyJ2Ijp7ImEiOiJhYmMiLCJiIjoxNzAwLCJjIjoiZGVmIn0sInMiOiJzaWcifQ==";
+            function readygo(){var c=JSON.parse(atob(cs));
+            document.cookie="_wafchallengeid="+btoa(JSON.stringify(c))+"; Max-Age=1";location.reload();}</script>
+            Please wait...</body></html>"#;
+        assert!(is_byte_waf_challenge_html(html));
+        // Its inline script text alone blows past the size bar — proving the
+        // signature check is what's needed, not is_content_sufficient.
+        assert!(is_content_sufficient(html));
+    }
+
+    #[test]
+    fn normal_article_not_byte_waf() {
+        let html = r#"<html><body><article><h1>readygo launched a new product</h1>
+            <p>An article mentioning readygo, the observability tool, in running text
+            without any WAF cookie reference. This is enough text to be sufficient.</p></article></body></html>"#;
+        assert!(!is_byte_waf_challenge_html(html));
     }
 
     // ---- extract_title ----
