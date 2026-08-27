@@ -722,6 +722,41 @@ curl -sS -X POST http://127.0.0.1:8089/session/$SID/close
 
 ---
 
+## robots.txt Compliance (default on)
+
+AginxBrowser fetches on demand — one page when an agent asks, not bulk crawling — and honors `robots.txt` by default on every autonomous path: `/fetch`, `/screenshot`, `/download`, their MCP tool equivalents, and the Firecrawl-compatible `/v1/scrape`. A disallowed URL returns **HTTP 403** with the matched rule in the error, so the agent can see exactly why:
+
+```json
+{"error": "robots.txt disallows /yinnho/aginxbrowser/pulse on https://github.com (matched `Disallow: /*/*/pulse`); aginxbrowser honors robots.txt by default. Set AGINXBROWSER_IGNORE_ROBOTS=1 on the server to override."}
+```
+
+Semantics (RFC 9309 subset):
+
+| robots.txt outcome | Result |
+|------|------|
+| Rule disallows the path (longest match wins, ties → Allow; `*`/`$` wildcards honored) | 403 with the matched rule |
+| 404 / 410 | allowed (no rules exist) |
+| body parses to no applicable rules | allowed |
+| other 4xx / 5xx / network failure fetching robots.txt | 403 — a server refusing to hand out its rules is not implicit permission |
+| private / loopback host (`127.0.0.1`, RFC1918, `.local`, …) | exempt (operator's own network) |
+
+Scope notes:
+
+- **Interactive sessions are exempt by design.** `/session/{id}/navigate`, `click`, `input`, `scroll` drive a browser the way a person at a keyboard does; robots.txt governs autonomous fetching, not browser interaction.
+- The robots.txt fetch itself uses the honest product User-Agent (`aginxbrowser/<version> (+https://browser.aginx.net)`), never the stealth fingerprint — you don't get to read the rules wearing a borrowed name.
+- Policies are cached per host (default 1h; refusals 5min so a dead endpoint doesn't lock the host out for an hour).
+
+**Operator opt-out** (the stance belongs to whoever runs the instance, not to each caller):
+
+```bash
+export AGINXBROWSER_IGNORE_ROBOTS=1   # skip robots.txt checks entirely
+export AGINXBROWSER_ROBOTS_TTL_SECS=3600  # per-host policy cache TTL
+```
+
+`aginxbrowser doctor` and `GET /doctor` both report the active stance.
+
+---
+
 ## Automatic CAPTCHA Solving
 
 When a search engine or target site throws up a CAPTCHA, AginxBrowser will:

@@ -22,6 +22,7 @@ mod firecrawl_compat;
 mod mcp;
 mod page;
 mod render;
+mod robots;
 mod search;
 mod server;
 mod session;
@@ -373,6 +374,7 @@ pub struct ErrorResponse {
 
 pub enum AppError {
     BadRequest(String),
+    Forbidden(String),
     NotFound(String),
     BadGateway(String),
     GatewayTimeout(String),
@@ -384,6 +386,7 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
+            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             AppError::BadGateway(msg) => (StatusCode::BAD_GATEWAY, msg),
             AppError::GatewayTimeout(msg) => (StatusCode::GATEWAY_TIMEOUT, msg),
@@ -702,6 +705,10 @@ async fn doctor_handler(Query(params): Query<DoctorParams>) -> impl IntoResponse
         "screenshot": cfg!(feature = "screenshot"),
         "stealth": cfg!(feature = "stealth"),
         "captcha_solver": std::env::var("CAPTCHA_SOLVER_API_KEY").is_ok(),
+        // The product stance, visible where agents and operators look first.
+        "robots_honored": std::env::var("AGINXBROWSER_IGNORE_ROBOTS")
+            .map(|v| !(v == "1" || v.eq_ignore_ascii_case("true")))
+            .unwrap_or(true),
     });
 
     let probe = if params.probe.unwrap_or(false) {
@@ -782,6 +789,10 @@ async fn mcp_handler(
 }
 
 async fn fetch_handler(Json(req): Json<FetchRequest>) -> Result<impl IntoResponse, AppError> {
+    // robots.txt gate before the cache — a policy flip applies to cached
+    // content too, and the robots policy itself is host-cached so this is
+    // cheap on the hot path.
+    robots::assert_allowed(&req.url).await.map_err(AppError::Forbidden)?;
     // Short-lived in-process cache. Each /fetch spins up a fresh V8 browser
     // (expensive), so repeated grabs of the same URL in one session benefit a
     // lot. Keyed by everything that affects the result (url/format/selector/
@@ -907,6 +918,7 @@ async fn eval_handler(Json(req): Json<EvalRequest>) -> Result<impl IntoResponse,
 
 #[cfg(feature = "screenshot")]
 async fn screenshot_handler(Json(req): Json<ScreenshotRequest>) -> Result<impl IntoResponse, AppError> {
+    robots::assert_allowed(&req.url).await.map_err(AppError::Forbidden)?;
     // V8 (deno_core) holds !Send state, so drive the whole capture on a
     // current-thread runtime on a blocking thread — same pattern as do_eval.
     let resp = spawn_blocking(move || server::do_screenshot(req)).await??;
@@ -921,6 +933,7 @@ async fn search_handler(Json(req): Json<SearchRequest>) -> Result<impl IntoRespo
 }
 
 async fn download_handler(Json(req): Json<download::DownloadRequest>) -> Result<impl IntoResponse, AppError> {
+    robots::assert_allowed(&req.url).await.map_err(AppError::Forbidden)?;
     let resp = download::do_download(req).await?;
     server::persist_shared_cookies();
     Ok((StatusCode::OK, Json(resp)))

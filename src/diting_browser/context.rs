@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::diting_net::{CookieJar, HttpClient, RobotsCache};
+use crate::diting_net::{CookieJar, HttpClient};
 
 pub struct BrowserContext {
     /// Context label (upstream names contexts for CDP Target.setAutoAttach
@@ -11,8 +11,6 @@ pub struct BrowserContext {
     pub http_client: Arc<HttpClient>,
     pub user_agent: String,
     pub proxy_url: Option<String>,
-    pub robots_cache: Arc<RobotsCache>,
-    pub obey_robots: bool,
     /// Persona flags: stealth gates tracker-blocking at HttpClient
     /// construction and the lazy wreq client in page.rs. tls_fingerprint
     /// selects the wreq Emulation for that client (stealth builds only),
@@ -146,8 +144,6 @@ impl BrowserContext {
             http_client,
             user_agent: resolved_ua,
             proxy_url,
-            robots_cache: Arc::new(RobotsCache::new()),
-            obey_robots: false,
             stealth,
             allow_file_access: false,
             storage_dir,
@@ -205,8 +201,6 @@ impl BrowserContext {
             http_client: Arc::new(client),
             user_agent: self.user_agent.clone(),
             proxy_url: self.proxy_url.clone(),
-            robots_cache: Arc::new(RobotsCache::new()),
-            obey_robots: self.obey_robots,
             stealth: self.stealth,
             allow_file_access: self.allow_file_access,
             storage_dir: persistent.then(|| self.storage_dir.clone()).flatten(),

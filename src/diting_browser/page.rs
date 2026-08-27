@@ -1278,41 +1278,6 @@ impl Page {
         self.url = Some(url.clone());
         self.network_events.clear();
 
-        if self.context.obey_robots {
-            if let Some(domain) = url.host_str() {
-                if self.context.robots_cache.is_allowed(domain, "/robots.txt") {
-                    // Derive robots.txt from the full URL, not by re-splicing
-                    // scheme+host: Url::host_str() drops the port, so a site
-                    // served on a non-standard port (local test servers,
-                    // intranet services) previously had its robots.txt fetch
-                    // sent to :80 — the fetch failed, the cache stayed empty,
-                    // and every path was allowed.
-                    let mut robots_url = url.clone();
-                    robots_url.set_path("/robots.txt");
-                    robots_url.set_query(None);
-                    robots_url.set_fragment(None);
-                    if let Ok(resp) = self.http_client.fetch(&robots_url).await {
-                        if resp.status == 200 {
-                            let body = String::from_utf8_lossy(&resp.body);
-                            self.context.robots_cache.parse_and_store(
-                                domain,
-                                &body,
-                                &self.context.user_agent,
-                            );
-                        }
-                    }
-                }
-
-                if !self.context.robots_cache.is_allowed(domain, url.path()) {
-                    self.lifecycle = LifecycleState::Failed;
-                    return Err(PageError::NetworkError(format!(
-                        "Blocked by robots.txt: {}",
-                        url
-                    )));
-                }
-            }
-        }
-
         if url.scheme() == "about" {
             self.navigate_blank();
             self.init_js();
@@ -2758,39 +2723,7 @@ mod tests {
         assert!(challenge_hits >= 1, "challenge was never issued");
     }
 
-    // ---- robots ------------------------------------------------------------
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn obey_robots_blocks_disallowed_and_allows_rest() {
-        let _g = net_test_guard();
-        let port = local_http_server(vec![
-            ("/robots.txt", 200, "User-agent: *\nDisallow: /private\n".into()),
-            ("/public", 200, "<html><title>pub</title></html>".into()),
-            ("/private", 200, "<html><title>secret</title></html>".into()),
-        ]);
-        let mut context = BrowserContext::with_storage_and_network(
-            "robots".into(),
-            None,
-            false,
-            None,
-            None,
-            true,
-            None,
-        );
-        context.obey_robots = true;
-        let mut p = Page::new("p".into(), Arc::new(context));
-        let err = p
-            .navigate(&format!("http://127.0.0.1:{port}/private"))
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("robots"), "got {err:?}");
-        assert_eq!(p.lifecycle, LifecycleState::Failed);
-        p.navigate(&format!("http://127.0.0.1:{port}/public"))
-            .await
-            .unwrap();
-        assert_eq!(p.title, "pub");
-    }
-
+    
     // ---- suspend / resume ---------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]

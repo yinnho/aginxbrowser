@@ -40,6 +40,8 @@ fn check(status: Status, name: &'static str, detail: impl Into<String>) -> Check
 /// Compiled-in features — the same booleans `/doctor` reports over HTTP,
 /// readable without a listener (self-hosters behind firewalls especially).
 fn features_check() -> Check {
+    // Pushes are cfg'd by feature, so mut-ness is feature-dependent.
+    #[allow(unused_mut)]
     let mut feats: Vec<&str> = Vec::new();
     #[cfg(feature = "screenshot")]
     feats.push("screenshot");
@@ -51,6 +53,20 @@ fn features_check() -> Check {
         format!("{} — rebuild with --features stealth,screenshot if missing", feats.join("+"))
     };
     check(Status::Ok, "features", detail)
+}
+
+/// The robots.txt stance is a product decision made visible: it defaults to
+/// honored, and the one env that turns it off should show up in doctor so a
+/// misconfigured instance explains itself.
+fn robots_check() -> Check {
+    if std::env::var("AGINXBROWSER_IGNORE_ROBOTS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        check(Status::Warn, "robots", "IGNORE_ROBOTS set — /fetch, /screenshot and /download skip robots.txt (operator opt-out)")
+    } else {
+        check(Status::Ok, "robots", "robots.txt honored by default (AGINXBROWSER_IGNORE_ROBOTS=1 to opt out)")
+    }
 }
 
 /// Probe the bundled CJK bundle the way paint consumes it — ink, not a cmap
@@ -154,7 +170,7 @@ pub fn render(checks: &[Check]) -> String {
 
 /// Entry point from main's arg dispatch. Returns the process exit code.
 pub async fn run() -> i32 {
-    let mut checks = vec![features_check(), fonts_check()];
+    let mut checks = vec![features_check(), fonts_check(), robots_check()];
     checks.extend(env_checks());
     checks.push(egress_check().await);
     let code = if checks.iter().any(|c| c.status == Status::Fail) { 1 } else { 0 };

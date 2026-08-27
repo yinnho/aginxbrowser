@@ -252,6 +252,9 @@ impl AginxBrowserMcp {
         annotations(title = "Fetch Webpage", read_only_hint = true)
     )]
     async fn fetch(&self, Parameters(params): Parameters<FetchParams>) -> String {
+        if let Err(e) = crate::robots::assert_allowed(&params.url).await {
+            return json!({ "error": e }).to_string();
+        }
         let req = FetchRequest {
             url: params.url,
             format: match params.format.as_str() {
@@ -372,6 +375,9 @@ impl AginxBrowserMcp {
         annotations(title = "Download File")
     )]
     async fn download(&self, Parameters(params): Parameters<DownloadParams>) -> String {
+        if let Err(e) = crate::robots::assert_allowed(&params.url).await {
+            return json!({ "error": e }).to_string();
+        }
         match crate::download::do_download(crate::download::DownloadRequest {
             url: params.url,
             filename: params.filename,

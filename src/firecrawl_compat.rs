@@ -119,6 +119,7 @@ pub struct ScrapeMetadata {
 pub async fn scrape_handler(
     Json(req): Json<ScrapeRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    crate::robots::assert_allowed(&req.url).await.map_err(AppError::Forbidden)?;
     let wants_html = req.formats.iter().any(|f| f == "html");
     let wants_markdown = req.formats.iter().any(|f| f == "markdown");
     let wants_screenshot = req.actions.iter().any(|a| matches!(a, ScrapeAction::Screenshot { .. }))
