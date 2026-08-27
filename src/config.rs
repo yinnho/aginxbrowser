@@ -43,3 +43,15 @@ impl Default for BrowserConfig {
         }
     }
 }
+
+/// Deep-stack budget (MB) shared by every thread that hosts a V8 isolate
+/// and by V8's own JS stack ceiling (set once before the first isolate;
+/// see diting_js::runtime). Minified SPA bundles recurse past defaults —
+/// override for constrained hosts via `AGINXBROWSER_JS_STACK_MB` (1..=1024).
+pub fn js_stack_mb() -> usize {
+    std::env::var("AGINXBROWSER_JS_STACK_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&mb| (1..=1024).contains(&mb))
+        .unwrap_or(32)
+}

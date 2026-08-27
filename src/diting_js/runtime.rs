@@ -252,6 +252,20 @@ impl JsRuntime {
         // (upstream obscura hit this under thread-per-connection, #430).
         let mut runtime = {
             let _construct_guard = ISOLATE_CONSTRUCT_LOCK.lock().unwrap();
+            // One-shot before the first isolate: raise V8's own JS stack
+            // ceiling. The default (~984 KB) is fine for hand-written code,
+            // but minified SPA bundles (juejin.cn class) recurse past it and
+            // the page dies with `RangeError: Maximum call stack size
+            // exceeded` before it renders. The flag is in KB; keep a 2 MB
+            // margin under the hosting thread's native stack, which callers
+            // size to match (config::js_stack_mb, default 32 MB).
+            static V8_STACK_FLAG: std::sync::Once = std::sync::Once::new();
+            V8_STACK_FLAG.call_once(|| {
+                let kb = crate::config::js_stack_mb().saturating_sub(2).max(1) * 1024;
+                // Returns (); V8 itself logs to stderr if a flag is rejected,
+                // which would leave the default ~984 KB ceiling in place.
+                v8::V8::set_flags_from_string(&format!("--stack-size={kb}"));
+            });
             deno_core::JsRuntime::new(RuntimeOptions {
                 extensions: vec![build_extension()],
                 module_loader: Some(module_loader),

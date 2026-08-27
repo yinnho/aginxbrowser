@@ -132,6 +132,10 @@ impl SessionManager {
         let thread_url = start_url.map(|s| s.to_string());
         std::thread::Builder::new()
             .name(format!("session-{}", &thread_id[..8.min(thread_id.len())]))
+            // Deep stack for the V8 isolate — see server::v8_stack_size.
+            // A default 2 MB thread dies on minified SPA recursion
+            // (juejin.cn class) before the page renders.
+            .stack_size(crate::server::v8_stack_size())
             .spawn(move || {
                 session_thread(thread_id, thread_url, use_proxy, cookies, cmd_rx);
             })

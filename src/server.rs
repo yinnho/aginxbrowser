@@ -124,14 +124,43 @@ pub fn build_browser_with_jar(
     Ok(builder.build()?)
 }
 
+/// Native stack size for threads that host a V8 isolate. V8 counts its JS
+/// frames against the hosting thread's native stack — minified SPA bundles
+/// (juejin.cn class) recurse past what a default 2 MB thread survives
+/// (`RangeError: Maximum call stack size exceeded` before the page renders).
+/// Sized in config (`AGINXBROWSER_JS_STACK_MB`, default 32 MB); V8's own
+/// ceiling is raised to match — see diting_js::runtime.
+pub(crate) fn v8_stack_size() -> usize {
+    crate::config::js_stack_mb() * 1024 * 1024
+}
+
 /// Run a browser operation on a dedicated single-threaded runtime.
 ///
 /// The V8 runtime holds `Rc<RefCell<…>>` state, which is `!Send`, so a
 /// `Page` cannot be held across `.await` points on Tokio's multi-threaded
 /// runtime. We spin up a current-thread runtime on a blocking thread and drive
 /// the whole navigation there — the V8 isolate stays on one thread for its
-/// entire lifetime, which is what deno_core expects.
+/// entire lifetime, which is what deno_core expects. That thread gets a deep
+/// native stack (`v8_stack_size`): callers reach us from tokio blocking
+/// threads whose default 2 MB stack is too shallow for V8-heavy pages.
 pub(crate) fn run_on_local_runtime<F, T>(f: F) -> Result<T>
+where
+    F: for<'a> FnOnce(&'a tokio::runtime::Runtime) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + 'a>>
+        + Send
+        + 'static,
+    T: Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .stack_size(v8_stack_size())
+        .name("v8-page".to_string())
+        .spawn(move || run_on_local_runtime_on_thread(f))
+        .context("failed to spawn V8 runtime thread")?;
+    handle.join().unwrap_or_else(|panic| {
+        Err(anyhow::anyhow!("V8 runtime thread panicked: {panic:?}"))
+    })
+}
+
+fn run_on_local_runtime_on_thread<F, T>(f: F) -> Result<T>
 where
     F: for<'a> FnOnce(&'a tokio::runtime::Runtime) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + 'a>>
         + Send
@@ -780,5 +809,32 @@ mod shared_jar_tests {
         let got = b2.cookies().get_for_url("https://www.example.com/").unwrap();
         let names: Vec<&str> = got.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"sid"), "second browser sees the cookie: {names:?}");
+    }
+
+    /// Regression (juejin.cn feed rendered empty, `RangeError: Maximum call
+    /// stack size exceeded` in the page bundle): V8 counts JS frames against
+    /// the hosting thread's native stack, so a default 2 MB thread dies a few
+    /// thousand frames in where desktop Chrome runs the same minified bundle
+    /// fine. 20k frames is past what any default-threaded embedder survives
+    /// and comfortably inside Chrome's own ceiling.
+    #[test]
+    fn v8_deep_recursion_survives_minified_bundle_depths() {
+        let depth = run_on_local_runtime(move |_rt| {
+            Box::pin(async move {
+                let browser = Browser::builder().stealth(false).build()?;
+                let mut page = browser.new_page().await?;
+                page.goto("about:blank").await?;
+                Ok(page.evaluate(
+                    "(function(){function f(n){return n===0?0:f(n-1)+1}\
+                     try{return String(f(20000))}catch(e){return 'ERR:'+e.message}})()",
+                ))
+            })
+        })
+        .unwrap();
+        let depth = depth.as_str().unwrap_or("<non-string>");
+        assert_eq!(
+            depth, "20000",
+            "deep JS recursion must not hit RangeError, got: {depth}"
+        );
     }
 }
