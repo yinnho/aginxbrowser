@@ -102,6 +102,38 @@ jobs:
               "${tag}-arm64"
           done
 
+  # The arm64 build compiles natively but nothing has ever *executed* it —
+  # V8 snapshots and BoringSSL asm can build fine and still not run. Pull the
+  # merged multi-arch tag on a real arm64 runner and smoke it: health,
+  # status page, cookie-store write under a non-root user.
+  verify:
+    runs-on: ubuntu-24.04-arm
+    needs: merge
+    steps:
+      - name: Smoke merged image on native arm64
+        env:
+          # Tag pushes verify the version tag; dispatches on main verify latest.
+          TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'latest' }}
+        run: |
+          mkdir -p /tmp/smoke-data/cookies && sudo chown -R 1000:1000 /tmp/smoke-data
+          docker run -d --name smoke -p 18089:8089 \
+            -e AGINXBROWSER_COOKIE_STORE_DIR=/data/cookies \
+            -u 1000:1000 \
+            -v /tmp/smoke-data/cookies:/data/cookies \
+            "ghcr.io/yinnho/aginxbrowser:${TAG}"
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:18089/health && break
+            sleep 2
+          done
+          echo
+          echo "--- status page:"
+          curl -fsS http://127.0.0.1:18089/ | head -3
+          echo "--- health body:"
+          curl -fsS http://127.0.0.1:18089/health
+          echo
+          echo "--- container logs (tail):"
+          docker logs smoke 2>&1 | tail -5
+
   # Mirror to Docker Hub when DOCKERHUB_USERNAME/TOKEN secrets are set
   # (steps skip — not fail — otherwise). Copies the merged multi-arch GHCR
   # manifests, so no second build. The secrets context can't be referenced in
