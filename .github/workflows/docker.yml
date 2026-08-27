@@ -118,21 +118,28 @@ jobs:
           mkdir -p /tmp/smoke-data/cookies && sudo chown -R 1000:1000 /tmp/smoke-data
           docker run -d --name smoke -p 18089:8089 \
             -e AGINXBROWSER_COOKIE_STORE_DIR=/data/cookies \
+            -e AGINXBROWSER_DOWNLOAD_DIR=/data/downloads \
             -u 1000:1000 \
             -v /tmp/smoke-data/cookies:/data/cookies \
+            -v /tmp/smoke-data/downloads:/data/downloads \
             "ghcr.io/yinnho/aginxbrowser:${TAG}"
+          # Diagnose first — a dead container must print its dying words before
+          # the curl loop can eat the exit code.
+          sleep 5
+          docker ps -a --filter name=smoke --format '{{.Status}}'
+          docker logs smoke 2>&1 | tail -15 || true
+          ok=""
           for i in $(seq 1 30); do
-            curl -fsS http://127.0.0.1:18089/health && break
+            if curl -fsS http://127.0.0.1:18089/health > /tmp/health.json 2>/dev/null; then ok=1; break; fi
             sleep 2
           done
-          echo
-          echo "--- status page:"
-          curl -fsS http://127.0.0.1:18089/ | head -3
           echo "--- health body:"
-          curl -fsS http://127.0.0.1:18089/health
-          echo
-          echo "--- container logs (tail):"
-          docker logs smoke 2>&1 | tail -5
+          cat /tmp/health.json 2>/dev/null || docker logs smoke 2>&1 | tail -25
+          test -n "$ok"
+          echo "--- status page head:"
+          curl -fsS http://127.0.0.1:18089/ | head -3
+          echo "--- cookie store written by uid 1000:"
+          ls -ln /tmp/smoke-data/cookies/ | tail -3
 
   # Mirror to Docker Hub when DOCKERHUB_USERNAME/TOKEN secrets are set
   # (steps skip — not fail — otherwise). Copies the merged multi-arch GHCR
