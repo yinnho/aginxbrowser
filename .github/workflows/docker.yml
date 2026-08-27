@@ -111,10 +111,15 @@ jobs:
     needs: merge
     steps:
       - name: Smoke merged image on native arm64
-        env:
-          # Tag pushes verify the version tag; dispatches on main verify latest.
-          TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'latest' }}
         run: |
+          # Image tags strip the leading "v" (metadata-action semver format):
+          # tag pushes verify the bare version, dispatches verify latest.
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF_NAME#v}"
+          else
+            TAG=latest
+          fi
+          echo "TAG=$TAG" | tee -a "$GITHUB_ENV"
           mkdir -p /tmp/smoke-data/cookies /tmp/smoke-data/downloads && sudo chown -R 1000:1000 /tmp/smoke-data
           # Any unresolved dynamic library shows up here first (exit 127 gives
           # no such hint from docker run alone).
