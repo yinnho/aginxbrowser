@@ -114,9 +114,13 @@ aginxbrowser doctor   # features + fonts + egress self-check
 docker run -p 8089:8089 yinnho/aginxbrowser:latest
 # (or ghcr.io/yinnho/aginxbrowser:latest)
 
-# Or the prebuilt binary (one-line installer: platform detect + sha256 + self-check)
+# Or the prebuilt binary (platform detect + sha256 + mirror fallback + doctor self-check)
+# Cautious: download -> inspect -> run (never blind-run network scripts)
 curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/install.sh -o install.sh
 less install.sh && bash install.sh
+# Or straight in, if you trust the repo:
+#   curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/install.sh | sh
+# GitHub slow/blocked? AGINXBROWSER_GH_PROXY=https://ghfast.top/ bash install.sh
 aginxbrowser doctor   # features + fonts + egress self-check
 
 # Or build from source (--features stealth,screenshot or you lose both)
