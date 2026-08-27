@@ -4560,17 +4560,22 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "screenshot")]
     fn test_element_from_point_in_viewport_returns_body() {
         let mut rt = setup_runtime("<html><body><h1>Hi</h1></body></html>");
         // With diting-layout rects backing getBoundingClientRect, hit testing
         // is real. The h1's UA box (body 8px margin + h1 .67em margin-top,
         // then the 2em line box) starts around y≈30, so (10,40) lands on it;
         // (10,10) sits in the h1's margin — body territory, like Chrome.
-        // NOTE: currently failing on main — regressed somewhere in the
-        // (301b43f..aa32edd] window (b70e042 UTF-8 boundary or a516ad7
-        // js wave 2): h1 lays out shrink-to-fit + centered at (450,190)
-        // instead of left-flow at y≈30. Pre-existing, tracked separately
-        // from the WAF work.
+        //
+        // Feature-gated: the layout_rects_all pipeline (and the
+        // _domRaw("layout_rect") op behind gBCR) only exists under the
+        // `screenshot` feature; without it gBCR falls back to bootstrap.js's
+        // synthetic nid-hashed grid (h1 lands at 450,190), which this test
+        // was never meant to pin. The long-standing bare-`cargo test` red
+        // was exactly that gate, not a layout regression — bisect pointed at
+        // 83129c5 only because that's when the test started asserting real
+        // rects.
         let tag = rt.evaluate("document.elementFromPoint(10, 40)?.tagName").unwrap();
         assert_eq!(tag, serde_json::json!("H1"));
         let margin_area = rt.evaluate("document.elementFromPoint(10, 10)?.tagName").unwrap();
