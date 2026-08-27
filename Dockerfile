@@ -18,10 +18,12 @@ COPY . .
 RUN touch src/main.rs && cargo build --release --features stealth,screenshot
 
 # Runtime stage — the binary is self-contained (V8 + HTTP stack + rendering
-# engine are statically linked in); curl only for the HEALTHCHECK.
+# engine are statically linked in) EXCEPT the font stack: the screenshot
+# feature's font enumeration links fontconfig/freetype dynamically on Linux.
+# curl only for the HEALTHCHECK.
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl libfontconfig1 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/aginxbrowser /usr/local/bin/aginxbrowser
 
