@@ -7974,38 +7974,92 @@ function __ditingLocaleArg(locales) {
   if (locales === undefined || locales === null) return __ditingLangList()[0];
   return locales;
 }
-Intl.DateTimeFormat = function(locales, options) {
-  if (!options) options = {};
-  if (!options.timeZone) options.timeZone = __ditingTZFromLang();
-  return new _OrigDateTimeFormat(__ditingLocaleArg(locales), options);
-};
-Intl.DateTimeFormat.prototype = _OrigDateTimeFormat.prototype;
-Intl.DateTimeFormat.supportedLocalesOf = _OrigDateTimeFormat.supportedLocalesOf;
+// Wrapping a native constructor with a plain JS function is itself a
+// fingerprint: Function.prototype.toString stops returning [native code],
+// name/length drift (stock Intl constructors are all length 0), and
+// prototype.constructor stops closing on Intl.X. A Proxy with only a
+// construct trap forwards everything else to the native target — the spec
+// resolves a callable proxy's source text from its target — so nothing has
+// to be forged by hand. It also keeps "class constructor requires new":
+// a plain wrapper is callable without new and silently returns an
+// instance, the proxy's default apply forwards to the native and throws
+// like stock.
+// Registry backing the toString disguise below: wrapped proxy -> native
+// original it stands in for.
+const __ditingNativeOf = new Map();
+// Shared per-call binding for the DateTimeFormat proxies.
+function __ditingDTFArgs(args) {
+  if (!args[1]) args[1] = {};
+  if (!args[1].timeZone) args[1].timeZone = __ditingTZFromLang();
+  args[0] = __ditingLocaleArg(args[0]);
+  return args;
+}
+Intl.DateTimeFormat = new Proxy(_OrigDateTimeFormat, {
+  construct(target, args, newTarget) {
+    return Reflect.construct(target, __ditingDTFArgs(args), newTarget);
+  },
+  // ECMA-402 legacy: these constructors stay callable without new. The
+  // proxy's default call forwarding resolves the legacy NewTarget to the
+  // inner native, which skips the construct trap — so bind here too.
+  apply(target, thisArg, args) {
+    return Reflect.construct(target, __ditingDTFArgs(args), target);
+  },
+});
+__ditingNativeOf.set(Intl.DateTimeFormat, _OrigDateTimeFormat);
+Object.defineProperty(_OrigDateTimeFormat.prototype, 'constructor', {
+  value: Intl.DateTimeFormat, writable: true, enumerable: false, configurable: true,
+});
 const _origResolved = _OrigDateTimeFormat.prototype.resolvedOptions;
-_OrigDateTimeFormat.prototype.resolvedOptions = function() {
-  const r = _origResolved.call(this);
-  if (r.timeZone === 'UTC') r.timeZone = __ditingTZFromLang();
-  return r;
-};
+_OrigDateTimeFormat.prototype.resolvedOptions = new Proxy(_origResolved, {
+  apply(target, thisArg, args) {
+    const r = Reflect.apply(target, thisArg, args);
+    if (r.timeZone === 'UTC') r.timeZone = __ditingTZFromLang();
+    return r;
+  },
+});
+__ditingNativeOf.set(_OrigDateTimeFormat.prototype.resolvedOptions, _origResolved);
 // The remaining (locales, options) Intl constructors get the same
-// default-locale binding via a generic wrapper. prototype + static
-// carried over so instanceof and supportedLocalesOf keep working.
+// default-locale binding via the same proxy treatment.
 (function() {
   const names = ['NumberFormat', 'Collator', 'PluralRules', 'RelativeTimeFormat',
                  'ListFormat', 'DisplayNames', 'Segmenter'];
   for (const n of names) {
     const Orig = Intl[n];
     if (typeof Orig !== 'function' || !Orig.prototype) continue;
-    const Wrapped = function(locales, options) {
-      return new Orig(__ditingLocaleArg(locales), options);
-    };
-    Wrapped.prototype = Orig.prototype;
-    if (typeof Orig.supportedLocalesOf === 'function') {
-      Wrapped.supportedLocalesOf = Orig.supportedLocalesOf;
-    }
-    Intl[n] = Wrapped;
+    Intl[n] = new Proxy(Orig, {
+      construct(target, args, newTarget) {
+        args[0] = __ditingLocaleArg(args[0]);
+        return Reflect.construct(target, args, newTarget);
+      },
+      apply(target, thisArg, args) {
+        args[0] = __ditingLocaleArg(args[0]);
+        return Reflect.construct(target, args, target);
+      },
+    });
+    __ditingNativeOf.set(Intl[n], Orig);
+    Object.defineProperty(Orig.prototype, 'constructor', {
+      value: Intl[n], writable: true, enumerable: false, configurable: true,
+    });
   }
 })();
+// V8 renders Function.prototype.toString on a proxy over a native as the
+// anonymous "function () { [native code] }" — stock shows the name
+// ("function NumberFormat() { [native code] }"). Close that last gap by
+// routing toString through a proxy of the real Function.prototype.toString
+// that answers for the wrapped set from the original and reflects
+// everything else untouched. This covers both Intl.X.toString() and a
+// direct Function.prototype.toString.call(Intl.X); the disguise itself
+// still renders native because the spec resolves a callable proxy's source
+// text from its target.
+const __ditingFnToString = Function.prototype.toString;
+Function.prototype.toString = new Proxy(__ditingFnToString, {
+  apply(target, thisArg, args) {
+    if (__ditingNativeOf.has(thisArg)) {
+      return __ditingFnToString.call(__ditingNativeOf.get(thisArg));
+    }
+    return Reflect.apply(target, thisArg, args);
+  },
+});
 
 if (typeof PointerEvent === 'undefined') {
   globalThis.PointerEvent = class PointerEvent extends MouseEvent {

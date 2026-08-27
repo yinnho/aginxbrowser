@@ -1880,6 +1880,61 @@ mod tests {
         assert_eq!(nav, serde_json::json!("en-US"));
     }
 
+    /// obscura#734 follow-up: replacing a native Intl constructor with a
+    /// plain JS function is itself a fingerprint — Function.prototype.toString
+    /// stops returning [native code], name/length drift, and
+    /// prototype.constructor stops closing on Intl.X. The wrappers are
+    /// proxies with only a construct trap, plus a toString disguise for the
+    /// one gap V8's proxy source-text resolution leaves (the anonymous
+    /// "function () { [native code] }" form, without the name).
+    #[test]
+    fn intl_wrappers_render_native_identity() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let native_str = rt
+            .evaluate(
+                "(function(){\
+                 \nreturn [Function.prototype.toString.call(Intl.NumberFormat),\
+                 \nString(Intl.DateTimeFormat),\
+                 \nFunction.prototype.toString.call(Intl.DateTimeFormat.prototype.resolvedOptions)]\
+                 \n.join('|')})()",
+            )
+            .unwrap();
+        let s = native_str.as_str().unwrap();
+        for part in s.split('|') {
+            assert!(part.contains("[native code]"), "expected native code form, got: {}", part);
+        }
+        assert!(s.contains("NumberFormat"), "toString should carry the constructor name");
+        assert!(s.contains("resolvedOptions"), "resolvedOptions toString should carry its name");
+        assert!(!s.contains("Wrapped"), "wrapper function name leaked");
+
+        let ident = rt
+            .evaluate(
+                "[Intl.NumberFormat.name, Intl.DateTimeFormat.name,\
+                 \nIntl.NumberFormat.length, Intl.DateTimeFormat.length,\
+                 \nIntl.NumberFormat.prototype.constructor === Intl.NumberFormat,\
+                 \nIntl.DateTimeFormat.prototype.constructor === Intl.DateTimeFormat,\
+                 \n(new Intl.NumberFormat()) instanceof Intl.NumberFormat].join('|')",
+            )
+            .unwrap();
+        assert_eq!(
+            ident,
+            serde_json::json!("NumberFormat|DateTimeFormat|0|0|true|true|true"),
+            "name/length/constructor identity must match stock"
+        );
+
+        // The toString disguise must not eat real source: plain functions
+        // still render their own text, and the disguise itself renders
+        // native (spec resolves a callable proxy's source from its target).
+        let passthrough = rt
+            .evaluate(
+                "(function(){var f=function foo(a){return a+1};\
+                 \nreturn [f.toString().indexOf('return a+1')>=0,\
+                 \nFunction.prototype.toString.toString().indexOf('[native code]')>=0].join('|')})()",
+            )
+            .unwrap();
+        assert_eq!(passthrough, serde_json::json!("true|true"));
+    }
+
     #[test]
     fn test_document_url() {
         let mut rt = setup_runtime("<html><body></body></html>");
