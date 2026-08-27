@@ -702,6 +702,50 @@ curl -sS -X POST http://127.0.0.1:8089/session/create \
 
 > 🔒 The hosted instance never persists any cookie to disk — cookies live only in session memory and are wiped when the session is reclaimed after 8 minutes idle. Callers hold their own login state (use a throwaway account, not your main one).
 
+### GET /session/{id}/export
+
+Export the session's recorded action log. Every page-changing command since create — `navigate` / `click` / `input` / `scroll` / `eval` — was recorded in order, in memory only (reads like `state` and `cookies` are not recorded; the log dies with the session).
+
+**Query parameters:**
+
+| Field | Type | Default | Description |
+|------|------|------|------|
+| format | string | `bash` | `bash` → a runnable curl script replaying every recorded action against a fresh session; `jsonl` → the raw action log, one JSON object per line |
+
+**Response (`format=jsonl`):**
+
+```
+{"action":"create","url":"https://example.com/login","use_proxy":false,"cookies":[]}
+{"action":"input","index":1,"text":"user@example.com","ok":true}
+{"action":"click","index":3,"ok":true}
+```
+
+**Response (`format=bash`, the default)** — a self-contained replay script:
+
+```bash
+#!/usr/bin/env bash
+# aginxbrowser session replay — recorded actions re-run as plain curl.
+# No LLM in the loop: replay costs zero model tokens.
+set -eu
+BASE="${AGINXBROWSER_URL:-http://127.0.0.1:8089}"
+POST() { curl -sS -X POST "$BASE/$1" -H 'Content-Type: application/json' -d "$2"; }
+
+SID=$(POST session/create '{"url":"https://example.com/login","cookies":[],"use_proxy":false}' | sed -n 's/.*"session_id":"\([^"]*\)".*/\1/p')
+[ -n "$SID" ] || { echo "session create failed" >&2; exit 1; }
+POST "session/$SID/input" '{"index":1,"text":"user@example.com"}' > /dev/null
+POST "session/$SID/click" '{"index":3}' > /dev/null
+
+echo '--- final state ---'
+POST "session/$SID/state" '{}'
+echo
+```
+
+Run it anywhere with `curl` (override the target with `AGINXBROWSER_URL`), from cron, in CI, on another machine. What an agent figured out interactively becomes a deterministic, auditable script — re-running it costs **zero model tokens**.
+
+> ⚠️ Treat an exported script like credentials — it embeds any cookies the session was created with.
+>
+> **Index caveat**: `click`/`input` replay the *index* from the original run's `/state` output. If the page's element order changed, an index may land elsewhere. The script is a readable, editable starting point, not a guaranteed selector — fix the index (or swap in a selector of your own) and re-run.
+
 ### Session Usage Example
 
 ```bash
@@ -832,7 +876,7 @@ The streamable HTTP transport follows the protocol's dual session semantics — 
 
 Browser sessions (`session_create` & co.) are shared across MCP sessions by design: two MCP clients on the same server can list (`session_list`) and reuse the same browser session IDs, which is what makes "one instance per machine, every agent shares it" work. For a self-hosted instance reached over a LAN IP or a Docker hostname (not `localhost`/`127.0.0.1`), add the hostname to `AGINXBROWSER_MCP_ALLOWED_HOSTS` — the transport validates the `Host` header as DNS-rebinding protection and rejects unlisted hosts with `403`.
 
-### Provided Tools (15)
+### Provided Tools (16)
 
 #### Core Tools
 
@@ -857,6 +901,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `session_input` | Type text by index |
 | `session_scroll` | Scroll the page |
 | `session_eval` | Execute JavaScript in the session |
+| `session_export` | Export the session's recorded actions as a runnable curl replay script (`format=jsonl` for the raw log) |
 | `session_close` | Close the session |
 
 #### `fetch` Tool Parameters

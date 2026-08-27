@@ -529,6 +529,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/session/:id/navigate", post(session_navigate_handler))
         .route("/session/:id/state", post(session_state_handler))
         .route("/session/:id/cookies", get(session_cookies_handler))
+        .route("/session/:id/export", get(session_export_handler))
         .route("/session/:id/click", post(session_click_handler))
         .route("/session/:id/input", post(session_input_handler))
         .route("/session/:id/scroll", post(session_scroll_handler))
@@ -994,8 +995,7 @@ async fn session_state_handler(
 
 async fn session_cookies_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
-) -> Result<impl IntoResponse, AppError> {
-    let mut mgr = session::SESSIONS.lock().await;
+) -> Result<impl IntoResponse, AppError> {    let mut mgr = session::SESSIONS.lock().await;
     let text = mgr.send(&id, |reply| session::SessionCommand::Cookies { reply }).await
         .map_err(|e| AppError::Internal(e))?;
     // `text` is a JSON string {"url":...,"cookies":[...]} from the session
@@ -1003,6 +1003,31 @@ async fn session_cookies_handler(
     let val: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| AppError::Internal(format!("cookies parse error: {}", e)))?;
     Ok((StatusCode::OK, Json(val)))
+}
+
+#[derive(Deserialize)]
+struct SessionExportQuery {
+    /// `bash` (default) emits a runnable curl replay script;
+    /// `jsonl` emits the raw action log.
+    #[serde(default)]
+    format: Option<String>,
+}
+
+/// Export the session's recorded actions: as a bash+curl replay script
+/// (default — replay with zero model tokens) or as raw JSONL.
+async fn session_export_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<SessionExportQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    let jsonl = mgr.send(&id, |reply| session::SessionCommand::Export { reply }).await
+        .map_err(AppError::Internal)?;
+    if q.format.as_deref() == Some("jsonl") {
+        Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "application/x-ndjson")], jsonl))
+    } else {
+        let script = session::replay_bash(&jsonl, "http://127.0.0.1:8089");
+        Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")], script))
+    }
 }
 
 async fn session_click_handler(

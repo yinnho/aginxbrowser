@@ -48,7 +48,7 @@ Most new "agent browsers" are stateless, fingerprint-less one-shot renderers —
 
 - **🔐 Real TLS fingerprints** — stealth mode replicates the complete Chrome145 / Firefox133 / Safari / Edge TLS handshakes via BoringSSL (not just a UA string), switchable per request; Cloudflare Turnstile challenges wait automatically for `cf_clearance`. Fingerprint-less engines eat 403s — we get through.
 - **🤝 Stateful interactive sessions** — persistent sessions (8-minute idle keep-alive), login state injectable and exportable (`session_create(cookies=...)` ↔ `session_cookies`), surviving pagination and multi-step flows. One-shot engines throw state away.
-- **🔌 MCP native** — 15 tools as first-class citizens (not a CDP shim). Claude Code / Cursor / Claude Desktop connect in one line. HTTP + MCP dual protocol.
+- **🔌 MCP native** — 16 tools as first-class citizens (not a CDP shim). Claude Code / Cursor / Claude Desktop connect in one line. HTTP + MCP dual protocol.
 
 > Reference point: Cloudflare's Kitesurf explicitly ships neither real TLS-fingerprint negotiation nor persistent auth sessions — anti-bot and login territory is exactly where AginxBrowser plays.
 
@@ -59,13 +59,13 @@ Apache-2.0 open source, single binary — self-host today, no cloud lock-in.
 - **Tiered rendering**: static pages over plain HTTP (~100ms); V8 spins up only when JS rendering is needed (~1-2s) — 90% of the [bench](bench/README.md) page set served without spinning up V8 at all; every response reports which tier served it (`tier` field)
 - **Multi-engine meta-search**: general web (Baidu / Bing / Sogou / WeChat / Google), news (Bing News), code (Stack Overflow, GitHub), packages (npm, PyPI), academic (arXiv), AI models (Hugging Face) — queried concurrently, merged and deduplicated. Operators can plug a private Meilisearch index into the same `/search`. Search → read in one step
 - **Image search**: `categories=images` hits Baidu/Bing image indexes and returns direct binary `image_url` links (downloadable straight to jpg/png) plus `source_url` provenance
-- **Interactive sessions**: persistent browser sessions with indexed interaction (`state/click/input/scroll/eval`) — agents browse like humans do
+- **Interactive sessions**: persistent browser sessions with indexed interaction (`state/click/input/scroll/eval`) — agents browse like humans do, and `session_export` turns what an agent figured out into a runnable curl replay script (zero model tokens on re-run)
 - **CAPTCHA auto-solve**: type detection with optional 2captcha integration — search never stalls on verification pages
 - **JS data extraction**: `js_extract` pulls `window.__INITIAL_STATE__` and other structured data out of SPAs
 - **Screenshot rendering**: `/screenshot` endpoint (opt-in `--features screenshot`) paints the JS-rendered DOM with our own diting rendering engine — pure CPU, no Chromium — to PNG. Vision input for agents
 - **Cloudflare auto-wait**: detects "Just a moment..." challenge pages and waits out `cf_clearance`
 - **TLS fingerprint spoofing**: stealth mode impersonates Chrome145/Firefox133/Safari/Edge, switchable per request
-- **MCP server**: `--mcp` mode exposes 15 tools (fetch/eval/click/search/download + 10 session tools) — Claude Code / Claude Desktop / Cursor call them directly
+- **MCP server**: `--mcp` mode exposes 16 tools (fetch/eval/click/search/download + 11 session tools) — Claude Code / Claude Desktop / Cursor call them directly
 - **Firecrawl compatible**: `/v1/scrape` endpoint — existing Firecrawl clients migrate by changing the base URL
 - **DNS rebinding protection**: built-in SSRF guard + post-resolution IP validation
 
@@ -179,7 +179,7 @@ aginxbrowser/
     ├── session.rs           # Interactive browser sessions
     ├── captcha.rs           # CAPTCHA detection & auto-solve
     ├── render.rs            # Tiered rendering (HTTP direct → diting browser engine)
-    ├── mcp.rs               # MCP server (15 tools)
+    ├── mcp.rs               # MCP server (16 tools)
     ├── firecrawl_compat.rs  # Firecrawl-compatible /v1/scrape endpoint
     ├── browser.rs           # Top-level API: Browser, BrowserBuilder
     ├── page.rs              # Top-level API: Page, Element
@@ -251,7 +251,7 @@ Requirements: Rust 1.78+; the V8 static library downloads automatically on first
 **Security audit notes** → [`docs/skills-sh-audit.md`](docs/skills-sh-audit.md) — why skills.sh shows "Critical Risk", and which real product feature each warning corresponds to
 
 Covers:
-- All HTTP endpoints (`/fetch`, `/click`, `/eval`, `/search`, `/v1/scrape`, 9 session endpoints)
+- All HTTP endpoints (`/fetch`, `/click`, `/eval`, `/search`, `/v1/scrape`, 10 session endpoints)
 - All 15 MCP server tools and their parameters
 - Claude Code / Claude Desktop / Cursor client configuration
 - Environment variables, error codes, per-site scraping examples

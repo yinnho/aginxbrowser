@@ -63,6 +63,11 @@ pub enum SessionCommand {
     Close {
         reply: oneshot::Sender<()>,
     },
+    /// Export the session's recorded action log as JSONL (one
+    /// RecordedAction per line) — the raw material for replay scripts.
+    Export {
+        reply: oneshot::Sender<Result<String, String>>,
+    },
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -96,6 +101,20 @@ pub struct SessionListEntry {
     pub idle_secs: u64,
     /// Idle budget left before auto-eviction.
     pub expires_in_secs: u64,
+}
+
+/// One recorded session action — the replay log. Only actions that change
+/// the page are recorded; reads (State, Cookies) would just add noise to a
+/// replay script.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum RecordedAction {
+    Create { url: Option<String>, use_proxy: bool, cookies: Vec<String> },
+    Navigate { url: String, ok: bool },
+    Click { index: usize, ok: bool },
+    Input { index: usize, text: String, ok: bool },
+    Scroll { direction: String, amount: u32 },
+    Eval { script: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +274,87 @@ impl SessionManager {
 }
 
 // ---------------------------------------------------------------------------
+// Replay script generation
+// ---------------------------------------------------------------------------
+
+/// Embed a string in single quotes for bash: `'` → `'\''` (the standard
+/// close-quote-escaped-quote-reopen idiom). Everything else is literal.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Render a recorded action log (JSONL, as returned by the Export command)
+/// as a runnable bash script that replays the session against the HTTP API
+/// with plain curl — replay with zero model tokens and nothing to install.
+///
+/// Index-based actions replay against indexes from the ORIGINAL run's
+/// `/state` output; if the page's element order changed, indexes may point
+/// elsewhere. That's inherent to index-based replay — the script is a
+/// starting point, auditable and editable.
+pub fn replay_bash(jsonl: &str, default_base: &str) -> String {
+    let mut out = String::new();
+    out.push_str("#!/usr/bin/env bash\n");
+    out.push_str("# aginxbrowser session replay — recorded actions re-run as plain curl.\n");
+    out.push_str("# No LLM in the loop: replay costs zero model tokens.\n");
+    out.push_str("# Treat this file like credentials — it contains any cookies injected\n");
+    out.push_str("# at session create.\n");
+    out.push_str("set -eu\n");
+    out.push_str(&format!("BASE=\"${{AGINXBROWSER_URL:-{default_base}}}\"\n"));
+    out.push_str("POST() { curl -sS -X POST \"$BASE/$1\" -H 'Content-Type: application/json' -d \"$2\"; }\n\n");
+
+    let mut sid_bound = false;
+    for line in jsonl.lines().filter(|l| !l.trim().is_empty()) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        // Payload = JSON body, shell-single-quoted for the POST helper's -d "$2".
+        let payload = |body: Value| shell_quote(&body.to_string());
+        match v["action"].as_str().unwrap_or_default() {
+            "create" => {
+                let body = payload(serde_json::json!({
+                    "url": v["url"].clone(),
+                    "cookies": v["cookies"].clone(),
+                    "use_proxy": v["use_proxy"].as_bool().unwrap_or(false),
+                }));
+                out.push_str(&format!(
+                    "SID=$(POST session/create {body} | sed -n 's/.*\"session_id\":\"\\([^\"]*\\)\".*/\\1/p')\n"
+                ));
+                out.push_str("[ -n \"$SID\" ] || { echo \"session create failed\" >&2; exit 1; }\n");
+                sid_bound = true;
+            }
+            "navigate" if sid_bound => {
+                let body = payload(serde_json::json!({"url": v["url"].clone()}));
+                out.push_str(&format!("POST \"session/$SID/navigate\" {body} > /dev/null\n"));
+            }
+            "click" if sid_bound => {
+                let body = payload(serde_json::json!({"index": v["index"].clone()}));
+                out.push_str(&format!("POST \"session/$SID/click\" {body} > /dev/null\n"));
+            }
+            "input" if sid_bound => {
+                let body = payload(serde_json::json!({"index": v["index"].clone(), "text": v["text"].clone()}));
+                out.push_str(&format!("POST \"session/$SID/input\" {body} > /dev/null\n"));
+            }
+            "scroll" if sid_bound => {
+                let body = payload(serde_json::json!({
+                    "direction": v["direction"].clone(),
+                    "amount": v["amount"].clone(),
+                }));
+                out.push_str(&format!("POST \"session/$SID/scroll\" {body} > /dev/null\n"));
+            }
+            "eval" if sid_bound => {
+                let body = payload(serde_json::json!({"script": v["script"].clone()}));
+                out.push_str(&format!("POST \"session/$SID/eval\" {body} > /dev/null\n"));
+            }
+            _ => {}
+        }
+    }
+    if sid_bound {
+        out.push_str("\necho '--- final state ---'\n");
+        out.push_str("POST \"session/$SID/state\" '{}'\n");
+        out.push_str("echo\n");
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Session thread — owns Browser + Page
 // ---------------------------------------------------------------------------
 
@@ -285,6 +385,16 @@ fn session_thread(
                     crate::server::inject_cookies(&browser, &cookies, target);
                 }
                 let mut page = browser.new_page().await.expect("failed to create session page");
+
+                // Replay log: every page-changing action this session took,
+                // in order. In-memory only, dies with the session; exported
+                // explicitly via the Export command. Declared before the
+                // initial navigation below (which moves start_url).
+                let mut recorder: Vec<RecordedAction> = vec![RecordedAction::Create {
+                    url: start_url.clone(),
+                    use_proxy,
+                    cookies: cookies.clone(),
+                }];
 
                 // Navigate to start URL if provided.
                 if let Some(url) = start_url {
@@ -328,6 +438,10 @@ fn session_thread(
                                 }
                                 Err(e) => Err(format!("navigation failed: {}", e)),
                             };
+                            recorder.push(RecordedAction::Navigate {
+                                ok: result.is_ok(),
+                                url,
+                            });
                             let _ = reply.send(result);
                         }
 
@@ -339,11 +453,17 @@ fn session_thread(
 
                         SessionCommand::Click { index, reply } => {
                             let result = click_by_index(&mut page, &element_map, index).await;
+                            recorder.push(RecordedAction::Click { index, ok: result.is_ok() });
                             let _ = reply.send(result);
                         }
 
                         SessionCommand::Input { index, text, reply } => {
                             let result = input_by_index(&mut page, &element_map, index, &text);
+                            recorder.push(RecordedAction::Input {
+                                index,
+                                text,
+                                ok: result.is_ok(),
+                            });
                             let _ = reply.send(result);
                         }
 
@@ -354,11 +474,19 @@ fn session_thread(
                             };
                             let js = format!("window.scrollBy(0, {})", dy);
                             page.evaluate_with_timeout(&js, crate::page::INTERACTION_EVAL_TIMEOUT);
+                            recorder.push(RecordedAction::Scroll {
+                                direction: match direction {
+                                    ScrollDirection::Up => "up".to_string(),
+                                    ScrollDirection::Down => "down".to_string(),
+                                },
+                                amount,
+                            });
                             let _ = reply.send(Ok(true));
                         }
 
                         SessionCommand::Eval { script, reply } => {
                             let val = page.evaluate_async(&script).await;
+                            recorder.push(RecordedAction::Eval { script });
                             let _ = reply.send(Ok(val));
                         }
 
@@ -377,6 +505,15 @@ fn session_thread(
                             };
                             let resp = serde_json::json!({ "url": url_str, "cookies": cookies });
                             let _ = reply.send(Ok(resp.to_string()));
+                        }
+
+                        SessionCommand::Export { reply } => {
+                            let jsonl = recorder
+                                .iter()
+                                .filter_map(|a| serde_json::to_string(a).ok())
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            let _ = reply.send(Ok(jsonl));
                         }
 
                         SessionCommand::Close { reply } => {
@@ -677,5 +814,106 @@ mod tests {
         assert!(mgr.close_and_wait(&a).await);
         assert!(mgr.close_and_wait(&b).await);
         assert!(mgr.list().is_empty());
+    }
+
+    /// A recorded session replays as a bash+curl script: every action type
+    /// becomes a POST against $BASE, and single quotes in payloads survive
+    /// shell quoting (the '\'' idiom) instead of terminating the argument.
+    #[test]
+    fn replay_bash_renders_all_actions_and_quotes_singles() {
+        let jsonl = [
+            r#"{"action":"create","url":"https://example.com/","use_proxy":false,"cookies":["sid=it's"]}"#,
+            r#"{"action":"navigate","url":"https://example.com/page","ok":true}"#,
+            r#"{"action":"click","index":3,"ok":true}"#,
+            r#"{"action":"input","index":1,"text":"it's a test","ok":true}"#,
+            r#"{"action":"scroll","direction":"down","amount":3}"#,
+            r#"{"action":"eval","script":"document.querySelector('#q').value"}"#,
+        ]
+        .join("\n");
+
+        let script = replay_bash(&jsonl, "http://127.0.0.1:8089");
+        assert!(script.starts_with("#!/usr/bin/env bash"));
+        assert!(script.contains(r#"BASE="${AGINXBROWSER_URL:-http://127.0.0.1:8089}""#));
+        assert!(script.contains("POST session/create"));
+        assert!(script.contains(r#"POST "session/$SID/navigate""#));
+        assert!(script.contains(r#"POST "session/$SID/click""#));
+        assert!(script.contains(r#"POST "session/$SID/input""#));
+        assert!(script.contains(r#"POST "session/$SID/scroll""#));
+        assert!(script.contains(r#"POST "session/$SID/eval""#));
+        assert!(script.contains(r#"POST "session/$SID/state" '{}'"#), "ends by printing final state");
+        // Single-quote escaping: it's → 'it'\''s — an unescaped quote would
+        // terminate the argument and execute the rest as shell.
+        assert!(script.contains(r#""sid=it'\''s"]"#));
+        assert!(script.contains(r#""text":"it'\''s a test""#));
+        // Command substitution appears exactly once — capturing SID from the
+        // create call. Payloads are plain single-quoted strings, never
+        // $(...)-wrapped (that would execute JSON as shell).
+        assert_eq!(script.matches("$(").count(), 1);
+    }
+
+    /// Actions before a create record (or a log with no create at all) must
+    /// not emit $SID-referencing POSTs — the script would die on an unbound
+    /// variable under set -eu.
+    #[test]
+    fn replay_bash_without_create_skips_sid_actions() {
+        let jsonl = r#"{"action":"navigate","url":"https://example.com/","ok":true}"#;
+        let script = replay_bash(jsonl, "http://127.0.0.1:8089");
+        assert!(!script.contains("$SID"), "no SID may be referenced without a create");
+    }
+
+    /// A live session records what it did: create params + one entry per
+    /// navigate/scroll/eval command, exportable as JSONL. Reads (State,
+    /// Cookies) stay out of the log — replaying them is meaningless.
+    #[tokio::test]
+    async fn session_records_actions_and_exports_jsonl() {
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(Some("about:blank"), false, vec!["k=v".to_string()]);
+
+        let _ = mgr
+            .send(&sid, |reply| SessionCommand::State { reply })
+            .await
+            .unwrap(); // read: not recorded
+        let _ = mgr
+            .send(&sid, |reply| SessionCommand::Scroll {
+                direction: ScrollDirection::Down,
+                amount: 2,
+                reply,
+            })
+            .await
+            .unwrap();
+        let _ = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "1 + 1".to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+        let jsonl = mgr
+            .send(&sid, |reply| SessionCommand::Export { reply })
+            .await
+            .unwrap();
+        assert!(mgr.close_and_wait(&sid).await, "session thread must ack close");
+
+        let actions: Vec<Value> = jsonl.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(actions.len(), 3, "create + scroll + eval, state excluded");
+
+        assert_eq!(actions[0]["action"], "create");
+        assert_eq!(actions[0]["url"], "about:blank");
+        assert_eq!(actions[0]["cookies"][0], "k=v");
+        assert_eq!(actions[0]["use_proxy"], false);
+
+        assert_eq!(actions[1]["action"], "scroll");
+        assert_eq!(actions[1]["direction"], "down");
+        assert_eq!(actions[1]["amount"], 2);
+
+        assert_eq!(actions[2]["action"], "eval");
+        assert_eq!(actions[2]["script"], "1 + 1");
+
+        // The exported log must render through replay_bash without losing
+        // actions (create present → SID-bound POSTs emitted).
+        let script = replay_bash(&jsonl, "http://127.0.0.1:8089");
+        assert!(script.contains("POST session/create"));
+        assert!(script.contains(r#"POST "session/$SID/scroll""#));
+        assert!(script.contains(r#"POST "session/$SID/eval""#));
     }
 }

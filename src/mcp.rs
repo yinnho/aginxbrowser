@@ -197,6 +197,17 @@ pub struct SessionEvalParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionExportParams {
+    /// Session ID
+    pub session_id: String,
+    /// Output format: "bash" (default) renders a runnable curl script that
+    /// replays every recorded action against a fresh session; "jsonl" returns
+    /// the raw action log, one JSON object per line
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SessionCloseParams {
     /// Session ID
     pub session_id: String,
@@ -531,6 +542,25 @@ impl AginxBrowserMcp {
         mgr.evict_expired();
         let sessions = mgr.list();
         json!({ "count": sessions.len(), "sessions": sessions }).to_string()
+    }
+
+    #[tool(
+        description = "Export a browser session's recorded action log. Format \"bash\" (default) returns a runnable curl script that replays every recorded action (navigate/click/input/scroll/eval) against a fresh session on this server — hand it to a shell or cron, zero model tokens. Format \"jsonl\" returns the raw action log, one JSON object per line.",
+        annotations(title = "Export Session Replay Script", read_only_hint = true)
+    )]
+    async fn session_export(&self, Parameters(params): Parameters<SessionExportParams>) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        let jsonl = match mgr.send(&params.session_id, |reply| SessionCommand::Export { reply }).await {
+            Ok(j) => j,
+            Err(e) => return json!({ "error": e }).to_string(),
+        };
+        match params.format.as_deref() {
+            Some("jsonl") => json!({ "format": "jsonl", "actions": jsonl }).to_string(),
+            _ => {
+                let script = session::replay_bash(&jsonl, "http://127.0.0.1:8089");
+                json!({ "format": "bash", "script": script }).to_string()
+            }
+        }
     }
 
     #[tool(
