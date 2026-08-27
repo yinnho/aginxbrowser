@@ -21,6 +21,8 @@ One binary, zero dependencies, instant service. HTTP API + native MCP — agents
 
 ## Why Agents Need Their Own Browser
 
+Measured against headless Chrome on the same 20 pages, same network ([bench](bench/README.md), 2026-08-28): **7.6× faster** to agent-usable text (p50 532 ms vs 4 053 ms), **~10× less memory** (227 MB for the whole process vs ~2.1 GB per Chrome page), and 0 hard failures where Chrome's `--dump-dom` produced no DOM on 5 of 40 loads. An agent's total cost is browser efficiency × model efficiency — this is the browser half.
+
 Existing "browser automation" was built for humans or for one-shot scraping — not for agents:
 
 | | AginxBrowser | Puppeteer/Playwright | Firecrawl | Browser-use |
@@ -54,7 +56,7 @@ Apache-2.0 open source, single binary — self-host today, no cloud lock-in.
 
 ## Capabilities
 
-- **Tiered rendering**: static pages over plain HTTP (~100ms); V8 spins up only when JS rendering is needed (~1-2s) — 10x faster on ~80% of pages
+- **Tiered rendering**: static pages over plain HTTP (~100ms); V8 spins up only when JS rendering is needed (~1-2s) — 90% of the [bench](bench/README.md) page set served without spinning up V8 at all; every response reports which tier served it (`tier` field)
 - **Multi-engine meta-search**: general web (Baidu / Bing / Sogou / WeChat / Google), news (Bing News), code (Stack Overflow, GitHub), packages (npm, PyPI), academic (arXiv), AI models (Hugging Face) — queried concurrently, merged and deduplicated. Operators can plug a private Meilisearch index into the same `/search`. Search → read in one step
 - **Image search**: `categories=images` hits Baidu/Bing image indexes and returns direct binary `image_url` links (downloadable straight to jpg/png) plus `source_url` provenance
 - **Interactive sessions**: persistent browser sessions with indexed interaction (`state/click/input/scroll/eval`) — agents browse like humans do
@@ -165,6 +167,12 @@ aginxbrowser/
 ├── README.md
 ├── docs/
 │   └── API.md            # Full API reference (HTTP + MCP)
+├── bench/                # Benchmark harness + results (vs headless Chrome)
+│   ├── README.md         #   methodology + numbers
+│   ├── pages.txt         #   fixed 20-page set
+│   ├── run.py            #   harness
+│   ├── summarize.py      #   TSV → results table
+│   └── results/          #   raw run data
 └── src/
     ├── main.rs              # HTTP service entry & routing
     ├── server.rs            # Business layer (fetch/click/eval/search)

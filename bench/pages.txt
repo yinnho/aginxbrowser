@@ -1,0 +1,25 @@
+# Benchmark page set — fixed, public, robots.txt-allowed (checked against the
+# engine's own robots gate; HN/go.dev/lib.rs/StackOverflow were dropped
+# because their robots.txt disallows bots, not because they'd be slow).
+# Mix of static server-rendered pages (Tier 1 material) and JS-heavy
+# client-rendered ones (Tier 2 material).
+https://example.com
+https://github.com/yinnho/aginxbrowser
+https://www.rust-lang.org/
+https://doc.rust-lang.org/book/title-page.html
+https://blog.rust-lang.org/
+https://www.python.org/
+https://nodejs.org/en
+https://react.dev/
+https://vuejs.org/
+https://tailwindcss.com/
+https://nextjs.org/
+https://vitejs.dev/
+https://bun.sh/
+https://www.typescriptlang.org/
+https://www.sqlite.org/docs.html
+https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API
+https://docs.rs/serde/latest/serde/
+https://crates.io/
+https://arxiv.org/abs/1706.03762
+https://juejin.cn/

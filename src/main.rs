@@ -186,6 +186,12 @@ pub struct FetchResponse {
     /// Only present when `js_extract` was set in the request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub js_extract_result: Option<serde_json::Value>,
+    /// Which tier served the request: `"http"` (Tier 1, plain HTTP+convert)
+    /// or `"browser"` (Tier 2, V8 render). Absent on surfaces that predate
+    /// tiering. Lets callers see WHY a fetch was fast/slow — and the
+    /// benchmark measure tier hit-rate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1098,6 +1104,7 @@ mod tests {
             truncated: false,
             captcha_event: None,
             js_extract_result: None,
+            tier: None,
         }
     }
 

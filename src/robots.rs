@@ -15,9 +15,13 @@
 //! * 2xx → parse; product-token groups take priority over `*`; longest
 //!   matching rule wins, ties go to Allow; `*` and `$` wildcards honored.
 //! * 404 / 410 → allow all (the host has no rules).
-//! * other 4xx / 5xx / network failure → deny. A server refusing to hand out
-//!   its rules is not implicit permission — assuming it was is how Lightpanda
-//!   ended up banned from half of public infrastructure (their #3156/#3234).
+//! * other 4xx → allow all — the server declines to serve robots.txt to us,
+//!   and RFC 9309 / Google semantics read that as "no rules apply" (a
+//!   login-walled robots.txt doesn't restrict anonymous fetching).
+//! * 5xx / network failure (after one retry) → deny. Treating a failing
+//!   robots.txt as allow-all is how Lightpanda ended up banned from half of
+//!   public infrastructure (their #3156/#3234) — the gate denies while the
+//!   server is in trouble, with a short negative TTL so recovery is quick.
 //! * private / loopback hosts → exempt (the operator's own network).
 
 use std::collections::HashMap;
@@ -102,20 +106,37 @@ pub async fn assert_allowed(url: &str) -> Result<(), String> {
     );
 
     let policy = {
-        let mut cache = CACHE.lock().await;
-        if let Some(hit) = cache.get(&key) {
-            let ttl = match &hit.policy {
-                Policy::DenyAll(_) => NEGATIVE_TTL,
-                _ => positive_ttl(),
-            };
-            if hit.fetched.elapsed() < ttl {
-                hit.policy.clone()
-            } else {
-                cache.remove(&key);
-                fetch_policy(&key).await
+        // Read-side of the cache is lock-scoped; the network fetch happens
+        // OUTSIDE the lock (a 5s robots.txt fetch must not serialize every
+        // concurrent caller), and the miss path writes back so later calls
+        // are actually cached — the original version never inserted, making
+        // every request refetch (and hammering hosts into throttling us).
+        let cached = {
+            let mut cache = CACHE.lock().await;
+            match cache.get(&key) {
+                Some(hit) => {
+                    let ttl = match &hit.policy {
+                        Policy::DenyAll(_) => NEGATIVE_TTL,
+                        _ => positive_ttl(),
+                    };
+                    if hit.fetched.elapsed() < ttl {
+                        Some(hit.policy.clone())
+                    } else {
+                        cache.remove(&key);
+                        None
+                    }
+                }
+                None => None,
             }
-        } else {
-            fetch_policy(&key).await
+        };
+        match cached {
+            Some(p) => p,
+            None => {
+                let fetched = fetch_policy(&key).await;
+                let mut cache = CACHE.lock().await;
+                cache.insert(key.clone(), Cached { policy: fetched.clone(), fetched: Instant::now() });
+                fetched
+            }
         }
     };
 
@@ -171,9 +192,22 @@ async fn fetch_policy(origin: &str) -> Policy {
         Err(e) => return Policy::DenyAll(format!("client build: {e}")),
     };
 
+    // One inline retry on network-level failure before denying: a single
+    // 5s-timeout blip must not block a host for the whole negative TTL —
+    // this is a real-time fetcher, and the robots gate should deny on the
+    // site's refusal, not on our own packet loss. HTTP-level statuses are
+    // not retried: a 403/5xx answer IS the site speaking.
     let resp = match client.get(format!("{origin}/robots.txt")).send().await {
         Ok(r) => r,
-        Err(e) => return Policy::DenyAll(format!("network: {e}")),
+        Err(first) => {
+            tokio::time::sleep(Duration::from_millis(750)).await;
+            match client.get(format!("{origin}/robots.txt")).send().await {
+                Ok(r) => r,
+                Err(second) => {
+                    return Policy::DenyAll(format!("network: {first}; retry: {second}"))
+                }
+            }
+        }
     };
     match resp.status().as_u16() {
         404 | 410 => Policy::AllowAll,
@@ -189,7 +223,13 @@ async fn fetch_policy(origin: &str) -> Policy {
                 Err(_) => Policy::AllowAll,
             }
         }
-        // Explicit refusal (403 etc.) or server trouble (5xx): assume denial.
+        // Other 4xx (403, 401, …): the server declines to serve robots.txt
+        // to us. RFC 9309 / Google semantics treat that as "no rules apply"
+        // — a walled-off robots.txt does not restrict anonymous fetching.
+        400..=499 => Policy::AllowAll,
+        // Server trouble (5xx): assume denial — this is the Lightpanda
+        // #3156/#3234 lesson: treating a 5xxing robots.txt as allow-all is
+        // what hammered a site into crisis. Short negative TTL above.
         code => Policy::DenyAll(format!("http {code}")),
     }
 }

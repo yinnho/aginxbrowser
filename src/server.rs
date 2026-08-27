@@ -544,6 +544,7 @@ pub fn do_fetch(req: FetchRequest) -> Result<FetchResponse> {
                 truncated,
                 captcha_event,
                 js_extract_result,
+                tier: Some("browser"),
             })
         })
     })

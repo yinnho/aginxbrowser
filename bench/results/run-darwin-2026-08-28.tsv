@@ -1,0 +1,162 @@
+# scenario	url	round	wall_ms	out_chars	tier	peak_rss_kb
+tier1	https://example.com	1	618	176	http	
+tier2	https://example.com	1	958	125	browser	
+auto	https://example.com	1	547	176	http	
+chrome	https://example.com	1	4268	139	-	1902480
+tier1	https://github.com/yinnho/aginxbrowser	1	1505	30151	http	
+tier2	https://github.com/yinnho/aginxbrowser	1	3599	18281	browser	
+auto	https://github.com/yinnho/aginxbrowser	1	853	30151	http	
+chrome	https://github.com/yinnho/aginxbrowser	1	59402	20145	-	2376352
+tier1	https://www.rust-lang.org/	1	617	4987	http	
+tier2	https://www.rust-lang.org/	1	919	3452	browser	
+auto	https://www.rust-lang.org/	1	397	4987	http	
+chrome	https://www.rust-lang.org/	1	3280	3384	-	2157776
+tier1	https://doc.rust-lang.org/book/title-page.html	1	1237	1589	http	
+tier2	https://doc.rust-lang.org/book/title-page.html	1	1967	4969	browser	
+auto	https://doc.rust-lang.org/book/title-page.html	1	532	1589	http	
+chrome	https://doc.rust-lang.org/book/title-page.html	1	3684	4874	-	2225152
+tier1	https://blog.rust-lang.org/	1	530	72820	http	
+tier2	https://blog.rust-lang.org/	1	911	15847	browser	
+auto	https://blog.rust-lang.org/	1	223	72820	http	
+chrome	https://blog.rust-lang.org/	1	2608	15060	-	2129712
+tier1	https://www.python.org/	1	528	8357	http	
+tier2	https://www.python.org/	1	20248	6738	browser	
+auto	https://www.python.org/	1	160	8357	http	
+chrome	https://www.python.org/	1	90005	0	-	2129104
+tier1	https://nodejs.org/en	1	1091	5162	http	
+tier2	https://nodejs.org/en	1	2998	3126	browser	
+auto	https://nodejs.org/en	1	573	5162	http	
+chrome	https://nodejs.org/en	1	4189	3002	-	2120240
+tier1	https://react.dev/	1	587	17643	http	
+tier2	https://react.dev/	1	1160	0	browser	
+auto	https://react.dev/	1	330	17643	http	
+chrome	https://react.dev/	1	90005	0	-	2151280
+tier1	https://vuejs.org/	1	528	2856	http	
+tier2	https://vuejs.org/	1	2281	1958	browser	
+auto	https://vuejs.org/	1	262	2856	http	
+chrome	https://vuejs.org/	1	6552	1976	-	2146592
+tier1	https://tailwindcss.com/	1	1937	19485	http	
+tier2	https://tailwindcss.com/	1	3230	7564	browser	
+auto	https://tailwindcss.com/	1	809	19485	http	
+chrome	https://tailwindcss.com/	1	6366	7306	-	2268752
+tier1	https://nextjs.org/	1	918	44056	http	
+tier2	https://nextjs.org/	1	1965	6884	browser	
+auto	https://nextjs.org/	1	359	44056	http	
+chrome	https://nextjs.org/	1	4074	6902	-	2323312
+tier1	https://vitejs.dev/	1	1391	10194	http	
+tier2	https://vitejs.dev/	1	1399	3697	browser	
+auto	https://vitejs.dev/	1	550	10194	http	
+chrome	https://vitejs.dev/	1	89699	3920	-	2220848
+tier1	https://bun.sh/	1	1276	29368	http	
+tier2	https://bun.sh/	1	3886	0	browser	
+auto	https://bun.sh/	1	626	29368	http	
+chrome	https://bun.sh/	1	90005	0	-	2224256
+tier1	https://www.typescriptlang.org/	1	378	10533	http	
+tier2	https://www.typescriptlang.org/	1	1165	4804	browser	
+auto	https://www.typescriptlang.org/	1	263	10533	http	
+chrome	https://www.typescriptlang.org/	1	4353	5020	-	2165008
+tier1	https://www.sqlite.org/docs.html	1	1976	20624	http	
+tier2	https://www.sqlite.org/docs.html	1	2454	16960	browser	
+auto	https://www.sqlite.org/docs.html	1	1062	20624	http	
+chrome	https://www.sqlite.org/docs.html	1	3591	17268	-	2106896
+tier1	https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API	1	2148	5565	browser	
+tier2	https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API	1	1669	5565	browser	
+auto	https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API	1	1944	5565	browser	
+chrome	https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API	1	3391	5088	-	2215056
+tier1	https://docs.rs/serde/latest/serde/	1	360	7908	http	
+tier2	https://docs.rs/serde/latest/serde/	1	750	4698	browser	
+auto	https://docs.rs/serde/latest/serde/	1	168	7908	http	
+chrome	https://docs.rs/serde/latest/serde/	1	3139	4592	-	1993056
+tier1	https://crates.io/	1	2062	0	browser	
+tier2	https://crates.io/	1	1534	0	browser	
+auto	https://crates.io/	1	1790	0	browser	
+chrome	https://crates.io/	1	3505	4938	-	2104976
+tier1	https://arxiv.org/abs/1706.03762	1	676	9681	http	
+tier2	https://arxiv.org/abs/1706.03762	1	1209	4835	browser	
+auto	https://arxiv.org/abs/1706.03762	1	235	9681	http	
+chrome	https://arxiv.org/abs/1706.03762	1	2608	4678	-	1987632
+tier1	https://juejin.cn/	1	647	1020	http	
+tier2	https://juejin.cn/	1	2739	385	browser	
+auto	https://juejin.cn/	1	207	1020	http	
+chrome	https://juejin.cn/	1	4053	3487	-	2244400
+tier1	https://example.com	2	719	176	http	
+tier2	https://example.com	2	738	125	browser	
+auto	https://example.com	2	541	176	http	
+chrome	https://example.com	2	3014	139	-	1939232
+tier1	https://github.com/yinnho/aginxbrowser	2	1335	30151	http	
+tier2	https://github.com/yinnho/aginxbrowser	2	3580	18281	browser	
+auto	https://github.com/yinnho/aginxbrowser	2	1037	30151	http	
+chrome	https://github.com/yinnho/aginxbrowser	2	4961	20145	-	2382720
+tier1	https://www.rust-lang.org/	2	353	4987	http	
+tier2	https://www.rust-lang.org/	2	952	3452	browser	
+auto	https://www.rust-lang.org/	2	322	4987	http	
+chrome	https://www.rust-lang.org/	2	2557	3384	-	1975744
+tier1	https://doc.rust-lang.org/book/title-page.html	2	773	1589	http	
+tier2	https://doc.rust-lang.org/book/title-page.html	2	1950	4969	browser	
+auto	https://doc.rust-lang.org/book/title-page.html	2	616	1589	http	
+chrome	https://doc.rust-lang.org/book/title-page.html	2	3268	4874	-	2183888
+tier1	https://blog.rust-lang.org/	2	132	72820	http	
+tier2	https://blog.rust-lang.org/	2	639	15847	browser	
+auto	https://blog.rust-lang.org/	2	222	72820	http	
+chrome	https://blog.rust-lang.org/	2	2546	15060	-	1968448
+tier1	https://www.python.org/	2	264	8357	http	
+tier2	https://www.python.org/	2	20273	6738	browser	
+auto	https://www.python.org/	2	211	8357	http	
+chrome	https://www.python.org/	2	90005	0	-	2074480
+tier1	https://nodejs.org/en	2	741	5162	http	
+tier2	https://nodejs.org/en	2	2843	3126	browser	
+auto	https://nodejs.org/en	2	971	5162	http	
+chrome	https://nodejs.org/en	2	4161	3002	-	2257104
+tier1	https://react.dev/	2	361	17643	http	
+tier2	https://react.dev/	2	1182	0	browser	
+auto	https://react.dev/	2	341	17643	http	
+chrome	https://react.dev/	2	3019	7534	-	2113920
+tier1	https://vuejs.org/	2	283	2856	http	
+tier2	https://vuejs.org/	2	2144	1958	browser	
+auto	https://vuejs.org/	2	268	2856	http	
+chrome	https://vuejs.org/	2	5677	1976	-	2329584
+tier1	https://tailwindcss.com/	2	907	19485	http	
+tier2	https://tailwindcss.com/	2	3547	7564	browser	
+auto	https://tailwindcss.com/	2	855	19485	http	
+chrome	https://tailwindcss.com/	2	6281	7306	-	2343792
+tier1	https://nextjs.org/	2	398	44056	http	
+tier2	https://nextjs.org/	2	2034	6884	browser	
+auto	https://nextjs.org/	2	406	44056	http	
+chrome	https://nextjs.org/	2	4131	6902	-	2266720
+tier1	https://vitejs.dev/	2	647	10194	http	
+tier2	https://vitejs.dev/	2	1523	3697	browser	
+auto	https://vitejs.dev/	2	601	10194	http	
+chrome	https://vitejs.dev/	2	90004	0	-	2276368
+tier1	https://bun.sh/	2	623	29368	http	
+tier2	https://bun.sh/	2	3478	0	browser	
+auto	https://bun.sh/	2	592	29368	http	
+chrome	https://bun.sh/	2	5258	18365	-	2137440
+tier1	https://www.typescriptlang.org/	2	322	10533	http	
+tier2	https://www.typescriptlang.org/	2	1160	4804	browser	
+auto	https://www.typescriptlang.org/	2	190	10533	http	
+chrome	https://www.typescriptlang.org/	2	3400	5020	-	2236080
+tier1	https://www.sqlite.org/docs.html	2	982	20624	http	
+tier2	https://www.sqlite.org/docs.html	2	2357	16960	browser	
+auto	https://www.sqlite.org/docs.html	2	981	20624	http	
+chrome	https://www.sqlite.org/docs.html	2	3492	17268	-	2105984
+tier1	https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API	2	2066	5565	browser	
+tier2	https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API	2	1846	5565	browser	
+auto	https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API	2	1829	5565	browser	
+chrome	https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API	2	4045	5088	-	2197520
+tier1	https://docs.rs/serde/latest/serde/	2	174	7908	http	
+tier2	https://docs.rs/serde/latest/serde/	2	868	4698	browser	
+auto	https://docs.rs/serde/latest/serde/	2	212	7908	http	
+chrome	https://docs.rs/serde/latest/serde/	2	2814	4592	-	2156512
+tier1	https://crates.io/	2	2211	0	browser	
+tier2	https://crates.io/	2	1471	0	browser	
+auto	https://crates.io/	2	1591	0	browser	
+chrome	https://crates.io/	2	3535	5664	-	2146864
+tier1	https://arxiv.org/abs/1706.03762	2	609	9681	http	
+tier2	https://arxiv.org/abs/1706.03762	2	1995	4835	browser	
+auto	https://arxiv.org/abs/1706.03762	2	267	9681	http	
+chrome	https://arxiv.org/abs/1706.03762	2	3065	4678	-	2089120
+tier1	https://juejin.cn/	2	210	1020	http	
+tier2	https://juejin.cn/	2	1138	385	browser	
+auto	https://juejin.cn/	2	206	1020	http	
+chrome	https://juejin.cn/	2	3840	3475	-	2145328
+# server_peak_rss_kb	232928

@@ -137,9 +137,12 @@ curl -sS -X POST http://127.0.0.1:8089/fetch \
   "url": "https://example.com/",
   "title": "Example Domain",
   "content": "# Example Domain\n\nThis domain is for use in illustrative examples...",
-  "truncated": false
+  "truncated": false,
+  "tier": "http"
 }
 ```
+
+The `tier` field reports which strategy served the request: `"http"` (plain HTTP + conversion) or `"browser"` (V8 render) — including under `render_tier: "auto"`, so callers can see why a fetch was fast or slow.
 
 **Example — extract structured data from an SPA:**
 
@@ -749,7 +752,8 @@ Semantics (RFC 9309 subset):
 | Rule disallows the path (longest match wins, ties → Allow; `*`/`$` wildcards honored) | 403 with the matched rule |
 | 404 / 410 | allowed (no rules exist) |
 | body parses to no applicable rules | allowed |
-| other 4xx / 5xx / network failure fetching robots.txt | 403 — a server refusing to hand out its rules is not implicit permission |
+| other 4xx fetching robots.txt | allowed — the server declines to serve rules to us; RFC 9309 / Google semantics read that as "no rules apply" |
+| 5xx / network failure fetching robots.txt (one retry) | 403 while the server is in trouble, short negative cache (300s) so recovery is quick — treating a failing robots.txt as allow-all is how Lightpanda #3156 got sites hammered |
 | private / loopback host (`127.0.0.1`, RFC1918, `.local`, …) | exempt (operator's own network) |
 
 Scope notes:

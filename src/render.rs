@@ -269,6 +269,7 @@ pub async fn http_fetch(
         truncated,
         captcha_event: None,
         js_extract_result: None,
+        tier: Some("http"),
     }))
 }
 
