@@ -240,10 +240,13 @@ impl SpecifierMap {
             return Ok(None);
         }
 
-        for key in self
+        // Prefixes are pre-sorted descending (constructor + merge), so the
+        // first match wins — the loop this replaced returned unconditionally
+        // on its first iteration (clippy::never_loop).
+        if let Some(key) = self
             .prefixes
             .iter()
-            .filter(|key| normalized.starts_with(key.as_str()))
+            .find(|key| normalized.starts_with(key.as_str()))
         {
             let address = self
                 .entries
