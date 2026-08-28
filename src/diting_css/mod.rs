@@ -519,6 +519,12 @@ pub struct ComputedStyle {
     /// `z-index` (batch 6a), non-inherited; None = auto. Only meaningful on
     /// positioned elements (flex/grid-item support is a later batch).
     pub z_index: Option<i32>,
+    /// `transform: translate(x[, y])` — the one transform form the pipeline
+    /// computes (obscura #740). Percentages resolve against the element's
+    /// own border-box size at collect time; the shift moves paint, gBCR and
+    /// hit testing but NOT the layout box (Chrome semantics: transforms
+    /// never affect layout). Other transform values stay None.
+    pub transform_translate: Option<(Length, Length)>,
     /// Uniform circular `border-radius` (batch 6b): ONE length/percentage
     /// applied to all four corners (the 1-value syntax — by far the most
     /// common form). Percentages resolve against the box width. Per-corner
@@ -721,6 +727,40 @@ pub enum Length {
     /// `LengthPercentageAuto::auto()`, which implements both the in-flow
     /// auto-margin expansion and abspos auto-margin resolution.
     Auto,
+}
+
+/// Parse the translate component of a `transform` declaration: the
+/// `translate(x[, y])` / `translateX(x)` / `translateY(y)` forms, each
+/// argument px or % (of the element's own border box, resolved later by
+/// layout). Anything else — `none`, scale/rotate/matrix, a list of several
+/// functions — is not a pure translation and yields None.
+fn parse_translate(v: &str) -> Option<(Length, Length)> {
+    let v = v.trim();
+    let (name, args) = v.split_once('(')?;
+    let args = args.strip_suffix(')')?.trim();
+    let one = |s: &str| -> Option<Length> {
+        let s = s.trim();
+        if let Some(num) = s.strip_suffix('%') {
+            num.trim().parse::<f32>().ok().map(Length::Percent)
+        } else if let Some(num) = s.strip_suffix("px") {
+            num.trim().parse::<f32>().ok().map(Length::Px)
+        } else {
+            // `0` is a legal bare length; other unitless values are not.
+            (s == "0").then_some(Length::Px(0.0))
+        }
+    };
+    match name.trim() {
+        "translate" => {
+            let (a, b) = match args.split_once(',') {
+                Some((a, b)) => (one(a)?, one(b)?),
+                None => (one(args)?, Length::Px(0.0)), // translate(x) == translate(x, 0)
+            };
+            Some((a, b))
+        }
+        "translateX" => Some((one(args)?, Length::Px(0.0))),
+        "translateY" => Some((Length::Px(0.0), one(args)?)),
+        _ => None,
+    }
 }
 
 /// Declaration-level length: em/rem can't resolve until the font context is
@@ -1231,6 +1271,14 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 },
             };
             true
+        }
+        "transform" => {
+            // Only translation moves a rect without changing its shape, so
+            // only translate/translateX/translateY are computed (obscura
+            // #740); scale/rotate/matrix and multi-function values stay
+            // None — the element paints where layout put it.
+            style.transform_translate = parse_translate(v);
+            style.transform_translate.is_some()
         }
         "border-radius" => {
             // CSS syntax: 1-4 horizontal radii, optionally `/` plus 1-4

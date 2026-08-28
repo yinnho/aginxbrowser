@@ -3122,6 +3122,73 @@
         assert_eq!(below, serde_json::json!("BODY"));
     }
 
+    // Regression (obscura #740): translate percentages resolve against the
+    // element's own box — translate(-50%, -50%) centers a top:50% box. The
+    // Y axis used to come out wrong while X was right. Feature-gated: real
+    // geometry needs the layout stack.
+    #[test]
+    #[cfg(feature = "screenshot")]
+    fn test_translate_negative_percent_centers_the_box() {
+        let mut rt = setup_runtime(r#"<html><head><style>
+          .dialog { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 400px; height: 140px; }
+        </style></head><body>
+        <div class="dialog"></div>
+        </body></html>"#);
+        let diag = rt
+            .evaluate(
+                r#"JSON.stringify((() => {
+                    const r = document.querySelector('.dialog').getBoundingClientRect();
+                    return { top: r.top, left: r.left, w: r.width, h: r.height,
+                             vw: window.innerWidth, vh: window.innerHeight };
+                })())"#,
+            )
+            .unwrap();
+        println!("translate diagnostics: {diag}");
+        let v: serde_json::Value = serde_json::from_str(diag.as_str().unwrap()).unwrap();
+        let vh = v["vh"].as_f64().unwrap();
+        let vw = v["vw"].as_f64().unwrap();
+        let top = v["top"].as_f64().unwrap();
+        let left = v["left"].as_f64().unwrap();
+        assert_eq!(v["w"].as_f64().unwrap(), 400.0);
+        assert_eq!(v["h"].as_f64().unwrap(), 140.0);
+        // top:50% of the viewport, minus half the box: dead center.
+        assert_eq!(top, vh / 2.0 - 70.0, "Y must be viewport-centered, diag: {diag}");
+        assert_eq!(left, vw / 2.0 - 200.0, "X must be viewport-centered, diag: {diag}");
+    }
+
+    // Nested translate (px form): the ancestor's translate carries the
+    // whole subtree, the child's own translate stacks on top — and the
+    // layout-internal position of the child inside the ancestor is
+    // unchanged (transforms never feed back into layout).
+    #[test]
+    #[cfg(feature = "screenshot")]
+    fn test_translate_px_stacks_down_the_subtree() {
+        let mut rt = setup_runtime(r#"<html><head><style>
+          .outer { transform: translate(10px, 20px); width: 200px; height: 100px; }
+          .inner { transform: translate(0, -5px); width: 50px; height: 50px; }
+        </style></head><body>
+        <div class="outer"><div class="inner"></div></div>
+        </body></html>"#);
+        let diag = rt
+            .evaluate(
+                r#"JSON.stringify((() => {
+                    const o = document.querySelector('.outer').getBoundingClientRect();
+                    const i = document.querySelector('.inner').getBoundingClientRect();
+                    return { dx: i.left - o.left, dy: i.top - o.top,
+                             ow: o.width, oh: o.height, iw: i.width, ih: i.height };
+                })())"#,
+            )
+            .unwrap();
+        println!("translate px diagnostics: {diag}");
+        let v: serde_json::Value = serde_json::from_str(diag.as_str().unwrap()).unwrap();
+        // Layout kept the child at the ancestor's content origin; only the
+        // two translates move it: 0 + 0 = 0 in X, 0 + (-5) = -5 in Y.
+        assert_eq!(v["dx"].as_f64().unwrap(), 0.0, "diag: {diag}");
+        assert_eq!(v["dy"].as_f64().unwrap(), -5.0, "diag: {diag}");
+        assert_eq!(v["ow"].as_f64().unwrap(), 200.0);
+        assert_eq!(v["iw"].as_f64().unwrap(), 50.0);
+    }
+
     #[test]
     fn test_element_from_point_out_of_viewport_returns_null() {
         let mut rt = setup_runtime("<html><body></body></html>");

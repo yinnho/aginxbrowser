@@ -2678,6 +2678,25 @@ pub fn layout_dom_with_paint_order_and_images(
         if let Some(dom_id) = node_map.get(&node) {
             paint_order.push(*dom_id);
         }
+        // transform: translate shifts geometry — the element's own rect,
+        // its paint items and its whole subtree — but never layout itself
+        // (Chrome: transforms don't affect layout; taffy never sees this).
+        // Percentages resolve against the element's own border box
+        // (obscura #740). Folded into the offset so every consumer of
+        // `abs` below (rects, items, clips, the paint slots above) moves
+        // together.
+        let mut offset = offset;
+        if let Some(dom_id) = node_map.get(&node) {
+            if let Some((tx, ty)) = styles.get(dom_id).and_then(|s| s.transform_translate) {
+                let resolve = |l: crate::diting_css::Length, basis: f32| match l {
+                    crate::diting_css::Length::Px(v) => v,
+                    crate::diting_css::Length::Percent(p) => p / 100.0 * basis,
+                    crate::diting_css::Length::Auto => 0.0,
+                };
+                offset.0 += resolve(tx, layout.size.width);
+                offset.1 += resolve(ty, layout.size.height);
+            }
+        }
         let abs = (offset.0 + layout.location.x, offset.1 + layout.location.y);
         // Every visited node's absolute border box — the union pass after
         // the walk rebuilds rects for flattened inline wrappers from kids.
