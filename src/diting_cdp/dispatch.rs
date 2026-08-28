@@ -116,11 +116,6 @@ impl CdpContext {
         id
     }
 
-    pub fn create_page(&mut self) -> String {
-        self.create_page_in_context(None)
-            .expect("default browser context must exist")
-    }
-
     pub fn create_page_in_context(&mut self, context_id: Option<&str>) -> Result<String, String> {
         let context = match context_id {
             Some(id) => self
@@ -230,62 +225,6 @@ impl CdpContext {
 
         self.get_page_mut(&page_id)
     }
-}
-
-/// Whether a CDP method can be dispatched WITHOUT routing through
-/// `get_session_page_mut` (which triggers suspend_js/resume_js). Used by the
-/// server layer to skip the per-command JS park for pure-bookkeeping methods.
-pub(crate) fn is_v8_free_method(method: &str) -> bool {
-    matches!(
-        method,
-        "Target.getTargets"
-            | "Target.setDiscoverTargets"
-            | "Target.attachToTarget"
-            | "Target.attachToBrowserTarget"
-            | "Target.setAutoAttach"
-            | "Target.getBrowserContexts"
-            | "Target.createBrowserContext"
-            | "Target.disposeBrowserContext"
-            | "Target.getTargetInfo"
-            | "Target.detachFromTarget"
-            | "Target.activateTarget"
-            | "Browser.getVersion"
-            | "Browser.close"
-            | "Browser.getWindowForTarget"
-            | "Browser.setDownloadBehavior"
-            | "Browser.getWindowBounds"
-            | "Browser.setWindowBounds"
-            | "Page.enable"
-            | "Page.disable"
-            | "Page.getFrameTree"
-            | "Page.setDownloadBehavior"
-            | "Page.setLifecycleEventsEnabled"
-            | "Page.addScriptToEvaluateOnNewDocument"
-            | "Page.removeScriptToEvaluateOnNewDocument"
-            | "Page.setInterceptFileChooserDialog"
-            | "Page.getNavigationHistory"
-            | "Page.resetNavigationHistory"
-            | "Page.captureSnapshot"
-            | "Page.createIsolatedWorld"
-            | "Runtime.enable"
-            | "Runtime.disable"
-            | "Runtime.runIfWaitingForDebugger"
-            | "Runtime.getExceptionDetails"
-            | "Runtime.discardConsoleEntries"
-            | "Network.enable"
-            | "Network.disable"
-            | "Network.setCacheDisabled"
-            | "Network.setRequestInterception"
-            | "Network.getBlockedUrls"
-            | "Network.getCookies"
-            | "Network.getAllCookies"
-            | "Storage.getCookies"
-            | "Storage.setCookies"
-            | "Storage.clearCookies"
-            | "Storage.deleteCookies"
-            | "Emulation.setTouchEmulationEnabled"
-            | "Emulation.setFocusEmulationEnabled"
-    )
 }
 
 pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
@@ -534,10 +473,15 @@ mod tests {
     use super::*;
     use crate::diting_cdp::types::CdpRequest;
 
+    fn create_page(ctx: &mut CdpContext) -> String {
+        ctx.create_page_in_context(None)
+            .expect("default browser context must exist")
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn runtime_evaluate_reports_exception_thrown_and_details() {
         let mut ctx = CdpContext::new_with_options(None, false);
-        let page_id = ctx.create_page();
+        let page_id = create_page(&mut ctx);
         let session_id = "sess-1".to_string();
         ctx.sessions.insert(session_id.clone(), page_id);
 
@@ -591,7 +535,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn input_click_navigation_emits_full_frame_json() {
         let mut ctx = CdpContext::new_with_options(None, false);
-        let page_id = ctx.create_page();
+        let page_id = create_page(&mut ctx);
         let session_id = "sess-click".to_string();
         ctx.sessions.insert(session_id.clone(), page_id);
 
@@ -683,7 +627,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn input_mouse_click_on_label_activates_control() {
         let mut ctx = CdpContext::new_with_options(None, false);
-        let page_id = ctx.create_page();
+        let page_id = create_page(&mut ctx);
         let session_id = "sess-label".to_string();
         ctx.sessions.insert(session_id.clone(), page_id);
 

@@ -14,23 +14,6 @@ pub(crate) fn url_is_file_scheme(raw: &str) -> bool {
         .unwrap_or_else(|_| raw.trim_start().to_ascii_lowercase().starts_with("file:"))
 }
 
-/// Truncate `s` to at most `max` bytes, never splitting a UTF-8 character.
-///
-/// `&s[..max]` panics when `max` lands inside a multi-byte character, and the
-/// strings we truncate for log previews are attacker-controlled (raw WebSocket
-/// frames, intercepted URLs). A single frame whose byte `max` straddles a
-/// multi-byte char would otherwise panic the CDP processor task.
-pub(crate) fn truncate_on_char_boundary(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        return s;
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,25 +55,4 @@ mod tests {
         assert!(!url_is_file_scheme("http://file/"));
     }
 
-    #[test]
-    fn truncate_never_splits_a_multibyte_char() {
-        let s = format!("{}€tail", "a".repeat(199));
-        assert!(!s.is_char_boundary(200), "setup: byte 200 splits the € char");
-
-        let naive = std::panic::catch_unwind(|| {
-            let _ = &s[..s.len().min(200)];
-        });
-        assert!(naive.is_err(), "raw byte slice at a non-char-boundary must panic");
-
-        let safe = truncate_on_char_boundary(&s, 200);
-        assert!(s.starts_with(safe));
-        assert_eq!(safe.len(), 199, "should stop right before the € char");
-    }
-
-    #[test]
-    fn truncate_returns_whole_string_when_short() {
-        assert_eq!(truncate_on_char_boundary("hi", 200), "hi");
-        assert_eq!(truncate_on_char_boundary("", 10), "");
-        assert_eq!(truncate_on_char_boundary("abc", 3), "abc");
-    }
 }

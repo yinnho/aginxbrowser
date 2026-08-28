@@ -111,6 +111,7 @@ pub struct JsState {
     /// Memoized diting-layout rects for the live DOM tree, keyed by
     /// the tree's epoch (see DomTree::epoch). Filled on the first
     /// `layout_rect` op after each mutation; backs getBoundingClientRect.
+    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))] // the layout_rect op runs only in the screenshot-gated pipeline
     layout_cache: std::cell::RefCell<Option<(u64, HashMap<NodeId, [f32; 4]>)>>,
     /// Viewport the layout pipeline should anchor the initial containing
     /// block to, published by the JS persona (`__diting_setPersona`) so

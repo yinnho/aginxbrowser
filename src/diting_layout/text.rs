@@ -369,6 +369,7 @@ pub struct TextRaster {
     pub width: usize,
     pub height: usize,
     /// Distance from the tile's top edge to the FIRST line's baseline, px.
+    #[allow(dead_code)] // raster metadata: the compositor blits by `top` today; line-box baseline assembly (text batch) is the pending reader
     pub baseline: f32,
     /// Tile row 0 relative to the line box top (usually ≤ 0), px.
     pub top: f32,

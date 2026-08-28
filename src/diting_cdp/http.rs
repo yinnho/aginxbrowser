@@ -123,7 +123,7 @@ async fn connection_loop(socket: WebSocket) {
 
                 let mut out = Vec::new();
                 let mut events = std::mem::take(&mut ctx.pending_events);
-                let mut push_events = |out: &mut Vec<String>, events: &mut Vec<crate::diting_cdp::types::CdpEvent>| {
+                let push_events = |out: &mut Vec<String>, events: &mut Vec<crate::diting_cdp::types::CdpEvent>| {
                     for ev in events.drain(..) {
                         if let Ok(line) = serde_json::to_string(&ev) {
                             out.push(line);

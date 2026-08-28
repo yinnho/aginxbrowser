@@ -821,7 +821,7 @@ where
     F: FnOnce() -> Option<reqwest::Client>,
 {
     let plain = build_plain_client(12);
-    let mut last_err = String::new();
+    let last_err;
 
     // Attempt 1: direct.
     let mut req = plain.get(url);

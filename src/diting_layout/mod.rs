@@ -1465,7 +1465,6 @@ fn build_element(
         // present, else one line per structural row (p/li/tr/hN) plus a
         // character-count text estimate.
         let float_height_budget = {
-            let fs = styles.get(&child_ids[float_idx]).and_then(|s| s.font_size).unwrap_or(16.0);
             let mut est: f32 = styles
                 .get(&child_ids[float_idx])
                 .and_then(|s| s.height)
@@ -1795,10 +1794,10 @@ fn build_element(
 /// per-corner radii don't exist yet in this slice.
 #[derive(Debug, Clone)]
 pub enum PaintItem {
-    Bg { dom_id: NodeId, rect: Rect, color: [u8; 4], radius: f32 },
+    Bg { rect: Rect, color: [u8; 4], radius: f32 },
     /// Per-corner radii variant of `Bg` (batch 7c): CSS corner order
     /// (TL TR BR BL), each (rx, ry) already resolved to px.
-    BgCorner { dom_id: NodeId, rect: Rect, color: [u8; 4], radii: [(f32, f32); 4] },
+    BgCorner { rect: Rect, color: [u8; 4], radii: [(f32, f32); 4] },
     /// A decoded raster image blitted into the replaced box (batch 5b):
     /// sized per object-fit and offset per object-position (batch 5c) —
     /// see [`object_paint_rect`]. `rect` is the element box and doubles as
@@ -1840,7 +1839,6 @@ pub enum PaintItem {
     /// beneath the border) and before the subtree. Widths in CSS order
     /// (top right bottom left), px.
     Border {
-        dom_id: NodeId,
         rect: Rect,
         widths: [f32; 4],
         color: [u8; 4],
@@ -2402,14 +2400,12 @@ pub fn layout_dom_with_paint_and_images(
                             let uniform = radii.iter().all(|r| *r == radii[0]);
                             if uniform {
                                 items.push(PaintItem::Bg {
-                                    dom_id: *dom_id,
                                     rect,
                                     color,
                                     radius: radii[0].0,
                                 });
                             } else {
                                 items.push(PaintItem::BgCorner {
-                                    dom_id: *dom_id,
                                     rect,
                                     color,
                                     radii: [
@@ -2419,7 +2415,6 @@ pub fn layout_dom_with_paint_and_images(
                             }
                         }
                         None => items.push(PaintItem::Bg {
-                            dom_id: *dom_id,
                             rect,
                             color,
                             radius: 0.0,
@@ -2443,7 +2438,7 @@ pub fn layout_dom_with_paint_and_images(
                         .or(style.color)
                         .map(|c| [c.0, c.1, c.2, c.3])
                         .unwrap_or([0, 0, 0, 255]);
-                    items.push(PaintItem::Border { dom_id: *dom_id, rect, widths, color });
+                    items.push(PaintItem::Border { rect, widths, color });
                 }
             }
             // A replaced box paints either its decoded image (batch 5b,
