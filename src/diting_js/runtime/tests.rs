@@ -3189,6 +3189,59 @@
         assert_eq!(v["iw"].as_f64().unwrap(), 50.0);
     }
 
+    // Regression (companion to obscura #738): getComputedStyle consulted
+    // inline styles, dimensions and a defaults table — but never the
+    // stylesheet cascade, so a z-index/position set in a <style> block
+    // read back as "auto"/"static" no matter what the sheet said. Any
+    // script branching on computed layout properties (jQuery .css(),
+    // overlay/positioning logic) took the wrong branch silently.
+    #[test]
+    #[cfg(feature = "screenshot")]
+    fn test_get_computed_style_reads_the_stylesheet_cascade() {
+        let mut rt = setup_runtime(r#"<html><head><style>
+          .panel { position: absolute; z-index: 42; display: flex; color: rgb(1, 2, 3); }
+          .plain { color: #abcdef; }
+        </style></head><body>
+        <div class="panel" id="p"><span class="plain" id="s">x</span></div>
+        </body></html>"#);
+        let out = rt
+            .evaluate(
+                r#"JSON.stringify({
+                    pos: getComputedStyle(document.getElementById('p')).position,
+                    z: getComputedStyle(document.getElementById('p')).zIndex,
+                    disp: getComputedStyle(document.getElementById('p')).display,
+                    color: getComputedStyle(document.getElementById('p')).color,
+                    camel: getComputedStyle(document.getElementById('p')).zIndex,
+                    viaCall: getComputedStyle(document.getElementById('p')).getPropertyValue('z-index'),
+                })"#,
+            )
+            .unwrap();
+        println!("gcs cascade diagnostics: {out}");
+        let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        assert_eq!(v["pos"], serde_json::json!("absolute"));
+        assert_eq!(v["z"], serde_json::json!("42"));
+        assert_eq!(v["camel"], serde_json::json!("42"));
+        assert_eq!(v["viaCall"], serde_json::json!("42"));
+        assert_eq!(v["disp"], serde_json::json!("flex"));
+        assert_eq!(v["color"], serde_json::json!("rgb(1, 2, 3)"));
+        // Inline still wins the cascade over the stylesheet rule.
+        let inline = rt
+            .evaluate(
+                r#"(function() {
+                    const p = document.getElementById('p');
+                    p.style.zIndex = '7';
+                    return getComputedStyle(p).zIndex;
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(inline, serde_json::json!("7"));
+        // A property no rule targets keeps its initial value, not garbage.
+        let initial = rt
+            .evaluate("getComputedStyle(document.getElementById('s')).zIndex")
+            .unwrap();
+        assert_eq!(initial, serde_json::json!("auto"));
+    }
+
     #[test]
     fn test_element_from_point_out_of_viewport_returns_null() {
         let mut rt = setup_runtime("<html><body></body></html>");

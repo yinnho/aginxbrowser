@@ -5088,10 +5088,20 @@ globalThis.getComputedStyle = (el) => {
 
   const lookup = (rawProp) => {
     if (typeof rawProp !== 'string') return '';
-    // Inline value first.
+    // Inline value first — author inline style wins the cascade (barring
+    // !important rules, which we don't model).
     const inlineVal = target.getPropertyValue ? target.getPropertyValue(rawProp) : '';
     if (inlineVal) return inlineVal;
     const kebab = rawProp.replace(/([A-Z])/g, '-$1').toLowerCase();
+    // Cascaded stylesheet value next: rules from <style> blocks never
+    // reach el.style, so without this layer z-index/position/etc. read
+    // back as their initial values no matter what the stylesheet says
+    // (the trap flagged at obscura #738). Returns '' when the property
+    // isn't in the engine's table or no layout run exists.
+    try {
+      var cascaded = _domRaw("computed_style", String(el._nid | 0), kebab);
+    } catch (e) {}
+    if (cascaded && cascaded !== 'null') return cascaded;
     const dim = dimensionFor(kebab);
     if (dim != null) return dim;
     if (defaultsKebab[rawProp]) return defaultsKebab[rawProp];

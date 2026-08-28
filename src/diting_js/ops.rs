@@ -109,11 +109,13 @@ pub struct JsState {
     /// requestWillBeSent / responseReceived for them (upstream #406).
     pub(crate) js_network_events: Vec<JsNetworkEvent>,
     /// Memoized diting-layout run for the live DOM tree, keyed by the
-    /// tree's epoch (see DomTree::epoch): element rects plus the paint
-    /// order. Filled on the first `layout_rect` / `paint_order` op after
-    /// each mutation; backs getBoundingClientRect and elementFromPoint.
+    /// tree's epoch (see DomTree::epoch): element rects, the paint order,
+    /// and the cascaded ComputedStyle per element. Filled on the first
+    /// `layout_rect` / `paint_order` / `computed_style` op after each
+    /// mutation; backs getBoundingClientRect, elementFromPoint and
+    /// getComputedStyle.
     #[cfg_attr(not(feature = "screenshot"), allow(dead_code))] // the layout ops run only in the screenshot-gated pipeline
-    layout_cache: std::cell::RefCell<Option<(u64, HashMap<NodeId, [f32; 4]>, Vec<NodeId>)>>,
+    layout_cache: std::cell::RefCell<Option<(u64, LayoutRun)>>,
     /// Viewport the layout pipeline should anchor the initial containing
     /// block to, published by the JS persona (`__diting_setPersona`) so
     /// getBoundingClientRect agrees with window.innerWidth/innerHeight.
@@ -828,15 +830,15 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         "layout_rect" => {
             let nid = match parse_nid(&arg1) { Some(id) => id, None => return "null".into() };
             let epoch = dom.epoch();
-            let cache_hit = gs.layout_cache.borrow().as_ref().and_then(|(e, m, _)| {
+            let cache_hit = gs.layout_cache.borrow().as_ref().and_then(|(e, (m, _, _))| {
                 if *e == epoch { m.get(&nid).copied() } else { None }
             });
             let rect = match cache_hit {
                 Some(r) => Some(r),
                 None => {
-                    let (rects, order) = layout_run_all(&gs, dom);
+                    let (rects, order, styles) = layout_run_all(&gs, dom);
                     let r = rects.get(&nid).copied();
-                    *gs.layout_cache.borrow_mut() = Some((epoch, rects, order));
+                    *gs.layout_cache.borrow_mut() = Some((epoch, (rects, order, styles)));
                     r
                 }
             };
@@ -853,14 +855,14 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         #[cfg(feature = "screenshot")]
         "paint_order" => {
             let epoch = dom.epoch();
-            let cached = gs.layout_cache.borrow().as_ref().and_then(|(e, _, o)| {
+            let cached = gs.layout_cache.borrow().as_ref().and_then(|(e, (_, o, _))| {
                 if *e == epoch { Some(o.clone()) } else { None }
             });
             let order = match cached {
                 Some(o) => o,
                 None => {
-                    let (rects, order) = layout_run_all(&gs, dom);
-                    *gs.layout_cache.borrow_mut() = Some((epoch, rects, order.clone()));
+                    let (rects, order, styles) = layout_run_all(&gs, dom);
+                    *gs.layout_cache.borrow_mut() = Some((epoch, (rects, order.clone(), styles)));
                     order
                 }
             };
@@ -873,6 +875,35 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             s.push(']');
             s
         }
+        // Cascaded computed value of one property for one element, from the
+        // same style+layout run as layout_rect — the layer getComputedStyle
+        // was missing: only inline styles were consulted, so values from a
+        // <style> block (z-index, position, …) read back as the initial
+        // value (obscura #738's companion trap). Covers the layout-decision
+        // properties the ComputedStyle carries; unknown properties return
+        // null and the caller falls through to its own tables. Used value
+        // for width/height stays the bounding rect's job, so those are
+        // deliberately not in the table.
+        #[cfg(feature = "screenshot")]
+        "computed_style" => {
+            let nid = match parse_nid(&arg1) { Some(id) => id, None => return "null".into() };
+            let epoch = dom.epoch();
+            let cached = gs.layout_cache.borrow().as_ref().and_then(|(e, (_, _, s))| {
+                if *e == epoch { s.get(&nid).cloned() } else { None }
+            });
+            let style = cached.or_else(|| {
+                let (rects, order, styles) = layout_run_all(&gs, dom);
+                let s = styles.get(&nid).cloned();
+                *gs.layout_cache.borrow_mut() = Some((epoch, (rects, order, styles)));
+                s
+            });
+            match style.and_then(|s| computed_style_value(&s, &arg2)) {
+                Some(v) => v,
+                None => "null".into(),
+            }
+        }
+        #[cfg(not(feature = "screenshot"))]
+        "computed_style" => "null".into(),
         #[cfg(not(feature = "screenshot"))]
         "layout_rect" => "null".into(),
         #[cfg(not(feature = "screenshot"))]
@@ -881,14 +912,25 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
     }
 }
 
+/// One style+layout run over the live tree (see [`JsState::layout_cache`]):
+/// every element's border-box rect, the paint order, and the cascaded
+/// ComputedStyle per element.
+#[cfg(feature = "screenshot")]
+type LayoutRun = (
+    HashMap<NodeId, [f32; 4]>,
+    Vec<NodeId>,
+    HashMap<NodeId, crate::diting_css::ComputedStyle>,
+);
+
 /// Run the full diting style + layout pipeline over the live DOM tree and
-/// return every element's border-box rect plus the paint order (see
-/// `layout_dom_with_paint_order_and_images`). Styles are re-collected each
+/// return every element's border-box rect, the paint order (see
+/// `layout_dom_with_paint_order_and_images`) and the cascaded ComputedStyle
+/// per element (for the `computed_style` op). Styles are re-collected each
 /// run: attribute-level mutations (style/class writes) don't bump the tree
 /// epoch, so memoizing computed styles alongside the rects would serve
 /// stale geometry.
 #[cfg(feature = "screenshot")]
-fn layout_run_all(gs: &JsState, dom: &DomTree) -> (HashMap<NodeId, [f32; 4]>, Vec<NodeId>) {
+fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
     // Same viewport the persona publishes to window.innerWidth/innerHeight,
     // so geometry agrees with what scripts read off `window` (and the ICB
     // has a definite size for fixed-box inset resolution — obscura#675).
@@ -905,11 +947,11 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> (HashMap<NodeId, [f32; 4]>, Ve
         (viewport_width, viewport_height),
         crate::diting_css::CssMediaType::Screen,
     );
-    let styles = crate::diting_layout::compute_styles(dom, &rules);
+    let styles_map = crate::diting_layout::compute_styles(dom, &rules);
     let fonts = crate::diting_fonts::font_book();
     let (rects, _items, paint_order) = crate::diting_layout::layout_dom_with_paint_order_and_images(
         dom,
-        &styles,
+        &styles_map,
         &fonts,
         viewport_width,
         viewport_height,
@@ -918,7 +960,151 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> (HashMap<NodeId, [f32; 4]>, Ve
     (
         rects.into_iter().map(|(id, r)| (id, [r.x, r.y, r.width, r.height])).collect(),
         paint_order,
+        styles_map,
     )
+}
+
+/// Serialize one property of a cascaded [`ComputedStyle`] in Chrome's
+/// computed-value spelling, for the `computed_style` op (getComputedStyle's
+/// cascade layer). `None` means "not in the table" — the JS caller falls
+/// through to its inline/dimension/default chain, so initial values never
+/// shadow a caller that knows better.
+#[cfg(feature = "screenshot")]
+fn computed_style_value(
+    s: &crate::diting_css::ComputedStyle,
+    prop: &str,
+) -> Option<String> {
+    use crate::diting_css::*;
+    let color = |c: &Color| {
+        if c.3 == 255 {
+            format!("rgb({}, {}, {})", c.0, c.1, c.2)
+        } else {
+            let a = format!("{:.3}", c.3 as f32 / 255.0);
+            let a = a.trim_end_matches('0').trim_end_matches('.');
+            format!("rgba({}, {}, {}, {})", c.0, c.1, c.2, if a.is_empty() { "0" } else { a })
+        }
+    };
+    match prop {
+        "position" => Some(
+            match s.position {
+                Some(PositionMode::Relative) => "relative",
+                Some(PositionMode::Absolute) => "absolute",
+                Some(PositionMode::Fixed) => "fixed",
+                _ => "static",
+            }
+            .into(),
+        ),
+        "z-index" => Some(match s.z_index {
+            Some(z) => z.to_string(),
+            None => "auto".into(),
+        }),
+        "display" => Some(
+            match s.display {
+                Some(Display::Inline) => "inline",
+                Some(Display::Flex) => "flex",
+                Some(Display::Grid) => "grid",
+                Some(Display::None) => "none",
+                _ => "block",
+            }
+            .into(),
+        ),
+        "float" => Some(
+            match s.float_side {
+                Some(FloatSide::Left) => "left",
+                Some(FloatSide::Right) => "right",
+                None => "none",
+            }
+            .into(),
+        ),
+        "clear" => Some(
+            match s.clear_side {
+                Some(ClearSide::Left) => "left",
+                Some(ClearSide::Right) => "right",
+                Some(ClearSide::Both) => "both",
+                Some(ClearSide::InlineStart) => "inline-start",
+                Some(ClearSide::InlineEnd) => "inline-end",
+                None => "none",
+            }
+            .into(),
+        ),
+        "overflow" => Some(
+            match s.overflow {
+                Some(Overflow::Hidden) => "hidden",
+                Some(Overflow::Clip) => "clip",
+                Some(Overflow::Scroll) => "scroll",
+                Some(Overflow::Auto) => "auto",
+                _ => "visible",
+            }
+            .into(),
+        ),
+        "font-size" => s.font_size.map(|f| format!("{}px", f)),
+        "font-weight" => s.font_weight.map(|w| w.to_string()),
+        "text-align" => Some(
+            match s.text_align {
+                Some(TextAlign::Center) => "center",
+                Some(TextAlign::Right) => "right",
+                _ => "left",
+            }
+            .into(),
+        ),
+        "line-height" => Some(
+            match s.line_height {
+                Some(LineHeightSpec::Number(n)) => format_number(n),
+                Some(LineHeightSpec::Px(v)) => format!("{}px", format_number(v)),
+                _ => "normal".into(),
+            },
+        ),
+        "color" => s.color.as_ref().map(&color),
+        "background-color" => s.background_color.as_ref().map(&color),
+        "flex-direction" => Some(
+            match s.flex_direction {
+                Some(FlexDirection::RowReverse) => "row-reverse",
+                Some(FlexDirection::Column) => "column",
+                Some(FlexDirection::ColumnReverse) => "column-reverse",
+                _ => "row",
+            }
+            .into(),
+        ),
+        "flex-wrap" => Some(
+            match s.flex_wrap {
+                Some(FlexWrapMode::Wrap) => "wrap",
+                _ => "nowrap",
+            }
+            .into(),
+        ),
+        "justify-content" => Some(
+            match s.justify_content {
+                Some(JustifyMode::Center) => "center",
+                Some(JustifyMode::FlexEnd) => "flex-end",
+                Some(JustifyMode::SpaceBetween) => "space-between",
+                Some(JustifyMode::SpaceAround) => "space-around",
+                Some(JustifyMode::SpaceEvenly) => "space-evenly",
+                _ => "flex-start",
+            }
+            .into(),
+        ),
+        "align-items" => Some(
+            match s.align_items {
+                Some(AlignMode::Center) => "center",
+                Some(AlignMode::FlexEnd) => "flex-end",
+                Some(AlignMode::FlexStart) => "flex-start",
+                _ => "stretch",
+            }
+            .into(),
+        ),
+        _ => None,
+    }
+}
+
+/// Minimal float spelling: integral values print without a fraction (Chrome
+/// reports `24px`, not `24.00px`).
+#[cfg(feature = "screenshot")]
+fn format_number(v: f32) -> String {
+    if (v - v.round()).abs() < f32::EPSILON {
+        format!("{}", v as i64)
+    } else {
+        format!("{}", v)
+    }
 }
 
 /// Index of `n` among its parent's children (0-based).
