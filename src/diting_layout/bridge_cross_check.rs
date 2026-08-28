@@ -277,6 +277,70 @@
         assert!((c5.x - 0.0).abs() < EPS as f32, "wrapped float restarts at the left edge");
     }
 
+    /// Zone ordering (8b/8h/8i): zone rows interleave with normal siblings
+    /// in DOCUMENT order, and bridge-separated same-side floats form ONE
+    /// rail. The wikipedia lead shape — a block, then a floated infobox,
+    /// then across an empty bridge a SECOND float (the sidebar tables,
+    /// clear-stacked), then lead prose. Hand contract: the pre-float block
+    /// renders ABOVE the float band; the two floats form a right rail (each
+    /// hugging the right edge, stacked); the prose starts beside the FIRST
+    /// float's band in a column as wide as the container minus the rail.
+    #[test]
+    fn float_zone_rows_follow_document_order() {
+        // MediaWiki's exact lead-section shape: the empty bridge between the
+        // infobox and the sidebar is a mw-empty-elt span whose only children
+        // are ResourceLoader <link> hints — no visible content, but a bare
+        // has-children check reads it as flow and breaks the float rail.
+        let html = r#"<body>
+            <div id="desc"></div>
+            <table id="ib"><tr><td>info</td></tr></table>
+            <span id="bridge" class="mw-empty-elt"><link rel="stylesheet" href="/load.php"><meta property="mw:x"></span>
+            <table id="sb"></table>
+            <p id="lead1">第一段导语</p>
+            <p id="lead2">第二段导语</p>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #desc { height: 20px; margin: 0; }
+            #ib { float: right; width: 200px; height: 150px; margin: 0; }
+            .mw-empty-elt { display: none; }
+            #sb { float: right; clear: right; width: 150px; height: 100px; margin: 0; }
+            p { margin: 0; font-size: 16px; height: 40px; }
+        "#;
+
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW, VH);
+
+        let r = |sel: &str| rects[&tree.query_selector(sel).unwrap().unwrap()];
+        let (desc, ib, sb, l1, l2) = (r("#desc"), r("#ib"), r("#sb"), r("#lead1"), r("#lead2"));
+
+        // Pre-float content owns the band ABOVE the float: CSS floats only
+        // displace content that follows them in document order.
+        assert!((desc.y + desc.height) <= ib.y + EPS as f32,
+            "pre-float block renders above the float band: desc.bottom={} ib.y={}",
+            desc.y + desc.height, ib.y);
+        // First float: right edge, authored size.
+        assert!((ib.x - (VW - 200.0)).abs() < EPS as f32,
+            "infobox hugs the right edge: x={} want {}", ib.x, VW - 200.0);
+        assert!((ib.width - 200.0).abs() < EPS as f32, "infobox width: {ib:?}");
+        // The SECOND float joins the rail: right edge, stacked below the
+        // first (clear:right — the wikipedia sidebar idiom).
+        assert!((sb.x - (VW - 150.0)).abs() < EPS as f32,
+            "sidebar hugs the right edge too: x={} want {}", sb.x, VW - 150.0);
+        assert!(sb.y >= ib.y + ib.height - EPS as f32,
+            "sidebar stacks below the infobox: sb.y={} ib.bottom={}", sb.y, ib.y + ib.height);
+        // Lead prose shares the WHOLE rail's band: starts beside the first
+        // float, column = container − widest rail float.
+        assert!((l1.y - ib.y).abs() < EPS as f32,
+            "lead starts beside the first float's band: l1.y={} ib.y={}", l1.y, ib.y);
+        assert!((l1.x - 0.0).abs() < EPS as f32, "lead starts at the left edge: {l1:?}");
+        assert!((l1.width - (VW - 200.0)).abs() <= 2.0 * EPS as f32,
+            "lead column = container − rail width: {} vs {}", l1.width, VW - 200.0);
+        assert!(l2.y > l1.y, "second paragraph follows the first");
+    }
+
     /// The opposing-float header (8d): a left float and a right float
     /// (across an empty bridge sibling) share ONE band — left hugs the
     /// container's left edge, right hugs its right edge, both at band top.
