@@ -4,15 +4,16 @@ use crate::diting_cdp::dispatch::CdpContext;
 use crate::diting_dom::{DomTree, NodeData, NodeId};
 use crate::diting_browser::Page;
 
-/// Escape a client-supplied objectId for interpolation into a single-quoted JS
-/// string literal (`__diting_objects['<here>']`). Backslashes must be escaped
-/// before single quotes, otherwise an id ending in `\` turns the closing quote
-/// into `\'` and produces a syntax error. All objectId lookup sites route
-/// through this so they cannot diverge; not an injection vector (every `'`
-/// stays escaped, so the worst case is an unterminated string -> clean
-/// resolution failure), but a robustness fix.
-fn escape_object_id(oid: &str) -> String {
-    oid.replace('\\', "\\\\").replace('\'', "\\'")
+/// Embed an objectId into generated JS as a JSON double-quoted literal.
+/// The old backslash+quote replacement left C0 controls raw, and a newline
+/// in a page-minted child id (`parent::key` — key is a page property
+/// name, so the page decides the characters and the client cannot
+/// sanitise them away) terminated the string literal and killed the whole
+/// snippet as a syntax error (obscura#723 chain). serde escapes `\`, `"`,
+/// and every control char, so the literal is always well-formed; call
+/// sites embed it without their own quotes.
+fn object_id_literal(oid: &str) -> String {
+    serde_json::to_string(oid).unwrap_or_else(|_| "\"\"".to_string())
 }
 
 /// Resolve a DOM `nodeId` from CDP params. Honors `nodeId`, `backendNodeId`,
@@ -28,9 +29,9 @@ fn resolve_node_id(page: &mut Page, params: &Value) -> Result<u64, String> {
     }
     if let Some(oid) = params.get("objectId").and_then(|v| v.as_str()) {
         let code = format!(
-            "(function() {{ var o = globalThis.__diting_objects && globalThis.__diting_objects['{}']; \
+            "(function() {{ var o = globalThis.__diting_objects && globalThis.__diting_objects[{}]; \
              return (o && typeof o._nid === 'number') ? o._nid : -1; }})()",
-            escape_object_id(oid)
+            object_id_literal(oid)
         );
         let result = page.evaluate(&code);
         let nid = result.as_f64().map(|n| n as i64).unwrap_or(-1);
@@ -95,23 +96,12 @@ pub async fn handle(
             let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
             let depth = params.get("depth").and_then(|v| v.as_i64()).unwrap_or(0);
 
-            let node_id = if let Some(nid) = params
-                .get("nodeId")
-                .and_then(|v| v.as_u64())
-                .or_else(|| params.get("backendNodeId").and_then(|v| v.as_u64()))
-            {
-                nid
-            } else if let Some(oid) = params.get("objectId").and_then(|v| v.as_str()) {
-                let code = format!(
-                    "(function() {{ var o = globalThis.__diting_objects['{}']; \
-                     if (!o) return -1; return (typeof o._nid === 'number') ? o._nid : -1; }})()",
-                    escape_object_id(oid)
-                );
-                let result = page.evaluate(&code);
-                result.as_f64().map(|n| n as u64).unwrap_or(0)
-            } else {
-                return Err("nodeId or objectId required".to_string());
-            };
+            // resolve_node_id honors nodeId/backendNodeId/objectId and
+            // errors on a handle that no longer resolves — the inline
+            // version this replaced converted the JS probe's -1 to u64 0
+            // (`unwrap_or(0)`), so a stale handle silently described node
+            // 0, the document (obscura#723 chain).
+            let node_id = resolve_node_id(page, params)?;
 
             let node = page
                 .with_dom(|dom| serialize_node(dom, NodeId::new(node_id as u32), depth as u32, 0))
@@ -120,23 +110,9 @@ pub async fn handle(
         }
         "resolveNode" => {
             let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
-            let node_id = if let Some(nid) = params
-                .get("nodeId")
-                .and_then(|v| v.as_u64())
-                .or_else(|| params.get("backendNodeId").and_then(|v| v.as_u64()))
-            {
-                nid
-            } else if let Some(oid) = params.get("objectId").and_then(|v| v.as_str()) {
-                let code = format!(
-                    "(function() {{ var o = globalThis.__diting_objects['{}']; \
-                     return (o && typeof o._nid === 'number') ? o._nid : -1; }})()",
-                    escape_object_id(oid)
-                );
-                let result = page.evaluate(&code);
-                result.as_f64().map(|n| n as u64).unwrap_or(0)
-            } else {
-                return Err("nodeId or objectId required".to_string());
-            };
+            // Same routing as describeNode: resolve_node_id errors on a
+            // stale handle instead of falling through to node 0.
+            let node_id = resolve_node_id(page, params)?;
 
             // _wrap resolves the canonical JS wrapper (cached per nid), which
             // is what Runtime.callFunctionOn and the input domains target.
@@ -580,11 +556,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn escape_object_id_escapes_backslash_before_quote() {
-        assert_eq!(escape_object_id(r"x\"), r"x\\");
-        assert_eq!(escape_object_id("a'b"), r"a\'b");
-        assert_eq!(escape_object_id(r"a\'b"), r"a\\\'b");
-        assert_eq!(escape_object_id("plain"), "plain");
+    fn object_id_literal_embeds_control_chars_safely() {
+        // obscura#723 chain: page-minted child ids carry raw property
+        // names, so the literal must survive control characters, quotes
+        // and backslashes — every output below is a well-formed JS string
+        // literal on its own.
+        assert_eq!(object_id_literal("plain"), "\"plain\"");
+        assert_eq!(object_id_literal("a'b"), "\"a'b\"");
+        assert_eq!(object_id_literal(r"x\"), "\"x\\\\\"");
+        assert_eq!(object_id_literal("weird\nid"), "\"weird\\nid\"");
+        assert_eq!(object_id_literal("q\"id"), "\"q\\\"id\"");
     }
 
     #[test]

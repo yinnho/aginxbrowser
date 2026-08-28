@@ -615,6 +615,72 @@ mod tests {
         assert_eq!(result["result"]["value"], "timer");
     }
 
+    // obscura#723 chain (bycatch of the merged upstream PR): the page, not
+    // the client, mints child objectIds ("parent::key" — key is a page
+    // property name), and those ids flow back through DOM.describeNode /
+    // DOM.resolveNode. Two lineage holes at once: (1) the dom.rs lookup
+    // embedded ids with backslash+quote replacement only, so a raw newline
+    // in a page-minted id terminated the string literal and the snippet
+    // died as a syntax error; (2) that silent failure hit `unwrap_or(0)`,
+    // so an unresolvable handle described node 0 — the document — instead
+    // of erroring like Chrome does.
+    #[tokio::test(flavor = "current_thread")]
+    async fn describe_node_resolves_newline_ids_and_errors_on_gone_handles() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-1".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": "data:text/html,<html><body><p>hi</p></body></html>" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        // Mint a handle whose id contains a newline — the shape a
+        // page-minted child id ("parent::prop\nname") has.
+        let mint = CdpRequest {
+            id: 2,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "globalThis.__diting_objects['weird\\nid'] = document.body; 'ok'",
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&mint, &mut ctx).await;
+        assert!(resp.error.is_none(), "mint failed: {:?}", resp.error);
+        assert_eq!(resp.result.expect("result")["result"]["value"], "ok");
+
+        let describe = CdpRequest {
+            id: 3,
+            method: "DOM.describeNode".to_string(),
+            params: json!({ "objectId": "weird\nid", "depth": 0 }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&describe, &mut ctx).await;
+        assert!(
+            resp.error.is_none(),
+            "newline id must resolve: {:?}",
+            resp.error
+        );
+        assert_eq!(resp.result.expect("result")["node"]["nodeName"], "BODY");
+
+        let gone = CdpRequest {
+            id: 4,
+            method: "DOM.describeNode".to_string(),
+            params: json!({ "objectId": "gone" }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&gone, &mut ctx).await;
+        assert!(
+            resp.error.is_some(),
+            "unresolvable handle must error, described node 0 instead: {:?}",
+            resp.result
+        );
+    }
+
     // The click-navigation branch of Input.dispatchMouseEvent emits
     // Page.frameNavigated through frame_json(), so it must carry the same
     // required Frame fields the Page.navigate path does — a previous version
