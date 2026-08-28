@@ -40,6 +40,24 @@ pub fn parse_tls_fingerprint(s: &str) -> Option<wreq_util::Emulation> {
     }
 }
 
+/// Derive the TLS emulation's OS from an advertised User-Agent. The
+/// fingerprint's platform (JA3 is OS-specific) must match the UA the
+/// transport sends — "shape coherence".
+#[cfg(feature = "stealth")]
+pub fn emulation_os_for_ua(ua: &str) -> wreq_util::EmulationOS {
+    if ua.contains("Windows") {
+        wreq_util::EmulationOS::Windows
+    } else if ua.contains("Macintosh") || ua.contains("Mac OS X") {
+        wreq_util::EmulationOS::MacOS
+    } else if ua.contains("Android") {
+        wreq_util::EmulationOS::Android
+    } else if ua.contains("iPhone") || ua.contains("iPad") {
+        wreq_util::EmulationOS::IOS
+    } else {
+        wreq_util::EmulationOS::Linux
+    }
+}
+
 /// GETs are idempotent, so a connection reset mid-request is safe to retry
 /// once. Some anti-bot frontends RST the first TLS connection from a fresh IP
 /// and only serve the retry.
@@ -122,19 +140,10 @@ impl StealthHttpClient {
         } else {
             // The emulation OS must match the advertised User-Agent, otherwise the
             // TLS/JA3 fingerprint (OS-specific) clashes with the HTTP UA — a strong
-            // anti-bot signal ("shape coherence"). Derive from AGINXBROWSER_UA.
-            let ua = std::env::var("AGINXBROWSER_UA").unwrap_or_default();
-            if ua.contains("Windows") {
-                wreq_util::EmulationOS::Windows
-            } else if ua.contains("Macintosh") || ua.contains("Mac OS X") {
-                wreq_util::EmulationOS::MacOS
-            } else if ua.contains("Android") {
-                wreq_util::EmulationOS::Android
-            } else if ua.contains("iPhone") || ua.contains("iPad") {
-                wreq_util::EmulationOS::IOS
-            } else {
-                wreq_util::EmulationOS::Linux
-            }
+            // anti-bot signal ("shape coherence"). Pages pass the OS derived from
+            // the context's resolved UA explicitly; this env fallback applies only
+            // to callers that construct the client standalone (search engines).
+            emulation_os_for_ua(&std::env::var("AGINXBROWSER_UA").unwrap_or_default())
         };
 
         let emulation_opts = wreq_util::EmulationOption::builder()
@@ -339,6 +348,10 @@ impl StealthHttpClient {
         *self.extra_headers.write().await = headers;
     }
 
+    pub async fn set_user_agent(&self, ua: &str) {
+        *self.user_agent.write().await = ua.to_string();
+    }
+
     pub fn active_requests(&self) -> u32 {
         self.in_flight.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -454,6 +467,7 @@ mod tests {
     // set_extra_headers must reach the wire per-request, and an extras
     // override must win over the client's default Accept-Language (the
     // suppression contract the per-hop merge loop implements).
+    #[allow(clippy::await_holding_lock)] // env-lock guard held for the fixture fetch, as above
     #[tokio::test]
     async fn set_extra_headers_reach_the_wire() {
         let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();

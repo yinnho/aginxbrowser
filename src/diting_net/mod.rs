@@ -16,7 +16,9 @@ pub use encoding::{
     url_encode_query,
 };
 #[cfg(feature = "stealth")]
-pub use wreq_client::{StealthHttpClient, STEALTH_USER_AGENT, parse_tls_fingerprint};
+pub use wreq_client::{
+    StealthHttpClient, STEALTH_USER_AGENT, emulation_os_for_ua, parse_tls_fingerprint,
+};
 
 /// Serializes tests that read or mutate `AGINXBROWSER_ALLOW_PRIVATE_NETWORK`,
 /// since process env is shared across parallel test threads.

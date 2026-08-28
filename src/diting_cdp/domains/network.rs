@@ -60,8 +60,8 @@ pub async fn handle(
         }
         "setUserAgentOverride" => {
             let ua = params.get("userAgent").and_then(|v| v.as_str()).unwrap_or("");
-            if let Some(page) = ctx.get_session_page(session_id) {
-                page.http_client.set_user_agent(ua).await;
+            if let Some(page) = ctx.get_session_page_mut(session_id) {
+                page.set_user_agent_override(ua).await;
             }
             Ok(json!({}))
         }

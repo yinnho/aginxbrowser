@@ -298,12 +298,23 @@ impl Page {
                 .as_deref()
                 .and_then(crate::diting_net::parse_tls_fingerprint)
                 .unwrap_or(wreq_util::Emulation::Chrome145);
-            Some(Arc::new(StealthHttpClient::with_proxy_and_emulation(
+            // Single source of truth for the page's identity: the context's
+            // resolved UA drives every surface. Left to itself the stealth
+            // client falls back to AGINXBROWSER_UA / a Linux default, which
+            // put a Linux User-Agent and a Linux TLS fingerprint on stealth
+            // document requests behind a macOS navigator/platform persona —
+            // a one-glance bot tell (obscura #481 class).
+            let os = crate::diting_net::emulation_os_for_ua(&context.user_agent);
+            let client = StealthHttpClient::with_proxy_and_emulation(
                 context.cookie_jar.clone(),
                 context.proxy_url.as_deref(),
-                None,
+                Some(os),
                 emulation,
-            )))
+            );
+            if let Ok(mut guard) = client.user_agent.try_write() {
+                *guard = context.user_agent.clone();
+            }
+            Some(Arc::new(client))
         } else {
             None
         };
@@ -1572,6 +1583,28 @@ impl Page {
         #[cfg(feature = "stealth")]
         if let Some(ref stealth) = self.stealth_client {
             stealth.set_extra_headers(headers).await;
+        }
+    }
+
+    /// Apply a CDP `setUserAgentOverride` (Network + Emulation domains) to
+    /// every surface that advertises an identity: both HTTP transports, and
+    /// the live JS persona so navigator.userAgent / platform / fonts follow
+    /// immediately instead of on the next navigation. One source of truth
+    /// for the whole identity (obscura #481 class). The TLS fingerprint's
+    /// OS is baked into the wreq client at construction and is deliberately
+    /// not rebuilt here — matching Chrome, where a UA override does not
+    /// re-handshake the TLS stack.
+    pub async fn set_user_agent_override(&mut self, ua: &str) {
+        if ua.is_empty() {
+            return;
+        }
+        self.http_client.set_user_agent(ua).await;
+        #[cfg(feature = "stealth")]
+        if let Some(ref stealth) = self.stealth_client {
+            stealth.set_user_agent(ua).await;
+        }
+        if let Some(ref mut rt) = self.js {
+            rt.set_user_agent(ua);
         }
     }
 

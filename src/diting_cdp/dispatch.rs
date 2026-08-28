@@ -478,6 +478,38 @@ mod tests {
             .expect("default browser context must exist")
     }
 
+    /// Loopback fixture recording each request's raw head (request line +
+    /// all header lines) into the shared vec, replying with a minimal
+    /// document. Shared by the stealth wire-coherence tests.
+    #[cfg(feature = "stealth")]
+    async fn head_recording_fixture() -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let heads: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let heads2 = heads.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let h = heads2.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = vec![0u8; 8192];
+                    let Ok(n) = stream.read(&mut buf).await else { return };
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let head = req.split("\r\n\r\n").next().unwrap_or("").to_string();
+                    h.lock().unwrap().push(head);
+                    let body = "<!DOCTYPE html><html><body><p>echo</p></body></html>";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        (port, heads)
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn runtime_evaluate_reports_exception_thrown_and_details() {
         let mut ctx = CdpContext::new_with_options(None, false);
@@ -1045,32 +1077,7 @@ mod tests {
         // Loopback fixture + the same SSRF gate on both transports: run
         // under the net env lock with private networks allowed.
         let _guard = crate::server::test_util::net_env_guard();
-
-        // Echo fixture recording each request's raw head.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let heads: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
-        let heads2 = heads.clone();
-        tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
-                let h = heads2.clone();
-                tokio::spawn(async move {
-                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                    let mut buf = vec![0u8; 8192];
-                    let Ok(n) = stream.read(&mut buf).await else { return };
-                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let head = req.split("\r\n\r\n").next().unwrap_or("").to_string();
-                    h.lock().unwrap().push(head);
-                    let body = "<!DOCTYPE html><html><body><p>echo</p></body></html>";
-                    let resp = format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
-                    );
-                    let _ = stream.write_all(resp.as_bytes()).await;
-                });
-            }
-        });
+        let (port, heads) = head_recording_fixture().await;
 
         // stealth: true — the page builds a wreq stealth client and the
         // document request below goes out through it.
@@ -1116,6 +1123,153 @@ mod tests {
         assert!(
             doc_head.contains("accept-language: ja"),
             "extras must override the stealth client's default Accept-Language, got:\n{doc_head}"
+        );
+    }
+
+    // Regression (obscura #481 class, stealth variant): the page's identity
+    // must come from one source of truth — the context's resolved UA. The
+    // stealth transport used to advertise its own Linux default on document
+    // requests while navigator.userAgent / platform / fonts (driven by the
+    // context UA through init_js) told a macOS story: a split an anti-bot
+    // reads in one glance. An explicit per-context UA is the same path
+    // AGINXBROWSER_UA / the fingerprint-pool default feed, without the env
+    // dependency in the test.
+    #[cfg(feature = "stealth")]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn stealth_document_advertises_the_context_ua() {
+        let _guard = crate::server::test_util::net_env_guard();
+        let (port, heads) = head_recording_fixture().await;
+
+        let mut ctx = CdpContext::new_with_full_options(
+            None,
+            true,
+            Some("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36".to_string()),
+        );
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-context-ua".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": format!("http://127.0.0.1:{port}/") }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&nav, &mut ctx).await;
+        assert!(resp.error.is_none(), "navigate failed: {:?}", resp.error);
+
+        let heads = heads.lock().unwrap();
+        let doc_head = heads
+            .iter()
+            .find(|h| h.contains("GET / "))
+            .expect("document request must hit the fixture")
+            .to_lowercase();
+        assert!(
+            doc_head.contains("user-agent: mozilla/5.0 (macintosh"),
+            "stealth document request must advertise the context's resolved UA, got:\n{doc_head}"
+        );
+    }
+
+    // Regression (obscura #481 class): setUserAgentOverride must move every
+    // surface that advertises an identity — both transports here; the live
+    // navigator persona follows via the runtime update (asserted through
+    // the wire only, the JS side is covered by init_js reading the same
+    // client).
+    #[cfg(feature = "stealth")]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn set_user_agent_override_reaches_stealth_document_requests() {
+        let _guard = crate::server::test_util::net_env_guard();
+        let (port, heads) = head_recording_fixture().await;
+
+        let mut ctx = CdpContext::new_with_options(None, true);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-ua-override".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let set = CdpRequest {
+            id: 1,
+            method: "Network.setUserAgentOverride".to_string(),
+            params: json!({ "userAgent": "DitingOverride/3.0" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&set, &mut ctx).await.error.is_none());
+
+        let nav = CdpRequest {
+            id: 2,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": format!("http://127.0.0.1:{port}/") }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&nav, &mut ctx).await;
+        assert!(resp.error.is_none(), "navigate failed: {:?}", resp.error);
+
+        let heads = heads.lock().unwrap();
+        let doc_head = heads
+            .iter()
+            .find(|h| h.contains("GET / "))
+            .expect("document request must hit the fixture")
+            .to_lowercase();
+        assert!(
+            doc_head.contains("user-agent: ditingoverride/3.0"),
+            "UA override must reach the stealth document request, got:\n{doc_head}"
+        );
+    }
+
+    // The override must also move the live page's persona immediately —
+    // Chrome updates navigator.userAgent on setUserAgentOverride, it does
+    // not wait for the next navigation. navigator.userAgent is a live
+    // getter over the runtime's __diting_ua and platform derives from it,
+    // so both flip with the override. Feature-independent (JS layer), so
+    // this runs in the default gate.
+    #[tokio::test(flavor = "current_thread")]
+    async fn set_user_agent_override_updates_the_live_navigator_persona() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-ua-live".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": "data:text/html,<html><body>hi</body></html>" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        let set = CdpRequest {
+            id: 2,
+            method: "Emulation.setUserAgentOverride".to_string(),
+            params: json!({
+                "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&set, &mut ctx).await.error.is_none());
+
+        let req = CdpRequest {
+            id: 3,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "navigator.userAgent + ' || ' + navigator.platform",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&req, &mut ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        let value = resp.result.expect("result")["result"]["value"]
+            .as_str()
+            .expect("string value")
+            .to_string();
+        assert!(
+            value.contains("Windows NT 10.0"),
+            "navigator.userAgent must follow the override immediately, got: {value}"
+        );
+        assert!(
+            value.contains("Windows"),
+            "navigator.platform must derive from the overridden UA, got: {value}"
         );
     }
 }
