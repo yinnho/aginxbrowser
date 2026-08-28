@@ -854,6 +854,104 @@ mod tests {
         );
     }
 
+    // Target discovery surfaces must agree (obscura#570 class): /json/list,
+    // Target.getTargets, and the setDiscoverTargets event stream all read the
+    // same per-connection context. A fresh connection has no pages, so all
+    // three report empty — never "HTTP lists a page the CDP session can't
+    // see" (upstream's bug) or the reverse. createTarget then makes the page
+    // visible to all three at once.
+    #[tokio::test(flavor = "current_thread")]
+    async fn target_discovery_surfaces_agree_on_fresh_connection() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+
+        // getTargets on a fresh session: empty, same truth as /json/list ([]).
+        let resp = dispatch(
+            &CdpRequest {
+                id: 1,
+                method: "Target.getTargets".to_string(),
+                params: json!({}),
+                session_id: None,
+            },
+            &mut ctx,
+        )
+        .await;
+        assert!(resp.error.is_none());
+        let result = resp.result.expect("result");
+        let infos = result["targetInfos"].as_array().expect("array");
+        assert!(infos.is_empty(), "fresh connection has no pages: {infos:?}");
+
+        // setDiscoverTargets: exactly one targetCreated — the browser target.
+        let resp = dispatch(
+            &CdpRequest {
+                id: 2,
+                method: "Target.setDiscoverTargets".to_string(),
+                params: json!({ "discover": true }),
+                session_id: None,
+            },
+            &mut ctx,
+        )
+        .await;
+        assert!(resp.error.is_none());
+        let events = std::mem::take(&mut ctx.pending_events);
+        let names: Vec<&str> = events.iter().map(|e| e.method.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["Target.targetCreated"],
+            "browser target only, no phantom pages: {names:?}"
+        );
+        assert_eq!(events[0].params["targetInfo"]["type"], "browser");
+
+        // createTarget: the page becomes visible to getTargets and the event
+        // stream together.
+        let resp = dispatch(
+            &CdpRequest {
+                id: 3,
+                method: "Target.createTarget".to_string(),
+                params: json!({ "url": "about:blank" }),
+                session_id: None,
+            },
+            &mut ctx,
+        )
+        .await;
+        assert!(resp.error.is_none());
+        // Drain createTarget's own events before re-reading discovery.
+        let _ = std::mem::take(&mut ctx.pending_events);
+
+        let resp = dispatch(
+            &CdpRequest {
+                id: 4,
+                method: "Target.getTargets".to_string(),
+                params: json!({}),
+                session_id: None,
+            },
+            &mut ctx,
+        )
+        .await;
+        let result = resp.result.expect("result");
+        let infos = result["targetInfos"].as_array().expect("array");
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0]["type"], "page");
+
+        let resp = dispatch(
+            &CdpRequest {
+                id: 5,
+                method: "Target.setDiscoverTargets".to_string(),
+                params: json!({ "discover": true }),
+                session_id: None,
+            },
+            &mut ctx,
+        )
+        .await;
+        assert!(resp.error.is_none());
+        let events = std::mem::take(&mut ctx.pending_events);
+        let page_events: Vec<&str> = events
+            .iter()
+            .filter(|e| e.params["targetInfo"]["type"] == "page")
+            .map(|e| e.method.as_str())
+            .collect();
+        assert_eq!(page_events, vec!["Target.targetCreated"]);
+    }
+
     // DOM.getBoxModel (obscura#576): Chrome's wire emits integral doubles
     // without the ".0", and strict clients deserialize quads as i64. The
     // whole pipeline — evaluate through the quad helpers — must land on
