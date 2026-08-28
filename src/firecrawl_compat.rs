@@ -446,7 +446,7 @@ async fn scrape_with_session(
             // Pre-fetch images/stylesheets while the page's cookie'd HTTP
             // client is still alive (dropped right below, before paint).
             #[cfg(feature = "screenshot")]
-            let resources = crate::screenshot::prefetch_render_resources(&page, &final_url, &full_html).await;
+            let resources = crate::screenshot::prefetch_render_resources(&page, &final_url, &full_html, 1280.0).await;
             drop(page);
             drop(browser);
 

@@ -126,27 +126,27 @@ pub fn stylesheet_hrefs(html: &str, base_url: &str) -> std::collections::HashSet
     out
 }
 
-/// Pre-fetch the sub-resources Blitz will request while rendering `html`:
-/// `<img src>` and `<link rel=stylesheet href>`, resolved against `base_url`.
-///
-/// Uses the page's own HTTP client — same UA, cookie jar (session cookies
-/// from the page load) and proxy the navigation used, plus the stealth TLS
-/// fingerprint when enabled. Bounded: ≤32 URLs, ≤2 MiB per body, 3s per
-/// request — this is fidelity polish for the screenshot, not a scrape.
-pub async fn prefetch_render_resources(
-    page: &crate::page::Page,
-    base_url: &str,
-    html: &str,
-) -> PrefetchedResources {
-    use scraper::{Html, Selector};
+/// Cap on pre-fetched sub-resource URLs: this is fidelity polish for the
+/// screenshot, not a scrape.
+const MAX_RESOURCES: usize = 32;
 
-    const MAX_RESOURCES: usize = 32;
-    const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
-    const PER_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+/// Absolute sub-resource URLs the render paths request for `html`, resolved
+/// against `base_url`, deduped, capped at [`MAX_RESOURCES`].
+///
+/// `<link rel=stylesheet>` first: a dropped head stylesheet blanks layout,
+/// images are only fidelity polish. Then ONE winner per `<img>` — a
+/// `srcset` is a priority list, not a set of resources (obscura#667 class):
+/// fetching every candidate multiplies state-changing GETs (#662's damage)
+/// and burns the cap so stylesheets stop fitting.
+fn collect_resource_urls(html: &str, base: &url::Url, viewport_width: f32) -> Vec<url::Url> {
+    use scraper::{ElementRef, Html, Selector};
 
     fn push_resolved(base: &url::Url, raw: &str, out: &mut Vec<url::Url>) {
         let raw = raw.trim();
         if raw.is_empty() || raw.starts_with("data:") || raw.starts_with("blob:") {
+            return;
+        }
+        if out.len() >= MAX_RESOURCES {
             return;
         }
         if let Ok(u) = base.join(raw) {
@@ -155,6 +155,90 @@ pub async fn prefetch_render_resources(
             }
         }
     }
+
+    // The single URL the diting layout path resolves for this img — a
+    // scraper-DOM mirror of `diting_layout::resolve_img_source`: the
+    // `<picture>` parent's first `<source>` whose media gate matches the
+    // viewport, else the img's own srcset selection. Plain `src` is NOT
+    // included (the caller pushes it separately for the Blitz path).
+    fn selection_winner(el: ElementRef, vw: f32) -> Option<String> {
+        let picture = ElementRef::wrap(el.parent()?).filter(|p| p.value().name() == "picture");
+        if let Some(pic) = picture {
+            for sib in pic.child_elements() {
+                if sib == el {
+                    break; // the img terminates the source scan
+                }
+                if sib.value().name() != "source" {
+                    continue;
+                }
+                if !crate::diting_layout::media_matches_width(sib.value().attr("media"), vw) {
+                    continue;
+                }
+                if let Some(srcset) = sib.value().attr("srcset") {
+                    let cands = crate::diting_layout::image::parse_srcset(srcset);
+                    if let Some(c) =
+                        crate::diting_layout::image::select_srcset_candidate(&cands, vw)
+                    {
+                        return Some(c.url.clone());
+                    }
+                }
+            }
+        }
+        let srcset = el.value().attr("srcset")?;
+        let cands = crate::diting_layout::image::parse_srcset(srcset);
+        crate::diting_layout::image::select_srcset_candidate(&cands, vw).map(|c| c.url.clone())
+    }
+
+    let mut urls: Vec<url::Url> = Vec::new();
+    let doc = Html::parse_document(html);
+    // Stylesheets first so image alternates can't starve them under the cap.
+    if let Ok(sel) = Selector::parse("link[href]") {
+        for el in doc.select(&sel) {
+            let is_css = el
+                .value()
+                .attr("rel")
+                .map(|r| r.split_ascii_whitespace().any(|t| t.eq_ignore_ascii_case("stylesheet")))
+                .unwrap_or(false);
+            if is_css {
+                if let Some(href) = el.value().attr("href") {
+                    push_resolved(base, href, &mut urls);
+                }
+            }
+        }
+    }
+    if let Ok(sel) = Selector::parse("img") {
+        for el in doc.select(&sel) {
+            // The diting path requests the selection winner; the Blitz path
+            // requests the bare `src` (it has no srcset support) — collect
+            // exactly that pair, not every candidate. Non-picture <source>
+            // elements (video/audio) are requested by neither path.
+            if let Some(winner) = selection_winner(el, viewport_width) {
+                push_resolved(base, &winner, &mut urls);
+            }
+            if let Some(src) = el.value().attr("src") {
+                push_resolved(base, src, &mut urls);
+            }
+        }
+    }
+    urls
+}
+
+/// Pre-fetch the sub-resources the render paths request for `html`
+/// (see [`collect_resource_urls`]), resolved against `base_url`.
+///
+/// Uses the page's own HTTP client — same UA, cookie jar (session cookies
+/// from the page load) and proxy the navigation used, plus the stealth TLS
+/// fingerprint when enabled. Bounded: ≤[`MAX_RESOURCES`] URLs, ≤2 MiB per
+/// body, 3s per request — this is fidelity polish for the screenshot, not a
+/// scrape.
+pub async fn prefetch_render_resources(
+    page: &crate::page::Page,
+    base_url: &str,
+    html: &str,
+    viewport_width: f32,
+) -> PrefetchedResources {
+    const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+    const PER_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
     // Route through the same client the page navigated with: stealth wreq
     // when enabled, plain reqwest otherwise.
@@ -169,49 +253,10 @@ pub async fn prefetch_render_resources(
         page.inner.http_client.fetch(u).await.ok()
     }
 
-    let mut urls: Vec<url::Url> = Vec::new();
     let Ok(base) = url::Url::parse(base_url) else {
         return PrefetchedResources::new();
     };
-
-    let doc = Html::parse_document(html);
-    if let Ok(sel) = Selector::parse("img[src], img[srcset], source[srcset]") {
-        for el in doc.select(&sel) {
-            if urls.len() >= MAX_RESOURCES {
-                break;
-            }
-            for attr in ["src", "srcset"] {
-                if let Some(src) = el.value().attr(attr) {
-                    // srcset entries beyond the first URL are descriptors;
-                    // each comma-separated entry's head is a fetchable URL.
-                    for candidate in src.split(',') {
-                        let url_head = candidate.split_whitespace().next().unwrap_or("");
-                        push_resolved(&base, url_head, &mut urls);
-                        if urls.len() >= MAX_RESOURCES {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if let Ok(sel) = Selector::parse("link[href]") {
-        for el in doc.select(&sel) {
-            if urls.len() >= MAX_RESOURCES {
-                break;
-            }
-            let is_css = el
-                .value()
-                .attr("rel")
-                .map(|r| r.split_ascii_whitespace().any(|t| t.eq_ignore_ascii_case("stylesheet")))
-                .unwrap_or(false);
-            if is_css {
-                if let Some(href) = el.value().attr("href") {
-                    push_resolved(&base, href, &mut urls);
-                }
-            }
-        }
-    }
+    let urls = collect_resource_urls(html, &base, viewport_width);
     if urls.is_empty() {
         return PrefetchedResources::new();
     }
@@ -1024,6 +1069,61 @@ mod tests {
         let html4 = r##"<html><body style="margin:0"><p><a id="textonly" href="#">just text</a></p></body></html>"##;
         assert!(render_html_to_png(html4, "https://example.com/", 800, 600, 1.0, false, Some("#textonly"), false, None)
             .is_err());
+    }
+
+    /// obscura#667 class, DOM side: a `srcset` is a priority list, not a set
+    /// of resources — the collector must take the one candidate selection
+    /// picks (plus the bare `src` the Blitz path requests, it has no srcset
+    /// support), never every candidate.
+    #[test]
+    fn srcset_collects_the_selection_winner_not_every_candidate() {
+        let html = r#"<img src="/a.jpg" srcset="/a1.jpg 480w, /a2.jpg 1024w, /a3.jpg 2048w">"#;
+        let base = url::Url::parse("https://x.test/").unwrap();
+        let urls = collect_resource_urls(html, &base, 1280.0);
+        let strs: Vec<&str> = urls.iter().map(|u| u.as_str()).collect();
+        assert_eq!(
+            strs,
+            vec!["https://x.test/a2.jpg", "https://x.test/a.jpg"],
+            "1024w is the largest fitting a 1280 viewport; got {strs:?}"
+        );
+    }
+
+    /// `<picture>`: the first `<source>` whose media gate matches wins, one
+    /// candidate from it, plus the fallback img's `src`. A `<source>` outside
+    /// a picture (video/audio) is never fetched by either render path.
+    #[test]
+    fn picture_media_gate_picks_one_and_video_sources_are_skipped() {
+        let html = r#"
+            <picture>
+              <source media="(min-width: 800px)" srcset="/wide1.jpg 480w, /wide2.jpg 1600w">
+              <source srcset="/narrow.jpg 1x">
+              <img src="/fallback.jpg">
+            </picture>
+            <video><source srcset="/v1.jpg 1x, /v2.jpg 2x"></video>
+        "#;
+        let base = url::Url::parse("https://x.test/").unwrap();
+        let urls = collect_resource_urls(html, &base, 1280.0);
+        let strs: Vec<&str> = urls.iter().map(|u| u.as_str()).collect();
+        assert_eq!(
+            strs,
+            vec!["https://x.test/wide1.jpg", "https://x.test/fallback.jpg"],
+            "first source matches at 1280, its 480w candidate fits; got {strs:?}"
+        );
+    }
+
+    /// Stylesheets come first: img alternates must not burn the fetch cap and
+    /// starve the sheet (a dropped head stylesheet blanks layout, images are
+    /// only fidelity polish).
+    #[test]
+    fn stylesheets_are_collected_before_image_urls() {
+        let mut html = String::from(r##"<link rel="stylesheet" href="/style.css">"##);
+        for i in 0..40 {
+            html.push_str(&format!(r##"<img src="/i{i}.jpg">"##));
+        }
+        let base = url::Url::parse("https://x.test/").unwrap();
+        let urls = collect_resource_urls(&html, &base, 1280.0);
+        assert_eq!(urls.len(), MAX_RESOURCES, "capped at {MAX_RESOURCES}");
+        assert_eq!(urls[0].as_str(), "https://x.test/style.css");
     }
 
     /// PrefetchedNetProvider: served stylesheets and images actually paint;

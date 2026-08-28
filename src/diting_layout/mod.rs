@@ -780,7 +780,7 @@ fn normalize_candidate_url(_tree: &DomTree, _source: NodeId, url: &str) -> Optio
 /// real-world forms `(min-width: Npx)` / `(max-width: Npx)` joined by
 /// `and`, plus absent/`all`. Anything else declines (conservative: falls
 /// through to the next source or the fallback img).
-fn media_matches_width(media: Option<&str>, vw: f32) -> bool {
+pub(crate) fn media_matches_width(media: Option<&str>, vw: f32) -> bool {
     let Some(media) = media.map(str::trim).filter(|m| !m.is_empty()) else {
         return true;
     };

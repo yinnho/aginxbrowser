@@ -640,7 +640,7 @@ pub fn do_screenshot(req: ScreenshotRequest) -> Result<ScreenshotResponse> {
             // JS-rendered DOM — the same source /fetch uses for OutputFormat::Html.
             let html = page.content();
             // Pre-fetch while the page (its cookie'd HTTP client) is still alive.
-            let resources = crate::screenshot::prefetch_render_resources(&page, &final_url, &html).await;
+            let resources = crate::screenshot::prefetch_render_resources(&page, &final_url, &html, req.width as f32).await;
             drop(page);
             drop(browser);
 
