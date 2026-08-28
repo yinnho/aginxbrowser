@@ -783,7 +783,7 @@ curl -sS -X POST http://127.0.0.1:8089/session/$SID/close
 
 ## robots.txt Compliance (default on)
 
-AginxBrowser fetches on demand — one page when an agent asks, not bulk crawling — and honors `robots.txt` by default on every autonomous path: `/fetch`, `/screenshot`, `/download`, their MCP tool equivalents, and the Firecrawl-compatible `/v1/scrape`. A disallowed URL returns **HTTP 403** with the matched rule in the error, so the agent can see exactly why:
+AginxBrowser fetches on demand — one page when an agent asks, not bulk crawling — and honors `robots.txt` by default on every autonomous path: `/fetch`, `/click`, `/eval`, `/screenshot`, `/download`, the `/search` fetch_top body-grab (denied results keep their entry; `fetch_error` carries the reason), their MCP tool equivalents, and the Firecrawl-compatible `/v1/scrape`. A disallowed URL returns **HTTP 403** with the matched rule in the error, so the agent can see exactly why:
 
 ```json
 {"error": "robots.txt disallows /yinnho/aginxbrowser/pulse on https://github.com (matched `Disallow: /*/*/pulse`); aginxbrowser honors robots.txt by default. Set AGINXBROWSER_IGNORE_ROBOTS=1 on the server to override."}

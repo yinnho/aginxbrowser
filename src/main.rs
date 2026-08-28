@@ -915,11 +915,17 @@ fn now_secs() -> u64 {
 }
 
 async fn click_handler(Json(req): Json<ClickRequest>) -> Result<impl IntoResponse, AppError> {
+    // /click fetches the URL autonomously before acting on it — same robots
+    // gate as /fetch (see robots.rs for the contract).
+    robots::assert_allowed(&req.url).await.map_err(AppError::Forbidden)?;
     let resp = spawn_blocking(move || do_click(req)).await?;
     Ok((StatusCode::OK, Json(resp?)))
 }
 
 async fn eval_handler(Json(req): Json<EvalRequest>) -> Result<impl IntoResponse, AppError> {
+    // /eval fetches the URL autonomously to run the script on it — same
+    // robots gate as /fetch (see robots.rs for the contract).
+    robots::assert_allowed(&req.url).await.map_err(AppError::Forbidden)?;
     let resp = spawn_blocking(move || do_eval(req)).await?;
     Ok((StatusCode::OK, Json(resp?)))
 }

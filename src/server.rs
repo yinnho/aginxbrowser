@@ -747,6 +747,14 @@ pub async fn do_search(req: SearchRequest) -> Result<SearchResponse, SearchError
             if items[i].image_url.is_some() {
                 continue;
             }
+            // robots.txt gates the body-grab too: /search must not become a
+            // side door around the /fetch policy check. A denied item keeps
+            // its result entry; only the content fetch is skipped, with the
+            // reason in fetch_error so the agent can see why.
+            if let Err(reason) = crate::robots::assert_allowed(&items[i].url).await {
+                items[i].fetch_error = Some(reason);
+                continue;
+            }
             let url = items[i].url.clone();
             let cookies = items[i].cookies.clone();
             let use_proxy = req.use_proxy;

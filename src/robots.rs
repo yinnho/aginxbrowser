@@ -1,6 +1,7 @@
 //! robots.txt compliance (RFC 9309 subset), checked before every autonomous
-//! fetch path — `/fetch`, `/screenshot`, `/download`, and their MCP and
-//! firecrawl equivalents. aginxbrowser grabs one page when an agent asks
+//! fetch path — `/fetch`, `/click`, `/eval`, `/screenshot`, `/download`, the
+//! `/search` fetch_top body-grab, and the MCP and firecrawl equivalents.
+//! aginxbrowser grabs one page when an agent asks
 //! (real-time data, not crawling), and honoring the site's rules by default
 //! is the stance that keeps it that way. Operators who disagree own their
 //! instance: `AGINXBROWSER_IGNORE_ROBOTS=1`.

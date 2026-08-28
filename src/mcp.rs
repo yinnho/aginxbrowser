@@ -305,6 +305,9 @@ impl AginxBrowserMcp {
         annotations(title = "Evaluate JavaScript")
     )]
     async fn eval(&self, Parameters(params): Parameters<EvalParams>) -> String {
+        if let Err(e) = crate::robots::assert_allowed(&params.url).await {
+            return json!({ "error": e }).to_string();
+        }
         let req = EvalRequest {
             url: params.url,
             script: params.script,
@@ -330,6 +333,9 @@ impl AginxBrowserMcp {
         annotations(title = "Click Element")
     )]
     async fn click(&self, Parameters(params): Parameters<ClickParams>) -> String {
+        if let Err(e) = crate::robots::assert_allowed(&params.url).await {
+            return json!({ "error": e }).to_string();
+        }
         let req = ClickRequest {
             url: params.url,
             selector: params.selector,
