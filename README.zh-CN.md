@@ -44,7 +44,7 @@ Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操
 
 - **🔐 真实 TLS 指纹** — stealth 模式用 BoringSSL 复刻 Chrome145 / Firefox133 / Safari / Edge 的完整 TLS 握手（不是只改 UA），可按请求切换；Cloudflare Turnstile 挑战页自动等待 `cf_clearance`。无指纹引擎碰反爬就是 403，我们穿过去。
 - **🤝 有状态交互 Session** — 持久化浏览器会话（8 分钟空闲保活），登录态可注入可导出（`session_create(cookies=...)` ↔ `session_cookies`），跨页面、跨翻页、跨多步流程不断。一次性引擎抓完即弃，做不了「登录 → 操作 → 再操作」。
-- **🔌 MCP 原生** — 14 个工具是一等公民（不是 CDP 套壳），Claude Code / Cursor / Claude Desktop 一行接入。HTTP + MCP 双协议，agent 不用先学一套 DevTools 协议就能上手。
+- **🔌 MCP 原生** — 16 个工具是一等公民（不是 CDP 套壳），Claude Code / Cursor / Claude Desktop 一行接入。HTTP + MCP 双协议，agent 不用先学一套 DevTools 协议就能上手。
 
 > 参照：Cloudflare Kitesurf 官方明确不做真实 TLS 指纹协商、不做需要持久状态的认证会话——反爬与登录正是 AginxBrowser 的地盘。
 
@@ -53,7 +53,7 @@ Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操
 ## 核心能力
 
 - **分层渲染**：静态页面纯 HTTP 直取（~100ms），需要 JS 渲染时才启动 V8（~1-2s），80% 页面加速 10x
-- **多引擎聚合搜索**：通用网页（百度/Bing/搜狗/搜狗微信/Google）、新闻（Bing News）、代码（Stack Overflow/GitHub）、包（npm/PyPI）、学术（arXiv）、AI 模型（Hugging Face）——并发查询、合并去重、可选自动抓正文；运维还可把私有 Meilisearch 索引接入同一 `/search`。Agent 一步完成"搜→读"
+- **多引擎聚合搜索**：通用网页（百度/Bing/搜狗/搜狗微信/Google/DuckDuckGo）、新闻（Bing News）、代码（Stack Overflow/GitHub）、包（npm/PyPI）、学术（arXiv）、AI 模型（Hugging Face）——并发查询、合并去重、可选自动抓正文；运维还可把私有 Meilisearch 索引接入同一 `/search`。Agent 一步完成"搜→读"
 - **图片搜索**：`categories=images` 接百度图片/必应图片，返回 `image_url` 二进制直链（`curl -o` 可直接下成 jpg/png）+ `source_url` 溯源，Agent 自主补真实素材
 - **交互式 Session**：持久化浏览器会话，索引化交互（state/click/input/scroll/eval），AI Agent 像人一样浏览网页；`session_export` 把 Agent 探索出来的操作导出成可直接跑的 curl 回放脚本，重放零模型 token
 - **CAPTCHA 自动解决**：检测验证码类型，可选 2captcha 自动解决，搜索不再卡死
@@ -167,9 +167,12 @@ aginxbrowser/
     ├── search/              # 原生搜索引擎
     │   ├── mod.rs           #   SearchEngine trait、Registry、合并去重、渐进退避
     │   ├── baidu.rs         #   百度（JSON API，wreq stealth）
+    │   ├── baidu_images.rs  #   百度图片（acjson API，images 类）
     │   ├── bing.rs          #   Bing（HTML 解析，plain reqwest）
+    │   ├── bing_images.rs   #   必应图片（images/async 端点，images 类）
     │   ├── sogou.rs         #   搜狗通用（HTML 解析，plain reqwest）
     │   ├── sogou_wechat.rs  #   搜狗微信（HTML 解析，plain reqwest + /link 解析）
+    │   ├── duckduckgo.rs    #   DuckDuckGo（html.duckduckgo.com，general 类；直连优先）
     │   ├── google.rs        #   Google（HTML 解析，wreq stealth + proxy）
     │   ├── stackexchange.rs #   Stack Overflow（SE API v2.3，code 类）
     │   ├── github_repos.rs  #   GitHub 仓库（api.github.com，code 类）
@@ -227,7 +230,7 @@ cargo build --release --features stealth,screenshot
 **安全审计说明** → [`docs/skills-sh-audit.md`](docs/skills-sh-audit.md) — 为什么 skills.sh 上显示 Critical Risk，每条告警对应的真实产品功能
 
 包含：
-- 所有 HTTP 端点（`/fetch`、`/click`、`/eval`、`/search`、`/v1/scrape`、9 个 Session 端点）
+- 所有 HTTP 端点（`/fetch`、`/click`、`/eval`、`/search`、`/v1/scrape`、10 个 Session 端点）
 - MCP Server 的 16 个工具及参数
 - Claude Code / Claude Desktop / Cursor 客户端配置
 - 远程服务器 SSH 接入方式

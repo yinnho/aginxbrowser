@@ -31,7 +31,7 @@ Existing "browser automation" was built for humans or for one-shot scraping — 
 | Dependencies | Single binary, no Chromium | Chromium ~500MB | Docker ~1GB | Chromium |
 | Sees (screenshots) | ✅ built-in diting rendering engine | Needs Chromium | ❌ | Needs Chromium |
 | Reads | markdown + js_extract | DIY | markdown | DIY |
-| Finds (search) | ✅ 5-engine meta-search | ❌ | ❌ | ❌ |
+| Finds (search) | ✅ 6-engine meta-search | ❌ | ❌ | ❌ |
 | Acts | indexed session interaction | DevTools API | ❌ | LLM-driven |
 | Protocol | HTTP + native MCP | Node API | HTTP | Python |
 | TLS fingerprints | ✅ Chrome/Firefox/Safari | Plugin required | ❌ | ❌ |
@@ -57,7 +57,7 @@ Apache-2.0 open source, single binary — self-host today, no cloud lock-in.
 ## Capabilities
 
 - **Tiered rendering**: static pages over plain HTTP (~100ms); V8 spins up only when JS rendering is needed (~1-2s) — 90% of the [bench](bench/README.md) page set served without spinning up V8 at all; every response reports which tier served it (`tier` field)
-- **Multi-engine meta-search**: general web (Baidu / Bing / Sogou / WeChat / Google), news (Bing News), code (Stack Overflow, GitHub), packages (npm, PyPI), academic (arXiv), AI models (Hugging Face) — queried concurrently, merged and deduplicated. Operators can plug a private Meilisearch index into the same `/search`. Search → read in one step
+- **Multi-engine meta-search**: general web (Baidu / Bing / Sogou / WeChat / Google / DuckDuckGo), news (Bing News), code (Stack Overflow, GitHub), packages (npm, PyPI), academic (arXiv), AI models (Hugging Face) — queried concurrently, merged and deduplicated. Operators can plug a private Meilisearch index into the same `/search`. Search → read in one step
 - **Image search**: `categories=images` hits Baidu/Bing image indexes and returns direct binary `image_url` links (downloadable straight to jpg/png) plus `source_url` provenance
 - **Interactive sessions**: persistent browser sessions with indexed interaction (`state/click/input/scroll/eval`) — agents browse like humans do, and `session_export` turns what an agent figured out into a runnable curl replay script (zero model tokens on re-run)
 - **CAPTCHA auto-solve**: type detection with optional 2captcha integration — search never stalls on verification pages
@@ -189,9 +189,12 @@ aginxbrowser/
     ├── search/              # Native search engines
     │   ├── mod.rs           #   SearchEngine trait, Registry, merge/dedupe, progressive backoff
     │   ├── baidu.rs         #   Baidu (JSON API, wreq stealth)
+    │   ├── baidu_images.rs  #   Baidu Images (acjson API, images category)
     │   ├── bing.rs          #   Bing (HTML parsing, plain reqwest)
+    │   ├── bing_images.rs   #   Bing Images (images/async endpoint, images category)
     │   ├── sogou.rs         #   Sogou web (HTML parsing, plain reqwest)
     │   ├── sogou_wechat.rs  #   Sogou WeChat (HTML parsing + /link resolution)
+    │   ├── duckduckgo.rs    #   DuckDuckGo (html.duckduckgo.com, general; direct-first)
     │   ├── google.rs        #   Google (HTML parsing, wreq stealth + proxy)
     │   ├── stackexchange.rs #   Stack Overflow (SE API v2.3, code category)
     │   ├── github_repos.rs  #   GitHub repos (api.github.com, code category)
