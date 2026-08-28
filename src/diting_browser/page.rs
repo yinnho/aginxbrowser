@@ -1560,6 +1560,21 @@ impl Page {
             .unwrap_or_else(|| "about:blank".to_string())
     }
 
+    /// Fan `Network.setExtraHTTPHeaders` out to every transport this page
+    /// can issue requests from. A stealth page fetches its main document
+    /// through the wreq stealth client (`fetch_document`) while JS
+    /// fetch()/XHR keep using the plain reqwest one — writing the extras to
+    /// the plain client alone silently drops them from document requests,
+    /// which is exactly the header a CDP client set them to control
+    /// (obscura #571).
+    pub async fn set_extra_headers(&self, headers: std::collections::HashMap<String, String>) {
+        self.http_client.set_extra_headers(headers.clone()).await;
+        #[cfg(feature = "stealth")]
+        if let Some(ref stealth) = self.stealth_client {
+            stealth.set_extra_headers(headers).await;
+        }
+    }
+
     #[cfg_attr(not(test), allow(dead_code))] // snapshot helper exercised by tests; DOM consumers read via evaluate
     pub fn with_dom<R>(&self, f: impl FnOnce(&DomTree) -> R) -> Option<R> {
         if let Some(js) = &self.js {
@@ -2719,8 +2734,8 @@ mod tests {
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let mut served_real = false;
-        let mut challenge_hits = 0u32;
+        let served_real = false;
+        let challenge_hits = 0u32;
         let log = std::sync::Arc::new(std::sync::Mutex::new((served_real, challenge_hits)));
         let log2 = log.clone();
         let prefix2 = prefix.clone();

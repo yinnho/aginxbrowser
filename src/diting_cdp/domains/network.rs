@@ -49,7 +49,11 @@ pub async fn handle(
                         .iter()
                         .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
                         .collect();
-                    page.http_client.set_extra_headers(header_map).await;
+                    // Fan out to every transport (plain + stealth) — see
+                    // Page::set_extra_headers. Writing the plain client
+                    // alone drops the headers from stealth document
+                    // requests (obscura #571).
+                    page.set_extra_headers(header_map).await;
                 }
             }
             Ok(json!({}))

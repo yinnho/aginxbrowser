@@ -1031,4 +1031,91 @@ mod tests {
             model["height"]
         );
     }
+
+    // Regression (obscura #571): Network.setExtraHTTPHeaders must reach the
+    // wire on stealth pages. A stealth page's main document goes out through
+    // the page's wreq client (fetch_document), while the CDP handler used to
+    // write the extras to the plain reqwest client only — Puppeteer's
+    // page.setExtraHTTPHeaders then silently vanished from document
+    // requests. Needs the wreq transport to exist at all, hence the gate.
+    #[cfg(feature = "stealth")]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn set_extra_http_headers_reach_stealth_document_requests() {
+        // Loopback fixture + the same SSRF gate on both transports: run
+        // under the net env lock with private networks allowed.
+        let _guard = crate::server::test_util::net_env_guard();
+
+        // Echo fixture recording each request's raw head.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let heads: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let heads2 = heads.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let h = heads2.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = vec![0u8; 8192];
+                    let Ok(n) = stream.read(&mut buf).await else { return };
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let head = req.split("\r\n\r\n").next().unwrap_or("").to_string();
+                    h.lock().unwrap().push(head);
+                    let body = "<!DOCTYPE html><html><body><p>echo</p></body></html>";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+
+        // stealth: true — the page builds a wreq stealth client and the
+        // document request below goes out through it.
+        let mut ctx = CdpContext::new_with_options(None, true);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-extra-headers".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        // What Puppeteer's page.setExtraHTTPHeaders lands as: a custom
+        // header plus an Accept-Language override (the suppression case).
+        let set = CdpRequest {
+            id: 1,
+            method: "Network.setExtraHTTPHeaders".to_string(),
+            params: json!({
+                "headers": {
+                    "x-diting-test": "abc",
+                    "Accept-Language": "ja"
+                }
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&set, &mut ctx).await.error.is_none());
+
+        let nav = CdpRequest {
+            id: 2,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": format!("http://127.0.0.1:{port}/") }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&nav, &mut ctx).await;
+        assert!(resp.error.is_none(), "navigate failed: {:?}", resp.error);
+
+        let heads = heads.lock().unwrap();
+        let doc_head = heads
+            .iter()
+            .find(|h| h.contains("GET / "))
+            .expect("document request must hit the fixture")
+            .to_lowercase();
+        assert!(
+            doc_head.contains("x-diting-test: abc"),
+            "extra header must reach the stealth document request, got:\n{doc_head}"
+        );
+        assert!(
+            doc_head.contains("accept-language: ja"),
+            "extras must override the stealth client's default Accept-Language, got:\n{doc_head}"
+        );
+    }
 }

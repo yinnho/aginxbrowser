@@ -421,4 +421,66 @@ mod tests {
         let url = Url::parse("http://127.0.0.1:1/").unwrap();
         assert!(client.fetch(&url).await.is_err(), "loopback must be rejected");
     }
+
+    /// Serve 200s on an ephemeral port, recording each request's raw head
+    /// (request line + all header lines) into the shared vec.
+    async fn head_recording_fixture() -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let heads: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let heads2 = heads.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let h = heads2.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let Ok(n) = stream.read(&mut buf).await else { return };
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let head = req.split("\r\n\r\n").next().unwrap_or("").to_string();
+                    h.lock().unwrap().push(head);
+                    let body = "<!DOCTYPE html><html><body><p>ok</p></body></html>";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        (port, heads)
+    }
+
+    // set_extra_headers must reach the wire per-request, and an extras
+    // override must win over the client's default Accept-Language (the
+    // suppression contract the per-hop merge loop implements).
+    #[tokio::test]
+    async fn set_extra_headers_reach_the_wire() {
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+        let (port, heads) = head_recording_fixture().await;
+        let client = StealthHttpClient::new(Arc::new(CookieJar::new()));
+        client
+            .set_extra_headers(
+                [("x-diting-test".to_string(), "abc".to_string()), ("Accept-Language".to_string(), "ja".to_string())]
+                    .into_iter()
+                    .collect(),
+            )
+            .await;
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let result = client.fetch(&url).await;
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+        let resp = result.expect("fixture fetch");
+        assert_eq!(resp.status, 200);
+        let heads = heads.lock().unwrap();
+        let head = heads.first().expect("fixture saw the request").to_lowercase();
+        assert!(
+            head.contains("x-diting-test: abc"),
+            "custom extra header must land on the wire, got:\n{head}"
+        );
+        assert!(
+            head.contains("accept-language: ja"),
+            "extras Accept-Language must override the default, got:\n{head}"
+        );
+    }
 }
