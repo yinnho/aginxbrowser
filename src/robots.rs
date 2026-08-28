@@ -198,7 +198,7 @@ async fn fetch_policy(origin: &str) -> Policy {
     // this is a real-time fetcher, and the robots gate should deny on the
     // site's refusal, not on our own packet loss. HTTP-level statuses are
     // not retried: a 403/5xx answer IS the site speaking.
-    let resp = match client.get(format!("{origin}/robots.txt")).send().await {
+    let mut resp = match client.get(format!("{origin}/robots.txt")).send().await {
         Ok(r) => r,
         Err(first) => {
             tokio::time::sleep(Duration::from_millis(750)).await;
@@ -213,12 +213,27 @@ async fn fetch_policy(origin: &str) -> Policy {
     match resp.status().as_u16() {
         404 | 410 => Policy::AllowAll,
         200..=299 => {
-            let body = match resp.bytes().await {
-                Ok(b) => b,
-                Err(e) => return Policy::DenyAll(format!("body read: {e}")),
-            };
-            let body = &body[..body.len().min(MAX_ROBOTS_BYTES)];
-            match std::str::from_utf8(body) {
+            // Stream with a hard stop at MAX_ROBOTS_BYTES (upstream #581
+            // class): `.bytes().await` would buffer a hostile multi-GB
+            // "robots.txt" in full before the truncate below ever ran. A
+            // real robots.txt is bytes-to-a-few-KiB; Google parses at most
+            // 500 KiB, so the cap loses nothing legitimate.
+            let mut body: Vec<u8> = Vec::new();
+            loop {
+                match resp.chunk().await {
+                    Ok(Some(chunk)) => {
+                        let room = MAX_ROBOTS_BYTES.saturating_sub(body.len());
+                        if room == 0 {
+                            break;
+                        }
+                        let take = chunk.len().min(room);
+                        body.extend_from_slice(&chunk[..take]);
+                    }
+                    Ok(None) => break,
+                    Err(e) => return Policy::DenyAll(format!("body read: {e}")),
+                }
+            }
+            match std::str::from_utf8(&body) {
                 Ok(text) => parse_rules(text),
                 // Bizarre, but not a refusal — parse nothing, allow everything.
                 Err(_) => Policy::AllowAll,

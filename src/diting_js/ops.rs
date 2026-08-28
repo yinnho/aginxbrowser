@@ -162,6 +162,23 @@ fn response_body_byte_limit() -> usize {
         .unwrap_or(2 * 1024 * 1024)
 }
 
+/// Hard ceiling on a single JS fetch()/XHR response body (upstream #581).
+/// Unlike the two limits above — which bound what is *retained* for CDP —
+/// this one bounds the initial allocation itself: page JS can fetch() any
+/// URL, so a server streaming gigabytes must fail as a network error
+/// instead of OOMing the process (plus the UTF-8 and base64 copies that
+/// follow the raw buffer). Chrome streams bodies to disk; we draw a line.
+/// Bulk transfer is the streaming download layer's job, not page fetch().
+/// `0` disables the cap, matching the 0-disables convention of the two
+/// limits above.
+fn fetch_body_byte_limit() -> usize {
+    std::env::var("AGINXBROWSER_FETCH_BODY_LIMIT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(|v| if v == 0 { usize::MAX } else { v })
+        .unwrap_or(64 * 1024 * 1024)
+}
+
 /// True when a Content-Type deserves text storage rather than base64. Mirrors
 /// the page-side document/script/stylesheet decision (no Content-Type at all
 /// counts as text, matching the HTML-parse default).
@@ -1332,7 +1349,7 @@ async fn op_fetch_url(
         }
     }
 
-    let response = loop {
+    let mut response = loop {
         let mut req = client.request(current_method.clone(), &current_url);
 
         // Cross-origin and credentials are per-hop: a redirect can change
@@ -1533,10 +1550,37 @@ async fn op_fetch_url(
         }
     }
 
-    let resp_bytes = response
-        .bytes()
+    // Cap the buffered body (upstream #581): the retained-for-CDP limits
+    // above only gate the cache, never the allocation, and everything
+    // downstream (utf8-lossy, base64) copies the full buffer again.
+    // Content-Length is checked before reading; a lying or absent header
+    // still runs into the per-chunk check while streaming.
+    let body_limit = fetch_body_byte_limit();
+    if let Some(len) = resp_headers
+        .get("content-length")
+        .and_then(|v| v.trim().parse::<usize>().ok())
+    {
+        if len > body_limit {
+            return Err(deno_error::JsErrorBox::generic(format!(
+                "fetch response body too large: content-length {} exceeds limit {} bytes",
+                len, body_limit
+            )));
+        }
+    }
+    let mut resp_bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|e| deno_error::JsErrorBox::generic(e.to_string()))?;
+        .map_err(|e| deno_error::JsErrorBox::generic(e.to_string()))?
+    {
+        resp_bytes.extend_from_slice(&chunk);
+        if resp_bytes.len() > body_limit {
+            return Err(deno_error::JsErrorBox::generic(format!(
+                "fetch response body exceeded limit of {} bytes",
+                body_limit
+            )));
+        }
+    }
     let resp_body = String::from_utf8_lossy(&resp_bytes).to_string();
     let resp_body_base64 = BASE64.encode(&resp_bytes);
 

@@ -2049,6 +2049,98 @@
         );
     }
 
+    /// Upstream #581 class: op_fetch_url buffered the entire response with
+    /// `.bytes().await` before any limit was consulted, so page JS fetching
+    /// a multi-GB body OOMed the process (the retained-for-CDP byte limit
+    /// only gates the cache, not the allocation). The cap must reject as a
+    /// network-style failure — both when Content-Length advertises it and
+    /// when an unbounded stream crosses it mid-body.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_rejects_response_body_over_limit() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+        std::env::set_var("AGINXBROWSER_FETCH_BODY_LIMIT", "1024");
+
+        // Advertised Content-Length over the cap: rejected before buffering.
+        {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let resp = "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 99999999\r\nconnection: close\r\n\r\n";
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            });
+            let mut rt = setup_runtime("<html><body></body></html>");
+            rt.set_url(&format!("http://127.0.0.1:{}/huge", port));
+            let result = rt
+                .call_function_on_for_cdp(
+                    r#"async () => {
+                        try { await fetch(document.URL); return "resolved"; }
+                        catch (e) { return "rejected"; }
+                    }"#,
+                    None,
+                    &[],
+                    true,
+                    true,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                result.value.unwrap(),
+                serde_json::json!("rejected"),
+                "oversized advertised Content-Length must reject the fetch"
+            );
+        }
+
+        // No Content-Length: the stream itself must cross the cap and reject.
+        {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let resp = "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\nconnection: close\r\n\r\n";
+                let _ = stream.write_all(resp.as_bytes());
+                // 8 KiB in small writes: an unbounded stream with no framing.
+                for _ in 0..64 {
+                    if stream.write_all(&[b'x'; 128]).is_err() {
+                        break; // client hung up once the cap tripped
+                    }
+                }
+                let _ = stream.flush();
+            });
+            let mut rt = setup_runtime("<html><body></body></html>");
+            rt.set_url(&format!("http://127.0.0.1:{}/stream", port));
+            let result = rt
+                .call_function_on_for_cdp(
+                    r#"async () => {
+                        try { await fetch(document.URL); return "resolved"; }
+                        catch (e) { return "rejected"; }
+                    }"#,
+                    None,
+                    &[],
+                    true,
+                    true,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                result.value.unwrap(),
+                serde_json::json!("rejected"),
+                "unbounded stream over the cap must reject the fetch"
+            );
+        }
+
+        std::env::remove_var("AGINXBROWSER_FETCH_BODY_LIMIT");
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+    }
+
     /// Browsers send Origin on every non-GET/HEAD request, including
     /// same-origin POSTs (SolidStart server functions 403 without it).
     /// Regression: we only set Origin cross-origin, so a same-origin POST
