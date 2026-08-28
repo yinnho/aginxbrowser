@@ -364,7 +364,21 @@ pub async fn handle(
                                 if (!target) return;\
                                 target.dispatchEvent(globalThis.__diting_markTrusted(new KeyboardEvent('keypress', {bubbles:true,key:'Enter',code:'Enter'})));\
                                 if (target.localName === 'textarea') {\
-                                    globalThis.__diting_setFieldValue(target, 'value', (target.value || '') + '\\n');\
+                                    // Newline splices at the caret like insert_text_js
+                                    // does (obscura#577 follow-up): appending at the
+                                    // end put the newline after a mid-text caret and
+                                    // left the selection pointing before it.
+                                    var v = target.value || '';\
+                                    var s = target.selectionStart, e = target.selectionEnd;\
+                                    var lo, hi;\
+                                    if (s == null) { lo = hi = v.length; }\
+                                    else {\
+                                        s = Math.max(0, Math.min(s, v.length));\
+                                        e = (e == null) ? s : Math.max(0, Math.min(e, v.length));\
+                                        lo = Math.min(s, e); hi = Math.max(s, e);\
+                                    }\
+                                    globalThis.__diting_setFieldValue(target, 'value', v.slice(0, lo) + '\\n' + v.slice(hi));\
+                                    target.setSelectionRange(lo + 1, lo + 1);\
                                     target.dispatchEvent(globalThis.__diting_markTrusted(new Event('input', {bubbles:true})));\
                                 } else {\
                                     var form = target.form || (target.closest && target.closest('form'));\

@@ -787,6 +787,73 @@ mod tests {
         );
     }
 
+    // Enter in a textarea (obscura#577 follow-up): the newline must splice
+    // at the caret like any other insertion, and the caret must land after
+    // it. The old append-at-end left the selection at the pre-insert offset,
+    // so the next typed character spliced in before the newline.
+    #[tokio::test(flavor = "current_thread")]
+    async fn input_enter_in_textarea_splices_newline_at_caret() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-enter-caret".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({
+                "url": "data:text/html,<textarea id=t></textarea>"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        // Caret parked at offset 1 of an existing value.
+        let park = CdpRequest {
+            id: 2,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "(function(){var el=document.getElementById('t');el.value='ab';el.focus();el.setSelectionRange(1,1);})()"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&park, &mut ctx).await.error.is_none());
+
+        let req = CdpRequest {
+            id: 3,
+            method: "Input.dispatchKeyEvent".to_string(),
+            params: json!({
+                "type": "keyDown",
+                "key": "Enter",
+                "code": "Enter",
+                "text": "\r"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(
+            dispatch(&req, &mut ctx).await.error.is_none(),
+            "dispatchKeyEvent failed"
+        );
+
+        let check = CdpRequest {
+            id: 4,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "document.getElementById('t').value + '|' + document.getElementById('t').selectionStart",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&check, &mut ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        let result = resp.result.expect("result");
+        let value = result["result"]["value"].as_str().expect("string value");
+        assert_eq!(
+            value, "a\nb|2",
+            "newline spliced at the caret, caret after it"
+        );
+    }
+
     // DOM.getBoxModel (obscura#576): Chrome's wire emits integral doubles
     // without the ".0", and strict clients deserialize quads as i64. The
     // whole pipeline — evaluate through the quad helpers — must land on
