@@ -402,6 +402,26 @@ pub async fn handle(
 
             Ok(json!({}))
         }
+        // Text that doesn't come from a key press — IME commits (CJK),
+        // emoji pickers, paste-style agent drivers (Hermes browser_type) —
+        // has no dispatchKeyEvent representation, so without this arm such
+        // clients cannot type at all (obscura#577). Reuses the same
+        // insertion path as the char branch: the helper embeds text as a
+        // serde_json string literal, which also survives the control-
+        // character escaping trap upstream's first arm hit (#688).
+        "insertText" => {
+            let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            if !text.is_empty() {
+                if let Some(page) = ctx.get_session_page_mut(session_id) {
+                    page.evaluate(INPUT_HELPERS);
+                    page.evaluate(&insert_text_js(text));
+                    // Pump the event loop so framework change detection
+                    // picks up the mutation (same as the char branch above).
+                    page.settle(50).await;
+                }
+            }
+            Ok(json!({}))
+        }
         "dispatchTouchEvent" => Ok(json!({})),
         "setIgnoreInputEvents" => Ok(json!({})),
         _ => Err(format!("Unknown Input method: {}", method)),

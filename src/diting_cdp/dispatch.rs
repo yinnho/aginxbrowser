@@ -690,4 +690,100 @@ mod tests {
         let value = result["result"]["value"].as_str().expect("string value");
         assert_eq!(value, "checked=true", "label click activated the checkbox");
     }
+
+    // Input.insertText (obscura#577): text that doesn't come from a key
+    // press — IME commits, emoji pickers, paste-style agent drivers — has
+    // no dispatchKeyEvent representation, so without this arm such clients
+    // cannot type at all. It must insert at the caret, replace a selection,
+    // and fire an input event announcing the new value (React/Vue
+    // controlled inputs only register changes through that combination).
+    // The helper embeds text as a serde_json string literal, so CJK and
+    // control characters ride through too — the escaping trap upstream's
+    // first arm hit in #688.
+    #[tokio::test(flavor = "current_thread")]
+    async fn input_insert_text_types_into_focused_field() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-insert-text".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({
+                "url": "data:text/html,<input id=t>"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        // Focus the field, park the caret at position 1 of an existing
+        // value, and record every input event's resulting value.
+        let park = CdpRequest {
+            id: 2,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "(function(){var el=document.getElementById('t');el.value='ab';el.focus();el.setSelectionRange(1,1);window.seen=[];el.addEventListener('input',function(){seen.push(el.value)});})()"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&park, &mut ctx).await.error.is_none());
+
+        let req = CdpRequest {
+            id: 3,
+            method: "Input.insertText".to_string(),
+            params: json!({ "text": "XY" }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&req, &mut ctx).await;
+        assert!(
+            resp.error.is_none(),
+            "Input.insertText failed: {:?}",
+            resp.error
+        );
+
+        let check = CdpRequest {
+            id: 4,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "document.getElementById('t').value + '|' + window.seen.join(',')",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&check, &mut ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        let result = resp.result.expect("result");
+        let value = result["result"]["value"].as_str().expect("string value");
+        assert_eq!(
+            value, "aXYb|aXYb",
+            "inserted at the caret AND announced via an input event"
+        );
+
+        // CJK plus a control character: both must arrive verbatim.
+        let cjk = CdpRequest {
+            id: 5,
+            method: "Input.insertText".to_string(),
+            params: json!({ "text": "中\u{1}文" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&cjk, &mut ctx).await.error.is_none());
+        let check = CdpRequest {
+            id: 6,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "document.getElementById('t').value",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&check, &mut ctx).await;
+        assert!(resp.error.is_none());
+        let result = resp.result.expect("result");
+        let value = result["result"]["value"].as_str().expect("string value");
+        assert_eq!(
+            value, "aXY中\u{1}文b",
+            "CJK and control chars insert verbatim"
+        );
+    }
 }
