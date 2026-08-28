@@ -2049,6 +2049,85 @@
         );
     }
 
+    /// obscura#664 class: the fetch/XHR redirect budget is the Fetch spec's
+    /// fixed 20 — WPT `fetch/api/redirect/redirect-count.any.js` pins both
+    /// ends: the 20th hop succeeds, the 21st fails. (HTTP-3xx during
+    /// document navigation and the JS navigation-chain document cap are
+    /// separate budgets; the chain cap lives in diting_browser/page.rs and
+    /// counts documents, not redirects.)
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_redirect_count_matches_wpt_pair() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        // /r/N → 302 → /r/{N-1}; /r/0 is the terminal document.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for _ in 0..48 {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let path = String::from_utf8_lossy(&buf[..n])
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/r/0")
+                    .to_string();
+                let resp = match path.strip_prefix("/r/").and_then(|n| n.parse::<u32>().ok()) {
+                    Some(0) => "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 9\r\nconnection: close\r\n\r\nchain-end"
+                        .to_string(),
+                    Some(n) => format!(
+                        "HTTP/1.1 302 Found\r\nlocation: /r/{}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                        n - 1
+                    ),
+                    None => "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        .to_string(),
+                };
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/r/0", port));
+        let result = rt.call_function_on_for_cdp(
+                r#"async () => {
+                    const outcomes = {};
+                    try {
+                        const r = await fetch(new URL("/r/20", document.URL));
+                        outcomes.twenty = r.status + ":" + (await r.text());
+                    } catch (e) { outcomes.twenty = "rejected"; }
+                    try {
+                        const r = await fetch(new URL("/r/21", document.URL));
+                        outcomes.twentyOne = r.status + ":" + (await r.text());
+                    } catch (e) { outcomes.twentyOne = "rejected"; }
+                    return outcomes;
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let outcomes = result.value.unwrap();
+        assert_eq!(
+            outcomes["twenty"],
+            serde_json::json!("200:chain-end"),
+            "the 20th redirect hop must still succeed (http-redirect-fetch step 7: count 20 passes)"
+        );
+        assert_eq!(
+            outcomes["twentyOne"],
+            serde_json::json!("rejected"),
+            "the 21st redirect hop must fail (count 21 → network error)"
+        );
+    }
+
     /// Upstream #581 class: op_fetch_url buffered the entire response with
     /// `.bytes().await` before any limit was consulted, so page JS fetching
     /// a multi-GB body OOMed the process (the retained-for-CDP byte limit

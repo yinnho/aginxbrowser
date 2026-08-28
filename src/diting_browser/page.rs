@@ -1223,8 +1223,19 @@ impl Page {
         let mut current_url = url_str.to_string();
         let mut current_method = method.to_string();
         let mut current_body = body.to_string();
-        const REDIRECT_LIMIT: usize = 10;
-        for chain in 0..REDIRECT_LIMIT {
+        // This cap counts documents in a JS-initiated navigation chain
+        // (location/form hops), not HTTP 3xx redirects — those are budgeted
+        // separately (20) by the net client. The low default is right: it is
+        // what stops a page that resets `location` on every load. But a
+        // legitimate long chain (SSO handover across providers) must be
+        // raisable by the operator — env knob in the shape of
+        // AGINXBROWSER_NAV_TIMEOUT_MS (obscura#664).
+        let chain_limit = std::env::var("AGINXBROWSER_NAV_CHAIN_LIMIT")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(10);
+        for chain in 0..chain_limit {
             self.navigate_single(&current_url, wait_until, &current_method, &current_body).await?;
             if let Some((next_url, next_method, next_body)) = self.take_pending_navigation() {
                 if cross_scheme_to_file(&current_url, &next_url) {
@@ -1251,12 +1262,12 @@ impl Page {
                 current_url = next_url;
                 current_method = next_method;
                 current_body = next_body;
-                if chain + 1 == REDIRECT_LIMIT {
+                if chain + 1 == chain_limit {
                     // Hit the cap and the page still wants to keep
                     // chaining. Surface that as an error instead of
                     // returning Ok(()) so callers can distinguish a
                     // successful load from a redirect storm.
-                    return Err(PageError::TooManyRedirects(REDIRECT_LIMIT));
+                    return Err(PageError::TooManyClientNavigations(chain_limit));
                 }
                 continue;
             }
@@ -2165,8 +2176,14 @@ pub enum PageError {
     #[error("Network error: {0}")]
     NetworkError(String),
 
-    #[error("Too many redirects (limit {0})")]
-    TooManyRedirects(usize),
+    /// Not HTTP 3xx redirects (those are `NetError::TooManyRedirects`) —
+    /// this counts documents in a JS-initiated navigation chain. The count
+    /// includes the requested document, so a limit of N buys N-1
+    /// navigations on top. The message must name the layer: operators
+    /// debugging "too many redirects" against a server that never 3xx'd
+    /// lose hours one layer down (obscura#664).
+    #[error("client navigation chain exceeded {0} documents (JS location/form hops, not HTTP redirects) — raise AGINXBROWSER_NAV_CHAIN_LIMIT if this flow is legitimate")]
+    TooManyClientNavigations(usize),
 }
 
 impl From<NetError> for PageError {
@@ -2493,7 +2510,10 @@ mod tests {
     async fn js_chain_over_limit_reports_too_many_redirects() {
         let _g = net_test_guard();
         // Every /hopN page redirects to /hop{N+1}: an infinite JS chain that
-        // must stop at REDIRECT_LIMIT (10) with TooManyRedirects.
+        // must stop at the default chain limit (10 documents) with
+        // TooManyClientNavigations — and the message must not blame HTTP
+        // redirects (obscura#664: a message pointing at the wrong layer
+        // costs more than none).
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
@@ -2527,7 +2547,64 @@ mod tests {
             .navigate(&format!("http://127.0.0.1:{port}/hop0"))
             .await
             .unwrap_err();
-        assert!(matches!(err, PageError::TooManyRedirects(10)), "got {err:?}");
+        assert!(matches!(err, PageError::TooManyClientNavigations(10)), "got {err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("client navigation chain"), "message must name the layer: {msg}");
+        assert!(
+            !msg.starts_with("Too many redirects"),
+            "message must not blame HTTP redirects — the server never 3xx'd: {msg}"
+        );
+        assert!(
+            msg.contains("AGINXBROWSER_NAV_CHAIN_LIMIT"),
+            "message must name the operator remedy: {msg}"
+        );
+    }
+
+    /// obscura#664 class: the navigation-chain cap counts documents, not
+    /// HTTP redirects, and an operator with a legitimate long chain (SSO
+    /// handover across several providers) must be able to raise it. Env
+    /// knob, in the shape of `AGINXBROWSER_NAV_TIMEOUT_MS`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn nav_chain_limit_env_unblocks_long_chains() {
+        let _g = net_test_guard();
+        // Finite chain /hop0 → /hop1 → … → /hop10 (terminal document):
+        // 11 documents total, one past the default cap of 10.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for _ in 0..16 {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let path = String::from_utf8_lossy(&buf[..n])
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/hop0")
+                    .to_string();
+                let body = match path.strip_prefix("/hop").and_then(|n| n.parse::<usize>().ok()) {
+                    Some(10) => "<html><body>done</body></html>".to_string(),
+                    Some(n) => {
+                        format!("<html><script>location.href = '/hop{}';</script></html>", n + 1)
+                    }
+                    None => "/hop0".to_string(),
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        std::env::set_var("AGINXBROWSER_NAV_CHAIN_LIMIT", "12");
+        let mut p = test_page();
+        let res = p.navigate(&format!("http://127.0.0.1:{port}/hop0")).await;
+        std::env::remove_var("AGINXBROWSER_NAV_CHAIN_LIMIT");
+        res.unwrap();
+        assert_eq!(p.url_string(), format!("http://127.0.0.1:{port}/hop10"));
     }
 
     // ---- wait semantics & network events ---------------------------------

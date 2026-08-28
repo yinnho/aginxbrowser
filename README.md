@@ -238,6 +238,7 @@ Requirements: Rust 1.78+; the V8 static library downloads automatically on first
 | `AGINXBROWSER_UA` | Linux Chrome145 | Spoofed User-Agent |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language header |
 | `AGINXBROWSER_PROXY` | none | Optional fallback proxy. Blocked-source engines (Google, Bing News, Hugging Face) connect directly first and fall through to this proxy only when the direct attempt fails — overseas deployments need no proxy at all; per-request `use_proxy:true` also routes fetch/search through it |
+| `AGINXBROWSER_NAV_CHAIN_LIMIT` | `10` | JS navigation-chain cap: documents a page may chain via `location`/form hops before navigation aborts. The count includes the requested document (10 = initial doc + 9 hops). Raise for legit long chains (SSO handover across providers); HTTP 3xx redirects are budgeted separately (20, per Fetch spec / browser parity) |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL, `0` disables |
 | `AGINXBROWSER_IGNORE_ROBOTS` | unset | robots.txt is honored by default on `/fetch`, `/screenshot`, `/download` and MCP tools; set `1` to skip checks (operator opt-out) |
 | `AGINXBROWSER_ROBOTS_TTL_SECS` | `3600` | Per-host robots.txt policy cache TTL |
