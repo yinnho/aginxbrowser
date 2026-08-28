@@ -559,6 +559,62 @@ mod tests {
         );
     }
 
+    // Chrome spells a number RemoteObject's description via Number→String
+    // ("2"), but serde_json's Number Display keeps float-ness ("2.0") and
+    // v8_to_json hands us f64 boxes for every JS number — awaitPromise +
+    // returnByValue must not leak that Rust-side repr. The surrounding
+    // assertions pin the awaitPromise forms themselves (obscura#541 probe:
+    // resolved value, async object, timer-settled promise).
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_evaluate_awaits_promises_and_spells_numbers_like_chrome() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-1".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": "data:text/html,<html><body>hi</body></html>" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        let eval = |id: u64, expr: &str| CdpRequest {
+            id,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": expr,
+                "returnByValue": true,
+                "awaitPromise": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+
+        let int = dispatch(&eval(2, "Promise.resolve(2)"), &mut ctx).await;
+        assert!(int.error.is_none(), "unexpected CDP error: {:?}", int.error);
+        let result = int.result.expect("result");
+        assert_eq!(result["result"]["type"], "number");
+        assert_eq!(result["result"]["value"], 2);
+        assert_eq!(result["result"]["description"], "2");
+
+        let frac = dispatch(&eval(3, "Promise.resolve(2.5)"), &mut ctx).await;
+        let result = frac.result.expect("result");
+        assert_eq!(result["result"]["description"], "2.5");
+
+        let obj = dispatch(&eval(4, "(async () => ({ok:true}))()"), &mut ctx).await;
+        let result = obj.result.expect("result");
+        assert_eq!(result["result"]["value"]["ok"], true);
+
+        let timer = dispatch(
+            &eval(5, "new Promise(r=>setTimeout(()=>r('timer'),50))"),
+            &mut ctx,
+        )
+        .await;
+        let result = timer.result.expect("result");
+        assert_eq!(result["result"]["value"], "timer");
+    }
+
     // The click-navigation branch of Input.dispatchMouseEvent emits
     // Page.frameNavigated through frame_json(), so it must carry the same
     // required Frame fields the Page.navigate path does — a previous version

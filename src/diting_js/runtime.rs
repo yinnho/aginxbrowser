@@ -1740,6 +1740,33 @@ impl JsRuntime {
         Ok(serde_json::Value::String(s))
     }
 
+    /// Chrome spells a JS number via Number→String: integral doubles lose
+    /// the fraction ("2", not "2.0"). v8_to_json boxes every JS number as an
+    /// f64 serde Number, whose Display keeps float-ness, and JS clients only
+    /// normalize that away for `value` (JSON.parse), never for the
+    /// `description` string (obscura#541 probe follow-up, same class as the
+    /// #576 integer coordinates).
+    fn chrome_number_string(n: &serde_json::Number) -> String {
+        match n.as_f64() {
+            Some(f) if f.is_finite() && f.fract() == 0.0 && f.abs() < i64::MAX as f64 => {
+                format!("{}", f as i64)
+            }
+            _ => n.to_string(),
+        }
+    }
+
+    /// Integral f64 numbers serialize without the trailing ".0" so
+    /// `returnByValue` payloads match Chrome's wire form for non-JS clients
+    /// too (serde_json would print 2.0).
+    fn chrome_number_value(n: &serde_json::Number) -> serde_json::Value {
+        if let Some(f) = n.as_f64() {
+            if f.is_finite() && f.fract() == 0.0 && f.abs() < i64::MAX as f64 {
+                return serde_json::Value::Number(serde_json::Number::from(f as i64));
+            }
+        }
+        serde_json::Value::Number(n.clone())
+    }
+
     fn info_from_json(value: &serde_json::Value) -> RemoteObjectInfo {
         match value {
             serde_json::Value::Null => RemoteObjectInfo {
@@ -1762,9 +1789,9 @@ impl JsRuntime {
                 js_type: "number".into(),
                 subtype: None,
                 class_name: String::new(),
-                description: n.to_string(),
+                description: Self::chrome_number_string(n),
                 object_id: None,
-                value: Some(value.clone()),
+                value: Some(Self::chrome_number_value(n)),
             },
             serde_json::Value::String(s) => RemoteObjectInfo {
                 js_type: "string".into(),
