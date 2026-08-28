@@ -3028,6 +3028,74 @@
         assert_eq!(kind2, serde_json::json!("function"));
     }
 
+    // Regression (obscura #738): hit-testing among overlapping positioned
+    // siblings must follow paint order, not document order. The close
+    // button (z-index 1002) precedes the loading overlay (z-index 1001) in
+    // the DOM; the old nid tie-break handed the click to the overlay — a
+    // coordinate click aimed at the visibly topmost element was delivered
+    // to the z-index-below one. Feature-gated: real rects need the layout
+    // stack (as above).
+    #[test]
+    #[cfg(feature = "screenshot")]
+    fn test_element_from_point_respects_z_index_among_positioned_siblings() {
+        let mut rt = setup_runtime(r#"<html><head><style>
+          .dialog { position: absolute; top: 100px; left: 100px; width: 400px; height: 200px; }
+          .close-button { position: absolute; top: 10px; left: 350px; width: 32px; height: 32px; z-index: 1002; }
+          .loading-overlay { position: absolute; top: 0; left: 0; width: 400px; height: 200px; z-index: 1001; }
+        </style></head><body>
+        <div class="dialog"><button class="close-button">x</button><div class="loading-overlay"></div></div>
+        </body></html>"#);
+        let diag = rt
+            .evaluate(
+                r#"JSON.stringify((() => {
+                    const btn = document.querySelector('.close-button');
+                    const r = btn.getBoundingClientRect();
+                    return {
+                        z: getComputedStyle(btn).zIndex,
+                        overlayZ: getComputedStyle(document.querySelector('.loading-overlay')).zIndex,
+                        pos: getComputedStyle(btn).position,
+                        rect: [r.left, r.top, r.width, r.height],
+                    };
+                })())"#,
+            )
+            .unwrap();
+        println!("z-index hit-test diagnostics: {diag}");
+        let hit = rt
+            .evaluate(
+                r#"(function() {
+                    const btn = document.querySelector('.close-button');
+                    const r = btn.getBoundingClientRect();
+                    return document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)?.className;
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(
+            hit,
+            serde_json::json!("close-button"),
+            "topmost z-index must win the hit, got {hit} (diag: {diag})"
+        );
+        // elementsFromPoint mirrors the ranking: front-to-back, the button
+        // before the overlay it visually sits on.
+        let stack = rt
+            .evaluate(
+                r#"(function() {
+                    const btn = document.querySelector('.close-button');
+                    const r = btn.getBoundingClientRect();
+                    return document
+                        .elementsFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+                        .slice(0, 2)
+                        .map((el) => el.className)
+                        .join(',');
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(
+            stack,
+            serde_json::json!("close-button,loading-overlay"),
+            "elementsFromPoint must be front-to-back by paint order, got {stack}"
+        );
+    }
+
     #[test]
     #[cfg(feature = "screenshot")]
     fn test_element_from_point_in_viewport_returns_body() {

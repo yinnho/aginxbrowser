@@ -108,11 +108,12 @@ pub struct JsState {
     /// `Page::sync_js_network_events` so the CDP layer emits
     /// requestWillBeSent / responseReceived for them (upstream #406).
     pub(crate) js_network_events: Vec<JsNetworkEvent>,
-    /// Memoized diting-layout rects for the live DOM tree, keyed by
-    /// the tree's epoch (see DomTree::epoch). Filled on the first
-    /// `layout_rect` op after each mutation; backs getBoundingClientRect.
-    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))] // the layout_rect op runs only in the screenshot-gated pipeline
-    layout_cache: std::cell::RefCell<Option<(u64, HashMap<NodeId, [f32; 4]>)>>,
+    /// Memoized diting-layout run for the live DOM tree, keyed by the
+    /// tree's epoch (see DomTree::epoch): element rects plus the paint
+    /// order. Filled on the first `layout_rect` / `paint_order` op after
+    /// each mutation; backs getBoundingClientRect and elementFromPoint.
+    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))] // the layout ops run only in the screenshot-gated pipeline
+    layout_cache: std::cell::RefCell<Option<(u64, HashMap<NodeId, [f32; 4]>, Vec<NodeId>)>>,
     /// Viewport the layout pipeline should anchor the initial containing
     /// block to, published by the JS persona (`__diting_setPersona`) so
     /// getBoundingClientRect agrees with window.innerWidth/innerHeight.
@@ -827,15 +828,15 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         "layout_rect" => {
             let nid = match parse_nid(&arg1) { Some(id) => id, None => return "null".into() };
             let epoch = dom.epoch();
-            let cache_hit = gs.layout_cache.borrow().as_ref().and_then(|(e, m)| {
+            let cache_hit = gs.layout_cache.borrow().as_ref().and_then(|(e, m, _)| {
                 if *e == epoch { m.get(&nid).copied() } else { None }
             });
             let rect = match cache_hit {
                 Some(r) => Some(r),
                 None => {
-                    let rects = layout_rects_all(&gs, dom);
+                    let (rects, order) = layout_run_all(&gs, dom);
                     let r = rects.get(&nid).copied();
-                    *gs.layout_cache.borrow_mut() = Some((epoch, rects));
+                    *gs.layout_cache.borrow_mut() = Some((epoch, rects, order));
                     r
                 }
             };
@@ -844,18 +845,50 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 None => "null".into(),
             }
         }
+        // Elements in paint order (ascending), from the same layout run as
+        // `layout_rect`. Backs elementFromPoint: document order is not paint
+        // order once positioned z-index siblings hoist out of it (obscura
+        // #738). Boxless inline wrappers are absent — the JS side ranks
+        // them with their nearest boxed ancestor.
+        #[cfg(feature = "screenshot")]
+        "paint_order" => {
+            let epoch = dom.epoch();
+            let cached = gs.layout_cache.borrow().as_ref().and_then(|(e, _, o)| {
+                if *e == epoch { Some(o.clone()) } else { None }
+            });
+            let order = match cached {
+                Some(o) => o,
+                None => {
+                    let (rects, order) = layout_run_all(&gs, dom);
+                    *gs.layout_cache.borrow_mut() = Some((epoch, rects, order.clone()));
+                    order
+                }
+            };
+            let mut s = String::with_capacity(order.len() * 8 + 2);
+            s.push('[');
+            for (i, id) in order.iter().enumerate() {
+                if i > 0 { s.push(','); }
+                s.push_str(&id.index().to_string());
+            }
+            s.push(']');
+            s
+        }
         #[cfg(not(feature = "screenshot"))]
         "layout_rect" => "null".into(),
+        #[cfg(not(feature = "screenshot"))]
+        "paint_order" => "null".into(),
         _ => "null".into(),
     }
 }
 
 /// Run the full diting style + layout pipeline over the live DOM tree and
-/// return every element's border-box rect. Styles are re-collected each run:
-/// attribute-level mutations (style/class writes) don't bump the tree epoch,
-/// so memoizing computed styles alongside the rects would serve stale geometry.
+/// return every element's border-box rect plus the paint order (see
+/// `layout_dom_with_paint_order_and_images`). Styles are re-collected each
+/// run: attribute-level mutations (style/class writes) don't bump the tree
+/// epoch, so memoizing computed styles alongside the rects would serve
+/// stale geometry.
 #[cfg(feature = "screenshot")]
-fn layout_rects_all(gs: &JsState, dom: &DomTree) -> HashMap<NodeId, [f32; 4]> {
+fn layout_run_all(gs: &JsState, dom: &DomTree) -> (HashMap<NodeId, [f32; 4]>, Vec<NodeId>) {
     // Same viewport the persona publishes to window.innerWidth/innerHeight,
     // so geometry agrees with what scripts read off `window` (and the ICB
     // has a definite size for fixed-box inset resolution — obscura#675).
@@ -874,10 +907,18 @@ fn layout_rects_all(gs: &JsState, dom: &DomTree) -> HashMap<NodeId, [f32; 4]> {
     );
     let styles = crate::diting_layout::compute_styles(dom, &rules);
     let fonts = crate::diting_fonts::font_book();
-    crate::diting_layout::layout_dom(dom, &styles, &fonts, viewport_width, viewport_height)
-        .into_iter()
-        .map(|(id, r)| (id, [r.x, r.y, r.width, r.height]))
-        .collect()
+    let (rects, _items, paint_order) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+        dom,
+        &styles,
+        &fonts,
+        viewport_width,
+        viewport_height,
+        None,
+    );
+    (
+        rects.into_iter().map(|(id, r)| (id, [r.x, r.y, r.width, r.height])).collect(),
+        paint_order,
+    )
 }
 
 /// Index of `n` among its parent's children (0-based).

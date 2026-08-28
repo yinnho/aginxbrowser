@@ -2187,6 +2187,33 @@ pub fn layout_dom_with_paint_and_images(
     viewport_height: f32,
     network_bytes: Option<&HashMap<String, Vec<u8>>>,
 ) -> (HashMap<NodeId, Rect>, Vec<PaintItem>) {
+    let (rects, items, _order) = layout_dom_with_paint_order_and_images(
+        tree,
+        styles,
+        fonts,
+        viewport_width,
+        viewport_height,
+        network_bytes,
+    );
+    (rects, items)
+}
+
+/// [`layout_dom_with_paint_and_images`] plus the paint order: every boxed
+/// element in the sequence the flat item list paints it, so the LAST entry
+/// whose rect contains a point is the element a pixel there shows. This is
+/// the ranking `elementFromPoint` needs — document order is not paint order
+/// once positioned siblings with z-index hoist out of it (obscura #738).
+/// Boxless flattened inline wrappers (span/a/label — obscura#722 lineage)
+/// are absent; hit testing ranks them with their nearest boxed ancestor,
+/// which paints their hoisted ink in-flow anyway.
+pub fn layout_dom_with_paint_order_and_images(
+    tree: &DomTree,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    fonts: &FontBook,
+    viewport_width: f32,
+    viewport_height: f32,
+    network_bytes: Option<&HashMap<String, Vec<u8>>>,
+) -> (HashMap<NodeId, Rect>, Vec<PaintItem>, Vec<NodeId>) {
     let mut taffy_tree = TaffyTree::new();
     let mut node_map: HashMap<taffy::tree::NodeId, NodeId> = HashMap::new();
 
@@ -2231,10 +2258,14 @@ pub fn layout_dom_with_paint_and_images(
 
     let mut rects = HashMap::new();
     let mut items: Vec<PaintItem> = Vec::new();
+    // Paint sequence of the boxed elements (obscura #738): filled by the
+    // `collect` walk, sibling bands already z-sorted. See the doc on
+    // [`layout_dom_with_paint_order_and_images`].
+    let mut paint_order: Vec<NodeId> = Vec::new();
     // Flattened inline wrappers (see build_element) recorded as
     // dom id → hoisted taffy children, for the union pass after the walk.
     let mut flattened: HashMap<NodeId, Vec<taffy::tree::NodeId>> = HashMap::new();
-    let Some(root_id) = root else { return (rects, items) };
+    let Some(root_id) = root else { return (rects, items, paint_order) };
     let Some(root_node) = build_element(
         tree,
         root_id,
@@ -2245,7 +2276,7 @@ pub fn layout_dom_with_paint_and_images(
         &mut node_map,
         &mut flattened,
     ) else {
-        return (rects, items);
+        return (rects, items, paint_order);
     };
 
     // The initial containing block (obscura#675 lineage fix): CSS anchors a
@@ -2436,7 +2467,7 @@ pub fn layout_dom_with_paint_and_images(
         }
     });
     if measured.is_err() {
-        return (rects, items);
+        return (rects, items, paint_order);
     }
 
     // --- float continuation (batch 8g) -----------------------------------
@@ -2606,7 +2637,7 @@ pub fn layout_dom_with_paint_and_images(
                     },
                 );
                 if re.is_err() {
-                    return (rects, items);
+                    return (rects, items, paint_order);
                 }
             }
         }
@@ -2631,11 +2662,22 @@ pub fn layout_dom_with_paint_and_images(
         rects: &mut HashMap<NodeId, Rect>,
         abs_by_node: &mut HashMap<taffy::tree::NodeId, Rect>,
         items: &mut Vec<PaintItem>,
+        paint_order: &mut Vec<NodeId>,
         node: taffy::tree::NodeId,
         offset: (f32, f32),
         viewport_width: f32,
     ) {
         let Ok(layout) = taffy_tree.layout(node) else { return };
+        // Hit testing (obscura #738): record this element's slot in the flat
+        // paint sequence as the walk reaches it. Because `collect` pushes a
+        // node's own items before recursing and sorts children into the
+        // z-index bands below, the resulting vector IS the paint order —
+        // descendants after ancestors, hoisted z>0 siblings after the flow.
+        // Text leaves and the synthetic ICB root never enter `node_map`, so
+        // only boxed elements land here.
+        if let Some(dom_id) = node_map.get(&node) {
+            paint_order.push(*dom_id);
+        }
         let abs = (offset.0 + layout.location.x, offset.1 + layout.location.y);
         // Every visited node's absolute border box — the union pass after
         // the walk rebuilds rects for flattened inline wrappers from kids.
@@ -2927,7 +2969,7 @@ pub fn layout_dom_with_paint_and_images(
         pos.sort_by_key(|(z, _)| *z);
         for list in [neg, mid, pos] {
             for (_, i) in list {
-                collect(tree, taffy_tree, node_map, styles, images, static_pos, rects, abs_by_node, items, children[i], abs, viewport_width);
+                collect(tree, taffy_tree, node_map, styles, images, static_pos, rects, abs_by_node, items, paint_order, children[i], abs, viewport_width);
             }
         }
         if clips {
@@ -2945,6 +2987,7 @@ pub fn layout_dom_with_paint_and_images(
         &mut rects,
         &mut abs_by_node,
         &mut items,
+        &mut paint_order,
         icb_node,
         (0.0, 0.0),
         viewport_width,
@@ -2998,7 +3041,7 @@ pub fn layout_dom_with_paint_and_images(
             );
         }
     }
-    (rects, items)
+    (rects, items, paint_order)
 }
 
 

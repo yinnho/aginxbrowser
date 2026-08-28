@@ -9414,19 +9414,61 @@ if (typeof Element !== 'undefined' && !Element.prototype.toggleAttribute) {
   _markNative(Element.prototype.toggleAttribute);
 }
 
-// Document.elementFromPoint / elementsFromPoint — no layout engine, so this is a stub:
-// in-viewport coords return <body> (or <html> as fallback), out-of-viewport returns null.
-// Wrong-but-non-throwing beats "undefined", which traps ad/analytics bootstraps in retry loops
-// (see issue #63).
+// Document.elementFromPoint / elementsFromPoint — hit testing against the
+// element rects (real layout geometry under the screenshot build, the
+// synthetic grid otherwise; see issue #63 for the original stub rationale).
+// Flat iteration over every element, NOT a tree walk: rects don't always
+// nest (a synthetic child rect can lie outside its parent's), so a walk
+// that only descends into containing ancestors would miss deep elements.
+//
+// Which overlapping candidate wins is a PAINT question, not a document
+// order question (obscura #738): a close button with z-index 1002 that
+// precedes a z-index 1001 overlay in the DOM is the element the pixel
+// shows. The Rust side exports the layout walk's paint order
+// (_domRaw("paint_order")); candidates rank by it, ties (and the
+// no-layout fallback) fall back to document order via nid. Boxless inline
+// wrappers (span/a/label) never get their own slot — rank them with their
+// nearest boxed ancestor, whose subtree painted their hoisted ink anyway.
 if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
-  // Real hit testing against the synthetic bboxes from getBoundingClientRect.
-  // Flat iteration over every element, NOT a tree walk: our synthetic rects
-  // don't form a proper containment hierarchy (a child's rect can lie far
-  // outside its parent's), so a tree walk that only descends into ancestors
-  // containing (x,y) would never reach a deep <input> inside <label><p>.
-  // Returns the deepest matching element (highest nid wins as a proxy for
-  // tree depth) so descendants beat ancestors.
+  function __ditingPaintRanks() {
+    try {
+      var raw = _domRaw("paint_order", "", "");
+      if (!raw) return null;
+      var ids = JSON.parse(raw);
+      if (!ids || !ids.length) return null;
+      var rank = {};
+      for (var i = 0; i < ids.length; i++) rank[ids[i]] = i;
+      return rank;
+    } catch (e) {
+      return null;
+    }
+  }
+  function __ditingPaintRankOf(el, rank) {
+    var v = rank[el._nid | 0];
+    if (v !== undefined) return v;
+    for (var p = el.parentElement; p; p = p.parentElement) {
+      var pv = rank[p._nid | 0];
+      if (pv !== undefined) return pv;
+    }
+    return -1;
+  }
   Document.prototype.elementFromPoint = function(x, y) {
+    var cands = __ditingHitCandidates.call(this, x, y);
+    if (cands === null) return null;
+    return cands.length ? cands[0] : (this.body || this.documentElement || null);
+  };
+  Document.prototype.elementsFromPoint = function(x, y) {
+    var cands = __ditingHitCandidates.call(this, x, y);
+    if (cands === null) return [];
+    if (cands.length) return cands;
+    var el = this.elementFromPoint(x, y); // body fallback, as before
+    return el ? [el] : [];
+  };
+  // Shared candidate walk: every non-root element whose rect contains
+  // (x, y), sorted front-to-back by (paint rank, document order). Invalid
+  // coordinates return null so both entry points can distinguish "miss"
+  // from "empty list".
+  function __ditingHitCandidates(x, y) {
     if (typeof x !== 'number' || typeof y !== 'number' || !isFinite(x) || !isFinite(y)) {
       return null;
     }
@@ -9434,8 +9476,8 @@ if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
     var h = (typeof window !== 'undefined' && window.innerHeight) || 720;
     if (x < 0 || y < 0 || x > w || y > h) return null;
     var all = this.querySelectorAll('*');
-    var best = null;
-    var bestNid = -1;
+    var rank = __ditingPaintRanks();
+    var cands = [];
     for (var i = 0; i < all.length; i++) {
       var el = all[i];
       if (!el || !el.getBoundingClientRect) continue;
@@ -9445,16 +9487,19 @@ if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
       var r = el.getBoundingClientRect();
       if (r.width === 0 || r.height === 0) continue;
       if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
-        var nid = el._nid | 0;
-        if (nid > bestNid) { best = el; bestNid = nid; }
+        cands.push(el);
       }
     }
-    return best || this.body || this.documentElement || null;
-  };
-  Document.prototype.elementsFromPoint = function(x, y) {
-    var el = this.elementFromPoint(x, y);
-    return el ? [el] : [];
-  };
+    if (!cands.length) return cands;
+    cands.sort(function(a, b) {
+      // No paint table (default build / synthetic grid): document order,
+      // deepest (highest nid) wins — the pre-#738 behavior.
+      if (!rank) return (b._nid | 0) - (a._nid | 0);
+      return __ditingPaintRankOf(b, rank) - __ditingPaintRankOf(a, rank)
+        || (b._nid | 0) - (a._nid | 0);
+    });
+    return cands;
+  }
 }
 if (typeof ShadowRoot !== 'undefined' && !ShadowRoot.prototype.elementFromPoint) {
   ShadowRoot.prototype.elementFromPoint = function(x, y) {
