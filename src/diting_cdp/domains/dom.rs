@@ -324,23 +324,37 @@ fn nums_from_value(val: &Value) -> Option<Vec<f64>> {
     val.as_array().map(|arr| arr.iter().filter_map(|v| v.as_f64()).collect())
 }
 
-fn quad_from_value(val: &Value) -> Vec<Value> {
-    match nums_from_value(val) {
-        Some(nums) if nums.len() == 8 => nums.iter().map(|n| json!(n)).collect(),
-        _ => FALLBACK_QUAD.iter().map(|n| json!(n)).collect(),
+// Chrome's CDP wire emits integral doubles without the ".0" (base::Value JSON
+// writer), so a box at x=256 arrives as `256` — and strict clients (Hermes
+// Agent browser tools) deserialize quads as i64, failing on `256.0` with
+// "invalid type: floating point, expected i64" (obscura#576). Fractional
+// coordinates stay fractional; the 2^53 bound keeps absurd magnitudes from
+// saturating the i64 cast instead of serializing.
+fn coord_json(n: &f64) -> Value {
+    if n.fract() == 0.0 && n.abs() <= 9_007_199_254_740_992.0 {
+        json!(*n as i64)
+    } else {
+        json!(n)
     }
 }
 
-fn box_from_value(val: &Value) -> (Vec<Value>, f64, f64) {
+fn quad_from_value(val: &Value) -> Vec<Value> {
+    match nums_from_value(val) {
+        Some(nums) if nums.len() == 8 => nums.iter().map(coord_json).collect(),
+        _ => FALLBACK_QUAD.iter().map(coord_json).collect(),
+    }
+}
+
+fn box_from_value(val: &Value) -> (Vec<Value>, Value, Value) {
     match nums_from_value(val) {
         Some(nums) if nums.len() >= 10 => {
-            let q: Vec<Value> = nums[..8].iter().map(|n| json!(n)).collect();
-            (q, nums[8], nums[9])
+            let q: Vec<Value> = nums[..8].iter().map(coord_json).collect();
+            (q, coord_json(&nums[8]), coord_json(&nums[9]))
         }
         _ => (
-            FALLBACK_QUAD.iter().map(|n| json!(n)).collect(),
-            100.0,
-            20.0,
+            FALLBACK_QUAD.iter().map(coord_json).collect(),
+            json!(100),
+            json!(20),
         ),
     }
 }
@@ -509,7 +523,7 @@ fn serialize_node(dom: &DomTree, node_id: NodeId, max_depth: u32, current_depth:
 /// DOM.setFileInputFiles without pulling in a dependency.
 fn encode_base64(input: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = *chunk.get(1).unwrap_or(&0) as u32;
@@ -580,6 +594,42 @@ mod tests {
         assert_eq!(encode_base64(b"fo"), "Zm8=");
         assert_eq!(encode_base64(b"foo"), "Zm9v");
         assert_eq!(encode_base64(b"foob"), "Zm9vYg==");
+    }
+
+    #[test]
+    fn quad_coords_serialize_integral_values_as_integers() {
+        // obscura#576: Chrome's CDP wire emits integral doubles without the
+        // ".0" (base::Value JSON writer), and strict clients (Hermes Agent
+        // browser tools) deserialize quads as i64 — a "256.0" fails with
+        // "invalid type: floating point `256.0`, expected i64". Fractional
+        // coordinates must stay fractional. Payload is the issue's quad.
+        let quad = quad_from_value(&json!([
+            256.0,
+            206.0390625,
+            347.25,
+            206.0390625,
+            347.25,
+            225.0390625,
+            256.0,
+            225.0390625
+        ]));
+        let wire = serde_json::to_string(&quad).expect("serialize");
+        assert!(
+            wire.starts_with("[256,206.0390625,347.25,"),
+            "integral coords must serialize without .0, got {wire}"
+        );
+
+        // Fallback quad is all-integral too, and width/height ride the same rule.
+        let (quad, w, h) = box_from_value(&json!([
+            8.0, 8.0, 108.0, 8.0, 108.0, 28.0, 8.0, 28.0, 100.0, 20.0
+        ]));
+        let wire = serde_json::to_string(&quad).expect("serialize");
+        assert_eq!(
+            wire, "[8,8,108,8,108,28,8,28]",
+            "fallback quad integral: {wire}"
+        );
+        assert_eq!(serde_json::to_string(&w).unwrap(), "100");
+        assert_eq!(serde_json::to_string(&h).unwrap(), "20");
     }
 
     #[test]

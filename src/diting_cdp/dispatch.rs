@@ -786,4 +786,84 @@ mod tests {
             "CJK and control chars insert verbatim"
         );
     }
+
+    // DOM.getBoxModel (obscura#576): Chrome's wire emits integral doubles
+    // without the ".0", and strict clients deserialize quads as i64. The
+    // whole pipeline — evaluate through the quad helpers — must land on
+    // integer-typed JSON numbers for integral coordinates.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dom_get_box_model_emits_integral_coords_as_integers() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-box-model".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({
+                "url": "data:text/html,<div id=d style='position:absolute;left:0;top:0;width:100px;height:20px'>x</div>"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        let doc = CdpRequest {
+            id: 2,
+            method: "DOM.getDocument".to_string(),
+            params: json!({}),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&doc, &mut ctx).await;
+        assert!(resp.error.is_none(), "getDocument failed: {:?}", resp.error);
+        let root_id = resp.result.expect("result")["root"]["nodeId"]
+            .as_u64()
+            .expect("root nodeId");
+
+        let query = CdpRequest {
+            id: 3,
+            method: "DOM.querySelector".to_string(),
+            params: json!({ "nodeId": root_id, "selector": "#d" }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&query, &mut ctx).await;
+        assert!(
+            resp.error.is_none(),
+            "querySelector failed: {:?}",
+            resp.error
+        );
+        let node_id = resp.result.expect("result")["nodeId"]
+            .as_u64()
+            .expect("matched nodeId");
+        assert!(node_id > 0, "selector must match the div");
+
+        let box_req = CdpRequest {
+            id: 4,
+            method: "DOM.getBoxModel".to_string(),
+            params: json!({ "nodeId": node_id }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&box_req, &mut ctx).await;
+        assert!(resp.error.is_none(), "getBoxModel failed: {:?}", resp.error);
+        let model = &resp.result.expect("result")["model"];
+        let content = model["content"].as_array().expect("content quad");
+        assert_eq!(content.len(), 8);
+        // A zero-layout test page yields all-zero (or fallback) integral
+        // coords — the point is the JSON *type*: i64, never 0.0.
+        assert!(
+            content.iter().all(|v| v.is_i64()),
+            "integral coords must be integer-typed on the wire, got {content:?}"
+        );
+        let wire = serde_json::to_string(content).expect("serialize");
+        assert!(
+            !wire.contains(".0") && !wire.contains("."),
+            "integral coords must serialize without a decimal point, got {wire}"
+        );
+        assert!(
+            model["width"].is_i64() && model["height"].is_i64(),
+            "integral width/height must be integer-typed, got {}x{}",
+            model["width"],
+            model["height"]
+        );
+    }
 }
