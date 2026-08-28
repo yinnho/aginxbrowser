@@ -14,7 +14,7 @@ pub struct SogouEngine {
 
 impl SogouEngine {
     pub fn new() -> Self {
-        let client = reqwest::Client::builder()
+        let client = crate::diting_net::client::reqwest_builder_no_env_proxy()
             .timeout(std::time::Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
             .build()

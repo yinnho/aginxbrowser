@@ -1297,7 +1297,7 @@ fn build_request_client(proxy_url: Option<&str>) -> Result<reqwest::Client, Stri
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(30_000);
-    let mut builder = reqwest::Client::builder()
+    let mut builder = crate::diting_net::client::reqwest_builder_no_env_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_millis(timeout_ms))
         .connect_timeout(std::time::Duration::from_secs(10))

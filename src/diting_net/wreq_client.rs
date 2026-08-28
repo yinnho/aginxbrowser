@@ -85,6 +85,10 @@ pub struct StealthHttpClient {
     proxied_client: Option<wreq::Client>,
     /// Direct-connect client (no proxy). Always present.
     direct_client: wreq::Client,
+    /// The configured upstream proxy, kept for error reporting only (the
+    /// clients already embed it) — an unreachable proxy must be named in the
+    /// error, not folded into "error sending request" (obscura#491).
+    proxy_url: Option<String>,
     pub cookie_jar: Arc<CookieJar>,
     pub extra_headers: RwLock<HashMap<String, String>>,
     /// Override the emulation's built-in User-Agent. wreq's Chrome emulation
@@ -151,7 +155,12 @@ impl StealthHttpClient {
             .emulation_os(os)
             .build();
 
+        // .no_proxy() disables wreq's implicit env/system proxy matcher
+        // (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) — the engine's proxy decision is
+        // the explicit `proxy_url` below, nothing else. Must precede the
+        // .proxy() attach, which no_proxy() would otherwise clear.
         let mut builder = wreq::Client::builder()
+            .no_proxy()
             .emulation(emulation_opts)
             .cert_store(cert_store)
             .timeout(Duration::from_secs(30))
@@ -203,6 +212,7 @@ impl StealthHttpClient {
         StealthHttpClient {
             proxied_client,
             direct_client,
+            proxy_url: proxy_url.map(|s| s.to_string()),
             cookie_jar,
             extra_headers: RwLock::new(HashMap::new()),
             user_agent: RwLock::new(
@@ -286,10 +296,27 @@ impl StealthHttpClient {
             }
 
             self.in_flight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let resp = send_get_with_connection_reset_retry(req, &current_url).await.map_err(|e| {
-                self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                NetError::Network(format!("{}: {} (source: {:?})", current_url, e, e.source()))
-            })?;
+            let resp = match send_get_with_connection_reset_retry(req, &current_url).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    // Mirror the reqwest path: name an unreachable configured
+                    // proxy instead of folding it into "error sending request"
+                    // (obscura#491).
+                    return Err(match (&self.proxy_url, e.is_connect()) {
+                        (Some(proxy), true) => NetError::Network(format!(
+                            "upstream proxy {} unreachable while fetching {}: {} — unset AGINXBROWSER_PROXY to connect directly",
+                            proxy, current_url, e
+                        )),
+                        _ => NetError::Network(format!(
+                            "{}: {} (source: {:?})",
+                            current_url,
+                            e,
+                            e.source()
+                        )),
+                    });
+                }
+            };
             self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
 
             let status = resp.status();

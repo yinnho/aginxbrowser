@@ -25,7 +25,7 @@ impl BingNewsEngine {
             } else {
                 proxy
             };
-            let mut builder = reqwest::Client::builder()
+            let mut builder = crate::diting_net::client::reqwest_builder_no_env_proxy()
                 .timeout(std::time::Duration::from_secs(12))
                 .redirect(reqwest::redirect::Policy::none());
             match reqwest::Proxy::all(&proxy_str) {

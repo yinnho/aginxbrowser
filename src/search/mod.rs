@@ -507,7 +507,7 @@ pub fn html_unescape(s: &str) -> String {
 
 /// Build a plain reqwest client suitable for search (no auto-redirect, 15s timeout).
 pub fn build_plain_client(timeout_secs: u64) -> reqwest::Client {
-    reqwest::Client::builder()
+    crate::diting_net::client::reqwest_builder_no_env_proxy()
         .timeout(Duration::from_secs(timeout_secs))
         .redirect(reqwest::redirect::Policy::none())
         .build()

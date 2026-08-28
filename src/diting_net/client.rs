@@ -12,6 +12,23 @@ use url::Url;
 
 use crate::diting_net::cookies::CookieJar;
 
+/// A reqwest builder with reqwest's implicit system/env proxy matcher turned
+/// off. Every HTTP client the engine builds goes through here.
+///
+/// reqwest reads `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` from the
+/// environment by default (loopback destinations are exempt, like Chrome's
+/// implicit localhost bypass), which silently routes engine traffic through
+/// a proxy the operator never configured in the engine — `use_proxy:false`
+/// fetches, search's direct-first tier, robots checks, downloads, all of
+/// it. When that env proxy dies, every public fetch fails with an error
+/// that never mentions a proxy (obscura#491). The engine's proxy decision
+/// is explicit instead: `AGINXBROWSER_PROXY` / the context `proxy_url`,
+/// attached with `.proxy()` at the call sites — and `.no_proxy()` must come
+/// BEFORE that attach, since it also clears any already-pushed proxy.
+pub(crate) fn reqwest_builder_no_env_proxy() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().no_proxy()
+}
+
 #[derive(Debug, Clone)]
 pub struct Response {
     pub url: Url,
@@ -441,7 +458,7 @@ impl HttpClient {
 
     async fn get_client(&self) -> &Client {
         self.client.get_or_init(|| async {
-            let mut builder = Client::builder()
+            let mut builder = reqwest_builder_no_env_proxy()
                 .redirect(Policy::none())
                 .timeout(Duration::from_secs(30))
                 .connect_timeout(Duration::from_secs(10))
@@ -472,7 +489,7 @@ impl HttpClient {
     /// Build (once) a direct-connect client with no upstream proxy.
     async fn get_direct_client(&self) -> &Client {
         self.direct_client.get_or_init(|| async {
-            Client::builder()
+            reqwest_builder_no_env_proxy()
                 .redirect(Policy::none())
                 .timeout(Duration::from_secs(30))
                 .connect_timeout(Duration::from_secs(10))
@@ -734,10 +751,23 @@ impl HttpClient {
             }
 
             self.in_flight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let resp = req_builder.send().await.map_err(|e| {
-                self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                NetError::Network(format!("{}: {}", current_url, e))
-            })?;
+            let resp = match req_builder.send().await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    // Name the culprit when the configured upstream proxy is
+                    // the part that cannot be reached: the target URL alone
+                    // reads as "site down" and sends the operator debugging
+                    // the wrong layer (obscura#491's debugging cost).
+                    return Err(match (&self.proxy_url, e.is_connect()) {
+                        (Some(proxy), true) => NetError::Network(format!(
+                            "upstream proxy {} unreachable while fetching {}: {} — unset AGINXBROWSER_PROXY to connect directly",
+                            proxy, current_url, e
+                        )),
+                        _ => NetError::Network(format!("{}: {}", current_url, e)),
+                    });
+                }
+            };
             self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
 
             let status = resp.status();
@@ -983,4 +1013,140 @@ mod tests {
     }
 
     use std::str::FromStr;
+
+    /// Serve a canned 200 response on a NON-loopback local address.
+    ///
+    /// reqwest exempts loopback destinations from env-proxy matching (like
+    /// Chrome's implicit localhost bypass), so a 127.0.0.1 fixture is blind
+    /// to exactly the failure these tests pin — the first probe round here
+    /// reported "env ignored" purely because of that exemption. The LAN
+    /// address is discovered via a UDP connect (no packet leaves; it only
+    /// makes the routing table pick an interface).
+    async fn lan_http_origin(body: &'static str) -> Option<(Url, tokio::task::JoinHandle<()>)> {
+        let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+        probe.connect("8.8.8.8:80").ok()?;
+        let ip = probe.local_addr().ok()?.ip();
+        if ip.is_loopback() {
+            return None;
+        }
+        let listener = tokio::net::TcpListener::bind((ip, 0)).await.ok()?;
+        let addr = listener.local_addr().ok()?;
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else { break };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 1024];
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        stream.read(&mut buf),
+                    )
+                    .await;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        Some((Url::parse(&format!("http://{addr}/")).unwrap(), handle))
+    }
+
+    fn set_dead_standard_proxy_env() {
+        for (k, v) in [
+            ("HTTP_PROXY", "http://127.0.0.1:1"),
+            ("HTTPS_PROXY", "http://127.0.0.1:1"),
+            ("ALL_PROXY", "http://127.0.0.1:1"),
+            ("http_proxy", "http://127.0.0.1:1"),
+            ("https_proxy", "http://127.0.0.1:1"),
+            ("all_proxy", "http://127.0.0.1:1"),
+        ] {
+            unsafe { std::env::set_var(k, v) };
+        }
+    }
+
+    fn clear_standard_proxy_env() {
+        for k in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            unsafe { std::env::remove_var(k) };
+        }
+    }
+
+    /// obscura#491 class: standard proxy env vars must not silently route
+    /// engine traffic through a proxy the operator never configured in the
+    /// engine. If they do, a dead HTTP_PROXY takes down every public fetch
+    /// with an error that never mentions a proxy. Runs under the crate env
+    /// lock because the env mutation is process-global.
+    #[allow(clippy::await_holding_lock)] // env guard must span the fixture fetch — that's the serialization
+    #[tokio::test]
+    async fn standard_proxy_env_cannot_hijack_engine_clients() {
+        let Some((url, origin)) = lan_http_origin("env-proxy-hijack").await else {
+            eprintln!("skip: no non-loopback local address to serve on");
+            return;
+        };
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        set_dead_standard_proxy_env();
+
+        // proxy_url None + private-network allowed (the LAN fixture address is
+        // RFC1918): the operator asked for a direct fetch.
+        let client = HttpClient::with_full_options(
+            std::sync::Arc::new(CookieJar::new()),
+            None,
+            true,
+        );
+        let fetched = client.fetch(&url).await;
+
+        clear_standard_proxy_env();
+        origin.abort();
+
+        match fetched {
+            Ok(resp) => assert_eq!(resp.status, 200, "direct fetch must succeed"),
+            Err(e) => panic!("standard proxy env hijacked a proxy-less client: {e:?}"),
+        }
+    }
+
+    /// #664 lesson applied to the proxy path: when the configured upstream
+    /// proxy is unreachable, the error must name the proxy and its knob —
+    /// the reader should not have to go verbose-logging to learn a proxy is
+    /// involved at all (the original #491 debugging cost).
+    #[allow(clippy::await_holding_lock)] // env guard must span the fixture fetch — that's the serialization
+    #[tokio::test]
+    async fn dead_upstream_proxy_error_names_the_proxy() {
+        let Some((url, origin)) = lan_http_origin("proxy-naming").await else {
+            eprintln!("skip: no non-loopback local address to serve on");
+            return;
+        };
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        clear_standard_proxy_env();
+
+        let client = HttpClient::with_options(
+            std::sync::Arc::new(CookieJar::new()),
+            Some("http://127.0.0.1:1"),
+        );
+        // The engine's own proxy gate: RFC1918 target needs the opt-in even
+        // though the dial actually goes to the dead proxy.
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+        let fetched = client.fetch(&url).await;
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+        origin.abort();
+
+        let err = fetched.expect_err("dialing a dead proxy must fail");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("upstream proxy") && msg.contains("http://127.0.0.1:1"),
+            "error must name the unreachable proxy, got: {msg}"
+        );
+        assert!(
+            msg.contains("AGINXBROWSER_PROXY"),
+            "error must name the knob, got: {msg}"
+        );
+    }
 }

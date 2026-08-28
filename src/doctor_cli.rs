@@ -100,7 +100,19 @@ fn env_checks() -> Vec<Check> {
     ));
     match std::env::var("AGINXBROWSER_PROXY") {
         Ok(p) if !p.is_empty() => out.push(check(Status::Info, "proxy", format!("{p}"))),
-        _ => out.push(check(Status::Info, "proxy", "none — direct-first, auto-fallback per fetch")),
+        _ => {
+            out.push(check(Status::Info, "proxy", "none — direct-first, auto-fallback per fetch"));
+            // The engine ignores standard proxy env vars (every client pins
+            // the implicit matcher off); say so before a shell proxy looks
+            // "configured" while fetches go direct.
+            if let Some(env) = crate::config::standard_proxy_env() {
+                out.push(check(
+                    Status::Info,
+                    "proxy",
+                    format!("{env} set — ignored by the engine; set AGINXBROWSER_PROXY to use it"),
+                ));
+            }
+        }
     }
     if std::env::var_os("AGINXBROWSER_ALLOW_PRIVATE_NETWORK").is_some() {
         out.push(check(
@@ -116,7 +128,10 @@ fn env_checks() -> Vec<Check> {
 /// "network blocked". 10s cap so a firewalled box doesn't hang the doctor.
 async fn egress_check() -> Check {
     let started = Instant::now();
-    let client = match reqwest::Client::builder()
+    // Same client policy as the engine (no implicit env proxy) so the check
+    // answers the question that matters: can the ENGINE reach the web as
+    // configured — not "does this shell have a working proxy".
+    let client = match crate::diting_net::client::reqwest_builder_no_env_proxy()
         .timeout(Duration::from_secs(10))
         .user_agent(format!("aginxbrowser-doctor/{}", env!("CARGO_PKG_VERSION")))
         .build()

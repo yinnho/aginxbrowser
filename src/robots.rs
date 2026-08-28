@@ -177,7 +177,7 @@ fn ignore_env() -> bool {
 /// the instance's global proxy setting (never the stealth client — and never
 /// a borrowed fingerprint) with a short timeout; robots.txt is small.
 async fn fetch_policy(origin: &str) -> Policy {
-    let mut builder = reqwest::Client::builder()
+    let mut builder = crate::diting_net::client::reqwest_builder_no_env_proxy()
         .timeout(Duration::from_secs(5))
         .user_agent(format!(
             "{PRODUCT_TOKEN}/{} (+https://browser.aginx.net)",

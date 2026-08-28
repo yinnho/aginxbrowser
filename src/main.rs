@@ -550,6 +550,18 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     tracing::info!("aginxbrowser listening on {}", listener.local_addr()?);
 
+    // Standard proxy env vars do NOT configure this engine (reqwest/wreq's
+    // implicit env matcher is pinned off on every engine client); make that
+    // visible once at startup instead of letting a shell proxy look
+    // "configured" while fetches go direct (obscura#491).
+    if config::proxy_from_env().is_none() {
+        if let Some(env) = config::standard_proxy_env() {
+            tracing::warn!(
+                "{env} is set but ignored — set AGINXBROWSER_PROXY to route engine traffic through a proxy"
+            );
+        }
+    }
+
     // Periodically persist the process-global shared cookie jar (stateless
     // handlers mutate it in place; a crash shouldn't cost returning-client
     // cookies that keep anti-bot CAPTCHA rates down).
