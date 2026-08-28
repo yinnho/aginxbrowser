@@ -272,6 +272,20 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
         if let Some(rows) = &style.grid_template_rows {
             s.grid_template_rows = rows.iter().map(|t| to_grid_track(*t)).collect();
         }
+        if let Some(matrix) = &style.grid_template_areas {
+            if let Some(areas) = template_areas_from_matrix(matrix) {
+                s.grid_template_areas = Some(areas);
+            }
+        }
+    }
+    // Named-area placement: `grid-area: <name>` expands to the area's
+    // implicit `<name>-start`/`<name>-end` lines on both axes (CSS §8,
+    // exactly the convention taffy's NamedLineResolver implements).
+    if let Some(name) = &style.grid_area {
+        let start = taffy::style::GridPlacement::NamedLine(format!("{}-start", name), 1);
+        let end = taffy::style::GridPlacement::NamedLine(format!("{}-end", name), 1);
+        s.grid_row = taffy::geometry::Line { start: start.clone(), end: end.clone() };
+        s.grid_column = taffy::geometry::Line { start, end };
     }
 
     // --- positioning + clamps (batch 2d) ---
@@ -337,7 +351,7 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
 /// diting_css track → taffy track: `1fr` maps to minmax(auto, 1fr), a px
 /// track is fixed, `auto` sizes to content.
 fn to_grid_track(track: GridTrack) -> taffy::style::GridTemplateComponent<String> {
-    use taffy::style::TrackSizingFunction;
+    use taffy::style::{MaxTrackSizingFunction, MinTrackSizingFunction, TrackSizingFunction};
     match track {
         GridTrack::Fr(f) => {
             let tsf: TrackSizingFunction = fr(f);
@@ -348,7 +362,68 @@ fn to_grid_track(track: GridTrack) -> taffy::style::GridTemplateComponent<String
             tsf.into()
         }
         GridTrack::Auto => TrackSizingFunction::AUTO.into(),
+        GridTrack::MinMax { min, max } => {
+            // min-side fr is invalid CSS; treat it as auto like the spec's
+            // clamping does for the min track sizing function.
+            let t_min: MinTrackSizingFunction = match min {
+                crate::diting_css::TrackSize::Px(px) => length(px),
+                _ => MinTrackSizingFunction::AUTO,
+            };
+            let t_max: MaxTrackSizingFunction = match max {
+                crate::diting_css::TrackSize::Px(px) => length(px),
+                crate::diting_css::TrackSize::Fr(f) => fr(f),
+                _ => MaxTrackSizingFunction::AUTO,
+            };
+            let tsf: TrackSizingFunction = minmax(t_min, t_max);
+            tsf.into()
+        }
     }
+}
+
+/// `'nav main' 'nav footer'` cell matrix → taffy `GridTemplateAreas`: each
+/// distinct name becomes the bounding rectangle of its cells (CSS requires
+/// named areas to be rectangular; `.` cells are null). Taffy's resolver then
+/// derives the implicit `<name>-start`/`<name>-end` grid lines that
+/// `grid-area: <name>` items reference.
+fn template_areas_from_matrix(matrix: &[Vec<String>]) -> Option<taffy::style::GridTemplateAreas<String>> {
+    use taffy::style::GridTemplateArea;
+    let cols = matrix.first()?.len();
+    if cols == 0 || matrix.iter().any(|r| r.len() != cols) {
+        return None;
+    }
+    let mut areas: Vec<GridTemplateArea<String>> = Vec::new();
+    for (r, row) in matrix.iter().enumerate() {
+        for (c, cell) in row.iter().enumerate() {
+            if cell == "." {
+                continue;
+            }
+            match areas.iter_mut().find(|a| a.name == *cell) {
+                Some(a) => {
+                    a.row_start = a.row_start.min((r + 1) as u16);
+                    a.row_end = a.row_end.max((r + 2) as u16);
+                    a.column_start = a.column_start.min((c + 1) as u16);
+                    a.column_end = a.column_end.max((c + 2) as u16);
+                }
+                None => areas.push(GridTemplateArea {
+                    name: cell.clone(),
+                    // GridTemplateArea fields are 1-based LINE indices
+                    // (row 1 = before the first track), matching how CSS
+                    // numbers grid lines. Feeding 0-based track indices
+                    // lands items on line 0, which the spec makes invalid
+                    // — placement silently degrades to auto.
+                    row_start: (r + 1) as u16,
+                    row_end: (r + 2) as u16,
+                    column_start: (c + 1) as u16,
+                    column_end: (c + 2) as u16,
+                }),
+            }
+        }
+    }
+    Some(taffy::style::GridTemplateAreas {
+        areas,
+        row_count: matrix.len() as u16,
+        column_count: cols as u16,
+    })
 }
 
 /// Padding contribution in px for the content-box→border-box carry-over
@@ -2203,9 +2278,20 @@ pub fn layout_dom_with_paint_and_images(
                 // the float's OWN zone row (the 8b flow column) share the
                 // float's taffy parent — they are the content the float
                 // already excludes by construction, so skip them.
+                let mut below = *float_dom;
                 let mut cur = parent_dom;
                 loop {
-                    let Some(grand) = tree.with_node(cur, |n| n.parent).flatten() else { break };
+                    // A grid/flex container establishes an independent
+                    // formatting context: its children are grid/flex items
+                    // that CSS floats can never displace. Vector 2022 parks
+                    // floated navboxes deep inside the article's mw-body
+                    // grid — without this stop the climb escapes the grid
+                    // and narrows the page's TOC column to max-width 0.
+                    if styles.get(&cur).is_some_and(|s| {
+                        matches!(s.display, Some(CssDisplay::Grid) | Some(CssDisplay::Flex))
+                    }) {
+                        break;
+                    }
                     // cur's taffy box shares the float's taffy parent — both
                     // sit inside the same synthetic 8b/8c/8d row, whose
                     // contents the float already excludes. Stop climbing.
@@ -2215,28 +2301,17 @@ pub fn layout_dom_with_paint_and_images(
                         }
                     }
                     let siblings = tree.children(cur);
-                    for sib in siblings {
-                        if sib == *float_dom {
-                            continue;
-                        }
-                        // Ancestors of the float (its parent chain up to the
-                        // BFC) are not "later content" — narrowing the body
-                        // itself would shrink the whole zone row.
-                        let mut is_ancestor = false;
-                        {
-                            let mut a = Some(*float_dom);
-                            while let Some(x) = a {
-                                if x == sib {
-                                    is_ancestor = true;
-                                    break;
-                                }
-                                a = tree.with_node(x, |n| n.parent).flatten();
-                            }
-                        }
-                        if is_ancestor {
-                            continue;
-                        }
-                        let Some(&snid) = dom_of.get(&sib) else { continue };
+                    // Floats displace only content that FOLLOWS them in
+                    // document order: siblings BEFORE the float's branch
+                    // keep their full width (their boxes predate the float's
+                    // band). Narrowing them would, e.g., shrink every
+                    // section above an article-bottom navbox float.
+                    let after = match siblings.iter().position(|s| *s == below) {
+                        Some(i) => &siblings[i + 1..],
+                        None => &siblings[..],
+                    };
+                    for sib in after {
+                        let Some(&snid) = dom_of.get(sib) else { continue };
                         // Anything whose taffy ANCESTRY runs through the
                         // float's own synthetic row (the 8b flow column
                         // wraps the zone's blocks) is content the float
@@ -2302,6 +2377,8 @@ pub fn layout_dom_with_paint_and_images(
                             }
                         }
                     }
+                    below = cur;
+                    let Some(grand) = tree.with_node(cur, |n| n.parent).flatten() else { break };
                     cur = grand;
                 }
             }
@@ -2683,6 +2760,21 @@ pub fn layout_dom_with_paint_and_images(
             max_y = max_y.max(r.y + r.height);
         }
         if any {
+            // Strut (obscura#722 residual): the inline's own box carries its
+            // line-height even when its content is shorter — a replaced-only
+            // inline (`<a><img 8x8></a>`) or a smaller-font descendant unions
+            // below the line box Chrome reports. Grow the union vertically to
+            // the element's effective line-height, split like half-leading.
+            // Sub-pixel shortfalls (< 1px) are run-metric rounding, not a
+            // missing strut — growing there just pushes the first line's
+            // inline above y=0, which Chrome never reports.
+            let (_, _, lh) = font_context(tree, *dom, styles);
+            let h = max_y - min_y;
+            if lh - h > 1.0 {
+                let grow = (lh - h) / 2.0;
+                min_y -= grow;
+                max_y += grow;
+            }
             rects.insert(
                 *dom,
                 Rect {

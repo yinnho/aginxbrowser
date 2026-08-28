@@ -423,3 +423,188 @@
         // measure's 10px stands.
         assert_eq!(size, Size { width: 300.0, height: 10.0 });
     }
+
+/// Strut on flattened inlines (obscura#722 residual, our side): the union
+/// pass rebuilds a rect from hoisted kids, and that union must grow to the
+/// element's own effective line-height — a smaller-font descendant (or a
+/// replaced-only inline) otherwise reports a box shorter than the line box
+/// Chrome hands out, and click targeting by rect lands short. Structural
+/// assertion: no Chrome oracle, we lock our own contract.
+#[test]
+fn flattened_inline_union_carries_strut_height() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    let html = r#"<html><body><p>before <a style="line-height:32px"><span style="font-size:8px">x</span></a> after</p></body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let rects = crate::diting_layout::layout_dom(
+        &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0,
+    );
+
+    let a_id = tree.query_selector_all("a").unwrap()[0];
+    let r = rects.get(&a_id).expect("flattened <a> must own a union rect");
+    assert!(
+        r.height >= 31.0,
+        "own line-height 32px must strut the union; got {r:?}"
+    );
+    assert!(r.height <= 40.0, "strut must not overshoot the line box; got {r:?}");
+    assert!(r.width > 0.0, "text content must give the inline width");
+
+    // Regression guard: a plain text inline keeps a sane line box (no strut
+    // needed — its word leaves already carry the line height).
+    let html2 = r#"<html><body><p>plain <b>bold word</b> tail</p></body></html>"#;
+    let tree2 = parse_html(html2);
+    let styles2 = crate::diting_layout::compute_styles(&tree2, &rules);
+    let rects2 = crate::diting_layout::layout_dom(
+        &tree2, &styles2, &crate::diting_fonts::font_book(), 1280.0, 800.0,
+    );
+    let b_id = tree2.query_selector_all("b").unwrap()[0];
+    let rb = rects2.get(&b_id).expect("flattened <b> must own a union rect");
+    let (_, _, lh) = super::font_context(&tree2, b_id, &styles2);
+    assert!(
+        rb.height >= lh - 1.0 && rb.height <= lh + 8.0,
+        "text inline should sit at its line height {lh}; got {rb:?}"
+    );
+}
+
+/// Ground truth for the named-area feed (the Vector 2022 page scaffold
+/// shape): a GridTemplateAreas matrix on the container plus
+/// `<name>-start`/`<name>-end` NamedLine placements on the items must lay
+/// each item into its named rectangle — nav in the fixed first column, main
+/// beside it in the minmax(0, 1fr) remainder, footer spanning both columns
+/// below. If stock taffy (the same rev the bridge pins) ever disagrees with
+/// how diting_layout feeds it, this is where the divergence surfaces first.
+#[test]
+fn taffy_named_grid_area_placement() {
+    use taffy::style::{GridPlacement, GridTemplateArea, GridTemplateAreas};
+
+    let area = |name: &str, rs: u16, re: u16, cs: u16, ce: u16| GridTemplateArea {
+        name: name.into(),
+        row_start: rs,
+        row_end: re,
+        column_start: cs,
+        column_end: ce,
+    };
+    // Each axis spans the area's implicit lines: start → `<n>-start`,
+    // end → `<n>-end` (CSS §8; taffy's NamedLineResolver implements the same
+    // convention).
+    let place = |name: &str| Style {
+        grid_row: taffy::geometry::Line {
+            start: GridPlacement::NamedLine(format!("{}-start", name), 1),
+            end: GridPlacement::NamedLine(format!("{}-end", name), 1),
+        },
+        grid_column: taffy::geometry::Line {
+            start: GridPlacement::NamedLine(format!("{}-start", name), 1),
+            end: GridPlacement::NamedLine(format!("{}-end", name), 1),
+        },
+        ..Default::default()
+    };
+
+    let mut tree: TaffyTree<()> = TaffyTree::new();
+    tree.disable_rounding();
+    let nav = tree.new_leaf(place("nav")).unwrap();
+    let main = tree.new_leaf(place("main")).unwrap();
+    let ft = tree.new_leaf(place("ft")).unwrap();
+    let root = tree
+        .new_with_children(
+            Style {
+                display: Display::Grid,
+                size: Size { width: length(320.0), height: auto() },
+                grid_template_columns: vec![length(100.0), minmax(length(0.0), fr(1.0))],
+                grid_template_areas: Some(GridTemplateAreas {
+                    areas: vec![
+                        area("nav", 1, 3, 1, 2),
+                        area("main", 1, 3, 2, 3),
+                        area("ft", 3, 4, 1, 3),
+                    ],
+                    row_count: 3,
+                    column_count: 2,
+                }),
+                ..Default::default()
+            },
+            &[nav, main, ft],
+        )
+        .unwrap();
+    tree.compute_layout(root, Size { width: AvailableSpace::Definite(320.0), height: AvailableSpace::MaxContent }).unwrap();
+
+    let nav_layout = tree.layout(nav).unwrap();
+    let main_layout = tree.layout(main).unwrap();
+    let ft_layout = tree.layout(ft).unwrap();
+    assert_eq!(nav_layout.size.width, 100.0, "nav fills the fixed first column");
+    assert_eq!(main_layout.location.x, 100.0, "main starts at the second column");
+    assert_eq!(main_layout.size.width, 220.0, "main takes the minmax(0, 1fr) remainder");
+    assert_eq!(main_layout.location.y, nav_layout.location.y, "nav and main share the first row");
+    assert_eq!(ft_layout.size.width, 320.0, "footer spans both columns");
+    assert_eq!(ft_layout.location.y, nav_layout.location.y + nav_layout.size.height, "footer below nav");
+}
+
+/// Vector 2022's `.vector-column-start` wears real skin margins (margin-top
+/// 2.85rem, margin-left -0.75rem) inside a fixed 12.25rem first track. The
+/// margin box must still stretch across the track, leaving the content box
+/// WIDER than the track (196 + 12), never zero.
+#[test]
+fn taffy_grid_item_negative_margin_still_stretches() {
+    use taffy::style::{GridPlacement, GridTemplateArea, GridTemplateAreas};
+
+    let place = |name: &str| Style {
+        grid_row: taffy::geometry::Line {
+            start: GridPlacement::NamedLine(format!("{}-start", name), 1),
+            end: GridPlacement::NamedLine(format!("{}-end", name), 1),
+        },
+        grid_column: taffy::geometry::Line {
+            start: GridPlacement::NamedLine(format!("{}-start", name), 1),
+            end: GridPlacement::NamedLine(format!("{}-end", name), 1),
+        },
+        ..Default::default()
+    };
+    let mut tree: TaffyTree<()> = TaffyTree::new();
+    tree.disable_rounding();
+    let toc = tree
+        .new_leaf(Style {
+            margin: taffy::geometry::Rect {
+                top: LengthPercentageAuto::length(45.6),
+                right: LengthPercentageAuto::length(0.0),
+                bottom: LengthPercentageAuto::length(0.0),
+                left: LengthPercentageAuto::length(-12.0),
+            },
+            ..place("columnStart")
+        })
+        .unwrap();
+    let content = tree.new_leaf(place("pageContent")).unwrap();
+    let notice = tree.new_leaf(place("siteNotice")).unwrap();
+    let footer = tree.new_leaf(place("footer")).unwrap();
+    let root = tree
+        .new_with_children(
+            Style {
+                display: Display::Grid,
+                gap: Size { width: length(24.0), height: length(0.0) },
+                size: Size { width: length(1352.0), height: auto() },
+                grid_template_columns: vec![length(196.0), minmax(length(0.0), fr(1.0))],
+                grid_template_rows: vec![min_content(), fr(1.0), min_content()],
+                grid_template_areas: Some(GridTemplateAreas {
+                    areas: vec![
+                        GridTemplateArea { name: "siteNotice".into(), row_start: 1, row_end: 2, column_start: 1, column_end: 3 },
+                        GridTemplateArea { name: "columnStart".into(), row_start: 2, row_end: 3, column_start: 1, column_end: 2 },
+                        GridTemplateArea { name: "pageContent".into(), row_start: 2, row_end: 3, column_start: 2, column_end: 3 },
+                        GridTemplateArea { name: "footer".into(), row_start: 3, row_end: 4, column_start: 1, column_end: 3 },
+                    ],
+                    row_count: 3,
+                    column_count: 2,
+                }),
+                ..Default::default()
+            },
+            &[notice, toc, content, footer],
+        )
+        .unwrap();
+    tree.compute_layout(root, Size { width: AvailableSpace::Definite(1352.0), height: AvailableSpace::MaxContent }).unwrap();
+
+    let toc_l = tree.layout(toc).unwrap();
+    let content_l = tree.layout(content).unwrap();
+    println!("toc: x={} y={} w={} h={}", toc_l.location.x, toc_l.location.y, toc_l.size.width, toc_l.size.height);
+    println!("content: x={} y={} w={} h={}", content_l.location.x, content_l.location.y, content_l.size.width, content_l.size.height);
+    assert_eq!(toc_l.size.width, 208.0, "fixed 196 track minus a -12 margin leaves a 208-wide content box");
+    assert_eq!(toc_l.location.x, -12.0, "negative margin shifts the box out of the track origin");
+    assert_eq!(content_l.size.width, 1132.0, "pageContent takes the fr remainder");
+}

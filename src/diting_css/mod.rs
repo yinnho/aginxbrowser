@@ -489,9 +489,16 @@ pub struct ComputedStyle {
     pub flex_basis: Option<f32>,
     pub column_gap: Option<f32>,
     pub row_gap: Option<f32>,
-    /// Track list (px / fr / auto). `None` = not declared.
+    /// Track list (px / rem / fr / auto / minmax). `None` = not declared.
     pub grid_template_columns: Option<Vec<GridTrack>>,
     pub grid_template_rows: Option<Vec<GridTrack>>,
+    /// `grid-template-areas` cell matrix, rows of names (`.` = null cell).
+    /// Non-rectangular declarations are dropped — the spec makes them
+    /// invalid — so the layout side can trust the shape.
+    pub grid_template_areas: Option<Vec<Vec<String>>>,
+    /// Named area an item is placed into (`grid-area: <name>`); resolves to
+    /// the area's implicit `<name>-start`/`<name>-end` grid lines.
+    pub grid_area: Option<String>,
     // --- positioning + size clamps (batch 2d), non-inherited ---
     pub position: Option<PositionMode>,
     /// Inset offsets (top/right/bottom/left): px or %.
@@ -628,10 +635,21 @@ fn border_style_kw(v: &str) -> BorderStyleKw {
     }
 }
 
-/// One grid track sizing. `1fr` / `100px` / `auto` — minmax() and repeat()
-/// are later batches.
+/// One grid track sizing. `1fr` / `100px` / `auto` / `minmax(a, b)` —
+/// repeat() is a later batch.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GridTrack {
+    Fr(f32),
+    Px(f32),
+    Auto,
+    /// minmax(min, max); the two arguments are shallow (nested minmax is
+    /// invalid CSS), which also keeps the enum non-recursive.
+    MinMax { min: TrackSize, max: TrackSize },
+}
+
+/// A minmax() argument — one of the simple sizings, never another minmax.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TrackSize {
     Fr(f32),
     Px(f32),
     Auto,
@@ -1377,6 +1395,31 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             style.grid_template_rows = parse_grid_tracks(v);
             style.grid_template_rows.is_some()
         }
+        "grid-template-areas" => {
+            style.grid_template_areas = parse_grid_template_areas(v);
+            style.grid_template_areas.is_some()
+        }
+        // Shorthand `rows / columns`. The string-literal-areas form
+        // (`grid-template: 'a b' 1fr / 2rem`) is not supported — both halves
+        // fall through to None rather than half-parse.
+        "grid-template" => {
+            if let Some((rows, cols)) = v.split_once('/') {
+                if !v.contains('\'') {
+                    style.grid_template_rows = parse_grid_tracks(rows);
+                    style.grid_template_columns = parse_grid_tracks(cols);
+                }
+            }
+            true
+        }
+        // Single-ident named form only (`grid-area: main`); the 4-value
+        // numeric form is a later batch.
+        "grid-area" => {
+            let name = v.trim();
+            if !name.contains(' ') && !name.contains('/') && !name.is_empty() {
+                style.grid_area = Some(name.to_string());
+            }
+            true
+        }
         "position" => {
             style.position = match v {
                 "static" => Some(PositionMode::Static),
@@ -1475,22 +1518,106 @@ fn parse_num_f32(v: &str) -> Option<f32> {
 /// abort the whole declaration (browsers drop it entirely).
 fn parse_grid_tracks(v: &str) -> Option<Vec<GridTrack>> {
     let mut tracks = Vec::new();
-    for token in v.split_whitespace() {
-        if token == "auto" {
-            tracks.push(GridTrack::Auto);
-        } else if let Some(fr) = token.strip_suffix("fr") {
-            tracks.push(GridTrack::Fr(fr.parse::<f32>().ok()?));
-        } else if let Some(px) = parse_px_f32(token) {
-            tracks.push(GridTrack::Px(px));
-        } else {
-            return None;
-        }
+    let mut rest = v.trim();
+    while !rest.is_empty() {
+        let (token, tail) = next_track_token(rest)?;
+        tracks.push(parse_grid_track_token(token)?);
+        rest = tail.trim_start();
     }
     if tracks.is_empty() {
         None
     } else {
         Some(tracks)
     }
+}
+
+/// Split off one track token: `minmax(a, b)` contains spaces, so it can't
+/// go through plain whitespace splitting (nesting never occurs in valid CSS).
+fn next_track_token(v: &str) -> Option<(&str, &str)> {
+    if let Some(open) = v.find("minmax(") {
+        if open > 0 {
+            // Non-minmax token ahead of it: cut at the first whitespace.
+            let end = v.find(char::is_whitespace).unwrap_or(v.len());
+            return Some(v.split_at(end));
+        }
+        let close = v.find(')')? + 1;
+        return Some(v.split_at(close));
+    }
+    let end = v.find(char::is_whitespace).unwrap_or(v.len());
+    if end == 0 {
+        None
+    } else {
+        Some(v.split_at(end))
+    }
+}
+
+/// One sizing token: `auto`, `<len>` (px; rem resolves against the 16px
+/// browser root — grid tracks live at the top of the page where the root
+/// size is what authors mean), `Nfr`, `0`, or a `minmax(a, b)` pair.
+/// `min-content`/`max-content` approximate to `auto` until the track
+/// machinery learns them.
+fn parse_grid_track_token(tok: &str) -> Option<GridTrack> {
+    if let Some(inner) = tok.strip_prefix("minmax(").and_then(|t| t.strip_suffix(')')) {
+        let (a, b) = inner.split_once(',')?;
+        return Some(GridTrack::MinMax {
+            min: parse_track_size(a.trim())?,
+            max: parse_track_size(b.trim())?,
+        });
+    }
+    parse_track_size(tok).map(|sz| match sz {
+        TrackSize::Fr(f) => GridTrack::Fr(f),
+        TrackSize::Px(px) => GridTrack::Px(px),
+        TrackSize::Auto => GridTrack::Auto,
+    })
+}
+
+/// One minmax() argument (or a bare track token): same sizings as
+/// [`parse_grid_track_token`], minus minmax itself.
+fn parse_track_size(tok: &str) -> Option<TrackSize> {
+    if tok.eq_ignore_ascii_case("auto")
+        || tok.eq_ignore_ascii_case("min-content")
+        || tok.eq_ignore_ascii_case("max-content")
+    {
+        return Some(TrackSize::Auto);
+    }
+    if let Some(fr) = tok.strip_suffix("fr") {
+        return fr.parse::<f32>().ok().map(TrackSize::Fr);
+    }
+    if let Some(px) = parse_px_f32(tok) {
+        return Some(TrackSize::Px(px));
+    }
+    if let Some(r) = tok.strip_suffix("rem") {
+        return r.parse::<f32>().ok().map(|n| TrackSize::Px(n * 16.0));
+    }
+    if tok == "0" {
+        return Some(TrackSize::Px(0.0));
+    }
+    None
+}
+
+/// `'a b' 'c d'` → `[[a, b], [c, d]]`. Every string row must have the same
+/// cell count (CSS §7.3) or the whole declaration is invalid → None.
+fn parse_grid_template_areas(v: &str) -> Option<Vec<Vec<String>>> {
+    let mut rows = Vec::new();
+    for raw in v.split('\'') {
+        let row = raw.trim();
+        if row.is_empty() {
+            continue;
+        }
+        let cells: Vec<String> = row.split_whitespace().map(str::to_string).collect();
+        if cells.is_empty() {
+            return None;
+        }
+        rows.push(cells);
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    let width = rows[0].len();
+    if rows.iter().any(|r| r.len() != width) {
+        return None;
+    }
+    Some(rows)
 }
 
 fn set_side(sides: &mut Sides, name: &str, value: Option<Length>) {
@@ -1819,6 +1946,100 @@ mod tests {
     use super::*;
 
     // ---- stylesheet parsing ----
+
+    #[test]
+    fn grid_areas_minmax_and_shorthand_parse() {
+        // Vector 2022's scaffold: minmax + rem tracks, the rows/columns
+        // shorthand, the areas matrix, and named-area item placement.
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "grid-template-columns: 11.5rem minmax(0, 60rem) 16rem");
+        assert_eq!(
+            s.grid_template_columns,
+            Some(vec![
+                GridTrack::Px(184.0),
+                GridTrack::MinMax { min: TrackSize::Px(0.0), max: TrackSize::Px(960.0) },
+                GridTrack::Px(256.0),
+            ]),
+        );
+
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "grid-template: min-content 1fr min-content / auto minmax(0, 1fr)");
+        assert_eq!(s.grid_template_rows, Some(vec![GridTrack::Auto, GridTrack::Fr(1.0), GridTrack::Auto]));
+        assert_eq!(
+            s.grid_template_columns,
+            Some(vec![GridTrack::Auto, GridTrack::MinMax { min: TrackSize::Px(0.0), max: TrackSize::Fr(1.0) }]),
+        );
+
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "grid-template-areas: 'siteNotice siteNotice' 'columnStart pageContent' 'footer footer'");
+        assert_eq!(
+            s.grid_template_areas,
+            Some(vec![
+                vec!["siteNotice".into(), "siteNotice".into()],
+                vec!["columnStart".into(), "pageContent".into()],
+                vec!["footer".into(), "footer".into()],
+            ]),
+        );
+        // Non-rectangular matrices are invalid → the whole declaration drops.
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "grid-template-areas: 'a b' 'a'");
+        assert_eq!(s.grid_template_areas, None);
+
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "grid-area: pageContent");
+        assert_eq!(s.grid_area, Some("pageContent".into()));
+        // The 4-value numeric form is not this batch; it must not half-parse.
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "grid-area: 2 / 1 / 3 / 2");
+        assert_eq!(s.grid_area, None);
+    }
+
+
+    #[test]
+    fn vector_2022_minified_media_rule_reaches_computed_style() {
+        // Byte-for-byte excerpt of the live load.php payload (minified, no
+        // spaces after colons, the grid rule media-gated at 1120px). The
+        // scaffold only applies on wide viewports — narrow ones must not
+        // see it either.
+        let css = concat!(
+            "@media screen and (min-width:1680px){.mw-page-container{padding-left:3.25rem}}",
+            "@media screen and (min-width:1120px){.mw-page-container-inner{",
+            "display:grid;column-gap:24px;",
+            "grid-template:min-content 1fr min-content / 12.25rem minmax(0,1fr);",
+            "grid-template-areas:'siteNotice siteNotice' 'columnStart pageContent' 'footer footer'}}",
+            ".mw-body .vector-page-titlebar{grid-area:titlebar}",
+        );
+        let rules = parse_stylesheet_for(css, (1440.0, 900.0), CssMediaType::Screen);
+        let inner = rules
+            .iter()
+            .find(|r| r.selector == ".mw-page-container-inner")
+            .expect("media-gated grid rule must survive parsing at 1440px");
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, &inner.declarations);
+        assert_eq!(
+            s.grid_template_areas,
+            Some(vec![
+                vec!["siteNotice".into(), "siteNotice".into()],
+                vec!["columnStart".into(), "pageContent".into()],
+                vec!["footer".into(), "footer".into()],
+            ]),
+        );
+        assert_eq!(
+            s.grid_template_columns,
+            Some(vec![
+                GridTrack::Px(196.0),
+                GridTrack::MinMax { min: TrackSize::Px(0.0), max: TrackSize::Fr(1.0) },
+            ]),
+        );
+        let titlebar = rules.iter().find(|r| r.selector == ".mw-body .vector-page-titlebar").unwrap();
+        let mut t = ComputedStyle::default();
+        apply_declarations(&mut t, &titlebar.declarations);
+        assert_eq!(t.grid_area, Some("titlebar".into()));
+
+        // Same sheet below the breakpoint: the scaffold stays out.
+        let narrow = parse_stylesheet_for(css, (375.0, 700.0), CssMediaType::Screen);
+        assert!(!narrow.iter().any(|r| r.selector == ".mw-page-container-inner"));
+    }
 
     #[test]
     fn float_and_clear_parse_into_style() {

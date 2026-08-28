@@ -581,6 +581,106 @@
         assert!((t2.x - 100.0).abs() < EPS as f32 && (t2.width - 200.0).abs() < EPS as f32, "t2 track: {:?}", t2);
     }
 
+    /// Grid template areas (the Vector 2022 page scaffold): named cells,
+    /// `grid-template` rows/columns shorthand, `grid-area: <name>` item
+    /// placement, and a minmax(0, 1fr) track. Wikipedia's chrome is built
+    /// exactly from these three pieces — before this batch all three fell
+    /// out of the parser and the whole scaffold collapsed into one implicit
+    /// column.
+    #[test]
+    fn grid_template_areas_place_named_items() {
+        let html = r#"<body>
+            <div id="wrap"><nav id="nav"></nav><main id="main"></main><footer id="ft"></footer></div>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #wrap { display: grid; width: 320px;
+                grid-template: auto 1fr auto / 100px minmax(0, 1fr);
+                grid-template-areas: 'nav main' 'nav main' 'ft ft'; }
+            #nav { grid-area: nav; }
+            #main { grid-area: main; }
+            #ft { grid-area: ft; }
+        "#;
+        let (doc, tree, _styles, rects) = both_engines(html, sheet);
+        for selector in ["#wrap", "#nav", "#main", "#ft"] {
+            let blitz_nid = doc.query_selector(selector).unwrap().expect(selector);
+            let our_nid = tree.query_selector(selector).unwrap().expect(selector);
+            let theirs = element_rect(&doc, blitz_nid);
+            let ours = *rects.get(&our_nid).unwrap_or(&Rect::default());
+            assert_close(&format!("{selector} x"), ours.x, theirs.x);
+            assert_close(&format!("{selector} y"), ours.y, theirs.y);
+            assert_close(&format!("{selector} width"), ours.width, theirs.width);
+            assert_close(&format!("{selector} height"), ours.height, theirs.height);
+        }
+        let nav = rects[&tree.query_selector("#nav").unwrap().unwrap()];
+        let main = rects[&tree.query_selector("#main").unwrap().unwrap()];
+        let ft = rects[&tree.query_selector("#ft").unwrap().unwrap()];
+        // The collapse symptom: nav and main must SHARE a row (side-by-side
+        // columns), not stack. ft spans both columns at full width.
+        assert!((nav.x - 0.0).abs() < EPS as f32 && (nav.width - 100.0).abs() < EPS as f32,
+            "nav takes the fixed first column: {:?}", nav);
+        assert!((main.x - 100.0).abs() < EPS as f32 && (main.width - 220.0).abs() < EPS as f32,
+            "main takes the minmax(0, 1fr) remainder: {:?}", main);
+        assert!((main.y - nav.y).abs() < EPS as f32, "nav and main share the first grid row");
+        assert!((ft.y - (nav.y + nav.height)).abs() < EPS as f32 && (ft.width - 320.0).abs() < EPS as f32,
+            "ft starts below nav and spans both columns: {:?}", ft);
+    }
+
+    /// Vector 2022 collapse (the wikipedia TOC bug): a `float:left` buried
+    /// deep inside a LATER grid item must never narrow the grid's EARLIER
+    /// items. The 8f displacement climb used to reach the grid container and
+    /// clamp the earlier area's max-width to `float right edge − column x`
+    /// (negative → 0), collapsing the whole TOC column to width 0. Two CSS
+    /// rules restore it: floats only displace content AFTER them in document
+    /// order, and the climb stops at the grid container — its items are not
+    /// in-flow content a float can push.
+    #[test]
+    fn float_deep_in_grid_item_keeps_earlier_areas_intact() {
+        let html = r#"<body>
+            <div id="wrap">
+                <nav id="col"><p>toc line one</p><p>toc line two</p></nav>
+                <main id="page">
+                    <div id="article"><div id="box"><div id="fl">F</div><p id="after">after the float</p></div></div>
+                </main>
+            </div>
+        </body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #wrap { display: grid; width: 320px;
+                grid-template: auto / 100px minmax(0, 1fr);
+                grid-template-areas: 'col page'; }
+            #col { grid-area: col; }
+            #col p { margin: 0; height: 30px; }
+            #page { grid-area: page; }
+            #fl { float: left; width: 36px; height: 60px; }
+        "#;
+        let (doc, tree, _styles, rects) = both_engines(html, sheet);
+        for selector in ["#col", "#page"] {
+            let blitz_nid = doc.query_selector(selector).unwrap().expect(selector);
+            let our_nid = tree.query_selector(selector).unwrap().expect(selector);
+            let theirs = element_rect(&doc, blitz_nid);
+            let ours = *rects.get(&our_nid).unwrap_or(&Rect::default());
+            assert_close(&format!("{selector} x"), ours.x, theirs.x);
+            assert_close(&format!("{selector} y"), ours.y, theirs.y);
+            assert_close(&format!("{selector} width"), ours.width, theirs.width);
+            // Height left out: the two engines model default <p> margins
+            // differently and the bug under test is horizontal collapse.
+        }
+        let col = rects[&tree.query_selector("#col").unwrap().unwrap()];
+        let page = rects[&tree.query_selector("#page").unwrap().unwrap()];
+        let fl = rects[&tree.query_selector("#fl").unwrap().unwrap()];
+        let after = rects[&tree.query_selector("#after").unwrap().unwrap()];
+        // The collapse symptom: the earlier item keeps its full track.
+        assert!((col.width - 100.0).abs() < EPS as f32,
+            "earlier grid item keeps the fixed track width: {:?}", col);
+        // The float stays inside its own (later) grid item.
+        assert!(fl.x >= page.x && fl.x + fl.width <= page.x + page.width + EPS as f32,
+            "float stays within its grid item: fl={:?} page={:?}", fl, page);
+        // Legit displacement survives: content after the float narrows.
+        assert!(after.width < page.width - 30.0,
+            "later content is still displaced by the float: after={:?} page={:?}", after, page);
+    }
+
     /// Replaced img: HTML width/height attributes map to definite sizes both
     /// engines honor; a CSS axis override wins per-axis with NO ratio
     /// derivation (attrs are presentational-hint declarations, so both axes

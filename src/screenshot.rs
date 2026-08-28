@@ -94,6 +94,38 @@ impl NetProvider for PrefetchedNetProvider {
     // rather than being skipped by the #636 gating.
 }
 
+/// Absolute URLs of the `<link rel=stylesheet>` elements in `html`, resolved
+/// against `base_url` — the same set [`prefetch_render_resources`] collects.
+///
+/// Prefetched bodies keyed by these URLs are stylesheets regardless of file
+/// extension: MediaWiki serves its skin CSS from `/w/load.php?...`, which no
+/// `.css` suffix test ever matches. Vector 2022's entire grid scaffold lives
+/// in such a sheet, so the suffix test silently dropped it and the page
+/// rendered as one stacked column.
+pub fn stylesheet_hrefs(html: &str, base_url: &str) -> std::collections::HashSet<String> {
+    use scraper::{Html, Selector};
+
+    let mut out = std::collections::HashSet::new();
+    let Ok(base) = url::Url::parse(base_url) else { return out };
+    let doc = Html::parse_document(html);
+    let Ok(sel) = Selector::parse("link[href]") else { return out };
+    for el in doc.select(&sel) {
+        let is_css = el
+            .value()
+            .attr("rel")
+            .map(|r| r.split_ascii_whitespace().any(|t| t.eq_ignore_ascii_case("stylesheet")))
+            .unwrap_or(false);
+        if is_css {
+            if let Some(href) = el.value().attr("href") {
+                if let Ok(u) = base.join(href.trim()) {
+                    out.insert(u.as_str().to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Pre-fetch the sub-resources Blitz will request while rendering `html`:
 /// `<img src>` and `<link rel=stylesheet href>`, resolved against `base_url`.
 ///
@@ -434,7 +466,7 @@ pub fn render_html_to_png(
 #[allow(clippy::too_many_arguments)]
 pub fn render_html_to_png_diting(
     html: &str,
-    _base_url: &str, // relative img-URL normalization is still 挂账 in ImageCache
+    base_url: &str, // stylesheet hrefs resolve against it; img-URL normalization is still 挂账 in ImageCache
     width: u32,
     height: u32,
     _scale: f32,
@@ -453,7 +485,10 @@ pub fn render_html_to_png_diting(
 
     // Cascade input: inline <style> blocks, then the external sheet bodies
     // the prefetch pass already fetched (same join order as
-    // element_rects_diting, so both engines see the same rules).
+    // element_rects_diting, so both engines see the same rules). A fetched
+    // body counts as CSS when its URL is a <link rel=stylesheet> href — the
+    // suffix alone misses extensionless sheet URLs like MediaWiki's load.php.
+    let css_urls = stylesheet_hrefs(html, base_url);
     let mut css = String::new();
     if let Ok(style_els) = tree.query_selector_all("style") {
         for el in style_els {
@@ -463,7 +498,7 @@ pub fn render_html_to_png_diting(
     }
     if let Some(res) = resources {
         for (k, v) in res {
-            if k.ends_with(".css") && !v.is_empty() {
+            if !v.is_empty() && (css_urls.contains(k.as_str()) || k.ends_with(".css")) {
                 css.push_str(&String::from_utf8_lossy(v));
                 css.push('\n');
             }
@@ -477,12 +512,12 @@ pub fn render_html_to_png_diting(
     let styles = crate::diting_layout::compute_styles(&tree, &rules);
     let fonts = crate::diting_fonts::font_book();
 
-    // Image bytes: everything non-CSS the prefetch pass fetched (already
-    // keyed by absolute URL, which is what ImageCache looks up).
+    // Image bytes: everything non-stylesheet the prefetch pass fetched
+    // (already keyed by absolute URL, which is what ImageCache looks up).
     let network_bytes: HashMap<String, Vec<u8>> = resources
         .map(|res| {
             res.iter()
-                .filter(|(k, v)| !k.ends_with(".css") && !v.is_empty())
+                .filter(|(k, v)| (!css_urls.contains(k.as_str()) && !k.ends_with(".css")) && !v.is_empty())
                 .map(|(k, v)| (k.clone(), v.as_ref().clone()))
                 .collect()
         })
@@ -803,6 +838,29 @@ use anyrender::PaintScene as _;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stylesheet_hrefs_resolve_extensionless_sheet_urls() {
+        // MediaWiki shape: the skin CSS comes from a query-string URL with no
+        // `.css` suffix; plain hosted sheets keep working; rel values that
+        // merely mention stylesheets (preload/alternate) stay out.
+        let html = r#"<html><head>
+            <link rel="stylesheet" href="/w/load.php?lang=en&amp;modules=skins.vector&amp;only=styles">
+            <link rel="stylesheet" href="https://cdn.example.com/skin.css">
+            <link rel="stylesheet preload" as="style" href="/both.css">
+            <link rel="alternate stylesheet" href="/alt.css">
+            <link rel="preload" as="style" href="/pre.css">
+            <link rel="icon" href="/favicon.ico">
+        </head></html>"#;
+        let set = stylesheet_hrefs(html, "https://en.wikipedia.org/wiki/HTTP");
+        assert!(set.contains(
+            "https://en.wikipedia.org/w/load.php?lang=en&modules=skins.vector&only=styles"
+        ), "{set:?}");
+        assert!(set.contains("https://cdn.example.com/skin.css"), "{set:?}");
+        assert!(set.contains("https://en.wikipedia.org/both.css"), "{set:?}");
+        assert!(!set.contains("https://en.wikipedia.org/pre.css"), "{set:?}");
+        assert!(!set.contains("https://en.wikipedia.org/favicon.ico"), "{set:?}");
+    }
 
     /// The diting element-coordinate entry answers the same wire shape as
     /// Blitz's selector_rects: a `<style>`-driven absolute box lands at its
