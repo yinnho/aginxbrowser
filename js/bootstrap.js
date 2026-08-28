@@ -55,7 +55,20 @@ globalThis.dispatchEvent = function(event) {
 // (WorkOS Radar) hash window property names. A top-level `const` creates a
 // global *lexical* binding — it never appears on the global object at all.
 const _OPS = Deno.core.ops;
-const _domRaw = (cmd, a1, a2) => _OPS.op_dom(cmd, String(a1 ?? ""), String(a2 ?? ""));
+// DOM mutation epoch (upstream's shape): every tree/attribute write bumps
+// this at the one choke point all _domRaw commands pass through, so
+// consumers of retained snapshots (getComputedStyle) can tell staleness
+// without a native round-trip.
+let _ditingMutationEpoch = 0;
+const _DOM_MUTATION_COMMANDS = new Set([
+  "append_child", "insert_before", "remove_child",
+  "set_attribute", "remove_attribute",
+  "set_text_content", "set_inner_html", "document_write_reset",
+]);
+const _domRaw = (cmd, a1, a2) => {
+  if (_DOM_MUTATION_COMMANDS.has(cmd)) _ditingMutationEpoch++;
+  return _OPS.op_dom(cmd, String(a1 ?? ""), String(a2 ?? ""));
+};
 const _domStrA1 = new Set([
   "create_element", "create_text_node", "create_comment_node",
   "create_processing_instruction", "create_doctype",
@@ -5030,9 +5043,37 @@ const _camel = (kebab) => {
 const _computedKebab = () => _COMPUTED_PROPS_KEBAB;
 const _computedSet = () => { if (!_computedSet._s) { _computedSet._s = new Set(_COMPUTED_PROPS_KEBAB.map(_camel)); } return _computedSet._s; };
 
+// getComputedStyle() wrappers share one immutable native snapshot per
+// element until the DOM mutates — frameworks call getComputedStyle()
+// repeatedly on the same few roots, and jQuery reads one property per
+// call, so a fresh snapshot per wrapper would dominate real-page startup
+// (upstream learned this the same way).
+const _computedStyleSnapshotCache = new WeakMap();
 globalThis.getComputedStyle = (el) => {
   if (!el) el = document.body || {};
   const style = el?.style || el?._style || new CSSStyleDeclaration();
+  const cacheable = (typeof el === 'object' && el !== null) || typeof el === 'function';
+  let snapshot = cacheable ? _computedStyleSnapshotCache.get(el) : null;
+  if (!snapshot) {
+    snapshot = { rendered: null, epoch: -1 };
+    if (cacheable) _computedStyleSnapshotCache.set(el, snapshot);
+  }
+  // The cascade snapshot from the layout run (whole table per call,
+  // upstream's op shape): stylesheet rules + the folded inline style
+  // attribute. Absent without a layout run (default build) or for
+  // properties outside the engine's table — the fallbacks below keep
+  // serving those.
+  const refreshRendered = () => {
+    if (snapshot.epoch === _ditingMutationEpoch) return;
+    snapshot.epoch = _ditingMutationEpoch;
+    snapshot.rendered = null;
+    if (el?._nid != null) {
+      try {
+        const raw = _domRaw("computed_style", String(el._nid | 0), "");
+        if (raw && raw !== 'null') snapshot.rendered = JSON.parse(raw);
+      } catch (e) {}
+    }
+  };
   // React virtualization libraries (react-window, tanstack-virtual,
   // react-virtuoso) all compute container dimensions via getComputedStyle.
   // The defaults table previously returned `auto` for width/height and
@@ -5088,20 +5129,16 @@ globalThis.getComputedStyle = (el) => {
 
   const lookup = (rawProp) => {
     if (typeof rawProp !== 'string') return '';
-    // Inline value first — author inline style wins the cascade (barring
-    // !important rules, which we don't model).
+    // Snapshot first: it already resolved the cascade, inline included.
+    refreshRendered();
+    const kebab = rawProp.replace(/([A-Z])/g, '-$1').toLowerCase();
+    if (snapshot.rendered && Object.prototype.hasOwnProperty.call(snapshot.rendered, kebab)) {
+      return snapshot.rendered[kebab];
+    }
+    // Inline value next — CSSOM writes not yet folded into a snapshot
+    // (or no layout run at all).
     const inlineVal = target.getPropertyValue ? target.getPropertyValue(rawProp) : '';
     if (inlineVal) return inlineVal;
-    const kebab = rawProp.replace(/([A-Z])/g, '-$1').toLowerCase();
-    // Cascaded stylesheet value next: rules from <style> blocks never
-    // reach el.style, so without this layer z-index/position/etc. read
-    // back as their initial values no matter what the stylesheet says
-    // (the trap flagged at obscura #738). Returns '' when the property
-    // isn't in the engine's table or no layout run exists.
-    try {
-      var cascaded = _domRaw("computed_style", String(el._nid | 0), kebab);
-    } catch (e) {}
-    if (cascaded && cascaded !== 'null') return cascaded;
     const dim = dimensionFor(kebab);
     if (dim != null) return dim;
     if (defaultsKebab[rawProp]) return defaultsKebab[rawProp];

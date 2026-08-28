@@ -114,7 +114,7 @@ pub struct JsState {
     /// `layout_rect` / `paint_order` / `computed_style` op after each
     /// mutation; backs getBoundingClientRect, elementFromPoint and
     /// getComputedStyle.
-    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))] // the layout ops run only in the screenshot-gated pipeline
+    #[cfg(feature = "screenshot")] // the layout ops run only in the screenshot-gated pipeline
     layout_cache: std::cell::RefCell<Option<(u64, LayoutRun)>>,
     /// Viewport the layout pipeline should anchor the initial containing
     /// block to, published by the JS persona (`__diting_setPersona`) so
@@ -233,6 +233,7 @@ impl JsState {
             // Memoized diting-layout rects for the live DOM tree, keyed by
             // the tree's epoch (see DomTree::epoch). Filled on the first
             // `layout_rect` op after each mutation; backs getBoundingClientRect.
+            #[cfg(feature = "screenshot")]
             layout_cache: std::cell::RefCell::new(None),
             #[cfg(feature = "screenshot")]
             viewport: (1920.0, 1000.0),
@@ -402,6 +403,27 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         let gs = state.borrow::<SharedState>().clone();
         gs.borrow_mut().title = arg1;
         return "null".into();
+    }
+    // Style/tree writes don't all bump the DomTree epoch (attribute-level
+    // mutations don't allocate nodes), so the memoized layout run must be
+    // dropped explicitly at the write commands — the bootstrap mirrors
+    // this set as _DOM_MUTATION_COMMANDS for its getComputedStyle
+    // snapshot epoch, and both sides see the same op_dom traffic through
+    // the same choke point.
+    #[cfg(feature = "screenshot")]
+    if matches!(
+        cmd.as_str(),
+        "append_child"
+            | "insert_before"
+            | "remove_child"
+            | "set_attribute"
+            | "remove_attribute"
+            | "set_text_content"
+            | "set_inner_html"
+            | "document_write_reset"
+    ) {
+        let gs = state.borrow::<SharedState>().clone();
+        *gs.borrow().layout_cache.borrow_mut() = None;
     }
     // Persona viewport: needs a mutable borrow, so it runs before the main
     // read-only `gs` alias below (same pattern as set_document_title).
@@ -875,14 +897,18 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             s.push(']');
             s
         }
-        // Cascaded computed value of one property for one element, from the
-        // same style+layout run as layout_rect — the layer getComputedStyle
-        // was missing: only inline styles were consulted, so values from a
-        // <style> block (z-index, position, …) read back as the initial
-        // value (obscura #738's companion trap). Covers the layout-decision
-        // properties the ComputedStyle carries; unknown properties return
-        // null and the caller falls through to its own tables. Used value
-        // for width/height stays the bounding rect's job, so those are
+        // Cascaded computed values for one element as a single JSON object,
+        // from the same style+layout run as layout_rect — the layer
+        // getComputedStyle was missing: only inline styles were consulted,
+        // so values from a <style> block (z-index, position, …) read back
+        // as the initial value (obscura #738's companion trap). Snapshot
+        // shape follows upstream's op_computed_style: one call returns the
+        // whole table, so a style object costs one native round-trip
+        // instead of one per property. Covers the layout-decision
+        // properties the ComputedStyle carries (inline style attr is
+        // folded in by compute_styles); unknown properties stay absent and
+        // the JS caller falls through to its own tables. Used value for
+        // width/height stays the bounding rect's job, so those are
         // deliberately not in the table.
         #[cfg(feature = "screenshot")]
         "computed_style" => {
@@ -892,13 +918,21 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 if *e == epoch { s.get(&nid).cloned() } else { None }
             });
             let style = cached.or_else(|| {
-                let (rects, order, styles) = layout_run_all(&gs, dom);
-                let s = styles.get(&nid).cloned();
-                *gs.layout_cache.borrow_mut() = Some((epoch, (rects, order, styles)));
+                let run = layout_run_all(&gs, dom);
+                let s = run.2.get(&nid).cloned();
+                *gs.layout_cache.borrow_mut() = Some((epoch, run));
                 s
             });
-            match style.and_then(|s| computed_style_value(&s, &arg2)) {
-                Some(v) => v,
+            match style {
+                Some(s) => {
+                    let mut obj = serde_json::Map::with_capacity(COMPUTED_STYLE_PROPS.len());
+                    for prop in COMPUTED_STYLE_PROPS {
+                        if let Some(v) = computed_style_value(&s, prop) {
+                            obj.insert((*prop).to_string(), serde_json::Value::String(v));
+                        }
+                    }
+                    serde_json::Value::Object(obj).to_string()
+                }
                 None => "null".into(),
             }
         }
@@ -969,6 +1003,31 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
 /// cascade layer). `None` means "not in the table" — the JS caller falls
 /// through to its inline/dimension/default chain, so initial values never
 /// shadow a caller that knows better.
+#[cfg(feature = "screenshot")]
+/// The property table the `computed_style` snapshot serializes — every
+/// property [`computed_style_value`] can spell. Order is irrelevant (the
+/// consumer is a JSON object); this list just guarantees the op and the
+/// serializer stay in lockstep.
+#[cfg(feature = "screenshot")]
+const COMPUTED_STYLE_PROPS: &[&str] = &[
+    "position",
+    "z-index",
+    "display",
+    "float",
+    "clear",
+    "overflow",
+    "font-size",
+    "font-weight",
+    "text-align",
+    "line-height",
+    "color",
+    "background-color",
+    "flex-direction",
+    "flex-wrap",
+    "justify-content",
+    "align-items",
+];
+
 #[cfg(feature = "screenshot")]
 fn computed_style_value(
     s: &crate::diting_css::ComputedStyle,
