@@ -487,6 +487,11 @@ fn session_thread(
                         SessionCommand::Eval { script, reply } => {
                             let val = page.evaluate_async(&script).await;
                             recorder.push(RecordedAction::Eval { script });
+                            // Drain any JS-initiated navigation the script
+                            // started (location.href / form submit) so the
+                            // session's current URL moves with it — same
+                            // policy as click_by_index below.
+                            let _ = page.process_pending_navigation().await;
                             let _ = reply.send(Ok(val));
                         }
 
@@ -791,6 +796,57 @@ mod tests {
         assert!(timeout, "setTimeout must fire during the idle gap");
         assert!(micro, "promise chain must settle during the idle gap");
         assert!(ticks >= 3, "interval must keep firing while idle, got {ticks} ticks");
+    }
+
+    /// Regression (obscura #618 class): an eval whose script clicks a submit
+    /// button must leave the session on the form's action URL — the click
+    /// stores a pending JS navigation that the Eval command drains (same
+    /// policy as click_by_index).
+    #[tokio::test]
+    async fn eval_submit_click_navigates_the_session() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[
+            (
+                "GET /form",
+                "<html><body><form method='POST' action='/done'>\
+                 <input name='q' value='hello'>\
+                 <button type='submit' id='go'>Go</button></form></body></html>",
+            ),
+            ("POST /done", "<html><body>submitted ok</body></html>"),
+        ]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/form")),
+            false,
+            vec![],
+        );
+
+        let clicked = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "document.querySelector('#go').click(); 'clicked'".to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(clicked.as_str().unwrap_or(""), "clicked");
+
+        let href = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "location.href".to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert!(
+            href.as_str().unwrap_or("").ends_with("/done"),
+            "session must follow the submit navigation, got {}",
+            href
+        );
+        assert!(
+            mgr.close_and_wait(&sid).await,
+            "session thread must ack close"
+        );
     }
 
     /// list() reports every live session with an expiry budget, most recently

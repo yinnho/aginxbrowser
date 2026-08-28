@@ -571,6 +571,16 @@ pub fn do_click(req: ClickRequest) -> Result<ClickResponse> {
             };
 
             page.settle(500).await;
+            // A submit click routes through the bootstrap form glue and
+            // lands as a pending JS navigation; draining it fires the POST
+            // and moves the page to the action URL (obscura #618 class —
+            // the CDP layer drains after clicks, this is the stateless
+            // surface's equivalent).
+            if page.process_pending_navigation().await.unwrap_or(false) {
+                // The landed document needs its own event-loop slice before
+                // url/innerText are read.
+                page.settle(800).await;
+            }
             let text_after = page
                 .evaluate("document.body.innerText")
                 .as_str()
@@ -600,6 +610,12 @@ pub fn do_eval(req: EvalRequest) -> Result<EvalResponse> {
             }
 
             let result = page.evaluate_async(&req.script).await;
+            // A location.href-style navigation in the script lands as a
+            // pending JS navigation — drain so the reported url follows it
+            // (mirrors the CDP Runtime.evaluate path, which drains post-eval).
+            if page.process_pending_navigation().await.unwrap_or(false) {
+                page.settle(500).await;
+            }
 
             Ok(EvalResponse {
                 url: page.url(),
@@ -799,6 +815,164 @@ pub async fn do_search(req: SearchRequest) -> Result<SearchResponse, SearchError
     })
 }
 
+/// Shared test plumbing for handler-level tests that need a real local
+/// origin: an env guard that opens the private-network door under the same
+/// process-wide lock diting_net uses, and a request-recording HTTP server.
+#[cfg(test)]
+pub(crate) mod test_util {
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    /// Holds PRIVATE_NET_ENV_LOCK and clears the env var on drop, mirroring
+    /// diting_browser's NetGuard. The field is the point: holding the guard
+    /// is what serializes against tests asserting on the unset state.
+    #[allow(dead_code)] // the guard field is never read; holding it is the effect
+    pub(crate) struct NetEnvGuard(std::sync::MutexGuard<'static, ()>);    impl Drop for NetEnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+        }
+    }
+    pub(crate) fn net_env_guard() -> NetEnvGuard {
+        let guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+        NetEnvGuard(guard)
+    }
+
+    /// Local HTTP server on an ephemeral port recording every request line
+    /// plus body ("POST /submitted q=hello") into the shared log. Routes
+    /// match on "METHOD path" prefixes; misses 404. Serves 32 requests —
+    /// enough for a document plus its navigation hops.
+    pub(crate) fn recording_server(
+        routes: &[(&'static str, &'static str)],
+    ) -> (u16, Arc<Mutex<Vec<String>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits: Arc<Mutex<Vec<String>>> = Arc::default();
+        let hits2 = hits.clone();
+        let routes: Vec<(String, &'static str)> = routes
+            .iter()
+            .map(|(k, body)| (k.to_string(), *body))
+            .collect();
+        std::thread::spawn(move || {
+            for _ in 0..32 {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let head = req.lines().next().unwrap_or("").to_string();
+                let body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+                hits2.lock().unwrap().push(format!("{} {}", head, body));
+                // Route keys are "METHOD path"; an unmatched request 404s.
+                let method = head.split_whitespace().next().unwrap_or("");
+                let path = head.split_whitespace().nth(1).unwrap_or("");
+                let key = format!("{} {}", method, path);
+                let (code, body_out) = match routes.iter().find(|(k, _)| *k == key) {
+                    Some((_, b)) => ("200 OK", *b),
+                    None => ("404 Not Found", ""),
+                };
+                let resp = format!(
+                    "HTTP/1.1 {code}\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body_out.len(),
+                    body_out
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (port, hits)
+    }
+}
+
+/// Regression (obscura #618 class, wrapper layer): clicking a submit button
+/// routes through the bootstrap form glue, which stores the POST as a
+/// pending JS navigation — the stateless click surface must drain it or the
+/// request never fires and the response reports the form page as if nothing
+/// happened. The CDP layer drains after clicks (input.rs); this is the
+/// stateless surface's equivalent.
+#[cfg(test)]
+mod click_nav_tests {
+    use super::test_util::{net_env_guard, recording_server};
+    use super::*;
+
+    #[test]
+    fn click_on_submit_fires_the_form_post_and_lands() {
+        let _net = net_env_guard();
+        let (port, hits) = recording_server(&[
+            (
+                "GET /form",
+                "<html><body><form method='POST' action='/submitted'>\
+                 <input name='q' value='hello'>\
+                 <button type='submit' id='go'>Go</button></form></body></html>",
+            ),
+            ("POST /submitted", "<html><body>submitted ok</body></html>"),
+        ]);
+
+        let resp = do_click(ClickRequest {
+            url: format!("http://127.0.0.1:{port}/form"),
+            selector: "#go".to_string(),
+            wait_secs: None,
+            use_proxy: false,
+            cookies: vec![],
+            tls_fingerprint: None,
+        })
+        .unwrap();
+
+        assert!(resp.clicked, "submit button found and clicked");
+        assert!(
+            resp.url.ends_with("/submitted"),
+            "response url must reflect the form action after drain, got {}",
+            resp.url
+        );
+        let hits = hits.lock().unwrap();
+        assert!(
+            hits.iter()
+                .any(|h| h.starts_with("POST /submitted") && h.contains("q=hello")),
+            "the submit POST must actually reach the wire: {hits:?}"
+        );
+        assert!(
+            resp.text_after
+                .as_deref()
+                .unwrap_or("")
+                .contains("submitted ok"),
+            "text_after must come from the landed page: {:?}",
+            resp.text_after
+        );
+    }
+
+    /// Same class, evaluate surface: a `location.href` assignment in the
+    /// script lands as a pending JS navigation — without a drain the
+    /// response reports the page the script started on.
+    #[test]
+    fn eval_navigation_drains_to_the_new_url() {
+        let _net = net_env_guard();
+        let (port, hits) = recording_server(&[
+            ("GET /start", "<html><body>start page</body></html>"),
+            ("GET /next", "<html><body>landed</body></html>"),
+        ]);
+
+        let resp = do_eval(EvalRequest {
+            url: format!("http://127.0.0.1:{port}/start"),
+            script: "location.href='/next'".to_string(),
+            wait_secs: None,
+            use_proxy: false,
+            cookies: vec![],
+            tls_fingerprint: None,
+        })
+        .unwrap();
+
+        assert!(
+            resp.url.ends_with("/next"),
+            "eval response url must follow the script's navigation, got {}",
+            resp.url
+        );
+        let hits = hits.lock().unwrap();
+        assert!(
+            hits.iter().any(|h| h.starts_with("GET /next")),
+            "the navigation must actually reach the wire: {hits:?}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod shared_jar_tests {
     use super::*;
@@ -820,10 +994,10 @@ mod shared_jar_tests {
         };
         let b1 = mk();
         let url = url::Url::parse("https://www.example.com/").unwrap();
-        b1.cookies().set("sid=abc123", "https://www.example.com/").unwrap();
+        b1.cookies().set("sid=abc123", url.as_str()).unwrap();
 
         let b2 = mk();
-        let got = b2.cookies().get_for_url("https://www.example.com/").unwrap();
+        let got = b2.cookies().get_for_url(url.as_str()).unwrap();
         let names: Vec<&str> = got.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"sid"), "second browser sees the cookie: {names:?}");
     }
