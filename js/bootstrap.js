@@ -4866,7 +4866,101 @@ if (typeof TextEncoderStream === 'undefined') {
   };
 }
 
-globalThis.matchMedia = _markNative(function matchMedia(q) { return { matches: false, media: q, addListener(){}, removeListener(){}, addEventListener(){}, removeEventListener(){}, dispatchEvent(){return true;} }; });
+// matchMedia evaluates against the live window viewport — the same
+// innerWidth/innerHeight the persona publishes and set_viewport feeds the
+// layout ICB — so a page's JS branching agrees with the @media rules the CSS
+// cascade already applied. The old always-false stub answered
+// `(min-width:640px)` with false while a 2560px viewport was published:
+// wrong for responsive pages and a self-contradiction any fingerprint
+// script could catch by cross-checking the two. Covers what page scripts
+// actually branch on: width/height bounds, orientation, aspect-ratio,
+// resolution, and the preference features pinned to the desktop-light
+// persona. Comma (or) / and / not follow the classic grammar; unknown
+// features evaluate false, matching Chrome's answer for unsupported ones.
+const _MQ_PERSONA_BOOL = {
+  'prefers-color-scheme': { light: true, dark: false },
+  'prefers-reduced-motion': { 'no-preference': true, reduce: false },
+  'prefers-reduced-transparency': { 'no-preference': true, reduce: false },
+  pointer: { fine: true, coarse: false, none: false },
+  'any-pointer': { fine: true, coarse: false, none: false },
+  hover: { hover: true, none: false },
+  'any-hover': { hover: true, none: false },
+};
+function _mqExpr(inner) {
+  const colon = inner.indexOf(':');
+  const feature = (colon < 0 ? inner : inner.slice(0, colon)).trim().toLowerCase();
+  const value = colon < 0 ? null : inner.slice(colon + 1).trim().toLowerCase();
+  if (feature in _MQ_PERSONA_BOOL) return value != null && _MQ_PERSONA_BOOL[feature][value] === true;
+  if (value == null) return false;
+  const num = parseFloat(value);
+  const vw = globalThis.innerWidth || 0, vh = globalThis.innerHeight || 0;
+  switch (feature) {
+    case 'min-width': return num <= vw;
+    case 'max-width': return num >= vw;
+    case 'width': return num === vw;
+    case 'min-height': return num <= vh;
+    case 'max-height': return num >= vh;
+    case 'height': return num === vh;
+    case 'orientation': return value === (vw >= vh ? 'landscape' : 'portrait');
+    case 'aspect-ratio': case 'min-aspect-ratio': case 'max-aspect-ratio': {
+      const m = value.match(/^(\d*\.?\d+)\s*\/\s*(\d*\.?\d+)$/);
+      if (!m) return false;
+      const want = parseFloat(m[1]) / parseFloat(m[2]), have = vw / vh;
+      return feature === 'aspect-ratio' ? Math.abs(have - want) < 1e-6
+        : feature === 'min-aspect-ratio' ? have >= want : have <= want;
+    }
+    case 'resolution': case 'min-resolution': case 'max-resolution': {
+      // Normalize the value to device px per css px (dppx) and compare
+      // against the persona's devicePixelRatio.
+      let dppx;
+      if (/dppx|x$/.test(value)) dppx = num;
+      else if (/dpcm$/.test(value)) dppx = (num * 96) / 2.54;
+      else dppx = num / 96; // dpi; a unitless number is invalid CSS, dpi is the least-wrong read
+      const dpr = globalThis.devicePixelRatio || 1;
+      return feature === 'resolution' ? Math.abs(dppx - dpr) < 1e-6
+        : feature === 'min-resolution' ? dppx <= dpr : dppx >= dpr;
+    }
+    default: return false;
+  }
+}
+function _mqClause(clause) {
+  let s = clause.trim(), invert = false;
+  if (/^not\s+/i.test(s)) { invert = true; s = s.replace(/^not\s+/i, ''); }
+  s = s.replace(/^only\s+/i, '');
+  const parts = s.split(/\s+and\s+/i);
+  let i = 0;
+  if (parts[0] && parts[0][0] !== '(') {
+    const mt = parts[0].toLowerCase();
+    if (mt !== 'all' && mt !== 'screen') return invert;
+    i = 1;
+  }
+  for (; i < parts.length; i++) {
+    const p = parts[i].trim();
+    if (!p) continue;
+    if (!(p[0] === '(' && p[p.length - 1] === ')') || !_mqExpr(p.slice(1, -1))) return invert;
+  }
+  return !invert;
+}
+function _mqMatches(q) {
+  const s = String(q).trim();
+  if (s === '') return true;
+  const clauses = [];
+  let depth = 0, cur = '';
+  for (const ch of s) {
+    if (ch === '(') depth++;
+    else if (ch === ')') depth--;
+    if (ch === ',' && depth === 0) { clauses.push(cur); cur = ''; continue; }
+    cur += ch;
+  }
+  clauses.push(cur);
+  return clauses.some((c) => c.trim() !== '' && _mqClause(c));
+}
+globalThis.matchMedia = _markNative(function matchMedia(q) {
+  let matches = false;
+  try { matches = _mqMatches(q); } catch (e) {}
+  return { matches, media: String(q), onchange: null,
+           addListener(){}, removeListener(){}, addEventListener(){}, removeEventListener(){}, dispatchEvent(){return true;} };
+});
 // Chrome's enumerable computed-style property set (kebab-case). Real
 // Chrome 145 exposes ~470 of these on every getComputedStyle() result;
 // count AND enumeration are fingerprint surfaces (Castle cssKeys).
@@ -5024,6 +5118,13 @@ globalThis.getComputedStyle = (el) => {
       }
       if (prop === 'cssText') return '';
       if (prop === 'parentRule') return null;
+      // CSS property names must resolve through lookup BEFORE the
+      // `prop in target` branch: element.style's named-property surface
+      // claims every CSS property, so that branch would short-circuit
+      // computed reads to the (usually empty) INLINE value —
+      // getComputedStyle(el).width answered '' even while
+      // getBoundingClientRect().width reported real geometry.
+      if (typeof prop === 'string') { const v = lookup(prop); if (v) return v; }
       if (prop in target) return target[prop];
       if (typeof prop === 'string') return lookup(prop);
       return undefined;

@@ -48,6 +48,81 @@
         assert_eq!(nav, serde_json::json!("en-US"));
     }
 
+    /// obscura#737 lineage probe: matchMedia answered `(min-width:640px)`
+    /// with false while the persona published a 2560px innerWidth — a page's
+    /// JS branching disagreed with the @media rules the CSS cascade applied,
+    /// and the self-contradiction was itself a fingerprint tell (scripts
+    /// cross-check the two). The evaluator now reads the live window
+    /// viewport, so the two cannot drift.
+    #[test]
+    fn match_media_agrees_with_published_viewport() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let checks = rt.evaluate(r#"
+            const vw = innerWidth, vh = innerHeight;
+            return [
+                matchMedia("").matches,
+                matchMedia("(min-width: 640px)").matches === (vw >= 640),
+                matchMedia("(min-width: 99999px)").matches,
+                matchMedia("(max-width: 10px)").matches === (vw <= 10),
+                matchMedia("(min-width: " + vw + "px)").matches,
+                matchMedia("(max-width: " + (vw - 0.01) + "px)").matches,
+                matchMedia("screen and (min-width: 100px)").matches,
+                matchMedia("print").matches,
+                matchMedia("not print").matches,
+                matchMedia("(min-width: 99999px), (min-width: 100px)").matches,
+                matchMedia("(orientation: landscape)").matches === (vw >= vh),
+                matchMedia("(prefers-color-scheme: light)").matches,
+                matchMedia("(prefers-color-scheme: dark)").matches,
+                matchMedia("(unknown-feature: 3)").matches,
+            ];
+        "#).unwrap();
+        let parts = checks.as_array().expect("array result");
+        assert_eq!(parts[0], serde_json::json!(true), "empty query matches everything");
+        assert_eq!(parts[1], serde_json::json!(true), "min-width tracks the real viewport");
+        assert_eq!(parts[2], serde_json::json!(false), "impossible min-width is false");
+        assert_eq!(parts[3], serde_json::json!(true), "max-width tracks the real viewport");
+        assert_eq!(parts[4], serde_json::json!(true), "boundary width is inclusive");
+        assert_eq!(parts[5], serde_json::json!(false), "just-below viewport is false");
+        assert_eq!(parts[6], serde_json::json!(true), "screen and (...) matches");
+        assert_eq!(parts[7], serde_json::json!(false), "print does not match");
+        assert_eq!(parts[8], serde_json::json!(true), "not print matches");
+        assert_eq!(parts[9], serde_json::json!(true), "comma list is OR");
+        assert_eq!(parts[10], serde_json::json!(true), "orientation follows the viewport");
+        assert_eq!(parts[11], serde_json::json!(true), "persona is light color scheme");
+        assert_eq!(parts[12], serde_json::json!(false), "dark scheme does not match");
+        assert_eq!(parts[13], serde_json::json!(false), "unknown features are false");
+    }
+
+    /// Computed-style property reads must resolve through the lookup chain
+    /// (inline → bounding-rect geometry → defaults), not get short-circuited
+    /// by element.style's named-property surface: that surface claims every
+    /// CSS property, so the Proxy's `prop in target` branch answered ''
+    /// for width while getBoundingClientRect reported real geometry — the
+    /// exact read react-virtuoso-style libraries branch on.
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn computed_style_width_resolves_past_the_inline_surface() {
+        let mut rt = setup_runtime(
+            "<html><body><div id=\"a\">alpha</div><div id=\"b\" style=\"width: 123px\">bravo</div></body></html>",
+        );
+        let checks = rt.evaluate(r#"
+            const a = document.getElementById("a"), b = document.getElementById("b");
+            return [
+                getComputedStyle(a).width,
+                getComputedStyle(b).width,
+                typeof getComputedStyle(a).getPropertyValue,
+                typeof getComputedStyle(a).length,
+            ];
+        "#).unwrap();
+        let parts = checks.as_array().expect("array result");
+        let block_w = parts[0].as_str().expect("geometry-backed width string");
+        assert!(block_w.ends_with("px") && block_w != "0px",
+            "width comes from the layout rect, not the empty inline value");
+        assert_eq!(parts[1], serde_json::json!("123px"), "inline width still wins the cascade-less approximation");
+        assert_eq!(parts[2], serde_json::json!("function"), "interface methods still route to the target");
+        assert_eq!(parts[3], serde_json::json!("number"), "interface members still route to the target");
+    }
+
     /// obscura#734 follow-up: replacing a native Intl constructor with a
     /// plain JS function is itself a fingerprint — Function.prototype.toString
     /// stops returning [native code], name/length drift, and
