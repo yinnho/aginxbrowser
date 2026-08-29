@@ -48,3 +48,36 @@ jobs:
           files: |
             aginxbrowser-*.tar.gz
             aginxbrowser-*.sha256
+
+  # AginxOS pulls this asset on device first-boot: bare static binary +
+  # sha256 (agpkg convention), so NO features — stealth (BoringSSL) and
+  # screenshot (fontconfig) must stay opt-in.
+  build-musl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.16.0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64-unknown-linux-musl
+      - name: Build
+        run: cargo zigbuild --release --target aarch64-unknown-linux-musl
+      - name: Package
+        run: |
+          bin=aginxbrowser-v${GITHUB_REF_NAME#v}-aarch64-unknown-linux-musl
+          cp target/aarch64-unknown-linux-musl/release/aginxbrowser "$bin"
+          shasum -a 256 "$bin" > "$bin.sha256"
+      - name: Upload artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            aginxbrowser-*-aarch64-unknown-linux-musl
+            aginxbrowser-*-aarch64-unknown-linux-musl.sha256
