@@ -1772,6 +1772,51 @@
         assert_eq!(result.as_str().unwrap(), "http://localhost:8080/dir/api.json");
     }
 
+    // Blob URLs must look like Chrome's: `blob:<document origin>/<uuid>`.
+    // The pre-rename engine handed out `blob:obscura/<base36>`, so a page
+    // reading back its own blob URL (a Worker's script URL, an anchor href,
+    // performance entries) could name the engine with one startsWith.
+    // Non-Blob input throws Chrome's TypeErrors instead of minting a
+    // fallback URL, and revoke drops the blob from both stores so a
+    // revoked URL can no longer construct a Worker synchronously.
+    #[test]
+    fn blob_urls_are_chrome_shaped_and_non_blob_input_throws() {
+        let mut rt = JsRuntime::with_base_url("https://example.com/page");
+        let result = rt
+            .evaluate(
+                r#"return (() => {
+                    // with_base_url only feeds the module loader; the realm's
+                    // location reads __virtualUrl/document_url. Pin it so the
+                    // minted blob URL carries a real origin, like a page.
+                    globalThis.__virtualUrl = 'https://example.com/page';
+                    const out = {};
+                    const url = URL.createObjectURL(new Blob(['hello'], {type: 'text/plain'}));
+                    out.url = url;
+                    out.shaped = /^blob:https:\/\/example\.com\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(url);
+                    out.inStore = !!globalThis.__blobObjs[url];
+                    URL.revokeObjectURL(url);
+                    out.afterRevoke = !!globalThis.__blobObjs[url];
+                    out.missingArg = (() => { try { URL.createObjectURL(); return 'no-throw'; } catch (e) { return e.name + '|' + e.message; } })();
+                    out.wrongType = (() => { try { URL.createObjectURL('nope'); return 'no-throw'; } catch (e) { return e.name + '|' + e.message; } })();
+                    return out;
+                })()"#,
+            )
+            .unwrap();
+        let out = result.as_object().expect("object result");
+        let url = out["url"].as_str().unwrap();
+        assert_eq!(out["shaped"], serde_json::json!(true), "blob url not chrome-shaped: {url}");
+        assert_eq!(out["inStore"], serde_json::json!(true));
+        assert_eq!(out["afterRevoke"], serde_json::json!(false));
+        assert_eq!(
+            out["missingArg"],
+            serde_json::json!("TypeError|Failed to execute 'createObjectURL' on 'URL': 1 argument required, but only 0 present.")
+        );
+        assert_eq!(
+            out["wrongType"],
+            serde_json::json!("TypeError|Failed to execute 'createObjectURL' on 'URL': parameter 1 is not of type 'Blob'.")
+        );
+    }
+
     // One stream per document. The tokenizer carries its state across the calls.
     // https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-document-write
     #[test]

@@ -8604,31 +8604,41 @@ globalThis.__blobStore = globalThis.__blobStore || {};
 // Blob objects by URL, registered synchronously — Worker construction reads
 // these so the createObjectURL → new Worker race can't lose.
 globalThis.__blobObjs = globalThis.__blobObjs || {};
-const _origCreateObjectURL = URL.createObjectURL;
 URL.createObjectURL = function(blob) {
-  if (blob && typeof blob.text === 'function') {
-    // Chrome shape: blob:https://<origin>/<uuid> (blob:null/ for opaque
-    // origins). The old blob:obscura/ prefix named the engine to any page
-    // that inspected the returned URL.
-    const origin = (globalThis.location && globalThis.location.origin) || 'null';
-    let u = '';
-    while (u.length < 36) {
-      if (u.length === 8 || u.length === 13 || u.length === 18 || u.length === 23) {
-        u += '-';
-      } else {
-        u += '0123456789abcdef'[Math.floor(Math.random() * 16)];
-      }
-    }
-    const id = 'blob:' + origin + '/' + u;
-    globalThis.__blobObjs[id] = blob;
-    blob.text().then(text => { globalThis.__blobStore[id] = text; });
-    return id;
+  // Chrome throws on missing / non-Blob input rather than minting a URL;
+  // a silent fallback string was both a compat gap and a fingerprint.
+  if (arguments.length === 0) {
+    throw new TypeError("Failed to execute 'createObjectURL' on 'URL': 1 argument required, but only 0 present.");
   }
+  if (!blob || typeof blob.text !== 'function') {
+    throw new TypeError("Failed to execute 'createObjectURL' on 'URL': parameter 1 is not of type 'Blob'.");
+  }
+  // Chrome shape: blob:https://<origin>/<uuid> (blob:null/ for opaque
+  // origins). The old blob:obscura/ prefix named the engine to any page
+  // that inspected the returned URL.
+  // Chrome mints v4 UUIDs (version nibble at 14, variant nibble at 19);
+  // a fully-random id fails strict UUID parsers.
   const origin = (globalThis.location && globalThis.location.origin) || 'null';
-  return 'blob:' + origin + '/fallback';
+  let u = '';
+  while (u.length < 36) {
+    if (u.length === 8 || u.length === 13 || u.length === 18 || u.length === 23) {
+      u += '-';
+    } else if (u.length === 14) {
+      u += '4';
+    } else if (u.length === 19) {
+      u += '89ab'[Math.floor(Math.random() * 4)];
+    } else {
+      u += '0123456789abcdef'[Math.floor(Math.random() * 16)];
+    }
+  }
+  const id = 'blob:' + origin + '/' + u;
+  globalThis.__blobObjs[id] = blob;
+  blob.text().then(text => { globalThis.__blobStore[id] = text; });
+  return id;
 };
 URL.revokeObjectURL = function(url) {
   delete globalThis.__blobStore[url];
+  delete globalThis.__blobObjs[url];
 };
 
 // Window-level scrolling (upstream #468). The dominant infinite-scroll idiom
