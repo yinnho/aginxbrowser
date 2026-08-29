@@ -845,6 +845,134 @@ mod tests {
         assert_eq!(value, "checked=true", "label click activated the checkbox");
     }
 
+    // Checkbox activation over a real CDP mouse click must clear
+    // `indeterminate` (HTML legacy-pre-activation: toggle checkedness AND
+    // clear the flag), and a cancelled click restores both. The
+    // Element#click() path in bootstrap.js does this; the duplicated
+    // activation snippet in the CDP mouse path must too, or a
+    // Playwright/Puppeteer click on an indeterminate checkbox leaves the
+    // flag stuck (upstream #732).
+    #[tokio::test(flavor = "current_thread")]
+    async fn input_mouse_click_clears_indeterminate_and_cancel_restores() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-indet".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({
+                "url": "data:text/html,<input type=checkbox id=c><input type=checkbox id=x>"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        // #c: indeterminate, click goes through. #x: indeterminate, click is
+        // cancelled by a listener.
+        let setup = CdpRequest {
+            id: 2,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "var c=document.getElementById('c'),x=document.getElementById('x');c.indeterminate=true;x.indeterminate=true;x.addEventListener('click',function(e){e.preventDefault();});'ok'",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&setup, &mut ctx).await.error.is_none());
+        ctx.pending_events.clear();
+
+        // Click #c (goes through).
+        let set_c = CdpRequest {
+            id: 3,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "globalThis.__diting_click_target = document.getElementById('c')"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&set_c, &mut ctx).await.error.is_none());
+        ctx.pending_events.clear();
+        for (i, ty) in ["mousePressed", "mouseReleased"].iter().enumerate() {
+            let req = CdpRequest {
+                id: 4 + i as u64,
+                method: "Input.dispatchMouseEvent".to_string(),
+                params: json!({
+                    "type": ty,
+                    "x": -1,
+                    "y": -1,
+                    "button": "left",
+                    "clickCount": 1,
+                }),
+                session_id: Some(session_id.clone()),
+            };
+            assert!(
+                dispatch(&req, &mut ctx).await.error.is_none(),
+                "dispatchMouseEvent {ty} failed"
+            );
+        }
+        let check_c = CdpRequest {
+            id: 6,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "(function(){var e=document.getElementById('c');return 'checked='+e.checked+' indeterminate='+e.indeterminate;})()",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&check_c, &mut ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        let outcome = resp.result.expect("result");
+        let value = outcome["result"]["value"].as_str().expect("string value");
+        assert_eq!(value, "checked=true indeterminate=false");
+
+        // Click #x (listener cancels it) — both checkedness and the
+        // indeterminate flag must be restored.
+        let set_x = CdpRequest {
+            id: 7,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "globalThis.__diting_click_target = document.getElementById('x')"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&set_x, &mut ctx).await.error.is_none());
+        ctx.pending_events.clear();
+        for (i, ty) in ["mousePressed", "mouseReleased"].iter().enumerate() {
+            let req = CdpRequest {
+                id: 8 + i as u64,
+                method: "Input.dispatchMouseEvent".to_string(),
+                params: json!({
+                    "type": ty,
+                    "x": -1,
+                    "y": -1,
+                    "button": "left",
+                    "clickCount": 1,
+                }),
+                session_id: Some(session_id.clone()),
+            };
+            assert!(
+                dispatch(&req, &mut ctx).await.error.is_none(),
+                "dispatchMouseEvent {ty} failed"
+            );
+        }
+        let check_x = CdpRequest {
+            id: 10,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "(function(){var e=document.getElementById('x');return 'checked='+e.checked+' indeterminate='+e.indeterminate;})()",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&check_x, &mut ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        let outcome = resp.result.expect("result");
+        let value = outcome["result"]["value"].as_str().expect("string value");
+        assert_eq!(value, "checked=false indeterminate=true");
+    }
+
     // Input.insertText (obscura#577): text that doesn't come from a key
     // press — IME commits, emoji pickers, paste-style agent drivers — has
     // no dispatchKeyEvent representation, so without this arm such clients
