@@ -223,6 +223,32 @@ fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
+/// deno_core 0.411 captures the ambient tokio handle when the isolate is
+/// registered and later spawns V8 platform tasks (the memory reducer's
+/// delayed GC probe, ~30s after heap growth, posts from inside an eval)
+/// through it — `std::process::abort()` when none was captured, by design,
+/// since a panic cannot unwind through V8's FFI frames. Server paths run
+/// under `#[tokio::main]`, but sync callers (tests, warmup) don't. This
+/// enters a process-lifetime background runtime; the returned guard must
+/// outlive the `deno_core::JsRuntime::new` call so registration finds the
+/// handle. Delayed tasks keep spawning afterward through the stored
+/// `Handle` clone, which stays valid because the runtime never drops.
+static BACKGROUND_TOKIO: std::sync::OnceLock<tokio::runtime::Runtime> =
+    std::sync::OnceLock::new();
+
+fn enter_tokio_context() -> Option<tokio::runtime::EnterGuard<'static>> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return None;
+    }
+    let runtime = BACKGROUND_TOKIO.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("background tokio runtime for V8 platform tasks")
+    });
+    Some(runtime.enter())
+}
+
 impl JsRuntime {
     pub fn new() -> Self {
         Self::with_base_url("about:blank")
@@ -245,6 +271,10 @@ impl JsRuntime {
             proxy_url,
             import_map.clone(),
         ));
+
+        // Must stay alive through the deno_core::JsRuntime::new call inside
+        // the lock below — isolate registration reads the ambient handle.
+        let _tokio_context = enter_tokio_context();
 
         // Serialize isolate construction process-wide: V8's JSDispatchTable
         // setup is not safe to run from several threads at once, and sessions
@@ -1697,7 +1727,8 @@ impl JsRuntime {
         &mut self,
         result: deno_core::v8::Global<deno_core::v8::Value>,
     ) -> Result<serde_json::Value, String> {
-        let scope = &mut self.runtime.handle_scope();
+        // 0.411 removed JsRuntime::handle_scope; deno_core::scope! is the blessed rebuild.
+        deno_core::scope!(scope, self.runtime);
         let local = deno_core::v8::Local::new(scope, result);
 
         if local.is_undefined() || local.is_null() {

@@ -1382,7 +1382,7 @@ fn cors_response_allows(
     }
 }
 
-#[op2(async)]
+#[op2(async(deferred), fast)]
 #[string]
 async fn op_fetch_url(
     state: Rc<RefCell<OpState>>,
@@ -2183,7 +2183,7 @@ fn op_navigate(state: &OpState, #[string] url: &str, #[string] method: &str, #[s
     gs.pending_navigation = Some((url.to_string(), method.to_string(), body.to_string()));
 }
 
-#[op2(async)]
+#[op2(async(deferred), fast)]
 async fn op_sleep(#[number] millis: u64) {
     tokio::time::sleep(std::time::Duration::from_millis(millis)).await;
 }

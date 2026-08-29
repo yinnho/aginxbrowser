@@ -130,8 +130,8 @@ scraper = "0.21"
 html2md = "0.2"
 
 # --- V8 / JS runtime (inlined obscura-js) ---
-deno_core = "0.350"
-deno_error = "0.6"
+deno_core = "0.411"
+deno_error = "0.7"
 base64 = "0.22"
 sha1 = "0.10"
 sha2 = "0.10"
@@ -194,7 +194,7 @@ wreq = { version = "=6.0.0-rc.28", optional = true, features = ["prefix-symbols"
 wreq = { version = "=6.0.0-rc.28", optional = true, features = ["socks", "gzip", "brotli", "deflate", "zstd"] }
 
 [build-dependencies]
-deno_core = "0.350"
+deno_core = "0.411"
 
 [dev-dependencies]
 ureq = { version = "2", features = ["json"] }
