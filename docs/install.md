@@ -122,7 +122,7 @@ less install.sh
 bash install.sh
 ```
 
-Detects your platform, downloads the prebuilt binary, verifies the SHA-256, installs to `~/.local/bin` (override with `PREFIX=...`, pin with `VERSION=v0.2.4`), and finishes with a self-check:
+Detects your platform, downloads the prebuilt binary, verifies the SHA-256, installs to `~/.local/bin` (override with `PREFIX=...`, pin with `VERSION=v0.2.5`), and finishes with a self-check:
 
 ```bash
 aginxbrowser doctor   # features + bundled fonts + env posture + one egress probe
@@ -130,10 +130,10 @@ aginxbrowser doctor   # features + bundled fonts + env posture + one egress prob
 
 ### Option C′: Manual prebuilt download
 
-Prebuilt binaries for v0.2.4 (macOS Apple Silicon / macOS Intel / Linux x86_64):
+Prebuilt binaries for v0.2.5 (macOS Apple Silicon / macOS Intel / Linux x86_64):
 
 ```bash
-VER=v0.2.4
+VER=v0.2.5
 OS=$(uname -s); ARCH=$(uname -m)
 case "$OS-$ARCH" in
   Darwin-arm64) T=aarch64-apple-darwin ;;

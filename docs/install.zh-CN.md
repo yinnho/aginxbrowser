@@ -122,7 +122,7 @@ less install.sh
 bash install.sh
 ```
 
-自动识别平台、下载预编译二进制、SHA-256 校验、装到 `~/.local/bin`（`PREFIX=...` 改路径、`VERSION=v0.2.4` 钉版本），收尾跑一次自检：
+自动识别平台、下载预编译二进制、SHA-256 校验、装到 `~/.local/bin`（`PREFIX=...` 改路径、`VERSION=v0.2.5` 钉版本），收尾跑一次自检：
 
 ```bash
 aginxbrowser doctor   # 编译特性 + 内置字体 + 环境态势 + 一次出口探针
@@ -130,10 +130,10 @@ aginxbrowser doctor   # 编译特性 + 内置字体 + 环境态势 + 一次出�
 
 ### 方式 C′：手动下载预编译二进制
 
-v0.2.4 提供三平台预编译二进制（macOS Apple Silicon / macOS Intel / Linux x86_64）：
+v0.2.5 提供三平台预编译二进制（macOS Apple Silicon / macOS Intel / Linux x86_64）：
 
 ```bash
-VER=v0.2.4
+VER=v0.2.5
 OS=$(uname -s); ARCH=$(uname -m)
 case "$OS-$ARCH" in
   Darwin-arm64) T=aarch64-apple-darwin ;;
