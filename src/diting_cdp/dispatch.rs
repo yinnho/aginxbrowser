@@ -1394,4 +1394,84 @@ mod tests {
             "navigator.platform must derive from the overridden UA, got: {value}"
         );
     }
+
+    // CDP mouse input models a real input device, so the PointerEvents must
+    // precede their compatibility mouse events exactly as Chrome does:
+    // pointerdown → mousedown → pointerup → mouseup → click (obscura#739
+    // class). Pointer-event delegation sites only see the click if the
+    // pointer pair is there.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dispatch_mouse_event_emits_pointer_pair_before_mouse_pair() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-1".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": "data:text/html,<html><body><button id=b>b</button>\
+                <script>\
+                window.__seq = [];\
+                ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function (t) {\
+                  document.addEventListener(t, function (e) {\
+                    window.__seq.push({ t: t, isPointer: e instanceof PointerEvent,\
+                      isMouse: e instanceof MouseEvent, pointerType: e.pointerType === undefined ? null : e.pointerType,\
+                      isPrimary: e.isPrimary === undefined ? null : e.isPrimary, pressure: e.pressure });\
+                  });\
+                });\
+                </script></body></html>" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        for (id, event_type, buttons) in
+            [(2, "mousePressed", 1), (3, "mouseReleased", 0)]
+        {
+            let req = CdpRequest {
+                id,
+                method: "Input.dispatchMouseEvent".to_string(),
+                params: json!({
+                    "type": event_type,
+                    "x": 8.0,
+                    "y": 8.0,
+                    "button": "left",
+                    "buttons": buttons,
+                    "clickCount": 1,
+                }),
+                session_id: Some(session_id.clone()),
+            };
+            let resp = dispatch(&req, &mut ctx).await;
+            assert!(resp.error.is_none(), "dispatch failed: {:?}", resp.error);
+        }
+
+        let eval = CdpRequest {
+            id: 4,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "JSON.stringify(window.__seq)",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&eval, &mut ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        let raw = resp.result.expect("result")["result"]["value"]
+            .as_str()
+            .expect("json string")
+            .to_string();
+        let seq: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap();
+        let names: Vec<&str> = seq.iter().filter_map(|e| e["t"].as_str()).collect();
+        assert_eq!(
+            names,
+            ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]
+        );
+        assert_eq!(seq[0]["isPointer"], json!(true));
+        assert_eq!(seq[0]["isMouse"], json!(true), "PointerEvent extends MouseEvent");
+        assert_eq!(seq[0]["pointerType"], json!("mouse"));
+        assert_eq!(seq[0]["isPrimary"], json!(true));
+        assert_eq!(seq[0]["pressure"], json!(0.5));
+        assert_eq!(seq[1]["isPointer"], json!(false), "mousedown is not a PointerEvent");
+        assert_eq!(seq[2]["pressure"], json!(0));
+    }
 }

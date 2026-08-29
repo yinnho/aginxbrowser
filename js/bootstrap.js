@@ -5645,7 +5645,20 @@ globalThis.CustomEvent = class extends Event {
     this.detail = detail;
   }
 };
-globalThis.MouseEvent = class extends Event {
+// UIEvent must be defined before its subclasses — the whole UI family
+// re-parents onto it to match the Chrome prototype chain (a pointer event
+// that fails `instanceof UIEvent` is what delegation libraries notice first).
+globalThis.UIEvent = class extends Event {
+  constructor(t,o={}) { super(t,o);this.view=o.view||null;this.detail=o.detail||0; }
+  // Legacy DOM Level 2 initializer. Positional signature per UI Events spec.
+  initUIEvent(type,canBubble,cancelable,view,detail) {
+    if (arguments.length < 1) throw new TypeError("Failed to execute 'initUIEvent' on 'UIEvent': 1 argument required, but only 0 present.");
+    this.initEvent(type,canBubble,cancelable);
+    this.view=view===undefined?null:view;
+    this.detail=detail||0;
+  }
+};
+globalThis.MouseEvent = class extends UIEvent {
   constructor(t,o={}) { super(t,o);this.view=o.view||null;this.detail=o.detail||0;this.screenX=o.screenX||0;this.screenY=o.screenY||0;this.clientX=o.clientX||0;this.clientY=o.clientY||0;this.ctrlKey=!!o.ctrlKey;this.altKey=!!o.altKey;this.shiftKey=!!o.shiftKey;this.metaKey=!!o.metaKey;this.button=o.button||0;this.buttons=o.buttons||0;this.relatedTarget=o.relatedTarget||null; }
   // Legacy DOM Level 2 initializer. Positional signature per UI Events spec.
   initMouseEvent(type,canBubble,cancelable,view,detail,screenX,screenY,clientX,clientY,ctrlKey,altKey,shiftKey,metaKey,button,relatedTarget) {
@@ -5665,7 +5678,7 @@ globalThis.MouseEvent = class extends Event {
     this.relatedTarget=relatedTarget===undefined?null:relatedTarget;
   }
 };
-globalThis.KeyboardEvent = class extends Event {
+globalThis.KeyboardEvent = class extends UIEvent {
   constructor(t,o={}) { super(t,o);this.view=o.view||null;this.detail=o.detail||0;this.key=o.key||"";this.code=o.code||"";this.location=o.location||0;this.ctrlKey=!!o.ctrlKey;this.altKey=!!o.altKey;this.shiftKey=!!o.shiftKey;this.metaKey=!!o.metaKey;this.repeat=!!o.repeat; }
   // Legacy DOM Level 3 initializer. Positional signature per the WebKit/Gecko form.
   initKeyboardEvent(type,canBubble,cancelable,view,key,location,ctrlKey,altKey,shiftKey,metaKey) {
@@ -5680,25 +5693,14 @@ globalThis.KeyboardEvent = class extends Event {
     this.metaKey=!!metaKey;
   }
 };
-globalThis.FocusEvent = class extends Event { constructor(t,o={}) { super(t,o);this.relatedTarget=o.relatedTarget||null; } };
-globalThis.InputEvent = class extends Event { constructor(t,o={}) { super(t,o);this.data=o.data||null;this.inputType=o.inputType||""; } };
+globalThis.FocusEvent = class extends UIEvent { constructor(t,o={}) { super(t,o);this.relatedTarget=o.relatedTarget||null; } };
+globalThis.InputEvent = class extends UIEvent { constructor(t,o={}) { super(t,o);this.data=o.data||null;this.inputType=o.inputType||""; } };
 globalThis.ErrorEvent = class extends Event { constructor(t,o={}) { super(t,o);this.message=o.message||"";this.error=o.error||null; } };
-globalThis.PointerEvent = class extends Event { constructor(t,o={}) { super(t,o); } };
 globalThis.AnimationEvent = class extends Event {};
 globalThis.TransitionEvent = class extends Event {};
-globalThis.UIEvent = class extends Event {
-  constructor(t,o={}) { super(t,o);this.view=o.view||null;this.detail=o.detail||0; }
-  // Legacy DOM Level 2 initializer. Positional signature per UI Events spec.
-  initUIEvent(type,canBubble,cancelable,view,detail) {
-    if (arguments.length < 1) throw new TypeError("Failed to execute 'initUIEvent' on 'UIEvent': 1 argument required, but only 0 present.");
-    this.initEvent(type,canBubble,cancelable);
-    this.view=view===undefined?null:view;
-    this.detail=detail||0;
-  }
-};
-globalThis.WheelEvent = class extends Event { constructor(t,o={}) { super(t,o);this.deltaX=o.deltaX||0;this.deltaY=o.deltaY||0;this.deltaZ=o.deltaZ||0;this.deltaMode=o.deltaMode||0; } };
+globalThis.WheelEvent = class extends MouseEvent { constructor(t,o={}) { super(t,o);this.deltaX=o.deltaX||0;this.deltaY=o.deltaY||0;this.deltaZ=o.deltaZ||0;this.deltaMode=o.deltaMode||0; } };
 
-globalThis.CompositionEvent = class extends Event {
+globalThis.CompositionEvent = class extends UIEvent {
   constructor(t,o={}) { super(t,o);this.view=o.view||null;this.detail=o.detail||0;this.data=o.data||""; }
   // Legacy DOM Level 3 initializer. Positional signature per UI Events spec.
   initCompositionEvent(type,canBubble,cancelable,view,data) {
@@ -8372,10 +8374,12 @@ Function.prototype.toString = new Proxy(__ditingFnToString, {
   },
 });
 
-if (typeof PointerEvent === 'undefined') {
-  globalThis.PointerEvent = class PointerEvent extends MouseEvent {
-    constructor(type, opts={}) { super(type, opts); this.pointerId = opts.pointerId || 0; this.width = opts.width || 1; this.height = opts.height || 1; this.pressure = opts.pressure || 0; this.pointerType = opts.pointerType || 'mouse'; }
-  };
+// A weak `PointerEvent extends Event` used to squat on this name earlier in
+// the bootstrap, which kept the real class below dead behind its
+// typeof-guard. Chrome shape: pointerType defaults to '' (only real input
+// carries 'mouse'/'pen'/'touch'), isPrimary defaults to false.
+globalThis.PointerEvent = class PointerEvent extends MouseEvent {
+  constructor(type, opts={}) { super(type, opts); this.pointerId = opts.pointerId || 0; this.width = opts.width || 1; this.height = opts.height || 1; this.pressure = opts.pressure || 0; this.pointerType = opts.pointerType !== undefined ? opts.pointerType : ''; this.isPrimary = !!opts.isPrimary; }
 }
 
 if (typeof navigator.credentials === 'undefined') {

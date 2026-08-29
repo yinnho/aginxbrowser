@@ -4422,6 +4422,40 @@
     }
 
     #[test]
+    fn test_pointer_event_class_matches_chrome_defaults() {
+        // A weak `PointerEvent extends Event` used to squat on the name,
+        // keeping the real MouseEvent subclass dead behind its typeof-guard.
+        // Chrome shape: pointer events are MouseEvents; constructor defaults
+        // are pointerId 0, pointerType '', isPrimary false, pressure 0,
+        // width/height 1 — only real input carries 'mouse'/'pen'/'touch'.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt.evaluate(r#"
+            const bare = new PointerEvent('pointerdown');
+            const full = new PointerEvent('pointermove', {
+                pointerId: 7, pointerType: 'touch', isPrimary: true,
+                pressure: 0.25, clientX: 5, clientY: 6, button: 0,
+            });
+            return [
+                bare instanceof MouseEvent, bare instanceof UIEvent, bare instanceof Event,
+                bare.pointerId, bare.pointerType, bare.isPrimary, bare.pressure,
+                bare.width, bare.height,
+                full.pointerId, full.pointerType, full.isPrimary, full.pressure,
+                full.clientX, full.bubbles,
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                true, true, true,
+                0, "", false, 0,
+                1, 1,
+                7, "touch", true, 0.25,
+                5, false,
+            ])
+        );
+    }
+
+    #[test]
     fn test_performance_now_is_offset_monotonic_and_bounded() {
         // Upstream cdab919 + d93ff51: now() reports ms since timeOrigin (not
         // the raw epoch), never goes backwards under bursty calls, and does

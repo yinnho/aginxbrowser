@@ -169,8 +169,11 @@ pub async fn handle(
                             if (!target) return;\
                             globalThis.__diting_click_target = target;\
                             globalThis.__diting_mouse_down = {{target:target,button:{button_code},clickCount:{click_count}}};\
-                            var evt = globalThis.__diting_markTrusted(new MouseEvent('mousedown', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:{button_code},buttons:{buttons},detail:{click_count},altKey:{alt_key},ctrlKey:{ctrl_key},metaKey:{meta_key},shiftKey:{shift_key}}}));\
-                            target.dispatchEvent(evt);\
+                            var pd = globalThis.__diting_markTrusted(new PointerEvent('pointerdown', {{bubbles:true,cancelable:true,composed:true,view:globalThis,clientX:{x},clientY:{y},button:{button_code},buttons:{buttons},pointerId:1,pointerType:'mouse',isPrimary:true,pressure:{buttons}!==0?0.5:0,width:1,height:1}}));\
+                            if (target.dispatchEvent(pd)) {{\
+                                var evt = globalThis.__diting_markTrusted(new MouseEvent('mousedown', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:{button_code},buttons:{buttons},detail:{click_count},altKey:{alt_key},ctrlKey:{ctrl_key},metaKey:{meta_key},shiftKey:{shift_key}}}));\
+                                target.dispatchEvent(evt);\
+                            }}\
                         }})()",
                         x = x, y = y, button_code = button_code, buttons = buttons,
                         click_count = click_count, alt_key = alt_key, ctrl_key = ctrl_key,
@@ -187,6 +190,8 @@ pub async fn handle(
                             if (!target) return;\
                             var down = globalThis.__diting_mouse_down;\
                             globalThis.__diting_mouse_down = null;\
+                            var pu = globalThis.__diting_markTrusted(new PointerEvent('pointerup', {{bubbles:true,cancelable:true,composed:true,view:globalThis,clientX:{x},clientY:{y},button:{button_code},buttons:0,pointerId:1,pointerType:'mouse',isPrimary:true,pressure:0,width:1,height:1}}));\
+                            target.dispatchEvent(pu);\
                             var evt = globalThis.__diting_markTrusted(new MouseEvent('mouseup', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:{button_code},buttons:0,detail:{click_count},altKey:{alt_key},ctrlKey:{ctrl_key},metaKey:{meta_key},shiftKey:{shift_key}}}));\
                             target.dispatchEvent(evt);\
                             if (!down || down.button !== {button_code} || {button_code} !== 0) return;\
