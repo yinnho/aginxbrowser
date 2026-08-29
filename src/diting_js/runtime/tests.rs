@@ -4353,6 +4353,74 @@
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_throwing_timer_is_contained_and_later_timers_still_fire() {
+        // Upstream #394: a page timer that throws (Booking.com's
+        // "Cannot redefine property: src" inside a timer) took the whole
+        // obscura process down with it. Timer callbacks are page code —
+        // a throw must be caught at the timer boundary and the loop must
+        // keep servicing later timers (same for setInterval ticks).
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"async () => {
+            setTimeout(() => { throw new TypeError('boom-timeout'); }, 0);
+            let intervalTicks = 0;
+            const iid = setInterval(() => {
+                intervalTicks++;
+                if (intervalTicks === 1) throw new RangeError('boom-interval');
+                if (intervalTicks >= 3) clearInterval(iid);
+            }, 0);
+            setTimeout(() => { window.__survivor = 'ran'; }, 0);
+            await new Promise(r => setTimeout(r, 30));
+            return [window.__survivor, intervalTicks];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(result.value.unwrap(), serde_json::json!(["ran", 3]));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_intersection_observer_drives_infinite_scroll_to_completion() {
+        // The obstacle-course `observer-intersection` pattern (obscura-benchmark,
+        // discussed upstream in #671): a sentinel is observed, each intersection
+        // appends a batch, and the feed must reach the cap and set the done flag.
+        // Our IO is geometry-naive (always intersecting) but re-fires on DOM
+        // mutations + a burst schedule, so the pattern completes regardless of
+        // font-metric-driven card heights (real-geometry engines flip pass/fail
+        // on the default 18px line height).
+        let mut rt = setup_runtime("<html><body><div id=feed></div><div id=sentinel></div></body></html>");
+        let script = r#"async () => {
+            const feed = document.getElementById('feed');
+            let loaded = 0;
+            // 30, not the fixture's 50: completion is driven by the burst
+            // schedule (120/500/1500/3500/7000ms), and a unit test should
+            // not wait out the late bursts. The invariant is "completes and
+            // terminates", not "reaches 50".
+            const BATCH = 10, MAX = 30;
+            const io = new IntersectionObserver((entries) => {
+                for (const e of entries) {
+                    if (e.isIntersecting && loaded < MAX) {
+                        for (let i = 0; i < BATCH && loaded < MAX; i++) {
+                            const card = document.createElement('div');
+                            card.className = 'card';
+                            feed.appendChild(card);
+                            loaded++;
+                        }
+                        if (loaded >= MAX) { io.disconnect(); window.__done = 'io:' + loaded; }
+                    }
+                }
+            });
+            io.observe(document.getElementById('sentinel'));
+            // The chain advances one batch per loop turn (mutation hop or
+            // burst timer), so poll until the flag lands rather than a
+            // single fixed sleep.
+            for (let k = 0; k < 40 && !window.__done; k++) {
+                await new Promise(r => setTimeout(r, 25));
+            }
+            return [loaded, String(window.__done || '')];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(result.value.unwrap(), serde_json::json!([30, "io:30"]));
+    }
+
     #[test]
     fn test_performance_now_is_offset_monotonic_and_bounded() {
         // Upstream cdab919 + d93ff51: now() reports ms since timeOrigin (not
