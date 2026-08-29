@@ -1,10 +1,11 @@
-//! robots.txt compliance (RFC 9309 subset), checked before every autonomous
+//! robots.txt compliance (RFC 9309 subset), available on every autonomous
 //! fetch path — `/fetch`, `/click`, `/eval`, `/screenshot`, `/download`, the
 //! `/search` fetch_top body-grab, and the MCP and firecrawl equivalents.
-//! aginxbrowser grabs one page when an agent asks
-//! (real-time data, not crawling), and honoring the site's rules by default
-//! is the stance that keeps it that way. Operators who disagree own their
-//! instance: `AGINXBROWSER_IGNORE_ROBOTS=1`.
+//! aginxbrowser is a real-time acquisition layer, not a crawler: an agent
+//! arrives with a question, reads a few pages, leaves with the answer, and
+//! robots.txt is crawler etiquette — not a gate for that. The check is
+//! therefore OFF by default; operators who want it opt in with
+//! `AGINXBROWSER_HONOR_ROBOTS=1`.
 //!
 //! Interactive sessions (navigate/click/type) are deliberately exempt — they
 //! are agent-driven the way a person at a keyboard is, and robots.txt governs
@@ -82,11 +83,12 @@ struct Cached {
 static CACHE: LazyLock<tokio::sync::Mutex<HashMap<String, Cached>>> =
     LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
 
-/// Err(reason) when robots.txt disallows fetching `url`.
+/// Err(reason) when robots.txt disallows fetching `url`. Only runs at all
+/// when the operator opted in (see [`honor_env`]).
 ///
 /// Cheap after the first call for a host — the policy is cached.
 pub async fn assert_allowed(url: &str) -> Result<(), String> {
-    if ignore_env() {
+    if !honor_env() {
         return Ok(());
     }
     let url = Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
@@ -144,8 +146,8 @@ pub async fn assert_allowed(url: &str) -> Result<(), String> {
     match policy {
         Policy::AllowAll => Ok(()),
         Policy::DenyAll(reason) => Err(format!(
-            "robots.txt on {key} is unreachable ({reason}); aginxbrowser assumes denial rather than permission in that case. \
-             Set AGINXBROWSER_IGNORE_ROBOTS=1 on the server to override."
+            "robots.txt on {key} is unreachable ({reason}); this instance checks robots.txt (AGINXBROWSER_HONOR_ROBOTS=1) and assumes denial rather than permission while it fails. \
+             Remove the env to skip the check."
         )),
         Policy::Rules(rules) => {
             let target = url.path();
@@ -155,8 +157,7 @@ pub async fn assert_allowed(url: &str) -> Result<(), String> {
             };
             match best_match(&rules, &target) {
                 Some(rule) if !rule.allow => Err(format!(
-                    "robots.txt disallows {target} on {key} (matched `Disallow: {}`); aginxbrowser honors robots.txt by default. \
-                     Set AGINXBROWSER_IGNORE_ROBOTS=1 on the server to override.",
+                    "robots.txt disallows {target} on {key} (matched `Disallow: {}`). This instance checks robots.txt (AGINXBROWSER_HONOR_ROBOTS=1); remove it to skip the check.",
                     rule.pattern
                 )),
                 _ => Ok(()),
@@ -165,10 +166,10 @@ pub async fn assert_allowed(url: &str) -> Result<(), String> {
     }
 }
 
-/// The operator-level opt-out. Deliberately not a per-request field: the
+/// The operator-level opt-in. Deliberately not a per-request field: the
 /// robots stance belongs to whoever runs the instance, not to each caller.
-fn ignore_env() -> bool {
-    std::env::var("AGINXBROWSER_IGNORE_ROBOTS")
+fn honor_env() -> bool {
+    std::env::var("AGINXBROWSER_HONOR_ROBOTS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
@@ -510,6 +511,43 @@ mod tests {
             Policy::Rules(rs) => assert_eq!(rs[0].pattern, "/no"),
             _ => panic!("expected rules"),
         }
+    }
+
+    // The gate is OFF by default — aginxbrowser is a real-time acquisition
+    // layer, not a crawler, and robots.txt is crawler etiquette. The env
+    // flip is the whole switch; no compat alias for the old
+    // AGINXBROWSER_IGNORE_ROBOTS name.
+    #[test]
+    fn robots_gate_defaults_off_and_honor_env_opts_in() {
+        static HONOR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _env = HONOR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        unsafe { std::env::remove_var("AGINXBROWSER_HONOR_ROBOTS") };
+        assert!(!honor_env());
+        unsafe { std::env::set_var("AGINXBROWSER_HONOR_ROBOTS", "1") };
+        assert!(honor_env());
+        unsafe { std::env::set_var("AGINXBROWSER_HONOR_ROBOTS", "true") };
+        assert!(honor_env());
+        unsafe { std::env::set_var("AGINXBROWSER_HONOR_ROBOTS", "0") };
+        assert!(!honor_env());
+        unsafe { std::env::remove_var("AGINXBROWSER_HONOR_ROBOTS") };
+    }
+
+    // End to end on the gate position: by default assert_allowed returns Ok
+    // before ANY work — the unparsable URL proves it (parsing would error).
+    // With HONOR_ROBOTS=1 the gate actually runs and the same input errors.
+    // Both branches stay network-free, so the test makes no requests.
+    #[tokio::test]
+    async fn default_allows_without_consulting_robots_honor_runs_the_gate() {
+        static HONOR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _env = HONOR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        unsafe { std::env::remove_var("AGINXBROWSER_HONOR_ROBOTS") };
+        assert!(assert_allowed(":::not a url").await.is_ok());
+
+        unsafe { std::env::set_var("AGINXBROWSER_HONOR_ROBOTS", "1") };
+        assert!(assert_allowed(":::not a url").await.is_err());
+        unsafe { std::env::remove_var("AGINXBROWSER_HONOR_ROBOTS") };
     }
 
     // With AGINXBROWSER_PROXY set, the robots fetch used to attach the proxy

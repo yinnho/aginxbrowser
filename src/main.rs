@@ -733,9 +733,9 @@ async fn doctor_handler(Query(params): Query<DoctorParams>) -> impl IntoResponse
         "stealth": cfg!(feature = "stealth"),
         "captcha_solver": std::env::var("CAPTCHA_SOLVER_API_KEY").is_ok(),
         // The product stance, visible where agents and operators look first.
-        "robots_honored": std::env::var("AGINXBROWSER_IGNORE_ROBOTS")
-            .map(|v| !(v == "1" || v.eq_ignore_ascii_case("true")))
-            .unwrap_or(true),
+        "robots_honored": std::env::var("AGINXBROWSER_HONOR_ROBOTS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false),
     });
 
     let probe = if params.probe.unwrap_or(false) {

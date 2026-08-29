@@ -73,7 +73,7 @@ Apache-2.0 open source, single binary — self-host today, no cloud lock-in.
 
 AginxBrowser exists for **real-time retrieval**: an agent arrives with a question, reads a handful of pages, leaves with the answer. It is not a crawling tool — and the product is shaped so it can't quietly become one:
 
-- **robots.txt honored by default** (RFC 9309) on every autonomous fetch path. Crawler-style mass fetching is exactly what robots.txt exists to refuse, and we take the refusal.
+- **robots.txt is not our gate.** The RFC 9309 checker ships built in, but a real-time lookup layer isn't a crawler and doesn't do crawler etiquette by default; operators who want it set `AGINXBROWSER_HONOR_ROBOTS=1`.
 - **No site-walking API.** There is no crawl endpoint and no link-following recursion — every page load happens because an agent asked for that page.
 - **Built-in budgets.** Per-domain: 20 pages/minute. Per interactive session: 200 pages. Toggled via `AGINXBROWSER_DOMAIN_RATE_PER_MIN` / `AGINXBROWSER_SESSION_PAGE_LIMIT` (`0` disables on your own instance). Generous for an agent grinding through docs or a console; fatal to the page-after-page crawl pattern, including subdomain rotation (one registrable domain, one budget).
 - **The hosted instance (browser.aginx.net) runs tighter budgets.** Every user shares one egress IP, and keeping sites comfortable with that IP is part of the service. Self-host if you want different numbers.
@@ -250,7 +250,7 @@ Requirements: Rust 1.78+; the V8 static library downloads automatically on first
 | `AGINXBROWSER_PROXY` | none | Optional fallback proxy. Blocked-source engines (Google, Bing News, Hugging Face) connect directly first and fall through to this proxy only when the direct attempt fails — overseas deployments need no proxy at all; per-request `use_proxy:true` also routes fetch/search through it. Standard `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` are deliberately ignored by the engine (set them for other tools freely); startup logs a warning when it sees one |
 | `AGINXBROWSER_NAV_CHAIN_LIMIT` | `10` | JS navigation-chain cap: documents a page may chain via `location`/form hops before navigation aborts. The count includes the requested document (10 = initial doc + 9 hops). Raise for legit long chains (SSO handover across providers); HTTP 3xx redirects are budgeted separately (20, per Fetch spec / browser parity) |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL, `0` disables |
-| `AGINXBROWSER_IGNORE_ROBOTS` | unset | robots.txt is honored by default on `/fetch`, `/screenshot`, `/download` and MCP tools; set `1` to skip checks (operator opt-out) |
+| `AGINXBROWSER_HONOR_ROBOTS` | unset | robots.txt is not consulted by default on `/fetch`, `/screenshot`, `/download` and MCP tools; set `1` to opt in (operator choice) |
 | `AGINXBROWSER_ROBOTS_TTL_SECS` | `3600` | Per-host robots.txt policy cache TTL |
 | `AGINXBROWSER_DOMAIN_RATE_PER_MIN` | `20` | Per-registrable-domain page budget per minute (subdomains share one budget); over-budget requests get 429 with the stance message. `0` disables. See "A Browser, Not a Crawler" |
 | `AGINXBROWSER_SESSION_PAGE_LIMIT` | `200` | Total pages one interactive session may walk (navigation-causing clicks count); over-budget navigations are refused, the current page stays interactive. `0` disables |

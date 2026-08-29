@@ -56,16 +56,17 @@ fn features_check() -> Check {
 }
 
 /// The robots.txt stance is a product decision made visible: it defaults to
-/// honored, and the one env that turns it off should show up in doctor so a
-/// misconfigured instance explains itself.
+/// skipped (real-time acquisition layer, not a crawler), and the one env
+/// that turns it on should show up in doctor so a misconfigured instance
+/// explains itself.
 fn robots_check() -> Check {
-    if std::env::var("AGINXBROWSER_IGNORE_ROBOTS")
+    if std::env::var("AGINXBROWSER_HONOR_ROBOTS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
     {
-        check(Status::Warn, "robots", "IGNORE_ROBOTS set — /fetch, /screenshot and /download skip robots.txt (operator opt-out)")
+        check(Status::Ok, "robots", "HONOR_ROBOTS set — /fetch, /screenshot and /download check robots.txt (operator opt-in)")
     } else {
-        check(Status::Ok, "robots", "robots.txt honored by default (AGINXBROWSER_IGNORE_ROBOTS=1 to opt out)")
+        check(Status::Ok, "robots", "robots.txt not consulted by default (AGINXBROWSER_HONOR_ROBOTS=1 to opt in)")
     }
 }
 

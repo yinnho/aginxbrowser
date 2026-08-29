@@ -168,7 +168,7 @@ curl -sS -X POST http://127.0.0.1:8089/fetch \
 
 **Caching**: `/fetch` has an in-process cache (key includes url/format/selector/cookies/use_proxy/max_chars/render_tier/tls_fingerprint); TTL is controlled by `AGINXBROWSER_CACHE_TTL_SECS` (default 600s, `0` disables). Repeat fetches of the same URL hit the cache (~0.01s vs ~1s on first fetch).
 
-**Security**: built-in SSRF protection (blocks non-http(s) schemes and private-network/loopback IPs), DNS rebinding protection, robots.txt compliance, and tracker blocking (stealth mode).
+**Security**: built-in SSRF protection (blocks non-http(s) schemes and private-network/loopback IPs), DNS rebinding protection, and tracker blocking (stealth mode). An RFC 9309 robots.txt checker ships built in but is off by default (`AGINXBROWSER_HONOR_ROBOTS=1` to opt in).
 
 ---
 
@@ -781,12 +781,12 @@ curl -sS -X POST http://127.0.0.1:8089/session/$SID/close
 
 ---
 
-## robots.txt Compliance (default on)
+## robots.txt Checking (opt-in)
 
-AginxBrowser fetches on demand — one page when an agent asks, not bulk crawling — and honors `robots.txt` by default on every autonomous path: `/fetch`, `/click`, `/eval`, `/screenshot`, `/download`, the `/search` fetch_top body-grab (denied results keep their entry; `fetch_error` carries the reason), their MCP tool equivalents, and the Firecrawl-compatible `/v1/scrape`. A disallowed URL returns **HTTP 403** with the matched rule in the error, so the agent can see exactly why:
+AginxBrowser fetches on demand — one page when an agent asks, not bulk crawling — and by default does **not** consult `robots.txt` on any path: real-time acquisition is not crawling, and robots.txt is crawler etiquette. The full RFC 9309 checker ships built in and, when the operator opts in with `AGINXBROWSER_HONOR_ROBOTS=1`, applies to every autonomous path — `/fetch`, `/click`, `/eval`, `/screenshot`, `/download`, the `/search` fetch_top body-grab (denied results keep their entry; `fetch_error` carries the reason), their MCP tool equivalents, and the Firecrawl-compatible `/v1/scrape`. A disallowed URL then returns **HTTP 403** with the matched rule in the error, so the agent can see exactly why:
 
 ```json
-{"error": "robots.txt disallows /yinnho/aginxbrowser/pulse on https://github.com (matched `Disallow: /*/*/pulse`); aginxbrowser honors robots.txt by default. Set AGINXBROWSER_IGNORE_ROBOTS=1 on the server to override."}
+{"error": "robots.txt disallows /yinnho/aginxbrowser/pulse on https://github.com (matched `Disallow: /*/*/pulse`). This instance checks robots.txt (AGINXBROWSER_HONOR_ROBOTS=1); remove it to skip the check."}
 ```
 
 Semantics (RFC 9309 subset):
@@ -806,10 +806,10 @@ Scope notes:
 - The robots.txt fetch itself uses the honest product User-Agent (`aginxbrowser/<version> (+https://browser.aginx.net)`), never the stealth fingerprint — you don't get to read the rules wearing a borrowed name.
 - Policies are cached per host (default 1h; refusals 5min so a dead endpoint doesn't lock the host out for an hour).
 
-**Operator opt-out** (the stance belongs to whoever runs the instance, not to each caller):
+**Operator opt-in** (the stance belongs to whoever runs the instance, not to each caller):
 
 ```bash
-export AGINXBROWSER_IGNORE_ROBOTS=1   # skip robots.txt checks entirely
+export AGINXBROWSER_HONOR_ROBOTS=1     # opt in to robots.txt checks
 export AGINXBROWSER_ROBOTS_TTL_SECS=3600  # per-host policy cache TTL
 ```
 
@@ -817,7 +817,7 @@ export AGINXBROWSER_ROBOTS_TTL_SECS=3600  # per-host policy cache TTL
 
 ## Rate & Page Budgets (default on)
 
-AginxBrowser is a real-time retrieval tool, not a crawler — the same stance as the robots gate, enforced by budgets on **how much** any caller can fetch:
+AginxBrowser is a real-time retrieval tool, not a crawler — budgets enforce that on **how much** any caller can fetch:
 
 - **Per-domain rate**: 20 pages/minute per registrable domain (`AGINXBROWSER_DOMAIN_RATE_PER_MIN`). Subdomains share one budget, so rotating `www.` / `api.` / random subdomains doesn't escape. A private/loopback host is exempt (the operator's own network), and a domain's window resets when the minute rolls over.
 - **Per-session page budget**: 200 pages per interactive session (`AGINXBROWSER_SESSION_PAGE_LIMIT`). Every navigation counts, plus clicks that change the page; reads on the current page (state/scroll/eval/typing) are free. An over-budget session refuses further navigations but stays interactive until closed.
