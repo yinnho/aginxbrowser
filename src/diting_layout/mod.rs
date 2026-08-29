@@ -116,7 +116,7 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
         CssDisplay::Flex => Display::Flex,
         CssDisplay::Grid => Display::Grid,
         // The inline/IFC stand-in is a wrapping flex row (upstream model).
-        CssDisplay::Inline => Display::Flex,
+        CssDisplay::Inline | CssDisplay::InlineBlock => Display::Flex,
         CssDisplay::None => Display::None,
     };
     if promote {
@@ -126,7 +126,7 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
             Some(TextAlign::Right) => Some(AlignItems::FLEX_END),
             _ => None,
         };
-    } else if display == CssDisplay::Inline {
+    } else if display == CssDisplay::Inline || display == CssDisplay::InlineBlock {
         s.flex_direction = FlexDirection::Row;
         s.flex_wrap = FlexWrap::Wrap;
         s.align_items = Some(AlignItems::FLEX_START);
@@ -1028,6 +1028,21 @@ fn build_normal_sibling(
         }
         return;
     }
+    if !is_text
+        && child_display == Some(CssDisplay::InlineBlock)
+        && !atomic_container
+        && !out_of_flow
+    {
+        // Atomic inline-level box (obscura#750 family): keeps its own subtree
+        // box and gets the wrapping-run stand-in so it sits on the text line
+        // path like a replaced atom, sized shrink-to-fit by the parent run.
+        if let Some(sub) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened) {
+            if let Ok(wrapper) = taffy_tree.new_with_children(run_wrapper_style(), &[sub]) {
+                direct.push(wrapper);
+            }
+        }
+        return;
+    }
     if is_text || (inline_level && !atomic_container && !out_of_flow) {
         // Text and flattenable inlines become their own measured run here:
         // single-segment runs are the overwhelmingly common case at
@@ -1306,6 +1321,12 @@ fn build_flow_column(
             let lh = if styles.get(&child).is_some() { lh } else { lh_elem };
             let col = color_context(tree, child, styles);
             run.push(RunSeg::Text(text, fs, b, col, lh));
+        } else if child_display == Some(CssDisplay::InlineBlock) && !out_of_flow {
+            // Atomic inline-level box (obscura#750 family): keeps its own
+            // subtree box, joins the run as one shrink-to-fit unit.
+            if let Some(sub) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened) {
+                run.push(RunSeg::Nodes(vec![sub]));
+            }
         } else if inline_level && !out_of_flow {
             let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened);
             if let Some(sub) = sub {
@@ -2033,6 +2054,17 @@ fn build_element(
             // first-segment approximation fs/bold already use.
             let col = color_context(tree, child, styles);
             run.push(RunSeg::Text(text, fs, b, col, lh));
+        } else if child_display == Some(CssDisplay::InlineBlock) && !atomic_container && !out_of_flow {
+            // An inline-level block is ATOMIC (Chrome line-box model): it keeps
+            // its own subtree box and joins the run as one unit, like a replaced
+            // leaf. Flattening it would let its content wrap across the parent's
+            // line; keeping the box makes taffy size it shrink-to-fit
+            // (min(max-content, available)) against the run — and our wrapping
+            // runs can't build the overflow bomb upstream's NoWrap rows did
+            // (obscura#750).
+            if let Some(sub) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened) {
+                run.push(RunSeg::Nodes(vec![sub]));
+            }
         } else if inline_level && !atomic_container && !out_of_flow {
             // A plain inline wrapper flattens into the enclosing run (upstream
             // is_flattenable_inline): the words wrap at the real block level.

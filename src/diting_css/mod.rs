@@ -697,6 +697,7 @@ pub enum AlignMode {
 pub enum Display {
     Block,
     Inline,
+    InlineBlock,
     Flex,
     Grid,
     None,
@@ -1040,6 +1041,7 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             style.display = match v {
                 "block" => Some(Display::Block),
                 "inline" => Some(Display::Inline),
+                "inline-block" => Some(Display::InlineBlock),
                 "flex" => Some(Display::Flex),
                 "grid" => Some(Display::Grid),
                 "none" => Some(Display::None),
@@ -2042,6 +2044,18 @@ mod tests {
         assert_eq!(s.grid_area, None);
     }
 
+
+    #[test]
+    fn display_inline_block_parses_and_serializes() {
+        let mut s = ComputedStyle::default();
+        assert!(
+            apply_declarations(&mut s, "display: inline-block"),
+            "inline-block must not be dropped by the cascade"
+        );
+        assert_eq!(s.display, Some(Display::InlineBlock));
+        // @supports already claimed inline-block; now the claim is truthful.
+        assert!(supports_declaration("display", "inline-block"));
+    }
 
     #[test]
     fn vector_2022_minified_media_rule_reaches_computed_style() {

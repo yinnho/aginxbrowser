@@ -469,6 +469,67 @@ fn flattened_inline_union_carries_strut_height() {
     );
 }
 
+/// Inline-block is an atomic inline-level box (obscura#750 family). Our CSS
+/// layer used to drop `display: inline-block` entirely (no enum variant, the
+/// declaration fell to `_ => return false`), so every inline list/stack
+/// rendered as a full-width block — and @supports (display:inline-block)
+/// claimed support the cascade then ignored. The atomic-box model must also
+/// keep the box from overflowing: upstream's NoWrap single-line approximation
+/// ran wikipedia's .cslist as one ~1000px line inside the infobox <td>, which
+/// became the table's min-content floor and blew the 22em table to 641px.
+/// Ours wraps, so shrink-to-fit is min(max-content, available) by
+/// construction. Structural assertions, no Chrome oracle.
+#[test]
+fn inline_block_is_atomic_shrink_to_fit_and_wraps() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    let items: String = (0..17).map(|i| format!("<li>ITEM{}</li>", if i % 2 == 0 { "Alef" } else { "BETA" })).collect();
+    let html = format!(
+        r#"<html><body>
+        <div id="wrap" style="width:352px"><ul id="list" style="display:inline-block;margin:0;padding:0">{items}</ul></div>
+        <div id="hug" style="width:352px"><span id="chip" style="display:inline-block">OK</span></div>
+        </body></html>"#
+    );
+    let tree = parse_html(&html);
+    let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let rects = crate::diting_layout::layout_dom(
+        &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0,
+    );
+
+    let list = tree.query_selector_all("#list").unwrap()[0];
+    let rl = rects.get(&list).expect("inline-block keeps its own box");
+    assert!(
+        rl.width <= 353.0,
+        "inline-block must not exceed its containing block (upstream ran ~1000px); got {rl:?}"
+    );
+    assert!(
+        rl.width > 100.0,
+        "17 items must shrink-wrap to more than one item's width; got {rl:?}"
+    );
+    let lh = {
+        let (_, _, lh) = super::font_context(&tree, list, &styles);
+        lh
+    };
+    assert!(
+        rl.height >= lh * 1.8,
+        "must wrap onto multiple lines (min-content floor bomb came from one-line layout); got {rl:?}"
+    );
+
+    let chip = tree.query_selector_all("#chip").unwrap()[0];
+    let rc = rects.get(&chip).expect("inline-block span keeps its box");
+    assert!(
+        rc.width < 100.0,
+        "a short inline-block hugs its content instead of filling the block; got {rc:?}"
+    );
+    assert!(
+        rc.height > 0.0 && rc.height < 60.0,
+        "single chip stays one line tall; got {rc:?}"
+    );
+}
+
+
 /// Ground truth for the named-area feed (the Vector 2022 page scaffold
 /// shape): a GridTemplateAreas matrix on the container plus
 /// `<name>-start`/`<name>-end` NamedLine placements on the items must lay

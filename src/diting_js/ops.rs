@@ -1060,6 +1060,7 @@ fn computed_style_value(
         "display" => Some(
             match s.display {
                 Some(Display::Inline) => "inline",
+                Some(Display::InlineBlock) => "inline-block",
                 Some(Display::Flex) => "flex",
                 Some(Display::Grid) => "grid",
                 Some(Display::None) => "none",
