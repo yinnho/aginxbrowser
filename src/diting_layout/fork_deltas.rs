@@ -529,6 +529,178 @@ fn inline_block_is_atomic_shrink_to_fit_and_wraps() {
     );
 }
 
+/// Absolute y of a span's text baseline, through the same metrics model the
+/// layout shift and the paint path both use (fixture font metrics, quantized
+/// parley-style offset).
+#[cfg(test)]
+fn span_baseline_y(
+    r: &super::Rect,
+    fonts: &super::text::FontBook,
+    fs: f32,
+    bold: bool,
+    lh: f32,
+) -> f32 {
+    let m = fonts.metrics(fs, bold).unwrap_or(super::text::ScaledMetrics {
+        ascent: fs,
+        descent: fs * 0.2,
+        line_gap: 0.0,
+    });
+    r.y + super::text::baseline_offset(m.ascent, m.descent, lh)
+}
+
+/// Baseline alignment for a mixed-font run (blitz#750 semantics): taffy
+/// leaves can't report baselines, so run wrappers lay out FLEX_START and the
+/// post-layout pass drops every item of a line by (line max baseline − own
+/// baseline). A 16px word next to a 24px word must end with both baselines
+/// on the same y — before the shift they shared a TOP edge instead.
+/// Structural assertions through the fixture font, no Chrome oracle.
+#[test]
+fn mixed_font_run_aligns_baselines() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    let html = r#"<html><body><p><span id="a" style="font-size:16px">A</span> <span id="b" style="font-size:24px">B</span></p></body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let fonts = crate::diting_fonts::font_book();
+    let rects = crate::diting_layout::layout_dom(&tree, &styles, &fonts, 1280.0, 800.0);
+
+    let a_id = tree.query_selector_all("#a").unwrap()[0];
+    let b_id = tree.query_selector_all("#b").unwrap()[0];
+    let ra = rects.get(&a_id).expect("16px span rect");
+    let rb = rects.get(&b_id).expect("24px span rect");
+    let (fs_a, bold_a, lh_a) = super::font_context(&tree, a_id, &styles);
+    let (fs_b, bold_b, lh_b) = super::font_context(&tree, b_id, &styles);
+
+    let base_a = span_baseline_y(ra, &fonts, fs_a, bold_a, lh_a);
+    let base_b = span_baseline_y(rb, &fonts, fs_b, bold_b, lh_b);
+    assert!(
+        (base_a - base_b).abs() < 0.6,
+        "baselines must be collinear: a={base_a} b={base_b} (ra={ra:?} rb={rb:?})"
+    );
+    assert!(
+        rb.y < ra.y - 1.0,
+        "the larger word must sit HIGHER than the smaller one (shift fired, not top-aligned): ra={ra:?} rb={rb:?}"
+    );
+}
+
+/// The line grouping is per wrapped line, not per run: a wide container
+/// packs the 16px and 24px words onto line one and pushes the tail onto
+/// line two, and each line aligns independently — line one's small word
+/// drops to the big word's baseline, line two (uniform 16px) moves not at
+/// all relative to its own top.
+#[test]
+fn mixed_font_run_aligns_baselines_per_wrapped_line() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    let html = r#"<html><body><div style="width:140px"><span id="a" style="font-size:16px">AAAA</span> <span id="b" style="font-size:24px">BBBB</span> <span id="c" style="font-size:16px">CCCC CCCC CCCC</span></div></body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let fonts = crate::diting_fonts::font_book();
+    let rects = crate::diting_layout::layout_dom(&tree, &styles, &fonts, 1280.0, 800.0);
+
+    let a_id = tree.query_selector_all("#a").unwrap()[0];
+    let b_id = tree.query_selector_all("#b").unwrap()[0];
+    let c_id = tree.query_selector_all("#c").unwrap()[0];
+    let ra = rects.get(&a_id).expect("span a rect");
+    let rb = rects.get(&b_id).expect("span b rect");
+    let rc = rects.get(&c_id).expect("span c rect");
+    let (fs_a, bold_a, lh_a) = super::font_context(&tree, a_id, &styles);
+    let (fs_b, bold_b, lh_b) = super::font_context(&tree, b_id, &styles);
+    let (fs_c, bold_c, lh_c) = super::font_context(&tree, c_id, &styles);
+
+    let base_a = span_baseline_y(ra, &fonts, fs_a, bold_a, lh_a);
+    let base_b = span_baseline_y(rb, &fonts, fs_b, bold_b, lh_b);
+    assert!(
+        (base_a - base_b).abs() < 0.6,
+        "line one baselines must be collinear: a={base_a} b={base_b}"
+    );
+    assert!(
+        rc.y > ra.y + lh_a * 0.8,
+        "the tail must wrap below line one: ra={ra:?} rc={rc:?} lh={lh_a}"
+    );
+    let base_c = span_baseline_y(rc, &fonts, fs_c, bold_c, lh_c);
+    assert!(
+        base_c > base_a + lh_a * 0.8,
+        "line two's baseline sits a line box below line one's: a={base_a} c={base_c}"
+    );
+}
+
+/// An atomic inline-block joins the line on the baseline of its LAST in-flow
+/// line box (CSS2, blitz#750's inline-block arm) — here a narrow box wraps
+/// its words onto several lines, and the adjacent text baseline must land on
+/// the box's last-line baseline, not its first line or its bottom edge.
+#[test]
+fn inline_block_baseline_is_its_last_line() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    let html = r#"<html><body><p><span id="t">text</span> <span id="box" style="display:inline-block;width:36px">AA BB CC</span></p></body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let fonts = crate::diting_fonts::font_book();
+    let rects = crate::diting_layout::layout_dom(&tree, &styles, &fonts, 1280.0, 800.0);
+
+    let t_id = tree.query_selector_all("#t").unwrap()[0];
+    let box_id = tree.query_selector_all("#box").unwrap()[0];
+    let rt = rects.get(&t_id).expect("text span rect");
+    let rbox = rects.get(&box_id).expect("inline-block rect");
+    let (fs_t, bold_t, lh_t) = super::font_context(&tree, t_id, &styles);
+    let (fs_b, bold_b, lh_b) = super::font_context(&tree, box_id, &styles);
+    assert!(
+        rbox.height > lh_b * 1.5,
+        "the narrow box must wrap onto multiple lines: {rbox:?} lh={lh_b}"
+    );
+
+    let base_t = span_baseline_y(rt, &fonts, fs_t, bold_t, lh_t);
+    // Last line's baseline below the box top: box height − one line box + the
+    // baseline offset inside that line box.
+    let m = fonts.metrics(fs_b, bold_b).unwrap_or(super::text::ScaledMetrics {
+        ascent: fs_b,
+        descent: fs_b * 0.2,
+        line_gap: 0.0,
+    });
+    let box_last_baseline =
+        rbox.y + rbox.height - lh_b + super::text::baseline_offset(m.ascent, m.descent, lh_b);
+    assert!(
+        (base_t - box_last_baseline).abs() < 0.6,
+        "text baseline must sit on the box's last-line baseline: text={base_t} box_last={box_last_baseline} (rt={rt:?} rbox={rbox:?})"
+    );
+}
+
+/// A textless atomic box has no baseline to offer: CSS falls back to its
+/// bottom margin edge, so the neighboring text baseline must land on the
+/// box's BOTTOM, not share its top (the pre-shift FLEX_START behavior).
+#[test]
+fn empty_inline_block_aligns_bottom_edge() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    let html = r#"<html><body><p><span id="t">text</span> <span id="box" style="display:inline-block;width:30px;height:40px"></span></p></body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let fonts = crate::diting_fonts::font_book();
+    let rects = crate::diting_layout::layout_dom(&tree, &styles, &fonts, 1280.0, 800.0);
+
+    let t_id = tree.query_selector_all("#t").unwrap()[0];
+    let box_id = tree.query_selector_all("#box").unwrap()[0];
+    let rt = rects.get(&t_id).expect("text span rect");
+    let rbox = rects.get(&box_id).expect("empty inline-block keeps its box");
+    let (fs_t, bold_t, lh_t) = super::font_context(&tree, t_id, &styles);
+
+    let base_t = span_baseline_y(rt, &fonts, fs_t, bold_t, lh_t);
+    let bottom = rbox.y + rbox.height;
+    assert!(
+        (base_t - bottom).abs() < 0.6,
+        "text baseline must land on the empty box's bottom edge: text={base_t} bottom={bottom} (rt={rt:?} rbox={rbox:?})"
+    );
+}
+
 
 /// Ground truth for the named-area feed (the Vector 2022 page scaffold
 /// shape): a GridTemplateAreas matrix on the container plus

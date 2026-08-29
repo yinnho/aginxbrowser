@@ -994,6 +994,7 @@ fn build_normal_sibling(
     taffy_tree: &mut TaffyTree<TextLeaf>,
     node_map: &mut HashMap<taffy::tree::NodeId, NodeId>,
     flattened: &mut HashMap<NodeId, Vec<taffy::tree::NodeId>>,
+    run_wrappers: &mut Vec<taffy::tree::NodeId>,
     atomic_container: bool,
     font_size: f32,
     line_height: f32,
@@ -1020,6 +1021,7 @@ fn build_normal_sibling(
                 if let Ok(wrapper) =
                     taffy_tree.new_with_children(run_wrapper_style(), &[leaf])
                 {
+                    run_wrappers.push(wrapper);
                     direct.push(wrapper);
                 }
             }
@@ -1036,8 +1038,9 @@ fn build_normal_sibling(
         // Atomic inline-level box (obscura#750 family): keeps its own subtree
         // box and gets the wrapping-run stand-in so it sits on the text line
         // path like a replaced atom, sized shrink-to-fit by the parent run.
-        if let Some(sub) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened) {
+        if let Some(sub) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers) {
             if let Ok(wrapper) = taffy_tree.new_with_children(run_wrapper_style(), &[sub]) {
+                run_wrappers.push(wrapper);
                 direct.push(wrapper);
             }
         }
@@ -1064,7 +1067,7 @@ fn build_normal_sibling(
             let col = color_context(tree, child, styles);
             leaves.extend(build_word_leaves(&text, fs, b, col, lh, fonts, taffy_tree));
         } else {
-            let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened);
+            let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers);
             if let Some(sub) = sub {
                 let sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
                 leaves.extend(sub_children.clone());
@@ -1081,12 +1084,13 @@ fn build_normal_sibling(
         }
         if !leaves.is_empty() {
             if let Ok(wrapper) = taffy_tree.new_with_children(run_wrapper_style(), &leaves) {
+                run_wrappers.push(wrapper);
                 direct.push(wrapper);
             }
         }
         return;
     }
-    if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened) {
+    if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers) {
         direct.push(node);
     }
 }
@@ -1245,6 +1249,7 @@ fn build_flow_column(
     taffy_tree: &mut TaffyTree<TextLeaf>,
     node_map: &mut HashMap<taffy::tree::NodeId, NodeId>,
     flattened: &mut HashMap<NodeId, Vec<taffy::tree::NodeId>>,
+    run_wrappers: &mut Vec<taffy::tree::NodeId>,
     font_size: f32,
     lh_elem: f32,
 ) -> Vec<taffy::tree::NodeId> {
@@ -1254,7 +1259,7 @@ fn build_flow_column(
     }
     let mut flow_children: Vec<taffy::tree::NodeId> = Vec::new();
     let mut run: Vec<RunSeg> = Vec::new();
-    let flush_run = |run: &mut Vec<RunSeg>, flow_children: &mut Vec<taffy::tree::NodeId>, taffy_tree: &mut TaffyTree<TextLeaf>| {
+    let flush_run = |run: &mut Vec<RunSeg>, flow_children: &mut Vec<taffy::tree::NodeId>, taffy_tree: &mut TaffyTree<TextLeaf>, run_wrappers: &mut Vec<taffy::tree::NodeId>| {
         if run.is_empty() {
             return;
         }
@@ -1285,6 +1290,7 @@ fn build_flow_column(
             }
         }
         if let Ok(wrapper) = taffy_tree.new_with_children(run_wrapper_style(), &leaves) {
+            run_wrappers.push(wrapper);
             flow_children.push(wrapper);
         }
     };
@@ -1308,7 +1314,7 @@ fn build_flow_column(
                 if inline_level && !out_of_flow {
                     run.push(RunSeg::Nodes(vec![leaf]));
                 } else {
-                    flush_run(&mut run, &mut flow_children, taffy_tree);
+                    flush_run(&mut run, &mut flow_children, taffy_tree, run_wrappers);
                     flow_children.push(leaf);
                 }
             }
@@ -1324,11 +1330,11 @@ fn build_flow_column(
         } else if child_display == Some(CssDisplay::InlineBlock) && !out_of_flow {
             // Atomic inline-level box (obscura#750 family): keeps its own
             // subtree box, joins the run as one shrink-to-fit unit.
-            if let Some(sub) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened) {
+            if let Some(sub) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers) {
                 run.push(RunSeg::Nodes(vec![sub]));
             }
         } else if inline_level && !out_of_flow {
-            let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened);
+            let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers);
             if let Some(sub) = sub {
                 let sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
                 run.push(RunSeg::Nodes(sub_children.clone()));
@@ -1340,13 +1346,13 @@ fn build_flow_column(
                 }
             }
         } else {
-            flush_run(&mut run, &mut flow_children, taffy_tree);
-            if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened) {
+            flush_run(&mut run, &mut flow_children, taffy_tree, run_wrappers);
+            if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers) {
                 flow_children.push(node);
             }
         }
     }
-    flush_run(&mut run, &mut flow_children, taffy_tree);
+    flush_run(&mut run, &mut flow_children, taffy_tree, run_wrappers);
     flow_children
 }
 
@@ -1403,6 +1409,7 @@ fn build_element(
     taffy_tree: &mut TaffyTree<TextLeaf>,
     node_map: &mut HashMap<taffy::tree::NodeId, NodeId>,
     flattened: &mut HashMap<NodeId, Vec<taffy::tree::NodeId>>,
+    run_wrappers: &mut Vec<taffy::tree::NodeId>,
 ) -> Option<taffy::tree::NodeId> {
     let style = styles.get(&id).cloned().unwrap_or_default();
     if style.display == Some(CssDisplay::None) {
@@ -1437,7 +1444,7 @@ fn build_element(
     }
     let mut direct: Vec<taffy::tree::NodeId> = Vec::new();
     let mut run: Vec<RunSeg> = Vec::new();
-    let flush_run = |run: &mut Vec<RunSeg>, direct: &mut Vec<taffy::tree::NodeId>, taffy_tree: &mut TaffyTree<TextLeaf>| {
+    let flush_run = |run: &mut Vec<RunSeg>, direct: &mut Vec<taffy::tree::NodeId>, taffy_tree: &mut TaffyTree<TextLeaf>, run_wrappers: &mut Vec<taffy::tree::NodeId>| {
         if run.is_empty() {
             return;
         }
@@ -1474,6 +1481,7 @@ fn build_element(
             }
         }
         if let Ok(wrapper) = taffy_tree.new_with_children(run_wrapper_style(), &leaves) {
+            run_wrappers.push(wrapper);
             direct.push(wrapper);
         }
     };
@@ -1609,6 +1617,7 @@ fn build_element(
                     taffy_tree,
                     node_map,
                     flattened,
+                    run_wrappers,
                     atomic_container,
                     font_size,
                     lh_elem,
@@ -1619,7 +1628,7 @@ fn build_element(
             // right floats inline-end first).
             let mut right_children: Vec<taffy::tree::NodeId> = Vec::new();
             for cid in right_floats.iter().rev() {
-                if let Some(f) = build_element(tree, *cid, styles, images, fonts, taffy_tree, node_map, flattened) {
+                if let Some(f) = build_element(tree, *cid, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers) {
                     right_children.push(f);
                 }
             }
@@ -1690,6 +1699,7 @@ fn build_element(
                     taffy_tree,
                     node_map,
                     flattened,
+                    run_wrappers,
                     atomic_container,
                     font_size,
                     lh_elem,
@@ -1743,7 +1753,7 @@ fn build_element(
                         continue;
                     }
                     if let Some(f) =
-                        build_element(tree, child_ids[i], styles, images, fonts, taffy_tree, node_map, flattened)
+                        build_element(tree, child_ids[i], styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers)
                     {
                         inner.push(f);
                     }
@@ -1758,12 +1768,12 @@ fn build_element(
                     pair_children.push(row);
                 }
             } else if let Some(f) =
-                build_element(tree, child_ids[float_idx], styles, images, fonts, taffy_tree, node_map, flattened)
+                build_element(tree, child_ids[float_idx], styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers)
             {
                 pair_children.push(f);
             }
             if let Some(o) =
-                build_element(tree, child_ids[opp_idx], styles, images, fonts, taffy_tree, node_map, flattened)
+                build_element(tree, child_ids[opp_idx], styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers)
             {
                 pair_children.push(o);
             }
@@ -1841,6 +1851,7 @@ fn build_element(
                     taffy_tree,
                     node_map,
                     flattened,
+                    run_wrappers,
                     font_size,
                     lh_elem,
                 );
@@ -1848,7 +1859,7 @@ fn build_element(
                 let mut rail_children: Vec<taffy::tree::NodeId> = Vec::new();
                 for &i in &rail_idx {
                     if let Some(f) =
-                        build_element(tree, child_ids[i], styles, images, fonts, taffy_tree, node_map, flattened)
+                        build_element(tree, child_ids[i], styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers)
                     {
                         rail_children.push(f);
                     }
@@ -1916,7 +1927,7 @@ fn build_element(
                 if !is_float_child(&child_ids[i]) {
                     continue;
                 }
-                if let Some(f) = build_element(tree, child_ids[i], styles, images, fonts, taffy_tree, node_map, flattened) {
+                if let Some(f) = build_element(tree, child_ids[i], styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers) {
                     row_children.push(f);
                 }
             }
@@ -1950,7 +1961,7 @@ fn build_element(
         // Build the float itself (blockified into the row's first item).
         let float_dom = child_ids[float_idx];
         let float_taffy =
-            build_element(tree, float_dom, styles, images, fonts, taffy_tree, node_map, flattened);
+            build_element(tree, float_dom, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers);
         // The flow column: an ANONYMOUS block wrapper around every in-zone
         // sibling built normally inside it (see build_flow_column).
         let flow_children = build_flow_column(
@@ -1962,6 +1973,7 @@ fn build_element(
             taffy_tree,
             node_map,
             flattened,
+            run_wrappers,
             font_size,
             lh_elem,
         );
@@ -2039,7 +2051,7 @@ fn build_element(
                 if inline_level && !atomic_container && !out_of_flow {
                     run.push(RunSeg::Nodes(vec![leaf]));
                 } else {
-                    flush_run(&mut run, &mut direct, taffy_tree);
+                    flush_run(&mut run, &mut direct, taffy_tree, run_wrappers);
                     direct.push(leaf);
                 }
             }
@@ -2062,13 +2074,13 @@ fn build_element(
             // (min(max-content, available)) against the run — and our wrapping
             // runs can't build the overflow bomb upstream's NoWrap rows did
             // (obscura#750).
-            if let Some(sub) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened) {
+            if let Some(sub) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers) {
                 run.push(RunSeg::Nodes(vec![sub]));
             }
         } else if inline_level && !atomic_container && !out_of_flow {
             // A plain inline wrapper flattens into the enclosing run (upstream
             // is_flattenable_inline): the words wrap at the real block level.
-            let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened);
+            let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers);
             if let Some(sub) = sub {
                 let sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
                 run.push(RunSeg::Nodes(sub_children.clone()));
@@ -2080,14 +2092,14 @@ fn build_element(
                 }
             }
         } else {
-            flush_run(&mut run, &mut direct, taffy_tree);
-            if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened) {
+            flush_run(&mut run, &mut direct, taffy_tree, run_wrappers);
+            if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers) {
                 direct.push(node);
             }
         }
     }
     }
-    flush_run(&mut run, &mut direct, taffy_tree);
+    flush_run(&mut run, &mut direct, taffy_tree, run_wrappers);
     // Sibling margin normalization runs over the FINAL child list of every
     // container (see collapse_adjacent_sibling_margins: fixes the
     // border/padding separation rule taffy's native block collapse lacks,
@@ -2230,6 +2242,173 @@ pub fn layout_dom_with_paint_and_images(
     (rects, items)
 }
 
+/// Baseline of a text line box below its top edge, from real font metrics
+/// (the same quantized model the paint path rasterizes against).
+fn text_baseline(fonts: &FontBook, font_size: f32, bold: bool, line_height: f32) -> f32 {
+    let m = fonts.metrics(font_size, bold).unwrap_or(text::ScaledMetrics {
+        ascent: font_size,
+        descent: font_size * 0.2,
+        line_gap: 0.0,
+    });
+    text::baseline_offset(m.ascent, m.descent, line_height)
+}
+
+/// The LAST in-flow line baseline inside an atomic inline-level box (CSS2:
+/// an inline-block baseline-aligns to the baseline of its last in-flow line
+/// box), as a y offset from the box's border-box top. `rel_y` accumulates
+/// taffy locations plus already-computed baseline shifts (inner runs are
+/// processed before outer ones). Returns None when the subtree carries no
+/// text — the caller then falls back to the bottom edge, which is the CSS
+/// behavior for a box with no in-flow line boxes.
+fn subtree_last_baseline(
+    taffy_tree: &TaffyTree<TextLeaf>,
+    node: taffy::tree::NodeId,
+    rel_y: f32,
+    shifts: &HashMap<taffy::tree::NodeId, f32>,
+    fonts: &FontBook,
+    best: &mut Option<f32>,
+) {
+    let Ok(layout) = taffy_tree.layout(node) else { return };
+    let rel_y = rel_y + shifts.get(&node).copied().unwrap_or(0.0);
+    match taffy_tree.get_node_context(node) {
+        Some(TextLeaf::Word { font_size, bold, line_height, .. }) => {
+            if layout.size.height > 0.0 {
+                let b = rel_y + text_baseline(fonts, *font_size, *bold, *line_height);
+                *best = Some(best.map_or(b, |x: f32| x.max(b)));
+            }
+            return;
+        }
+        Some(TextLeaf::Run { font_size, bold, line_height, .. }) => {
+            // A wrapped run's last line sits one line box above its bottom.
+            let b = rel_y + layout.size.height - line_height
+                + text_baseline(fonts, *font_size, *bold, *line_height);
+            *best = Some(best.map_or(b, |x: f32| x.max(b)));
+            return;
+        }
+        None => {}
+    }
+    for child in taffy_tree.children(node).unwrap_or_default() {
+        let Ok(cl) = taffy_tree.layout(child) else { continue };
+        subtree_last_baseline(taffy_tree, child, rel_y + cl.location.y, shifts, fonts, best);
+    }
+}
+
+/// Baseline alignment for inline runs (blitz#750 family): CSS aligns the
+/// boxes of one line by their baselines, but taffy leaves cannot report
+/// baselines (the measure closure returns Size only — still true at the
+/// taffy rev blitz's own baseline PR pins), so run wrappers lay out
+/// FLEX_START and we shift afterwards. Wrapping is width-driven, so the
+/// flex lines taffy already formed ARE the CSS line boxes; per line every
+/// item drops by (line max baseline − its own baseline). For uniform-font
+/// runs every dy is zero, leaving existing geometry bit-identical — only
+/// runs mixing font metrics or atomic boxes move.
+fn compute_baseline_shifts(
+    taffy_tree: &TaffyTree<TextLeaf>,
+    run_wrappers: &[taffy::tree::NodeId],
+    fonts: &FontBook,
+) -> HashMap<taffy::tree::NodeId, f32> {
+    let mut shifts: HashMap<taffy::tree::NodeId, f32> = HashMap::new();
+    // First-line baselines of processed wrappers: a nested wrapper (flattened
+    // inline content) joins an outer run as ONE item and, as a flex
+    // container, contributes its FIRST baseline (css-align, blitz#750's
+    // Display::Flex arm).
+    let mut first_baselines: HashMap<taffy::tree::NodeId, f32> = HashMap::new();
+    // Inner wrappers first: outer runs read their shifts and first baselines.
+    let depth = |mut n: taffy::tree::NodeId| {
+        let mut d = 0usize;
+        while let Some(p) = taffy_tree.parent(n) {
+            d += 1;
+            n = p;
+        }
+        d
+    };
+    let mut ordered = run_wrappers.to_vec();
+    ordered.sort_by_key(|w| std::cmp::Reverse(depth(*w)));
+
+    for wrapper in ordered {
+        let children = taffy_tree.children(wrapper).unwrap_or_default().to_vec();
+        if children.len() < 2 {
+            // A lone item aligns to itself; nothing to shift. Still record
+            // the first baseline for an enclosing run.
+            if let Some(&only) = children.first() {
+                if let Ok(l) = taffy_tree.layout(only) {
+                    if l.size.height > 0.0 {
+                        let b = item_baseline(taffy_tree, only, &shifts, &first_baselines, fonts, l.size.height);
+                        first_baselines.insert(wrapper, b);
+                    }
+                }
+            }
+            continue;
+        }
+        // Group into flex lines by y (taffy rounds locations to the pixel
+        // grid, so same-line items share a y).
+        let mut lines: Vec<(f32, Vec<(taffy::tree::NodeId, f32)>)> = Vec::new();
+        for child in children {
+            let Ok(l) = taffy_tree.layout(child) else { continue };
+            // Whitespace-only word leaves carry no height and no ink.
+            if l.size.height <= 0.0 {
+                continue;
+            }
+            let b = item_baseline(taffy_tree, child, &shifts, &first_baselines, fonts, l.size.height);
+            match lines.iter_mut().find(|(y, _)| (*y - l.location.y).abs() < 0.5) {
+                Some((_, items)) => items.push((child, b)),
+                None => lines.push((l.location.y, vec![(child, b)])),
+            }
+        }
+        lines.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        if let Some((_, items)) = lines.first() {
+            let b = items.iter().fold(0.0f32, |m, (_, b)| m.max(*b));
+            first_baselines.insert(wrapper, b);
+        }
+        for (_, items) in lines {
+            let line_b = items.iter().fold(0.0f32, |m, (_, b)| m.max(*b));
+            for (child, b) in items {
+                let dy = line_b - b;
+                if dy > 0.01 {
+                    shifts.insert(child, dy);
+                }
+            }
+        }
+    }
+    shifts
+}
+
+/// Baseline of one run item below its border-box top.
+fn item_baseline(
+    taffy_tree: &TaffyTree<TextLeaf>,
+    child: taffy::tree::NodeId,
+    shifts: &HashMap<taffy::tree::NodeId, f32>,
+    first_baselines: &HashMap<taffy::tree::NodeId, f32>,
+    fonts: &FontBook,
+    height: f32,
+) -> f32 {
+    match taffy_tree.get_node_context(child) {
+        Some(TextLeaf::Word { font_size, bold, line_height, .. }) => {
+            text_baseline(fonts, *font_size, *bold, *line_height)
+        }
+        Some(TextLeaf::Run { font_size, bold, line_height, .. }) => {
+            height - line_height + text_baseline(fonts, *font_size, *bold, *line_height)
+        }
+        None => {
+            if let Some(b) = first_baselines.get(&child) {
+                return *b;
+            }
+            if taffy_tree.children(child).map_or(0, |c| c.len()) > 0 {
+                // Atomic inline-level box: last in-flow line baseline.
+                let mut best = None;
+                subtree_last_baseline(taffy_tree, child, 0.0, shifts, fonts, &mut best);
+                if let Some(b) = best {
+                    return b;
+                }
+            }
+            // Replaced leaf or textless box: bottom edge (CSS bottom
+            // margin-edge fallback — run items carry no vertical margins in
+            // this model).
+            height
+        }
+    }
+}
+
 /// [`layout_dom_with_paint_and_images`] plus the paint order: every boxed
 /// element in the sequence the flat item list paints it, so the LAST entry
 /// whose rect contains a point is the element a pixel there shows. This is
@@ -2297,6 +2476,11 @@ pub fn layout_dom_with_paint_order_and_images(
     // Flattened inline wrappers (see build_element) recorded as
     // dom id → hoisted taffy children, for the union pass after the walk.
     let mut flattened: HashMap<NodeId, Vec<taffy::tree::NodeId>> = HashMap::new();
+    // Run wrappers (the IFC stand-in flex rows) recorded at assembly for the
+    // post-layout baseline-alignment pass (blitz#750 family) — they can't be
+    // re-identified structurally (inline-block boxes share the same taffy
+    // style), so the builders log them as they create them.
+    let mut run_wrappers: Vec<taffy::tree::NodeId> = Vec::new();
     let Some(root_id) = root else { return (rects, items, paint_order) };
     let Some(root_node) = build_element(
         tree,
@@ -2307,6 +2491,7 @@ pub fn layout_dom_with_paint_order_and_images(
         &mut taffy_tree,
         &mut node_map,
         &mut flattened,
+        &mut run_wrappers,
     ) else {
         return (rects, items, paint_order);
     };
@@ -2678,6 +2863,10 @@ pub fn layout_dom_with_paint_order_and_images(
     // use_rounding defaults on; blitz rounds via the same path), so the
     // rect comparisons assume integer edges on both sides.
 
+    // Baseline alignment of inline runs (blitz#750 family): per-line shifts
+    // computed against the FINAL layout, applied during the collect walk.
+    let baseline_shifts = compute_baseline_shifts(&taffy_tree, &run_wrappers, fonts);
+
     // Accumulate locations down the taffy tree: child location already
     // includes the parent's border+padding offset, so a plain sum is the
     // absolute border-box origin (same accumulation blitz-paint performs).
@@ -2691,6 +2880,7 @@ pub fn layout_dom_with_paint_order_and_images(
         styles: &HashMap<NodeId, ComputedStyle>,
         images: &HashMap<NodeId, DecodedImage>,
         static_pos: &HashMap<NodeId, (f32, f32)>,
+        baseline_shifts: &HashMap<taffy::tree::NodeId, f32>,
         rects: &mut HashMap<NodeId, Rect>,
         abs_by_node: &mut HashMap<taffy::tree::NodeId, Rect>,
         items: &mut Vec<PaintItem>,
@@ -2728,6 +2918,12 @@ pub fn layout_dom_with_paint_order_and_images(
                 offset.0 += resolve(tx, layout.size.width);
                 offset.1 += resolve(ty, layout.size.height);
             }
+        }
+        // Baseline alignment (blitz#750 family): run items drop onto their
+        // line's baseline. Folded into the offset like the translate above,
+        // so the item's rect, paint and whole subtree move together.
+        if let Some(dy) = baseline_shifts.get(&node) {
+            offset.1 += dy;
         }
         let abs = (offset.0 + layout.location.x, offset.1 + layout.location.y);
         // Every visited node's absolute border box — the union pass after
@@ -3020,7 +3216,7 @@ pub fn layout_dom_with_paint_order_and_images(
         pos.sort_by_key(|(z, _)| *z);
         for list in [neg, mid, pos] {
             for (_, i) in list {
-                collect(tree, taffy_tree, node_map, styles, images, static_pos, rects, abs_by_node, items, paint_order, children[i], abs, viewport_width);
+                collect(tree, taffy_tree, node_map, styles, images, static_pos, baseline_shifts, rects, abs_by_node, items, paint_order, children[i], abs, viewport_width);
             }
         }
         if clips {
@@ -3035,6 +3231,7 @@ pub fn layout_dom_with_paint_order_and_images(
         styles,
         &images,
         &static_pos,
+        &baseline_shifts,
         &mut rects,
         &mut abs_by_node,
         &mut items,
