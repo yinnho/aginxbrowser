@@ -65,6 +65,16 @@ Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操
 - **Firecrawl 兼容**：`/v1/scrape` 端点，现有 Firecrawl 客户端改 base URL 即可迁移
 - **DNS 重绑定防护**：内置 SSRF 防护 + DNS 解析后 IP 校验
 
+## 是浏览器，不是爬虫
+
+AginxBrowser 是干**实时取信息**的：agent 带着问题来，看几页，拿着答案走。它不是爬虫工具，而且产品形态上就让它变不成爬虫：
+
+- **robots.txt 默认遵守**（RFC 9309），所有自主抓取路径都过这道闸。批量抓站正是 robots.txt 要拒绝的事，人家拒绝我们就听。
+- **没有"抓全站"的 API。** 没有 crawl 端点，没有链接递归——每一页都是 agent 明确要的那一页。
+- **内置限额。** 单域名每分钟 20 页；每个交互 session 一共 200 页。`AGINXBROWSER_DOMAIN_RATE_PER_MIN` / `AGINXBROWSER_SESSION_PAGE_LIMIT` 可调（`0` 关闭，自己的实例自己定）。agent 啃文档站、跑后台足够宽裕；一页接一页遍历的爬虫套路、包括换子域名轮着爬（同一个注册域，共用一个额度），直接卡死。
+- **托管实例（browser.aginx.net）限额更紧。** 所有用户共用一个出口 IP，让站点对这个 IP 保持好感是服务的一部分。想要不一样的数字，自己部署。
+- 想批量爬站？请用爬虫工具。这里不是，以后也不会是。
+
 ## 适合做什么
 
 不是 demo，是真实有人在用 agent 浏览器干的事：
@@ -217,6 +227,8 @@ cargo build --release --features stealth,screenshot
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language |
 | `AGINXBROWSER_PROXY` | 无 | 可选回退代理。被墙源引擎（Google/Bing News/Hugging Face）先直连、失败才走此代理——海外部署无需配置；单次请求也可传 `use_proxy:true` 走代理 |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 缓存 TTL，`0` 禁用 |
+| `AGINXBROWSER_DOMAIN_RATE_PER_MIN` | `20` | 单域名每分钟页面数上限（注册域聚合，子域名共额度），超限返回 429；`0` 关闭。见「是浏览器，不是爬虫」 |
+| `AGINXBROWSER_SESSION_PAGE_LIMIT` | `200` | 单个交互 session 可走的页面总数上限（换页的点击也计），超限后续导航被拒，当前页仍可操作；`0` 关闭 |
 | `AGINXBROWSER_MCP_ALLOWED_HOSTS` | 无 | `/mcp` 额外放行的 `Host`（逗号分隔）。传输层的 DNS 重绑定防护默认只认回环地址，局域网 IP 或 Docker 主机名调用本实例时需加上 |
 | `CAPTCHA_SOLVER_API_KEY` | 无 | 2captcha API Key，设置后自动解决验证码 |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | 验证码解决服务 |

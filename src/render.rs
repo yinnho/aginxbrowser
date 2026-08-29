@@ -302,6 +302,10 @@ fn tier1_eligible(req: &crate::FetchRequest) -> bool {
 /// declines (returns `None`) do we fall back to Tier 2, which spins up the
 /// current-thread runtime for V8.
 pub async fn smart_fetch(req: crate::FetchRequest) -> Result<FetchResponse, anyhow::Error> {
+    // Per-domain page budget — see rate.rs for the stance. Runs before the
+    // tiers (and before the caller's response cache, whose hits never count:
+    // a repeat the target never sees costs it nothing).
+    crate::rate::check_domain(&req.url).map_err(anyhow::Error::msg)?;
     // Tier 1: HTTP direct (only when not forced to the browser).
     if tier1_eligible(&req) {
         let proxy_url = crate::config::proxy_from_env();

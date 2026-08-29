@@ -166,6 +166,8 @@ Environment variables:
 | `AGINXBROWSER_PROXY` | none | Proxy address (used when `use_proxy:true`, for fetching sites from other regions). Standard `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` are ignored by the engine — `AGINXBROWSER_PROXY` is the only proxy knob |
 | `CAPTCHA_SOLVER_API_KEY` | none | 2captcha key; when set, CAPTCHAs are solved automatically |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL (seconds); `0` disables caching |
+| `AGINXBROWSER_DOMAIN_RATE_PER_MIN` | `20` | Per-domain pages/minute cap (429 beyond; `0` disables) — aginxbrowser is for real-time lookups, not crawling |
+| `AGINXBROWSER_SESSION_PAGE_LIMIT` | `200` | Pages per interactive session (`0` disables) |
 
 ---
 

@@ -815,6 +815,30 @@ export AGINXBROWSER_ROBOTS_TTL_SECS=3600  # per-host policy cache TTL
 
 `aginxbrowser doctor` and `GET /doctor` both report the active stance.
 
+## Rate & Page Budgets (default on)
+
+AginxBrowser is a real-time retrieval tool, not a crawler — the same stance as the robots gate, enforced by budgets on **how much** any caller can fetch:
+
+- **Per-domain rate**: 20 pages/minute per registrable domain (`AGINXBROWSER_DOMAIN_RATE_PER_MIN`). Subdomains share one budget, so rotating `www.` / `api.` / random subdomains doesn't escape. A private/loopback host is exempt (the operator's own network), and a domain's window resets when the minute rolls over.
+- **Per-session page budget**: 200 pages per interactive session (`AGINXBROWSER_SESSION_PAGE_LIMIT`). Every navigation counts, plus clicks that change the page; reads on the current page (state/scroll/eval/typing) are free. An over-budget session refuses further navigations but stays interactive until closed.
+
+Counted surfaces: `/fetch`, `/click`, `/eval`, `/screenshot`, `/download`, the `/search` fetch_top body-grab (an over-budget item keeps its entry; `fetch_error` carries the reason), `/v1/scrape` (both plain and actions paths), their MCP tool equivalents, and session navigations/clicks. Subresources a page pulls are never counted. The CDP bridge is exempt — it is a raw automation surface by design, like Chrome's remote debugging port.
+
+An over-budget request returns **HTTP 429** with the stance in the message (MCP tools return the same text in their `error` field):
+
+```json
+{"error": "rate limit: example.com is capped at 20 pages/min — aginxbrowser does real-time lookups for agents, not site crawling. Slow down, or self-host and tune AGINXBROWSER_DOMAIN_RATE_PER_MIN."}
+```
+
+Attempts count even when the fetch itself fails — a rate limit that only counted successes would be one you escape by hammering 404s.
+
+**Operator tuning** (hosted runs are tighter; your instance is yours):
+
+```bash
+export AGINXBROWSER_DOMAIN_RATE_PER_MIN=20    # pages per domain per minute, 0 disables
+export AGINXBROWSER_SESSION_PAGE_LIMIT=200    # pages per session, 0 disables
+```
+
 ---
 
 ## Automatic CAPTCHA Solving

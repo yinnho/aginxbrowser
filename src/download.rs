@@ -74,6 +74,7 @@ pub struct DownloadResponse {
 /// Runs entirely on Tokio (no V8 state involved), safe to await directly from
 /// the axum runtime.
 pub async fn do_download(req: DownloadRequest) -> Result<DownloadResponse> {
+    crate::rate::check_domain(&req.url).map_err(anyhow::Error::msg)?;
     let start_url =
         Url::parse(req.url.trim()).with_context(|| format!("invalid url: {}", req.url))?;
     ensure_http_scheme(&start_url)?;

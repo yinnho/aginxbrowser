@@ -69,6 +69,16 @@ Apache-2.0 open source, single binary — self-host today, no cloud lock-in.
 - **Firecrawl compatible**: `/v1/scrape` endpoint — existing Firecrawl clients migrate by changing the base URL
 - **DNS rebinding protection**: built-in SSRF guard + post-resolution IP validation
 
+## A Browser, Not a Crawler
+
+AginxBrowser exists for **real-time retrieval**: an agent arrives with a question, reads a handful of pages, leaves with the answer. It is not a crawling tool — and the product is shaped so it can't quietly become one:
+
+- **robots.txt honored by default** (RFC 9309) on every autonomous fetch path. Crawler-style mass fetching is exactly what robots.txt exists to refuse, and we take the refusal.
+- **No site-walking API.** There is no crawl endpoint and no link-following recursion — every page load happens because an agent asked for that page.
+- **Built-in budgets.** Per-domain: 20 pages/minute. Per interactive session: 200 pages. Toggled via `AGINXBROWSER_DOMAIN_RATE_PER_MIN` / `AGINXBROWSER_SESSION_PAGE_LIMIT` (`0` disables on your own instance). Generous for an agent grinding through docs or a console; fatal to the page-after-page crawl pattern, including subdomain rotation (one registrable domain, one budget).
+- **The hosted instance (browser.aginx.net) runs tighter budgets.** Every user shares one egress IP, and keeping sites comfortable with that IP is part of the service. Self-host if you want different numbers.
+- Need to bulk-crawl a site? Use a crawler. This isn't one, and it won't become one.
+
 ## What It's For
 
 Not demos — real jobs agent browsers are doing today:
@@ -242,6 +252,8 @@ Requirements: Rust 1.78+; the V8 static library downloads automatically on first
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL, `0` disables |
 | `AGINXBROWSER_IGNORE_ROBOTS` | unset | robots.txt is honored by default on `/fetch`, `/screenshot`, `/download` and MCP tools; set `1` to skip checks (operator opt-out) |
 | `AGINXBROWSER_ROBOTS_TTL_SECS` | `3600` | Per-host robots.txt policy cache TTL |
+| `AGINXBROWSER_DOMAIN_RATE_PER_MIN` | `20` | Per-registrable-domain page budget per minute (subdomains share one budget); over-budget requests get 429 with the stance message. `0` disables. See "A Browser, Not a Crawler" |
+| `AGINXBROWSER_SESSION_PAGE_LIMIT` | `200` | Total pages one interactive session may walk (navigation-causing clicks count); over-budget navigations are refused, the current page stays interactive. `0` disables |
 | `AGINXBROWSER_MCP_ALLOWED_HOSTS` | unset | Extra `Host` values accepted by `/mcp` (comma-separated) — the transport's DNS-rebinding guard defaults to loopback, so add your LAN IP or Docker hostname when other machines call the instance |
 | `CAPTCHA_SOLVER_API_KEY` | none | 2captcha API key; enables CAPTCHA auto-solving |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | CAPTCHA solving provider |

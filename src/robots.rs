@@ -377,7 +377,7 @@ fn rule_matches(pattern: &str, target: &str) -> bool {
 
 /// Loopback, RFC1918, link-local, and .local/.internal names are the
 /// operator's own turf — no robots ceremony for them.
-fn is_private_host(host: &str) -> bool {
+pub(crate) fn is_private_host(host: &str) -> bool {
     let h = host.trim_end_matches('.').to_ascii_lowercase();
     if h == "localhost" || h.ends_with(".local") || h.ends_with(".internal") {
         return true;

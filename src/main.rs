@@ -21,6 +21,7 @@ mod error;
 mod firecrawl_compat;
 mod mcp;
 mod page;
+mod rate;
 mod render;
 mod robots;
 mod search;
@@ -382,6 +383,7 @@ pub enum AppError {
     BadRequest(String),
     Forbidden(String),
     NotFound(String),
+    TooManyRequests(String),
     BadGateway(String),
     GatewayTimeout(String),
     ServiceUnavailable(String),
@@ -394,6 +396,7 @@ impl IntoResponse for AppError {
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            AppError::TooManyRequests(msg) => (StatusCode::TOO_MANY_REQUESTS, msg),
             AppError::BadGateway(msg) => (StatusCode::BAD_GATEWAY, msg),
             AppError::GatewayTimeout(msg) => (StatusCode::GATEWAY_TIMEOUT, msg),
             AppError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg),
@@ -407,7 +410,11 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
     fn from(err: E) -> Self {
         let e = err.into();
         let msg = e.to_string();
-        if msg.contains("timeout") || msg.contains("timed out") {
+        if msg.starts_with("rate limit:") {
+            // Stance gate (crate::rate) must surface as 429, not the generic
+            // catch-all — the status IS part of the message.
+            AppError::TooManyRequests(msg)
+        } else if msg.contains("timeout") || msg.contains("timed out") {
             AppError::GatewayTimeout(msg)
         } else if msg.contains("resolve") || msg.contains("connect") || msg.contains("dns") {
             AppError::BadGateway(msg)
@@ -997,8 +1004,18 @@ async fn session_navigate_handler(
     let resp = mgr.send(&id, |reply| session::SessionCommand::Navigate {
         url: req.url.clone(),
         reply,
-    }).await.map_err(|e| AppError::Internal(e))?;
+    }).await.map_err(session_err)?;
     Ok((StatusCode::OK, Json(resp)))
+}
+
+/// Session-command errors: the stance gate (rate.rs) must surface as 429,
+/// not the generic 500 the session handlers default to.
+fn session_err(e: String) -> AppError {
+    if e.starts_with("rate limit:") {
+        AppError::TooManyRequests(e)
+    } else {
+        AppError::Internal(e)
+    }
 }
 
 async fn session_state_handler(
@@ -1056,7 +1073,7 @@ async fn session_click_handler(
     let resp = mgr.send(&id, |reply| session::SessionCommand::Click {
         index: req.index,
         reply,
-    }).await.map_err(|e| AppError::Internal(e))?;
+    }).await.map_err(session_err)?;
     Ok((StatusCode::OK, Json(resp)))
 }
 

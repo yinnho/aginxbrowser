@@ -263,6 +263,9 @@ impl AginxBrowserMcp {
         annotations(title = "Fetch Webpage", read_only_hint = true)
     )]
     async fn fetch(&self, Parameters(params): Parameters<FetchParams>) -> String {
+        if let Err(e) = crate::rate::check_domain(&params.url) {
+            return json!({ "error": e }).to_string();
+        }
         if let Err(e) = crate::robots::assert_allowed(&params.url).await {
             return json!({ "error": e }).to_string();
         }

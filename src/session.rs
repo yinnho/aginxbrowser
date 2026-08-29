@@ -397,9 +397,14 @@ fn session_thread(
                 }];
 
                 // Navigate to start URL if provided.
+                // Page budget: every page this session walks counts (initial
+                // navigation included). Bounds bulk walking; working one page
+                // (state/scroll/eval/typing) stays free. See rate.rs.
+                let mut pages_loaded: u32 = 0;
                 if let Some(url) = start_url {
-                    if let Err(e) = page.goto(&url).await {
-                        tracing::warn!("session: initial navigation failed: {}", e);
+                    match page.goto(&url).await {
+                        Ok(()) => pages_loaded += 1,
+                        Err(e) => tracing::warn!("session: initial navigation failed: {}", e),
                     }
                 }
 
@@ -425,18 +430,26 @@ fn session_thread(
                     };
                     match cmd {
                         SessionCommand::Navigate { url, reply } => {
-                            let result = match page.goto(&url).await {
-                                Ok(()) => {
-                                    let final_url = page.url();
-                                    let title = page
-                                        .evaluate("document.title")
-                                        .as_str()
-                                        .filter(|s| !s.is_empty())
-                                        .map(|s| s.to_string());
-                                    element_map.clear();
-                                    Ok(SessionNavResponse { url: final_url, title })
-                                }
-                                Err(e) => Err(format!("navigation failed: {}", e)),
+                            // Budget first (local, free), then the per-domain
+                            // rate gate — same stance as the stateless paths.
+                            let result = match crate::rate::check_page_budget(pages_loaded)
+                                .and_then(|_| crate::rate::check_domain(&url))
+                            {
+                                Err(reason) => Err(reason),
+                                Ok(()) => match page.goto(&url).await {
+                                    Ok(()) => {
+                                        let final_url = page.url();
+                                        let title = page
+                                            .evaluate("document.title")
+                                            .as_str()
+                                            .filter(|s| !s.is_empty())
+                                            .map(|s| s.to_string());
+                                        element_map.clear();
+                                        pages_loaded += 1;
+                                        Ok(SessionNavResponse { url: final_url, title })
+                                    }
+                                    Err(e) => Err(format!("navigation failed: {}", e)),
+                                },
                             };
                             recorder.push(RecordedAction::Navigate {
                                 ok: result.is_ok(),
@@ -452,7 +465,23 @@ fn session_thread(
                         }
 
                         SessionCommand::Click { index, reply } => {
-                            let result = click_by_index(&mut page, &element_map, index).await;
+                            // A click that changes the page is a page walk and
+                            // spends the budget; one that only toggles state
+                            // (a checkbox, a menu) is free.
+                            let result = match crate::rate::check_page_budget(pages_loaded) {
+                                Err(reason) => Err(reason),
+                                Ok(()) => {
+                                    let before = page.url();
+                                    click_by_index(&mut page, &element_map, index)
+                                        .await
+                                        .map(|resp| {
+                                            if resp.url != before {
+                                                pages_loaded += 1;
+                                            }
+                                            resp
+                                        })
+                                }
+                            };
                             recorder.push(RecordedAction::Click { index, ok: result.is_ok() });
                             let _ = reply.send(result);
                         }

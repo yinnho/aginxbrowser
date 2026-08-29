@@ -274,6 +274,25 @@ async fn scrape_with_session(
     wants_markdown: bool,
     wants_screenshot: bool,
 ) -> (StatusCode, Json<ScrapeResponse>) {
+    // Per-domain page budget — the actions path must not become a scrape
+    // side door around the plain path's gate in smart_fetch. Firecrawl shape:
+    // success:false with the reason in metadata.error (see plain path below).
+    if let Err(e) = crate::rate::check_domain(&req.url) {
+        let data = ScrapeData {
+            markdown: None,
+            html: None,
+            links: None,
+            screenshot: None,
+            metadata: ScrapeMetadata {
+                title: None,
+                source_url: req.url.clone(),
+                description: None,
+                status_code: 429,
+                error: Some(e),
+            },
+        };
+        return (StatusCode::OK, Json(ScrapeResponse { success: false, data }));
+    }
     let url = req.url.clone();
     let actions = req.actions.clone();
     let selector = req.selector.clone();

@@ -554,6 +554,7 @@ pub fn do_fetch(req: FetchRequest) -> Result<FetchResponse> {
 pub fn do_click(req: ClickRequest) -> Result<ClickResponse> {
     run_on_local_runtime(move |_rt| {
         Box::pin(async move {
+            crate::rate::check_domain(&req.url).map_err(anyhow::Error::msg)?;
             let browser = build_browser(req.use_proxy, &req.url, req.tls_fingerprint.as_deref())?;
             inject_cookies(&browser, &req.cookies, &req.url);
             let mut page = browser.new_page().await?;
@@ -600,6 +601,7 @@ pub fn do_click(req: ClickRequest) -> Result<ClickResponse> {
 pub fn do_eval(req: EvalRequest) -> Result<EvalResponse> {
     run_on_local_runtime(move |_rt| {
         Box::pin(async move {
+            crate::rate::check_domain(&req.url).map_err(anyhow::Error::msg)?;
             let browser = build_browser(req.use_proxy, &req.url, req.tls_fingerprint.as_deref())?;
             inject_cookies(&browser, &req.cookies, &req.url);
             let mut page = browser.new_page().await?;
@@ -638,6 +640,7 @@ pub fn do_eval(req: EvalRequest) -> Result<EvalResponse> {
 pub fn do_screenshot(req: ScreenshotRequest) -> Result<ScreenshotResponse> {
     run_on_local_runtime(move |_rt| {
         Box::pin(async move {
+            crate::rate::check_domain(&req.url).map_err(anyhow::Error::msg)?;
             let browser = build_browser(req.use_proxy, &req.url, req.tls_fingerprint.as_deref())?;
             inject_cookies(&browser, &req.cookies, &req.url);
             let mut page = browser.new_page().await?;
@@ -774,7 +777,12 @@ pub async fn do_search(req: SearchRequest) -> Result<SearchResponse, SearchError
             // robots.txt gates the body-grab too: /search must not become a
             // side door around the /fetch policy check. A denied item keeps
             // its result entry; only the content fetch is skipped, with the
-            // reason in fetch_error so the agent can see why.
+            // reason in fetch_error so the agent can see why. Same for the
+            // per-domain page budget — the reason text carries the stance.
+            if let Err(reason) = crate::rate::check_domain(&items[i].url) {
+                items[i].fetch_error = Some(reason);
+                continue;
+            }
             if let Err(reason) = crate::robots::assert_allowed(&items[i].url).await {
                 items[i].fetch_error = Some(reason);
                 continue;
