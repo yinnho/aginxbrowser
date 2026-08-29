@@ -5,7 +5,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let snapshot_path = out_dir.join("OBSCURA_SNAPSHOT.bin");
+    let snapshot_path = out_dir.join("DITING_SNAPSHOT.bin");
 
     let bootstrap_js = include_str!("js/bootstrap.js");
 
@@ -18,7 +18,7 @@ fn main() {
             extension_transpiler: None,
             with_runtime_cb: Some(Box::new(move |runtime| {
                 runtime
-                    .execute_script("<obscura:bootstrap>", bootstrap_js.to_string())
+                    .execute_script("<diting:bootstrap>", bootstrap_js.to_string())
                     .expect("bootstrap.js should not fail during snapshot creation");
             })),
         },

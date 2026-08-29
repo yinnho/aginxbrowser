@@ -2470,12 +2470,12 @@ class Element extends Node {
   }
   get offsetWidth() {
     if (this._isViewportRoot()) return (globalThis.innerWidth || 1280);
-    const m = _obscuraFontBox(this);
+    const m = _ditingFontBox(this);
     return m ? m.w : 100;
   }
   get offsetHeight() {
     if (this._isViewportRoot()) return (globalThis.innerHeight || 720);
-    const m = _obscuraFontBox(this);
+    const m = _ditingFontBox(this);
     return m ? m.h : 20;
   }
   get offsetTop() { return 0; } get offsetLeft() { return 0; }
@@ -3588,7 +3588,7 @@ function __ditingUADataPlatformFromUA() {
 // Chrome can resolve per OS — Windows-only faces (Segoe UI, Calibri,
 // Consolas) are absent on macOS and vice versa (Menlo, Monaco), so the
 // detected set stays coherent with the UA persona.
-const _OBSCURA_FONT_PLATFORM = () => {
+const _DITING_FONT_PLATFORM = () => {
   const p = __ditingPlatformFromUA();
   if (p === "Windows") return "win";
   if (p === "MacIntel" || p === "iPhone") return "mac";
@@ -3609,7 +3609,7 @@ const _INSTALLED_FONTS = {
 // values inside ±1% nudged out) so the probe reliably detects installed
 // faces, exactly like a real font's metrics never coincide with the fallback.
 function _installedFontFactor(name) {
-  const list = _INSTALLED_FONTS[_OBSCURA_FONT_PLATFORM()] || _INSTALLED_FONTS.mac;
+  const list = _INSTALLED_FONTS[_DITING_FONT_PLATFORM()] || _INSTALLED_FONTS.mac;
   if (list.indexOf(name) === -1) return null;
   let h = 0;
   for (let i = 0; i < name.length; i++) h = (Math.imul(h, 31) + name.charCodeAt(i)) | 0;
@@ -3650,7 +3650,7 @@ const _GENERIC_FONT = {
 // Synthesize a leaf text element's content box from its inline font styles.
 // Returns null for elements we shouldn't size this way (containers, no text)
 // so their callers keep the default synthesized cell.
-function _obscuraFontBox(el) {
+function _ditingFontBox(el) {
   try {
     const st = el.style;
     if (!st || !st._props) return null;
@@ -7642,7 +7642,7 @@ class _Canvas2D {
     // Per-font width factor so font-presence probes (measure the same
     // string across many family names; available fonts change the width,
     // missing ones fall back to the default) see a realistic spread.
-    // Shares the persona's installed-font table with _obscuraFontBox so
+    // Shares the persona's installed-font table with _ditingFontBox so
     // canvas probing and offsetWidth probing agree on which faces exist.
     const fam = String(this.font || '');
     let factor = 1;
@@ -8607,12 +8607,25 @@ globalThis.__blobObjs = globalThis.__blobObjs || {};
 const _origCreateObjectURL = URL.createObjectURL;
 URL.createObjectURL = function(blob) {
   if (blob && typeof blob.text === 'function') {
-    const id = 'blob:obscura/' + Math.random().toString(36).substring(2);
+    // Chrome shape: blob:https://<origin>/<uuid> (blob:null/ for opaque
+    // origins). The old blob:obscura/ prefix named the engine to any page
+    // that inspected the returned URL.
+    const origin = (globalThis.location && globalThis.location.origin) || 'null';
+    let u = '';
+    while (u.length < 36) {
+      if (u.length === 8 || u.length === 13 || u.length === 18 || u.length === 23) {
+        u += '-';
+      } else {
+        u += '0123456789abcdef'[Math.floor(Math.random() * 16)];
+      }
+    }
+    const id = 'blob:' + origin + '/' + u;
     globalThis.__blobObjs[id] = blob;
     blob.text().then(text => { globalThis.__blobStore[id] = text; });
     return id;
   }
-  return 'blob:obscura/fallback';
+  const origin = (globalThis.location && globalThis.location.origin) || 'null';
+  return 'blob:' + origin + '/fallback';
 };
 URL.revokeObjectURL = function(url) {
   delete globalThis.__blobStore[url];
@@ -9713,7 +9726,7 @@ globalThis.__diting_init = function() {
     // Pattern, not the static hide list: `__diting_objects` & friends are
     // created by the Rust init AFTER the snapshot froze the list, so they'd
     // slip through a membership check against it.
-    const _isInternal = n => typeof n === 'string' && (n.startsWith('_') || n.includes('obscura') || n.includes('Obscura') || n === '__bootstrap');
+    const _isInternal = n => typeof n === 'string' && (n.startsWith('_') || n.includes('diting') || n.includes('Diting') || n === '__bootstrap');
     const _gopn = Object.getOwnPropertyNames;
     const _ownKeys = Reflect.ownKeys;
     const _keys = Object.keys;
@@ -9758,7 +9771,7 @@ globalThis.__diting_init = function() {
 // before this line would be omitted by Object.keys and escape the per-page
 // hiding below (upstream 4c33f6d).
 globalThis.__diting_hide_list = Object.getOwnPropertyNames(globalThis).filter(k =>
-  k.startsWith('_') || k.includes('obscura') || k.includes('Obscura')
+  k.startsWith('_') || k.includes('diting') || k.includes('Diting')
 );
 
 /* ===== WPT conformance shims: batch 2 ===== */
