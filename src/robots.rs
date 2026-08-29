@@ -57,13 +57,13 @@ const NEGATIVE_TTL: Duration = Duration::from_secs(300);
 const MAX_ROBOTS_BYTES: usize = 512 * 1024;
 const MAX_LINE_BYTES: usize = 1000;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Rule {
     allow: bool,
     pattern: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum Policy {
     /// No applicable rules — everything allowed.
     AllowAll,
@@ -184,8 +184,18 @@ async fn fetch_policy(origin: &str) -> Policy {
             env!("CARGO_PKG_VERSION")
         ));
     if let Some(proxy) = crate::config::proxy_from_env() {
-        if let Ok(p) = reqwest::Proxy::all(&proxy) {
-            builder = builder.proxy(p);
+        // Follow the same proxy decision the page fetch makes for this
+        // origin. Unconditional proxying broke China-hosted sites on
+        // foreign-exit deployments: robots.txt timed out through the proxy,
+        // DenyAll got cached, and /fetch 403'd a page the engine fetches
+        // direct just fine (gongkaoleida class). Should the caller force
+        // use_proxy for this origin, the page fetch rides the proxy while
+        // robots is judged from our direct IP — fine, robots content is
+        // path-based, not client-IP-based.
+        if crate::server::should_auto_proxy(origin) {
+            if let Ok(p) = reqwest::Proxy::all(&proxy) {
+                builder = builder.proxy(p);
+            }
         }
     }
     let client = match builder.build() {
@@ -500,5 +510,50 @@ mod tests {
             Policy::Rules(rs) => assert_eq!(rs[0].pattern, "/no"),
             _ => panic!("expected rules"),
         }
+    }
+
+    // With AGINXBROWSER_PROXY set, the robots fetch used to attach the proxy
+    // unconditionally — including for origins the page-fetch layer fetches
+    // DIRECT (the should_auto_proxy allowlist). On a foreign-exit deployment
+    // that made China-hosted sites unfetchable: robots timed out through the
+    // proxy, DenyAll was cached, and /fetch 403'd. The fetch must skip the
+    // proxy for direct origins even when one is configured.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the fetch
+    #[tokio::test]
+    async fn robots_fetch_skips_proxy_for_direct_origins() {
+        static PROXY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _env = PROXY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Loopback fixture serving a real robots.txt.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else { break };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = vec![0u8; 2048];
+                    let _ = stream.read(&mut buf).await;
+                    let body = "User-agent: *\nDisallow: /private";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+
+        // A configured-but-dead proxy: with the old unconditional attach this
+        // request could only fail (nothing listens there), and the policy
+        // would come back DenyAll(network).
+        unsafe { std::env::set_var("AGINXBROWSER_PROXY", "socks5h://127.0.0.1:1") };
+        let policy = fetch_policy(&format!("http://127.0.0.1:{port}")).await;
+        unsafe { std::env::remove_var("AGINXBROWSER_PROXY") };
+
+        assert!(
+            matches!(policy, Policy::Rules(_)),
+            "robots fetch must skip the configured proxy for direct origins, got {policy:?}"
+        );
     }
 }
