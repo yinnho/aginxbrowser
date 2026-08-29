@@ -559,6 +559,59 @@ mod tests {
         );
     }
 
+    // callFunctionOn shares evaluate's rejection shape: a rejected awaited
+    // Promise rides a successful reply with exceptionDetails (plus the
+    // exceptionThrown event), NOT a protocol error. obscura#746's reporter
+    // measured upstream answering "successfully with the wrong value" here;
+    // Chrome (and this engine) hand back the exception instead.
+    #[tokio::test(flavor = "current_thread")]
+    async fn call_function_on_reports_awaited_rejection_as_exception_details() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-1".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        // A real document initializes the V8 isolate (create_page blanks it),
+        // so the call below actually runs in a live runtime.
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": "data:text/html,<html><body>hi</body></html>" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        let req = CdpRequest {
+            id: 2,
+            method: "Runtime.callFunctionOn".to_string(),
+            params: json!({
+                "functionDeclaration": "() => Promise.reject(new Error('boom'))",
+                "returnByValue": true,
+                "awaitPromise": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&req, &mut ctx).await;
+        assert!(resp.error.is_none(), "unexpected CDP error: {:?}", resp.error);
+        let result = resp.result.expect("result");
+        let details = result
+            .get("exceptionDetails")
+            .expect("response carries exceptionDetails");
+        assert_eq!(details["text"], "Uncaught (in promise)");
+        assert_eq!(details["exception"]["description"], "Error: boom");
+        assert_eq!(details["exception"]["subtype"], "error");
+
+        let thrown = ctx
+            .pending_events
+            .iter()
+            .find(|e| e.method == "Runtime.exceptionThrown")
+            .expect("Runtime.exceptionThrown event queued");
+        assert_eq!(
+            thrown.params["exceptionDetails"]["exception"]["description"],
+            "Error: boom"
+        );
+    }
+
     // Chrome spells a number RemoteObject's description via Number→String
     // ("2"), but serde_json's Number Display keeps float-ness ("2.0") and
     // v8_to_json hands us f64 boxes for every JS number — awaitPromise +
