@@ -6712,25 +6712,68 @@ Storage.prototype.clear = function() { const d = this._data; for (const k in d) 
 Storage.prototype.key = function(i) { const ks = Object.keys(this._data); i = i >>> 0; return i < ks.length ? ks[i] : null; };
 Object.defineProperty(Storage.prototype, 'length', { get: function() { return Object.keys(this._data).length; }, configurable: true });
 
-const _mkStore = () => {
+const _mkStore = (persistent) => {
   const target = Object.create(Storage.prototype);
   Object.defineProperty(target, '_data', { value: Object.create(null), writable: true, enumerable: false, configurable: true });
+  // localStorage loads its persisted entries on first access (one JSON file
+  // per origin, mirrored through the Rust-side global map — see
+  // op_storage_read) and flushes writes debounced; sessionStorage stays
+  // memory-only, per-tab lifetime is the spec'd behavior. Opaque origins
+  // (data: pages report "null") stay memory-only too. Loading must be lazy:
+  // the bootstrap runs before the document URL lands, so an eager read at
+  // construction time would pin origin to about:blank.
+  let flushPending = false;
+  const scheduleFlush = () => {
+    if (flushPending) return;
+    flushPending = true;
+    setTimeout(() => {
+      flushPending = false;
+      try {
+        const origin = location.origin;
+        if (!origin || origin === "null") return;
+        _OPS.op_storage_write(origin, JSON.stringify(target._data));
+      } catch { }
+    }, 100);
+  };
+  let loadPending = persistent;
+  const ensureLoaded = () => {
+    if (!loadPending) return;
+    loadPending = false;
+    try {
+      const origin = location.origin;
+      if (!origin || origin === "null") return;
+      const entries = JSON.parse(_OPS.op_storage_read(origin));
+      for (const k in entries) target._data[k] = entries[k];
+    } catch { }
+  };
+  if (persistent) {
+    // Instance overrides: setItem/getItem et al. touch `this._data` directly
+    // and so bypass the proxy traps (`localStorage.foo = x` does not); all of
+    // them need the load hook for the same reason.
+    target.getItem = function (k) { ensureLoaded(); return Storage.prototype.getItem.call(target, k); };
+    target.setItem = function (k, v) { ensureLoaded(); Storage.prototype.setItem.call(target, k, v); scheduleFlush(); };
+    target.removeItem = function (k) { ensureLoaded(); Storage.prototype.removeItem.call(target, k); scheduleFlush(); };
+    target.clear = function () { ensureLoaded(); Storage.prototype.clear.call(target); scheduleFlush(); };
+    target.key = function (i) { ensureLoaded(); return Storage.prototype.key.call(target, i); };
+    Object.defineProperty(target, 'length', { get: function () { ensureLoaded(); return Object.keys(target._data).length; }, configurable: true });
+  }
   const isReal = (p) => p === '_data' || p === 'constructor' || (p in Storage.prototype);
   return new Proxy(target, {
-    get(t, p, recv) { if (typeof p === 'symbol' || isReal(p)) return Reflect.get(t, p, recv); const v = t.getItem(p); return v === null ? undefined : v; },
+    get(t, p, recv) { if (typeof p === 'symbol' || isReal(p)) return Reflect.get(t, p, recv); ensureLoaded(); const v = t.getItem(p); return v === null ? undefined : v; },
     set(t, p, v, recv) { if (typeof p === 'symbol' || isReal(p)) return Reflect.set(t, p, v, recv); t.setItem(p, v); return true; },
-    has(t, p) { if (typeof p === 'symbol' || isReal(p)) return true; return Object.prototype.hasOwnProperty.call(t._data, p); },
+    has(t, p) { if (typeof p === 'symbol' || isReal(p)) return true; ensureLoaded(); return Object.prototype.hasOwnProperty.call(t._data, p); },
     deleteProperty(t, p) { if (typeof p === 'symbol' || isReal(p)) return Reflect.deleteProperty(t, p); t.removeItem(p); return true; },
-    ownKeys(t) { return Object.keys(t._data); },
+    ownKeys(t) { ensureLoaded(); return Object.keys(t._data); },
     getOwnPropertyDescriptor(t, p) {
-      if (typeof p !== 'symbol' && Object.prototype.hasOwnProperty.call(t._data, p))
+      if (typeof p !== 'symbol') ensureLoaded();
+      if (Object.prototype.hasOwnProperty.call(t._data, p))
         return { value: t._data[p], writable: true, enumerable: true, configurable: true };
       return Reflect.getOwnPropertyDescriptor(t, p);
     },
   });
 };
-globalThis.localStorage = _mkStore();
-globalThis.sessionStorage = _mkStore();
+globalThis.localStorage = _mkStore(true);
+globalThis.sessionStorage = _mkStore(false);
 
 globalThis.btoa = globalThis.btoa || ((s) => { const b = new TextEncoder().encode(s); const c="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"; let r=""; for(let i=0;i<b.length;i+=3){const a=b[i],bb=b[i+1]??0,cc=b[i+2]??0; r+=c[a>>2]+c[((a&3)<<4)|(bb>>4)]+(i+1<b.length?c[((bb&15)<<2)|(cc>>6)]:"=")+(i+2<b.length?c[cc&63]:"=");} return r; });
 globalThis.atob = globalThis.atob || ((s) => { const c="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"; let r=[]; for(let i=0;i<s.length;i+=4){const a=c.indexOf(s[i]),b=c.indexOf(s[i+1]),cc=c.indexOf(s[i+2]),d=c.indexOf(s[i+3]); r.push((a<<2)|(b>>4)); if(cc>=0)r.push(((b&15)<<4)|(cc>>2)); if(d>=0)r.push(((cc&3)<<6)|d);} return String.fromCharCode(...r); });

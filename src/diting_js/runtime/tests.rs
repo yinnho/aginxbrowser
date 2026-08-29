@@ -4762,3 +4762,80 @@
             serde_json::json!("https://example.com/app/index")
         );
     }
+
+    // localStorage persistence (obscura#629 class): writes flush (debounced)
+    // to one JSON file per origin, and a fresh realm — the process-restart
+    // equivalent — reads them back. sessionStorage stays memory-only: its
+    // per-tab lifetime is the spec'd behavior, and nothing it holds may
+    // reach the disk.
+    static STORAGE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[allow(clippy::await_holding_lock)] // the env guard must span the awaits
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_storage_persists_across_realms_and_session_storage_does_not() {
+        let _env = STORAGE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("diting-ls-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("AGINXBROWSER_STORAGE_DIR", &dir);
+        crate::diting_js::ops::reset_local_storage_for_tests();
+
+        // Realm 1: the method path and the property path both flush, and
+        // sessionStorage stays out of the picture.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate_for_cdp(
+                "(async () => { localStorage.setItem('token', 'abc'); localStorage.theme = 'dark'; \
+                 sessionStorage.setItem('s', '1'); await new Promise(r => setTimeout(r, 250)); return 'ok'; })()",
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.value.unwrap(), serde_json::json!("ok"));
+
+        let ls_dir = dir.join("localStorage");
+        let files: Vec<_> = std::fs::read_dir(&ls_dir)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(files.len(), 1, "one file per origin");
+        let on_disk = std::fs::read_to_string(files[0].path()).unwrap();
+        assert!(on_disk.contains("\"token\":\"abc\""), "disk copy: {on_disk}");
+        assert!(!on_disk.contains("\"s\""), "sessionStorage never reaches disk: {on_disk}");
+
+        // Realm 2 = restart equivalent: drop the in-memory mirror and
+        // rebuild; the fresh store reads the same values back from disk.
+        crate::diting_js::ops::reset_local_storage_for_tests();
+        drop(rt);
+        let mut rt2 = setup_runtime("<html><body></body></html>");
+        assert_eq!(
+            rt2.evaluate("localStorage.getItem('token')").unwrap(),
+            serde_json::json!("abc")
+        );
+        assert_eq!(
+            rt2.evaluate("localStorage.theme").unwrap(),
+            serde_json::json!("dark")
+        );
+        assert_eq!(
+            rt2.evaluate("sessionStorage.getItem('s')").unwrap(),
+            serde_json::json!(null)
+        );
+
+        // The deletion flushes too, not just additions.
+        let result = rt2
+            .evaluate_for_cdp(
+                "(async () => { localStorage.removeItem('token'); await new Promise(r => setTimeout(r, 250)); return 'ok'; })()",
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.value.unwrap(), serde_json::json!("ok"));
+        let on_disk = std::fs::read_to_string(files[0].path()).unwrap();
+        assert!(!on_disk.contains("token"), "removal reached disk: {on_disk}");
+
+        std::env::remove_var("AGINXBROWSER_STORAGE_DIR");
+        crate::diting_js::ops::reset_local_storage_for_tests();
+        let _ = std::fs::remove_dir_all(&dir);
+    }

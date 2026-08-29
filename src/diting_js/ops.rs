@@ -2069,6 +2069,112 @@ fn op_set_cookie(state: &OpState, #[string] cookie_str: &str) {
     jar.set_cookie_from_js(cookie_str, &url);
 }
 
+// localStorage persistence (obscura#629 class): the bootstrap store is a
+// plain JS map, so logins/flags a page keeps in localStorage died with the
+// process. The store now loads through op_storage_read on first access and
+// flushes (debounced JS-side) through op_storage_write; the authoritative
+// copy lives in this process-global map, mirrored to one JSON file per
+// origin under AGINXBROWSER_STORAGE_DIR (falling back to the cookie store
+// dir). sessionStorage deliberately stays memory-only — per-tab lifetime is
+// the spec'd behavior.
+static LOCAL_STORAGE: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, HashMap<String, String>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+static LOCAL_STORAGE_LOADED: std::sync::LazyLock<std::sync::Mutex<HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
+
+fn storage_file(origin: &str) -> Option<std::path::PathBuf> {
+    let dir = std::env::var("AGINXBROWSER_STORAGE_DIR")
+        .ok()
+        .or_else(|| std::env::var("AGINXBROWSER_COOKIE_STORE_DIR").ok())
+        .unwrap_or_else(|| ".".to_string());
+    let mut sanitized = String::with_capacity(origin.len());
+    for c in origin.chars() {
+        if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+            sanitized.push(c);
+        } else {
+            sanitized.push('_');
+        }
+    }
+    // FNV-1a suffix: sanitized names collide ("a:b" vs "a_b"); the hash does not.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in origin.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    Some(
+        std::path::Path::new(&dir)
+            .join("localStorage")
+            .join(format!("{sanitized}-{:016x}.json", hash)),
+    )
+}
+
+fn storage_load_locked(origin: &str) {
+    let mut loaded = LOCAL_STORAGE_LOADED.lock().unwrap();
+    if !loaded.insert(origin.to_string()) {
+        return;
+    }
+    let Some(path) = storage_file(origin) else {
+        return;
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(entries) = serde_json::from_str::<HashMap<String, String>>(&raw) else {
+        return;
+    };
+    LOCAL_STORAGE
+        .lock()
+        .unwrap()
+        .insert(origin.to_string(), entries);
+}
+
+#[op2]
+#[string]
+fn op_storage_read(#[string] origin: &str) -> String {
+    storage_load_locked(origin);
+    let map = LOCAL_STORAGE.lock().unwrap();
+    let entries = map.get(origin);
+    serde_json::to_string(&entries.unwrap_or(&HashMap::new())).unwrap_or_else(|_| "{}".to_string())
+}
+
+#[op2(fast)]
+fn op_storage_write(#[string] origin: &str, #[string] json: &str) {
+    let Ok(entries) = serde_json::from_str::<HashMap<String, String>>(json) else {
+        return;
+    };
+    // Load-first: a write for a never-read origin must not be clobbered by
+    // the on-disk copy when the reader side initializes later.
+    storage_load_locked(origin);
+    LOCAL_STORAGE
+        .lock()
+        .unwrap()
+        .insert(origin.to_string(), entries);
+    let Some(path) = storage_file(origin) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let payload = LOCAL_STORAGE
+        .lock()
+        .unwrap()
+        .get(origin)
+        .map(|entries| serde_json::to_string(entries).unwrap_or_else(|_| "{}".to_string()));
+    let Some(payload) = payload else { return };
+    // tmp + rename so a mid-write kill never leaves a truncated store
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, payload).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_local_storage_for_tests() {
+    LOCAL_STORAGE.lock().unwrap().clear();
+    LOCAL_STORAGE_LOADED.lock().unwrap().clear();
+}
+
 #[op2(fast)]
 fn op_navigate(state: &OpState, #[string] url: &str, #[string] method: &str, #[string] body: &str) {
     let gs = state.borrow::<SharedState>().clone();
@@ -2621,6 +2727,8 @@ pub fn build_extension() -> Extension {
             op_fetch_url(),
             op_get_cookies(),
             op_set_cookie(),
+            op_storage_read(),
+            op_storage_write(),
             op_navigate(),
             op_sleep(),
             op_binding_called(),
