@@ -40,8 +40,12 @@ fn is_content_sufficient(html: &str) -> bool {
         return false;
     }
 
-    // Crude text extraction: drop everything between < and >, collapse ws.
-    let text_only: String = strip_html_tags(&lower).split_whitespace().collect::<Vec<_>>().join(" ");
+    // Measure text after dropping script/style/noscript/head bodies, the same
+    // drop the markdown conversion applies. Measuring the raw HTML let a
+    // JS-only SPA shell (17KB inline bundle, zero text nodes) pass the bar on
+    // its script text, and Tier 1 then served the empty conversion result
+    // (gongkaoleida class) instead of deferring to Tier 2.
+    let text_only: String = strip_html_tags(&strip_non_content(html));
 
     // SPA framework shells: a mount point with near-empty body text. We only
     // flag it when the visible text is very short, which is the SPA signature.
@@ -256,6 +260,15 @@ pub async fn http_fetch(
         }
     };
 
+    // Safety net under the sufficiency bar: if the conversion produced
+    // nothing at all, this page had no content outside script/style (or the
+    // selector didn't match the static DOM). Tier 2 may still render real
+    // content — serving an empty result at tier "http" is the worst outcome.
+    if content.trim().is_empty() {
+        tracing::debug!("http_fetch: converted content empty for {}, deferring to Tier 2", url);
+        return Ok(None);
+    }
+
     let (content, truncated) = if max_chars > 0 && content.chars().count() > max_chars {
         (content.chars().take(max_chars).collect::<String>(), true)
     } else {
@@ -417,9 +430,12 @@ mod tests {
             document.cookie="_wafchallengeid="+btoa(JSON.stringify(c))+"; Max-Age=1";location.reload();}</script>
             Please wait...</body></html>"#;
         assert!(is_byte_waf_challenge_html(html));
-        // Its inline script text alone blows past the size bar — proving the
-        // signature check is what's needed, not is_content_sufficient.
-        assert!(is_content_sufficient(html));
+        // The signature gate is what actually catches this stub (it fires
+        // first in http_fetch). The sufficiency bar now rejects it too —
+        // script bodies don't count as visible text, leaving "Please
+        // wait..." under the 64-char bar — so an unsigned variant of the
+        // same stub can't slip through Tier 1 either.
+        assert!(!is_content_sufficient(html));
     }
 
     #[test]
@@ -497,5 +513,176 @@ mod tests {
     fn strip_html_tags_preserves_multibyte_utf8() {
         let out = strip_html_tags("<div>日本語のテキスト</div>");
         assert_eq!(out, "日本語のテキスト");
+    }
+
+    // ---- sufficiency bar vs script/style bodies (gongkaoleida class) ----
+
+    #[test]
+    fn content_sufficient_rejects_script_only_shell() {
+        // The gongkaoleida shape: a big inline bundle, zero text nodes, no
+        // <title>. The script text alone used to pass the 64-char bar, Tier 1
+        // accepted the page, and the markdown conversion came back empty.
+        let bundle = "var a=1;function f(){return document.getElementById('x')};".repeat(60);
+        let html = format!(
+            r#"<html><head><script>{bundle}</script></head><body><div id="page"></div><script>{bundle}</script></body></html>"#
+        );
+        assert!(!is_content_sufficient(&html));
+    }
+
+    #[test]
+    fn content_sufficient_counts_text_outside_scripts() {
+        // A bundle plus real body text must still pass — the fix defers
+        // script-only shells, not every scripting-heavy page.
+        let bundle = "var longVariableName=function(anotherArgument){return anotherArgument*2};".repeat(20);
+        let html = format!(
+            r#"<html><head><script>{bundle}</script></head><body><h1>Welcome to the site</h1>
+            <p>This is a real page with more than enough visible text content to clearly pass the threshold for sufficiency checking.</p></body></html>"#
+        );
+        assert!(is_content_sufficient(&html));
+    }
+
+    // ---- http_fetch deferral over a loopback fixture ----
+
+    /// Serve one fixed raw HTTP response to every request on an ephemeral
+    /// port; returns the port. Raw bytes so fixtures control the exact wire
+    /// (gzip members, header casing).
+    async fn raw_response_fixture(response: Vec<u8>) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let r = response.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = vec![0u8; 4096];
+                    let _ = stream.read(&mut buf).await;
+                    let _ = stream.write_all(&r).await;
+                });
+            }
+        });
+        port
+    }
+
+    /// Hand-roll a one-member gzip stream holding a single stored
+    /// (uncompressed) deflate block, so a fixture can serve a gzip response
+    /// without pulling a compression crate into dev-deps.
+    fn gzip_stored(data: &[u8]) -> Vec<u8> {
+        assert!(data.len() <= 65535);
+        fn crc32_ieee(data: &[u8]) -> u32 {
+            let mut table = [0u32; 256];
+            for i in 0..256u32 {
+                let mut c = i;
+                for _ in 0..8 {
+                    c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+                }
+                table[i as usize] = c;
+            }
+            let mut crc = 0xFFFF_FFFFu32;
+            for &b in data {
+                crc = table[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
+            }
+            crc ^ 0xFFFF_FFFF
+        }
+        let mut out = vec![0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03];
+        let len = data.len() as u16;
+        out.push(0x01); // BFINAL=1, BTYPE=00 (stored)
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&(!len).to_le_bytes());
+        out.extend_from_slice(data);
+        out.extend_from_slice(&crc32_ieee(data).to_le_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out
+    }
+
+    // A script-only shell must defer to Tier 2, not come back as an empty
+    // tier-"http" result: the sufficiency bar ignores script text and the
+    // converted-content emptiness check catches whatever else slips through.
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_fetch_defers_script_only_shell_to_tier_2() {
+        let _guard = crate::server::test_util::net_env_guard();
+        let bundle = "var a=1;function f(){return document.getElementById('x')};".repeat(60);
+        let body = format!(
+            r#"<html><head><script>{bundle}</script></head><body><div id="page"></div></body></html>"#
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let port = raw_response_fixture(response.into_bytes()).await;
+        let got = http_fetch(
+            &format!("http://127.0.0.1:{port}/"),
+            false,
+            None,
+            OutputFormat::Markdown,
+            None,
+            &[],
+            50000,
+        )
+        .await
+        .unwrap();
+        assert!(got.is_none(), "script-only shell must defer to Tier 2, got {:?}", got.map(|r| r.content.chars().count()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_fetch_accepts_real_static_content() {
+        let _guard = crate::server::test_util::net_env_guard();
+        let body = "<html><head><title>static ok</title></head><body><p>Plenty of real text on this page, comfortably past the sufficiency bar for the tier-one HTTP gate.</p></body></html>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let port = raw_response_fixture(response.into_bytes()).await;
+        let got = http_fetch(
+            &format!("http://127.0.0.1:{port}/"),
+            false,
+            None,
+            OutputFormat::Markdown,
+            None,
+            &[],
+            50000,
+        )
+        .await
+        .unwrap()
+        .expect("static content must be served at tier http");
+        assert_eq!(got.tier, Some("http"));
+        assert_eq!(got.title.as_deref(), Some("static ok"));
+        assert!(!got.content.trim().is_empty());
+    }
+
+    // Aliyun Tengine fronts (gongkaoleida class) reply `Content-Encoding:
+    // gzip` even though we never advertise Accept-Encoding. The engine must
+    // decode by the response header — a title pulled out of the gunzipped
+    // page is the proof (a raw-bytes pass would leave title None).
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_fetch_decodes_unconditional_gzip_by_response_header() {
+        let _guard = crate::server::test_util::net_env_guard();
+        let html = "<html><head><title>gz ok</title></head><body><p>Enough real text on this page to clear the sufficiency gate without any help at all.</p></body></html>";
+        let gz = gzip_stored(html.as_bytes());
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-encoding: gzip\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            gz.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(&gz);
+        let port = raw_response_fixture(response).await;
+        let got = http_fetch(
+            &format!("http://127.0.0.1:{port}/"),
+            false,
+            None,
+            OutputFormat::Markdown,
+            None,
+            &[],
+            50000,
+        )
+        .await
+        .unwrap()
+        .expect("gunzipped page must be accepted");
+        assert_eq!(
+            got.title.as_deref(),
+            Some("gz ok"),
+            "body must be gunzipped before parsing"
+        );
     }
 }

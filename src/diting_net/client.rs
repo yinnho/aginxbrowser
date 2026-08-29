@@ -470,11 +470,15 @@ impl HttpClient {
                 .pool_idle_timeout(Duration::from_secs(60))
                 .tcp_keepalive(Duration::from_secs(30))
                 .danger_accept_invalid_certs(false);
-                // No .gzip()/.brotli(): without these reqwest does not
-                // advertise Accept-Encoding, so servers reply with plain text
-                // and we read raw bytes reliably. reqwest's auto-decode fails
-                // when a server ignores our Accept-Encoding and returns a
-                // mismatched encoding (Baidu sends br after gzip is advertised).
+                // No manual Accept-Encoding header: reqwest 0.12 with the
+                // gzip/brotli/deflate cargo features decodes by the RESPONSE's
+                // Content-Encoding header regardless of what we advertised
+                // (pinned by render.rs's unconditional-gzip fixture test), so
+                // Aliyun Tengine fronts that compress unrequested still
+                // decode. Advertising nothing keeps the request fingerprint
+                // plain; advertising would also be fine, but never set the
+                // header by hand — a manual Accept-Encoding disables reqwest's
+                // auto-decode and raw gzip then reaches the HTML parser.
 
             if let Some(ref proxy) = self.proxy_url {
                 if let Ok(p) = reqwest::Proxy::all(proxy.as_str()) {
