@@ -59,9 +59,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-musl
-      - uses: mlugg/setup-zig@v1
-        with:
-          version: 0.16.0
+      - name: Install zig
+        run: |
+          curl -fsSL https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz | sudo tar -xJ -C /opt
+          echo "/opt/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-zigbuild
