@@ -91,6 +91,10 @@ pub struct SessionNavResponse {
 pub struct SessionClickResponse {
     pub url: String,
     pub clicked: bool,
+    /// Post-click landed page text (body.innerText, capped), so the client
+    /// can diff before/after in one response — same evidence contract as the
+    /// stateless /click.
+    pub text_after: Option<String>,
 }
 
 /// One live session, as reported by [`SessionManager::list`].
@@ -746,7 +750,11 @@ async fn click_by_index(
         page.settle_until_idle(5000).await;
     }
     let url = page.url();
-    Ok(SessionClickResponse { url, clicked })
+    let text_after = page
+        .evaluate("document.body.innerText")
+        .as_str()
+        .map(|s| s.chars().take(2000).collect::<String>());
+    Ok(SessionClickResponse { url, clicked, text_after })
 }
 
 fn input_by_index(

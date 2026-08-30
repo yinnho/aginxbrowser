@@ -614,8 +614,10 @@ Click an interactive element by index.
 **Response:**
 
 ```json
-{"url": "https://example.com/dashboard", "clicked": true}
+{"url": "https://example.com/dashboard", "clicked": true, "text_after": "Dashboard …"}
 ```
+
+`text_after` is the landed page's text after the click (capped at 2000 chars) — before/after evidence in one response, same contract as `/click`.
 
 ### POST /session/{id}/input
 

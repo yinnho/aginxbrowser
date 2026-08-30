@@ -571,7 +571,7 @@ impl AginxBrowserMcp {
             index: params.index,
             reply,
         }).await {
-            Ok(resp) => json!({ "url": resp.url, "clicked": resp.clicked }).to_string(),
+            Ok(resp) => json!({ "url": resp.url, "clicked": resp.clicked, "text_after": resp.text_after }).to_string(),
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
