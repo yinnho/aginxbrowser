@@ -213,6 +213,37 @@ pub struct SessionCloseParams {
     pub session_id: String,
 }
 
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct CacheParams {
+    /// Full-text search over cached page contents, titles, URLs and past search queries. Omit to list the latest rows.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Only rows whose URL contains this substring
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Return the FULL cached content of this exact URL instead of listing hits
+    #[serde(default)]
+    pub get: Option<String>,
+    /// Which rows to search: "auto" (default, pages + searches), "pages", or "searches"
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Only rows stored within the last N hours
+    #[serde(default)]
+    pub since_hours: Option<u64>,
+    /// Maximum rows returned (default: 10, max 100)
+    #[serde(default = "default_max_results")]
+    pub limit: usize,
+    /// Return row counts and database size instead of rows
+    #[serde(default)]
+    pub stats: bool,
+    /// Delete matching rows instead of returning them (requires url, since_hours, or all)
+    #[serde(default)]
+    pub clear: bool,
+    /// With clear: delete everything cached for this caller
+    #[serde(default)]
+    pub all: bool,
+}
+
 fn default_scroll_dir() -> String {
     "down".to_string()
 }
@@ -254,7 +285,12 @@ fn default_js_timeout() -> u64 {
 /// dispatch these calls via `spawn_blocking` to avoid the "cannot start a
 /// runtime from within a runtime" panic.
 #[derive(Debug, Clone)]
-pub struct AginxBrowserMcp;
+pub struct AginxBrowserMcp {
+    /// Local-store owner for this MCP instance: "global" under the default
+    /// scope, or a unique id per client session when
+    /// AGINXBROWSER_STORE_SCOPE=session (shared deployments).
+    pub owner: String,
+}
 
 #[tool_router]
 impl AginxBrowserMcp {
@@ -291,13 +327,16 @@ impl AginxBrowserMcp {
         };
 
         match tokio::task::spawn_blocking(move || do_fetch(req)).await {
-            Ok(Ok(resp)) => json!({
-                "url": resp.url,
-                "title": resp.title,
-                "content": resp.content,
-                "truncated": resp.truncated
-            })
-            .to_string(),
+            Ok(Ok(resp)) => {
+                crate::store::record_fetch(&self.owner, &resp);
+                json!({
+                    "url": resp.url,
+                    "title": resp.title,
+                    "content": resp.content,
+                    "truncated": resp.truncated
+                })
+                .to_string()
+            }
             Ok(Err(e)) => json!({ "error": format!("{}", e) }).to_string(),
             Err(e) => json!({ "error": format!("task panicked: {}", e) }).to_string(),
         }
@@ -365,6 +404,7 @@ impl AginxBrowserMcp {
         annotations(title = "Web Search", read_only_hint = true)
     )]
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
+        let categories = params.categories.clone();
         let req = SearchRequest {
             q: params.q,
             fetch_top: params.fetch_top,
@@ -380,12 +420,15 @@ impl AginxBrowserMcp {
         // do_search is already async and uses spawn_blocking internally for
         // the fetch_top body-grabbing, so it's safe to call directly.
         match do_search(req).await {
-            Ok(resp) => json!({
-                "query": resp.query,
-                "number_of_results": resp.number_of_results,
-                "results": resp.results
-            })
-            .to_string(),
+            Ok(resp) => {
+                crate::store::record_search(&self.owner, &resp.query, &categories, &resp);
+                json!({
+                    "query": resp.query,
+                    "number_of_results": resp.number_of_results,
+                    "results": resp.results
+                })
+                .to_string()
+            }
             Err(e) => json!({ "error": format!("{:?}", e) }).to_string(),
         }
     }
@@ -418,6 +461,48 @@ impl AginxBrowserMcp {
             })
             .to_string(),
             Err(e) => json!({ "error": format!("{e:#}") }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Query the LOCAL CACHE of every page this server has fetched and every search it has run. Check here BEFORE re-fetching or re-searching — a hit is instant and free while a fresh fetch costs 5-60s. Use query for full-text search (works for Chinese substrings and English words), get to pull a page's full cached content, stats for counts, clear to delete rows.",
+        annotations(title = "Local Cache", read_only_hint = false)
+    )]
+    async fn cache(&self, Parameters(params): Parameters<CacheParams>) -> String {
+        if params.clear {
+            return match crate::store::clear(&self.owner, params.url.as_deref(), params.since_hours, params.all)
+            {
+                Ok((pages, searches)) => json!({
+                    "cleared_pages": pages,
+                    "cleared_searches": searches
+                })
+                .to_string(),
+                Err(e) => json!({ "error": e }).to_string(),
+            };
+        }
+        if let Some(url) = &params.get {
+            return match crate::store::get_page(&self.owner, url) {
+                Ok(Some(p)) => json!(p).to_string(),
+                Ok(None) => json!({ "error": "not in cache", "url": url }).to_string(),
+                Err(e) => json!({ "error": e }).to_string(),
+            };
+        }
+        if params.stats {
+            return match crate::store::stats(&self.owner) {
+                Ok(s) => json!(s).to_string(),
+                Err(e) => json!({ "error": e }).to_string(),
+            };
+        }
+        let q = crate::store::CacheQuery {
+            query: params.query,
+            url: params.url,
+            kind: params.kind.unwrap_or_else(|| "auto".into()),
+            since_hours: params.since_hours,
+            limit: params.limit,
+        };
+        match crate::store::query(&self.owner, &q) {
+            Ok(r) => json!(r).to_string(),
+            Err(e) => json!({ "error": e }).to_string(),
         }
     }
 
@@ -593,8 +678,10 @@ impl ServerHandler for AginxBrowserMcp {}
 /// Start MCP server on stdio transport.
 pub async fn run_mcp_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("Starting aginxbrowser MCP server on stdio");
-    AginxBrowserMcp
-        .serve(rmcp::transport::io::stdio())
+    AginxBrowserMcp {
+        owner: crate::store::session_owner(),
+    }
+    .serve(rmcp::transport::io::stdio())
         .await?
         .waiting()
         .await?;
@@ -627,7 +714,9 @@ pub fn mcp_http_service() -> StreamableHttpService<AginxBrowserMcp, LocalSession
     }
     let config = StreamableHttpServerConfig::default().with_allowed_hosts(hosts);
     StreamableHttpService::new(
-        || Ok(AginxBrowserMcp),
+        || Ok(AginxBrowserMcp {
+            owner: crate::store::session_owner(),
+        }),
         Arc::new(LocalSessionManager::default()),
         config,
     )

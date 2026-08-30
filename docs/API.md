@@ -841,6 +841,28 @@ export AGINXBROWSER_SESSION_PAGE_LIMIT=200    # pages per session, 0 disables
 
 ---
 
+## Local Store (durable cache, default on)
+
+Every successful `fetch` and `search` — HTTP API and MCP tools alike — is persisted to a local SQLite database so an agent can query what it already read instead of paying for it again (a cache hit is instant; a fresh fetch costs 5-60s). Default location: `~/.aginxbrowser/cache.db` (WAL mode, `0600`).
+
+- **Pages**: one row per fetched URL — title, extracted content, serving tier, fetch time — deduplicated by normalized URL and FTS5-indexed (Chinese substrings work: CJK text is indexed per character)
+- **Searches**: whole result sets per `(query, categories)` pair
+- **TTL**: pages 30 days, search results 7 days; expired rows are purged lazily on writes
+
+Query it through the `cache` MCP tool: `query` (full-text over page contents/titles/URLs and past search queries), `get` (full cached content of one URL), `url`/`since_hours` filters, `stats`, `clear` (refuses to run without a filter or `all=true`).
+
+| Env | Default | Meaning |
+|-----|---------|---------|
+| `AGINXBROWSER_STORE` | on | Set `0` to disable persistence entirely |
+| `AGINXBROWSER_STORE_PATH` | `~/.aginxbrowser/cache.db` | Database file location |
+| `AGINXBROWSER_STORE_TTL_HOURS` | `720` | Page rows time-to-live |
+| `AGINXBROWSER_STORE_SEARCH_TTL_HOURS` | `168` | Search-result rows time-to-live |
+| `AGINXBROWSER_STORE_SCOPE` | `global` | `global` = one shared pool, right for single-user instances; `session` = each MCP client session only sees its own rows — set this on public multi-client deployments |
+
+This is the durable layer; the short-lived in-process `/fetch` cache (`AGINXBROWSER_CACHE_TTL_SECS`) is unchanged and sits in front of it.
+
+---
+
 ## Automatic CAPTCHA Solving
 
 When a search engine or target site throws up a CAPTCHA, AginxBrowser will:
@@ -900,7 +922,7 @@ The streamable HTTP transport follows the protocol's dual session semantics — 
 
 Browser sessions (`session_create` & co.) are shared across MCP sessions by design: two MCP clients on the same server can list (`session_list`) and reuse the same browser session IDs, which is what makes "one instance per machine, every agent shares it" work. For a self-hosted instance reached over a LAN IP or a Docker hostname (not `localhost`/`127.0.0.1`), add the hostname to `AGINXBROWSER_MCP_ALLOWED_HOSTS` — the transport validates the `Host` header as DNS-rebinding protection and rejects unlisted hosts with `403`.
 
-### Provided Tools (16)
+### Provided Tools (17)
 
 #### Core Tools
 
@@ -911,6 +933,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `click` | Click a page element (CSS selector) |
 | `search` | Multi-engine aggregated search (Baidu/Bing/Sogou/Sogou WeChat/Google) |
 | `download` | Stream a file to disk with SHA-256 and resume support |
+| `cache` | Query the local cache of fetched pages and past searches (full-text incl. CJK, full-content `get`, stats, filtered clear) |
 
 #### Session Tools
 

@@ -186,6 +186,7 @@ peniko = { version = "0.6", optional = true }
 png = { version = "0.18", optional = true }
 # Same version blitz-dom pins (0.25.x); jpeg/webp/gif are the only features we need.
 image = { version = "0.25", optional = true, default-features = false, features = ["jpeg", "webp", "gif"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 wreq = { version = "=6.0.0-rc.28", optional = true, features = ["prefix-symbols", "socks", "gzip", "brotli", "deflate", "zstd"] }

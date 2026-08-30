@@ -27,6 +27,7 @@ mod robots;
 mod search;
 mod server;
 mod session;
+mod store;
 #[cfg(feature = "screenshot")]
 mod screenshot;
 
@@ -832,6 +833,7 @@ async fn fetch_handler(Json(req): Json<FetchRequest>) -> Result<impl IntoRespons
 
     let resp = smart_fetch(req).await?;
     fetch_cache_put(&cache_key, &resp);
+    store::record_fetch(store::REST_OWNER, &resp);
     Ok((StatusCode::OK, Json(resp)))
 }
 
@@ -959,9 +961,11 @@ async fn screenshot_handler(Json(req): Json<ScreenshotRequest>) -> Result<impl I
 }
 
 async fn search_handler(Json(req): Json<SearchRequest>) -> Result<impl IntoResponse, AppError> {
+    let categories = req.categories.clone();
     let resp = do_search(req).await.map_err(|e| match e {
         SearchError::Other(msg) => AppError::Internal(msg),
     })?;
+    store::record_search(store::REST_OWNER, &resp.query, &categories, &resp);
     Ok((StatusCode::OK, Json(resp)))
 }
 

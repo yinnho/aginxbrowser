@@ -48,7 +48,7 @@ Most new "agent browsers" are stateless, fingerprint-less one-shot renderers —
 
 - **🔐 Real TLS fingerprints** — stealth mode replicates the complete Chrome145 / Firefox133 / Safari / Edge TLS handshakes via BoringSSL (not just a UA string), switchable per request; Cloudflare Turnstile challenges wait automatically for `cf_clearance`. Fingerprint-less engines eat 403s — we get through.
 - **🤝 Stateful interactive sessions** — persistent sessions (8-minute idle keep-alive), login state injectable and exportable (`session_create(cookies=...)` ↔ `session_cookies`), surviving pagination and multi-step flows. One-shot engines throw state away.
-- **🔌 MCP native** — 16 tools as first-class citizens (not a CDP shim). Claude Code / Cursor / Claude Desktop connect in one line. HTTP + MCP dual protocol.
+- **🔌 MCP native** — 17 tools as first-class citizens (not a CDP shim). Claude Code / Cursor / Claude Desktop connect in one line. HTTP + MCP dual protocol.
 
 > Reference point: Cloudflare's Kitesurf explicitly ships neither real TLS-fingerprint negotiation nor persistent auth sessions — anti-bot and login territory is exactly where AginxBrowser plays.
 
@@ -65,7 +65,8 @@ Apache-2.0 open source, single binary — self-host today, no cloud lock-in.
 - **Screenshot rendering**: `/screenshot` endpoint (opt-in `--features screenshot`) paints the JS-rendered DOM with our own diting rendering engine — pure CPU, no Chromium — to PNG. Vision input for agents
 - **Cloudflare auto-wait**: detects "Just a moment..." challenge pages and waits out `cf_clearance`
 - **TLS fingerprint spoofing**: stealth mode impersonates Chrome145/Firefox133/Safari/Edge, switchable per request
-- **MCP server**: `--mcp` mode exposes 16 tools (fetch/eval/click/search/download + 11 session tools) — Claude Code / Claude Desktop / Cursor call them directly
+- **MCP server**: `--mcp` mode exposes 17 tools (fetch/eval/click/search/download/cache + 11 session tools) — Claude Code / Claude Desktop / Cursor call them directly
+- **Local cache**: every fetch/search lands in SQLite (FTS5) at `~/.aginxbrowser/cache.db` — the `cache` tool re-answers from what the agent already read instead of re-paying network time; CJK substring + English full-text, TTL-bounded, per-session scoping for shared deployments
 - **Firecrawl compatible**: `/v1/scrape` endpoint — existing Firecrawl clients migrate by changing the base URL
 - **DNS rebinding protection**: built-in SSRF guard + post-resolution IP validation
 
@@ -189,7 +190,7 @@ aginxbrowser/
     ├── session.rs           # Interactive browser sessions
     ├── captcha.rs           # CAPTCHA detection & auto-solve
     ├── render.rs            # Tiered rendering (HTTP direct → diting browser engine)
-    ├── mcp.rs               # MCP server (16 tools)
+    ├── mcp.rs               # MCP server (17 tools)
     ├── firecrawl_compat.rs  # Firecrawl-compatible /v1/scrape endpoint
     ├── browser.rs           # Top-level API: Browser, BrowserBuilder
     ├── page.rs              # Top-level API: Page, Element
