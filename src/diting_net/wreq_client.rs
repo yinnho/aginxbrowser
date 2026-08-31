@@ -399,6 +399,10 @@ impl StealthHttpClient {
         *self.user_agent.write().await = ua.to_string();
     }
 
+    pub async fn set_accept_language(&self, lang: &str) {
+        *self.accept_language.write().await = lang.to_string();
+    }
+
     pub fn active_requests(&self) -> u32 {
         self.in_flight.load(std::sync::atomic::Ordering::Relaxed)
     }

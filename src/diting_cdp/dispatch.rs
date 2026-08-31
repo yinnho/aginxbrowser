@@ -1662,7 +1662,7 @@ mod tests {
         let set = CdpRequest {
             id: 1,
             method: "Network.setUserAgentOverride".to_string(),
-            params: json!({ "userAgent": "DitingOverride/3.0" }),
+            params: json!({ "userAgent": "DitingOverride/3.0", "acceptLanguage": "fr-FR,fr;q=0.9" }),
             session_id: Some(session_id.clone()),
         };
         assert!(dispatch(&set, &mut ctx).await.error.is_none());
@@ -1685,6 +1685,12 @@ mod tests {
         assert!(
             doc_head.contains("user-agent: ditingoverride/3.0"),
             "UA override must reach the stealth document request, got:\n{doc_head}"
+        );
+        // obscura #777 class: the override's acceptLanguage rides the same
+        // identity surface as the UA — it must reach the wire too.
+        assert!(
+            doc_head.contains("accept-language: fr-fr,fr;q=0.9"),
+            "acceptLanguage override must reach the stealth document request, got:\n{doc_head}"
         );
     }
 
@@ -1741,6 +1747,112 @@ mod tests {
         assert!(
             value.contains("Windows"),
             "navigator.platform must derive from the overridden UA, got: {value}"
+        );
+    }
+
+    // obscura #777 class: the override's acceptLanguage is part of the same
+    // identity as the UA — it must move the transport header source AND the
+    // live navigator.language immediately (Chrome updates it in place).
+    #[tokio::test(flavor = "current_thread")]
+    async fn set_user_agent_override_accept_language_moves_navigator_language() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-lang-override".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": "data:text/html,<html><body>hi</body></html>" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        let set = CdpRequest {
+            id: 2,
+            method: "Network.setUserAgentOverride".to_string(),
+            params: json!({
+                "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+                "acceptLanguage": "fr-FR,fr;q=0.9"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&set, &mut ctx).await.error.is_none());
+
+        let req = CdpRequest {
+            id: 3,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "navigator.language + '|' + navigator.languages.join('|')",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&req, &mut ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        let value = resp.result.expect("result")["result"]["value"]
+            .as_str()
+            .expect("string value")
+            .to_string();
+        assert_eq!(
+            value, "fr-FR|fr-FR|fr",
+            "navigator.language(s) must follow the acceptLanguage override immediately, got: {value}"
+        );
+    }
+
+    // Only-sent-fields discipline (obscura #778 review): a locale-only
+    // override call must not blank or move the previously set UA, and a
+    // UA-only call must not touch the language. Chrome applies each sent
+    // field independently.
+    #[tokio::test(flavor = "current_thread")]
+    async fn locale_only_override_leaves_user_agent_untouched() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-lang-only".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": "data:text/html,<html><body>hi</body></html>" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        let set_ua = CdpRequest {
+            id: 2,
+            method: "Emulation.setUserAgentOverride".to_string(),
+            params: json!({ "userAgent": "DitingUAOnly/9.0" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&set_ua, &mut ctx).await.error.is_none());
+
+        let set_lang = CdpRequest {
+            id: 3,
+            method: "Emulation.setUserAgentOverride".to_string(),
+            params: json!({ "acceptLanguage": "de-DE,de;q=0.9" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&set_lang, &mut ctx).await.error.is_none());
+
+        let req = CdpRequest {
+            id: 4,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "navigator.userAgent + '|' + navigator.language",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&req, &mut ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        let value = resp.result.expect("result")["result"]["value"]
+            .as_str()
+            .expect("string value")
+            .to_string();
+        assert_eq!(
+            value, "DitingUAOnly/9.0|de-DE",
+            "locale-only override must leave the UA and move only the language, got: {value}"
         );
     }
 

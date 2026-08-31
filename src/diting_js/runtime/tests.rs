@@ -48,6 +48,32 @@
         assert_eq!(nav, serde_json::json!("en-US"));
     }
 
+    /// obscura#777 class: the CDP acceptLanguage override seeds the persona
+    /// on a LIVE isolate (set_navigator_language), which must move navigator
+    /// and Intl's undefined-locale binding while leaving the process-global
+    /// ICU pin alone — set_default_locale is not per-isolate, so re-pinning
+    /// mid-session would contaminate sibling isolates (obscura #778 hazard).
+    #[test]
+    fn set_navigator_language_moves_persona_without_repinning_icu() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_language("zh-CN,zh;q=0.9,en;q=0.8");
+        assert_eq!(rt.evaluate("navigator.language").unwrap(), serde_json::json!("zh-CN"));
+        // Mid-session persona move via the CDP acceptLanguage path.
+        rt.set_navigator_language("fr-FR,fr;q=0.9");
+        assert_eq!(rt.evaluate("navigator.language").unwrap(), serde_json::json!("fr-FR"));
+        assert_eq!(
+            rt.evaluate("navigator.languages.join('|')").unwrap(),
+            serde_json::json!("fr-FR|fr")
+        );
+        // Intl follows through the bootstrap binding (reads __diting_lang per
+        // call), so the persona stays coherent — same contract as set_language
+        // minus the process-global ICU re-pin.
+        let locale = rt
+            .evaluate("Intl.DateTimeFormat().resolvedOptions().locale")
+            .unwrap();
+        assert_eq!(locale, serde_json::json!("fr-FR"));
+    }
+
     /// obscura#737 lineage probe: matchMedia answered `(min-width:640px)`
     /// with false while the persona published a 2560px innerWidth — a page's
     /// JS branching disagreed with the @media rules the CSS cascade applied,

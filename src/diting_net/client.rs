@@ -415,6 +415,9 @@ pub struct HttpClient {
     proxy_url: Option<String>,
     pub cookie_jar: Arc<CookieJar>,
     pub user_agent: RwLock<String>,
+    /// Same default and env knob as the stealth transport (`diting_net::wreq_client`),
+    /// so both transports advertise one Accept-Language (obscura #777 class).
+    pub accept_language: RwLock<String>,
     pub extra_headers: RwLock<HashMap<String, String>>,
     pub timeout: Duration,
     pub in_flight: Arc<std::sync::atomic::AtomicU32>,
@@ -453,6 +456,10 @@ impl HttpClient {
                 std::env::var("AGINXBROWSER_UA").unwrap_or_else(|_| {
                     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36".to_string()
                 }),
+            ),
+            accept_language: RwLock::new(
+                std::env::var("AGINXBROWSER_ACCEPT_LANGUAGE")
+                    .unwrap_or_else(|_| "zh-CN,zh;q=0.9,en;q=0.8".to_string()),
             ),
             extra_headers: RwLock::new(HashMap::new()),
             in_flight: Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -688,7 +695,8 @@ impl HttpClient {
             );
             headers.insert(
                 reqwest::header::ACCEPT_LANGUAGE,
-                HeaderValue::from_static("zh-CN,zh;q=0.9,en;q=0.8"),
+                HeaderValue::from_str(&self.accept_language.read().await.clone())
+                    .unwrap_or_else(|_| HeaderValue::from_static("zh-CN,zh;q=0.9,en;q=0.8")),
             );
             headers.insert(
                 HeaderName::from_static("sec-ch-ua"),
@@ -894,6 +902,10 @@ impl HttpClient {
 
     pub async fn set_user_agent(&self, ua: &str) {
         *self.user_agent.write().await = ua.to_string();
+    }
+
+    pub async fn set_accept_language(&self, lang: &str) {
+        *self.accept_language.write().await = lang.to_string();
     }
 
     pub async fn set_extra_headers(&self, headers: HashMap<String, String>) {

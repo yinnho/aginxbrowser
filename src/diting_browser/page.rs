@@ -1594,17 +1594,33 @@ impl Page {
     /// OS is baked into the wreq client at construction and is deliberately
     /// not rebuilt here — matching Chrome, where a UA override does not
     /// re-handshake the TLS stack.
-    pub async fn set_user_agent_override(&mut self, ua: &str) {
-        if ua.is_empty() {
-            return;
+    ///
+    /// `lang` carries the override's `acceptLanguage` (obscura #777 class).
+    /// Each sent field applies independently — a locale-only call must not
+    /// touch the UA and vice versa (Chrome's only-sent-fields semantics).
+    /// The language moves navigator.language immediately and the transport
+    /// headers, but never re-pins the ICU default (process-global, sticky
+    /// per-isolate — see [`crate::diting_js::runtime`]).
+    pub async fn set_user_agent_override(&mut self, ua: &str, lang: Option<&str>) {
+        if !ua.is_empty() {
+            self.http_client.set_user_agent(ua).await;
+            #[cfg(feature = "stealth")]
+            if let Some(ref stealth) = self.stealth_client {
+                stealth.set_user_agent(ua).await;
+            }
+            if let Some(ref mut rt) = self.js {
+                rt.set_user_agent(ua);
+            }
         }
-        self.http_client.set_user_agent(ua).await;
-        #[cfg(feature = "stealth")]
-        if let Some(ref stealth) = self.stealth_client {
-            stealth.set_user_agent(ua).await;
-        }
-        if let Some(ref mut rt) = self.js {
-            rt.set_user_agent(ua);
+        if let Some(lang) = lang.filter(|l| !l.is_empty()) {
+            self.http_client.set_accept_language(lang).await;
+            #[cfg(feature = "stealth")]
+            if let Some(ref stealth) = self.stealth_client {
+                stealth.set_accept_language(lang).await;
+            }
+            if let Some(ref mut rt) = self.js {
+                rt.set_navigator_language(lang);
+            }
         }
     }
 

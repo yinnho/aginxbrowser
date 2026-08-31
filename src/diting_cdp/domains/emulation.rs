@@ -97,10 +97,9 @@ pub async fn handle(
         "setEmulatedMedia" => Ok(json!({})),
         "setUserAgentOverride" => {
             let ua = params.get("userAgent").and_then(|v| v.as_str()).unwrap_or("");
-            if !ua.is_empty() {
-                if let Some(page) = ctx.get_session_page_mut(session_id) {
-                    page.set_user_agent_override(ua).await;
-                }
+            let lang = params.get("acceptLanguage").and_then(|v| v.as_str());
+            if let Some(page) = ctx.get_session_page_mut(session_id) {
+                page.set_user_agent_override(ua, lang).await;
             }
             Ok(json!({}))
         }
