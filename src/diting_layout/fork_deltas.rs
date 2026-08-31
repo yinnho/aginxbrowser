@@ -841,3 +841,80 @@ fn taffy_grid_item_negative_margin_still_stretches() {
     assert_eq!(toc_l.location.x, -12.0, "negative margin shifts the box out of the track origin");
     assert_eq!(content_l.size.width, 1132.0, "pageContent takes the fr remainder");
 }
+
+/// CSS sizing keywords on `width` (servo#41512-adjacent pool, servo#38320
+/// face): `min-content`/`max-content`/`fit-content` resolve against the
+/// subtree's intrinsic width via taffy measure passes at build time.
+/// Structural assertions; the intrinsic references come from shrink-to-fit
+/// inline-blocks of the same content (same measure path, so the comparison
+/// isolates the keyword plumbing, not the font metrics).
+#[test]
+fn width_sizing_keywords_resolve_to_intrinsic() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    let html = r#"<html><body>
+        <div id="minw" style="width:min-content">AAAA AAAA AAAA</div>
+        <div id="maxw" style="width:max-content">AAAA AAAA AAAA</div>
+        <span id="refword" style="display:inline-block">AAAA</span>
+        <span id="refline" style="display:inline-block">AAAA AAAA AAAA</span>
+        <div id="narrow" style="width:120px"><div id="fitn" style="width:fit-content">AAAA AAAA AAAA</div></div>
+        <div id="wide" style="width:2000px"><div id="fitw" style="width:fit-content">AAAA AAAA AAAA</div></div>
+        <div id="nest" style="width:min-content"><p id="nestp" style="margin:0">AAAA AAAA AAAA</p></div>
+        <div id="fmin" style="display:flex;width:min-content;border:2px solid">
+          <div style="flex:none"><div style="float:left;width:100px"></div><div style="float:left;width:100px"></div></div>
+        </div>
+    </body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let rects = crate::diting_layout::layout_dom(
+        &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0,
+    );
+    let w = |sel: &str| {
+        let id = tree.query_selector_all(sel).unwrap()[0];
+        rects.get(&id).unwrap_or_else(|| panic!("{sel} must own a rect")).width
+    };
+
+    // min-content = the widest word, measured by the same engine as a
+    // shrink-to-fit inline-block of that word.
+    let (minw, refword) = (w("#minw"), w("#refword"));
+    assert!(
+        (minw - refword).abs() < 1.5,
+        "width:min-content must equal the widest word: {minw} vs word {refword}"
+    );
+    // max-content = the whole unwrapped line.
+    let (maxw, refline) = (w("#maxw"), w("#refline"));
+    assert!(
+        (maxw - refline).abs() < 1.5,
+        "width:max-content must equal the unwrapped line: {maxw} vs line {refline}"
+    );
+    assert!(maxw > minw + 10.0, "fixture text must actually wrap at min-content");
+    // fit-content: clamps to the containing block when narrower than
+    // max-content; passes through when the CB is wider (2000 > viewport).
+    let (fitn, fitw) = (w("#fitn"), w("#fitw"));
+    assert!(
+        (fitn - 120.0).abs() < 1.5,
+        "fit-content must clamp to the 120px containing block; got {fitn}"
+    );
+    assert!(
+        (fitw - maxw).abs() < 1.5,
+        "fit-content under a wider CB must equal max-content: {fitw} vs {maxw}"
+    );
+    // Recursion: the keyword resolves through a block child's contribution.
+    let nest = w("#nest");
+    assert!(
+        (nest - minw).abs() < 1.5,
+        "min-content must propagate through the block child: {nest} vs {minw}"
+    );
+    // The servo#38320 face at container level: flex container with a
+    // min-content width over two 100px floats. Chrome gives 200px of float
+    // contribution (floats never fragment in intrinsic sizing); our float
+    // zones are wrapping flex rows whose taffy min-content is the widest
+    // item, so we land at 100px + borders here — pinned honestly.
+    let fmin = w("#fmin");
+    assert!(
+        (fmin - 104.0).abs() < 1.5,
+        "float-zone min-content currently measures widest-item (100) + 4px borders; got {fmin}"
+    );
+}

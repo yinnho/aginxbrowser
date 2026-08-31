@@ -146,7 +146,8 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
         }
         // Auto can only reach margins (parser rejects it elsewhere) - a
         // padding/border slot never holds it, but treat it as 0 defensively.
-        Some(crate::diting_css::Length::Auto) => LengthPercentage::length(0.0),
+        // Sizing keywords are width-family only: unreachable here, same 0.
+        Some(crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent) => LengthPercentage::length(0.0),
         None => LengthPercentage::length(0.0),
     };
     // Margin has an auto variant; unset margins are CSS `0`, not auto.
@@ -163,6 +164,8 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
             LengthPercentageAuto::percent(percent / 100.0)
         }
         Some(crate::diting_css::Length::Auto) => LengthPercentageAuto::auto(),
+        // Sizing keywords are width-family only: unreachable in a margin.
+        Some(crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent) => LengthPercentageAuto::length(0.0),
         None => LengthPercentageAuto::length(0.0),
     };
     // Inset/clamp unset values are CSS `auto`.
@@ -172,7 +175,7 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
         Some(crate::diting_css::Length::Calc { percent, .. }) => {
             LengthPercentageAuto::percent(percent / 100.0)
         }
-        Some(crate::diting_css::Length::Auto) => LengthPercentageAuto::auto(),
+        Some(crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent) => LengthPercentageAuto::auto(),
         None => LengthPercentageAuto::auto(),
     };
     // taffy::geometry::Rect spelled in full — this module's own Rect shadows
@@ -222,8 +225,11 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
             Some(crate::diting_css::Length::Calc { percent, .. }) => {
                 Dimension::percent(percent / 100.0)
             }
-            // width/min/max: auto is the CSS initial value = unset.
-            Some(crate::diting_css::Length::Auto) | None => auto(),
+            // width/min/max: auto is the CSS initial value = unset. Sizing
+            // keywords ride in as auto — resolve_sizing_keywords replaces
+            // them with the measured intrinsic width right after the node
+            // is built (before the global layout pass).
+            Some(crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent) | None => auto(),
         },
         height: match style.height {
             Some(crate::diting_css::Length::Px(h)) => Dimension::length(
@@ -233,7 +239,7 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
             Some(crate::diting_css::Length::Calc { percent, .. }) => {
                 Dimension::percent(percent / 100.0)
             }
-            Some(crate::diting_css::Length::Auto) | None => auto(),
+            Some(crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent) | None => auto(),
         },
     };
 
@@ -341,7 +347,9 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
             Some(crate::diting_css::Length::Calc { percent, .. }) => {
                 LengthPercentageAuto::percent(percent / 100.0)
             }
-            Some(crate::diting_css::Length::Auto) | None => LengthPercentageAuto::auto(),
+            // Sizing keywords ride in as auto here too; fit-content replaces
+            // this slot with the measured min-content floor at build time.
+            Some(crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent) | None => LengthPercentageAuto::auto(),
         },
         height: match style.min_height {
             Some(crate::diting_css::Length::Px(h)) => LengthPercentageAuto::length(
@@ -351,7 +359,7 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
             Some(crate::diting_css::Length::Calc { percent, .. }) => {
                 LengthPercentageAuto::percent(percent / 100.0)
             }
-            Some(crate::diting_css::Length::Auto) | None => LengthPercentageAuto::auto(),
+            Some(crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent) | None => LengthPercentageAuto::auto(),
         },
     };
     s.max_size = Size {
@@ -363,7 +371,7 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
             Some(crate::diting_css::Length::Calc { percent, .. }) => {
                 LengthPercentageAuto::percent(percent / 100.0)
             }
-            Some(crate::diting_css::Length::Auto) | None => LengthPercentageAuto::auto(),
+            Some(crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent) | None => LengthPercentageAuto::auto(),
         },
         height: match style.max_height {
             Some(crate::diting_css::Length::Px(h)) => LengthPercentageAuto::length(
@@ -373,7 +381,7 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
             Some(crate::diting_css::Length::Calc { percent, .. }) => {
                 LengthPercentageAuto::percent(percent / 100.0)
             }
-            Some(crate::diting_css::Length::Auto) | None => LengthPercentageAuto::auto(),
+            Some(crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent) | None => LengthPercentageAuto::auto(),
         },
     };
     if let Some(ar) = style.aspect_ratio {
@@ -382,6 +390,56 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
         }
     }
     s
+}
+
+/// CSS sizing keywords (`width: min-content` / `max-content` /
+/// `fit-content`): taffy's Dimension has no intrinsic keyword, so the width
+/// resolves at build time with measure passes over the just-built subtree —
+/// taffy's own intrinsic sizing produces both widths (the text measure
+/// closure already handles AvailableSpace::MinContent/MaxContent).
+/// `fit-content` ships as the max-content width with a min-content
+/// min-size floor and a 100%-of-containing-block max-size clamp, so taffy
+/// applies the CSS `fit-content(stretch, max-content)` clamp inside its own
+/// size resolution (indefinite containing block → plain max-content).
+fn resolve_sizing_keywords(
+    taffy_tree: &mut TaffyTree<TextLeaf>,
+    node: taffy::tree::NodeId,
+    style: &ComputedStyle,
+    fonts: &FontBook,
+) {
+    let Some(crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent) = style.width else {
+        return;
+    };
+    // Same measured-leaf dispatch as the root pass: plain compute_layout
+    // would zero the TextLeaf runs (no measure fn attached).
+    let measured = |taffy_tree: &mut TaffyTree<TextLeaf>, w: AvailableSpace| -> f32 {
+        let space = taffy::geometry::Size { width: w, height: AvailableSpace::MaxContent };
+        let _ = taffy_tree.compute_layout_with_measure(node, space, |inputs, _id, ctx, style| {
+            match ctx {
+                Some(TextLeaf::Run { text, font_size, bold, line_height, .. }) => {
+                    measure_text_leaf(text, *font_size, *bold, *line_height, fonts, &inputs)
+                }
+                Some(TextLeaf::Word { .. }) | None => {
+                    taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO)
+                }
+            }
+        });
+        taffy_tree.layout(node).map(|l| l.size.width).unwrap_or(0.0)
+    };
+    let w_min = measured(taffy_tree, AvailableSpace::MinContent);
+    let w_max = if matches!(style.width, Some(crate::diting_css::Length::MinContent)) {
+        w_min
+    } else {
+        measured(taffy_tree, AvailableSpace::MaxContent)
+    };
+    if let Ok(mut st) = taffy_tree.style(node).cloned() {
+        st.size.width = Dimension::length(w_max);
+        if matches!(style.width, Some(crate::diting_css::Length::FitContent)) {
+            st.min_size.width = LengthPercentageAuto::length(w_min);
+            st.max_size.width = LengthPercentageAuto::percent(1.0);
+        }
+        let _ = taffy_tree.set_style(node, st);
+    }
 }
 
 /// diting_css track → taffy track: `1fr` maps to minmax(auto, 1fr), a px
@@ -1026,7 +1084,9 @@ fn build_replaced_leaf(
             Some(crate::diting_css::Length::Calc { percent, .. }) => {
                 Dimension::percent(percent / 100.0)
             }
-            Some(crate::diting_css::Length::Auto) | None => Dimension::length(nat_w + if bline { bl + br } else { 0.0 }),
+            // Sizing keywords on replaced boxes: intrinsic = natural size
+            // (css-sizing-3), same fallback as auto.
+            Some(crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent) | None => Dimension::length(nat_w + if bline { bl + br } else { 0.0 }),
         },
         height: match style.height {
             Some(crate::diting_css::Length::Px(h)) => {
@@ -1036,7 +1096,7 @@ fn build_replaced_leaf(
             Some(crate::diting_css::Length::Calc { percent, .. }) => {
                 Dimension::percent(percent / 100.0)
             }
-            Some(crate::diting_css::Length::Auto) | None => Dimension::length(nat_h + if bline { bt + bb } else { 0.0 }),
+            Some(crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent) | None => Dimension::length(nat_h + if bline { bt + bb } else { 0.0 }),
         },
     };
 
@@ -2188,6 +2248,7 @@ fn build_element(
         taffy_tree.new_with_children(taffy_style, &direct).ok()?
     };
     node_map.insert(node, id);
+    resolve_sizing_keywords(taffy_tree, node, &style, fonts);
     Some(node)
 }
 
@@ -3092,7 +3153,7 @@ pub fn layout_dom_with_paint_order_and_images(
                     crate::diting_css::Length::Percent(p) => p / 100.0 * basis,
                     // Percent-only approximation, same as to_taffy_style.
                     crate::diting_css::Length::Calc { percent, .. } => percent / 100.0 * basis,
-                    crate::diting_css::Length::Auto => 0.0,
+                    crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent => 0.0,
                 };
                 offset.0 += resolve(tx, layout.size.width);
                 offset.1 += resolve(ty, layout.size.height);
@@ -3145,7 +3206,7 @@ pub fn layout_dom_with_paint_order_and_images(
                         crate::diting_css::Length::Px(v) => *v,
                         crate::diting_css::Length::Percent(p) => p * basis / 100.0,
                         crate::diting_css::Length::Calc { percent, .. } => percent * basis / 100.0,
-                        crate::diting_css::Length::Auto => 0.0,
+                        crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent => 0.0,
                     };
                     match &styles.get(dom_id).and_then(|s| s.corner_radii.clone()) {
                         Some(corners) => {
@@ -3276,7 +3337,7 @@ pub fn layout_dom_with_paint_order_and_images(
                     crate::diting_css::Length::Px(v) => *v,
                     crate::diting_css::Length::Percent(p) => p * basis / 100.0,
                     crate::diting_css::Length::Calc { percent, .. } => percent * basis / 100.0,
-                    crate::diting_css::Length::Auto => 0.0,
+                    crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent => 0.0,
                 };
                 let pad_w = (rect.width - bl - br).max(0.0);
                 let pad_h = (rect.height - bt - bb).max(0.0);
@@ -3300,7 +3361,7 @@ pub fn layout_dom_with_paint_order_and_images(
                                 crate::diting_css::Length::Calc { percent, .. } => {
                                     percent * rect.width / 100.0
                                 }
-                                crate::diting_css::Length::Auto => 0.0,
+                                crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent => 0.0,
                             };
                             [(v, v); 4]
                         })

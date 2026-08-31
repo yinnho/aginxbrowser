@@ -739,6 +739,14 @@ pub enum Length {
     /// `LengthPercentageAuto::auto()`, which implements both the in-flow
     /// auto-margin expansion and abspos auto-margin resolution.
     Auto,
+    /// CSS sizing keywords, accepted only in the width/min-width/max-width
+    /// slots. taffy's Dimension has no intrinsic keyword, so layout resolves
+    /// them against the subtree's intrinsic width with measure passes at
+    /// build time (`resolve_sizing_keywords`); every other slot keeps them
+    /// unreachable and maps them like `Auto` defensively.
+    MinContent,
+    MaxContent,
+    FitContent,
 }
 
 /// Parse the translate component of a `transform` declaration: the
@@ -1212,6 +1220,16 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
         }
         parse_css_length(t).map(|l| resolve_len(l, fonts))
     };
+    // Sizing keywords first: only the width family accepts them (the match
+    // arms below decide legality); everything else is a regular length.
+    let len_sizing = |val: &str| -> Option<Length> {
+        match val.trim().to_ascii_lowercase().as_str() {
+            "min-content" => Some(Length::MinContent),
+            "max-content" => Some(Length::MaxContent),
+            "fit-content" => Some(Length::FitContent),
+            _ => len(val),
+        }
+    };
     match name {
         "display" => {
             style.display = match v {
@@ -1388,7 +1406,10 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 _ => {} // em/rem/% handled by the pre-pass, not this arm
             }).is_some()
         }
-        "width" => len(v).map(|l| style.width = Some(l)).is_some(),
+        "width" => {
+            style.width = len_sizing(v);
+            style.width.is_some()
+        }
         "height" => len(v).map(|l| style.height = Some(l)).is_some(),
         "font-weight" => {
             let weight = parse_font_weight(v);
@@ -1697,6 +1718,9 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             style.left = len(v);
             style.left.is_some()
         }
+        // min/max-width sizing keywords are valid CSS but not resolved by the
+        // layout layer yet — they stay unparsed (drop to auto) rather than
+        // parse-into-nothing.
         "min-width" => {
             style.min_width = len(v);
             style.min_width.is_some()
