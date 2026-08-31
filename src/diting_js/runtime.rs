@@ -735,12 +735,16 @@ impl JsRuntime {
         }
 
         let info = if return_by_value {
-            let read = self
-                .runtime
-                .execute_script("<readResult>", format!("globalThis.__diting_objects['{}']", oid))
-                .map_err(|e| format!("JS error: {}", e))?;
-            let json_val = self.v8_to_json(read)?;
-            Self::info_from_json(&json_val)
+            if self.stored_value_is_undefined(&oid)? {
+                Self::undefined_info()
+            } else {
+                let read = self
+                    .runtime
+                    .execute_script("<readResult>", format!("globalThis.__diting_objects['{}']", oid))
+                    .map_err(|e| format!("JS error: {}", e))?;
+                let json_val = self.v8_to_json(read)?;
+                Self::info_from_json(&json_val)
+            }
         } else {
             let meta = self
                 .runtime
@@ -933,12 +937,16 @@ impl JsRuntime {
             }
 
             let info = if return_by_value {
-                let read = self
-                    .runtime
-                    .execute_script("<readResult>", format!("globalThis.__diting_objects['{}']", oid))
-                    .map_err(|e| format!("JS error: {}", e))?;
-                let json_val = self.v8_to_json(read)?;
-                Self::info_from_json(&json_val)
+                if self.stored_value_is_undefined(&oid)? {
+                    Self::undefined_info()
+                } else {
+                    let read = self
+                        .runtime
+                        .execute_script("<readResult>", format!("globalThis.__diting_objects['{}']", oid))
+                        .map_err(|e| format!("JS error: {}", e))?;
+                    let json_val = self.v8_to_json(read)?;
+                    Self::info_from_json(&json_val)
+                }
             } else {
                 let meta_result = self
                     .runtime
@@ -970,7 +978,8 @@ impl JsRuntime {
                     var __this = ({this_expr});\n\
                     globalThis.__diting_await_rejected = false;\n\
                     try {{\n\
-                        return __fn.call(__this, {args});\n\
+                        globalThis.__diting_objects['{oid}'] = __fn.call(__this, {args});\n\
+                        return globalThis.__diting_objects['{oid}'];\n\
                     }} catch(e) {{\n\
                         globalThis.__diting_objects['{oid}'] = e;\n\
                         globalThis.__diting_await_meta = {exc_meta_fn};\n\
@@ -995,6 +1004,12 @@ impl JsRuntime {
                 .map_err(|e| format!("JS error: {}", e))?;
             if self.v8_to_json(rejected)?.as_bool().unwrap_or(false) {
                 return self.exception_outcome(&oid, false);
+            }
+            if self.stored_value_is_undefined(&oid)? {
+                return Ok(EvalOutcome {
+                    info: Self::undefined_info(),
+                    exception: None,
+                });
             }
             let json_val = self.v8_to_json(result)?;
             return Ok(EvalOutcome {
@@ -1028,8 +1043,7 @@ impl JsRuntime {
             meta_fn = Self::meta_extract_js("__result"),
             exc_meta_fn = exc_meta_fn,
         );
-        let result = self
-            .runtime
+        self.runtime
             .execute_script("<callFnRemote>", code)
             .map_err(|e| format!("JS error: {}", e))?;
         let rejected = self
@@ -1039,7 +1053,16 @@ impl JsRuntime {
         if self.v8_to_json(rejected)?.as_bool().unwrap_or(false) {
             return self.exception_outcome(&oid, false);
         }
-        let meta_str = self.v8_to_json(result)?;
+        // The IIFE returns nothing (it parks the meta JSON in a global) —
+        // read the global back, same as the evaluate handle path does.
+        // Reading the IIFE's own return value used to feed `null` into
+        // info_from_meta; it went unnoticed because object_id was threaded
+        // through unconditionally (obscura#779 tightened that contract).
+        let meta = self
+            .runtime
+            .execute_script("<readMeta>", "globalThis.__diting_await_meta".to_string())
+            .map_err(|e| format!("JS error: {}", e))?;
+        let meta_str = self.v8_to_json(meta)?;
         let meta_json = if let serde_json::Value::String(s) = &meta_str {
             serde_json::from_str(s).unwrap_or(meta_str.clone())
         } else {
@@ -1616,8 +1639,8 @@ impl JsRuntime {
         format!(
             r#"(function(v) {{
                 var t = typeof v;
-                var st = null, cn = '', desc = '';
-                if (v === null) {{ t = 'object'; st = 'null'; }}
+                var st = null, cn = '', desc = '', val;
+                if (v === null) {{ t = 'object'; st = 'null'; desc = 'null'; }}
                 else if (v === undefined) {{ t = 'undefined'; }}
                 else if (Array.isArray(v)) {{
                     st = 'array'; cn = 'Array';
@@ -1638,8 +1661,16 @@ impl JsRuntime {
                     cn = (v.constructor && v.constructor.name) || 'Object';
                     desc = cn;
                 }}
+                else if (t === 'number' || t === 'boolean' || t === 'string') {{
+                    // Chrome puts the real value (JSON number/bool/string, not
+                    // a description-string copy) on the RemoteObject — and
+                    // only for these three; JSON.stringify drops the key when
+                    // `val` stayed undefined, and serializing a bigint/symbol
+                    // would throw.
+                    val = v; desc = String(v);
+                }}
                 else {{ desc = String(v); }}
-                return JSON.stringify({{type:t,subtype:st,className:cn,description:desc}});
+                return JSON.stringify({{type:t,subtype:st,className:cn,description:desc,value:val}});
             }})({var_name})"#,
             var_name = var_name,
         )
@@ -1851,6 +1882,33 @@ impl JsRuntime {
         }
     }
 
+    /// Chrome's RemoteObject for JS `undefined` is `{type:"undefined"}` —
+    /// no value, no subtype (obscura#779).
+    fn undefined_info() -> RemoteObjectInfo {
+        RemoteObjectInfo {
+            js_type: "undefined".into(),
+            subtype: None,
+            class_name: String::new(),
+            description: String::new(),
+            object_id: None,
+            value: None,
+        }
+    }
+
+    /// `v8_to_json` cannot tell a stored `undefined` from a missing value —
+    /// both come back as JSON null — so the byValue read-backs ask the
+    /// runtime for the stored value's typeof first (obscura#779).
+    fn stored_value_is_undefined(&mut self, oid: &str) -> Result<bool, String> {
+        let probe = self
+            .runtime
+            .execute_script(
+                "<typeofResult>",
+                format!("typeof globalThis.__diting_objects['{oid}'] === 'undefined'"),
+            )
+            .map_err(|e| format!("JS error: {}", e))?;
+        Ok(self.v8_to_json(probe)?.as_bool().unwrap_or(false))
+    }
+
     fn info_from_meta(
         meta: &serde_json::Value,
         object_id: Option<String>,
@@ -1875,12 +1933,18 @@ impl JsRuntime {
             .unwrap_or("")
             .to_string();
 
-        let value = if js_type != "object" && js_type != "function" {
-            meta.get("description")
-                .and_then(|v| v.as_str())
-                .map(|s| serde_json::Value::String(s.to_string()))
-        } else {
-            None
+        // Chrome's RemoteObject for a primitive carries the real JSON value
+        // (which meta_extract_js put in `value` for number/boolean/string),
+        // and a handle (objectId) only for objects and functions — a number
+        // or `undefined` result is never something the client can call into
+        // (obscura#779).
+        let value = match js_type.as_str() {
+            "number" | "boolean" | "string" => meta.get("value").cloned(),
+            _ => None,
+        };
+        let object_id = match js_type.as_str() {
+            "object" | "function" => object_id,
+            _ => None,
         };
 
         RemoteObjectInfo {

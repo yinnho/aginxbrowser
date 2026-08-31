@@ -721,6 +721,121 @@ mod tests {
         assert_eq!(result["result"]["value"], "timer");
     }
 
+    // obscura#779: CDP RemoteObject parity for primitives on the handle
+    // path (returnByValue:false). Chrome sends the real JSON value and no
+    // objectId for number/boolean/string, and `{type:"undefined"}` — no
+    // value field at all — for undefined. Our lineage used to copy the
+    // description string into `value` and mint a handle for every result.
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_evaluate_primitives_carry_real_values_without_object_id() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-1".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": "data:text/html,<html><body>hi</body></html>" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        let eval = |id: u64, expr: &str| CdpRequest {
+            id,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": expr,
+                "returnByValue": false,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+
+        let num = dispatch(&eval(2, "1 + 1"), &mut ctx).await;
+        assert!(num.error.is_none(), "unexpected CDP error: {:?}", num.error);
+        let result = num.result.expect("result");
+        assert_eq!(result["result"]["type"], "number");
+        assert_eq!(result["result"]["value"], 2);
+        assert_eq!(result["result"]["description"], "2");
+        assert!(
+            result["result"].get("objectId").is_none(),
+            "primitives carry no objectId: {result}"
+        );
+
+        let boolean = dispatch(&eval(3, "true"), &mut ctx).await;
+        let result = boolean.result.expect("result");
+        assert_eq!(result["result"]["type"], "boolean");
+        assert_eq!(result["result"]["value"], true);
+        assert!(result["result"].get("objectId").is_none());
+
+        let string = dispatch(&eval(4, "'hi'"), &mut ctx).await;
+        let result = string.result.expect("result");
+        assert_eq!(result["result"]["type"], "string");
+        assert_eq!(result["result"]["value"], "hi");
+        assert!(result["result"].get("objectId").is_none());
+
+        let undef = dispatch(&eval(5, "undefined"), &mut ctx).await;
+        let result = undef.result.expect("result");
+        assert_eq!(result["result"]["type"], "undefined");
+        assert!(
+            result["result"].get("value").is_none(),
+            "undefined has no value field: {result}"
+        );
+        assert!(result["result"].get("objectId").is_none());
+        assert!(result["result"].get("subtype").is_none());
+    }
+
+    // obscura#779 hole 4: with returnByValue:true, JS `undefined` used to
+    // collapse into `{type:"object",subtype:"null",value:null}` — v8_to_json
+    // cannot tell an undefined value from a missing one. Chrome spells it
+    // `{type:"undefined"}` in both return modes; the callFunctionOn variant
+    // pins the synchronous byValue path, whose IIFE never even stored the
+    // result for the read-back to classify.
+    #[tokio::test(flavor = "current_thread")]
+    async fn undefined_by_value_stays_undefined_across_evaluate_and_call_fn() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-1".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": "data:text/html,<html><body>hi</body></html>" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        let evaluate = CdpRequest {
+            id: 2,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({ "expression": "undefined", "returnByValue": true }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&evaluate, &mut ctx).await;
+        assert!(resp.error.is_none(), "unexpected CDP error: {:?}", resp.error);
+        let result = resp.result.expect("result");
+        assert_eq!(result["result"]["type"], "undefined");
+        assert!(result["result"].get("value").is_none(), "{result}");
+        assert!(result["result"].get("subtype").is_none());
+
+        let call = CdpRequest {
+            id: 3,
+            method: "Runtime.callFunctionOn".to_string(),
+            params: json!({
+                "functionDeclaration": "function() { return undefined; }",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&call, &mut ctx).await;
+        assert!(resp.error.is_none(), "unexpected CDP error: {:?}", resp.error);
+        let result = resp.result.expect("result");
+        assert_eq!(result["result"]["type"], "undefined");
+        assert!(result["result"].get("value").is_none(), "{result}");
+        assert!(result["result"].get("subtype").is_none());
+    }
+
     // obscura#723 chain (bycatch of the merged upstream PR): the page, not
     // the client, mints child objectIds ("parent::key" — key is a page
     // property name), and those ids flow back through DOM.describeNode /
