@@ -8,7 +8,7 @@ Tag `v0.2.0` 已推（f5ff5cc）。release notes 草稿在 docs/release-v0.2.0.m
 |---|---|---|---|
 | aarch64-apple-darwin | macOS Apple Silicon | stealth,screenshot | 本机原生 |
 | x86_64-apple-darwin | macOS Intel | stealth,screenshot | rustup target + cross |
-| x86_64-unknown-linux-musl | Linux x86_64 静态 | stealth,screenshot | musl 全静态，服务器免依赖；⚠️BoringSSL/wreq 在 Linux 上才编译得过（macOS 上 C++ 头报错）|
+| x86_64-unknown-linux-gnu | Linux x86_64 (glibc) | stealth,screenshot | musl 路线死：musl-tools 无 C++ 编译器，boring-sys2(BoringSSL) 必挂（cargo#3359）；RUST_FONTCONFIG_DLOPEN 也不能设——dlopen 模式不导出 Fc* 符号，fontique 直接 E0432；正解=runner 装 pkg-config+libfontconfig1-dev |
 
 产物命名：`aginxbrowser-v0.2.0-{target}.tar.gz`（内含二进制+README+install.md）
 
