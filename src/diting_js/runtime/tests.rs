@@ -204,6 +204,37 @@
         assert_eq!(passthrough, serde_json::json!("true|true"));
     }
 
+    /// obscura#734 (WorkOS differ follow-up): a proxy trap inserts one extra
+    /// frame into error stacks that stock does not have, and V8 labels it
+    /// after the handler's constructor and the trap key. A plain-object
+    /// handler reads "Object.construct"; the handler carrier is named after
+    /// the wrapped constructor so the frame reads "NumberFormat.construct" —
+    /// a relabel, since the frame itself is inherent to trapping in JS.
+    #[test]
+    fn intl_wrapper_trap_frames_carry_the_wrapped_name() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let stack = rt
+            .evaluate(
+                "(function(){\
+                 \ntry { new Intl.NumberFormat('en-US', {localeMatcher: 'bogus'}); }\
+                 \ncatch (e) { return e.stack; }\
+                 \nreturn 'no-throw';\
+                 \n})()",
+            )
+            .unwrap();
+        let s = stack.as_str().expect("stack string");
+        assert!(
+            s.contains("NumberFormat.construct"),
+            "trap frame should carry the wrapped constructor name, got:\n{}",
+            s
+        );
+        assert!(
+            !s.contains("Object.construct"),
+            "plain-object handler label leaked, stack:\n{}",
+            s
+        );
+    }
+
     #[test]
     fn test_document_url() {
         let mut rt = setup_runtime("<html><body></body></html>");

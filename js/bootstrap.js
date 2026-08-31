@@ -8379,7 +8379,18 @@ function __ditingDTFArgs(args) {
   args[0] = __ditingLocaleArg(args[0]);
   return args;
 }
-Intl.DateTimeFormat = new Proxy(_OrigDateTimeFormat, {
+// V8 names the proxy-trap frame in error stacks after the handler's
+// constructor and the trap key: a plain object handler reads
+// "Object.construct" between the caller and the native — a stack tell that
+// only shows when the constructor throws (independent differ run, obscura#734
+// thread). Carrying the traps on a class named after the wrapped constructor
+// relabels the frame to match stock's constructor name. The extra frame is
+// inherent to trapping in JS and cannot be removed, so this is a relabel.
+function __ditingHandler(ctorName, traps) {
+  const Carrier = { [ctorName]: class {} }[ctorName];
+  return Object.assign(new Carrier(), traps);
+}
+Intl.DateTimeFormat = new Proxy(_OrigDateTimeFormat, __ditingHandler('DateTimeFormat', {
   construct(target, args, newTarget) {
     return Reflect.construct(target, __ditingDTFArgs(args), newTarget);
   },
@@ -8389,7 +8400,7 @@ Intl.DateTimeFormat = new Proxy(_OrigDateTimeFormat, {
   apply(target, thisArg, args) {
     return Reflect.construct(target, __ditingDTFArgs(args), target);
   },
-});
+}));
 __ditingNativeOf.set(Intl.DateTimeFormat, _OrigDateTimeFormat);
 Object.defineProperty(_OrigDateTimeFormat.prototype, 'constructor', {
   value: Intl.DateTimeFormat, writable: true, enumerable: false, configurable: true,
@@ -8411,7 +8422,7 @@ __ditingNativeOf.set(_OrigDateTimeFormat.prototype.resolvedOptions, _origResolve
   for (const n of names) {
     const Orig = Intl[n];
     if (typeof Orig !== 'function' || !Orig.prototype) continue;
-    Intl[n] = new Proxy(Orig, {
+    Intl[n] = new Proxy(Orig, __ditingHandler(n, {
       construct(target, args, newTarget) {
         args[0] = __ditingLocaleArg(args[0]);
         return Reflect.construct(target, args, newTarget);
@@ -8420,7 +8431,7 @@ __ditingNativeOf.set(_OrigDateTimeFormat.prototype.resolvedOptions, _origResolve
         args[0] = __ditingLocaleArg(args[0]);
         return Reflect.construct(target, args, target);
       },
-    });
+    }));
     __ditingNativeOf.set(Intl[n], Orig);
     Object.defineProperty(Orig.prototype, 'constructor', {
       value: Intl[n], writable: true, enumerable: false, configurable: true,
