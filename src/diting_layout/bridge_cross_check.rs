@@ -3610,3 +3610,122 @@
         assert!(s_rect.x > 0.0, "span starts after leading text, got {:?}", s_rect);
     }
 
+
+    // ── calc() width resolution (obscura#767) ──────────────────────────────
+    //
+    // A mixed percent+px calc parses to Length::Calc and rides the first
+    // layout as a percent-only placeholder; the post-layout repair pass
+    // resolves it ONCE against the settled containing block content box.
+
+    #[test]
+    fn calc_width_resolves_against_real_containing_block() {
+        let html = r#"<body><div id="wrap"><div id="box"></div></div></body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #wrap { width: 600px; }
+            #box { width: calc(50% + 10px); height: 20px; }
+        "#;
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW, VH);
+        let box_id = tree.query_selector("#box").unwrap().unwrap();
+        let r = rects[&box_id];
+        assert!(
+            (r.width - 310.0).abs() < EPS as f32,
+            "calc(50% + 10px) of a 600px CB = 310, got {r:?}"
+        );
+    }
+
+    #[test]
+    fn calc_min_max_width_clamp_the_box() {
+        let html = r#"<body><div id="wide"></div><div id="small"></div></body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #wide { width: calc(100% - 100px); max-width: calc(50% + 20px); height: 10px; }
+            #small { width: 10px; min-width: calc(50% - 380px); height: 10px; }
+        "#;
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW, VH);
+        // max-width wins over the authored calc width: 700 clamps to 420.
+        let wide = rects[&tree.query_selector("#wide").unwrap().unwrap()];
+        assert!((wide.width - 420.0).abs() < EPS as f32, "max-width calc clamps: {wide:?}");
+        // min-width lifts the 10px box to the calc result (20px).
+        let small = rects[&tree.query_selector("#small").unwrap().unwrap()];
+        assert!((small.width - 20.0).abs() < EPS as f32, "min-width calc lifts: {small:?}");
+    }
+
+    #[test]
+    fn calc_width_inside_calc_width_parent_cascades() {
+        let html = r#"<body><div id="outer"><div id="inner"></div></div></body>"#;
+        let sheet = r#"
+            body { margin: 0; }
+            #outer { width: calc(50% + 100px); height: 20px; }
+            #inner { width: calc(50% + 10px); height: 10px; }
+        "#;
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW, VH);
+        let outer = rects[&tree.query_selector("#outer").unwrap().unwrap()];
+        let inner = rects[&tree.query_selector("#inner").unwrap().unwrap()];
+        assert!((outer.width - 500.0).abs() < EPS as f32, "outer in 800px body: {outer:?}");
+        // 50% of the PARENT'S REPAIRED width (500), not of the body (800):
+        // shallow-first repair + arithmetic cascade, no second percent pass.
+        assert!((inner.width - 260.0).abs() < EPS as f32, "inner = 50%·500 + 10: {inner:?}");
+    }
+
+    // ── run-edge whitespace trim (obscura#764) ─────────────────────────────
+
+    #[test]
+    fn float_shrink_to_fit_ignores_run_edge_whitespace() {
+        // obscura#764's shape: a floated (shrink-to-fit) box whose mixed run
+        // carries formatting whitespace at its edges. Each tokenized space
+        // used to keep its full advance as a word leaf, inflating the float.
+        let html = r#"<body>
+            <div id="ws" style="float:left"><span>x</span>
+            </div>
+            <div id="compact" style="float:left"><span>x</span></div>
+        </body>"#;
+        let sheet = "body { margin: 0; font-size: 16px; } span { font-size: 16px; }";
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW, VH);
+        let a = rects[&tree.query_selector("#ws").unwrap().unwrap()];
+        let b = rects[&tree.query_selector("#compact").unwrap().unwrap()];
+        assert!(
+            (a.width - b.width).abs() < EPS as f32,
+            "edge whitespace adds nothing to shrink-to-fit: ws={} compact={}",
+            a.width, b.width
+        );
+        assert!(a.width > 0.0, "both floats still size to content: {a:?}");
+        assert!(
+            (b.x - a.x - a.width).abs() < 1.5,
+            "the two floats sit side by side in the float row: {a:?} {b:?}"
+        );
+    }
+
+    #[test]
+    fn interior_whitespace_between_inline_siblings_still_counts() {
+        // Over-trim guard: only run EDGES collapse; a space BETWEEN two
+        // inline elements separates the words (CSS §16.6.1 interior rule).
+        let html = r#"<body>
+            <div id="spaced" style="float:left"><span>x</span> <span>y</span></div>
+            <div id="tight" style="float:left"><span>x</span><span>y</span></div>
+        </body>"#;
+        let sheet = "body { margin: 0; font-size: 16px; } span { font-size: 16px; }";
+        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let rules = diting_css::parse_stylesheet(sheet);
+        let styles = our_styles(&tree, &rules);
+        let rects = layout_dom(&tree, &styles, &fixture_fonts(), VW, VH);
+        let a = rects[&tree.query_selector("#spaced").unwrap().unwrap()];
+        let b = rects[&tree.query_selector("#tight").unwrap().unwrap()];
+        assert!(
+            a.width > b.width + 1.0,
+            "the interior space keeps its advance: spaced={} tight={}",
+            a.width, b.width
+        );
+    }

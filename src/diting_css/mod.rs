@@ -727,6 +727,12 @@ pub struct Color(pub u8, pub u8, pub u8, pub u8);
 pub enum Length {
     Px(f32),
     Percent(f32),
+    /// A calc() mixing percent and px (`calc(100% - 30px)`), kept symbolic:
+    /// percent in CSS 0-100 scale resolves against the containing block in
+    /// the layout engine's post-layout repair pass (width/min/max only —
+    /// other slots keep the percent-only placeholder or drop, see
+    /// to_taffy_style). The px part is always exact here.
+    Calc { percent: f32, px: f32 },
     /// CSS `auto` - legal ONLY for margins (the horizontal centering idiom
     /// and the abspos §10.3.3 centering pattern). Padding and borders reject
     /// it at parse time; layout maps it to taffy's
@@ -860,6 +866,164 @@ fn parse_css_length(v: &str) -> Option<CssLength> {
         return px.parse::<f32>().ok().map(CssLength::Px);
     }
     None
+}
+
+/// A calc() intermediate value: a plain number (only legal as a `*`/`/`
+/// operand) or a length carrying its px and percent parts accumulated
+/// independently (percent in CSS 0-100 scale).
+#[derive(Debug, Clone, Copy)]
+enum CalcVal {
+    Number(f32),
+    Len { px: f32, percent: f32 },
+}
+
+impl CalcVal {
+    fn parts(self) -> (f32, f32) {
+        match self {
+            CalcVal::Len { px, percent } => (px, percent),
+            CalcVal::Number(_) => (0.0, 0.0),
+        }
+    }
+}
+
+/// Evaluate a calc() expression body (the text BETWEEN the parentheses) into
+/// a [`Length`]: pure px arithmetic folds to [`Length::Px`], percent-only to
+/// [`Length::Percent`], and a mix to [`Length::Calc`]. em/rem fold against
+/// the font context like bare declarations. The grammar is the CSS one —
+/// `+`/`-` need whitespace on both sides, `*`/`/` take one number operand,
+/// parentheses and nested calc() group.
+pub fn eval_calc(expr: &str, fonts: &FontCtx) -> Option<Length> {
+    let mut p = CalcParser { s: expr.as_bytes(), i: 0, fonts };
+    let v = p.expr_value()?;
+    p.skip_ws();
+    if p.i != p.s.len() {
+        return None;
+    }
+    match v {
+        // A bare number is not a length; `calc(0)` has no unit context here.
+        CalcVal::Number(_) | CalcVal::Len { px: 0.0, percent: 0.0 } => None,
+        CalcVal::Len { px: 0.0, percent } => Some(Length::Percent(percent)),
+        CalcVal::Len { px, percent: 0.0 } => Some(Length::Px(px)),
+        CalcVal::Len { px, percent } => Some(Length::Calc { percent, px }),
+    }
+}
+
+struct CalcParser<'a> {
+    s: &'a [u8],
+    i: usize,
+    fonts: &'a FontCtx,
+}
+
+impl CalcParser<'_> {
+    fn skip_ws(&mut self) {
+        while self.i < self.s.len() && self.s[self.i].is_ascii_whitespace() {
+            self.i += 1;
+        }
+    }
+
+    fn eat(&mut self, c: u8) -> bool {
+        self.skip_ws();
+        if self.i < self.s.len() && self.s[self.i] == c {
+            self.i += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn starts_with_ignore_case(&self, prefix: &str) -> bool {
+        let end = self.i + prefix.len();
+        end <= self.s.len() && self.s[self.i..end].eq_ignore_ascii_case(prefix.as_bytes())
+    }
+
+    /// sum: term (( '+' | '-' ) term)* — both sides must carry units.
+    fn expr_value(&mut self) -> Option<CalcVal> {
+        let mut acc = self.term_value()?;
+        loop {
+            self.skip_ws();
+            let plus = match self.s.get(self.i) {
+                Some(b'+') => true,
+                Some(b'-') => false,
+                _ => break,
+            };
+            self.i += 1;
+            let rhs = self.term_value()?;
+            if matches!(acc, CalcVal::Number(_)) || matches!(rhs, CalcVal::Number(_)) {
+                return None;
+            }
+            let (a, ap) = acc.parts();
+            let (b, bp) = rhs.parts();
+            acc = CalcVal::Len {
+                px: if plus { a + b } else { a - b },
+                percent: if plus { ap + bp } else { ap - bp },
+            };
+        }
+        Some(acc)
+    }
+
+    /// product: factor (( '*' | '/' ) factor)*, one side a number.
+    fn term_value(&mut self) -> Option<CalcVal> {
+        let mut acc = self.factor_value()?;
+        loop {
+            self.skip_ws();
+            let div = match self.s.get(self.i) {
+                Some(b'*') => false,
+                Some(b'/') => true,
+                _ => break,
+            };
+            self.i += 1;
+            let rhs = self.factor_value()?;
+            let (n, val) = match (acc, rhs) {
+                (CalcVal::Number(n), v) => (n, v),
+                (v, CalcVal::Number(n)) => (n, v),
+                _ => return None,
+            };
+            acc = match val {
+                CalcVal::Len { px, percent } if !div => CalcVal::Len { px: px * n, percent: percent * n },
+                CalcVal::Len { px, percent } if div && n != 0.0 => CalcVal::Len { px: px / n, percent: percent / n },
+                _ => return None,
+            };
+        }
+        Some(acc)
+    }
+
+    fn factor_value(&mut self) -> Option<CalcVal> {
+        self.skip_ws();
+        if self.eat(b'(') {
+            let v = self.expr_value()?;
+            return self.eat(b')').then_some(v);
+        }
+        if self.starts_with_ignore_case("calc(") {
+            self.i += 5;
+            let v = self.expr_value()?;
+            return self.eat(b')').then_some(v);
+        }
+        // number | length token. '+/-/"/("/")' end a token but may START one
+        // (a signed number), so only delimit when past the first byte.
+        let start = self.i;
+        while self.i < self.s.len() {
+            let c = self.s[self.i];
+            if self.i > start
+                && (c.is_ascii_whitespace() || matches!(c, b'+' | b'-' | b'*' | b'/' | b'(' | b')'))
+            {
+                break;
+            }
+            self.i += 1;
+        }
+        if self.i == start {
+            return None;
+        }
+        let tok = std::str::from_utf8(&self.s[start..self.i]).ok()?;
+        if let Ok(n) = tok.parse::<f32>() {
+            return n.is_finite().then_some(CalcVal::Number(n));
+        }
+        let resolved = parse_css_length(tok).map(|l| resolve_len(l, self.fonts))?;
+        match resolved {
+            Length::Px(px) => Some(CalcVal::Len { px, percent: 0.0 }),
+            Length::Percent(p) => Some(CalcVal::Len { px: 0.0, percent: p }),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -1039,8 +1203,15 @@ pub fn apply_declarations_with(
 
 fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx) -> bool {
     let v = value.trim();
-    // Length arm helper: parse + fold em/rem against the font context.
-    let len = |val: &str| parse_css_length(val).map(|l| resolve_len(l, fonts));
+    // Length arm helper: parse + fold em/rem against the font context;
+    // calc() bodies route through the evaluator (same folding per term).
+    let len = |val: &str| -> Option<Length> {
+        let t = val.trim();
+        if t.len() >= 6 && t[..5].eq_ignore_ascii_case("calc(") && t.ends_with(')') {
+            return eval_calc(&t[5..t.len() - 1], fonts);
+        }
+        parse_css_length(t).map(|l| resolve_len(l, fonts))
+    };
     match name {
         "display" => {
             style.display = match v {
@@ -1416,31 +1587,34 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             style.flex_shrink.is_some()
         }
         "flex-basis" => {
-            // px only; `auto` (the initial value) stays None.
-            style.flex_basis = parse_px_f32(v);
+            // px (calc pure-px folds); `auto` (the initial value) stays None.
+            style.flex_basis = parse_px_f32_ctx(v, fonts);
             style.flex_basis.is_some()
         }
         "gap" => {
-            let vals: Vec<Option<f32>> = v.split_whitespace().map(parse_px_f32).collect();
+            let vals: Vec<Option<f32>> = split_sides(v).into_iter().map(|t| parse_px_f32_ctx(t, fonts)).collect();
             match vals.as_slice() {
-                [one] => {
-                    style.column_gap = *one;
-                    style.row_gap = *one;
+                [Some(one)] => {
+                    style.column_gap = Some(*one);
+                    style.row_gap = Some(*one);
+                    true
                 }
-                [c, r] => {
-                    style.column_gap = *c;
-                    style.row_gap = *r;
+                [Some(c), Some(r)] => {
+                    style.column_gap = Some(*c);
+                    style.row_gap = Some(*r);
+                    true
                 }
-                _ => return false,
-            };
-            true
+                // One invalid component invalidates the whole declaration
+                // (CSS syntax) — no partial application.
+                _ => false,
+            }
         }
         "column-gap" => {
-            style.column_gap = parse_px_f32(v);
+            style.column_gap = parse_px_f32_ctx(v, fonts);
             style.column_gap.is_some()
         }
         "row-gap" => {
-            style.row_gap = parse_px_f32(v);
+            style.row_gap = parse_px_f32_ctx(v, fonts);
             style.row_gap.is_some()
         }
         "grid-template-columns" => {
@@ -1687,15 +1861,17 @@ fn set_side(sides: &mut Sides, name: &str, value: Option<Length>) {
     *slot = value;
 }
 
-/// CSS 1–4 value expansion (px/em/rem/%; unknown units drop to None).
+/// CSS 1–4 value expansion (px/em/rem/%/calc(); unknown units drop to None).
 /// `auto` tokens pass through as `Length::Auto` (margin centering) - the
 /// padding/border call sites reject them by dropping the declaration.
 fn expand_sides(value: &str, fonts: &FontCtx) -> Sides {
-    let vals: Vec<Option<Length>> = value
-        .split_whitespace()
+    let vals: Vec<Option<Length>> = split_sides(value)
+        .into_iter()
         .map(|tok| {
             if tok.eq_ignore_ascii_case("auto") {
                 Some(Length::Auto)
+            } else if tok.len() >= 6 && tok[..5].eq_ignore_ascii_case("calc(") && tok.ends_with(')') {
+                eval_calc(&tok[5..tok.len() - 1], fonts)
             } else {
                 parse_css_length(tok).map(|l| resolve_len(l, fonts))
             }
@@ -1708,6 +1884,33 @@ fn expand_sides(value: &str, fonts: &FontCtx) -> Sides {
         [t, r, b, l] => Sides { top: *t, right: *r, bottom: *b, left: *l },
         _ => Sides::default(),
     }
+}
+
+/// Split a shorthand value into its top-level whitespace-separated tokens,
+/// keeping whitespace INSIDE balanced parentheses together —
+/// `calc(100% - 30px) 5px` is two tokens, not four.
+fn split_sides(value: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start: Option<usize> = None;
+    for (idx, ch) in value.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if depth == 0 && ch.is_whitespace() {
+            if let Some(s) = start.take() {
+                out.push(&value[s..idx]);
+            }
+        } else if start.is_none() {
+            start = Some(idx);
+        }
+    }
+    if let Some(s) = start {
+        out.push(&value[s..]);
+    }
+    out
 }
 
 /// Reject `Length::Auto` entries (padding/border grammar: auto is illegal
@@ -1728,6 +1931,20 @@ fn parse_px_f32(v: &str) -> Option<f32> {
         return Some(0.0);
     }
     v.strip_suffix("px")?.parse::<f32>().ok()
+}
+
+/// [`parse_px_f32`] plus calc(): pure-px arithmetic folds at parse time
+/// (em/rem fold against the font context like any declaration); a
+/// percent-carrying calc has no resolved-value slot here and drops.
+fn parse_px_f32_ctx(v: &str, fonts: &FontCtx) -> Option<f32> {
+    let v = v.trim();
+    if v.len() >= 6 && v[..5].eq_ignore_ascii_case("calc(") && v.ends_with(')') {
+        return match eval_calc(&v[5..v.len() - 1], fonts)? {
+            Length::Px(px) => Some(px),
+            _ => None,
+        };
+    }
+    parse_px_f32(v)
 }
 
 /// font-size accepts px/em/rem/% and the common absolute keywords. em/%
@@ -2636,5 +2853,114 @@ mod tests {
         assert_eq!(art_matched.len(), 1, "{art_matched:?}");
         let art_computed = cascade_element("article", &tree, article, &art_matched, None, None, DEFAULT_ROOT_FONT_SIZE);
         assert_eq!(art_computed.padding.top, Some(Length::Px(12.0)), ":where(article) padding applies");
+    }
+
+    // ---- calc() (obscura#767) ----
+
+    #[test]
+    fn calc_folds_to_px_percent_or_mixed() {
+        let f = FontCtx::default();
+        // Pure px arithmetic folds at parse time — never reaches layout.
+        assert_eq!(eval_calc("100px + 50px", &f), Some(Length::Px(150.0)));
+        assert_eq!(eval_calc("calc(60px - 10.5px)", &f), Some(Length::Px(49.5)));
+        assert_eq!(eval_calc("2 * 25px", &f), Some(Length::Px(50.0)));
+        assert_eq!(eval_calc("100px / 4", &f), Some(Length::Px(25.0)));
+        // Percent-only folds to Percent.
+        assert_eq!(eval_calc("100% - 50%", &f), Some(Length::Percent(50.0)));
+        assert_eq!(eval_calc("50%", &f), Some(Length::Percent(50.0)));
+        // Mixed stays symbolic: percent in CSS 0-100 scale, px exact.
+        assert_eq!(
+            eval_calc("100% - 30px", &f),
+            Some(Length::Calc { percent: 100.0, px: -30.0 })
+        );
+        assert_eq!(
+            eval_calc("50% + 10px", &f),
+            Some(Length::Calc { percent: 50.0, px: 10.0 })
+        );
+        // em folds against the font context like bare declarations.
+        let big = FontCtx { own: 20.0, root: 16.0 };
+        assert_eq!(eval_calc("1em + 4px", &big), Some(Length::Px(24.0)));
+        // Parentheses and nested calc() group.
+        assert_eq!(
+            eval_calc("(100% - 30px) / 2", &f),
+            Some(Length::Calc { percent: 50.0, px: -15.0 })
+        );
+        assert_eq!(
+            eval_calc("CALC(100% - calc(10px + 5px))", &f),
+            Some(Length::Calc { percent: 100.0, px: -15.0 })
+        );
+        // Signed operand right after the operator lexes as one token.
+        assert_eq!(
+            eval_calc("10px + -2px", &f),
+            Some(Length::Px(8.0))
+        );
+    }
+
+    #[test]
+    fn calc_rejects_invalid_grammar() {
+        let f = FontCtx::default();
+        // A bare number is not a length without a unit context.
+        assert_eq!(eval_calc("5", &f), None);
+        // + / - between a number and a length is invalid CSS.
+        assert_eq!(eval_calc("100px + 5", &f), None);
+        assert_eq!(eval_calc("5 + 100px", &f), None);
+        // Division by zero.
+        assert_eq!(eval_calc("100px / 0", &f), None);
+        // Trailing garbage after a complete expression.
+        assert_eq!(eval_calc("100px + 5px )", &f), None);
+        assert_eq!(eval_calc("100px + 5px extra", &f), None);
+        // Unbalanced parens.
+        assert_eq!(eval_calc("(100px", &f), None);
+        assert_eq!(eval_calc("100px)", &f), None);
+        // * / with two length operands is invalid.
+        assert_eq!(eval_calc("10px * 2px", &f), None);
+        assert_eq!(eval_calc("10px / 2px", &f), None);
+    }
+
+    #[test]
+    fn calc_width_min_max_and_sides_parse() {
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "width: calc(100% - 30px)"));
+        assert_eq!(s.width, Some(Length::Calc { percent: 100.0, px: -30.0 }));
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "min-width: calc(50% + 10px); max-width: calc(100% - 2em)"));
+        assert_eq!(s.min_width, Some(Length::Calc { percent: 50.0, px: 10.0 }));
+        assert_eq!(s.max_width, Some(Length::Calc { percent: 100.0, px: -32.0 }));
+
+        // expand_sides keeps calc() tokens whole across the whitespace split.
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "padding: calc(100% - 30px) 5px"));
+        assert_eq!(s.padding.top, Some(Length::Calc { percent: 100.0, px: -30.0 }));
+        assert_eq!(s.padding.right, Some(Length::Px(5.0)));
+        assert_eq!(s.padding.bottom, Some(Length::Calc { percent: 100.0, px: -30.0 }));
+        assert_eq!(s.padding.left, Some(Length::Px(5.0)));
+
+        // Inline styles share the grammar.
+        let mut s = ComputedStyle::default();
+        assert!(apply_inline_declarations(&mut s, "margin-left: calc(2 * 8px)"));
+        assert_eq!(s.margin.left, Some(Length::Px(16.0)));
+    }
+
+    #[test]
+    fn calc_flex_basis_and_gap_px_only() {
+        // Resolved-value slots (flex-basis, gap) accept pure-px calc and drop
+        // percent-carrying calc — the percent part has no slot to ride in.
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "flex-basis: calc(60px + 40px)"));
+        assert_eq!(s.flex_basis, Some(100.0));
+        let mut s = ComputedStyle::default();
+        assert!(!apply_declarations(&mut s, "flex-basis: calc(50% + 10px)"));
+        assert_eq!(s.flex_basis, None);
+
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "gap: calc(8px + 4px)"));
+        assert_eq!(s.column_gap, Some(12.0));
+        assert_eq!(s.row_gap, Some(12.0));
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "column-gap: calc(24px - 4px)"));
+        assert_eq!(s.column_gap, Some(20.0));
+        let mut s = ComputedStyle::default();
+        assert!(!apply_declarations(&mut s, "gap: calc(50% + 4px) 8px"));
+        assert_eq!(s.column_gap, None);
     }
 }
