@@ -2094,6 +2094,68 @@
         );
     }
 
+    /// obscura #754/#716 class: XHR `responseType: "arraybuffer"`/`"blob"`
+    /// must round-trip the raw response bytes. The old path took `resp.text()`
+    /// (lossy UTF-8) and re-encoded it, mangling every non-UTF-8 byte — PNG
+    /// magic came back with 0x89/0x1A replaced by U+FFFD (EF BF BD).
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn xhr_binary_response_types_roundtrip_bytes() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).unwrap();
+                let body: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.write_all(&body).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/test", port));
+        let result = rt.call_function_on_for_cdp(
+            r#"async () => {
+                const asType = (type) => new Promise((resolve, reject) => {
+                    const xhr = new XMLHttpRequest();
+                    xhr.open("GET", "/img.png");
+                    xhr.responseType = type;
+                    xhr.onload = () => resolve(xhr.response);
+                    xhr.onerror = () => reject(new Error("xhr error"));
+                    xhr.send();
+                });
+                const bytes = Array.from(new Uint8Array(await asType("arraybuffer")));
+                const blobBytes = Array.from(new Uint8Array(await (await asType("blob")).arrayBuffer()));
+                return { bytes, blobBytes };
+            }"#,
+            None,
+            &[],
+            true,
+            true,
+        ).await.unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let png_magic = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!({
+                "bytes": png_magic,
+                "blobBytes": png_magic,
+            })
+        );
+    }
+
     /// obscura#664 class: the fetch/XHR redirect budget is the Fetch spec's
     /// fixed 20 — WPT `fetch/api/redirect/redirect-count.any.js` pins both
     /// ends: the 20th hop succeeds, the 21st fails. (HTTP-3xx during
@@ -3285,6 +3347,105 @@
             .evaluate("getComputedStyle(document.getElementById('s')).zIndex")
             .unwrap();
         assert_eq!(initial, serde_json::json!("auto"));
+    }
+
+    // Regression (obscura #771 wrong-value rows): getComputedStyle served the
+    // layout engine's Block bucket for the table family and `stretch` /
+    // `flex-start` for unset align-items/justify-content. Chrome answers
+    // table/table-row/table-cell/list-item and `normal` — an element's box
+    // type was otherwise unreadable over CDP. An author `display: block`
+    // (responsive table collapses) must still win over the UA table.
+    #[test]
+    #[cfg(feature = "screenshot")]
+    fn test_get_computed_style_table_family_and_flex_initials() {
+        let mut rt = setup_runtime(r#"<html><head><style>
+          .flat { display: block; }
+        </style></head><body>
+        <table><tr><td id="cell">a</td><td class="flat" id="flat">b</td></tr></table>
+        <ul><li id="item">x</li></ul>
+        <div id="box"><span id="in">y</span></div>
+        </body></html>"#);
+        let out = rt
+            .evaluate(
+                r#"JSON.stringify({
+                    table: getComputedStyle(document.querySelector('table')).display,
+                    row: getComputedStyle(document.querySelector('tr')).display,
+                    cell: getComputedStyle(document.getElementById('cell')).display,
+                    authorBlock: getComputedStyle(document.getElementById('flat')).display,
+                    listItem: getComputedStyle(document.getElementById('item')).display,
+                    div: getComputedStyle(document.getElementById('box')).display,
+                    span: getComputedStyle(document.getElementById('in')).display,
+                    alignNormal: getComputedStyle(document.getElementById('box')).alignItems,
+                    justifyNormal: getComputedStyle(document.getElementById('box')).justifyContent,
+                })"#,
+            )
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        assert_eq!(v["table"], serde_json::json!("table"));
+        assert_eq!(v["row"], serde_json::json!("table-row"));
+        assert_eq!(v["cell"], serde_json::json!("table-cell"));
+        assert_eq!(v["authorBlock"], serde_json::json!("block"));
+        assert_eq!(v["listItem"], serde_json::json!("list-item"));
+        assert_eq!(v["div"], serde_json::json!("block"));
+        assert_eq!(v["span"], serde_json::json!("inline"));
+        assert_eq!(v["alignNormal"], serde_json::json!("normal"));
+        assert_eq!(v["justifyNormal"], serde_json::json!("normal"));
+    }
+
+    // Regression (obscura #771 empty-value rows): 41 computed properties read
+    // back '' on an unstyled element; '' is indistinguishable from "not set",
+    // so feature probes silently took the wrong branch. The defaults table
+    // now carries Chrome's initial values (audited against Chromium 147).
+    #[test]
+    fn test_get_computed_style_initial_values_not_empty() {
+        let mut rt = setup_runtime(r#"<html><body><div id="d">x</div></body></html>"#);
+        let out = rt
+            .evaluate(
+                r#"JSON.stringify({
+                    bg: getComputedStyle(document.getElementById('d')).backgroundImage,
+                    bgPos: getComputedStyle(document.getElementById('d')).backgroundPosition,
+                    bgRepeat: getComputedStyle(document.getElementById('d')).backgroundRepeat,
+                    fontStyle: getComputedStyle(document.getElementById('d')).fontStyle,
+                    flexGrow: getComputedStyle(document.getElementById('d')).flexGrow,
+                    flexShrink: getComputedStyle(document.getElementById('d')).flexShrink,
+                    flexBasis: getComputedStyle(document.getElementById('d')).flexBasis,
+                    transProp: getComputedStyle(document.getElementById('d')).transitionProperty,
+                    animName: getComputedStyle(document.getElementById('d')).animationName,
+                    animIter: getComputedStyle(document.getElementById('d')).animationIterationCount,
+                    animTiming: getComputedStyle(document.getElementById('d')).animationTimingFunction,
+                    userSelect: getComputedStyle(document.getElementById('d')).userSelect,
+                    direction: getComputedStyle(document.getElementById('d')).direction,
+                    zoom: getComputedStyle(document.getElementById('d')).zoom,
+                    minHeight: getComputedStyle(document.getElementById('d')).minHeight,
+                    order: getComputedStyle(document.getElementById('d')).order,
+                    objectFit: getComputedStyle(document.getElementById('d')).objectFit,
+                    aspectRatio: getComputedStyle(document.getElementById('d')).aspectRatio,
+                    outlineWidth: getComputedStyle(document.getElementById('d')).outlineWidth,
+                })"#,
+            )
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        assert_eq!(v["bg"], serde_json::json!("none"));
+        assert_eq!(v["bgPos"], serde_json::json!("0% 0%"));
+        assert_eq!(v["bgRepeat"], serde_json::json!("repeat"));
+        assert_eq!(v["fontStyle"], serde_json::json!("normal"));
+        assert_eq!(v["flexGrow"], serde_json::json!("0"));
+        assert_eq!(v["flexShrink"], serde_json::json!("1"));
+        assert_eq!(v["flexBasis"], serde_json::json!("auto"));
+        assert_eq!(v["transProp"], serde_json::json!("all"));
+        assert_eq!(v["animName"], serde_json::json!("none"));
+        assert_eq!(v["animIter"], serde_json::json!("1"));
+        assert_eq!(v["animTiming"], serde_json::json!("ease"));
+        assert_eq!(v["userSelect"], serde_json::json!("auto"));
+        assert_eq!(v["direction"], serde_json::json!("ltr"));
+        assert_eq!(v["zoom"], serde_json::json!("1"));
+        assert_eq!(v["minHeight"], serde_json::json!("0px"));
+        assert_eq!(v["order"], serde_json::json!("0"));
+        assert_eq!(v["objectFit"], serde_json::json!("fill"));
+        assert_eq!(v["aspectRatio"], serde_json::json!("auto"));
+        // Verified against local Chromium: the computed value stays `medium`
+        // (3px) even with outline-style none — not the used value 0px.
+        assert_eq!(v["outlineWidth"], serde_json::json!("3px"));
     }
 
     #[test]

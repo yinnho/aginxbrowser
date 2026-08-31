@@ -4320,7 +4320,12 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
 
       xhr._setReadyState(2); // HEADERS_RECEIVED
 
-      const text = await resp.text();
+      // arraybuffer/blob must round-trip the raw bytes: resp.text() is a
+      // lossy UTF-8 decode and re-encoding it mangles binary payloads
+      // (obscura #754/#716 class). Take the byte-exact buffer once and
+      // derive the charset-decoded text from the same bytes.
+      const bodyBuf = await resp.arrayBuffer();
+      const text = _decodeBodyWithCharset(new Uint8Array(bodyBuf), resp.headers);
       if (xhr._aborted) return;
 
       xhr.responseText = text;
@@ -4335,10 +4340,10 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
           xhr.response = text;
           break;
         case 'arraybuffer':
-          xhr.response = new TextEncoder().encode(text).buffer;
+          xhr.response = bodyBuf;
           break;
         case 'blob':
-          xhr.response = new Blob([text]);
+          xhr.response = new Blob([bodyBuf]);
           break;
         case 'document':
           xhr.response = text; // simplified
@@ -5125,6 +5130,30 @@ globalThis.getComputedStyle = (el) => {
     'justify-content': 'normal', gap: 'normal',
     'grid-template-columns': 'none', 'grid-template-rows': 'none',
     'will-change': 'auto', 'backface-visibility': 'visible',
+    // Chrome initial values for the computed properties scripts branch on
+    // (obscura #771): an '' read is indistinguishable from "not set", so
+    // feature probes silently took the wrong path. Values match Chromium 147.
+    'background-image': 'none', 'background-size': 'auto',
+    'background-position': '0% 0%', 'background-repeat': 'repeat',
+    'font-style': 'normal', 'word-spacing': '0px',
+    'text-decoration': 'none', 'text-decoration-line': 'none', 'text-indent': '0px',
+    'list-style-position': 'outside', 'border-spacing': '0px', 'caption-side': 'top',
+    'align-self': 'auto', 'flex-grow': '0', 'flex-shrink': '1',
+    'flex-basis': 'auto', 'grid-column': 'auto', 'grid-row': 'auto',
+    'transition-property': 'all', 'transition-duration': '0s',
+    'animation-name': 'none', 'animation-duration': '0s',
+    'animation-iteration-count': '1', 'animation-timing-function': 'ease',
+    'user-select': 'auto', 'box-shadow': 'none', 'text-shadow': 'none',
+    'content': 'normal', 'order': '0', 'object-fit': 'fill',
+    'resize': 'none', 'appearance': 'none', 'filter': 'none',
+    'mix-blend-mode': 'normal', 'writing-mode': 'horizontal-tb', 'direction': 'ltr',
+    'unicode-bidi': 'isolate', 'isolation': 'auto', 'contain': 'none',
+    'aspect-ratio': 'auto', 'zoom': '1',
+    'min-height': '0px', 'min-width': '0px',
+    // outline-width resolves to the computed `medium` (3px) even while
+    // outline-style is none — verified against local Chromium, not the
+    // used value (0px) the spec's resolved-value rule suggests.
+    'outline-width': '3px',
   };
 
   const lookup = (rawProp) => {

@@ -449,6 +449,11 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
 pub struct ComputedStyle {
     /// Outer display role. `None` means "not declared anywhere".
     pub display: Option<Display>,
+    /// True while `display` still holds the cascade's UA-default fill
+    /// (`Some(ua_display(tag))`). The CSSOM layer reports Chrome's per-tag
+    /// UA display for those tags (table→table, li→list-item, ...) without
+    /// the layout engine needing table/list box types (obscura #771).
+    pub display_from_ua: bool,
     pub color: Option<Color>,
     pub background_color: Option<Color>,
     /// Shorthand sides in CSS order (top right bottom left), already expanded.
@@ -1047,6 +1052,7 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 "none" => Some(Display::None),
                 _ => return false,
             };
+            style.display_from_ua = false;
             true
         }
         "color" => parse_color(v).map(|c| style.color = Some(c)).is_some(),
@@ -1873,6 +1879,7 @@ pub fn cascade_element(
 ) -> ComputedStyle {
     let mut style = ComputedStyle {
         display: Some(ua_display(tag)),
+        display_from_ua: true,
         font_weight: ua_font_weight(tag),
         ..Default::default()
     };

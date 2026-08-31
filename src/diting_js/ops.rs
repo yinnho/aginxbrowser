@@ -913,6 +913,11 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         #[cfg(feature = "screenshot")]
         "computed_style" => {
             let nid = match parse_nid(&arg1) { Some(id) => id, None => return "null".into() };
+            let cssom_tag = dom
+                .with_node(nid, |n| {
+                    n.as_element().map(|e| e.local.as_ref().to_ascii_lowercase())
+                })
+                .flatten();
             let epoch = dom.epoch();
             let cached = gs.layout_cache.borrow().as_ref().and_then(|(e, (_, _, s))| {
                 if *e == epoch { s.get(&nid).cloned() } else { None }
@@ -927,7 +932,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 Some(s) => {
                     let mut obj = serde_json::Map::with_capacity(COMPUTED_STYLE_PROPS.len());
                     for prop in COMPUTED_STYLE_PROPS {
-                        if let Some(v) = computed_style_value(&s, prop) {
+                        if let Some(v) = computed_style_value(&s, prop, cssom_tag.as_deref()) {
                             obj.insert((*prop).to_string(), serde_json::Value::String(v));
                         }
                     }
@@ -998,12 +1003,6 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
     )
 }
 
-/// Serialize one property of a cascaded [`ComputedStyle`] in Chrome's
-/// computed-value spelling, for the `computed_style` op (getComputedStyle's
-/// cascade layer). `None` means "not in the table" — the JS caller falls
-/// through to its inline/dimension/default chain, so initial values never
-/// shadow a caller that knows better.
-#[cfg(feature = "screenshot")]
 /// The property table the `computed_style` snapshot serializes — every
 /// property [`computed_style_value`] can spell. Order is irrelevant (the
 /// consumer is a JSON object); this list just guarantees the op and the
@@ -1028,10 +1027,35 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "align-items",
 ];
 
+/// Chrome's UA-sheet display for the tags whose CSSOM value differs from the
+/// Block bucket the layout engine gives them. Layout intentionally has no
+/// table/list box types, so `td` lays out as a block — but getComputedStyle
+/// must still answer like a browser (obscura #771: a table's box type was
+/// unreadable over CDP). Only consulted while `display_from_ua` is set.
+fn ua_display_cssom(tag: Option<&str>) -> Option<&'static str> {
+    match tag? {
+        "table" => Some("table"),
+        "tr" => Some("table-row"),
+        "td" | "th" => Some("table-cell"),
+        "thead" | "tbody" | "tfoot" => Some("table-row-group"),
+        "col" => Some("table-column"),
+        "colgroup" => Some("table-column-group"),
+        "caption" => Some("table-caption"),
+        "li" => Some("list-item"),
+        _ => None,
+    }
+}
+
+/// Serialize one property of a cascaded [`ComputedStyle`] in Chrome's
+/// computed-value spelling, for the `computed_style` op (getComputedStyle's
+/// cascade layer). `None` means "not in the table" — the JS caller falls
+/// through to its inline/dimension/default chain, so initial values never
+/// shadow a caller that knows better.
 #[cfg(feature = "screenshot")]
 fn computed_style_value(
     s: &crate::diting_css::ComputedStyle,
     prop: &str,
+    cssom_tag: Option<&str>,
 ) -> Option<String> {
     use crate::diting_css::*;
     let color = |c: &Color| {
@@ -1053,21 +1077,28 @@ fn computed_style_value(
             }
             .into(),
         ),
+        "display" => {
+            if s.display_from_ua {
+                if let Some(ua) = ua_display_cssom(cssom_tag) {
+                    return Some(ua.to_string());
+                }
+            }
+            Some(
+                match s.display {
+                    Some(Display::Inline) => "inline",
+                    Some(Display::InlineBlock) => "inline-block",
+                    Some(Display::Flex) => "flex",
+                    Some(Display::Grid) => "grid",
+                    Some(Display::None) => "none",
+                    _ => "block",
+                }
+                .into(),
+            )
+        },
         "z-index" => Some(match s.z_index {
             Some(z) => z.to_string(),
             None => "auto".into(),
         }),
-        "display" => Some(
-            match s.display {
-                Some(Display::Inline) => "inline",
-                Some(Display::InlineBlock) => "inline-block",
-                Some(Display::Flex) => "flex",
-                Some(Display::Grid) => "grid",
-                Some(Display::None) => "none",
-                _ => "block",
-            }
-            .into(),
-        ),
         "float" => Some(
             match s.float_side {
                 Some(FloatSide::Left) => "left",
@@ -1134,21 +1165,25 @@ fn computed_style_value(
         ),
         "justify-content" => Some(
             match s.justify_content {
+                Some(JustifyMode::FlexStart) => "flex-start",
                 Some(JustifyMode::Center) => "center",
                 Some(JustifyMode::FlexEnd) => "flex-end",
                 Some(JustifyMode::SpaceBetween) => "space-between",
                 Some(JustifyMode::SpaceAround) => "space-around",
                 Some(JustifyMode::SpaceEvenly) => "space-evenly",
-                _ => "flex-start",
+                // Unset computes to `normal` in Chrome; only an author
+                // declaration yields a keyword (obscura #771 wrong-value rows).
+                None => "normal",
             }
             .into(),
         ),
         "align-items" => Some(
             match s.align_items {
+                Some(AlignMode::Stretch) => "stretch",
+                Some(AlignMode::FlexStart) => "flex-start",
                 Some(AlignMode::Center) => "center",
                 Some(AlignMode::FlexEnd) => "flex-end",
-                Some(AlignMode::FlexStart) => "flex-start",
-                _ => "stretch",
+                None => "normal",
             }
             .into(),
         ),
@@ -2197,6 +2232,14 @@ fn op_binding_called(state: &OpState, #[string] name: &str, #[string] payload: &
     let gs = state.borrow::<SharedState>().clone();
     let mut gs = gs.borrow_mut();
     gs.pending_binding_calls.push((name.to_string(), payload.to_string()));
+    // The CDP layer drains this after every dispatch, but a page can loop
+    // calling an exposed binding many times inside one long evaluate — same
+    // unbounded-queue shape as js_network_events (obscura #705 class).
+    const MAX_PENDING_BINDING_CALLS: usize = 4096;
+    if gs.pending_binding_calls.len() > MAX_PENDING_BINDING_CALLS {
+        let overflow = gs.pending_binding_calls.len() - MAX_PENDING_BINDING_CALLS;
+        gs.pending_binding_calls.drain(0..overflow);
+    }
 }
 
 /// Real WebCrypto `crypto.subtle.digest`. `algorithm` is the SubtleCrypto
