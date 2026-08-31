@@ -805,7 +805,7 @@ Semantics (RFC 9309 subset):
 Scope notes:
 
 - **Interactive sessions are exempt by design.** `/session/{id}/navigate`, `click`, `input`, `scroll` drive a browser the way a person at a keyboard does; robots.txt governs autonomous fetching, not browser interaction.
-- The robots.txt fetch itself uses the honest product User-Agent (`aginxbrowser/<version> (+https://browser.aginx.net)`), never the stealth fingerprint — you don't get to read the rules wearing a borrowed name.
+- The robots.txt fetch itself uses the honest product User-Agent (`aginxbrowser/<version> (+https://browser.aginx.net)`) — the name robots.txt group matching keys on is never a borrowed one. If the site's TLS stack is older than the default client can speak (a CBC-only TLS 1.2 server, obscura#769), the fetch takes one final ride on the stealth transport's BoringSSL stack — a different cipher shelf, the same honest name.
 - Policies are cached per host (default 1h; refusals 5min so a dead endpoint doesn't lock the host out for an hour).
 
 **Operator opt-in** (the stance belongs to whoever runs the instance, not to each caller):

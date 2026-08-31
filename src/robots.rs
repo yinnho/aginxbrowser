@@ -24,6 +24,10 @@
 //!   robots.txt as allow-all is how Lightpanda ended up banned from half of
 //!   public infrastructure (their #3156/#3234) — the gate denies while the
 //!   server is in trouble, with a short negative TTL so recovery is quick.
+//!   One carve-out: when the failure is a TLS handshake the default stack
+//!   cannot speak at all — a CBC-only TLS 1.2 server (obscura#769) — a
+//!   final attempt rides the BoringSSL transport before denying, still
+//!   under the honest product UA.
 //! * private / loopback hosts → exempt (the operator's own network).
 
 use std::collections::HashMap;
@@ -175,8 +179,12 @@ fn honor_env() -> bool {
 }
 
 /// Fetch and classify the host's robots.txt. Uses the honest product UA and
-/// the instance's global proxy setting (never the stealth client — and never
-/// a borrowed fingerprint) with a short timeout; robots.txt is small.
+/// the instance's global proxy setting on the plain rustls client, with a
+/// short timeout; robots.txt is small. When rustls cannot even complete the
+/// handshake — a CBC-only TLS 1.2 server (obscura#769) — one last attempt
+/// rides the BoringSSL transport ([`fetch_policy_via_legacy_tls`]), still
+/// under the honest product UA: what the stealth client lends is its cipher
+/// shelf, never its name.
 async fn fetch_policy(origin: &str) -> Policy {
     let mut builder = crate::diting_net::client::reqwest_builder_no_env_proxy()
         .timeout(Duration::from_secs(5))
@@ -216,40 +224,63 @@ async fn fetch_policy(origin: &str) -> Policy {
             match client.get(format!("{origin}/robots.txt")).send().await {
                 Ok(r) => r,
                 Err(second) => {
-                    return Policy::DenyAll(format!("network: {first}; retry: {second}"))
+                    // A rustls double-failure includes the obscura#769 case:
+                    // CBC-only TLS 1.2 server, TCP fine, every handshake
+                    // refused because rustls ships no CBC suites. One last
+                    // attempt rides the BoringSSL transport — same honest
+                    // UA, same proxy decision — before denying.
+                    #[cfg(feature = "stealth")]
+                    match fetch_policy_via_legacy_tls(origin).await {
+                        Ok(policy) => return policy,
+                        Err(legacy) => {
+                            return Policy::DenyAll(format!(
+                                "network: {first}; retry: {second}; legacy-tls: {legacy}"
+                            ))
+                        }
+                    }
+                    #[cfg(not(feature = "stealth"))]
+                    return Policy::DenyAll(format!("network: {first}; retry: {second}"));
                 }
             }
         }
     };
-    match resp.status().as_u16() {
-        404 | 410 => Policy::AllowAll,
-        200..=299 => {
-            // Stream with a hard stop at MAX_ROBOTS_BYTES (upstream #581
-            // class): `.bytes().await` would buffer a hostile multi-GB
-            // "robots.txt" in full before the truncate below ever ran. A
-            // real robots.txt is bytes-to-a-few-KiB; Google parses at most
-            // 500 KiB, so the cap loses nothing legitimate.
-            let mut body: Vec<u8> = Vec::new();
-            loop {
-                match resp.chunk().await {
-                    Ok(Some(chunk)) => {
-                        let room = MAX_ROBOTS_BYTES.saturating_sub(body.len());
-                        if room == 0 {
-                            break;
-                        }
-                        let take = chunk.len().min(room);
-                        body.extend_from_slice(&chunk[..take]);
-                    }
-                    Ok(None) => break,
-                    Err(e) => return Policy::DenyAll(format!("body read: {e}")),
+    let status = resp.status().as_u16();
+    if !(200..=299).contains(&status) {
+        return policy_from_robots_response(status, &[]);
+    }
+    // Stream with a hard stop at MAX_ROBOTS_BYTES (upstream #581
+    // class): `.bytes().await` would buffer a hostile multi-GB
+    // "robots.txt" in full before the truncate below ever ran. A
+    // real robots.txt is bytes-to-a-few-KiB; Google parses at most
+    // 500 KiB, so the cap loses nothing legitimate.
+    let mut body: Vec<u8> = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                let room = MAX_ROBOTS_BYTES.saturating_sub(body.len());
+                if room == 0 {
+                    break;
                 }
+                let take = chunk.len().min(room);
+                body.extend_from_slice(&chunk[..take]);
             }
-            match std::str::from_utf8(&body) {
-                Ok(text) => parse_rules(text),
-                // Bizarre, but not a refusal — parse nothing, allow everything.
-                Err(_) => Policy::AllowAll,
-            }
+            Ok(None) => break,
+            Err(e) => return Policy::DenyAll(format!("body read: {e}")),
         }
+    }
+    policy_from_robots_response(status, &body)
+}
+
+/// Classify a fetched robots.txt (HTTP status + body) into a policy. Shared
+/// by both transports so the legacy-TLS fallback speaks identical semantics.
+fn policy_from_robots_response(status: u16, body: &[u8]) -> Policy {
+    match status {
+        404 | 410 => Policy::AllowAll,
+        200..=299 => match std::str::from_utf8(body) {
+            Ok(text) => parse_rules(text),
+            // Bizarre, but not a refusal — parse nothing, allow everything.
+            Err(_) => Policy::AllowAll,
+        },
         // Other 4xx (403, 401, …): the server declines to serve robots.txt
         // to us. RFC 9309 / Google semantics treat that as "no rules apply"
         // — a walled-off robots.txt does not restrict anonymous fetching.
@@ -259,6 +290,37 @@ async fn fetch_policy(origin: &str) -> Policy {
         // what hammered a site into crisis. Short negative TTL above.
         code => Policy::DenyAll(format!("http {code}")),
     }
+}
+
+/// Last-resort transport for the robots.txt fetch (obscura#769): the
+/// primary client is rustls, which carries no TLS 1.2 CBC cipher suites at
+/// all — against a CBC-only server both attempts die in the handshake while
+/// the site is perfectly healthy for every browser. The stealth transport's
+/// BoringSSL stack still speaks CBC, so retry once through it. Identity is
+/// unchanged: the borrowed part of the stealth client is its cipher shelf,
+/// never its name — the advertised User-Agent (what `User-agent:` group
+/// matching keys on) stays the honest product token.
+#[cfg(feature = "stealth")]
+async fn fetch_policy_via_legacy_tls(origin: &str) -> Result<Policy, String> {
+    let client = crate::diting_net::StealthHttpClient::with_proxy(
+        std::sync::Arc::new(crate::diting_net::CookieJar::new()),
+        None,
+    );
+    client
+        .set_user_agent(&format!(
+            "{PRODUCT_TOKEN}/{} (+https://browser.aginx.net)",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .await;
+    let url = Url::parse(&format!("{origin}/robots.txt")).map_err(|e| format!("url: {e}"))?;
+    let resp = match tokio::time::timeout(Duration::from_secs(5), client.fetch(&url)).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => return Err(e.to_string()),
+        Err(_) => return Err("timeout".into()),
+    };
+    let mut body = resp.body;
+    body.truncate(MAX_ROBOTS_BYTES);
+    Ok(policy_from_robots_response(resp.status, &body))
 }
 
 /// Parse a robots.txt body into the policy for our product token.
@@ -415,6 +477,22 @@ mod tests {
 
     fn rule(allow: bool, pattern: &str) -> Rule {
         Rule { allow, pattern: pattern.to_string() }
+    }
+
+    #[test]
+    fn response_status_classification() {
+        // 2xx parses the body; 404/410 and other 4xx allow; 5xx denies.
+        assert!(matches!(
+            policy_from_robots_response(200, b"User-agent: *\nDisallow: /private"),
+            Policy::Rules(_)
+        ));
+        assert!(matches!(policy_from_robots_response(204, b""), Policy::AllowAll));
+        assert!(matches!(policy_from_robots_response(404, b""), Policy::AllowAll));
+        assert!(matches!(policy_from_robots_response(410, b""), Policy::AllowAll));
+        assert!(matches!(policy_from_robots_response(403, b""), Policy::AllowAll));
+        assert!(matches!(policy_from_robots_response(503, b""), Policy::DenyAll(_)));
+        // A hostile non-UTF-8 body is not a refusal — allow all.
+        assert!(matches!(policy_from_robots_response(200, &[0xff, 0xfe]), Policy::AllowAll));
     }
 
     #[test]
