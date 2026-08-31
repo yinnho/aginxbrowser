@@ -22,3 +22,6 @@ skills-lock.json
 
 # Local publisher tooling binary
 mcp-publisher
+
+# localStorage persistence test artifact (runtime state, must never rsync to hosted instance)
+/localStorage/
