@@ -612,6 +612,59 @@ mod tests {
         );
     }
 
+    // The sync path (awaitPromise:false) must carry exceptions the same way —
+    // obscura#746's reporter found upstream's non-await wrapper swallowing a
+    // ReferenceError into a successful `null`, and `(throw …)` dying as a
+    // SyntaxError because the expression wrap parenthesizes. Our evaluate runs
+    // the text through indirect eval (statements are legal) and both wrappers
+    // record the throw, so a ReferenceError and a bare `throw` statement both
+    // ride a successful reply with exceptionDetails.
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_evaluate_sync_exceptions_carry_exception_details() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-1".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": "data:text/html,<html><body>hi</body></html>" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        for (id, expression, expected) in [
+            (2, "undefined_variable_xyz", "ReferenceError"),
+            (3, "throw new Error('thrown')", "Error: thrown"),
+        ] {
+            let req = CdpRequest {
+                id,
+                method: "Runtime.evaluate".to_string(),
+                params: json!({
+                    "expression": expression,
+                    "returnByValue": true,
+                    "awaitPromise": false,
+                }),
+                session_id: Some(session_id.clone()),
+            };
+            let resp = dispatch(&req, &mut ctx).await;
+            assert!(resp.error.is_none(), "unexpected CDP error for {expression}: {:?}", resp.error);
+            let result = resp.result.expect("result");
+            let details = result.get("exceptionDetails").unwrap_or_else(|| {
+                panic!("sync throw of `{expression}` must carry exceptionDetails")
+            });
+            assert!(
+                details["exception"]["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with(expected),
+                "`{expression}` should describe {expected}, got {}",
+                details["exception"]["description"]
+            );
+        }
+    }
+
     // Chrome spells a number RemoteObject's description via Number→String
     // ("2"), but serde_json's Number Display keeps float-ness ("2.0") and
     // v8_to_json hands us f64 boxes for every JS number — awaitPromise +
