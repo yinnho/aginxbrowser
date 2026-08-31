@@ -1580,7 +1580,7 @@ async fn op_fetch_url(
     // process-wide cache remains the fallback for runtimes with no owning
     // HttpClient (e.g. a bare module-loader runtime).
     let client = match &http_client {
-        Some(client) => client.request_client().await,
+        Some(client) => client.request_client(&url).await,
         None => select_request_client(&url, proxy_url.as_deref())
             .await
             .map_err(deno_error::JsErrorBox::generic)?,

@@ -21,7 +21,7 @@ use url::Url;
 use crate::config::proxy_from_env;
 use crate::diting_net::client::validate_url;
 use crate::diting_net::{CookieJar, HttpClient};
-use crate::server::should_auto_proxy;
+use crate::config::should_auto_proxy;
 
 /// Per-chunk stall budget: if no bytes arrive for this long, give up instead
 /// of hanging forever (dead NAT mapping, half-closed proxy socket).
@@ -92,7 +92,7 @@ pub async fn do_download(req: DownloadRequest) -> Result<DownloadResponse> {
         jar.set_cookie(raw.trim(), &start_url);
     }
     let client = HttpClient::with_full_options(jar.clone(), proxy.as_deref(), false);
-    let rc = client.request_client().await;
+    let rc = client.request_client(&req.url).await;
     let ua = client.user_agent.read().await.clone();
 
     // Follow redirects manually so every hop passes the SSRF guard, and learn

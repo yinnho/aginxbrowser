@@ -16,46 +16,6 @@ pub enum SearchError {
     Other(String),
 }
 
-/// Check if a URL points to a known foreign/blocked domain that requires proxy.
-/// Uses suffix matching: `sub.github.com` matches `github.com`.
-/// Returns `false` if URL parsing fails (safe fallback).
-pub fn should_auto_proxy(url: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(url) else {
-        return false;
-    };
-    let Some(host) = parsed.host_str() else {
-        return false;
-    };
-
-    // Known foreign domains that are blocked in China.
-    // Suffix match: `raw.githubusercontent.com` matches `githubusercontent.com`.
-    const BLOCKED_DOMAINS: &[&str] = &[
-        "github.com",
-        "githubusercontent.com",
-        "github.io",
-        "google.com",
-        "google.co.jp",
-        "googleapis.com",
-        "googleusercontent.com",
-        "wikipedia.org",
-        "stackoverflow.com",
-        "medium.com",
-        "x.com",
-        "twitter.com",
-        "youtube.com",
-        "reddit.com",
-        "openai.com",
-        "anthropic.com",
-    ];
-
-    for domain in BLOCKED_DOMAINS {
-        if host == *domain || host.ends_with(&format!(".{}", domain)) {
-            return true;
-        }
-    }
-    false
-}
-
 /// Build a browser instance.
 /// `use_proxy` decides whether the upstream `AGINXBROWSER_PROXY` is applied. Domestic
 /// sites should pass `false` (direct is faster and SOCKS5 often times out);
@@ -116,7 +76,7 @@ pub fn build_browser_with_jar(
     if let Some(fp) = tls_fingerprint {
         builder = builder.tls_fingerprint(fp);
     }
-    if should_auto_proxy(url) || use_proxy {
+    if crate::config::should_auto_proxy(url) || use_proxy {
         if let Some(proxy) = crate::config::proxy_from_env() {
             builder = builder.proxy(&proxy);
         }

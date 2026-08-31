@@ -193,7 +193,7 @@ async fn fetch_policy(origin: &str) -> Policy {
         // use_proxy for this origin, the page fetch rides the proxy while
         // robots is judged from our direct IP — fine, robots content is
         // path-based, not client-IP-based.
-        if crate::server::should_auto_proxy(origin) {
+        if crate::config::should_auto_proxy(origin) {
             if let Ok(p) = reqwest::Proxy::all(&proxy) {
                 builder = builder.proxy(p);
             }

@@ -174,8 +174,8 @@ pub async fn http_fetch(
         Err(e) => return Err(format!("invalid url: {e}")),
     };
 
-    // Proxy decision mirrors server.rs::should_auto_proxy + use_proxy.
-    let use_proxy = use_proxy || crate::server::should_auto_proxy(url);
+    // Proxy decision mirrors config.rs::should_auto_proxy + use_proxy.
+    let use_proxy = use_proxy || crate::config::should_auto_proxy(url);
     let proxy = if use_proxy { proxy_url } else { None };
 
     let jar = Arc::new(CookieJar::new());

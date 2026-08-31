@@ -13,6 +13,67 @@ pub fn proxy_from_env() -> Option<String> {
         .filter(|p| !p.is_empty())
 }
 
+/// Check if a URL points to a known foreign/blocked domain that requires proxy.
+/// Uses suffix matching: `sub.github.com` matches `github.com`.
+/// Returns `false` if URL parsing fails (safe fallback).
+///
+/// Governs every transport's proxy routing, not just the /fetch endpoint: the
+/// net clients consult this per request when no explicit proxy was configured,
+/// so page/session/CDP navigations reach blocked origins the same way /fetch
+/// and download do.
+pub fn should_auto_proxy(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+
+    // Known foreign domains that are blocked in China.
+    // Suffix match: `raw.githubusercontent.com` matches `githubusercontent.com`.
+    const BLOCKED_DOMAINS: &[&str] = &[
+        "github.com",
+        "githubusercontent.com",
+        "github.io",
+        "google.com",
+        "google.co.jp",
+        "googleapis.com",
+        "googleusercontent.com",
+        "wikipedia.org",
+        "stackoverflow.com",
+        "medium.com",
+        "x.com",
+        "twitter.com",
+        "youtube.com",
+        "reddit.com",
+        "openai.com",
+        "anthropic.com",
+    ];
+
+    for domain in BLOCKED_DOMAINS {
+        if host == *domain || host.ends_with(&format!(".{}", domain)) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_auto_proxy;
+
+    // The list gates routing for every navigation now — pin the match shapes.
+    #[test]
+    fn auto_proxy_matches_apex_and_subdomains_only() {
+        assert!(should_auto_proxy("https://en.wikipedia.org/wiki/Rust"));
+        assert!(should_auto_proxy("https://wikipedia.org/"));
+        assert!(should_auto_proxy("https://raw.githubusercontent.com/x/y"));
+        assert!(!should_auto_proxy("https://notwikipedia.org/"));
+        assert!(!should_auto_proxy("https://example.com/"));
+        assert!(!should_auto_proxy("not a url"));
+    }
+}
+
 /// First standard proxy env var that is set, as "NAME=value". Used to warn
 /// that the engine ignores these: every engine client pins reqwest/wreq's
 /// implicit env/system proxy matcher off (see `reqwest_builder_no_env_proxy`),

@@ -83,6 +83,11 @@ async fn send_get_with_connection_reset_retry(
 pub struct StealthHttpClient {
     /// Proxy-configured client. None when no proxy is set.
     proxied_client: Option<wreq::Client>,
+    /// Proxy client for known-blocked domains, built when no explicit proxy
+    /// was configured but `AGINXBROWSER_PROXY` is set. Same per-domain
+    /// fallback the reqwest transport applies, so stealth document requests
+    /// reach blocked origins too.
+    auto_proxied_client: Option<wreq::Client>,
     /// Direct-connect client (no proxy). Always present.
     direct_client: wreq::Client,
     /// The configured upstream proxy, kept for error reporting only (the
@@ -208,9 +213,17 @@ impl StealthHttpClient {
     ) -> Self {
         let proxied_client = proxy_url.map(|_| Self::build_stealth_client_with_os(proxy_url, os_override, emulation));
         let direct_client = Self::build_stealth_client_with_os(None, os_override, emulation);
+        let auto_proxied_client = if proxy_url.is_none() {
+            crate::config::proxy_from_env().map(|p| {
+                Self::build_stealth_client_with_os(Some(&p), os_override, emulation)
+            })
+        } else {
+            None
+        };
 
         StealthHttpClient {
             proxied_client,
+            auto_proxied_client,
             direct_client,
             proxy_url: proxy_url.map(|s| s.to_string()),
             cookie_jar,
@@ -228,14 +241,21 @@ impl StealthHttpClient {
         }
     }
 
-    /// Pick the client. When no proxy was configured there is only the direct
-    /// client; otherwise the proxy applies to the whole page (foreign sites),
-    /// so all requests go through it.
-    async fn select_client(&self, _url: &Url) -> &wreq::Client {
-        match &self.proxied_client {
-            Some(p) => p,
-            None => &self.direct_client,
+    /// Pick the client. An explicitly configured proxy applies to the whole
+    /// page (foreign sites), so all requests go through it. Without one,
+    /// requests go direct except known-blocked domains, which ride
+    /// `AGINXBROWSER_PROXY` when set — the same fallback /fetch applies, so a
+    /// stealth session page doesn't hard-fail on an origin /fetch reaches.
+    async fn select_client(&self, url: &Url) -> &wreq::Client {
+        if let Some(p) = &self.proxied_client {
+            return p;
         }
+        if let Some(p) = &self.auto_proxied_client {
+            if crate::config::should_auto_proxy(url.as_str()) {
+                return p;
+            }
+        }
+        &self.direct_client
     }
 
     pub async fn fetch(&self, url: &Url) -> Result<Response, NetError> {

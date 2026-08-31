@@ -407,6 +407,11 @@ pub struct HttpClient {
     client: tokio::sync::OnceCell<Client>,
     /// Direct-connect client (no proxy). Built once on first use.
     direct_client: tokio::sync::OnceCell<Client>,
+    /// Proxy client for known-blocked domains when no explicit proxy was
+    /// configured. Built once on first auto-proxy hit from `AGINXBROWSER_PROXY`;
+    /// `None` inside means the env var is unset (every later check falls
+    /// through to the direct client without rebuilding).
+    auto_proxy_client: tokio::sync::OnceCell<Option<Client>>,
     proxy_url: Option<String>,
     pub cookie_jar: Arc<CookieJar>,
     pub user_agent: RwLock<String>,
@@ -441,6 +446,7 @@ impl HttpClient {
         HttpClient {
             client: tokio::sync::OnceCell::new(),
             direct_client: tokio::sync::OnceCell::new(),
+            auto_proxy_client: tokio::sync::OnceCell::new(),
             proxy_url: proxy_url.map(|s| s.to_string()),
             cookie_jar,
             user_agent: RwLock::new(
@@ -514,14 +520,54 @@ impl HttpClient {
         }).await
     }
 
-    /// Pick the client for this request. When a proxy is configured, route
-    /// through it (foreign-site mode); otherwise connect directly.
-    async fn get_client_for(&self) -> &Client {
+    /// Pick the client for this request. An explicitly configured proxy
+    /// (`context proxy_url`) routes ALL traffic — that is the operator's
+    /// opt-in. Without one, requests go direct except known-blocked domains
+    /// (the same list /fetch and download honor), which ride
+    /// `AGINXBROWSER_PROXY` when set. That per-request fallback is what keeps
+    /// page/session/CDP navigations working on the CN boundary: a session
+    /// created without use_proxy used to hard-fail on wikipedia while /fetch
+    /// succeeded for the same origin.
+    async fn get_client_for(&self, url: &Url) -> &Client {
         if self.proxy_url.is_some() {
-            self.get_client().await
-        } else {
-            self.get_direct_client().await
+            return self.get_client().await;
         }
+        if let Some(c) = self.get_auto_proxy_client(url).await {
+            return c;
+        }
+        self.get_direct_client().await
+    }
+
+    /// Proxied client for known-blocked domains, built once from
+    /// `AGINXBROWSER_PROXY`. `None` when the domain isn't listed or no proxy
+    /// is configured — callers fall through to the direct client.
+    ///
+    /// Like `get_client`, no SSRF DNS resolver here: with a proxy the target
+    /// resolves at the proxy, and the proxy host itself is often loopback.
+    async fn get_auto_proxy_client(&self, url: &Url) -> Option<&Client> {
+        if !crate::config::should_auto_proxy(url.as_str()) {
+            return None;
+        }
+        let proxy = match crate::config::proxy_from_env() {
+            Some(p) => p,
+            None => return None,
+        };
+        self.auto_proxy_client
+            .get_or_init(|| async move {
+                let mut builder = reqwest_builder_no_env_proxy()
+                    .redirect(Policy::none())
+                    .timeout(Duration::from_secs(30))
+                    .connect_timeout(Duration::from_secs(10))
+                    .pool_idle_timeout(Duration::from_secs(60))
+                    .tcp_keepalive(Duration::from_secs(30))
+                    .danger_accept_invalid_certs(false);
+                if let Ok(p) = reqwest::Proxy::all(&proxy) {
+                    builder = builder.proxy(p);
+                }
+                Some(builder.build().expect("failed to build auto-proxy HTTP client"))
+            })
+            .await
+            .as_ref()
     }
 
     /// Read-only accessor for the proxy URL the client was configured with
@@ -537,8 +583,11 @@ impl HttpClient {
     /// the underlying connection pool — so callers that need an owned handle
     /// (e.g. `op_fetch_url`, which builds a request and follows redirects
     /// itself) can take one without copying the pool.
-    pub async fn request_client(&self) -> Client {
-        self.get_client_for().await.clone()
+    pub async fn request_client(&self, url: &str) -> Client {
+        match url::Url::parse(url) {
+            Ok(u) => self.get_client_for(&u).await.clone(),
+            Err(_) => self.get_direct_client().await.clone(),
+        }
     }
 
     pub async fn fetch(&self, url: &Url) -> Result<Response, NetError> {
@@ -731,7 +780,7 @@ impl HttpClient {
                 _ => None,
             };
 
-            let mut req_builder = self.get_client_for().await.request(method.clone(), current_url.as_str())
+            let mut req_builder = self.get_client_for(&current_url).await.request(method.clone(), current_url.as_str())
                 .headers(headers);
 
             if let Some(ref b) = body {

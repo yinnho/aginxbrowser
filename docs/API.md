@@ -1091,7 +1091,7 @@ If AginxBrowser is deployed on a remote server, connect through an SSH tunnel:
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL (seconds); `0` disables |
 | `AGINXBROWSER_MCP_ALLOWED_HOSTS` | unset | Extra `Host` values accepted by `/mcp` (comma-separated) — the DNS-rebinding guard defaults to loopback; add your LAN IP / Docker hostname when other machines call the instance |
 | `AGINXBROWSER_DOWNLOAD_DIR` | `.` | Directory where `/download` saves files |
-| `AGINXBROWSER_PROXY` | None | Proxy address (used when `use_proxy:true`) |
+| `AGINXBROWSER_PROXY` | None | Proxy address (used when `use_proxy:true`, and applied automatically for browser/session/CDP navigations to known-blocked domains) |
 | `CAPTCHA_SOLVER_API_KEY` | None | 2captcha API key; enables automatic CAPTCHA solving when set |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | CAPTCHA solving service |
 

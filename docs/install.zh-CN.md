@@ -163,7 +163,7 @@ cargo build --release --features stealth,screenshot   # 约 4 分钟
 | 变量 | 默认 | 说明 |
 |------|------|------|
 | `AGINXBROWSER_BIND` | `0.0.0.0:8089` | 监听地址（公网部署建议绑 127.0.0.1 + nginx 反代） |
-| `AGINXBROWSER_PROXY` | 无 | 代理地址（`use_proxy:true` 时用，抓国外站）。注意：`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` 这些标准代理变量引擎一律不认，代理只看 `AGINXBROWSER_PROXY` 这一个开关 |
+| `AGINXBROWSER_PROXY` | 无 | 代理地址（`use_proxy:true` 时用；browser/session/CDP 页面导航遇到已知被墙域名（wikipedia.org、github.com 等）也会自动走它）。注意：`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` 这些标准代理变量引擎一律不认，代理只看 `AGINXBROWSER_PROXY` 这一个开关 |
 | `CAPTCHA_SOLVER_API_KEY` | 无 | 2captcha Key，设了自动解验证码 |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 缓存 TTL（秒），`0` 禁用 |
 | `AGINXBROWSER_DOMAIN_RATE_PER_MIN` | `20` | 单域名每分钟页面上限（超限返回 429；`0` 关闭）——本工具做实时查询，不做爬虫 |

@@ -932,7 +932,7 @@ claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 缓存 TTL（秒），`0` 禁用 |
 | `AGINXBROWSER_DOWNLOAD_DIR` | `.` | `/download` 落盘目录 |
-| `AGINXBROWSER_PROXY` | 无 | 代理地址（`use_proxy:true` 时使用） |
+| `AGINXBROWSER_PROXY` | 无 | 代理地址（`use_proxy:true` 时使用；browser/session/CDP 页面导航遇到已知被墙域名时也会自动走它） |
 | `CAPTCHA_SOLVER_API_KEY` | 无 | 2captcha API Key，设置后自动解决验证码 |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | 验证码解决服务 |
 
