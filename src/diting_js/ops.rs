@@ -142,9 +142,9 @@ pub struct JsNetworkEvent {
     pub timestamp: f64,
 }
 
-/// A response body retained for `Network.getResponseBody`. Text bodies are
-/// stored lossy-UTF-8 (`base64_encoded = false`); binary bodies base64.
-#[cfg_attr(not(test), allow(dead_code))] // tests read both fields; CDP consumer pending
+/// A response body retained for `Network.getResponseBody`. Bodies that are
+/// exact UTF-8 text are stored as strings (`base64_encoded = false`); binary
+/// and non-UTF-8 bodies (GBK text, mislabeled binaries) are stored base64.
 #[derive(Debug, Clone)]
 pub struct StoredNetworkResponseBody {
     pub body: String,
@@ -1918,8 +1918,11 @@ async fn op_fetch_url(
         let request_id = format!("fetch-{}", gs.network_response_body_counter);
         let max_entries = response_body_entry_limit();
         let max_bytes = response_body_byte_limit();
-        let base64_encoded =
-            !text_like_content_type(resp_headers.get("content-type").map(|s| s.as_str()));
+        // Content-Type claiming text but bytes not valid UTF-8 (a GBK page)
+        // must store base64 — a lossy copy would corrupt the CDP
+        // getResponseBody round-trip (upstream #716 family).
+        let base64_encoded = !text_like_content_type(resp_headers.get("content-type").map(|s| s.as_str()))
+            || std::str::from_utf8(&resp_bytes).is_err();
         if max_entries > 0 && max_bytes > 0 && resp_bytes.len() <= max_bytes {
             gs.network_response_bodies.insert(
                 request_id.clone(),

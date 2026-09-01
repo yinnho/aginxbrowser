@@ -431,7 +431,6 @@ impl JsRuntime {
 
     /// Retained response body for a script-initiated request, keyed by its
     /// `fetch-{N}` id. See `JsState::network_response_bodies`.
-    #[cfg_attr(not(test), allow(dead_code))] // batch-2 kernel; /network endpoint is the pending consumer
     pub fn get_network_response_body(
         &self,
         request_id: &str,
@@ -443,7 +442,6 @@ impl JsRuntime {
             .cloned()
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // frees the fetch-{N} LRU between sessions
     pub fn clear_network_response_bodies(&self) {
         let mut state = self.state.borrow_mut();
         state.network_response_bodies.clear();

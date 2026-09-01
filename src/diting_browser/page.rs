@@ -129,10 +129,10 @@ pub struct NetworkEvent {
     pub timestamp: f64,
 }
 
-/// A response body retained for `get_response_body` (upstream #360). Text
-/// bodies are stored lossy-UTF-8 (`base64_encoded = false`); binary bodies
-/// base64 so `take_response_body_raw` is byte-exact.
-#[cfg_attr(not(test), allow(dead_code))] // read by tests; CDP getResponseBody consumer pending
+/// A response body retained for `get_response_body` (upstream #360). Bodies
+/// that are exact UTF-8 text are stored as strings (`base64_encoded = false`);
+/// anything else (binary, or non-UTF-8 text like GBK) is stored base64 so
+/// `take_response_body_raw` is byte-exact.
 #[derive(Debug, Clone)]
 pub struct StoredResponseBody {
     pub body: String,
@@ -1925,9 +1925,10 @@ impl Page {
         request_id
     }
 
-    /// Record the event and retain the body for `get_response_body`. Text
-    /// Content-Types store lossy-UTF-8; anything else stores base64 so
-    /// `take_response_body_raw` is byte-exact.
+    /// Record the event and retain the body for `get_response_body`. Bodies
+    /// that are exact UTF-8 text store as strings; binary and non-UTF-8
+    /// bodies (GBK text included) store base64 so `take_response_body_raw`
+    /// is byte-exact.
     fn record_network_event_with_body(
         &mut self,
         url: &str,
@@ -1957,6 +1958,10 @@ impl Page {
         if max_entries == 0 || max_bytes == 0 || body.len() > max_bytes {
             return;
         }
+        // Content-Type can claim text while the bytes are not valid UTF-8
+        // (a GBK text/html page). A lossy store would hand U+FFFD back to
+        // getResponseBody — Chrome keeps such bodies base64 (byte-exact).
+        let base64_encoded = base64_encoded || std::str::from_utf8(body).is_err();
         let body = if base64_encoded {
             BASE64.encode(body)
         } else {
@@ -1979,7 +1984,6 @@ impl Page {
 
     /// Body stored for a request id: page-side (`{page}.{N}`) or
     /// script-initiated (`fetch-{N}`, retained in the JS runtime).
-    #[cfg_attr(not(test), allow(dead_code))] // batch-2 kernel; /network endpoint is the pending consumer
     pub fn get_response_body(&self, request_id: &str) -> Option<StoredResponseBody> {
         self.response_bodies.get(request_id).cloned().or_else(|| {
             self.js
@@ -2037,7 +2041,6 @@ impl Page {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // batch-2 kernel; frees the LRU caches between sessions
     pub fn clear_response_bodies(&mut self) {
         self.response_bodies.clear();
         self.response_body_order.clear();
@@ -2320,6 +2323,40 @@ mod tests {
                 );
                 let _ = stream.write_all(response.as_bytes());
                 let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        port
+    }
+
+    /// `local_http_server_typed` for bodies that are not valid UTF-8 (the
+    /// GBK tests). Byte-exact on the wire.
+    fn local_http_server_bytes(routes: Vec<(&'static str, u16, &'static str, Vec<u8>)>) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for _ in 0..64 {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let path = String::from_utf8_lossy(&buf[..n])
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_string();
+                let (status, ctype, body) = routes
+                    .iter()
+                    .find(|(p, _, _, _)| *p == path)
+                    .map(|(_, s, c, b)| (*s, *c, b.clone()))
+                    .unwrap_or((404, "text/html", Vec::new()));
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: {ctype}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(&body);
                 let _ = stream.flush();
             }
         });
@@ -3271,6 +3308,63 @@ mod tests {
         assert!(stored.base64_encoded, "octet-stream must store base64");
         let raw = p.take_response_body_raw(&rid).expect("raw bytes");
         assert_eq!(raw, wire_bytes);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn non_utf8_text_body_stores_base64() {
+        let _g = net_test_guard();
+        // GBK "中文-tail": a text/html body that is NOT valid UTF-8. Storing
+        // it by content-type alone would go lossy (U+FFFD); Chrome keeps
+        // non-UTF-8 bodies base64 so the getResponseBody round-trip is
+        // byte-exact (upstream #716 family).
+        let gbk: Vec<u8> = vec![0xD6, 0xD0, 0xCE, 0xC4, b'-', b't', b'a', b'i', b'l'];
+        let mut headers = std::collections::HashMap::new();
+        headers.insert(
+            "content-type".to_string(),
+            "text/html; charset=gbk".to_string(),
+        );
+        let mut p = test_page();
+        let rid = p.record_network_event_with_body(
+            "http://127.0.0.1:1/gbk",
+            "GET",
+            "Document",
+            200,
+            &headers,
+            &gbk,
+        );
+        let stored = p.get_response_body(&rid).expect("gbk body stored");
+        assert!(stored.base64_encoded, "non-UTF-8 text must store base64");
+        assert_eq!(p.take_response_body_raw(&rid).unwrap(), gbk);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn js_fetch_non_utf8_text_body_stores_base64() {
+        let _g = net_test_guard();
+        let gbk: Vec<u8> = vec![0xD6, 0xD0, 0xCE, 0xC4, b'-', b't', b'a', b'i', b'l'];
+        let host = "<html><script>\
+                     fetch('/api').then(r => r.text()).then(t => { window.__got = t; });\
+                     </script></html>"
+            .as_bytes()
+            .to_vec();
+        let port = local_http_server_bytes(vec![
+            ("/app", 200, "text/html", host),
+            ("/api", 200, "text/html; charset=gbk", gbk.clone()),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/app")).await.unwrap();
+        // r.text() hands page JS a lossy string; what matters here is the
+        // retained body for CDP getResponseBody: base64, byte-exact.
+        assert!(p.evaluate("window.__got").is_string());
+        p.sync_js_network_events();
+        let ev = p
+            .network_events
+            .iter()
+            .find(|e| e.url.ends_with("/api"))
+            .expect("fetch network event after sync");
+        let rid = ev.request_id.clone();
+        let stored = p.get_response_body(&rid).expect("fetch body stored");
+        assert!(stored.base64_encoded, "non-UTF-8 text fetch must store base64");
+        assert_eq!(p.take_response_body_raw(&rid).unwrap(), gbk);
     }
 
     #[tokio::test(flavor = "current_thread")]
