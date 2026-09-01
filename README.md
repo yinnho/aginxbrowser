@@ -1,6 +1,6 @@
 # AginxBrowser
 
-**The Browser for AI Agents. See the live web. Interact with it.**
+**The Browser for AI Agents. See the live web. Read it. Act on it. Remember it.**
 
 [![skills.sh](https://skills.sh/b/yinnho/aginxbrowser)](https://skills.sh/yinnho/aginxbrowser)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -9,11 +9,11 @@
 
 **[English](README.md)** | [中文文档](README.zh-CN.md)
 
-A browser built for agents from the first line of code — not a human browser bolted onto automation. See the world, read it, search it, and act on it: one Rust binary with built-in V8, **no Chromium required**.
+A browser built for agents from the first line of code — not a human browser bolted onto automation. See the world, read it, search it, act on it, and keep what you read: one Rust binary with built-in V8, **no Chromium required**.
 
 > Humans have Chrome. Agents have AginxBrowser.
 
-One binary, zero dependencies, instant service. HTTP API + native MCP — agents plug in and go.
+One binary, zero dependencies, instant service. HTTP API + native MCP + CDP — agents plug in and go, and existing Playwright / Puppeteer / browser-use code attaches directly.
 
 *Real pages rendered by AginxBrowser's diting engine (no Chromium) — Wikipedia, this repo, Rust. [Screenshot it yourself →](docs/API.md#screenshot)*
 
@@ -30,17 +30,18 @@ Existing "browser automation" was built for humans or for one-shot scraping — 
 | Designed for | **Agents first** | Human debugging | Scraping service | LLM wrapper |
 | Dependencies | Single binary, no Chromium | Chromium ~500MB | Docker ~1GB | Chromium |
 | Sees (screenshots) | ✅ built-in diting rendering engine | Needs Chromium | ❌ | Needs Chromium |
-| Reads | markdown + js_extract | DIY | markdown | DIY |
-| Finds (search) | ✅ 6-engine meta-search | ❌ | ❌ | ❌ |
+| Reads | markdown + js_extract + fetch receipts | DIY | markdown | DIY |
+| Finds (search) | ✅ 15 engines, 7 categories, merged | ❌ | ❌ | ❌ |
 | Acts | indexed session interaction | DevTools API | ❌ | LLM-driven |
-| Protocol | HTTP + native MCP | Node API | HTTP | Python |
-| TLS fingerprints | ✅ Chrome/Firefox/Safari | Plugin required | ❌ | ❌ |
-| CAPTCHA solving | ✅ automatic | DIY | ❌ | ❌ |
+| Remembers | ✅ local fetch/search cache (SQLite FTS5) | ❌ | crawl cache | ❌ |
+| Protocol | HTTP + native MCP + CDP | Node API | HTTP | Python |
+| TLS fingerprints | ✅ Chrome/Firefox/Safari/Edge | Plugin required | ❌ | ❌ |
+| CAPTCHA | ✅ detect + auto-wait + optional 2captcha | DIY | ❌ | ❌ |
 | Interactive sessions | ✅ persistent | ✅ | ❌ | ✅ |
 
-An agent needs five things from a browser: **see, read, find, act, deploy.** One binary covers them all — systemd-friendly, MCP-native for Claude/Cursor, zero dependencies.
+An agent needs five things from a browser: **see, read, find, act, remember.** One binary covers them all — systemd-friendly, MCP-native for Claude/Cursor, zero dependencies.
 
-**Core advantage: no Chromium.** AginxBrowser inlines a full browser engine (V8 + Rust HTTP stack + our own diting CSS/layout/paint rendering engine, with the Blitz/Stylo/Taffy lineage as its reference implementation). No Puppeteer, no Chrome, no Docker. One Rust binary under systemd is your agent browsing infrastructure.
+**Core advantage: no Chromium.** AginxBrowser inlines a full browser engine (V8 + Rust HTTP stack + the diting CSS/layout/paint rendering engine, with the Blitz/Stylo/Taffy lineage as its reference implementation). No Puppeteer, no Chrome, no Docker. One Rust binary under systemd is your agent browsing infrastructure.
 
 ## Three Things Stateless Renderers Can't Do
 
@@ -48,25 +49,37 @@ Most new "agent browsers" are stateless, fingerprint-less one-shot renderers —
 
 - **🔐 Real TLS fingerprints** — stealth mode replicates the complete Chrome145 / Firefox133 / Safari / Edge TLS handshakes via BoringSSL (not just a UA string), switchable per request; Cloudflare Turnstile challenges wait automatically for `cf_clearance`. Fingerprint-less engines eat 403s — we get through.
 - **🤝 Stateful interactive sessions** — persistent sessions (8-minute idle keep-alive), login state injectable and exportable (`session_create(cookies=...)` ↔ `session_cookies`), surviving pagination and multi-step flows. One-shot engines throw state away.
-- **🔌 MCP native** — 17 tools as first-class citizens (not a CDP shim). Claude Code / Cursor / Claude Desktop connect in one line. HTTP + MCP dual protocol.
+- **🔌 MCP native** — 17 tools as first-class citizens (not a CDP shim). Claude Code / Cursor / Claude Desktop connect in one line. HTTP + MCP dual protocol — plus a CDP bridge, so the DevTools ecosystem works too.
 
 > Reference point: Cloudflare's Kitesurf explicitly ships neither real TLS-fingerprint negotiation nor persistent auth sessions — anti-bot and login territory is exactly where AginxBrowser plays.
 
 Apache-2.0 open source, single binary — self-host today, no cloud lock-in.
 
+## Every Fetch Is a Receipt
+
+Agents act on what a browser tells them, so the response reports what actually happened — not just "got a 200":
+
+- **`tier`** — which path served the page: plain HTTP (~100 ms) or the V8-rendered browser tier. An agent can see *why* a fetch was fast or slow.
+- **`redirected_from`** — the full redirect trail. `redirected_from[0]` is the URL you asked for, `url` is where the content actually came from — requested paired with effective, every hop visible.
+- **`content_hash` + `changed_since_prev`** — every fetch is hashed; consecutive samples of the same URL can be diffed. A rate-limited origin serving the same frozen 200 body for days reads as `changed_since_prev: false` — the cheapest drift detector there is.
+- **`captcha_event`** — when a challenge page was detected (and solved, if a solver is configured), the response says so instead of handing over a challenge page as if it were content.
+
+The [local cache](#capabilities) builds on the same idea: search hits come back with `[§ heading]` section prefixes so an agent knows *where on the page* a hit landed, and ranking fuses keyword relevance with freshness.
+
 ## Capabilities
 
 - **Tiered rendering**: static pages over plain HTTP (~100ms); V8 spins up only when JS rendering is needed (~1-2s) — 90% of the [bench](bench/README.md) page set served without spinning up V8 at all; every response reports which tier served it (`tier` field)
-- **Multi-engine meta-search**: general web (Baidu / Bing / Sogou / WeChat / Google / DuckDuckGo), news (Bing News), code (Stack Overflow, GitHub), packages (npm, PyPI), academic (arXiv), AI models (Hugging Face) — queried concurrently, merged and deduplicated. Operators can plug a private Meilisearch index into the same `/search`. Search → read in one step
+- **Multi-engine meta-search**: general web (Baidu / Bing / Sogou / WeChat / Google / DuckDuckGo), news (Bing News), code (Stack Overflow, GitHub), packages (npm, PyPI), academic (arXiv), AI models (Hugging Face) — 15 engines across 7 categories, queried concurrently, merged and deduplicated. Operators can plug a private Meilisearch index into the same `/search`. Search → read in one step
 - **Image search**: `categories=images` hits Baidu/Bing image indexes and returns direct binary `image_url` links (downloadable straight to jpg/png) plus `source_url` provenance
 - **Interactive sessions**: persistent browser sessions with indexed interaction (`state/click/input/scroll/eval`) — agents browse like humans do, and `session_export` turns what an agent figured out into a runnable curl replay script (zero model tokens on re-run)
-- **CAPTCHA auto-solve**: type detection with optional 2captcha integration — search never stalls on verification pages
+- **CDP bridge**: `/json/version` + `/devtools/{kind}/{id}` WebSocket — `chromium.connectOverCDP()` from Playwright, Puppeteer, or browser-use attaches with one line ([integration guide](docs/integrations.md)). DevTools ecosystem compatibility without becoming a CDP shim
+- **File download**: streaming to disk (no memory buffering), SHA-256 integrity, resume of interrupted transfers — for binaries, archives, datasets
+- **Local cache that remembers**: every fetch/search lands in SQLite (FTS5) at `~/.aginxbrowser/cache.db`. The `cache` tool re-answers from what the agent already read instead of re-paying network time: full-text search with CJK substring matching, keyword × freshness fusion ranking, `[§ heading]` section-aware snippets, per-URL content hashes for drift detection, TTL-bounded, per-session scoping for shared deployments
+- **CAPTCHA handling**: type detection with automatic Cloudflare challenge wait and optional 2captcha integration — search never stalls on verification pages
 - **JS data extraction**: `js_extract` pulls `window.__INITIAL_STATE__` and other structured data out of SPAs
-- **Screenshot rendering**: `/screenshot` endpoint (opt-in `--features screenshot`) paints the JS-rendered DOM with our own diting rendering engine — pure CPU, no Chromium — to PNG. Vision input for agents
-- **Cloudflare auto-wait**: detects "Just a moment..." challenge pages and waits out `cf_clearance`
+- **Screenshot rendering**: `/screenshot` endpoint (opt-in `--features screenshot`) paints the JS-rendered DOM with the diting rendering engine — pure CPU, no Chromium — to PNG. Vision input for agents
 - **TLS fingerprint spoofing**: stealth mode impersonates Chrome145/Firefox133/Safari/Edge, switchable per request
-- **MCP server**: `--mcp` mode exposes 17 tools (fetch/eval/click/search/download/cache + 11 session tools) — Claude Code / Claude Desktop / Cursor call them directly
-- **Local cache**: every fetch/search lands in SQLite (FTS5) at `~/.aginxbrowser/cache.db` — the `cache` tool re-answers from what the agent already read instead of re-paying network time; CJK substring + English full-text, TTL-bounded, per-session scoping for shared deployments
+- **MCP server**: `--mcp` mode exposes 17 tools (fetch/eval/search/download/cache + session + screenshot tools) — Claude Code / Claude Desktop / Cursor call them directly
 - **Firecrawl compatible**: `/v1/scrape` endpoint — existing Firecrawl clients migrate by changing the base URL
 - **DNS rebinding protection**: built-in SSRF guard + post-resolution IP validation
 
@@ -177,7 +190,8 @@ aginxbrowser/
 │   └── bootstrap.js      # V8 bootstrap script
 ├── README.md
 ├── docs/
-│   └── API.md            # Full API reference (HTTP + MCP)
+│   ├── API.md            # Full API reference (HTTP + MCP)
+│   └── integrations.md   # CDP bridge: Playwright / Puppeteer / browser-use
 ├── bench/                # Benchmark harness + results (vs headless Chrome)
 │   ├── README.md         #   methodology + numbers
 │   ├── pages.txt         #   fixed 20-page set
@@ -188,21 +202,28 @@ aginxbrowser/
     ├── main.rs              # HTTP service entry & routing
     ├── server.rs            # Business layer (fetch/click/eval/search)
     ├── session.rs           # Interactive browser sessions
-    ├── captcha.rs           # CAPTCHA detection & auto-solve
-    ├── render.rs            # Tiered rendering (HTTP direct → diting browser engine)
     ├── mcp.rs               # MCP server (17 tools)
+    ├── render.rs            # Tiered rendering (HTTP direct → diting browser engine)
+    ├── store.rs             # Local fetch/search cache (SQLite FTS5, drift hashes)
+    ├── download.rs          # Streaming file download (sha256, resume)
+    ├── robots.rs            # RFC 9309 robots.txt checker (opt-in gate)
+    ├── rate.rs              # Per-domain + per-session budgets
+    ├── captcha.rs           # CAPTCHA detection & auto-solve
     ├── firecrawl_compat.rs  # Firecrawl-compatible /v1/scrape endpoint
+    ├── diting_cdp/          # CDP bridge (DevTools HTTP + WebSocket)
+    ├── doctor_cli.rs        # `aginxbrowser doctor` self-check
     ├── browser.rs           # Top-level API: Browser, BrowserBuilder
     ├── page.rs              # Top-level API: Page, Element
     ├── config.rs            # BrowserConfig
     ├── cookie.rs            # CookieStore
     ├── error.rs             # Error types
-    ├── search/              # Native search engines
+    ├── search/              # 15 native search engines, 7 categories
     │   ├── mod.rs           #   SearchEngine trait, Registry, merge/dedupe, progressive backoff
     │   ├── baidu.rs         #   Baidu (JSON API, wreq stealth)
     │   ├── baidu_images.rs  #   Baidu Images (acjson API, images category)
     │   ├── bing.rs          #   Bing (HTML parsing, plain reqwest)
     │   ├── bing_images.rs   #   Bing Images (images/async endpoint, images category)
+    │   ├── bing_news.rs     #   Bing News RSS (news category; proxy-first)
     │   ├── sogou.rs         #   Sogou web (HTML parsing, plain reqwest)
     │   ├── sogou_wechat.rs  #   Sogou WeChat (HTML parsing + /link resolution)
     │   ├── duckduckgo.rs    #   DuckDuckGo (html.duckduckgo.com, general; direct-first)
@@ -210,15 +231,17 @@ aginxbrowser/
     │   ├── stackexchange.rs #   Stack Overflow (SE API v2.3, code category)
     │   ├── github_repos.rs  #   GitHub repos (api.github.com, code category)
     │   ├── arxiv.rs         #   arXiv (Atom API, academic category)
-    │   ├── bing_news.rs     #   Bing News RSS (news category; proxy-first)
     │   ├── huggingface.rs   #   HF Hub models/datasets/spaces (ai category)
     │   ├── npm.rs           #   npm packages (npms.io API, packages category)
     │   ├── pypi.rs          #   PyPI name resolution (JSON API, packages)
     │   └── meilisearch.rs   #   Private-index adapter (env-configured)
     │
     ├── diting_dom/          # HTML parsing, DOM tree, CSS selectors
+    ├── diting_css/          # CSS parsing + cascade
     ├── diting_net/          # HTTP client, cookies, encoding, proxies
     ├── diting_js/           # V8 runtime, JS ops, module loading
+    ├── diting_layout/       # Taffy-based layout, floats, hit-testing
+    ├── diting_fonts/        # Bundled CJK font subset, fallback
     └── diting_browser/      # Page navigation, lifecycle, browser context
 ```
 
@@ -256,6 +279,11 @@ Requirements: Rust 1.78+; the V8 static library downloads automatically on first
 | `AGINXBROWSER_DOMAIN_RATE_PER_MIN` | `20` | Per-registrable-domain page budget per minute (subdomains share one budget); over-budget requests get 429 with the stance message. `0` disables. See "A Browser, Not a Crawler" |
 | `AGINXBROWSER_SESSION_PAGE_LIMIT` | `200` | Total pages one interactive session may walk (navigation-causing clicks count); over-budget navigations are refused, the current page stays interactive. `0` disables |
 | `AGINXBROWSER_MCP_ALLOWED_HOSTS` | unset | Extra `Host` values accepted by `/mcp` (comma-separated) — the transport's DNS-rebinding guard defaults to loopback, so add your LAN IP or Docker hostname when other machines call the instance |
+| `AGINXBROWSER_STORE` | on | Local fetch/search cache; `0`/`false`/`off` disables |
+| `AGINXBROWSER_STORE_PATH` | `~/.aginxbrowser/cache.db` | SQLite database location (created 0600) |
+| `AGINXBROWSER_STORE_TTL_HOURS` | `720` | Cached page TTL |
+| `AGINXBROWSER_STORE_SEARCH_TTL_HOURS` | `168` | Cached search-result-set TTL |
+| `AGINXBROWSER_STORE_SCOPE` | `global` | `session` gives each MCP client session its own cache scope — set this on public multi-client deployments |
 | `CAPTCHA_SOLVER_API_KEY` | none | 2captcha API key; enables CAPTCHA auto-solving |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | CAPTCHA solving provider |
 | `AGINXBROWSER_MEILI_URL` | none | Meilisearch base URL; set to enable the private-index engine |
@@ -265,17 +293,24 @@ Requirements: Rust 1.78+; the V8 static library downloads automatically on first
 ## API Documentation
 
 **Full API reference** → [`docs/API.md`](docs/API.md)
+**CDP integration guide** → [`docs/integrations.md`](docs/integrations.md) — Playwright / Puppeteer / browser-use one-liners
 **Security audit notes** → [`docs/skills-sh-audit.md`](docs/skills-sh-audit.md) — why skills.sh shows "Critical Risk", and which real product feature each warning corresponds to
 
 Covers:
-- All HTTP endpoints (`/fetch`, `/click`, `/eval`, `/search`, `/v1/scrape`, 10 session endpoints)
-- All 15 MCP server tools and their parameters
+- All 25 HTTP endpoints (`/fetch`, `/search`, `/screenshot`, `/download`, `/v1/scrape`, `/doctor`, 11 session endpoints, CDP discovery, MCP transport)
+- All 17 MCP server tools and their parameters
 - Claude Code / Claude Desktop / Cursor client configuration
 - Environment variables, error codes, per-site scraping examples
 
 ## Plugging Into Other Systems
 
 AginxBrowser is **pure attach-alongside infrastructure** — like a real browser, it runs as an independent service that anything can call, without embedding host code or polluting host config. Deploy one instance per machine (under systemd) and every app needing "render + scrape" capability shares it.
+
+Three attach points:
+
+- **HTTP** — `/fetch`, `/search`, `/screenshot`, `/download` for any language with an HTTP client
+- **MCP** — one line into Claude Code / Cursor / Claude Desktop (above)
+- **CDP** — point Playwright / Puppeteer / browser-use at `ws://your-host:8089/devtools/browser/<id>`; see [`docs/integrations.md`](docs/integrations.md)
 
 Integration: read the environment variable `AGINXBROWSER_URL=http://127.0.0.1:8089`. Unset → behavior unchanged; set → risk-controlled sites automatically route through AginxBrowser for rendering, falling back gracefully on failure.
 
@@ -289,4 +324,4 @@ Integration: read the environment variable `AGINXBROWSER_URL=http://127.0.0.1:80
 
 ## License
 
-Consistent with the OpenCarrier main project. Apache-2.0.
+Apache-2.0.
