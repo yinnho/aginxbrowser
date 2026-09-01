@@ -12,7 +12,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::server::{do_click, do_eval, do_fetch, do_search};
+use crate::render::smart_fetch;
+use crate::server::{do_click, do_eval, do_search};
 use crate::session::{self, SessionCommand};
 use crate::{ClickRequest, EvalRequest, FetchRequest, OutputFormat, SearchRequest};
 
@@ -295,13 +296,10 @@ pub struct AginxBrowserMcp {
 #[tool_router]
 impl AginxBrowserMcp {
     #[tool(
-        description = "Fetch a webpage and return clean markdown/html/text. Use whenever the agent needs to READ any web page - blogs, docs, articles, JS-rendered SPAs, Cloudflare-protected sites. Supports JS rendering, stealth TLS fingerprints, and structured-data extraction via js_extract.",
+        description = "Fetch a webpage and return clean markdown/html/text. Use whenever the agent needs to READ any web page - blogs, docs, articles, JS-rendered SPAs, Cloudflare-protected sites. Static pages are served over plain HTTP (~100ms tier:\"http\"); pages that need JS get the full browser (tier:\"browser\"). render_tier selects auto (default) / http (pure HTTP, refuses the upgrade) / obscura (always browser).",
         annotations(title = "Fetch Webpage", read_only_hint = true)
     )]
     async fn fetch(&self, Parameters(params): Parameters<FetchParams>) -> String {
-        if let Err(e) = crate::rate::check_domain(&params.url) {
-            return json!({ "error": e }).to_string();
-        }
         if let Err(e) = crate::robots::assert_allowed(&params.url).await {
             return json!({ "error": e }).to_string();
         }
@@ -326,22 +324,22 @@ impl AginxBrowserMcp {
             }),
         };
 
-        match tokio::task::spawn_blocking(move || do_fetch(req)).await {
-            Ok(Ok(resp)) => {
+        match smart_fetch(req).await {
+            Ok(resp) => {
                 crate::store::record_fetch(&self.owner, &resp);
                 let mut out = json!({
                     "url": resp.url,
                     "title": resp.title,
                     "content": resp.content,
-                    "truncated": resp.truncated
+                    "truncated": resp.truncated,
+                    "tier": resp.tier,
                 });
                 if !resp.redirected_from.is_empty() {
                     out["redirected_from"] = json!(resp.redirected_from);
                 }
                 out.to_string()
             }
-            Ok(Err(e)) => json!({ "error": format!("{}", e) }).to_string(),
-            Err(e) => json!({ "error": format!("task panicked: {}", e) }).to_string(),
+            Err(e) => json!({ "error": format!("{e:#}") }).to_string(),
         }
     }
 

@@ -79,8 +79,9 @@ pub struct FetchRequest {
     #[serde(default = "default_true")]
     pub auto_bypass_challenge: bool,
     /// Rendering strategy. `auto` (default): try fast HTTP-direct first, fall
-    /// back to the JS browser only if the page needs rendering. `http`: force
-    /// HTTP-only (fastest, no JS). `browser`: always use the full browser.
+    /// back to the JS browser only if the page needs rendering. `http`: pure
+    /// HTTP (fastest, no JS; errors instead of upgrading). `obscura`: always
+    /// use the full browser.
     #[serde(default)]
     pub render_tier: RenderTier,
     /// TLS fingerprint override (stealth mode only): "chrome145", "firefox133",

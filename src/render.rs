@@ -353,6 +353,16 @@ pub async fn smart_fetch(req: crate::FetchRequest) -> Result<FetchResponse, anyh
         }
     }
 
+    // render_tier:http is a promise to the caller — pure HTTP, no V8. When
+    // Tier 1 declines, report that instead of silently paying for the
+    // browser tier the caller explicitly opted out of.
+    if req.render_tier == RenderTier::Http {
+        return Err(anyhow::anyhow!(
+            "render_tier=http: {} is not servable over plain HTTP (SPA shell, challenge page, or non-200). Retry with render_tier=auto for JS rendering.",
+            req.url
+        ));
+    }
+
     // Tier 2: diting browser (existing do_fetch logic, runs on a dedicated
     // current-thread runtime via spawn_blocking because V8 is !Send — calling
     // run_on_local_runtime directly from an async context panics).
@@ -702,6 +712,39 @@ mod tests {
         assert_eq!(
             got.redirected_from,
             vec![format!("http://127.0.0.1:{port}/start")]
+        );
+    }
+
+    // render_tier:http is a pure-HTTP promise: when Tier 1 declines, the
+    // caller gets an error naming the contract, never a silently-upgraded
+    // browser fetch (which would also burn the V8 cost they opted out of).
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_tier_refuses_the_tier_two_upgrade() {
+        let _guard = crate::server::test_util::net_env_guard();
+        let port = raw_response_fixture(
+            b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_vec(),
+        )
+        .await;
+        let req = crate::FetchRequest {
+            url: format!("http://127.0.0.1:{port}/"),
+            format: OutputFormat::Markdown,
+            selector: None,
+            wait_secs: None,
+            use_proxy: false,
+            cookies: vec![],
+            max_chars: 50000,
+            auto_bypass_challenge: true,
+            render_tier: crate::RenderTier::Http,
+            tls_fingerprint: None,
+            js_extract: None,
+        };
+        let err = smart_fetch(req)
+            .await
+            .err()
+            .expect("tier http must refuse the upgrade instead of serving tier browser");
+        assert!(
+            err.to_string().contains("render_tier=http"),
+            "error must name the contract, got: {err}"
         );
     }
 
