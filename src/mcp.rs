@@ -329,13 +329,16 @@ impl AginxBrowserMcp {
         match tokio::task::spawn_blocking(move || do_fetch(req)).await {
             Ok(Ok(resp)) => {
                 crate::store::record_fetch(&self.owner, &resp);
-                json!({
+                let mut out = json!({
                     "url": resp.url,
                     "title": resp.title,
                     "content": resp.content,
                     "truncated": resp.truncated
-                })
-                .to_string()
+                });
+                if !resp.redirected_from.is_empty() {
+                    out["redirected_from"] = json!(resp.redirected_from);
+                }
+                out.to_string()
             }
             Ok(Err(e)) => json!({ "error": format!("{}", e) }).to_string(),
             Err(e) => json!({ "error": format!("task panicked: {}", e) }).to_string(),
