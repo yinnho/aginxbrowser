@@ -305,6 +305,30 @@ impl Store {
              );",
         )
         .map_err(|e| e.to_string())?;
+        // Migration for stores created before drift tracking: consecutive-sample
+        // hashes (prev_hash/prev_fetched_at) power changed_since_prev.
+        for (col, ddl) in [
+            (
+                "prev_hash",
+                "ALTER TABLE pages ADD COLUMN prev_hash TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "prev_fetched_at",
+                "ALTER TABLE pages ADD COLUMN prev_fetched_at INTEGER NOT NULL DEFAULT 0",
+            ),
+        ] {
+            let known: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('pages') WHERE name=?1",
+                    params![col],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(|n| n > 0)
+                .unwrap_or(true);
+            if !known {
+                let _ = conn.execute(ddl, []);
+            }
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -329,17 +353,30 @@ impl Store {
         let hash = hex(&Sha256::digest(content.as_bytes()));
         let ts = now();
         let expires = ts + page_ttl_hours() * 3600;
+        // Keep the previous sample's hash so repeated fetches of the same
+        // source expose drift (a rate-limited origin serving frozen 200s
+        // shows up as changed_since_prev=false across samples).
+        let prev: (String, i64) = self
+            .conn
+            .query_row(
+                "SELECT content_hash, fetched_at FROM pages WHERE owner=?1 AND norm_url=?2",
+                params![owner, norm],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap_or_default();
         let res = self.conn.query_row(
             "INSERT INTO pages (owner, url, norm_url, title, content, tier, truncated,
-                                content_hash, fetched_at, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                                content_hash, prev_hash, prev_fetched_at, fetched_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(owner, norm_url) DO UPDATE SET
                  url=excluded.url, title=excluded.title, content=excluded.content,
                  tier=excluded.tier, truncated=excluded.truncated,
                  content_hash=excluded.content_hash,
+                 prev_hash=excluded.prev_hash, prev_fetched_at=excluded.prev_fetched_at,
                  fetched_at=excluded.fetched_at, expires_at=excluded.expires_at
              RETURNING id",
-            params![owner, url, norm, title, content, tier, truncated as i64, hash, ts, expires],
+            params![owner, url, norm, title, content, tier, truncated as i64, hash,
+                    prev.0, prev.1, ts, expires],
             |r| r.get::<_, i64>(0),
         );
         match res {
@@ -438,7 +475,7 @@ impl Store {
             filter_sql.push_str(&format!(" AND p.fetched_at >= ?{}", filter_args.len() + 1));
             filter_args.push(s.into());
         }
-        let cols = "p.url, p.title, p.content, p.tier, p.truncated, p.fetched_at";
+        let cols = "p.url, p.title, p.content, p.tier, p.truncated, p.fetched_at, p.content_hash";
 
         // 1) FTS path: bm25() must sit in the same (sub)query as its MATCH.
         if let Some(raw) = q.query.as_deref().filter(|s| !s.trim().is_empty()) {
@@ -504,12 +541,14 @@ impl Store {
                     r.get::<_, String>(3)?,
                     r.get::<_, i64>(4)?,
                     r.get::<_, i64>(5)?,
+                    r.get::<_, String>(6)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
         let mut hits = Vec::new();
         for row in rows {
-            let (url, title, content, tier, truncated, fetched_at) = row.map_err(|e| e.to_string())?;
+            let (url, title, content, tier, truncated, fetched_at, content_hash) =
+                row.map_err(|e| e.to_string())?;
             hits.push(PageHit {
                 url,
                 title,
@@ -517,6 +556,7 @@ impl Store {
                 tier,
                 truncated: truncated != 0,
                 fetched_at,
+                content_hash,
             });
         }
         Ok(hits)
@@ -598,10 +638,13 @@ impl Store {
     fn get_page(&self, owner: &str, url: &str) -> Result<Option<PageFull>, String> {
         self.conn
             .query_row(
-                "SELECT url, title, content, tier, truncated, fetched_at FROM pages
+                "SELECT url, title, content, tier, truncated, fetched_at,
+                        content_hash, prev_hash, prev_fetched_at FROM pages
                  WHERE owner=?1 AND norm_url=?2",
                 params![owner, normalize_url(url)],
                 |r| {
+                    let content_hash: String = r.get(6)?;
+                    let prev_hash: String = r.get(7)?;
                     Ok(PageFull {
                         url: r.get(0)?,
                         title: r.get(1)?,
@@ -609,6 +652,10 @@ impl Store {
                         tier: r.get(3)?,
                         truncated: r.get::<_, i64>(4)? != 0,
                         fetched_at: r.get(5)?,
+                        changed_since_prev: !prev_hash.is_empty() && prev_hash != content_hash,
+                        content_hash,
+                        prev_hash,
+                        prev_fetched_at: r.get(8)?,
                     })
                 },
             )
@@ -781,6 +828,9 @@ pub struct PageHit {
     pub tier: String,
     pub truncated: bool,
     pub fetched_at: i64,
+    /// SHA-256 of the cached content — diff consecutive samples of the same
+    /// URL to catch a source that serves frozen bodies while claiming 200.
+    pub content_hash: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -809,6 +859,13 @@ pub struct PageFull {
     pub tier: String,
     pub truncated: bool,
     pub fetched_at: i64,
+    /// True when this fetch's content differs from the previous sample of the
+    /// same URL. Frozen-body lies (rate-limited origins serving stale 200s)
+    /// show up as false across consecutive samples.
+    pub changed_since_prev: bool,
+    pub content_hash: String,
+    pub prev_hash: String,
+    pub prev_fetched_at: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -867,6 +924,61 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].url, "https://docs.rs/rusqlite/latest");
         assert!(hits[0].snippet.contains("Rust"));
+    }
+
+    #[test]
+    fn page_hits_carry_content_hash() {
+        let s = test_store();
+        let body = "Rust bindings for SQLite. Use prepare and query_map.";
+        page(&s, "a", "https://docs.rs/rusqlite/latest", "rusqlite docs", body);
+        let hits = s
+            .query_pages("a", &CacheQuery { ..Default::default() })
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].content_hash, hex(&Sha256::digest(body.as_bytes())));
+    }
+
+    #[test]
+    fn consecutive_samples_expose_drift() {
+        let s = test_store();
+        page(&s, "a", "https://example.cn/feed", "feed", "version one");
+        let first = s.get_page("a", "https://example.cn/feed").unwrap().unwrap();
+        assert!(!first.changed_since_prev);
+        assert!(first.prev_hash.is_empty());
+
+        page(&s, "a", "https://example.cn/feed", "feed", "version two");
+        let second = s.get_page("a", "https://example.cn/feed").unwrap().unwrap();
+        assert!(second.changed_since_prev);
+        assert_eq!(second.prev_hash, first.content_hash);
+        assert_eq!(second.prev_fetched_at, first.fetched_at);
+
+        // The frozen-body lie: same bytes again in a row reads as unchanged.
+        page(&s, "a", "https://example.cn/feed", "feed", "version two");
+        let third = s.get_page("a", "https://example.cn/feed").unwrap().unwrap();
+        assert!(!third.changed_since_prev);
+        assert_eq!(third.content_hash, second.content_hash);
+    }
+
+    #[test]
+    fn reopen_migrates_pre_drift_schema() {
+        let path = std::env::temp_dir().join(format!("agx-store-mig-{}.db", uuid::Uuid::new_v4()));
+        {
+            let s = Store::open(&path).unwrap();
+            page(&s, "a", "https://example.cn/x", "t", "body");
+            // Roll the schema back to the pre-drift shape so the reopen below
+            // exercises the ALTER TABLE migration branch for real.
+            s.conn
+                .execute_batch("ALTER TABLE pages DROP COLUMN prev_hash;
+                                ALTER TABLE pages DROP COLUMN prev_fetched_at;")
+                .unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        let p = s.get_page("a", "https://example.cn/x").unwrap().unwrap();
+        assert!(!p.changed_since_prev);
+        assert_eq!(p.prev_fetched_at, 0);
+        page(&s, "a", "https://example.cn/x", "t", "body v2");
+        let p = s.get_page("a", "https://example.cn/x").unwrap().unwrap();
+        assert!(p.changed_since_prev);
     }
 
     #[test]
