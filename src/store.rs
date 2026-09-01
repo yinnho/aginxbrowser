@@ -209,7 +209,9 @@ fn like_escape(s: &str) -> String {
 }
 
 /// Snippet centered on the earliest occurrence of any term, bounded to
-/// char boundaries.
+/// char boundaries. When the hit sits under a markdown heading that falls
+/// outside the window, the heading is prefixed so the caller can tell which
+/// section of the page it landed in.
 fn snippet(text: &str, raw_query: &str) -> String {
     let hay = text.to_lowercase();
     let mut hit: Option<usize> = None;
@@ -225,6 +227,11 @@ fn snippet(text: &str, raw_query: &str) -> String {
     let start = floor_char_boundary(text, center.saturating_sub(80));
     let end = ceil_char_boundary(text, (center + 200).min(bytes));
     let mut s = String::new();
+    if let Some((off, h)) = heading_above(text, center) {
+        if off < start {
+            s.push_str(&format!("[§ {h}] "));
+        }
+    }
     if start > 0 {
         s.push('…');
     }
@@ -233,6 +240,30 @@ fn snippet(text: &str, raw_query: &str) -> String {
         s.push('…');
     }
     s
+}
+
+/// Text of the nearest markdown heading (`#`..`######`) strictly above the
+/// line containing `pos`, plus its byte offset.
+fn heading_above(text: &str, pos: usize) -> Option<(usize, String)> {
+    let line_start = text[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let mut off = 0;
+    let mut last_heading: Option<(usize, String)> = None;
+    for line in text[..line_start].split_inclusive('\n') {
+        let trimmed = line.trim_end().trim_start();
+        let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+        if (1..=6).contains(&hashes) {
+            let rest = trimmed[hashes..].trim_start();
+            if !rest.is_empty() {
+                let mut out: String = rest.chars().take(60).collect();
+                if rest.chars().count() > 60 {
+                    out.push('…');
+                }
+                last_heading = Some((off, out));
+            }
+        }
+        off += line.len();
+    }
+    last_heading
 }
 
 fn floor_char_boundary(s: &str, mut i: usize) -> usize {
@@ -478,6 +509,9 @@ impl Store {
         let cols = "p.url, p.title, p.content, p.tier, p.truncated, p.fetched_at, p.content_hash";
 
         // 1) FTS path: bm25() must sit in the same (sub)query as its MATCH.
+        //    Candidates are over-fetched and fused with recency before the
+        //    limit is applied — a much newer fetch can outrank a hair better
+        //    bm25 score, which is what a fetch-history cache wants.
         if let Some(raw) = q.query.as_deref().filter(|s| !s.trim().is_empty()) {
             if let Some(match_expr) = fts_query(raw) {
                 let mph = filter_args.len() + 1;
@@ -487,11 +521,12 @@ impl Store {
                            FROM pages_fts WHERE pages_fts MATCH ?{mph}) f
                        ON f.rid = p.id
                      WHERE {filter_sql}
-                     ORDER BY f.rank LIMIT {limit}"
+                     ORDER BY f.rank LIMIT {}",
+                    limit.saturating_mul(4)
                 );
                 let mut fargs = filter_args.clone();
                 fargs.push(match_expr.into());
-                if let Ok(hits) = self.query_page_hits(&sql, &fargs, raw) {
+                if let Ok(hits) = self.query_fts_fused(&sql, &fargs, raw, limit) {
                     if !hits.is_empty() {
                         return Ok(hits);
                     }
@@ -560,6 +595,73 @@ impl Store {
             });
         }
         Ok(hits)
+    }
+
+    /// Reciprocal-rank fusion over the FTS candidate set: bm25 rank (the
+    /// order the SQL returns) × recency rank, equal weight, k=60. Exact
+    /// score ties break toward the newer fetch.
+    fn query_fts_fused(
+        &self,
+        sql: &str,
+        args: &[rusqlite::types::Value],
+        raw_query: &str,
+        limit: i64,
+    ) -> Result<Vec<PageHit>, String> {
+        let mut stmt = self.conn.prepare(sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params_from_iter(args.iter()), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, String>(6)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut cands: Vec<(String, String, String, String, bool, i64, String)> = Vec::new();
+        for row in rows {
+            let (url, title, content, tier, truncated, fetched_at, content_hash) =
+                row.map_err(|e| e.to_string())?;
+            cands.push((url, title, content, tier, truncated != 0, fetched_at, content_hash));
+        }
+        let n = cands.len();
+        let mut by_recency: Vec<usize> = (0..n).collect();
+        by_recency.sort_by(|&a, &b| cands[b].5.cmp(&cands[a].5));
+        let mut recency_rank = vec![0usize; n];
+        for (pos, &idx) in by_recency.iter().enumerate() {
+            recency_rank[idx] = pos + 1;
+        }
+        let k = 60.0f64;
+        let mut scored: Vec<(f64, usize)> = cands
+            .iter()
+            .enumerate()
+            .map(|(i, _)| (1.0 / (k + i as f64 + 1.0) + 1.0 / (k + recency_rank[i] as f64), i))
+            .collect();
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(cands[b.1].5.cmp(&cands[a.1].5))
+                .then(a.1.cmp(&b.1))
+        });
+        Ok(scored
+            .into_iter()
+            .take(limit as usize)
+            .map(|(_, i)| {
+                let (url, title, content, tier, truncated, fetched_at, content_hash) = &cands[i];
+                PageHit {
+                    url: url.clone(),
+                    title: title.clone(),
+                    snippet: snippet(content, raw_query),
+                    tier: tier.clone(),
+                    truncated: *truncated,
+                    fetched_at: *fetched_at,
+                    content_hash: content_hash.clone(),
+                }
+            })
+            .collect())
     }
 
     fn query_searches(&self, owner: &str, q: &CacheQuery) -> Result<Vec<SearchHit>, String> {
@@ -957,6 +1059,56 @@ mod tests {
         let third = s.get_page("a", "https://example.cn/feed").unwrap().unwrap();
         assert!(!third.changed_since_prev);
         assert_eq!(third.content_hash, second.content_hash);
+    }
+
+    #[test]
+    fn fts_order_fuses_relevance_with_recency() {
+        let s = test_store();
+        page(&s, "a", "https://example.cn/old", "", "rust rust rust docs");
+        page(&s, "a", "https://example.cn/mid", "", "rust middle tokio docs");
+        page(&s, "a", "https://example.cn/new", "", "rust newer far longer filler content docs");
+        // bm25 order: old (3 hits) > mid > new (longest doc). Overwrite fetch
+        // times so recency runs the other way: new > mid > old.
+        let ts = now();
+        for (url, at) in [
+            ("https://example.cn/old", ts - 7200),
+            ("https://example.cn/mid", ts - 3600),
+            ("https://example.cn/new", ts),
+        ] {
+            s.conn
+                .execute("UPDATE pages SET fetched_at=?1 WHERE url=?2", params![at, url])
+                .unwrap();
+        }
+        let hits = s
+            .query_pages(
+                "a",
+                &CacheQuery { query: Some("rust".into()), limit: 10, ..Default::default() },
+            )
+            .unwrap();
+        let urls: Vec<&str> = hits.iter().map(|h| h.url.as_str()).collect();
+        // Leader+trailer tie exactly; the tiebreak hands it to the newer one,
+        // and the consistent-middle doc falls last.
+        assert_eq!(urls, vec!["https://example.cn/new", "https://example.cn/old", "https://example.cn/mid"]);
+    }
+
+    #[test]
+    fn snippets_carry_the_section_heading() {
+        let s = test_store();
+        let filler = "filler line here\n".repeat(8);
+        let body = format!("## Deploy runbook\n\n{filler}now use rsync to publish the site\n");
+        page(&s, "a", "https://example.cn/guide", "guide", &body);
+        // Hit before any heading and heading-free content stay unprefixed.
+        page(&s, "a", "https://example.cn/plain", "plain", "plain text without markdown headings mentions rsync once\n");
+        let hits = s
+            .query_pages(
+                "a",
+                &CacheQuery { query: Some("rsync".into()), limit: 10, ..Default::default() },
+            )
+            .unwrap();
+        let guide = hits.iter().find(|h| h.url.contains("guide")).unwrap();
+        assert!(guide.snippet.starts_with("[§ Deploy runbook] "), "got: {}", guide.snippet);
+        let plain = hits.iter().find(|h| h.url.contains("plain")).unwrap();
+        assert!(!plain.snippet.starts_with("[§ "), "got: {}", plain.snippet);
     }
 
     #[test]
