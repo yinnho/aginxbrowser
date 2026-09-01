@@ -505,6 +505,7 @@ pub fn do_fetch(req: FetchRequest) -> Result<FetchResponse> {
                 captcha_event,
                 js_extract_result,
                 tier: Some("browser"),
+                redirected_from: Vec::new(),
             })
         })
     })

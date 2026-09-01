@@ -194,6 +194,11 @@ pub struct FetchResponse {
     /// benchmark measure tier hit-rate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tier: Option<&'static str>,
+    /// URLs that each issued a redirect before the response landed at
+    /// `url` — so `redirected_from.first().unwrap_or(&url)` is the requested
+    /// URL and `url` the effective one. Always empty on the browser tier.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub redirected_from: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1169,6 +1174,7 @@ mod tests {
             captcha_event: None,
             js_extract_result: None,
             tier: None,
+            redirected_from: Vec::new(),
         }
     }
 

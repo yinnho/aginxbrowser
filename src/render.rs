@@ -283,6 +283,11 @@ pub async fn http_fetch(
         captcha_event: None,
         js_extract_result: None,
         tier: Some("http"),
+        redirected_from: resp
+            .redirected_from
+            .iter()
+            .map(|u| u.to_string())
+            .collect(),
     }))
 }
 
@@ -649,6 +654,55 @@ mod tests {
         assert_eq!(got.tier, Some("http"));
         assert_eq!(got.title.as_deref(), Some("static ok"));
         assert!(!got.content.trim().is_empty());
+    }
+
+    // requested/effective pairing: the tier-"http" response must carry the
+    // redirect trail — `url` alone can't tell a 200 at the requested address
+    // from a 200 somewhere the request was bounced to.
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_fetch_exposes_the_redirect_trail() {
+        let _guard = crate::server::test_util::net_env_guard();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = vec![0u8; 4096];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]);
+                    let out = if head.starts_with("GET /start") {
+                        "HTTP/1.1 302 Found\r\nlocation: /final\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                            .to_string()
+                    } else {
+                        let body = "<html><head><title>after hop</title></head><body><p>Plenty of real text on this page, comfortably past the sufficiency bar for the tier-one HTTP gate.</p></body></html>";
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                    };
+                    let _ = stream.write_all(out.as_bytes()).await;
+                });
+            }
+        });
+        let got = http_fetch(
+            &format!("http://127.0.0.1:{port}/start"),
+            false,
+            None,
+            OutputFormat::Markdown,
+            None,
+            &[],
+            50000,
+        )
+        .await
+        .unwrap()
+        .expect("redirected fetch must land at tier http");
+        assert_eq!(got.url, format!("http://127.0.0.1:{port}/final"));
+        assert_eq!(
+            got.redirected_from,
+            vec![format!("http://127.0.0.1:{port}/start")]
+        );
     }
 
     // Aliyun Tengine fronts (gongkaoleida class) reply `Content-Encoding:
