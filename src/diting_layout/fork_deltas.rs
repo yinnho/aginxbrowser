@@ -529,6 +529,80 @@ fn inline_block_is_atomic_shrink_to_fit_and_wraps() {
     );
 }
 
+/// Unstyled form controls are Chrome-shaped boxes (obscura#807 class). They
+/// used to fall through to the plain-block path and measure full-width × 0 —
+/// an input has no laid-out content, and a zero-height box reads as
+/// "invisible" to every rect-based consumer: Playwright's actionability loop
+/// waits forever on `fill`/`click` against a 0-height input. Now input/
+/// textarea are replaced leaves with per-type natural sizes (CSS/attr width
+/// & height still win per axis), and <button> is an inline-block atom that
+/// shrink-to-fits its label.
+#[test]
+fn unstyled_form_controls_get_default_boxes() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    let html = r#"<html><body>
+        <p>a <input id="t"> <input id="c" type="checkbox"></p>
+        <input id="s" type="submit" value="Go go">
+        <textarea id="ta"></textarea>
+        <button id="b">OK</button>
+        <input id="styled" style="width:300px;height:40px">
+        </body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let rects = crate::diting_layout::layout_dom(
+        &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0,
+    );
+    let rect = |sel: &str| {
+        let id = tree.query_selector_all(sel).unwrap()[0];
+        *rects.get(&id).unwrap_or_else(|| panic!("{sel} must own a box"))
+    };
+
+    let t = rect("#t");
+    assert_eq!(t.width, 177.0, "text input default width; got {t:?}");
+    assert_eq!(t.height, 22.0, "text input default height; got {t:?}");
+
+    let c = rect("#c");
+    assert_eq!(c.width, 13.0, "checkbox default width; got {c:?}");
+    assert_eq!(c.height, 13.0, "checkbox default height; got {c:?}");
+    // Same line, baseline-aligned: a replaced box's baseline is its bottom
+    // margin edge (CSS inline layout; Chrome gives checkbox the same
+    // bottom-edge baseline), so text input and checkbox share a bottom line.
+    assert_eq!(
+        c.y + c.height, t.y + t.height,
+        "inline-level controls share the line on their baseline (bottom edge); got {t:?} vs {c:?}"
+    );
+
+    let s = rect("#s");
+    assert!(
+        (56.0..=72.0).contains(&s.width),
+        "submit input width approximates its value label (5 chars); got {s:?}"
+    );
+    assert_eq!(s.height, 22.0, "button-like input height; got {s:?}");
+
+    let ta = rect("#ta");
+    assert_eq!(ta.width, 177.0, "textarea default width; got {ta:?}");
+    assert_eq!(ta.height, 38.0, "textarea default height (2 rows); got {ta:?}");
+
+    let b_id = tree.query_selector_all("#b").unwrap()[0];
+    let b = rects.get(&b_id).expect("button owns a box");
+    assert!(
+        b.width < 200.0 && b.height > 0.0,
+        "button shrink-to-fits its label instead of filling the block; got {b:?}"
+    );
+    assert_eq!(
+        styles.get(&b_id).and_then(|st| st.display),
+        Some(crate::diting_css::Display::InlineBlock),
+        "computed display for button matches the UA sheet"
+    );
+
+    let styled = rect("#styled");
+    assert_eq!(styled.width, 300.0, "CSS width wins over the default; got {styled:?}");
+    assert_eq!(styled.height, 40.0, "CSS height wins over the default; got {styled:?}");
+}
+
 /// Absolute y of a span's text baseline, through the same metrics model the
 /// layout shift and the paint path both use (fixture font metrics, quantized
 /// parley-style offset).

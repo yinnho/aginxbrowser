@@ -820,9 +820,16 @@ fn run_wrapper_style() -> Style {    Style {
 }
 
 /// Tags whose layout box is a replaced leaf: intrinsic size + aspect ratio,
-/// no children in the layout tree.
+/// no children in the layout tree. `input`/`textarea` join the img/canvas
+/// family: an unstyled control used to fall through to the plain-block path
+/// and measure 0×N (no content to lay out), which reads as "invisible" to
+/// every rect-based consumer — Playwright's actionability loop waits forever
+/// on a zero-height input (obscura#807 class).
 fn is_replaced_tag(tag: &str) -> bool {
-    matches!(tag, "img" | "video" | "iframe" | "canvas" | "object" | "embed")
+    matches!(
+        tag,
+        "img" | "video" | "iframe" | "canvas" | "object" | "embed" | "input" | "textarea"
+    )
 }
 
 /// The URL an `<img>` should load: its `<picture>` parent's first matching
@@ -1020,12 +1027,43 @@ fn build_replaced_leaf(
     let (aw, ah) = (attr("width"), attr("height"));
     // Natural size AND whether a missing axis derives from the ratio.
     let (nat_w, nat_h, ratio_transfer) = match tag.as_str() {
-        t if t == "canvas" => (
+        // Form controls (obscura#807 class): Chrome-shaped default boxes.
+        // Text-like inputs ≈ the size=20 default column; checkbox/radio are
+        // square 13px widgets; button-like inputs approximate label width
+        // from the value attribute (input has no laid-out text of its own);
+        // textarea is the cols=20/rows=2 default box. All three axes are
+        // overridable per-axis by CSS/attribute width & height below.
+        "input" => {
+            let ty = tree
+                .with_node(id, |n| {
+                    n.get_attribute("type").map(|v| v.to_ascii_lowercase())
+                })
+                .flatten()
+                .unwrap_or_default();
+            match ty.as_str() {
+                "checkbox" | "radio" => (13.0, 13.0, false),
+                "button" | "submit" | "reset" => {
+                    let label = tree
+                        .with_node(id, |n| n.get_attribute("value").map(|v| v.to_string()))
+                        .flatten()
+                        .unwrap_or_default();
+                    let label: String = if label.is_empty() && ty == "submit" {
+                        "Submit".to_string()
+                    } else {
+                        label
+                    };
+                    (label.chars().count() as f32 * 8.8 + 20.0, 22.0, false)
+                }
+                _ => (177.0, 22.0, false),
+            }
+        }
+        "textarea" => (177.0, 38.0, false),
+        "canvas" => (
             aw.unwrap_or(300.0),
             ah.unwrap_or(150.0),
             true,
         ),
-        t if t == "video" || t == "iframe" || t == "embed" || t == "object" => {
+        "video" | "iframe" | "embed" | "object" => {
             (aw.unwrap_or(300.0), ah.unwrap_or(150.0), false)
         }
         // img: attrs override the decoded image per-axis, the image ratio
@@ -1143,7 +1181,12 @@ fn build_normal_sibling(
         matches!(s.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
     });
     if !is_text && is_replaced_tag(&child_tag) {
-        if inline_level && !atomic_container && !out_of_flow {
+        // A replaced element whose display resolves to any inline flavor
+        // (UA-sheet inline-block for form controls included) is an inline
+        // atom: it joins the text run instead of becoming a block sibling.
+        let inline_atom =
+            inline_level || child_display == Some(CssDisplay::InlineBlock);
+        if inline_atom && !atomic_container && !out_of_flow {
             if let Some(leaf) = build_replaced_leaf(tree, child, styles, images, taffy_tree, node_map) {
                 // A lone inline atom still gets the wrapping-run stand-in so
                 // it lays out on the text baseline path like the main loop.
@@ -1443,7 +1486,12 @@ fn build_flow_column(
         if !is_text && is_replaced_tag(&child_tag) {
             let leaf = build_replaced_leaf(tree, child, styles, images, taffy_tree, node_map);
             if let Some(leaf) = leaf {
-                if inline_level && !out_of_flow {
+                // Inline-flavored replaced elements (UA inline-block form
+                // controls included) join the text run; the rest stay block
+                // siblings (current shipped behavior for img/video).
+                let inline_atom =
+                    inline_level || child_display == Some(CssDisplay::InlineBlock);
+                if inline_atom && !out_of_flow {
                     run.push(RunSeg::Nodes(vec![leaf]));
                 } else {
                     flush_run(&mut run, &mut flow_children, taffy_tree, run_wrappers);
@@ -2183,7 +2231,9 @@ fn build_element(
             // UA/author made it block-level (our ua_display keeps img block).
             let leaf = build_replaced_leaf(tree, child, styles, images, taffy_tree, node_map);
             if let Some(leaf) = leaf {
-                if inline_level && !atomic_container && !out_of_flow {
+                let inline_atom =
+                    inline_level || child_display == Some(CssDisplay::InlineBlock);
+                if inline_atom && !atomic_container && !out_of_flow {
                     run.push(RunSeg::Nodes(vec![leaf]));
                 } else {
                     flush_run(&mut run, &mut direct, taffy_tree, run_wrappers);

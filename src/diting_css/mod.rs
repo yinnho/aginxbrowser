@@ -1056,6 +1056,13 @@ pub fn ua_display(tag: &str) -> Display {
     match tag {
         "span" | "a" | "b" | "i" | "strong" | "em" | "code" | "small" | "sub" | "sup"
         | "label" | "time" | "abbr" => Display::Inline,
+        // Form controls are inline-level per every browser UA sheet, and the
+        // inline-flavor matters twice: computed-style fidelity (CSSOM) and
+        // the run dispatch — inline-block replaced elements join the text
+        // run as atomic boxes, which is what keeps unstyled inputs on the
+        // same line as their labels (obscura#807 class). button
+        // shrink-to-fits its label content.
+        "input" | "textarea" | "button" => Display::InlineBlock,
         // Non-visual metadata elements: every browser's UA stylesheet sets
         // display:none on these (blitz assets/default.css included). Without
         // it a page's <head>/<style> blocks lay out as empty boxes and push
