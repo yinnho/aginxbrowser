@@ -12,8 +12,8 @@ pub use client::{
 };
 pub use cookies::CookieJar;
 pub use encoding::{
-    decode_non_html, decode_response_with_name, decode_with_label, label_name,
-    url_encode_query,
+    decode_devtools_body, decode_non_html, decode_response_with_name, decode_with_label,
+    label_name, url_encode_query,
 };
 #[cfg(feature = "stealth")]
 pub use wreq_client::{

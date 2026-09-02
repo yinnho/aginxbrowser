@@ -130,34 +130,15 @@ pub struct NetworkEvent {
 }
 
 /// A response body retained for `get_response_body` (upstream #360). Bodies
-/// that are exact UTF-8 text are stored as strings (`base64_encoded = false`);
-/// anything else (binary, or non-UTF-8 text like GBK) is stored base64 so
+/// are classified with the Chromium DevTools policy (see
+/// `diting_net::decode_devtools_body`): replacement-free text is stored as a
+/// string (`base64_encoded = false`, declared-GBK pages included, matching
+/// Chrome); opaque or undecodable bodies are stored base64 so
 /// `take_response_body_raw` is byte-exact.
 #[derive(Debug, Clone)]
 pub struct StoredResponseBody {
     pub body: String,
     pub base64_encoded: bool,
-}
-
-/// True when a Content-Type deserves text storage rather than base64. No
-/// Content-Type at all counts as text, matching the HTML-parse default.
-fn is_text_like_content_type(content_type: Option<&str>) -> bool {
-    let ct = match content_type {
-        Some(c) => c.split(';').next().unwrap_or(c).trim().to_ascii_lowercase(),
-        None => return true,
-    };
-    if ct.is_empty() {
-        return true;
-    }
-    ct.starts_with("text/")
-        || ct == "application/json"
-        || ct == "application/xml"
-        || ct == "application/xhtml+xml"
-        || ct == "application/javascript"
-        || ct == "application/ecmascript"
-        || ct == "image/svg+xml"
-        || ct.ends_with("+json")
-        || ct.ends_with("+xml")
 }
 
 fn response_body_entry_limit() -> usize {
@@ -1925,10 +1906,9 @@ impl Page {
         request_id
     }
 
-    /// Record the event and retain the body for `get_response_body`. Bodies
-    /// that are exact UTF-8 text store as strings; binary and non-UTF-8
-    /// bodies (GBK text included) store base64 so `take_response_body_raw`
-    /// is byte-exact.
+    /// Record the event and retain the body for `get_response_body`. The
+    /// text/base64 split follows the Chromium DevTools body policy (Chrome
+    /// 152 verified, obscura #791).
     fn record_network_event_with_body(
         &mut self,
         url: &str,
@@ -1938,8 +1918,6 @@ impl Page {
         response_headers: &std::collections::HashMap<String, String>,
         body: &[u8],
     ) -> String {
-        let base64_encoded =
-            !is_text_like_content_type(response_headers.get("content-type").map(|s| s.as_str()));
         let request_id = self.record_network_event(
             url,
             method,
@@ -1948,32 +1926,36 @@ impl Page {
             response_headers,
             body.len(),
         );
-        self.store_response_body(request_id.clone(), body, base64_encoded);
+        self.store_response_body(
+            request_id.clone(),
+            body,
+            response_headers.get("content-type").map(|s| s.as_str()),
+        );
         request_id
     }
 
-    fn store_response_body(&mut self, request_id: String, body: &[u8], base64_encoded: bool) {
+    fn store_response_body(
+        &mut self,
+        request_id: String,
+        body: &[u8],
+        content_type: Option<&str>,
+    ) {
         let max_entries = response_body_entry_limit();
         let max_bytes = response_body_byte_limit();
         if max_entries == 0 || max_bytes == 0 || body.len() > max_bytes {
             return;
         }
-        // Content-Type can claim text while the bytes are not valid UTF-8
-        // (a GBK text/html page). A lossy store would hand U+FFFD back to
-        // getResponseBody — Chrome keeps such bodies base64 (byte-exact).
-        let base64_encoded = base64_encoded || std::str::from_utf8(body).is_err();
-        let body = if base64_encoded {
-            BASE64.encode(body)
-        } else {
-            String::from_utf8_lossy(body).to_string()
-        };
-        self.response_bodies.insert(
-            request_id.clone(),
-            StoredResponseBody {
-                body,
-                base64_encoded,
+        let stored = match crate::diting_net::decode_devtools_body(body, content_type) {
+            Some(text) => StoredResponseBody {
+                body: text,
+                base64_encoded: false,
             },
-        );
+            None => StoredResponseBody {
+                body: BASE64.encode(body),
+                base64_encoded: true,
+            },
+        };
+        self.response_bodies.insert(request_id.clone(), stored);
         self.response_body_order.push_back(request_id);
         while self.response_body_order.len() > max_entries {
             if let Some(oldest) = self.response_body_order.pop_front() {
@@ -3311,12 +3293,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn non_utf8_text_body_stores_base64() {
+    async fn declared_gbk_document_stores_decoded_text() {
         let _g = net_test_guard();
-        // GBK "中文-tail": a text/html body that is NOT valid UTF-8. Storing
-        // it by content-type alone would go lossy (U+FFFD); Chrome keeps
-        // non-UTF-8 bodies base64 so the getResponseBody round-trip is
-        // byte-exact (upstream #716 family).
+        // Chrome 152 raw CDP returns a declared-GBK page as decoded text with
+        // base64Encoded=false (verified 2026-09-02, obscura #791) — the same
+        // policy now governs the store, so getResponseBody hands back 中文.
         let gbk: Vec<u8> = vec![0xD6, 0xD0, 0xCE, 0xC4, b'-', b't', b'a', b'i', b'l'];
         let mut headers = std::collections::HashMap::new();
         headers.insert(
@@ -3333,12 +3314,86 @@ mod tests {
             &gbk,
         );
         let stored = p.get_response_body(&rid).expect("gbk body stored");
-        assert!(stored.base64_encoded, "non-UTF-8 text must store base64");
-        assert_eq!(p.take_response_body_raw(&rid).unwrap(), gbk);
+        assert!(!stored.base64_encoded, "declared GBK must decode to text");
+        assert_eq!(stored.body, "中文-tail");
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn js_fetch_non_utf8_text_body_stores_base64() {
+    async fn undecodable_text_bodies_still_store_base64() {
+        let _g = net_test_guard();
+        // Opaque bytes under a text-ish MIME (Chrome 152 verified for JSON)
+        // and invalid bytes under a declared UTF-8 label both travel base64.
+        let mut headers = std::collections::HashMap::new();
+        headers.insert(
+            "content-type".to_string(),
+            "application/json".to_string(),
+        );
+        let mut p = test_page();
+        let rid = p.record_network_event_with_body(
+            "http://127.0.0.1:1/badjson",
+            "GET",
+            "XHR",
+            200,
+            &headers,
+            &[0xFF],
+        );
+        let stored = p.get_response_body(&rid).expect("json body stored");
+        assert!(stored.base64_encoded, "undecodable JSON must store base64");
+        assert_eq!(p.take_response_body_raw(&rid).unwrap(), vec![0xFF]);
+
+        let mut headers = std::collections::HashMap::new();
+        headers.insert(
+            "content-type".to_string(),
+            "text/plain; charset=utf-8".to_string(),
+        );
+        let rid = p.record_network_event_with_body(
+            "http://127.0.0.1:1/badtxt",
+            "GET",
+            "Document",
+            200,
+            &headers,
+            &[b'a', 0xFF, b'b'],
+        );
+        let stored = p.get_response_body(&rid).expect("txt body stored");
+        assert!(stored.base64_encoded, "invalid declared-UTF-8 must store base64");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn charsetless_text_stores_decoded_1252_text() {
+        let _g = net_test_guard();
+        // Chrome 152 verified: text/plain without a charset — and no
+        // Content-Type at all — still return text (windows-1252 is total).
+        let bytes: Vec<u8> = vec![0x81, 0x8D];
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("content-type".to_string(), "text/plain".to_string());
+        let mut p = test_page();
+        let rid = p.record_network_event_with_body(
+            "http://127.0.0.1:1/nocharset",
+            "GET",
+            "Document",
+            200,
+            &headers,
+            &bytes,
+        );
+        let stored = p.get_response_body(&rid).expect("plain body stored");
+        assert!(!stored.base64_encoded);
+        assert_eq!(stored.body, "\u{0081}\u{008D}");
+
+        let rid = p.record_network_event_with_body(
+            "http://127.0.0.1:1/noct",
+            "GET",
+            "Document",
+            200,
+            &std::collections::HashMap::new(),
+            &bytes,
+        );
+        let stored = p.get_response_body(&rid).expect("noct body stored");
+        assert!(!stored.base64_encoded);
+        assert_eq!(stored.body, "\u{0081}\u{008D}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn js_fetch_declared_gbk_stores_decoded_text() {
         let _g = net_test_guard();
         let gbk: Vec<u8> = vec![0xD6, 0xD0, 0xCE, 0xC4, b'-', b't', b'a', b'i', b'l'];
         let host = "<html><script>\
@@ -3352,8 +3407,6 @@ mod tests {
         ]);
         let mut p = test_page();
         p.navigate(&format!("http://127.0.0.1:{port}/app")).await.unwrap();
-        // r.text() hands page JS a lossy string; what matters here is the
-        // retained body for CDP getResponseBody: base64, byte-exact.
         assert!(p.evaluate("window.__got").is_string());
         p.sync_js_network_events();
         let ev = p
@@ -3363,8 +3416,8 @@ mod tests {
             .expect("fetch network event after sync");
         let rid = ev.request_id.clone();
         let stored = p.get_response_body(&rid).expect("fetch body stored");
-        assert!(stored.base64_encoded, "non-UTF-8 text fetch must store base64");
-        assert_eq!(p.take_response_body_raw(&rid).unwrap(), gbk);
+        assert!(!stored.base64_encoded, "declared GBK fetch must decode to text");
+        assert_eq!(stored.body, "中文-tail");
     }
 
     #[tokio::test(flavor = "current_thread")]

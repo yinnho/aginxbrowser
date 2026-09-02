@@ -33,7 +33,9 @@ pub fn decode_with_label(label: &str, bytes: &[u8], fatal: bool, ignore_bom: boo
         enc.new_decoder()
     };
     if fatal {
-        let mut out = String::with_capacity(bytes.len() + 1);
+        let capacity = dec
+            .max_utf8_buffer_length_without_replacement(bytes.len())?;
+        let mut out = String::with_capacity(capacity);
         let (res, _) = dec.decode_to_string_without_replacement(bytes, &mut out, true);
         match res {
             DecoderResult::InputEmpty => Some(out),
@@ -66,6 +68,82 @@ pub fn decode_response_with_name(
     let (encoding, _) = detect_encoding(bytes, content_type_header);
     let (cow, _, _) = encoding.decode(bytes);
     (cow.into_owned(), encoding.name())
+}
+
+/// Chromium DevTools response-body policy for `Network.getResponseBody` /
+/// `Fetch.takeResponseBodyAsStream`: a body travels as text when its MIME
+/// family has a text decoder and decoding it (explicit `charset`, else the
+/// family's default) is replacement-free; opaque or undecodable bodies travel
+/// base64. Returns the decoded text, or None when the caller must store
+/// base64.
+///
+/// Verified against raw CDP on headless Chrome 152 (2026-09-02):
+///   text/html; charset=GBK   + GBK bytes  -> decoded text, base64Encoded=false
+///   text/plain; charset=gbk  + GBK bytes  -> decoded text, base64Encoded=false
+///   application/json         + [0xFF]     -> base64
+///   application/octet-stream + bytes      -> base64
+///   text/plain (no charset)  + [0x81 0x8D]-> text (windows-1252 is a total decoder)
+///   no Content-Type at all   + [0x81 0x8D]-> text
+pub fn decode_devtools_body(bytes: &[u8], content_type: Option<&str>) -> Option<String> {
+    if bytes.is_empty() {
+        return Some(String::new());
+    }
+    let header = content_type.unwrap_or("");
+    let mime = header
+        .split(';')
+        .next()
+        .unwrap_or(header)
+        .trim()
+        .to_ascii_lowercase();
+
+    // MIME family first: a charset parameter on a binary type does not make
+    // it text. No Content-Type at all behaves like plain text in Chrome.
+    let family: DevtoolsFamily = if mime.is_empty() {
+        Some(DevtoolsFamily::Plain)
+    } else if mime == "text/html" {
+        Some(DevtoolsFamily::Html)
+    } else if mime == "application/json"
+        || mime.ends_with("+json")
+        || mime.contains("javascript")
+        || mime.contains("ecmascript")
+        || mime == "application/xml"
+        || mime.ends_with("+xml")
+        || mime == "image/svg+xml"
+    {
+        Some(DevtoolsFamily::Utf8)
+    } else if mime.starts_with("text/") {
+        Some(DevtoolsFamily::Plain)
+    } else {
+        None
+    }?;
+
+    let label = match family {
+        DevtoolsFamily::Html => {
+            let (encoding, _) = detect_encoding(bytes, Some(header));
+            return decode_fatal(encoding, bytes);
+        }
+        DevtoolsFamily::Utf8 => charset_from_content_type(header)
+            .unwrap_or_else(|| "utf-8".to_string()),
+        DevtoolsFamily::Plain => charset_from_content_type(header)
+            .unwrap_or_else(|| "windows-1252".to_string()),
+    };
+    decode_with_label(&label, bytes, true, false)
+}
+
+#[derive(Clone, Copy)]
+enum DevtoolsFamily {
+    Html,
+    Utf8,
+    Plain,
+}
+
+fn decode_fatal(encoding: &'static Encoding, bytes: &[u8]) -> Option<String> {
+    let mut dec = encoding.new_decoder();
+    let capacity = dec
+        .max_utf8_buffer_length_without_replacement(bytes.len())?;
+    let mut out = String::with_capacity(capacity);
+    let (res, _) = dec.decode_to_string_without_replacement(bytes, &mut out, true);
+    (res == DecoderResult::InputEmpty).then_some(out)
 }
 
 const PCT_HEX: &[u8; 16] = b"0123456789ABCDEF";
@@ -392,6 +470,76 @@ mod tests {
         let bytes = br#"var x = '<meta charset="gbk">'; // not the real charset"#;
         let s = decode_non_html(bytes, Some("application/javascript"));
         assert!(s.contains("<meta charset="));
+    }
+
+    #[test]
+    fn fatal_decode_capacity_handles_multibyte_output() {
+        // Regression: the fatal path used to allocate bytes.len()+1, which
+        // makes encoding_rs report OutputFull for multi-byte output ("€" is
+        // 3 UTF-8 bytes from a single windows-1252 byte) and silently fail.
+        assert_eq!(
+            decode_with_label("windows-1252", &[0x80], true, false),
+            Some("\u{20AC}".to_string())
+        );
+        assert_eq!(
+            decode_with_label("gbk", &[0xD6, 0xD0, 0xCE, 0xC4], true, false),
+            Some("中文".to_string())
+        );
+    }
+
+    #[test]
+    fn devtools_body_declared_gbk_is_text() {
+        let bytes: &[u8] = &[0xD6, 0xD0, 0xCE, 0xC4];
+        assert_eq!(
+            decode_devtools_body(bytes, Some("text/html; charset=GBK")),
+            Some("中文".to_string())
+        );
+        assert_eq!(
+            decode_devtools_body(bytes, Some("text/plain; charset=gbk")),
+            Some("中文".to_string())
+        );
+    }
+
+    #[test]
+    fn devtools_body_json_and_binary_stay_base64() {
+        // Chrome 152 verified: JSON with a stray 0xFF travels base64; so does
+        // octet-stream. A charset parameter does not rescue a binary MIME.
+        assert_eq!(decode_devtools_body(&[0xFF], Some("application/json")), None);
+        assert_eq!(
+            decode_devtools_body(&[0x00, 0x01], Some("application/octet-stream; charset=utf-8")),
+            None
+        );
+    }
+
+    #[test]
+    fn devtools_body_charsetless_text_uses_1252_default() {
+        // Chrome 152: no charset and no Content-Type at all still return text
+        // (windows-1252 is a total decoder, so this only fails per-label).
+        assert_eq!(
+            decode_devtools_body(&[0x81, 0x8D], Some("text/plain")),
+            Some("\u{0081}\u{008D}".to_string())
+        );
+        assert_eq!(
+            decode_devtools_body(&[0x81, 0x8D], None),
+            Some("\u{0081}\u{008D}".to_string())
+        );
+    }
+
+    #[test]
+    fn devtools_body_undecodable_declared_text_stays_base64() {
+        // Declared UTF-8 with invalid bytes: replacement-free decode fails.
+        assert_eq!(
+            decode_devtools_body(&[0xC4, 0xE3, 0xFF], Some("text/plain; charset=utf-8")),
+            None
+        );
+    }
+
+    #[test]
+    fn devtools_body_empty_is_always_text() {
+        assert_eq!(
+            decode_devtools_body(b"", Some("application/octet-stream")),
+            Some(String::new())
+        );
     }
 
     #[test]

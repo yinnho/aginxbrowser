@@ -142,9 +142,11 @@ pub struct JsNetworkEvent {
     pub timestamp: f64,
 }
 
-/// A response body retained for `Network.getResponseBody`. Bodies that are
-/// exact UTF-8 text are stored as strings (`base64_encoded = false`); binary
-/// and non-UTF-8 bodies (GBK text, mislabeled binaries) are stored base64.
+/// A response body retained for `Network.getResponseBody`. Bodies are
+/// classified with the Chromium DevTools policy (see
+/// `diting_net::decode_devtools_body`): replacement-free text is stored as a
+/// string (`base64_encoded = false`, declared-GBK pages included, matching
+/// Chrome); opaque or undecodable bodies are stored base64.
 #[derive(Debug, Clone)]
 pub struct StoredNetworkResponseBody {
     pub body: String,
@@ -180,28 +182,6 @@ fn fetch_body_byte_limit() -> usize {
         .and_then(|v| v.parse().ok())
         .map(|v| if v == 0 { usize::MAX } else { v })
         .unwrap_or(64 * 1024 * 1024)
-}
-
-/// True when a Content-Type deserves text storage rather than base64. Mirrors
-/// the page-side document/script/stylesheet decision (no Content-Type at all
-/// counts as text, matching the HTML-parse default).
-fn text_like_content_type(content_type: Option<&str>) -> bool {
-    let ct = match content_type {
-        Some(c) => c.split(';').next().unwrap_or(c).trim().to_ascii_lowercase(),
-        None => return true,
-    };
-    if ct.is_empty() {
-        return true;
-    }
-    ct.starts_with("text/")
-        || ct == "application/json"
-        || ct == "application/xml"
-        || ct == "application/xhtml+xml"
-        || ct == "application/javascript"
-        || ct == "application/ecmascript"
-        || ct == "image/svg+xml"
-        || ct.ends_with("+json")
-        || ct.ends_with("+xml")
 }
 
 impl JsState {
@@ -1903,7 +1883,13 @@ async fn op_fetch_url(
             )));
         }
     }
-    let resp_body = String::from_utf8_lossy(&resp_bytes).to_string();
+    // Chromium DevTools body policy (Chrome 152 verified, obscura #791): a
+    // declared non-UTF-8 charset (GBK) decodes to text with base64Encoded=false;
+    // opaque or undecodable bodies travel base64 byte-exact.
+    let stored_text = crate::diting_net::decode_devtools_body(
+        &resp_bytes,
+        resp_headers.get("content-type").map(|s| s.as_str()),
+    );
     let resp_body_base64 = BASE64.encode(&resp_bytes);
 
     // Retain the body + record a network event for this script-initiated
@@ -1918,20 +1904,15 @@ async fn op_fetch_url(
         let request_id = format!("fetch-{}", gs.network_response_body_counter);
         let max_entries = response_body_entry_limit();
         let max_bytes = response_body_byte_limit();
-        // Content-Type claiming text but bytes not valid UTF-8 (a GBK page)
-        // must store base64 — a lossy copy would corrupt the CDP
-        // getResponseBody round-trip (upstream #716 family).
-        let base64_encoded = !text_like_content_type(resp_headers.get("content-type").map(|s| s.as_str()))
-            || std::str::from_utf8(&resp_bytes).is_err();
+        let (stored_body, base64_encoded) = match &stored_text {
+            Some(text) => (text.clone(), false),
+            None => (resp_body_base64.clone(), true),
+        };
         if max_entries > 0 && max_bytes > 0 && resp_bytes.len() <= max_bytes {
             gs.network_response_bodies.insert(
                 request_id.clone(),
                 StoredNetworkResponseBody {
-                    body: if base64_encoded {
-                        resp_body_base64.clone()
-                    } else {
-                        resp_body.clone()
-                    },
+                    body: stored_body,
                     base64_encoded,
                 },
             );
@@ -1966,7 +1947,7 @@ async fn op_fetch_url(
         "op_fetch_url completed: {} {} ({} bytes, network event {})",
         method,
         url,
-        resp_body.len(),
+        resp_bytes.len(),
         request_id,
     );
 
@@ -1993,7 +1974,7 @@ async fn op_fetch_url(
 
     Ok(serde_json::json!({
         "status": status,
-        "body": resp_body,
+        "body": stored_text.unwrap_or_default(),
         "bodyBase64": resp_body_base64,
         "url": url,
         "headers": resp_headers,
