@@ -408,6 +408,42 @@
         assert_eq!(is_form, serde_json::json!(true));
     }
 
+    /// Regression for #222: HTML interface globals must discriminate by tag.
+    /// The old `= Element` aliases made `head instanceof HTMLIFrameElement`
+    /// true for every element, so webpack style-loader handed the head
+    /// element to `contentDocument.head` and bilibili's player core threw
+    /// "Couldn't find a style target" before the player could mount.
+    #[test]
+    fn html_interface_instanceof_discriminates_by_tag() {
+        let mut rt = setup_runtime(
+            r#"<head id="h"></head><body><div id="d"></div><iframe id="i"></iframe><h2 id="t"></h2><form id="f"></form></body>"#,
+        );
+        let checks: &[(&str, bool)] = &[
+            ("document.getElementById('d') instanceof HTMLDivElement", true),
+            ("document.getElementById('d') instanceof HTMLElement", true),
+            ("document.getElementById('d') instanceof HTMLIFrameElement", false),
+            ("document.getElementById('i') instanceof HTMLIFrameElement", true),
+            ("document.getElementById('i') instanceof HTMLDivElement", false),
+            ("document.getElementById('h') instanceof HTMLIFrameElement", false),
+            ("document.getElementById('h') instanceof HTMLHeadElement", true),
+            ("document.getElementById('t') instanceof HTMLHeadingElement", true),
+            ("document.getElementById('t') instanceof HTMLDivElement", false),
+            ("document.getElementById('f') instanceof HTMLFormElement", true),
+            ("document.getElementById('f') instanceof HTMLDivElement", false),
+            ("'x' instanceof HTMLIFrameElement", false),
+            ("HTMLDivElement.prototype === Element.prototype", true),
+            ("document.getElementById('d').constructor === Element", true),
+        ];
+        for (expr, expected) in checks {
+            let got = rt.evaluate(expr).unwrap();
+            assert_eq!(got, serde_json::json!(expected), "expr: {expr}");
+        }
+        let ctor = rt
+            .evaluate("(() => { try { new HTMLDivElement(); } catch (e) { return e.name; } return 'no-throw'; })()")
+            .unwrap();
+        assert_eq!(ctor, serde_json::json!("TypeError"));
+    }
+
     /// Regression for #105: `Element.prepend` must actually insert at the
     /// start, not silently no-op.
     #[test]

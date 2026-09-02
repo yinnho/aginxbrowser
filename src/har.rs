@@ -134,6 +134,81 @@ pub fn media_entries(events: &[NetworkEvent]) -> Vec<Value> {
         .collect()
 }
 
+/// Playback URLs hidden inside retained XHR/fetch response bodies. Players
+/// receive signed media links from JSON APIs (bilibili `playurl` durl/dash
+/// being the canonical case) and the engine has no media pipeline, so those
+/// links never appear as network entries — without this pass they would be
+/// invisible to the filter=media sniffer even though the page holds them.
+pub fn media_from_bodies(
+    events: &[NetworkEvent],
+    body_of: &dyn Fn(&str) -> Option<StoredResponseBody>,
+) -> Vec<Value> {
+    const MAX_SCAN: usize = 4 * 1024 * 1024;
+    let mut seen: std::collections::HashSet<String> =
+        events.iter().map(|e| e.url.clone()).collect();
+    let mut out = Vec::new();
+    for e in events {
+        if e.resource_type != "XHR" && e.resource_type != "Fetch" {
+            continue;
+        }
+        let Some(body) = body_of(&e.request_id) else {
+            continue;
+        };
+        // JSON media manifests are plain text; base64 bodies are binary
+        // assets where URL extraction would only produce noise.
+        if body.base64_encoded || body.body.len() > MAX_SCAN {
+            continue;
+        }
+        for url in extract_media_urls(&body.body) {
+            if seen.insert(url.clone()) {
+                if let Some(kind) = media_kind(&url, None) {
+                    out.push(json!({
+                        "url": url,
+                        "kind": kind,
+                        "status": e.status,
+                        "mime": "",
+                        "type": e.resource_type,
+                        "via": "body",
+                    }));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Pull `http(s)://` URLs whose path carries a media suffix out of a text
+/// body. JSON escapes must be flattened first (`&` → `&`, `\/` → `/`)
+/// or signed query strings get truncated mid-escape.
+fn extract_media_urls(text: &str) -> Vec<String> {
+    const DELIMS: &[char] = &['"', '\'', ' ', '\\', '<', '>', '(', ')', '[', ']', '{', '}', '\n', '\r', '\t'];
+    let flat = text.replace("\\u0026", "&").replace("\\/", "/");
+    let mut out = Vec::new();
+    let mut rest = flat.as_str();
+    while let Some(pos) = rest.find("http") {
+        rest = &rest[pos..];
+        let taken = if rest.starts_with("https://") || rest.starts_with("http://") {
+            let end = rest.find(DELIMS).unwrap_or(rest.len());
+            let mut url = rest[..end].to_string();
+            while url.ends_with(['.', ',', ';', ':', '!', '?', '"', '\'']) {
+                url.pop();
+            }
+            if url.len() > 12 {
+                Some(url)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(url) = taken {
+            out.push(url);
+        }
+        rest = &rest[4.min(rest.len())..];
+    }
+    out
+}
+
 /// Canonical status text for the phrases HAR consumers expect. Unknown codes
 /// emit the empty string (legal per spec).
 fn status_text(status: u16) -> &'static str {
@@ -305,6 +380,52 @@ mod tests {
         assert_eq!(media_kind("https://cdn.example/app.js", None), None);
         // A .ts page route is only media when the path really ends in .ts.
         assert_eq!(media_kind("https://cdn.example/ts", None), None);
+    }
+
+    #[test]
+    fn media_from_bodies_extracts_playback_links_from_playurl_json() {
+        // bilibili-style playurl payload: signed durl URLs, & escapes,
+        // a page event plus an unrelated XHR that must contribute nothing.
+        let events = vec![
+            event("https://e.example/video/BV1GJ411x7h7/", "Document", 200, 1.0),
+            event("https://api.example/x/player/wbi/playurl?avid=1", "Fetch", 200, 2.0),
+            event("https://api.example/x/web-interface/nav", "Fetch", 200, 3.0),
+        ];
+        let bodies: HashMap<String, StoredResponseBody> = HashMap::from([
+            (
+                events[1].request_id.clone(),
+                StoredResponseBody {
+                    body: "{\"code\":0,\"data\":{\"durl\":[{\"url\":\"https://cdn.example/upgcxcode/99/91/137649199/137649199_da2-1-16.mp4?e=abc\\u0026oi=9\",\"backup_url\":[\"https://upos.example/backup/137649199.mp4?e=z\\u0026oi=1\"]}],\"dash\":{\"video\":[{\"baseUrl\":\"https://v.example/dash/137649199.m4s\"}]}}}".into(),
+                    base64_encoded: false,
+                },
+            ),
+            (
+                events[2].request_id.clone(),
+                StoredResponseBody {
+                    body: "{\"code\":0,\"data\":{\"isLogin\":false}}".into(),
+                    base64_encoded: false,
+                },
+            ),
+        ]);
+        let body_of = |rid: &str| bodies.get(rid).cloned();
+        let media = media_from_bodies(&events, &body_of);
+        let urls: Vec<&str> = media
+            .iter()
+            .map(|m| m["url"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            urls,
+            vec![
+                "https://cdn.example/upgcxcode/99/91/137649199/137649199_da2-1-16.mp4?e=abc&oi=9",
+                "https://upos.example/backup/137649199.mp4?e=z&oi=1",
+                "https://v.example/dash/137649199.m4s",
+            ]
+        );
+        assert_eq!(media[0]["via"], "body");
+        assert_eq!(media[0]["kind"], "mp4");
+        // No bodies retained -> nothing extracted, no panic.
+        let empty = media_from_bodies(&events, &|_| None);
+        assert!(empty.is_empty());
     }
 
     #[test]

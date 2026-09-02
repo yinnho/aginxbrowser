@@ -6892,13 +6892,35 @@ globalThis.scrollX = 0; globalThis.scrollY = 0;
 globalThis.CSS = { supports(){return false;}, escape(s){return s;} };
 
 globalThis.HTMLElement = Element;
-globalThis.HTMLDivElement = Element;
-globalThis.HTMLSpanElement = Element;
-globalThis.HTMLParagraphElement = Element;
-globalThis.HTMLAnchorElement = Element;
-globalThis.HTMLImageElement = Element;
-globalThis.HTMLInputElement = Element;
-globalThis.HTMLButtonElement = Element;
+
+// Real pages discriminate elements per interface — webpack style-loader
+// gates style injection on `document.querySelector('head') instanceof
+// window.HTMLIFrameElement`, and player/form libs do the same. Element
+// wrappers share Element.prototype (only FORM gets a per-tag class in
+// _elementClassFor), so the check must consult tagName, not the prototype
+// chain. The old `= Element` aliases made every instanceof true for every
+// element — bilibili's player core threw "Couldn't find a style target" at
+// boot because head passed the iframe test, and the player never mounted.
+// .prototype stays === Element.prototype so property patches written against
+// these globals keep landing on (and reading back from) the shared prototype.
+function _htmlInterface(name, tags) {
+  const C = { [name]: function () {
+    throw new DOMException("Failed to construct '" + name + "': Illegal constructor.", 'TypeError');
+  } }[name];
+  C.prototype = Element.prototype;
+  Object.defineProperty(C, Symbol.hasInstance, {
+    value(obj) { return !!obj && tags.includes(String(obj.tagName || '').toLowerCase()); },
+    configurable: true,
+  });
+  return C;
+}
+globalThis.HTMLDivElement = _htmlInterface('HTMLDivElement', ['div']);
+globalThis.HTMLSpanElement = _htmlInterface('HTMLSpanElement', ['span']);
+globalThis.HTMLParagraphElement = _htmlInterface('HTMLParagraphElement', ['p']);
+globalThis.HTMLAnchorElement = _htmlInterface('HTMLAnchorElement', ['a']);
+globalThis.HTMLImageElement = _htmlInterface('HTMLImageElement', ['img']);
+globalThis.HTMLInputElement = _htmlInterface('HTMLInputElement', ['input']);
+globalThis.HTMLButtonElement = _htmlInterface('HTMLButtonElement', ['button']);
 globalThis.HTMLFormElement = class HTMLFormElement extends Element {
   get elements() { return HTMLCollection._from(this.querySelectorAll("input, select, textarea, button, fieldset, output, object")); }
   get length() { return this.elements.length; }
@@ -6906,37 +6928,37 @@ globalThis.HTMLFormElement = class HTMLFormElement extends Element {
   // 'submit' event and (if not prevented) builds form data and navigates.
   reset() { for (const f of this.elements) { if ('value' in f) f.value = ''; } }
 };
-globalThis.HTMLSelectElement = Element;
-globalThis.HTMLTextAreaElement = Element;
-globalThis.HTMLLabelElement = Element;
-globalThis.HTMLTableElement = Element;
-globalThis.HTMLIFrameElement = Element;
-globalThis.HTMLCanvasElement = Element;
-globalThis.HTMLVideoElement = Element;
-globalThis.HTMLAudioElement = Element;
-globalThis.HTMLScriptElement = Element;
-globalThis.HTMLStyleElement = Element;
-globalThis.HTMLLinkElement = Element;
-globalThis.HTMLMetaElement = Element;
-globalThis.HTMLHeadElement = Element;
-globalThis.HTMLBodyElement = Element;
-globalThis.HTMLHtmlElement = Element;
-globalThis.HTMLBRElement = Element;
-globalThis.HTMLHRElement = Element;
-globalThis.HTMLUListElement = Element;
-globalThis.HTMLOListElement = Element;
-globalThis.HTMLLIElement = Element;
-globalThis.HTMLPreElement = Element;
-globalThis.HTMLHeadingElement = Element;
-globalThis.HTMLTemplateElement = Element;
-globalThis.HTMLSlotElement = Element;
-globalThis.HTMLOptionElement = Element;
-globalThis.HTMLDataListElement = Element;
-globalThis.HTMLFieldSetElement = Element;
-globalThis.HTMLLegendElement = Element;
-globalThis.HTMLProgressElement = Element;
-globalThis.HTMLDetailsElement = Element;
-globalThis.HTMLDialogElement = Element;
+globalThis.HTMLSelectElement = _htmlInterface('HTMLSelectElement', ['select']);
+globalThis.HTMLTextAreaElement = _htmlInterface('HTMLTextAreaElement', ['textarea']);
+globalThis.HTMLLabelElement = _htmlInterface('HTMLLabelElement', ['label']);
+globalThis.HTMLTableElement = _htmlInterface('HTMLTableElement', ['table']);
+globalThis.HTMLIFrameElement = _htmlInterface('HTMLIFrameElement', ['iframe']);
+globalThis.HTMLCanvasElement = _htmlInterface('HTMLCanvasElement', ['canvas']);
+globalThis.HTMLVideoElement = _htmlInterface('HTMLVideoElement', ['video']);
+globalThis.HTMLAudioElement = _htmlInterface('HTMLAudioElement', ['audio']);
+globalThis.HTMLScriptElement = _htmlInterface('HTMLScriptElement', ['script']);
+globalThis.HTMLStyleElement = _htmlInterface('HTMLStyleElement', ['style']);
+globalThis.HTMLLinkElement = _htmlInterface('HTMLLinkElement', ['link']);
+globalThis.HTMLMetaElement = _htmlInterface('HTMLMetaElement', ['meta']);
+globalThis.HTMLHeadElement = _htmlInterface('HTMLHeadElement', ['head']);
+globalThis.HTMLBodyElement = _htmlInterface('HTMLBodyElement', ['body']);
+globalThis.HTMLHtmlElement = _htmlInterface('HTMLHtmlElement', ['html']);
+globalThis.HTMLBRElement = _htmlInterface('HTMLBRElement', ['br']);
+globalThis.HTMLHRElement = _htmlInterface('HTMLHRElement', ['hr']);
+globalThis.HTMLUListElement = _htmlInterface('HTMLUListElement', ['ul']);
+globalThis.HTMLOListElement = _htmlInterface('HTMLOListElement', ['ol']);
+globalThis.HTMLLIElement = _htmlInterface('HTMLLIElement', ['li']);
+globalThis.HTMLPreElement = _htmlInterface('HTMLPreElement', ['pre']);
+globalThis.HTMLHeadingElement = _htmlInterface('HTMLHeadingElement', ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
+globalThis.HTMLTemplateElement = _htmlInterface('HTMLTemplateElement', ['template']);
+globalThis.HTMLSlotElement = _htmlInterface('HTMLSlotElement', ['slot']);
+globalThis.HTMLOptionElement = _htmlInterface('HTMLOptionElement', ['option']);
+globalThis.HTMLDataListElement = _htmlInterface('HTMLDataListElement', ['datalist']);
+globalThis.HTMLFieldSetElement = _htmlInterface('HTMLFieldSetElement', ['fieldset']);
+globalThis.HTMLLegendElement = _htmlInterface('HTMLLegendElement', ['legend']);
+globalThis.HTMLProgressElement = _htmlInterface('HTMLProgressElement', ['progress']);
+globalThis.HTMLDetailsElement = _htmlInterface('HTMLDetailsElement', ['details']);
+globalThis.HTMLDialogElement = _htmlInterface('HTMLDialogElement', ['dialog']);
 globalThis.SVGElement = Element;
 globalThis.SVGSVGElement = Element;
 // API-tamper probes check these globals exist with the listed methods on

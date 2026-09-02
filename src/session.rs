@@ -585,6 +585,8 @@ fn session_thread(
                                 let events = &page.inner.network_events;
                                 let mut media = crate::har::media_entries(events);
                                 merge_dom_candidates(&mut media, &dom);
+                                let body_of = |rid: &str| page.inner.get_response_body(rid);
+                                media.extend(crate::har::media_from_bodies(events, &body_of));
                                 serde_json::json!({
                                     "url": page.url(),
                                     "media": media,
