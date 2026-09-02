@@ -12,9 +12,8 @@ use html5ever::namespace_url;
 use crate::diting_net::{CookieJar, HttpClient};
 
 /// CDP Fetch-domain resolution: what a client answers a paused request with.
-/// Only `Continue` is ever produced today (by tests); `Fulfill` / `Fail` are
-/// the wire shapes a CDP client would send — no CDP client exists yet.
-#[allow(dead_code)]
+/// Produced by the CDP bridge's `Fetch.continueRequest` / `fulfillRequest` /
+/// `failRequest` handlers.
 #[derive(Debug)]
 pub enum InterceptResolution {
     Continue {
@@ -33,17 +32,26 @@ pub enum InterceptResolution {
 
 /// A paused request surfaced to the interception channel (CDP
 /// `Fetch.requestPaused` shape). The resolver answers with an
-/// `InterceptResolution`. Field readers are the CDP layer, which is not
-/// absorbed; ops code only moves the struct through the channel.
-#[allow(dead_code)]
+/// `InterceptResolution`. Field readers are the CDP layer, which mints its
+/// own pause ids; ops code only moves the struct through the channel.
 pub struct InterceptedRequest {
-    pub request_id: String,
     pub url: String,
     pub method: String,
     pub headers: HashMap<String, String>,
     pub resource_type: String,
     pub resolver: tokio::sync::oneshot::Sender<InterceptResolution>,
 }
+
+/// How long a paused fetch()/XHR waits for a CDP client's resolution before
+/// falling through to the real request (Continue semantics). The CDP bridge
+/// can only drain pauses between commands — a pause created inside a
+/// dispatch that itself waits on the fetch (Runtime.evaluate of a fetch
+/// expression) is undeliverable until that dispatch ends, so without a
+/// bound such a call would hang forever. Real clients resolve in
+/// milliseconds; the default only shows up on client-less pages. Tests
+/// shorten it via the atomic.
+pub static INTERCEPT_RESOLUTION_TIMEOUT_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(10_000);
 
 pub struct JsState {
     pub dom: Option<DomTree>,
@@ -63,7 +71,6 @@ pub struct JsState {
     pub http_client: Option<Arc<HttpClient>>,
     pub pending_navigation: Option<(String, String, String)>,
     pub intercept_tx: Option<tokio::sync::mpsc::UnboundedSender<InterceptedRequest>>,
-    pub intercept_counter: u64,
     pub intercept_enabled: bool,
     // Queue of (binding_name, payload) calls made by page JS via the
     // `op_binding_called` op. Drained by the CDP layer after each dispatch
@@ -197,7 +204,6 @@ impl JsState {
             http_client: None,
             pending_navigation: None,
             intercept_tx: None,
-            intercept_counter: 0,
             intercept_enabled: false,
             pending_binding_calls: Vec::new(),
             pending_console_calls: Vec::new(),
@@ -1441,7 +1447,7 @@ async fn op_fetch_url(
     let (cookie_jar, in_flight, intercept_tx, proxy_url, http_client, callbacks) = {
         let state_borrow = state.borrow();
         let gs = state_borrow.borrow::<SharedState>().clone();
-        let mut gs = gs.borrow_mut();
+        let gs = gs.borrow_mut();
         for pattern in &gs.blocked_urls {
             if pattern == "*" || url.contains(pattern) || glob_match(pattern, &url) {
                 return Ok(serde_json::json!({
@@ -1461,8 +1467,7 @@ async fn op_fetch_url(
         let proxy_url = gs.http_client.as_ref().and_then(|c| c.proxy_url().map(|s| s.to_string()));
         tracing::debug!("op_fetch_url: intercept_enabled={}, has_tx={}", gs.intercept_enabled, gs.intercept_tx.is_some());
         let itx = if gs.intercept_enabled {
-            gs.intercept_counter += 1;
-            gs.intercept_tx.clone().map(|tx| (tx, format!("intercept-{}", gs.intercept_counter)))
+            gs.intercept_tx.clone()
         } else {
             None
         };
@@ -1473,11 +1478,10 @@ async fn op_fetch_url(
     let mut override_method: Option<String> = None;
     let mut override_headers: Option<HashMap<String, String>> = None;
     let mut override_body: Option<String> = None;
-    if let Some((tx, request_id)) = intercept_tx {
+    if let Some(tx) = intercept_tx {
         let custom_headers: HashMap<String, String> = serde_json::from_str(&headers_json).unwrap_or_default();
         let (resolve_tx, resolve_rx) = tokio::sync::oneshot::channel();
         let intercepted = InterceptedRequest {
-            request_id: request_id.clone(),
             url: url.clone(),
             method: method.clone(),
             headers: custom_headers.clone(),
@@ -1485,8 +1489,15 @@ async fn op_fetch_url(
             resolver: resolve_tx,
         };
         if tx.send(intercepted).is_ok() {
-            match resolve_rx.await {
-                Ok(InterceptResolution::Fulfill { status, headers: h, body: b }) => {
+            // Bounded wait: the bridge drains pauses between commands, so a
+            // resolution normally lands within one command gap. When the
+            // dispatch that triggered the fetch is itself parked on this
+            // future (evaluate of a fetch expression), the resolution cannot
+            // be delivered and the wait must expire instead of hanging the
+            // command forever.
+            let timeout_ms = INTERCEPT_RESOLUTION_TIMEOUT_MS.load(std::sync::atomic::Ordering::Relaxed);
+            match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), resolve_rx).await {
+                Ok(Ok(InterceptResolution::Fulfill { status, headers: h, body: b })) => {
                     let resp_headers: HashMap<String, String> = h;
                     return Ok(serde_json::json!({
                         "status": status,
@@ -1495,7 +1506,7 @@ async fn op_fetch_url(
                         "headers": resp_headers,
                     }).to_string());
                 }
-                Ok(InterceptResolution::Fail { reason }) => {
+                Ok(Ok(InterceptResolution::Fail { reason })) => {
                     return Ok(serde_json::json!({
                         "status": 0,
                         "body": "",
@@ -1505,14 +1516,15 @@ async fn op_fetch_url(
                         "error": reason,
                     }).to_string());
                 }
-                Ok(InterceptResolution::Continue { url: new_url, method: new_method, headers: new_headers, body: new_body }) => {
+                Ok(Ok(InterceptResolution::Continue { url: new_url, method: new_method, headers: new_headers, body: new_body })) => {
                     override_url = new_url;
                     override_method = new_method;
                     override_headers = new_headers;
                     override_body = new_body;
                 }
-                Err(_) => {
-                }
+                // Client answered nothing in time (or dropped the resolver):
+                // fall through to the real request, i.e. Continue semantics.
+                Ok(Err(_)) | Err(_) => {}
             }
         }
     }

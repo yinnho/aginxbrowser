@@ -416,7 +416,12 @@ impl JsRuntime {
         state.intercept_tx = Some(tx);
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // tests cover the auto-enable hang regression
+    /// Enable/disable interception for the wired channel. Kept separate from
+    /// `set_intercept_tx` on purpose: the two were entangled once and every
+    /// navigation auto-enabled interception, which made `fetch()` from page JS
+    /// hang forever waiting for a CDP client to answer Fetch.requestPaused
+    /// events the client never asked for. The CDP bridge now drives both —
+    /// but only after the client explicitly calls Fetch.enable.
     pub fn set_intercept_enabled(&self, enabled: bool) {
         let mut state = self.state.borrow_mut();
         state.intercept_enabled = enabled;

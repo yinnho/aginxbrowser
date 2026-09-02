@@ -232,6 +232,10 @@ pub struct Page {
     response_body_order: std::collections::VecDeque<String>,
     pub intercept_enabled: bool,
     pub intercept_block_patterns: Vec<String>,
+    /// Fetch-domain interception kernel channel. `Some` means armed — the
+    /// CDP bridge receives every script-initiated fetch()/XHR as an
+    /// `InterceptedRequest` and answers with a resolution. Cleared by
+    /// `set_fetch_intercept(None)`.
     intercept_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::diting_js::ops::InterceptedRequest>>,
     // Scripts to execute in the page's JS context BEFORE any of the page's
     // own scripts run — the CDP `Page.addScriptToEvaluateOnNewDocument`
@@ -415,6 +419,11 @@ impl Page {
 
         if let Some(tx) = &self.intercept_tx {
             rt.set_intercept_tx(tx.clone());
+            // tx presence == armed: `set_fetch_intercept(None)` clears both,
+            // so a realm rebuilt after navigation (init_js runs on every
+            // document) resumes intercepting instead of silently passing
+            // fetches straight through while the bridge still waits.
+            rt.set_intercept_enabled(true);
         }
 
         // Script-initiated fetch()/XHR fire the page's passive observers too
@@ -2199,19 +2208,23 @@ impl Page {
         }
     }
 
-    #[allow(dead_code)] // Fetch-domain intercept kernel (requestPaused channel); no CDP client to answer pauses yet
-    pub fn set_intercept_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<crate::diting_js::ops::InterceptedRequest>) {
-        self.intercept_tx = Some(tx.clone());
+    /// Arm / disarm the Fetch-domain interception kernel. `Some(tx)` routes
+    /// every script-initiated fetch()/XHR through the CDP bridge as an
+    /// `InterceptedRequest` (the bridge answers via the per-request oneshot);
+    /// `None` disarms and lets in-flight resolvers fall through to the real
+    /// request. Arming survives navigation — `init_js` carries the channel
+    /// into each rebuilt realm.
+    pub fn set_fetch_intercept(&mut self, tx: Option<tokio::sync::mpsc::UnboundedSender<crate::diting_js::ops::InterceptedRequest>>) {
+        self.intercept_tx = tx.clone();
+        self.intercept_enabled = tx.is_some();
         if let Some(js) = &self.js {
-            js.set_intercept_tx(tx);
-        }
-    }
-
-    #[allow(dead_code)] // toggles the kernel above; kept separate so fetch() never auto-pauses
-    pub fn enable_intercept(&mut self, enabled: bool) {
-        self.intercept_enabled = enabled;
-        if let Some(js) = &self.js {
-            js.set_intercept_enabled(enabled);
+            match tx {
+                Some(tx) => {
+                    js.set_intercept_tx(tx);
+                    js.set_intercept_enabled(true);
+                }
+                None => js.set_intercept_enabled(false),
+            }
         }
     }
 }

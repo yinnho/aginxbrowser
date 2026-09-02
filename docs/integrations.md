@@ -26,7 +26,19 @@ The engine advertises itself as a Chrome instance on the standard discovery endp
 | `GET /json/list` | `[]` — targets are per-connection, created over the browser socket |
 | `WS /devtools/{browser\|page}/{id}` | the debugger WebSocket |
 
-Implemented CDP domains: `browser`, `dom`, `emulation`, `input`, `network`, `page`, `runtime`, `storage`, `target`. Playwright and Puppeteer create targets themselves via `Target.createTarget`, so the empty `/json/list` is normal.
+Implemented CDP domains: `browser`, `dom`, `emulation`, `fetch`, `input`, `network`, `page`, `runtime`, `storage`, `target`. Playwright and Puppeteer create targets themselves via `Target.createTarget`, so the empty `/json/list` is normal.
+
+### Request interception (`page.route()` / `setRequestInterception`)
+
+The `Fetch` domain is wired to the engine's intercept kernel: script-initiated `fetch()`/XHR pause at the Request stage and surface as `Fetch.requestPaused`, so Playwright routing and Puppeteer interception work:
+
+```python
+page.route("**/api/*", lambda route: route.fulfill(status=200, body="mocked"))
+page.route("**/tracker.js", lambda route: route.abort())
+page.route("**/slow.json", lambda route: route.continue_(url=url.replace("/slow", "")))
+```
+
+Boundaries: document/subresource loads take the navigation transport and are not intercepted (route page-initiated `fetch()` calls instead); Response-stage interception and `takeResponseBodyAsStream` are not implemented. A pause that outlives the command which created it (e.g. `evaluate` awaiting its own intercepted fetch) falls through to the real request after a bounded resolution timeout rather than hanging the connection.
 
 ### Playwright (Python)
 
@@ -117,7 +129,7 @@ Response: `{ success, data: { markdown, html, links, screenshot, metadata: { tit
 
 ## MCP
 
-Register the MCP server (13 tools: `fetch`, `eval`, `click`, `search`, plus 9 session tools — `session_create`, `session_navigate`, `session_state`, `session_cookies`, `session_click`, `session_input`, `session_scroll`, `session_eval`, `session_close`):
+Register the MCP server (18 tools: `fetch`, `eval`, `search`, `download`, `cache`, screenshot, plus the session tools — `session_create`, `session_navigate`, `session_state`, `session_cookies`, `session_click`, `session_input`, `session_scroll`, `session_eval`, `session_close`):
 
 ```bash
 claude mcp add aginxbrowser --transport http http://127.0.0.1:8089/mcp

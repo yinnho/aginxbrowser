@@ -4,17 +4,38 @@
 //! Adaptation notes vs upstream:
 //! - no screencasts (upstream render feature; diting screenshots go through
 //!   `crate::screenshot::render_html_to_png_diting` instead)
-//! - no Fetch-intercept state yet (Fetch domain not claimed in wave 1)
-//! - single realm per page, so child-frame bookkeeping is a stub
+//! - Fetch interception pauses only script-initiated fetch()/XHR at the
+//!   Request stage (document/subresource loads ride the navigation transport)
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::diting_browser::{BrowserContext, Page};
-use serde_json::json;
+use crate::diting_cdp::domains::fetch::url_pattern_matches;
+use crate::diting_js::ops::{InterceptResolution, InterceptedRequest};
+use serde_json::{json, Value};
 
 use crate::diting_cdp::domains;
 use crate::diting_cdp::types::{CdpEvent, CdpRequest, CdpResponse};
+
+/// A pause waiting for the client's `Fetch.continueRequest` /
+/// `fulfillRequest` / `failRequest`. Only the id the client answered with and
+/// the resolver matter — the request shape already went out on the wire in
+/// the `Fetch.requestPaused` event.
+pub struct PendingPause {
+    pub bridge_request_id: String,
+    pub resolver: Option<tokio::sync::oneshot::Sender<InterceptResolution>>,
+}
+
+/// Per-page Fetch-intercept state, created by `Fetch.enable`.
+pub struct FetchInterceptState {
+    /// `Fetch.enable` urlPatterns; empty matches every request.
+    pub patterns: Vec<String>,
+    /// Engine → bridge channel for parked requests (armed via
+    /// `Page::set_fetch_intercept`).
+    pub rx: tokio::sync::mpsc::UnboundedReceiver<InterceptedRequest>,
+    pub pending: Vec<PendingPause>,
+}
 
 pub struct CdpContext {
     pub pages: Vec<Page>,
@@ -54,6 +75,12 @@ pub struct CdpContext {
     // Monotonic counter for isolated-world execution context ids — incrementing,
     // never reused, mirroring what real Chrome would emit.
     pub next_isolated_context_id: i64,
+    /// Fetch-intercept state per page (`Fetch.enable` arms it). Lives on the
+    /// context, not the Page, so it dies with the WebSocket connection.
+    pub fetch_intercept: HashMap<String, FetchInterceptState>,
+    /// Bridge-unique pause ids (`fi-{N}`) — independent of the engine's
+    /// per-realm `intercept-{N}` ids, which restart at 1 after navigation.
+    pub fetch_pause_counter: u64,
 }
 
 impl CdpContext {
@@ -81,6 +108,8 @@ impl CdpContext {
             isolated_worlds: Vec::new(),
             valid_context_ids,
             next_isolated_context_id: 100,
+            fetch_intercept: HashMap::new(),
+            fetch_pause_counter: 0,
         }
     }
 
@@ -189,6 +218,21 @@ impl CdpContext {
     }
 
     pub fn remove_page(&mut self, id: &str) {
+        // Unpark anything the client never answered; the dropped oneshot side
+        // falls through to the real request on the engine side anyway, but an
+        // explicit Continue keeps semantics obvious.
+        if let Some(mut state) = self.fetch_intercept.remove(id) {
+            for pause in state.pending.drain(..) {
+                if let Some(resolver) = pause.resolver {
+                    let _ = resolver.send(InterceptResolution::Continue {
+                        url: None,
+                        method: None,
+                        headers: None,
+                        body: None,
+                    });
+                }
+            }
+        }
         self.pages.retain(|p| p.id != id);
         self.current_loader_ids.remove(id);
         self.announced_frames.remove(id);
@@ -198,6 +242,12 @@ impl CdpContext {
     pub fn get_session_page(&self, session_id: &Option<String>) -> Option<&Page> {
         let page_id = session_id.as_ref().and_then(|sid| self.sessions.get(sid))?;
         self.get_page(page_id)
+    }
+
+    /// The page id a session routes to. Domain handlers that must touch both
+    /// the page and other context state use this to avoid overlapping borrows.
+    pub fn session_page_id(&self, session_id: &Option<String>) -> Option<&String> {
+        session_id.as_ref().and_then(|sid| self.sessions.get(sid))
     }
 
     pub fn get_session_page_mut(&mut self, session_id: &Option<String>) -> Option<&mut Page> {
@@ -256,17 +306,27 @@ pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
         "Input" => domains::input::handle(method, &req.params, ctx, &req.session_id).await,
         "Emulation" => domains::emulation::handle(method, &req.params, ctx, &req.session_id).await,
         "Storage" => domains::storage::handle(method, &req.params, ctx, &req.session_id).await,
+        "Fetch" => domains::fetch::handle(method, &req.params, ctx, &req.session_id).await,
         // Accepted but no-op. Puppeteer's FrameManager.initialize calls
         // Audits.enable on connect — refusing it breaks puppeteer.connect()
         // before any user code runs.
         "Log" | "Performance" | "Security" | "CSS" | "ServiceWorker" | "Inspector" | "Debugger"
         | "Profiler" | "HeapProfiler" | "Overlay" | "Audits" | "Tracing" | "DeviceAccess"
-        | "SystemInfo" | "Media" | "WebAuthn" | "Fetch" => Ok(json!({})),
+        | "SystemInfo" | "Media" | "WebAuthn" => Ok(json!({})),
         _ => Err(format!("Unknown domain: {}", domain)),
     };
 
     drain_binding_calls(ctx);
     drain_console_calls(ctx);
+    let settle_pages = drain_intercept_calls(ctx);
+    // Run the continuations of every fetch the drain just answered itself.
+    // Nothing else polls the event loop between commands, so without this the
+    // auto-continued request sits parked until an unrelated awaited command.
+    for page_id in settle_pages {
+        if let Some(page) = ctx.get_page_mut(&page_id) {
+            page.settle(50).await;
+        }
+    }
 
     match result {
         Ok(value) => CdpResponse::success(req.id, value, req.session_id.clone()),
@@ -410,6 +470,109 @@ pub(crate) fn drain_console_calls(ctx: &mut CdpContext) {
     ctx.pending_events.extend(events);
 }
 
+// Drain every armed page's intercept channel and surface parked requests as
+// `Fetch.requestPaused` events, following the same after-every-dispatch shape
+// as the binding/console drains. Pauses only land in the channel while V8
+// runs inside a CDP handler, so between-command draining cannot lose one;
+// a pause created by a dispatch that itself parks on the parked fetch
+// (Runtime.evaluate of an awaited fetch) is undeliverable until that dispatch
+// ends — the engine bounds that wait instead (INTERCEPT_RESOLUTION_TIMEOUT_MS).
+//
+// Returns the page ids whose parked fetches were answered with an automatic
+// Continue (no session attached, or the URL matched no pattern). Those
+// resolutions unblock continuations that only run when the JS event loop is
+// next polled — a sync Runtime.evaluate never polls it — so the dispatcher
+// settles each returned page right after this drain.
+pub(crate) fn drain_intercept_calls(ctx: &mut CdpContext) -> Vec<String> {
+    let mut page_to_sessions: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (session_id, page_id) in &ctx.sessions {
+        page_to_sessions
+            .entry(page_id.as_str())
+            .or_default()
+            .push(session_id.as_str());
+    }
+    for sessions in page_to_sessions.values_mut() {
+        sessions.sort_unstable();
+    }
+
+    let mut events: Vec<CdpEvent> = Vec::new();
+    let mut needs_settle: Vec<String> = Vec::new();
+    for (page_id, state) in ctx.fetch_intercept.iter_mut() {
+        let mut parked = Vec::new();
+        while let Ok(intercepted) = state.rx.try_recv() {
+            parked.push(intercepted);
+        }
+        if parked.is_empty() {
+            continue;
+        }
+        let Some(page_sessions) = page_to_sessions.get(page_id.as_str()) else {
+            // No session attached: answer Continue so the fetch proceeds.
+            for req in parked {
+                let _ = req.resolver.send(InterceptResolution::Continue {
+                    url: None,
+                    method: None,
+                    headers: None,
+                    body: None,
+                });
+            }
+            needs_settle.push(page_id.clone());
+            continue;
+        };
+        for req in parked {
+            let matched = state.patterns.is_empty()
+                || state
+                    .patterns
+                    .iter()
+                    .any(|p| url_pattern_matches(p, &req.url));
+            if !matched {
+                let _ = req.resolver.send(InterceptResolution::Continue {
+                    url: None,
+                    method: None,
+                    headers: None,
+                    body: None,
+                });
+                if !needs_settle.contains(page_id) {
+                    needs_settle.push(page_id.clone());
+                }
+                continue;
+            }
+            ctx.fetch_pause_counter += 1;
+            let bridge_request_id = format!("fi-{}", ctx.fetch_pause_counter);
+            // Hide the engine's out-of-band markers from the client view.
+            let headers: serde_json::Map<String, Value> = req
+                .headers
+                .iter()
+                .filter(|(k, _)| !k.starts_with("__diting_"))
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect();
+            for session_id in page_sessions {
+                events.push(CdpEvent {
+                    method: "Fetch.requestPaused".into(),
+                    params: json!({
+                        "requestId": bridge_request_id,
+                        "request": {
+                            "url": req.url,
+                            "method": req.method,
+                            "headers": headers,
+                            "initialPriority": "High",
+                            "referrer": "",
+                        },
+                        "resourceType": req.resource_type,
+                        "frameId": page_id,
+                    }),
+                    session_id: Some(session_id.to_string()),
+                });
+            }
+            state.pending.push(PendingPause {
+                bridge_request_id,
+                resolver: Some(req.resolver),
+            });
+        }
+    }
+    ctx.pending_events.extend(events);
+    needs_settle
+}
+
 async fn dispatch_send_message_to_target(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
     let session_id = req
         .params
@@ -471,6 +634,7 @@ async fn dispatch_send_message_to_target(req: &CdpRequest, ctx: &mut CdpContext)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use crate::diting_cdp::types::CdpRequest;
 
     fn create_page(ctx: &mut CdpContext) -> String {
@@ -1934,5 +2098,343 @@ mod tests {
         assert_eq!(seq[0]["pressure"], json!(0.5));
         assert_eq!(seq[1]["isPointer"], json!(false), "mousedown is not a PointerEvent");
         assert_eq!(seq[2]["pressure"], json!(0));
+    }
+
+    // --- Fetch-domain interception ---------------------------------------
+
+    /// Loopback fixture serving one fixed HTML document for every request,
+    /// counting hits. The document doubles as same-origin base for page-side
+    /// fetch() (a data: URL page would fetch cross-origin and trip CORS).
+    async fn intercept_fixture() -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::AtomicUsize;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits2 = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let h = hits2.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut stream = stream;
+                    let mut buf = vec![0u8; 8192];
+                    if stream.read(&mut buf).await.is_err() {
+                        return;
+                    }
+                    h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let body = "<!DOCTYPE html><html><body>fixture-ok</body></html>";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        (port, hits)
+    }
+
+    async fn setup(page_url: &str) -> (CdpContext, String) {
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-1".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": page_url }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+        (ctx, session_id)
+    }
+
+    fn fetch_enable(id: u64, session: &str, patterns: serde_json::Value) -> CdpRequest {
+        CdpRequest {
+            id,
+            method: "Fetch.enable".to_string(),
+            params: json!({ "patterns": patterns }),
+            session_id: Some(session.to_string()),
+        }
+    }
+
+    fn evaluate_expr(id: u64, session: &str, expression: &str, await_promise: bool) -> CdpRequest {
+        CdpRequest {
+            id,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({ "expression": expression, "returnByValue": true, "awaitPromise": await_promise }),
+            session_id: Some(session.to_string()),
+        }
+    }
+
+    fn paused_request_ids(ctx: &CdpContext) -> Vec<String> {
+        ctx.pending_events
+            .iter()
+            .filter(|e| e.method == "Fetch.requestPaused")
+            .map(|e| e.params["requestId"].as_str().unwrap_or("").to_string())
+            .collect()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_fulfill_request_serves_synthetic_response() {
+        let (port, hits) = intercept_fixture().await;
+        let (mut ctx, session) = setup(&format!("http://127.0.0.1:{port}/doc")).await;
+
+        assert!(dispatch(&fetch_enable(2, &session, json!([{ "urlPattern": "*" }])), &mut ctx)
+            .await
+            .error
+            .is_none());
+
+        // Fire-and-forget fetch: the dispatch returns, the pause drains after
+        // it, the client answers on the next command.
+        let eval = evaluate_expr(
+            3,
+            &session,
+            &format!("fetch('http://127.0.0.1:{port}/data').then(r => {{ window.__status = r.status; return r.text(); }}).then(t => {{ window.__got = t; }})"),
+            false,
+        );
+        assert!(dispatch(&eval, &mut ctx).await.error.is_none());
+        // One extra tick: guaranteed drain opportunity even if the deferred
+        // op's first poll landed after the fetch evaluate's own drain.
+        let tick = evaluate_expr(4, &session, "1", false);
+        assert!(dispatch(&tick, &mut ctx).await.error.is_none());
+
+        assert_eq!(paused_request_ids(&ctx), vec!["fi-1".to_string()]);
+        let paused = ctx
+            .pending_events
+            .iter()
+            .find(|e| e.method == "Fetch.requestPaused")
+            .unwrap();
+        assert_eq!(paused.params["request"]["method"], "GET");
+        assert_eq!(paused.session_id.as_deref(), Some(session.as_str()));
+        assert_eq!(ctx.fetch_intercept.values().next().unwrap().pending.len(), 1);
+
+        let fulfill = CdpRequest {
+            id: 5,
+            method: "Fetch.fulfillRequest".to_string(),
+            params: json!({
+                "requestId": "fi-1",
+                "responseCode": 201,
+                "responseHeaders": [{ "name": "content-type", "value": "text/plain" }],
+                "body": base64::engine::general_purpose::STANDARD.encode("intercepted-body"),
+            }),
+            session_id: Some(session.clone()),
+        };
+        assert!(dispatch(&fulfill, &mut ctx).await.error.is_none());
+
+        let check = evaluate_expr(6, &session, "window.__status + '|' + window.__got", false);
+        let resp = dispatch(&check, &mut ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        assert_eq!(
+            resp.result.unwrap()["result"]["value"],
+            json!("201|intercepted-body")
+        );
+        // The synthetic response satisfied the page: no network hit after the
+        // initial document load.
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(ctx.fetch_intercept.values().next().unwrap().pending.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_continue_request_falls_through_to_network() {
+        let (port, hits) = intercept_fixture().await;
+        let (mut ctx, session) = setup(&format!("http://127.0.0.1:{port}/doc")).await;
+        assert!(dispatch(&fetch_enable(2, &session, json!([{ "urlPattern": "*" }])), &mut ctx)
+            .await
+            .error
+            .is_none());
+
+        let eval = evaluate_expr(
+            3,
+            &session,
+            &format!("fetch('http://127.0.0.1:{port}/data').then(r => r.text()).then(t => {{ window.__got = t; }})"),
+            false,
+        );
+        assert!(dispatch(&eval, &mut ctx).await.error.is_none());
+        assert!(dispatch(&evaluate_expr(4, &session, "1", false), &mut ctx)
+            .await
+            .error
+            .is_none());
+        assert_eq!(paused_request_ids(&ctx), vec!["fi-1".to_string()]);
+
+        let cont = CdpRequest {
+            id: 5,
+            method: "Fetch.continueRequest".to_string(),
+            params: json!({ "requestId": "fi-1" }),
+            session_id: Some(session.clone()),
+        };
+        assert!(dispatch(&cont, &mut ctx).await.error.is_none());
+
+        let check = evaluate_expr(6, &session, "window.__got", false);
+        let resp = dispatch(&check, &mut ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        let value = resp.result.unwrap()["result"]["value"].clone();
+        assert!(
+            value.as_str().unwrap_or("").contains("fixture-ok"),
+            "page must receive the real fixture body, got: {value}"
+        );
+        // Document load + the continued fetch.
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_fail_request_rejects_page_fetch() {
+        let (port, _hits) = intercept_fixture().await;
+        let (mut ctx, session) = setup(&format!("http://127.0.0.1:{port}/doc")).await;
+        assert!(dispatch(&fetch_enable(2, &session, json!([{ "urlPattern": "*" }])), &mut ctx)
+            .await
+            .error
+            .is_none());
+
+        let eval = evaluate_expr(
+            3,
+            &session,
+            &format!("fetch('http://127.0.0.1:{port}/data').catch(e => {{ window.__err = String(e); }})"),
+            false,
+        );
+        assert!(dispatch(&eval, &mut ctx).await.error.is_none());
+        assert!(dispatch(&evaluate_expr(4, &session, "1", false), &mut ctx)
+            .await
+            .error
+            .is_none());
+        assert_eq!(paused_request_ids(&ctx), vec!["fi-1".to_string()]);
+
+        let fail = CdpRequest {
+            id: 5,
+            method: "Fetch.failRequest".to_string(),
+            params: json!({ "requestId": "fi-1", "errorReason": "Failed" }),
+            session_id: Some(session.clone()),
+        };
+        assert!(dispatch(&fail, &mut ctx).await.error.is_none());
+
+        let check = evaluate_expr(6, &session, "window.__err || ''", false);
+        let resp = dispatch(&check, &mut ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        let err = resp.result.unwrap()["result"]["value"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        assert!(!err.is_empty(), "fetch must reject after failRequest");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_enable_patterns_auto_continue_non_matching() {
+        let (port, hits) = intercept_fixture().await;
+        let (mut ctx, session) = setup(&format!("http://127.0.0.1:{port}/doc")).await;
+        let pattern = json!([{ "urlPattern": format!("http://127.0.0.1:{port}/allowed*") }]);
+        assert!(dispatch(&fetch_enable(2, &session, pattern), &mut ctx)
+            .await
+            .error
+            .is_none());
+
+        let eval = evaluate_expr(
+            3,
+            &session,
+            &format!("fetch('http://127.0.0.1:{port}/denied').then(r => r.text()).then(t => {{ window.__got = t; }})"),
+            false,
+        );
+        assert!(dispatch(&eval, &mut ctx).await.error.is_none());
+        assert!(dispatch(&evaluate_expr(4, &session, "1", false), &mut ctx)
+            .await
+            .error
+            .is_none());
+
+        // Non-matching URL: no pause, the real request went out.
+        assert!(paused_request_ids(&ctx).is_empty(), "no pause for non-matching pattern");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(ctx.fetch_intercept.values().next().unwrap().pending.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_disable_unwires_and_answers_pending() {
+        let (port, hits) = intercept_fixture().await;
+        let (mut ctx, session) = setup(&format!("http://127.0.0.1:{port}/doc")).await;
+        assert!(dispatch(&fetch_enable(2, &session, json!([{ "urlPattern": "*" }])), &mut ctx)
+            .await
+            .error
+            .is_none());
+
+        let eval = evaluate_expr(
+            3,
+            &session,
+            &format!("fetch('http://127.0.0.1:{port}/data').then(r => r.text()).then(t => {{ window.__got = t; }})"),
+            false,
+        );
+        assert!(dispatch(&eval, &mut ctx).await.error.is_none());
+        assert_eq!(paused_request_ids(&ctx).len(), 1);
+
+        let disable = CdpRequest {
+            id: 4,
+            method: "Fetch.disable".to_string(),
+            params: json!({}),
+            session_id: Some(session.clone()),
+        };
+        assert!(dispatch(&disable, &mut ctx).await.error.is_none());
+        assert!(ctx.fetch_intercept.is_empty());
+
+        // Post-disable fetches go straight to the network. Awaited, because a
+        // sync evaluate never polls the event loop and nothing else would
+        // drive the un-intercepted fetch to completion.
+        let eval2 = evaluate_expr(
+            5,
+            &session,
+            &format!("fetch('http://127.0.0.1:{port}/data2').then(r => r.text()).then(t => {{ window.__got2 = t; }})"),
+            true,
+        );
+        assert!(dispatch(&eval2, &mut ctx).await.error.is_none());
+        assert!(dispatch(&evaluate_expr(6, &session, "1", false), &mut ctx)
+            .await
+            .error
+            .is_none());
+        assert_eq!(paused_request_ids(&ctx).len(), 1, "no new pause after disable");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    // The documented bound: an evaluate that parks on its own intercepted
+    // fetch (awaitPromise) cannot receive a pause until the dispatch ends, so
+    // the engine's resolution timeout falls through to the real request
+    // instead of hanging the command.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_parked_evaluate_falls_through_after_resolution_timeout() {
+        struct RestoreTimeout;
+        impl Drop for RestoreTimeout {
+            fn drop(&mut self) {
+                crate::diting_js::ops::INTERCEPT_RESOLUTION_TIMEOUT_MS
+                    .store(10_000, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let _restore = RestoreTimeout;
+        crate::diting_js::ops::INTERCEPT_RESOLUTION_TIMEOUT_MS.store(300, std::sync::atomic::Ordering::Relaxed);
+
+        let (port, hits) = intercept_fixture().await;
+        let (mut ctx, session) = setup(&format!("http://127.0.0.1:{port}/doc")).await;
+        assert!(dispatch(&fetch_enable(2, &session, json!([{ "urlPattern": "*" }])), &mut ctx)
+            .await
+            .error
+            .is_none());
+
+        let started = std::time::Instant::now();
+        let eval = evaluate_expr(
+            3,
+            &session,
+            &format!("fetch('http://127.0.0.1:{port}/data').then(r => r.text())"),
+            true,
+        );
+        let resp = dispatch(&eval, &mut ctx).await;
+        let elapsed = started.elapsed();
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        let value = resp.result.unwrap()["result"]["value"].clone();
+        assert!(
+            value.as_str().unwrap_or("").contains("fixture-ok"),
+            "awaited fetch must fall through to the real body, got: {value}"
+        );
+        assert!(elapsed >= std::time::Duration::from_millis(250),
+            "dispatch must ride out the shortened resolution timeout, took {elapsed:?}");
+        // The pause surfaces only after the dispatch ends — the client would
+        // answer too late, and its resolution degrades to a no-op error.
+        assert_eq!(paused_request_ids(&ctx), vec!["fi-1".to_string()]);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }
