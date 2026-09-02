@@ -2135,8 +2135,13 @@ mod tests {
         (port, hits)
     }
 
-    async fn setup(page_url: &str) -> (CdpContext, String) {
-        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+    #[allow(clippy::await_holding_lock)]
+    async fn setup(page_url: &str) -> (CdpContext, String, crate::server::test_util::NetEnvGuard) {
+        // Hold the process-wide private-net guard for the whole test (the
+        // third return element): the runtime SSRF test concurrently unsets
+        // the same env var under the same lock, and a bare set_var here
+        // would race it into blocked loopback requests.
+        let net = crate::server::test_util::net_env_guard();
         let mut ctx = CdpContext::new_with_options(None, false);
         let page_id = create_page(&mut ctx);
         let session_id = "sess-1".to_string();
@@ -2148,7 +2153,7 @@ mod tests {
             session_id: Some(session_id.clone()),
         };
         assert!(dispatch(&nav, &mut ctx).await.error.is_none());
-        (ctx, session_id)
+        (ctx, session_id, net)
     }
 
     fn fetch_enable(id: u64, session: &str, patterns: serde_json::Value) -> CdpRequest {
@@ -2177,10 +2182,11 @@ mod tests {
             .collect()
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
     async fn fetch_fulfill_request_serves_synthetic_response() {
         let (port, hits) = intercept_fixture().await;
-        let (mut ctx, session) = setup(&format!("http://127.0.0.1:{port}/doc")).await;
+        let (mut ctx, session, _net) = setup(&format!("http://127.0.0.1:{port}/doc")).await;
 
         assert!(dispatch(&fetch_enable(2, &session, json!([{ "urlPattern": "*" }])), &mut ctx)
             .await
@@ -2237,10 +2243,139 @@ mod tests {
         assert!(ctx.fetch_intercept.values().next().unwrap().pending.is_empty());
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    // Byte-native fulfillment (obscura#718 class): a synthetic binary body
+    // must reach the page byte-exact through response.arrayBuffer(). The
+    // base64 wire form decodes to raw bytes and rides the same bodyBase64
+    // envelope channel as real network responses — no UTF-8 lossy hop in
+    // between (a lossy String pass would corrupt every non-UTF-8 byte here).
+    #[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+    async fn fetch_fulfill_request_roundtrips_binary_body() {
+        let (port, hits) = intercept_fixture().await;
+        let (mut ctx, session, _net) = setup(&format!("http://127.0.0.1:{port}/doc")).await;
+        assert!(dispatch(&fetch_enable(2, &session, json!([{ "urlPattern": "*" }])), &mut ctx)
+            .await
+            .error
+            .is_none());
+
+        let payload: Vec<u8> = vec![0, 1, 2, 0x7f, 0x80, 0xfe, 0xff, 0x0a, 0x00];
+        let eval = evaluate_expr(
+            3,
+            &session,
+            &format!("window.__p = fetch('http://127.0.0.1:{port}/bin').then(r => r.arrayBuffer())"),
+            false,
+        );
+        assert!(dispatch(&eval, &mut ctx).await.error.is_none());
+        assert!(dispatch(&evaluate_expr(4, &session, "1", false), &mut ctx)
+            .await
+            .error
+            .is_none());
+        assert_eq!(paused_request_ids(&ctx), vec!["fi-1".to_string()]);
+
+        let fulfill = CdpRequest {
+            id: 5,
+            method: "Fetch.fulfillRequest".to_string(),
+            params: json!({
+                "requestId": "fi-1",
+                "responseCode": 200,
+                "responseHeaders": [{ "name": "content-type", "value": "application/octet-stream" }],
+                "body": base64::engine::general_purpose::STANDARD.encode(&payload),
+            }),
+            session_id: Some(session.clone()),
+        };
+        assert!(dispatch(&fulfill, &mut ctx).await.error.is_none());
+
+        let check = evaluate_expr(
+            6,
+            &session,
+            "window.__p.then(b => JSON.stringify(Array.from(new Uint8Array(b))))",
+            true,
+        );
+        let resp = dispatch(&check, &mut ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        let raw = resp.result.unwrap()["result"]["value"]
+            .as_str()
+            .expect("json string")
+            .to_string();
+        let got: Vec<u8> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(got, payload, "binary fulfillment must round-trip byte-exact");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    // Invalid base64 in a resolution is a protocol error and must NOT consume
+    // the pause: the same requestId stays answerable afterwards.
+    #[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+    async fn fetch_invalid_base64_errors_without_consuming_the_pause() {
+        let (port, _hits) = intercept_fixture().await;
+        let (mut ctx, session, _net) = setup(&format!("http://127.0.0.1:{port}/doc")).await;
+        assert!(dispatch(&fetch_enable(2, &session, json!([{ "urlPattern": "*" }])), &mut ctx)
+            .await
+            .error
+            .is_none());
+
+        let eval = evaluate_expr(
+            3,
+            &session,
+            &format!("fetch('http://127.0.0.1:{port}/data').then(r => r.text()).then(t => {{ window.__got = t; }})"),
+            false,
+        );
+        assert!(dispatch(&eval, &mut ctx).await.error.is_none());
+        assert!(dispatch(&evaluate_expr(4, &session, "1", false), &mut ctx)
+            .await
+            .error
+            .is_none());
+        assert_eq!(paused_request_ids(&ctx), vec!["fi-1".to_string()]);
+
+        for (id, method, extra) in [
+            (5u64, "Fetch.continueRequest", json!({ "postData": "!!!not-base64" })),
+            (6, "Fetch.fulfillRequest", json!({ "body": "!!!" })),
+        ] {
+            let mut params = serde_json::Map::new();
+            params.insert("requestId".into(), json!("fi-1"));
+            if let serde_json::Value::Object(m) = extra {
+                for (k, v) in m {
+                    params.insert(k, v);
+                }
+            }
+            let bad = CdpRequest {
+                id,
+                method: method.to_string(),
+                params: serde_json::Value::Object(params),
+                session_id: Some(session.clone()),
+            };
+            let resp = dispatch(&bad, &mut ctx).await;
+            assert!(resp.error.is_some(), "{method} must reject invalid base64");
+        }
+
+        // The pause survived the failed resolutions: a valid answer on the
+        // same requestId still drives the page fetch.
+        let fulfill = CdpRequest {
+            id: 7,
+            method: "Fetch.fulfillRequest".to_string(),
+            params: json!({
+                "requestId": "fi-1",
+                "responseCode": 200,
+                "responseHeaders": [{ "name": "content-type", "value": "text/plain" }],
+                "body": base64::engine::general_purpose::STANDARD.encode("still-answerable"),
+            }),
+            session_id: Some(session.clone()),
+        };
+        assert!(dispatch(&fulfill, &mut ctx).await.error.is_none());
+        let check = evaluate_expr(8, &session, "window.__got || ''", false);
+        let resp = dispatch(&check, &mut ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        assert_eq!(
+            resp.result.unwrap()["result"]["value"],
+            json!("still-answerable")
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
     async fn fetch_continue_request_falls_through_to_network() {
         let (port, hits) = intercept_fixture().await;
-        let (mut ctx, session) = setup(&format!("http://127.0.0.1:{port}/doc")).await;
+        let (mut ctx, session, _net) = setup(&format!("http://127.0.0.1:{port}/doc")).await;
         assert!(dispatch(&fetch_enable(2, &session, json!([{ "urlPattern": "*" }])), &mut ctx)
             .await
             .error
@@ -2279,10 +2414,11 @@ mod tests {
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
     async fn fetch_fail_request_rejects_page_fetch() {
         let (port, _hits) = intercept_fixture().await;
-        let (mut ctx, session) = setup(&format!("http://127.0.0.1:{port}/doc")).await;
+        let (mut ctx, session, _net) = setup(&format!("http://127.0.0.1:{port}/doc")).await;
         assert!(dispatch(&fetch_enable(2, &session, json!([{ "urlPattern": "*" }])), &mut ctx)
             .await
             .error
@@ -2319,10 +2455,11 @@ mod tests {
         assert!(!err.is_empty(), "fetch must reject after failRequest");
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
     async fn fetch_enable_patterns_auto_continue_non_matching() {
         let (port, hits) = intercept_fixture().await;
-        let (mut ctx, session) = setup(&format!("http://127.0.0.1:{port}/doc")).await;
+        let (mut ctx, session, _net) = setup(&format!("http://127.0.0.1:{port}/doc")).await;
         let pattern = json!([{ "urlPattern": format!("http://127.0.0.1:{port}/allowed*") }]);
         assert!(dispatch(&fetch_enable(2, &session, pattern), &mut ctx)
             .await
@@ -2347,10 +2484,11 @@ mod tests {
         assert!(ctx.fetch_intercept.values().next().unwrap().pending.is_empty());
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
     async fn fetch_disable_unwires_and_answers_pending() {
         let (port, hits) = intercept_fixture().await;
-        let (mut ctx, session) = setup(&format!("http://127.0.0.1:{port}/doc")).await;
+        let (mut ctx, session, _net) = setup(&format!("http://127.0.0.1:{port}/doc")).await;
         assert!(dispatch(&fetch_enable(2, &session, json!([{ "urlPattern": "*" }])), &mut ctx)
             .await
             .error
@@ -2396,7 +2534,8 @@ mod tests {
     // fetch (awaitPromise) cannot receive a pause until the dispatch ends, so
     // the engine's resolution timeout falls through to the real request
     // instead of hanging the command.
-    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
     async fn fetch_parked_evaluate_falls_through_after_resolution_timeout() {
         struct RestoreTimeout;
         impl Drop for RestoreTimeout {
@@ -2409,7 +2548,7 @@ mod tests {
         crate::diting_js::ops::INTERCEPT_RESOLUTION_TIMEOUT_MS.store(300, std::sync::atomic::Ordering::Relaxed);
 
         let (port, hits) = intercept_fixture().await;
-        let (mut ctx, session) = setup(&format!("http://127.0.0.1:{port}/doc")).await;
+        let (mut ctx, session, _net) = setup(&format!("http://127.0.0.1:{port}/doc")).await;
         assert!(dispatch(&fetch_enable(2, &session, json!([{ "urlPattern": "*" }])), &mut ctx)
             .await
             .error

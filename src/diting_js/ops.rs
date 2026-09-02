@@ -20,12 +20,12 @@ pub enum InterceptResolution {
         url: Option<String>,
         method: Option<String>,
         headers: Option<HashMap<String, String>>,
-        body: Option<String>,
+        body: Option<Vec<u8>>,
     },
     Fulfill {
         status: u16,
         headers: HashMap<String, String>,
-        body: String,
+        body: Vec<u8>,
     },
     Fail { reason: String },
 }
@@ -1477,7 +1477,7 @@ async fn op_fetch_url(
     let mut override_url: Option<String> = None;
     let mut override_method: Option<String> = None;
     let mut override_headers: Option<HashMap<String, String>> = None;
-    let mut override_body: Option<String> = None;
+    let mut override_body: Option<Vec<u8>> = None;
     if let Some(tx) = intercept_tx {
         let custom_headers: HashMap<String, String> = serde_json::from_str(&headers_json).unwrap_or_default();
         let (resolve_tx, resolve_rx) = tokio::sync::oneshot::channel();
@@ -1499,9 +1499,12 @@ async fn op_fetch_url(
             match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), resolve_rx).await {
                 Ok(Ok(InterceptResolution::Fulfill { status, headers: h, body: b })) => {
                     let resp_headers: HashMap<String, String> = h;
+                    // Byte-native: the synthetic body rides the same base64
+                    // channel as real network responses (binary payloads
+                    // survive; text is reconstructed on the JS side).
                     return Ok(serde_json::json!({
                         "status": status,
-                        "body": b,
+                        "bodyBase64": BASE64.encode(b),
                         "url": url,
                         "headers": resp_headers,
                     }).to_string());
@@ -1551,16 +1554,18 @@ async fn op_fetch_url(
         url
     };
     let method = override_method.unwrap_or(method);
-    // An interception Continue rewrite supplies a plain-text body, never the
-    // base64 wire form, so the base64 flag applies only to the original body.
-    let (body, body_is_base64) = match override_body {
-        Some(b) => (b, false),
-        None => (body, body_is_base64),
-    };
-    let body_bytes: Vec<u8> = if body_is_base64 {
-        BASE64.decode(&body).unwrap_or_default()
-    } else {
-        body.into_bytes()
+    // A Continue rewrite supplies raw request bytes (the CDP layer already
+    // decoded the base64 wire form), so the base64 flag applies only to the
+    // original body.
+    let body_bytes: Vec<u8> = match override_body {
+        Some(b) => b,
+        None => {
+            if body_is_base64 {
+                BASE64.decode(&body).unwrap_or_default()
+            } else {
+                body.into_bytes()
+            }
+        }
     };
     let headers_json = match override_headers {
         Some(h) => serde_json::to_string(&h).unwrap_or(headers_json),

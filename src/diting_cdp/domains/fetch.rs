@@ -152,14 +152,11 @@ fn resolve_continue(params: &Value) -> Result<InterceptResolution, String> {
         .and_then(|v| v.as_str())
         .map(str::to_string);
     let headers = header_map(params.get("headers"));
-    // postData is base64 on the CDP wire; the engine's body model is text.
+    // postData is base64 on the CDP wire; it rides byte-native from here on.
     let body = match params.get("postData").and_then(|v| v.as_str()) {
-        Some(data) => Some(
-            String::from_utf8_lossy(&BASE64.decode(data).map_err(|e| {
-                format!("continueRequest postData is not valid base64: {}", e)
-            })?)
-            .into_owned(),
-        ),
+        Some(data) => Some(BASE64.decode(data).map_err(|e| {
+            format!("continueRequest postData is not valid base64: {}", e)
+        })?),
         None => None,
     };
     Ok(InterceptResolution::Continue {
@@ -177,13 +174,13 @@ fn resolve_fulfill(params: &Value) -> Result<InterceptResolution, String> {
         .ok_or("fulfillRequest requires responseCode")? as u16;
     let headers = header_map(params.get("responseHeaders")).unwrap_or_default();
     let body = match params.get("body").and_then(|v| v.as_str()) {
-        Some(data) => String::from_utf8_lossy(
-            &BASE64
-                .decode(data)
-                .map_err(|e| format!("fulfillRequest body is not valid base64: {}", e))?,
-        )
-        .into_owned(),
-        None => String::new(),
+        // Byte-native: decode straight to bytes so binary fulfillments
+        // (images, WASM, ...) round-trip exactly; the JS side re-derives
+        // text through the response's charset.
+        Some(data) => BASE64
+            .decode(data)
+            .map_err(|e| format!("fulfillRequest body is not valid base64: {}", e))?,
+        None => Vec::new(),
     };
     Ok(InterceptResolution::Fulfill {
         status,
