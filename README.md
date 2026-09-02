@@ -49,7 +49,7 @@ Most new "agent browsers" are stateless, fingerprint-less one-shot renderers —
 
 - **🔐 Real TLS fingerprints** — stealth mode replicates the complete Chrome145 / Firefox133 / Safari / Edge TLS handshakes via BoringSSL (not just a UA string), switchable per request; Cloudflare Turnstile challenges wait automatically for `cf_clearance`. Fingerprint-less engines eat 403s — we get through.
 - **🤝 Stateful interactive sessions** — persistent sessions (8-minute idle keep-alive), login state injectable and exportable (`session_create(cookies=...)` ↔ `session_cookies`), surviving pagination and multi-step flows. One-shot engines throw state away.
-- **🔌 MCP native** — 17 tools as first-class citizens (not a CDP shim). Claude Code / Cursor / Claude Desktop connect in one line. HTTP + MCP dual protocol — plus a CDP bridge, so the DevTools ecosystem works too.
+- **🔌 MCP native** — 18 tools as first-class citizens (not a CDP shim). Claude Code / Cursor / Claude Desktop connect in one line. HTTP + MCP dual protocol — plus a CDP bridge, so the DevTools ecosystem works too.
 
 > Reference point: Cloudflare's Kitesurf explicitly ships neither real TLS-fingerprint negotiation nor persistent auth sessions — anti-bot and login territory is exactly where AginxBrowser plays.
 
@@ -72,6 +72,7 @@ The [local cache](#capabilities) builds on the same idea: search hits come back 
 - **Multi-engine meta-search**: general web (Baidu / Bing / Sogou / WeChat / Google / DuckDuckGo), news (Bing News), code (Stack Overflow, GitHub), packages (npm, PyPI), academic (arXiv), AI models (Hugging Face) — 15 engines across 7 categories, queried concurrently, merged and deduplicated. Operators can plug a private Meilisearch index into the same `/search`. Search → read in one step
 - **Image search**: `categories=images` hits Baidu/Bing image indexes and returns direct binary `image_url` links (downloadable straight to jpg/png) plus `source_url` provenance
 - **Interactive sessions**: persistent browser sessions with indexed interaction (`state/click/input/scroll/eval`) — agents browse like humans do, and `session_export` turns what an agent figured out into a runnable curl replay script (zero model tokens on re-run)
+- **Playback-link sniffer**: `session_network(filter=media)` extracts the m3u8/mp4/dash URLs a page's player *actually requested* at runtime — links found only in page HTML are often decoys, so the request log is the source of truth. `GET /session/{id}/har` exports the same traffic as HAR 1.2 (retained bodies included)
 - **CDP bridge**: `/json/version` + `/devtools/{kind}/{id}` WebSocket — `chromium.connectOverCDP()` from Playwright, Puppeteer, or browser-use attaches with one line ([integration guide](docs/integrations.md)). DevTools ecosystem compatibility without becoming a CDP shim
 - **File download**: streaming to disk (no memory buffering), SHA-256 integrity, resume of interrupted transfers — for binaries, archives, datasets
 - **Local cache that remembers**: every fetch/search lands in SQLite (FTS5) at `~/.aginxbrowser/cache.db`. The `cache` tool re-answers from what the agent already read instead of re-paying network time: full-text search with CJK substring matching, keyword × freshness fusion ranking, `[§ heading]` section-aware snippets, per-URL content hashes for drift detection, TTL-bounded, per-session scoping for shared deployments
@@ -79,7 +80,7 @@ The [local cache](#capabilities) builds on the same idea: search hits come back 
 - **JS data extraction**: `js_extract` pulls `window.__INITIAL_STATE__` and other structured data out of SPAs
 - **Screenshot rendering**: `/screenshot` endpoint (opt-in `--features screenshot`) paints the JS-rendered DOM with the diting rendering engine — pure CPU, no Chromium — to PNG. Vision input for agents
 - **TLS fingerprint spoofing**: stealth mode impersonates Chrome145/Firefox133/Safari/Edge, switchable per request
-- **MCP server**: `--mcp` mode exposes 17 tools (fetch/eval/search/download/cache + session + screenshot tools) — Claude Code / Claude Desktop / Cursor call them directly
+- **MCP server**: `--mcp` mode exposes 18 tools (fetch/eval/search/download/cache + session + screenshot tools) — Claude Code / Claude Desktop / Cursor call them directly
 - **Firecrawl compatible**: `/v1/scrape` endpoint — existing Firecrawl clients migrate by changing the base URL
 - **DNS rebinding protection**: built-in SSRF guard + post-resolution IP validation
 
@@ -202,7 +203,7 @@ aginxbrowser/
     ├── main.rs              # HTTP service entry & routing
     ├── server.rs            # Business layer (fetch/click/eval/search)
     ├── session.rs           # Interactive browser sessions
-    ├── mcp.rs               # MCP server (17 tools)
+    ├── mcp.rs               # MCP server (18 tools)
     ├── render.rs            # Tiered rendering (HTTP direct → diting browser engine)
     ├── store.rs             # Local fetch/search cache (SQLite FTS5, drift hashes)
     ├── download.rs          # Streaming file download (sha256, resume)

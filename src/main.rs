@@ -19,6 +19,7 @@ mod doctor_cli;
 mod download;
 mod error;
 mod firecrawl_compat;
+mod har;
 mod mcp;
 mod page;
 mod rate;
@@ -544,6 +545,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/session/:id/state", post(session_state_handler))
         .route("/session/:id/cookies", get(session_cookies_handler))
         .route("/session/:id/export", get(session_export_handler))
+        .route("/session/:id/network", get(session_network_handler))
+        .route("/session/:id/har", get(session_har_handler))
         .route("/session/:id/click", post(session_click_handler))
         .route("/session/:id/input", post(session_input_handler))
         .route("/session/:id/scroll", post(session_scroll_handler))
@@ -1073,6 +1076,48 @@ async fn session_export_handler(
         let script = session::replay_bash(&jsonl, "http://127.0.0.1:8089");
         Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")], script))
     }
+}
+
+#[derive(Deserialize)]
+struct SessionNetworkQuery {
+    /// `media` extracts playback/stream links (m3u8, mp4, ...) from the
+    /// requests the page actually issued; anything else lists all traffic.
+    #[serde(default)]
+    filter: Option<String>,
+}
+
+/// The session's network request log: `?filter=media` is the playback-link
+/// sniffer; the default returns compact rows for every request.
+async fn session_network_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<SessionNetworkQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    let text = mgr
+        .send(&id, |reply| session::SessionCommand::Network {
+            media_only: q.filter.as_deref() == Some("media"),
+            reply,
+        })
+        .await
+        .map_err(AppError::Internal)?;
+    let val: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| AppError::Internal(format!("network parse error: {}", e)))?;
+    Ok((StatusCode::OK, Json(val)))
+}
+
+/// Full HAR 1.2 export of the session's current-page traffic (retained
+/// response bodies included) — opens in Chrome DevTools / har viewers.
+async fn session_har_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    let text = mgr
+        .send(&id, |reply| session::SessionCommand::Har { reply })
+        .await
+        .map_err(AppError::Internal)?;
+    let val: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| AppError::Internal(format!("har parse error: {}", e)))?;
+    Ok((StatusCode::OK, Json(val)))
 }
 
 async fn session_click_handler(

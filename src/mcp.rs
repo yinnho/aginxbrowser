@@ -209,6 +209,15 @@ pub struct SessionExportParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionNetworkParams {
+    /// Session ID
+    pub session_id: String,
+    /// "media" extracts playback/stream links (m3u8/HLS, mp4, dash, ...) from the requests the page actually issued - the reliable way to get a real video link, since URLs embedded in page HTML are often decoys. Omit to list every request as compact rows.
+    #[serde(default)]
+    pub filter: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SessionCloseParams {
     /// Session ID
     pub session_id: String,
@@ -624,6 +633,21 @@ impl AginxBrowserMcp {
             reply,
         }).await {
             Ok(result) => json!({ "result": result }).to_string(),
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Read the session's network request log. filter=\"media\" extracts playback/stream URLs (m3u8/HLS, mp4, dash, flv...) actually requested by the page's player at runtime - the reliable way to get a real video link, since links embedded in page HTML are often decoys. Default returns every request as compact rows (method/url/status/type/size). Navigate to the video page first, let it load, then call this.",
+        annotations(title = "Session Network Sniffer", read_only_hint = true)
+    )]
+    async fn session_network(&self, Parameters(params): Parameters<SessionNetworkParams>) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        match mgr.send(&params.session_id, |reply| SessionCommand::Network {
+            media_only: params.filter.as_deref() == Some("media"),
+            reply,
+        }).await {
+            Ok(text) => text,
             Err(e) => json!({ "error": e }).to_string(),
         }
     }

@@ -748,6 +748,48 @@ Run it anywhere with `curl` (override the target with `AGINXBROWSER_URL`), from 
 >
 > **Index caveat**: `click`/`input` replay the *index* from the original run's `/state` output. If the page's element order changed, an index may land elsewhere. The script is a readable, editable starting point, not a guaranteed selector — fix the index (or swap in a selector of your own) and re-run.
 
+### GET /session/{id}/network
+
+The session's network request log for the current page — every document, subresource and script-initiated `fetch()`/XHR the page actually issued, one compact row each. This is the sniffer surface.
+
+**Query parameters:**
+
+| Field | Type | Default | Description |
+|------|------|------|------|
+| filter | string | — | `media` → only playback/stream requests (HLS `.m3u8`, DASH `.mpd`, `.mp4`, `.flv`, `.ts`, `.webm`, audio), classified by URL suffix or response Content-Type |
+
+**Response (default):**
+
+```json
+{
+  "url": "https://example.com/watch",
+  "total": 14,
+  "requests": [
+    {"method":"GET","url":"https://example.com/watch","status":200,"type":"Document","size":51234},
+    {"method":"GET","url":"https://cdn.example/api/resolve","status":200,"type":"Fetch","size":210}
+  ]
+}
+```
+
+**Response (`?filter=media`)** — the playback-link sniffer. Links embedded in page HTML are often decoys; these are the requests the player actually made, so they are what plays:
+
+```json
+{
+  "url": "https://example.com/watch",
+  "media": [
+    {"url":"https://cdn.example/v/master.m3u8?token=1","kind":"hls","status":200,"mime":"application/vnd.apple.mpegurl","type":"Fetch"}
+  ]
+}
+```
+
+### GET /session/{id}/har
+
+The same traffic as a full **HAR 1.2** document (`application/json`) — opens in Chrome DevTools or any HAR viewer. Retained response bodies are inlined as `content.text` (large/opaque bodies base64, `content.encoding: "base64"`); bodies beyond the retention limits are absent. Timing phases we do not measure are `-1`.
+
+```bash
+curl -sS http://127.0.0.1:8089/session/$SID/har -o page.har
+```
+
 ### Session Usage Example
 
 ```bash
@@ -950,6 +992,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `session_input` | Type text by index |
 | `session_scroll` | Scroll the page |
 | `session_eval` | Execute JavaScript in the session |
+| `session_network` | Read the session's network request log; `filter: "media"` extracts playback/stream URLs (m3u8, mp4, ...) actually requested by the page — the reliable way to get a real video link |
 | `session_export` | Export the session's recorded actions as a runnable curl replay script (`format=jsonl` for the raw log) |
 | `session_close` | Close the session |
 

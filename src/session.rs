@@ -68,6 +68,19 @@ pub enum SessionCommand {
     Export {
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Snapshot the page's network request log (the sniffer surface). With
+    /// `media_only`, the reply is `{"url","media":[{url,kind,status,mime}]}`
+    /// — playback links extracted from requests the page actually issued;
+    /// otherwise `{"url","total","requests":[...]}` compact rows.
+    Network {
+        media_only: bool,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Export the current page's traffic as a HAR 1.2 JSON document
+    /// (retained response bodies included).
+    Har {
+        reply: oneshot::Sender<Result<String, String>>,
+    },
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -554,6 +567,37 @@ fn session_thread(
                             let _ = reply.send(Ok(jsonl));
                         }
 
+                        SessionCommand::Network { media_only, reply } => {
+                            page.inner.sync_js_network_events();
+                            let events = &page.inner.network_events;
+                            let payload = if media_only {
+                                serde_json::json!({
+                                    "url": page.url(),
+                                    "media": crate::har::media_entries(events),
+                                })
+                            } else {
+                                serde_json::json!({
+                                    "url": page.url(),
+                                    "total": events.len(),
+                                    "requests": crate::har::compact_events(events),
+                                })
+                            };
+                            let _ = reply.send(Ok(payload.to_string()));
+                        }
+
+                        SessionCommand::Har { reply } => {
+                            page.inner.sync_js_network_events();
+                            let title = page
+                                .evaluate("document.title")
+                                .as_str()
+                                .unwrap_or("")
+                                .to_string();
+                            let events = &page.inner.network_events;
+                            let body_of = |rid: &str| page.inner.get_response_body(rid);
+                            let har = crate::har::har_log(&title, events, &body_of);
+                            let _ = reply.send(Ok(har.to_string()));
+                        }
+
                         SessionCommand::Close { reply } => {
                             let _ = reply.send(());
                             break;
@@ -1008,5 +1052,78 @@ mod tests {
         assert!(script.contains("POST session/create"));
         assert!(script.contains(r#"POST "session/$SID/scroll""#));
         assert!(script.contains(r#"POST "session/$SID/eval""#));
+    }
+
+    /// The session sniffer: a page-side fetch() of a media URL surfaces in
+    /// the Network command (media filter extracts the playback link), and
+    /// Har returns a parseable HAR 1.2 document whose document entry carries
+    /// its retained text body.
+    #[tokio::test]
+    async fn network_sniffer_and_har_surfaces() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[
+            (
+                "GET /watch",
+                "<html><body><script>\
+                 fetch('/v/master.m3u8?token=1').then(function(r){return r.text()});\
+                 </script></body></html>",
+            ),
+            ("GET /v/master.m3u8?token=1", "#EXTM3U"),
+        ]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(Some(&format!("http://127.0.0.1:{port}/watch")), false, vec![]);
+
+        // One pump cycle so the page's fetch() settles into the event queue.
+        let _ = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "1".to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+
+        let media = mgr
+            .send(&sid, |reply| SessionCommand::Network { media_only: true, reply })
+            .await
+            .unwrap();
+        let media: Value = serde_json::from_str(&media).unwrap();
+        let items = media["media"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "one media request: {media}");
+        assert_eq!(items[0]["kind"], "hls");
+        assert!(
+            items[0]["url"].as_str().unwrap().ends_with("/v/master.m3u8?token=1"),
+            "playback link carries its query: {media}"
+        );
+
+        let all = mgr
+            .send(&sid, |reply| SessionCommand::Network { media_only: false, reply })
+            .await
+            .unwrap();
+        let all: Value = serde_json::from_str(&all).unwrap();
+        assert!(
+            all["total"].as_u64().unwrap() >= 2,
+            "document + script fetch: {all}"
+        );
+
+        let har = mgr
+            .send(&sid, |reply| SessionCommand::Har { reply })
+            .await
+            .unwrap();
+        let har: Value = serde_json::from_str(&har).unwrap();
+        assert_eq!(har["log"]["version"], "1.2");
+        let entries = har["log"]["entries"].as_array().unwrap();
+        assert!(entries.len() >= 2, "document + fetch entry: {har}");
+        let doc = entries
+            .iter()
+            .find(|e| e["request"]["url"].as_str().unwrap().ends_with("/watch"))
+            .unwrap();
+        assert_eq!(doc["response"]["status"], 200);
+        assert!(
+            doc["response"]["content"]["text"].as_str().unwrap().contains("master.m3u8"),
+            "document body retained as text"
+        );
+
+        assert!(mgr.close_and_wait(&sid).await, "session thread must ack close");
     }
 }

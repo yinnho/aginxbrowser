@@ -49,7 +49,7 @@ Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操
 
 - **🔐 真实 TLS 指纹** — stealth 模式用 BoringSSL 复刻 Chrome145 / Firefox133 / Safari / Edge 的完整 TLS 握手（不是只改 UA），可按请求切换；Cloudflare Turnstile 挑战页自动等 `cf_clearance`。无指纹引擎碰反爬就是 403，我们穿过去。
 - **🤝 有状态交互 Session** — 持久化浏览器会话（8 分钟空闲保活），登录态可注入可导出（`session_create(cookies=...)` ↔ `session_cookies`），跨翻页、跨多步流程不断。一次性引擎抓完即弃，做不了「登录 → 操作 → 再操作」。
-- **🔌 MCP 原生** — 17 个工具是一等公民（不是 CDP 套壳），Claude Code / Cursor / Claude Desktop 一行接入。HTTP + MCP 双协议之外还有 CDP 桥，DevTools 生态照样能用。
+- **🔌 MCP 原生** — 18 个工具是一等公民（不是 CDP 套壳），Claude Code / Cursor / Claude Desktop 一行接入。HTTP + MCP 双协议之外还有 CDP 桥，DevTools 生态照样能用。
 
 > 参照：Cloudflare 的 Kitesurf 明确不做真实 TLS 指纹协商、不做持久认证会话——反爬与登录正是 AginxBrowser 的地盘。
 
@@ -72,6 +72,7 @@ Agent 是照着浏览器说的话行事的，所以响应里要写清楚实际�
 - **多引擎聚合搜索**：通用网页（百度/Bing/搜狗/搜狗微信/Google/DuckDuckGo）、新闻（Bing News）、代码（Stack Overflow/GitHub）、包（npm/PyPI）、学术（arXiv）、AI 模型（Hugging Face）——15 引擎 7 分类，并发查询、合并去重；运维还可把私有 Meilisearch 索引接入同一 `/search`。Agent 一步完成"搜→读"
 - **图片搜索**：`categories=images` 接百度图片/必应图片，返回 `image_url` 二进制直链（可直接下成 jpg/png）+ `source_url` 溯源
 - **交互式 Session**：持久化浏览器会话，索引化交互（state/click/input/scroll/eval），Agent 像人一样浏览；`session_export` 把 Agent 摸索出来的操作导出成能直接跑的 curl 回放脚本，重放零模型 token
+- **播放链接嗅探**：`session_network(filter=media)` 从页面播放器运行时真正发出的请求里挖 m3u8/mp4/dash 链接——写在 HTML 里的播放地址多半是诱饵，请求日志才是真相。`GET /session/{id}/har` 把同一份流量导出成 HAR 1.2（含已保留的响应体）
 - **CDP 桥**：`/json/version` + `/devtools/{kind}/{id}` WebSocket——Playwright / Puppeteer / browser-use 的 `chromium.connectOverCDP()` 一行接入（[集成指南](docs/integrations.md)）。兼容 DevTools 生态，但自己不做 CDP 套壳
 - **文件下载**：流式落盘（不吃内存）、SHA-256 校验、断点续传——二进制、压缩包、数据集用这个
 - **记得住本地缓存**：每次 fetch/搜索自动进 SQLite（FTS5），落 `~/.aginxbrowser/cache.db`。`cache` 工具从 Agent 已读过的内容里找答案，不再重付网络时间：全文检索支持中文逐字匹配、关键词×新鲜度融合排序、`[§ 标题]` 小节感知摘要、每 URL 内容哈希测漂移、TTL 有界、共享部署可按 session 隔离
@@ -79,7 +80,7 @@ Agent 是照着浏览器说的话行事的，所以响应里要写清楚实际�
 - **JS 数据提取**：`js_extract` 参数，从 SPA 提 `window.__INITIAL_STATE__` 等结构化数据
 - **截图渲染**：`/screenshot` 端点（`--features screenshot`），JS 渲染后的 DOM 用自有的 diting 引擎出 PNG——纯 CPU，无 Chromium，agent 的视觉输入
 - **TLS 指纹伪装**：stealth 模式模拟 Chrome145/Firefox133/Safari/Edge，可按请求切换
-- **MCP Server**：`--mcp` 模式暴露 17 个工具（fetch/eval/click/search/download/cache + session + 截图工具），Claude Code / Claude Desktop / Cursor 直接调用
+- **MCP Server**：`--mcp` 模式暴露 18 个工具（fetch/eval/click/search/download/cache + session + 截图工具），Claude Code / Claude Desktop / Cursor 直接调用
 - **Firecrawl 兼容**：`/v1/scrape` 端点，现有 Firecrawl 客户端改 base URL 即可迁移
 - **DNS 重绑定防护**：内置 SSRF 防护 + 解析后 IP 校验
 
@@ -202,7 +203,7 @@ aginxbrowser/
     ├── main.rs              # HTTP 服务入口与路由
     ├── server.rs            # 业务层（fetch/click/eval/search）
     ├── session.rs           # 交互式浏览器会话
-    ├── mcp.rs               # MCP Server（17 个工具）
+    ├── mcp.rs               # MCP Server（18 个工具）
     ├── render.rs            # 分层渲染（HTTP 直取 → diting 浏览器引擎）
     ├── store.rs             # 本地 fetch/搜索缓存（SQLite FTS5、漂移哈希）
     ├── download.rs          # 流式文件下载（sha256、断点续传）
@@ -298,7 +299,7 @@ cargo build --release --features stealth,screenshot
 
 包含：
 - 全部 25 个 HTTP 端点（`/fetch`、`/search`、`/screenshot`、`/download`、`/v1/scrape`、`/doctor`、11 个 session 端点、CDP 发现、MCP 传输）
-- MCP Server 的 17 个工具及参数
+- MCP Server 的 18 个工具及参数
 - Claude Code / Claude Desktop / Cursor 客户端配置
 - 环境变量、错误码、站点抓取示例
 

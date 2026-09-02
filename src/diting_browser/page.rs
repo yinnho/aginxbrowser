@@ -113,9 +113,8 @@ fn escape_for_js_template_literal(input: &str) -> String {
 
 /// One recorded network exchange (CDP `Network.requestWillBeSent` /
 /// `responseReceived` shape). Recorded for every document + subresource
-/// fetch; no reader beyond tests exists yet — the /network service endpoint
-/// is the intended consumer.
-#[allow(dead_code)]
+/// fetch and drained from the JS runtime for script-initiated requests;
+/// read by the session /network and /har surfaces.
 #[derive(Debug, Clone)]
 pub struct NetworkEvent {
     pub request_id: String,
@@ -2036,7 +2035,7 @@ impl Page {
     /// the CDP layer emits Network.requestWillBeSent / responseReceived for
     /// them (upstream #406). Idempotent: the runtime's queue is drained. The
     /// `fetch-{N}` request id is preserved so get_response_body resolves.
-    #[cfg_attr(not(test), allow(dead_code))] // batch-2 kernel; the /network consumer will call this itself
+    /// The session /network and /har surfaces call this before reading.
     pub fn sync_js_network_events(&mut self) {
         let events = match self.js.as_ref() {
             Some(js) => js.take_js_network_events(),
