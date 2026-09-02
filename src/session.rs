@@ -69,8 +69,10 @@ pub enum SessionCommand {
         reply: oneshot::Sender<Result<String, String>>,
     },
     /// Snapshot the page's network request log (the sniffer surface). With
-    /// `media_only`, the reply is `{"url","media":[{url,kind,status,mime}]}`
-    /// — playback links extracted from requests the page actually issued;
+    /// `media_only`, the reply is `{"url","media":[{url,kind,status,mime,via}]}`
+    /// — playback links extracted from requests the page actually issued
+    /// (via "network"), merged with DOM-observed media-element and player
+    /// iframe sources the engine never fetches (via "dom" candidates);
     /// otherwise `{"url","total","requests":[...]}` compact rows.
     Network {
         media_only: bool,
@@ -569,13 +571,26 @@ fn session_thread(
 
                         SessionCommand::Network { media_only, reply } => {
                             page.inner.sync_js_network_events();
-                            let events = &page.inner.network_events;
                             let payload = if media_only {
+                                // Media elements and player iframes are never
+                                // fetched by the engine (no media/frame
+                                // loading), so they cannot surface in the
+                                // network log — collect their DOM sources and
+                                // merge them in as candidates.
+                                let dom = page
+                                    .evaluate(DOM_MEDIA_SCRIPT)
+                                    .as_str()
+                                    .unwrap_or("[]")
+                                    .to_string();
+                                let events = &page.inner.network_events;
+                                let mut media = crate::har::media_entries(events);
+                                merge_dom_candidates(&mut media, &dom);
                                 serde_json::json!({
                                     "url": page.url(),
-                                    "media": crate::har::media_entries(events),
+                                    "media": media,
                                 })
                             } else {
+                                let events = &page.inner.network_events;
                                 serde_json::json!({
                                     "url": page.url(),
                                     "total": events.len(),
@@ -619,6 +634,77 @@ fn session_thread(
             })
             .await;
     });
+}
+
+// ---------------------------------------------------------------------------
+// DOM media candidates
+// ---------------------------------------------------------------------------
+
+/// Collect playback-relevant sources the engine never fetches (media
+/// elements, player iframes), as a JSON array of `{url, tag}`. Relative URLs
+/// resolve against the page location; duplicates collapse.
+const DOM_MEDIA_SCRIPT: &str = r#"(function(){
+    var out = [];
+    var seen = {};
+    function add(u, tag) {
+        if (!u) return;
+        try { u = new URL(String(u), location.href).href; } catch (e) { return; }
+        if (!seen[u]) { seen[u] = 1; out.push({ url: u, tag: tag }); }
+    }
+    var els = document.querySelectorAll('video,audio,source,iframe');
+    for (var i = 0; i < els.length; i++) {
+        var e = els[i];
+        add(e.getAttribute('src'), e.tagName.toLowerCase());
+    }
+    return JSON.stringify(out);
+})()"#;
+
+/// Merge DOM-observed candidates into the network-derived media list. A
+/// candidate the network log already confirms (same URL ignoring query —
+/// players append auth/expiry tokens the markup never carries) is dropped;
+/// iframes surface as kind "iframe" (player pages to navigate or sniff
+/// inside, not playable URLs themselves); the rest must classify as media
+/// or they are dropped. These are candidates, not confirmations — `via`
+/// says which side produced each entry.
+fn merge_dom_candidates(media: &mut Vec<Value>, dom_json: &str) {
+    let dom: Vec<Value> = match serde_json::from_str(dom_json) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let bare = |u: &str| {
+        u.split(['?', '#'])
+            .next()
+            .unwrap_or(u)
+            .to_ascii_lowercase()
+    };
+    let confirmed: std::collections::HashSet<String> = media
+        .iter()
+        .filter_map(|m| m["url"].as_str())
+        .map(bare)
+        .collect();
+    for cand in dom {
+        let Some(url) = cand["url"].as_str().map(str::to_string) else {
+            continue;
+        };
+        let tag = cand["tag"].as_str().unwrap_or("").to_string();
+        if confirmed.contains(&bare(&url)) {
+            continue;
+        }
+        let kind = if tag == "iframe" {
+            "iframe".to_string()
+        } else {
+            match crate::har::media_kind(&url, None) {
+                Some(k) => k.to_string(),
+                None => continue,
+            }
+        };
+        media.push(serde_json::json!({
+            "url": url,
+            "kind": kind,
+            "via": "dom",
+            "tag": tag,
+        }));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1057,14 +1143,19 @@ mod tests {
     /// The session sniffer: a page-side fetch() of a media URL surfaces in
     /// the Network command (media filter extracts the playback link), and
     /// Har returns a parseable HAR 1.2 document whose document entry carries
-    /// its retained text body.
+    /// its retained text body. Media elements and player iframes the engine
+    /// never fetches surface as DOM candidates (via "dom"); the token-less
+    /// <source> URL dedupes against its token-carrying network twin.
     #[tokio::test]
     async fn network_sniffer_and_har_surfaces() {
         let _net = crate::server::test_util::net_env_guard();
         let (port, _hits) = crate::server::test_util::recording_server(&[
             (
                 "GET /watch",
-                "<html><body><script>\
+                "<html><body>\
+                 <video src='/v/clip.mp4' controls><source src='/v/master.m3u8'></video>\
+                 <iframe src='/embed'></iframe>\
+                 <script>\
                  fetch('/v/master.m3u8?token=1').then(function(r){return r.text()});\
                  </script></body></html>",
             ),
@@ -1089,11 +1180,32 @@ mod tests {
             .unwrap();
         let media: Value = serde_json::from_str(&media).unwrap();
         let items = media["media"].as_array().unwrap();
-        assert_eq!(items.len(), 1, "one media request: {media}");
+        assert_eq!(
+            items.len(),
+            3,
+            "network m3u8 + dom video + dom iframe (source deduped): {media}"
+        );
         assert_eq!(items[0]["kind"], "hls");
+        assert_eq!(items[0]["via"], "network");
         assert!(
             items[0]["url"].as_str().unwrap().ends_with("/v/master.m3u8?token=1"),
             "playback link carries its query: {media}"
+        );
+        // Native video src the engine never fetched: a dom candidate.
+        assert_eq!(items[1]["via"], "dom");
+        assert_eq!(items[1]["tag"], "video");
+        assert_eq!(items[1]["kind"], "mp4");
+        assert!(
+            items[1]["url"].as_str().unwrap().ends_with("/v/clip.mp4"),
+            "native video src is a dom candidate: {media}"
+        );
+        // Player iframe: a candidate to navigate into, not a playable URL.
+        assert_eq!(items[2]["via"], "dom");
+        assert_eq!(items[2]["tag"], "iframe");
+        assert_eq!(items[2]["kind"], "iframe");
+        assert!(
+            items[2]["url"].as_str().unwrap().ends_with("/embed"),
+            "player iframe surfaces as a navigation candidate: {media}"
         );
 
         let all = mgr

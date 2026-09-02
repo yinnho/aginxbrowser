@@ -212,7 +212,7 @@ pub struct SessionExportParams {
 pub struct SessionNetworkParams {
     /// Session ID
     pub session_id: String,
-    /// "media" extracts playback/stream links (m3u8/HLS, mp4, dash, ...) from the requests the page actually issued - the reliable way to get a real video link, since URLs embedded in page HTML are often decoys. Omit to list every request as compact rows.
+    /// "media" extracts playback/stream links (m3u8/HLS, mp4, dash, ...) from the requests the page actually issued - the reliable way to get a real video link, since URLs embedded in page HTML are often decoys. Media elements and player iframes the engine never fetches (video/audio/source src, iframe src) are merged in as candidates: entries carry via="network" (confirmed requests) or via="dom" (candidates, with their tag; iframes surface as kind "iframe" - player pages to navigate or sniff inside, not playable URLs). Omit to list every request as compact rows.
     #[serde(default)]
     pub filter: Option<String>,
 }
@@ -638,7 +638,7 @@ impl AginxBrowserMcp {
     }
 
     #[tool(
-        description = "Read the session's network request log. filter=\"media\" extracts playback/stream URLs (m3u8/HLS, mp4, dash, flv...) actually requested by the page's player at runtime - the reliable way to get a real video link, since links embedded in page HTML are often decoys. Default returns every request as compact rows (method/url/status/type/size). Navigate to the video page first, let it load, then call this.",
+        description = "Read the session's network request log. filter=\"media\" extracts playback/stream URLs (m3u8/HLS, mp4, dash, flv...) actually requested by the page's player at runtime - the reliable way to get a real video link, since links embedded in page HTML are often decoys. Media elements and player iframes the engine never fetches (video/audio/source/iframe src) are merged in as candidates: via=\"network\" entries are confirmed requests, via=\"dom\" entries are candidates carrying their tag (iframes = kind \"iframe\", navigate into them to sniff). Default returns every request as compact rows (method/url/status/type/size). Navigate to the video page first, let it load, then call this.",
         annotations(title = "Session Network Sniffer", read_only_hint = true)
     )]
     async fn session_network(&self, Parameters(params): Parameters<SessionNetworkParams>) -> String {

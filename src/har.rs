@@ -127,6 +127,7 @@ pub fn media_entries(events: &[NetworkEvent]) -> Vec<Value> {
                     "status": e.status,
                     "mime": mime.unwrap_or(""),
                     "type": e.resource_type,
+                    "via": "network",
                 })
             })
         })
@@ -321,6 +322,7 @@ mod tests {
         assert_eq!(media.len(), 1);
         assert_eq!(media[0]["kind"], "hls");
         assert_eq!(media[0]["status"], 200);
+        assert_eq!(media[0]["via"], "network");
         assert_eq!(media[0]["url"], "https://e.example/video/master.m3u8?tk=1");
     }
 
