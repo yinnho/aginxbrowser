@@ -244,22 +244,28 @@ pub async fn handle(
         }
         "getBoxModel" => {
             let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
-            let node_id = match resolve_node_id(page, params) {
-                Ok(nid) => nid,
-                Err(_) => return Ok(json!(null)),
-            };
-            let code = format!(
-                "(function() {{\
-                    var el = globalThis._wrap && globalThis._wrap({0});\
-                    if (!el || typeof el.getBoundingClientRect !== 'function') return null;\
-                    var r = el.getBoundingClientRect();\
-                    return [r.left, r.top, r.right, r.top, r.right, r.bottom, r.left, r.bottom,\
-                            r.width, r.height];\
-                }})()",
-                node_id
-            );
-            let val = page.evaluate(&code);
-            let (quad, w, h) = box_from_value(&val);
+            // Chrome (probed headless 141): a bogus id → -32000 "Could not
+            // find node with given id"; a resolvable node without a rendered
+            // box (display:none, detached, non-box nodes like comments) →
+            // -32000 "Could not compute box model." The old code answered
+            // `null` / a hardcoded 100x20 fallback quad for all of those.
+            // Accepted divergence: text nodes error too — layout rects are
+            // element-keyed in this engine, and an honest error beats a
+            // fabricated box.
+            let node_id = resolve_node_id(page, params)
+                .map_err(|_| "#-32000 Could not find node with given id".to_string())?;
+            // Chrome's nodeId space starts at 1 — 0 is the frontend's "no
+            // node" sentinel and errors the find-node form (probed), even
+            // though this engine's slot 0 may hold a live node.
+            if node_id == 0 {
+                return Err("#-32000 Could not find node with given id".to_string());
+            }
+            let val = page.evaluate(&node_box_probe_code(node_id));
+            if val.as_str() == Some("missing") {
+                return Err("#-32000 Could not find node with given id".to_string());
+            }
+            let (quad, w, h) = box_from_value(&val)
+                .ok_or_else(|| "#-32000 Could not compute box model.".to_string())?;
             Ok(json!({
                 "model": {
                     "content": quad.clone(),
@@ -273,28 +279,60 @@ pub async fn handle(
         }
         "getContentQuads" => {
             let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
-            let node_id = match resolve_node_id(page, params) {
-                Ok(nid) => nid,
-                Err(_) => return Ok(json!(null)),
-            };
-            let code = format!(
-                "(function() {{\
-                    var el = globalThis._wrap && globalThis._wrap({0});\
-                    if (!el || typeof el.getBoundingClientRect !== 'function') return null;\
-                    var r = el.getBoundingClientRect();\
-                    return [r.left, r.top, r.right, r.top, r.right, r.bottom, r.left, r.bottom];\
-                }})()",
-                node_id
-            );
-            let val = page.evaluate(&code);
-            let quad = quad_from_value(&val);
-            Ok(json!({ "quads": [quad] }))
+            // Same Chrome contract as getBoxModel, except a boxless node
+            // SUCCEEDS with an empty quad list (probed: display:none →
+            // {"quads":[]}).
+            let node_id = resolve_node_id(page, params)
+                .map_err(|_| "#-32000 Could not find node with given id".to_string())?;
+            if node_id == 0 {
+                return Err("#-32000 Could not find node with given id".to_string());
+            }
+            let val = page.evaluate(&node_box_probe_code(node_id));
+            if val.as_str() == Some("missing") {
+                return Err("#-32000 Could not find node with given id".to_string());
+            }
+            let quads = quad_from_value(&val)
+                .map(|quad| vec![quad])
+                .unwrap_or_default();
+            Ok(json!({ "quads": quads }))
         }
         _ => Err(format!("Unknown DOM method: {method}")),
     }
 }
 
-const FALLBACK_QUAD: [f64; 8] = [8.0, 8.0, 108.0, 8.0, 108.0, 28.0, 8.0, 28.0];
+/// Probe JS shared by getBoxModel/getContentQuads: a node's rendered box
+/// straight from the `layout_rect` op (NOT gBCR, whose synthetic 12-col grid
+/// fallback fabricates a box for every boxless node). Returns a 10-number
+/// array [x1,y1, x2,y2, x3,y3, x4,y4, width, height], the string "missing"
+/// when the id resolves to no node (`node_type` answers "0"), or null when
+/// the node exists but has no rendered box — display:none subtrees, detached
+/// nodes, comments. Viewport roots (document node; html/body when no layout
+/// ran yet) answer the viewport rect like gBCR does, matching Chrome's
+/// document-root success.
+fn node_box_probe_code(node_id: u64) -> String {
+    format!(
+        "(function() {{\
+            var t = +globalThis.__diting_domRaw('node_type', '{0}', '');\
+            if (!t) return 'missing';\
+            var el = globalThis._wrap && globalThis._wrap({0});\
+            var r = null;\
+            if (el) {{\
+                try {{\
+                    var raw = globalThis.__diting_domRaw('layout_rect', '{0}', '');\
+                    var a = typeof raw === 'string' ? JSON.parse(raw) : raw;\
+                    if (Array.isArray(a) && a.length === 4 && a.every(Number.isFinite)) r = [+a[0], +a[1], +a[2], +a[3]];\
+                }} catch (e) {{}}\
+            }}\
+            if (!r && el && ((el._isViewportRoot && el._isViewportRoot()) || el.nodeType === 9)) {{\
+                r = [0, 0, globalThis.innerWidth || 1280, globalThis.innerHeight || 720];\
+            }}\
+            if (!r) return null;\
+            var x = r[0], y = r[1], w = r[2], h = r[3];\
+            return [x, y, x + w, y, x + w, y + h, x, y + h, w, h];\
+        }})()",
+        node_id
+    )
+}
 
 fn nums_from_value(val: &Value) -> Option<Vec<f64>> {
     val.as_array().map(|arr| arr.iter().filter_map(|v| v.as_f64()).collect())
@@ -314,24 +352,22 @@ fn coord_json(n: &f64) -> Value {
     }
 }
 
-fn quad_from_value(val: &Value) -> Vec<Value> {
+fn quad_from_value(val: &Value) -> Option<Vec<Value>> {
+    // The shared probe returns 10 numbers (quad + width/height); the quad
+    // form takes the first 8.
     match nums_from_value(val) {
-        Some(nums) if nums.len() == 8 => nums.iter().map(coord_json).collect(),
-        _ => FALLBACK_QUAD.iter().map(coord_json).collect(),
+        Some(nums) if nums.len() >= 8 => Some(nums[..8].iter().map(coord_json).collect()),
+        _ => None,
     }
 }
 
-fn box_from_value(val: &Value) -> (Vec<Value>, Value, Value) {
+fn box_from_value(val: &Value) -> Option<(Vec<Value>, Value, Value)> {
     match nums_from_value(val) {
         Some(nums) if nums.len() >= 10 => {
             let q: Vec<Value> = nums[..8].iter().map(coord_json).collect();
-            (q, coord_json(&nums[8]), coord_json(&nums[9]))
+            Some((q, coord_json(&nums[8]), coord_json(&nums[9])))
         }
-        _ => (
-            FALLBACK_QUAD.iter().map(coord_json).collect(),
-            json!(100),
-            json!(20),
-        ),
+        _ => None,
     }
 }
 
@@ -593,24 +629,29 @@ mod tests {
             225.0390625,
             256.0,
             225.0390625
-        ]));
+        ]))
+        .expect("quad");
         let wire = serde_json::to_string(&quad).expect("serialize");
         assert!(
             wire.starts_with("[256,206.0390625,347.25,"),
             "integral coords must serialize without .0, got {wire}"
         );
 
-        // Fallback quad is all-integral too, and width/height ride the same rule.
+        // Width/height ride the same rule through the box form.
         let (quad, w, h) = box_from_value(&json!([
             8.0, 8.0, 108.0, 8.0, 108.0, 28.0, 8.0, 28.0, 100.0, 20.0
-        ]));
+        ]))
+        .expect("box");
         let wire = serde_json::to_string(&quad).expect("serialize");
-        assert_eq!(
-            wire, "[8,8,108,8,108,28,8,28]",
-            "fallback quad integral: {wire}"
-        );
+        assert_eq!(wire, "[8,8,108,8,108,28,8,28]", "box quad integral: {wire}");
         assert_eq!(serde_json::to_string(&w).unwrap(), "100");
         assert_eq!(serde_json::to_string(&h).unwrap(), "20");
+
+        // Boxless payloads are None now — the hardcoded fallback quad is
+        // gone and the handlers error / answer empty quads instead (the
+        // Chrome contract).
+        assert!(quad_from_value(&Value::Null).is_none());
+        assert!(box_from_value(&json!([])).is_none());
     }
 
     #[test]

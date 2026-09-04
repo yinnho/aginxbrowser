@@ -331,8 +331,16 @@ pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
     match result {
         Ok(value) => CdpResponse::success(req.id, value, req.session_id.clone()),
         Err(msg) => {
+            // A domain handler pins a Chrome-accurate protocol code by
+            // prefixing its message with `#-32000 ` (Chrome's DOM errors
+            // carry -32000, not the JSON-RPC method-not-found -32601 this
+            // arm defaults to). The prefix is stripped before the wire.
+            let (code, msg) = match msg.strip_prefix("#-32000 ") {
+                Some(m) => (-32000, m.to_string()),
+                None => (-32601, msg),
+            };
             tracing::warn!("CDP error for {}: {}", req.method, msg);
-            CdpResponse::error(req.id, -32601, msg, req.session_id.clone())
+            CdpResponse::error(req.id, code, msg, req.session_id.clone())
         }
     }
 }
@@ -1696,6 +1704,103 @@ mod tests {
             "integral width/height must be integer-typed, got {}x{}",
             model["width"],
             model["height"]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dom_box_model_unresolvable_nodes_match_chrome_errors() {
+        // Probed against headless Chrome 141 (2026-09-04):
+        //   bogus nodeId / nodeId 0 → BOTH methods error -32000
+        //     "Could not find node with given id"
+        //   display:none → getBoxModel errors -32000 "Could not compute
+        //     box model." while getContentQuads SUCCEEDS with {"quads":[]}
+        //   shown element → both succeed.
+        // The old handlers answered `null` / a hardcoded fallback quad for
+        // every one of the failure cases.
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-box-errors".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({
+                "url": "data:text/html,<div id=shown style='width:100px;height:20px'>x</div><div id=hidden style='display:none'>h</div>"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        let doc = CdpRequest {
+            id: 2,
+            method: "DOM.getDocument".to_string(),
+            params: json!({}),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&doc, &mut ctx).await;
+        assert!(resp.error.is_none(), "getDocument failed: {:?}", resp.error);
+        let root_id = resp.result.expect("result")["root"]["nodeId"]
+            .as_u64()
+            .expect("root nodeId");
+
+        let query = CdpRequest {
+            id: 3,
+            method: "DOM.querySelector".to_string(),
+            params: json!({ "nodeId": root_id, "selector": "#hidden" }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&query, &mut ctx).await;
+        let hidden = resp.result.expect("result")["nodeId"]
+            .as_u64()
+            .expect("hidden nodeId");
+
+        let send = |id: u64, method: &str, node: u64| CdpRequest {
+            id,
+            method: method.to_string(),
+            params: json!({ "nodeId": node }),
+            session_id: Some(session_id.clone()),
+        };
+
+        // display:none: box model errors, content quads succeed empty.
+        let resp = dispatch(&send(10, "DOM.getBoxModel", hidden), &mut ctx).await;
+        let err = resp.error.expect("hidden getBoxModel must error");
+        assert_eq!(err.code, -32000, "code: {err:?}");
+        assert_eq!(err.message, "Could not compute box model.");
+        let resp = dispatch(&send(11, "DOM.getContentQuads", hidden), &mut ctx).await;
+        assert!(resp.error.is_none(), "hidden quads: {:?}", resp.error);
+        assert_eq!(resp.result.expect("result")["quads"], json!([]));
+
+        // Bogus ids (including 0): both methods error the find-node form.
+        for bogus in [999999u64, 0] {
+            let resp = dispatch(&send(20, "DOM.getBoxModel", bogus), &mut ctx).await;
+            let err = resp.error.expect("bogus getBoxModel must error");
+            assert_eq!(err.code, -32000, "code: {err:?}");
+            assert_eq!(err.message, "Could not find node with given id");
+            let resp = dispatch(&send(21, "DOM.getContentQuads", bogus), &mut ctx).await;
+            let err = resp.error.expect("bogus getContentQuads must error");
+            assert_eq!(err.code, -32000, "code: {err:?}");
+            assert_eq!(err.message, "Could not find node with given id");
+        }
+
+        // A shown element still succeeds on both.
+        let query = CdpRequest {
+            id: 30,
+            method: "DOM.querySelector".to_string(),
+            params: json!({ "nodeId": root_id, "selector": "#shown" }),
+            session_id: Some(session_id.clone()),
+        };
+        let shown = dispatch(&query, &mut ctx).await.result.expect("result")["nodeId"]
+            .as_u64()
+            .expect("shown nodeId");
+        let resp = dispatch(&send(31, "DOM.getBoxModel", shown), &mut ctx).await;
+        assert!(resp.error.is_none(), "shown getBoxModel: {:?}", resp.error);
+        assert!(resp.result.expect("result")["model"]["content"].is_array());
+        let resp = dispatch(&send(32, "DOM.getContentQuads", shown), &mut ctx).await;
+        assert!(resp.error.is_none(), "shown quads: {:?}", resp.error);
+        assert_eq!(
+            resp.result.expect("result")["quads"].as_array().map(Vec::len),
+            Some(1)
         );
     }
 

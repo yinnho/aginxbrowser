@@ -69,6 +69,11 @@ const _domRaw = (cmd, a1, a2) => {
   if (_DOM_MUTATION_COMMANDS.has(cmd)) _ditingMutationEpoch++;
   return _OPS.op_dom(cmd, String(a1 ?? ""), String(a2 ?? ""));
 };
+// CDP evaluate runs in this realm but outside this closure; box-model
+// handlers read the real layout_rect op through this export — gBCR's
+// synthetic 12-col grid fallback would fabricate a box for every boxless
+// node, and Chrome errors "Could not compute box model." for those.
+globalThis.__diting_domRaw = _domRaw;
 const _domStrA1 = new Set([
   "create_element", "create_text_node", "create_comment_node",
   "create_processing_instruction", "create_doctype",
