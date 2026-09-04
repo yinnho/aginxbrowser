@@ -583,6 +583,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/session/:id/state", post(session_state_handler))
         .route("/session/:id/cookies", get(session_cookies_handler))
         .route("/session/:id/storage", get(session_storage_handler))
+        .route("/session/:id/console", get(session_console_handler))
         .route("/session/:id/export", get(session_export_handler))
         .route("/session/:id/network", get(session_network_handler))
         .route("/session/:id/har", get(session_har_handler))
@@ -1105,6 +1106,18 @@ async fn session_storage_handler(
         .map_err(AppError::Internal)?;
     let val: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| AppError::Internal(format!("storage parse error: {}", e)))?;
+    Ok((StatusCode::OK, Json(val)))
+}
+
+/// Recent page console output (ring buffer of 500).
+async fn session_console_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    let text = mgr.send(&id, |reply| session::SessionCommand::Console { reply }).await
+        .map_err(AppError::Internal)?;
+    let val: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| AppError::Internal(format!("console parse error: {}", e)))?;
     Ok((StatusCode::OK, Json(val)))
 }
 

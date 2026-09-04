@@ -22,6 +22,30 @@ static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// shouldn't lose its login state to the idle reaper mid-run.
 const SESSION_TIMEOUT: Duration = Duration::from_secs(480); // 8 minutes
 
+/// Ring buffer size for a session's console log (see the Console command).
+const CONSOLE_RING_CAP: usize = 500;
+
+/// Move the engine's pending console calls into the session's ring buffer.
+/// Called after every command so the queue drains regularly (a long
+/// non-CDP session would otherwise grow it unboundedly) and by the Console
+/// command itself.
+fn drain_console(page: &Page, ring: &mut std::collections::VecDeque<Value>) {
+    let calls = page.inner.take_pending_console_calls();
+    if calls.is_empty() {
+        return;
+    }
+    let ts_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    for (level, msg) in calls {
+        ring.push_back(serde_json::json!({ "ts_ms": ts_ms, "level": level, "text": msg }));
+    }
+    while ring.len() > CONSOLE_RING_CAP {
+        ring.pop_front();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Command protocol
 // ---------------------------------------------------------------------------
@@ -72,6 +96,13 @@ pub enum SessionCommand {
     /// Round-trips with `session_create`'s `storage` field to replay a
     /// logged-in session when cookies alone aren't enough.
     Storage {
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Recent console output (log/warn/error/...) from the page, ring-buffered
+    /// (500 entries). Drained from the engine's console queue after every
+    /// command, so output from clicks/evals/navigation alike shows up here.
+    /// Read-only, so not recorded in the action log.
+    Console {
         reply: oneshot::Sender<Result<String, String>>,
     },
     /// Acknowledged by the session thread right before it exits. The closer
@@ -504,6 +535,11 @@ fn session_thread(
                     storage: storage.clone(),
                 }];
 
+                // Ring buffer of recent page console output, fed by
+                // drain_console after every command (see Console command).
+                let mut console_ring: std::collections::VecDeque<Value> =
+                    std::collections::VecDeque::new();
+
                 // Navigate to start URL if provided.
                 // Page budget: every page this session walks counts (initial
                 // navigation included). Bounds bulk walking; working one page
@@ -681,6 +717,16 @@ fn session_thread(
                                 "url": page.url(),
                                 "local_storage": v.get("local_storage").cloned().unwrap_or(serde_json::json!({})),
                                 "session_storage": v.get("session_storage").cloned().unwrap_or(serde_json::json!({})),
+                            });
+                            let _ = reply.send(Ok(payload.to_string()));
+                        }
+
+                        SessionCommand::Console { reply } => {
+                            drain_console(&page, &mut console_ring);
+                            let payload = serde_json::json!({
+                                "url": page.url(),
+                                "total": console_ring.len(),
+                                "messages": console_ring.iter().collect::<Vec<_>>(),
                             });
                             let _ = reply.send(Ok(payload.to_string()));
                         }
@@ -923,6 +969,7 @@ fn session_thread(
                     // loop is idle, so quiescent pages pay nothing; busy pages
                     // get up to 1.5s of drain per command.
                     page.settle_until_idle(1500).await;
+                    drain_console(&page, &mut console_ring);
                 }
             })
             .await;
@@ -1623,6 +1670,77 @@ mod tests {
         for id in [long, short, def, clamped] {
             assert!(mgr.close_and_wait(&id).await);
         }
+    }
+
+    /// Page console output lands in the session ring: messages from the
+    /// page's own script and from a later eval both show up, with levels
+    /// intact, and the second read doesn't duplicate (queue drained).
+    #[tokio::test]
+    async fn console_ring_captures_page_and_eval_output() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /console",
+            "<html><body><script>\
+             console.log('boot ok'); \
+             console.warn('legacy api'); \
+             console.error('load failed: x'); \
+             </script></body></html>",
+        )]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/console")),
+            false,
+            vec![],
+            None,
+            None,
+        );
+
+        // Output produced by an agent-driven eval joins the same ring.
+        mgr.send(&sid, |reply| SessionCommand::Eval {
+            script: "console.error('eval-time boom'); 'done'".to_string(),
+            reply,
+        })
+        .await
+        .unwrap();
+
+        let out = mgr
+            .send(&sid, |reply| SessionCommand::Console { reply })
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&out).expect("console JSON");
+        let msgs = v["messages"].as_array().expect("messages array");
+        let texts: Vec<&str> = msgs
+            .iter()
+            .filter_map(|m| m["text"].as_str())
+            .collect();
+        assert!(texts.contains(&"boot ok"), "log from page script, got {texts:?}");
+        assert!(texts.contains(&"legacy api"), "warn level, got {texts:?}");
+        assert!(
+            texts.contains(&"load failed: x") && texts.contains(&"eval-time boom"),
+            "errors from page and eval, got {texts:?}"
+        );
+        let err_levels: Vec<&str> = msgs
+            .iter()
+            .filter(|m| m["text"].as_str().unwrap_or("").contains("load failed"))
+            .filter_map(|m| m["level"].as_str())
+            .collect();
+        assert_eq!(err_levels, vec!["error"]);
+
+        // Reads are non-destructive on the ring: the repeat read still
+        // carries everything (agents re-read / diff by ts_ms as needed).
+        let out = mgr
+            .send(&sid, |reply| SessionCommand::Console { reply })
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&out).expect("console JSON 2");
+        assert_eq!(
+            v["messages"].as_array().map(Vec::len),
+            Some(msgs.len()),
+            "ring must be stable across reads"
+        );
+
+        assert!(mgr.close_and_wait(&sid).await);
     }
 
     /// list() reports every live session with an expiry budget, most recently

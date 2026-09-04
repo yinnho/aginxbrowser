@@ -645,6 +645,21 @@ keep the session token in localStorage). Call before the session idles out.",
     }
 
     #[tool(
+        description = "Read the session's recent page console output (log/info/warn/error) as \
+{url, total, messages:[{ts_ms, level, text}]}, newest last. Ring buffer of 500 entries; captures \
+output from page scripts, clicks, evals and navigation alike. The fastest way to see WHY a page \
+misbehaves: click the button, call this, read the error.",
+        annotations(title = "Session Console", read_only_hint = true)
+    )]
+    async fn session_console(&self, Parameters(params): Parameters<SessionCookiesParams>) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        match mgr.send(&params.session_id, |reply| SessionCommand::Console { reply }).await {
+            Ok(text) => text,
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
         description = "Click an interactive element by its index (from session_state output).",
         annotations(title = "Session Click")
     )]
