@@ -111,6 +111,8 @@ Fetch a page and return its content. Supports tiered rendering, automatic Cloudf
 | title | string? | Page title |
 | content | string | Fetched content (markdown/html/text) |
 | truncated | bool | Whether `content` was truncated by `max_chars` |
+| tier | string? | Which path served the page: `"http"` (plain HTTP + conversion, ~100ms) or `"browser"` (V8 render) — present under `render_tier: "auto"` too, so callers can see why a fetch was fast or slow |
+| redirected_from | string[]? | The redirect trail: `redirected_from[0]` is the URL you asked for, `url` is where the content actually came from (absent when no redirect happened) |
 | js_extract_result | any? | JS extraction result (only present when `js_extract` is set) |
 | captcha_event | object? | CAPTCHA event (only present when a CAPTCHA is detected) |
 
@@ -790,6 +792,63 @@ The same traffic as a full **HAR 1.2** document (`application/json`) — opens i
 curl -sS http://127.0.0.1:8089/session/$SID/har -o page.har
 ```
 
+### GET /session/{id}/storage
+
+Snapshot the session's `localStorage` + `sessionStorage` for the current origin — the half of login state that cookies can't carry (many sites keep the session token in web storage). Call it before the session idles out, then feed the snapshot back via `session/create`'s `storage` field to restore the logged-in state in a new session.
+
+**Response:**
+
+```json
+{"url": "https://example.com", "local_storage": {"token": "eyJ..."}, "session_storage": {}}
+```
+
+### GET /session/{id}/console
+
+The session's recent page console output (`log` / `info` / `warn` / `error`) as a ring buffer of the last 500 entries, newest last — captures output from page scripts, clicks, evals and navigations alike. The fastest way to see *why* a page misbehaves: click the button, call this, read the error.
+
+**Response:**
+
+```json
+{"url": "https://example.com", "total": 3, "messages": [{"ts_ms": 1712, "level": "error", "text": "TypeError: x is not a function"}]}
+```
+
+### POST /session/{id}/viewport
+
+Set the session's viewport (device emulation). Scripts see `innerWidth`/`innerHeight` move, media queries like `(max-width: 600px)` re-evaluate, and `mobile: true` flips `pointer: coarse` / `hover: none` in `matchMedia` and reports `navigator.maxTouchPoints = 5`. Omitted fields keep their current value; the override survives navigation.
+
+```bash
+curl -sS -X POST http://127.0.0.1:8089/session/$SID/viewport \
+  -H "Content-Type: application/json" -d '{"width": 390, "height": 844, "mobile": true}'
+```
+
+**Response:** `{"viewport": {"width": 390, "height": 844, "mobile": true}}`
+
+### POST /session/{id}/screenshot
+
+Screenshot the session's **current DOM state** (mutations from clicks/evals included) as a base64 PNG. Mirrors `POST /screenshot`'s response shape (`image_base64`), so existing consumers work against either. The body is optional — omit it for a viewport-sized capture.
+
+| Field | Type | Default | Description |
+|------|------|------|------|
+| width | u32 | current | Render width in CSS pixels |
+| height | u32 | current | Render height in CSS pixels |
+| full_page | bool | `false` | Capture the full scrollable page instead of the viewport |
+| selector | string | — | Capture only that element's box |
+| selector_all | bool | `false` | With `selector`: capture every match instead of the first |
+
+**Response:** `{"url": "...", "width": 1280, "height": 800, "image_base64": "iVBOR...", "format": "png"}`
+
+### POST /session/{id}/wait
+
+Wait until a CSS selector matches or a JS predicate turns truthy, with a timeout. The page's event loop keeps running while waiting (fetches, timers, promise chains progress), so this replaces blind sleeps for async content: navigate, wait for `.price-card`, then click/read. Exactly one of `selector` / `predicate`.
+
+| Field | Type | Default | Description |
+|------|------|------|------|
+| selector | string | — | CSS selector to wait for (e.g. `.price-card`) |
+| predicate | string | — | JS expression polled until truthy (e.g. `document.querySelectorAll('.card').length >= 3`) |
+| timeout_ms | u64 | `10000` | Give up after this long (max 120000) |
+
+**Response:** `{"matched": true, "elapsed_ms": 743, "detail": {"tag": "div", "text": "..."}}` — on expiry, an error naming the selector/predicate.
+
 ### Session Usage Example
 
 ```bash
@@ -893,7 +952,7 @@ Every successful `fetch` and `search` — HTTP API and MCP tools alike — is pe
 - **Searches**: whole result sets per `(query, categories)` pair
 - **TTL**: pages 30 days, search results 7 days; expired rows are purged lazily on writes
 
-Query it through the `cache` MCP tool: `query` (full-text over page contents/titles/URLs and past search queries), `get` (full cached content of one URL), `url`/`since_hours` filters, `stats`, `clear` (refuses to run without a filter or `all=true`).
+Query it through the `cache` MCP tool: `query` (full-text over page contents/titles/URLs and past search queries, ranked by BM25 × recency fusion), `get` (full cached content of one URL), `url`/`since_hours` filters, `stats`, `clear` (refuses to run without a filter or `all=true`). Text hits come back with `[§ heading]` section prefixes so you know *where on the page* they landed. Every page row stores a `content_hash` plus the previous sample's hash — `cache get` reports `changed_since_prev`, the cheapest drift detector for origins serving frozen bodies (a rate-limited 200 that never changes reads as `false` across consecutive samples).
 
 | Env | Default | Meaning |
 |-----|---------|---------|
@@ -966,7 +1025,7 @@ The streamable HTTP transport follows the protocol's dual session semantics — 
 
 Browser sessions (`session_create` & co.) are shared across MCP sessions by design: two MCP clients on the same server can list (`session_list`) and reuse the same browser session IDs, which is what makes "one instance per machine, every agent shares it" work. For a self-hosted instance reached over a LAN IP or a Docker hostname (not `localhost`/`127.0.0.1`), add the hostname to `AGINXBROWSER_MCP_ALLOWED_HOSTS` — the transport validates the `Host` header as DNS-rebinding protection and rejects unlisted hosts with `403`.
 
-### Provided Tools (17)
+### Provided Tools (23)
 
 #### Core Tools
 
@@ -988,10 +1047,15 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `session_navigate` | Navigate to a new URL within a session |
 | `session_state` | Get the indexed page state |
 | `session_cookies` | Export the session's current cookies (`["name=value",...]`, for login-state reuse) |
+| `session_storage` | Snapshot the session's `localStorage`/`sessionStorage` for the current origin — the half of login state cookies can't carry; restore it in a new session via `session_create`'s `storage` field |
+| `session_console` | Read the session's recent page console output (`log/info/warn/error` ring buffer of 500) — the fastest way to see why a page misbehaves |
 | `session_click` | Click an element by index |
 | `session_input` | Type text by index |
 | `session_scroll` | Scroll the page |
 | `session_eval` | Execute JavaScript in the session |
+| `session_viewport` | Set the session's viewport (device emulation): media queries re-evaluate, `mobile: true` flips `pointer: coarse` / `hover: none`; override survives navigation |
+| `session_screenshot` | Screenshot the session's current DOM state (mutations included) as a base64 PNG; optional `width`/`height`/`full_page`/`selector` |
+| `session_wait` | Wait until a CSS selector matches or a JS predicate turns truthy, with a timeout — the page's event loop keeps running while waiting, so this replaces blind sleeps for async content |
 | `session_network` | Read the session's network request log; `filter: "media"` extracts playback/stream URLs (m3u8, mp4, ...) actually requested by the page — the reliable way to get a real video link |
 | `session_export` | Export the session's recorded actions as a runnable curl replay script (`format=jsonl` for the raw log) |
 | `session_close` | Close the session |
@@ -1018,10 +1082,12 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | url | string | | `null` | Initial URL |
 | use_proxy | bool | | `false` | Route through a proxy |
 | cookies | string[] | | `[]` | Inject cookies (`["name=value",...]`) so the session starts already logged in. Pair with `session_cookies` to reuse login state |
+| storage | object | | `null` | Web storage to inject after the initial navigation lands: `{"local_storage": {"k":"v"}, "session_storage": {"k":"v"}}`. Round-trips with `session_storage` |
+| ttl_secs | u64 | | `480` | Idle time-to-live in seconds before the session is evicted (clamped 60..3600). Raise it for long workflows |
 
 #### Session Operation Parameters
 
-All session operations require the `session_id` parameter. `click`/`input` also need `index` (from `session_state`); `input` additionally needs `text`; `eval` needs `script`.
+All session operations require the `session_id` parameter. `click`/`input` also need `index` (from `session_state`); `input` additionally needs `text`; `eval` needs `script`; `navigate` needs `url`. The acting/rendering tools take optional extras: `viewport` accepts `width`/`height`/`mobile` (all optional — omit to keep current); `screenshot` accepts `width`/`height`/`full_page`/`selector`/`selector_all`; `wait` takes exactly one of `selector` / `predicate` plus `timeout_ms` (default 10000, max 120000); `export` accepts `format` (`bash` default / `jsonl`); `network` accepts `filter: "media"`; `cache`-style `storage`/`console`/`cookies` take only `session_id`.
 
 ### Client Configuration
 

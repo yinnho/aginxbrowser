@@ -298,7 +298,7 @@ cargo build --release --features stealth,screenshot
 **安全审计说明** → [`docs/skills-sh-audit.md`](docs/skills-sh-audit.md) — 为什么 skills.sh 上显示 Critical Risk，每条告警对应的真实产品功能
 
 包含：
-- 全部 25 个 HTTP 端点（`/fetch`、`/search`、`/screenshot`、`/download`、`/v1/scrape`、`/doctor`、11 个 session 端点、CDP 发现、MCP 传输）
+- 全部 33 个 HTTP 端点（`/fetch`、`/search`、`/screenshot`、`/download`、`/v1/scrape`、`/doctor`、18 个 session 端点、CDP 发现、MCP 传输）
 - MCP Server 的 23 个工具及参数
 - Claude Code / Claude Desktop / Cursor 客户端配置
 - 环境变量、错误码、站点抓取示例

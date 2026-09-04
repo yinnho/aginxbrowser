@@ -298,8 +298,8 @@ Requirements: Rust 1.78+; the V8 static library downloads automatically on first
 **Security audit notes** → [`docs/skills-sh-audit.md`](docs/skills-sh-audit.md) — why skills.sh shows "Critical Risk", and which real product feature each warning corresponds to
 
 Covers:
-- All 25 HTTP endpoints (`/fetch`, `/search`, `/screenshot`, `/download`, `/v1/scrape`, `/doctor`, 11 session endpoints, CDP discovery, MCP transport)
-- All 17 MCP server tools and their parameters
+- All 33 HTTP endpoints (`/fetch`, `/search`, `/screenshot`, `/download`, `/v1/scrape`, `/doctor`, 18 session endpoints, CDP discovery, MCP transport)
+- All 23 MCP server tools and their parameters
 - Claude Code / Claude Desktop / Cursor client configuration
 - Environment variables, error codes, per-site scraping examples
 

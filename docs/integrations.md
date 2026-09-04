@@ -129,7 +129,7 @@ Response: `{ success, data: { markdown, html, links, screenshot, metadata: { tit
 
 ## MCP
 
-Register the MCP server (18 tools: `fetch`, `eval`, `search`, `download`, `cache`, screenshot, plus the session tools — `session_create`, `session_navigate`, `session_state`, `session_cookies`, `session_click`, `session_input`, `session_scroll`, `session_eval`, `session_close`):
+Register the MCP server (23 tools: `fetch`, `eval`, `search`, `download`, `cache`, screenshot, plus the session tools — `session_create`, `session_navigate`, `session_state`, `session_cookies`, `session_storage`, `session_console`, `session_click`, `session_input`, `session_scroll`, `session_eval`, `session_viewport`, `session_screenshot`, `session_wait`, `session_network`, `session_list`, `session_export`, `session_close`):
 
 ```bash
 claude mcp add aginxbrowser --transport http http://127.0.0.1:8089/mcp
