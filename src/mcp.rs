@@ -212,6 +212,24 @@ pub struct SessionViewportParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionScreenshotParams {
+    /// Session ID
+    pub session_id: String,
+    /// Render width in CSS pixels; defaults to the session's current viewport
+    pub width: Option<u32>,
+    /// Render height in CSS pixels; defaults to the session's current viewport
+    pub height: Option<u32>,
+    /// Capture the full scrollable page instead of the viewport (default: false)
+    #[serde(default)]
+    pub full_page: bool,
+    /// CSS selector: capture only that element's box
+    pub selector: Option<String>,
+    /// With selector, capture every match (default: first match only)
+    #[serde(default)]
+    pub selector_all: bool,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SessionExportParams {
     /// Session ID
     pub session_id: String,
@@ -666,6 +684,28 @@ flips pointer/hover matchMedia answers to coarse/none. Omitted width/height keep
             reply,
         }).await {
             Ok(viewport) => json!({ "viewport": viewport }).to_string(),
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Screenshot the session's CURRENT DOM state (mutations from clicks/evals included) \
+as a base64 PNG via the built-in renderer. Width/height default to the session's viewport, so \
+session_viewport + session_screenshot shows the responsive layout. Returns \
+{url, width, height, image_base64, format}.",
+        annotations(title = "Session Screenshot")
+    )]
+    async fn session_screenshot(&self, Parameters(params): Parameters<SessionScreenshotParams>) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        match mgr.send(&params.session_id, |reply| SessionCommand::Screenshot {
+            width: params.width,
+            height: params.height,
+            full_page: params.full_page,
+            selector: params.selector.clone(),
+            selector_all: params.selector_all,
+            reply,
+        }).await {
+            Ok(s) => s,
             Err(e) => json!({ "error": e }).to_string(),
         }
     }

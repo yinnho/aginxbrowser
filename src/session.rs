@@ -92,6 +92,19 @@ pub enum SessionCommand {
     Har {
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Render the session's CURRENT DOM state — mutations from clicks,
+    /// inputs, evals included — to a PNG through the diting pipeline.
+    /// Read-only, so not recorded in the action log. Width/height default
+    /// to the session's live viewport (a session_viewport override shows up
+    /// in the pixels). Reply is a JSON string with image_base64.
+    Screenshot {
+        width: Option<u32>,
+        height: Option<u32>,
+        full_page: bool,
+        selector: Option<String>,
+        selector_all: bool,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -657,6 +670,69 @@ fn session_thread(
                             let _ = reply.send(Ok(har.to_string()));
                         }
 
+                        SessionCommand::Screenshot { width, height, full_page, selector, selector_all, reply } => {
+                            #[cfg(feature = "screenshot")]
+                            {
+                                let html = page.content();
+                                let url = page.url();
+                                // Default to the live viewport so a
+                                // session_viewport override is what the
+                                // pixels show, not the render default.
+                                let vw = page.evaluate_with_timeout(
+                                    "innerWidth",
+                                    crate::page::INTERACTION_EVAL_TIMEOUT,
+                                );
+                                let vh = page.evaluate_with_timeout(
+                                    "innerHeight",
+                                    crate::page::INTERACTION_EVAL_TIMEOUT,
+                                );
+                                let w = width
+                                    .unwrap_or_else(|| vw.as_f64().unwrap_or(1280.0) as u32)
+                                    .max(1);
+                                let h = height
+                                    .unwrap_or_else(|| vh.as_f64().unwrap_or(800.0) as u32)
+                                    .max(1);
+                                let resources = crate::screenshot::prefetch_render_resources(
+                                    &page, &url, &html, w as f32,
+                                )
+                                .await;
+                                let result = crate::screenshot::render_html_to_png_diting(
+                                    &html,
+                                    &url,
+                                    w,
+                                    h,
+                                    1.0,
+                                    full_page,
+                                    selector.as_deref(),
+                                    selector_all,
+                                    Some(&resources),
+                                )
+                                .map_err(|e| format!("screenshot failed: {e}"))
+                                .map(|rendered| {
+                                    use base64::{engine::general_purpose::STANDARD, Engine as _};
+                                    serde_json::json!({
+                                        "url": url,
+                                        "width": rendered.pixel_width,
+                                        "height": rendered.pixel_height,
+                                        "image_base64": STANDARD.encode(&rendered.png),
+                                        "format": "png",
+                                    })
+                                    .to_string()
+                                });
+                                let _ = reply.send(result);
+                            }
+                            #[cfg(not(feature = "screenshot"))]
+                            {
+                                let _ = (
+                                    &width, &height, &full_page, &selector, &selector_all,
+                                );
+                                let _ = reply.send(Err(
+                                    "session screenshot requires the `screenshot` feature"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+
                         SessionCommand::Close { reply } => {
                             let _ = reply.send(());
                             break;
@@ -1151,6 +1227,52 @@ mod tests {
             exported.contains("\"viewport\""),
             "export must record the viewport action, got: {exported}"
         );
+
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
+    #[cfg(feature = "screenshot")]
+    #[tokio::test]
+    async fn screenshot_captures_current_dom_state() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /shot",
+            "<html><head><style>body{background-color:#336699}</style>\
+             </head><body><h1>before</h1></body></html>",
+        )]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(Some(&format!("http://127.0.0.1:{port}/shot")), false, vec![]);
+
+        // Mutate the DOM after load — the capture renders page.content(),
+        // so the pixels must reflect the mutation, not the HTTP response.
+        mgr.send(&sid, |reply| SessionCommand::Eval {
+            script: "document.querySelector('h1').textContent = 'after'".to_string(),
+            reply,
+        })
+        .await
+        .unwrap();
+
+        let shot = mgr
+            .send(&sid, |reply| SessionCommand::Screenshot {
+                width: Some(400),
+                height: Some(300),
+                full_page: false,
+                selector: None,
+                selector_all: false,
+                reply,
+            })
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&shot).expect("screenshot JSON");
+        assert_eq!(v["width"].as_f64(), Some(400.0));
+        assert_eq!(v["format"], serde_json::json!("png"));
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let png = STANDARD
+            .decode(v["image_base64"].as_str().expect("base64 body"))
+            .expect("decodable base64");
+        assert_eq!(&png[0..4], b"\x89PNG", "PNG magic bytes");
+        assert!(png.len() > 1000, "non-trivial image, got {} bytes", png.len());
 
         assert!(mgr.close_and_wait(&sid).await);
     }

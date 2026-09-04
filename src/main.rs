@@ -496,6 +496,17 @@ pub struct SessionViewportRequest {
     pub mobile: bool,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct SessionScreenshotRequest {
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub full_page: bool,
+    pub selector: Option<String>,
+    #[serde(default)]
+    pub selector_all: bool,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SessionNavigateRequest {
     pub url: String,
@@ -559,6 +570,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/session/:id/input", post(session_input_handler))
         .route("/session/:id/scroll", post(session_scroll_handler))
         .route("/session/:id/viewport", post(session_viewport_handler))
+        .route("/session/:id/screenshot", post(session_screenshot_handler))
         .route("/session/:id/eval", post(session_eval_handler))
         .route("/session/:id/close", post(session_close_handler))
         .route("/mcp", get(mcp_handler).post(mcp_handler))
@@ -1179,6 +1191,28 @@ async fn session_viewport_handler(
         reply,
     }).await.map_err(AppError::Internal)?;
     Ok((StatusCode::OK, Json(serde_json::json!({ "viewport": viewport }))))
+}
+
+/// Screenshot the session's current DOM state. The reply mirrors
+/// POST /screenshot's shape (image_base64 PNG) so existing consumers work
+/// against either; empty body is allowed (viewport-sized capture).
+async fn session_screenshot_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    req: Option<Json<SessionScreenshotRequest>>,
+) -> Result<impl IntoResponse, AppError> {
+    let req = req.map(|Json(r)| r).unwrap_or_default();
+    let mut mgr = session::SESSIONS.lock().await;
+    let shot = mgr.send(&id, |reply| session::SessionCommand::Screenshot {
+        width: req.width,
+        height: req.height,
+        full_page: req.full_page,
+        selector: req.selector.clone(),
+        selector_all: req.selector_all,
+        reply,
+    }).await.map_err(AppError::Internal)?;
+    let body: serde_json::Value = serde_json::from_str(&shot)
+        .map_err(|_| AppError::Internal(shot.clone()))?;
+    Ok((StatusCode::OK, Json(body)))
 }
 
 async fn session_eval_handler(
