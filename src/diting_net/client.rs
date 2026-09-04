@@ -243,36 +243,100 @@ pub fn env_allows_private_network() -> bool {
 /// engine: loopback, RFC1918 private, link-local (incl. the 169.254.169.254
 /// cloud-metadata endpoint), broadcast, documentation, the unspecified address
 /// (0.0.0.0 / ::, which the OS routes to localhost), IPv6 unique-local
-/// (fc00::/7), and any IPv4-mapped/compatible IPv6 form of the above.
+/// (fc00::/7), CGNAT (100.64.0.0/10 — where Alibaba's 100.100.100.200
+/// metadata endpoint lives), benchmarking (198.18.0.0/15), multicast and the
+/// reserved/future ranges, and ANY IPv6 form with an embedded IPv4
+/// (IPv4-mapped, IPv4-compatible, 6to4 2002::/16, NAT64 64:ff9b::/96) that
+/// itself lands in the deny-set.
 /// Centralizes the SSRF deny-set so the literal-host check and the
 /// DNS-resolution check (`SsrfGuardResolver`) can never disagree.
 pub fn is_forbidden_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
+            let o = v4.octets();
             v4.is_loopback()
                 || v4.is_private()
                 || v4.is_link_local()
                 || v4.is_broadcast()
                 || v4.is_documentation()
                 || v4.is_unspecified()
+                // 0.0.0.0/8: "this network" — some stacks treat it as
+                // loopback-adjacent; block the whole /8, not just 0.0.0.0.
+                || o[0] == 0
+                // 100.64.0.0/10 CGNAT (cloud metadata endpoints live here,
+                // e.g. Alibaba 100.100.100.200).
+                || (o[0] == 100 && o[1] & 0xc0 == 64)
+                // 192.0.0.0/24 (Oracle 192.0.0.192 et al), 192.31.196.0/24
+                // and 192.52.193.0/24 (AS112), 192.88.99.0/24 (6to4 relay),
+                // 192.175.48.0/24 (Portmap).
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0)
+                || (o[0] == 192 && o[1] == 31 && o[2] == 196)
+                || (o[0] == 192 && o[1] == 52 && o[2] == 193)
+                || (o[0] == 192 && o[1] == 88 && o[2] == 99)
+                || (o[0] == 192 && o[1] == 175 && o[2] == 48)
+                // 198.18.0.0/15 benchmarking.
+                || (o[0] == 198 && o[1] & 0xfe == 18)
+                || v4.is_multicast() // 224.0.0.0/4
+                || (o[0] & 0xf0) == 0xf0 // 240.0.0.0/4 reserved/future
         }
         IpAddr::V6(v6) => {
             if v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_unique_local()
                 || v6.is_unicast_link_local()
+                || v6.is_multicast() // ff00::/8
             {
                 return true;
             }
-            // Unwrap IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d)
-            // forms and re-check the embedded v4 so e.g. [::ffff:127.0.0.1] or
-            // [::ffff:169.254.169.254] cannot slip past the v6 arm.
-            if let Some(v4) = v6.to_ipv4_mapped().or_else(|| v6.to_ipv4()) {
+            let seg = v6.segments();
+            // 2001:db8::/32 documentation, ::/96-adjacent discard (100::/64).
+            if seg[0] == 0x2001 && seg[1] == 0x0db8 {
+                return true;
+            }
+            if seg[0] == 0x0100 && seg[1] == 0 && seg[2] == 0 && seg[3] == 0 {
+                return true;
+            }
+            if let Some(v4) = embedded_ipv4(v6) {
                 return is_forbidden_ip(IpAddr::V4(v4));
             }
             false
         }
     }
+}
+
+/// Extract the IPv4 address carried inside an IPv6 address, for every
+/// embedding format: IPv4-mapped (::ffff:a.b.c.d), IPv4-compatible (::a.b.c.d),
+/// 6to4 (2002:a.b.c.d::, the public v4 sits in bits 16-47), and NAT64
+/// (64:ff9b::a.b.c.d, well-known prefix). Without the last two, a literal
+/// host like [2002:a9fe:a9fe::] (6to4-wrapped 169.254.169.254) or
+/// [64:ff9b::7f00:1] (NAT64-wrapped 127.0.0.1) bypasses the v6 arm and dials
+/// a forbidden v4 target.
+fn embedded_ipv4(v6: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+    if let Some(v4) = v6.to_ipv4_mapped() {
+        return Some(v4);
+    }
+    let seg = v6.segments();
+    // 6to4: 2002:<high16>:<low16>::/48 — embedded v4 is bits 16..48.
+    if seg[0] == 0x2002 {
+        return Some(std::net::Ipv4Addr::new(
+            (seg[1] >> 8) as u8,
+            seg[1] as u8,
+            (seg[2] >> 8) as u8,
+            seg[2] as u8,
+        ));
+    }
+    // NAT64 well-known prefix 64:ff9b::/96 — embedded v4 in the low 32 bits.
+    if seg[0] == 0x0064 && seg[1] == 0xff9b && seg[2] == 0 && seg[3] == 0 && seg[4] == 0 && seg[5] == 0
+    {
+        return Some(std::net::Ipv4Addr::new(
+            (seg[6] >> 8) as u8,
+            seg[6] as u8,
+            (seg[7] >> 8) as u8,
+            seg[7] as u8,
+        ));
+    }
+    // IPv4-compatible ::a.b.c.d (all zero except the low 32 bits).
+    v6.to_ipv4()
 }
 
 /// reqwest DNS resolver that performs the lookup and then rejects the whole
@@ -1056,6 +1120,72 @@ mod tests {
         }
         for good in ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"] {
             assert!(!is_forbidden_ip(IpAddr::from_str(good).unwrap()), "{good} must be allowed");
+        }
+    }
+
+    #[test]
+    fn is_forbidden_ip_covers_iana_special_purposes() {
+        use std::str::FromStr;
+        for bad in [
+            "0.0.0.0", "0.1.2.3",                  // 0.0.0.0/8 "this network"
+            "100.64.0.1", "100.100.100.200",       // 100.64.0.0/10 CGNAT (Alibaba metadata)
+            "100.127.255.254",                     // CGNAT upper edge
+            "192.0.0.192",                         // 192.0.0.0/24 (Oracle)
+            "192.31.196.1", "192.52.193.1",        // AS112
+            "192.88.99.1",                         // 6to4 relay
+            "192.175.48.1",                        // Portmap
+            "198.18.0.1", "198.19.255.254",        // 198.18.0.0/15 benchmarking
+            "224.0.0.1", "239.1.1.1",              // multicast
+            "240.0.0.1", "250.1.2.3",              // reserved/future
+            "2001:db8::1",                         // documentation v6
+            "100::1",                              // discard-only 100::/64
+            "ff02::1", "ff0e::1",                  // ff00::/8
+        ] {
+            assert!(is_forbidden_ip(IpAddr::from_str(bad).unwrap()), "{bad} must be forbidden");
+        }
+        // CGNAT lower/upper neighbors stay reachable.
+        for good in ["100.63.255.254", "100.128.0.1", "198.17.255.254", "198.20.0.1", "223.255.255.254"] {
+            assert!(!is_forbidden_ip(IpAddr::from_str(good).unwrap()), "{good} must be allowed");
+        }
+    }
+
+    #[test]
+    fn is_forbidden_ip_unwraps_embedded_ipv4_from_6to4_and_nat64() {
+        use std::str::FromStr;
+        for bad in [
+            // 6to4 2002::/16 wrapping forbidden v4 targets.
+            "2002:a9fe:a9fe::",   // 169.254.169.254 cloud metadata
+            "2002:7f00:1::",      // 127.0.0.1 loopback
+            "2002:a00:1::",       // 10.0.0.1 RFC1918
+            "2002:6464:64c8::",   // 100.100.100.200 Alibaba metadata
+            "2002:c0a8:101::",    // 192.168.1.1
+            // NAT64 well-known prefix 64:ff9b::/96.
+            "64:ff9b::7f00:1",    // 127.0.0.1
+            "64:ff9b::a9fe:a9fe", // 169.254.169.254
+            // IPv4-compatible and mapped re-checked through the v4 deny-set.
+            "::127.0.0.1", "::ffff:169.254.169.254",
+        ] {
+            assert!(is_forbidden_ip(IpAddr::from_str(bad).unwrap()), "{bad} must be forbidden");
+        }
+        // A 6to4/NAT64 wrapper around a PUBLIC v4 stays allowed — the guard
+        // re-checks the embedded address, it does not blanket-ban the prefix.
+        for good in ["2002:0808:0808::", /* 8.8.8.8 */ "64:ff9b::808:808"] {
+            assert!(!is_forbidden_ip(IpAddr::from_str(good).unwrap()), "{good} must be allowed");
+        }
+    }
+
+    #[test]
+    fn validate_url_rejects_embedded_ipv6_literal_hosts() {
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        for bad in [
+            "http://[2002:7f00:1::]/",         // 6to4-wrapped loopback
+            "http://[64:ff9b::7f00:1]/",       // NAT64-wrapped loopback
+            "http://[2002:a9fe:a9fe::]/latest/meta-data", // 6to4-wrapped metadata
+        ] {
+            let url = Url::parse(bad).unwrap();
+            assert!(validate_url(&url, false).is_err(), "{bad} must be rejected");
         }
     }
 
