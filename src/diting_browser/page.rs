@@ -198,6 +198,13 @@ pub struct Page {
     /// after rebuild — otherwise a same-origin navigation or a second target's
     /// evaluate wipes the store (upstream #678).
     session_storage: Option<(String, std::collections::HashMap<String, String>)>,
+    /// Viewport override for session_viewport / CDP
+    /// setDeviceMetricsOverride: (width, height, mobile). Lives on the
+    /// Page, not the realm, because every navigation rebuilds the realm and
+    /// republishes the desktop persona viewport (`set_user_agent` →
+    /// `__diting_setPersona`) — the override has to be replayed after that
+    /// or the page silently flips back mid-session.
+    viewport_override: Option<(f32, f32, bool)>,
     pub lifecycle: LifecycleState,
     pub http_client: Arc<HttpClient>,
     pub context: Arc<BrowserContext>,
@@ -320,6 +327,7 @@ impl Page {
             network_events: Vec::new(),
             network_event_counter: 0,
             session_storage: None,
+            viewport_override: None,
             callbacks: Arc::new(crate::diting_net::CallbackRegistry::new()),
             response_bodies: std::collections::HashMap::new(),
             response_body_order: std::collections::VecDeque::new(),
@@ -436,6 +444,7 @@ impl Page {
 
         self.js = Some(rt);
         self.restore_session_storage();
+        self.apply_viewport_override();
     }
 
     /// Capture the live realm's `sessionStorage` into `self.session_storage`
@@ -1613,6 +1622,9 @@ impl Page {
             if let Some(ref mut rt) = self.js {
                 rt.set_user_agent(ua);
             }
+            // set_user_agent republished the persona viewport; put the
+            // override back on top of it.
+            self.apply_viewport_override();
         }
         if let Some(lang) = lang.filter(|l| !l.is_empty()) {
             self.http_client.set_accept_language(lang).await;
@@ -1623,6 +1635,35 @@ impl Page {
             if let Some(ref mut rt) = self.js {
                 rt.set_navigator_language(lang);
             }
+        }
+    }
+
+    /// Pin the session's viewport: scripts see innerWidth/innerHeight/
+    /// visualViewport move, matchMedia answers coarse-pointer/hover-none
+    /// when `mobile`, and the layout ICB (element rects, @media cascade)
+    /// follows via the same set_viewport op the persona publishes through.
+    pub fn set_viewport_override(&mut self, w: f32, h: f32, mobile: bool) {
+        self.viewport_override = Some((w, h, mobile));
+        self.apply_viewport_override();
+    }
+
+    /// Drop the override and return to the persona viewport everywhere.
+    pub fn clear_viewport_override(&mut self) {
+        self.viewport_override = None;
+        if let Some(js) = &mut self.js {
+            let _ = js.execute_script("<viewport>", "__diting_clearViewport()");
+        }
+    }
+
+    /// Replay the stored override into the current realm. No-op when none
+    /// is set, so navigation on a default session costs one branch.
+    fn apply_viewport_override(&mut self) {
+        let Some((w, h, mobile)) = self.viewport_override else { return; };
+        if let Some(js) = &mut self.js {
+            let _ = js.execute_script(
+                "<viewport>",
+                &format!("__diting_setViewport({w}, {h}, {mobile})"),
+            );
         }
     }
 
@@ -3279,6 +3320,77 @@ mod tests {
                 .to_string();
             assert!(bg.starts_with("rgb(255"), "backgroundColor: {bg}");
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn viewport_override_drives_media_queries_and_survives_navigation() {
+        let _g = net_test_guard();
+        let page_html = |body: &'static str| {
+            format!(
+                "<html><head><style>\
+                 @media (max-width:600px) {{ body {{ background-color:#010203 }} }}\
+                 </style></head><body>{body}</body></html>"
+            )
+        };
+        let port = local_http_server(vec![
+            ("/a", 200, page_html("x")),
+            ("/b", 200, page_html("y")),
+        ]);
+        let mut p = test_page();
+        p.set_viewport_override(375.0, 667.0, true);
+        p.navigate(&format!("http://127.0.0.1:{port}/a"))
+            .await
+            .unwrap();
+
+        // Scripts see the emulated window.
+        assert_eq!(p.evaluate("innerWidth").as_f64(), Some(375.0));
+        assert_eq!(p.evaluate("innerHeight").as_f64(), Some(667.0));
+        assert_eq!(
+            p.evaluate("matchMedia('(max-width:600px)').matches"),
+            serde_json::json!(true)
+        );
+        // Mobile flips the pointer/hover persona too — those move together
+        // or the viewport contradicts maxTouchPoints.
+        assert_eq!(
+            p.evaluate("matchMedia('(pointer:coarse)').matches"),
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            p.evaluate("matchMedia('(hover:none)').matches"),
+            serde_json::json!(true)
+        );
+        assert_eq!(p.evaluate("navigator.maxTouchPoints").as_f64(), Some(5.0));
+
+        // The layout ICB moved with it: the mobile-only rule applied in
+        // the cascade (a desktop viewport leaves the background initial).
+        let bg = p
+            .evaluate("getComputedStyle(document.body).backgroundColor")
+            .as_str()
+            .expect("color string")
+            .to_string();
+        assert!(bg.starts_with("rgb(1, 2, 3"), "mobile media rule applied, got {bg}");
+
+        // Navigation rebuilds the realm and republishes the persona
+        // viewport; the override has to be replayed on top or the page
+        // silently flips back mid-session.
+        p.navigate(&format!("http://127.0.0.1:{port}/b"))
+            .await
+            .unwrap();
+        assert_eq!(p.evaluate("innerWidth").as_f64(), Some(375.0));
+        assert_eq!(
+            p.evaluate("matchMedia('(pointer:coarse)').matches"),
+            serde_json::json!(true)
+        );
+
+        // Clearing returns the persona viewport and desktop answers.
+        p.clear_viewport_override();
+        let w = p.evaluate("innerWidth").as_f64().unwrap();
+        assert!(w > 600.0, "persona viewport restored, got {w}");
+        assert_eq!(
+            p.evaluate("matchMedia('(pointer:coarse)').matches"),
+            serde_json::json!(false)
+        );
+        assert_eq!(p.evaluate("navigator.maxTouchPoints").as_f64(), Some(0.0));
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -489,6 +489,14 @@ pub struct SessionEvalRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SessionViewportRequest {
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub mobile: bool,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct SessionNavigateRequest {
     pub url: String,
 }
@@ -550,6 +558,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/session/:id/click", post(session_click_handler))
         .route("/session/:id/input", post(session_input_handler))
         .route("/session/:id/scroll", post(session_scroll_handler))
+        .route("/session/:id/viewport", post(session_viewport_handler))
         .route("/session/:id/eval", post(session_eval_handler))
         .route("/session/:id/close", post(session_close_handler))
         .route("/mcp", get(mcp_handler).post(mcp_handler))
@@ -1156,6 +1165,20 @@ async fn session_scroll_handler(
         reply,
     }).await.map_err(|e| AppError::Internal(e))?;
     Ok((StatusCode::OK, Json(serde_json::json!({ "scrolled": scrolled }))))
+}
+
+async fn session_viewport_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<SessionViewportRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    let viewport = mgr.send(&id, |reply| session::SessionCommand::Viewport {
+        width: req.width,
+        height: req.height,
+        mobile: req.mobile,
+        reply,
+    }).await.map_err(AppError::Internal)?;
+    Ok((StatusCode::OK, Json(serde_json::json!({ "viewport": viewport }))))
 }
 
 async fn session_eval_handler(

@@ -198,6 +198,20 @@ pub struct SessionEvalParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionViewportParams {
+    /// Session ID
+    pub session_id: String,
+    /// Viewport width in CSS pixels; omit to keep the current width
+    pub width: Option<u32>,
+    /// Viewport height in CSS pixels; omit to keep the current height
+    pub height: Option<u32>,
+    /// Mobile emulation: matchMedia answers pointer:coarse / hover:none and
+    /// navigator.maxTouchPoints reports 5 (default: false)
+    #[serde(default)]
+    pub mobile: bool,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SessionExportParams {
     /// Session ID
     pub session_id: String,
@@ -633,6 +647,25 @@ impl AginxBrowserMcp {
             reply,
         }).await {
             Ok(result) => json!({ "result": result }).to_string(),
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Set the session's viewport (device emulation): scripts see innerWidth/innerHeight \
+move, media queries like (max-width: 600px) re-evaluate, element rects re-anchor, and mobile=true \
+flips pointer/hover matchMedia answers to coarse/none. Omitted width/height keeps the current value.",
+        annotations(title = "Session Viewport")
+    )]
+    async fn session_viewport(&self, Parameters(params): Parameters<SessionViewportParams>) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        match mgr.send(&params.session_id, |reply| SessionCommand::Viewport {
+            width: params.width,
+            height: params.height,
+            mobile: params.mobile,
+            reply,
+        }).await {
+            Ok(viewport) => json!({ "viewport": viewport }).to_string(),
             Err(e) => json!({ "error": e }).to_string(),
         }
     }

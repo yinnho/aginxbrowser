@@ -50,6 +50,15 @@ pub enum SessionCommand {
         script: String,
         reply: oneshot::Sender<Result<Value, String>>,
     },
+    /// Pin the viewport (width/height/mobile). None width/height keeps the
+    /// current dimension (Chrome's setDeviceMetricsOverride semantics),
+    /// both-None with mobile flips only the pointer persona.
+    Viewport {
+        width: Option<u32>,
+        height: Option<u32>,
+        mobile: bool,
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
     /// Export the session's current cookies (for the page's URL) as a JSON
     /// string `{"url":...,"cookies":["name=value",...]}`. Round-trips with
     /// `session_create`'s `cookies` field to replay a logged-in session.
@@ -134,6 +143,7 @@ pub enum RecordedAction {
     Input { index: usize, text: String, ok: bool },
     Scroll { direction: String, amount: u32 },
     Eval { script: String },
+    Viewport { width: Option<u32>, height: Option<u32>, mobile: bool },
 }
 
 // ---------------------------------------------------------------------------
@@ -358,6 +368,14 @@ pub fn replay_bash(jsonl: &str, default_base: &str) -> String {
                 }));
                 out.push_str(&format!("POST \"session/$SID/scroll\" {body} > /dev/null\n"));
             }
+            "viewport" if sid_bound => {
+                let body = payload(serde_json::json!({
+                    "width": v["width"].clone(),
+                    "height": v["height"].clone(),
+                    "mobile": v["mobile"].as_bool().unwrap_or(false),
+                }));
+                out.push_str(&format!("POST \"session/$SID/viewport\" {body} > /dev/null\n"));
+            }
             "eval" if sid_bound => {
                 let body = payload(serde_json::json!({"script": v["script"].clone()}));
                 out.push_str(&format!("POST \"session/$SID/eval\" {body} > /dev/null\n"));
@@ -530,6 +548,30 @@ fn session_thread(
                                 amount,
                             });
                             let _ = reply.send(Ok(true));
+                        }
+
+                        SessionCommand::Viewport { width, height, mobile, reply } => {
+                            // Unspecified dimensions keep the current ones
+                            // (Chrome's setDeviceMetricsOverride rule), so
+                            // read the live values before overriding.
+                            let probe = "(function(){return [innerWidth, innerHeight]})()";
+                            let current = {
+                                let v = page.evaluate_with_timeout(probe, crate::page::INTERACTION_EVAL_TIMEOUT);
+                                match (v.get(0).and_then(Value::as_f64), v.get(1).and_then(Value::as_f64)) {
+                                    (Some(w), Some(h)) if w > 0.0 && h > 0.0 => (w as f32, h as f32),
+                                    _ => (1920.0, 1000.0),
+                                }
+                            };
+                            let w = width.map(|v| v as f32).unwrap_or(current.0);
+                            let h = height.map(|v| v as f32).unwrap_or(current.1);
+                            page.set_viewport_override(w, h, mobile);
+                            let val = serde_json::json!({
+                                "width": w as u32,
+                                "height": h as u32,
+                                "mobile": mobile,
+                            });
+                            recorder.push(RecordedAction::Viewport { width: Some(w as u32), height: Some(h as u32), mobile });
+                            let _ = reply.send(Ok(val));
                         }
 
                         SessionCommand::Eval { script, reply } => {
@@ -1016,6 +1058,101 @@ mod tests {
             mgr.close_and_wait(&sid).await,
             "session thread must ack close"
         );
+    }
+
+    #[tokio::test]
+    async fn viewport_command_pins_viewport_across_navigation() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[
+            (
+                "GET /m",
+                "<html><head><style>@media (max-width:600px){body{color:#010203}}</style>\
+                 </head><body><p>m</p></body></html>",
+            ),
+            (
+                "GET /n",
+                "<html><head><style>@media (max-width:600px){body{color:#010203}}</style>\
+                 </head><body><p>n</p></body></html>",
+            ),
+        ]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/m")),
+            false,
+            vec![],
+        );
+
+        let vp = mgr
+            .send(&sid, |reply| SessionCommand::Viewport {
+                width: Some(375),
+                height: Some(667),
+                mobile: true,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(vp["width"].as_f64(), Some(375.0));
+        assert_eq!(vp["height"].as_f64(), Some(667.0));
+        assert_eq!(vp["mobile"].as_bool(), Some(true));
+
+        let matches = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "matchMedia('(max-width:600px)').matches && matchMedia('(pointer:coarse)').matches".to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(matches, serde_json::json!(true));
+
+        // Omitted dimensions keep the current ones (Chrome's
+        // setDeviceMetricsOverride rule): only the flag moves here.
+        let vp = mgr
+            .send(&sid, |reply| SessionCommand::Viewport {
+                width: None,
+                height: None,
+                mobile: false,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(vp["width"].as_f64(), Some(375.0));
+        let pointer = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "matchMedia('(pointer:coarse)').matches".to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(pointer, serde_json::json!(false));
+
+        // The override must survive a later navigation.
+        mgr.send(&sid, |reply| SessionCommand::Navigate {
+            url: format!("http://127.0.0.1:{port}/n"),
+            reply,
+        })
+        .await
+        .unwrap();
+        let w = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "innerWidth".to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(w.as_f64(), Some(375.0));
+
+        // Recorded so replay scripts re-pin the viewport.
+        let exported = mgr
+            .send(&sid, |reply| SessionCommand::Export { reply })
+            .await
+            .unwrap();
+        assert!(
+            exported.contains("\"viewport\""),
+            "export must record the viewport action, got: {exported}"
+        );
+
+        assert!(mgr.close_and_wait(&sid).await);
     }
 
     /// list() reports every live session with an expiry budget, most recently

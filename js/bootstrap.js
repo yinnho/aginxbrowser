@@ -4932,6 +4932,8 @@ function _mqExpr(inner) {
   const colon = inner.indexOf(':');
   const feature = (colon < 0 ? inner : inner.slice(0, colon)).trim().toLowerCase();
   const value = colon < 0 ? null : inner.slice(colon + 1).trim().toLowerCase();
+  const ov = globalThis.__diting_mq_overrides;
+  if (ov && feature in ov) return value != null && ov[feature][value] === true;
   if (feature in _MQ_PERSONA_BOOL) return value != null && _MQ_PERSONA_BOOL[feature][value] === true;
   if (value == null) return false;
   const num = parseFloat(value);
@@ -9812,6 +9814,53 @@ globalThis.__diting_setPersona = function() {
   }
   globalThis.navigator.hardwareConcurrency = globalThis.__diting_hw;
   globalThis.navigator.deviceMemory = globalThis.__diting_mem;
+};
+
+// Viewport override for session_viewport / CDP setDeviceMetricsOverride.
+// The persona stays the identity of the machine; the override is the window
+// the page is looked at through — screen keeps the persona while
+// innerWidth/innerHeight/visualViewport/outer* move, which is what Chrome's
+// device emulation does too. The mobile flag swaps the matchMedia pointer/
+// hover answers to coarse/none: a phone-sized viewport answering
+// `pointer: fine` is a contradiction a fingerprint script can cross-check
+// against maxTouchPoints, so those move together.
+globalThis.__diting_setViewport = function(w, h, mobile) {
+  globalThis.innerWidth = w; globalThis.innerHeight = h;
+  globalThis.outerWidth = w; globalThis.outerHeight = h;
+  globalThis.visualViewport = {
+    width: w, height: h, offsetLeft: 0, offsetTop: 0, scale: 1,
+    addEventListener() {}, removeEventListener() {},
+  };
+  globalThis.__diting_mq_overrides = mobile ? {
+    'prefers-color-scheme': { light: true, dark: false },
+    'prefers-reduced-motion': { 'no-preference': true, reduce: false },
+    'prefers-reduced-transparency': { 'no-preference': true, reduce: false },
+    pointer: { coarse: true, fine: false, none: false },
+    'any-pointer': { coarse: true, fine: false, none: false },
+    hover: { none: true, hover: false },
+    'any-hover': { none: true, hover: false },
+  } : null;
+  try {
+    Object.defineProperty(globalThis.navigator, 'maxTouchPoints', {
+      value: mobile ? 5 : 0, configurable: true, enumerable: true, writable: true,
+    });
+  } catch (e) {}
+  // Feed the Rust layout ICB so element rects and @media cascade see the
+  // same width the scripts do.
+  try { _domRaw("set_viewport", String(w), String(h)); } catch (e) {}
+  try { globalThis.dispatchEvent(new Event('resize')); } catch (e) {}
+};
+
+// Drop the override: persona viewport everywhere, desktop pointer answers.
+globalThis.__diting_clearViewport = function() {
+  globalThis.__diting_mq_overrides = null;
+  try {
+    Object.defineProperty(globalThis.navigator, 'maxTouchPoints', {
+      value: 0, configurable: true, enumerable: true, writable: true,
+    });
+  } catch (e) {}
+  __diting_setPersona();
+  try { globalThis.dispatchEvent(new Event('resize')); } catch (e) {}
 };
 
 globalThis.__diting_init = function() {

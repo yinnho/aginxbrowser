@@ -80,6 +80,11 @@ impl Page {
         self.inner.evaluate_with_timeout(expression, timeout)
     }
 
+    /// Pin the viewport (device emulation); survives navigation.
+    pub fn set_viewport_override(&mut self, w: f32, h: f32, mobile: bool) {
+        self.inner.set_viewport_override(w, h, mobile);
+    }
+
     /// Get page HTML content.
     pub fn content(&mut self) -> String {
         let val = self.evaluate("document.documentElement.outerHTML");

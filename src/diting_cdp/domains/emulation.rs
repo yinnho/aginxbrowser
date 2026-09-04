@@ -64,11 +64,12 @@ pub async fn handle(
 ) -> Result<Value, String> {
     match method {
         "setDeviceMetricsOverride" => {
-            // Validate exactly as Chromium does even though the single-realm
-            // engine has no compositor viewport to resize yet: clients (and
-            // tests) rely on the error surface for malformed input.
-            let _width = metric_dimension(params, "width")?;
-            let _height = metric_dimension(params, "height")?;
+            // Chromium's rule: width/height 0 means "keep the current
+            // value" — but there is no prior compositor metric to keep on
+            // the first call, so 0 falls back to the live innerWidth/
+            // innerHeight the persona published.
+            let width = metric_dimension(params, "width")?;
+            let height = metric_dimension(params, "height")?;
             let device_scale_factor = params
                 .get("deviceScaleFactor")
                 .and_then(Value::as_f64)
@@ -79,14 +80,38 @@ pub async fn handle(
                         .to_string(),
                 );
             }
-            if params.get("mobile").and_then(Value::as_bool).is_none() {
-                return Err("Emulation.setDeviceMetricsOverride requires boolean mobile".to_string());
-            }
+            let mobile = params
+                .get("mobile")
+                .and_then(Value::as_bool)
+                .ok_or("Emulation.setDeviceMetricsOverride requires boolean mobile")?;
             optional_metric_dimension(params, "screenWidth")?;
             optional_metric_dimension(params, "screenHeight")?;
+            if let Some(page) = ctx.get_session_page_mut(session_id) {
+                let keep = |v: u32| if v == 0 { None } else { Some(v) };
+                let current = page.evaluate_with_timeout(
+                    "innerWidth",
+                    std::time::Duration::from_secs(2),
+                );
+                let current_h = page.evaluate_with_timeout(
+                    "innerHeight",
+                    std::time::Duration::from_secs(2),
+                );
+                let w = keep(width)
+                    .or_else(|| current.as_f64().map(|v| v as u32))
+                    .unwrap_or(1280);
+                let h = keep(height)
+                    .or_else(|| current_h.as_f64().map(|v| v as u32))
+                    .unwrap_or(800);
+                page.set_viewport_override(w as f32, h as f32, mobile);
+            }
             Ok(json!({}))
         }
-        "clearDeviceMetricsOverride" => Ok(json!({})),
+        "clearDeviceMetricsOverride" => {
+            if let Some(page) = ctx.get_session_page_mut(session_id) {
+                page.clear_viewport_override();
+            }
+            Ok(json!({}))
+        }
         "setDefaultBackgroundColorOverride" => {
             default_background_color(params)?;
             Ok(json!({}))
