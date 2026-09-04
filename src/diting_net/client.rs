@@ -325,9 +325,10 @@ fn embedded_ipv4(v6: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
             seg[2] as u8,
         ));
     }
-    // NAT64 well-known prefix 64:ff9b::/96 — embedded v4 in the low 32 bits.
-    if seg[0] == 0x0064 && seg[1] == 0xff9b && seg[2] == 0 && seg[3] == 0 && seg[4] == 0 && seg[5] == 0
-    {
+    // NAT64 prefixes 64:ff9b::/96 (well-known, RFC 6052) and 64:ff9b:1::/48
+    // (local-use, RFC 8215) — in both the embedded v4 is the low 32 bits, so
+    // one prefix pair check covers both forms.
+    if seg[0] == 0x0064 && seg[1] == 0xff9b {
         return Some(std::net::Ipv4Addr::new(
             (seg[6] >> 8) as u8,
             seg[6] as u8,
@@ -1162,6 +1163,7 @@ mod tests {
             // NAT64 well-known prefix 64:ff9b::/96.
             "64:ff9b::7f00:1",    // 127.0.0.1
             "64:ff9b::a9fe:a9fe", // 169.254.169.254
+            "64:ff9b:1::7f00:1",  // local-use 64:ff9b:1::/48 (RFC 8215) → 127.0.0.1
             // IPv4-compatible and mapped re-checked through the v4 deny-set.
             "::127.0.0.1", "::ffff:169.254.169.254",
         ] {
