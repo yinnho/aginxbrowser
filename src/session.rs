@@ -105,6 +105,17 @@ pub enum SessionCommand {
         selector_all: bool,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Poll until a CSS selector matches or a JS predicate turns truthy,
+    /// driving the page's event loop between checks so async work (fetches,
+    /// timers, promise chains) actually progresses — a plain sleep does not
+    /// run page JS. Read-only, so not recorded in the action log. Reply is
+    /// `{"matched":true,"elapsed_ms":N,"detail":{...}}`; timeout replies Err.
+    Wait {
+        selector: Option<String>,
+        predicate: Option<String>,
+        timeout_ms: u64,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -733,6 +744,92 @@ fn session_thread(
                             }
                         }
 
+                        SessionCommand::Wait { selector, predicate, timeout_ms, reply } => {
+                            let result = if selector.is_some() == predicate.is_some() {
+                                Err("wait takes exactly one of `selector` or `predicate`"
+                                    .to_string())
+                            } else {
+                                // Clamp so a stray request can't pin the
+                                // session thread (Close included) for long.
+                                let timeout_ms = timeout_ms.clamp(1, 120_000);
+                                let started = std::time::Instant::now();
+                                let deadline = started + Duration::from_millis(timeout_ms);
+                                let mut last_error: Option<String> = None;
+                                loop {
+                                    let detail = if let Some(sel) = &selector {
+                                        let escaped =
+                                            sel.replace('\\', "\\\\").replace('\'', "\\'");
+                                        let js = format!(
+                                            "(function(){{ var el = document.querySelector('{}'); \
+                                             if (!el) return null; \
+                                             return {{tag: el.tagName, \
+                                             text: (el.textContent || '').trim().slice(0, 200)}}; }})()",
+                                            escaped
+                                        );
+                                        let v = page.evaluate_with_timeout(
+                                            &js,
+                                            crate::page::INTERACTION_EVAL_TIMEOUT,
+                                        );
+                                        if v.is_null() { None } else { Some(v) }
+                                    } else {
+                                        let pred = predicate.as_deref().unwrap_or("false");
+                                        let js = format!(
+                                            "(function(){{ try {{ var v = ({pred}); \
+                                             if (!v) return {{truthy: false}}; \
+                                             return {{truthy: true, value: \
+                                             (typeof v === 'object' && v !== null \
+                                             ? JSON.stringify(v) : String(v)).slice(0, 200)}}; \
+                                             }} catch (e) {{ return {{truthy: false, \
+                                             error: String(e).slice(0, 200)}}; }} }})()"
+                                        );
+                                        let v = page.evaluate_with_timeout(
+                                            &js,
+                                            crate::page::INTERACTION_EVAL_TIMEOUT,
+                                        );
+                                        if v.get("truthy").and_then(|t| t.as_bool()) == Some(true) {
+                                            v.get("value").cloned()
+                                        } else {
+                                            last_error = v
+                                                .get("error")
+                                                .and_then(|e| e.as_str())
+                                                .map(str::to_string)
+                                                .or(last_error);
+                                            None
+                                        }
+                                    };
+                                    if let Some(detail) = detail {
+                                        break Ok(serde_json::json!({
+                                            "matched": true,
+                                            "elapsed_ms": started.elapsed().as_millis() as u64,
+                                            "detail": detail,
+                                        })
+                                        .to_string());
+                                    }
+                                    if std::time::Instant::now() >= deadline {
+                                        let what = selector
+                                            .as_deref()
+                                            .map(|s| format!("selector \"{s}\""))
+                                            .unwrap_or_else(|| {
+                                                format!("predicate \"{}\"",
+                                                        predicate.as_deref().unwrap_or(""))
+                                            });
+                                        let mut msg =
+                                            format!("timeout after {timeout_ms}ms waiting for {what}");
+                                        if let Some(e) = last_error {
+                                            msg.push_str(&format!(" (last error: {e})"));
+                                        }
+                                        break Err(msg);
+                                    }
+                                    // Drive the page's loop while waiting —
+                                    // fetches/timers only advance when pumped,
+                                    // and the slice parks when quiescent so
+                                    // idle pages don't spin hot.
+                                    page.pump_event_loop_slice(150).await;
+                                }
+                            };
+                            let _ = reply.send(result);
+                        }
+
                         SessionCommand::Close { reply } => {
                             let _ = reply.send(());
                             break;
@@ -1273,6 +1370,89 @@ mod tests {
             .expect("decodable base64");
         assert_eq!(&png[0..4], b"\x89PNG", "PNG magic bytes");
         assert!(png.len() > 1000, "non-trivial image, got {} bytes", png.len());
+
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
+    /// The async-content case straight from real usage: a page whose cards
+    /// arrive via setTimeout can't be probed with a bare eval (racy), so the
+    /// agent sleeps blindly. Wait polls with the event loop driven in
+    /// between, so the timer actually fires and the selector matches.
+    #[tokio::test]
+    async fn wait_selector_matches_async_inserted_element() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /wait",
+            "<html><body><div id=\"root\"></div><script>\
+             setTimeout(function() { \
+               document.getElementById('root').innerHTML = \
+                 '<div class=\"card\">Plan A</div><div class=\"card\">Plan B</div>'; \
+             }, 600); \
+             setTimeout(function() { window.__ready = true; }, 1200); \
+             </script></body></html>",
+        )]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(Some(&format!("http://127.0.0.1:{port}/wait")), false, vec![]);
+
+        // Elapsed must cover the 600ms timer — proof the loop was driven,
+        // not just polled.
+        let out = mgr
+            .send(&sid, |reply| SessionCommand::Wait {
+                selector: Some(".card".to_string()),
+                predicate: None,
+                timeout_ms: 8_000,
+                reply,
+            })
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).expect("wait JSON");
+        assert_eq!(v["matched"], serde_json::json!(true));
+        assert_eq!(v["detail"]["tag"], serde_json::json!("DIV"));
+        assert!(
+            v["detail"]["text"].as_str().unwrap_or("").contains("Plan A"),
+            "detail carries the matched element's text"
+        );
+
+        // Predicate form against a later timer.
+        let out = mgr
+            .send(&sid, |reply| SessionCommand::Wait {
+                selector: None,
+                predicate: Some("window.__ready === true".to_string()),
+                timeout_ms: 8_000,
+                reply,
+            })
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).expect("wait JSON");
+        assert_eq!(v["matched"], serde_json::json!(true));
+
+        // Timeout path: never-matching selector errors with the selector named.
+        let err = mgr
+            .send(&sid, |reply| SessionCommand::Wait {
+                selector: Some(".never".to_string()),
+                predicate: None,
+                timeout_ms: 300,
+                reply,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("timeout") && err.contains(".never"),
+            "timeout error names the selector, got: {err}"
+        );
+
+        // Exactly one of selector/predicate.
+        let err = mgr
+            .send(&sid, |reply| SessionCommand::Wait {
+                selector: Some("a".to_string()),
+                predicate: Some("true".to_string()),
+                timeout_ms: 1_000,
+                reply,
+            })
+            .await
+            .unwrap_err();
+        assert!(err.contains("exactly one"), "got: {err}");
 
         assert!(mgr.close_and_wait(&sid).await);
     }

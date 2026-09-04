@@ -230,6 +230,23 @@ pub struct SessionScreenshotParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionWaitParams {
+    /// Session ID
+    pub session_id: String,
+    /// CSS selector to wait for (e.g. ".price-card")
+    pub selector: Option<String>,
+    /// JS expression polled until truthy (e.g. "document.querySelectorAll('.card').length >= 3")
+    pub predicate: Option<String>,
+    /// Give up after this many milliseconds (default: 10000, max: 120000)
+    #[serde(default = "default_wait_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_wait_timeout_ms() -> u64 {
+    10_000
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SessionExportParams {
     /// Session ID
     pub session_id: String,
@@ -703,6 +720,27 @@ session_viewport + session_screenshot shows the responsive layout. Returns \
             full_page: params.full_page,
             selector: params.selector.clone(),
             selector_all: params.selector_all,
+            reply,
+        }).await {
+            Ok(s) => s,
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Wait until a CSS selector matches or a JS predicate turns truthy, with a timeout. \
+The page's event loop keeps running while waiting (fetches, timers, promise chains progress), so this \
+replaces blind sleeps for async content: navigate, session_wait for '.price-card', then click/read. \
+Returns {matched, elapsed_ms, detail:{tag,text} or the predicate value}; errors with `timeout ...` \
+naming the selector/predicate on expiry. Exactly one of selector/predicate.",
+        annotations(title = "Session Wait", read_only_hint = true)
+    )]
+    async fn session_wait(&self, Parameters(params): Parameters<SessionWaitParams>) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        match mgr.send(&params.session_id, |reply| SessionCommand::Wait {
+            selector: params.selector.clone(),
+            predicate: params.predicate.clone(),
+            timeout_ms: params.timeout_ms,
             reply,
         }).await {
             Ok(s) => s,

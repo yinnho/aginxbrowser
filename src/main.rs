@@ -507,6 +507,18 @@ pub struct SessionScreenshotRequest {
     pub selector_all: bool,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct SessionWaitRequest {
+    pub selector: Option<String>,
+    pub predicate: Option<String>,
+    #[serde(default = "default_wait_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_wait_timeout_ms() -> u64 {
+    10_000
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SessionNavigateRequest {
     pub url: String,
@@ -571,6 +583,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/session/:id/scroll", post(session_scroll_handler))
         .route("/session/:id/viewport", post(session_viewport_handler))
         .route("/session/:id/screenshot", post(session_screenshot_handler))
+        .route("/session/:id/wait", post(session_wait_handler))
         .route("/session/:id/eval", post(session_eval_handler))
         .route("/session/:id/close", post(session_close_handler))
         .route("/mcp", get(mcp_handler).post(mcp_handler))
@@ -1225,6 +1238,25 @@ async fn session_eval_handler(
         reply,
     }).await.map_err(|e| AppError::Internal(e))?;
     Ok((StatusCode::OK, Json(serde_json::json!({ "result": result }))))
+}
+
+/// Wait for a selector/predicate with the page's event loop driven between
+/// polls. Errors (timeout) surface as 500 with the message, matching the
+/// other session error paths.
+async fn session_wait_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<SessionWaitRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    let out = mgr.send(&id, |reply| session::SessionCommand::Wait {
+        selector: req.selector.clone(),
+        predicate: req.predicate.clone(),
+        timeout_ms: req.timeout_ms,
+        reply,
+    }).await.map_err(AppError::Internal)?;
+    let body: serde_json::Value =
+        serde_json::from_str(&out).map_err(|_| AppError::Internal(out.clone()))?;
+    Ok((StatusCode::OK, Json(body)))
 }
 
 async fn session_close_handler(
