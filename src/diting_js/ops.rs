@@ -10,6 +10,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use crate::diting_dom::{DomTree, NodeData, NodeId};
 use html5ever::namespace_url;
 use crate::diting_net::{CookieJar, HttpClient};
+use url::Url;
 
 /// CDP Fetch-domain resolution: what a client answers a paused request with.
 /// Produced by the CDP bridge's `Fetch.continueRequest` / `fulfillRequest` /
@@ -123,6 +124,10 @@ pub struct JsState {
     /// getComputedStyle.
     #[cfg(feature = "screenshot")] // the layout ops run only in the screenshot-gated pipeline
     layout_cache: std::cell::RefCell<Option<(u64, LayoutRun)>>,
+    /// External stylesheet bodies fetched at navigation (absolute URL →
+    /// decoded CSS text). Joined into the cascade by [`layout_run_all`]
+    /// and served to the JS side as `document.styleSheets` rule content.
+    pub(crate) ext_sheets: std::cell::RefCell<std::collections::HashMap<String, String>>,
     /// Viewport the layout pipeline should anchor the initial containing
     /// block to, published by the JS persona (`__diting_setPersona`) so
     /// getBoundingClientRect agrees with window.innerWidth/innerHeight.
@@ -223,6 +228,13 @@ impl JsState {
             layout_cache: std::cell::RefCell::new(None),
             #[cfg(feature = "screenshot")]
             viewport: (1920.0, 1000.0),
+            // External stylesheet bodies fetched at navigation, keyed by
+            // absolute URL. The layout run joins them with the live <style>
+            // blocks in document order — without this table an author sheet
+            // that arrives over <link> never reaches the cascade, so
+            // getComputedStyle answers initial values and every rect-based
+            // consumer (gBCR, elementFromPoint) sees unstyled geometry.
+            ext_sheets: std::cell::RefCell::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -828,6 +840,36 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             }
             cur.index().to_string()
         }
+        // External stylesheet bodies (absolute URL → CSS text) fetched at
+        // navigation. document.styleSheets reads this to build real
+        // CSSStyleSheet entries for <link rel=stylesheet> elements — the
+        // fetch itself lives in Page's navigation pipeline, this is the
+        // retention side.
+        "ext_sheets" => {
+            let map = gs.ext_sheets.borrow();
+            let mut obj = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map.iter() {
+                obj.insert(k.clone(), serde_json::Value::String(v.clone()));
+            }
+            serde_json::Value::Object(obj).to_string()
+        }
+        // Parse CSS text into rule records for CSSOM: real selector +
+        // declaration text from the same parser the cascade uses, so
+        // sheet.cssRules agrees with what layout actually applies.
+        "parse_css_rules" => {
+            let rules = crate::diting_css::parse_stylesheet(&arg1);
+            let arr: Vec<serde_json::Value> = rules
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "selectorText": r.selector,
+                        "cssText": format!("{}{{{}}}", r.selector, r.declarations),
+                        "declarations": r.declarations,
+                    })
+                })
+                .collect();
+            serde_json::Value::Array(arr).to_string()
+        }
         // Real layout geometry for one element, from the diting_css +
         // diting_layout pipeline. Memoized per tree epoch; a stale epoch
         // (any node allocation/free since the last run) re-lays-out. Returns
@@ -961,10 +1003,49 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
     // has a definite size for fixed-box inset resolution — obscura#675).
     let (viewport_width, viewport_height) = gs.viewport;
     let mut css = String::new();
-    if let Ok(style_els) = dom.query_selector_all("style") {
-        for el in style_els {
-            css.push_str(&dom.text_content(el));
-            css.push('\n');
+    // Sheets join in DOCUMENT order (a comma query returns exactly that):
+    // an earlier <link> loses equal-specificity ties to a later <style>,
+    // like Chrome's cascade. External sheet bodies come from the
+    // navigation-time fetch table (JsState::ext_sheets); a <link> whose
+    // fetch failed (or was blocked) contributes nothing, matching a
+    // browser that leaves the sheet empty rather than dropping the page's
+    // other styling.
+    if let Ok(els) = dom.query_selector_all("style, link") {
+        for el in els {
+            let meta = dom.with_node(el, |n| {
+                let tag = n.as_element()?.local.to_ascii_lowercase();
+                Some((
+                    tag,
+                    n.get_attribute("rel").map(|v| v.to_ascii_lowercase()),
+                    n.get_attribute("href").map(|v| v.to_string()),
+                ))
+            });
+            let Some((tag, rel, href)) = meta.flatten() else { continue };
+            match &*tag {
+                "style" => {
+                    css.push_str(&dom.text_content(el));
+                    css.push('\n');
+                }
+                "link" => {
+                    let is_sheet = rel
+                        .as_deref()
+                        .is_some_and(|r| r.split_ascii_whitespace().any(|t| t == "stylesheet"));
+                    if !is_sheet {
+                        continue;
+                    }
+                    let Some(href) = href.filter(|h| !h.is_empty()) else { continue };
+                    let abs = Url::parse(&gs.url)
+                        .ok()
+                        .and_then(|base| base.join(&href).ok())
+                        .map(|u| u.to_string());
+                    let Some(abs) = abs else { continue };
+                    if let Some(body) = gs.ext_sheets.borrow().get(&abs) {
+                        css.push_str(body);
+                        css.push('\n');
+                    }
+                }
+                _ => {}
+            }
         }
     }
     let rules = crate::diting_css::parse_stylesheet_for(

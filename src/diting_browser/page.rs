@@ -1423,26 +1423,39 @@ impl Page {
             .buffer_unordered(16)
             .collect()
             .await;
-        let mut css_sources = Vec::new();
-        for result in css_results {
-            if let Some((url_str, resp)) = result {
-                // CSS bodies: honor the Content-Type charset; CSS @charset is
-                // out of scope for the current scrape-focused pipeline.
-                let css = crate::diting_net::decode_non_html(&resp.body, resp.content_type());
-                self.record_network_event_with_body(&url_str, "GET", "Stylesheet", resp.status, &resp.headers, &resp.body);
-                css_sources.push(css);
-            }
+        let mut css_sources: Vec<(String, String)> = Vec::new();
+        for (url_str, resp) in css_results.into_iter().flatten() {
+            // CSS bodies: honor the Content-Type charset; CSS @charset is
+            // out of scope for the current scrape-focused pipeline.
+            let css = crate::diting_net::decode_non_html(&resp.body, resp.content_type());
+            self.record_network_event_with_body(&url_str, "GET", "Stylesheet", resp.status, &resp.headers, &resp.body);
+            css_sources.push((url_str, css));
         }
 
         self.dom = Some(dom);
         self.init_js();
 
-        // Inject CSS as a global so getComputedStyle and any CSS-aware shim
-        // can read it. Has to happen before scripts run, regardless of
-        // waitUntil, so handlers that read window.__diting_css see it.
+        // Hand the fetched sheet bodies to the JS state natively: the
+        // layout run joins them into the cascade (getComputedStyle /
+        // getBoundingClientRect / elementFromPoint see authored styles, not
+        // initial values) and document.styleSheets builds real rule lists
+        // from them. Has to happen before scripts run, regardless of
+        // waitUntil, so handlers that read geometry or cssRules mid-boot
+        // see the styled document.
+        if let Some(js) = &mut self.js {
+            let sheets: std::collections::HashMap<String, String> =
+                css_sources.iter().cloned().collect();
+            js.set_ext_sheets(sheets);
+        }
+        // Inject CSS as a global so any CSS-aware page shim can read the
+        // joined text directly (window.__diting_css).
         if !css_sources.is_empty() {
             if let Some(js) = &mut self.js {
-                let combined_css = css_sources.join("\n");
+                let combined_css = css_sources
+                    .iter()
+                    .map(|(_, c)| c.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 // Use the thorough template-literal escape that
                 // covers U+2028 / U+2029 and other control chars.
                 // The previous escaper only handled `, \, and ${,
@@ -3200,6 +3213,72 @@ mod tests {
             resps.iter().any(|(k, _, _)| k == "Stylesheet"),
             "responses: {resps:?}"
         );
+    }
+
+    /// External stylesheets fetched at navigation must reach three places:
+    /// the cascade (getComputedStyle), document.styleSheets' rule lists, and
+    /// the `__diting_css` global. Before the ext_sheets plumbing the fetch
+    /// succeeded but only fed the unused global — computed reads came back
+    /// as initial values and cssRules was an empty stub.
+    #[tokio::test(flavor = "current_thread")]
+    async fn external_stylesheet_applies_and_lists_rules() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![
+            (
+                "/page",
+                200,
+                "<html><head><link rel=\"stylesheet\" href=\"/s.css\"></head>\
+                 <body><div class=\"box\">x</div></body></html>"
+                    .into(),
+            ),
+            (
+                "/s.css",
+                200,
+                ".box{position:absolute;left:10px;background-color:#ff0000}".into(),
+            ),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/page")).await.unwrap();
+
+        // styleSheets lists the loaded sheet with engine-parsed rules.
+        assert_eq!(p.evaluate("document.styleSheets.length").as_f64(), Some(1.0));
+        assert_eq!(
+            p.evaluate("document.styleSheets[0].href"),
+            serde_json::json!(format!("http://127.0.0.1:{port}/s.css"))
+        );
+        let rules = p
+            .evaluate("Array.from(document.styleSheets[0].cssRules, r => r.selectorText)")
+            .as_array()
+            .expect("cssRules array")
+            .clone();
+        assert_eq!(rules, vec![serde_json::json!(".box")]);
+        // The declaration block round-trips through the same parser the
+        // cascade uses, so both readers quote the sheet identically.
+        let decls = p
+            .evaluate(
+                "document.styleSheets[0].cssRules[0].style.getPropertyValue('background-color')",
+            )
+            .as_str()
+            .expect("declaration string")
+            .to_string();
+        assert_eq!(decls, "#ff0000");
+
+        // The cascade sees the external rules too, not just inline <style>.
+        #[cfg(feature = "screenshot")]
+        {
+            let pos = p
+                .evaluate("getComputedStyle(document.querySelector('.box')).position")
+                .as_str()
+                .expect("position string")
+                .to_string();
+            assert_eq!(pos, "absolute");
+            let bg = p
+                .evaluate("getComputedStyle(document.querySelector('.box')).backgroundColor")
+                .as_str()
+                .expect("color string")
+                .to_string();
+            assert!(bg.starts_with("rgb(255"), "backgroundColor: {bg}");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

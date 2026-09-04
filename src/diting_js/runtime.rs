@@ -382,6 +382,14 @@ impl JsRuntime {
         self.state.borrow_mut().blocked_urls = patterns;
     }
 
+    /// External stylesheet bodies (absolute URL → CSS text) fetched during
+    /// navigation. The layout pipeline joins them into the cascade
+    /// (getComputedStyle/gBCR see the authored styles) and
+    /// `document.styleSheets` builds its rule lists from them.
+    pub fn set_ext_sheets(&self, sheets: std::collections::HashMap<String, String>) {
+        *self.state.borrow_mut().ext_sheets.borrow_mut() = sheets;
+    }
+
     pub fn take_pending_navigation(&self) -> Option<(String, String, String)> {
         self.state.borrow_mut().pending_navigation.take()
     }

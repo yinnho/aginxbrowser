@@ -3230,7 +3230,31 @@ class Document extends Node {
       hasFeature() { return true; },
     };
   }
-  get styleSheets() { return []; }
+  get styleSheets() {
+    // Document-order sheet list: <style> elements plus <link rel=stylesheet>
+    // whose navigation-time fetch succeeded (Chrome only lists loaded
+    // sheets). Rule content is parsed engine-side by the same parser the
+    // cascade uses, so cssRules and getComputedStyle can never disagree
+    // about what a sheet says.
+    const out = [];
+    for (const el of this.querySelectorAll("style, link")) {
+      const tag = (el.tagName || "").toLowerCase();
+      if (tag === "style") {
+        out.push(_sheetFromCssText(el, null, el.textContent || ""));
+      } else if (tag === "link") {
+        const rel = (el.getAttribute("rel") || "").toLowerCase();
+        if (!rel.split(/\s+/).includes("stylesheet")) continue;
+        const raw = el.getAttribute("href");
+        if (!raw) continue;
+        let abs;
+        try { abs = new URL(raw, globalThis.location.href).href; } catch (e) { continue; }
+        const body = _extSheetBodies()[abs];
+        if (body == null) continue;
+        out.push(_sheetFromCssText(el, abs, body));
+      }
+    }
+    return _sheetList(out);
+  }
   get forms() { return this.querySelectorAll("form"); }
   get images() { return this.querySelectorAll("img"); }
   get links() { return this.querySelectorAll("a[href], area[href]"); }
@@ -5264,6 +5288,70 @@ globalThis.CSSStyleSheet = class CSSStyleSheet {
     this.cssRules = this._rules;
   }
 };
+
+// --- document.styleSheets backing -------------------------------------
+// External sheet bodies fetched at navigation, served by the native side
+// as a JSON map (absolute URL → CSS text). Cached per realm: the table is
+// fixed after navigation, so one op round-trip serves every access.
+let _extSheetsMap = null;
+function _extSheetBodies() {
+  if (_extSheetsMap === null) {
+    try { _extSheetsMap = JSON.parse(_domRaw("ext_sheets", "", "")) || {}; }
+    catch (e) { _extSheetsMap = {}; }
+  }
+  return _extSheetsMap;
+}
+// Rule records per css text, from the engine-side parser via the
+// `parse_css_rules` op. Cached by text so identical bodies parse once.
+const _sheetRulesCache = new Map();
+function _parseSheetRules(cssText) {
+  let rules = _sheetRulesCache.get(cssText);
+  if (rules) return rules;
+  rules = [];
+  try {
+    for (const r of JSON.parse(_domRaw("parse_css_rules", cssText, "")) || []) {
+      const style = new CSSStyleDeclaration(null);
+      style.cssText = r.declarations || "";
+      rules.push({
+        type: 1,
+        selectorText: r.selectorText,
+        get cssText() { return r.cssText; },
+        style,
+      });
+    }
+  } catch (e) { /* unreadable sheet: empty rule list, like a failed load */ }
+  _sheetRulesCache.set(cssText, rules);
+  return rules;
+}
+function _sheetFromCssText(ownerNode, href, cssText) {
+  const sheet = new CSSStyleSheet();
+  sheet._rules = _parseSheetRules(cssText);
+  sheet.cssRules = sheet._rules;
+  sheet.href = href;
+  sheet.ownerNode = ownerNode;
+  sheet.type = "text/css";
+  sheet.parentStyleSheet = null;
+  sheet.title = "";
+  sheet.media = {
+    length: 0,
+    item: () => null,
+    mediaText: "",
+    appendMedium() {},
+    deleteMedium() {},
+  };
+  return sheet;
+}
+function _sheetList(sheets) {
+  const out = {
+    length: sheets.length,
+    item(i) { return sheets[i] || null; },
+    [Symbol.iterator]() { return sheets[Symbol.iterator](); },
+  };
+  // Chrome's StyleSheetList answers numeric index reads without being an
+  // Array (no push/map); mirror that with own index properties.
+  for (let i = 0; i < sheets.length; i++) out[i] = sheets[i];
+  return out;
+}
 
 Object.defineProperty(Document.prototype, 'adoptedStyleSheets', {
   get() { return this._adoptedStyleSheets || []; },
