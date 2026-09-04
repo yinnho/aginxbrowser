@@ -958,11 +958,19 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             });
             match style {
                 Some(s) => {
-                    let mut obj = serde_json::Map::with_capacity(COMPUTED_STYLE_PROPS.len());
+                    let mut obj = serde_json::Map::with_capacity(
+                        COMPUTED_STYLE_PROPS.len() + s.custom.len(),
+                    );
                     for prop in COMPUTED_STYLE_PROPS {
                         if let Some(v) = computed_style_value(&s, prop, cssom_tag.as_deref()) {
                             obj.insert((*prop).to_string(), serde_json::Value::String(v));
                         }
+                    }
+                    // Custom properties ride the same snapshot (case-sensitive
+                    // keys — the JS lookup skips its kebab-lowercase step for
+                    // `--` names): getComputedStyle(el).getPropertyValue('--x').
+                    for (k, v) in &s.custom {
+                        obj.insert(k.clone(), serde_json::Value::String(v.clone()));
                     }
                     serde_json::Value::Object(obj).to_string()
                 }
@@ -1088,6 +1096,7 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "line-height",
     "color",
     "background-color",
+    "background-image",
     "flex-direction",
     "flex-wrap",
     "justify-content",
@@ -1214,6 +1223,9 @@ fn computed_style_value(
         ),
         "color" => s.color.as_ref().map(&color),
         "background-color" => s.background_color.as_ref().map(&color),
+        // Raw author token stream (var() already substituted by the cascade);
+        // unset stays absent so the JS initial (`none`) serves it.
+        "background-image" => s.background_image.clone(),
         "flex-direction" => Some(
             match s.flex_direction {
                 Some(FlexDirection::RowReverse) => "row-reverse",

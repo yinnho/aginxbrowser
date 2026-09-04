@@ -3442,6 +3442,52 @@
         assert_eq!(initial, serde_json::json!("auto"));
     }
 
+    // CSS custom properties end-to-end (#229 residue): --* declared in a
+    // stylesheet must (a) feed var() substitution in the cascade, (b) be
+    // readable back through getComputedStyle().getPropertyValue('--*')
+    // case-sensitively, and (c) survive the inline-style round-trip without
+    // the kebab-lowercase pass corrupting --mainColor into --main-color.
+    // background-image rides along raw (longhand only).
+    #[test]
+    #[cfg(feature = "screenshot")]
+    fn test_custom_properties_and_var_substitution() {
+        let mut rt = setup_runtime(r#"<html><head><style>
+          :root { --brand: rgb(200, 10, 10); --card-w: 120px; }
+          .card { width: var(--card-w); color: var(--brand); background-image: linear-gradient(to right, var(--brand), blue); }
+          .fallback { color: var(--missing, rgb(9, 9, 9)); }
+        </style></head><body>
+        <div class="card" id="c">x</div>
+        <div class="fallback" id="f">y</div>
+        </body></html>"#);
+        let out = rt
+            .evaluate(
+                r#"JSON.stringify({
+                    color: getComputedStyle(document.getElementById('c')).color,
+                    bg: getComputedStyle(document.getElementById('c')).backgroundImage,
+                    rootVar: getComputedStyle(document.getElementById('c')).getPropertyValue('--brand'),
+                    inheritedVar: getComputedStyle(document.getElementById('c')).getPropertyValue('--card-w'),
+                    fallback: getComputedStyle(document.getElementById('f')).color,
+                    camelInline: (function() {
+                        document.body.style.setProperty('--mainColor', '#123456');
+                        return getComputedStyle(document.body).getPropertyValue('--mainColor');
+                    })(),
+                })"#,
+            )
+            .unwrap();
+        println!("custom props diagnostics: {out}");
+        let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        assert_eq!(v["color"], serde_json::json!("rgb(200, 10, 10)"), "var() substitutes in the cascade");
+        assert_eq!(
+            v["bg"],
+            serde_json::json!("linear-gradient(to right, rgb(200, 10, 10), blue)"),
+            "background-image passes through with vars substituted"
+        );
+        assert_eq!(v["rootVar"], serde_json::json!("rgb(200, 10, 10)"), "--brand readable on descendants");
+        assert_eq!(v["inheritedVar"], serde_json::json!("120px"), "--card-w inherits from :root");
+        assert_eq!(v["fallback"], serde_json::json!("rgb(9, 9, 9)"), "var() fallback applies");
+        assert_eq!(v["camelInline"], serde_json::json!("#123456"), "--mainColor survives case-sensitively");
+    }
+
     // Regression (obscura #771 wrong-value rows): getComputedStyle served the
     // layout engine's Block bucket for the table family and `stretch` /
     // `flex-start` for unset align-items/justify-content. Chrome answers

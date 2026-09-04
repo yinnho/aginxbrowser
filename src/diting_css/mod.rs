@@ -545,6 +545,15 @@ pub struct ComputedStyle {
     pub float_side: Option<FloatSide>,
     /// `clear`, non-inherited; None = none.
     pub clear_side: Option<ClearSide>,
+    /// `background-image` longhand, kept as the raw (already var()-substituted)
+    /// token stream — gradients/urls don't feed layout, so there is no parsed
+    /// form; this exists so the CSSOM reports author-set images instead of
+    /// the `none` initial. The `background` shorthand does NOT fill it (v1).
+    pub background_image: Option<String>,
+    /// Custom properties (`--*`), which DO inherit: the var() substitution
+    /// source. Values are stored raw (author tokens) — !important stripped at
+    /// insertion; resolution to colors/lengths happens at use sites.
+    pub custom: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1187,7 +1196,14 @@ pub fn split_declarations(css: &str) -> Vec<(String, String)> {
             if value.contains('{') {
                 return None;
             }
-            Some((name.to_ascii_lowercase(), value.trim().to_string()))
+            // Custom property names are case-SENSITIVE (--Main ≠ --main);
+            // everything else lowercases.
+            let name = if name.starts_with("--") {
+                name.to_string()
+            } else {
+                name.to_ascii_lowercase()
+            };
+            Some((name, value.trim().to_string()))
         })
         .collect()
 }
@@ -1209,11 +1225,121 @@ pub fn apply_declarations_with(
     for (name, value) in split_declarations(declarations) {
         // !important wins later during cascade merge; here both streams apply
         // with important taking precedence per-property at the call site.
+        if name.starts_with("--") {
+            // Custom property: store the token stream raw. Values may hold
+            // anything (including semicolon-free junk), so we only strip a
+            // trailing !important. Empty value = guaranteed-invalid → unset.
+            let v = value.trim();
+            let v = match v.to_ascii_lowercase().strip_suffix("!important") {
+                Some(_) => v[..v.len() - "!important".len()].trim(),
+                None => v,
+            };
+            if v.is_empty() {
+                style.custom.remove(&name);
+            } else {
+                style.custom.insert(name.clone(), v.to_string());
+            }
+            applied = true;
+            continue;
+        }
+        // Normal property: substitute var() references against the custom
+        // map (inherited + already-applied declarations). Unresolved without
+        // fallback ⇒ treat the declaration as invalid-at-computed-value-time
+        // and drop it — inherited/earlier values survive, which matches the
+        // common case of IACVT on non-inherited properties closely enough.
+        let value = if value.to_ascii_lowercase().contains("var(") {
+            match substitute_vars(&value, &style.custom, 0) {
+                Some(v) => v,
+                None => continue,
+            }
+        } else {
+            value.clone()
+        };
         if apply_one(style, &name, &value, fonts) {
             applied = true;
         }
     }
     applied
+}
+
+/// Replace every `var(--name[, fallback])` in `value` using `custom`.
+/// `None` when any reference is unresolvable (no such property AND no
+/// usable fallback) — the caller then drops the declaration (IACVT).
+/// Depth-capped to break `--a: var(--b); --b: var(--a)` cycles.
+fn substitute_vars(value: &str, custom: &std::collections::HashMap<String, String>, depth: usize) -> Option<String> {
+    const MAX_DEPTH: usize = 8;
+    if depth > MAX_DEPTH {
+        return None;
+    }
+    let lower = value.to_ascii_lowercase();
+    let Some(start) = lower.find("var(") else {
+        return Some(value.to_string());
+    };
+    // Walk to the matching close paren. `start`/`end` are byte offsets of
+    // ASCII chars, so slicing between them is char-boundary safe; interior
+    // UTF-8 bytes (>= 0x80) never match the ASCII delimiters.
+    let bytes = value.as_bytes();
+    let mut level = 0usize;
+    let mut end = None;
+    let mut i = start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' => level += 1,
+            b')' => {
+                level -= 1;
+                if level == 0 {
+                    end = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let end = end?;
+    // Inside the parens: `--name` + optional `, fallback`.
+    let inner = &value[start + 4..end];
+    let (name, fallback) = match split_top_comma(inner) {
+        Some((n, f)) => (n.trim(), Some(f)),
+        None => (inner.trim(), None),
+    };
+    let head = &value[..start];
+    let tail = &value[end + 1..];
+    let replacement = match custom.get(name) {
+        Some(v) => substitute_vars(v, custom, depth + 1)?,
+        None => match fallback {
+            Some(f) => substitute_vars(f.trim(), custom, depth + 1)?,
+            None => return None,
+        },
+    };
+    // The tail may contain further var() references.
+    let tail = substitute_vars(tail, custom, depth)?;
+    Some(format!("{head}{replacement}{tail}"))
+}
+
+/// Split at the first top-level comma (outside parens/quotes) — used to
+/// separate a var() fallback, which may itself contain commas and nested
+/// functions like `var(--x, 1px, 2px)` / `var(--y, rgb(0, 0, 0))`.
+fn split_top_comma(s: &str) -> Option<(&str, &str)> {
+    let bytes = s.as_bytes();
+    let mut paren = 0i32;
+    let mut quote: Option<u8> = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        if let Some(q) = quote {
+            if b == q {
+                quote = None;
+            }
+            continue;
+        }
+        match b {
+            b'"' | b'\'' => quote = Some(b),
+            b'(' => paren += 1,
+            b')' => paren -= 1,
+            b',' if paren == 0 => return Some((&s[..i], &s[i + 1..])),
+            _ => {}
+        }
+    }
+    None
 }
 
 fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx) -> bool {
@@ -1252,6 +1378,12 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             true
         }
         "color" => parse_color(v).map(|c| style.color = Some(c)).is_some(),
+        // Raw passthrough: no parsed form, no layout effect — the CSSOM
+        // layer reports it verbatim (var() already substituted upstream).
+        "background-image" => {
+            style.background_image = Some(v.to_string());
+            true
+        }
         "background" | "background-color" => {
             // `background` shorthand: take a leading color token if present.
             let candidate = if name == "background" {
@@ -2148,6 +2280,9 @@ pub fn cascade_element(
         // Number keeps its multiplier for descendants (spec computed value);
         // Px inherits as absolute px — both copy straight through.
         style.line_height = parent.line_height;
+        // Custom properties inherit computed (already-substituted-where-
+        // possible) values; author rules below may re-declare per element.
+        style.custom = parent.custom.clone();
     }
 
     // Author rules: sort by (specificity, source order) ascending, apply in
@@ -2669,6 +2804,82 @@ mod tests {
         // Section itself: block UA default even with no author CSS.
         let block = cascade_element("section", &tree, section, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
         assert_eq!(block.display, Some(Display::Block));
+    }
+
+    #[test]
+    fn var_substitutes_from_custom_properties_and_inherits() {
+        let tree =
+            diting_dom::tree_sink::parse_html(r#"<section><p>x</p><span>y</span></section>"#);
+        let section = tree.query_selector("section").unwrap().unwrap();
+        let span = tree.query_selector("span").unwrap().unwrap();
+
+        let root_rule = ParsedRule {
+            selector: "section".into(),
+            declarations: "--main-color: #ff0000; color: var(--main-color)".into(),
+        };
+        let spec = tree.compile_rule_selector("section").unwrap().specificity();
+        let parent = cascade_element("section", &tree, section, &[(&root_rule, spec)], None, None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(parent.color, Some(Color(255, 0, 0, 255)), "var() resolves against same-element custom property");
+        assert_eq!(parent.custom.get("--main-color").map(String::as_str), Some("#ff0000"));
+
+        // Child with no rules: custom map inherits (and would feed its own var()s).
+        let child = cascade_element("span", &tree, span, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(child.custom.get("--main-color").map(String::as_str), Some("#ff0000"), "custom properties inherit");
+
+        // Child rule USING the inherited custom property.
+        let use_rule = ParsedRule { selector: "span".into(), declarations: "color: var(--main-color)".into() };
+        let use_spec = tree.compile_rule_selector("span").unwrap().specificity();
+        let styled = cascade_element("span", &tree, span, &[(&use_rule, use_spec)], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(styled.color, Some(Color(255, 0, 0, 255)), "var() resolves against inherited custom property");
+    }
+
+    #[test]
+    fn var_fallback_and_unresolved_behavior() {
+        let tree = diting_dom::tree_sink::parse_html(r#"<p>x</p>"#);
+        let p = tree.query_selector("p").unwrap().unwrap();
+
+        let rule = ParsedRule {
+            selector: "p".into(),
+            declarations: "color: var(--missing, rgb(0, 0, 255)); background-color: var(--missing)".into(),
+        };
+        let spec = tree.compile_rule_selector("p").unwrap().specificity();
+
+        let parent = ComputedStyle { color: Some(Color(1, 2, 3, 255)), ..Default::default() };
+        let cs = cascade_element("p", &tree, p, &[(&rule, spec)], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
+        // Fallback may contain commas (rgb) — split_top_comma keeps it whole.
+        assert_eq!(cs.color, Some(Color(0, 0, 255, 255)), "fallback (with commas) substitutes");
+        // Unresolved without fallback: declaration dropped, inherited value survives (IACVT approximation).
+        assert_eq!(cs.background_color, None, "unresolved var() drops the declaration");
+    }
+
+    #[test]
+    fn var_in_dimensions_and_chained_custom_properties() {
+        let tree = diting_dom::tree_sink::parse_html(r#"<div>x</div>"#);
+        let div = tree.query_selector("div").unwrap().unwrap();
+
+        let rule = ParsedRule {
+            selector: "div".into(),
+            declarations:
+                "--w: 100px; width: var(--w); --a: var(--b); --b: 10px; padding-top: var(--a)".into(),
+        };
+        let spec = tree.compile_rule_selector("div").unwrap().specificity();
+        let cs = cascade_element("div", &tree, div, &[(&rule, spec)], None, None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(cs.width, Some(Length::Px(100.0)), "var() resolves in dimensions");
+        // --a references --b (declared earlier in the list): stored raw and
+        // substituted when `padding-top` uses --a, so chains resolve.
+        assert_eq!(cs.padding.top, Some(Length::Px(10.0)), "chained custom properties resolve at use time");
+    }
+
+    #[test]
+    fn custom_property_names_are_case_sensitive() {
+        let mut s = ComputedStyle::default();
+        let fonts = FontCtx::default();
+        assert!(apply_declarations_with(&mut s, "--Main: 5px; width: var(--Main)", &fonts));
+        assert_eq!(s.width, Some(Length::Px(5.0)), "--Main round-trips case-sensitively");
+
+        let mut s2 = ComputedStyle::default();
+        apply_declarations_with(&mut s2, "--Main: 5px; width: var(--main, 9px)", &fonts);
+        assert_eq!(s2.width, Some(Length::Px(9.0)), "--main does NOT match --Main (case-sensitive)");
     }
 
     // ---- line-height + UA box defaults (§49 parity fixes) ----

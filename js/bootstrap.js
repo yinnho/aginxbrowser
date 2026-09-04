@@ -421,7 +421,12 @@ class MessageChannel {
 globalThis.MessageChannel = MessageChannel;
 globalThis.MessagePort = class MessagePort { constructor(){} postMessage(){} close(){} addEventListener(){} removeEventListener(){} };
 
-const _cssCamelToKebab = (s) => String(s).replace(/[A-Z]/g, (m) => "-" + m.toLowerCase());
+// Custom property names are case-sensitive and carry no camelCase IDL form
+// (--mainColor must round-trip verbatim through style.setProperty/getPropertyValue).
+const _cssCamelToKebab = (s) => {
+  const str = String(s);
+  return str.startsWith('--') ? str : str.replace(/[A-Z]/g, (m) => "-" + m.toLowerCase());
+};
 const _cssKebabToCamel = (s) => String(s).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
 
 // Standard CSS property names (camelCase). Real CSSStyleDeclaration exposes
@@ -5186,7 +5191,13 @@ globalThis.getComputedStyle = (el) => {
     if (typeof rawProp !== 'string') return '';
     // Snapshot first: it already resolved the cascade, inline included.
     refreshRendered();
-    const kebab = rawProp.replace(/([A-Z])/g, '-$1').toLowerCase();
+    // Custom property names are case-SENSITIVE and never camelCase — the
+    // kebab+lowercase pass would corrupt --mainColor into --main-color.
+    // Past the snapshot, the inline-style fallback below still applies
+    // (el.style.setProperty('--x', …) is part of the cascade).
+    const kebab = rawProp.startsWith('--')
+      ? rawProp
+      : rawProp.replace(/([A-Z])/g, '-$1').toLowerCase();
     if (snapshot.rendered && Object.prototype.hasOwnProperty.call(snapshot.rendered, kebab)) {
       return snapshot.rendered[kebab];
     }
