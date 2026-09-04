@@ -5670,7 +5670,7 @@ globalThis.ElementInternals = class ElementInternals {
   get validationMessage() { return this._message || ''; }
   get willValidate() { return true; }
   get form() { return this._el && this._el.closest ? this._el.closest('form') : null; }
-  get labels() { return _nodeList([]); }
+  get labels() { return this._el && this._el.labels ? this._el.labels : _nodeList([]); }
   get shadowRoot() { return (this._el && this._el._shadowRoot) || null; }
   get states() { return this._states; }
 };
@@ -7173,6 +7173,43 @@ globalThis.HTMLFormElement = class HTMLFormElement extends Element {
 globalThis.HTMLSelectElement = _htmlInterface('HTMLSelectElement', ['select']);
 globalThis.HTMLTextAreaElement = _htmlInterface('HTMLTextAreaElement', ['textarea']);
 globalThis.HTMLLabelElement = _htmlInterface('HTMLLabelElement', ['label']);
+// `labels` / `control` (obscura#835 lineage): label↔control association is a
+// two-way street, and Playwright's getByLabel() reads both directions off the
+// page. Per the HTML spec, `el.labels` lists every label whose labeled control
+// is el — for-matched AND wrapping — which is exactly what _labeledControl
+// resolves in the forward direction, so the reverse is a filter over the
+// document's labels. Element wrappers share Element.prototype (see
+// _htmlInterface), so both getters live there behind tagName/matchability
+// guards instead of on per-interface prototypes; `div.control` reads
+// undefined like Chrome's, though `in` diverges (true here) — the shared
+// prototype is the price of keeping property patches on one object. Must run
+// after `class Element` initializes (TDZ), hence the placement down here.
+Object.defineProperty(Element.prototype, 'labels', {
+  get() {
+    if (!this.matches || !this.matches(_LABELABLE)) return _nodeList([]);
+    const out = [];
+    const doc = this.ownerDocument || globalThis.document;
+    if (doc && doc.querySelectorAll) {
+      const all = doc.querySelectorAll('label');
+      for (let i = 0; i < all.length; i++) {
+        if (_labeledControl(all[i]) === this) out.push(all[i]);
+      }
+    }
+    // Detached trees: the document scan can't see ancestor labels there, so
+    // walk up (for-association inside a detached tree stays unlisted —
+    // getElementById only resolves the document, same approximation as
+    // _labeledControl's for-arm).
+    for (let p = this.parentElement; p; p = p.parentElement) {
+      if (p.tagName === 'LABEL' && _labeledControl(p) === this && out.indexOf(p) === -1) out.push(p);
+    }
+    return _nodeList(out);
+  },
+  configurable: true,
+});
+Object.defineProperty(Element.prototype, 'control', {
+  get() { return this.tagName === 'LABEL' ? _labeledControl(this) : undefined; },
+  configurable: true,
+});
 globalThis.HTMLTableElement = _htmlInterface('HTMLTableElement', ['table']);
 globalThis.HTMLIFrameElement = _htmlInterface('HTMLIFrameElement', ['iframe']);
 globalThis.HTMLCanvasElement = _htmlInterface('HTMLCanvasElement', ['canvas']);

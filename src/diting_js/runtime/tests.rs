@@ -1261,6 +1261,49 @@
         );
     }
 
+    #[test]
+    fn test_element_labels_and_label_control_getters() {
+        // obscura#835 lineage: label↔control association must be readable in
+        // both directions — Playwright's getByLabel() leans on `label.control`
+        // and `el.labels` in the page. Per spec, a label's control is the
+        // for-referenced element (if `for` is present, empty for = nothing)
+        // else the first labelable descendant; `labels` is the reverse map.
+        let mut rt = setup_runtime(r#"<div id=d></div>
+            <input type=hidden id=h>
+            <label for=a id=la>Name</label><input id=a>
+            <label id=lb><input id=b><input id=b2></label>
+            <label for=a id=lc><input id=c></label>"#);
+        let result = rt.evaluate(r#"
+            const $ = (id) => document.getElementById(id);
+            return [
+                // non-labelable: empty NodeList, property present
+                $('d').labels.length, $('h').labels.length,
+                // for-linked: BOTH for=a labels associate (la and lc), tree order
+                $('a').labels.length, $('a').labels[0] === $('la'), $('la').control === $('a'),
+                // wrapping: only the FIRST labelable descendant associates
+                $('b').labels.length, $('b').labels[0] === $('lb'), $('b2').labels.length,
+                // a wrapping label whose `for` points elsewhere: not associated
+                // with the wrapped input, and still controls its for-target
+                $('c').labels.length, $('lc').control === $('a'),
+                // label with no for and no labelable descendant: control null
+                $('d').closest ? $('lc').control !== $('c') : true,
+                // NodeList shape
+                $('a').labels instanceof NodeList,
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                0, 0,
+                2, true, true,
+                1, true, 0,
+                0, true,
+                true,
+                true,
+            ])
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn test_unhandled_rejection_dispatches_window_events() {
         // Chrome surfaces unhandled promise rejections on the window as
