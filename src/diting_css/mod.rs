@@ -1072,6 +1072,11 @@ pub fn ua_display(tag: &str) -> Display {
         // same line as their labels (obscura#807 class). button
         // shrink-to-fits its label content.
         "input" | "textarea" | "button" => Display::InlineBlock,
+        // Replaced media is inline-level in every browser UA sheet: an
+        // unstyled <img> sits ON the text line (baseline = bottom margin
+        // edge), not stacked as a block between the text lines. Same run
+        // dispatch as form controls — the replaced leaf joins the run.
+        "img" | "video" | "iframe" | "canvas" | "object" | "embed" => Display::Inline,
         // Non-visual metadata elements: every browser's UA stylesheet sets
         // display:none on these (blitz assets/default.css included). Without
         // it a page's <head>/<style> blocks lay out as empty boxes and push

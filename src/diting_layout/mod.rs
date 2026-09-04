@@ -602,7 +602,12 @@ pub(crate) fn tokenize(text: &str) -> Vec<String> {
             if !word.is_empty() {
                 tokens.push(std::mem::take(&mut word));
             }
-            tokens.push(" ".to_string());
+            // CSS §16.6.1: a whitespace run collapses to ONE space, not one
+            // leaf per char — the newline+indent node between inline
+            // siblings used to measure as a dozen-plus spaces.
+            if !tokens.last().is_some_and(|t| t.trim().is_empty()) {
+                tokens.push(" ".to_string());
+            }
         } else if is_cjk(ch) {
             if !word.is_empty() {
                 tokens.push(std::mem::take(&mut word));
@@ -1085,6 +1090,34 @@ fn build_replaced_leaf(
         }
     };
 
+    // Attrs block ratio transfer only for img: width/height attrs are
+    // presentational-hint DECLARATIONS, so a CSS override of one axis does
+    // not re-derive the other (#cssw stays 100×200, not 100×50). Canvas
+    // attrs ARE the intrinsic size and never block.
+    let (attr_dw, attr_dh) = if tag == "img" { (aw.is_some(), ah.is_some()) } else { (false, false) };
+    let ratio = ratio_transfer.then(|| nat_w / nat_h);
+    let css_w_px = match style.width {
+        Some(crate::diting_css::Length::Px(w)) => Some(w),
+        _ => None,
+    };
+    let css_h_px = match style.height {
+        Some(crate::diting_css::Length::Px(h)) => Some(h),
+        _ => None,
+    };
+    // Build-time ratio transfer: with exactly one authored CSS px axis and
+    // nothing declaring the other, the free axis derives through the
+    // natural ratio. taffy's aspect_ratio only re-derives in block/column
+    // flows — not the flex-row run wrapper inline atoms now join — while
+    // Chrome transfers in every container.
+    let derived_h = match (ratio, css_w_px) {
+        (Some(r), Some(w)) if !attr_dh => Some(w / r),
+        _ => None,
+    };
+    let derived_w = match (ratio, css_h_px) {
+        (Some(r), Some(h)) if !attr_dw => Some(h * r),
+        _ => None,
+    };
+
     let mut s = Style::default();
     s.item_is_replaced = true;
     // UA/author border lays out on replaced boxes too (batch 7a): the
@@ -1124,7 +1157,7 @@ fn build_replaced_leaf(
             }
             // Sizing keywords on replaced boxes: intrinsic = natural size
             // (css-sizing-3), same fallback as auto.
-            Some(crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent) | None => Dimension::length(nat_w + if bline { bl + br } else { 0.0 }),
+            Some(crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent) | None => Dimension::length(derived_w.unwrap_or(nat_w) + if bline { bl + br } else { 0.0 }),
         },
         height: match style.height {
             Some(crate::diting_css::Length::Px(h)) => {
@@ -1134,7 +1167,7 @@ fn build_replaced_leaf(
             Some(crate::diting_css::Length::Calc { percent, .. }) => {
                 Dimension::percent(percent / 100.0)
             }
-            Some(crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent) | None => Dimension::length(nat_h + if bline { bt + bb } else { 0.0 }),
+            Some(crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent) | None => Dimension::length(derived_h.unwrap_or(nat_h) + if bline { bt + bb } else { 0.0 }),
         },
     };
 

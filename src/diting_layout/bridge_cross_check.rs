@@ -748,9 +748,10 @@
     /// Replaced img: HTML width/height attributes map to definite sizes both
     /// engines honor; a CSS axis override wins per-axis with NO ratio
     /// derivation (attrs are presentational-hint declarations, so both axes
-    /// are declared → 100×200, not 100×50). Position is NOT cross-asserted:
-    /// our UA models img block-level while real CSS (and blitz) makes it an
-    /// inline-level box on a text baseline (~2px strut offsets).
+    /// are declared → 100×200, not 100×50). Position is not cross-asserted
+    /// against blitz (their line-box strut differs by a couple px); our own
+    /// inline geometry — x advancing, bottoms on one shared baseline — is
+    /// asserted instead.
     #[test]
     fn replaced_img_matches_blitz() {
         let html = r#"<body>
@@ -777,10 +778,21 @@
         assert!((none.width - 300.0).abs() < EPS as f32, "default width: {}", none.width);
         assert!((none.height - 150.0).abs() < EPS as f32, "default height: {}", none.height);
 
-        // Block stacking of our model: none starts at nat.bottom + cssw.height
-        // (cssw is 100×200 — both axes declared, no ratio derivation).
+        // Inline model: the three atoms share one text line — x advances
+        // sibling-to-sibling (the fixture's inter-tag whitespace collapses
+        // to one space, as in Chrome), and the baseline-shift pass puts
+        // every replaced bottom on the line's baseline (cssw is 100×200 —
+        // both axes declared, no ratio derivation).
         let nat = rects[&tree.query_selector("#nat").unwrap().unwrap()];
-        assert!((none.y - (nat.y + nat.height + 200.0)).abs() < EPS as f32, "stacking");
+        let cssw = rects[&tree.query_selector("#cssw").unwrap().unwrap()];
+        let gap = (cssw.x - (nat.x + nat.width)).max(0.0);
+        assert!(gap < 8.0, "cssw follows nat within a space: gap={gap}");
+        let gap2 = (none.x - (cssw.x + cssw.width)).max(0.0);
+        assert!(gap2 < 8.0, "none follows cssw within a space: gap={gap2}");
+        assert!(
+            (none.y + none.height - (nat.y + nat.height)).abs() < EPS as f32,
+            "replaced bottoms share the baseline"
+        );
     }
 
     /// obscura #698: `<img width=1024 height=572 style="width:100%">` inside a
