@@ -10,7 +10,7 @@ use rmcp::transport::streamable_http_server::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::render::smart_fetch;
 use crate::server::{do_click, do_eval, do_search};
@@ -137,6 +137,14 @@ pub struct SessionCreateParams {
     /// session start already logged-in. Round-trips with session_cookies.
     #[serde(default)]
     pub cookies: Vec<String>,
+    /// Web Storage to inject after the initial navigation lands:
+    /// {"local_storage": {"k":"v"}, "session_storage": {"k":"v"}}. For login
+    /// states that live in localStorage rather than the cookie jar.
+    /// Round-trips with session_storage.
+    pub storage: Option<Value>,
+    /// Idle time-to-live in seconds before the session is evicted
+    /// (default: 480, clamped 60..3600). Raise it for long workflows.
+    pub ttl_secs: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -577,7 +585,8 @@ impl AginxBrowserMcp {
         let mut mgr = session::SESSIONS.lock().await;
         mgr.evict_expired();
         let url = params.url.clone();
-        let id = mgr.create(params.url.as_deref(), params.use_proxy, params.cookies);
+        let storage = params.storage.clone();
+        let id = mgr.create(params.url.as_deref(), params.use_proxy, params.cookies, storage, params.ttl_secs);
         json!({ "session_id": id, "url": url }).to_string()
     }
 
@@ -615,6 +624,21 @@ impl AginxBrowserMcp {
     async fn session_cookies(&self, Parameters(params): Parameters<SessionCookiesParams>) -> String {
         let mut mgr = session::SESSIONS.lock().await;
         match mgr.send(&params.session_id, |reply| SessionCommand::Cookies { reply }).await {
+            Ok(text) => text,
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Snapshot the session's localStorage/sessionStorage for the current origin: \
+{url, local_storage, session_storage}. Feed it back via session_create's `storage` field to restore \
+a logged-in state in a new session — the half of login state that cookies can't carry (many sites \
+keep the session token in localStorage). Call before the session idles out.",
+        annotations(title = "Session Storage", read_only_hint = true)
+    )]
+    async fn session_storage(&self, Parameters(params): Parameters<SessionCookiesParams>) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        match mgr.send(&params.session_id, |reply| SessionCommand::Storage { reply }).await {
             Ok(text) => text,
             Err(e) => json!({ "error": e }).to_string(),
         }

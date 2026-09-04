@@ -448,6 +448,13 @@ pub struct SessionCreateRequest {
     /// GET /session/:id/cookies.
     #[serde(default)]
     pub cookies: Vec<String>,
+    /// Web Storage to inject after the initial navigation lands:
+    /// `{"local_storage": {"k":"v"}, "session_storage": {"k":"v"}}`.
+    /// Round-trips with GET /session/:id/storage.
+    pub storage: Option<serde_json::Value>,
+    /// Idle time-to-live in seconds (default: 480, clamped 60..3600).
+    #[serde(default)]
+    pub ttl_secs: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -575,6 +582,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/session/:id/navigate", post(session_navigate_handler))
         .route("/session/:id/state", post(session_state_handler))
         .route("/session/:id/cookies", get(session_cookies_handler))
+        .route("/session/:id/storage", get(session_storage_handler))
         .route("/session/:id/export", get(session_export_handler))
         .route("/session/:id/network", get(session_network_handler))
         .route("/session/:id/har", get(session_har_handler))
@@ -1026,7 +1034,7 @@ async fn download_handler(Json(req): Json<download::DownloadRequest>) -> Result<
 async fn session_create_handler(Json(req): Json<SessionCreateRequest>) -> Result<impl IntoResponse, AppError> {
     let mut mgr = session::SESSIONS.lock().await;
     mgr.evict_expired();
-    let id = mgr.create(req.url.as_deref(), req.use_proxy, req.cookies);
+    let id = mgr.create(req.url.as_deref(), req.use_proxy, req.cookies, req.storage, req.ttl_secs);
     Ok((StatusCode::OK, Json(SessionCreateResponse {
         session_id: id,
         url: req.url,
@@ -1084,6 +1092,19 @@ async fn session_cookies_handler(
     // thread; parse it back so we emit a real JSON response.
     let val: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| AppError::Internal(format!("cookies parse error: {}", e)))?;
+    Ok((StatusCode::OK, Json(val)))
+}
+
+/// Snapshot the session's localStorage/sessionStorage (round-trips with
+/// session/create's `storage` field).
+async fn session_storage_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    let text = mgr.send(&id, |reply| session::SessionCommand::Storage { reply }).await
+        .map_err(AppError::Internal)?;
+    let val: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| AppError::Internal(format!("storage parse error: {}", e)))?;
     Ok((StatusCode::OK, Json(val)))
 }
 
