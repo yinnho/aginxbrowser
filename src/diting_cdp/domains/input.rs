@@ -200,68 +200,8 @@ pub async fn handle(
                                 clickTarget = clickTarget.parentElement;\
                             }}\
                             if (!clickTarget) return;\
-                            var tag = clickTarget.tagName;\
-                            var type = (clickTarget.getAttribute && clickTarget.getAttribute('type') || '').toLowerCase();\
-                            var checkable = tag === 'INPUT' && (type === 'checkbox' || type === 'radio');\
-                            var oldChecked = checkable ? !!clickTarget.checked : false;\
-                            var oldIndeterminate = false;\
-                            var radioStates = null;\
-                            if (checkable && type === 'radio') {{\
-                                var radioName = clickTarget.getAttribute('name') || '';\
-                                if (radioName) {{\
-                                    var candidates = document.querySelectorAll('input');\
-                                    radioStates = [];\
-                                    for (var ri = 0; ri < candidates.length; ri++) {{\
-                                        var radio = candidates[ri];\
-                                        if ((radio.getAttribute('type') || '').toLowerCase() !== 'radio' || (radio.getAttribute('name') || '') !== radioName || radio.form !== clickTarget.form) continue;\
-                                        radioStates.push([radio, !!radio.checked]);\
-                                        if (radio !== clickTarget) radio.checked = false;\
-                                    }}\
-                                }}\
-                                clickTarget.checked = true;\
-                            }} else if (checkable) {{\
-                                clickTarget.checked = !oldChecked;\
-                                oldIndeterminate = !!clickTarget.indeterminate;\
-                                clickTarget.indeterminate = false;\
-                            }}\
                             var click = globalThis.__diting_markTrusted(new MouseEvent('click', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:0,buttons:0,detail:{click_count},altKey:{alt_key},ctrlKey:{ctrl_key},metaKey:{meta_key},shiftKey:{shift_key}}}));\
-                            var cancelled = !clickTarget.dispatchEvent(click);\
-                            if (cancelled) {{\
-                                if (radioStates) {{\
-                                    for (var rr = 0; rr < radioStates.length; rr++) radioStates[rr][0].checked = radioStates[rr][1];\
-                                }} else if (checkable) {{ clickTarget.checked = oldChecked; clickTarget.indeterminate = oldIndeterminate; }}\
-                                return;\
-                            }}\
-                            if (checkable && clickTarget.checked !== oldChecked) {{\
-                                try {{ clickTarget.dispatchEvent(globalThis.__diting_markTrusted(new Event('input', {{bubbles:true}}))); }} catch(e) {{}}\
-                                try {{ clickTarget.dispatchEvent(globalThis.__diting_markTrusted(new Event('change', {{bubbles:true}}))); }} catch(e) {{}}\
-                                return;\
-                            }}\
-                            var labelHost = (clickTarget.matches && !clickTarget.matches('button,input:not([type=hidden]),meter,output,progress,select,textarea,a')) ? (tag === 'LABEL' ? clickTarget : (clickTarget.closest ? clickTarget.closest('label') : null)) : null;\
-                            if (labelHost) {{\
-                                var lblFor = labelHost.getAttribute('for');\
-                                var ctl = null;\
-                                if (lblFor !== null && lblFor !== undefined) ctl = lblFor === '' ? null : document.getElementById(lblFor);\
-                                else if (labelHost.querySelector) ctl = labelHost.querySelector('button,input:not([type=hidden]),meter,output,progress,select,textarea');\
-                                if (ctl && !(ctl.matches && ctl.matches('button,input:not([type=hidden]),meter,output,progress,select,textarea'))) ctl = null;\
-                                if (ctl && ctl !== clickTarget && !ctl.disabled && !ctl.hasAttribute('disabled')) {{ ctl.click(); return; }}\
-                            }}\
-                            var link = clickTarget.closest ? clickTarget.closest('a[href]') : null;\
-                            if (!link && tag === 'A' && clickTarget.getAttribute('href')) link = clickTarget;\
-                            if (link) {{\
-                                var href = link.getAttribute('href');\
-                                if (href && !href.startsWith('#') && !href.startsWith('javascript:')) location.assign(href);\
-                            }} else if (tag === 'BUTTON' && type !== 'button' && type !== 'reset') {{\
-                                var form = clickTarget.closest ? clickTarget.closest('form') : null;\
-                                if (form) {{ try {{ if (typeof form.requestSubmit === 'function') {{ form.requestSubmit(clickTarget); }} else {{ form.submit(clickTarget); }} }} catch(e) {{}} }}\
-                            }} else if (tag === 'INPUT' && (type === 'submit' || type === 'image')) {{\
-                                var form2 = clickTarget.closest ? clickTarget.closest('form') : null;\
-                                if (form2) {{ try {{ if (typeof form2.requestSubmit === 'function') {{ form2.requestSubmit(clickTarget); }} else {{ form2.submit(clickTarget); }} }} catch(e) {{}} }}\
-                            }} else if ({click_count} >= 3 && (tag === 'INPUT' || tag === 'TEXTAREA')) {{\
-                                var len = clickTarget.value ? clickTarget.value.length : 0;\
-                                if (clickTarget.setSelectionRange) clickTarget.setSelectionRange(0, len);\
-                                else {{ clickTarget.selectionStart = 0; clickTarget.selectionEnd = len; }}\
-                            }}\
+                            globalThis.__diting_dispatchTrustedClick(clickTarget, click, {click_count} >= 3);\
                         }})()",
                         x = x, y = y, button_code = button_code,
                         click_count = click_count, alt_key = alt_key, ctrl_key = ctrl_key,

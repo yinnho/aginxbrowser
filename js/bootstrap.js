@@ -18,9 +18,6 @@ globalThis.__ditingEvalScript = function(src) {
 
 globalThis.__diting_errors = [];
 
-globalThis.addEventListener = globalThis.addEventListener || function(){};
-globalThis.onunhandledrejection = function(e) { if (e?.preventDefault) e.preventDefault(); };
-
 globalThis.onerror = function(msg, src, line, col, error) {
   globalThis.__diting_errors.push({msg: String(msg), src: String(src||""), line, error: String(error||"")});
 };
@@ -748,6 +745,138 @@ function _labeledControl(label) {
   }
   return label.querySelector ? label.querySelector(_LABELABLE) : null;
 }
+
+// Activation state for a checkable input's legacy pre-click flip: the
+// checkbox/radio state changes BEFORE the click event dispatches (listeners
+// observe the new state) and reverts if the event is cancelled. Shared by
+// Element.click() and by unmanaged synthetic dispatches through
+// dispatchEvent() — Chrome runs activation behavior for untrusted clicks too,
+// so `cb.dispatchEvent(new MouseEvent('click'))` toggles like cb.click() does.
+function _preClickFlip(el) {
+  if (!el || el.tagName !== 'INPUT' || _isFormControlDisabled(el)) return null;
+  const type = (el.getAttribute('type') || '').toLowerCase();
+  if (type !== 'checkbox' && type !== 'radio') return null;
+  const st = { el: el, type: type, oldChecked: !!el.checked, oldIndeterminate: false, radioStates: null };
+  if (type === 'radio') {
+    const name = el.getAttribute('name') || '';
+    if (name) {
+      st.radioStates = [];
+      const all = (el.ownerDocument || globalThis.document).querySelectorAll('input');
+      for (let i = 0; i < all.length; i++) {
+        const r = all[i];
+        if ((r.getAttribute('type') || '').toLowerCase() !== 'radio') continue;
+        if ((r.getAttribute('name') || '') !== name || r.form !== el.form) continue;
+        st.radioStates.push([r, !!r.checked]);
+        if (r !== el) r.checked = false;
+      }
+    }
+    el.checked = true;
+  } else {
+    el.checked = !st.oldChecked;
+    st.oldIndeterminate = !!el.indeterminate;
+    el.indeterminate = false;
+  }
+  return st;
+}
+
+// A cancelled click restores every prior state the flip touched (the whole
+// radio group included); checkbox activation also restores `indeterminate`.
+function _cancelPreClickFlip(st) {
+  if (!st) return;
+  if (st.radioStates) {
+    for (let i = 0; i < st.radioStates.length; i++) st.radioStates[i][0].checked = st.radioStates[i][1];
+  } else {
+    st.el.checked = st.oldChecked;
+    if (st.type === 'checkbox') st.el.indeterminate = st.oldIndeterminate;
+  }
+}
+
+// Commit a surviving flip: fire input/change when the checked state actually
+// changed (an already-checked radio stays silent, like Chrome).
+function _commitPreClickFlip(st) {
+  if (!st) return;
+  if (st.el.checked === st.oldChecked) return;
+  try { st.el.dispatchEvent(new Event('input', {bubbles: true})); } catch (e) {}
+  try { st.el.dispatchEvent(new Event('change', {bubbles: true})); } catch (e) {}
+}
+
+// Post-click activation behaviour for elements that are not checkable inputs:
+// label forwarding to the labeled control, anchor navigation, submit buttons.
+// Runs after the click dispatch survives uncanceled. Returns what activated
+// ('label' | 'link' | 'submit') or null — the trusted CDP path uses the
+// return value to gate its triple-click select-all tail.
+function _postClickActivation(el) {
+  const tag = el.tagName;
+  // Interactive elements keep their own activation, so a control nested
+  // inside a label toggles once instead of forwarding through the label
+  // and firing twice.
+  const selfInteractive = el.matches && el.matches(_LABELABLE + ',a');
+  const labelHost = selfInteractive ? null : (tag === 'LABEL' ? el : (el.closest ? el.closest('label') : null));
+  if (labelHost) {
+    const control = _labeledControl(labelHost);
+    // A disabled control has no activation behaviour — own attribute or
+    // disabled through an ancestor fieldset both count.
+    if (control && control !== el && !_isFormControlDisabled(control)) {
+      control.click();
+      return 'label';
+    }
+  }
+  const link = tag === 'A' ? el : (el.closest ? el.closest('a[href]') : null);
+  if (link) {
+    const href = link.getAttribute('href');
+    if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+      location.assign(href);
+      return 'link';
+    }
+  }
+  if (_isSubmitButton(el)) {
+    const form = el.closest ? el.closest('form') : null;
+    if (form) {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit(el);
+      } else if (typeof form.submit === 'function') {
+        form.submit(el);
+      }
+      return 'submit';
+    }
+  }
+  return null;
+}
+
+// Trusted CDP click: the Rust Input domain drives the same activation
+// sequence as Element.click() but with a positioned, trusted event object.
+// input/change events fired here are trusted-marked like the click itself.
+globalThis.__diting_dispatchTrustedClick = function (target, event, tripleSelect) {
+  if (!target) return false;
+  if (target._ditingClickInProgress) return true;
+  target._ditingClickInProgress = true;
+  try {
+    const flip = _preClickFlip(target);
+    const cancelled = !target.dispatchEvent(event);
+    if (cancelled) {
+      _cancelPreClickFlip(flip);
+      return false;
+    }
+    const mk = globalThis.__diting_markTrusted || function (e) { return e; };
+    if (flip && flip.el.checked !== flip.oldChecked) {
+      try { flip.el.dispatchEvent(mk(new Event('input', {bubbles: true}))); } catch (e) {}
+      try { flip.el.dispatchEvent(mk(new Event('change', {bubbles: true}))); } catch (e) {}
+      return true;
+    }
+    const activated = _postClickActivation(target);
+    if (!activated && tripleSelect) {
+      const tag = target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') {
+        const len = target.value ? target.value.length : 0;
+        if (target.setSelectionRange) target.setSelectionRange(0, len);
+        else { target.selectionStart = 0; target.selectionEnd = len; }
+      }
+    }
+    return true;
+  } finally {
+    target._ditingClickInProgress = false;
+  }
+};
 
 // The first <legend> child of a fieldset — the only legend whose descendants
 // a disabled fieldset does NOT disable (HTML spec: "the first legend child").
@@ -1753,7 +1882,20 @@ class Element extends Node {
   }
   dispatchEvent(event) {
     if (!event) return true;
-    if (!event.target) event.target = this;
+    // Original dispatch target detection: bubbling re-enters here with the
+    // event's target already pinned, and activation must only run for the
+    // element the page actually dispatched on.
+    const isOrigin = !event.target;
+    if (isOrigin) event.target = this;
+    // Activation for an unmanaged click: Chrome runs activation behavior for
+    // untrusted clicks too, so `cb.dispatchEvent(new MouseEvent('click'))`
+    // toggles a checkbox and a label click forwards to its control. click()
+    // sets its own in-progress flag and drives its activation, so its inner
+    // dispatchEvent skips this arm.
+    let flip = null;
+    if (isOrigin && event.type === 'click' && !this._ditingClickInProgress) {
+      flip = _preClickFlip(this);
+    }
     event.currentTarget = this;
     // Spec: inline `onclick="..."` content attributes are event handlers
     // for the matching event type. Fire them alongside any
@@ -1776,6 +1918,17 @@ class Element extends Node {
     }
     if (event.bubbles && !event._propagationStopped && this.parentNode) {
       this.parentNode.dispatchEvent(event);
+    }
+    if (flip) {
+      if (event.defaultPrevented) {
+        _cancelPreClickFlip(flip);
+      } else {
+        _commitPreClickFlip(flip);
+        if (flip.el.checked !== flip.oldChecked) return !event.defaultPrevented;
+        _postClickActivation(this);
+      }
+    } else if (isOrigin && event.type === 'click' && !this._ditingClickInProgress && !event.defaultPrevented) {
+      _postClickActivation(this);
     }
     return !event.defaultPrevented;
   }
@@ -1805,84 +1958,22 @@ class Element extends Node {
     if (this._ditingClickInProgress) return;
     this._ditingClickInProgress = true;
     try {
-      // Pre-click activation steps (HTML spec): a checkbox/radio flips BEFORE the
-      // click event dispatches, so listeners observe the new state, and the flip
-      // reverts if the event is cancelled. Radio groups uncheck same-name peers
-      // up front; a cancel restores every prior state. Checkbox activation also
-      // clears `indeterminate`; a cancel restores it along with `checked`.
-      const tag = this.tagName;
-      const type = (this.getAttribute('type') || '').toLowerCase();
-      const checkable = tag === 'INPUT' && (type === 'checkbox' || type === 'radio');
-      let oldChecked = false, oldIndeterminate = false, radioStates = null;
-      if (checkable) {
-        oldChecked = !!this.checked;
-        if (type === 'radio') {
-          const name = this.getAttribute('name') || '';
-          if (name) {
-            radioStates = [];
-            const all = (this.ownerDocument || globalThis.document).querySelectorAll('input');
-            for (let i = 0; i < all.length; i++) {
-              const r = all[i];
-              if ((r.getAttribute('type') || '').toLowerCase() !== 'radio') continue;
-              if ((r.getAttribute('name') || '') !== name || r.form !== this.form) continue;
-              radioStates.push([r, !!r.checked]);
-              if (r !== this) r.checked = false;
-            }
-          }
-          this.checked = true;
-        } else {
-          this.checked = !oldChecked;
-          oldIndeterminate = !!this.indeterminate;
-          this.indeterminate = false;
-        }
-      }
+      // Pre-click activation steps (HTML spec): a checkbox/radio flips BEFORE
+      // the click event dispatches, so listeners observe the new state, and
+      // the flip reverts if the event is cancelled. Radio groups uncheck
+      // same-name peers up front; a cancel restores every prior state.
+      // Checkbox activation also clears `indeterminate`; a cancel restores it
+      // along with `checked`. The rest of activation (label forwarding,
+      // anchors, submit) runs after an uncanceled dispatch.
+      const flip = _preClickFlip(this);
       const cancelled = !this.dispatchEvent(new MouseEvent("click", {bubbles: true, cancelable: true}));
       if (cancelled) {
-        if (radioStates) { for (let i = 0; i < radioStates.length; i++) radioStates[i][0].checked = radioStates[i][1]; }
-        else if (checkable) {
-          this.checked = oldChecked;
-          if (type === 'checkbox') this.indeterminate = oldIndeterminate;
-        }
+        _cancelPreClickFlip(flip);
         return;
       }
-      if (checkable && this.checked !== oldChecked) {
-        try { this.dispatchEvent(new Event('input', {bubbles: true})); } catch (e) {}
-        try { this.dispatchEvent(new Event('change', {bubbles: true})); } catch (e) {}
-        return;
-      }
-      // Label activation behaviour (HTML spec): activating a label runs a
-      // synthetic click on its labeled control. Interactive elements keep
-      // their own activation, so a control nested inside a label toggles
-      // once instead of forwarding through the label and firing twice.
-      const selfInteractive = this.matches && this.matches(_LABELABLE + ',a');
-      const labelHost = selfInteractive ? null : (tag === 'LABEL' ? this : (this.closest ? this.closest('label') : null));
-      if (labelHost) {
-        const control = _labeledControl(labelHost);
-        // A disabled control has no activation behaviour — own attribute or
-        // disabled through an ancestor fieldset both count.
-        if (control && control !== this && !_isFormControlDisabled(control)) {
-          control.click();
-          return;
-        }
-      }
-      const link = tag === 'A' ? this : (this.closest ? this.closest('a[href]') : null);
-      if (link) {
-        const href = link.getAttribute('href');
-        if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
-          location.assign(href);
-          return;
-        }
-      }
-      if (_isSubmitButton(this)) {
-        const form = this.closest ? this.closest('form') : null;
-        if (form) {
-          if (typeof form.requestSubmit === 'function') {
-            form.requestSubmit(this);
-          } else if (typeof form.submit === 'function') {
-            form.submit(this);
-          }
-        }
-      }
+      _commitPreClickFlip(flip);
+      if (flip && flip.el.checked !== flip.oldChecked) return;
+      _postClickActivation(this);
     } finally {
       this._ditingClickInProgress = false;
     }
@@ -5780,6 +5871,51 @@ globalThis.CustomEvent = class extends Event {
     this.detail = detail;
   }
 };
+// Chrome surfaces every unhandled promise rejection on the window as a
+// cancelable `unhandledrejection` PromiseRejectionEvent (`promise` + `reason`);
+// `rejectionhandled` follows when a handler is attached late. deno_core routes
+// both through core callbacks — registered while `Deno` is still on the global
+// (page init deletes it; the closure itself survives in the snapshot).
+// Returning true marks the rejection handled and suppresses deno_core's
+// default exception dispatch, which is what preventDefault() means here.
+globalThis.PromiseRejectionEvent = class extends Event {
+  // WebIDL PromiseRejectionEventInit: Promise<any> promise = null, any reason.
+  constructor(t, o = {}) {
+    if (arguments.length < 1) throw new TypeError("Failed to construct 'PromiseRejectionEvent': 1 argument required, but only 0 present.");
+    super(t, o);
+    this.promise = o.promise !== undefined ? o.promise : null;
+    this.reason = o.reason;
+  }
+};
+(function () {
+  const core = globalThis.Deno && globalThis.Deno.core;
+  if (!core || typeof core.setUnhandledPromiseRejectionHandler !== 'function') return;
+  core.setUnhandledPromiseRejectionHandler(function (promise, reason) {
+    const e = new PromiseRejectionEvent('unhandledrejection', { promise: promise, reason: reason, cancelable: true });
+    // The IDL attribute handler (window.onunhandledrejection = fn) runs first
+    // and can preventDefault to swallow the default report, like Chrome.
+    const attr = globalThis['on' + e.type];
+    if (typeof attr === 'function') {
+      try { attr.call(globalThis, e); } catch (err) { console.error(err); }
+    }
+    globalThis.dispatchEvent(e);
+    // Chrome's default report is a console line and the page keeps running.
+    // deno_core's default (op_dispatch_exception) terminates the runtime —
+    // it aborts the rest of the rejection batch and the event loop with it,
+    // which is CLI semantics, not browser semantics. Always report true so
+    // the dispatch path never arms; do our own console report when the event
+    // was not prevented.
+    if (!e.defaultPrevented) {
+      try { console.error('Uncaught (in promise) ' + String(reason)); } catch (err) {}
+    }
+    return true;
+  });
+  if (typeof core.setHandledPromiseRejectionHandler === 'function') {
+    core.setHandledPromiseRejectionHandler(function (promise) {
+      globalThis.dispatchEvent(new PromiseRejectionEvent('rejectionhandled', { promise: promise }));
+    });
+  }
+})();
 // UIEvent must be defined before its subclasses — the whole UI family
 // re-parents onto it to match the Chrome prototype chain (a pointer event
 // that fails `instanceof UIEvent` is what delegation libraries notice first).

@@ -1225,6 +1225,76 @@
     }
 
     #[test]
+    fn test_dispatchevent_click_runs_activation_like_chrome() {
+        // Chrome runs activation behavior for untrusted clicks too:
+        // `cb.dispatchEvent(new MouseEvent('click'))` toggles the checkbox,
+        // a preventDefault listener cancels the flip, and a synthetic click
+        // on a label forwards to its labeled control (obscura#826 lineage —
+        // our .click()/label.click() already matched; this closes the
+        // dispatchEvent arm).
+        let mut rt = setup_runtime(r#"<input type=checkbox id=syn><input type=checkbox id=cxl>
+            <label for=syn id=lb>go</label><input type=radio name=g id=r1><input type=radio name=g id=r2 checked>"#);
+        let result = rt.evaluate(r#"
+            const syn = document.getElementById('syn'), cxl = document.getElementById('cxl');
+            let changes = 0;
+            syn.addEventListener('change', () => changes++);
+            syn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+            const synAfter = syn.checked;
+            cxl.addEventListener('click', (e) => e.preventDefault());
+            cxl.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+            const cxlAfter = cxl.checked;
+            document.getElementById('lb').dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+            document.getElementById('r2').dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+            return [synAfter, cxlAfter, syn.checked, changes,
+                    document.getElementById('r1').checked, document.getElementById('r2').checked];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                true,  // synthetic dispatch toggles
+                false, // preventDefault cancels the flip
+                false, // label dispatch forwards and toggles back
+                2,     // change fired for both syn toggles
+                false, // peer radio stays unchecked
+                true,  // clicked radio checked
+            ])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_unhandled_rejection_dispatches_window_events() {
+        // Chrome surfaces unhandled promise rejections on the window as
+        // PromiseRejectionEvents (obscura#797 lineage): `unhandledrejection`
+        // carries the real promise + reason, and `rejectionhandled` fires
+        // when a handler is attached late. deno_core routes both through the
+        // core callbacks bootstrap registers.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.evaluate(r#"
+            globalThis.__seen = [];
+            addEventListener('unhandledrejection', function (e) {
+                __seen.push(['unhandledrejection', String(e.reason && e.reason.message), e.promise instanceof Promise, e.cancelable]);
+            });
+            addEventListener('rejectionhandled', function (e) {
+                __seen.push(['rejectionhandled', e.promise instanceof Promise]);
+            });
+            Promise.reject(new Error('boom-xyz'));
+            globalThis.__late = Promise.reject(new Error('late-1'));
+        "#).unwrap();
+        let _ = rt.run_event_loop_bounded(300).await;
+        rt.evaluate("globalThis.__late.catch(function () {})").unwrap();
+        let _ = rt.run_event_loop_bounded(300).await;
+        let result = rt.evaluate("globalThis.__seen").unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                ["unhandledrejection", "boom-xyz", true, true],
+                ["unhandledrejection", "late-1", true, true],
+                ["rejectionhandled", true],
+            ])
+        );
+    }
+
+    #[test]
     fn test_url_reflection_src_and_href_resolve_absolute() {
         // Next.js/Turbopack webpack runtime does `new URL(x, document.currentScript.src)`
         // to derive its chunk base. If src/href return the raw relative attribute,
