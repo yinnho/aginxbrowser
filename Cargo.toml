@@ -54,14 +54,16 @@ screenshot = [
 [dependencies]
 # The alias is how blitz-dom names upstream stylo; same crate, same version.
 stylo_alias = { version = "0.20", package = "stylo", optional = true }
-# Stock taffy 0.13.0 as pinned by blitz. Features must EXACTLY mirror blitz's
-# workspace declaration (default-features = false, no float_layout): cargo
-# unifies features across the graph, so any extra feature here would silently
-# change the product pipeline's layout behavior (float_layout alters block
-# layout). taffy_tree is additionally listed because the unified graph already
-# enables it (Cargo.lock shows taffy pulling slotmap) — an explicit no-op.
+# Taffy git pin, mirroring blitz's workspace declaration after their #835
+# (taffy#1177 grid contribution-skip + #1178 floor available sizes at zero).
+# Features must EXACTLY mirror blitz's workspace declaration (default-features
+# = false, no float_layout): cargo unifies features across the graph, so any
+# extra feature here would silently change the product pipeline's layout
+# behavior (float_layout alters block layout). taffy_tree is additionally
+# listed because the unified graph already enables it (Cargo.lock shows taffy
+# pulling slotmap) — an explicit no-op.
 # Used by diting_layout fork-delta tests — see docs/engine/render.md.
-taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "864b4fd02e344bf9676f653e945161011cf93c0d", optional = true, default-features = false, features = [
+taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "1b918bafcab101dd234ebeb27da0443e24fd9de2", optional = true, default-features = false, features = [
     "std",
     "taffy_tree",
     "flexbox",

@@ -810,7 +810,18 @@ fn measure_text_leaf(
         width: known.width.unwrap_or(max_line.ceil()),
         height: known.height.unwrap_or(lines.len() as f32 * lh),
     };
-    taffy::tree::LayoutOutput::from_sizes(size, size)
+    // taffy >= 1b918ba replaced the `content_size: Size` second argument
+    // with a scrollable-overflow `Rect`; a text leaf's content is exactly
+    // its own box, so the rect's extent equals the measured size.
+    taffy::tree::LayoutOutput::from_sizes(
+        size,
+        taffy::geometry::Rect {
+            left: 0.0,
+            top: 0.0,
+            right: size.width,
+            bottom: size.height,
+        },
+    )
 }
 
 /// The inline-formatting-context stand-in around a run of inline content:

@@ -102,7 +102,7 @@ dependencies = [
  "sha2",
  "stylo",
  "swash",
- "taffy",
+ "taffy 0.14.0",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -464,7 +464,7 @@ dependencies = [
  "stylo_taffy",
  "stylo_traits",
  "svgtypes",
- "taffy",
+ "taffy 0.13.0",
  "thin-vec",
  "thread_local",
  "url",
@@ -500,7 +500,7 @@ dependencies = [
  "peniko",
  "smallvec",
  "stylo",
- "taffy",
+ "taffy 0.13.0",
  "usvg",
 ]
 
@@ -4397,7 +4397,7 @@ source = "git+https://github.com/DioxusLabs/blitz?rev=2fa6434d#2fa6434d996783faf
 dependencies = [
  "stylo",
  "stylo_atoms",
- "taffy",
+ "taffy 0.13.0",
 ]
 
 [[package]]
@@ -4526,6 +4526,17 @@ dependencies = [
 name = "taffy"
 version = "0.13.0"
 source = "git+https://github.com/DioxusLabs/taffy?rev=864b4fd02e344bf9676f653e945161011cf93c0d#864b4fd02e344bf9676f653e945161011cf93c0d"
+dependencies = [
+ "arrayvec",
+ "serde",
+ "slotmap",
+ "smallvec",
+]
+
+[[package]]
+name = "taffy"
+version = "0.14.0"
+source = "git+https://github.com/DioxusLabs/taffy?rev=1b918bafcab101dd234ebeb27da0443e24fd9de2#1b918bafcab101dd234ebeb27da0443e24fd9de2"
 dependencies = [
  "arrayvec",
  "serde",

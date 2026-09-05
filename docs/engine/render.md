@@ -1743,3 +1743,22 @@ memory aginxbrowser-hosted-captcha-flicker）。付费修法（2captcha key）�
 **预期效果**：同站二次访问带上首次的 wappass/cf 类授权 cookie，CAPTCHA 触发
 率下降；配合 workload 侧已有的 URL 缓存（2026-08-10 验证过），构成无 key
 缓解组合。效果依赖站点行为，无法离线断言——观察线上 flicker 频率变化。
+
+## 54. taffy 钉升级 864b4fd → 1b918ba（2026-09-05，743 绿）
+
+blitz#835（09-03 合并）把 taffy 升到 main `1b918baf`，我们照抄（吸收他们
+Wikipedia Vector 皮肤布局提速的成果）。两 rev 之间共 **39 个提交**，关键：
+#1177 grid 贡献测量跳过（收不到贡献的 track 不再量 item）、#1178 可用宽度
+零下限、#1119 flex 不必要的 min-content 测量、#1120 abspos 双定尺寸跳测、
+#1118 `content_size: Size` → `scrollable_overflow_rect: Rect`（唯一 API 破坏，
+diting_layout/mod.rs 文本叶 `from_sizes` 调用点改成 extent=尺寸的 Rect）。
+
+**A/B 基准**（release 二进制、loopback 合成页 3000 段落、5 发取中位、抖动
+<1%）：定宽 grid `12.25rem minmax(0,1fr)` 28.7s → 18.1s（-37%）；带
+min-content 轨同 -37%；不定宽（inline-block 包装，intrinsic sizing 全开）
+66.0s → 34.0s（**-48%**）。三个形状升级前后**像素级 0 差异**（各
+1024000px 全同）——纯提速，输出不变。
+
+验证：fork_deltas 17/17、全量 `--features stealth,screenshot` 743/0（与升级
+前同数）、clippy 70 == 70 零新增。基准注意：en.wikipedia 本机网络不可达，
+真实 Vector 页数字待 86quan 侧验证；合成页按 PR 描述的触发形状构造。
