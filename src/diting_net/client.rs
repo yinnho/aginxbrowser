@@ -246,8 +246,8 @@ pub fn env_allows_private_network() -> bool {
 /// (fc00::/7), CGNAT (100.64.0.0/10 — where Alibaba's 100.100.100.200
 /// metadata endpoint lives), benchmarking (198.18.0.0/15), multicast and the
 /// reserved/future ranges, and ANY IPv6 form with an embedded IPv4
-/// (IPv4-mapped, IPv4-compatible, 6to4 2002::/16, NAT64 64:ff9b::/96) that
-/// itself lands in the deny-set.
+/// (IPv4-mapped, IPv4-compatible, 6to4 2002::/16, NAT64 64:ff9b::/96,
+/// Teredo 2001:0000::/32) that itself lands in the deny-set.
 /// Centralizes the SSRF deny-set so the literal-host check and the
 /// DNS-resolution check (`SsrfGuardResolver`) can never disagree.
 pub fn is_forbidden_ip(ip: IpAddr) -> bool {
@@ -296,6 +296,26 @@ pub fn is_forbidden_ip(ip: IpAddr) -> bool {
             if seg[0] == 0x0100 && seg[1] == 0 && seg[2] == 0 && seg[3] == 0 {
                 return true;
             }
+            // Teredo 2001:0000::/32 (RFC 4380): the server IPv4 sits in bits
+            // 32-63 and the client IPv4 in bits 96-127, XOR-obfuscated with
+            // 0xffff. A crafted literal puts attacker bytes in every slot, so
+            // check server, raw client, and de-obfuscated client alike.
+            if seg[0] == 0x2001 && seg[1] == 0 {
+                for (hi, lo) in [
+                    (seg[2], seg[3]),
+                    (seg[6], seg[7]),
+                    (seg[6] ^ 0xffff, seg[7] ^ 0xffff),
+                ] {
+                    if is_forbidden_ip(IpAddr::V4(std::net::Ipv4Addr::new(
+                        (hi >> 8) as u8,
+                        hi as u8,
+                        (lo >> 8) as u8,
+                        lo as u8,
+                    ))) {
+                        return true;
+                    }
+                }
+            }
             if let Some(v4) = embedded_ipv4(v6) {
                 return is_forbidden_ip(IpAddr::V4(v4));
             }
@@ -304,13 +324,15 @@ pub fn is_forbidden_ip(ip: IpAddr) -> bool {
     }
 }
 
-/// Extract the IPv4 address carried inside an IPv6 address, for every
-/// embedding format: IPv4-mapped (::ffff:a.b.c.d), IPv4-compatible (::a.b.c.d),
-/// 6to4 (2002:a.b.c.d::, the public v4 sits in bits 16-47), and NAT64
-/// (64:ff9b::a.b.c.d, well-known prefix). Without the last two, a literal
-/// host like [2002:a9fe:a9fe::] (6to4-wrapped 169.254.169.254) or
-/// [64:ff9b::7f00:1] (NAT64-wrapped 127.0.0.1) bypasses the v6 arm and dials
-/// a forbidden v4 target.
+/// Extract the IPv4 address carried inside an IPv6 address, for the
+/// single-embedded-address formats: IPv4-mapped (::ffff:a.b.c.d),
+/// IPv4-compatible (::a.b.c.d), 6to4 (2002:a.b.c.d::, the public v4 sits in
+/// bits 16-47), and NAT64 (64:ff9b::a.b.c.d, well-known prefix). Without the
+/// last two, a literal host like [2002:a9fe:a9fe::] (6to4-wrapped
+/// 169.254.169.254) or [64:ff9b::7f00:1] (NAT64-wrapped 127.0.0.1) bypasses
+/// the v6 arm and dials a forbidden v4 target. Teredo carries two
+/// attacker-writable slots (server + XOR-obfuscated client) and is checked
+/// directly in `is_forbidden_ip`.
 fn embedded_ipv4(v6: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
     if let Some(v4) = v6.to_ipv4_mapped() {
         return Some(v4);
@@ -1177,6 +1199,32 @@ mod tests {
     }
 
     #[test]
+    fn is_forbidden_ip_unwraps_teredo_embedded_ipv4() {
+        use std::str::FromStr;
+        for bad in [
+            // Client slot XOR-obfuscated with 0xffff (RFC 4380 wire format):
+            // 80fe:fefe ^ ffff:ffff = 7f01:0101 = 127.1.1.1.
+            "2001:0:4136:e378:8000:63bf:80fe:fefe",
+            // Server slot (bits 32-63) is raw attacker bytes too.
+            "2001:0:a9fe:a9fe::", // 169.254.169.254 cloud metadata
+            "2001:0:7f00:1::",    // 127.0.0.1
+            "2001:0:6464:64c8::", // 100.100.100.200 Alibaba metadata
+            // Client slot written raw (unobfuscated).
+            "2001:0:cf2e:d242::7f00:1",
+            // Client slot obfuscated metadata: 5601:5601 ^ ffff = a9fe:a9fe.
+            "2001:0:cf2e:d242:eb00:1234:5601:5601",
+        ] {
+            assert!(is_forbidden_ip(IpAddr::from_str(bad).unwrap()), "{bad} must be forbidden");
+        }
+        // A Teredo wrapper with a public v4 in every slot stays allowed —
+        // server 65.54.227.120 (real Teredo server), raw client 176.16.33.80,
+        // de-obfuscated client 79.239.222.175.
+        for good in ["2001:0:4136:e378:8000:63bf:b010:2150"] {
+            assert!(!is_forbidden_ip(IpAddr::from_str(good).unwrap()), "{good} must be allowed");
+        }
+    }
+
+    #[test]
     fn validate_url_rejects_embedded_ipv6_literal_hosts() {
         let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
         std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
@@ -1185,6 +1233,7 @@ mod tests {
             "http://[2002:7f00:1::]/",         // 6to4-wrapped loopback
             "http://[64:ff9b::7f00:1]/",       // NAT64-wrapped loopback
             "http://[2002:a9fe:a9fe::]/latest/meta-data", // 6to4-wrapped metadata
+            "http://[2001:0:4136:e378:8000:63bf:80fe:fefe]/", // Teredo-obfuscated loopback
         ] {
             let url = Url::parse(bad).unwrap();
             assert!(validate_url(&url, false).is_err(), "{bad} must be rejected");
