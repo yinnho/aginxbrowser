@@ -125,7 +125,7 @@ AginxBrowser 反过来：**它是一个独立服务，挂在系统里，谁需�
    一开始 TLS 指纹伪装成 Chrome/Linux，HTTP UA 却写 Chrome/macOS——这种矛盾本身就是强风控信号。修成 macOS UA 配 macOS TLS 指纹，微信立刻放行。**一致性 > 单点逼真度**。
 
 3. **innerText 在自研 DOM 里不等于真浏览器**。
-   真浏览器的 `innerText` 自动排除 `<script>` 文本，自研 DOM 不排除——微信 44 个 inline script 把 `body.innerText` 撑到 260 万字符。这种"看起来标准、实则坑"的差异，是自研 DOM 的持续成本。
+   真浏览器的 `innerText` 自动排除 `<script>` 文本，自研 DOM 一开始不排除——微信 44 个 inline script 把 `body.innerText` 撑到 260 万字符。这种"看起来标准、实则坑"的差异，是自研 DOM 的持续成本。后来我们给 innerText 补了渲染语义（跳过 script/style/display:none、块级换行、空白折叠），这一条修掉了，但"每个标准 API 都可能埋着一坑"的教训还在。
 
 ## 适合谁，不适合谁
 

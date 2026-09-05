@@ -280,21 +280,17 @@ pub(crate) async fn maybe_bypass_byte_waf(page: &mut crate::page::Page) -> Resul
 /// When `selector` is given, return that element's innerText; otherwise the
 /// whole body. This reflects JS-filled content (WeChat/SPA), unlike parsing
 /// the initial HTML snapshot.
-///
-/// Our innerText does NOT exclude script/style text (unlike a real
-/// browser), so we blank those elements' textContent on the live DOM first.
-/// This mutates the page, but do_fetch discards it right after.
 fn rendered_text(page: &mut crate::page::Page, selector: Option<&str>) -> String {
+    // innerText now carries rendered-text semantics itself (script/style/
+    // display:none excluded, block boundaries as newlines), so no DOM
+    // mutation is needed here — the old workaround blanked script text by
+    // destructively rewriting textContent before reading.
     let js = match selector {
         Some(sel) => {
             let escaped = sel.replace('\\', "\\\\").replace('`', "\\`").replace('$', "\\$");
-            format!(
-                "(function(){{var el=document.querySelector(`{escaped}`);if(!el)return'';el.querySelectorAll('script,style,noscript').forEach(function(e){{e.textContent=''}});return el.innerText;}})()"
-            )
+            format!("(function(){{var el=document.querySelector(`{escaped}`);return el?el.innerText:'';}})()")
         }
-        None => {
-            "(function(){var b=document.body;if(!b)return '';b.querySelectorAll('script,style,noscript').forEach(function(e){e.textContent=''});return b.innerText;})()".to_string()
-        }
+        None => "(function(){return document.body?document.body.innerText:'';})()".to_string(),
     };
     let raw = page.evaluate(&js).as_str().unwrap_or("").to_string();
     // Collapse runs of whitespace (heavy SPA pages produce lots of blank

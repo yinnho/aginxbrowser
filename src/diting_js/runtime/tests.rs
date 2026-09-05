@@ -5318,3 +5318,96 @@
         crate::diting_js::ops::reset_local_storage_for_tests();
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// obscura#841 mechanism, pinned. deno_core's isolate-level
+    /// `promise_reject_callback` (runtime/bindings.rs) unconditionally looks
+    /// up the CURRENT context's CONTEXT_STATE_SLOT embedder data and bumps the
+    /// `Rc` found there — no null guard (`state_from_scope` ->
+    /// `clone_rc_raw` -> `Rc::increment_strong_count`). Only
+    /// `JsRuntime::new_inner` initializes that slot, and only for the main
+    /// context. A context created via raw `v8::Context::from_snapshot` —
+    /// obscura's `create_realm_context` path for frame realms — never gets
+    /// the slot set, so the first promise rejection fired while such a
+    /// context is entered refcounts NULL: fault at 0xfffffffffffffff0, the
+    /// `ldr x9, [x8, #-0x10]!` frame from #841. We run one main context per
+    /// JsRuntime, so the product never creates such a context; this test
+    /// documents the hazard for anyone adding multi-realm support. Manual
+    /// only: it segfaults the harness by design.
+    #[test]
+    #[ignore = "segfaults by design (obscura#841 probe); run explicitly with --ignored"]
+    fn raw_snapshot_context_promise_reject_segfaults() {
+        let mut rt = JsRuntime::new();
+        let context = {
+            deno_core::scope!(scope, rt.runtime);
+            let ctx = deno_core::v8::Context::from_snapshot(scope, 1, Default::default())
+                .or_else(|| {
+                    deno_core::v8::Context::from_snapshot(scope, 0, Default::default())
+                })
+                .expect("snapshot context to restore");
+            deno_core::v8::Global::new(scope, ctx)
+        };
+        let isolate = rt.runtime.v8_isolate();
+        deno_core::v8::scope_with_context!(cscope, isolate, &context);
+        let src = deno_core::v8::String::new(cscope, "Promise.reject(1)").unwrap();
+        let script = deno_core::v8::Script::compile(cscope, src, None).unwrap();
+        let _ = script.run(cscope);
+        panic!("unreachable: the rejection should have crashed the process");
+    }
+
+    /// obscura#828 lineage: innerText is rendered text, not textContent —
+    /// script/style/template/noscript bodies, display:none subtrees and
+    /// visibility:hidden text contribute nothing; block boxes break lines;
+    /// collapsible whitespace collapses. The old getter was a textContent
+    /// passthrough, interleaving script source with visible text (~100x
+    /// bloat on script-heavy pages).
+    #[test]
+    fn inner_text_excludes_script_and_style_bodies() {
+        let mut rt = setup_runtime(
+            "<html><body><p>visible</p><script>var secret = 'leakme';</script>\
+             <style>.x { color: red }</style><noscript>nojs</noscript></body></html>",
+        );
+        let t = rt.evaluate("document.body.innerText").unwrap();
+        assert_eq!(t, serde_json::json!("visible"), "got: {t}");
+    }
+
+    #[test]
+    fn inner_text_skips_display_none_subtree_and_hidden_text() {
+        let mut rt = setup_runtime(
+            "<html><body>\
+             <div style=\"display:none\">gone</div>\
+             <div style=\"visibility:hidden\">veiled</div>\
+             <div hidden>also-gone</div>\
+             kept</body></html>",
+        );
+        let t = rt.evaluate("document.body.innerText").unwrap();
+        assert_eq!(t, serde_json::json!("kept"), "got: {t}");
+    }
+
+    #[test]
+    fn inner_text_breaks_lines_on_blocks_and_collapses_whitespace() {
+        let mut rt = setup_runtime(
+            "<html><body><p>hello   world</p><p>second</p>\
+             <div><span>a</span><span>b</span> c</div>tail</body></html>",
+        );
+        let t = rt.evaluate("document.body.innerText").unwrap();
+        // Two blocks -> single newline between; inline flow stays inline with
+        // collapsed internal whitespace; text after a closed block starts a
+        // new line.
+        assert_eq!(t, serde_json::json!("hello world\nsecond\nab c\ntail"), "got: {t}");
+    }
+
+    #[test]
+    fn inner_text_preserves_pre_content_verbatim() {
+        let mut rt = setup_runtime(
+            "<html><body><pre>  keep\n   me  </pre><p>after</p></body></html>",
+        );
+        let t = rt.evaluate("document.body.innerText").unwrap();
+        assert_eq!(t, serde_json::json!("  keep\n   me  \nafter"), "got: {t}");
+    }
+
+    #[test]
+    fn inner_text_br_forces_line_break() {
+        let mut rt = setup_runtime("<html><body><div>one<br>two</div></body></html>");
+        let t = rt.evaluate("document.body.innerText").unwrap();
+        assert_eq!(t, serde_json::json!("one\ntwo"), "got: {t}");
+    }

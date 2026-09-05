@@ -1588,6 +1588,92 @@ function _htmlAttrName(el, n) {
   return n;
 }
 
+// innerText machinery (see the getter on Element). Tags whose UA default is
+// display:none (never rendered) and block-level (line-breaking) respectively.
+const _IT_SKIP_TAGS = new Set(['script', 'style', 'template', 'noscript']);
+const _IT_BLOCK_TAGS = new Set(('address article aside blockquote center dd details dialog dir div dl dt ' +
+  'fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 header hgroup hr li listing main menu nav ol p pre ' +
+  'section summary table tfoot tr ul').split(' '));
+const _IT_BLOCK_DISPLAY = /^(block|flow-root|list-item|flex|inline-flex|grid|inline-grid|table|table-row|table-row-group|table-header-group|table-footer-group|table-caption)$/;
+const _IT_PRE_TAGS = new Set(['pre', 'textarea', 'listing']);
+// One cascade read (whole computed-style table) — same op getComputedStyle
+// uses, just without building the proxy. Null when the style engine hasn't
+// answered for this element yet.
+const _itCascade = (el) => {
+  try {
+    if (el && el._nid != null) {
+      const raw = _domRaw('computed_style', String(el._nid | 0), '');
+      if (raw && raw !== 'null') {
+        const t = JSON.parse(raw);
+        if (t && typeof t === 'object') return t;
+      }
+    }
+  } catch (e) {}
+  return null;
+};
+const _innerTextDisplay = (el) => {
+  // Inline style first, then the hidden attribute, then the cascade table —
+  // the cascade answers with defaults ('block') for any element it has seen,
+  // so asking it first would shadow [hidden] entirely whenever a style pass
+  // has run (feature-dependent behavior otherwise).
+  const s = el && el.style && el.style.display;
+  if (s) return s;
+  if (el && el.getAttribute && el.getAttribute('hidden') != null) return 'none';
+  const cs = _itCascade(el);
+  if (cs && cs.display != null) return String(cs.display);
+  return null;
+};
+const _itPushBreak = (out) => {
+  if (!out.length) return;
+  const last = out[out.length - 1];
+  if (last.s.endsWith('\n')) return;
+  if (!last.pre) {
+    last.s = last.s.replace(/[ \t]+$/, '');
+    if (last.s === '') { out.pop(); if (!out.length) return; }
+  }
+  out.push({ s: '\n', pre: false });
+};
+const _innerTextCollect = (node, out, st) => {
+  if (!node) return;
+  const nt = node.nodeType;
+  if (nt === 3 || nt === 4) {
+    if (st.hidden) return;
+    let s = String(node.data ?? '');
+    if (!s) return;
+    if (st.pre) { out.push({ s, pre: true }); return; }
+    s = s.replace(/[ \t\r\n\f]+/g, ' ');
+    if (out.length && out[out.length - 1].s.endsWith('\n')) s = s.replace(/^ +/, '');
+    if (s) out.push({ s, pre: false });
+    return;
+  }
+  if (nt !== 1) return;
+  const el = node;
+  const tag = el.localName;
+  if (_IT_SKIP_TAGS.has(tag)) return;
+  if (tag === 'br') { _itPushBreak(out); return; }
+  const cs = _itCascade(el);
+  let display = (el.style && el.style.display) || null;
+  if (display == null && el.getAttribute && el.getAttribute('hidden') != null) display = 'none';
+  if (display == null && cs && cs.display != null) display = String(cs.display);
+  if (display === 'none') return;
+  const blockish = display != null
+    ? _IT_BLOCK_DISPLAY.test(display)
+    : _IT_BLOCK_TAGS.has(tag);
+  let visibility = cs && cs.visibility != null ? String(cs.visibility) : null;
+  if (visibility == null) visibility = (el.style && el.style.visibility) || 'visible';
+  const ws = cs && typeof cs['white-space'] === 'string' ? cs['white-space'] : '';
+  const prevHidden = st.hidden;
+  const prevPre = st.pre;
+  if (visibility === 'hidden' || visibility === 'collapse') st.hidden = true;
+  if (_IT_PRE_TAGS.has(tag) || ws.startsWith('pre')) st.pre = true;
+  if (blockish) _itPushBreak(out);
+  const kids = el.childNodes;
+  for (let i = 0; i < kids.length; i++) _innerTextCollect(kids[i], out, st);
+  if (blockish) _itPushBreak(out);
+  st.hidden = prevHidden;
+  st.pre = prevPre;
+};
+
 class Element extends Node {
   constructor(nid) {
     super(nid);
@@ -1640,7 +1726,35 @@ class Element extends Node {
     }
   }
   get outerHTML() { return _domParse("outer_html", this._nid) ?? ""; }
-  get innerText() { return this.textContent; }
+  // innerText approximates rendered-text semantics (obscura #828 lineage):
+  // <script>/<style>/<template>/<noscript> and display:none subtrees are not
+  // rendered so contribute nothing; visibility:hidden suppresses text but not
+  // overridable descendants; block-level boxes break lines; collapsible
+  // whitespace collapses as rendered. Known approximations: no list markers,
+  // no text-transform, no table-cell tabs. The cascade is read per element
+  // (stylesheet rules + inline style); when the style engine hasn't run, the
+  // inline style attribute and the UA-default tag table below stand in.
+  get innerText() {
+    try {
+      const rootDisp = _innerTextDisplay(this);
+      if (rootDisp === 'none') return '';
+      const out = [];
+      const kids = this.childNodes;
+      for (let i = 0; i < kids.length; i++) {
+        _innerTextCollect(kids[i], out, { hidden: false, pre: false });
+      }
+      if (!out.length) return '';
+      let s = '';
+      for (const p of out) s += p.s;
+      // Outer trim, except where a pre-formatted piece owns the edge —
+      // Chromium keeps pre spacing even at the element boundary.
+      if (!out[0].pre) s = s.replace(/^[ \t\r\n]+/, '');
+      if (!out[out.length - 1].pre) s = s.replace(/[ \t\r\n]+$/, '');
+      return s;
+    } catch (e) {
+      return this.textContent;
+    }
+  }
   set innerText(v) { this.textContent = v; }
   get children() {
     const ids = _domParse("element_children", this._nid) || [];
