@@ -599,6 +599,8 @@ async fn main() -> anyhow::Result<()> {
         // CDP bridge — Playwright connectOverCDP / Puppeteer connect surface.
         .route("/json/version", get(diting_cdp::http::json_version))
         .route("/json/version/", get(diting_cdp::http::json_version))
+        .route("/json", get(diting_cdp::http::json_list))
+        .route("/json/", get(diting_cdp::http::json_list))
         .route("/json/list", get(diting_cdp::http::json_list))
         .route("/json/list/", get(diting_cdp::http::json_list))
         .route("/devtools/:kind/:id", get(diting_cdp::http::devtools_ws));

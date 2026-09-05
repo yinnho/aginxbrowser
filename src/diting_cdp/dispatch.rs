@@ -81,6 +81,12 @@ pub struct CdpContext {
     /// Bridge-unique pause ids (`fi-{N}`) — independent of the engine's
     /// per-realm `intercept-{N}` ids, which restart at 1 after navigation.
     pub fetch_pause_counter: u64,
+    /// The page a page-scoped WebSocket connection (`/devtools/page/<id>`)
+    /// auto-provisions. Naive CDP clients attach to a page endpoint and send
+    /// sessionless commands (`Runtime.evaluate` with no `sessionId`), which
+    /// Chrome routes to that one target; without this fallback those commands
+    /// would find no page (obscura#680).
+    pub default_page: Option<String>,
 }
 
 impl CdpContext {
@@ -110,6 +116,7 @@ impl CdpContext {
             next_isolated_context_id: 100,
             fetch_intercept: HashMap::new(),
             fetch_pause_counter: 0,
+            default_page: None,
         }
     }
 
@@ -239,21 +246,32 @@ impl CdpContext {
         self.sessions.retain(|_, v| v != id);
     }
 
+    /// Session lookup with the page-connection fallback: a command with no
+    /// (or an unknown) `sessionId` on a page-scoped WebSocket routes to the
+    /// auto-provisioned page, the way Chrome scopes every command on a
+    /// page-level endpoint to that target. Browser-level connections leave
+    /// `default_page` unset and behave exactly as before.
+    fn resolve_page_id(&self, session_id: &Option<String>) -> Option<&String> {
+        session_id
+            .as_ref()
+            .and_then(|sid| self.sessions.get(sid))
+            .or(self.default_page.as_ref())
+    }
+
     pub fn get_session_page(&self, session_id: &Option<String>) -> Option<&Page> {
-        let page_id = session_id.as_ref().and_then(|sid| self.sessions.get(sid))?;
+        let page_id = self.resolve_page_id(session_id)?;
         self.get_page(page_id)
     }
 
     /// The page id a session routes to. Domain handlers that must touch both
     /// the page and other context state use this to avoid overlapping borrows.
     pub fn session_page_id(&self, session_id: &Option<String>) -> Option<&String> {
-        session_id.as_ref().and_then(|sid| self.sessions.get(sid))
+        self.resolve_page_id(session_id)
     }
 
     pub fn get_session_page_mut(&mut self, session_id: &Option<String>) -> Option<&mut Page> {
-        let page_id = session_id
-            .as_ref()
-            .and_then(|sid| self.sessions.get(sid))
+        let page_id = self
+            .resolve_page_id(session_id)
             .cloned()?;
 
         // Single V8 isolate per process thread: only one page can run JS at a
@@ -2342,6 +2360,46 @@ mod tests {
         (port, hits)
     }
 
+    /// Echo fixture: replies with a JSON body describing the received request
+    /// head — method, path, and the `x-probe` header — so a test can assert
+    /// exactly what the engine put on the wire.
+    async fn echo_fixture() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut stream = stream;
+                    let mut buf = vec![0u8; 8192];
+                    if stream.read(&mut buf).await.is_err() {
+                        return;
+                    }
+                    let req = String::from_utf8_lossy(&buf).to_string();
+                    let mut lines = req.split("\r\n");
+                    let head = lines.next().unwrap_or("");
+                    let method = head.split(' ').next().unwrap_or("");
+                    let path = head.split(' ').nth(1).unwrap_or("");
+                    let probe = lines
+                        .find(|l| l.to_ascii_lowercase().starts_with("x-probe:"))
+                        .and_then(|l| l.split_once(':'))
+                        .map(|(_, v)| v.trim().to_string())
+                        .unwrap_or_default();
+                    let body = format!(
+                        "{{\"method\":\"{method}\",\"path\":\"{path}\",\"probe\":\"{probe}\"}}"
+                    );
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        port
+    }
+
     #[allow(clippy::await_holding_lock)]
     async fn setup(page_url: &str) -> (CdpContext, String, crate::server::test_util::NetEnvGuard) {
         // Hold the process-wide private-net guard for the whole test (the
@@ -2541,6 +2599,74 @@ mod tests {
         navigate(&mut ctx, &session, &format!("http://127.0.0.1:{port}/doc")).await;
         let value = eval_value(&mut ctx, &session, 4, "document.styleSheets.length").await;
         assert_eq!(value, "1", "clearing the block list must restore loading");
+    }
+
+    // obscura#680: a naive client on a page-scoped WebSocket sends sessionless
+    // commands — Runtime.enable, Page.navigate, Runtime.evaluate, all with no
+    // sessionId. With the attached page installed as `default_page`, every one
+    // of them must route to it.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn sessionless_commands_route_to_the_attached_page() {
+        let _net = crate::server::test_util::net_env_guard();
+        let port = static_subresource_fixture().await;
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        ctx.default_page = Some(page_id);
+
+        let enable = CdpRequest {
+            id: 1,
+            method: "Runtime.enable".to_string(),
+            params: json!({}),
+            session_id: None,
+        };
+        assert!(dispatch(&enable, &mut ctx).await.error.is_none());
+
+        let nav = CdpRequest {
+            id: 2,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": format!("http://127.0.0.1:{port}/doc") }),
+            session_id: None,
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        let eval = CdpRequest {
+            id: 3,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "document.getElementById('out').textContent",
+                "returnByValue": true
+            }),
+            session_id: None,
+        };
+        let resp = dispatch(&eval, &mut ctx).await;
+        assert!(
+            resp.error.is_none(),
+            "sessionless evaluate failed: {:?}",
+            resp.error
+        );
+        assert_eq!(
+            resp.result.expect("result")["result"]["value"],
+            "marker-dep-ran"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sessionless_evaluate_without_an_attached_page_errors() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        create_page(&mut ctx); // page exists but nothing binds commands to it
+        let eval = CdpRequest {
+            id: 1,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({ "expression": "1+1", "returnByValue": true }),
+            session_id: None,
+        };
+        let resp = dispatch(&eval, &mut ctx).await;
+        let err = resp.error.expect("expected No page error");
+        assert!(
+            format!("{err:?}").contains("No page"),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[allow(clippy::await_holding_lock)]
@@ -2773,6 +2899,68 @@ mod tests {
         );
         // Document load + the continued fetch.
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    // obscura#569: Fetch.continueRequest overrides must reach the wire — URL
+    // rewrite, method swap, and header injection all applied to the actual
+    // reissued request, not silently dropped.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_continue_request_overrides_reach_the_wire() {
+        let port = echo_fixture().await;
+        let (mut ctx, session, _net) = setup(&format!("http://127.0.0.1:{port}/doc")).await;
+        assert!(dispatch(&fetch_enable(2, &session, json!([{ "urlPattern": "*" }])), &mut ctx)
+            .await
+            .error
+            .is_none());
+
+        let eval = evaluate_expr(
+            3,
+            &session,
+            &format!(
+                "fetch('http://127.0.0.1:{port}/original').then(r => r.text()).then(t => {{ window.__echo = t; }})"
+            ),
+            false,
+        );
+        assert!(dispatch(&eval, &mut ctx).await.error.is_none());
+        assert!(dispatch(&evaluate_expr(4, &session, "1", false), &mut ctx)
+            .await
+            .error
+            .is_none());
+        assert_eq!(paused_request_ids(&ctx), vec!["fi-1".to_string()]);
+
+        let cont = CdpRequest {
+            id: 5,
+            method: "Fetch.continueRequest".to_string(),
+            params: json!({
+                "requestId": "fi-1",
+                "url": format!("http://127.0.0.1:{port}/rewritten"),
+                "method": "POST",
+                "headers": [{ "name": "X-Probe", "value": "override-live" }]
+            }),
+            session_id: Some(session.clone()),
+        };
+        assert!(dispatch(&cont, &mut ctx).await.error.is_none());
+
+        let check = evaluate_expr(6, &session, "window.__echo || ''", false);
+        let resp = dispatch(&check, &mut ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        let value = resp.result.unwrap()["result"]["value"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            value.contains("\"method\":\"POST\""),
+            "method override dropped: {value}"
+        );
+        assert!(
+            value.contains("\"path\":\"/rewritten\""),
+            "url override dropped: {value}"
+        );
+        assert!(
+            value.contains("\"probe\":\"override-live\""),
+            "header override dropped: {value}"
+        );
     }
 
     #[allow(clippy::await_holding_lock)]

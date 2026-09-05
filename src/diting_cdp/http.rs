@@ -38,32 +38,47 @@ pub async fn json_version(Host(host): Host) -> impl IntoResponse {
     }))
 }
 
-/// `/json/list` — targets are per-connection, so there is no persistent target
-/// registry to enumerate. Empty list; clients create targets over the browser
-/// WebSocket (`Target.createTarget`).
-pub async fn json_list() -> impl IntoResponse {
-    axum::Json(json!([]))
+/// `/json/list` (and `/json`) — Chrome's fresh launch lists exactly one
+/// about:blank page, and naive CDP clients depend on that shape: read the
+/// list, connect to the page's `webSocketDebuggerUrl`, drive it with
+/// sessionless commands. The listed page is a per-connection template — it
+/// materializes when a client attaches to its WebSocket and belongs to that
+/// connection alone; browser-level connections still start empty and create
+/// targets explicitly (see `Target.getTargets`).
+pub async fn json_list(Host(host): Host) -> impl IntoResponse {
+    let page_id = uuid::Uuid::new_v4();
+    axum::Json(json!([{
+        "description": "",
+        "id": format!("{page_id}"),
+        "title": "about:blank",
+        "type": "page",
+        "url": "about:blank",
+        "webSocketDebuggerUrl": format!("ws://{host}/devtools/page/{page_id}"),
+    }]))
 }
 
-/// WebSocket upgrade handler for `/devtools/{kind}/{id}` (`kind` = `browser`
-/// or `page`). Both are treated identically: a fresh isolated context whose
-/// pages are created on demand through `Target.createTarget`.
+/// WebSocket upgrade handler for `/devtools/{kind}/{id}`. A `browser`
+/// connection starts empty and creates targets on demand through
+/// `Target.createTarget`. A `page` connection auto-provisions the one page
+/// the endpoint names and routes sessionless commands to it — Chrome scopes
+/// every command on a page-level endpoint to that target (obscura#680).
 pub async fn devtools_ws(
     ws: WebSocketUpgrade,
-    Path((_kind, _id)): Path<(String, String)>,
+    Path((kind, _id)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    let page_mode = kind == "page";
     ws.on_upgrade(move |socket| async move {
         // The dispatch loop is blocking (it parks V8 on one thread), so hand
         // the socket to the blocking pool rather than pinning a Tokio worker
         // for the connection's lifetime.
-        let _ = tokio::task::spawn_blocking(move || run_connection(socket));
+        let _ = tokio::task::spawn_blocking(move || run_connection(socket, page_mode));
     })
 }
 
 /// Build a current-thread runtime + `LocalSet` on the calling (blocking) thread
 /// and drive the connection loop there. Every `Page` and `CdpContext` lives and
 /// dies on this one thread, which is what deno_core requires.
-fn run_connection(socket: WebSocket) {
+fn run_connection(socket: WebSocket, page_mode: bool) {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -75,10 +90,10 @@ fn run_connection(socket: WebSocket) {
         }
     };
     let local = tokio::task::LocalSet::new();
-    local.block_on(&rt, connection_loop(socket));
+    local.block_on(&rt, connection_loop(socket, page_mode));
 }
 
-async fn connection_loop(socket: WebSocket) {
+async fn connection_loop(socket: WebSocket, page_mode: bool) {
     let (mut sender, mut receiver) = socket.split();
     // Each connection is a fresh browser: own cookie jar, own HTTP client,
     // own page set. Stealth/proxy follow the process env like the HTTP API.
@@ -88,6 +103,20 @@ async fn connection_loop(socket: WebSocket) {
         Some("0")
     );
     let mut ctx = CdpContext::new_with_options(proxy, stealth);
+
+    if page_mode {
+        // The page the client attached to: created up front, registered under
+        // its session id, and installed as the sessionless-command fallback.
+        let page_id = ctx
+            .create_page_in_context(None)
+            .expect("default browser context must exist");
+        if let Some(page) = ctx.get_page_mut(&page_id) {
+            page.navigate_blank();
+        }
+        ctx.sessions
+            .insert(format!("{page_id}-session"), page_id.clone());
+        ctx.default_page = Some(page_id);
+    }
 
     while let Some(msg) = receiver.next().await {
         let msg = match msg {
