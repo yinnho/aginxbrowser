@@ -154,6 +154,22 @@ fn response_body_byte_limit() -> usize {
         .unwrap_or(2 * 1024 * 1024)
 }
 
+/// Module evaluation budget (ms): the timeout driving a module's load + eval
+/// to completion during the script phase. Default 10s;
+/// `AGINXBROWSER_MODULE_EVAL_TIMEOUT_MS` raises it for slow module graphs
+/// (dev-server HMR clients — obscura#531).
+fn module_eval_budget_ms() -> u64 {
+    module_eval_budget_from(
+        std::env::var("AGINXBROWSER_MODULE_EVAL_TIMEOUT_MS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn module_eval_budget_from(raw: Option<&str>) -> u64 {
+    raw.and_then(|s| s.parse().ok()).unwrap_or(10_000)
+}
+
 /// Compute the default `strict-origin-when-cross-origin` referrer for a
 /// document-initiated navigation (upstream edb1785). Same-origin sends the
 /// full source URL minus fragment/credentials; cross-origin sends only the
@@ -904,7 +920,7 @@ impl Page {
 
                 tracing::info!("Loading ES module: {}", full_url);
                 if let Some(js) = &mut self.js {
-                    match js.load_module(&full_url, 10_000).await {
+                    match js.load_module(&full_url, module_eval_budget_ms()).await {
                         Ok(()) => {
                             tracing::info!("ES module loaded: {}", full_url);
                             self.record_network_event(&full_url, "GET", "Script", 200, &std::collections::HashMap::new(), 0);
@@ -917,7 +933,10 @@ impl Page {
             } else if !module_script.inline.is_empty() {
                 let base = module_script.base_url.clone();
                 if let Some(js) = &mut self.js {
-                    if let Err(e) = js.load_inline_module(&module_script.inline, &base, 10_000).await {
+                    if let Err(e) =
+                    js.load_inline_module(&module_script.inline, &base, module_eval_budget_ms())
+                        .await
+                {
                         tracing::warn!("Inline ES module error: {}", e);
                     }
                 }
@@ -2568,6 +2587,13 @@ mod tests {
         assert_eq!(p.title, "");
         assert_eq!(p.lifecycle, LifecycleState::Loaded);
         assert!(p.js.is_none());
+    }
+
+    #[test]
+    fn module_eval_budget_parses_override_and_default() {
+        assert_eq!(super::module_eval_budget_from(None), 10_000);
+        assert_eq!(super::module_eval_budget_from(Some("not-a-number")), 10_000);
+        assert_eq!(super::module_eval_budget_from(Some("30000")), 30_000);
     }
 
     // ---- navigation chains over a local server ---------------------------
