@@ -2,13 +2,22 @@
 //! Puppeteer `setRequestInterception()`).
 //!
 //! `Fetch.enable` arms the engine's intercept kernel: every script-initiated
-//! fetch()/XHR is parked and surfaced to the bridge as an `InterceptedRequest`.
-//! The shared drain (`dispatch::drain_intercept_calls`) turns those into
-//! `Fetch.requestPaused` events after each command; the client answers with
-//! `continueRequest` / `fulfillRequest` / `failRequest`, which resolve the
-//! parked op. Boundaries: Request stage only (no Response-stage pauses), and
-//! document/subresource fetches take the navigation transport, which is not
-//! intercepted.
+//! fetch()/XHR — including dynamically inserted classic `<script src>`, which
+//! loads through `op_fetch_url` — is parked and surfaced to the bridge as an
+//! `InterceptedRequest`. The shared drain (`dispatch::drain_intercept_calls`)
+//! turns those into `Fetch.requestPaused` events after each command; the
+//! client answers with `continueRequest` / `fulfillRequest` / `failRequest`,
+//! which resolve the parked op.
+//!
+//! Boundaries: Request stage only (no Response-stage pauses). Parser-time
+//! static subresources (`<script src>`, `<link rel=stylesheet>` discovered
+//! during navigation) are also not parked — they load inside the
+//! `Page.navigate` dispatch, and this bridge processes commands strictly
+//! sequentially, so a pause created there could not be answered before the
+//! dispatch that created it returns; parking one would either deadlock the
+//! navigation or ride out the resolution timeout into an unobserved
+//! pass-through. Hard-blocking those is `Network.setBlockedURLs` territory
+//! (no client round trip, no timing dependency).
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::{json, Value};

@@ -2389,8 +2389,162 @@ mod tests {
             .collect()
     }
 
+    // Serves /doc (HTML with a stylesheet + a dep script + an inline marker),
+    // /dep.js and /style.css — the obscura #643 repro shape: arming Fetch
+    // interception must never cost the page its static scripts, while
+    // Network.setBlockedURLs must be able to fail them outright.
+    async fn static_subresource_fixture() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut stream = stream;
+                    let mut buf = vec![0u8; 8192];
+                    if stream.read(&mut buf).await.is_err() {
+                        return;
+                    }
+                    let req = String::from_utf8_lossy(&buf).to_string();
+                    let path = req.split(' ').nth(1).unwrap_or("/");
+                    let (ctype, body) = match path {
+                        p if p.starts_with("/dep.js") => {
+                            ("application/javascript", "window.dep = true;".to_string())
+                        }
+                        p if p.starts_with("/style.css") => {
+                            ("text/css", "#out { color: rgb(255, 0, 0); }".to_string())
+                        }
+                        _ => (
+                            "text/html",
+                            "<!DOCTYPE html><html><head><link rel=\"stylesheet\" href=\"/style.css\"></head><body><div id=\"out\">marker-before</div><script src=\"/dep.js\"></script><script>document.getElementById('out').textContent = window.dep ? 'marker-dep-ran' : 'marker-dep-missing';</script></body></html>".to_string(),
+                        ),
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        ctype,
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        port
+    }
+
+    fn fresh_context(session_id: &str) -> (CdpContext, String) {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        ctx.sessions.insert(session_id.to_string(), page_id);
+        (ctx, session_id.to_string())
+    }
+
+    async fn navigate(ctx: &mut CdpContext, session: &str, url: &str) {
+        let req = CdpRequest {
+            id: 7,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": url }),
+            session_id: Some(session.to_string()),
+        };
+        assert!(dispatch(&req, ctx).await.error.is_none());
+    }
+
+    async fn eval_value(ctx: &mut CdpContext, session: &str, id: u64, expr: &str) -> String {
+        let req = evaluate_expr(id, session, expr, false);
+        let resp = dispatch(&req, ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        let result = resp.result.expect("result");
+        let value = &result["result"]["value"];
+        value
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| value.as_i64().map(|v| v.to_string()))
+            .expect("string or number value")
+    }
+
     #[allow(clippy::await_holding_lock)]
-#[tokio::test(flavor = "current_thread")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_enable_must_not_block_static_subresources() {
+        let _net = crate::server::test_util::net_env_guard();
+        let port = static_subresource_fixture().await;
+        let (mut ctx, session) = fresh_context("sess-static-fetch");
+
+        assert!(
+            dispatch(&fetch_enable(1, &session, json!([{ "urlPattern": "*" }])), &mut ctx)
+                .await
+                .error
+                .is_none()
+        );
+        navigate(&mut ctx, &session, &format!("http://127.0.0.1:{port}/doc")).await;
+
+        let value = eval_value(&mut ctx, &session, 2, "document.getElementById('out').textContent").await;
+        assert_eq!(
+            value, "marker-dep-ran",
+            "arming Fetch interception must not cost the page its static scripts (obscura #643)"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn set_blocked_urls_fails_parser_scripts() {
+        let _net = crate::server::test_util::net_env_guard();
+        let port = static_subresource_fixture().await;
+        let (mut ctx, session) = fresh_context("sess-static-block");
+
+        let blocked = CdpRequest {
+            id: 1,
+            method: "Network.setBlockedURLs".to_string(),
+            params: json!({ "urls": ["*dep.js*"] }),
+            session_id: Some(session.clone()),
+        };
+        assert!(dispatch(&blocked, &mut ctx).await.error.is_none());
+        navigate(&mut ctx, &session, &format!("http://127.0.0.1:{port}/doc")).await;
+
+        let value = eval_value(
+            &mut ctx,
+            &session,
+            2,
+            "window.dep === undefined ? 'marker-dep-missing' : 'marker-dep-ran'",
+        )
+        .await;
+        assert_eq!(
+            value, "marker-dep-missing",
+            "setBlockedURLs must fail matched parser-time scripts outright"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn set_blocked_urls_fails_stylesheets_and_clears() {
+        let _net = crate::server::test_util::net_env_guard();
+        let port = static_subresource_fixture().await;
+        let (mut ctx, session) = fresh_context("sess-static-css");
+
+        let blocked = CdpRequest {
+            id: 1,
+            method: "Network.setBlockedURLs".to_string(),
+            params: json!({ "urls": ["*style.css*"] }),
+            session_id: Some(session.clone()),
+        };
+        assert!(dispatch(&blocked, &mut ctx).await.error.is_none());
+        navigate(&mut ctx, &session, &format!("http://127.0.0.1:{port}/doc")).await;
+        let value = eval_value(&mut ctx, &session, 2, "document.styleSheets.length").await;
+        assert_eq!(value, "0", "blocked stylesheet must not reach the document");
+
+        let cleared = CdpRequest {
+            id: 3,
+            method: "Network.setBlockedURLs".to_string(),
+            params: json!({ "urls": [] }),
+            session_id: Some(session.clone()),
+        };
+        assert!(dispatch(&cleared, &mut ctx).await.error.is_none());
+        navigate(&mut ctx, &session, &format!("http://127.0.0.1:{port}/doc")).await;
+        let value = eval_value(&mut ctx, &session, 4, "document.styleSheets.length").await;
+        assert_eq!(value, "1", "clearing the block list must restore loading");
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
     async fn fetch_fulfill_request_serves_synthetic_response() {
         let (port, hits) = intercept_fixture().await;
         let (mut ctx, session, _net) = setup(&format!("http://127.0.0.1:{port}/doc")).await;

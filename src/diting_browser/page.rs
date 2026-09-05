@@ -237,8 +237,12 @@ pub struct Page {
     /// `response_body_entry_limit` / `response_body_byte_limit`.
     response_bodies: std::collections::HashMap<String, StoredResponseBody>,
     response_body_order: std::collections::VecDeque<String>,
-    pub intercept_enabled: bool,
-    pub intercept_block_patterns: Vec<String>,
+    /// `Network.setBlockedURLs` patterns: a hard block — matched static
+    /// subresources (parser-time `<script src>`, `<link rel=stylesheet>`)
+    /// fail to load without any client interaction. Deliberately separate
+    /// from `Fetch.enable` interception, whose pause flow cannot cover
+    /// navigation-time loads on this bridge (see `domains::fetch` docs).
+    pub blocked_urls: Vec<String>,
     /// Fetch-domain interception kernel channel. `Some` means armed — the
     /// CDP bridge receives every script-initiated fetch()/XHR as an
     /// `InterceptedRequest` and answers with a resolution. Cleared by
@@ -336,8 +340,7 @@ impl Page {
             callbacks: Arc::new(crate::diting_net::CallbackRegistry::new()),
             response_bodies: std::collections::HashMap::new(),
             response_body_order: std::collections::VecDeque::new(),
-            intercept_enabled: false,
-            intercept_block_patterns: Vec::new(),
+            blocked_urls: Vec::new(),
             intercept_tx: None,
             preload_scripts: Vec::new(),
             navigation_timeout_ms: None,
@@ -348,23 +351,15 @@ impl Page {
         }
     }
 
-    fn should_block_url(&self, url: &str) -> bool {
-        if !self.intercept_enabled || self.intercept_block_patterns.is_empty() {
+    /// Hard block from `Network.setBlockedURLs`: matched resources fail
+    /// outright (Chrome semantics — no pause, no client round trip).
+    fn url_blocked(&self, url: &str) -> bool {
+        if self.blocked_urls.is_empty() {
             return false;
         }
-        for pattern in &self.intercept_block_patterns {
-            if pattern == "*" { return true; }
-            if pattern.starts_with('*') && pattern.ends_with('*') {
-                if url.contains(&pattern[1..pattern.len()-1]) { return true; }
-            } else if pattern.starts_with('*') {
-                if url.ends_with(&pattern[1..]) { return true; }
-            } else if pattern.ends_with('*') {
-                if url.starts_with(&pattern[..pattern.len()-1]) { return true; }
-            } else if url.contains(pattern) {
-                return true;
-            }
-        }
-        false
+        self.blocked_urls
+            .iter()
+            .any(|p| crate::diting_cdp::domains::fetch::url_pattern_matches(p, url))
     }
 
     /// Fetch the main document. Stealth mode bypasses the tracing client —
@@ -437,6 +432,12 @@ impl Page {
             // document) resumes intercepting instead of silently passing
             // fetches straight through while the bridge still waits.
             rt.set_intercept_enabled(true);
+        }
+        if !self.blocked_urls.is_empty() {
+            // setBlockedURLs must survive navigation like the intercept arm
+            // does — the static loaders read the Page field directly, the
+            // JS path (fetch()/XHR) needs it replayed into the fresh realm.
+            rt.set_blocked_urls(self.blocked_urls.clone());
         }
 
         // Script-initiated fetch()/XHR fire the page's passive observers too
@@ -747,8 +748,8 @@ impl Page {
                     );
                     continue;
                 }
-                if self.should_block_url(&full_url) {
-                    tracing::info!("Blocked script by interception: {}", full_url);
+                if self.url_blocked(&full_url) {
+                    tracing::info!("Blocked script by Network.setBlockedURLs: {}", full_url);
                     continue;
                 }
                 resolved.push((i, full_url.clone()));
@@ -1403,8 +1404,8 @@ impl Page {
                 );
                 continue;
             }
-            if self.should_block_url(&full_url) {
-                tracing::info!("Blocked stylesheet by interception: {}", full_url);
+            if self.url_blocked(&full_url) {
+                tracing::info!("Blocked stylesheet by Network.setBlockedURLs: {}", full_url);
                 continue;
             }
             css_fetch_urls.push(full_url);
@@ -1941,8 +1942,8 @@ impl Page {
         }
     }
 
-    #[allow(dead_code)] // CDP Network.setBlockedURLs parity — no CDP client to call it yet
     pub fn set_blocked_urls(&mut self, patterns: Vec<String>) {
+        self.blocked_urls = patterns.clone();
         if let Some(js) = &self.js {
             js.set_blocked_urls(patterns);
         }
@@ -2286,7 +2287,6 @@ impl Page {
     /// into each rebuilt realm.
     pub fn set_fetch_intercept(&mut self, tx: Option<tokio::sync::mpsc::UnboundedSender<crate::diting_js::ops::InterceptedRequest>>) {
         self.intercept_tx = tx.clone();
-        self.intercept_enabled = tx.is_some();
         if let Some(js) = &self.js {
             match tx {
                 Some(tx) => {
