@@ -2798,7 +2798,47 @@
         std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
     }
 
-    /// The module path must answer to the same deny-by-default posture as
+    /// DOMTokenList.supports() must answer for the lists the spec gives
+    /// supported tokens (<link> relList, iframe sandbox) and throw for the
+    /// rest (classList, a/area relList). Resource loaders feature-probe via
+    /// relList.supports("preload") — an unguarded throw there aborts the
+    /// whole load chain (2captcha's turnstile loader died exactly this way).
+    #[tokio::test(flavor = "current_thread")]
+    async fn tokenlist_supported_sets_match_spec() {
+        let mut rt = setup_runtime(
+            r##"<html><body><a id="x" href="#">a</a><iframe id="f" sandbox="allow-scripts"></iframe><link id="l" rel="stylesheet" href="s.css"></body></html>"##,
+        );
+        let result = rt
+            .evaluate_for_cdp(
+                r#"(() => {
+                    const out = {};
+                    const link = document.getElementById("l");
+                    const anchor = document.getElementById("x");
+                    const frame = document.getElementById("f");
+                    out.linkPreload = link.relList.supports("preload");
+                    out.linkModulepreload = link.relList.supports("modulepreload");
+                    out.linkNonsense = link.relList.supports("nonsense");
+                    try { anchor.relList.supports("preload"); out.anchorThrows = false; }
+                    catch (e) { out.anchorThrows = e instanceof TypeError; }
+                    out.sandboxScripts = frame.sandbox.supports("allow-scripts");
+                    out.sandboxBogus = frame.sandbox.supports("allow-bogus");
+                    try { document.body.classList.supports("x"); out.classThrows = false; }
+                    catch (e) { out.classThrows = e instanceof TypeError; }
+                    return JSON.stringify(out);
+                })()"#,
+                false,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!(
+                r#"{"linkPreload":true,"linkModulepreload":true,"linkNonsense":false,"anchorThrows":true,"sandboxScripts":true,"sandboxBogus":false,"classThrows":true}"#
+            ),
+            "supported-token sets must match the spec/Chrome shape per element kind"
+        );
+    }
     /// fetch(): file:// and private/internal hosts rejected, private hosts
     /// reachable again once the operator opts in.
     #[tokio::test(flavor = "current_thread")]

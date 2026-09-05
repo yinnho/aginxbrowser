@@ -1333,6 +1333,14 @@ class Comment extends CharacterData {
   cloneNode() { return document.createComment(this.data); }
 }
 
+// Supported-token sets per HTML spec. Without them supports() must throw —
+// classList/sizes have no supported tokens — but relList on <link> and
+// iframe.sandbox DO, and resource loaders feature-probe via
+// relList.supports("preload"); throwing there aborts their load chains.
+// a/area relList stays unsupported (supports() throws), matching Chrome.
+const LINK_REL_SUPPORTED = ["alternate","author","bookmark","canonical","dns-prefetch","external","help","icon","license","manifest","me","modulepreload","next","nofollow","noopener","noreferrer","opener","pingback","preconnect","prefetch","preload","prev","privacy-policy","search","stylesheet","tag","terms-of-service"];
+const SANDBOX_SUPPORTED = ["allow-downloads","allow-forms","allow-modals","allow-orientation-lock","allow-pointer-lock","allow-popups","allow-popups-to-escape-sandbox","allow-presentation","allow-same-origin","allow-scripts","allow-storage-access-by-user-activation","allow-top-navigation","allow-top-navigation-by-user-activation","allow-top-navigation-to-custom-protocols"];
+
 // DOMTokenList backs class/rel/sandbox/etc. attribute reflection. It parses the
 // associated content attribute as an ordered set of tokens and writes changes
 // straight back, so reads and writes stay live with the element. A Proxy is
@@ -1807,12 +1815,15 @@ class Element extends Node {
     const ok = (ns === "http://www.w3.org/2000/svg" && ln === "a") ||
                (ns === "http://www.w3.org/1999/xhtml" && (ln === "a" || ln === "area" || ln === "link"));
     if (!ok) return undefined;
-    if (!this._relList) this._relList = new DOMTokenList(this, "rel");
+    if (!this._relList) {
+      this._relList = new DOMTokenList(this, "rel",
+        (ns === "http://www.w3.org/1999/xhtml" && ln === "link") ? LINK_REL_SUPPORTED : undefined);
+    }
     return this._relList;
   }
   get sandbox() {
     if (this.namespaceURI !== "http://www.w3.org/1999/xhtml" || this.localName !== "iframe") return undefined;
-    if (!this._sandboxList) this._sandboxList = new DOMTokenList(this, "sandbox");
+    if (!this._sandboxList) this._sandboxList = new DOMTokenList(this, "sandbox", SANDBOX_SUPPORTED);
     return this._sandboxList;
   }
   get sizes() {
