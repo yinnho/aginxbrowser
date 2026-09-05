@@ -87,11 +87,13 @@ pub async fn handle(
             let page_id = ctx.create_page_in_context(context_id)?;
             let session_id = format!("{}-session", page_id);
 
+            let mut navigated = false;
             if let Some(page) = ctx.get_page_mut(&page_id) {
                 if url == "about:blank" || url.is_empty() {
                     page.navigate_blank();
                 } else {
                     let _ = page.navigate(url).await;
+                    navigated = true;
                 }
             }
 
@@ -137,6 +139,19 @@ pub async fn handle(
                         "waitingForDebugger": false,
                     }),
                 ));
+            }
+
+            // A page created with a URL navigated before the client ever saw
+            // it: emit the load-event sequence AFTER attachedToTarget (so the
+            // client can resolve the sessionId the events carry) instead of
+            // never — Page-domain waiters otherwise hang on the initial load
+            // (obscura#833 shape).
+            if navigated {
+                super::page::emit_navigation_for_page(
+                    ctx,
+                    &Some(session_id),
+                    &page_id,
+                );
             }
 
             Ok(json!({ "targetId": page_id }))

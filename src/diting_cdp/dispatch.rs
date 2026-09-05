@@ -1627,6 +1627,60 @@ mod tests {
         assert_eq!(page_events, vec!["Target.targetCreated"]);
     }
 
+    // obscura#833 shape: createTarget with a URL navigates inline, before the
+    // client has attached or enabled Page. The load-event sequence must still
+    // be emitted — AFTER targetCreated/attachedToTarget so the client can
+    // resolve the sessionId the events carry — or chromiumoxide-style clients
+    // hang waiting for the initial load that already happened.
+    #[tokio::test(flavor = "current_thread")]
+    async fn create_target_with_url_emits_load_events_after_attach() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+
+        let resp = dispatch(
+            &CdpRequest {
+                id: 1,
+                method: "Target.createTarget".to_string(),
+                params: json!({ "url": "data:text/html,<html><body>hi</body></html>" }),
+                session_id: None,
+            },
+            &mut ctx,
+        )
+        .await;
+        assert!(resp.error.is_none());
+        let target_id = resp.result.unwrap()["targetId"].as_str().unwrap().to_string();
+        let session_id = format!("{}-session", target_id);
+
+        let events = std::mem::take(&mut ctx.pending_events);
+        let names: Vec<&str> = events.iter().map(|e| e.method.as_str()).collect();
+        let attach_pos = names
+            .iter()
+            .position(|m| *m == "Target.attachedToTarget")
+            .expect("attachedToTarget emitted");
+        let nav_pos = names
+            .iter()
+            .position(|m| *m == "Page.frameNavigated")
+            .expect("frameNavigated emitted for the inline navigation");
+        assert!(
+            nav_pos > attach_pos,
+            "load events must follow attachedToTarget, got: {names:?}"
+        );
+        for expected in [
+            "Page.frameStartedLoading",
+            "Page.frameNavigated",
+            "Page.domContentEventFired",
+            "Page.loadEventFired",
+        ] {
+            assert!(names.contains(&expected), "{expected} missing: {names:?}");
+        }
+        // The nav events ride the created session, like Page.navigate's do.
+        let nav = &events[nav_pos];
+        assert_eq!(nav.session_id.as_deref(), Some(session_id.as_str()));
+        assert_eq!(
+            nav.params["frame"]["url"],
+            "data:text/html,<html><body>hi</body></html>"
+        );
+    }
+
     // DOM.getBoxModel (obscura#576): Chrome's wire emits integral doubles
     // without the ".0", and strict clients deserialize quads as i64. The
     // whole pipeline — evaluate through the quad helpers — must land on

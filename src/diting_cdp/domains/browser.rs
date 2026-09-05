@@ -26,6 +26,12 @@ pub async fn handle(method: &str, _params: &Value) -> Result<Value, String> {
         // lets the client's setup sequence complete instead of tearing down
         // the page on an unknown-method error.
         "setWindowBounds" => Ok(json!({})),
+        // Permission grants (camera, geolocation, notifications, ...) —
+        // Playwright's `context.grantPermissions()` and Puppeteer's
+        // `browserContext.overridePermissions()` call these during setup.
+        // We don't gate any capability behind CDP permissions, so the ack is
+        // the whole implementation.
+        "grantPermissions" | "resetPermissions" => Ok(json!({})),
         _ => Err(format!("Unknown Browser method: {}", method)),
     }
 }

@@ -5802,7 +5802,16 @@ globalThis.IntersectionObserver = class IntersectionObserver {
   else Promise.resolve().then(wireUp);
 })();
 globalThis.IntersectionObserverEntry = class IntersectionObserverEntry {};
-globalThis.PerformanceObserver = class { constructor(){} observe(){} disconnect(){} };
+globalThis.PerformanceObserver = class {
+  constructor(){}
+  observe(){}
+  disconnect(){}
+  // Honest set: exactly the entry types the Performance timeline records
+  // (mark/measure via user timing, navigation, paint). Web-vitals wrappers
+  // gate their LCP/CLS/longtask setup on this list — advertising types we
+  // never emit would push them into a wait that never resolves.
+  static get supportedEntryTypes() { return ['mark', 'measure', 'navigation', 'paint']; }
+};
 
 globalThis.DOMException = (function () {
   const NAME_TO_CODE = {

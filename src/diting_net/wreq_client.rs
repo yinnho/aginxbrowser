@@ -102,6 +102,14 @@ pub struct StealthHttpClient {
     pub user_agent: RwLock<String>,
     pub accept_language: RwLock<String>,
     pub in_flight: Arc<std::sync::atomic::AtomicU32>,
+    /// When true, `validate_url` lets localhost / RFC1918 / link-local hosts
+    /// through on the stealth path too. Mirrors the HttpClient field of the
+    /// same name: a context built with the private-network opt-in used to
+    /// open its stealth document requests while HttpClient allowed them —
+    /// the same half-threaded-flag shape as obscura#793. The env var
+    /// (`AGINXBROWSER_ALLOW_PRIVATE_NETWORK`) is OR'd inside `validate_url`
+    /// itself, so this field only carries the per-context flag.
+    pub allow_private_network: bool,
 }
 
 #[cfg(feature = "stealth")]
@@ -238,6 +246,7 @@ impl StealthHttpClient {
                     .unwrap_or_else(|_| "zh-CN,zh;q=0.9,en;q=0.8".to_string()),
             ),
             in_flight: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            allow_private_network: false,
         }
     }
 
@@ -261,8 +270,10 @@ impl StealthHttpClient {
     pub async fn fetch(&self, url: &Url) -> Result<Response, NetError> {
         // The stealth path must enforce the same SSRF rules as the reqwest
         // path — without this, StealthHttpClient could reach loopback/private
-        // addresses that HttpClient rejects.
-        crate::diting_net::client::validate_url(url, false)?;
+        // addresses that HttpClient rejects. The per-context opt-in rides the
+        // `allow_private_network` field (obscura#793 shape); the env var is
+        // OR'd inside `validate_url`.
+        crate::diting_net::client::validate_url(url, self.allow_private_network)?;
         if url.scheme() == "file" {
             return crate::diting_net::client::fetch_file_url(url).await;
         }
@@ -364,7 +375,10 @@ impl StealthHttpClient {
                     })?;
                     // A redirect must not be able to bounce the stealth client
                     // to a forbidden target (e.g. 302 -> http://127.0.0.1/).
-                    crate::diting_net::client::validate_url(&next_url, false)?;
+                    crate::diting_net::client::validate_url(
+                        &next_url,
+                        self.allow_private_network,
+                    )?;
                     if next_url.scheme() == "file" {
                         return crate::diting_net::client::fetch_file_url(&next_url).await;
                     }
@@ -484,6 +498,25 @@ mod tests {
         let client = StealthHttpClient::new(Arc::new(CookieJar::new()));
         let url = Url::parse("http://127.0.0.1:1/").unwrap();
         assert!(client.fetch(&url).await.is_err(), "loopback must be rejected");
+    }
+
+    // obscura#793 same shape: the per-context allow-private flag must ride
+    // the stealth client, not only the reqwest one — with the env var unset,
+    // the flag alone decides.
+    #[allow(clippy::await_holding_lock)] // env-lock guard spans the fixture fetch, as above
+    #[tokio::test]
+    async fn stealth_fetch_honors_context_private_flag() {
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+        let (port, _heads) = head_recording_fixture().await;
+        let mut client = StealthHttpClient::new(Arc::new(CookieJar::new()));
+        client.allow_private_network = true;
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let resp = client
+            .fetch(&url)
+            .await
+            .expect("context flag must open the stealth path to loopback");
+        assert_eq!(resp.status, 200);
     }
 
     /// Serve 200s on an ephemeral port, recording each request's raw head

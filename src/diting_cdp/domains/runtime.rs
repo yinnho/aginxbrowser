@@ -30,28 +30,11 @@ async fn emit_post_eval_nav(
     if !did_navigate {
         return Ok(());
     }
-    let (frame_id, page_url, page_id, network_events, reached_idle) = {
+    let page_id = {
         let p = ctx.get_session_page_mut(session_id).ok_or("No page")?;
-        (
-            p.frame_id.clone(),
-            p.url_string(),
-            p.id.clone(),
-            p.network_events.drain(..).collect::<Vec<_>>(),
-            p.lifecycle == LifecycleState::NetworkIdle,
-        )
+        p.id.clone()
     };
-    let loader_id = format!("loader-{}", uuid::Uuid::new_v4());
-    super::page::emit_navigation_events(
-        ctx,
-        session_id,
-        &frame_id,
-        &loader_id,
-        &page_url,
-        &page_id,
-        &network_events,
-        crate::diting_browser::lifecycle::WaitUntil::Load,
-        reached_idle,
-    );
+    super::page::emit_navigation_for_page(ctx, session_id, &page_id);
     Ok(())
 }
 

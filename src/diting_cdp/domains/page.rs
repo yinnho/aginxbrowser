@@ -237,6 +237,51 @@ pub(crate) fn emit_navigation_events(
     }
 }
 
+/// Drain a page's recorded navigation state (frame id, final URL, network
+/// events, idle flag), mint a fresh loaderId, and emit the full
+/// post-navigation event sequence. The shared tail of every "a navigation
+/// just happened" site: `Page.navigate`/`reload`, the post-eval drain for
+/// JS-initiated navigations, and `Target.createTarget`'s inline `url`
+/// navigation. Without the last one, a page created with a URL never
+/// announces itself to Page-domain waiters — frameNavigated /
+/// domContentEventFired / loadEventFired never fire and chromiumoxide-style
+/// clients hang waiting for the initial load (obscura#833 shape).
+///
+/// Returns `(frame_id, loader_id)` for callers that echo them in a command
+/// response.
+pub(crate) fn emit_navigation_for_page(
+    ctx: &mut CdpContext,
+    session_id: &Option<String>,
+    page_id: &str,
+) -> (String, String) {
+    let (frame_id, url_str, network_events, reached_idle) = {
+        let Some(page) = ctx.get_page_mut(page_id) else {
+            return (String::new(), String::new());
+        };
+        (
+            page.frame_id.clone(),
+            page.url_string(),
+            page.network_events.drain(..).collect::<Vec<_>>(),
+            page.lifecycle == LifecycleState::NetworkIdle,
+        )
+    };
+    let loader_id = format!("loader-{}", uuid::Uuid::new_v4());
+    ctx.current_loader_ids
+        .insert(page_id.to_string(), loader_id.clone());
+    emit_navigation_events(
+        ctx,
+        session_id,
+        &frame_id,
+        &loader_id,
+        &url_str,
+        page_id,
+        &network_events,
+        WaitUntil::Load,
+        reached_idle,
+    );
+    (frame_id, loader_id)
+}
+
 /// Drive a full navigation of the session page, then emit the navigation event
 /// sequence. Both `Page.navigate` and `Page.reload` route through here so the
 /// `allow_file_access` gate and preload-script sync cannot diverge.
@@ -255,7 +300,7 @@ async fn navigate_page(
         .map(|(_, source)| source.clone())
         .collect();
 
-    let (frame_id, page_id, url_str, network_events, reached_idle) = {
+    let (frame_id, page_id) = {
         let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
         if url_is_file_scheme(url) && !page.context.allow_file_access {
             return Err(
@@ -265,29 +310,10 @@ async fn navigate_page(
         }
         page.set_preload_scripts(preload_sources);
         page.navigate(url).await.map_err(|e| e.to_string())?;
-        (
-            page.frame_id.clone(),
-            page.id.clone(),
-            page.url_string(),
-            page.network_events.drain(..).collect::<Vec<_>>(),
-            page.lifecycle == LifecycleState::NetworkIdle,
-        )
+        (page.frame_id.clone(), page.id.clone())
     };
 
-    let loader_id = format!("loader-{}", uuid::Uuid::new_v4());
-    ctx.current_loader_ids
-        .insert(page_id.clone(), loader_id.clone());
-    emit_navigation_events(
-        ctx,
-        session_id,
-        &frame_id,
-        &loader_id,
-        &url_str,
-        &page_id,
-        &network_events,
-        WaitUntil::Load,
-        reached_idle,
-    );
+    let (_frame_id, loader_id) = emit_navigation_for_page(ctx, session_id, &page_id);
     Ok(json!({ "frameId": frame_id, "loaderId": loader_id }))
 }
 

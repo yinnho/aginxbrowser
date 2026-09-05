@@ -4975,6 +4975,27 @@
     }
 
     #[test]
+    fn test_performance_observer_supported_entry_types_is_honest() {
+        // PerformanceObserver.supportedEntryTypes (exposed upstream in the
+        // #840 batch) must list exactly the entry types the Performance
+        // timeline actually records — advertising LCP/CLS/longtask would push
+        // web-vitals wrappers into a wait that never resolves.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt.evaluate(r#"
+            const listed = PerformanceObserver.supportedEntryTypes;
+            performance.mark('probe');
+            const recorded = performance.getEntries().map(e => e.entryType);
+            const unrecorded = recorded.filter(t => !listed.includes(t));
+            return [listed, unrecorded, listed.includes('largest-contentful-paint')];
+        "#).unwrap();
+        assert_eq!(result, serde_json::json!([
+            ["mark", "measure", "navigation", "paint"],
+            [],
+            false
+        ]));
+    }
+
+    #[test]
     fn test_location_navigation_coerces_url_objects() {
         // Upstream fe26417: a URL object passed to location.href/assign/replace
         // must coerce to its href string (our _resolveUrl called .startsWith on
