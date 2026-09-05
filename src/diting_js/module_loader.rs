@@ -97,6 +97,20 @@ impl ModuleLoader for DitingModuleLoader {
         let proxy_url = self.proxy_url.clone();
 
         ModuleLoadResponse::Async(Pin::from(Box::new(async move {
+            // Same page-reachable policy as fetch()/XHR (obscura #849):
+            // dynamic import() must not reach file:// or private/internal
+            // hosts just because it took the module-loader path.
+            let specifier = ModuleSpecifier::parse(&url)
+                .map_err(|e| io_err(format!("Invalid module URL {}: {}", url, e)))?;
+            if let Err(reason) =
+                crate::diting_js::ops::validate_fetch_url(&specifier)
+            {
+                return Err(io_err(format!(
+                    "Failed to fetch module {}: {}",
+                    url, reason
+                )));
+            }
+
             // Reuse the process-wide cached client (same one op_fetch_url
             // uses). Modern SPAs dynamic-import 20-50 chunks per page; the
             // old code built a fresh reqwest::Client per import, each with
@@ -113,7 +127,7 @@ impl ModuleLoader for DitingModuleLoader {
                 proxy_url.as_deref().unwrap_or("direct")
             );
 
-            let resp = client
+            let mut resp = client
                 .get(&url)
                 .header("Accept", "application/javascript, text/javascript, */*")
                 .send()
@@ -128,12 +142,44 @@ impl ModuleLoader for DitingModuleLoader {
                 )));
             }
 
-            let code = resp.text().await.map_err(|e| {
-                io_err(format!("Failed to read module body {}: {}", url, e))
-            })?;
-
-            let specifier = ModuleSpecifier::parse(&url)
-                .map_err(|e| io_err(format!("Invalid module URL {}: {}", url, e)))?;
+            // Same body cap as fetch()/XHR (obscura #849): the page controls
+            // module URLs, so a server streaming gigabytes into a dynamic
+            // import() must fail as a catchable rejection instead of OOMing
+            // the process. Content-Length is checked before reading; a lying
+            // or absent header still runs into the per-chunk check while
+            // streaming.
+            let body_limit = crate::diting_js::ops::fetch_body_byte_limit();
+            if let Some(len) = resp
+                .headers()
+                .get(reqwest::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<usize>().ok())
+            {
+                if len > body_limit {
+                    return Err(io_err(format!(
+                        "Module {} response body too large: content-length {} exceeds limit {} bytes",
+                        url, len, body_limit
+                    )));
+                }
+            }
+            let mut code_bytes: Vec<u8> = Vec::new();
+            while let Some(chunk) = resp
+                .chunk()
+                .await
+                .map_err(|e| io_err(format!("Failed to read module body {}: {}", url, e)))?
+            {
+                code_bytes.extend_from_slice(&chunk);
+                if code_bytes.len() > body_limit {
+                    return Err(io_err(format!(
+                        "Module {} response body exceeded limit of {} bytes",
+                        url, body_limit
+                    )));
+                }
+            }
+            // Module scripts decode as UTF-8 per spec (unlike classic scripts,
+            // which honour charset attributes), so lossy conversion here
+            // matches what a browser would run.
+            let code = String::from_utf8_lossy(&code_bytes).into_owned();
 
             Ok(ModuleSource::new(
                 deno_core::ModuleType::JavaScript,

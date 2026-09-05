@@ -184,11 +184,11 @@ fn response_body_byte_limit() -> usize {
 /// this one bounds the initial allocation itself: page JS can fetch() any
 /// URL, so a server streaming gigabytes must fail as a network error
 /// instead of OOMing the process (plus the UTF-8 and base64 copies that
-/// follow the raw buffer). Chrome streams bodies to disk; we draw a line.
-/// Bulk transfer is the streaming download layer's job, not page fetch().
-/// `0` disables the cap, matching the 0-disables convention of the two
-/// limits above.
-fn fetch_body_byte_limit() -> usize {
+/// follow the raw buffer). Bulk transfer is the streaming download layer's
+/// job, not page fetch(). `0` disables the cap, matching the 0-disables
+/// convention of the two limits above. Shared with the ES module loader
+/// (obscura #849) so page-controlled remote code has one size policy.
+pub(crate) fn fetch_body_byte_limit() -> usize {
     std::env::var("AGINXBROWSER_FETCH_BODY_LIMIT")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -2108,7 +2108,12 @@ fn glob_match(pattern: &str, url: &str) -> bool {
     url == pattern
 }
 
-fn validate_fetch_url(url: &url::Url) -> Result<(), String> {
+/// Also applied by the ES module loader (obscura #849): dynamic import() is
+/// as page-reachable as fetch(), so it answers to the same scheme and
+/// private-network policy. The cached client these paths share never
+/// auto-follows redirects, so validating the resolved specifier covers
+/// every hop a fetch can actually take.
+pub(crate) fn validate_fetch_url(url: &url::Url) -> Result<(), String> {
     let scheme = url.scheme();
     // file:// is rejected up front for page-reachable fetch/XHR, matching the
     // deny-by-default navigation posture (upstream obscura #708: the old gate

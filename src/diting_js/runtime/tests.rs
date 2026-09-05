@@ -2649,6 +2649,236 @@
         std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
     }
 
+    /// obscura #849 class: the ES module loader is a second page-controlled
+    /// fetch path, so the #581 body cap must hold there too — same env knob,
+    /// same streaming check, and the failure surfaces as a catchable
+    /// import() rejection (not a silent empty module).
+    #[tokio::test(flavor = "current_thread")]
+    async fn module_import_rejects_body_over_limit() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+        std::env::set_var("AGINXBROWSER_FETCH_BODY_LIMIT", "1024");
+
+        // Advertised Content-Length over the cap: rejected before buffering.
+        {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let resp = "HTTP/1.1 200 OK\r\ncontent-type: text/javascript\r\ncontent-length: 99999999\r\nconnection: close\r\n\r\n";
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            });
+            let mut rt = setup_runtime("<html><body></body></html>");
+            rt.set_url(&format!("http://127.0.0.1:{}/", port));
+            let result = rt
+                .call_function_on_for_cdp(
+                    r#"async () => {
+                        try { await import(document.URL + "big.mjs"); return "resolved"; }
+                        catch (e) { return "rejected: " + e.message; }
+                    }"#,
+                    None,
+                    &[],
+                    true,
+                    true,
+                )
+                .await
+                .unwrap();
+            let v = result.value.unwrap();
+            assert_eq!(
+                v,
+                serde_json::json!(
+                    "rejected: Module http://127.0.0.1:PORT/big.mjs response body too large: content-length 99999999 exceeds limit 1024 bytes"
+                    .replace("PORT", &port.to_string())
+                ),
+                "oversized advertised Content-Length must reject the import before buffering"
+            );
+        }
+
+        // No Content-Length: the stream itself must cross the cap and reject.
+        {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let resp = "HTTP/1.1 200 OK\r\ncontent-type: text/javascript\r\nconnection: close\r\n\r\nexport const ok = true;\n";
+                let _ = stream.write_all(resp.as_bytes());
+                for _ in 0..64 {
+                    if stream.write_all(&[b'x'; 128]).is_err() {
+                        break; // client hung up once the cap tripped
+                    }
+                }
+                let _ = stream.flush();
+            });
+            let mut rt = setup_runtime("<html><body></body></html>");
+            rt.set_url(&format!("http://127.0.0.1:{}/", port));
+            let result = rt
+                .call_function_on_for_cdp(
+                    r#"async () => {
+                        try { await import(document.URL + "stream.mjs"); return "resolved"; }
+                        catch (e) { return "rejected: " + e.message; }
+                    }"#,
+                    None,
+                    &[],
+                    true,
+                    true,
+                )
+                .await
+                .unwrap();
+            let v = result.value.unwrap();
+            let msg = v.as_str().unwrap();
+            assert!(
+                msg.starts_with("rejected: ") && msg.contains("exceeded limit of 1024 bytes"),
+                "unbounded stream over the cap must reject the import, got: {}",
+                msg
+            );
+        }
+
+        std::env::remove_var("AGINXBROWSER_FETCH_BODY_LIMIT");
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+    }
+
+    /// A module above obscura's hardcoded 33554432-byte cap must load fine
+    /// under our default (the Angular 18 `main` bundle from the issue is
+    /// 37.9 MB) — the knob is the only policy, and the default sits above
+    /// routine production bundles.
+    #[tokio::test(flavor = "current_thread")]
+    async fn module_import_allows_body_above_upstream_cap() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+        std::env::remove_var("AGINXBROWSER_FETCH_BODY_LIMIT");
+
+        const BIG: usize = 34 * 1024 * 1024; // 34 MiB > upstream's 32 MiB cap
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            // A 34 MiB line comment: the full body must be downloaded (that
+            // is the point) without V8 parsing megabytes of tokens.
+            let body = format!("//{}\nglobalThis.__BIG_MODULE__ = true;\nexport const ok = true;\n", "x".repeat(BIG));
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/javascript\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.write_all(body.as_bytes());
+            let _ = stream.flush();
+        });
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/", port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    await import(document.URL + "big.mjs");
+                    return "resolved:" + (globalThis.__BIG_MODULE__ === true);
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!("resolved:true"),
+            "a 34 MiB module must load and execute under the default cap"
+        );
+
+        std::env::remove_var("AGINXBROWSER_FETCH_BODY_LIMIT");
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+    }
+
+    /// The module path must answer to the same deny-by-default posture as
+    /// fetch(): file:// and private/internal hosts rejected, private hosts
+    /// reachable again once the operator opts in.
+    #[tokio::test(flavor = "current_thread")]
+    async fn module_import_honors_fetch_url_policy() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+        std::env::remove_var("AGINXBROWSER_FETCH_BODY_LIMIT");
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url("http://example.invalid/page");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const out = {};
+                    try { await import("file:///etc/hostname"); out.file = "resolved"; }
+                    catch (e) { out.file = e.message; }
+                    try { await import("http://127.0.0.1:9/x.mjs"); out.loopback = "resolved"; }
+                    catch (e) { out.loopback = e.message; }
+                    return out;
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let out = result.value.unwrap();
+        assert!(
+            out["file"].as_str().unwrap().contains("Forbidden URL scheme 'file'"),
+            "file:// import must be rejected by scheme, got: {}",
+            out["file"]
+        );
+        assert!(
+            out["loopback"].as_str().unwrap().contains("Access to private/internal"),
+            "loopback import must be rejected by the private-network policy, got: {}",
+            out["loopback"]
+        );
+
+        // Operator opt-in reopens private hosts for the module path too.
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let body = "globalThis.__PRIVATE_OK__ = true;\nexport const ok = true;\n";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/javascript\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.write_all(body.as_bytes());
+            let _ = stream.flush();
+        });
+        rt.set_url(&format!("http://127.0.0.1:{}/", port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    await import(document.URL + "local.mjs");
+                    return "resolved:" + (globalThis.__PRIVATE_OK__ === true);
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!("resolved:true"),
+            "with the opt-in env set, a loopback module must load"
+        );
+
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+    }
+
     /// Browsers send Origin on every non-GET/HEAD request, including
     /// same-origin POSTs (SolidStart server functions 403 without it).
     /// Regression: we only set Origin cross-origin, so a same-origin POST
