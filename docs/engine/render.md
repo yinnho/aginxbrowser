@@ -1765,3 +1765,22 @@ min-content 轨同 -37%；不定宽（inline-block 包装，intrinsic sizing 全
 en.wikipedia Obama 条目 /screenshot 端到端 32.0/32.3/34.0s（含走代理的
 网络耗时，非纯布局），三发 image_base64 长度全同——输出确定性没破。纯
 布局提速的归因仍以合成页 A/B 为准。
+
+**归因拆分（2026-09-05 晚，回应 nicoburns "20s 对真实页太慢" 的追问，
+[回评](https://github.com/DioxusLabs/blitz/pull/835#issuecomment-5552169017)）**：
+此前 A/B 的秒数是 /screenshot 端到端整管道（解析→样式→taffy 布局→paint→
+PNG 编码），非纯布局；页是按触发形状刻意放大的。重建页面统一口径重测
+（release、新 rev、loopback、1024×1000 视口、3 发中位）：
+
+| 页面 | 端到端 |
+|---|---|
+| realistic 文章形（~280 元素 + 1 小 grid） | **0.91s**（含每请求建 browser+isolate） |
+| 同 3000 段纯块流（无 grid） | 6.0s |
+| 3000 段直接做 grid 子元素（定宽轨） | 8.7s |
+| 同上 + inline-block 包装（intrinsic 全开） | 12.8s |
+
+结论：真实页 <1s；秒级全在 stress 形状里。3000 段的 6.0s 基线是**我们自己
+的文字管线**（~2ms/段；debug sample 热点=swash shaping + glyph paint +
+greedy_wrap，疑似布局测量与 paint 双重 shaping——待剖析），grid 叠加仅
++2.7s（定宽）/ +6.8s（intrinsic）。页是重建的，绝对值与早前 28.7→18.1 /
+66→34 不可直接对表（生成器已失，行内同页可比）。
