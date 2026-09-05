@@ -2073,6 +2073,72 @@
         );
     }
 
+    // importScripts() was a silent no-op stub: Yahoo Finance's worker imports
+    // protobuf at startup, got `undefined` instead, and the SDK died to a
+    // TypeError pages could not see (obscura#827 family). The worker source
+    // executes synchronously inside new Function, so imports cannot be
+    // fetched at call time — they are preloaded from string-literal targets
+    // in the source, then replayed from cache via indirect eval, which puts
+    // top-level `var` in the global lexical scope the Function-wrapped body
+    // can see (a plain `var` assignment would also work, but declarations
+    // would not — pin the declaration semantics).
+    #[tokio::test(flavor = "current_thread")]
+    async fn worker_import_scripts_expose_declarations_to_worker_body() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate_for_cdp(
+                r#"new Promise((resolve, reject) => {
+                    const body = "importScripts('data:text/javascript,var%20pbVersion=42');" +
+                        "self.onmessage = function(e) { self.postMessage(pbVersion + '|' + typeof window); };";
+                    const w = new Worker(URL.createObjectURL(new Blob([body])));
+                    w.onerror = e => reject(new Error('worker error: ' + e.message));
+                    w.onmessage = e => resolve(e.data);
+                    w.postMessage('go');
+                })"#,
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.value.unwrap(), serde_json::json!("42|undefined"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn worker_import_scripts_failed_target_fires_error_event() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate_for_cdp(
+                r#"new Promise((resolve) => {
+                    const body = "importScripts('data:text/javascript;base64,!!!!');" +
+                        "self.onmessage = function(e) { self.postMessage('unreached'); };";
+                    const w = new Worker(URL.createObjectURL(new Blob([body])));
+                    w.onerror = e => resolve('err|' + e.message);
+                    w.onmessage = e => resolve('msg|' + e.data);
+                    w.postMessage('go');
+                })"#,
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let msg = result.value.unwrap();
+        let msg = msg.as_str().unwrap();
+        assert!(msg.starts_with("err|"), "worker delivered instead of erroring: {msg}");
+        assert!(msg.contains("failed to load"), "error lost the importScripts origin: {msg}");
+    }
+
+    #[test]
+    fn worker_import_url_extraction_skips_dynamic_arguments() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate(
+                r#"return globalThis.__ditingWorkerImportUrls(
+                    "importScripts('a.js', \"b.js\"); importScripts(runtimePath); importScripts()")"#,
+            )
+            .unwrap();
+        assert_eq!(result, serde_json::json!(["a.js", "b.js"]));
+    }
+
     // One stream per document. The tokenizer carries its state across the calls.
     // https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-document-write
     #[test]

@@ -8926,11 +8926,14 @@ globalThis.Worker = class Worker {
         catch { return Promise.resolve(null); }
       }
       if (/^https?:/i.test(abs)) {
+        worker._url = abs;
         return fetch(abs).then(r => r.text()).catch(e => { worker._fetchError = e; return null; });
       }
       return Promise.resolve(null);
     };
-    resolveCode().then(code => {
+    resolveCode()
+      .then(code => preloadWorkerImports(worker, code).then(() => code))
+      .then(code => {
       worker._code = code;
       worker._codeReady = true;
       // Drain messages that queued while the source loaded. Delivery here
@@ -8985,6 +8988,65 @@ globalThis.Worker = class Worker {
     if (this._listeners[type]) this._listeners[type] = this._listeners[type].filter(h => h !== fn);
   }
 };
+// importScripts() is synchronous per spec, but the only I/O this realm can
+// do is promise-based while the worker body runs synchronously inside
+// new Function — so the targets are preloaded: string-literal arguments in
+// the worker source (and in each imported source, three waves deep) are
+// fetched before _codeReady flips, and importScripts() replays them from
+// the cache. Replay uses indirect eval so top-level var/const/function land
+// in the global lexical scope, where the Function-wrapped worker body
+// (whose scope chain ends at the global environment) and later
+// importScripts() calls can see them — that is what makes
+// "importScripts(lib); use lib" work. Imports share the page realm, which
+// the synthetic worker already does. Arguments that are not string
+// literals, or whose fetch failed, throw at call time — a real failed
+// importScripts surfaces the same way (the worker's error event). The
+// preloader goes through the page's own fetch, so the SSRF deny-set and
+// robots/proxy policy apply to worker imports exactly as to the page.
+function workerImportUrls(src) {
+  const urls = [];
+  const callRe = /importScripts\s*\(([^)]*)\)/g;
+  let call;
+  while ((call = callRe.exec(src))) {
+    const litRe = /(["'])([^"']*)\1/g;
+    let lit;
+    while ((lit = litRe.exec(call[1]))) urls.push(lit[2]);
+  }
+  return urls;
+}
+globalThis.__ditingWorkerImportUrls = workerImportUrls;
+
+function resolveWorkerImportUrl(u, worker) {
+  try {
+    return new URL(u, worker._url || (globalThis.location && globalThis.location.href) || 'https://example.com/').href;
+  } catch {
+    return u;
+  }
+}
+
+async function preloadWorkerImports(worker, code) {
+  worker._imported = {};
+  if (typeof code !== 'string' || !code.includes('importScripts')) return;
+  let frontier = workerImportUrls(code);
+  for (let wave = 0; wave < 3 && frontier.length; wave++) {
+    const batch = frontier;
+    frontier = [];
+    await Promise.all(batch.map(async raw => {
+      const u = resolveWorkerImportUrl(raw, worker);
+      if (u in worker._imported) return;
+      try {
+        const text = u.startsWith('data:')
+          ? _decodeDataScriptUrl(u)
+          : await fetch(u).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); });
+        worker._imported[u] = text;
+        for (const nested of workerImportUrls(text)) frontier.push(nested);
+      } catch {
+        worker._imported[u] = null;
+      }
+    }));
+  }
+}
+
 function runWorkerMessage(worker, data) {
   try {
     if (!worker._workerSelf) {
@@ -9037,7 +9099,16 @@ function runWorkerMessage(worker, data) {
           caches: { open: () => Promise.reject(new DOMException('NotFoundError')), keys: () => Promise.resolve([]) },
           isSecureContext: true,
           origin: (globalThis.location && globalThis.location.origin) || 'https://example.com',
-          importScripts: () => {},
+          importScripts: (...urls) => {
+            for (const raw of urls) {
+              const u = resolveWorkerImportUrl(raw, worker);
+              const text = worker._imported && worker._imported[u];
+              if (typeof text !== 'string') {
+                throw new Error('importScripts: failed to load "' + raw + '"');
+              }
+              (0, eval)(text);
+            }
+          },
           queueMicrotask: globalThis.queueMicrotask,
           structuredClone: globalThis.structuredClone,
         };
