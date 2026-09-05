@@ -1761,4 +1761,7 @@ min-content 轨同 -37%；不定宽（inline-block 包装，intrinsic sizing 全
 
 验证：fork_deltas 17/17、全量 `--features stealth,screenshot` 743/0（与升级
 前同数）、clippy 70 == 70 零新增。基准注意：en.wikipedia 本机网络不可达，
-真实 Vector 页数字待 86quan 侧验证；合成页按 PR 描述的触发形状构造。
+合成页按 PR 描述的触发形状构造。86quan 部署 v0.2.8 后补测真实页（2026-09-05）：
+en.wikipedia Obama 条目 /screenshot 端到端 32.0/32.3/34.0s（含走代理的
+网络耗时，非纯布局），三发 image_base64 长度全同——输出确定性没破。纯
+布局提速的归因仍以合成页 A/B 为准。
