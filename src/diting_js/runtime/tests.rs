@@ -1790,6 +1790,56 @@
         assert_eq!(result.value.unwrap().as_f64().unwrap() as i64, 84);
     }
 
+    #[test]
+    fn resolve_this_parses_numeric_node_ids_only() {
+        let rt = setup_runtime("<html><body></body></html>");
+        let good = rt.resolve_this(Some("node-7"));
+        assert!(good.contains("var nid = 7"), "{good}");
+        // Anything after the digits must not ride along as script source.
+        for bad in ["node-1; globalThis.__injected = true", "node-", "node-x", "node-1.5"] {
+            assert_eq!(rt.resolve_this(Some(bad)), "globalThis", "{bad}");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn adversarial_object_id_does_not_inject_script() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let payload = "node-1; globalThis.__injected = 42";
+        let result = rt
+            .call_function_on(
+                "function() { return typeof globalThis.__injected; }",
+                Some(payload),
+                &[],
+                true,
+            )
+            .await.unwrap();
+        assert_eq!(result.value.unwrap(), serde_json::json!("undefined"));
+        let probe = rt
+            .call_function_on(
+                "function() { return globalThis.__injected === undefined; }",
+                None,
+                &[],
+                true,
+            )
+            .await.unwrap();
+        assert_eq!(probe.value.unwrap(), serde_json::json!(true));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn release_object_with_adversarial_id_is_inert() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.release_object("x']; globalThis.__injected = 42; ('");
+        let probe = rt
+            .call_function_on(
+                "function() { return globalThis.__injected === undefined; }",
+                None,
+                &[],
+                true,
+            )
+            .await.unwrap();
+        assert_eq!(probe.value.unwrap(), serde_json::json!(true));
+    }
+
     fn setup_runtime_with_cookies(html: &str) -> (JsRuntime, std::sync::Arc<crate::diting_net::CookieJar>) {
         let dom = crate::diting_dom::parse_html(html);
         let jar = std::sync::Arc::new(crate::diting_net::CookieJar::new());

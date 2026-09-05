@@ -660,18 +660,18 @@ impl JsRuntime {
                 "(async function() {{\n\
                     try {{\n\
                         var __result = await __ditingEvalScript({expr});\n\
-                        globalThis.__diting_objects['{oid}'] = __result;\n\
+                        {slot} = __result;\n\
                         globalThis.__diting_await_meta = {meta_fn};\n\
                         globalThis.__diting_await_rejected = false;\n\
                     }} catch(e) {{\n\
-                        globalThis.__diting_objects['{oid}'] = e;\n\
+                        {slot} = e;\n\
                         globalThis.__diting_await_meta = {exc_meta_fn};\n\
                         globalThis.__diting_await_rejected = true;\n\
                     }}\n\
                     globalThis.__diting_done_{done_counter} = true;\n\
                 }})()",
                 expr = expr_literal,
-                oid = oid,
+                slot = Self::object_slot(&oid),
                 meta_fn = Self::meta_extract_js("__result"),
                 exc_meta_fn = exc_meta_fn,
                 done_counter = done_counter,
@@ -682,17 +682,17 @@ impl JsRuntime {
                     var __result;\n\
                     try {{\n\
                         __result = __ditingEvalScript({expr});\n\
-                        globalThis.__diting_objects['{oid}'] = __result;\n\
+                        {slot} = __result;\n\
                         globalThis.__diting_await_meta = {meta_fn};\n\
                         globalThis.__diting_await_rejected = false;\n\
                     }} catch(e) {{\n\
-                        globalThis.__diting_objects['{oid}'] = e;\n\
+                        {slot} = e;\n\
                         globalThis.__diting_await_meta = {exc_meta_fn};\n\
                         globalThis.__diting_await_rejected = true;\n\
                     }}\n\
                 }})()",
                 expr = expr_literal,
-                oid = oid,
+                slot = Self::object_slot(&oid),
                 meta_fn = Self::meta_extract_js("__result"),
                 exc_meta_fn = exc_meta_fn,
             )
@@ -761,7 +761,7 @@ impl JsRuntime {
             } else {
                 let read = self
                     .runtime
-                    .execute_script("<readResult>", format!("globalThis.__diting_objects['{}']", oid))
+                    .execute_script("<readResult>", Self::object_slot(&oid))
                     .map_err(|e| format!("JS error: {}", e))?;
                 let json_val = self.v8_to_json(read)?;
                 Self::info_from_json(&json_val)
@@ -779,10 +779,7 @@ impl JsRuntime {
             };
             Self::info_from_meta(&meta_json, Some(oid.clone()))
         };
-        self.object_store.insert(
-            oid.clone(),
-            format!("globalThis.__diting_objects['{}']", oid),
-        );
+        self.object_store.insert(oid.clone(), Self::object_slot(&oid));
         Ok(EvalOutcome {
             info,
             exception: None,
@@ -856,10 +853,7 @@ impl JsRuntime {
             .unwrap_or("")
             .to_string();
 
-        self.object_store.insert(
-            oid.to_string(),
-            format!("globalThis.__diting_objects['{}']", oid),
-        );
+        self.object_store.insert(oid.to_string(), Self::object_slot(oid));
 
         let text = if await_promise {
             "Uncaught (in promise)"
@@ -914,11 +908,11 @@ impl JsRuntime {
                     var __result;\n\
                     try {{\n\
                         __result = await __fn.call(__this, {args});\n\
-                        globalThis.__diting_objects['{oid}'] = __result;\n\
+                        {slot} = __result;\n\
                         globalThis.__diting_await_meta = {meta_fn};\n\
                         globalThis.__diting_await_rejected = false;\n\
                     }} catch(e) {{\n\
-                        globalThis.__diting_objects['{oid}'] = e;\n\
+                        {slot} = e;\n\
                         globalThis.__diting_await_meta = {exc_meta_fn};\n\
                         globalThis.__diting_await_rejected = true;\n\
                     }} finally {{\n\
@@ -929,7 +923,7 @@ impl JsRuntime {
                 fn_decl = function_declaration,
                 this_expr = this_expr,
                 args = args_list,
-                oid = oid,
+                slot = Self::object_slot(&oid),
                 meta_fn = Self::meta_extract_js("__result"),
                 exc_meta_fn = exc_meta_fn,
                 done_counter = done_counter,
@@ -963,7 +957,7 @@ impl JsRuntime {
                 } else {
                     let read = self
                         .runtime
-                        .execute_script("<readResult>", format!("globalThis.__diting_objects['{}']", oid))
+                        .execute_script("<readResult>", Self::object_slot(&oid))
                         .map_err(|e| format!("JS error: {}", e))?;
                     let json_val = self.v8_to_json(read)?;
                     Self::info_from_json(&json_val)
@@ -981,10 +975,7 @@ impl JsRuntime {
                 };
                 Self::info_from_meta(&meta_json, Some(oid.clone()))
             };
-            self.object_store.insert(
-                oid.clone(),
-                format!("globalThis.__diting_objects['{}']", oid),
-            );
+            self.object_store.insert(oid.clone(), Self::object_slot(&oid));
             return Ok(EvalOutcome {
                 info,
                 exception: None,
@@ -999,10 +990,10 @@ impl JsRuntime {
                     var __this = ({this_expr});\n\
                     globalThis.__diting_await_rejected = false;\n\
                     try {{\n\
-                        globalThis.__diting_objects['{oid}'] = __fn.call(__this, {args});\n\
-                        return globalThis.__diting_objects['{oid}'];\n\
+                        {slot} = __fn.call(__this, {args});\n\
+                        return {slot};\n\
                     }} catch(e) {{\n\
-                        globalThis.__diting_objects['{oid}'] = e;\n\
+                        {slot} = e;\n\
                         globalThis.__diting_await_meta = {exc_meta_fn};\n\
                         globalThis.__diting_await_rejected = true;\n\
                         return undefined;\n\
@@ -1012,7 +1003,7 @@ impl JsRuntime {
                 fn_decl = function_declaration,
                 this_expr = this_expr,
                 args = args_list,
-                oid = oid,
+                slot = Self::object_slot(&oid),
                 exc_meta_fn = exc_meta_fn,
             );
             let result = self
@@ -1047,11 +1038,11 @@ impl JsRuntime {
                 var __result;\n\
                 try {{\n\
                     __result = __fn.call(__this, {args});\n\
-                    globalThis.__diting_objects['{oid}'] = __result;\n\
+                    {slot} = __result;\n\
                     globalThis.__diting_await_meta = {meta_fn};\n\
                     globalThis.__diting_await_rejected = false;\n\
                 }} catch(e) {{\n\
-                    globalThis.__diting_objects['{oid}'] = e;\n\
+                    {slot} = e;\n\
                     globalThis.__diting_await_meta = {exc_meta_fn};\n\
                     globalThis.__diting_await_rejected = true;\n\
                 }}\n\
@@ -1060,7 +1051,7 @@ impl JsRuntime {
             fn_decl = function_declaration,
             this_expr = this_expr,
             args = args_list,
-            oid = oid,
+            slot = Self::object_slot(&oid),
             meta_fn = Self::meta_extract_js("__result"),
             exc_meta_fn = exc_meta_fn,
         );
@@ -1089,10 +1080,7 @@ impl JsRuntime {
         } else {
             meta_str
         };
-        self.object_store.insert(
-            oid.clone(),
-            format!("globalThis.__diting_objects['{}']", oid),
-        );
+        self.object_store.insert(oid.clone(), Self::object_slot(&oid));
         Ok(EvalOutcome {
             info: Self::info_from_meta(&meta_json, Some(oid)),
             exception: None,
@@ -1112,17 +1100,11 @@ impl JsRuntime {
     pub fn store_object(&mut self, js_expression: &str) -> Result<String, String> {
         self.object_counter += 1;
         let oid = self.make_oid(self.object_counter);
-        let code = format!(
-            "globalThis.__diting_objects['{}'] = ({});",
-            oid, js_expression,
-        );
+        let code = format!("{} = ({});", Self::object_slot(&oid), js_expression);
         self.runtime
             .execute_script("<store>", code)
             .map_err(|e| format!("Store error: {}", e))?;
-        self.object_store.insert(
-            oid.clone(),
-            format!("globalThis.__diting_objects['{}']", oid),
-        );
+        self.object_store.insert(oid.clone(), Self::object_slot(&oid));
         Ok(oid)
     }
 
@@ -1136,11 +1118,11 @@ impl JsRuntime {
         let code = format!(
             "(function() {{\n\
                 var __result = (\n{expr}\n);\n\
-                globalThis.__diting_objects['{oid}'] = __result;\n\
+                {slot} = __result;\n\
                 return {meta_fn};\n\
             }})()",
             expr = js_expression,
-            oid = oid,
+            slot = Self::object_slot(&oid),
             meta_fn = Self::meta_extract_js("__result"),
         );
         let result = self
@@ -1153,20 +1135,14 @@ impl JsRuntime {
         } else {
             meta_str
         };
-        self.object_store.insert(
-            oid.clone(),
-            format!("globalThis.__diting_objects['{}']", oid),
-        );
+        self.object_store.insert(oid.clone(), Self::object_slot(&oid));
         Ok(Self::info_from_meta(&meta_json, Some(oid)))
     }
 
     #[allow(dead_code)] // CDP Runtime.releaseObject parity
     pub fn release_object(&mut self, object_id: &str) {
         if self.object_store.remove(object_id).is_some() {
-            let code = format!(
-                "delete globalThis.__diting_objects['{}'];",
-                object_id,
-            );
+            let code = format!("delete {};", Self::object_slot(object_id));
             let _ = self.runtime.execute_script("<release>", code);
         }
     }
@@ -1623,6 +1599,14 @@ impl JsRuntime {
         format!("{{\"injectedScriptId\":1,\"id\":{}}}", counter)
     }
 
+    /// Object-store slot expression with the id embedded as a JSON string
+    /// literal, so an objectId — minted or inbound — can never splice itself
+    /// into the surrounding script (obscura#843 class).
+    fn object_slot(oid: &str) -> String {
+        let lit = serde_json::to_string(oid).unwrap_or_else(|_| "\"\"".to_string());
+        format!("globalThis.__diting_objects[{lit}]")
+    }
+
     fn wrap_expression(expression: &str) -> String {
         // CDP Runtime.evaluate semantics: the input is a *script*, not an
         // expression — statements are legal and the completion value of the
@@ -1729,16 +1713,15 @@ impl JsRuntime {
             Some(oid) => {
                 if let Some(retrieval) = self.object_store.get(oid) {
                     retrieval.clone()
-                } else if oid.starts_with("node-") {
-                    let nid = oid.strip_prefix("node-").unwrap_or("0");
+                } else if let Some(nid) = oid.strip_prefix("node-").and_then(|s| s.parse::<u64>().ok())
+                {
                     format!(
                         "(function() {{ \
-                            var nid = {}; \
+                            var nid = {nid}; \
                             var cache = globalThis._cache || new Map(); \
                             if (cache.has(nid)) return cache.get(nid); \
                             return null; \
-                        }})()",
-                        nid
+                        }})()"
                     )
                 } else {
                     "globalThis".to_string()
@@ -1924,7 +1907,7 @@ impl JsRuntime {
             .runtime
             .execute_script(
                 "<typeofResult>",
-                format!("typeof globalThis.__diting_objects['{oid}'] === 'undefined'"),
+                format!("typeof {} === 'undefined'", Self::object_slot(oid)),
             )
             .map_err(|e| format!("JS error: {}", e))?;
         Ok(self.v8_to_json(probe)?.as_bool().unwrap_or(false))
