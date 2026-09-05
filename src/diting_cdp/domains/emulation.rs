@@ -123,8 +123,9 @@ pub async fn handle(
         "setUserAgentOverride" => {
             let ua = params.get("userAgent").and_then(|v| v.as_str()).unwrap_or("");
             let lang = params.get("acceptLanguage").and_then(|v| v.as_str());
+            let platform = params.get("platform").and_then(|v| v.as_str());
             if let Some(page) = ctx.get_session_page_mut(session_id) {
-                page.set_user_agent_override(ua, lang).await;
+                page.set_user_agent_override(ua, lang, platform).await;
             }
             Ok(json!({}))
         }

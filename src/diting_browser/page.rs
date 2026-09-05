@@ -1611,13 +1611,19 @@ impl Page {
     /// not rebuilt here — matching Chrome, where a UA override does not
     /// re-handshake the TLS stack.
     ///
-    /// `lang` carries the override's `acceptLanguage` (obscura #777 class).
+    /// `lang` carries the override's `acceptLanguage`, `platform` its
+    /// `platform` field (navigator.platform only — obscura #777 class).
     /// Each sent field applies independently — a locale-only call must not
     /// touch the UA and vice versa (Chrome's only-sent-fields semantics).
     /// The language moves navigator.language immediately and the transport
     /// headers, but never re-pins the ICU default (process-global, sticky
     /// per-isolate — see [`crate::diting_js::runtime`]).
-    pub async fn set_user_agent_override(&mut self, ua: &str, lang: Option<&str>) {
+    pub async fn set_user_agent_override(
+        &mut self,
+        ua: &str,
+        lang: Option<&str>,
+        platform: Option<&str>,
+    ) {
         if !ua.is_empty() {
             self.http_client.set_user_agent(ua).await;
             #[cfg(feature = "stealth")]
@@ -1639,6 +1645,11 @@ impl Page {
             }
             if let Some(ref mut rt) = self.js {
                 rt.set_navigator_language(lang);
+            }
+        }
+        if let Some(platform) = platform.filter(|p| !p.is_empty()) {
+            if let Some(ref mut rt) = self.js {
+                rt.set_navigator_platform(platform);
             }
         }
     }

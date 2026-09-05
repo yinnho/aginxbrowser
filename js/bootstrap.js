@@ -3997,7 +3997,7 @@ _markNative(NetworkInformation);
 globalThis.navigator = {
   get userAgent() { return globalThis.__diting_ua || "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"; },
   get appVersion() { return this.userAgent.replace('Mozilla/', ''); },
-  get platform() { return __ditingPlatformFromUA(); },
+  get platform() { return globalThis.__diting_platform_override || __ditingPlatformFromUA(); },
   get language() { return __ditingLangList()[0]; },
   get languages() { return __ditingLangList().slice(); },
   onLine: true, cookieEnabled: true, hardwareConcurrency: 8,

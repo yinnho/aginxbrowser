@@ -499,6 +499,17 @@ impl JsRuntime {
             format!("globalThis.__diting_lang = '{}';", escaped),
         );
     }
+    /// Move only the navigator.platform persona (the CDP `platform` field of
+    /// setUserAgentOverride — per protocol it targets navigator.platform
+    /// only, never the UA string, the transport headers, or
+    /// userAgentData.platform, which is userAgentMetadata territory).
+    pub fn set_navigator_platform(&mut self, platform: &str) {
+        let escaped = platform.replace('\\', "\\\\").replace('\'', "\\'");
+        let _ = self.runtime.execute_script(
+            "<set-platform>",
+            format!("globalThis.__diting_platform_override = '{}';", escaped),
+        );
+    }
     pub fn set_language(&mut self, lang: &str) {
         self.set_navigator_language(lang);
         // Pin ICU's default locale to the SAME source (obscura#734 lineage):

@@ -2123,6 +2123,54 @@ mod tests {
         );
     }
 
+    // The `platform` field is the third leg of setUserAgentOverride: the
+    // protocol pins it to navigator.platform only, so the UA string, the
+    // transport headers, and userAgentData.platform must all stay put. A
+    // platform-only call must not move the language either (obscura #777).
+    #[tokio::test(flavor = "current_thread")]
+    async fn set_user_agent_override_platform_moves_navigator_platform_only() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-platform-override".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": "data:text/html,<html><body>hi</body></html>" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        let set = CdpRequest {
+            id: 2,
+            method: "Network.setUserAgentOverride".to_string(),
+            params: json!({ "platform": "Win32" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&set, &mut ctx).await.error.is_none());
+
+        let req = CdpRequest {
+            id: 3,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "navigator.platform + '|' + navigator.userAgentData.platform + '|' + navigator.language",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&req, &mut ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        let value = resp.result.expect("result")["result"]["value"]
+            .as_str()
+            .expect("string value")
+            .to_string();
+        assert_eq!(
+            value, "Win32|macOS|zh-CN",
+            "platform override must move navigator.platform only, got: {value}"
+        );
+    }
+
     // Only-sent-fields discipline (obscura #778 review): a locale-only
     // override call must not blank or move the previously set UA, and a
     // UA-only call must not touch the language. Chrome applies each sent
