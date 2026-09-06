@@ -937,6 +937,59 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             s.push(']');
             s
         }
+        // CSSOM scrollWidth/scrollHeight for one element as "[w,h]", from
+        // the same layout run as `layout_rect`: the element's own box
+        // unioned with every laid-out DOM descendant's overflow extent
+        // relative to the element's origin (blitz #444 — scroll ranges that
+        // ignore overflowing content clamp agents out of the bottom of the
+        // page). html/body additionally clamp up to the viewport: Chrome's
+        // scrolling area is never smaller than the window, while its
+        // client* stay the viewport contract. Element boxes carry the
+        // content extent (blocks include their text, abspos kids have their
+        // own rects), so the element-rect walk approximates the CSSOM
+        // scrollable overflow region without per-margin-box geometry.
+        #[cfg(feature = "screenshot")]
+        "scroll_extent" => {
+            let nid = match parse_nid(&arg1) { Some(id) => id, None => return "null".into() };
+            let epoch = dom.epoch();
+            let fresh = gs.layout_cache.borrow().as_ref().map(|(e, _)| *e == epoch) != Some(true);
+            if fresh {
+                let run = layout_run_all(&gs, dom);
+                *gs.layout_cache.borrow_mut() = Some((epoch, run));
+            }
+            let guard = gs.layout_cache.borrow();
+            let Some((_, (rects, _, _))) = guard.as_ref().filter(|(e, _)| *e == epoch) else {
+                return "null".into();
+            };
+            let Some(&[ox, oy, ow, oh]) = rects.get(&nid) else { return "null".into() };
+            let is_root = dom
+                .with_node(nid, |n| {
+                    n.as_element().map(|e| {
+                        matches!(
+                            e.local.to_ascii_lowercase().as_ref(),
+                            "html" | "body"
+                        )
+                    })
+                })
+                .flatten()
+                .unwrap_or(false);
+            let mut max_w = ow;
+            let mut max_h = oh;
+            let mut stack = dom.children(nid);
+            while let Some(cur) = stack.pop() {
+                stack.extend(dom.children(cur));
+                if let Some(&[x, y, w, h]) = rects.get(&cur) {
+                    max_w = max_w.max((x + w - ox).max(0.0));
+                    max_h = max_h.max((y + h - oy).max(0.0));
+                }
+            }
+            if is_root {
+                let (vw, vh) = gs.viewport;
+                max_w = max_w.max(vw);
+                max_h = max_h.max(vh);
+            }
+            format!("[{},{}]", max_w, max_h)
+        }
         // Cascaded computed values for one element as a single JSON object,
         // from the same style+layout run as layout_rect — the layer
         // getComputedStyle was missing: only inline styles were consulted,
@@ -995,6 +1048,8 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         "layout_rect" => "null".into(),
         #[cfg(not(feature = "screenshot"))]
         "paint_order" => "null".into(),
+        #[cfg(not(feature = "screenshot"))]
+        "scroll_extent" => "null".into(),
         _ => "null".into(),
     }
 }

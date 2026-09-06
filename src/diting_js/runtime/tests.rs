@@ -5637,6 +5637,94 @@
         assert_eq!(parts[2], serde_json::json!(true));
     }
 
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn test_scroll_height_reports_overflow_extent_not_own_box() {
+        // blitz#444 family: scrollHeight must be the scrollable overflow
+        // extent (union of the laid-out subtree), not the element's own box
+        // height — otherwise scrollHeight - clientHeight is always 0 and
+        // neither our wheel helper nor a page's lazy loader can detect
+        // scrollability. client* keep the box contract; scroll* must move.
+        let mut rt = setup_runtime(
+            "<html><body><div id=\"box\" style=\"width:200px;height:100px;overflow:auto\"><div style=\"height:500px\"></div></div></body></html>",
+        );
+        let result = rt.evaluate(r#"
+            const el = document.getElementById("box");
+            return [el.scrollHeight, el.clientHeight,
+                    el.scrollWidth, el.clientWidth,
+                    el.scrollHeight - el.clientHeight > 0];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        assert_eq!(
+            parts[0],
+            serde_json::json!(500),
+            "scrollHeight serves the descendant overflow extent, not 100"
+        );
+        assert_eq!(parts[1], serde_json::json!(100), "clientHeight stays the box");
+        assert_eq!(
+            parts[2],
+            serde_json::json!(200),
+            "no horizontal overflow -> scrollWidth equals the box width"
+        );
+        assert_eq!(parts[3], serde_json::json!(200));
+        assert_eq!(
+            parts[4],
+            serde_json::json!(true),
+            "scrollability is now detectable via scrollHeight - clientHeight"
+        );
+    }
+
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn test_document_scroll_height_tracks_page_extent_with_viewport_floor() {
+        // The document scrolling area must track real page extent (tall page
+        // -> scrollHeight > innerHeight) and clamp UP to the viewport on
+        // short pages — Chrome never lets the root scrolling area be smaller
+        // than the window. clientHeight keeps the viewport contract either
+        // way, so scrollHeight - clientHeight stays a working overflow probe.
+        let mut rt = setup_runtime("<html><body><div style=\"height:2000px\"></div></body></html>");
+        let result = rt.evaluate(r#"
+            return [document.documentElement.scrollHeight > innerHeight,
+                    document.body.scrollHeight > innerHeight,
+                    document.documentElement.scrollHeight >= document.body.scrollHeight];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        assert_eq!(
+            parts[0],
+            serde_json::json!(true),
+            "documentElement.scrollHeight reports the real page extent"
+        );
+        assert_eq!(
+            parts[1],
+            serde_json::json!(true),
+            "body.scrollHeight reports the real content extent"
+        );
+        assert_eq!(
+            parts[2],
+            serde_json::json!(true),
+            "html extent contains the body extent"
+        );
+
+        let mut rt = setup_runtime("<html><body><p>short</p></body></html>");
+        let result = rt.evaluate(r#"
+            return [document.documentElement.scrollHeight === innerHeight,
+                    document.body.scrollHeight === innerHeight,
+                    document.documentElement.clientHeight === innerHeight];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        assert_eq!(
+            parts[0],
+            serde_json::json!(true),
+            "short page clamps the root scrolling area up to the viewport"
+        );
+        assert_eq!(parts[1], serde_json::json!(true));
+        assert_eq!(
+            parts[2],
+            serde_json::json!(true),
+            "clientHeight keeps the viewport contract"
+        );
+    }
+
     /// Upstream obscura #704: postMessage's targetOrigin argument must gate
     /// delivery — '*' or a matching origin delivers, a mismatched origin
     /// drops silently (browsers never throw), '/' requires same-origin with

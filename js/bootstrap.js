@@ -2703,8 +2703,25 @@ class Element extends Node {
   // returning 100x20 there made every element appear off-screen and broke .click().
   get clientWidth() { return this._ditingExtent("w", 100); }
   get clientHeight() { return this._ditingExtent("h", 20); }
-  get scrollWidth() { return this._ditingExtent("w", 100); }
-  get scrollHeight() { return this._ditingExtent("h", 20); }
+  // CSSOM scroll* = own box + descendant overflow extent (blitz #444): a
+  // scroll range that ignores overflowing content reports "nothing to
+  // scroll" and whoever reads it stops at the first viewport. html/body
+  // clamp up to the viewport natively (Chrome: the scrolling area is never
+  // smaller than the window) while client* keep the viewport contract.
+  // No layout data (no screenshot feature, display:none, …) → old path.
+  get scrollWidth() { return this._ditingScrollExtent("w") ?? this._ditingExtent("w", 100); }
+  get scrollHeight() { return this._ditingScrollExtent("h") ?? this._ditingExtent("h", 20); }
+  _ditingScrollExtent(axis) {
+    try {
+      if (this._nid == null) return null;
+      const raw = _domRaw("scroll_extent", String(this._nid | 0), "");
+      const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
+      if (Array.isArray(arr) && arr.length === 2 && Number.isFinite(arr[0])) {
+        return Math.max(0, Math.round(axis === "w" ? arr[0] : arr[1]));
+      }
+    } catch { /* no layout data */ }
+    return null;
+  }
   // Same taffy-layout source as getBoundingClientRect (without its
   // click-target side effect), so a script measuring a container via
   // offsetWidth (map-lib init) sees the real box instead of the 100x20 stub
