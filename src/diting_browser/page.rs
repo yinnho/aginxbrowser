@@ -170,32 +170,6 @@ fn module_eval_budget_from(raw: Option<&str>) -> u64 {
     raw.and_then(|s| s.parse().ok()).unwrap_or(10_000)
 }
 
-/// Compute the default `strict-origin-when-cross-origin` referrer for a
-/// document-initiated navigation (upstream edb1785). Same-origin sends the
-/// full source URL minus fragment/credentials; cross-origin sends only the
-/// origin; downgrades (https -> http) and non-HTTP(S) schemes send nothing.
-/// Referrer-Policy overrides are not yet plumbed through.
-fn navigation_referrer(source: &Url, target: &Url) -> String {
-    if !matches!(source.scheme(), "http" | "https")
-        || !matches!(target.scheme(), "http" | "https")
-        || (source.scheme() == "https" && target.scheme() == "http")
-    {
-        return String::new();
-    }
-
-    if source.origin() == target.origin() {
-        let mut sanitized = source.clone();
-        sanitized.set_fragment(None);
-        let _ = sanitized.set_username("");
-        let _ = sanitized.set_password(None);
-        return sanitized.to_string();
-    }
-
-    let mut origin = source.origin().ascii_serialization();
-    origin.push('/');
-    origin
-}
-
 pub struct Page {
     pub id: String,
     /// Upstream frame-realm identifier: one Page can host sub-frame realms
@@ -397,8 +371,12 @@ impl Page {
         if let Some(ref stealth) = self.stealth_client {
             return stealth.fetch(url).await;
         }
+        // A JS/link-initiated navigation carries the referring document's
+        // URL per browser semantics; direct automation navigations leave
+        // self.referrer empty (edb1785) and go out bare.
+        let referrer = if self.referrer.is_empty() { None } else { Some(self.referrer.as_str()) };
         self.http_client
-            .fetch_with_callbacks(url, Some(&self.callbacks), crate::diting_net::ResourceType::Document)
+            .fetch_with_callbacks(url, Some(&self.callbacks), crate::diting_net::ResourceType::Document, referrer)
             .await
     }
     fn init_js(&mut self) {
@@ -788,11 +766,13 @@ impl Page {
 
         let client = self.http_client.clone();
         let script_callbacks = self.callbacks.clone();
+        let doc_referrer = self.url.as_ref().map(|u| u.to_string());
         let fetch_futures: Vec<_> = fetch_tasks.iter().map(|(idx, url)| {
             let client = client.clone();
             let script_callbacks = script_callbacks.clone();
             let url = url.clone();
             let idx = *idx;
+            let doc_referrer = doc_referrer.clone();
             async move {
                 let parsed = Url::parse(&url).unwrap_or_else(|_| Url::parse("about:blank").unwrap());
                 if parsed.scheme() == "data" {
@@ -820,7 +800,7 @@ impl Page {
                     return Some((idx, url, resp));
                 }
                 match client
-                    .fetch_with_callbacks(&parsed, Some(script_callbacks.as_ref()), crate::diting_net::ResourceType::Script)
+                    .fetch_with_callbacks(&parsed, Some(script_callbacks.as_ref()), crate::diting_net::ResourceType::Script, doc_referrer.as_deref())
                     .await
                 {
                     Ok(resp) => Some((idx, url, resp)),
@@ -1304,7 +1284,7 @@ impl Page {
                 // the strict-origin-when-cross-origin referrer of this one.
                 self.referrer = Url::parse(&current_url)
                     .ok()
-                    .and_then(|src| Url::parse(&next_url).ok().map(|dst| navigation_referrer(&src, &dst)))
+                    .and_then(|src| Url::parse(&next_url).ok().map(|dst| crate::diting_net::client::HttpClient::navigation_referrer(&src, &dst)))
                     .unwrap_or_default();
                 current_url = next_url;
                 current_method = next_method;
@@ -1366,8 +1346,11 @@ impl Page {
             headers.insert("content-type".to_string(), content_type);
             Ok(crate::diting_net::Response { url: url.clone(), status: 200, headers, body: body_bytes, redirected_from: Vec::new() })
         } else if method == "POST" {
+            // The submitting document initiates the POST: it is both the
+            // Referer (policy-trimmed per hop) and the Origin source.
+            let doc_referrer = self.url.as_ref().map(|u| u.to_string());
             self.http_client
-                .post_form_with_callbacks(&url, body, Some(&self.callbacks), crate::diting_net::ResourceType::Document)
+                .post_form_with_callbacks(&url, body, Some(&self.callbacks), crate::diting_net::ResourceType::Document, doc_referrer.as_deref())
                 .await
         } else {
             self.fetch_document(&url).await
@@ -1445,14 +1428,16 @@ impl Page {
 
         let client = self.http_client.clone();
         let css_callbacks = self.callbacks.clone();
+        let doc_referrer = self.url.as_ref().map(|u| u.to_string());
         let css_futures: Vec<_> = css_fetch_urls.iter().map(|full_url| {
             let client = client.clone();
             let css_callbacks = css_callbacks.clone();
             let url_str = full_url.clone();
+            let doc_referrer = doc_referrer.clone();
             async move {
                 let parsed = Url::parse(&url_str).unwrap_or_else(|_| Url::parse("about:blank").unwrap());
                 match client
-                    .fetch_with_callbacks(&parsed, Some(css_callbacks.as_ref()), crate::diting_net::ResourceType::Stylesheet)
+                    .fetch_with_callbacks(&parsed, Some(css_callbacks.as_ref()), crate::diting_net::ResourceType::Stylesheet, doc_referrer.as_deref())
                     .await
                 {
                     Ok(resp) => Some((url_str, resp)),
@@ -2292,7 +2277,7 @@ impl Page {
                 .and_then(|source| {
                     Url::parse(&url)
                         .ok()
-                        .map(|target| navigation_referrer(source, &target))
+                        .map(|target| crate::diting_net::client::HttpClient::navigation_referrer(source, &target))
                 })
                 .unwrap_or_default();
             self.navigate_with_wait_post_ref(
@@ -2503,7 +2488,7 @@ mod tests {
     #[test]
     fn navigation_referrer_matrix() {
         let same = |a: &str, b: &str| {
-            navigation_referrer(&Url::parse(a).unwrap(), &Url::parse(b).unwrap())
+            crate::diting_net::client::HttpClient::navigation_referrer(&Url::parse(a).unwrap(), &Url::parse(b).unwrap())
         };
         // Same-origin: full URL, fragment and credentials stripped.
         assert_eq!(

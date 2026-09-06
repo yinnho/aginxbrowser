@@ -1537,7 +1537,7 @@ async fn op_fetch_url(
         })
         .unwrap_or(false);
 
-    let (cookie_jar, in_flight, intercept_tx, proxy_url, http_client, callbacks) = {
+    let (cookie_jar, in_flight, intercept_tx, proxy_url, http_client, callbacks, document_url) = {
         let state_borrow = state.borrow();
         let gs = state_borrow.borrow::<SharedState>().clone();
         let gs = gs.borrow_mut();
@@ -1564,7 +1564,7 @@ async fn op_fetch_url(
         } else {
             None
         };
-        (jar, in_flight, itx, proxy_url, gs.http_client.clone(), gs.callbacks.clone())
+        (jar, in_flight, itx, proxy_url, gs.http_client.clone(), gs.callbacks.clone(), gs.url.clone())
     };
 
     let mut override_url: Option<String> = None;
@@ -1826,6 +1826,21 @@ async fn op_fetch_url(
         ] {
             if !custom_headers.keys().any(|k| k.eq_ignore_ascii_case(name)) {
                 req = req.header(name, value);
+            }
+        }
+
+        // The initiating document is the Referer (strict-origin-when-cross-origin,
+        // trimmed per hop like client.rs). Domain-whitelist APIs (e.g. AMap keys
+        // bound to a domain) reject bare requests. Origin on non-GET already
+        // handled above. Explicit Referer in fetch init wins.
+        if !document_url.is_empty()
+            && !custom_headers.keys().any(|k| k.eq_ignore_ascii_case("referer"))
+        {
+            if let (Ok(doc), Ok(target)) = (Url::parse(&document_url), Url::parse(&current_url)) {
+                let ref_val = crate::diting_net::client::HttpClient::navigation_referrer(&doc, &target);
+                if !ref_val.is_empty() {
+                    req = req.header(reqwest::header::REFERER, ref_val);
+                }
             }
         }
 

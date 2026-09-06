@@ -692,17 +692,57 @@ impl HttpClient {
         self.fetch_with_method(Method::POST, url, Some(body.as_bytes().to_vec())).await
     }
 
+    /// Compute the default `strict-origin-when-cross-origin` referrer for a
+    /// document-initiated request (upstream edb1785). Same-origin sends the
+    /// full source URL minus fragment/credentials; cross-origin sends only
+    /// the origin; downgrades (https -> http) and non-HTTP(S) schemes send
+    /// nothing. Referrer-Policy overrides are not yet plumbed through.
+    pub(crate) fn navigation_referrer(source: &Url, target: &Url) -> String {
+        if !matches!(source.scheme(), "http" | "https")
+            || !matches!(target.scheme(), "http" | "https")
+            || (source.scheme() == "https" && target.scheme() == "http")
+        {
+            return String::new();
+        }
+
+        if source.origin() == target.origin() {
+            let mut sanitized = source.clone();
+            sanitized.set_fragment(None);
+            let _ = sanitized.set_username("");
+            let _ = sanitized.set_password(None);
+            return sanitized.to_string();
+        }
+
+        let mut origin = source.origin().ascii_serialization();
+        origin.push('/');
+        origin
+    }
+
+    /// Page-subresource fetch (render-time img/media prefetch): a plain GET
+    /// that carries the initiating document's Referer. `referrer` is the raw
+    /// document URL; the policy trim happens per hop in the traced path.
+    pub async fn fetch_subresource(
+        &self,
+        url: &Url,
+        referrer: Option<&str>,
+    ) -> Result<Response, NetError> {
+        self.fetch_with_method_traced(Method::GET, url, None, None, ResourceType::Image, referrer)
+            .await
+    }
+
     /// Passive-observer variants (upstream issue #408): fire the registry's
     /// on_request callbacks with the fully-built request just before each hop
     /// is sent, and on_response with the completed response. `None` behaves
-    /// exactly like the untraced entry points.
+    /// exactly like the untraced entry points. `referrer` is the initiating
+    /// document URL for page-driven loads; top-level tool fetches pass None.
     pub async fn fetch_with_callbacks(
         &self,
         url: &Url,
         callbacks: Option<&CallbackRegistry>,
         resource_type: ResourceType,
+        referrer: Option<&str>,
     ) -> Result<Response, NetError> {
-        self.fetch_with_method_traced(Method::GET, url, None, callbacks, resource_type)
+        self.fetch_with_method_traced(Method::GET, url, None, callbacks, resource_type, referrer)
             .await
     }
 
@@ -713,6 +753,7 @@ impl HttpClient {
         body: &str,
         callbacks: Option<&CallbackRegistry>,
         resource_type: ResourceType,
+        referrer: Option<&str>,
     ) -> Result<Response, NetError> {
         self.fetch_with_method_traced(
             Method::POST,
@@ -720,6 +761,7 @@ impl HttpClient {
             Some(body.as_bytes().to_vec()),
             callbacks,
             resource_type,
+            referrer,
         )
         .await
     }
@@ -730,7 +772,7 @@ impl HttpClient {
         url: &Url,
         initial_body: Option<Vec<u8>>,
     ) -> Result<Response, NetError> {
-        self.fetch_with_method_traced(initial_method, url, initial_body, None, ResourceType::Document)
+        self.fetch_with_method_traced(initial_method, url, initial_body, None, ResourceType::Document, None)
             .await
     }
 
@@ -741,6 +783,7 @@ impl HttpClient {
         initial_body: Option<Vec<u8>>,
         callbacks: Option<&CallbackRegistry>,
         resource_type: ResourceType,
+        referrer: Option<&str>,
     ) -> Result<Response, NetError> {
         validate_url(url, self.allow_private_network)?;
 
@@ -817,6 +860,32 @@ impl HttpClient {
                 HeaderName::from_static("upgrade-insecure-requests"),
                 HeaderValue::from_static("1"),
             );
+            // Document-initiated requests carry the initiator's Referer —
+            // whitelist-checked service APIs (map vendors, CDN anti-leech)
+            // reject bare requests — trimmed per hop by the navigation
+            // policy, since a redirect can change the same/cross-origin
+            // answer. Non-GET/HEAD also carries Origin (same-origin POSTs
+            // included, matching the fetch() op's b744b9b semantics).
+            // extra_headers below can override both.
+            if let Some(src) = referrer {
+                if let Ok(source) = Url::parse(src) {
+                    let ref_value = Self::navigation_referrer(&source, &current_url);
+                    if !ref_value.is_empty() {
+                        if let Ok(v) = HeaderValue::from_str(&ref_value) {
+                            headers.insert(reqwest::header::REFERER, v);
+                        }
+                    }
+                    if method != Method::GET
+                        && method != Method::HEAD
+                        && !headers.contains_key(reqwest::header::ORIGIN)
+                    {
+                        let origin_value = source.origin().ascii_serialization();
+                        if let Ok(v) = HeaderValue::from_str(&origin_value) {
+                            headers.insert(reqwest::header::ORIGIN, v);
+                        }
+                    }
+                }
+            }
 
             let cookie_header = self.cookie_jar.get_cookie_header(&current_url);
             tracing::debug!(
@@ -1393,6 +1462,183 @@ mod tests {
         assert!(
             msg.contains("AGINXBROWSER_PROXY"),
             "error must name the knob, got: {msg}"
+        );
+    }
+
+    /// Same LAN placement as [`lan_http_origin`], but the response body is
+    /// the received request head (one `name: value` line per header). Let's
+    /// the tests assert exactly what went out on the wire.
+    async fn header_echo_origin() -> Option<(Url, tokio::task::JoinHandle<()>)> {
+        let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+        probe.connect("8.8.8.8:80").ok()?;
+        let ip = probe.local_addr().ok()?.ip();
+        if ip.is_loopback() {
+            return None;
+        }
+        let listener = tokio::net::TcpListener::bind((ip, 0)).await.ok()?;
+        let addr = listener.local_addr().ok()?;
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else { break };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = Vec::new();
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        async {
+                            let mut chunk = [0u8; 2048];
+                            // Consume the body too, so small POSTs never hit a
+                            // reset mid-write on the client side.
+                            loop {
+                                let n = stream.read(&mut chunk).await?;
+                                buf.extend_from_slice(&chunk[..n]);
+                                let head_end = buf
+                                    .windows(4)
+                                    .position(|w| w == b"\r\n\r\n")
+                                    .map(|p| p + 4);
+                                if let Some(end) = head_end {
+                                    let head = String::from_utf8_lossy(&buf[..end]).to_string();
+                                    let claimed: usize = head
+                                        .lines()
+                                        .find_map(|l| {
+                                            l.to_ascii_lowercase()
+                                                .strip_prefix("content-length:")
+                                                .and_then(|v| v.trim().parse().ok())
+                                        })
+                                        .unwrap_or(0);
+                                    if buf.len() >= end + claimed {
+                                        break;
+                                    }
+                                }
+                                if buf.len() > 64 * 1024 {
+                                    break;
+                                }
+                            }
+                            Ok::<(), std::io::Error>(())
+                        },
+                    )
+                    .await;
+                    let head = String::from_utf8_lossy(&buf).to_string();
+                    let echo: Vec<String> = head
+                        .lines()
+                        .skip(1)
+                        .take_while(|l| !l.is_empty())
+                        .map(|l| l.to_ascii_lowercase())
+                        .collect();
+                    let body = echo.join("\n");
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        Some((Url::parse(&format!("http://{addr}/")).unwrap(), handle))
+    }
+
+    fn echoed<'a>(echo: &'a str, name: &str) -> Vec<&'a str> {
+        echo.lines()
+            .filter_map(|l| l.strip_prefix(&format!("{name}:")).map(|v| v.trim()))
+            .collect()
+    }
+
+    fn referrer_client() -> HttpClient {
+        HttpClient::with_full_options(std::sync::Arc::new(CookieJar::new()), None, true)
+    }
+
+    /// Page-subresource GETs carry the initiating document as Referer
+    /// (strict-origin-when-cross-origin: same-origin keeps the full URL
+    /// minus the fragment). Domain-whitelist service APIs reject bare
+    /// requests — this is the #268 wire contract.
+    #[tokio::test]
+    async fn subresource_get_carries_document_referer() {
+        let Some((base, server)) = header_echo_origin().await else {
+            eprintln!("skip: no non-loopback local address to serve on");
+            return;
+        };
+        let doc = format!("{}doc/page.html?a=1#frag", base);
+        let target = format!("{}img/pin.png", base);
+        let fetched = referrer_client()
+            .fetch_subresource(&Url::parse(&target).unwrap(), Some(&doc))
+            .await;
+        server.abort();
+
+        let resp = fetched.expect("echo fetch must succeed");
+        let echo = String::from_utf8_lossy(&resp.body).to_string();
+        let want = doc.split('#').next().unwrap().to_string();
+        let refs = echoed(&echo, "referer");
+        assert_eq!(refs.len(), 1, "exactly one Referer, echo: {echo}");
+        assert_eq!(refs[0], want, "fragment must be trimmed, echo: {echo}");
+    }
+
+    /// Non-GET subresource loads carry Origin alongside Referer — same-origin
+    /// POSTs included (b744b9b fetch()-op semantics).
+    #[tokio::test]
+    async fn post_form_carries_origin_and_referer() {
+        let Some((base, server)) = header_echo_origin().await else {
+            eprintln!("skip: no non-loopback local address to serve on");
+            return;
+        };
+        let doc = format!("{}doc/form.html", base);
+        let fetched = referrer_client()
+            .post_form_with_callbacks(&base, "a=1", None, ResourceType::Fetch, Some(&doc))
+            .await;
+        server.abort();
+
+        let resp = fetched.expect("echo post must succeed");
+        let echo = String::from_utf8_lossy(&resp.body).to_string();
+        let origins = echoed(&echo, "origin");
+        assert_eq!(origins.len(), 1, "exactly one Origin, echo: {echo}");
+        assert_eq!(origins[0], base.as_str().trim_end_matches('/'), "echo: {echo}");
+        assert!(!echoed(&echo, "referer").is_empty(), "echo: {echo}");
+    }
+
+    /// setExtraHTTPHeaders-style overrides win over the computed Referer —
+    /// a tool that pins a header must not be silently re-prefixed.
+    #[tokio::test]
+    async fn extra_headers_override_computed_referer() {
+        let Some((base, server)) = header_echo_origin().await else {
+            eprintln!("skip: no non-loopback local address to serve on");
+            return;
+        };
+        let client = referrer_client();
+        client
+            .set_extra_headers(HashMap::from([(
+                "Referer".to_string(),
+                "https://override.example/page".to_string(),
+            )]))
+            .await;
+        let doc = format!("{}doc/page.html", base);
+        let fetched = client
+            .fetch_subresource(&base.clone(), Some(&doc))
+            .await;
+        server.abort();
+
+        let resp = fetched.expect("echo fetch must succeed");
+        let echo = String::from_utf8_lossy(&resp.body).to_string();
+        let refs = echoed(&echo, "referer");
+        assert_eq!(refs.len(), 1, "echo: {echo}");
+        assert_eq!(refs[0], "https://override.example/page", "echo: {echo}");
+    }
+
+    /// Direct automation navs (tool-initiated fetch() with no referrer)
+    /// stay bare — edb1785 semantics preserved by the same code path.
+    #[tokio::test]
+    async fn untraced_fetch_stays_bare() {
+        let Some((base, server)) = header_echo_origin().await else {
+            eprintln!("skip: no non-loopback local address to serve on");
+            return;
+        };
+        let fetched = referrer_client().fetch(&base.clone()).await;
+        server.abort();
+
+        let resp = fetched.expect("echo fetch must succeed");
+        let echo = String::from_utf8_lossy(&resp.body).to_string();
+        assert!(
+            echoed(&echo, "referer").is_empty(),
+            "tool fetch must not invent a Referer, echo: {echo}"
         );
     }
 }

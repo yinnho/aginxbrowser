@@ -241,16 +241,23 @@ pub async fn prefetch_render_resources(
     const PER_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
     // Route through the same client the page navigated with: stealth wreq
-    // when enabled, plain reqwest otherwise.
+    // when enabled, plain reqwest otherwise. The plain path carries the
+    // document as Referer (domain-whitelist image CDNs reject bare requests);
+    // the stealth path takes only a URL.
     async fn fetch_via(
         page: &crate::page::Page,
         u: &url::Url,
+        doc: Option<&str>,
     ) -> Option<crate::diting_net::Response> {
         #[cfg(feature = "stealth")]
         if let Some(ref stealth) = page.inner.stealth_client {
             return stealth.fetch(u).await.ok();
         }
-        page.inner.http_client.fetch(u).await.ok()
+        page.inner
+            .http_client
+            .fetch_subresource(u, doc)
+            .await
+            .ok()
     }
 
     let Ok(base) = url::Url::parse(base_url) else {
@@ -261,16 +268,23 @@ pub async fn prefetch_render_resources(
         return PrefetchedResources::new();
     }
     let requested = urls.len();
+    let doc_referrer = base.as_str().to_string();
 
-    let futs = urls.into_iter().map(|u| async move {
-        let resp = tokio::time::timeout(PER_REQUEST_TIMEOUT, fetch_via(page, &u))
+    let futs = urls.into_iter().map(|u| {
+        let doc_referrer = doc_referrer.clone();
+        async move {
+            let resp = tokio::time::timeout(
+                PER_REQUEST_TIMEOUT,
+                fetch_via(page, &u, Some(doc_referrer.as_str())),
+            )
             .await
             .ok()
             .flatten()?;
-        if resp.status != 200 || resp.body.is_empty() || resp.body.len() > MAX_BODY_BYTES {
-            return None;
+            if resp.status != 200 || resp.body.is_empty() || resp.body.len() > MAX_BODY_BYTES {
+                return None;
+            }
+            Some((u.as_str().to_string(), Arc::new(resp.body)))
         }
-        Some((u.as_str().to_string(), Arc::new(resp.body)))
     });
     let map: PrefetchedResources = futures::future::join_all(futs).await.into_iter().flatten().collect();
     tracing::debug!(
