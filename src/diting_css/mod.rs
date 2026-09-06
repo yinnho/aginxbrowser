@@ -376,7 +376,7 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "border-top-width", "border-right-width", "border-bottom-width", "border-left-width",
         "width", "height", "flex-direction", "gap", "overflow",
         "object-fit", "object-position", "z-index", "border-radius",
-        "float", "clear",
+        "float", "clear", "border-collapse",
     ];
     if !SUPPORTED.contains(&name.to_ascii_lowercase().as_str()) {
         return false;
@@ -420,6 +420,7 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "z-index" => value == "auto" || value.parse::<i32>().is_ok(),
         "float" => matches!(value, "left" | "right" | "none"),
         "clear" => matches!(value, "left" | "right" | "both" | "inline-start" | "inline-end" | "none"),
+        "border-collapse" => matches!(value, "collapse" | "separate"),
         "border-radius" => {
             // 1-4 radii, optionally `/` plus 1-4 vertical radii.
             let (horiz, vert) = match value.split_once('/') {
@@ -551,6 +552,10 @@ pub struct ComputedStyle {
     /// form; this exists so the CSSOM reports author-set images instead of
     /// the `none` initial. The `background` shorthand does NOT fill it (v1).
     pub background_image: Option<String>,
+    /// `border-collapse` (table layout): collapse = adjacent cell borders
+    /// merge (we realize this as zero cell gaps), separate = the HTML
+    /// default 2px `border-spacing`. `None` = not declared (separate).
+    pub border_collapse: Option<BorderCollapse>,
     /// Custom properties (`--*`), which DO inherit: the var() substitution
     /// source. Values are stored raw (author tokens) — !important stripped at
     /// insertion; resolution to colors/lengths happens at use sites.
@@ -594,6 +599,14 @@ pub enum BorderStyle {
     Dashed,
     Dotted,
     Double,
+}
+
+/// `border-collapse` (table layout). The layout engine maps Collapse to
+/// zero cell gaps and Separate to the 2px UA `border-spacing`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BorderCollapse {
+    Collapse,
+    Separate,
 }
 
 /// What a border-style token means: not a style keyword at all, an explicit
@@ -715,6 +728,12 @@ pub enum Display {
     InlineBlock,
     Flex,
     Grid,
+    /// Table family (batch: table layout). The three inner roles drive the
+    /// layout engine's table branch; `Display::Table` on the element means
+    /// "shrink-to-fit grid of rows", not a block.
+    Table,
+    TableRow,
+    TableCell,
     None,
 }
 
@@ -1073,6 +1092,12 @@ pub fn ua_display(tag: &str) -> Display {
         // same line as their labels (obscura#807 class). button
         // shrink-to-fits its label content.
         "input" | "textarea" | "button" => Display::InlineBlock,
+        // Table family: the layout engine's table branch dispatches on these
+        // roles (rows become flex rows of cells inside a column-of-rows
+        // table node); the CSSOM already reports the same values.
+        "table" => Display::Table,
+        "tr" | "thead" | "tbody" | "tfoot" => Display::TableRow,
+        "td" | "th" => Display::TableCell,
         // Replaced media is inline-level in every browser UA sheet: an
         // unstyled <img> sits ON the text line (baseline = bottom margin
         // edge), not stacked as a block between the text lines. Same run
@@ -1095,6 +1120,17 @@ pub fn ua_font_weight(tag: &str) -> Option<u16> {
         // heading levels; our ua_font_weight only fed b/strong before,
         // so unstyled <h1> painted regular weight.
         "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => Some(700),
+        _ => None,
+    }
+}
+
+/// UA text-align: the header cell centering every browser UA sheet carries.
+/// The element's own UA declaration beats an inherited value (cascadeElement
+/// merges with `.or`), so a th stays centered inside a text-align:right
+/// ancestor, matching Chrome.
+pub fn ua_text_align(tag: &str) -> Option<TextAlign> {
+    match tag {
+        "th" => Some(TextAlign::Center),
         _ => None,
     }
 }
@@ -1377,10 +1413,21 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 "inline-block" => Some(Display::InlineBlock),
                 "flex" => Some(Display::Flex),
                 "grid" => Some(Display::Grid),
+                "table" => Some(Display::Table),
+                "table-row" => Some(Display::TableRow),
+                "table-cell" => Some(Display::TableCell),
                 "none" => Some(Display::None),
                 _ => return false,
             };
             style.display_from_ua = false;
+            true
+        }
+        "border-collapse" => {
+            style.border_collapse = match v {
+                "collapse" => Some(BorderCollapse::Collapse),
+                "separate" => Some(BorderCollapse::Separate),
+                _ => return false,
+            };
             true
         }
         "color" => parse_color(v).map(|c| style.color = Some(c)).is_some(),
@@ -2287,6 +2334,7 @@ pub fn cascade_element(
         display: Some(ua_display(tag)),
         display_from_ua: true,
         font_weight: ua_font_weight(tag),
+        text_align: ua_text_align(tag),
         ..Default::default()
     };
     if let Some((px, line)) = ua_border(tag) {
@@ -2302,7 +2350,10 @@ pub fn cascade_element(
         style.color = parent.color;
         style.font_size = parent.font_size;
         style.font_weight = style.font_weight.or(parent.font_weight);
-        style.text_align = parent.text_align;
+        // `.or` (not overwrite): the element's own UA declaration beats an
+        // inherited value — a th stays centered inside a text-align:right
+        // ancestor, matching every browser UA sheet.
+        style.text_align = style.text_align.or(parent.text_align);
         // Number keeps its multiplier for descendants (spec computed value);
         // Px inherits as absolute px — both copy straight through.
         style.line_height = parent.line_height;
@@ -2372,8 +2423,23 @@ pub fn cascade_element(
         style.padding.left = style.padding.left.or(Some(l));
     }
 
-    let _ = tree;
-    let _ = node_id;
+    // Presentational attribute hint (blitz#507): the `height` attribute on
+    // td/th/tr is a px height per the HTML spec (bare number). It slots
+    // below every author declaration — the author candidates below apply
+    // after this and win unconditionally — but fills the slot an author
+    // rule never touched. HTML-email bar charts are bare
+    // `<td height="55">` columns; without this they collapse to 0.
+    if matches!(tag, "td" | "th" | "tr") {
+        let attr_h = tree
+            .with_node(node_id, |n| {
+                n.get_attribute("height")
+                    .and_then(|v| v.trim().parse::<f32>().ok())
+            })
+            .flatten();
+        if let Some(h) = attr_h {
+            style.height = Some(Length::Px(h));
+        }
+    }
     for candidate in &candidates {
         apply_declarations_with(&mut style, candidate.declarations, &fonts);
     }
@@ -2844,6 +2910,50 @@ mod tests {
         // Section itself: block UA default even with no author CSS.
         let block = cascade_element("section", &tree, section, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
         assert_eq!(block.display, Some(Display::Block));
+    }
+
+    #[test]
+    fn th_centers_by_default_and_beats_an_inherited_align() {
+        let tree = diting_dom::tree_sink::parse_html(
+            r#"<table><tr><th>x</th><td><em>z</em></td></tr></table>"#,
+        );
+        let th = tree.query_selector("th").unwrap().unwrap();
+        let td = tree.query_selector("td").unwrap().unwrap();
+        let em = tree.query_selector("em").unwrap().unwrap();
+
+        let th_cs = cascade_element("th", &tree, th, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(th_cs.text_align, Some(TextAlign::Center), "UA center on th");
+        let td_cs = cascade_element("td", &tree, td, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(td_cs.text_align, None, "td stays start-aligned");
+
+        // The element's own UA declaration beats an inherited value: a th
+        // stays centered inside a right-aligned ancestor, plain tags inherit.
+        let parent = ComputedStyle { text_align: Some(TextAlign::Right), ..Default::default() };
+        let centered = cascade_element("th", &tree, th, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(centered.text_align, Some(TextAlign::Center));
+        let right = cascade_element("em", &tree, em, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(right.text_align, Some(TextAlign::Right));
+    }
+
+    #[test]
+    fn table_height_attribute_is_a_presentational_hint() {
+        let tree = diting_dom::tree_sink::parse_html(
+            r#"<table><tr height="30"><td height="55">x</td><td style="height:10px">y</td></tr></table>"#,
+        );
+        let td1 = tree.query_selector("td").unwrap().unwrap();
+        let td2 = tree.query_selector("td[style]").unwrap().unwrap();
+        let tr = tree.query_selector("tr").unwrap().unwrap();
+
+        let cs = cascade_element("td", &tree, td1, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(cs.height, Some(Length::Px(55.0)), "attr height lands as px");
+        // Inline style applies after the hint and wins.
+        let authored = cascade_element("td", &tree, td2, &[], None, Some("height:10px"), DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(authored.height, Some(Length::Px(10.0)));
+        let tr_cs = cascade_element("tr", &tree, tr, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(tr_cs.height, Some(Length::Px(30.0)));
+        // Non-table tags ignore the attribute entirely.
+        let plain = cascade_element("div", &tree, td1, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(plain.height, None, "height attr is table-cell/row only");
     }
 
     #[test]

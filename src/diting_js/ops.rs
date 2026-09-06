@@ -1102,6 +1102,7 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "float",
     "clear",
     "overflow",
+    "border-collapse",
     "font-size",
     "font-weight",
     "text-align",
@@ -1177,6 +1178,9 @@ fn computed_style_value(
                     Some(Display::InlineBlock) => "inline-block",
                     Some(Display::Flex) => "flex",
                     Some(Display::Grid) => "grid",
+                    Some(Display::Table) => "table",
+                    Some(Display::TableRow) => "table-row",
+                    Some(Display::TableCell) => "table-cell",
                     Some(Display::None) => "none",
                     _ => "block",
                 }
@@ -1187,6 +1191,13 @@ fn computed_style_value(
             Some(z) => z.to_string(),
             None => "auto".into(),
         }),
+        "border-collapse" => Some(
+            match s.border_collapse {
+                Some(BorderCollapse::Collapse) => "collapse",
+                _ => "separate",
+            }
+            .into(),
+        ),
         "float" => Some(
             match s.float_side {
                 Some(FloatSide::Left) => "left",

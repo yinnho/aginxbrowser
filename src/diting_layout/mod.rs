@@ -105,18 +105,26 @@ fn effective_line_height(spec: Option<&crate::diting_css::LineHeightSpec>, font_
 fn to_taffy_style(style: &ComputedStyle) -> Style {
     let mut s = Style::default();
     let display = style.display.unwrap_or(CssDisplay::Block);
-    // A block box with centered/right inline content needs a flex-column
-    // stand-in because taffy's native block algorithm has no line alignment
-    // (upstream to_taffy_style's promote_for_alignment).
-    let promote = display == CssDisplay::Block
+    // A block box (or table cell) with centered/right inline content needs a
+    // flex-column stand-in because taffy's native block algorithm has no
+    // line alignment (upstream to_taffy_style's promote_for_alignment).
+    // Cells join the promote: `td { text-align: center }` is everywhere in
+    // HTML-email-era markup.
+    let promote = matches!(display, CssDisplay::Block | CssDisplay::TableCell)
         && matches!(style.text_align, Some(TextAlign::Center) | Some(TextAlign::Right));
     s.display = match display {
         CssDisplay::Block if promote => Display::Flex,
-        CssDisplay::Block => Display::Block,
+        CssDisplay::TableCell if promote => Display::Flex,
+        CssDisplay::Block | CssDisplay::TableCell => Display::Block,
         CssDisplay::Flex => Display::Flex,
         CssDisplay::Grid => Display::Grid,
         // The inline/IFC stand-in is a wrapping flex row (upstream model).
         CssDisplay::Inline | CssDisplay::InlineBlock => Display::Flex,
+        // Table stand-ins (table layout batch): a table is a column of row
+        // wrappers, a row a non-wrapping row of cell items; cells already
+        // mapped to Block above.
+        CssDisplay::Table => Display::Flex,
+        CssDisplay::TableRow => Display::Flex,
         CssDisplay::None => Display::None,
     };
     if promote {
@@ -126,6 +134,14 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
             Some(TextAlign::Right) => Some(AlignItems::FLEX_END),
             _ => None,
         };
+    } else if display == CssDisplay::Table {
+        s.flex_direction = FlexDirection::Column;
+        s.align_items = Some(AlignItems::STRETCH);
+        s.flex_wrap = FlexWrap::NoWrap;
+    } else if display == CssDisplay::TableRow {
+        s.flex_direction = FlexDirection::Row;
+        s.align_items = Some(AlignItems::STRETCH);
+        s.flex_wrap = FlexWrap::NoWrap;
     } else if display == CssDisplay::Inline || display == CssDisplay::InlineBlock {
         s.flex_direction = FlexDirection::Row;
         s.flex_wrap = FlexWrap::Wrap;
@@ -294,6 +310,19 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
         width: LengthPercentage::length(style.column_gap.unwrap_or(0.0)),
         height: LengthPercentage::length(style.row_gap.unwrap_or(0.0)),
     };
+    if display == CssDisplay::Table {
+        // `border-collapse: collapse` means shared borders — realized as
+        // zero gaps between rows/cells; `separate` (the UA initial) gets
+        // Chrome's default 2px border-spacing.
+        let gap = match style.border_collapse {
+            Some(crate::diting_css::BorderCollapse::Collapse) => 0.0,
+            _ => 2.0,
+        };
+        s.gap = Size {
+            width: LengthPercentage::length(gap),
+            height: LengthPercentage::length(gap),
+        };
+    }
     if display == CssDisplay::Grid {
         if let Some(cols) = &style.grid_template_columns {
             s.grid_template_columns = cols.iter().map(|t| to_grid_track(*t)).collect();
@@ -1624,6 +1653,238 @@ fn subtree_paints_nothing(tree: &DomTree, id: NodeId) -> bool {
     true
 }
 
+/// Table layout (display:table family), v1 model:
+///
+/// The table becomes a taffy flex COLUMN of row wrappers; each row wrapper
+/// is a non-wrapping flex ROW of its cells (cells themselves build through
+/// the normal element paths, so every inline/block behavior inside a cell
+/// keeps working); thead/tbody/tfoot flatten into their tr children.
+///
+/// Column alignment comes from a pre-measure pass — each row wrapper is laid
+/// out at max-content width, per-column maxima are collected, then every
+/// cell's flex-basis is pinned to its column max (grow 0 / shrink 1). With
+/// a uniform basis per column, taffy's proportional shrink/grow preserves
+/// alignment under ANY final table width (authored or shrink-to-fit), so
+/// columns line up across rows the way a real table algorithm produces.
+///
+/// Width: authored table width passes through; otherwise the table
+/// shrink-to-fits the summed column maxima with a 100%-of-containing-block
+/// max clamp (the same fit-content idiom `resolve_sizing_keywords` uses).
+/// `border-collapse: collapse` realizes as zero gaps between rows/cells;
+/// the separate initial gets Chrome's default 2px border-spacing.
+///
+/// v1 known limits: no colspan/rowspan, no anonymous cell synthesis, no
+/// caption/colgroup, no fixed layout algorithm.
+#[allow(clippy::too_many_arguments)]
+fn build_table(
+    tree: &DomTree,
+    id: NodeId,
+    style: &ComputedStyle,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    images: &HashMap<NodeId, DecodedImage>,
+    fonts: &FontBook,
+    taffy_tree: &mut TaffyTree<TextLeaf>,
+    node_map: &mut HashMap<taffy::tree::NodeId, NodeId>,
+    flattened: &mut HashMap<NodeId, Vec<taffy::tree::NodeId>>,
+    run_wrappers: &mut Vec<taffy::tree::NodeId>,
+) -> Option<taffy::tree::NodeId> {
+    let tag_of = |nid: NodeId| -> String {
+        tree.with_node(nid, |n| n.as_element().map(|e| e.local.to_string()))
+            .flatten()
+            .unwrap_or_default()
+    };
+    // Rows in document order, row groups flattened; CSS `display: table-row`
+    // children count as rows too (the CSS-authored minimum).
+    let mut row_ids: Vec<NodeId> = Vec::new();
+    for child in tree.children(id) {
+        match tag_of(child).as_str() {
+            "tr" => row_ids.push(child),
+            "thead" | "tbody" | "tfoot" => {
+                row_ids.extend(
+                    tree.children(child)
+                        .into_iter()
+                        .filter(|gc| tag_of(*gc) == "tr"),
+                );
+            }
+            _ => {
+                if styles.get(&child).and_then(|s| s.display) == Some(CssDisplay::TableRow) {
+                    row_ids.push(child);
+                }
+            }
+        }
+    }
+
+    // `collapse` = shared borders → zero gaps; separate (the UA initial)
+    // gets Chrome's default 2px border-spacing. Same value on both axes:
+    // vertical between row wrappers, horizontal between cells.
+    let gap = match style.border_collapse {
+        Some(crate::diting_css::BorderCollapse::Collapse) => 0.0,
+        _ => 2.0,
+    };
+
+    let mut row_wrappers: Vec<(taffy::tree::NodeId, Vec<taffy::tree::NodeId>)> = Vec::new();
+    for rid in row_ids {
+        let cells: Vec<taffy::tree::NodeId> = tree
+            .children(rid)
+            .into_iter()
+            .filter(|cid| {
+                styles.get(cid).and_then(|s| s.display) == Some(CssDisplay::TableCell)
+            })
+            .filter_map(|cid| {
+                build_element(tree, cid, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers)
+            })
+            .collect();
+        if cells.is_empty() {
+            continue;
+        }
+        // The `height` attribute on tr (blitz#507) landed in the tr's
+        // computed style as a px presentational hint; the wrapper is
+        // synthetic, so carry it across here. Spec: it's a MINIMUM row
+        // height — the row still grows for taller cells (STRETCH below).
+        let row_height = styles
+            .get(&rid)
+            .and_then(|s| s.height)
+            .and_then(|l| match l {
+                crate::diting_css::Length::Px(px) => Some(px),
+                _ => None,
+            });
+        let row_style = Style {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Row,
+            align_items: Some(AlignItems::STRETCH),
+            flex_wrap: FlexWrap::NoWrap,
+            gap: taffy::geometry::Size {
+                width: LengthPercentage::length(gap),
+                height: LengthPercentage::length(0.0),
+            },
+            size: taffy::geometry::Size {
+                width: auto(),
+                height: row_height.map(Dimension::length).unwrap_or_else(auto),
+            },
+            ..Default::default()
+        };
+        if let Ok(row_node) = taffy_tree.new_with_children(row_style, &cells) {
+            node_map.insert(row_node, rid);
+            row_wrappers.push((row_node, cells));
+        }
+    }
+
+    let table_children: Vec<taffy::tree::NodeId> =
+        row_wrappers.iter().map(|(r, _)| *r).collect();
+    let table_node = if table_children.is_empty() {
+        taffy_tree.new_leaf(to_taffy_style(style)).ok()?
+    } else {
+        taffy_tree
+            .new_with_children(to_taffy_style(style), &table_children)
+            .ok()?
+    };
+    node_map.insert(table_node, id);
+
+    if row_wrappers.is_empty() {
+        return Some(table_node);
+    }
+
+    // Pre-measure each row wrapper at max-content and harvest per-column
+    // maxima. The measured closure is the same TextLeaf dispatch as the
+    // root pass — a plain compute_layout would zero the text runs.
+    let measure_pass = |taffy_tree: &mut TaffyTree<TextLeaf>, node: taffy::tree::NodeId| -> Option<f32> {
+        let space = taffy::geometry::Size {
+            width: AvailableSpace::MaxContent,
+            height: AvailableSpace::MaxContent,
+        };
+        let _ = taffy_tree.compute_layout_with_measure(node, space, |inputs, _id, ctx, style| {
+            match ctx {
+                Some(TextLeaf::Run { text, font_size, bold, line_height, .. }) => {
+                    measure_text_leaf(text, *font_size, *bold, *line_height, fonts, &inputs)
+                }
+                Some(TextLeaf::Word { .. }) | None => {
+                    taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO)
+                }
+            }
+        });
+        taffy_tree.layout(node).ok().map(|l| l.size.width)
+    };
+    let mut col_max: Vec<f32> = Vec::new();
+    for (row_node, cells) in &row_wrappers {
+        if measure_pass(taffy_tree, *row_node).is_none() {
+            continue;
+        }
+        for (i, cell) in cells.iter().enumerate() {
+            let w = taffy_tree
+                .layout(*cell)
+                .map(|l| l.size.width)
+                .unwrap_or(0.0);
+            if i >= col_max.len() {
+                col_max.resize(i + 1, 0.0);
+            }
+            col_max[i] = col_max[i].max(w);
+        }
+    }
+
+    // Pin every cell to its column max: uniform bases per column keep the
+    // columns aligned under any final width. grow = basis makes surplus
+    // table width distribute across columns proportional to their content
+    // width (the auto-layout behavior); a zero-content column gets the
+    // minimal grow of 1 so it still absorbs its share of an authored table
+    // width (Chrome: a single empty column in `width:100px` is 100px wide).
+    // Shrink 1 takes the deficit back proportionally. Both preserve
+    // alignment because the ratios are uniform per column.
+    for (_, cells) in &row_wrappers {
+        for (i, cell) in cells.iter().enumerate() {
+            let Some(max) = col_max.get(i).copied() else { continue };
+            if let Ok(mut st) = taffy_tree.style(*cell).cloned() {
+                st.flex_basis = Dimension::length(max);
+                st.flex_grow = if max > 0.0 { max } else { 1.0 };
+                st.flex_shrink = 1.0;
+                // valign (blitz#508): the attribute moves cell CONTENT, not
+                // the box — the cell still fills the row via the wrapper's
+                // STRETCH. A flex-column cell plus justify_content models
+                // it; absent/unknown values take Chrome's UA middle default
+                // (every browser's vertical-align:middle on cells).
+                let valign = node_map
+                    .get(cell)
+                    .and_then(|dom| {
+                        tree.with_node(*dom, |n| {
+                            n.get_attribute("valign").map(|v| v.trim().to_ascii_lowercase())
+                        })
+                    })
+                    .flatten();
+                st.display = Display::Flex;
+                st.flex_direction = FlexDirection::Column;
+                st.justify_content = Some(match valign.as_deref() {
+                    Some("top") => JustifyContent::FLEX_START,
+                    Some("bottom") => JustifyContent::FLEX_END,
+                    _ => JustifyContent::CENTER,
+                });
+                let _ = taffy_tree.set_style(*cell, st);
+            }
+        }
+    }
+
+    // Shrink-to-fit: without an authored width (an explicit `width: auto`
+    // parses to None too), the table sizes to the summed column maxima
+    // plus gaps, capped at the containing block width by a 100% max clamp
+    // (the same fit-content idiom resolve_sizing_keywords uses).
+    if style.width.is_none() && !col_max.is_empty() {
+        let widest_row_cols = row_wrappers
+            .iter()
+            .map(|(_, c)| c.len())
+            .max()
+            .unwrap_or(0);
+        let gaps = gap * widest_row_cols.saturating_sub(1) as f32;
+        let shrink = col_max.iter().sum::<f32>() + gaps;
+        if shrink > 0.0 {
+            if let Ok(mut st) = taffy_tree.style(table_node).cloned() {
+                st.size.width = Dimension::length(shrink);
+                st.max_size.width = LengthPercentageAuto::percent(1.0);
+                let _ = taffy_tree.set_style(table_node, st);
+            }
+        }
+    }
+
+    Some(table_node)
+}
+
 fn build_element(
     tree: &DomTree,
     id: NodeId,
@@ -1647,6 +1908,15 @@ fn build_element(
     // replaced boxes own no layout children.
     if is_replaced_tag(&tag) {
         return build_replaced_leaf(tree, id, styles, images, taffy_tree, node_map);
+    }
+
+    // --- table layout (display:table family) ------------------------------
+    // A table dispatches here BEFORE the block/inline partition: its rows
+    // are reified as flex rows of cells, never run through the flow logic.
+    if style.display == Some(CssDisplay::Table) {
+        return build_table(
+            tree, id, &style, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers,
+        );
     }
 
     let child_ids: Vec<NodeId> = tree.children(id);

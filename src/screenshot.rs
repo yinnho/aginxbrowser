@@ -1125,6 +1125,213 @@ mod tests {
         );
     }
 
+    // --- table layout (display:table family) ------------------------------
+
+    /// Cells sit side by side, rows stack, and columns line up across rows
+    /// with uniform per-column widths (the pre-measured maxima).
+    #[test]
+    fn table_cells_sit_side_by_side_with_columns_aligned_across_rows() {
+        let html = r##"<html><head><style>
+            body { margin: 0; }
+            table { border-collapse: collapse; }
+            td { padding: 0; font-size: 16px; }
+        </style></head><body>
+            <table>
+                <tr><td id="a1" style="width:120px">alpha</td><td id="a2">b</td></tr>
+                <tr><td id="b1">x</td><td id="b2">y</td></tr>
+            </table>
+        </body></html>"##;
+        let rects = element_rects_diting(html, "td", true, 800.0, 600.0, None).expect("rects");
+        assert_eq!(rects.len(), 4, "all four cells: {rects:?}");
+        // Row 1: a1 then a2 on one line.
+        assert!(rects[0].x < rects[1].x, "cells share a line: {rects:?}");
+        assert!((rects[0].y - rects[1].y).abs() <= 1.0, "same band: {rects:?}");
+        // Row 2 below, columns aligned with row 1.
+        assert!(
+            rects[2].y > rects[0].y + rects[0].height - 1.0,
+            "row 2 starts below row 1: {rects:?}"
+        );
+        assert!(
+            (rects[2].x - rects[0].x).abs() <= 1.0,
+            "column 1 aligned: {:?} vs {:?}",
+            rects[2],
+            rects[0]
+        );
+        assert!(
+            (rects[3].x - rects[1].x).abs() <= 1.0,
+            "column 2 aligned: {:?} vs {:?}",
+            rects[3],
+            rects[1]
+        );
+        assert!(
+            (rects[2].width - rects[0].width).abs() <= 1.0,
+            "column 1 width uniform: {rects:?}"
+        );
+        assert!(
+            (rects[3].width - rects[1].width).abs() <= 1.0,
+            "column 2 width uniform: {rects:?}"
+        );
+    }
+
+    /// An unstyled table shrink-to-fits its content instead of eating the
+    /// whole body width (the biggest visible symptom of no table layout).
+    #[test]
+    fn table_shrink_to_fits_its_content_instead_of_full_width() {
+        let html = r##"<html><head><style>
+            body { margin: 0; }
+            td { padding: 0; }
+        </style></head><body>
+            <table><tr><td><div style="width:100px;height:40px"></div></td></tr></table>
+        </body></html>"##;
+        let table = element_rects_diting(html, "table", false, 800.0, 600.0, None).expect("table");
+        assert_eq!(table.len(), 1);
+        assert!(
+            (table[0].width - 100.0).abs() <= 1.0,
+            "table shrink-wraps to the 100px cell, not the 800px body: {:?}",
+            table[0]
+        );
+    }
+
+    /// An authored table width distributes its slack across columns
+    /// proportionally to their content bases, keeping rows aligned.
+    #[test]
+    fn authored_table_width_distributes_over_columns() {
+        let html = r##"<html><head><style>
+            body { margin: 0; }
+            table { width: 360px; border-collapse: collapse; }
+            td { padding: 0; height: 20px; }
+        </style></head><body>
+            <table>
+                <tr><td id="l1" style="width:120px">a</td><td id="r1" style="width:60px">b</td></tr>
+                <tr><td id="l2">c</td><td id="r2">d</td></tr>
+            </table>
+        </body></html>"##;
+        let l1 = element_rects_diting(html, "#l1", false, 800.0, 600.0, None).expect("l1")[0];
+        let r1 = element_rects_diting(html, "#r1", false, 800.0, 600.0, None).expect("r1")[0];
+        let l2 = element_rects_diting(html, "#l2", false, 800.0, 600.0, None).expect("l2")[0];
+        let r2 = element_rects_diting(html, "#r2", false, 800.0, 600.0, None).expect("r2")[0];
+        assert!((l1.x + l1.width - r1.x).abs() <= 1.0, "row 1 columns adjacent: {l1:?} {r1:?}");
+        assert!(
+            (l1.width + r1.width - 360.0).abs() <= 1.0,
+            "cells fill the 360px table: {l1:?} {r1:?}"
+        );
+        assert!((l2.x - l1.x).abs() <= 1.0 && (r2.x - r1.x).abs() <= 1.0, "rows aligned: {l1:?} {r1:?} {l2:?} {r2:?}");
+        assert!((l2.width - l1.width).abs() <= 1.0 && (r2.width - r1.width).abs() <= 1.0, "column widths uniform: {l1:?} {r1:?} {l2:?} {r2:?}");
+    }
+
+    /// `border-collapse: collapse` = zero gaps between cells; the separate
+    /// initial keeps Chrome's default 2px border-spacing.
+    #[test]
+    fn border_collapse_zero_gap_and_separate_two_px_gap() {
+        let mk = |mode: &str| {
+            format!(
+                r##"<html><head><style>
+            body {{ margin: 0; }}
+            table {{ border-collapse: {mode}; }}
+            td {{ width: 100px; height: 40px; padding: 0; }}
+        </style></head><body>
+            <table><tr><td id="l">a</td><td id="r">b</td></tr></table>
+        </body></html>"##
+            )
+        };
+        let gap = |mode: &str| {
+            let html = mk(mode);
+            let l = element_rects_diting(&html, "#l", false, 800.0, 600.0, None).expect("l")[0];
+            let r = element_rects_diting(&html, "#r", false, 800.0, 600.0, None).expect("r")[0];
+            r.x - (l.x + l.width)
+        };
+        let collapsed = gap("collapse");
+        assert!(collapsed.abs() <= 0.5, "collapse = shared border, no gap: {collapsed}");
+        let separate = gap("separate");
+        assert!(
+            (separate - 2.0).abs() <= 0.5,
+            "separate = Chrome's default 2px border-spacing: {separate}"
+        );
+    }
+
+    /// thead/tbody flatten into their tr children; the header row sits
+    /// above the body row and its cells align with it.
+    #[test]
+    fn thead_tbody_flatten_into_rows() {
+        let html = r##"<html><head><style>
+            body { margin: 0; }
+            table { border-collapse: collapse; }
+            td, th { padding: 0; height: 20px; }
+        </style></head><body>
+            <table>
+                <thead><tr><th id="h">head</th></tr></thead>
+                <tbody><tr><td id="b">body</td></tr></tbody>
+            </table>
+        </body></html>"##;
+        let h = element_rects_diting(html, "#h", false, 800.0, 600.0, None).expect("h")[0];
+        let b = element_rects_diting(html, "#b", false, 800.0, 600.0, None).expect("b")[0];
+        assert!(b.y > h.y + 1.0, "tbody row below thead row: {h:?} {b:?}");
+        assert!((h.x - b.x).abs() <= 1.0, "cells left-aligned: {h:?} {b:?}");
+        assert!((h.width - b.width).abs() <= 1.0, "single column, uniform width: {h:?} {b:?}");
+    }
+
+    /// The `height` attribute on td is a px presentational hint (blitz#507):
+    /// an empty `<td height="55">` is a 55px-tall box — the bare bones of
+    /// HTML-email bar charts.
+    #[test]
+    fn td_height_attribute_sizes_the_cell() {
+        let html = r##"<html><head><style>
+            body { margin: 0; }
+            table { width: 100px; border-collapse: collapse; }
+            td { padding: 0; font-size: 0; line-height: 0; }
+        </style></head><body>
+            <table><tr><td id="c" height="55">&nbsp;</td></tr></table>
+        </body></html>"##;
+        let c = element_rects_diting(html, "#c", false, 800.0, 600.0, None).expect("c")[0];
+        assert!((c.height - 55.0).abs() <= 1.0, "attr height 55: {c:?}");
+        assert!((c.width - 100.0).abs() <= 1.0, "fills the authored table width: {c:?}");
+    }
+
+    /// Same for tr: the attribute is the row height, cells stretch to it.
+    #[test]
+    fn tr_height_attribute_sets_the_row_height() {
+        let html = r##"<html><head><style>
+            body { margin: 0; }
+            table { border-collapse: collapse; }
+            td { padding: 0; }
+        </style></head><body>
+            <table><tr height="70"><td id="c">x</td></tr></table>
+        </body></html>"##;
+        let c = element_rects_diting(html, "#c", false, 800.0, 600.0, None).expect("c")[0];
+        assert!((c.height - 70.0).abs() <= 1.0, "cell stretches to the tr attr height: {c:?}");
+    }
+
+    /// valign moves cell content within a taller cell (blitz#508); the
+    /// attribute's default is Chrome's UA vertical-align: middle.
+    #[test]
+    fn valign_attr_positions_cell_content_vertically() {
+        let mk = |valign: &str| {
+            format!(
+                r##"<html><head><style>
+            body {{ margin: 0; }}
+            table {{ border-collapse: collapse; }}
+            td {{ padding: 0; height: 110px; }}
+        </style></head><body>
+            <table><tr><td {valign}><div id="d" style="width:50px;height:20px"></div></td></tr></table>
+        </body></html>"##
+            )
+        };
+        let top = element_rects_diting(&mk("valign=\"top\""), "div", false, 800.0, 600.0, None)
+            .expect("top")[0];
+        let middle = element_rects_diting(&mk(""), "div", false, 800.0, 600.0, None).expect("mid")[0];
+        let bottom = element_rects_diting(&mk("valign=\"bottom\""), "div", false, 800.0, 600.0, None)
+            .expect("bottom")[0];
+        assert!(top.y <= 1.0, "valign=top pins content to the cell top: {top:?}");
+        assert!(
+            (middle.y - 45.0).abs() <= 1.5,
+            "no attr = UA middle default: 110 cell, 20 content → y=45: {middle:?}"
+        );
+        assert!(
+            (bottom.y - 90.0).abs() <= 1.5,
+            "valign=bottom pins content to the cell bottom: {bottom:?}"
+        );
+    }
+
     /// Stylesheets come first: img alternates must not burn the fetch cap and
     /// starve the sheet (a dropped head stylesheet blanks layout, images are
     /// only fidelity polish).
