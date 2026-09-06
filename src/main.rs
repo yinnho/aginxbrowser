@@ -455,12 +455,27 @@ pub struct SessionCreateRequest {
     /// Idle time-to-live in seconds (default: 480, clamped 60..3600).
     #[serde(default)]
     pub ttl_secs: Option<u64>,
+    /// Initial viewport width in CSS pixels — pinned for the session's life.
+    #[serde(default)]
+    pub width: Option<u32>,
+    /// Initial viewport height in CSS pixels.
+    #[serde(default)]
+    pub height: Option<u32>,
+    /// Mobile device emulation for the initial viewport.
+    #[serde(default)]
+    pub mobile: bool,
+    /// Exempt the session from the idle reaper (lives until close/exit).
+    #[serde(default)]
+    pub keepalive: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub struct SessionCreateResponse {
     pub session_id: String,
     pub url: Option<String>,
+    /// Idle budget left before auto-eviction; absent for keepalive sessions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_in_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1040,8 +1055,14 @@ async fn download_handler(Json(req): Json<download::DownloadRequest>) -> Result<
 async fn session_create_handler(Json(req): Json<SessionCreateRequest>) -> Result<impl IntoResponse, AppError> {
     let mut mgr = session::SESSIONS.lock().await;
     mgr.evict_expired();
-    let id = mgr.create(req.url.as_deref(), req.use_proxy, req.cookies, req.storage, req.ttl_secs);
+    let pin = match (req.width, req.height) {
+        (None, None) => None,
+        (w, h) => Some((w, h, req.mobile)),
+    };
+    let id = mgr.create(req.url.as_deref(), req.use_proxy, req.cookies, req.storage, req.ttl_secs, pin, req.keepalive);
+    let expires_in_secs = mgr.expires_in_secs(&id);
     Ok((StatusCode::OK, Json(SessionCreateResponse {
+        expires_in_secs,
         session_id: id,
         url: req.url,
     })))

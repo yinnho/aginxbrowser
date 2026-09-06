@@ -145,6 +145,21 @@ pub struct SessionCreateParams {
     /// Idle time-to-live in seconds before the session is evicted
     /// (default: 480, clamped 60..3600). Raise it for long workflows.
     pub ttl_secs: Option<u64>,
+    /// Initial viewport width in CSS pixels. Pinned for the session's life
+    /// (survives navigation) so element rects and media queries anchor to
+    /// the same layout across every page of the visit.
+    pub width: Option<u32>,
+    /// Initial viewport height in CSS pixels.
+    pub height: Option<u32>,
+    /// Mobile device emulation (coarse pointer, no hover) for the initial
+    /// viewport.
+    #[serde(default)]
+    pub mobile: bool,
+    /// Exempt the session from the idle reaper: it lives until
+    /// session_close or server exit, so a workflow interrupted by long
+    /// non-browser steps keeps its login state.
+    #[serde(default)]
+    pub keepalive: bool,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -592,8 +607,24 @@ impl AginxBrowserMcp {
         mgr.evict_expired();
         let url = params.url.clone();
         let storage = params.storage.clone();
-        let id = mgr.create(params.url.as_deref(), params.use_proxy, params.cookies, storage, params.ttl_secs);
-        json!({ "session_id": id, "url": url }).to_string()
+        let pin = match (params.width, params.height) {
+            (None, None) => None,
+            (w, h) => Some((w, h, params.mobile)),
+        };
+        let id = mgr.create(
+            params.url.as_deref(),
+            params.use_proxy,
+            params.cookies,
+            storage,
+            params.ttl_secs,
+            pin,
+            params.keepalive,
+        );
+        let mut resp = json!({ "session_id": id, "url": url });
+        if let Some(s) = mgr.expires_in_secs(&id) {
+            resp["expires_in_secs"] = json!(s);
+        }
+        resp.to_string()
     }
 
     #[tool(
@@ -606,7 +637,7 @@ impl AginxBrowserMcp {
             url: params.url.clone(),
             reply,
         }).await {
-            Ok(resp) => json!({ "url": resp.url, "title": resp.title }).to_string(),
+            Ok(resp) => stamped_json(json!({ "url": resp.url, "title": resp.title }), &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -630,7 +661,7 @@ impl AginxBrowserMcp {
     async fn session_cookies(&self, Parameters(params): Parameters<SessionCookiesParams>) -> String {
         let mut mgr = session::SESSIONS.lock().await;
         match mgr.send(&params.session_id, |reply| SessionCommand::Cookies { reply }).await {
-            Ok(text) => text,
+            Ok(text) => stamped(text, &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -645,7 +676,7 @@ keep the session token in localStorage). Call before the session idles out.",
     async fn session_storage(&self, Parameters(params): Parameters<SessionCookiesParams>) -> String {
         let mut mgr = session::SESSIONS.lock().await;
         match mgr.send(&params.session_id, |reply| SessionCommand::Storage { reply }).await {
-            Ok(text) => text,
+            Ok(text) => stamped(text, &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -660,7 +691,7 @@ misbehaves: click the button, call this, read the error.",
     async fn session_console(&self, Parameters(params): Parameters<SessionCookiesParams>) -> String {
         let mut mgr = session::SESSIONS.lock().await;
         match mgr.send(&params.session_id, |reply| SessionCommand::Console { reply }).await {
-            Ok(text) => text,
+            Ok(text) => stamped(text, &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -675,7 +706,7 @@ misbehaves: click the button, call this, read the error.",
             index: params.index,
             reply,
         }).await {
-            Ok(resp) => json!({ "url": resp.url, "clicked": resp.clicked, "text_after": resp.text_after }).to_string(),
+            Ok(resp) => stamped_json(json!({ "url": resp.url, "clicked": resp.clicked, "text_after": resp.text_after }), &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -693,7 +724,7 @@ misbehaves: click the button, call this, read the error.",
             full_events: full,
             reply,
         }).await {
-            Ok(filled) => filled.to_string(),
+            Ok(filled) => stamped(filled.to_string(), &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -713,7 +744,7 @@ misbehaves: click the button, call this, read the error.",
             amount: params.amount,
             reply,
         }).await {
-            Ok(scrolled) => json!({ "scrolled": scrolled }).to_string(),
+            Ok(scrolled) => stamped_json(json!({ "scrolled": scrolled }), &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -728,7 +759,7 @@ misbehaves: click the button, call this, read the error.",
             script: params.script.clone(),
             reply,
         }).await {
-            Ok(result) => json!({ "result": result }).to_string(),
+            Ok(result) => stamped_json(json!({ "result": result }), &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -747,7 +778,7 @@ flips pointer/hover matchMedia answers to coarse/none. Omitted width/height keep
             mobile: params.mobile,
             reply,
         }).await {
-            Ok(viewport) => json!({ "viewport": viewport }).to_string(),
+            Ok(viewport) => stamped_json(json!({ "viewport": viewport }), &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -769,7 +800,7 @@ session_viewport + session_screenshot shows the responsive layout. Returns \
             selector_all: params.selector_all,
             reply,
         }).await {
-            Ok(s) => s,
+            Ok(s) => stamped(s, &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -790,7 +821,7 @@ naming the selector/predicate on expiry. Exactly one of selector/predicate.",
             timeout_ms: params.timeout_ms,
             reply,
         }).await {
-            Ok(s) => s,
+            Ok(s) => stamped(s, &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -832,10 +863,10 @@ naming the selector/predicate on expiry. Exactly one of selector/predicate.",
             Err(e) => return json!({ "error": e }).to_string(),
         };
         match params.format.as_deref() {
-            Some("jsonl") => json!({ "format": "jsonl", "actions": jsonl }).to_string(),
+            Some("jsonl") => stamped_json(json!({ "format": "jsonl", "actions": jsonl }), &mgr, &params.session_id),
             _ => {
                 let script = session::replay_bash(&jsonl, "http://127.0.0.1:8089");
-                json!({ "format": "bash", "script": script }).to_string()
+                stamped_json(json!({ "format": "bash", "script": script }), &mgr, &params.session_id)
             }
         }
     }
@@ -848,6 +879,29 @@ naming the selector/predicate on expiry. Exactly one of selector/predicate.",
         let mut mgr = session::SESSIONS.lock().await;
         mgr.close(&params.session_id);
         json!({ "ok": true }).to_string()
+    }
+}
+
+/// Feedback ③: session_* responses carry the session's remaining idle
+/// lifetime so the agent can re-arm cookies/storage export before the reaper
+/// fires instead of discovering an expired session mid-workflow. keepalive
+/// sessions have no expiry and stay unstamped. Free-form text (session_state's
+/// compact listing, the network rows) passes through untouched.
+fn stamped_json(
+    mut v: serde_json::Value,
+    mgr: &session::SessionManager,
+    sid: &str,
+) -> String {
+    if let Some(s) = mgr.expires_in_secs(sid) {
+        v["expires_in_secs"] = json!(s);
+    }
+    v.to_string()
+}
+
+fn stamped(text: String, mgr: &session::SessionManager, sid: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) if v.is_object() => stamped_json(v, mgr, sid),
+        _ => text,
     }
 }
 

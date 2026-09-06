@@ -259,8 +259,12 @@ pub struct SessionListEntry {
     pub session_id: String,
     /// Seconds since the session last answered a command.
     pub idle_secs: u64,
-    /// Idle budget left before auto-eviction.
-    pub expires_in_secs: u64,
+    /// Idle budget left before auto-eviction. Absent for `keepalive`
+    /// sessions, which never auto-evict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_in_secs: Option<u64>,
+    /// True when the session is exempt from the idle reaper.
+    pub keepalive: bool,
 }
 
 /// One recorded session action — the replay log. Only actions that change
@@ -286,11 +290,15 @@ struct BrowserSession {
     cmd_tx: mpsc::UnboundedSender<SessionCommand>,
     last_active: Instant,
     timeout: Duration,
+    /// keepalive sessions are exempt from the idle reaper — a long workflow
+    /// with SSH/DB queries between browser steps must not lose its login
+    /// state (real-device feedback ③). Lives until session_close or exit.
+    keepalive: bool,
 }
 
 impl BrowserSession {
     fn is_expired(&self) -> bool {
-        self.last_active.elapsed() > self.timeout
+        !self.keepalive && self.last_active.elapsed() > self.timeout
     }
 }
 
@@ -313,7 +321,13 @@ impl SessionManager {
         }
     }
 
-    /// Create a new browser session. Returns the session ID.
+    /// Create a new browser session. Returns the session ID. `pin_viewport`
+    /// sets the initial device emulation (feedback ⑤: the viewport belongs to
+    /// the session's identity, so `session_create {width, height, mobile}`
+    /// must produce the same layout a prior session_viewport call would).
+    /// Dimensions are forwarded as given — the Viewport command keeps the
+    /// live value for any unspecified axis.
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         &mut self,
         start_url: Option<&str>,
@@ -321,6 +335,8 @@ impl SessionManager {
         cookies: Vec<String>,
         storage: Option<Value>,
         ttl_secs: Option<u64>,
+        pin_viewport: Option<(Option<u32>, Option<u32>, bool)>,
+        keepalive: bool,
     ) -> String {
         let session_id = format!("s_{}", SESSION_COUNTER.fetch_add(1, Ordering::Relaxed));
         let timeout = Duration::from_secs(ttl_secs.unwrap_or(SESSION_TIMEOUT.as_secs()).clamp(60, 3600));
@@ -343,12 +359,38 @@ impl SessionManager {
         self.sessions.insert(
             session_id.clone(),
             BrowserSession {
-                cmd_tx,
+                cmd_tx: cmd_tx.clone(),
                 last_active: Instant::now(),
                 timeout,
+                keepalive,
             },
         );
+        // Fire-and-forget viewport pin: it queues ahead of anything the
+        // caller can send (the id is returned only after this enqueue), and
+        // the thread applies it right after its initial navigation. The
+        // override lives on the Page, so it survives every later navigation.
+        if let Some((w, h, mobile)) = pin_viewport {
+            let (tx, _rx) = oneshot::channel();
+            let _ = cmd_tx.send(SessionCommand::Viewport {
+                width: w,
+                height: h,
+                mobile,
+                reply: tx,
+            });
+        }
         session_id
+    }
+
+    /// Seconds left before this session is evicted for idleness; None for
+    /// keepalive sessions (no idle expiry). Feedback ③: the agent should see
+    /// the remaining lifetime instead of discovering an expired session
+    /// mid-workflow.
+    pub fn expires_in_secs(&self, session_id: &str) -> Option<u64> {
+        let s = self.sessions.get(session_id)?;
+        if s.keepalive {
+            return None;
+        }
+        Some(s.timeout.saturating_sub(s.last_active.elapsed()).as_secs())
     }
 
     /// Send a command to a session and await the result.
@@ -434,10 +476,12 @@ impl SessionManager {
             .map(|(id, s)| SessionListEntry {
                 session_id: id.clone(),
                 idle_secs: s.last_active.elapsed().as_secs(),
-                expires_in_secs: s
-                    .timeout
-                    .saturating_sub(s.last_active.elapsed())
-                    .as_secs(),
+                expires_in_secs: if s.keepalive {
+                    None
+                } else {
+                    Some(s.timeout.saturating_sub(s.last_active.elapsed()).as_secs())
+                },
+                keepalive: s.keepalive,
             })
             .collect();
         out.sort_by_key(|e| e.idle_secs);
@@ -1404,7 +1448,7 @@ mod tests {
     #[tokio::test]
     async fn idle_session_keeps_timers_and_microtasks_firing() {
         let mut mgr = SessionManager::new();
-        let sid = mgr.create(Some("about:blank"), false, vec![], None, None);
+        let sid = mgr.create(Some("about:blank"), false, vec![], None, None, None, false);
 
         let armed = mgr
             .send(&sid, |reply| SessionCommand::Eval {
@@ -1465,7 +1509,7 @@ mod tests {
 
         // Command failure inside a LIVE session: COMMAND_FAILED, no recreate
         // hint, and the session survives (a retry is safe).
-        let sid = mgr.create(Some("about:blank"), false, vec![], None, None);
+        let sid = mgr.create(Some("about:blank"), false, vec![], None, None, None, false);
         let err = mgr
             .send(&sid, |reply| SessionCommand::Click { index: 99_999, reply })
             .await
@@ -1476,7 +1520,7 @@ mod tests {
 
         // Expired: SESSION_EXPIRED + destructive close, then the same id
         // answers SESSION_NOT_FOUND — the two conclusions agree.
-        let sid = mgr.create(Some("about:blank"), false, vec![], None, None);
+        let sid = mgr.create(Some("about:blank"), false, vec![], None, None, None, false);
         mgr.sessions.get_mut(&sid).unwrap().last_active = Instant::now() - Duration::from_secs(3600);
         let err = mgr
             .send(&sid, |reply| SessionCommand::State { reply })
@@ -1516,6 +1560,8 @@ mod tests {
             vec![],
             None,
             None,
+            None,
+            false,
         );
 
         let clicked = mgr
@@ -1568,6 +1614,8 @@ mod tests {
             vec![],
             None,
             None,
+            None,
+            false,
         );
 
         let vp = mgr
@@ -1653,7 +1701,7 @@ mod tests {
         )]);
 
         let mut mgr = SessionManager::new();
-        let sid = mgr.create(Some(&format!("http://127.0.0.1:{port}/shot")), false, vec![], None, None);
+        let sid = mgr.create(Some(&format!("http://127.0.0.1:{port}/shot")), false, vec![], None, None, None, false);
 
         // Mutate the DOM after load — the capture renders page.content(),
         // so the pixels must reflect the mutation, not the HTTP response.
@@ -1707,7 +1755,7 @@ mod tests {
         )]);
 
         let mut mgr = SessionManager::new();
-        let sid = mgr.create(Some(&format!("http://127.0.0.1:{port}/wait")), false, vec![], None, None);
+        let sid = mgr.create(Some(&format!("http://127.0.0.1:{port}/wait")), false, vec![], None, None, None, false);
 
         // Elapsed must cover the 600ms timer — proof the loop was driven,
         // not just polled.
@@ -1784,7 +1832,7 @@ mod tests {
         let url = format!("http://127.0.0.1:{port}/store");
 
         let mut mgr = SessionManager::new();
-        let a = mgr.create(Some(&url), false, vec![], None, None);
+        let a = mgr.create(Some(&url), false, vec![], None, None, None, false);
 
         mgr.send(&a, |reply| SessionCommand::Eval {
             script: "localStorage.setItem('token','abc\"123'); \
@@ -1807,7 +1855,7 @@ mod tests {
         assert!(mgr.close_and_wait(&a).await);
 
         // Fresh session on the same origin, restored from A's snapshot.
-        let b = mgr.create(Some(&url), false, vec![], Some(v), None);
+        let b = mgr.create(Some(&url), false, vec![], Some(v), None, None, false);
         let token = mgr
             .send(&b, |reply| SessionCommand::Eval {
                 script: "localStorage.getItem('token') + '|' + localStorage.getItem('user') \
@@ -1830,9 +1878,9 @@ mod tests {
     #[tokio::test]
     async fn ttl_secs_overrides_the_idle_budget() {
         let mut mgr = SessionManager::new();
-        let long = mgr.create(Some("about:blank"), false, vec![], None, Some(3600));
-        let short = mgr.create(Some("about:blank"), false, vec![], None, Some(60));
-        let def = mgr.create(Some("about:blank"), false, vec![], None, None);
+        let long = mgr.create(Some("about:blank"), false, vec![], None, Some(3600), None, false);
+        let short = mgr.create(Some("about:blank"), false, vec![], None, Some(60), None, false);
+        let def = mgr.create(Some("about:blank"), false, vec![], None, None, None, false);
 
         let entries = mgr.list();
         let by_id = |list: &[SessionListEntry], id: &str| {
@@ -1840,6 +1888,7 @@ mod tests {
                 .find(|e| e.session_id == id)
                 .unwrap_or_else(|| panic!("{id} missing"))
                 .expires_in_secs
+                .expect("non-keepalive session carries a countdown")
         };
         assert!(by_id(&entries, &long) > 3500, "hour-long TTL, got {}", by_id(&entries, &long));
         assert!(by_id(&entries, &short) <= 60, "60s TTL, got {}", by_id(&entries, &short));
@@ -1850,13 +1899,135 @@ mod tests {
         );
 
         // Clamp: out-of-range asks land on the rails.
-        let clamped = mgr.create(Some("about:blank"), false, vec![], None, Some(999_999));
+        let clamped = mgr.create(Some("about:blank"), false, vec![], None, Some(999_999), None, false);
         let entries = mgr.list();
         assert!(by_id(&entries, &clamped) <= 3600, "clamp at one hour");
 
         for id in [long, short, def, clamped] {
             assert!(mgr.close_and_wait(&id).await);
         }
+    }
+
+    /// Feedback ⑤: session_create {width,height,mobile} pins the viewport at
+    /// session birth — the first page already renders under the override, so
+    /// the very first probe (and a later navigation) sees it without a
+    /// separate session_viewport call.
+    #[tokio::test]
+    async fn create_pins_viewport_before_first_command() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[
+            (
+                "GET /m",
+                "<html><head><style>@media (max-width:600px){body{color:#010203}}</style>\
+                 </head><body><p>m</p></body></html>",
+            ),
+            ("GET /n", "<html><body>n</body></html>"),
+        ]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/m")),
+            false,
+            vec![],
+            None,
+            None,
+            Some((Some(375), Some(667), true)),
+            false,
+        );
+
+        // First command the caller sends is a probe — the queued pin must
+        // have been applied ahead of it (FIFO on the command channel). The
+        // probe echoes current metrics without moving the mobile flag.
+        let vp = mgr
+            .send(&sid, |reply| SessionCommand::Viewport {
+                width: None,
+                height: None,
+                mobile: true,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(vp["width"].as_f64(), Some(375.0), "pin applied before first command");
+        assert_eq!(vp["mobile"].as_bool(), Some(true));
+
+        let matches = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "innerWidth + 'x' + innerHeight + '|' + matchMedia('(pointer:coarse)').matches"
+                    .to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(matches, serde_json::json!("375x667|true"));
+
+        // The pin is a real override: it rides through a navigation too.
+        mgr.send(&sid, |reply| SessionCommand::Navigate {
+            url: format!("http://127.0.0.1:{port}/n"),
+            reply,
+        })
+        .await
+        .unwrap();
+        let after = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "innerWidth".to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(after, serde_json::json!(375));
+
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
+    /// Feedback ③: keepalive sessions skip the idle reaper — backdate the
+    /// clock past any TTL and they still answer, expires_in_secs() goes
+    /// quiet, and list() flags them.
+    #[tokio::test]
+    async fn keepalive_sessions_never_expire() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /ka",
+            "<html><body>ka</body></html>",
+        )]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/ka")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            true,
+        );
+
+        {
+            let s = mgr.sessions.get_mut(&sid).expect("session");
+            s.last_active = std::time::Instant::now() - std::time::Duration::from_secs(99_999);
+        }
+
+        assert!(mgr.expires_in_secs(&sid).is_none(), "keepalive has no countdown");
+        let entry = mgr
+            .list()
+            .into_iter()
+            .find(|e| e.session_id == sid)
+            .expect("listed");
+        assert!(entry.keepalive, "list() flags keepalive");
+        assert!(
+            !mgr.sessions.get(&sid).expect("session").is_expired(),
+            "past any TTL, keepalive still lives"
+        );
+
+        let v = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "1 + 1".to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(v, serde_json::json!(2));
+
+        assert!(mgr.close_and_wait(&sid).await);
     }
 
     /// Page console output lands in the session ring: messages from the
@@ -1881,6 +2052,8 @@ mod tests {
             vec![],
             None,
             None,
+            None,
+            false,
         );
 
         // Output produced by an agent-driven eval joins the same ring.
@@ -1935,9 +2108,9 @@ mod tests {
     #[tokio::test]
     async fn list_reports_live_sessions_and_goes_empty_after_close() {
         let mut mgr = SessionManager::new();
-        let a = mgr.create(Some("about:blank"), false, vec![], None, None);
+        let a = mgr.create(Some("about:blank"), false, vec![], None, None, None, false);
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let b = mgr.create(Some("about:blank"), false, vec![], None, None);
+        let b = mgr.create(Some("about:blank"), false, vec![], None, None, None, false);
 
         let entries = mgr.list();
         assert_eq!(entries.len(), 2);
@@ -1945,7 +2118,10 @@ mod tests {
         assert!(ids.contains(&a.as_str()) && ids.contains(&b.as_str()));
         assert!(entries[0].idle_secs <= entries[1].idle_secs, "most recent first");
         for e in &entries {
-            assert!(e.expires_in_secs <= 480, "expiry budget caps at the 8 min timeout");
+            assert!(
+                e.expires_in_secs.expect("countdown") <= 480,
+                "expiry budget caps at the 8 min timeout"
+            );
         }
 
         assert!(mgr.close_and_wait(&a).await);
@@ -2004,7 +2180,7 @@ mod tests {
     #[tokio::test]
     async fn session_records_actions_and_exports_jsonl() {
         let mut mgr = SessionManager::new();
-        let sid = mgr.create(Some("about:blank"), false, vec!["k=v".to_string()], None, None);
+        let sid = mgr.create(Some("about:blank"), false, vec!["k=v".to_string()], None, None, None, false);
 
         let _ = mgr
             .send(&sid, |reply| SessionCommand::State { reply })
@@ -2077,7 +2253,7 @@ mod tests {
         ]);
 
         let mut mgr = SessionManager::new();
-        let sid = mgr.create(Some(&format!("http://127.0.0.1:{port}/watch")), false, vec![], None, None);
+        let sid = mgr.create(Some(&format!("http://127.0.0.1:{port}/watch")), false, vec![], None, None, None, false);
 
         // One pump cycle so the page's fetch() settles into the event queue.
         let _ = mgr
