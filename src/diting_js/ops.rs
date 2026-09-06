@@ -1158,6 +1158,7 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "clear",
     "overflow",
     "border-collapse",
+    "vertical-align",
     "font-size",
     "font-weight",
     "text-align",
@@ -1253,6 +1254,17 @@ fn computed_style_value(
             }
             .into(),
         ),
+        // Declared values only: undeclared cells keep the JS caller's own
+        // default chain (the UA middle behavior at the alignment site isn't
+        // a declaration, and baseline folds into Top for the layout model).
+        "vertical-align" => s
+            .vertical_align
+            .map(|va| match va {
+                VerticalAlign::Top => "top",
+                VerticalAlign::Middle => "middle",
+                VerticalAlign::Bottom => "bottom",
+            })
+            .map(str::to_string),
         "float" => Some(
             match s.float_side {
                 Some(FloatSide::Left) => "left",

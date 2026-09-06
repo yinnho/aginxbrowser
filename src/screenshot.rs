@@ -1332,6 +1332,48 @@ mod tests {
         );
     }
 
+    /// The CSS property mirrors the attribute (blitz#508): top/bottom move
+    /// the content within the taller cell; baseline behaves like top for
+    /// the flex-column cell model.
+    #[test]
+    fn css_vertical_align_positions_cell_content() {
+        let mk = |decl: &str| {
+            format!(
+                r##"<html><head><style>
+            body {{ margin: 0; }}
+            table {{ border-collapse: collapse; }}
+            td {{ padding: 0; height: 110px; {decl} }}
+        </style></head><body>
+            <table><tr><td><div id="d" style="width:50px;height:20px"></div></td></tr></table>
+        </body></html>"##
+            )
+        };
+        for (decl, want, label) in [
+            ("vertical-align: top", 0.0, "top"),
+            ("vertical-align: baseline", 0.0, "baseline folds to top"),
+            ("vertical-align: bottom", 90.0, "bottom"),
+        ] {
+            let r = element_rects_diting(&mk(decl), "#d", false, 800.0, 600.0, None)
+                .unwrap_or_else(|e| panic!("{label}: {e}"))[0];
+            assert!((r.y - want).abs() <= 1.5, "{label} → y≈{want}, got {r:?}");
+        }
+    }
+
+    /// Presentational hints sit below every author declaration: a CSS
+    /// vertical-align outranks a competing valign attribute on the cell.
+    #[test]
+    fn css_vertical_align_outranks_valign_attribute() {
+        let html = r##"<html><head><style>
+            body { margin: 0; }
+            table { border-collapse: collapse; }
+            td { padding: 0; height: 110px; vertical-align: top; }
+        </style></head><body>
+            <table><tr><td valign="bottom"><div id="d" style="width:50px;height:20px"></div></td></tr></table>
+        </body></html>"##;
+        let d = element_rects_diting(html, "#d", false, 800.0, 600.0, None).expect("d")[0];
+        assert!(d.y <= 1.0, "CSS top beats valign=bottom: {d:?}");
+    }
+
     /// Stylesheets come first: img alternates must not burn the fetch cap and
     /// starve the sheet (a dropped head stylesheet blanks layout, images are
     /// only fidelity polish).

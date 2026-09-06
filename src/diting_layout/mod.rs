@@ -1836,24 +1836,21 @@ fn build_table(
                 st.flex_basis = Dimension::length(max);
                 st.flex_grow = if max > 0.0 { max } else { 1.0 };
                 st.flex_shrink = 1.0;
-                // valign (blitz#508): the attribute moves cell CONTENT, not
-                // the box — the cell still fills the row via the wrapper's
-                // STRETCH. A flex-column cell plus justify_content models
-                // it; absent/unknown values take Chrome's UA middle default
-                // (every browser's vertical-align:middle on cells).
+                // vertical-align (blitz#508): the declaration or the legacy
+                // valign attribute (same computed slot) moves cell CONTENT,
+                // not the box — the cell still fills the row via the
+                // wrapper's STRETCH. A flex-column cell plus justify_content
+                // models it; absent/unknown values take Chrome's UA middle
+                // default (every browser's vertical-align:middle on cells).
                 let valign = node_map
                     .get(cell)
-                    .and_then(|dom| {
-                        tree.with_node(*dom, |n| {
-                            n.get_attribute("valign").map(|v| v.trim().to_ascii_lowercase())
-                        })
-                    })
-                    .flatten();
+                    .and_then(|dom| styles.get(dom))
+                    .and_then(|s| s.vertical_align);
                 st.display = Display::Flex;
                 st.flex_direction = FlexDirection::Column;
-                st.justify_content = Some(match valign.as_deref() {
-                    Some("top") => JustifyContent::FLEX_START,
-                    Some("bottom") => JustifyContent::FLEX_END,
+                st.justify_content = Some(match valign {
+                    Some(crate::diting_css::VerticalAlign::Top) => JustifyContent::FLEX_START,
+                    Some(crate::diting_css::VerticalAlign::Bottom) => JustifyContent::FLEX_END,
                     _ => JustifyContent::CENTER,
                 });
                 let _ = taffy_tree.set_style(*cell, st);

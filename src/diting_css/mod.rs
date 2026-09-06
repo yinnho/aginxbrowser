@@ -376,7 +376,7 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "border-top-width", "border-right-width", "border-bottom-width", "border-left-width",
         "width", "height", "flex-direction", "gap", "overflow",
         "object-fit", "object-position", "z-index", "border-radius",
-        "float", "clear", "border-collapse",
+        "float", "clear", "border-collapse", "vertical-align",
     ];
     if !SUPPORTED.contains(&name.to_ascii_lowercase().as_str()) {
         return false;
@@ -421,6 +421,10 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "float" => matches!(value, "left" | "right" | "none"),
         "clear" => matches!(value, "left" | "right" | "both" | "inline-start" | "inline-end" | "none"),
         "border-collapse" => matches!(value, "collapse" | "separate"),
+        "vertical-align" => matches!(
+            value,
+            "top" | "middle" | "bottom" | "baseline" | "sub" | "super"
+        ),
         "border-radius" => {
             // 1-4 radii, optionally `/` plus 1-4 vertical radii.
             let (horiz, vert) = match value.split_once('/') {
@@ -556,6 +560,11 @@ pub struct ComputedStyle {
     /// merge (we realize this as zero cell gaps), separate = the HTML
     /// default 2px `border-spacing`. `None` = not declared (separate).
     pub border_collapse: Option<BorderCollapse>,
+    /// `vertical-align` on table cells (blitz#508); None = not declared
+    /// (the UA middle default applies at the cell alignment site). The
+    /// valign attribute feeds the same slot as a presentational hint, so
+    /// an author declaration outranks the attribute by construction.
+    pub vertical_align: Option<VerticalAlign>,
     /// Custom properties (`--*`), which DO inherit: the var() substitution
     /// source. Values are stored raw (author tokens) — !important stripped at
     /// insertion; resolution to colors/lengths happens at use sites.
@@ -607,6 +616,17 @@ pub enum BorderStyle {
 pub enum BorderCollapse {
     Collapse,
     Separate,
+}
+
+/// `vertical-align` on table cells (blitz#508): top/middle/bottom move the
+/// cell's content within a taller cell; baseline behaves like top for the
+/// flex-column cell model. On inline content (sub/super/lengths) the
+/// declaration is accepted but has no layout effect — same as before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerticalAlign {
+    Top,
+    Middle,
+    Bottom,
 }
 
 /// What a border-style token means: not a style keyword at all, an explicit
@@ -1428,6 +1448,18 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 "separate" => Some(BorderCollapse::Separate),
                 _ => return false,
             };
+            true
+        }
+        "vertical-align" => {
+            match v {
+                "top" | "baseline" => style.vertical_align = Some(VerticalAlign::Top),
+                "middle" => style.vertical_align = Some(VerticalAlign::Middle),
+                "bottom" => style.vertical_align = Some(VerticalAlign::Bottom),
+                // sub/super/lengths/percentages are inline-baseline shifts;
+                // valid declarations with no modeled layout effect (and no
+                // effect on the cell alignment path either).
+                _ => {}
+            }
             true
         }
         "color" => parse_color(v).map(|c| style.color = Some(c)).is_some(),
@@ -2438,6 +2470,26 @@ pub fn cascade_element(
             .flatten();
         if let Some(h) = attr_h {
             style.height = Some(Length::Px(h));
+        }
+    }
+    // valign attribute (blitz#508), same hint slot: fills vertical_align
+    // below every author declaration, so `td { vertical-align: top }`
+    // outranks valign="middle" like in a real browser. middle (and unknown
+    // values) stay None — the alignment site's UA default is middle anyway.
+    if matches!(tag, "td" | "th") {
+        let attr_va = tree
+            .with_node(node_id, |n| {
+                n.get_attribute("valign")
+                    .map(|v| v.trim().to_ascii_lowercase())
+            })
+            .flatten()
+            .and_then(|v| match v.as_str() {
+                "top" => Some(VerticalAlign::Top),
+                "bottom" => Some(VerticalAlign::Bottom),
+                _ => None,
+            });
+        if attr_va.is_some() {
+            style.vertical_align = attr_va;
         }
     }
     for candidate in &candidates {
