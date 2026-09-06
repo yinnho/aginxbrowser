@@ -80,7 +80,7 @@ pub struct ClickParams {
     pub url: String,
     /// CSS selector of element to click
     pub selector: String,
-    /// Seconds to wait after click
+    /// Seconds to wait for the page to settle after load, before clicking
     #[serde(default)]
     pub wait_secs: Option<u64>,
 }
@@ -520,7 +520,11 @@ impl AginxBrowserMcp {
     }
 
     #[tool(
-        description = "Execute JavaScript on a webpage and return the result. Supports async/Promise.",
+        description = "Execute JavaScript on a one-off page: loads `url` in a fresh browser context, \
+optionally waits `wait_secs` for the page to settle, evaluates `script` (async/Promise supported) \
+and returns `{url, result}`. Script-driven navigation (location.href, form submit) is drained and \
+reflected in the returned `url`. Stateless — no cookies or page state shared with other calls; \
+when the script needs prior page state or a login, use session_eval.",
         annotations(title = "Evaluate JavaScript")
     )]
     async fn eval(&self, Parameters(params): Parameters<EvalParams>) -> String {
@@ -548,7 +552,12 @@ impl AginxBrowserMcp {
     }
 
     #[tool(
-        description = "Click an element on a webpage using CSS selector.",
+        description = "Click an element on a one-off page: loads `url` in a fresh browser context \
+(stateless — no cookies unless passed, no shared state with other calls), waits `wait_secs` after \
+load before clicking, then fires a DOM click on the first CSS-selector match. The click may \
+trigger navigation (link, form submit) — the response `url` and `text_after` are read after that \
+navigation lands. Returns `clicked:false` when the selector matches nothing. For multi-step \
+interaction on a shared page use session_click instead.",
         annotations(title = "Click Element")
     )]
     async fn click(&self, Parameters(params): Parameters<ClickParams>) -> String {
@@ -839,7 +848,11 @@ default argument); \"dismiss\" restores the default.",
     }
 
     #[tool(
-        description = "Click an interactive element by its index (from session_state output).",
+        description = "Click an interactive element by its index (from session_state output) inside \
+a live browser session: scrolls it into view and fires a DOM click on the session's current page. \
+A submit click may navigate the session — the returned `url`/`text_after` reflect the page after \
+the action, and session state (cookies, localStorage, globals) persists for follow-up calls. \
+Indexes come from the most recent session_state; re-list after navigation.",
         annotations(title = "Session Click")
     )]
     async fn session_click(&self, Parameters(params): Parameters<SessionClickParams>) -> String {
@@ -941,7 +954,10 @@ drag targets and canvas selections that only track while the pointer travels.",
     }
 
     #[tool(
-        description = "Execute arbitrary JavaScript in the browser session and return the result.",
+        description = "Execute arbitrary JavaScript in a live browser session and return the result. \
+Runs in the session's current page, so DOM mutations, globals and storage persist across calls — \
+unlike the stateless eval tool, which loads its own throwaway page each call. Script-driven \
+navigation moves the session's URL. JS exceptions are reported with name, line/column and stack.",
         annotations(title = "Session Eval")
     )]
     async fn session_eval(&self, Parameters(params): Parameters<SessionEvalParams>) -> String {
