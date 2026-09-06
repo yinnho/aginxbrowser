@@ -49,7 +49,7 @@ Most new "agent browsers" are stateless, fingerprint-less one-shot renderers —
 
 - **🔐 Real TLS fingerprints** — stealth mode replicates the complete Chrome145 / Firefox133 / Safari / Edge TLS handshakes via BoringSSL (not just a UA string), switchable per request; Cloudflare Turnstile challenges wait automatically for `cf_clearance`. Fingerprint-less engines eat 403s — we get through.
 - **🤝 Stateful interactive sessions** — persistent sessions (8-minute idle keep-alive), login state injectable and exportable (`session_create(cookies=...)` ↔ `session_cookies`), surviving pagination and multi-step flows. One-shot engines throw state away.
-- **🔌 MCP native** — 23 tools as first-class citizens (not a CDP shim). Claude Code / Cursor / Claude Desktop connect in one line. HTTP + MCP dual protocol — plus a CDP bridge, so the DevTools ecosystem works too.
+- **🔌 MCP native** — 27 tools as first-class citizens (not a CDP shim). Claude Code / Cursor / Claude Desktop connect in one line. HTTP + MCP dual protocol — plus a CDP bridge, so the DevTools ecosystem works too.
 
 > Reference point: Cloudflare's Kitesurf explicitly ships neither real TLS-fingerprint negotiation nor persistent auth sessions — anti-bot and login territory is exactly where AginxBrowser plays.
 
@@ -80,7 +80,7 @@ The [local cache](#capabilities) builds on the same idea: search hits come back 
 - **JS data extraction**: `js_extract` pulls `window.__INITIAL_STATE__` and other structured data out of SPAs
 - **Screenshot rendering**: `/screenshot` endpoint (opt-in `--features screenshot`) paints the JS-rendered DOM with the diting rendering engine — pure CPU, no Chromium — to PNG. Vision input for agents
 - **TLS fingerprint spoofing**: stealth mode impersonates Chrome145/Firefox133/Safari/Edge, switchable per request
-- **MCP server**: `--mcp` mode exposes 23 tools (fetch/eval/search/download/cache + session + screenshot tools) — Claude Code / Claude Desktop / Cursor call them directly
+- **MCP server**: `--mcp` mode exposes 27 tools (fetch/eval/search/download/cache + session + screenshot tools) — Claude Code / Claude Desktop / Cursor call them directly
 - **Firecrawl compatible**: `/v1/scrape` endpoint — existing Firecrawl clients migrate by changing the base URL
 - **DNS rebinding protection**: built-in SSRF guard + post-resolution IP validation
 
@@ -203,7 +203,7 @@ aginxbrowser/
     ├── main.rs              # HTTP service entry & routing
     ├── server.rs            # Business layer (fetch/click/eval/search)
     ├── session.rs           # Interactive browser sessions
-    ├── mcp.rs               # MCP server (23 tools)
+    ├── mcp.rs               # MCP server (27 tools)
     ├── render.rs            # Tiered rendering (HTTP direct → diting browser engine)
     ├── store.rs             # Local fetch/search cache (SQLite FTS5, drift hashes)
     ├── download.rs          # Streaming file download (sha256, resume)

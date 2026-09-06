@@ -169,6 +169,12 @@ pub struct SessionCookiesParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionCloneParams {
+    /// Session ID to derive from (stays alive and untouched)
+    pub session_id: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SessionConsoleParams {
     /// Session ID
     pub session_id: String,
@@ -698,6 +704,21 @@ impl AginxBrowserMcp {
             resp["expires_in_secs"] = json!(s);
         }
         resp.to_string()
+    }
+
+    #[tool(
+        description = "Derive a new browser session from a live one, carrying the full login state: \
+cookies, localStorage/sessionStorage, viewport pin, dialog policy, proxy and keepalive flags. The \
+source session stays untouched. Use to snapshot a logged-in state before risky actions, or to run \
+the same login in parallel tabs. Returns {session_id (new), cloned_from, url, viewport}.",
+        annotations(title = "Clone Session")
+    )]
+    async fn session_clone(&self, Parameters(params): Parameters<SessionCloneParams>) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        match mgr.clone_session(&params.session_id).await {
+            Ok(resp) => resp.to_string(),
+            Err(e) => json!({ "error": e }).to_string(),
+        }
     }
 
     #[tool(

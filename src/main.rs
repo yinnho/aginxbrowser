@@ -596,6 +596,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/download", post(download_handler))
         .route("/v1/scrape", post(firecrawl_compat::scrape_handler))
         .route("/session/create", post(session_create_handler))
+        .route("/session/:id/clone", post(session_clone_handler))
         .route("/session/list", get(session_list_handler))
         .route("/session/:id/navigate", post(session_navigate_handler))
         .route("/session/:id/state", post(session_state_handler))
@@ -1069,6 +1070,16 @@ async fn session_create_handler(Json(req): Json<SessionCreateRequest>) -> Result
         session_id: id,
         url: req.url,
     })))
+}
+
+/// Derive a session carrying the source's login state (cookies + storage +
+/// viewport + dialog policy); the source stays untouched.
+async fn session_clone_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    let resp = mgr.clone_session(&id).await.map_err(session_err)?;
+    Ok((StatusCode::OK, Json(resp)))
 }
 
 /// Live sessions with idle age and time left before auto-eviction — the

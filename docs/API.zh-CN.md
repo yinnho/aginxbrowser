@@ -685,6 +685,18 @@ curl -sS -X POST http://127.0.0.1:8089/session/create \
 
 > 🔒 托管实例**不落盘**任何 cookie——cookie 只在会话内存里，会话 8 分钟空闲回收即清。登录态由调用方自己持有（建议用小号，别用主账号）。
 
+### POST /session/{id}/clone
+
+从现役会话派生一个新会话，完整带走登录态——cookie、`localStorage`/`sessionStorage`、视口设置、弹窗策略、代理和 keepalive 开关——原会话原样不动。危险操作前先克隆存档，或同一登录态并行开多个会话。以前手工「`session_cookies` 导出 → `session_create` 回灌」的路子，手一滑把好的登录态改坏过；这条路不再需要。
+
+**响应：**
+
+```json
+{"session_id": "s_2", "cloned_from": "s_1", "url": "https://example.com/dashboard", "viewport": {"width": 390, "height": 844, "mobile": true}, "expires_in_secs": 431}
+```
+
+`viewport` 为 `null` 表示源会话没设过视口。
+
 ### Session 使用示例
 
 ```bash
@@ -769,7 +781,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 
 `--mcp` 模式走 stdio 协议，不启动 HTTP 服务器，通过 stdin/stdout 与 MCP 客户端通信。
 
-### 提供的工具（14 个）
+### 提供的工具（27 个）
 
 #### 基础工具
 
@@ -780,19 +792,32 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 | `click` | 点击页面元素（CSS 选择器） |
 | `search` | 多引擎聚合搜索（百度/Bing/搜狗/搜狗微信/Google） |
 | `download` | 流式下载文件到磁盘（SHA-256 校验、断点续传） |
+| `cache` | 查询本地抓取/搜索缓存（全文含 CJK、整页 `get`、统计、按条件清理） |
 
 #### Session 工具
 
 | 工具 | 说明 |
 |------|------|
 | `session_create` | 创建交互式浏览器会话 |
+| `session_clone` | 从现役会话派生新会话，完整带走登录态（cookie + storage + viewport + 弹窗策略），原会话不动——危险操作前先存档，或同一登录态并行开多会话 |
+| `session_list` | 列出存活会话（空闲时长 + 剩余寿命，能复用就别新建） |
 | `session_navigate` | 会话内导航到新 URL |
 | `session_state` | 获取索引化的页面状态 |
 | `session_cookies` | 导出会话当前 cookie（`["name=value",...]`，用于登录态复用） |
+| `session_storage` | 快照会话的 `localStorage`/`sessionStorage`——cookie 带不走的那半登录态，配 `session_create` 的 `storage` 字段回灌 |
+| `session_console` | 读会话最近的页面 console 输出（`log/info/warn/error/dialog` 环形缓冲 500 条，支持 `level`/`since_ts`/`url_contains`/`limit` 过滤）——页面为什么坏，点一下按钮再读它最快 |
 | `session_click` | 按索引点击元素 |
-| `session_input` | 按索引输入文本 |
+| `session_click_xy` | 按页面坐标走真实鼠标链点击（pointerdown→click，逐事件 hit-test）——canvas/地图/自绘控件吃这套；`click_count: 2` 补 `dblclick` |
+| `session_drag` | 从 `from` 按下、插值 `mousemove` 滑到 `to` 松开——地图 marker/canvas 选区跟着每一步走 |
+| `session_input` | 按索引输入文本（写值后派发 `input`+`change`；`events:"full"` 逐字符派发键盘事件） |
 | `session_scroll` | 滚动页面 |
 | `session_eval` | 在会话中执行 JavaScript |
+| `session_dialog` | 查看/接管弹窗策略（`alert`/`confirm`/`prompt` 永不阻塞：自动作答并记录，`list`/`accept`/`dismiss`） |
+| `session_viewport` | 设会话视口（设备模拟）：media query 重算，`mobile: true` 翻 `pointer: coarse`/`hover: none`；设置活过导航 |
+| `session_screenshot` | 截会话**当前** DOM 状态（含 click/eval 后的突变）为 base64 PNG；可选 `width`/`height`/`full_page`/`selector` |
+| `session_wait` | 等 CSS 选择器命中或 JS 谓词为真，带超时——等待期间页面事件循环照常跑，替代瞎 sleep |
+| `session_network` | 读会话网络请求日志；`filter: "media"` 从页面真实发出的请求里提播放/直播链接（m3u8、mp4…）——拿真视频直链靠它 |
+| `session_export` | 导出会话录制的动作（默认出可回放的 curl 脚本；`format=jsonl` 出原始日志） |
 | `session_close` | 关闭会话 |
 
 #### fetch 工具参数
@@ -817,10 +842,15 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 | url | string | | `null` | 初始 URL |
 | use_proxy | bool | | `false` | 走代理 |
 | cookies | string[] | | `[]` | 注入 cookie（`["name=value",...]`），会话创建即登录态。配合 `session_cookies` 复用登录态 |
+| storage | object | | `null` | 初始导航落地后注入的 Web Storage：`{"local_storage": {"k":"v"}, "session_storage": {"k":"v"}}`。与 `session_storage` 工具往返 |
+| ttl_secs | u64 | | `480` | 空闲回收秒数（钳 60..3600），长流程调大 |
+| keepalive | bool | | `false` | 免空闲回收：活到 `session_close` 或进程退出——中间穿插长非浏览器步骤的流程不再丢登录态 |
+| width / height | u32 | | `null` | 初始视口，会话存活期钉住（活过导航） |
+| mobile | bool | | `false` | 初始视口的手机模拟（`pointer: coarse`、`hover: none`、`maxTouchPoints = 5`） |
 
 #### session 操作参数
 
-所有 session 操作都需要 `session_id` 参数。`click`/`input` 需要 `index`（从 `session_state` 获取），`input` 还需要 `text`，`eval` 需要 `script`。
+所有 session 操作都需要 `session_id` 参数。`click`/`input` 需要 `index`（从 `session_state` 获取），`input` 还需要 `text`，`eval` 需要 `script`，`navigate` 需要 `url`，`clone` 只要源会话 id。带可选参数的工具：`click_xy` 要 `x`/`y`（可选 `button`、`click_count`）；`drag` 要 `from`/`to`（可选 `steps`、`delay_ms`）；`viewport` 收 `width`/`height`/`mobile`（都可选，缺省保持当前值）；`screenshot` 收 `width`/`height`/`full_page`/`selector`/`selector_all`；`wait` 的 `selector`/`predicate` 二选一，加 `timeout_ms`（默认 10000，上限 120000）；`export` 收 `format`（默认 `bash` / `jsonl`）；`network` 收 `filter: "media"`；`dialog` 收 `action`（`list`/`accept`/`dismiss`）加可选 `prompt_text`；`console` 收 `level`/`since_ts`/`url_contains`/`limit`；`storage`/`cookies` 只要 `session_id`。
 
 ### 客户端配置
 

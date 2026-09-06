@@ -555,6 +555,18 @@ Create an interactive browser session.
 {"session_id": "s_1", "url": "https://example.com/"}
 ```
 
+### POST /session/{id}/clone
+
+Derive a new session carrying the source's full login state — cookies, `localStorage`/`sessionStorage`, viewport pin, dialog policy, proxy and keepalive flags — with the source left untouched. Use it to snapshot a logged-in state before risky actions, or to run the same login in parallel sessions. The manual `cookies` → `session/create` round-trip this replaces is where a hand-edited cookie string clobbers a working login.
+
+**Response:**
+
+```json
+{"session_id": "s_2", "cloned_from": "s_1", "url": "https://example.com/dashboard", "viewport": {"width": 390, "height": 844, "mobile": true}, "expires_in_secs": 431}
+```
+
+`viewport` is `null` when the source never pinned one.
+
 ### GET /session/list
 
 List live sessions — the discovery twin of `/session/create` (reuse an idle session instead of spawning a fresh V8 thread per step). Entries carry idle age and the eviction budget; most recently active first.
@@ -621,9 +633,35 @@ Click an interactive element by index.
 
 `text_after` is the landed page's text after the click (capped at 2000 chars) — before/after evidence in one response, same contract as `/click`.
 
+### POST /session/{id}/click_xy
+
+Click at page coordinates via the real mouse chain: `pointerdown`/`mousedown` → `pointerup`/`mouseup` → `click`, each hit-tested through `elementFromPoint` at the given viewport position — the shape canvas/map pages and custom widgets listen for. `click_count: 2` also synthesizes `dblclick`.
+
+| Field | Type | Default | Description |
+|------|------|------|------|
+| x | number | ✅ | Viewport X in CSS pixels |
+| y | number | ✅ | Viewport Y in CSS pixels |
+| button | string | `"left"` | `left` / `right` / `middle` |
+| click_count | u32 | `1` | Chrome click count: 2 adds `dblclick`, 3+ sets `detail` |
+
+**Response:** `{"url": "...", "x": 120, "y": 120}`
+
+### POST /session/{id}/drag
+
+Press at `from`, glide through `steps` interpolated `mousemove` events (`delay_ms` apart), release at `to` — drags a marker/canvas selection the way a real pointer would, so move-driven widgets (map markers, drag handles, sliders) track every intermediate position.
+
+| Field | Type | Default | Description |
+|------|------|------|------|
+| from | object | ✅ | `{"x":…,"y":…}` press point |
+| to | object | ✅ | `{"x":…,"y":…}` release point |
+| steps | u32 | `10` | Interpolated move events (clamped 1..200) |
+| delay_ms | u64 | `30` | Pause between moves (clamped 0..1000) |
+
+**Response:** `{"url": "...", "from": {"x":120,"y":120}, "to": {"x":300,"y":220}, "steps": 10}`
+
 ### POST /session/{id}/input
 
-Type text into an input field by index.
+Type text into an input field by index. After writing the value, `input` + `change` events are dispatched (bubbling), so framework-bound forms (Vue/React models, validation listeners) see the text.
 
 **Request fields:**
 
@@ -631,6 +669,7 @@ Type text into an input field by index.
 |------|------|------|------|
 | index | usize | ✅ | Element index |
 | text | string | ✅ | Text to enter |
+| events | string | `"standard"` | `standard` → `input` + `change` after the value lands; `full` → per-character `keydown`/`keypress`/`input`/`keyup` cycles for strict keyboard listeners |
 
 **Response:**
 
@@ -804,13 +843,29 @@ Snapshot the session's `localStorage` + `sessionStorage` for the current origin 
 
 ### GET /session/{id}/console
 
-The session's recent page console output (`log` / `info` / `warn` / `error`) as a ring buffer of the last 500 entries, newest last — captures output from page scripts, clicks, evals and navigations alike. The fastest way to see *why* a page misbehaves: click the button, call this, read the error.
+The session's recent page console output (`log` / `info` / `warn` / `error`, plus `dialog` entries for auto-answered `alert`/`confirm`/`prompt`) as a ring buffer of the last 500 entries, newest last — captures output from page scripts, clicks, evals and navigations alike. The fastest way to see *why* a page misbehaves: click the button, call this, read the error.
 
-**Response:**
+**Query parameters** (all optional, combinable):
 
-```json
-{"url": "https://example.com", "total": 3, "messages": [{"ts_ms": 1712, "level": "error", "text": "TypeError: x is not a function"}]}
-```
+| Field | Type | Default | Description |
+|------|------|------|------|
+| level | string | — | Only entries at this exact level (e.g. `error`, `dialog`) |
+| since_ts | u64 | — | Only entries at or after this Unix epoch millisecond |
+| url_contains | string | — | Only entries whose page URL contains this substring |
+| limit | usize | — | Keep only the most recent N matches |
+
+**Response:** `{"url": "...", "total": 3, "matched": 1, "messages": [{"ts_ms": 1712, "level": "error", "text": "TypeError: x is not a function", "url": "https://example.com/"}]}` — `total` is the whole ring, `matched` what the filters let through.
+
+### POST /session/{id}/dialog
+
+Inspect or steer how the session answers `window.alert` / `confirm` / `prompt`. Dialogs never block the page — they are answered immediately under the session policy (default: dismiss) and logged to the console ring with `level: "dialog"`.
+
+| Field | Type | Required | Description |
+|------|------|------|------|
+| action | string | ✅ | `list` → current policy + every dialog entry seen; `accept` → subsequent dialogs answer OK/true; `dismiss` → answer cancel/false (the default) |
+| prompt_text | string | | What `window.prompt` returns when accepted; persists for the session |
+
+**Response:** `{"policy": "accept", "prompt_text": null, "dialogs": [{"ts_ms": 1712, "level": "dialog", "text": "{\"dialog\":\"alert\",\"message\":\"修改成功\"}"}]}`
 
 ### POST /session/{id}/viewport
 
@@ -1025,7 +1080,7 @@ The streamable HTTP transport follows the protocol's dual session semantics — 
 
 Browser sessions (`session_create` & co.) are shared across MCP sessions by design: two MCP clients on the same server can list (`session_list`) and reuse the same browser session IDs, which is what makes "one instance per machine, every agent shares it" work. For a self-hosted instance reached over a LAN IP or a Docker hostname (not `localhost`/`127.0.0.1`), add the hostname to `AGINXBROWSER_MCP_ALLOWED_HOSTS` — the transport validates the `Host` header as DNS-rebinding protection and rejects unlisted hosts with `403`.
 
-### Provided Tools (23)
+### Provided Tools (27)
 
 #### Core Tools
 
@@ -1043,16 +1098,20 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | Tool | Description |
 |------|------|
 | `session_create` | Create an interactive browser session |
+| `session_clone` | Derive a new session carrying the full login state (cookies + storage + viewport + dialog policy); the source stays untouched — snapshot before risky actions, or run one login in parallel |
 | `session_list` | List live sessions with idle age and time left before auto-eviction (discover one to reuse) |
 | `session_navigate` | Navigate to a new URL within a session |
 | `session_state` | Get the indexed page state |
 | `session_cookies` | Export the session's current cookies (`["name=value",...]`, for login-state reuse) |
 | `session_storage` | Snapshot the session's `localStorage`/`sessionStorage` for the current origin — the half of login state cookies can't carry; restore it in a new session via `session_create`'s `storage` field |
-| `session_console` | Read the session's recent page console output (`log/info/warn/error` ring buffer of 500) — the fastest way to see why a page misbehaves |
+| `session_console` | Read the session's recent page console output (`log/info/warn/error/dialog` ring buffer of 500, filters: `level`/`since_ts`/`url_contains`/`limit`) — the fastest way to see why a page misbehaves |
 | `session_click` | Click an element by index |
-| `session_input` | Type text by index |
+| `session_click_xy` | Click at viewport coordinates via the real mouse chain (`pointerdown`→`click`, hit-tested) — for canvas/map/custom widgets; `click_count: 2` adds `dblclick` |
+| `session_drag` | Press at `from`, glide through interpolated `mousemove` events, release at `to` — drags map markers/canvas selections the way a real pointer would |
+| `session_input` | Type text by index (`input`+`change` dispatched; `events:"full"` for per-character keyboard cycles) |
 | `session_scroll` | Scroll the page |
 | `session_eval` | Execute JavaScript in the session |
+| `session_dialog` | Inspect/steer dialog policy (`alert`/`confirm`/`prompt` never block: auto-answered, logged, `list`/`accept`/`dismiss`) |
 | `session_viewport` | Set the session's viewport (device emulation): media queries re-evaluate, `mobile: true` flips `pointer: coarse` / `hover: none`; override survives navigation |
 | `session_screenshot` | Screenshot the session's current DOM state (mutations included) as a base64 PNG; optional `width`/`height`/`full_page`/`selector` |
 | `session_wait` | Wait until a CSS selector matches or a JS predicate turns truthy, with a timeout — the page's event loop keeps running while waiting, so this replaces blind sleeps for async content |
@@ -1084,10 +1143,13 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | cookies | string[] | | `[]` | Inject cookies (`["name=value",...]`) so the session starts already logged in. Pair with `session_cookies` to reuse login state |
 | storage | object | | `null` | Web storage to inject after the initial navigation lands: `{"local_storage": {"k":"v"}, "session_storage": {"k":"v"}}`. Round-trips with `session_storage` |
 | ttl_secs | u64 | | `480` | Idle time-to-live in seconds before the session is evicted (clamped 60..3600). Raise it for long workflows |
+| keepalive | bool | | `false` | Exempt the session from the idle reaper: it lives until `session_close` or server exit — a workflow interrupted by long non-browser steps keeps its login state |
+| width / height | u32 | | `null` | Initial viewport, pinned for the session's life (survives navigation) |
+| mobile | bool | | `false` | Mobile emulation for the initial viewport (`pointer: coarse`, `hover: none`, `maxTouchPoints = 5`) |
 
 #### Session Operation Parameters
 
-All session operations require the `session_id` parameter. `click`/`input` also need `index` (from `session_state`); `input` additionally needs `text`; `eval` needs `script`; `navigate` needs `url`. The acting/rendering tools take optional extras: `viewport` accepts `width`/`height`/`mobile` (all optional — omit to keep current); `screenshot` accepts `width`/`height`/`full_page`/`selector`/`selector_all`; `wait` takes exactly one of `selector` / `predicate` plus `timeout_ms` (default 10000, max 120000); `export` accepts `format` (`bash` default / `jsonl`); `network` accepts `filter: "media"`; `cache`-style `storage`/`console`/`cookies` take only `session_id`.
+All session operations require the `session_id` parameter. `click`/`input` also need `index` (from `session_state`); `input` additionally needs `text`; `eval` needs `script`; `navigate` needs `url`; `clone` needs nothing but the source id. The acting/rendering tools take optional extras: `click_xy` needs `x`/`y` (optional `button`, `click_count`); `drag` needs `from`/`to` (optional `steps`, `delay_ms`); `viewport` accepts `width`/`height`/`mobile` (all optional — omit to keep current); `screenshot` accepts `width`/`height`/`full_page`/`selector`/`selector_all`; `wait` takes exactly one of `selector` / `predicate` plus `timeout_ms` (default 10000, max 120000); `export` accepts `format` (`bash` default / `jsonl`); `network` accepts `filter: "media"`; `dialog` accepts `action` (`list` default / `accept` / `dismiss`) plus optional `prompt_text`; `console` accepts `level`/`since_ts`/`url_contains`/`limit`; `storage`/`cookies` take only `session_id`.
 
 ### Client Configuration
 

@@ -105,6 +105,10 @@ impl Page {
         self.inner.set_viewport_override(w, h, mobile);
     }
 
+    pub fn viewport_override(&self) -> Option<(f32, f32, bool)> {
+        self.inner.viewport_override()
+    }
+
     /// Get page HTML content.
     pub fn content(&mut self) -> String {
         let val = self.evaluate("document.documentElement.outerHTML");

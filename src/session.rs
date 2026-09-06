@@ -172,6 +172,9 @@ impl ConsoleFilter {
 // Command protocol
 // ---------------------------------------------------------------------------
 
+/// GetViewport's read-back: the pinned (width, height, mobile), or None.
+type ViewportOverrideReply = oneshot::Sender<Result<Option<(f32, f32, bool)>, String>>;
+
 pub enum SessionCommand {
     Navigate {
         url: String,
@@ -209,6 +212,11 @@ pub enum SessionCommand {
         height: Option<u32>,
         mobile: bool,
         reply: oneshot::Sender<Result<Value, String>>,
+    },
+    /// Read back the pinned viewport (session_clone's source side); None
+    /// when the session never called Viewport.
+    GetViewport {
+        reply: ViewportOverrideReply,
     },
     /// Export the session's current cookies (for the page's URL) as a JSON
     /// string `{"url":...,"cookies":["name=value",...]}`. Round-trips with
@@ -390,6 +398,9 @@ struct BrowserSession {
     /// with SSH/DB queries between browser steps must not lose its login
     /// state (real-device feedback ③). Lives until session_close or exit.
     keepalive: bool,
+    /// Remembered so session_clone can reproduce the egress path (a login
+    /// behind a proxy breaks when the clone egresses directly).
+    use_proxy: bool,
 }
 
 impl BrowserSession {
@@ -459,6 +470,7 @@ impl SessionManager {
                 last_active: Instant::now(),
                 timeout,
                 keepalive,
+                use_proxy,
             },
         );
         // Fire-and-forget viewport pin: it queues ahead of anything the
@@ -487,6 +499,96 @@ impl SessionManager {
             return None;
         }
         Some(s.timeout.saturating_sub(s.last_active.elapsed()).as_secs())
+    }
+
+    /// Derive a new session carrying the source's login state: cookies,
+    /// localStorage/sessionStorage, viewport pin, dialog policy, proxy and
+    /// keepalive flags, remaining timeout. The source is untouched — this
+    /// replaces the manual cookies→create round-trip where a hand-edited
+    /// cookie string could clobber a working login (real-device feedback ⑩).
+    pub async fn clone_session(&mut self, session_id: &str) -> Result<Value, SessionError> {
+        let cookies_text = self.send(session_id, |reply| SessionCommand::Cookies { reply }).await?;
+        let storage_text = self.send(session_id, |reply| SessionCommand::Storage { reply }).await?;
+        let dialog_text = self
+            .send(session_id, |reply| SessionCommand::Dialog {
+                action: "list".to_string(),
+                prompt_text: None,
+                reply,
+            })
+            .await?;
+        let viewport = self
+            .send(session_id, |reply| SessionCommand::GetViewport { reply })
+            .await?;
+
+        let parse = |text: String, what: &str| -> Result<Value, SessionError> {
+            serde_json::from_str(&text)
+                .map_err(|e| SessionError::Command(format!("{} snapshot parse error: {}", what, e)))
+        };
+        let cookies = parse(cookies_text, "cookies")?;
+        let storage = parse(storage_text, "storage")?;
+        let dialog = parse(dialog_text, "dialog")?;
+
+        let (use_proxy, keepalive, timeout) = {
+            let s = self
+                .sessions
+                .get(session_id)
+                .ok_or_else(|| SessionError::NotFound(format!("session not found: {}", session_id)))?;
+            (s.use_proxy, s.keepalive, s.timeout)
+        };
+
+        let url = cookies["url"].as_str().unwrap_or("about:blank").to_string();
+        let cookie_list: Vec<String> = cookies["cookies"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        let ls = storage["local_storage"].clone();
+        let ss = storage["session_storage"].clone();
+        let injected = if ls.as_object().is_none_or(|m| m.is_empty())
+            && ss.as_object().is_none_or(|m| m.is_empty())
+        {
+            None
+        } else {
+            Some(serde_json::json!({ "local_storage": ls, "session_storage": ss }))
+        };
+        let pin = viewport.map(|(w, h, mobile)| (Some(w as u32), Some(h as u32), mobile));
+
+        let new_id = self.create(
+            Some(&url),
+            use_proxy,
+            cookie_list,
+            injected,
+            Some(timeout.as_secs()),
+            pin,
+            keepalive,
+        );
+
+        // Copy a non-default dialog policy over (fire-and-forget, same
+        // enqueue-ahead pattern as the viewport pin inside create).
+        let accept = dialog["policy"].as_str() == Some("accept");
+        let prompt_text = dialog["prompt_text"].as_str().map(str::to_string);
+        if accept || prompt_text.is_some() {
+            if let Some(s) = self.sessions.get(&new_id) {
+                let (tx, _rx) = oneshot::channel();
+                let _ = s.cmd_tx.send(SessionCommand::Dialog {
+                    action: if accept { "accept" } else { "dismiss" }.to_string(),
+                    prompt_text,
+                    reply: tx,
+                });
+            }
+        }
+
+        let mut resp = serde_json::json!({
+            "session_id": new_id,
+            "cloned_from": session_id,
+            "url": url,
+            "viewport": viewport
+                .map(|(w, h, mobile)| serde_json::json!({"width": w as u32, "height": h as u32, "mobile": mobile}))
+                .unwrap_or(Value::Null),
+        });
+        if let Some(s) = self.expires_in_secs(resp["session_id"].as_str().unwrap_or("")) {
+            resp["expires_in_secs"] = serde_json::json!(s);
+        }
+        Ok(resp)
     }
 
     /// Send a command to a session and await the result. Most commands
@@ -944,6 +1046,10 @@ fn session_thread(
                                 amount,
                             });
                             let _ = reply.send(Ok(true));
+                        }
+
+                        SessionCommand::GetViewport { reply } => {
+                            let _ = reply.send(Ok(page.viewport_override()));
                         }
 
                         SessionCommand::Viewport { width, height, mobile, reply } => {
@@ -1941,6 +2047,106 @@ mod tests {
         );
 
         assert!(mgr.close_and_wait(&sid).await);
+    }
+
+    #[tokio::test]
+    async fn clone_carries_login_state_to_a_new_session() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /app",
+            "<html><body><script>localStorage.setItem('user','miccim')</script>\
+             <p>app</p></body></html>",
+        )]);
+
+        let mut mgr = SessionManager::new();
+        let src = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/app")),
+            false,
+            vec!["sid=abc".to_string()],
+            None,
+            None,
+            None,
+            false,
+        );
+        mgr.send(&src, |reply| SessionCommand::Viewport {
+            width: Some(375),
+            height: Some(667),
+            mobile: false,
+            reply,
+        })
+        .await
+        .unwrap();
+        mgr.send(&src, |reply| SessionCommand::Dialog {
+            action: "accept".to_string(),
+            prompt_text: None,
+            reply,
+        })
+        .await
+        .unwrap();
+
+        let resp = mgr.clone_session(&src).await.unwrap();
+        assert_eq!(resp["cloned_from"].as_str(), Some(src.as_str()));
+        assert_eq!(resp["viewport"]["width"].as_f64(), Some(375.0));
+        let dup = resp["session_id"].as_str().unwrap().to_string();
+        assert_ne!(dup, src);
+
+        // Login state arrived in the derived session: cookie, storage,
+        // viewport pin, dialog policy.
+        let cookies = mgr
+            .send(&dup, |reply| SessionCommand::Cookies { reply })
+            .await
+            .unwrap();
+        let cookies: Value = serde_json::from_str(&cookies).unwrap();
+        assert!(
+            cookies["cookies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c.as_str() == Some("sid=abc")),
+            "cookie must carry over: {cookies}"
+        );
+
+        let user = mgr
+            .send(&dup, |reply| SessionCommand::Eval {
+                script: "localStorage.getItem('user')".to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(user.as_str(), Some("miccim"));
+
+        let w = mgr
+            .send(&dup, |reply| SessionCommand::Eval {
+                script: "innerWidth".to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(w.as_f64(), Some(375.0));
+
+        let policy = mgr
+            .send(&dup, |reply| SessionCommand::Dialog {
+                action: "list".to_string(),
+                prompt_text: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        let policy: Value = serde_json::from_str(&policy).unwrap();
+        assert_eq!(policy["policy"].as_str(), Some("accept"));
+
+        // The source keeps serving untouched.
+        let still = mgr
+            .send(&src, |reply| SessionCommand::Eval {
+                script: "localStorage.getItem('user')".to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(still.as_str(), Some("miccim"));
+
+        assert!(mgr.close_and_wait(&dup).await);
+        assert!(mgr.close_and_wait(&src).await);
     }
 
     #[cfg(feature = "screenshot")]

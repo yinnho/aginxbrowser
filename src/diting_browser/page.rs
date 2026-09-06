@@ -1681,6 +1681,12 @@ impl Page {
         self.apply_viewport_override();
     }
 
+    /// The pinned viewport, if any — read back by session_clone so the
+    /// derived session reproduces the same device emulation.
+    pub fn viewport_override(&self) -> Option<(f32, f32, bool)> {
+        self.viewport_override
+    }
+
     /// Drop the override and return to the persona viewport everywhere.
     pub fn clear_viewport_override(&mut self) {
         self.viewport_override = None;
