@@ -2253,6 +2253,22 @@ impl Page {
         }
     }
 
+    /// Set the session-side dialog policy for window.confirm/prompt (see
+    /// `JsState::dialog_accept`); None keeps the stored prompt text.
+    pub fn set_dialog_policy(&self, accept: bool, prompt_text: Option<String>) {
+        if let Some(js) = &self.js {
+            js.set_dialog_policy(accept, prompt_text);
+        }
+    }
+
+    /// Current dialog policy: (accept, prompt_text).
+    pub fn dialog_policy(&self) -> (bool, Option<String>) {
+        match &self.js {
+            Some(js) => js.dialog_policy(),
+            None => (false, None),
+        }
+    }
+
     #[cfg_attr(not(test), allow(dead_code))] // engine path is live (init_js runs these); no bin caller registers one yet
     pub fn set_preload_scripts(&mut self, scripts: Vec<String>) {
         self.preload_scripts = scripts;

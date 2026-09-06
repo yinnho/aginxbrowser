@@ -9292,9 +9292,23 @@ for (const [name, offset] of [
 globalThis.focus = function() {};
 globalThis.blur = function() {};
 globalThis.print = function() {};
-globalThis.alert = function() {};
-globalThis.confirm = function() { return true; };
-globalThis.prompt = function() { return null; };
+// alert/confirm/prompt never block: the host answers each from the
+// session-side dialog policy (default: dismiss) and records it as a
+// level-"dialog" console entry. See op_dialog.
+const _dlgArg = v => (v === undefined ? "undefined" : v === null ? "null" : String(v));
+const _dialog = (kind, msg) => {
+  let r;
+  try { r = JSON.parse(_OPS.op_dialog(kind, _dlgArg(msg))); } catch { r = { accept: false, value: null }; }
+  return r;
+};
+globalThis.alert = function(msg) { _dialog("alert", msg); };
+globalThis.confirm = function(msg) { return _dialog("confirm", msg).accept; };
+globalThis.prompt = function(msg, def) {
+  const r = _dialog("prompt", msg);
+  if (!r.accept) return null;
+  if (r.value !== null && r.value !== undefined) return r.value;
+  return def === undefined || def === null ? "" : String(def);
+};
 globalThis.open = function() { return null; };
 globalThis.close = function() {};
 globalThis.stop = function() {};

@@ -567,6 +567,58 @@
         assert!(rt.take_pending_console_calls().is_empty());
     }
 
+    /// alert/confirm/prompt are auto-answered from the dialog policy and
+    /// recorded as level-"dialog" console entries. Default dismisses; the
+    /// accepted prompt falls back to the call's default argument when no
+    /// session prompt_text is set.
+    #[test]
+    fn test_dialogs_answer_from_policy_and_log() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let out = rt
+            .evaluate(
+                "[String(alert('hi')), String(confirm('go?')), String(prompt('name?', 'anon'))].join('|')",
+            )
+            .unwrap();
+        assert_eq!(out, serde_json::json!("undefined|false|null"), "dismiss default");
+        let stripped: Vec<(String, String)> = rt
+            .take_pending_console_calls()
+            .into_iter()
+            .map(|(level, msg, _url)| (level, msg))
+            .collect();
+        let parsed: Vec<serde_json::Value> = stripped
+            .iter()
+            .map(|(l, m)| {
+                assert_eq!(l, "dialog");
+                serde_json::from_str(m).unwrap()
+            })
+            .collect();
+        assert_eq!(parsed[0]["dialog"], "alert");
+        assert_eq!(parsed[0]["message"], "hi");
+        assert!(parsed[0].get("answer").is_none(), "alert carries no answer");
+        assert_eq!(parsed[1]["dialog"], "confirm");
+        assert_eq!(parsed[1]["answer"], false);
+        assert_eq!(parsed[2]["dialog"], "prompt");
+        assert_eq!(parsed[2]["answer"], false);
+
+        rt.set_dialog_policy(true, None);
+        let out = rt
+            .evaluate("[String(confirm('go?')), String(prompt('name?', 'anon')), String(prompt('name?'))].join('|')")
+            .unwrap();
+        assert_eq!(
+            out,
+            serde_json::json!("true|anon|"),
+            "accept: prompt falls back to its default argument"
+        );
+        // prompt_text wins over the call's default once set.
+        rt.set_dialog_policy(true, Some("ada".into()));
+        let out = rt.evaluate("prompt('name?', 'anon')").unwrap();
+        assert_eq!(out, serde_json::json!("ada"));
+
+        rt.set_dialog_policy(false, None);
+        let out = rt.evaluate("String(confirm('go?'))").unwrap();
+        assert_eq!(out, serde_json::json!("false"));
+    }
+
     #[test]
     fn test_location() {
         let mut rt = setup_runtime("<html><body></body></html>");

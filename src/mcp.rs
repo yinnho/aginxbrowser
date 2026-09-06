@@ -187,6 +187,20 @@ pub struct SessionConsoleParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionDialogParams {
+    /// Session ID
+    pub session_id: String,
+    /// "list" reports the policy and dialog history; "accept"/"dismiss" set
+    /// the answer applied to subsequent window.confirm/prompt calls (alert
+    /// is always logged, never blocking).
+    pub action: String,
+    /// With action "accept": text window.prompt returns once accepted
+    /// (omitted keeps the current text).
+    #[serde(default)]
+    pub prompt_text: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SessionNavigateParams {
     /// Session ID
     pub session_id: String,
@@ -718,6 +732,29 @@ this, read the error.",
         let mut mgr = session::SESSIONS.lock().await;
         match mgr
             .send(&params.session_id, |reply| SessionCommand::Console { filter, reply })
+            .await
+        {
+            Ok(text) => stamped(text, &mgr, &params.session_id),
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Inspect or flip the session's dialog policy for window.alert/confirm/prompt. \
+Dialogs never block the page: each is auto-answered (default dismiss) and logged into \
+session_console at level \"dialog\". action \"list\" reports {policy, prompt_text, dialogs}; \
+\"accept\" makes subsequent confirm() true and prompt() return prompt_text (or the call's \
+default argument); \"dismiss\" restores the default.",
+        annotations(title = "Session Dialog")
+    )]
+    async fn session_dialog(&self, Parameters(params): Parameters<SessionDialogParams>) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        match mgr
+            .send(&params.session_id, |reply| SessionCommand::Dialog {
+                action: params.action,
+                prompt_text: params.prompt_text,
+                reply,
+            })
             .await
         {
             Ok(text) => stamped(text, &mgr, &params.session_id),

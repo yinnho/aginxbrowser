@@ -422,6 +422,24 @@ impl JsRuntime {
         std::mem::take(&mut self.state.borrow_mut().pending_console_calls)
     }
 
+    /// Session-side dialog policy for window.confirm/prompt (see
+    /// `JsState::dialog_accept`). `prompt_text` is what prompt() returns when
+    /// accepted; None leaves the stored text unchanged so callers can flip
+    /// the answer without retyping it.
+    pub fn set_dialog_policy(&self, accept: bool, prompt_text: Option<String>) {
+        let mut state = self.state.borrow_mut();
+        state.dialog_accept = accept;
+        if let Some(t) = prompt_text {
+            state.dialog_prompt_text = Some(t);
+        }
+    }
+
+    /// Current dialog policy: (accept, prompt_text).
+    pub fn dialog_policy(&self) -> (bool, Option<String>) {
+        let state = self.state.borrow();
+        (state.dialog_accept, state.dialog_prompt_text.clone())
+    }
+
     /// Wire up the interception channel without enabling interception.
     /// Use set_intercept_enabled separately. The two were entangled before
     /// and every navigation auto-enabled interception, which made

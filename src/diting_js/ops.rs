@@ -82,6 +82,16 @@ pub struct JsState {
     // emitted as `Runtime.consoleAPICalled` events so console output is
     // visible to Playwright/Puppeteer instead of only the tracing log.
     pub pending_console_calls: Vec<(String, String, String)>,
+    /// Dialog policy applied by `op_dialog` to subsequent window.confirm/
+    /// prompt calls (alert has no answer). Default false = auto-dismiss, so
+    /// dialogs can never block: the thread that would show the dialog is the
+    /// same one running the page script. Flipped via the session_dialog
+    /// command; each dialog is recorded into `pending_console_calls` at
+    /// level "dialog" so session_console shows what the page asked.
+    pub dialog_accept: bool,
+    /// Text returned by window.prompt when a dialog is accepted and this is
+    /// set; unset falls back to the call's default argument (or "").
+    pub dialog_prompt_text: Option<String>,
     /// The document's input stream for `document.write()`, created on the
     /// first call. Why the calls share one parser is in `write_stream`.
     pub(crate) write_stream: std::cell::RefCell<Option<crate::diting_js::write_stream::DocumentWriteStream>>,
@@ -212,6 +222,8 @@ impl JsState {
             intercept_enabled: false,
             pending_binding_calls: Vec::new(),
             pending_console_calls: Vec::new(),
+            dialog_accept: false,
+            dialog_prompt_text: None,
             write_stream: std::cell::RefCell::new(None),
             already_started_scripts: RefCell::new(HashSet::new()),
             import_map: Rc::new(RefCell::new(crate::diting_js::import_map::ImportMap::default())),
@@ -1347,6 +1359,39 @@ fn op_console_msg(state: &OpState, #[string] level: &str, #[string] msg: &str) {
     let log_url = gs.url.clone();
     gs.pending_console_calls
         .push((level.to_string(), msg.to_string(), log_url));
+}
+
+/// window.alert/confirm/prompt land here from the bootstrap stubs. There is
+/// no UI to attach a dialog to, so blocking is not an option (the thread
+/// that would show the dialog is the same one running the page script);
+/// instead each call is answered from the session-side policy —
+/// `dialog_accept` (default false = dismiss) plus `dialog_prompt_text` for
+/// prompt — and recorded as a level-"dialog" console entry so
+/// session_console shows what the page asked. Returns
+/// `{"accept":bool,"value":string|null}`; value is only meaningful for
+/// prompt, where the JS wrapper falls back to the call's default argument.
+#[op2]
+#[string]
+fn op_dialog(state: &OpState, #[string] kind: &str, #[string] message: &str) -> String {
+    let shared = state.borrow::<SharedState>().clone();
+    let mut gs = shared.borrow_mut();
+    let (accept, value) = match kind {
+        "confirm" => (gs.dialog_accept, None),
+        "prompt" => (gs.dialog_accept, gs.dialog_prompt_text.clone()),
+        // alert: nothing to answer, recorded for observability only.
+        _ => (true, None),
+    };
+    let dialog_url = gs.url.clone();
+    let mut payload = serde_json::json!({ "dialog": kind, "message": message });
+    if kind == "confirm" || kind == "prompt" {
+        payload["answer"] = serde_json::Value::Bool(accept);
+        if kind == "prompt" {
+            payload["value"] = value.clone().into();
+        }
+    }
+    gs.pending_console_calls
+        .push(("dialog".to_string(), payload.to_string(), dialog_url));
+    serde_json::json!({ "accept": accept, "value": value }).to_string()
 }
 
 // op_fetch_url backs JS-level `fetch()` and XHR. Pre-#139 it used a
@@ -2882,6 +2927,7 @@ pub fn build_extension() -> Extension {
         ops: std::borrow::Cow::Owned(vec![
             op_dom(),
             op_console_msg(),
+            op_dialog(),
             op_script_mark_started(),
             op_script_try_start(),
             op_dyn_script_fetch_begin(),

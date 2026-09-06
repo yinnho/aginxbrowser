@@ -232,6 +232,16 @@ pub enum SessionCommand {
         filter: ConsoleFilter,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Inspect or flip the dialog policy for window.alert/confirm/prompt.
+    /// action "list" reports the policy plus every level-"dialog" ring
+    /// entry; "accept"/"dismiss" set it for subsequent dialogs (dialogs
+    /// never block — they are auto-answered and logged). prompt_text sets
+    /// what window.prompt returns once accepted; omitted keeps the current.
+    Dialog {
+        action: String,
+        prompt_text: Option<String>,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     /// Acknowledged by the session thread right before it exits. The closer
     /// waits on this to learn the thread actually stopped - without it, close
     /// replies ok while the thread is still pinned inside V8 (a runaway eval)
@@ -920,6 +930,38 @@ fn session_thread(
                                 "messages": messages,
                             });
                             let _ = reply.send(Ok(payload.to_string()));
+                        }
+
+                        SessionCommand::Dialog { action, prompt_text, reply } => {
+                            let out = match action.as_str() {
+                                "list" => {
+                                    drain_console(&page, &mut console_ring);
+                                    let (accept, prompt_text) = page.inner.dialog_policy();
+                                    let dialogs: Vec<Value> = console_ring
+                                        .iter()
+                                        .filter(|e| e["level"] == "dialog")
+                                        .cloned()
+                                        .collect();
+                                    Ok(serde_json::json!({
+                                        "policy": if accept { "accept" } else { "dismiss" },
+                                        "prompt_text": prompt_text,
+                                        "dialogs": dialogs,
+                                    }).to_string())
+                                }
+                                "accept" | "dismiss" => {
+                                    page.inner.set_dialog_policy(action == "accept", prompt_text);
+                                    let (accept, prompt_text) = page.inner.dialog_policy();
+                                    Ok(serde_json::json!({
+                                        "policy": if accept { "accept" } else { "dismiss" },
+                                        "prompt_text": prompt_text,
+                                    }).to_string())
+                                }
+                                other => Err(format!(
+                                    "unknown dialog action {:?} (expected list | accept | dismiss)",
+                                    other
+                                )),
+                            };
+                            let _ = reply.send(out);
                         }
 
                         SessionCommand::Cookies { reply } => {
@@ -2307,6 +2349,136 @@ mod tests {
             Some(0),
             "empty result is an empty array, not an error"
         );
+
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
+    /// Dialogs never block: default policy auto-dismisses (confirm false,
+    /// prompt null) while every call is logged at level "dialog"; the
+    /// session_dialog command flips the policy and prompt_text, and the
+    /// next dialog answers accordingly.
+    #[tokio::test]
+    async fn dialog_policy_answers_and_logs() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /dialogs",
+            "<html><body>dialogs</body></html>",
+        )]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/dialogs")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+        );
+
+        // Default policy: auto-dismiss. confirm → false, prompt → null.
+        let out = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "[String(confirm('delete it?')), String(prompt('your name'))].join('|')"
+                    .to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out, "false|null", "dismiss is the default policy");
+
+        // The three calls are observable in the ring via session_console.
+        let out = mgr
+            .send(&sid, |reply| SessionCommand::Console {
+                filter: ConsoleFilter {
+                    level: Some("dialog".into()),
+                    ..Default::default()
+                },
+                reply,
+            })
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&out).expect("dialog ring JSON");
+        let dialogs = v["messages"].as_array().expect("dialog entries");
+        assert_eq!(dialogs.len(), 2, "confirm + prompt logged");
+        assert!(dialogs.iter().all(|m| m["level"] == "dialog"));
+        let payloads: Vec<Value> = dialogs
+            .iter()
+            .map(|m| serde_json::from_str(m["text"].as_str().unwrap_or("")).unwrap())
+            .collect();
+        assert_eq!(payloads[0]["dialog"], "confirm", "kind tagged: {payloads:?}");
+        assert_eq!(payloads[0]["message"], "delete it?");
+        assert_eq!(payloads[0]["answer"], false, "dismissed");
+        assert_eq!(payloads[1]["dialog"], "prompt");
+        assert_eq!(payloads[1]["value"], Value::Null);
+
+        // Flip to accept with prompt text; the next dialogs answer on-policy.
+        let out = mgr
+            .send(&sid, |reply| SessionCommand::Dialog {
+                action: "accept".into(),
+                prompt_text: Some("ada".into()),
+                reply,
+            })
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&out).expect("policy JSON");
+        assert_eq!(v["policy"], "accept");
+        assert_eq!(v["prompt_text"], "ada");
+
+        let out = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "[String(confirm('sure?')), String(prompt('your name')), String(prompt('fallback'))].join('|')"
+                    .to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out, "true|ada|ada", "accept + prompt_text applied");
+
+        // list() reports the policy and the accumulated dialog history.
+        let out = mgr
+            .send(&sid, |reply| SessionCommand::Dialog {
+                action: "list".into(),
+                prompt_text: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&out).expect("list JSON");
+        assert_eq!(v["policy"], "accept");
+        assert_eq!(v["dialogs"].as_array().map(Vec::len), Some(5), "2 + 3 logged");
+
+        // Back to dismiss: prompts answer null again.
+        let out = mgr
+            .send(&sid, |reply| SessionCommand::Dialog {
+                action: "dismiss".into(),
+                prompt_text: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&out).expect("dismiss JSON");
+        assert_eq!(v["policy"], "dismiss");
+
+        let out = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "String(confirm('again?'))".to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out, "false", "policy flip is not sticky");
+
+        // Unknown actions are errors, not silent no-ops.
+        let err = mgr
+            .send(&sid, |reply| SessionCommand::Dialog {
+                action: "sudo".into(),
+                prompt_text: None,
+                reply,
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown dialog action"));
 
         assert!(mgr.close_and_wait(&sid).await);
     }
