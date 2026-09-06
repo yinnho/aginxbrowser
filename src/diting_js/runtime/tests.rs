@@ -1393,6 +1393,92 @@
         );
     }
 
+    #[test]
+    fn test_document_spec_collections_forms_images_links_scripts() {
+        // glama.ai admin hydration died on `document.forms.namedItem is not a
+        // function` — the Document class had no collection getters at all.
+        // forms/images/links/scripts are the spec set frameworks probe first;
+        // namedItem and Proxy named access come from HTMLCollection itself.
+        let mut rt = setup_runtime(r#"<form id=login name=primary></form>
+            <form name=secondary></form>
+            <img id=picture>
+            <a id=withhref href="/x"></a><a id=nohref></a>
+            <script id=inline>void 0;</script>"#);
+        let result = rt.evaluate(r#"
+            return [
+                document.forms instanceof HTMLCollection,
+                document.forms.length,
+                document.forms.namedItem('login').name,
+                document.forms.namedItem('primary').id,
+                document.forms.primary === document.forms.namedItem('primary'),
+                document.forms.item(1).name,
+                document.images.length, document.images.namedItem('picture').id,
+                // links counts only a[href]/area[href]: the bare <a> is out
+                document.links.length, document.links[0].id,
+                document.scripts.length,
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                true,
+                2,
+                "primary",
+                "login",
+                true,
+                "secondary",
+                1, "picture",
+                1, "withhref",
+                1,
+            ])
+        );
+    }
+
+    #[test]
+    fn test_option_legacy_factory() {
+        // glama.ai admin form chunk populates selects via `new Option(label,
+        // value)`; without the global its hydration died on "Option is not
+        // defined". Same deal as `new Image()`: return a real <option> element
+        // so value/selected semantics and select.add() come for free.
+        let mut rt = setup_runtime("<select id=s></select>");
+        let result = rt.evaluate(r#"
+            const sel = document.getElementById('s');
+            const opt = new Option('Label A', 'a');
+            sel.appendChild(opt);
+            const opt2 = new Option('B', 'b', false, true);
+            sel.appendChild(opt2);
+            // HTMLOptionsCollection surface on select.options
+            sel.options.add(new Option('C', 'c'));
+            sel.options.remove(1);
+            return [
+                typeof Option,
+                opt.tagName, opt.text, opt.value,
+                sel.options.length, sel.options[0].value,
+                opt2.selected, opt2.textContent,
+                typeof sel.options.add,
+                sel.options.length, sel.options[1].value,
+                sel.options.selectedIndex,
+                // option.selected = true is exclusive: the sibling that carried
+                // the selected attribute loses value/selectedIndex (glama form).
+                (sel.options[1].selected = true),
+                sel.value,
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                "function",
+                "OPTION", "Label A", "a",
+                2, "a",
+                true, "B",
+                "function",
+                2, "c",
+                0,
+                true, "c",
+            ])
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn test_unhandled_rejection_dispatches_window_events() {
         // Chrome surfaces unhandled promise rejections on the window as
@@ -3451,6 +3537,77 @@
             fd.windows(4).any(|w| w == needle),
             "multipart file part corrupted: {:?}",
             &fd[fd.len().saturating_sub(48)..]
+        );
+    }
+
+    /// Request.formData() / Response.formData(): react-router and remix route
+    /// actions open every form submission with request.formData() — the missing
+    /// method wedged the client action chain behind "e.formData is not a
+    /// function" (glama.ai admin form). Covers the FormData-body passthrough,
+    /// urlencoded pair parsing, multipart parts (File entries), and the spec
+    /// TypeError on a non-form content-type.
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_response_formdata_parse() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.evaluate(r#"
+            globalThis.__out = [];
+            const fd = new FormData();
+            fd.append("intent", "build");
+            fd.append("steps", '["a","b"]');
+            new Request("https://x.test/post", { method: "POST", body: fd })
+                .formData()
+                .then((f) => {
+                    __out.push(f.get("intent") === "build", f.get("steps") === '["a","b"]');
+                    // react-router converts file-less form submissions to a
+                    // URLSearchParams body (default urlencoded encType) and the
+                    // browser infers the content-type — the engine must too.
+                    const uspReq = new Request("https://x.test/post", { method: "POST", body: new URLSearchParams("a=1&b=x+y") });
+                    __out.push(uspReq.headers.get("content-type") === "application/x-www-form-urlencoded;charset=UTF-8");
+                    return uspReq.formData();
+                })
+                .then((f) => {
+                    __out.push(f.get("a") === "1", f.get("b") === "x y");
+                    return new Request("https://x.test/post", {
+                        method: "POST",
+                        headers: { "content-type": "application/x-www-form-urlencoded;charset=UTF-8" },
+                        body: "a=1&b=x+y&c=%E4%B8%AD",
+                    }).formData();
+                })
+                .then((f) => {
+                    __out.push(f.get("a") === "1", f.get("b") === "x y", f.get("c") === "中");
+                    const b = "----ditingT";
+                    const mp = [
+                        "--" + b,
+                        'Content-Disposition: form-data; name="field"',
+                        "",
+                        "plain",
+                        "--" + b,
+                        'Content-Disposition: form-data; name="up"; filename="a.bin"',
+                        "Content-Type: application/octet-stream",
+                        "",
+                        "BIN",
+                        "--" + b + "--",
+                        "",
+                    ].join("\r\n");
+                    return new Response(mp, {
+                        headers: { "content-type": "multipart/form-data; boundary=" + b },
+                    }).formData();
+                })
+                .then((f) => {
+                    const up = f.get("up");
+                    __out.push(f.get("field") === "plain", up instanceof File, up.name === "a.bin", up.type === "application/octet-stream");
+                    return new Request("https://x.test/post", {
+                        method: "POST", body: "hi", headers: { "content-type": "text/plain" },
+                    }).formData().then(() => "no-throw", (e) => (e instanceof TypeError ? "TypeError" : "other"));
+                })
+                .then((v) => { __out.push(v); })
+                .catch((e) => { __out.push("ERR:" + (e && (e.message || e.name))); });
+        "#).unwrap();
+        let _ = rt.run_event_loop_bounded(300).await;
+        let result = rt.evaluate("globalThis.__out").unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([true, true, true, true, true, true, true, true, true, true, true, true, "TypeError"])
         );
     }
 

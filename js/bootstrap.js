@@ -2398,7 +2398,27 @@ class Element extends Node {
     if (this._selected !== undefined) return this._selected;
     return this.hasAttribute("selected");
   }
-  set selected(v) { this._selected = !!v; }
+  set selected(v) {
+    // Selecting an option deselects its siblings in the same select (Chrome:
+    // option.selected = true moves select.value). glama.ai's admin form sets
+    // selected on a freshly appended <option>; without sibling clearing the
+    // old default-selected option kept winning every value/selectedIndex read.
+    v = !!v;
+    if (v) {
+      let p = this.parentNode;
+      while (p && p.localName !== 'select') p = p.parentNode;
+      if (p) {
+        const siblings = p.querySelectorAll('option');
+        for (let i = 0; i < siblings.length; i++) {
+          if (siblings[i] !== this) {
+            siblings[i]._selected = false;
+            siblings[i].removeAttribute("selected");
+          }
+        }
+      }
+    }
+    this._selected = v;
+  }
   get disabled() { return this.hasAttribute("disabled"); }
   set disabled(v) { if (v) this.setAttribute("disabled", ""); else this.removeAttribute("disabled"); }
   get type() {
@@ -2543,7 +2563,22 @@ class Element extends Node {
   }
   get options() {
     if (this.localName !== 'select') return [];
-    return HTMLCollection._from(this.querySelectorAll('option'));
+    // HTMLOptionsCollection: an HTMLCollection plus add/remove/selectedIndex.
+    // Framework form code populates selects via `select.options.add(opt)`
+    // (glama.ai admin hydration); a bare HTMLCollection has no add().
+    const sel = this;
+    const opts = HTMLCollection._from(this.querySelectorAll('option'));
+    opts.add = (item, before) => sel.add(item, before);
+    opts.remove = (i) => {
+      const o = sel.options[i >>> 0];
+      if (o && o.parentNode) o.parentNode.removeChild(o);
+    };
+    Object.defineProperty(opts, 'selectedIndex', {
+      configurable: true, enumerable: true,
+      get() { return sel.selectedIndex; },
+      set(v) { sel.selectedIndex = v; },
+    });
+    return opts;
   }
   add(item, before = null) {
     if (this.localName !== 'select') {
@@ -3508,10 +3543,13 @@ class Document extends Node {
     }
     return _sheetList(out);
   }
-  get forms() { return this.querySelectorAll("form"); }
-  get images() { return this.querySelectorAll("img"); }
-  get links() { return this.querySelectorAll("a[href], area[href]"); }
-  get scripts() { return this.querySelectorAll("script"); }
+  // Spec collections. HTMLCollection (not NodeList): namedItem + Proxy named
+  // access come free, and frameworks (react-router/Next.js form lookups) call
+  // document.forms.namedItem — which used to crash hydration here.
+  get forms() { return HTMLCollection._from(this.querySelectorAll('form')); }
+  get images() { return HTMLCollection._from(this.querySelectorAll('img')); }
+  get links() { return HTMLCollection._from(this.querySelectorAll('a[href], area[href]')); }
+  get scripts() { return HTMLCollection._from(this.querySelectorAll('script')); }
   get cookie() {
     return _OPS.op_get_cookies();
   }
@@ -4848,6 +4886,19 @@ if (typeof Request === 'undefined') {
       this.method = (init.method || 'GET').toUpperCase();
       this.headers = new Headers(init.headers);
       this.body = init.body || null;
+      // Body extraction infers Content-Type (fetch spec): FormData bodies get
+      // multipart/form-data; boundary=..., URLSearchParams get
+      // x-www-form-urlencoded. Without this, react-router/remix route actions
+      // handing a Request to request.formData() see a bare header and every
+      // framework form submission dies on "content-type isn't form data".
+      if (this.body != null && !this.headers.get('content-type')) {
+        if (typeof FormData === 'function' && this.body instanceof FormData) {
+          const boundary = '----ditingFormBoundary' + Math.random().toString(16).slice(2) + Date.now().toString(16);
+          this.headers.set('content-type', 'multipart/form-data; boundary=' + boundary);
+        } else if (typeof URLSearchParams === 'function' && this.body instanceof URLSearchParams) {
+          this.headers.set('content-type', 'application/x-www-form-urlencoded;charset=UTF-8');
+        }
+      }
       this.mode = init.mode || 'cors';
       this.credentials = init.credentials !== undefined
         ? String(init.credentials)
@@ -4879,6 +4930,13 @@ if (typeof Request === 'undefined') {
     async blob() {
       const ct = this.headers && this.headers.get ? (this.headers.get('content-type') || '') : '';
       return new Blob(this.body != null ? [this.body] : [], { type: ct });
+    }
+    // A Request constructed with a FormData body hands that instance back;
+    // string bodies parse by Content-Type (urlencoded / multipart).
+    async formData() {
+      if (typeof FormData === 'function' && this.body instanceof FormData) return this.body;
+      const ct = this.headers && this.headers.get ? (this.headers.get('content-type') || '') : '';
+      return _formDataFromString(this.body == null ? '' : String(this.body), ct);
     }
   };
 }
@@ -4912,6 +4970,11 @@ if (typeof Response === 'undefined') {
     async json() { this._bodyUsed = true; return JSON.parse(await this.text()); }
     async arrayBuffer() { this._bodyUsed = true; return _arrayBufferFromBytes(this._bodyBytes); }
     async blob() { this._bodyUsed = true; return new Blob([this._bodyBytes]); }
+    async formData() {
+      this._bodyUsed = true;
+      const ct = this.headers.get ? (this.headers.get('content-type') || '') : '';
+      return _formDataFromString(_decodeBodyWithCharset(this._bodyBytes, this.headers), ct);
+    }
     // RSC/flight consumers (React server actions, Next app-router prefetch)
     // stream the payload through response.body.getReader(); without a body
     // stream createFromFetch resolves `x.body` to undefined and the whole
@@ -6361,6 +6424,54 @@ if (typeof FormData === "undefined") globalThis.FormData = class FormData {
   [Symbol.iterator](){return this.entries();}
   forEach(cb,thisArg){this._d.forEach(([k,v])=>cb.call(thisArg,v,k,this));}
 };
+// formData() parse side, shared by Request.formData() and Response.formData().
+// Content-Type picks the decoder — urlencoded pairs, multipart parts (files
+// become File entries), anything else is the spec TypeError. react-router and
+// remix route actions open every form submission with request.formData(); a
+// missing method wedged the client action chain behind "e.formData is not a
+// function".
+function _formDataFromString(text, contentType) {
+  const ct = String(contentType || "").toLowerCase();
+  if (ct.includes("application/x-www-form-urlencoded")) {
+    const fd = new FormData();
+    for (const [k, v] of new URLSearchParams(text)) fd.append(k, v);
+    return fd;
+  }
+  if (ct.includes("multipart/form-data")) {
+    // The boundary parameter is case-sensitive — only the MIME type itself is
+    // case-insensitive — so it must come from the original header, not `ct`.
+    const m = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(String(contentType || ""));
+    if (!m) throw new TypeError("Failed to parse form data: multipart boundary not found in content-type");
+    const fd = new FormData();
+    const boundary = "--" + (m[1] || m[2]).trim();
+    const parts = String(text).split(boundary);
+    const unq = (s) => s.replace(/\\(.)/g, "$1");
+    for (let i = 1; i < parts.length; i++) {
+      // The closing delimiter is the trailing "--" segment (epilogue may follow it).
+      if (/^--(\r\n|\r|\n|$)/.test(parts[i])) break;
+      let part = parts[i].replace(/^\r\n/, "");
+      const sep = part.indexOf("\r\n\r\n");
+      if (sep < 0) continue;
+      const head = part.slice(0, sep);
+      let content = part.slice(sep + 4);
+      if (content.endsWith("\r\n")) content = content.slice(0, -2);
+      const cd = /content-disposition:\s*form-data;([^\r\n]*)/i.exec(head);
+      if (!cd) continue;
+      const nameM = /name="((?:[^"\\]|\\.)*)"/i.exec(cd[1]);
+      if (!nameM) continue;
+      const name = unq(nameM[1]);
+      const fileM = /filename="((?:[^"\\]|\\.)*)"/i.exec(cd[1]);
+      if (fileM) {
+        const typeM = /content-type:\s*([^\r\n]+)/i.exec(head);
+        fd.append(name, new File([content], unq(fileM[1]) || "blob", { type: typeM ? typeM[1].trim() : "" }));
+      } else {
+        fd.append(name, content);
+      }
+    }
+    return fd;
+  }
+  throw new TypeError("Request body's content-type isn't form data: expected a form content-type, got \"" + (contentType || "") + "\"");
+}
 // application/x-www-form-urlencoded serializer: like encodeURIComponent but
 // space -> '+' and also percent-encoding the chars encodeURIComponent leaves
 // bare ( ! ~ ' ( ) ), keeping the form-urlencoded safe set ( * - . _ ).
@@ -9892,6 +10003,29 @@ if (typeof Audio === 'undefined') {
     play() { return Promise.resolve(); } pause() { this.paused = true; } load() {}
     addEventListener() {} removeEventListener() {}
   };
+}
+
+// `new Option(text, value, defaultSelected, selected)` — the legacy factory for
+// <option>. Same shape as `new Image()`: build a real element so value/selected
+// semantics above and select.add()/appendChild all work. Framework form code
+// (glama.ai admin) populates selects this way; `Option is not defined` killed
+// its hydration. option.text mirrors textContent (instance-level: parsed
+// <option> elements keep their existing surface).
+if (typeof Option === 'undefined') {
+  globalThis.Option = function Option(text, value, defaultSelected, selected) {
+    const opt = document.createElement('option');
+    if (text !== undefined && text !== null) opt.textContent = String(text);
+    if (value !== undefined && value !== null) opt.setAttribute('value', String(value));
+    if (defaultSelected) opt.setAttribute('selected', '');
+    if (selected) opt.selected = true;
+    Object.defineProperty(opt, 'text', {
+      configurable: true, enumerable: true,
+      get() { return opt.textContent; },
+      set(v) { opt.textContent = String(v); },
+    });
+    return opt;
+  };
+  globalThis.Option.prototype = globalThis.HTMLElement ? globalThis.HTMLElement.prototype : Element.prototype;
 }
 
 if (typeof FileReader === 'undefined') {
