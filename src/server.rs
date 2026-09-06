@@ -547,28 +547,7 @@ pub fn do_fetch(req: FetchRequest) -> Result<FetchResponse> {
             let captcha_event = {
                 let final_url = page.url();
                 let html_snapshot = page.content();
-                if let Some(ct) = crate::captcha::detect_captcha_type(&final_url, Some(&html_snapshot)) {
-                    let mut event = crate::captcha::CaptchaEvent {
-                        engine: String::new(),
-                        captcha_type: ct.clone(),
-                        url: final_url.clone(),
-                        auto_solve_attempted: false,
-                        auto_solve_succeeded: false,
-                    };
-                    if let Some(config) = crate::captcha::load_solver_config_from_env() {
-                        event.auto_solve_attempted = true;
-                        let result = crate::captcha::auto_solve_captcha(
-                            &final_url, &html_snapshot, &ct, &config,
-                        ).await;
-                        event.auto_solve_succeeded = matches!(
-                            result,
-                            crate::captcha::CaptchaSolveResult::Solved { .. }
-                        );
-                    }
-                    Some(event)
-                } else {
-                    None
-                }
+                crate::captcha::detect_and_maybe_solve(&final_url, &html_snapshot).await
             };
 
             Ok(FetchResponse {

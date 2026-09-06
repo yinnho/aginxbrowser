@@ -112,7 +112,7 @@ curl http://127.0.0.1:8089/health
 | content | string | 抓取内容（markdown/html/text） |
 | truncated | bool | `content` 是否被 `max_chars` 截断 |
 | js_extract_result | any? | JS 提取结果（仅 `js_extract` 非空时有值） |
-| captcha_event | object? | CAPTCHA 事件（仅检测到验证码时有值） |
+| captcha_event | object? | CAPTCHA 事件（仅检测到验证码时有值；识别 Cloudflare/Google/Baidu 挑战页，以及淘宝/天猫风控信号——`punish` 跳转、`x5sec`、MTop `FAIL_SYS_USER_VALIDATE`/`RGV587` 应答，即使 HTTP 200 也会透出） |
 
 **captcha_event 格式：**
 
@@ -960,7 +960,7 @@ claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
 |------|------|------|
 | `AGINXBROWSER_BIND` | `0.0.0.0:8089` | HTTP 服务监听地址 |
 | `AGINXBROWSER_STEALTH` | 启用 | `0` 关闭 stealth（诊断用） |
-| `AGINXBROWSER_UA` | Linux Chrome145 | 伪装 UA |
+| `AGINXBROWSER_UA` | Linux Chrome145 | 伪装 UA。UA 的浏览器家族/主版本与 TLS 指纹（默认 chrome145）不一致时，启动会打 `fingerprint mismatch` 警告——保持成对一致才能不漏指纹 |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 缓存 TTL（秒），`0` 禁用 |
 | `AGINXBROWSER_DOWNLOAD_DIR` | `.` | `/download` 落盘目录 |

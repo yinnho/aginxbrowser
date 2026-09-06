@@ -114,7 +114,7 @@ Fetch a page and return its content. Supports tiered rendering, automatic Cloudf
 | tier | string? | Which path served the page: `"http"` (plain HTTP + conversion, ~100ms) or `"browser"` (V8 render) — present under `render_tier: "auto"` too, so callers can see why a fetch was fast or slow |
 | redirected_from | string[]? | The redirect trail: `redirected_from[0]` is the URL you asked for, `url` is where the content actually came from (absent when no redirect happened) |
 | js_extract_result | any? | JS extraction result (only present when `js_extract` is set) |
-| captcha_event | object? | CAPTCHA event (only present when a CAPTCHA is detected) |
+| captcha_event | object? | CAPTCHA event (only present when a CAPTCHA is detected; covers Cloudflare/Google/Baidu challenge pages plus Taobao/Tmall risk-control signals — `punish` redirects, `x5sec`, and MTop `FAIL_SYS_USER_VALIDATE`/`RGV587` replies even when they arrive as HTTP 200) |
 
 **`captcha_event` format:**
 
@@ -1259,7 +1259,7 @@ If AginxBrowser is deployed on a remote server, connect through an SSH tunnel:
 |------|------|------|
 | `AGINXBROWSER_BIND` | `0.0.0.0:8089` | HTTP server listen address |
 | `AGINXBROWSER_STEALTH` | Enabled | `0` disables stealth (for diagnostics) |
-| `AGINXBROWSER_UA` | Linux Chrome145 | Spoofed User-Agent |
+| `AGINXBROWSER_UA` | Linux Chrome145 | Spoofed User-Agent. Startup logs a `fingerprint mismatch` warning when the UA's browser family/major version disagrees with the TLS fingerprint (default chrome145) — an intentionally coherent pair avoids a WAF tell |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language header |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL (seconds); `0` disables |
 | `AGINXBROWSER_MCP_ALLOWED_HOSTS` | unset | Extra `Host` values accepted by `/mcp` (comma-separated) — the DNS-rebinding guard defaults to loopback; add your LAN IP / Docker hostname when other machines call the instance |

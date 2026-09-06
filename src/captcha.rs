@@ -69,6 +69,12 @@ pub fn detect_captcha_type(url: &str, html: Option<&str>) -> Option<CaptchaType>
     if url.contains("/antispider") || url.contains("wappass.baidu.com") {
         return Some(CaptchaType::SliderCaptcha);
     }
+    // Ali/Taobao risk control: the punish page is a slider; x5sec is the
+    // token appended once risk control has engaged.
+    if url.contains("punish.taobao.com") || url.contains("punish.tmall.com") || url.contains("x5sec")
+    {
+        return Some(CaptchaType::SliderCaptcha);
+    }
     if url.contains("challenge-platform") || url.contains("challenges.cloudflare.com") {
         return Some(CaptchaType::CloudflareTurnstile);
     }
@@ -96,9 +102,42 @@ pub fn detect_captcha_type(url: &str, html: Option<&str>) -> Option<CaptchaType>
             // 用户频率限制
             return Some(CaptchaType::SliderCaptcha);
         }
+        // Ali/Taobao MTop risk-control JSON served with HTTP 200 — the outer
+        // response looks like success, only the `ret` array says otherwise.
+        if html.contains("FAIL_SYS_USER_VALIDATE")
+            || html.contains("RGV587")
+            || html.contains("x5secdata")
+        {
+            return Some(CaptchaType::SliderCaptcha);
+        }
+        if html.contains("punish.taobao.com") || html.contains("punish.tmall.com") {
+            return Some(CaptchaType::SliderCaptcha);
+        }
     }
 
     None
+}
+
+/// Detect a CAPTCHA in a fetched body and optionally auto-solve it.
+///
+/// Shared by the Tier 1 (HTTP) and Tier 2 (browser) fetch paths so both
+/// surface the same `captcha_event` instead of serving a challenge as if
+/// it were content.
+pub async fn detect_and_maybe_solve(url: &str, body: &str) -> Option<CaptchaEvent> {
+    let ct = detect_captcha_type(url, Some(body))?;
+    let mut event = CaptchaEvent {
+        engine: String::new(),
+        captcha_type: ct.clone(),
+        url: url.to_string(),
+        auto_solve_attempted: false,
+        auto_solve_succeeded: false,
+    };
+    if let Some(config) = load_solver_config_from_env() {
+        event.auto_solve_attempted = true;
+        let result = auto_solve_captcha(url, body, &ct, &config).await;
+        event.auto_solve_succeeded = matches!(result, CaptchaSolveResult::Solved { .. });
+    }
+    Some(event)
 }
 
 /// Load CAPTCHA solver config from environment variables.
@@ -309,5 +348,56 @@ async fn solve_with_2captcha(
 
     CaptchaSolveResult::Failed {
         reason: "timeout waiting for solution".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn taobao_risk_markers_are_detected() {
+        // Clean MTop URL alone is not a captcha.
+        assert!(detect_captcha_type(
+            "https://h5api.m.taobao.com/h5/mtop.taobao.shop.simple.item.fetch/1.0/",
+            None
+        )
+        .is_none());
+        // MTop risk-control JSON body (the page-14-of-13 case: HTTP 200, ret
+        // array says FAIL).
+        let blocked = r#"{"api":"mtop.taobao.shop.simple.item.fetch","ret":["FAIL_SYS_USER_VALIDATE","RGV587_ERROR::SM::Validate failed"],"data":{"url":"https://h5api.m.taobao.com/h5/mtop.taobao.shop.simple.item.fetch/1.0/?punish=..."}}"#;
+        assert!(matches!(
+            detect_captcha_type("https://h5api.m.taobao.com/h5/mtop.taobao.shop.simple.item.fetch/1.0/", Some(blocked)),
+            Some(CaptchaType::SliderCaptcha)
+        ));
+        // Punish redirect URL.
+        assert!(matches!(
+            detect_captcha_type("https://punish.taobao.com/auth?x5sec=abcd", None),
+            Some(CaptchaType::SliderCaptcha)
+        ));
+        assert!(matches!(
+            detect_captcha_type("https://punish.tmall.com/x", None),
+            Some(CaptchaType::SliderCaptcha)
+        ));
+        // x5secdata token in the body without a punish host.
+        assert!(matches!(
+            detect_captcha_type("https://h5api.m.taobao.com/x", Some(r#"{"x5secdata":"zzz"}"#)),
+            Some(CaptchaType::SliderCaptcha)
+        ));
+        // Punish host inside an HTML body (script-driven redirect).
+        assert!(matches!(
+            detect_captcha_type("https://shop.m.taobao.com/", Some(r#"<script>location.href="https://punish.taobao.com/"</script>"#)),
+            Some(CaptchaType::SliderCaptcha)
+        ));
+    }
+
+    #[test]
+    fn successful_mtop_payload_is_not_flagged() {
+        let ok = r#"{"ret":["SUCCESS::调用成功"],"data":{"totalCnt":"397","hasNext":true,"data":[{"itemId":"1","title":"x"}]}}"#;
+        assert!(detect_captcha_type(
+            "https://h5api.m.taobao.com/h5/mtop.taobao.shop.simple.item.fetch/1.0/",
+            Some(ok)
+        )
+        .is_none());
     }
 }

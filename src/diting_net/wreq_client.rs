@@ -58,6 +58,80 @@ pub fn emulation_os_for_ua(ua: &str) -> wreq_util::EmulationOS {
     }
 }
 
+/// Browser family + major version from a User-Agent ("Chrome/152.0.0.0" ->
+/// ("chrome", 152)). Edge is matched before Chrome because an Edge UA embeds
+/// both tokens; Safari's own version hides in `Version/`, not `Safari/`.
+#[cfg(feature = "stealth")]
+pub fn ua_browser_version(ua: &str) -> Option<(&'static str, u32)> {
+    let (family, marker) = if ua.contains("Edg/") {
+        ("edge", "Edg/")
+    } else if ua.contains("Firefox/") {
+        ("firefox", "Firefox/")
+    } else if ua.contains("Chrome/") {
+        ("chrome", "Chrome/")
+    } else if ua.contains("Safari/") {
+        ("safari", "Version/")
+    } else {
+        return None;
+    };
+    let version = ua.split(marker).nth(1)?;
+    let major = version.split('.').next()?.parse().ok()?;
+    Some((family, major))
+}
+
+/// (family, major version) for a TLS fingerprint name ("safari17_5" ->
+/// ("safari", 17)).
+#[cfg(feature = "stealth")]
+fn fingerprint_family_version(name: &str) -> Option<(&'static str, u32)> {
+    let lower = name.to_ascii_lowercase();
+    let digits = lower.find(|c: char| c.is_ascii_digit())?;
+    let family = match &lower[..digits] {
+        "chrome" => "chrome",
+        "firefox" => "firefox",
+        "safari" => "safari",
+        "edge" => "edge",
+        _ => return None,
+    };
+    let major = lower[digits..]
+        .split(['_', '.'])
+        .next()?
+        .parse()
+        .ok()?;
+    Some((family, major))
+}
+
+/// Warn when the effective UA and the TLS emulation disagree on browser
+/// family or major version. An AGINXBROWSER_UA override rides the stealth
+/// transport's default Chrome145 handshake, and "Chrome/152" in the UA over
+/// a chrome/145 JA3+HTTP/2 setting is the kind of tell WAFs diff (taobao
+/// compat report ⑤). Returns true when a mismatch was logged; `None`
+/// fingerprint means the default Chrome145 handshake.
+#[cfg(feature = "stealth")]
+pub fn warn_on_ua_tls_mismatch(ua: &str, tls_fingerprint: Option<&str>) -> bool {
+    let Some((ua_family, ua_major)) = ua_browser_version(ua) else {
+        return false;
+    };
+    let (tls_family, tls_major) = match tls_fingerprint {
+        Some(name) => match fingerprint_family_version(name) {
+            Some(v) => v,
+            None => return false,
+        },
+        None => ("chrome", 145),
+    };
+    if ua_family != tls_family || ua_major != tls_major {
+        tracing::warn!(
+            "fingerprint mismatch: UA advertises {}/{} but the TLS handshake emulates {}/{} — align AGINXBROWSER_UA with the tls_fingerprint (or drop the override)",
+            ua_family,
+            ua_major,
+            tls_family,
+            tls_major
+        );
+        true
+    } else {
+        false
+    }
+}
+
 /// GETs are idempotent, so a connection reset mid-request is safe to retry
 /// once. Some anti-bot frontends RST the first TLS connection from a fresh IP
 /// and only serve the retry.
@@ -434,7 +508,66 @@ mod tests {
     use url::Url;
 
     use super::StealthHttpClient;
+    use super::{fingerprint_family_version, ua_browser_version, warn_on_ua_tls_mismatch};
     use crate::diting_net::cookies::CookieJar;
+
+    const CHROME152_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
+    const FIREFOX133_UA: &str =
+        "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0";
+    const EDGE126_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0";
+    const SAFARI17_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15";
+
+    #[test]
+    fn ua_browser_version_parses_family_and_major() {
+        assert_eq!(
+            ua_browser_version(crate::diting_net::STEALTH_USER_AGENT),
+            Some(("chrome", 145))
+        );
+        assert_eq!(ua_browser_version(CHROME152_UA), Some(("chrome", 152)));
+        assert_eq!(ua_browser_version(EDGE126_UA), Some(("edge", 126)));
+        assert_eq!(ua_browser_version(FIREFOX133_UA), Some(("firefox", 133)));
+        assert_eq!(ua_browser_version(SAFARI17_UA), Some(("safari", 17)));
+        assert_eq!(ua_browser_version("curl/8.0"), None);
+    }
+
+    #[test]
+    fn fingerprint_names_parse_to_versions() {
+        assert_eq!(fingerprint_family_version("chrome145"), Some(("chrome", 145)));
+        assert_eq!(
+            fingerprint_family_version("Chrome131"),
+            Some(("chrome", 131))
+        );
+        assert_eq!(
+            fingerprint_family_version("safari17_5"),
+            Some(("safari", 17))
+        );
+        assert_eq!(
+            fingerprint_family_version("firefox147"),
+            Some(("firefox", 147))
+        );
+        assert_eq!(fingerprint_family_version("edge145"), Some(("edge", 145)));
+        assert_eq!(fingerprint_family_version("chrome"), None);
+        assert_eq!(fingerprint_family_version("dolphin9"), None);
+    }
+
+    #[test]
+    fn ua_tls_mismatch_warns_on_version_drift() {
+        // Report's exact case: AGINXBROWSER_UA=Chrome/152 over the default
+        // Chrome145 handshake.
+        assert!(warn_on_ua_tls_mismatch(CHROME152_UA, None));
+        // Family drift warns too.
+        assert!(warn_on_ua_tls_mismatch(FIREFOX133_UA, None));
+        assert!(warn_on_ua_tls_mismatch(CHROME152_UA, Some("firefox147")));
+        // Coherent pairs stay silent.
+        assert!(!warn_on_ua_tls_mismatch(
+            crate::diting_net::STEALTH_USER_AGENT,
+            None
+        ));
+        assert!(!warn_on_ua_tls_mismatch(FIREFOX133_UA, Some("firefox133")));
+        // Unrecognizable UA or fingerprint: no opinion, no warning.
+        assert!(!warn_on_ua_tls_mismatch("curl/8.0", None));
+        assert!(!warn_on_ua_tls_mismatch(CHROME152_UA, Some("chrome")));
+    }
 
     const PLAIN_BODY: &str = "<!DOCTYPE html><html><body><p id=\"mark\">gzip ok</p></body></html>";
 

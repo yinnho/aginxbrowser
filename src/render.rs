@@ -264,12 +264,14 @@ pub async fn http_fetch(
         (content, false)
     };
 
+    let captcha_event = crate::captcha::detect_and_maybe_solve(resp.url.as_ref(), &html).await;
+
     Ok(Some(FetchResponse {
         url: resp.url.to_string(),
         title,
         content,
         truncated,
-        captcha_event: None,
+        captcha_event,
         js_extract_result: None,
         tier: Some("http"),
         redirected_from: resp

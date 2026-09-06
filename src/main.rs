@@ -583,6 +583,14 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(doctor_cli::run().await);
     }
 
+    // UA/TLS coherence (taobao compat report ⑤): AGINXBROWSER_UA overrides
+    // the UA while the stealth transport keeps its default Chrome145
+    // handshake — say so loudly instead of shipping a WAF tell silently.
+    #[cfg(feature = "stealth")]
+    if let Ok(ua) = std::env::var("AGINXBROWSER_UA") {
+        crate::diting_net::warn_on_ua_tls_mismatch(&ua, None);
+    }
+
     // Warm up V8 on the main thread before any session/blocking thread creates
     // an isolate: the first isolate's JSDispatchTable init is not safe to race
     // from several threads (upstream obscura #430; construction itself is
