@@ -549,8 +549,13 @@
             "console.log('hello'); console.warn('careful'); console.error('boom')",
         )
         .unwrap();
+        let stripped: Vec<(String, String)> = rt
+            .take_pending_console_calls()
+            .into_iter()
+            .map(|(level, msg, _url)| (level, msg))
+            .collect();
         assert_eq!(
-            rt.take_pending_console_calls(),
+            stripped,
             vec![
                 ("log".to_string(), "hello".to_string()),
                 ("warn".to_string(), "careful".to_string()),

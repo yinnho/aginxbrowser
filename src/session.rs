@@ -110,11 +110,61 @@ fn drain_console(page: &Page, ring: &mut std::collections::VecDeque<Value>) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    for (level, msg) in calls {
-        ring.push_back(serde_json::json!({ "ts_ms": ts_ms, "level": level, "text": msg }));
+    for (level, msg, log_url) in calls {
+        ring.push_back(serde_json::json!({
+            "ts_ms": ts_ms, "level": level, "text": msg, "url": log_url,
+        }));
     }
     while ring.len() > CONSOLE_RING_CAP {
         ring.pop_front();
+    }
+}
+
+/// Optional narrowing for a Console read (session tool + HTTP query share
+/// this). All fields absent → the full ring comes back, newest last. `limit`
+/// keeps the most recent N matches — with a rolling buffer that is the
+/// useful end of the log.
+#[derive(Clone, Debug, Default)]
+pub struct ConsoleFilter {
+    pub level: Option<String>,
+    pub since_ts: Option<u64>,
+    pub url_contains: Option<String>,
+    pub limit: Option<usize>,
+}
+
+impl ConsoleFilter {
+    fn matches(&self, entry: &Value) -> bool {
+        if let Some(level) = &self.level {
+            let hit = entry
+                .get("level")
+                .and_then(|v| v.as_str())
+                .map(|s| s.eq_ignore_ascii_case(level))
+                .unwrap_or(false);
+            if !hit {
+                return false;
+            }
+        }
+        if let Some(since) = self.since_ts {
+            let hit = entry
+                .get("ts_ms")
+                .and_then(|v| v.as_u64())
+                .map(|t| t >= since)
+                .unwrap_or(false);
+            if !hit {
+                return false;
+            }
+        }
+        if let Some(needle) = &self.url_contains {
+            let hit = entry
+                .get("url")
+                .and_then(|v| v.as_str())
+                .map(|u| u.contains(needle.as_str()))
+                .unwrap_or(false);
+            if !hit {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -176,8 +226,10 @@ pub enum SessionCommand {
     /// Recent console output (log/warn/error/...) from the page, ring-buffered
     /// (500 entries). Drained from the engine's console queue after every
     /// command, so output from clicks/evals/navigation alike shows up here.
-    /// Read-only, so not recorded in the action log.
+    /// Read-only, so not recorded in the action log. The filter narrows what
+    /// comes back; entries themselves are kept intact in the ring.
     Console {
+        filter: ConsoleFilter,
         reply: oneshot::Sender<Result<String, String>>,
     },
     /// Acknowledged by the session thread right before it exits. The closer
@@ -847,12 +899,25 @@ fn session_thread(
                             let _ = reply.send(Ok(payload.to_string()));
                         }
 
-                        SessionCommand::Console { reply } => {
+                        SessionCommand::Console { filter, reply } => {
                             drain_console(&page, &mut console_ring);
+                            let total = console_ring.len();
+                            let mut messages: Vec<Value> = console_ring
+                                .iter()
+                                .filter(|e| filter.matches(e))
+                                .cloned()
+                                .collect();
+                            let matched = messages.len();
+                            if let Some(cap) = filter.limit {
+                                if messages.len() > cap {
+                                    messages = messages.split_off(messages.len() - cap);
+                                }
+                            }
                             let payload = serde_json::json!({
                                 "url": page.url(),
-                                "total": console_ring.len(),
-                                "messages": console_ring.iter().collect::<Vec<_>>(),
+                                "total": total,
+                                "matched": matched,
+                                "messages": messages,
                             });
                             let _ = reply.send(Ok(payload.to_string()));
                         }
@@ -2140,7 +2205,10 @@ mod tests {
         .unwrap();
 
         let out = mgr
-            .send(&sid, |reply| SessionCommand::Console { reply })
+            .send(&sid, |reply| SessionCommand::Console {
+                filter: ConsoleFilter::default(),
+                reply,
+            })
             .await
             .unwrap();
         let v: Value = serde_json::from_str(&out).expect("console JSON");
@@ -2165,7 +2233,10 @@ mod tests {
         // Reads are non-destructive on the ring: the repeat read still
         // carries everything (agents re-read / diff by ts_ms as needed).
         let out = mgr
-            .send(&sid, |reply| SessionCommand::Console { reply })
+            .send(&sid, |reply| SessionCommand::Console {
+                filter: ConsoleFilter::default(),
+                reply,
+            })
             .await
             .unwrap();
         let v: Value = serde_json::from_str(&out).expect("console JSON 2");
@@ -2173,6 +2244,68 @@ mod tests {
             v["messages"].as_array().map(Vec::len),
             Some(msgs.len()),
             "ring must be stable across reads"
+        );
+
+        // Filters: level narrows (2 errors here), limit keeps the most
+        // recent match, total/matched report both sides of the funnel.
+        let out = mgr
+            .send(&sid, |reply| SessionCommand::Console {
+                filter: ConsoleFilter {
+                    level: Some("error".into()),
+                    limit: Some(1),
+                    ..Default::default()
+                },
+                reply,
+            })
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&out).expect("filtered JSON");
+        let filtered = v["messages"].as_array().expect("filtered array");
+        assert_eq!(v["total"].as_u64(), Some(4), "ring size, not filter size");
+        assert_eq!(v["matched"].as_u64(), Some(2), "errors in ring");
+        assert_eq!(filtered.len(), 1, "limit keeps the most recent");
+        assert_eq!(filtered[0]["text"].as_str(), Some("eval-time boom"));
+        assert_eq!(filtered[0]["level"].as_str(), Some("error"));
+
+        // Every entry carries the page URL it was logged on, so
+        // url_contains can slice a multi-page session.
+        let port_str = port.to_string();
+        let out = mgr
+            .send(&sid, |reply| SessionCommand::Console {
+                filter: ConsoleFilter {
+                    url_contains: Some(port_str.clone()),
+                    ..Default::default()
+                },
+                reply,
+            })
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&out).expect("url-filtered JSON");
+        assert_eq!(v["matched"].as_u64(), Some(4), "all logged on this page");
+        for m in v["messages"].as_array().unwrap() {
+            assert!(
+                m["url"].as_str().unwrap_or("").contains(&port_str),
+                "entry url stamped at log time: {m}"
+            );
+        }
+
+        let out = mgr
+            .send(&sid, |reply| SessionCommand::Console {
+                filter: ConsoleFilter {
+                    url_contains: Some("no-such-page.example".to_string()),
+                    since_ts: Some(u64::MAX / 2),
+                    ..Default::default()
+                },
+                reply,
+            })
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&out).expect("empty-filter JSON");
+        assert_eq!(v["matched"].as_u64(), Some(0), "non-matching filters");
+        assert_eq!(
+            v["messages"].as_array().map(Vec::len),
+            Some(0),
+            "empty result is an empty array, not an error"
         );
 
         assert!(mgr.close_and_wait(&sid).await);

@@ -415,9 +415,10 @@ impl JsRuntime {
         std::mem::take(&mut self.state.borrow_mut().pending_binding_calls)
     }
 
-    /// Drain queued console calls (level, message) captured by `op_console_msg`.
-    /// The CDP layer turns each into a `Runtime.consoleAPICalled` event.
-    pub fn take_pending_console_calls(&self) -> Vec<(String, String)> {
+    /// Drain queued console calls (level, message, page URL at log time)
+    /// captured by `op_console_msg`. The CDP layer turns each into a
+    /// `Runtime.consoleAPICalled` event.
+    pub fn take_pending_console_calls(&self) -> Vec<(String, String, String)> {
         std::mem::take(&mut self.state.borrow_mut().pending_console_calls)
     }
 

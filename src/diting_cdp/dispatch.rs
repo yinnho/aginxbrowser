@@ -467,7 +467,7 @@ pub(crate) fn drain_console_calls(ctx: &mut CdpContext) {
         let Some(page_sessions) = page_to_sessions.get(page.id.as_str()) else {
             continue;
         };
-        for (level, msg) in calls {
+        for (level, msg, _log_url) in calls {
             let cdp_type = match level.as_str() {
                 "warn" => "warning",
                 "error" => "error",

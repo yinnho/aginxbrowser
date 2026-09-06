@@ -2243,8 +2243,9 @@ impl Page {
         }
     }
 
-    /// Drain queued console calls (level, message) for CDP `Runtime.consoleAPICalled`.
-    pub fn take_pending_console_calls(&self) -> Vec<(String, String)> {
+    /// Drain queued console calls (level, message, page URL at log time)
+    /// for CDP `Runtime.consoleAPICalled` and the session console ring.
+    pub fn take_pending_console_calls(&self) -> Vec<(String, String, String)> {
         if let Some(js) = &self.js {
             js.take_pending_console_calls()
         } else {

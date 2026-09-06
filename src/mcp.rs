@@ -169,6 +169,24 @@ pub struct SessionCookiesParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionConsoleParams {
+    /// Session ID
+    pub session_id: String,
+    /// Only entries at this level: "log" | "info" | "warn" | "error"
+    #[serde(default)]
+    pub level: Option<String>,
+    /// Only entries logged at or after this Unix epoch millisecond timestamp
+    #[serde(default)]
+    pub since_ts: Option<u64>,
+    /// Only entries whose page URL contains this substring
+    #[serde(default)]
+    pub url_contains: Option<String>,
+    /// Keep only the most recent N matching entries
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SessionNavigateParams {
     /// Session ID
     pub session_id: String,
@@ -683,14 +701,25 @@ keep the session token in localStorage). Call before the session idles out.",
 
     #[tool(
         description = "Read the session's recent page console output (log/info/warn/error) as \
-{url, total, messages:[{ts_ms, level, text}]}, newest last. Ring buffer of 500 entries; captures \
-output from page scripts, clicks, evals and navigation alike. The fastest way to see WHY a page \
-misbehaves: click the button, call this, read the error.",
+{url, total, matched, messages:[{ts_ms, level, text, url}]}, newest last. Ring buffer of 500 \
+entries; captures output from page scripts, clicks, evals and navigation alike. Optional filters: \
+level (exact, e.g. \"error\"), since_ts (epoch ms), url_contains (page URL substring), limit \
+(most recent N matches). The fastest way to see WHY a page misbehaves: click the button, call \
+this, read the error.",
         annotations(title = "Session Console", read_only_hint = true)
     )]
-    async fn session_console(&self, Parameters(params): Parameters<SessionCookiesParams>) -> String {
+    async fn session_console(&self, Parameters(params): Parameters<SessionConsoleParams>) -> String {
+        let filter = session::ConsoleFilter {
+            level: params.level,
+            since_ts: params.since_ts,
+            url_contains: params.url_contains,
+            limit: params.limit,
+        };
         let mut mgr = session::SESSIONS.lock().await;
-        match mgr.send(&params.session_id, |reply| SessionCommand::Console { reply }).await {
+        match mgr
+            .send(&params.session_id, |reply| SessionCommand::Console { filter, reply })
+            .await
+        {
             Ok(text) => stamped(text, &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }

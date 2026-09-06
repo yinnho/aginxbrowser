@@ -1143,12 +1143,30 @@ async fn session_storage_handler(
     Ok((StatusCode::OK, Json(val)))
 }
 
-/// Recent page console output (ring buffer of 500).
+/// Recent page console output (ring buffer of 500). Optional query filters:
+/// `?level=error&since_ts=<epoch_ms>&url_contains=<substr>&limit=<n>`.
+#[derive(Deserialize)]
+struct SessionConsoleQuery {
+    level: Option<String>,
+    since_ts: Option<u64>,
+    url_contains: Option<String>,
+    limit: Option<usize>,
+}
+
 async fn session_console_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<SessionConsoleQuery>,
 ) -> Result<impl IntoResponse, AppError> {
+    let filter = session::ConsoleFilter {
+        level: q.level,
+        since_ts: q.since_ts,
+        url_contains: q.url_contains,
+        limit: q.limit,
+    };
     let mut mgr = session::SESSIONS.lock().await;
-    let text = mgr.send(&id, |reply| session::SessionCommand::Console { reply }).await
+    let text = mgr
+        .send(&id, |reply| session::SessionCommand::Console { filter, reply })
+        .await
         .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| AppError::Internal(format!("console parse error: {}", e)))?;

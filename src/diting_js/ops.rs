@@ -81,7 +81,7 @@ pub struct JsState {
     // `op_console_msg` op. Drained by the CDP layer after each dispatch and
     // emitted as `Runtime.consoleAPICalled` events so console output is
     // visible to Playwright/Puppeteer instead of only the tracing log.
-    pub pending_console_calls: Vec<(String, String)>,
+    pub pending_console_calls: Vec<(String, String, String)>,
     /// The document's input stream for `document.write()`, created on the
     /// first call. Why the calls share one parser is in `write_stream`.
     pub(crate) write_stream: std::cell::RefCell<Option<crate::diting_js::write_stream::DocumentWriteStream>>,
@@ -1341,8 +1341,12 @@ fn op_console_msg(state: &OpState, #[string] level: &str, #[string] msg: &str) {
     }
     let gs = state.borrow::<SharedState>().clone();
     let mut gs = gs.borrow_mut();
+    // Queue-time URL: the consumer may drain long after a navigation moved
+    // the page elsewhere, and per-entry URLs make session_console's
+    // url_contains filter truthful.
+    let log_url = gs.url.clone();
     gs.pending_console_calls
-        .push((level.to_string(), msg.to_string()));
+        .push((level.to_string(), msg.to_string(), log_url));
 }
 
 // op_fetch_url backs JS-level `fetch()` and XHR. Pre-#139 it used a
