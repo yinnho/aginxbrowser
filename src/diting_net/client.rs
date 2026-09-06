@@ -513,6 +513,14 @@ pub struct HttpClient {
     /// through in addition to the `AGINXBROWSER_ALLOW_PRIVATE_NETWORK` env var.
     /// Set via `--allow-private-network` on the CLI (issue #33).
     pub allow_private_network: bool,
+    /// Lazy legacy-TLS escape hatch (obscura#769 navigation layer): rustls
+    /// carries no TLS 1.2 CBC cipher suites, so CBC-only servers die in the
+    /// ClientHello while every browser connects. Built once on first
+    /// fallback need, sharing this client's cookie jar and proxy posture;
+    /// `None` means unavailable (non-stealth build, or a SOCKS proxy that
+    /// wreq cannot speak).
+    #[cfg(feature = "stealth")]
+    legacy_tls: tokio::sync::OnceCell<Option<Arc<crate::diting_net::StealthHttpClient>>>,
 }
 
 impl HttpClient {
@@ -553,6 +561,8 @@ impl HttpClient {
             timeout: Duration::from_secs(30),
             block_trackers: false,
             allow_private_network,
+            #[cfg(feature = "stealth")]
+            legacy_tls: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -777,6 +787,118 @@ impl HttpClient {
     }
 
     async fn fetch_with_method_traced(
+        &self,
+        initial_method: Method,
+        url: &Url,
+        initial_body: Option<Vec<u8>>,
+        callbacks: Option<&CallbackRegistry>,
+        resource_type: ResourceType,
+        referrer: Option<&str>,
+    ) -> Result<Response, NetError> {
+        match self
+            .fetch_with_method_traced_inner(
+                initial_method.clone(),
+                url,
+                initial_body,
+                callbacks,
+                resource_type,
+                referrer,
+            )
+            .await
+        {
+            Ok(resp) => Ok(resp),
+            Err(e) => self.retry_via_legacy_tls(initial_method, url, e).await,
+        }
+    }
+
+    /// One legacy-TLS retry for transport failures (obscura#769 navigation
+    /// layer): rustls carries no TLS 1.2 CBC cipher suites, so a CBC-only
+    /// server dies in the ClientHello while every browser connects; the
+    /// stealth transport's BoringSSL stack still speaks CBC. GET/HEAD that
+    /// failed on the primary transport get exactly one attempt through it.
+    /// Guards, in order:
+    /// - GET/HEAD only — a POST retry risks double form submission;
+    /// - the URL must pass `validate_url` again. Gate rejections travel as
+    ///   `NetError::Network` just like transport failures, so the error
+    ///   type cannot fence them — the re-check can, and the legacy
+    ///   transport re-validates every hop it walks on top of that;
+    /// - redirect loops and an unavailable transport (non-stealth build,
+    ///   SOCKS proxy) pass the original error through unchanged.
+    /// The legacy client shares the cookie jar and re-syncs identity at
+    /// attempt time, but not per-hop navigation headers (sec-fetch-*,
+    /// Referer) — the accepted cost of an escape hatch.
+    #[cfg(feature = "stealth")]
+    async fn retry_via_legacy_tls(
+        &self,
+        method: Method,
+        url: &Url,
+        err: NetError,
+    ) -> Result<Response, NetError> {
+        if !matches!(method, Method::GET | Method::HEAD) || matches!(err, NetError::TooManyRedirects(_))
+        {
+            return Err(err);
+        }
+        if validate_url(url, self.allow_private_network).is_err() {
+            return Err(err);
+        }
+        let Some(legacy) = self.legacy_transport().await else {
+            return Err(err);
+        };
+        legacy
+            .set_user_agent(&self.user_agent.read().await.clone())
+            .await;
+        legacy
+            .set_accept_language(&self.accept_language.read().await.clone())
+            .await;
+        legacy.set_extra_headers(self.extra_headers.read().await.clone()).await;
+        tracing::warn!("rustls transport failed for {url}; retrying once via legacy TLS transport");
+        match legacy.fetch(url).await {
+            Ok(resp) => Ok(resp),
+            Err(legacy_err) => Err(NetError::Network(format!(
+                "{err}; legacy TLS transport also failed: {legacy_err}"
+            ))),
+        }
+    }
+
+    #[cfg(not(feature = "stealth"))]
+    async fn retry_via_legacy_tls(
+        &self,
+        _method: Method,
+        _url: &Url,
+        err: NetError,
+    ) -> Result<Response, NetError> {
+        Err(err)
+    }
+
+    /// Build the legacy transport on first fallback need, mirroring this
+    /// client's cookie jar, proxy and private-network posture. wreq does
+    /// not speak SOCKS5 (the #160 shape), so a SOCKS proxy leaves the
+    /// client rustls-only rather than silently rewriting the scheme.
+    #[cfg(feature = "stealth")]
+    async fn legacy_transport(
+        &self,
+    ) -> Option<&Arc<crate::diting_net::StealthHttpClient>> {
+        self.legacy_tls
+            .get_or_init(|| async {
+                if self
+                    .proxy_url
+                    .as_deref()
+                    .is_some_and(|p| p.starts_with("socks"))
+                {
+                    return None;
+                }
+                let mut client = crate::diting_net::StealthHttpClient::with_proxy(
+                    self.cookie_jar.clone(),
+                    self.proxy_url.as_deref(),
+                );
+                client.allow_private_network = self.allow_private_network;
+                Some(Arc::new(client))
+            })
+            .await
+            .as_ref()
+    }
+
+    async fn fetch_with_method_traced_inner(
         &self,
         initial_method: Method,
         url: &Url,
@@ -1640,5 +1762,56 @@ mod tests {
             echoed(&echo, "referer").is_empty(),
             "tool fetch must not invent a Referer, echo: {echo}"
         );
+    }
+
+    /// 127.0.0.1:1 is a closed port: both transports fail fast with
+    /// connection refused, but the GET error must carry the legacy-attempt
+    /// marker proving the fallback actually fired.
+    #[cfg(feature = "stealth")]
+    #[tokio::test]
+    async fn legacy_tls_retries_get_transport_failures() {
+        let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+        let url = Url::parse("http://127.0.0.1:1/dead").unwrap();
+        let err = client.fetch(&url).await.expect_err("closed port must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("legacy TLS transport"),
+            "GET must reach the legacy retry, got: {msg}"
+        );
+    }
+
+    #[cfg(feature = "stealth")]
+    #[tokio::test]
+    async fn legacy_tls_skips_non_get_methods() {
+        let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+        let url = Url::parse("http://127.0.0.1:1/submit").unwrap();
+        let err = client
+            .fetch_with_method(Method::POST, &url, None)
+            .await
+            .expect_err("closed port must fail");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("legacy TLS transport"),
+            "POST must not be retried (double-submit), got: {msg}"
+        );
+    }
+
+    /// A gate rejection travels as NetError::Network just like a transport
+    /// failure — the re-validation inside the fallback is what keeps SSRF
+    /// denials from ever reaching the legacy stack.
+    #[cfg(feature = "stealth")]
+    #[tokio::test]
+    async fn legacy_tls_never_retries_ssrf_gate_rejections() {
+        let _env = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+        let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, false);
+        let url = Url::parse("http://127.0.0.1:1/dead").unwrap();
+        let err = client.fetch(&url).await.expect_err("gate must reject");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("legacy TLS transport"),
+            "SSRF denial must not fall through to the legacy stack, got: {msg}"
+        );
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
     }
 }
