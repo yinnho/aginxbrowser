@@ -2385,6 +2385,23 @@ mod tests {
         NetGuard(guard)
     }
 
+    /// Same discipline for the nav-chain knob: the default-cap exhaustion
+    /// test and the raised-cap test must not interleave their env writes —
+    /// an unguarded "12" leaking into a concurrent navigate() would let the
+    /// exhaustion test sail past the cap it exists to pin.
+    #[allow(dead_code)] // the guard field is never read; holding it is the effect
+    struct NavChainGuard(std::sync::MutexGuard<'static, ()>);
+    impl Drop for NavChainGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("AGINXBROWSER_NAV_CHAIN_LIMIT");
+        }
+    }
+    static NAV_CHAIN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn nav_chain_guard() -> NavChainGuard {
+        let guard = NAV_CHAIN_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        NavChainGuard(guard)
+    }
+
     /// Multi-path local HTTP server on 127.0.0.1. Bodies are owned Strings so
     /// a route can embed the port of another server (cross-origin tests).
     /// Answers up to 64 requests: one navigation may pull the document plus
@@ -2721,6 +2738,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn js_chain_over_limit_reports_too_many_redirects() {
         let _g = net_test_guard();
+        let _chain = nav_chain_guard();
         // Every /hopN page redirects to /hop{N+1}: an infinite JS chain that
         // must stop at the default chain limit (10 documents) with
         // TooManyClientNavigations — and the message must not blame HTTP
@@ -2779,6 +2797,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn nav_chain_limit_env_unblocks_long_chains() {
         let _g = net_test_guard();
+        let _chain = nav_chain_guard();
         // Finite chain /hop0 → /hop1 → … → /hop10 (terminal document):
         // 11 documents total, one past the default cap of 10.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2814,7 +2833,6 @@ mod tests {
         std::env::set_var("AGINXBROWSER_NAV_CHAIN_LIMIT", "12");
         let mut p = test_page();
         let res = p.navigate(&format!("http://127.0.0.1:{port}/hop0")).await;
-        std::env::remove_var("AGINXBROWSER_NAV_CHAIN_LIMIT");
         res.unwrap();
         assert_eq!(p.url_string(), format!("http://127.0.0.1:{port}/hop10"));
     }

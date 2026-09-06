@@ -559,6 +559,23 @@ mod tests {
         out
     }
 
+    /// Same hygiene for the download-dir knob: set under a lock, removed on
+    /// drop, so a panicked or interleaved test can't leak its tmp dir into
+    /// the next do_download.
+    #[allow(dead_code)] // the guard field is never read; holding it is the effect
+    struct DownloadDirGuard(std::sync::MutexGuard<'static, ()>);
+    impl Drop for DownloadDirGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("AGINXBROWSER_DOWNLOAD_DIR");
+        }
+    }
+    static DOWNLOAD_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn download_dir_guard(dir: &str) -> DownloadDirGuard {
+        let guard = DOWNLOAD_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("AGINXBROWSER_DOWNLOAD_DIR", dir);
+        DownloadDirGuard(guard)
+    }
+
     fn tempfile_dir(name: &str) -> String {
         let dir = std::env::temp_dir().join(format!("aginx-dl-test-{}-{}", name, std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
@@ -579,7 +596,7 @@ mod tests {
             };
             let (url, _srv) = spawn_fixture(payload, vec![]).await;
             let tmp = tempfile_dir("sha");
-            std::env::set_var("AGINXBROWSER_DOWNLOAD_DIR", &tmp);
+            let _dd = download_dir_guard(&tmp);
 
             let resp = do_download(DownloadRequest {
                 url: url.to_string(),
@@ -606,7 +623,7 @@ mod tests {
             let payload: Vec<u8> = (0..50_000u32).map(|i| (i % 249) as u8).collect();
             let (url, _srv) = spawn_fixture(payload.clone(), vec![]).await;
             let tmp = tempfile_dir("resume");
-            std::env::set_var("AGINXBROWSER_DOWNLOAD_DIR", &tmp);
+            let _dd = download_dir_guard(&tmp);
             let part = PathBuf::from(&tmp).join("fixture.bin.part");
             std::fs::write(&part, &payload[..10_000]).unwrap();
 
@@ -641,7 +658,7 @@ mod tests {
             )
             .await;
             let tmp = tempfile_dir("cd");
-            std::env::set_var("AGINXBROWSER_DOWNLOAD_DIR", &tmp);
+            let _dd = download_dir_guard(&tmp);
 
             let resp = do_download(DownloadRequest {
                 url: url.to_string(),
