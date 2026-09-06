@@ -1102,6 +1102,7 @@ fn session_err(e: session::SessionError) -> AppError {
         session::SessionError::NotFound(msg) | session::SessionError::Expired(msg) => {
             AppError::NotFound(msg)
         }
+        session::SessionError::Eval(msg) => AppError::BadRequest(msg),
         session::SessionError::ThreadDied(msg) => AppError::ServiceUnavailable(msg),
         session::SessionError::Command(msg) => AppError::Internal(msg),
     }

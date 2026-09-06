@@ -70,6 +70,26 @@ impl Page {
         info.value.unwrap_or(Value::Null)
     }
 
+    /// Like [`Self::evaluate_async`], but a thrown/rejected script comes
+    /// back as `Err("TypeError: boom (line 1, col 14)\n    at <anonymous>:1:14")`
+    /// instead of collapsing to Null — agents can't debug what they can't
+    /// see. The position is the user-script frame from the error's stack.
+    pub async fn evaluate_async_checked(&mut self, expression: &str) -> Result<Value, String> {
+        let outcome = self.inner.evaluate_for_cdp_outcome(expression, true, true).await;
+        if let Some(exc) = outcome.exception {
+            let mut msg = exc.description;
+            if let (Some(line), Some(col)) = (exc.line, exc.col) {
+                msg = format!("{} (line {}, col {})", msg, line, col);
+            }
+            if let Some(frame) = exc.stack_first {
+                msg.push_str("\n    ");
+                msg.push_str(&frame);
+            }
+            return Err(msg);
+        }
+        Ok(outcome.info.value.unwrap_or(Value::Null))
+    }
+
     /// Bounded evaluate for interaction dispatch (click/input). A runaway
     /// event handler — or a MutationObserver microtask storm it triggers —
     /// pins the session thread inside V8 where tokio timeouts cannot reach;

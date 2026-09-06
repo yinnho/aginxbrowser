@@ -39,6 +39,11 @@ pub enum SessionError {
     /// The command itself failed inside a live session (selector miss,
     /// navigation failure, stance gate, ...). The session is still usable.
     Command(String),
+    /// The evaluated script threw or a returned promise rejected. Distinct
+    /// from [`SessionError::Command`] so agents can tell "my script is
+    /// wrong" from "the tool refused"; the message carries the error name,
+    /// message, throw position and first stack frame.
+    Eval(String),
 }
 
 impl SessionError {
@@ -48,6 +53,7 @@ impl SessionError {
             SessionError::Expired(_) => "SESSION_EXPIRED",
             SessionError::ThreadDied(_) => "SESSION_CRASHED",
             SessionError::Command(_) => "COMMAND_FAILED",
+            SessionError::Eval(_) => "EVAL_ERROR",
         }
     }
 
@@ -69,7 +75,8 @@ impl std::fmt::Display for SessionError {
             SessionError::NotFound(m)
             | SessionError::Expired(m)
             | SessionError::ThreadDied(m)
-            | SessionError::Command(m) => f.write_str(m),
+            | SessionError::Command(m)
+            | SessionError::Eval(m) => f.write_str(m),
         }
     }
 }
@@ -142,7 +149,7 @@ pub enum SessionCommand {
     },
     Eval {
         script: String,
-        reply: oneshot::Sender<Result<Value, String>>,
+        reply: oneshot::Sender<Result<Value, SessionError>>,
     },
     /// Pin the viewport (width/height/mobile). None width/height keeps the
     /// current dimension (Chrome's setDeviceMetricsOverride semantics),
@@ -393,11 +400,14 @@ impl SessionManager {
         Some(s.timeout.saturating_sub(s.last_active.elapsed()).as_secs())
     }
 
-    /// Send a command to a session and await the result.
-    pub async fn send<T: Send + 'static>(
+    /// Send a command to a session and await the result. Most commands
+    /// reply `Result<T, String>` (→ [`SessionError::Command`]); a few carry
+    /// a richer error (e.g. Eval's [`SessionError::Eval`]) — both work via
+    /// `E: Into<SessionError>`, inferred from the command's reply channel.
+    pub async fn send<T: Send + 'static, E: Into<SessionError> + Send + 'static>(
         &mut self,
         session_id: &str,
-        make_cmd: impl FnOnce(oneshot::Sender<Result<T, String>>) -> SessionCommand,
+        make_cmd: impl FnOnce(oneshot::Sender<Result<T, E>>) -> SessionCommand,
     ) -> Result<T, SessionError> {
         let session = self
             .sessions
@@ -419,7 +429,7 @@ impl SessionManager {
         reply_rx
             .await
             .map_err(|_| SessionError::ThreadDied("session thread died".to_string()))?
-            .map_err(SessionError::Command)
+            .map_err(Into::into)
     }
 
     /// Close and remove a session. Fire-and-forget; use [`Self::close_and_wait`]
@@ -813,14 +823,14 @@ fn session_thread(
                         }
 
                         SessionCommand::Eval { script, reply } => {
-                            let val = page.evaluate_async(&script).await;
+                            let outcome = page.evaluate_async_checked(&script).await;
                             recorder.push(RecordedAction::Eval { script });
                             // Drain any JS-initiated navigation the script
                             // started (location.href / form submit) so the
                             // session's current URL moves with it — same
                             // policy as click_by_index below.
                             let _ = page.process_pending_navigation().await;
-                            let _ = reply.send(Ok(val));
+                            let _ = reply.send(outcome.map_err(SessionError::Eval));
                         }
 
                         SessionCommand::Storage { reply } => {
@@ -2026,6 +2036,71 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(v, serde_json::json!(2));
+
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
+    /// Feedback ⑨: a throwing eval is an EVAL_ERROR with the error name,
+    /// message, throw position and first stack frame — not a silent null.
+    /// A rejected promise surfaces the same way.
+    #[tokio::test]
+    async fn eval_exceptions_carry_name_position_and_stack() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /err",
+            "<html><body>err</body></html>",
+        )]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/err")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+        );
+
+        let err = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "1 + 1; throw new TypeError('boom at runtime')".to_string(),
+                reply,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "EVAL_ERROR");
+        let text = err.to_string();
+        assert!(text.contains("TypeError: boom at runtime"), "got: {text}");
+        assert!(text.contains("(line 1, col"), "throw position in message, got: {text}");
+        assert!(
+            text.contains("<anonymous>:1:14"),
+            "first stack frame carries the throw site, got: {text}"
+        );
+
+        // The session survives a failed eval and still evaluates fine.
+        let ok = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "2 + 2".to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(ok, serde_json::json!(4));
+
+        let err = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "Promise.reject(new Error('async boom'))".to_string(),
+                reply,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "EVAL_ERROR");
+        assert!(
+            err.to_string().contains("Error: async boom"),
+            "got: {}",
+            err.to_string()
+        );
 
         assert!(mgr.close_and_wait(&sid).await);
     }

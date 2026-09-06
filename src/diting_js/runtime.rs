@@ -52,6 +52,13 @@ pub struct ExceptionInfo {
     pub class_name: String,
     /// Object-store id of the error object, when one was allocated.
     pub object_id: Option<String>,
+    /// First stack frame, e.g. "at <anonymous>:1:13" — the throw site.
+    pub stack_first: Option<String>,
+    /// Line/column of the user script frame (the `<anonymous>:L:C` frame),
+    /// when one was found — bootstrap eval wrapper frames are skipped so
+    /// the position points into the caller's script.
+    pub line: Option<u32>,
+    pub col: Option<u32>,
 }
 
 static ISOLATE_CONSTRUCT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -875,6 +882,13 @@ impl JsRuntime {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let stack_first = exc_meta
+            .get("stack_first")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let line = exc_meta.get("line").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let col = exc_meta.get("col").and_then(|v| v.as_u64()).map(|v| v as u32);
 
         self.object_store.insert(oid.to_string(), Self::object_slot(oid));
 
@@ -899,6 +913,9 @@ impl JsRuntime {
                 description,
                 class_name,
                 object_id: Some(oid.to_string()),
+                stack_first,
+                line,
+                col,
             }),
         })
     }
@@ -1713,7 +1730,7 @@ impl JsRuntime {
     fn exception_meta_extract_js(var_name: &str) -> String {
         format!(
             r#"(function(e) {{
-                var name = '', msg = '', desc = '';
+                var name = '', msg = '', desc = '', frame = '', line = 0, col = 0;
                 if (e !== null && e !== undefined) {{
                     if (typeof e === 'object' || typeof e === 'function') {{
                         name = e.name || (e.constructor && e.constructor.name) || '';
@@ -1721,10 +1738,24 @@ impl JsRuntime {
                     }} else {{
                         try {{ msg = String(e); }} catch (_) {{}}
                     }}
+                    // Prefer the <anonymous>:L:C frame — that's the caller's
+                    // eval'd script; the outermost "at" frame here is the
+                    // bootstrap eval wrapper, whose position points into
+                    // bootstrap.js and would mislead.
+                    if (typeof e.stack === 'string') {{
+                        var lines = e.stack.split('\n');
+                        for (var i = 0; i < lines.length; i++) {{
+                            var ln = lines[i].trim();
+                            if (ln.indexOf('at ') !== 0) continue;
+                            var m = ln.match(/<anonymous>:(\d+):(\d+)/);
+                            if (m) {{ frame = ln; line = +m[1]; col = +m[2]; break; }}
+                            if (!frame) frame = ln;
+                        }}
+                    }}
                 }}
                 if (msg) {{ desc = name ? (name + ': ' + msg) : msg; }}
                 else {{ desc = name || msg || 'Uncaught exception'; }}
-                return JSON.stringify({{className:name, description:desc}});
+                return JSON.stringify({{className:name, description:desc, stack_first:frame, line:line, col:col}});
             }})({var_name})"#,
             var_name = var_name,
         )
