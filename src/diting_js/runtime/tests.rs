@@ -5941,6 +5941,11 @@
     #[allow(clippy::await_holding_lock)] // the env guard must span the awaits
     #[tokio::test(flavor = "current_thread")]
     async fn local_storage_persists_across_realms_and_session_storage_does_not() {
+        // Ephemeral flips storage_file to None, killing every flush below —
+        // hold its lock so the ephemeral tests can't race this one.
+        let _ephemeral = crate::config::EPHEMERAL_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _env = STORAGE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("diting-ls-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

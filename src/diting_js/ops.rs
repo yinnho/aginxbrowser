@@ -1,7 +1,11 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::io::Write as _;
 use std::rc::Rc;
 use std::sync::Arc;
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 use deno_core::op2;
 use deno_core::OpState;
@@ -2361,9 +2365,13 @@ static LOCAL_STORAGE_LOADED: std::sync::LazyLock<std::sync::Mutex<HashSet<String
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
 
 fn storage_file(origin: &str) -> Option<std::path::PathBuf> {
+    if crate::config::ephemeral() {
+        return None;
+    }
     let dir = std::env::var("AGINXBROWSER_STORAGE_DIR")
         .ok()
         .or_else(|| std::env::var("AGINXBROWSER_COOKIE_STORE_DIR").ok())
+        .or_else(|| crate::config::app_data_dir().map(|p| p.to_string_lossy().into_owned()))
         .unwrap_or_else(|| ".".to_string());
     let mut sanitized = String::with_capacity(origin.len());
     for c in origin.chars() {
@@ -2439,9 +2447,19 @@ fn op_storage_write(#[string] origin: &str, #[string] json: &str) {
         .get(origin)
         .map(|entries| serde_json::to_string(entries).unwrap_or_else(|_| "{}".to_string()));
     let Some(payload) = payload else { return };
-    // tmp + rename so a mid-write kill never leaves a truncated store
+    // tmp + rename so a mid-write kill never leaves a truncated store;
+    // 0600 to match the cookie store — this file carries login tokens too
+    // (the xinzao-class session shape).
     let tmp = path.with_extension("tmp");
-    if std::fs::write(&tmp, payload).is_ok() {
+    let write_ok = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(payload.as_bytes()))
+        .is_ok();
+    if write_ok {
         let _ = std::fs::rename(&tmp, &path);
     }
 }
@@ -3042,6 +3060,27 @@ pub fn build_extension() -> Extension {
 mod tests {
     use super::{cors_response_allows, validate_fetch_url, FetchCredentials};
     use super::{pbkdf2_derive, PBKDF2_MAX_ITERATIONS, PBKDF2_MAX_OUTPUT_BYTES};
+
+    // Ephemeral deployments must not persist login tokens: storage_file is
+    // the single choke point every localStorage flush goes through.
+    #[test]
+    fn storage_file_is_none_under_ephemeral() {
+        let _env = crate::config::EPHEMERAL_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        std::env::remove_var("AGINXBROWSER_EPHEMERAL");
+        assert!(super::storage_file("https://example.com").is_some());
+
+        std::env::set_var("AGINXBROWSER_EPHEMERAL", "1");
+        assert_eq!(super::storage_file("https://example.com"), None);
+        assert_eq!(
+            super::storage_file("https://login.taobao.com"),
+            None,
+            "the gate must sit above every origin"
+        );
+        std::env::remove_var("AGINXBROWSER_EPHEMERAL");
+    }
 
     // Upstream obscura #708: file:// must be rejected up front for
     // page-reachable fetch/XHR (deny-by-default, matching navigation),

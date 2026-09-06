@@ -60,7 +60,7 @@ pub fn should_auto_proxy(url: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::should_auto_proxy;
+    use super::{app_data_dir, ephemeral, should_auto_proxy};
 
     // The list gates routing for every navigation now — pin the match shapes.
     #[test]
@@ -71,6 +71,38 @@ mod tests {
         assert!(!should_auto_proxy("https://notwikipedia.org/"));
         assert!(!should_auto_proxy("https://example.com/"));
         assert!(!should_auto_proxy("not a url"));
+    }
+
+    #[test]
+    fn ephemeral_parses_env_truthiness() {
+        let _env = super::EPHEMERAL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        std::env::remove_var("AGINXBROWSER_EPHEMERAL");
+        assert!(!ephemeral());
+        for truthy in ["1", "true", "TRUE", "Yes", "on", " 1 "] {
+            std::env::set_var("AGINXBROWSER_EPHEMERAL", truthy);
+            assert!(ephemeral(), "{truthy:?} should enable ephemeral");
+        }
+        for falsy in ["0", "false", "no", "off", ""] {
+            std::env::set_var("AGINXBROWSER_EPHEMERAL", falsy);
+            assert!(!ephemeral(), "{falsy:?} should not enable ephemeral");
+        }
+        std::env::remove_var("AGINXBROWSER_EPHEMERAL");
+        assert!(!ephemeral());
+    }
+
+    #[test]
+    fn app_data_dir_lands_under_platform_location() {
+        if std::env::var_os("HOME").is_none() && std::env::var_os("XDG_DATA_HOME").is_none() {
+            return; // no platform anchor; callers fall back to "."
+        }
+        let dir = app_data_dir().expect("anchor env set");
+        assert!(dir.is_absolute(), "relative: {}", dir.display());
+        assert!(
+            dir.components().any(|c| c.as_os_str() == "aginxbrowser"),
+            "path: {}",
+            dir.display()
+        );
     }
 }
 
@@ -139,4 +171,51 @@ pub fn js_stack_mb() -> usize {
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|&mb| (1..=1024).contains(&mb))
         .unwrap_or(32)
+}
+
+#[cfg(test)]
+pub(crate) static EPHEMERAL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// When set, no credential-bearing state touches the disk: the shared
+/// cookie jar and per-origin localStorage stay memory-only for the life of
+/// the process (the shared jar exists to blunt CAPTCHA rates across
+/// stateless fetches — see server::SHARED_COOKIE_JAR — but every auth
+/// session that flows through it also lands in that file, which is not a
+/// trade every deployment wants to make).
+pub fn ephemeral() -> bool {
+    matches!(
+        std::env::var("AGINXBROWSER_EPHEMERAL")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
+}
+
+/// Default on-disk home for credential-bearing state (the shared cookie
+/// jar, per-origin localStorage). The current working directory was the
+/// original default — which put live login cookies one careless
+/// `git add .` away from a commit — so state now lands in the platform
+/// application-data location instead. `AGINXBROWSER_COOKIE_STORE_DIR` /
+/// `AGINXBROWSER_STORAGE_DIR` still override, and files are written 0600.
+pub fn app_data_dir() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME").map(|h| {
+            std::path::PathBuf::from(h)
+                .join("Library/Application Support/aginxbrowser")
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+            if !xdg.is_empty() {
+                return Some(std::path::PathBuf::from(xdg).join("aginxbrowser"));
+            }
+        }
+        std::env::var_os("HOME")
+            .map(|h| std::path::PathBuf::from(h).join(".local/share/aginxbrowser"))
+    }
 }

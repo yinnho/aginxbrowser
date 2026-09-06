@@ -35,6 +35,9 @@ pub fn build_browser(use_proxy: bool, url: &str, tls_fingerprint: Option<&str>) 
 static SHARED_COOKIE_JAR: std::sync::LazyLock<Arc<CookieJar>> =
     std::sync::LazyLock::new(|| {
         let jar = Arc::new(CookieJar::new());
+        if crate::config::ephemeral() {
+            return jar;
+        }
         let path = cookie_store_path();
         if let Ok(n) = jar.load_from_file(&path) {
             if n > 0 {
@@ -46,12 +49,17 @@ static SHARED_COOKIE_JAR: std::sync::LazyLock<Arc<CookieJar>> =
 
 fn cookie_store_path() -> std::path::PathBuf {
     let dir = std::env::var("AGINXBROWSER_COOKIE_STORE_DIR")
-        .unwrap_or_else(|_| ".".to_string());
+        .ok()
+        .or_else(|| crate::config::app_data_dir().map(|p| p.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| ".".to_string());
     std::path::PathBuf::from(dir).join("cookie-store.json")
 }
 
 /// Persist the shared jar (best-effort; called after stateless requests).
 pub fn persist_shared_cookies() {
+    if crate::config::ephemeral() {
+        return;
+    }
     let path = cookie_store_path();
     if let Err(e) = SHARED_COOKIE_JAR.save_to_file(&path) {
         tracing::warn!("cookie store save failed: {}", e);
@@ -992,5 +1000,72 @@ mod shared_jar_tests {
             depth, "20000",
             "deep JS recursion must not hit RangeError, got: {depth}"
         );
+    }
+}
+
+#[cfg(test)]
+mod cookie_store_tests {
+    use super::{cookie_store_path, persist_shared_cookies};
+
+    // Restores "unset" on drop so an assert can't leak the knob into a
+    // concurrently running env-sensitive test.
+    struct UnsetEnv(&'static str);
+    impl UnsetEnv {
+        fn now(name: &'static str) -> Self {
+            std::env::remove_var(name);
+            Self(name)
+        }
+    }
+    impl Drop for UnsetEnv {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
+
+    // The old default was the CWD — one careless `git add .` away from
+    // committing live login cookies. Pin the relocation.
+    #[test]
+    fn cookie_store_defaults_to_app_data_dir_not_cwd() {
+        let _env = crate::config::EPHEMERAL_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _dir = UnsetEnv::now("AGINXBROWSER_COOKIE_STORE_DIR");
+        if std::env::var_os("HOME").is_none() && std::env::var_os("XDG_DATA_HOME").is_none() {
+            return; // no platform anchor; "." fallback covers this host
+        }
+        let path = cookie_store_path();
+        assert_eq!(path.file_name().unwrap(), "cookie-store.json");
+        assert!(
+            path.components().any(|c| c.as_os_str() == "aginxbrowser"),
+            "default must live under the app-data dir, got: {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn ephemeral_mode_never_writes_the_cookie_store() {
+        let _env = crate::config::EPHEMERAL_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("diting-cookie-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("AGINXBROWSER_COOKIE_STORE_DIR", &dir);
+        let _ephemeral_off = UnsetEnv::now("AGINXBROWSER_EPHEMERAL");
+
+        persist_shared_cookies();
+        let store = dir.join("cookie-store.json");
+        assert!(store.exists(), "default mode persists the shared jar");
+
+        std::env::set_var("AGINXBROWSER_EPHEMERAL", "1");
+        std::fs::remove_file(&store).unwrap();
+        persist_shared_cookies();
+        assert!(
+            !store.exists(),
+            "ephemeral mode must leave no credential file on disk"
+        );
+
+        std::env::remove_var("AGINXBROWSER_COOKIE_STORE_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
