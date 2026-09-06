@@ -221,6 +221,13 @@ pub struct Page {
     /// `__diting_setPersona`) — the override has to be replayed after that
     /// or the page silently flips back mid-session.
     viewport_override: Option<(f32, f32, bool)>,
+    /// 32-bit seed the JS persona draws its hardware identity from
+    /// (screen/dpr/GPU/canvas). Lives on the Page because every navigation
+    /// rebuilds the realm and `__diting_init` self-deletes after drawing a
+    /// fresh identity — without a re-pin, one visit would flip its screen
+    /// and GPU page to page, its own automation tell. Same pattern as the
+    /// viewport override above.
+    fp_seed: u64,
     pub lifecycle: LifecycleState,
     pub http_client: Arc<HttpClient>,
     pub context: Arc<BrowserContext>,
@@ -353,6 +360,9 @@ impl Page {
             network_event_counter: 0,
             session_storage: None,
             viewport_override: None,
+            fp_seed: u64::from_be_bytes(
+                uuid::Uuid::new_v4().into_bytes()[..8].try_into().unwrap(),
+            ),
             callbacks: Arc::new(crate::diting_net::CallbackRegistry::new()),
             response_bodies: std::collections::HashMap::new(),
             response_body_order: std::collections::VecDeque::new(),
@@ -416,6 +426,9 @@ impl Page {
         rt.set_encoding(&self.encoding);
         rt.set_title(&self.title);
         rt.set_referrer(&self.referrer);
+        // Re-pin this page's hardware persona before anything else reads it
+        // (the fresh realm just drew a throwaway identity at construction).
+        rt.set_fingerprint_seed(self.fp_seed);
 
         // JS-layer UA must match the HTTP-layer UA we advertise (set via
         // AGINXBROWSER_UA / context.user_agent). Hardcoding the stealth

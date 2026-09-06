@@ -17,6 +17,38 @@
         assert_eq!(title, serde_json::json!("Test Page"));
     }
 
+    /// The hardware persona (screen/dpr/GPU/canvas) is drawn from a seed the
+    /// host owns: the realm is rebuilt per navigation and __diting_init
+    /// self-deletes after drawing, so a Page re-pins the same seed via
+    /// set_fingerprint_seed on every fresh realm — a real machine does not
+    /// change its screen or GPU between pages of one visit (the identity
+    /// flipping per page is its own automation tell).
+    #[test]
+    fn fingerprint_seed_pins_hardware_identity_across_realms() {
+        let probe = "JSON.stringify([screen.width, screen.height, devicePixelRatio, \
+                     navigator.hardwareConcurrency])";
+        let id_a = {
+            let mut a = setup_runtime("<html><body></body></html>");
+            a.set_fingerprint_seed(0x5EED_0001);
+            a.evaluate(probe).unwrap()
+        };
+        let id_b = {
+            let mut b = setup_runtime("<html><body></body></html>");
+            b.set_fingerprint_seed(0x5EED_0001);
+            let v = b.evaluate(probe).unwrap();
+            assert_eq!(
+                b.evaluate("_fpSeed").unwrap(),
+                serde_json::json!(0x5EED_0001u64 as f64),
+                "the pinned seed lands verbatim and drives the persona draws"
+            );
+            v
+        };
+        assert_eq!(
+            id_a, id_b,
+            "same seed must reproduce the same machine persona in a fresh realm"
+        );
+    }
+
     /// obscura#734 lineage: Intl's default locale must follow the configured
     /// language source, not the process locale. Two layers keep them agreed:
     /// set_language pins ICU's default (fresh isolates), and bootstrap.js

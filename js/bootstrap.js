@@ -10257,6 +10257,25 @@ globalThis.__diting_clearViewport = function() {
   try { globalThis.dispatchEvent(new Event('resize')); } catch (e) {}
 };
 
+// The hardware persona (screen/dpr/GPU/canvas) must hold for a whole
+// visit: a real machine does not change its panel or GPU between pages,
+// and identity-level values flipping per navigation is its own automation
+// tell (the invariant hardwareConcurrency already keeps). __diting_init
+// runs once per realm (it self-deletes), so cross-page continuity comes
+// from the host re-pinning the same seed via __diting_setFpSeed after the
+// fresh realm boots — Page-owned state, like the viewport override.
+globalThis.__diting_setFpSeed = function(s) {
+  _fpSeed = s | 0;
+  _fpCache = null;
+  // __diting_init's throwaway draw already filled the hw/deviceMemory guard
+  // cache before this re-pin lands; drop it so the persona redraws them from
+  // the pinned seed (the guard then holds them put for the rest of the realm).
+  globalThis.__diting_hw = undefined;
+  globalThis.__diting_mem = undefined;
+  globalThis.__diting_hw_plat = undefined;
+  __diting_setPersona();
+};
+
 globalThis.__diting_init = function() {
   _fpSeed = Date.now() ^ (Math.random() * 0xFFFFFFFF >>> 0);
   _fpCache = null;

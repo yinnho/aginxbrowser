@@ -485,6 +485,18 @@ impl JsRuntime {
             ),
         );
     }
+
+    /// Re-pin the hardware-persona seed on a freshly booted realm. The realm
+    /// is rebuilt per navigation and `__diting_init` self-deletes after
+    /// drawing, so cross-page continuity of screen/dpr/GPU/canvas comes from
+    /// the Page handing the same seed back every time (see Page::fp_seed).
+    pub fn set_fingerprint_seed(&mut self, seed: u64) {
+        let s32 = (seed & 0xFFFF_FFFF) as u32;
+        let _ = self.runtime.execute_script(
+            "<set-fp-seed>",
+            format!("globalThis.__diting_setFpSeed({});", s32),
+        );
+    }
     /// Move only the navigator.language(s) persona (the `__diting_lang`
     /// global behind the bootstrap live getters). Deliberately does NOT
     /// re-pin the ICU default: `set_default_locale` is process-global and
