@@ -5739,7 +5739,10 @@
         // short pages — Chrome never lets the root scrolling area be smaller
         // than the window. clientHeight keeps the viewport contract either
         // way, so scrollHeight - clientHeight stays a working overflow probe.
-        let mut rt = setup_runtime("<html><body><div style=\"height:2000px\"></div></body></html>");
+        // 5000px, not 2000px: the stealth persona draws innerHeight from its
+        // screen pool (a 4K panel gives 2080), so a "tall" page must be tall
+        // against the largest plausible persona viewport, not just 800.
+        let mut rt = setup_runtime("<html><body><div style=\"height:5000px\"></div></body></html>");
         let result = rt.evaluate(r#"
             return [document.documentElement.scrollHeight > innerHeight,
                     document.body.scrollHeight > innerHeight,

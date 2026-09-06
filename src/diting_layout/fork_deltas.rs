@@ -1162,6 +1162,169 @@ fn nested_inline_backgrounds_stack_outer_under_inner() {
     );
 }
 
+/// Row-group backgrounds (blitz#346): thead/tbody/tfoot get no box of their
+/// own (build_table flattens them into rows), so a background-color on the
+/// group never painted. The fix climbs one DOM level at paint time when the
+/// row has no background of its own — CSS2.1's cell > row > row-group
+/// order, computed values untouched.
+#[test]
+fn row_group_background_paints_on_row_band() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::PaintItem;
+
+    let html = r#"<html><body><table><tbody><tr><td>x</td></tr></tbody></table></body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for(
+        "tbody { background-color: #ff0000; }",
+        (1280.0, 800.0),
+        CssMediaType::Screen,
+    );
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let (_, items) = crate::diting_layout::layout_dom_with_paint(
+        &tree,
+        &styles,
+        &crate::diting_fonts::font_book(),
+        1280.0,
+        800.0,
+    );
+
+    let bands: Vec<crate::diting_layout::Rect> = items
+        .iter()
+        .filter_map(|it| match it {
+            PaintItem::Bg { rect, color, .. } if *color == [0xff, 0x00, 0x00, 0xff] => {
+                Some(*rect)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bands.len(), 1, "tbody bg paints exactly one band; got {bands:?}");
+    let band = bands[0];
+
+    // The band is the row's, not the cell's: it underlaps the cell text and
+    // spans the full table width.
+    let (tx, ty) = items
+        .iter()
+        .find_map(|it| match it {
+            PaintItem::Text { text, x, y, .. } if text == "x" => Some((*x, *y)),
+            _ => None,
+        })
+        .expect("cell text paints");
+    assert!(
+        band.x <= tx
+            && tx <= band.x + band.width
+            && band.y <= ty
+            && ty <= band.y + band.height,
+        "band must underlap the cell text; band={band:?} text=({tx},{ty})"
+    );
+}
+
+/// Same climb through thead — the tag match covers all three row-group
+/// elements, thead is the one a typo'd match arm would silently drop.
+#[test]
+fn thead_background_paints_on_row_band() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::PaintItem;
+
+    let html = r#"<html><body><table><thead><tr><th>h</th></tr></thead></table></body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for(
+        "thead { background-color: #00ff00; }",
+        (1280.0, 800.0),
+        CssMediaType::Screen,
+    );
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let (_, items) = crate::diting_layout::layout_dom_with_paint(
+        &tree,
+        &styles,
+        &crate::diting_fonts::font_book(),
+        1280.0,
+        800.0,
+    );
+
+    let bands = items
+        .iter()
+        .filter(|it| matches!(it, PaintItem::Bg { color, .. } if *color == [0x00, 0xff, 0x00, 0xff]))
+        .count();
+    assert_eq!(bands, 1, "thead bg paints exactly one band; got {bands}");
+}
+
+/// Cell background over row-group background: with both set, the cell's own
+/// green paints ON TOP of the climbed red band (CSS2.1 cell > row-group),
+/// and the red band stays under it.
+#[test]
+fn cell_background_paints_over_row_group_band() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::PaintItem;
+
+    let html = r#"<html><body><table><tbody><tr><td class="hl">x</td></tr></tbody></table></body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for(
+        "tbody { background-color: #ff0000; } td.hl { background-color: #00cc00; }",
+        (1280.0, 800.0),
+        CssMediaType::Screen,
+    );
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let (_, items) = crate::diting_layout::layout_dom_with_paint(
+        &tree,
+        &styles,
+        &crate::diting_fonts::font_book(),
+        1280.0,
+        800.0,
+    );
+
+    let red_idx = items
+        .iter()
+        .position(|it| matches!(it, PaintItem::Bg { color, .. } if *color == [0xff, 0x00, 0x00, 0xff]))
+        .expect("climbed tbody band missing");
+    let green_idx = items
+        .iter()
+        .position(|it| matches!(it, PaintItem::Bg { color, .. } if *color == [0x00, 0xcc, 0x00, 0xff]))
+        .expect("cell's own bg missing");
+    assert!(
+        red_idx < green_idx,
+        "cell bg ({green_idx}) must paint over the row-group band ({red_idx})"
+    );
+}
+
+/// Row's own background wins over the row-group's: no climb happens (and no
+/// tbody red leaks anywhere) when the tr carries its own blue.
+#[test]
+fn row_background_beats_row_group_background() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::PaintItem;
+
+    let html = r#"<html><body><table><tbody><tr class="r"><td>x</td></tr></tbody></table></body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for(
+        "tbody { background-color: #ff0000; } tr.r { background-color: #0000ff; }",
+        (1280.0, 800.0),
+        CssMediaType::Screen,
+    );
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let (_, items) = crate::diting_layout::layout_dom_with_paint(
+        &tree,
+        &styles,
+        &crate::diting_fonts::font_book(),
+        1280.0,
+        800.0,
+    );
+
+    let reds = items
+        .iter()
+        .filter(|it| matches!(it, PaintItem::Bg { color, .. } if *color == [0xff, 0x00, 0x00, 0xff]))
+        .count();
+    let blues = items
+        .iter()
+        .filter(|it| matches!(it, PaintItem::Bg { color, .. } if *color == [0x00, 0x00, 0xff, 0xff]))
+        .count();
+    assert_eq!(reds, 0, "tbody red must not leak under an own-bg row");
+    assert_eq!(blues, 1, "the row's own blue paints once; got {blues}");
+}
+
 /// Per-side width longhands (blitz#837's repro shape): `border: 1px solid;
 /// border-top-width: 0` must erase exactly the top side — the property used
 /// to be unknown here, so the side kept the shorthand's width (Chrome shows

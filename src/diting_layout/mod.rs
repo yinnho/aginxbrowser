@@ -3609,7 +3609,36 @@ pub fn layout_dom_with_paint_order_and_images(
                 }
             }
             rects.insert(*dom_id, rect);
-            if let Some(c) = styles.get(dom_id).and_then(|s| s.background_color) {
+            // CSS2.1 paints cell > row > row-group backgrounds; row-group
+            // elements (thead/tbody/tfoot) get no box of their own here, so a
+            // background set on them is otherwise invisible. Climb one DOM
+            // level at paint time only — computed values stay untouched
+            // (blitz#346 family).
+            let mut bg = styles.get(dom_id).and_then(|s| s.background_color);
+            if bg.is_none() {
+                let is_tr = tree
+                    .with_node(*dom_id, |n| {
+                        n.as_element()
+                            .map(|e| matches!(e.local.to_ascii_lowercase().as_ref(), "tr"))
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                if is_tr {
+                    if let Some(pid) = tree.with_node(*dom_id, |n| n.parent).flatten() {
+                        let group = tree
+                            .with_node(pid, |n| {
+                                n.as_element()
+                                    .map(|e| e.local.to_ascii_lowercase().to_string())
+                            })
+                            .flatten()
+                            .unwrap_or_default();
+                        if matches!(group.as_str(), "thead" | "tbody" | "tfoot") {
+                            bg = styles.get(&pid).and_then(|s| s.background_color);
+                        }
+                    }
+                }
+            }
+            if let Some(c) = bg {
                 if c.3 != 0 && rect.width > 0.0 && rect.height > 0.0 {
                     let color = [c.0, c.1, c.2, c.3];
                     // Radii resolve per-axis: rx against the box width,
