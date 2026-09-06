@@ -5514,6 +5514,72 @@
         );
     }
 
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn test_offset_geometry_matches_real_layout_rect() {
+        // offsetWidth/Height/Top/Left and clientWidth/Height read the same
+        // taffy-layout source as getBoundingClientRect (rounded): a script
+        // sizing a container via offsetWidth (map-lib init) must not see the
+        // 100x20 stub while gBCR reports the real box.
+        let mut rt = setup_runtime(
+            "<html><body><div id=\"box\" style=\"width:300px;height:120px;margin:10px\">x</div></body></html>",
+        );
+        let result = rt.evaluate(r#"
+            const el = document.getElementById("box");
+            const r = el.getBoundingClientRect();
+            return [el.offsetWidth === 300, el.offsetHeight === 120,
+                    el.offsetWidth === r.width, el.offsetHeight === r.height,
+                    el.offsetTop === Math.round(r.y), el.offsetLeft === Math.round(r.x),
+                    el.clientWidth === r.width, el.clientHeight === r.height,
+                    document.body.clientWidth === innerWidth];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        assert_eq!(parts[0], serde_json::json!(true), "offsetWidth serves real layout width");
+        assert_eq!(parts[1], serde_json::json!(true), "offsetHeight serves real layout height");
+        assert_eq!(parts[2], serde_json::json!(true), "offsetWidth matches gBCR width");
+        assert_eq!(parts[3], serde_json::json!(true), "offsetHeight matches gBCR height");
+        assert_eq!(parts[4], serde_json::json!(true), "offsetTop matches gBCR y (document coords)");
+        assert_eq!(parts[5], serde_json::json!(true), "offsetLeft matches gBCR x");
+        assert_eq!(parts[6], serde_json::json!(true), "clientWidth matches gBCR width");
+        assert_eq!(parts[7], serde_json::json!(true), "clientHeight matches gBCR height");
+        assert_eq!(parts[8], serde_json::json!(true), "body stays a viewport root");
+    }
+
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn test_offset_geometry_zero_while_hidden_real_after_show() {
+        // CSSOM: offset*/client*/scroll* of a display:none element are 0 —
+        // the init-in-hidden-container pattern (map libs size while hidden,
+        // re-measure on show) must read 0 while hidden and the real box once
+        // shown. Hidden via stylesheet to cover the cascade path, not just
+        // inline style; the show write must invalidate the memoized layout
+        // run (set_attribute drops it), or the re-measure would serve the
+        // stale cached "none".
+        let mut rt = setup_runtime(
+            "<html><head><style>#h { display: none; }</style></head><body><div id=\"h\" style=\"width:300px;height:80px\">h</div><div id=\"s\">s</div></body></html>",
+        );
+        let result = rt.evaluate(r#"
+            const el = document.getElementById("h");
+            const hidden = [el.offsetWidth, el.offsetHeight, el.clientWidth,
+                            el.clientHeight, el.scrollWidth, el.scrollHeight];
+            el.style.display = "block";
+            const shown = [el.offsetWidth, el.offsetHeight];
+            return [hidden, shown, el.offsetWidth === 300];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        assert_eq!(
+            parts[0],
+            serde_json::json!([0, 0, 0, 0, 0, 0]),
+            "all six box metrics read 0 while display:none"
+        );
+        assert_eq!(
+            parts[1],
+            serde_json::json!([300, 80]),
+            "unhiding serves the real layout box, not a stale cached none"
+        );
+        assert_eq!(parts[2], serde_json::json!(true));
+    }
+
     /// Upstream obscura #704: postMessage's targetOrigin argument must gate
     /// delivery — '*' or a matching origin delivers, a mismatched origin
     /// drops silently (browsers never throw), '/' requires same-origin with

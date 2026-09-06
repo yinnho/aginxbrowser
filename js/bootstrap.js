@@ -2694,24 +2694,34 @@ class Element extends Node {
     });
     return el._dataset;
   }
-  get offsetWidth() {
-    if (this._isViewportRoot()) return (globalThis.innerWidth || 1280);
-    const m = _ditingFontBox(this);
-    return m ? m.w : 100;
-  }
-  get offsetHeight() {
-    if (this._isViewportRoot()) return (globalThis.innerHeight || 720);
-    const m = _ditingFontBox(this);
-    return m ? m.h : 20;
-  }
-  get offsetTop() { return 0; } get offsetLeft() { return 0; }
+  get offsetWidth() { return this._ditingExtent("w", 100); }
+  get offsetHeight() { return this._ditingExtent("h", 20); }
+  get offsetTop() { const b = _ditingLayoutBox(this); return b ? Math.round(b.y) : 0; }
+  get offsetLeft() { const b = _ditingLayoutBox(this); return b ? Math.round(b.x) : 0; }
   // documentElement / body / window expose VIEWPORT geometry, not their own content box.
   // Puppeteer's #clickableBox clips boxes to document.documentElement.clientWidth/Height;
   // returning 100x20 there made every element appear off-screen and broke .click().
-  get clientWidth() { return this._isViewportRoot() ? (globalThis.innerWidth || 1280) : 100; }
-  get clientHeight() { return this._isViewportRoot() ? (globalThis.innerHeight || 720) : 20; }
-  get scrollWidth() { return this._isViewportRoot() ? (globalThis.innerWidth || 1280) : 100; }
-  get scrollHeight() { return this._isViewportRoot() ? (globalThis.innerHeight || 720) : 20; }
+  get clientWidth() { return this._ditingExtent("w", 100); }
+  get clientHeight() { return this._ditingExtent("h", 20); }
+  get scrollWidth() { return this._ditingExtent("w", 100); }
+  get scrollHeight() { return this._ditingExtent("h", 20); }
+  // Same taffy-layout source as getBoundingClientRect (without its
+  // click-target side effect), so a script measuring a container via
+  // offsetWidth (map-lib init) sees the real box instead of the 100x20 stub
+  // gBCR contradicted. Deviations from CSSOM, both document-safe:
+  // offsetTop/Left are document coordinates (layout is scroll-blind), not
+  // offsetParent-relative; client*/scroll* read the border box, not
+  // padding/content extents.
+  _ditingExtent(axis, fallback) {
+    if (this._isViewportRoot()) {
+      return axis === "w" ? (globalThis.innerWidth || 1280) : (globalThis.innerHeight || 720);
+    }
+    if (_ditingDisplayNone(this)) return 0;
+    const box = _ditingLayoutBox(this);
+    if (box) return Math.round(box[axis]);
+    const m = _ditingFontBox(this);
+    return m ? m[axis] : fallback;
+  }
   _isViewportRoot() {
     const t = this.tagName;
     return t === 'HTML' || t === 'BODY';
@@ -3929,6 +3939,36 @@ function _ditingFontBox(el) {
       h: Math.round(fontSize * g.h * (chosen ? 1 + (ff - 1) * 0.45 : 1)),
     };
   } catch { return null; }
+}
+
+// Real taffy-layout geometry in document coordinates — the same source
+// getBoundingClientRect reads, but WITHOUT its __diting_click_target side
+// effect: a plain size read must never stamp the click-target hint.
+// Returns {x,y,w,h} or null (layout feature off / detached node).
+function _ditingLayoutBox(el) {
+  try {
+    if (el._nid == null) return null;
+    const raw = _domRaw("layout_rect", String(el._nid | 0), "");
+    const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (Array.isArray(arr) && arr.length === 4 && Number.isFinite(arr[0])) {
+      return { x: arr[0], y: arr[1], w: arr[2], h: arr[3] };
+    }
+  } catch { /* no layout box */ }
+  return null;
+}
+
+// CSSOM: offset*/client*/scroll* of a display:none element are all 0 — the
+// init-in-hidden-container pattern (map libs size their container while
+// hidden, re-measure on show) must read 0, not the 100x20 stub. Answered
+// from the computed_style op so stylesheet-hidden elements count too, not
+// just inline `style.display`.
+function _ditingDisplayNone(el) {
+  try {
+    if (el._nid == null) return false;
+    const raw = _domRaw("computed_style", String(el._nid | 0), "");
+    const s = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return !!(s && s.display === "none");
+  } catch { return false; }
 }
 
 // PluginArray / MimeTypeArray / Plugin / MimeType — real browsers expose these
