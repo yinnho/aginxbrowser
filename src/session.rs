@@ -242,6 +242,30 @@ pub enum SessionCommand {
         prompt_text: Option<String>,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Click at viewport coordinates via the real mouse chain
+    /// (pointerdown/mousedown → pointerup/mouseup → click on whatever
+    /// elementFromPoint hits there). click_count 2 adds dblclick, 3+ sets
+    /// detail — the shape canvas/map pages listen for.
+    ClickXY {
+        x: f64,
+        y: f64,
+        button: String,
+        click_count: u32,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Press at `from`, glide through `steps` interpolated mousemove events
+    /// (delay_ms between each), release at `to` — drags a marker/canvas
+    /// selection the way a real pointer would, so mousemove-driven widgets
+    /// (AMap markers, drag handles) track every intermediate position.
+    Drag {
+        from_x: f64,
+        from_y: f64,
+        to_x: f64,
+        to_y: f64,
+        steps: u32,
+        delay_ms: u64,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     /// Acknowledged by the session thread right before it exits. The closer
     /// waits on this to learn the thread actually stopped - without it, close
     /// replies ok while the thread is still pinned inside V8 (a runaway eval)
@@ -345,6 +369,9 @@ pub enum RecordedAction {
     Create { url: Option<String>, use_proxy: bool, cookies: Vec<String>, #[serde(skip_serializing_if = "Option::is_none")] storage: Option<Value> },
     Navigate { url: String, ok: bool },
     Click { index: usize, ok: bool },
+    #[serde(rename = "click_xy")]
+    ClickXY { x: f64, y: f64, ok: bool },
+    Drag { from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32 },
     Input { index: usize, text: String, ok: bool },
     Scroll { direction: String, amount: u32 },
     Eval { script: String },
@@ -645,6 +672,18 @@ pub fn replay_bash(jsonl: &str, default_base: &str) -> String {
                 let body = payload(serde_json::json!({"index": v["index"].clone()}));
                 out.push_str(&format!("POST \"session/$SID/click\" {body} > /dev/null\n"));
             }
+            "click_xy" if sid_bound => {
+                let body = payload(serde_json::json!({"x": v["x"].clone(), "y": v["y"].clone()}));
+                out.push_str(&format!("POST \"session/$SID/click_xy\" {body} > /dev/null\n"));
+            }
+            "drag" if sid_bound => {
+                let body = payload(serde_json::json!({
+                    "from": {"x": v["from_x"].clone(), "y": v["from_y"].clone()},
+                    "to": {"x": v["to_x"].clone(), "y": v["to_y"].clone()},
+                    "steps": v["steps"].clone(),
+                }));
+                out.push_str(&format!("POST \"session/$SID/drag\" {body} > /dev/null\n"));
+            }
             "input" if sid_bound => {
                 let body = payload(serde_json::json!({"index": v["index"].clone(), "text": v["text"].clone()}));
                 out.push_str(&format!("POST \"session/$SID/input\" {body} > /dev/null\n"));
@@ -840,6 +879,53 @@ fn session_thread(
                                 text,
                                 ok: result.as_ref().map(|v| v.get("filled").and_then(Value::as_bool).unwrap_or(false)).unwrap_or(false),
                             });
+                            let _ = reply.send(result);
+                        }
+
+                        SessionCommand::ClickXY { x, y, button, click_count, reply } => {
+                            // A coordinate click can navigate exactly like an
+                            // indexed one, so it spends the same page budget.
+                            let result = match crate::rate::check_page_budget(pages_loaded) {
+                                Err(reason) => Err(reason),
+                                Ok(()) => {
+                                    let before = page.url();
+                                    click_xy(&mut page, x, y, &button, click_count).await;
+                                    let _ = page.process_pending_navigation().await;
+                                    if page.url() != before {
+                                        pages_loaded += 1;
+                                    }
+                                    Ok(serde_json::json!({
+                                        "url": page.url(),
+                                        "x": x,
+                                        "y": y,
+                                    }).to_string())
+                                }
+                            };
+                            recorder.push(RecordedAction::ClickXY { x, y, ok: result.is_ok() });
+                            let _ = reply.send(result);
+                        }
+
+                        SessionCommand::Drag { from_x, from_y, to_x, to_y, steps, delay_ms, reply } => {
+                            let steps = steps.clamp(1, 200);
+                            let delay_ms = delay_ms.min(1000);
+                            let result = match crate::rate::check_page_budget(pages_loaded) {
+                                Err(reason) => Err(reason),
+                                Ok(()) => {
+                                    let before = page.url();
+                                    drag_xy(&mut page, from_x, from_y, to_x, to_y, steps, delay_ms).await;
+                                    let _ = page.process_pending_navigation().await;
+                                    if page.url() != before {
+                                        pages_loaded += 1;
+                                    }
+                                    Ok(serde_json::json!({
+                                        "url": page.url(),
+                                        "from": {"x": from_x, "y": from_y},
+                                        "to": {"x": to_x, "y": to_y},
+                                        "steps": steps,
+                                    }).to_string())
+                                }
+                            };
+                            recorder.push(RecordedAction::Drag { from_x, from_y, to_x, to_y, steps });
                             let _ = reply.send(result);
                         }
 
@@ -1472,6 +1558,56 @@ fn extract_indexed_state(
 // ---------------------------------------------------------------------------
 // Click / Input by index
 // ---------------------------------------------------------------------------
+
+use crate::diting_cdp::domains::input::{
+    mouse_down_js, mouse_move_js, mouse_up_js, mouse_button_code, mouse_button_mask,
+    INPUT_HELPERS,
+};
+
+fn eval_interaction(page: &mut Page, js: &str) {
+    page.evaluate_with_timeout(js, crate::page::INTERACTION_EVAL_TIMEOUT);
+}
+
+/// Click at viewport coordinates through the real mouse chain — same JS the
+/// CDP bridge dispatches, so pages can't tell the two apart.
+async fn click_xy(page: &mut Page, x: f64, y: f64, button: &str, click_count: u32) {
+    let code = mouse_button_code(button);
+    let mask = mouse_button_mask(button);
+    eval_interaction(page, INPUT_HELPERS);
+    eval_interaction(
+        page,
+        &mouse_down_js(x, y, code, mask, click_count as u64, 0),
+    );
+    eval_interaction(page, &mouse_up_js(x, y, code, click_count as u64, 0));
+}
+
+/// Press → interpolated mousemoves (buttons=1 held, delay between steps so
+/// mousemove-driven widgets can keep up) → release. The intermediate moves
+/// are the whole point: a marker drag only tracks when the page sees the
+/// pointer travel, not a teleporting cursor.
+async fn drag_xy(
+    page: &mut Page,
+    from_x: f64,
+    from_y: f64,
+    to_x: f64,
+    to_y: f64,
+    steps: u32,
+    delay_ms: u64,
+) {
+    eval_interaction(page, INPUT_HELPERS);
+    eval_interaction(page, &mouse_down_js(from_x, from_y, 0, 1, 1, 0));
+    let n = steps as f64;
+    for i in 1..=steps {
+        if delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
+        let k = i as f64 / n;
+        let x = from_x + (to_x - from_x) * k;
+        let y = from_y + (to_y - from_y) * k;
+        eval_interaction(page, &mouse_move_js(x, y, 1, 0));
+    }
+    eval_interaction(page, &mouse_up_js(to_x, to_y, 0, 1, 0));
+}
 
 async fn click_by_index(
     page: &mut Page,
@@ -2208,6 +2344,142 @@ mod tests {
             "got: {}",
             err.to_string()
         );
+
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
+    /// session_click_xy / session_drag synthesize the real mouse chain at
+    /// viewport coordinates: elementFromPoint hit-testing picks the pad (not
+    /// body), a drag delivers every interpolated mousemove so mousemove-driven
+    /// widgets see the pointer travel, and click_count 2 adds dblclick.
+    #[tokio::test]
+    async fn click_xy_and_drag_fire_mouse_chain() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /mousepad",
+            "<html><body style=\"margin:0\">\
+             <div id=\"pad\" style=\"position:absolute;left:10px;top:10px;width:200px;height:200px;\"></div>\
+             <script>\
+             var log = [];\
+             var pad = document.getElementById('pad');\
+             pad.addEventListener('mousedown', function(e){ log.push('down@'+e.clientX+','+e.clientY+' on '+e.target.id); });\
+             document.addEventListener('mousemove', function(e){ log.push('move@'+Math.round(e.clientX)+','+Math.round(e.clientY)); });\
+             document.addEventListener('mouseup', function(e){ log.push('up@'+e.clientX+','+e.clientY); });\
+             document.addEventListener('click', function(e){ log.push('click@'+e.clientX+','+e.clientY); });\
+             document.addEventListener('dblclick', function(e){ log.push('dblclick@'+e.clientX+','+e.clientY); });\
+             window.__log = log;\
+             </script>\
+             </body></html>",
+        )]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/mousepad")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+        );
+
+        async fn read_log(mgr: &mut SessionManager, sid: &str) -> Vec<String> {
+            let out = mgr
+                .send(sid, |reply| SessionCommand::Eval {
+                    script: "JSON.stringify(window.__log)".to_string(),
+                    reply,
+                })
+                .await
+                .unwrap();
+            let raw = out.as_str().unwrap_or("[]");
+            serde_json::from_str::<Vec<String>>(raw).expect("log array")
+        }
+
+        // Single click at (50,50) — inside the pad. The chain lands on the
+        // hit element: mousedown with the coordinates, mouseup, then click.
+        let out = mgr
+            .send(&sid, |reply| SessionCommand::ClickXY {
+                x: 50.0,
+                y: 50.0,
+                button: "left".to_string(),
+                click_count: 1,
+                reply,
+            })
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&out).expect("click_xy JSON");
+        assert_eq!(v["x"], 50.0);
+        assert_eq!(v["y"], 50.0);
+
+        let log = read_log(&mut mgr, &sid).await;
+        assert!(
+            log.iter().any(|e| e == "down@50,50 on pad"),
+            "mousedown hits the pad, got {log:?}"
+        );
+        assert!(log.iter().any(|e| e == "up@50,50"), "mouseup, got {log:?}");
+        assert!(log.iter().any(|e| e == "click@50,50"), "click, got {log:?}");
+        assert!(
+            !log.iter().any(|e| e.starts_with("dblclick")),
+            "single click must not dblclick, got {log:?}"
+        );
+
+        // click_count 2 adds the dblclick synthesis Chrome does.
+        mgr.send(&sid, |reply| SessionCommand::ClickXY {
+            x: 50.0,
+            y: 50.0,
+            button: "left".to_string(),
+            click_count: 2,
+            reply,
+        })
+        .await
+        .unwrap();
+        let log = read_log(&mut mgr, &sid).await;
+        assert!(
+            log.iter().any(|e| e == "dblclick@50,50"),
+            "dblclick after count 2, got {log:?}"
+        );
+
+        // Drag across the pad: 1 press, N interpolated moves ending at the
+        // release point, 1 release. The moves are what mousemove-driven
+        // widgets (map markers) track.
+        let out = mgr
+            .send(&sid, |reply| SessionCommand::Drag {
+                from_x: 60.0,
+                from_y: 60.0,
+                to_x: 150.0,
+                to_y: 90.0,
+                steps: 10,
+                delay_ms: 0,
+                reply,
+            })
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&out).expect("drag JSON");
+        assert_eq!(v["steps"], 10);
+
+        let log = read_log(&mut mgr, &sid).await;
+        let downs = log.iter().filter(|e| e.starts_with("down@60,60")).count();
+        assert_eq!(downs, 1, "one press, got {log:?}");
+        let moves: Vec<&String> = log.iter().filter(|e| e.starts_with("move@")).collect();
+        assert_eq!(moves.len(), 10, "every interpolated move delivered, got {log:?}");
+        assert_eq!(moves[0].as_str(), "move@69,63", "first step interpolated");
+        assert_eq!(
+            moves.last().map(|m| m.as_str()),
+            Some("move@150,90"),
+            "last move lands on the release point, got {log:?}"
+        );
+        assert!(
+            log.iter().any(|e| e == "up@150,90"),
+            "release at the destination, got {log:?}"
+        );
+
+        // Both actions join the replay log.
+        let out = mgr
+            .send(&sid, |reply| SessionCommand::Export { reply })
+            .await
+            .unwrap();
+        assert!(out.contains("\"click_xy\""), "click_xy recorded, got {out}");
+        assert!(out.contains("\"drag\""), "drag recorded, got {out}");
 
         assert!(mgr.close_and_wait(&sid).await);
     }

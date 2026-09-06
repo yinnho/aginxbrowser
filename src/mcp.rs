@@ -223,6 +223,47 @@ pub struct SessionClickParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionClickXyParams {
+    /// Session ID
+    pub session_id: String,
+    /// Viewport X coordinate in CSS pixels
+    pub x: f64,
+    /// Viewport Y coordinate in CSS pixels
+    pub y: f64,
+    /// Mouse button: "left" (default), "right", "middle"
+    #[serde(default)]
+    pub button: Option<String>,
+    /// Click count: 1 single (default), 2 adds dblclick, 3+ sets detail
+    #[serde(default)]
+    pub click_count: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionXy {
+    /// X coordinate in viewport CSS pixels
+    pub x: f64,
+    /// Y coordinate in viewport CSS pixels
+    pub y: f64,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionDragParams {
+    /// Session ID
+    pub session_id: String,
+    /// Where to press the mouse button down
+    pub from: SessionXy,
+    /// Where to release it
+    pub to: SessionXy,
+    /// Interpolated mousemove events between from and to (default 10)
+    #[serde(default)]
+    pub steps: Option<u32>,
+    /// Delay between moves in ms (default 30) — gives mousemove-driven
+    /// widgets time to react per step
+    #[serde(default)]
+    pub delay_ms: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SessionInputParams {
     /// Session ID
     pub session_id: String,
@@ -773,6 +814,55 @@ default argument); \"dismiss\" restores the default.",
             reply,
         }).await {
             Ok(resp) => stamped_json(json!({ "url": resp.url, "clicked": resp.clicked, "text_after": resp.text_after }), &mgr, &params.session_id),
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Click at viewport coordinates (CSS pixels) via real mouse events — \
+pointerdown/mousedown, pointerup/mouseup, then click on whatever element is hit there. \
+For canvas/map surfaces with no DOM element to index. click_count 2 adds dblclick.",
+        annotations(title = "Session Click XY")
+    )]
+    async fn session_click_xy(
+        &self,
+        Parameters(params): Parameters<SessionClickXyParams>,
+    ) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        match mgr.send(&params.session_id, |reply| SessionCommand::ClickXY {
+            x: params.x,
+            y: params.y,
+            button: params.button.unwrap_or_else(|| "left".to_string()),
+            click_count: params.click_count.unwrap_or(1),
+            reply,
+        })
+        .await
+        {
+            Ok(text) => stamped(text, &mgr, &params.session_id),
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Drag the mouse from one viewport position to another: press at `from`, \
+`steps` interpolated mousemove events (delay_ms apart), release at `to`. Moves AMarker-style \
+drag targets and canvas selections that only track while the pointer travels.",
+        annotations(title = "Session Drag")
+    )]
+    async fn session_drag(&self, Parameters(params): Parameters<SessionDragParams>) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        match mgr.send(&params.session_id, |reply| SessionCommand::Drag {
+            from_x: params.from.x,
+            from_y: params.from.y,
+            to_x: params.to.x,
+            to_y: params.to.y,
+            steps: params.steps.unwrap_or(10),
+            delay_ms: params.delay_ms.unwrap_or(30),
+            reply,
+        })
+        .await
+        {
+            Ok(text) => stamped(text, &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
     }

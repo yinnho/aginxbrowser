@@ -108,7 +108,7 @@ const BACKSPACE_JS: &str = "(function() {\
     t.dispatchEvent(globalThis.__diting_markTrusted(new Event('input', {bubbles:true})));\
 })()";
 
-fn mouse_button_code(button: &str) -> u8 {
+pub(crate) fn mouse_button_code(button: &str) -> u8 {
     match button {
         "middle" => 1,
         "right" => 2,
@@ -118,7 +118,7 @@ fn mouse_button_code(button: &str) -> u8 {
     }
 }
 
-fn mouse_button_mask(button: &str) -> u64 {
+pub(crate) fn mouse_button_mask(button: &str) -> u64 {
     match button {
         "right" => 2,
         "middle" => 4,
@@ -136,6 +136,92 @@ fn modifier_flags(modifiers: u64) -> (bool, bool, bool, bool) {
         modifiers & 2 != 0,
         modifiers & 4 != 0,
         modifiers & 8 != 0,
+    )
+}
+
+// Shared mouse-event builders: the CDP bridge and the session commands
+// (session_click_xy / session_drag) must synthesize identical event chains,
+// so the JS lives here rather than duplicated per layer. `modifiers` is the
+// CDP Input.Modifier bitfield (Alt=1, Ctrl=2, Meta=4, Shift=8).
+
+pub(crate) fn mouse_down_js(
+    x: f64,
+    y: f64,
+    button_code: u8,
+    buttons: u64,
+    click_count: u64,
+    modifiers: u64,
+) -> String {
+    let (alt_key, ctrl_key, meta_key, shift_key) = modifier_flags(modifiers);
+    format!(
+        "(function() {{\
+            var target = (document.elementFromPoint && document.elementFromPoint({x},{y})) || globalThis.__diting_click_target || document.activeElement || document.body;\
+            if (!target) return;\
+            globalThis.__diting_click_target = target;\
+            globalThis.__diting_mouse_down = {{target:target,button:{button_code},clickCount:{click_count}}};\
+            var pd = globalThis.__diting_markTrusted(new PointerEvent('pointerdown', {{bubbles:true,cancelable:true,composed:true,view:globalThis,clientX:{x},clientY:{y},button:{button_code},buttons:{buttons},pointerId:1,pointerType:'mouse',isPrimary:true,pressure:{buttons}!==0?0.5:0,width:1,height:1}}));\
+            if (target.dispatchEvent(pd)) {{\
+                var evt = globalThis.__diting_markTrusted(new MouseEvent('mousedown', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:{button_code},buttons:{buttons},detail:{click_count},altKey:{alt_key},ctrlKey:{ctrl_key},metaKey:{meta_key},shiftKey:{shift_key}}}));\
+                target.dispatchEvent(evt);\
+            }}\
+        }})()",
+        x = x, y = y, button_code = button_code, buttons = buttons,
+        click_count = click_count, alt_key = alt_key, ctrl_key = ctrl_key,
+        meta_key = meta_key, shift_key = shift_key,
+    )
+}
+
+pub(crate) fn mouse_move_js(x: f64, y: f64, buttons: u64, modifiers: u64) -> String {
+    let (alt_key, ctrl_key, meta_key, shift_key) = modifier_flags(modifiers);
+    format!(
+        "(function() {{\
+            var target = (document.elementFromPoint && document.elementFromPoint({x},{y})) || document.body;\
+            if (!target) return;\
+            var pm = globalThis.__diting_markTrusted(new PointerEvent('pointermove', {{bubbles:true,cancelable:true,composed:true,view:globalThis,clientX:{x},clientY:{y},button:0,buttons:{buttons},pointerId:1,pointerType:'mouse',isPrimary:true,pressure:{buttons}!==0?0.5:0,width:1,height:1}}));\
+            target.dispatchEvent(pm);\
+            var evt = globalThis.__diting_markTrusted(new MouseEvent('mousemove', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:0,buttons:{buttons},detail:0,altKey:{alt_key},ctrlKey:{ctrl_key},metaKey:{meta_key},shiftKey:{shift_key}}}));\
+            target.dispatchEvent(evt);\
+        }})()",
+        x = x, y = y, buttons = buttons,
+        alt_key = alt_key, ctrl_key = ctrl_key, meta_key = meta_key,
+        shift_key = shift_key,
+    )
+}
+
+pub(crate) fn mouse_up_js(
+    x: f64,
+    y: f64,
+    button_code: u8,
+    click_count: u64,
+    modifiers: u64,
+) -> String {
+    let (alt_key, ctrl_key, meta_key, shift_key) = modifier_flags(modifiers);
+    format!(
+        "(function() {{\
+            var target = (document.elementFromPoint && document.elementFromPoint({x},{y})) || globalThis.__diting_click_target || document.activeElement || document.body;\
+            if (!target) return;\
+            var down = globalThis.__diting_mouse_down;\
+            globalThis.__diting_mouse_down = null;\
+            var pu = globalThis.__diting_markTrusted(new PointerEvent('pointerup', {{bubbles:true,cancelable:true,composed:true,view:globalThis,clientX:{x},clientY:{y},button:{button_code},buttons:0,pointerId:1,pointerType:'mouse',isPrimary:true,pressure:0,width:1,height:1}}));\
+            target.dispatchEvent(pu);\
+            var evt = globalThis.__diting_markTrusted(new MouseEvent('mouseup', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:{button_code},buttons:0,detail:{click_count},altKey:{alt_key},ctrlKey:{ctrl_key},metaKey:{meta_key},shiftKey:{shift_key}}}));\
+            target.dispatchEvent(evt);\
+            if (!down || down.button !== {button_code} || {button_code} !== 0) return;\
+            var clickTarget = down.target;\
+            while (clickTarget && clickTarget !== target && !(clickTarget.contains && clickTarget.contains(target))) {{\
+                clickTarget = clickTarget.parentElement;\
+            }}\
+            if (!clickTarget) return;\
+            var click = globalThis.__diting_markTrusted(new MouseEvent('click', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:0,buttons:0,detail:{click_count},altKey:{alt_key},ctrlKey:{ctrl_key},metaKey:{meta_key},shiftKey:{shift_key}}}));\
+            globalThis.__diting_dispatchTrustedClick(clickTarget, click, {click_count} >= 3);\
+            if ({click_count} === 2) {{\
+                var dbl = globalThis.__diting_markTrusted(new MouseEvent('dblclick', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:0,buttons:0,detail:2,altKey:{alt_key},ctrlKey:{ctrl_key},metaKey:{meta_key},shiftKey:{shift_key}}}));\
+                clickTarget.dispatchEvent(dbl);\
+            }}\
+        }})()",
+        x = x, y = y, button_code = button_code,
+        click_count = click_count, alt_key = alt_key, ctrl_key = ctrl_key,
+        meta_key = meta_key, shift_key = shift_key,
     )
 }
 
@@ -163,50 +249,24 @@ pub async fn handle(
             if event_type == "mousePressed" {
                 if let Some(page) = ctx.get_session_page_mut(session_id) {
                     page.evaluate(INPUT_HELPERS);
-                    let code = format!(
-                        "(function() {{\
-                            var target = (document.elementFromPoint && document.elementFromPoint({x},{y})) || globalThis.__diting_click_target || document.activeElement || document.body;\
-                            if (!target) return;\
-                            globalThis.__diting_click_target = target;\
-                            globalThis.__diting_mouse_down = {{target:target,button:{button_code},clickCount:{click_count}}};\
-                            var pd = globalThis.__diting_markTrusted(new PointerEvent('pointerdown', {{bubbles:true,cancelable:true,composed:true,view:globalThis,clientX:{x},clientY:{y},button:{button_code},buttons:{buttons},pointerId:1,pointerType:'mouse',isPrimary:true,pressure:{buttons}!==0?0.5:0,width:1,height:1}}));\
-                            if (target.dispatchEvent(pd)) {{\
-                                var evt = globalThis.__diting_markTrusted(new MouseEvent('mousedown', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:{button_code},buttons:{buttons},detail:{click_count},altKey:{alt_key},ctrlKey:{ctrl_key},metaKey:{meta_key},shiftKey:{shift_key}}}));\
-                                target.dispatchEvent(evt);\
-                            }}\
-                        }})()",
-                        x = x, y = y, button_code = button_code, buttons = buttons,
-                        click_count = click_count, alt_key = alt_key, ctrl_key = ctrl_key,
-                        meta_key = meta_key, shift_key = shift_key,
-                    );
+                    let code = mouse_down_js(x, y, button_code, buttons, click_count, modifiers);
+                    page.evaluate(&code);
+                }
+            } else if event_type == "mouseMoved" {
+                // A plain move carries no pressed button unless the client
+                // says so — the shared `buttons` default above (mask of
+                // `button`) would report a held left button and turn hover
+                // tracking into a phantom drag.
+                let move_buttons = params.get("buttons").and_then(|v| v.as_u64()).unwrap_or(0);
+                if let Some(page) = ctx.get_session_page_mut(session_id) {
+                    page.evaluate(INPUT_HELPERS);
+                    let code = mouse_move_js(x, y, move_buttons, modifiers);
                     page.evaluate(&code);
                 }
             } else if event_type == "mouseReleased" {
                 if let Some(page) = ctx.get_session_page_mut(session_id) {
                     page.evaluate(INPUT_HELPERS);
-                    let code = format!(
-                        "(function() {{\
-                            var target = (document.elementFromPoint && document.elementFromPoint({x},{y})) || globalThis.__diting_click_target || document.activeElement || document.body;\
-                            if (!target) return;\
-                            var down = globalThis.__diting_mouse_down;\
-                            globalThis.__diting_mouse_down = null;\
-                            var pu = globalThis.__diting_markTrusted(new PointerEvent('pointerup', {{bubbles:true,cancelable:true,composed:true,view:globalThis,clientX:{x},clientY:{y},button:{button_code},buttons:0,pointerId:1,pointerType:'mouse',isPrimary:true,pressure:0,width:1,height:1}}));\
-                            target.dispatchEvent(pu);\
-                            var evt = globalThis.__diting_markTrusted(new MouseEvent('mouseup', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:{button_code},buttons:0,detail:{click_count},altKey:{alt_key},ctrlKey:{ctrl_key},metaKey:{meta_key},shiftKey:{shift_key}}}));\
-                            target.dispatchEvent(evt);\
-                            if (!down || down.button !== {button_code} || {button_code} !== 0) return;\
-                            var clickTarget = down.target;\
-                            while (clickTarget && clickTarget !== target && !(clickTarget.contains && clickTarget.contains(target))) {{\
-                                clickTarget = clickTarget.parentElement;\
-                            }}\
-                            if (!clickTarget) return;\
-                            var click = globalThis.__diting_markTrusted(new MouseEvent('click', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:0,buttons:0,detail:{click_count},altKey:{alt_key},ctrlKey:{ctrl_key},metaKey:{meta_key},shiftKey:{shift_key}}}));\
-                            globalThis.__diting_dispatchTrustedClick(clickTarget, click, {click_count} >= 3);\
-                        }})()",
-                        x = x, y = y, button_code = button_code,
-                        click_count = click_count, alt_key = alt_key, ctrl_key = ctrl_key,
-                        meta_key = meta_key, shift_key = shift_key,
-                    );
+                    let code = mouse_up_js(x, y, button_code, click_count, modifiers);
                     page.evaluate(&code);
                     let moved = page.process_pending_navigation().await.map_err(|e| e.to_string())?;
                     if moved {

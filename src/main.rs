@@ -607,6 +607,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/session/:id/network", get(session_network_handler))
         .route("/session/:id/har", get(session_har_handler))
         .route("/session/:id/click", post(session_click_handler))
+        .route("/session/:id/click_xy", post(session_click_xy_handler))
+        .route("/session/:id/drag", post(session_drag_handler))
         .route("/session/:id/input", post(session_input_handler))
         .route("/session/:id/scroll", post(session_scroll_handler))
         .route("/session/:id/viewport", post(session_viewport_handler))
@@ -1279,6 +1281,72 @@ async fn session_click_handler(
         reply,
     }).await.map_err(session_err)?;
     Ok((StatusCode::OK, Json(resp)))
+}
+
+#[derive(Deserialize)]
+struct SessionClickXyRequest {
+    x: f64,
+    y: f64,
+    #[serde(default)]
+    button: Option<String>,
+    #[serde(default)]
+    click_count: Option<u32>,
+}
+
+/// Click at viewport coordinates via the real mouse chain
+/// (pointerdown/mousedown → pointerup/mouseup → click on the hit element).
+async fn session_click_xy_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<SessionClickXyRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    let text = mgr.send(&id, |reply| session::SessionCommand::ClickXY {
+        x: req.x,
+        y: req.y,
+        button: req.button.unwrap_or_else(|| "left".to_string()),
+        click_count: req.click_count.unwrap_or(1),
+        reply,
+    }).await.map_err(session_err)?;
+    let val: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| AppError::Internal(format!("click_xy parse error: {}", e)))?;
+    Ok((StatusCode::OK, Json(val)))
+}
+
+#[derive(Deserialize)]
+struct SessionXyBody {
+    x: f64,
+    y: f64,
+}
+
+#[derive(Deserialize)]
+struct SessionDragRequest {
+    from: SessionXyBody,
+    to: SessionXyBody,
+    #[serde(default)]
+    steps: Option<u32>,
+    #[serde(default)]
+    delay_ms: Option<u64>,
+}
+
+/// Drag the mouse from `from` to `to` through interpolated mousemove events —
+/// drags markers/canvas selections that only track a traveling pointer.
+async fn session_drag_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<SessionDragRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    let text = mgr.send(&id, |reply| session::SessionCommand::Drag {
+        from_x: req.from.x,
+        from_y: req.from.y,
+        to_x: req.to.x,
+        to_y: req.to.y,
+        steps: req.steps.unwrap_or(10),
+        delay_ms: req.delay_ms.unwrap_or(30),
+        reply,
+    }).await.map_err(session_err)?;
+    let val: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| AppError::Internal(format!("drag parse error: {}", e)))?;
+    Ok((StatusCode::OK, Json(val)))
 }
 
 async fn session_input_handler(
