@@ -323,6 +323,18 @@ Integration: read the environment variable `AGINXBROWSER_URL=http://127.0.0.1:80
 4. **Proxy support**: HTTP/HTTPS/SOCKS5 via `AGINXBROWSER_PROXY`
 5. **Hard risk-controlled sites**: Baidu Wenku unsupported; Zhihu articles need a valid `__zse_ck`
 
+## Star History
+
+If AginxBrowser saved you a headless-Chrome fleet or a scraping headache, a star is how other agents (and their humans) find the project.
+
+<a href="https://star-history.com/#yinnho/aginxbrowser&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=yinnho/aginxbrowser&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=yinnho/aginxbrowser&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=yinnho/aginxbrowser&type=Date" />
+ </picture>
+</a>
+
 ## License
 
 Apache-2.0.

@@ -323,6 +323,18 @@ AginxBrowser 定位是**纯外挂基础设施**——像真实浏览器一样作
 4. **代理支持**：HTTP/HTTPS/SOCKS5，通过 `AGINXBROWSER_PROXY` 配置
 5. **强风控站点**：百度文库不支持；知乎专栏文章需有效 `__zse_ck`
 
+## Star 历史
+
+如果 AginxBrowser 替你省掉了一队 headless Chrome 或者省了一次抓取的头疼，给个 star 吧——别人（和他们的 Agent）就是靠这个找到这里的。
+
+<a href="https://star-history.com/#yinnho/aginxbrowser&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=yinnho/aginxbrowser&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=yinnho/aginxbrowser&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=yinnho/aginxbrowser&type=Date" />
+ </picture>
+</a>
+
 ## 许可证
 
 Apache-2.0。
