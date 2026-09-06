@@ -299,7 +299,7 @@ Requirements: Rust 1.78+; the V8 static library downloads automatically on first
 
 Covers:
 - All 33 HTTP endpoints (`/fetch`, `/search`, `/screenshot`, `/download`, `/v1/scrape`, `/doctor`, 18 session endpoints, CDP discovery, MCP transport)
-- All 23 MCP server tools and their parameters
+- All 27 MCP server tools and their parameters
 - Claude Code / Claude Desktop / Cursor client configuration
 - Environment variables, error codes, per-site scraping examples
 
