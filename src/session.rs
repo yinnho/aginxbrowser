@@ -25,6 +25,71 @@ const SESSION_TIMEOUT: Duration = Duration::from_secs(480); // 8 minutes
 /// Ring buffer size for a session's console log (see the Console command).
 const CONSOLE_RING_CAP: usize = 500;
 
+/// Why a session command failed. An agent must be able to tell "the session
+/// is gone — recreate it" from "this step failed — retry it" without parsing
+/// prose, so every variant carries a machine-readable code when serialized.
+#[derive(Debug, Clone)]
+pub enum SessionError {
+    /// Unknown id — never existed or already closed.
+    NotFound(String),
+    /// Idle past its TTL; the session was closed on this access.
+    Expired(String),
+    /// The session thread is gone (crashed or panicked).
+    ThreadDied(String),
+    /// The command itself failed inside a live session (selector miss,
+    /// navigation failure, stance gate, ...). The session is still usable.
+    Command(String),
+}
+
+impl SessionError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            SessionError::NotFound(_) => "SESSION_NOT_FOUND",
+            SessionError::Expired(_) => "SESSION_EXPIRED",
+            SessionError::ThreadDied(_) => "SESSION_CRASHED",
+            SessionError::Command(_) => "COMMAND_FAILED",
+        }
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut v = serde_json::json!({
+            "code": self.code(),
+            "message": self.to_string(),
+        });
+        if matches!(self, SessionError::NotFound(_) | SessionError::Expired(_)) {
+            v["hint"] = Value::String("call session_create to recreate".to_string());
+        }
+        v
+    }
+}
+
+impl std::fmt::Display for SessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SessionError::NotFound(m)
+            | SessionError::Expired(m)
+            | SessionError::ThreadDied(m)
+            | SessionError::Command(m) => f.write_str(m),
+        }
+    }
+}
+
+impl std::error::Error for SessionError {}
+
+impl From<String> for SessionError {
+    fn from(m: String) -> Self {
+        SessionError::Command(m)
+    }
+}
+
+// Serialized into tool responses via `json!({"error": e})` — the whole
+// object, not a bare string.
+impl Serialize for SessionError {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.to_value().serialize(serializer)
+    }
+}
+
 /// Move the engine's pending console calls into the session's ring buffer.
 /// Called after every command so the queue drains regularly (a long
 /// non-CDP session would otherwise grow it unboundedly) and by the Console
@@ -291,14 +356,15 @@ impl SessionManager {
         &mut self,
         session_id: &str,
         make_cmd: impl FnOnce(oneshot::Sender<Result<T, String>>) -> SessionCommand,
-    ) -> Result<T, String> {
+    ) -> Result<T, SessionError> {
         let session = self
             .sessions
             .get_mut(session_id)
-            .ok_or_else(|| format!("session not found: {}", session_id))?;
+            .ok_or_else(|| SessionError::NotFound(format!("session not found: {}", session_id)))?;
         if session.is_expired() {
+            let id = session_id.to_string();
             self.close(session_id);
-            return Err(format!("session expired: {}", session_id));
+            return Err(SessionError::Expired(format!("session expired: {}", id)));
         }
         session.last_active = Instant::now();
 
@@ -306,9 +372,12 @@ impl SessionManager {
         session
             .cmd_tx
             .send(make_cmd(reply_tx))
-            .map_err(|_| "session thread died".to_string())?;
+            .map_err(|_| SessionError::ThreadDied("session thread died".to_string()))?;
 
-        reply_rx.await.map_err(|_| "session thread died".to_string())?
+        reply_rx
+            .await
+            .map_err(|_| SessionError::ThreadDied("session thread died".to_string()))?
+            .map_err(SessionError::Command)
     }
 
     /// Close and remove a session. Fire-and-forget; use [`Self::close_and_wait`]
@@ -1376,6 +1445,53 @@ mod tests {
         assert!(ticks >= 3, "interval must keep firing while idle, got {ticks} ticks");
     }
 
+    /// Session errors must be machine-readable: an agent has to tell "the
+    /// session is gone — recreate it" from "this step failed — retry it"
+    /// without parsing prose (real-device feedback ①). Also pins the
+    /// acceptance rule from the same report: once an expiry error fires, the
+    /// id stays consistently dead — the next call answers SESSION_NOT_FOUND,
+    /// never a half-alive success.
+    #[tokio::test]
+    async fn session_errors_carry_codes_and_expiry_closes_consistently() {
+        let mut mgr = SessionManager::new();
+
+        // Unknown id: SESSION_NOT_FOUND with the recreate hint.
+        let err = mgr
+            .send(&"s_missing".to_string(), |reply| SessionCommand::State { reply })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "SESSION_NOT_FOUND");
+        assert_eq!(err.to_value()["hint"], "call session_create to recreate");
+
+        // Command failure inside a LIVE session: COMMAND_FAILED, no recreate
+        // hint, and the session survives (a retry is safe).
+        let sid = mgr.create(Some("about:blank"), false, vec![], None, None);
+        let err = mgr
+            .send(&sid, |reply| SessionCommand::Click { index: 99_999, reply })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "COMMAND_FAILED");
+        assert!(err.to_value().get("hint").is_none());
+        assert!(mgr.close_and_wait(&sid).await, "session thread must ack close");
+
+        // Expired: SESSION_EXPIRED + destructive close, then the same id
+        // answers SESSION_NOT_FOUND — the two conclusions agree.
+        let sid = mgr.create(Some("about:blank"), false, vec![], None, None);
+        mgr.sessions.get_mut(&sid).unwrap().last_active = Instant::now() - Duration::from_secs(3600);
+        let err = mgr
+            .send(&sid, |reply| SessionCommand::State { reply })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "SESSION_EXPIRED");
+        assert_eq!(err.to_value()["hint"], "call session_create to recreate");
+        assert!(!mgr.sessions.contains_key(&sid), "expiry must close the session");
+        let err = mgr
+            .send(&sid, |reply| SessionCommand::State { reply })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "SESSION_NOT_FOUND");
+    }
+
     /// Regression (obscura #618 class): an eval whose script clicks a submit
     /// button must leave the session on the form's action URL — the click
     /// stores a pending JS navigation that the Eval command drains (same
@@ -1636,7 +1752,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            err.contains("timeout") && err.contains(".never"),
+            err.to_string().contains("timeout") && err.to_string().contains(".never"),
             "timeout error names the selector, got: {err}"
         );
 
@@ -1650,7 +1766,7 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert!(err.contains("exactly one"), "got: {err}");
+        assert!(err.to_string().contains("exactly one"), "got: {err}");
 
         assert!(mgr.close_and_wait(&sid).await);
     }

@@ -1069,13 +1069,20 @@ async fn session_navigate_handler(
     Ok((StatusCode::OK, Json(resp)))
 }
 
-/// Session-command errors: the stance gate (rate.rs) must surface as 429,
-/// not the generic 500 the session handlers default to.
-fn session_err(e: String) -> AppError {
-    if e.starts_with("rate limit:") {
-        AppError::TooManyRequests(e)
-    } else {
-        AppError::Internal(e)
+/// Session-command errors → HTTP semantics: a dead session is 404, a crashed
+/// thread 503, the stance gate 429, everything else 500.
+fn session_err(e: session::SessionError) -> AppError {
+    if let session::SessionError::Command(msg) = &e {
+        if msg.starts_with("rate limit:") {
+            return AppError::TooManyRequests(msg.clone());
+        }
+    }
+    match e {
+        session::SessionError::NotFound(msg) | session::SessionError::Expired(msg) => {
+            AppError::NotFound(msg)
+        }
+        session::SessionError::ThreadDied(msg) => AppError::ServiceUnavailable(msg),
+        session::SessionError::Command(msg) => AppError::Internal(msg),
     }
 }
 
@@ -1084,7 +1091,7 @@ async fn session_state_handler(
 ) -> Result<impl IntoResponse, AppError> {
     let mut mgr = session::SESSIONS.lock().await;
     let compact_text = mgr.send(&id, |reply| session::SessionCommand::State { reply }).await
-        .map_err(|e| AppError::Internal(e))?;
+        .map_err(session_err)?;
     // Return as plain text for token efficiency.
     Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], compact_text))
 }
@@ -1093,7 +1100,7 @@ async fn session_cookies_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, AppError> {    let mut mgr = session::SESSIONS.lock().await;
     let text = mgr.send(&id, |reply| session::SessionCommand::Cookies { reply }).await
-        .map_err(|e| AppError::Internal(e))?;
+        .map_err(session_err)?;
     // `text` is a JSON string {"url":...,"cookies":[...]} from the session
     // thread; parse it back so we emit a real JSON response.
     let val: serde_json::Value = serde_json::from_str(&text)
@@ -1108,7 +1115,7 @@ async fn session_storage_handler(
 ) -> Result<impl IntoResponse, AppError> {
     let mut mgr = session::SESSIONS.lock().await;
     let text = mgr.send(&id, |reply| session::SessionCommand::Storage { reply }).await
-        .map_err(AppError::Internal)?;
+        .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| AppError::Internal(format!("storage parse error: {}", e)))?;
     Ok((StatusCode::OK, Json(val)))
@@ -1120,7 +1127,7 @@ async fn session_console_handler(
 ) -> Result<impl IntoResponse, AppError> {
     let mut mgr = session::SESSIONS.lock().await;
     let text = mgr.send(&id, |reply| session::SessionCommand::Console { reply }).await
-        .map_err(AppError::Internal)?;
+        .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| AppError::Internal(format!("console parse error: {}", e)))?;
     Ok((StatusCode::OK, Json(val)))
@@ -1142,7 +1149,7 @@ async fn session_export_handler(
 ) -> Result<impl IntoResponse, AppError> {
     let mut mgr = session::SESSIONS.lock().await;
     let jsonl = mgr.send(&id, |reply| session::SessionCommand::Export { reply }).await
-        .map_err(AppError::Internal)?;
+        .map_err(session_err)?;
     if q.format.as_deref() == Some("jsonl") {
         Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "application/x-ndjson")], jsonl))
     } else {
@@ -1172,7 +1179,7 @@ async fn session_network_handler(
             reply,
         })
         .await
-        .map_err(AppError::Internal)?;
+        .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| AppError::Internal(format!("network parse error: {}", e)))?;
     Ok((StatusCode::OK, Json(val)))
@@ -1187,7 +1194,7 @@ async fn session_har_handler(
     let text = mgr
         .send(&id, |reply| session::SessionCommand::Har { reply })
         .await
-        .map_err(AppError::Internal)?;
+        .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| AppError::Internal(format!("har parse error: {}", e)))?;
     Ok((StatusCode::OK, Json(val)))
@@ -1215,7 +1222,7 @@ async fn session_input_handler(
         text: req.text,
         full_events: req.events.as_deref() == Some("full"),
         reply,
-    }).await.map_err(|e| AppError::Internal(e))?;
+    }).await.map_err(session_err)?;
     Ok((StatusCode::OK, Json(filled)))
 }
 
@@ -1228,7 +1235,7 @@ async fn session_scroll_handler(
         direction: req.direction,
         amount: req.amount,
         reply,
-    }).await.map_err(|e| AppError::Internal(e))?;
+    }).await.map_err(session_err)?;
     Ok((StatusCode::OK, Json(serde_json::json!({ "scrolled": scrolled }))))
 }
 
@@ -1242,7 +1249,7 @@ async fn session_viewport_handler(
         height: req.height,
         mobile: req.mobile,
         reply,
-    }).await.map_err(AppError::Internal)?;
+    }).await.map_err(session_err)?;
     Ok((StatusCode::OK, Json(serde_json::json!({ "viewport": viewport }))))
 }
 
@@ -1262,7 +1269,7 @@ async fn session_screenshot_handler(
         selector: req.selector.clone(),
         selector_all: req.selector_all,
         reply,
-    }).await.map_err(AppError::Internal)?;
+    }).await.map_err(session_err)?;
     let body: serde_json::Value = serde_json::from_str(&shot)
         .map_err(|_| AppError::Internal(shot.clone()))?;
     Ok((StatusCode::OK, Json(body)))
@@ -1276,7 +1283,7 @@ async fn session_eval_handler(
     let result = mgr.send(&id, |reply| session::SessionCommand::Eval {
         script: req.script,
         reply,
-    }).await.map_err(|e| AppError::Internal(e))?;
+    }).await.map_err(session_err)?;
     Ok((StatusCode::OK, Json(serde_json::json!({ "result": result }))))
 }
 
@@ -1293,7 +1300,7 @@ async fn session_wait_handler(
         predicate: req.predicate.clone(),
         timeout_ms: req.timeout_ms,
         reply,
-    }).await.map_err(AppError::Internal)?;
+    }).await.map_err(session_err)?;
     let body: serde_json::Value =
         serde_json::from_str(&out).map_err(|_| AppError::Internal(out.clone()))?;
     Ok((StatusCode::OK, Json(body)))
