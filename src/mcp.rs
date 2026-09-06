@@ -183,6 +183,12 @@ pub struct SessionInputParams {
     pub index: usize,
     /// Text to type into the input field
     pub text: String,
+    /// Event fidelity: "full" types one character at a time with a
+    /// keydown/keypress/input/keyup cycle per character, for pages whose
+    /// listeners key on keyboard events (e.g. keypress-Enter login forms).
+    /// Default fires a single input+change pair after the value is set.
+    #[serde(default)]
+    pub events: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -680,12 +686,14 @@ misbehaves: click the button, call this, read the error.",
     )]
     async fn session_input(&self, Parameters(params): Parameters<SessionInputParams>) -> String {
         let mut mgr = session::SESSIONS.lock().await;
+        let full = params.events.as_deref() == Some("full");
         match mgr.send(&params.session_id, |reply| SessionCommand::Input {
             index: params.index,
             text: params.text.clone(),
+            full_events: full,
             reply,
         }).await {
-            Ok(filled) => json!({ "filled": filled }).to_string(),
+            Ok(filled) => filled.to_string(),
             Err(e) => json!({ "error": e }).to_string(),
         }
     }

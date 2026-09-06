@@ -472,6 +472,9 @@ pub struct SessionClickRequest {
 pub struct SessionInputRequest {
     pub index: usize,
     pub text: String,
+    /// "full" types per-character with keydown/keypress/input/keyup cycles.
+    #[serde(default)]
+    pub events: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1210,9 +1213,10 @@ async fn session_input_handler(
     let filled = mgr.send(&id, |reply| session::SessionCommand::Input {
         index: req.index,
         text: req.text,
+        full_events: req.events.as_deref() == Some("full"),
         reply,
     }).await.map_err(|e| AppError::Internal(e))?;
-    Ok((StatusCode::OK, Json(serde_json::json!({ "filled": filled }))))
+    Ok((StatusCode::OK, Json(filled)))
 }
 
 async fn session_scroll_handler(

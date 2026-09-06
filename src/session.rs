@@ -65,7 +65,10 @@ pub enum SessionCommand {
     Input {
         index: usize,
         text: String,
-        reply: oneshot::Sender<Result<bool, String>>,
+        /// events:"full" — per-character keydown/keypress/input/keyup cycle
+        /// for strict keyboard listeners (keypress-submit login forms).
+        full_events: bool,
+        reply: oneshot::Sender<Result<Value, String>>,
     },
     Scroll {
         direction: ScrollDirection,
@@ -645,12 +648,12 @@ fn session_thread(
                             let _ = reply.send(result);
                         }
 
-                        SessionCommand::Input { index, text, reply } => {
-                            let result = input_by_index(&mut page, &element_map, index, &text);
+                        SessionCommand::Input { index, text, full_events, reply } => {
+                            let result = input_by_index(&mut page, &element_map, index, &text, full_events);
                             recorder.push(RecordedAction::Input {
                                 index,
                                 text,
-                                ok: result.is_ok(),
+                                ok: result.as_ref().map(|v| v.get("filled").and_then(Value::as_bool).unwrap_or(false)).unwrap_or(false),
                             });
                             let _ = reply.send(result);
                         }
@@ -1056,9 +1059,39 @@ fn merge_dom_candidates(media: &mut Vec<Value>, dom_json: &str) {
 /// JSON array of element descriptors.
 const STATE_SCRIPT: &str = r#"
 (function() {
-    var interactive = document.querySelectorAll(
+    var interactive = Array.prototype.slice.call(document.querySelectorAll(
         'a, button, input, select, textarea, [role="button"], [role="link"], [onclick], [tabindex]'
-    );
+    ));
+    // Elements with a JS-bound click listener (jQuery .click(), addEventListener)
+    // are invisible to the selector above — a div-classed login button leaves the
+    // agent with no indexed way to click it. The engine's own event registry
+    // already knows every listener target, so union those nids in and restore
+    // document order.
+    try {
+        var reg = (typeof _eventRegistry === 'undefined') ? null : _eventRegistry;
+        if (reg) {
+            var seenNids = {};
+            for (var s = 0; s < interactive.length; s++) {
+                var n0 = interactive[s]._nid;
+                if (n0 !== undefined) seenNids[n0] = true;
+            }
+            for (var nid in reg) {
+                if (seenNids[nid]) continue;
+                var rec = reg[nid];
+                if (!rec || !rec.click || !rec.click.length) continue;
+                var bound = globalThis._wrap && globalThis._wrap(parseInt(nid, 10));
+                if (bound && bound.tagName) {
+                    interactive.push(bound);
+                    seenNids[nid] = true;
+                }
+            }
+            interactive.sort(function(a, b) {
+                if (!a.compareDocumentPosition || !b.compareDocumentPosition) return 0;
+                var p = a.compareDocumentPosition(b);
+                return (p & 4) ? -1 : ((p & 2) ? 1 : 0);
+            });
+        }
+    } catch (e) {}
     var elements = [];
     var indexMap = {};
     var idx = 0;
@@ -1081,6 +1114,20 @@ const STATE_SCRIPT: &str = r#"
             var v = el.getAttribute(attrNames[j]);
             if (v !== null) info.attrs[attrNames[j]] = v;
         }
+        // Control state the agent would otherwise need a follow-up eval for:
+        // checked (checkbox/radio), disabled, and the select's current option.
+        try {
+            var elType = (el.getAttribute('type') || '').toLowerCase();
+            if (el.tagName === 'INPUT' && (elType === 'checkbox' || elType === 'radio') && el.checked) {
+                info.attrs.checked = 'checked';
+            }
+            if (el.disabled) info.attrs.disabled = 'disabled';
+            if (el.tagName === 'SELECT' && el.selectedIndex >= 0 && el.options[el.selectedIndex]) {
+                var opt = el.options[el.selectedIndex];
+                var optVal = opt.getAttribute('value') !== null ? opt.getAttribute('value') : (opt.textContent || '');
+                info.attrs.selected = optVal.trim().substring(0, 40);
+            }
+        } catch (e) {}
         if (el._nid !== undefined) {
             indexMap[idx] = el._nid;
         }
@@ -1232,7 +1279,8 @@ fn input_by_index(
     element_map: &HashMap<usize, u64>,
     index: usize,
     text: &str,
-) -> Result<bool, String> {
+    full_events: bool,
+) -> Result<Value, String> {
     let nid = *element_map.get(&index).ok_or_else(|| format!("invalid index: {}", index))?;
     // Escape single quotes in text.
     let escaped = text.replace('\\', "\\\\").replace('\'', "\\'");
@@ -1240,13 +1288,36 @@ fn input_by_index(
     // React's _valueTracker own-property setter, which records the new value -
     // the following `input` event then compares equal and React swallows it
     // (onChange never fires). Reset the tracker and use the prototype setter
-    // so the dispatched event registers as a real change.
-    let js = format!(
-        "(function() {{ var el = globalThis._wrap && globalThis._wrap({}); if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {{ el.focus(); if (el._valueTracker) el._valueTracker.setValue(''); var p = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value') || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value'); if (p && p.set) p.set.call(el, '{}'); else el.value = '{}'; el.dispatchEvent(new Event('input', {{bubbles: true}})); el.dispatchEvent(new Event('change', {{bubbles: true}})); return true; }} return false; }})()",
-        nid, escaped, escaped
-    );
-    let result = page.evaluate_with_timeout(&js, crate::page::INTERACTION_EVAL_TIMEOUT);
-    Ok(result.as_bool().unwrap_or(false))
+    // so the dispatched event registers as a real change. The response carries
+    // the filled element's identity + value readback so a stale element_map
+    // (page re-rendered between state and input) is visible in the reply
+    // instead of silently typing into the wrong field.
+    let set_value = "if (el._valueTracker) el._valueTracker.setValue(''); var p = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value') || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');";
+    let js_body: String = if full_events {
+        // Strict listeners key on keyboard events (keypress-to-submit login
+        // forms, masked inputs). Build the value one character at a time with
+        // the full keydown/keypress/input/keyup cycle per character, then a
+        // single trailing change.
+        format!(
+            r#"(function() {{ var el = globalThis._wrap && globalThis._wrap({nid}); if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {{ el.focus(); {set_value} var text = '{text}'; var cur = ''; for (var i = 0; i < text.length; i++) {{ var ch = text[i]; var kc = ch.charCodeAt(0); var kev = function(t) {{ return new KeyboardEvent(t, {{key: ch, keyCode: kc, which: kc, bubbles: true}}); }}; el.dispatchEvent(kev('keydown')); if (p && p.set) p.set.call(el, cur + ch); else el.value = cur + ch; cur = cur + ch; el.dispatchEvent(new Event('input', {{bubbles: true}})); el.dispatchEvent(kev('keypress')); el.dispatchEvent(kev('keyup')); }} el.dispatchEvent(new Event('change', {{bubbles: true}})); return JSON.stringify({{filled: true, tag: el.tagName.toLowerCase(), id: el.id || '', name: el.getAttribute('name') || '', value: el.value}}); }} return '{{"filled":false}}'; }})()"#,
+            nid = nid,
+            set_value = set_value,
+            text = escaped,
+        )
+    } else {
+        format!(
+            r#"(function() {{ var el = globalThis._wrap && globalThis._wrap({nid}); if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {{ el.focus(); {set_value} if (p && p.set) p.set.call(el, '{text}'); else el.value = '{text}'; el.dispatchEvent(new Event('input', {{bubbles: true}})); el.dispatchEvent(new Event('change', {{bubbles: true}})); return JSON.stringify({{filled: true, tag: el.tagName.toLowerCase(), id: el.id || '', name: el.getAttribute('name') || '', value: el.value}}); }} return '{{"filled":false}}'; }})()"#,
+            nid = nid,
+            set_value = set_value,
+            text = escaped,
+        )
+    };
+    let result = page.evaluate_with_timeout(&js_body, crate::page::INTERACTION_EVAL_TIMEOUT);
+    let parsed = result
+        .as_str()
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .unwrap_or_else(|| serde_json::json!({"filled": false}));
+    Ok(parsed)
 }
 
 #[cfg(test)]
