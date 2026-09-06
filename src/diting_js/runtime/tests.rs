@@ -2228,6 +2228,63 @@
         assert_eq!(result, serde_json::json!(["a.js", "b.js"]));
     }
 
+    // A bare `onmessage = fn` (no self. prefix) inside the worker body must
+    // land on the worker scope, not create window.onmessage — the plain
+    // Function wrapper let the assignment fall through to the page global
+    // and the worker never received anything (obscura#867 family).
+    #[tokio::test(flavor = "current_thread")]
+    async fn worker_bare_onmessage_assignment_receives_messages() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate_for_cdp(
+                r#"new Promise((resolve, reject) => {
+                    const before = globalThis.onmessage;
+                    const body = "onmessage = function(e) { postMessage('bare|' + e.data); };";
+                    const w = new Worker(URL.createObjectURL(new Blob([body])));
+                    w.onerror = e => reject(new Error('worker error: ' + e.message));
+                    w.onmessage = e => resolve([e.data, globalThis.onmessage === before]);
+                    w.postMessage('go');
+                })"#,
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!(["bare|go", true]),
+            "bare onmessage works and leaves the page global untouched"
+        );
+    }
+
+    // Anti-fraud SDKs probe the worker's HTTP surface before using it and
+    // bail with "no supported http request object" when it is bare. fetch is
+    // on the synthetic scope; XMLHttpRequest resolves through to the shared
+    // realm's constructor — pin all three readable by bare identifier
+    // (obscura#851 family).
+    #[tokio::test(flavor = "current_thread")]
+    async fn worker_scope_exposes_http_request_surface() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate_for_cdp(
+                r#"new Promise((resolve, reject) => {
+                    const body = "onmessage = function(e) { postMessage(typeof fetch + '|' + typeof XMLHttpRequest + '|' + typeof Request); };";
+                    const w = new Worker(URL.createObjectURL(new Blob([body])));
+                    w.onerror = e => reject(new Error('worker error: ' + e.message));
+                    w.onmessage = e => resolve(e.data);
+                    w.postMessage('go');
+                })"#,
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!("function|function|function")
+        );
+    }
+
     // One stream per document. The tokenizer carries its state across the calls.
     // https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-document-write
     #[test]

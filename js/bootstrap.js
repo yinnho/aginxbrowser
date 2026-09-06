@@ -9182,8 +9182,13 @@ function runWorkerMessage(worker, data) {
         };
         workerSelf.self = workerSelf;
         worker._workerSelf = workerSelf;
+        // `with` puts the worker scope object in front of the scope chain so
+        // a bare `onmessage = fn` (no self. prefix) lands on the worker scope
+        // like in a real DedicatedWorkerGlobalScope — a plain Function body
+        // let the assignment fall through to the page global and the worker
+        // never received anything (obscura#867 family).
         const fn = new Function('self', 'postMessage', 'addEventListener', 'removeEventListener', 'close', 'window', 'document', 'navigator', 'location', 'importScripts',
-          worker._code);
+          'with (self) {\n' + worker._code + '\n}');
         fn(workerSelf, workerSelf.postMessage, workerSelf.addEventListener, workerSelf.removeEventListener, workerSelf.close, undefined, undefined, workerSelf.navigator, workerSelf.location, workerSelf.importScripts);
     }
     if (worker._workerSelf.onmessage) worker._workerSelf.onmessage({ data });
