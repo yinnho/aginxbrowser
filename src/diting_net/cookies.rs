@@ -547,10 +547,15 @@ fn resolve_cookie_domain(origin_host: &str, domain_attr: Option<&str>) -> Option
         None => return Some((origin, true)),
         Some(raw) => raw.trim().trim_start_matches('.').to_lowercase(),
     };
-    if dom.is_empty() || dom == origin {
+    if dom.is_empty() {
         return Some((origin, true));
     }
-    if dom.contains('.') && origin.ends_with(&format!(".{dom}")) {
+    // RFC 6265 §5.3: an explicit Domain attribute that domain-matches the
+    // origin — including Domain=origin itself — makes a domain cookie, not a
+    // host-only one. Browsers agree: `Domain=example.com` set from example.com
+    // is sent to subdomains. Anchoring an apex-declared cookie at the apex
+    // used to yield host-only, which broke cross-subdomain restore.
+    if dom.contains('.') && (origin == dom || origin.ends_with(&format!(".{dom}"))) {
         Some((dom, false))
     } else {
         Some((origin, true))

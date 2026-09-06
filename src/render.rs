@@ -181,21 +181,10 @@ pub async fn http_fetch(
     let jar = Arc::new(CookieJar::new());
     // Inject request cookies into the jar (same logic as server.rs::inject_cookies,
     // but on the standalone jar rather than a Browser).
-    if !cookies.is_empty() {
-        let base = url::Url::parse(url).ok();
-        let domain = base
-            .as_ref()
-            .and_then(|u| u.host_str())
-            .unwrap_or("");
-        for c in cookies {
-            let full = if c.to_ascii_lowercase().contains("domain=")
-                || c.to_ascii_lowercase().contains("path=")
-            {
-                c.clone()
-            } else {
-                format!("{}; Domain={}; Path=/", c, domain)
-            };
-            let _ = jar.set_cookie(&full, &parsed);
+    for c in cookies {
+        let (full, anchor) = crate::server::normalize_cookie_entry(c, url);
+        if let Ok(anchor_url) = url::Url::parse(&anchor) {
+            jar.set_cookie(&full, &anchor_url);
         }
     }
 

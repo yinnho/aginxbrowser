@@ -223,9 +223,10 @@ pub enum SessionCommand {
     GetViewport {
         reply: ViewportOverrideReply,
     },
-    /// Export the session's current cookies (for the page's URL) as a JSON
-    /// string `{"url":...,"cookies":["name=value",...]}`. Round-trips with
-    /// `session_create`'s `cookies` field to replay a logged-in session.
+    /// Export the session's cookies as a JSON string
+    /// `{"url":...,"cookies":["name=value; Domain=...; Path=...; ...", ...]}`.
+    /// Full Set-Cookie form so a clone opened on a sibling domain keeps its
+    /// login state. Round-trips with `session_create`'s `cookies` field.
     Cookies {
         reply: oneshot::Sender<Result<String, String>>,
     },
@@ -1478,17 +1479,33 @@ fn session_thread(
 
                         SessionCommand::Cookies { reply } => {
                             let url_str = page.url();
-                            let cookies: Vec<String> = match url::Url::parse(&url_str) {
-                                Ok(u) => page
-                                    .context
-                                    .cookie_jar
-                                    .get_cookie_header(&u)
-                                    .split("; ")
-                                    .filter(|s| !s.is_empty())
-                                    .map(|s| s.to_string())
-                                    .collect(),
-                                Err(_) => vec![],
-                            };
+                            // Full Set-Cookie form (Domain/flags included) so
+                            // snapshot/clone restores cross-subdomain login
+                            // state: bare name=value pairs re-anchor at
+                            // whatever URL the new session opens, losing
+                            // every sibling-domain cookie.
+                            let cookies: Vec<String> = page
+                                .context
+                                .cookie_jar
+                                .get_all_cookies()
+                                .into_iter()
+                                .map(|c| {
+                                    let mut s = format!(
+                                        "{}={}; Domain={}; Path={}",
+                                        c.name, c.value, c.domain, c.path
+                                    );
+                                    if c.secure {
+                                        s.push_str("; Secure");
+                                    }
+                                    if c.http_only {
+                                        s.push_str("; HttpOnly");
+                                    }
+                                    if !c.same_site.is_empty() {
+                                        s.push_str(&format!("; SameSite={}", c.same_site));
+                                    }
+                                    s
+                                })
+                                .collect();
                             let resp = serde_json::json!({ "url": url_str, "cookies": cookies });
                             let _ = reply.send(Ok(resp.to_string()));
                         }
@@ -2425,7 +2442,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|c| c.as_str() == Some("sid=abc")),
+                .any(|c| c.as_str().is_some_and(|s| s.starts_with("sid=abc;"))),
             "cookie must carry over: {cookies}"
         );
 
@@ -2886,7 +2903,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|c| c.as_str() == Some("sid=abc")),
+                .any(|c| c.as_str().is_some_and(|s| s.starts_with("sid=abc;"))),
             "cookie must survive the restart: {cookies}"
         );
 

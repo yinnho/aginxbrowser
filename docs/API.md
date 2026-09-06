@@ -61,7 +61,7 @@ Fetch a page and return its content. Supports tiered rendering, automatic Cloudf
 | selector | string | | `null` | CSS selector; only extract the matching region |
 | wait_secs | u64 | | `null` | Extra seconds to wait after page load (let JS rendering finish) |
 | use_proxy | bool | | `false` | Route through the `AGINXBROWSER_PROXY` proxy. Set `true` for overseas sites |
-| cookies | string[] | | `[]` | Cookies injected before navigation, format `["name=value", ...]` |
+| cookies | string[] \| object[] | | `[]` | Cookies injected before navigation: `"name=value"` strings (may carry `; Domain=…; Path=/; Secure` attributes) or CDP-style objects `{"name","value","domain","path","secure","httpOnly","sameSite"}`. Entries declaring `Domain=` anchor at that domain, so sibling-domain login state (`.taobao.com` / `.tmall.com` style) survives injection instead of being dropped by RFC 6265 domain checks |
 | max_chars | usize | | `50000` | Truncate `content` to this many characters. `0` = unlimited |
 | auto_bypass_challenge | bool | | `true` | Automatically detect and bypass Cloudflare Turnstile challenges |
 | render_tier | string | | `"auto"` | Rendering strategy (see below) |
@@ -186,7 +186,7 @@ Load a page and click the specified element (`element.click()`), returning the p
 | selector | string | ✅ | — | CSS selector |
 | wait_secs | u64 | | `null` | Extra seconds to wait after page load |
 | use_proxy | bool | | `false` | Route through a proxy |
-| cookies | string[] | | `[]` | Cookies injected before navigation |
+| cookies | string[] \| object[] | | `[]` | Cookies injected before navigation (`"name=value"` strings or CDP-style objects, same semantics as `/fetch`) |
 | tls_fingerprint | string | | `null` | TLS fingerprint (stealth mode) |
 
 **Response fields:**
@@ -220,7 +220,7 @@ Execute arbitrary JavaScript on the page and return the result. Supports `async`
 | script | string | ✅ | — | JS expression or async IIFE |
 | wait_secs | u64 | | `null` | Extra seconds to wait after page load |
 | use_proxy | bool | | `false` | Route through a proxy |
-| cookies | string[] | | `[]` | Cookies injected before navigation |
+| cookies | string[] \| object[] | | `[]` | Cookies injected before navigation (`"name=value"` strings or CDP-style objects, same semantics as `/fetch`) |
 | tls_fingerprint | string | | `null` | TLS fingerprint (stealth mode) |
 
 **Response fields:**
@@ -359,7 +359,7 @@ Stream a file from a URL to disk. Unlike `/fetch` (which returns page content fo
 | filename | string | | auto | Output filename. Auto resolution: `Content-Disposition` header → URL path tail → `"download"` |
 | resume | bool | | `false` | Continue an interrupted download when a local partial file exists. Server support is probed via `Range: bytes=N-`: `206` appends, `200` restarts |
 | use_proxy | bool | | `false` | Route through proxy (auto-enabled for known blocked domains like github.com) |
-| cookies | string[] | | `[]` | Cookies to send (`["name=value", ...]`) for gated downloads |
+| cookies | string[] \| object[] | | `[]` | Cookies to send (`["name=value", ...]` or CDP-style objects) for gated downloads |
 
 **Response fields:**
 
@@ -410,7 +410,7 @@ Does not use `/fetch`'s tiered rendering — it always drives the obscura browse
 | selector | string | | `null` | CSS selector; capture the **specified element region** instead of the full page (see below) |
 | selector_all | bool | | `false` | Used with `selector`: skip cropping and return coordinates of **all matches** |
 | use_proxy | bool | | `false` | Route through the `AGINXBROWSER_PROXY` proxy |
-| cookies | string[] | | `[]` | Cookies injected before navigation |
+| cookies | string[] \| object[] | | `[]` | Cookies injected before navigation (`"name=value"` strings or CDP-style objects, same semantics as `/fetch`) |
 | tls_fingerprint | string | | `null` | TLS fingerprint (stealth mode) |
 
 **Response fields:**
@@ -547,7 +547,7 @@ Create an interactive browser session.
 |------|------|------|------|------|
 | url | string | | `null` | Initial URL (optional) |
 | use_proxy | bool | | `false` | Route through a proxy |
-| cookies | string[] | | `[]` | Cookies injected before navigation (`["name=value",...]`) so the session starts already logged in |
+| cookies | string[] \| object[] | | `[]` | Cookies injected before navigation (`"name=value",...` or CDP-style objects) so the session starts already logged in |
 | persistent | bool | | `false` | Persist login state to the server-side store: if the session idles out or the server restarts, the same `session_id` revives logged-in on the next call (`session/{id}/close` drops the snapshot; idle expiry keeps it) |
 
 **Response:**
@@ -723,12 +723,12 @@ Close the session and release its resources. For a `persistent` session this als
 
 ### GET /session/{id}/cookies
 
-Export the session's current-page cookies (as a `["name=value",...]` array). Use it to persist login state — store it, then pass `cookies` to a future `session_create` to start the session already logged in, no re-login needed.
+Export the session's cookies as full Set-Cookie strings (`["name=value; Domain=example.com; Path=/", ...]`, flags included). Use it to persist login state — store it, then pass `cookies` to a future `session_create` to start the session already logged in, no re-login needed. The full form (not bare `name=value` pairs) is what makes cross-subdomain logins survive the round-trip: a `.taobao.com` cookie re-anchors at its own domain on the way back in, where a bare pair would be scoped to whatever page you happen to open.
 
 **Response:**
 
 ```json
-{"url": "https://example.com/dashboard", "cookies": ["sessionid=abc123", "csrftoken=xyz"]}
+{"url": "https://example.com/dashboard", "cookies": ["sessionid=abc123; Domain=example.com; Path=/", "csrftoken=xyz; Domain=example.com; Path=/; HttpOnly"]}
 ```
 
 **Login-state reuse loop:**
@@ -741,7 +741,7 @@ curl -sS http://127.0.0.1:8089/session/$SID/cookies | jq -r .cookies[]
 # 3. Next time, create the session with cookies directly — no login required
 curl -sS -X POST http://127.0.0.1:8089/session/create \
   -H "Content-Type: application/json" \
-  -d '{"url":"https://example.com/dashboard","cookies":["sessionid=abc123","csrftoken=xyz"]}'
+  -d '{"url":"https://example.com/dashboard","cookies":["sessionid=abc123; Domain=example.com; Path=/"]}'
 ```
 
 > 🔒 The hosted instance never persists any cookie to disk — cookies live only in session memory and are wiped when the session is reclaimed after 8 minutes idle. Callers hold their own login state (use a throwaway account, not your main one).
@@ -1103,7 +1103,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `session_list` | List live sessions with idle age and time left before auto-eviction (discover one to reuse) |
 | `session_navigate` | Navigate to a new URL within a session |
 | `session_state` | Get the indexed page state |
-| `session_cookies` | Export the session's current cookies (`["name=value",...]`, for login-state reuse) |
+| `session_cookies` | Export the session's current cookies as full Set-Cookie strings (`name=value; Domain=…; Path=/`, for login-state reuse — cross-subdomain state survives the round-trip) |
 | `session_storage` | Snapshot the session's `localStorage`/`sessionStorage` for the current origin — the half of login state cookies can't carry; restore it in a new session via `session_create`'s `storage` field |
 | `session_console` | Read the session's recent page console output (`log/info/warn/error/dialog` ring buffer of 500, filters: `level`/`since_ts`/`url_contains`/`limit`) — the fastest way to see why a page misbehaves |
 | `session_click` | Click an element by index |
@@ -1141,7 +1141,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 |------|------|------|------|------|
 | url | string | | `null` | Initial URL |
 | use_proxy | bool | | `false` | Route through a proxy |
-| cookies | string[] | | `[]` | Inject cookies (`["name=value",...]`) so the session starts already logged in. Pair with `session_cookies` to reuse login state |
+| cookies | string[] \| object[] | | `[]` | Inject cookies (`"name=value",...` or CDP-style objects) so the session starts already logged in. Pair with `session_cookies` to reuse login state |
 | storage | object | | `null` | Web storage to inject after the initial navigation lands: `{"local_storage": {"k":"v"}, "session_storage": {"k":"v"}}`. Round-trips with `session_storage` |
 | ttl_secs | u64 | | `480` | Idle time-to-live in seconds before the session is evicted (clamped 60..3600). Raise it for long workflows |
 | keepalive | bool | | `false` | Exempt the session from the idle reaper: it lives until `session_close` or server exit — a workflow interrupted by long non-browser steps keeps its login state |

@@ -61,7 +61,7 @@ curl http://127.0.0.1:8089/health
 | selector | string | | `null` | CSS 选择器，仅提取匹配区域 |
 | wait_secs | u64 | | `null` | 页面加载后额外等待秒数（等 JS 渲染完成） |
 | use_proxy | bool | | `false` | 走 `AGINXBROWSER_PROXY` 代理。国外站点设 `true` |
-| cookies | string[] | | `[]` | 导航前注入的 cookie，格式 `["name=value", ...]` |
+| cookies | string[] \| object[] | | `[]` | 导航前注入的 cookie：`"name=value"` 字符串（可带 `; Domain=…; Path=/; Secure` 属性）或 CDP 风格对象 `{"name","value","domain","path","secure","httpOnly","sameSite"}`。带 `Domain=` 的条目锚定在它自己声明的域上，跨子域登录态（`.taobao.com` / `.tmall.com` 这种）注入时不会再被 RFC 6265 域校验悄悄丢掉 |
 | max_chars | usize | | `50000` | 截断 `content` 到指定字符数。`0` 不限 |
 | auto_bypass_challenge | bool | | `true` | 自动检测并绕过 Cloudflare Turnstile 挑战 |
 | render_tier | string | | `"auto"` | 渲染策略（见下方说明） |
@@ -181,7 +181,7 @@ curl -sS -X POST http://127.0.0.1:8089/fetch \
 | selector | string | ✅ | — | CSS 选择器 |
 | wait_secs | u64 | | `null` | 页面加载后额外等待秒数 |
 | use_proxy | bool | | `false` | 走代理 |
-| cookies | string[] | | `[]` | 导航前注入的 cookie |
+| cookies | string[] \| object[] | | `[]` | 导航前注入的 cookie（`"name=value"` 字符串或 CDP 风格对象，语义同 `/fetch`） |
 | tls_fingerprint | string | | `null` | TLS 指纹（stealth 模式） |
 
 **响应字段：**
@@ -215,7 +215,7 @@ curl -sS -X POST http://127.0.0.1:8089/click \
 | script | string | ✅ | — | JS 表达式或 async IIFE |
 | wait_secs | u64 | | `null` | 页面加载后额外等待秒数 |
 | use_proxy | bool | | `false` | 走代理 |
-| cookies | string[] | | `[]` | 导航前注入的 cookie |
+| cookies | string[] \| object[] | | `[]` | 导航前注入的 cookie（`"name=value"` 字符串或 CDP 风格对象，语义同 `/fetch`） |
 | tls_fingerprint | string | | `null` | TLS 指纹（stealth 模式） |
 
 **响应字段：**
@@ -354,7 +354,7 @@ curl -sL -o cabin_ref.jpg "<image_url>"
 | filename | string | | 自动 | 输出文件名。自动解析顺序：`Content-Disposition` 头 → URL 路径尾段 → `"download"` |
 | resume | bool | | `false` | 本地存在未完成文件时续传。通过 `Range: bytes=N-` 探测服务端支持：`206` 追加，`200` 重下 |
 | use_proxy | bool | | `false` | 走代理（github.com 等已知被墙域名自动启用） |
-| cookies | string[] | | `[]` | 随请求发送的 cookie（`["name=value", ...]`），用于登录态下载 |
+| cookies | string[] \| object[] | | `[]` | 随请求发送的 cookie（`["name=value", ...]` 或 CDP 风格对象），用于登录态下载 |
 
 **响应字段：**
 
@@ -403,7 +403,7 @@ curl -sS -X POST http://127.0.0.1:8089/download \
 | selector | string | | `null` | CSS 选择器，截**指定元素区域**而非整页（见下） |
 | selector_all | bool | | `false` | 配合 `selector`：不裁剪，返回**所有匹配**的坐标 |
 | use_proxy | bool | | `false` | 走 `AGINXBROWSER_PROXY` 代理 |
-| cookies | string[] | | `[]` | 导航前注入的 cookie |
+| cookies | string[] \| object[] | | `[]` | 导航前注入的 cookie（`"name=value"` 字符串或 CDP 风格对象，语义同 `/fetch`） |
 | tls_fingerprint | string | | `null` | TLS 指纹（stealth 模式） |
 
 **响应字段：**
@@ -663,12 +663,12 @@ viewport=1280x800
 
 ### GET /session/{id}/cookies
 
-导出会话当前页面的 cookie（`["name=value",...]` 数组）。用于把登录态持久化——存下来，下次 `session_create` 传 `cookies` 直接以登录态起会话，不用重新登录。
+导出会话的 cookie，完整 Set-Cookie 形式（`["name=value; Domain=example.com; Path=/", ...]`，标志位都带）。用于把登录态持久化——存下来，下次 `session_create` 传 `cookies` 直接以登录态起会话，不用重新登录。导出用完整形式而不是裸 `name=value`，是为了跨子域登录态能扛住一个来回：`.taobao.com` 的 cookie 回灌时重新锚定在它自己的域上；裸键值对只会绑在你恰好打开的那个页面上。
 
 **响应：**
 
 ```json
-{"url": "https://example.com/dashboard", "cookies": ["sessionid=abc123", "csrftoken=xyz"]}
+{"url": "https://example.com/dashboard", "cookies": ["sessionid=abc123; Domain=example.com; Path=/", "csrftoken=xyz; Domain=example.com; Path=/; HttpOnly"]}
 ```
 
 **登录态复用闭环：**
@@ -681,7 +681,7 @@ curl -sS http://127.0.0.1:8089/session/$SID/cookies | jq -r .cookies[]
 # 3. 下次直接带 cookie 建会话，免登录
 curl -sS -X POST http://127.0.0.1:8089/session/create \
   -H "Content-Type: application/json" \
-  -d '{"url":"https://example.com/dashboard","cookies":["sessionid=abc123","csrftoken=xyz"]}'
+  -d '{"url":"https://example.com/dashboard","cookies":["sessionid=abc123; Domain=example.com; Path=/"]}'
 ```
 
 > 🔒 托管实例**不落盘**任何 cookie——cookie 只在会话内存里，会话 8 分钟空闲回收即清。登录态由调用方自己持有（建议用小号，别用主账号）。
@@ -804,7 +804,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 | `session_list` | 列出存活会话（空闲时长 + 剩余寿命，能复用就别新建） |
 | `session_navigate` | 会话内导航到新 URL |
 | `session_state` | 获取索引化的页面状态 |
-| `session_cookies` | 导出会话当前 cookie（`["name=value",...]`，用于登录态复用） |
+| `session_cookies` | 导出会话当前 cookie，完整 Set-Cookie 形式（`name=value; Domain=…; Path=/`，用于登录态复用——跨子域状态能扛住回灌） |
 | `session_storage` | 快照会话的 `localStorage`/`sessionStorage`——cookie 带不走的那半登录态，配 `session_create` 的 `storage` 字段回灌 |
 | `session_console` | 读会话最近的页面 console 输出（`log/info/warn/error/dialog` 环形缓冲 500 条，支持 `level`/`since_ts`/`url_contains`/`limit` 过滤）——页面为什么坏，点一下按钮再读它最快 |
 | `session_click` | 按索引点击元素 |
@@ -842,7 +842,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 |------|------|------|------|------|
 | url | string | | `null` | 初始 URL |
 | use_proxy | bool | | `false` | 走代理 |
-| cookies | string[] | | `[]` | 注入 cookie（`["name=value",...]`），会话创建即登录态。配合 `session_cookies` 复用登录态 |
+| cookies | string[] \| object[] | | `[]` | 注入 cookie（`"name=value",...` 或 CDP 风格对象），会话创建即登录态。配合 `session_cookies` 复用登录态 |
 | storage | object | | `null` | 初始导航落地后注入的 Web Storage：`{"local_storage": {"k":"v"}, "session_storage": {"k":"v"}}`。与 `session_storage` 工具往返 |
 | ttl_secs | u64 | | `480` | 空闲回收秒数（钳 60..3600），长流程调大 |
 | keepalive | bool | | `false` | 免空闲回收：活到 `session_close` 或进程退出——中间穿插长非浏览器步骤的流程不再丢登录态 |

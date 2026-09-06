@@ -66,9 +66,10 @@ pub struct FetchRequest {
     /// foreign sites that are blocked or slow without a proxy.
     #[serde(default)]
     pub use_proxy: bool,
-    /// Cookies to inject before navigation (`["name=value", ...]`). For sites
-    /// that gate content behind a logged-in session (e.g. WeChat articles).
-    #[serde(default)]
+    /// Cookies to inject before navigation. Entries are `"name=value"`
+    /// strings or CDP-style objects `{"name","value","domain",...}` —
+    /// browser-exported login state arrives in the object shape.
+    #[serde(default, deserialize_with = "crate::server::cookie_list_from_json")]
     pub cookies: Vec<String>,
     /// Truncate `content` to at most this many characters. 0 = no limit.
     /// Default 50000 — keeps responses from blowing up an LLM context window.
@@ -151,8 +152,9 @@ pub struct ClickRequest {
     /// Route through AGINXBROWSER_PROXY. Default false (direct).
     #[serde(default)]
     pub use_proxy: bool,
-    /// Cookies to inject before navigation.
-    #[serde(default)]
+    /// Cookies to inject before navigation. Entries are `"name=value"`
+    /// strings or CDP-style objects `{"name","value","domain",...}`.
+    #[serde(default, deserialize_with = "crate::server::cookie_list_from_json")]
     pub cookies: Vec<String>,
     /// TLS fingerprint override (stealth mode only).
     #[serde(default)]
@@ -168,8 +170,9 @@ pub struct EvalRequest {
     /// Route through AGINXBROWSER_PROXY. Default false (direct).
     #[serde(default)]
     pub use_proxy: bool,
-    /// Cookies to inject before navigation.
-    #[serde(default)]
+    /// Cookies to inject before navigation. Entries are `"name=value"`
+    /// strings or CDP-style objects `{"name","value","domain",...}`.
+    #[serde(default, deserialize_with = "crate::server::cookie_list_from_json")]
     pub cookies: Vec<String>,
     /// TLS fingerprint override (stealth mode only).
     #[serde(default)]
@@ -261,8 +264,9 @@ pub struct ScreenshotRequest {
     /// Route through AGINXBROWSER_PROXY. Default false (direct).
     #[serde(default)]
     pub use_proxy: bool,
-    /// Cookies to inject before navigation.
-    #[serde(default)]
+    /// Cookies to inject before navigation. Entries are `"name=value"`
+    /// strings or CDP-style objects `{"name","value","domain",...}`.
+    #[serde(default, deserialize_with = "crate::server::cookie_list_from_json")]
     pub cookies: Vec<String>,
     /// TLS fingerprint override (stealth mode only).
     #[serde(default)]
@@ -1518,6 +1522,30 @@ mod tests {
     }
 
     #[test]
+    fn fetch_request_accepts_string_and_object_cookie_entries() {
+        let r: FetchRequest = serde_json::from_str(
+            r#"{"url":"https://shop.miceal.taobao.com/","cookies":[
+                "bare=1",
+                {"name":"cookie1","value":"t","domain":".taobao.com",
+                 "path":"/","secure":true,"httpOnly":true,"sameSite":"None"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(r.cookies[0], "bare=1");
+        assert_eq!(
+            r.cookies[1],
+            "cookie1=t; Domain=.taobao.com; Path=/; SameSite=None; Secure; HttpOnly"
+        );
+    }
+
+    #[test]
+    fn fetch_request_rejects_cookie_objects_without_value() {
+        let err =
+            serde_json::from_str::<FetchRequest>(r#"{"url":"https://e.com/","cookies":[{"name":"x"}]}"#);
+        assert!(err.is_err());
+    }
+
+    #[test]
     fn cache_key_distinguishes_fields() {
         let a = req("https://e.com");
         let mut b = req("https://e.com");
@@ -1602,3 +1630,4 @@ mod tests {
         }
     }
 }
+

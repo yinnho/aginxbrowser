@@ -148,33 +148,103 @@ where
 }
 
 /// Inject request-supplied cookies into the browser's cookie jar before
-/// navigation. Each entry is a Set-Cookie style string (`name=value`). They
-/// are scoped to the target URL's host so they attach to the first request —
-/// needed for sites (e.g. WeChat articles) that gate content behind a
-/// logged-in session cookie.
+/// navigation. Entries are `name=value` pairs scoped to the target URL's
+/// host, or full Set-Cookie strings anchored at their own `Domain` —
+/// needed for sites (e.g. WeChat articles, taobao shops) that gate
+/// content behind a logged-in session cookie.
 pub(crate) fn inject_cookies(browser: &Browser, cookies: &[String], target_url: &str) {
     if cookies.is_empty() {
         return;
     }
     tracing::debug!("inject_cookies: {} cookies for {}", cookies.len(), target_url);
     let store = browser.cookies();
-    let base = match url::Url::parse(target_url) {
-        Ok(u) => u,
-        Err(e) => {
-            tracing::warn!("inject_cookies: failed to parse target URL '{}': {}", target_url, e);
-            return;
-        }
-    };
-    let domain = format!("Domain={}", base.host_str().unwrap_or(""));
     for c in cookies {
-        // Allow callers to pass either a bare "name=value" or a full Set-Cookie.
-        let full = if c.to_ascii_lowercase().contains("domain=") || c.to_ascii_lowercase().contains("path=") {
-            c.clone()
-        } else {
-            format!("{}; {}; Path=/", c, domain)
-        };
-        let _ = store.set(&full, target_url);
+        let (full, anchor) = normalize_cookie_entry(c, target_url);
+        let _ = store.set(&full, &anchor);
     }
+}
+
+/// Split a caller-supplied cookie entry into its full Set-Cookie form and
+/// the URL to anchor it at. The jar validates `Domain` against the anchor
+/// host (RFC 6265 §5.3), so an entry declaring `Domain=.tmall.com` must
+/// anchor at tmall.com — anchoring it at the taobao.com page being opened
+/// gets it silently dropped, which breaks exactly the cross-subdomain
+/// restore that login-state injection exists for. Bare `name=value`
+/// entries keep anchoring at the target URL's host.
+pub(crate) fn normalize_cookie_entry(entry: &str, target_url: &str) -> (String, String) {
+    let lower = entry.to_ascii_lowercase();
+    if lower.contains("domain=") || lower.contains("path=") {
+        let anchor = cookie_domain_attr(entry)
+            .map(|d| format!("https://{}/", d.trim_start_matches('.')))
+            .unwrap_or_else(|| target_url.to_string());
+        (entry.to_string(), anchor)
+    } else {
+        let host = url::Url::parse(target_url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default();
+        (format!("{}; Domain={}; Path=/", entry, host), target_url.to_string())
+    }
+}
+
+fn cookie_domain_attr(set_cookie: &str) -> Option<String> {
+    set_cookie.split(';').skip(1).find_map(|attr| {
+        let (k, v) = attr.split_once('=')?;
+        k.trim()
+            .eq_ignore_ascii_case("domain")
+            .then(|| v.trim().to_string())
+    })
+}
+
+/// Deserialize a `cookies` field whose entries are either bare
+/// `"name=value"` strings (the original shape) or CDP-style objects
+/// `{"name","value","domain","path","secure","httpOnly","sameSite"}`.
+/// Browser-exported login state arrives in the object shape, and a
+/// string-only field silently drops every attribute except the value —
+/// the domain most of all. Objects become full Set-Cookie strings here
+/// so every downstream consumer (which all speak Set-Cookie) is
+/// unaffected.
+pub(crate) fn cookie_list_from_json<'de, D>(d: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    let raw = Vec::<serde_json::Value>::deserialize(d)?;
+    raw.into_iter()
+        .map(|v| -> Result<String, D::Error> {
+            let full = match v {
+                serde_json::Value::String(s) => s,
+                serde_json::Value::Object(m) => {
+                    let name = m.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+                    let value = m.get("value").and_then(|v| v.as_str());
+                    let (Some(name), Some(value)) = (name, value) else {
+                        return Err(serde::de::Error::custom(format!(
+                            "cookie object needs string \"name\" and \"value\", got keys: {:?}",
+                            m.keys().collect::<Vec<_>>()
+                        )));
+                    };
+                    let mut full = format!("{name}={value}");
+                    for (key, attr) in [("domain", "Domain"), ("path", "Path"), ("sameSite", "SameSite")] {
+                        if let Some(val) = m.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                            full.push_str(&format!("; {attr}={val}"));
+                        }
+                    }
+                    for (key, attr) in [("secure", "Secure"), ("httpOnly", "HttpOnly")] {
+                        if m.get(key).and_then(|v| v.as_bool()) == Some(true) {
+                            full.push_str(&format!("; {attr}"));
+                        }
+                    }
+                    full
+                }
+                other => {
+                    return Err(serde::de::Error::custom(format!(
+                        "cookie entries must be strings or objects, got: {other}"
+                    )))
+                }
+            };
+            Ok(full)
+        })
+        .collect()
 }
 
 /// Check if the current page is a Cloudflare challenge.
@@ -1067,5 +1137,77 @@ mod cookie_store_tests {
 
         std::env::remove_var("AGINXBROWSER_COOKIE_STORE_DIR");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod cookie_injection_tests {
+    // The taobao report's finding #1: browser-exported login state carries
+    // cookies for sibling domains (.taobao.com, .tmall.com, .alicdn.com),
+    // and the jar's RFC 6265 Domain validation silently dropped every entry
+    // that didn't match the page being opened.
+
+    #[test]
+    fn cookie_entries_with_domain_anchor_at_their_own_domain() {
+        let (full, anchor) = super::normalize_cookie_entry(
+            "cookie1=t; Domain=.taobao.com; Path=/",
+            "https://shop.miceal.taobao.com/item",
+        );
+        assert_eq!(anchor, "https://taobao.com/");
+        assert!(full.starts_with("cookie1=t"));
+
+        let (full, anchor) = super::normalize_cookie_entry("sid=1", "https://a.example.com/x");
+        assert_eq!(anchor, "https://a.example.com/x");
+        assert_eq!(full, "sid=1; Domain=a.example.com; Path=/");
+    }
+
+    #[test]
+    fn cross_domain_cookies_survive_injection_into_the_jar() {
+        let jar = crate::diting_net::CookieJar::new();
+        let target = "https://shop.miceal.taobao.com/";
+        for entry in [
+            "cookie1=t; Domain=.taobao.com; Path=/",
+            "skt=s; Domain=.tmall.com; Path=/",
+            "sid=hostonly",
+        ] {
+            let (full, anchor) = super::normalize_cookie_entry(entry, target);
+            let anchor = url::Url::parse(&anchor).unwrap();
+            jar.set_cookie(&full, &anchor);
+        }
+        let header = |u: &str| jar.get_cookie_header(&url::Url::parse(u).unwrap());
+        assert!(header("https://www.taobao.com/").contains("cookie1=t"));
+        assert!(
+            header("https://detail.tmall.com/").contains("skt=s"),
+            "sibling-domain cookie must survive, got: {}",
+            header("https://detail.tmall.com/")
+        );
+        assert!(header("https://shop.miceal.taobao.com/").contains("sid=hostonly"));
+    }
+
+    #[test]
+    fn cookie_objects_deserialize_to_set_cookie_strings() {
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            #[serde(deserialize_with = "crate::server::cookie_list_from_json")]
+            cookies: Vec<String>,
+        }
+        let w: Wrapper = serde_json::from_str(
+            r#"{"cookies":[
+                "bare=1",
+                {"name":"cookie1","value":"t","domain":".taobao.com","path":"/",
+                 "secure":true,"httpOnly":true,"sameSite":"None"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(w.cookies[0], "bare=1");
+        assert_eq!(
+            w.cookies[1],
+            "cookie1=t; Domain=.taobao.com; Path=/; SameSite=None; Secure; HttpOnly"
+        );
+
+        let err = serde_json::from_str::<Wrapper>(r#"{"cookies":[{"name":"x"}]}"#);
+        assert!(err.is_err(), "name without value must be rejected");
+        let err = serde_json::from_str::<Wrapper>(r#"{"cookies":[42]}"#);
+        assert!(err.is_err(), "non-string non-object entries must be rejected");
     }
 }

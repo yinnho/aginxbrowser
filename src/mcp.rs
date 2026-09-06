@@ -116,8 +116,9 @@ pub struct DownloadParams {
     /// Route through proxy (default: false; auto-enabled for known blocked domains)
     #[serde(default)]
     pub use_proxy: bool,
-    /// Cookies to send with the request (["name=value", ...]) for gated downloads
-    #[serde(default)]
+    /// Cookies to send with the request: `"name=value"` strings or
+    /// CDP-style objects `{"name","value","domain",...}` for gated downloads
+    #[serde(default, deserialize_with = "crate::server::cookie_list_from_json")]
     pub cookies: Vec<String>,
 }
 
@@ -133,9 +134,10 @@ pub struct SessionCreateParams {
     /// Route through proxy (default: false)
     #[serde(default)]
     pub use_proxy: bool,
-    /// Cookies to inject before navigation (["name=value", ...]). Lets the
-    /// session start already logged-in. Round-trips with session_cookies.
-    #[serde(default)]
+    /// Cookies to inject before navigation: `"name=value"` strings or
+    /// CDP-style objects `{"name","value","domain",...}`. Lets the session
+    /// start already logged-in. Round-trips with session_cookies.
+    #[serde(default, deserialize_with = "crate::server::cookie_list_from_json")]
     pub cookies: Vec<String>,
     /// Web Storage to inject after the initial navigation lands:
     /// {"local_storage": {"k":"v"}, "session_storage": {"k":"v"}}. For login
