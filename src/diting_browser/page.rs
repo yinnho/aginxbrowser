@@ -170,6 +170,23 @@ fn module_eval_budget_from(raw: Option<&str>) -> u64 {
     raw.and_then(|s| s.parse().ok()).unwrap_or(10_000)
 }
 
+/// Engine-side init hook: `AGINXBROWSER_INIT_SCRIPT=<path>` runs its file
+/// contents before any page script on every navigation (same slot as CDP
+/// preloads) — the pre-hydration instrumentation point for debugging apps
+/// that bind during module eval.
+fn env_init_script_source() -> Option<String> {
+    env_init_script_from(std::env::var("AGINXBROWSER_INIT_SCRIPT").ok().as_deref())
+}
+
+fn env_init_script_from(path: Option<&str>) -> Option<String> {
+    let source = path.and_then(|p| std::fs::read_to_string(p).ok())?;
+    if source.trim().is_empty() {
+        None
+    } else {
+        Some(source)
+    }
+}
+
 pub struct Page {
     pub id: String,
     /// Upstream frame-realm identifier: one Page can host sub-frame realms
@@ -856,10 +873,17 @@ impl Page {
         // if preload runs after page scripts, every early binding call
         // hits an undefined function and silently no-ops.
         let preload_sources = self.preload_scripts.clone();
+        static ENV_INIT_SCRIPT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        let env_init = ENV_INIT_SCRIPT.get_or_init(env_init_script_source);
         if let Some(js) = &mut self.js {
             for source in &preload_sources {
                 if let Err(e) = js.execute_script_guarded("<preload>", source.as_str()) {
                     tracing::debug!("Preload script error: {}", e);
+                }
+            }
+            if let Some(source) = env_init.as_deref() {
+                if let Err(e) = js.execute_script_guarded("<init-script>", source) {
+                    tracing::debug!("Init script error: {}", e);
                 }
             }
         }
@@ -2632,6 +2656,23 @@ mod tests {
         assert_eq!(super::module_eval_budget_from(None), 10_000);
         assert_eq!(super::module_eval_budget_from(Some("not-a-number")), 10_000);
         assert_eq!(super::module_eval_budget_from(Some("30000")), 30_000);
+    }
+
+    #[test]
+    fn env_init_script_reads_file_and_skips_empty() {
+        assert_eq!(super::env_init_script_from(None), None);
+        assert_eq!(super::env_init_script_from(Some("/nonexistent/init.js")), None);
+        let dir = std::env::temp_dir().join("aginxbrowser_init_script_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("probe.js");
+        std::fs::write(&path, "window.__probed = true;").unwrap();
+        assert_eq!(
+            super::env_init_script_from(Some(path.to_str().unwrap())).as_deref(),
+            Some("window.__probed = true;")
+        );
+        std::fs::write(&path, "   \n").unwrap();
+        assert_eq!(super::env_init_script_from(Some(path.to_str().unwrap())), None);
+        std::fs::remove_file(&path).ok();
     }
 
     // ---- navigation chains over a local server ---------------------------
