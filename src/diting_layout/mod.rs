@@ -2472,6 +2472,52 @@ pub fn layout_dom_with_paint_and_images(
     (rects, items)
 }
 
+/// Collect the absolute rects of everything a flattened inline hoisted:
+/// descend through run wrappers (nested flattening wraps wrapper into
+/// wrapper) and stop at leaves / boxed nodes, which carry both a rect in
+/// `abs_by_node` and a first-item index in `node_first_item`. A wrapped
+/// run leaf is one taffy box covering every line it broke into — split it
+/// with the same greedy-wrap truth the paint path uses so bands follow the
+/// ragged line ends instead of painting the full union box.
+fn expand_wrapped_leaves(
+    node: taffy::tree::NodeId,
+    taffy_tree: &TaffyTree<TextLeaf>,
+    wrapper_set: &std::collections::HashSet<taffy::tree::NodeId>,
+    abs_by_node: &HashMap<taffy::tree::NodeId, Rect>,
+    fonts: &FontBook,
+    pieces: &mut Vec<Rect>,
+    owners: &mut Vec<taffy::tree::NodeId>,
+) {
+    if wrapper_set.contains(&node) {
+        for c in taffy_tree.children(node).unwrap_or_default() {
+            expand_wrapped_leaves(c, taffy_tree, wrapper_set, abs_by_node, fonts, pieces, owners);
+        }
+        return;
+    }
+    let Some(r) = abs_by_node.get(&node) else { return };
+    if let Some(TextLeaf::Run { text, font_size, bold, line_height, .. }) =
+        taffy_tree.get_node_context(node)
+    {
+        let tokens = text::tokens_of(text, *font_size, *bold, fonts);
+        let lines = text::greedy_wrap(&tokens, Some(r.width.max(0.0)));
+        for (i, line) in lines.iter().enumerate() {
+            if line.width <= 0.0 {
+                continue;
+            }
+            pieces.push(Rect {
+                x: r.x,
+                y: r.y + i as f32 * line_height,
+                width: line.width,
+                height: *line_height,
+            });
+            owners.push(node);
+        }
+        return;
+    }
+    pieces.push(*r);
+    owners.push(node);
+}
+
 /// Baseline of a text line box below its top edge, from real font metrics
 /// (the same quantized model the paint path rasterizes against).
 fn text_baseline(fonts: &FontBook, font_size: f32, bold: bool, line_height: f32) -> f32 {
@@ -3215,6 +3261,7 @@ pub fn layout_dom_with_paint_order_and_images(
         baseline_shifts: &HashMap<taffy::tree::NodeId, f32>,
         rects: &mut HashMap<NodeId, Rect>,
         abs_by_node: &mut HashMap<taffy::tree::NodeId, Rect>,
+        node_first_item: &mut HashMap<taffy::tree::NodeId, usize>,
         items: &mut Vec<PaintItem>,
         paint_order: &mut Vec<NodeId>,
         node: taffy::tree::NodeId,
@@ -3222,6 +3269,7 @@ pub fn layout_dom_with_paint_order_and_images(
         viewport_width: f32,
     ) {
         let Ok(layout) = taffy_tree.layout(node) else { return };
+        let item0 = items.len();
         // Hit testing (obscura #738): record this element's slot in the flat
         // paint sequence as the walk reaches it. Because `collect` pushes a
         // node's own items before recursing and sorts children into the
@@ -3509,6 +3557,12 @@ pub fn layout_dom_with_paint_order_and_images(
                 wrap_at: layout.size.width,
             });
         }
+        // Inline background bands (blitz#340 family) splice at the first
+        // paint item of the band owner's content — record this node's first
+        // item index while the walk is here.
+        if items.len() > item0 {
+            node_first_item.entry(node).or_insert(item0);
+        }
         // Stacking order (batch 6a, float level in 8f), the blitz-dom
         // damage.rs model per parent: children with z-index ≠ 0 that are
         // positioned hoist out of document order into the negative band
@@ -3555,7 +3609,7 @@ pub fn layout_dom_with_paint_order_and_images(
         pos.sort_by_key(|(z, _)| *z);
         for list in [neg, mid, pos] {
             for (_, i) in list {
-                collect(tree, taffy_tree, node_map, styles, images, static_pos, baseline_shifts, rects, abs_by_node, items, paint_order, children[i], abs, viewport_width);
+                collect(tree, taffy_tree, node_map, styles, images, static_pos, baseline_shifts, rects, abs_by_node, node_first_item, items, paint_order, children[i], abs, viewport_width);
             }
         }
         if clips {
@@ -3563,6 +3617,7 @@ pub fn layout_dom_with_paint_order_and_images(
         }
     }
     let mut abs_by_node: HashMap<taffy::tree::NodeId, Rect> = HashMap::new();
+    let mut node_first_item: HashMap<taffy::tree::NodeId, usize> = HashMap::new();
     collect(
         tree,
         &taffy_tree,
@@ -3573,6 +3628,7 @@ pub fn layout_dom_with_paint_order_and_images(
         &baseline_shifts,
         &mut rects,
         &mut abs_by_node,
+        &mut node_first_item,
         &mut items,
         &mut paint_order,
         icb_node,
@@ -3626,6 +3682,81 @@ pub fn layout_dom_with_paint_order_and_images(
                     height: max_y - min_y,
                 },
             );
+        }
+    }
+    // Inline backgrounds (blitz#340 family): a flattened inline element has
+    // no taffy box, so the collect walk never reaches the boxed-Bg emission
+    // for it and the background-color silently vanished (nicoburns'
+    // diagnosis in that issue is the same shape). Paint it as per-line bands
+    // over the hoisted content's absolute rects, spliced at the content's
+    // first paint item so the color lands under the element's own ink.
+    // Nested inlines record a later first item, so their bands splice after
+    // the outer's and overpaint it — outer bg under inner bg under ink, the
+    // CSS inline paint order.
+    if !flattened.is_empty() {
+        let wrapper_set: std::collections::HashSet<_> = run_wrappers.iter().copied().collect();
+        let mut inserts: Vec<(usize, usize, Vec<PaintItem>)> = Vec::new();
+        for (dom, kids) in &flattened {
+            let Some(color) = styles
+                .get(dom)
+                .and_then(|s| s.background_color)
+                .filter(|c| c.3 != 0)
+            else {
+                continue;
+            };
+            // The recorded kids can be leaves directly or run wrappers
+            // holding them at any depth (nested inlines flatten wrapper
+            // into wrapper); descend through wrappers so bands measure
+            // text geometry, not wrapper spans.
+            let mut pieces: Vec<Rect> = Vec::new();
+            let mut owners: Vec<taffy::tree::NodeId> = Vec::new();
+            for k in kids {
+                expand_wrapped_leaves(
+                    *k,
+                    &taffy_tree,
+                    &wrapper_set,
+                    &abs_by_node,
+                    fonts,
+                    &mut pieces,
+                    &mut owners,
+                );
+            }
+            let Some(&idx) = owners.iter().filter_map(|n| node_first_item.get(n)).min() else {
+                continue;
+            };
+            // Group pieces into line bands by vertical overlap: same-line
+            // leaves share the line box even where baseline shifts split
+            // their tops; different lines never overlap.
+            pieces.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
+            let mut bands: Vec<Rect> = Vec::new();
+            for r in pieces {
+                match bands.last_mut() {
+                    Some(last) if r.y < last.y + last.height => {
+                        let bottom = (last.y + last.height).max(r.y + r.height);
+                        let right = (last.x + last.width).max(r.x + r.width);
+                        last.y = last.y.min(r.y);
+                        last.x = last.x.min(r.x);
+                        last.width = right - last.x;
+                        last.height = bottom - last.y;
+                    }
+                    _ => bands.push(r),
+                }
+            }
+            let color = [color.0, color.1, color.2, color.3];
+            inserts.push((
+                idx,
+                tree.ancestors(*dom).len(),
+                bands
+                    .into_iter()
+                    .map(|rect| PaintItem::Bg { rect, color, radius: 0.0 })
+                    .collect(),
+            ));
+        }
+        // Later splice points first, deeper element first on ties, so each
+        // batch lands under everything recorded after it.
+        inserts.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        for (idx, _, band_items) in inserts {
+            items.splice(idx..idx, band_items);
         }
     }
     (rects, items, paint_order)

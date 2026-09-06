@@ -373,6 +373,7 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "line-height",
         "text-align", "border", "border-top", "border-right", "border-bottom", "border-left",
         "border-color", "border-width", "border-style",
+        "border-top-width", "border-right-width", "border-bottom-width", "border-left-width",
         "width", "height", "flex-direction", "gap", "overflow",
         "object-fit", "object-position", "z-index", "border-radius",
         "float", "clear",
@@ -1522,6 +1523,26 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             }
             width.is_some() || line.is_some() || color.is_some()
         }
+        // Per-side width longhands: `border: 1px solid; border-top-width: 0`
+        // must leave the other three sides intact (Chrome shows a three-sided
+        // outline there — blitz#837's repro shape). The property used to be
+        // unknown here, so the side kept the shorthand's width.
+        "border-top-width" | "border-right-width" | "border-bottom-width" | "border-left-width" => {
+            let l = match v {
+                "thin" => Some(Length::Px(1.0)),
+                "medium" => Some(Length::Px(3.0)),
+                "thick" => Some(Length::Px(5.0)),
+                _ => len(v),
+            };
+            let Some(l) = l else { return false };
+            match name {
+                "border-top-width" => style.border_width.top = Some(l),
+                "border-right-width" => style.border_width.right = Some(l),
+                "border-bottom-width" => style.border_width.bottom = Some(l),
+                _ => style.border_width.left = Some(l),
+            }
+            true
+        }
         "border-width" => {
             let sides = expand_sides(v, fonts);
             style.border_width = sides;
@@ -2581,6 +2602,20 @@ mod tests {
         // `none` computes any widths away (CSS initial style).
         apply_declarations(&mut s, "border-style: none");
         assert_eq!(s.border_style, None);
+
+        // Per-side width longhands narrow one side of a shorthand border
+        // without touching the rest (blitz#837 repro shape: 0 kills the top
+        // side only). Unitless zero is the canonical form there.
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "border: 1px solid #ff0000");
+        assert!(apply_declarations(&mut s, "border-top-width: 0"));
+        assert_eq!(s.border_width.top, Some(Length::Px(0.0)));
+        assert_eq!(s.border_width.right, Some(Length::Px(1.0)));
+        assert_eq!(s.border_width.bottom, Some(Length::Px(1.0)));
+        assert_eq!(s.border_width.left, Some(Length::Px(1.0)));
+        assert!(apply_declarations(&mut s, "border-left-width: thick"));
+        assert_eq!(s.border_width.left, Some(Length::Px(5.0)));
+        assert!(!apply_declarations(&mut s, "border-right-width: bogus"));
 
         // Garbage token drops the whole shorthand declaration.
         let mut s = ComputedStyle::default();

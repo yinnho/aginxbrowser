@@ -992,3 +992,217 @@ fn width_sizing_keywords_resolve_to_intrinsic() {
         "float-zone min-content currently measures widest-item (100) + 4px borders; got {fmin}"
     );
 }
+
+/// Inline backgrounds (blitz#340 family): a flattened inline (`<span>` in a
+/// block's run) owns no taffy box, so the boxed-Bg emission never ran for it
+/// and background-color silently vanished — same shape as nicoburns'
+/// diagnosis there. The fix paints per-line bands over the hoisted content
+/// and splices them at the content's first paint item, so the band lands
+/// under the element's own ink (CSS inline paint order).
+#[test]
+fn inline_background_paints_band_under_own_ink() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::PaintItem;
+
+    let html = r#"<html><body><p>aaa <span class="hl">bbb ccc</span> ddd</p></body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for(
+        "span.hl { background-color: #ff7500; }",
+        (1280.0, 800.0),
+        CssMediaType::Screen,
+    );
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let (_, items) = crate::diting_layout::layout_dom_with_paint(
+        &tree,
+        &styles,
+        &crate::diting_fonts::font_book(),
+        1280.0,
+        800.0,
+    );
+
+    let bands: Vec<(crate::diting_layout::Rect, f32)> = items
+        .iter()
+        .filter_map(|it| match it {
+            PaintItem::Bg { rect, color, radius } if *color == [0xff, 0x75, 0x00, 0xff] => {
+                Some((*rect, *radius))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        bands.len(),
+        1,
+        "single-line span paints exactly one band; got {bands:?}"
+    );
+    let (band, radius) = bands[0];
+    assert_eq!(radius, 0.0, "flattened inline bands carry no radius");
+
+    // The band covers the span's run, not the surrounding text: it starts
+    // at the run's left edge (not the line's) and stops before the " ddd"
+    // tail word outside the span.
+    let text_x = |needle: &str| {
+        items.iter().find_map(|it| match it {
+            PaintItem::Text { text, x, .. } if text.contains(needle) => Some(*x),
+            _ => None,
+        })
+    };
+    let bbb_x = text_x("bbb").expect("span's run paints");
+    let ddd_x = text_x("ddd").expect("tail word paints");
+    assert!(
+        (band.x - bbb_x).abs() <= 2.0,
+        "band must start at the span's first word, not the line's; band.x={} bbb.x={bbb_x}",
+        band.x
+    );
+    assert!(
+        band.x + band.width <= ddd_x + 1.0,
+        "band must stop at the span's last glyph, not reach the tail; band={band:?} ddd.x={ddd_x}"
+    );
+
+    // Under its own ink: the band precedes every Text item it underlaps.
+    let band_idx = items
+        .iter()
+        .position(|it| matches!(it, PaintItem::Bg { color, .. } if *color == [0xff, 0x75, 0x00, 0xff]))
+        .unwrap();
+    let ink_idx = items
+        .iter()
+        .position(|it| matches!(it, PaintItem::Text { text, .. } if text.contains("bbb")))
+        .unwrap();
+    assert!(
+        band_idx < ink_idx,
+        "band (idx {band_idx}) must precede the span's own text (idx {ink_idx})"
+    );
+}
+
+/// A wrapped inline background splits into one band per line box; the bands
+/// stack vertically without overlap (each line's color stops at the line
+/// box, never bleeding into the next).
+#[test]
+fn inline_background_splits_bands_per_wrapped_line() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::PaintItem;
+
+    let html = r#"<html><body><p style="width:120px">x <span class="hl">one two three four five six seven</span> y</p></body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for(
+        "span.hl { background-color: #00cc00; }",
+        (1280.0, 800.0),
+        CssMediaType::Screen,
+    );
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let (_, items) = crate::diting_layout::layout_dom_with_paint(
+        &tree,
+        &styles,
+        &crate::diting_fonts::font_book(),
+        1280.0,
+        800.0,
+    );
+
+    let mut bands: Vec<crate::diting_layout::Rect> = items
+        .iter()
+        .filter_map(|it| match it {
+            PaintItem::Bg { rect, color, .. } if *color == [0x00, 0xcc, 0x00, 0xff] => {
+                Some(*rect)
+            }
+            _ => None,
+        })
+        .collect();
+    bands.sort_by(|a, b| a.y.total_cmp(&b.y));
+    assert!(
+        bands.len() >= 2,
+        "a 7-word span in 120px must wrap to 2+ bands; got {bands:?}"
+    );
+    for w in bands.windows(2) {
+        assert!(
+            w[1].y >= w[0].y + w[0].height - 0.5,
+            "bands must not overlap vertically; {w:?}"
+        );
+    }
+}
+
+/// Nested inline backgrounds stack in CSS inline paint order: the outer
+/// element's band precedes the inner element's band, which precedes the
+/// shared text — outer bg under inner bg under ink.
+#[test]
+fn nested_inline_backgrounds_stack_outer_under_inner() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::PaintItem;
+
+    let html = r#"<html><body><p>pre <span class="outer">a <b class="inner">x</b> d</span> post</p></body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for(
+        "span.outer { background-color: #0000ff; } b.inner { background-color: #ff0000; }",
+        (1280.0, 800.0),
+        CssMediaType::Screen,
+    );
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let (_, items) = crate::diting_layout::layout_dom_with_paint(
+        &tree,
+        &styles,
+        &crate::diting_fonts::font_book(),
+        1280.0,
+        800.0,
+    );
+
+    let idx_of = |pred: &dyn Fn(&PaintItem) -> bool| {
+        items.iter().position(pred).expect("expected paint item missing")
+    };
+    let outer_idx = idx_of(&|it| {
+        matches!(it, PaintItem::Bg { color, .. } if *color == [0x00, 0x00, 0xff, 0xff])
+    });
+    let inner_idx = idx_of(&|it| {
+        matches!(it, PaintItem::Bg { color, .. } if *color == [0xff, 0x00, 0x00, 0xff])
+    });
+    let ink_idx = idx_of(&|it| matches!(it, PaintItem::Text { text, .. } if text == "x"));
+    assert!(
+        outer_idx < inner_idx && inner_idx < ink_idx,
+        "paint order must be outer bg ({outer_idx}) < inner bg ({inner_idx}) < ink ({ink_idx})"
+    );
+}
+
+/// Per-side width longhands (blitz#837's repro shape): `border: 1px solid;
+/// border-top-width: 0` must erase exactly the top side — the property used
+/// to be unknown here, so the side kept the shorthand's width (Chrome shows
+/// a three-sided outline; we showed four).
+#[test]
+fn per_side_border_width_longhand_zeroes_one_side() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::PaintItem;
+
+    let border_widths = |html: &str| -> [f32; 4] {
+        let tree = parse_html(html);
+        let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
+        let styles = crate::diting_layout::compute_styles(&tree, &rules);
+        let (_, items) = crate::diting_layout::layout_dom_with_paint(
+            &tree,
+            &styles,
+            &crate::diting_fonts::font_book(),
+            1280.0,
+            800.0,
+        );
+        items
+            .iter()
+            .find_map(|it| match it {
+                PaintItem::Border { widths, .. } => Some(*widths),
+                _ => None,
+            })
+            .expect("bordered div must emit a Border item")
+    };
+
+    let four_sided = border_widths(
+        r#"<html><body><div style="width:50px;height:30px;border:1px solid #ff0000">t</div></body></html>"#,
+    );
+    assert_eq!(four_sided, [1.0, 1.0, 1.0, 1.0], "shorthand keeps all sides");
+
+    let three_sided = border_widths(
+        r#"<html><body><div style="width:50px;height:30px;border:1px solid #ff0000;border-top-width:0;border-radius:8px">t</div></body></html>"#,
+    );
+    assert_eq!(
+        three_sided,
+        [0.0, 1.0, 1.0, 1.0],
+        "border-top-width: 0 erases only the top side (CSS order top right bottom left)"
+    );
+}
