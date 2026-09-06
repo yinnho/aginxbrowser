@@ -548,6 +548,7 @@ Create an interactive browser session.
 | url | string | | `null` | Initial URL (optional) |
 | use_proxy | bool | | `false` | Route through a proxy |
 | cookies | string[] | | `[]` | Cookies injected before navigation (`["name=value",...]`) so the session starts already logged in |
+| persistent | bool | | `false` | Persist login state to the server-side store: if the session idles out or the server restarts, the same `session_id` revives logged-in on the next call (`session/{id}/close` drops the snapshot; idle expiry keeps it) |
 
 **Response:**
 
@@ -712,7 +713,7 @@ Execute JavaScript within the session.
 
 ### POST /session/{id}/close
 
-Close the session and release its resources.
+Close the session and release its resources. For a `persistent` session this also drops the on-disk login snapshot — idle expiry keeps it, an explicit close does not.
 
 **Response:**
 
@@ -1097,7 +1098,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 
 | Tool | Description |
 |------|------|
-| `session_create` | Create an interactive browser session |
+| `session_create` | Create an interactive browser session; with `persistent: true` the login state survives idle eviction and server restarts — the same `session_id` revives logged-in |
 | `session_clone` | Derive a new session carrying the full login state (cookies + storage + viewport + dialog policy); the source stays untouched — snapshot before risky actions, or run one login in parallel |
 | `session_list` | List live sessions with idle age and time left before auto-eviction (discover one to reuse) |
 | `session_navigate` | Navigate to a new URL within a session |
@@ -1117,7 +1118,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `session_wait` | Wait until a CSS selector matches or a JS predicate turns truthy, with a timeout — the page's event loop keeps running while waiting, so this replaces blind sleeps for async content |
 | `session_network` | Read the session's network request log; `filter: "media"` extracts playback/stream URLs (m3u8, mp4, ...) actually requested by the page — the reliable way to get a real video link |
 | `session_export` | Export the session's recorded actions as a runnable curl replay script (`format=jsonl` for the raw log) |
-| `session_close` | Close the session |
+| `session_close` | Close the session (for a persistent one this drops the on-disk login snapshot — idle expiry keeps it, an explicit close does not) |
 
 #### `fetch` Tool Parameters
 
@@ -1144,6 +1145,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | storage | object | | `null` | Web storage to inject after the initial navigation lands: `{"local_storage": {"k":"v"}, "session_storage": {"k":"v"}}`. Round-trips with `session_storage` |
 | ttl_secs | u64 | | `480` | Idle time-to-live in seconds before the session is evicted (clamped 60..3600). Raise it for long workflows |
 | keepalive | bool | | `false` | Exempt the session from the idle reaper: it lives until `session_close` or server exit — a workflow interrupted by long non-browser steps keeps its login state |
+| persistent | bool | | `false` | Persist the login state (cookies, `localStorage`/`sessionStorage`, viewport, dialog policy) to the server-side store after every action. If the session idles out — or the server restarts — the same `session_id` revives logged-in on the next call. `session_close` drops the snapshot; idle expiry keeps it (Playwright storageState semantics, but keyed by the session id you already hold) |
 | width / height | u32 | | `null` | Initial viewport, pinned for the session's life (survives navigation) |
 | mobile | bool | | `false` | Mobile emulation for the initial viewport (`pointer: coarse`, `hover: none`, `maxTouchPoints = 5`) |
 

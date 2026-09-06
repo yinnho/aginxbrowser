@@ -541,6 +541,7 @@ curl -sS -X POST http://127.0.0.1:8089/screenshot \
 | url | string | | `null` | 初始 URL（可选） |
 | use_proxy | bool | | `false` | 走代理 |
 | cookies | string[] | | `[]` | 导航前注入的 cookie（`["name=value",...]`），让会话创建即登录态 |
+| persistent | bool | | `false` | 登录态落盘：会话闲置过期甚至服务重启后，下一次调用同一个 `session_id` 会带着登录态原地复活（`session/{id}/close` 会删掉快照，空闲过期则保留） |
 
 **响应：**
 
@@ -652,7 +653,7 @@ viewport=1280x800
 
 ### POST /session/{id}/close
 
-关闭会话，释放资源。
+关闭会话，释放资源。对 persistent 会话，这一步会顺带删掉落盘的登录快照——空闲过期会保留快照，显式关闭不会。
 
 **响应：**
 
@@ -798,7 +799,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 
 | 工具 | 说明 |
 |------|------|
-| `session_create` | 创建交互式浏览器会话 |
+| `session_create` | 创建交互式浏览器会话；`persistent: true` 时登录态落盘，闲置过期甚至服务重启后同一个 `session_id` 带登录态复活 |
 | `session_clone` | 从现役会话派生新会话，完整带走登录态（cookie + storage + viewport + 弹窗策略），原会话不动——危险操作前先存档，或同一登录态并行开多会话 |
 | `session_list` | 列出存活会话（空闲时长 + 剩余寿命，能复用就别新建） |
 | `session_navigate` | 会话内导航到新 URL |
@@ -818,7 +819,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 | `session_wait` | 等 CSS 选择器命中或 JS 谓词为真，带超时——等待期间页面事件循环照常跑，替代瞎 sleep |
 | `session_network` | 读会话网络请求日志；`filter: "media"` 从页面真实发出的请求里提播放/直播链接（m3u8、mp4…）——拿真视频直链靠它 |
 | `session_export` | 导出会话录制的动作（默认出可回放的 curl 脚本；`format=jsonl` 出原始日志） |
-| `session_close` | 关闭会话 |
+| `session_close` | 关闭会话（persistent 会话顺带删落盘登录快照——空闲过期保留，显式关闭不留） |
 
 #### fetch 工具参数
 
@@ -845,6 +846,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 | storage | object | | `null` | 初始导航落地后注入的 Web Storage：`{"local_storage": {"k":"v"}, "session_storage": {"k":"v"}}`。与 `session_storage` 工具往返 |
 | ttl_secs | u64 | | `480` | 空闲回收秒数（钳 60..3600），长流程调大 |
 | keepalive | bool | | `false` | 免空闲回收：活到 `session_close` 或进程退出——中间穿插长非浏览器步骤的流程不再丢登录态 |
+| persistent | bool | | `false` | 登录态落盘（cookie、`localStorage`/`sessionStorage`、视口、弹窗策略，每次操作后存一份）。会话闲置过期甚至服务重启后，下一次调用同一个 `session_id` 会带着登录态原地复活。`session_close` 会删掉快照，空闲过期则保留（Playwright storageState 的语义，但不用换钥匙——还是你手里那个 session_id） |
 | width / height | u32 | | `null` | 初始视口，会话存活期钉住（活过导航） |
 | mobile | bool | | `false` | 初始视口的手机模拟（`pointer: coarse`、`hover: none`、`maxTouchPoints = 5`） |
 

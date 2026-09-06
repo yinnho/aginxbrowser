@@ -48,7 +48,7 @@ Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操
 刚冒出来的「agent 浏览器」大多是**无状态、无指纹**的一次性渲染引擎——抓公开页很轻，碰上 Cloudflare 或要登录的站就死。AginxBrowser 走相反的路：
 
 - **🔐 真实 TLS 指纹** — stealth 模式用 BoringSSL 复刻 Chrome145 / Firefox133 / Safari / Edge 的完整 TLS 握手（不是只改 UA），可按请求切换；Cloudflare Turnstile 挑战页自动等 `cf_clearance`。无指纹引擎碰反爬就是 403，我们穿过去。
-- **🤝 有状态交互 Session** — 持久化浏览器会话（8 分钟空闲保活），登录态可注入可导出（`session_create(cookies=...)` ↔ `session_cookies`），跨翻页、跨多步流程不断。一次性引擎抓完即弃，做不了「登录 → 操作 → 再操作」。
+- **🤝 有状态交互 Session** — 登录态可注入可导出（`session_create(cookies=...)` ↔ `session_cookies`），跨翻页、跨多步流程不断；`persistent: true` 连闲置过期和服务重启都能扛过去，同一个 session_id 复活时还带着登录态。一次性引擎抓完即弃，做不了「登录 → 操作 → 再操作」。
 - **🔌 MCP 原生** — 27 个工具是一等公民（不是 CDP 套壳），Claude Code / Cursor / Claude Desktop 一行接入。HTTP + MCP 双协议之外还有 CDP 桥，DevTools 生态照样能用。
 
 > 参照：Cloudflare 的 Kitesurf 明确不做真实 TLS 指纹协商、不做持久认证会话——反爬与登录正是 AginxBrowser 的地盘。

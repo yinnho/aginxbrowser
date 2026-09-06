@@ -333,6 +333,11 @@ impl Store {
              CREATE INDEX IF NOT EXISTS idx_searches_expires ON searches(expires_at);
              CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(
                  title, content, url, content='', contentless_delete=1
+             );
+             CREATE TABLE IF NOT EXISTS session_snapshots (
+                 id TEXT PRIMARY KEY,
+                 snapshot TEXT NOT NULL,
+                 updated_at INTEGER NOT NULL
              );",
         )
         .map_err(|e| e.to_string())?;
@@ -813,6 +818,52 @@ impl Store {
         Ok((np, ns))
     }
 
+    // Persistent-session snapshots (feedback ③). Keyed by bare session id —
+    // session ids are process-global (REST and MCP share one manager), so an
+    // owner column would add nothing. Snapshots hold login cookies and live
+    // next to fetched page content under the same 0600 db.
+
+    fn save_session_snapshot(&self, id: &str, snapshot: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO session_snapshots (id, snapshot, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(id) DO UPDATE SET snapshot=excluded.snapshot, updated_at=excluded.updated_at",
+                params![id, snapshot, now()],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    fn load_session_snapshot(&self, id: &str) -> Result<Option<(String, i64)>, String> {
+        self.conn
+            .query_row(
+                "SELECT snapshot, updated_at FROM session_snapshots WHERE id=?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(e.to_string()),
+            })
+    }
+
+    fn delete_session_snapshot(&self, id: &str) -> Result<bool, String> {
+        self.conn
+            .execute("DELETE FROM session_snapshots WHERE id=?1", params![id])
+            .map(|n| n > 0)
+            .map_err(|e| e.to_string())
+    }
+
+    fn purge_session_snapshots(&self, max_age_secs: i64) -> Result<usize, String> {
+        self.conn
+            .execute(
+                "DELETE FROM session_snapshots WHERE updated_at < ?1",
+                params![now() - max_age_secs],
+            )
+            .map_err(|e| e.to_string())
+    }
+
     fn stats(&self, owner: &str) -> Result<Stats, String> {
         let (pages, searches, oldest) = self
             .conn
@@ -997,6 +1048,26 @@ pub fn clear(
 
 pub fn stats(owner: &str) -> Result<Stats, String> {
     with_store(|st| st.stats(&norm_owner(owner)))
+}
+
+/// Best-effort snapshot persistence — a failed write degrades the session to
+/// in-memory-only, never breaks the command that produced the state.
+pub fn save_session_snapshot(id: &str, snapshot: &str) -> Result<(), String> {
+    with_store(|st| st.save_session_snapshot(id, snapshot))
+}
+
+/// `None` when the store is disabled, the id has no snapshot, or the read
+/// failed (a revive then behaves as if the session never existed).
+pub fn load_session_snapshot(id: &str) -> Option<(String, i64)> {
+    with_store(|st| st.load_session_snapshot(id)).ok().flatten()
+}
+
+pub fn delete_session_snapshot(id: &str) -> bool {
+    with_store(|st| st.delete_session_snapshot(id)).unwrap_or(false)
+}
+
+pub fn purge_session_snapshots(max_age_secs: i64) {
+    let _ = with_store(|st| st.purge_session_snapshots(max_age_secs));
 }
 
 // ---------------------------------------------------------------------------
@@ -1253,6 +1324,35 @@ mod tests {
                 .unwrap();
             let _ = hits; // must not Err
         }
+    }
+
+    #[test]
+    fn session_snapshots_roundtrip_and_purge() {
+        let s = test_store();
+        assert!(s.load_session_snapshot("s_1").unwrap().is_none());
+        s.save_session_snapshot("s_1", "{\"url\":\"https://x.test\"}").unwrap();
+        let (snap, at) = s.load_session_snapshot("s_1").unwrap().unwrap();
+        assert_eq!(snap, "{\"url\":\"https://x.test\"}");
+        assert!(at > 0);
+        // Upsert overwrites; ids are independent.
+        s.save_session_snapshot("s_1", "{\"url\":\"https://y.test\"}").unwrap();
+        s.save_session_snapshot("s_2", "{\"url\":\"https://z.test\"}").unwrap();
+        assert_eq!(
+            s.load_session_snapshot("s_1").unwrap().unwrap().0,
+            "{\"url\":\"https://y.test\"}"
+        );
+        assert!(s.delete_session_snapshot("s_1").unwrap());
+        assert!(!s.delete_session_snapshot("s_1").unwrap());
+        assert!(s.load_session_snapshot("s_2").unwrap().is_some());
+        // Age-based purge only touches rows past the cutoff.
+        s.conn
+            .execute(
+                "UPDATE session_snapshots SET updated_at=?1 WHERE id='s_2'",
+                params![now() - 100_000],
+            )
+            .unwrap();
+        s.purge_session_snapshots(50_000).unwrap();
+        assert!(s.load_session_snapshot("s_2").unwrap().is_none());
     }
 
     #[test]

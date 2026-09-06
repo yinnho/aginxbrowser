@@ -160,6 +160,14 @@ pub struct SessionCreateParams {
     /// non-browser steps keeps its login state.
     #[serde(default)]
     pub keepalive: bool,
+    /// Persist the login state (cookies + localStorage/sessionStorage +
+    /// viewport + dialog policy) to the server's local store after every
+    /// action. If the session idles out — or the whole server restarts —
+    /// the next call with the same session_id revives it logged-in
+    /// (storageState-style recovery, no re-login). Explicit session_close
+    /// drops the snapshot.
+    #[serde(default)]
+    pub persistent: bool,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -678,7 +686,7 @@ impl AginxBrowserMcp {
     // ------------------------------------------------------------------
 
     #[tool(
-        description = "Create a persistent interactive browser session for multi-step interaction - clicking, typing, scrolling, reading state across page transitions. Use when the agent must INTERACT with a page (login flows, forms, pagination, click-through) rather than read it once. Returns session_id; persists 8 min idle.",
+        description = "Create a persistent interactive browser session for multi-step interaction - clicking, typing, scrolling, reading state across page transitions. Use when the agent must INTERACT with a page (login flows, forms, pagination, click-through) rather than read it once. Returns session_id; persists 8 min idle. With persistent:true the login state survives idle eviction and server restarts - the same session_id revives logged-in.",
         annotations(title = "Create Browser Session")
     )]
     async fn session_create(&self, Parameters(params): Parameters<SessionCreateParams>) -> String {
@@ -698,10 +706,14 @@ impl AginxBrowserMcp {
             params.ttl_secs,
             pin,
             params.keepalive,
+            params.persistent,
         );
         let mut resp = json!({ "session_id": id, "url": url });
         if let Some(s) = mgr.expires_in_secs(&id) {
             resp["expires_in_secs"] = json!(s);
+        }
+        if params.persistent {
+            resp["persistent"] = json!(true);
         }
         resp.to_string()
     }
@@ -1049,7 +1061,7 @@ naming the selector/predicate on expiry. Exactly one of selector/predicate.",
     }
 
     #[tool(
-        description = "Close a browser session and free its resources.",
+        description = "Close a browser session and free its resources. For a persistent session this also drops the on-disk login snapshot - idle expiry keeps it, an explicit close does not.",
         annotations(title = "Session Close")
     )]
     async fn session_close(&self, Parameters(params): Parameters<SessionCloseParams>) -> String {

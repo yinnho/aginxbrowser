@@ -467,6 +467,11 @@ pub struct SessionCreateRequest {
     /// Exempt the session from the idle reaper (lives until close/exit).
     #[serde(default)]
     pub keepalive: bool,
+    /// Persist the login state to the local store after every action; the
+    /// same session id revives logged-in after idle expiry or a server
+    /// restart. An explicit DELETE /session/:id drops the snapshot.
+    #[serde(default)]
+    pub persistent: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -476,6 +481,9 @@ pub struct SessionCreateResponse {
     /// Idle budget left before auto-eviction; absent for keepalive sessions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_in_secs: Option<u64>,
+    /// Echoed only for persistent sessions (the snapshot is live).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub persistent: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1063,12 +1071,13 @@ async fn session_create_handler(Json(req): Json<SessionCreateRequest>) -> Result
         (None, None) => None,
         (w, h) => Some((w, h, req.mobile)),
     };
-    let id = mgr.create(req.url.as_deref(), req.use_proxy, req.cookies, req.storage, req.ttl_secs, pin, req.keepalive);
+    let id = mgr.create(req.url.as_deref(), req.use_proxy, req.cookies, req.storage, req.ttl_secs, pin, req.keepalive, req.persistent);
     let expires_in_secs = mgr.expires_in_secs(&id);
     Ok((StatusCode::OK, Json(SessionCreateResponse {
         expires_in_secs,
         session_id: id,
         url: req.url,
+        persistent: req.persistent,
     })))
 }
 
