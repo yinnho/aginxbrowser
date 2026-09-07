@@ -78,3 +78,18 @@ screenshot = [ ..., "fontique/fontconfig-dlopen" ] # feature 数组加一行
 注意：仅设 env `RUST_FONTCONFIG_DLOPEN=1` **不够**——fontique 用自己的
 `fontconfig-dlopen` feature gate `ffi_dispatch!` 路径。dlopen 后运行时无
 libfontconfig 也能跑（bundled CJK 字体兜底），已在设备上验证。
+
+---
+
+## 更新 2026-09-07 — 截图构建零 blitz（回应"构建日志提到 blitz"）
+
+**根因**：AginxOS 构建拉 main rev + `--features screenshot`，与 0.2.x 版本号无关。
+当时 `screenshot` feature 仍内含 blitz 参照管线（blitz 四件套 + Stylo 族），
+故构建日志出现 blitz。diting 本就是默认渲染路径，属 feature 拆分欠账非引擎行为。
+
+**已修**（main `962abd3`）：`screenshot` = 纯 diting 栈，`cargo tree` 全图零
+blitz；参照管线独立 opt-in `blitz-reference`（设备构建永不开）。设备构建少背
+54 个包（blitz 四件套 + stylo 九件 + usvg/svg 工具链），依赖计数 416 → 362。
+构建命令不变。fontique/fontconfig-dlopen patch 仍需（fontique 是 diting 运行时
+依赖）。二进制体积降幅未测，AginxOS 下次出包记录 strip 后对比。交接细节见
+`~/Documents/aginx/aginxbrowser-zero-blitz-build.md`。
