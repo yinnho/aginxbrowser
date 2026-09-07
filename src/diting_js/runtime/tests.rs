@@ -5153,6 +5153,85 @@
         assert_eq!(rt.evaluate("window.__slow").unwrap().as_f64(), Some(1.0));
     }
 
+    /// Real browsers send and store cookies on cross-origin classic
+    /// `<script src>` requests (the JSONP-era contract: taobao mtop's token
+    /// refresh rotates `_m_h5_tk` via Set-Cookie on a cross-origin JSONP GET,
+    /// and with credentials "same-origin" the refresh looped on
+    /// FAIL_SYS_TOKEN_EMPTY forever, leaving decorated shop pages empty).
+    /// Page on port A, script server on port B — different ports are
+    /// different origins, same 127.0.0.1 host so jar cookies domain-match.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_dynamic_cross_origin_script_sends_and_stores_cookies() {
+        struct PrivateNetGuard(std::sync::MutexGuard<'static, ()>);
+        impl Drop for PrivateNetGuard {
+            fn drop(&mut self) {
+                std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+            }
+        }
+        let guard = PrivateNetGuard(crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap());
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        // Owns the page origin's port (nothing serves it — the runtime's
+        // document is injected locally; binding keeps the OS from reusing it).
+        let page_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let page_port = page_listener.local_addr().unwrap().port();
+
+        let script_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let script_port = script_listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for _ in 0..3 {
+                let Ok((mut stream, _)) = script_listener.accept() else { return };
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let sent_cookie = req.lines().any(|l| {
+                    let lower = l.to_ascii_lowercase();
+                    lower.starts_with("cookie:") && lower.contains("probe=")
+                });
+                let body: &[u8] = if sent_cookie {
+                    // Runs in the page realm, so document.cookie must already
+                    // reflect the Set-Cookie stored from these very headers.
+                    b"window.__dynEcho = 'COOKIE_SENT';"
+                } else {
+                    b"window.__dynEcho = 'NO_COOKIE';"
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/javascript\r\nset-cookie: dyn_sc=stored; Path=/\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.write_all(body).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        let (mut rt, jar) = setup_runtime_with_cookies("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", page_port));
+        jar.set_cookie(
+            "probe=1; Path=/",
+            &url::Url::parse(&format!("http://127.0.0.1:{}/page", page_port)).unwrap(),
+        );
+
+        let script = format!(r#"async () => {{
+            const s = document.createElement('script');
+            s.setAttribute('src', 'http://127.0.0.1:{script_port}/jsonp.js');
+            document.body.appendChild(s);
+            await new Promise(r => setTimeout(r, 300));
+            return window.__dynEcho;
+        }}"#);
+        let result = rt.call_function_on_for_cdp(&script, None, &[], true, true).await.unwrap();
+        drop(guard);
+
+        assert_eq!(result.value.unwrap(), serde_json::json!("COOKIE_SENT"));
+        let all = jar.get_all_cookies();
+        let stored = all
+            .iter()
+            .find(|c| c.name == "dyn_sc")
+            .expect("Set-Cookie from cross-origin dynamic script must land in the jar");
+        assert_eq!(stored.value, "stored");
+    }
+
     #[test]
     fn test_domparser_xml_parsererror_on_malformed() {
         // Upstream 53295fa+6927f11+869f700+20c4628: XML mime types get a

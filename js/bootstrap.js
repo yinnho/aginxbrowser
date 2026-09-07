@@ -972,9 +972,15 @@ function __prepareInsertedScript(script) {
           } else {
             // Bracket the fetch so the settle loop keeps pumping past its
             // fast-path deadline while this script is still in flight.
+            // credentials "include": classic <script src> requests carry and
+            // store cookies cross-origin in real browsers (JSONP-era APIs
+            // depend on it — taobao mtop's token refresh rotates _m_h5_tk via
+            // Set-Cookie on a cross-origin JSONP GET; with "same-origin" the
+            // Set-Cookie is dropped and the refresh loops on TOKEN_EMPTY
+            // forever, leaving decorated shop pages empty).
             _OPS.op_dyn_script_fetch_begin();
             try {
-              const raw = await _OPS.op_fetch_url(fullUrl, "GET", "{}", "", pageOrigin, "no-cors", "same-origin");
+              const raw = await _OPS.op_fetch_url(fullUrl, "GET", "{}", "", pageOrigin, "no-cors", "include");
               const parsed = JSON.parse(raw);
               if (!(parsed.status >= 200 && parsed.status <= 299)) {
                 throw new Error('HTTP ' + (parsed.status || 0));
