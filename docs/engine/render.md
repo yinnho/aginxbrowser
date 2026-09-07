@@ -1,5 +1,20 @@
 # obscura-render 摸底报告 — 渲染认领 Phase 0
 
+> 2026-09-07 补记：feature 已拆分。`screenshot` = diting 渲染栈（taffy/
+> parley/swash/vello_cpu 地基，零 blitz 代码，`cargo tree --features
+> screenshot` 全图零 blitz 命中）；Blitz 参照管线（blitz-* 四件套 + Stylo）
+> 挪到独立 opt-in `blitz-reference`，代码住 `src/screenshot_reference.rs`
+> （按用途命名——它是对照 oracle，用哪个引擎是血统写在头注释里）。
+> 跑双引擎 cross-check 与 bridge_cross_check 从此要 `--features
+> blitz-reference`（screen-only 构建里这些测试不存在）。产物面影响：
+> release/workflow 的 `--features stealth,screenshot` 构建自动零 blitz；
+> `engine:"blitz"` 请求在该构建下报错而非静默换引擎。依赖图实测（
+> `cargo tree -e normal --prefix none` 唯一包计数）：无 feature 302 /
+> screenshot 362 / blitz-reference 416——参照管线多背 54 个包（blitz 四件套
+> + stylo 九件 + usvg/svg 工具链），生产与设备构建全不背。测试拆分后
+> screenshot-only 761 全绿（86 个 blitz 侧测试随门控走），blitz-reference
+> 847 全绿（= 拆分前基线数，零测试丢失）。
+
 > 2026-08-23。Phase 2 双轨决策的慢线第一步：摸底上游自研渲染器
 > `/tmp/obscura-upstream/crates/obscura-render`（最新 main 39fe4d2），
 > 为「style/paint/text 三层自研」定批次节奏。主线 Blitz（钉 2fa6434d）

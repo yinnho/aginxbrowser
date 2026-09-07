@@ -395,7 +395,7 @@ curl -sS -X POST http://127.0.0.1:8089/download \
 
 Render the page's post-JS DOM into a PNG screenshot (returned as base64). **Requires building with `--features screenshot`** (not included by default; see the build section).
 
-Does not use `/fetch`'s tiered rendering — it always drives the obscura browser through full JS execution, then feeds the result to the built-in Blitz rendering stack (Stylo + Taffy + vello_cpu, pure CPU, no Chromium).
+Does not use `/fetch`'s tiered rendering — it always drives the obscura browser through full JS execution, then renders the result with the built-in diting engine (our own CSS cascade + Taffy box layout + CPU paint, no Chromium). Pass `"engine": "blitz"` to opt into the Blitz reference pipeline for comparison renders — that requires building with `--features blitz-reference` (blitz is not compiled in by default).
 
 **Request fields:**
 
@@ -429,7 +429,7 @@ Does not use `/fetch`'s tiered rendering — it always drives the obscura browse
 
 - `selector` + `selector_all=false` (default): the image is cropped to the border box of the first matching element; `selector_rects` contains exactly one entry (the cropped region).
 - `selector` + `selector_all=true`: the image renders as a normal full page; `selector_rects` returns coordinates for **every match** — the agent can consume just the coordinates without the image.
-- Coordinates come from Blitz's post-layout `final_layout` (Taffy border boxes), accumulated along the layout tree into absolute page coordinates.
+- Coordinates come from diting's post-layout Taffy border boxes, accumulated along the layout tree into absolute page coordinates.
 
 > ⚠️ **Inline element limitation**: inline elements containing only text (e.g. `<a>文字</a>`) have no standalone Taffy box — crop mode errors out advising you to pick a block-level ancestor, and `selector_all` mode returns `0x0`. Inline elements containing block-level or replaced content (`<a><img>` etc.) fall back to the union of their descendants' boxes. Selectors targeting **block-level containers** (div/section/li, etc.) yield reliable coordinates.
 
@@ -470,7 +470,7 @@ curl -sS -X POST http://127.0.0.1:8089/screenshot \
 }
 ```
 
-> Screenshots are the agent's "visual input" — but inline Blitz is beta; CSS rendering on complex sites is approximate (not Chromium pixel-perfect). Sub-resources such as images are not fetched separately (`<img>` may be missing from screenshots); text and layout are reliable.
+> Screenshots are the agent's "visual input" — CSS rendering on complex sites is approximate (not Chromium pixel-perfect). Sub-resources such as images are not fetched separately (`<img>` may be missing from screenshots); text and layout are reliable.
 
 ---
 

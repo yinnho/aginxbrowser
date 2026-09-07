@@ -1,6 +1,6 @@
     use super::*;
     use crate::diting_css::{self, ParsedRule};
-    use crate::screenshot::element_rect;
+    use crate::screenshot_reference::element_rect;
 
     const VW: f32 = 800.0;
     const VH: f32 = 600.0;

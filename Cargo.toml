@@ -16,43 +16,56 @@ default = []
 # Stealth HTTP client with TLS/JA3 fingerprint spoofing via wreq (BoringSSL).
 # Disable for plain reqwest-only builds.
 stealth = ["dep:wreq", "dep:wreq-util"]
-# Screenshot rendering via inlined Blitz (Stylo/Taffy/vello_cpu). Adds ~30-40MB
-# to the binary and notable compile time, so opt-in. Renders the JS-rendered DOM
-# (captured by the obscura V8 path) to a PNG — no Chromium required.
+# Screenshot rendering via the inlined diting engine (own CSS+layout+paint
+# stack on the taffy/parley/swash/vello_cpu foundation). Opt-in; renders the
+# JS-rendered DOM (captured by the diting V8 path) to a PNG — no Chromium
+# required, no blitz.
 screenshot = [
-    "dep:blitz-dom",
-    "dep:blitz-html",
-    "dep:blitz-paint",
-    "dep:blitz-traits",
     "dep:anyrender",
     "dep:anyrender_vello_cpu",
     "dep:peniko",
     "dep:png",
     # JPEG/WebP/GIF decode for diting_layout's ImageCache (batches 6d/7b/7e).
     # Same `image` crate version blitz-dom decodes with, so RGBA output is
-    # identical. Animated GIFs take the first frame.
+    # identical (only relevant when blitz-reference is also on). Animated
+    # GIFs take the first frame. `png` is needed by the CDP legacy path,
+    # which re-encodes JPEG captures from the rendered PNG bytes.
     "dep:image",
     "image/jpeg",
+    "image/png",
     "image/webp",
     "image/gif",
-    # Direct stylo handle for the dual-engine computed-style cross-check
-    # tests (diting_css vs Stylo) — must match the version blitz pins.
-    "dep:stylo_alias",
-    # Direct taffy handle for the fork-delta classification tests — same
-    # git rev blitz pins, and crucially the same feature set (see below).
+    # Taffy does diting's box layout. The direct handle also feeds the
+    # fork-delta tests (see below).
     "dep:taffy",
     # Real glyph measurement + rasterization for diting_layout text leaves
     # (render claim batches 3a/3b). Same stack upstream obscura-render builds
     # on. scale/render are the outline raster features (3b paint).
     "dep:swash",
-    # Direct parley handle to build a fixture FontContext for the blitz side
-    # of the 3a text cross-check (DocumentConfig.font_ctx injection with
-    # system_fonts disabled). Same version/features blitz pins.
+    # diting_fonts builds the FontContext (bundled faces registered) and
+    # diting_layout shapes text through parley — a runtime dep, not just the
+    # cross-check fixture it started as.
     "dep:parley",
     # musl cross builds cannot link fontconfig at build time (no pkg-config
     # sysroot). dlopen defers libfontconfig to runtime; fontique degrades
     # gracefully when it is absent (bundled CJK fonts carry the render).
     "fontique/fontconfig-dlopen",
+]
+# The Blitz reference pipeline (DioxusLabs/blitz, rev-pinned) — the engine
+# diting grew up against and still cross-checks. Purely opt-in: adds the
+# blitz-* crates plus Stylo (~30-40MB and a large compile-time chunk) and
+# enables `engine: "blitz"` on /screenshot plus the dual-engine cross-check
+# tests. Production builds (including the AginxOS device build) stop at
+# `screenshot` and contain zero blitz code.
+blitz-reference = [
+    "screenshot",
+    "dep:blitz-dom",
+    "dep:blitz-html",
+    "dep:blitz-paint",
+    "dep:blitz-traits",
+    # Direct stylo handle for the dual-engine computed-style cross-check
+    # tests (diting_css vs Stylo) — must match the version blitz pins.
+    "dep:stylo_alias",
 ]
 
 [dependencies]
@@ -60,13 +73,15 @@ screenshot = [
 stylo_alias = { version = "0.20", package = "stylo", optional = true }
 # Taffy git pin, mirroring blitz's workspace declaration after their #835
 # (taffy#1177 grid contribution-skip + #1178 floor available sizes at zero).
-# Features must EXACTLY mirror blitz's workspace declaration (default-features
-# = false, no float_layout): cargo unifies features across the graph, so any
-# extra feature here would silently change the product pipeline's layout
-# behavior (float_layout alters block layout). taffy_tree is additionally
-# listed because the unified graph already enables it (Cargo.lock shows taffy
-# pulling slotmap) — an explicit no-op.
-# Used by diting_layout fork-delta tests — see docs/engine/render.md.
+# When blitz-reference is also enabled, features must EXACTLY mirror blitz's
+# workspace declaration (default-features = false, no float_layout): cargo
+# unifies features across the graph, so any extra feature would silently
+# change the product pipeline's layout behavior (float_layout alters block
+# layout). In a screenshot-only build there is no unification partner, but
+# keep the mirror anyway so toggling blitz-reference can't shift diting.
+# taffy_tree is additionally listed because the unified graph already enables
+# it (Cargo.lock shows taffy pulling slotmap) — an explicit no-op.
+# Used by diting_layout box layout and the fork-delta tests (docs/engine/render.md).
 taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "1b918bafcab101dd234ebeb27da0443e24fd9de2", optional = true, default-features = false, features = [
     "std",
     "taffy_tree",
@@ -86,9 +101,10 @@ swash = { version = "0.2", optional = true, default-features = false, features =
     "scale",
     "render",
 ] }
-# Fixture FontContext construction for the blitz side of the 3a text
-# cross-check. Mirrors blitz's own declaration exactly (default-features
-# false, std) so the unified graph can't drift blitz's parley behavior.
+# parley shapes diting_layout text and (via diting_fonts) provides the
+# FontContext the render paths build. Mirrors blitz's own declaration
+# (default-features false, std) so the unified graph can't drift blitz's
+# parley behavior when blitz-reference is on.
 parley = { version = "0.10", optional = true, default-features = false, features = ["std"] }
 # Runtime-dlopen fontconfig for musl cross builds (see `screenshot` feature).
 fontique = { version = "0.10", optional = true }
@@ -162,7 +178,9 @@ getrandom = "0.2"
 # but the renaming is only correct on Linux/Android (per wreq's README).
 wreq-util = { version = "=3.0.0-rc.10", optional = true }
 
-# --- screenshot rendering (Blitz, opt-in via `screenshot` feature) ---
+# --- blitz reference pipeline (opt-in via `blitz-reference` feature) ---
+# NOT part of `screenshot`: production/device builds stop at diting and
+# compile zero blitz crates. This is the cross-check engine only.
 # Upstream DioxusLabs/blitz, rev-pinned (bump deliberately). The old yinnho/blitz
 # fork existed only for the no-op NetProvider critical-resource fix — merged
 # upstream as DioxusLabs/blitz#636 (2026-08-08), so the fork is retired.

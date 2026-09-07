@@ -23,6 +23,7 @@ use crate::diting_layout::text::FontBook;
 /// Real family name, on purpose: pages that style `font-family: "Noto Sans
 /// SC"` (common on Chinese sites) hit the bundled bytes directly, and the
 /// name truthfully reflects the OFL-licensed source.
+#[cfg(feature = "blitz-reference")]
 pub const FAMILY: &str = "Noto Sans SC";
 
 const REGULAR: &[u8] = include_bytes!("diting_fonts/diting-cjk-regular.ttf");
@@ -33,10 +34,15 @@ const BOLD: &[u8] = include_bytes!("diting_fonts/diting-cjk-bold.ttf");
 /// built-in registry would pick, and appended to the generic sans/serif
 /// families so even a completely font-less machine resolves unstyled text.
 /// `system_fonts` stays on — the tail fallback for non-GB2312 codepoints.
+///
+/// Only the blitz reference pipeline consumes a parley FontContext (the
+/// diting stack goes through [`font_book`]), hence the feature gate.
+#[cfg(feature = "blitz-reference")]
 pub fn font_ctx() -> parley::FontContext {
     build_ctx(true)
 }
 
+#[cfg(feature = "blitz-reference")]
 fn build_ctx(system_fonts: bool) -> parley::FontContext {
     use parley::fontique::{
         Collection, CollectionOptions, FontInfoOverride, FontStyle, FallbackKey, GenericFamily,
@@ -124,7 +130,11 @@ mod tests {
     /// The product claim: CJK text renders with the bundled collection and
     /// system fonts DISABLED — no fonts-noto-cjk, no PingFang, nothing.
     /// Uses the real production wiring (build_ctx), only with the system
-    /// tail turned off.
+    /// tail turned off. Renders through the Blitz pipeline (the heavier
+    /// engine-level variant of the swash coverage tests above) — hence
+    /// `blitz-reference`; in a screenshot-only build the bundle claim is
+    /// carried by bundle_cjk_coverage_paints / bundle_symbol_coverage_paints.
+    #[cfg(feature = "blitz-reference")]
     #[test]
     fn cjk_renders_without_system_fonts() {
         let ctx = build_ctx(false);

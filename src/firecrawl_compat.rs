@@ -474,7 +474,10 @@ async fn scrape_with_session(
                 // A render failure must not abort the scrape — the markdown/html
                 // are already extracted; just omit the screenshot (like the old
                 // capture_screenshot, which warned and returned None).
-                match crate::screenshot::render_html_to_png(
+                // Renderer is diting — the product default everywhere; the
+                // firecrawl surface has no engine knob and shouldn't smuggle
+                // the reference pipeline into production renders.
+                match crate::screenshot::render_html_to_png_diting(
                     &full_html,
                     &final_url,
                     1280,

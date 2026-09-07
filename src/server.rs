@@ -681,19 +681,29 @@ pub fn do_screenshot(req: ScreenshotRequest) -> Result<ScreenshotResponse> {
             // We're already on a blocking runtime thread, so just call it directly.
             // Default engine is diting — our own css+layout+paint stack (no
             // Stylo/vello/parley in the path). engine=blitz opts back into
-            // the Blitz reference pipeline for comparison renders.
+            // the Blitz reference pipeline for comparison renders — only
+            // available when compiled with the `blitz-reference` feature.
             let rendered = if req.engine.as_deref() == Some("blitz") {
-                crate::screenshot::render_html_to_png(
-                    &html,
-                    &final_url,
-                    req.width,
-                    req.height,
-                    req.scale,
-                    req.full_page,
-                    req.selector.as_deref(),
-                    req.selector_all,
-                    Some(&resources),
-                )?
+                #[cfg(feature = "blitz-reference")]
+                {
+                    crate::screenshot_reference::render_html_to_png(
+                        &html,
+                        &final_url,
+                        req.width,
+                        req.height,
+                        req.scale,
+                        req.full_page,
+                        req.selector.as_deref(),
+                        req.selector_all,
+                        Some(&resources),
+                    )?
+                }
+                #[cfg(not(feature = "blitz-reference"))]
+                {
+                    anyhow::bail!(
+                        "engine=\"blitz\" requires the blitz-reference feature (this build renders with diting only)"
+                    );
+                }
             } else {
                 crate::screenshot::render_html_to_png_diting(
                     &html,

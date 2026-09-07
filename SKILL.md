@@ -128,10 +128,10 @@ curl -sS -X POST https://browser.aginx.net/search \
 
 ## Capabilities & boundaries
 
-- **Screenshots are beta**: the built-in Blitz renderer (Stylo + Taffy +
-  vello_cpu, pure CPU, no Chromium) is reliable for text and layout; complex
-  CSS is approximate and `<img>` sub-resources aren't fetched (images may be
-  missing). For pixel-perfect rendering, don't rely on screenshots. Element
+- **Screenshots are approximate**: the built-in diting renderer (own CSS +
+  Taffy layout + CPU paint, no Chromium) is reliable for text and layout;
+  complex CSS is approximate and `<img>` sub-resources aren't fetched (images
+  may be missing). For pixel-perfect rendering, don't rely on screenshots. Element
   coordinates are available: `screenshot` with `selector` returns
   `selector_rects` (CSS-px page coords) and can crop straight to an element;
   coordinate-based clicking isn't wired up yet, interaction is JS `click()`.

@@ -4208,6 +4208,7 @@ mod fork_deltas;
 /// sides, so every difference the assertions catch is bridge modeling, not
 /// layout math. Authored-geometry fixtures only for cross-engine asserts
 /// (text metrics are heuristic here, glyph-measured in blitz — those are
-/// locked as our-side structural tests instead).
-#[cfg(test)]
+/// locked as our-side structural tests instead). Needs the blitz crates,
+/// hence `blitz-reference` on top of `screenshot`.
+#[cfg(all(test, feature = "blitz-reference"))]
 mod bridge_cross_check;

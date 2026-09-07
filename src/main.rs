@@ -31,6 +31,10 @@ mod session;
 mod store;
 #[cfg(feature = "screenshot")]
 mod screenshot;
+// The Blitz reference pipeline — cross-check oracle for diting, opt-in via
+// `blitz-reference`. Not compiled in production/device builds.
+#[cfg(feature = "blitz-reference")]
+mod screenshot_reference;
 
 // Inlined Diting engine (formerly external crates).
 mod diting_dom;
@@ -258,7 +262,9 @@ pub struct ScreenshotRequest {
     pub diting_rects: bool,
     /// Render engine: "diting" (default — our own css+layout+paint stack,
     /// no Stylo/vello/parley in the path) or "blitz" (the Blitz reference
-    /// pipeline via the pinned rev, for comparison renders).
+    /// pipeline via the pinned rev, for comparison renders; requires the
+    /// `blitz-reference` feature at build time — without it the request
+    /// errors instead of silently switching engines).
     #[serde(default)]
     pub engine: Option<String>,
     /// Route through AGINXBROWSER_PROXY. Default false (direct).

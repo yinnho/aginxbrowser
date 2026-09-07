@@ -45,6 +45,8 @@ fn features_check() -> Check {
     let mut feats: Vec<&str> = Vec::new();
     #[cfg(feature = "screenshot")]
     feats.push("screenshot");
+    #[cfg(feature = "blitz-reference")]
+    feats.push("blitz-reference");
     #[cfg(feature = "stealth")]
     feats.push("stealth");
     let detail = if feats.is_empty() {
