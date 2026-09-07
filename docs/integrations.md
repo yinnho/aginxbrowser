@@ -40,6 +40,21 @@ page.route("**/slow.json", lambda route: route.continue_(url=url.replace("/slow"
 
 Boundaries: document/subresource loads take the navigation transport and are not intercepted (route page-initiated `fetch()` calls instead); Response-stage interception and `takeResponseBodyAsStream` are not implemented. A pause that outlives the command which created it (e.g. `evaluate` awaiting its own intercepted fetch) falls through to the real request after a bounded resolution timeout rather than hanging the connection.
 
+### Screenshots & screencast (`Page.captureScreenshot` / `startScreencast`)
+
+`captureScreenshot` honors the CDP params, and the `clip` coordinate world flips with `captureBeyondViewport` exactly as in Chrome:
+
+| Shape | Path | `clip` means |
+|---|---|---|
+| no params, or `captureBeyondViewport: true` | full-page render | page-absolute |
+| `captureBeyondViewport: false` | **viewport band** — painted from the live layout cache, cost independent of page height | viewport-relative |
+
+The band path is the one to drive scrolling captures with: re-capturing at successive `window.scrollTo()` positions costs the same per frame whether the page is 900 px or 10,000 px tall (measured flat across a 10728 px page). `format: "jpeg"` (with `quality` 0–100, default 100) and `"png"` (default) work on both paths; `clip.scale ≠ 1` is rejected with a protocol error.
+
+`Page.startScreencast` is a real pump: frames flow on a 33 ms cadence gated by a damage signature (DOM epoch, scroll, viewport), with ack-based backpressure (`screencastFrameAck`) — one frame in flight at a time, zero frames while the page is static. An initial snapshot frame is pushed on start, like Chrome. Page time advances even for a silent client: the pump drives the page's JS event loop itself, so a page that damages itself via `setInterval`/animations keeps producing frames without any heartbeat messages from you.
+
+`Page.getLayoutMetrics` reports the real viewport and content size; the documentElement `scrollTop`/`scrollLeft` setters and `window.scrollTo` both land in the same scroll state the band path reads.
+
 ### Playwright (Python)
 
 ```python
