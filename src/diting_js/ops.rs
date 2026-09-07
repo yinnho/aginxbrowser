@@ -148,6 +148,25 @@ pub struct JsState {
     /// Defaults to the bootstrap's pre-persona 1920x1000.
     #[cfg(feature = "screenshot")]
     pub(crate) viewport: (f32, f32),
+    /// The root scroller's offset, mirrored from the bootstrap's
+    /// scrollTop/scrollLeft setters (viewport roots only) so the CDP frame
+    /// pump can paint the viewport band without re-serializing the DOM.
+    /// Layout is scroll-blind, so this never feeds the layout cache.
+    #[cfg(feature = "screenshot")]
+    pub(crate) scroll_offset: (f32, f32),
+    /// Absolute-URL → fetched image body, filled on demand by the CDP
+    /// viewport capture / screencast pump so band paint renders real rasters
+    /// instead of placeholders (the outerHTML re-render path pre-fetches;
+    /// the live-tree path fills lazily). Bounded entry-wise; every insert
+    /// also invalidates `layout_cache` (placeholder boxes vs real intrinsic
+    /// sizes can reflow).
+    #[cfg(feature = "screenshot")]
+    pub(crate) image_bytes:
+        std::cell::RefCell<HashMap<String, std::sync::Arc<Vec<u8>>>>,
+    /// Insertion order for `image_bytes` (FIFO eviction at the entry cap —
+    /// clearing wholesale would thrash pages with more images than the cap).
+    #[cfg(feature = "screenshot")]
+    pub(crate) image_order: std::cell::RefCell<std::collections::VecDeque<String>>,
 }
 
 /// A script-initiated request as a CDP-shaped network event. Static
@@ -244,6 +263,12 @@ impl JsState {
             layout_cache: std::cell::RefCell::new(None),
             #[cfg(feature = "screenshot")]
             viewport: (1920.0, 1000.0),
+            #[cfg(feature = "screenshot")]
+            scroll_offset: (0.0, 0.0),
+            #[cfg(feature = "screenshot")]
+            image_bytes: std::cell::RefCell::new(HashMap::new()),
+            #[cfg(feature = "screenshot")]
+            image_order: std::cell::RefCell::new(std::collections::VecDeque::new()),
             // External stylesheet bodies fetched at navigation, keyed by
             // absolute URL. The layout run joins them with the live <style>
             // blocks in document order — without this table an author sheet
@@ -451,6 +476,19 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             gs.viewport = (w, h);
             // Any rects memoized under the old ICB are stale now.
             *gs.layout_cache.borrow_mut() = None;
+        }
+        return "ok".into();
+    }
+    // Root-scroller offset mirror from the bootstrap (viewport roots only;
+    // element-level scrolling is not mirrored). The bootstrap already clamps
+    // negatives to 0; band paint clamps to the scrollable range itself.
+    #[cfg(feature = "screenshot")]
+    if cmd == "set_scroll_offset" {
+        let gs = state.borrow::<SharedState>().clone();
+        let x = arg1.parse::<f32>().unwrap_or(0.0);
+        let y = arg2.parse::<f32>().unwrap_or(0.0);
+        if x.is_finite() && y.is_finite() {
+            gs.borrow_mut().scroll_offset = (x.max(0.0), y.max(0.0));
         }
         return "ok".into();
     }
@@ -896,15 +934,15 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         "layout_rect" => {
             let nid = match parse_nid(&arg1) { Some(id) => id, None => return "null".into() };
             let epoch = dom.epoch();
-            let cache_hit = gs.layout_cache.borrow().as_ref().and_then(|(e, (m, _, _))| {
+            let cache_hit = gs.layout_cache.borrow().as_ref().and_then(|(e, (m, _, _, _))| {
                 if *e == epoch { m.get(&nid).copied() } else { None }
             });
             let rect = match cache_hit {
                 Some(r) => Some(r),
                 None => {
-                    let (rects, order, styles) = layout_run_all(&gs, dom);
+                    let (rects, order, styles, items) = layout_run_all(&gs, dom);
                     let r = rects.get(&nid).copied();
-                    *gs.layout_cache.borrow_mut() = Some((epoch, (rects, order, styles)));
+                    *gs.layout_cache.borrow_mut() = Some((epoch, (rects, order, styles, items)));
                     r
                 }
             };
@@ -921,14 +959,14 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         #[cfg(feature = "screenshot")]
         "paint_order" => {
             let epoch = dom.epoch();
-            let cached = gs.layout_cache.borrow().as_ref().and_then(|(e, (_, o, _))| {
+            let cached = gs.layout_cache.borrow().as_ref().and_then(|(e, (_, o, _, _))| {
                 if *e == epoch { Some(o.clone()) } else { None }
             });
             let order = match cached {
                 Some(o) => o,
                 None => {
-                    let (rects, order, styles) = layout_run_all(&gs, dom);
-                    *gs.layout_cache.borrow_mut() = Some((epoch, (rects, order.clone(), styles)));
+                    let (rects, order, styles, items) = layout_run_all(&gs, dom);
+                    *gs.layout_cache.borrow_mut() = Some((epoch, (rects, order.clone(), styles, items)));
                     order
                 }
             };
@@ -962,7 +1000,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 *gs.layout_cache.borrow_mut() = Some((epoch, run));
             }
             let guard = gs.layout_cache.borrow();
-            let Some((_, (rects, _, _))) = guard.as_ref().filter(|(e, _)| *e == epoch) else {
+            let Some((_, (rects, ..))) = guard.as_ref().filter(|(e, _)| *e == epoch) else {
                 return "null".into();
             };
             let Some(&[ox, oy, ow, oh]) = rects.get(&nid) else { return "null".into() };
@@ -1016,7 +1054,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 })
                 .flatten();
             let epoch = dom.epoch();
-            let cached = gs.layout_cache.borrow().as_ref().and_then(|(e, (_, _, s))| {
+            let cached = gs.layout_cache.borrow().as_ref().and_then(|(e, (_, _, s, _))| {
                 if *e == epoch { s.get(&nid).cloned() } else { None }
             });
             let style = cached.or_else(|| {
@@ -1059,13 +1097,15 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
 }
 
 /// One style+layout run over the live tree (see [`JsState::layout_cache`]):
-/// every element's border-box rect, the paint order, and the cascaded
-/// ComputedStyle per element.
+/// every element's border-box rect, the paint order, the cascaded
+/// ComputedStyle per element, and the flat paint-item list in paint order
+/// (band paint's input — computed anyway, so caching it is free).
 #[cfg(feature = "screenshot")]
 type LayoutRun = (
     HashMap<NodeId, [f32; 4]>,
     Vec<NodeId>,
     HashMap<NodeId, crate::diting_css::ComputedStyle>,
+    Vec<crate::diting_layout::PaintItem>,
 );
 
 /// Run the full diting style + layout pipeline over the live DOM tree and
@@ -1134,19 +1174,162 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
     );
     let styles_map = crate::diting_layout::compute_styles(dom, &rules);
     let fonts = crate::diting_fonts::font_book();
-    let (rects, _items, paint_order) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+    // The byte table the run resolves http(s) img sources against. Empty →
+    // None keeps the all-placeholder path byte-identical to before (and lets
+    // the caller decide when rasters are worth fetching).
+    let bytes_map = gs.image_bytes.borrow();
+    let network_bytes: Option<&HashMap<String, std::sync::Arc<Vec<u8>>>> =
+        if bytes_map.is_empty() { None } else { Some(&bytes_map) };
+    let (rects, items, paint_order) = crate::diting_layout::layout_dom_with_paint_order_and_images(
         dom,
         &styles_map,
         &fonts,
         viewport_width,
         viewport_height,
-        None,
+        network_bytes,
     );
+    drop(bytes_map);
     (
         rects.into_iter().map(|(id, r)| (id, [r.x, r.y, r.width, r.height])).collect(),
         paint_order,
         styles_map,
+        items,
     )
+}
+
+/// One viewport-band frame: RGBA pixels plus the scroll offset actually
+/// painted and the document's scrollable extent.
+#[cfg(feature = "screenshot")]
+pub(crate) struct BandFrame {
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    /// The scroll offset actually painted — clamped into
+    /// `[0, content − viewport]`, so `metadata.scrollOffsetX/Y` report this,
+    /// not the raw request.
+    pub dx: f32,
+    pub dy: f32,
+    /// CSS-pixel content size (root scrollWidth×scrollHeight).
+    pub content_size: (f32, f32),
+}
+
+/// Paint the viewport band `[dx, dx+vw) × [dy, dy+vh)` of the live tree's
+/// cached layout into a viewport-sized canvas — the CDP viewport-capture /
+/// screencast frame path. No outerHTML re-parse and no full-page raster:
+/// layout is scroll-blind and memoized per tree epoch, so scrolling is a
+/// pure re-blit and per-frame cost is independent of page height (the root
+/// fix for the ~1.4s/frame full-page re-render the AginxOS report measured).
+///
+/// Returns the frame plus the absolute img URLs the page references but
+/// [`JsState::image_bytes`] lacks — the async caller fetches them (same
+/// per-URL policy as `prefetch_render_resources`: page client, SSRF gate,
+/// size/timeout caps) via [`store_image_bytes`] and calls again for the
+/// image-complete frame. Band paint itself never touches the network.
+#[cfg(feature = "screenshot")]
+pub(crate) fn band_frame(
+    gs: &JsState,
+    scroll_x: f32,
+    scroll_y: f32,
+    viewport: (f32, f32),
+) -> Option<(BandFrame, Vec<String>)> {
+    let dom = gs.dom.as_ref()?;
+    // Same page-height cap the full-page render uses — a malicious client
+    // requesting a 1e9-viewport must not allocate for it.
+    const MAX_BAND: f32 = 16000.0;
+    let vw = if viewport.0.is_finite() { viewport.0.max(1.0) } else { 1.0 }.min(MAX_BAND);
+    let vh = if viewport.1.is_finite() { viewport.1.max(1.0) } else { 1.0 }.min(MAX_BAND);
+
+    let epoch = dom.epoch();
+    let fresh = gs.layout_cache.borrow().as_ref().map(|(e, _)| *e == epoch) != Some(true);
+    if fresh {
+        let run = layout_run_all(gs, dom);
+        *gs.layout_cache.borrow_mut() = Some((epoch, run));
+    }
+    let guard = gs.layout_cache.borrow();
+    let (_, (rects, _, _, items)) = guard.as_ref().filter(|(e, _)| *e == epoch)?;
+
+    // Scrollable content extent: the root scroller's box unioned with every
+    // laid-out descendant, clamped up to the viewport — the same union the
+    // `scroll_extent` op serves the JS side, so the pump's clamp and
+    // window.scrollY agree on the range.
+    let root = dom
+        .query_selector_all("html")
+        .ok()
+        .and_then(|v| v.into_iter().next())
+        .or_else(|| dom.query_selector_all("body").ok().and_then(|v| v.into_iter().next()));
+    let mut content_w = vw;
+    let mut content_h = vh;
+    if let Some(root) = root.filter(|r| rects.contains_key(r)) {
+        if let Some(&[ox, oy, ow, oh]) = rects.get(&root) {
+            content_w = content_w.max(ow);
+            content_h = content_h.max(oh);
+            let mut stack = dom.children(root);
+            while let Some(cur) = stack.pop() {
+                stack.extend(dom.children(cur));
+                if let Some(&[x, y, w, h]) = rects.get(&cur) {
+                    content_w = content_w.max((x + w - ox).max(0.0));
+                    content_h = content_h.max((y + h - oy).max(0.0));
+                }
+            }
+        }
+    }
+    let dx = (if scroll_x.is_finite() { scroll_x.max(0.0) } else { 0.0 })
+        .min((content_w - vw).max(0.0));
+    let dy = (if scroll_y.is_finite() { scroll_y.max(0.0) } else { 0.0 })
+        .min((content_h - vh).max(0.0));
+
+    // Images the page references but the byte table lacks.
+    let mut missing: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Ok(imgs) = dom.query_selector_all("img") {
+        let table = gs.image_bytes.borrow();
+        for nid in imgs {
+            if let Some(src) = crate::diting_layout::resolve_img_source(dom, nid, vw) {
+                if !table.contains_key(&src) && seen.insert(src.clone()) {
+                    missing.push(src);
+                }
+            }
+        }
+    }
+
+    let mut canvas =
+        crate::diting_layout::paint::Canvas::new_filled(vw as usize, vh as usize, [255, 255, 255, 255]);
+    let fonts = crate::diting_fonts::font_book();
+    crate::diting_layout::paint::execute_band(items, &fonts, &mut canvas, dx, dy);
+    drop(guard);
+    Some((
+        BandFrame {
+            width: canvas.width as u32,
+            height: canvas.height as u32,
+            rgba: canvas.data,
+            dx,
+            dy,
+            content_size: (content_w, content_h),
+        },
+        missing,
+    ))
+}
+
+/// Insert a fetched image body into [`JsState::image_bytes`] (FIFO eviction
+/// at the entry cap) and drop `layout_cache`: placeholder boxes and real
+/// intrinsic sizes can reflow differently, so memoized geometry from the
+/// pre-fetch run must not survive the insert.
+#[cfg(feature = "screenshot")]
+pub(crate) fn store_image_bytes(gs: &mut JsState, url: String, bytes: Vec<u8>) {
+    const IMAGE_TABLE_CAP: usize = 64;
+    let mut map = gs.image_bytes.borrow_mut();
+    if map.contains_key(&url) {
+        return;
+    }
+    if map.len() >= IMAGE_TABLE_CAP {
+        if let Some(oldest) = gs.image_order.borrow_mut().pop_front() {
+            map.remove(&oldest);
+        }
+    }
+    map.insert(url.clone(), std::sync::Arc::new(bytes));
+    drop(map);
+    gs.image_order.borrow_mut().push_back(url);
+    *gs.layout_cache.borrow_mut() = None;
 }
 
 /// The property table the `computed_style` snapshot serializes — every

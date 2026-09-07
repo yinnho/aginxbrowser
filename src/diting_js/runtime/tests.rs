@@ -5450,6 +5450,31 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[cfg(feature = "screenshot")]
+    async fn test_root_scroll_mirrors_to_native_band_paint_state() {
+        // AginxOS P0: the CDP band painter reads the root scroll offset from
+        // JsState. window.scrollTo and direct root writes (through either the
+        // html or the body wrapper — CSSOM View proxies body to the scrolling
+        // element) must all land in that one native pair.
+        let mut rt = setup_runtime(r#"<html><body><div style="height:5000px"></div></body></html>"#);
+        let script = r#"async () => {
+            window.scrollTo(0, 300);
+            document.documentElement.scrollLeft = 20;
+            document.body.scrollTop = 1000;   // proxies to the scrolling element
+            await new Promise(r => setTimeout(r, 10));
+            return [
+                window.scrollY,
+                document.body.scrollTop,
+                document.documentElement.scrollTop,
+            ];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(result.value.unwrap(), serde_json::json!([1000, 1000, 1000]));
+        let (sx, sy) = rt.with_state(|st| st.scroll_offset);
+        assert_eq!((sx, sy), (20.0, 1000.0));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn test_iframe_load_reaches_onload_and_addeventlistener() {
         // Upstream 2e3f5d8: iframe load used to call el.onload() directly,
         // bypassing addEventListener('load') listeners.

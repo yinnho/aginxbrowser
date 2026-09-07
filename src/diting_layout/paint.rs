@@ -437,35 +437,73 @@ fn over(dst: &mut [u8], src: [u8; 4]) {
 /// wrapped at the width its containing block offered at measure time, so
 /// the tile's line structure is the measure function's own.
 pub fn execute(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas) {
+    execute_band(items, fonts, out, 0.0, 0.0);
+}
+
+/// Replay the paint items shifted by `(-dx, -dy)` — the viewport-band paint:
+/// with `dy` at the band's page-space top, only the band's rows land on the
+/// canvas and everything else falls outside the bounds (every primitive's
+/// pixel loop intersects with `allowed()`, so off-band rects/borders/images
+/// cost an empty range). `Text`/`Replaced` rasterize at paint time, so they
+/// get a cheap bounds estimate first — a skip can only ever drop ink that
+/// the estimate put outside the band, and the estimate errs high.
+pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx: f32, dy: f32) {
+    // Rough advance width: CJK/fullwidth ≈ 1em, everything else ≈ 0.6em.
+    fn est_width(text: &str, font_size: f32) -> f32 {
+        text.chars()
+            .map(|c| if c > '\u{2E80}' { 1.0 } else { 0.6 })
+            .sum::<f32>()
+            * font_size
+    }
+    // Whether a text tile's ink can reach the band. Line count comes from
+    // the same wrap model rasterize_wrapped uses; `top` can lift ink above
+    // the line-box top by up to a line's leading, so the top edge gets a
+    // full line of slack.
+    fn text_reaches_band(
+        y: f32,
+        text: &str,
+        font_size: f32,
+        wrap_at: f32,
+        line_height: f32,
+        dy: f32,
+        band_h: i64,
+    ) -> bool {
+        let wrap = wrap_at.max(1.0);
+        let lines = (est_width(text, font_size) / wrap).ceil().max(1.0);
+        let top = y - line_height;
+        let bottom = y + lines * line_height;
+        bottom > dy && top < dy + band_h as f32
+    }
+
     for item in items {
         match item {
             PaintItem::Clip { rect } => out.push_clip(
-                rect.x.round() as i64,
-                rect.y.round() as i64,
-                (rect.x + rect.width).round() as i64,
-                (rect.y + rect.height).round() as i64,
+                (rect.x - dx).round() as i64,
+                (rect.y - dy).round() as i64,
+                (rect.x + rect.width - dx).round() as i64,
+                (rect.y + rect.height - dy).round() as i64,
             ),
             PaintItem::ClipRounded { rect, radii } => out.push_rounded_clip(
-                rect.x.round() as i64,
-                rect.y.round() as i64,
-                (rect.x + rect.width).round() as i64,
-                (rect.y + rect.height).round() as i64,
+                (rect.x - dx).round() as i64,
+                (rect.y - dy).round() as i64,
+                (rect.x + rect.width - dx).round() as i64,
+                (rect.y + rect.height - dy).round() as i64,
                 *radii,
             ),
             PaintItem::PopClip => {
                 out.pop_clip();
             }
             PaintItem::BgCorner { rect, color, radii, .. } => out.fill_corner_rect(
-                rect.x.round() as i64,
-                rect.y.round() as i64,
+                (rect.x - dx).round() as i64,
+                (rect.y - dy).round() as i64,
                 rect.width.round() as i64,
                 rect.height.round() as i64,
                 *radii,
                 *color,
             ),
             PaintItem::Bg { rect, color, radius, .. } => out.fill_rounded_rect(
-                rect.x.round() as i64,
-                rect.y.round() as i64,
+                (rect.x - dx).round() as i64,
+                (rect.y - dy).round() as i64,
                 rect.width.round() as i64,
                 rect.height.round() as i64,
                 *radius,
@@ -477,7 +515,10 @@ pub fn execute(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas) {
                 // by the top/bottom widths — the classic rectangular-border
                 // paint browsers produce with radius 0.
                 let [t, r, b, l] = *widths;
-                let (x, y) = (rect.x.round() as i64, rect.y.round() as i64);
+                let (x, y) = (
+                    (rect.x - dx).round() as i64,
+                    (rect.y - dy).round() as i64,
+                );
                 let (w, h) = (rect.width.round() as i64, rect.height.round() as i64);
                 out.fill_rect(x, y, w, t as i64, *color);
                 out.fill_rect(x, y + h - b as i64, w, b as i64, *color);
@@ -490,22 +531,28 @@ pub fn execute(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas) {
                 // object-fit cover/object-position can push paint_rect past
                 // `rect`, so clip the blit to the box.
                 out.push_clip(
-                    rect.x.round() as i64,
-                    rect.y.round() as i64,
-                    (rect.x + rect.width).round() as i64,
-                    (rect.y + rect.height).round() as i64,
+                    (rect.x - dx).round() as i64,
+                    (rect.y - dy).round() as i64,
+                    (rect.x + rect.width - dx).round() as i64,
+                    (rect.y + rect.height - dy).round() as i64,
                 );
                 out.blit_image(
                     image,
-                    paint_rect.x.round() as i64,
-                    paint_rect.y.round() as i64,
+                    (paint_rect.x - dx).round() as i64,
+                    (paint_rect.y - dy).round() as i64,
                     paint_rect.width.round() as i64,
                     paint_rect.height.round() as i64,
                 );
                 out.pop_clip();
             }
             PaintItem::Replaced { rect, alt, fill_placeholder } => {
-                let (x, y) = (rect.x.round() as i64, rect.y.round() as i64);
+                if rect.y + rect.height <= dy || rect.y >= dy + out.height as f32 {
+                    continue;
+                }
+                let (x, y) = (
+                    (rect.x - dx).round() as i64,
+                    (rect.y - dy).round() as i64,
+                );
                 let (w, h) = (rect.width.round() as i64, rect.height.round() as i64);
                 if *fill_placeholder && w > 0 && h > 0 {
                     out.fill_rect(x, y, w, h, [224, 224, 224, 255]);
@@ -533,9 +580,12 @@ pub fn execute(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas) {
                 }
             }
             PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at } => {
+                if !text_reaches_band(*y, text, *font_size, *wrap_at, *line_height, dy, out.height as i64) {
+                    continue;
+                }
                 let r = fonts.rasterize_wrapped(text, *font_size, *bold, *color, *wrap_at, *line_height);
                 // Tile row 0 sits `top` px above the leaf's line-box top.
-                out.blit_text(&r, x.round() as i64, (*y + r.top).round() as i64);
+                out.blit_text(&r, (x - dx).round() as i64, (y - dy + r.top).round() as i64);
             }
         }
     }
@@ -603,5 +653,105 @@ mod tests {
         c.push_clip(8, 8, 2, 2);
         c.fill_rect(0, 0, 10, 10, [255, 0, 0, 255]);
         assert_eq!(px(&c, 9, 9), [0, 255, 0, 255], "degenerate clip paints nothing");
+    }
+
+    /// Band painting with no shift is pixel-identical to plain execute —
+    /// the viewport path's dy=0 degenerate case must not perturb the
+    /// established renderer.
+    #[test]
+    fn band_dy_zero_matches_execute() {
+        use super::super::image::DecodedImage;
+        let items = vec![
+            PaintItem::Bg { rect: super::super::Rect { x: 0.0, y: 0.0, width: 40.0, height: 60.0 }, color: [30, 60, 90, 255], radius: 0.0 },
+            PaintItem::Border { rect: super::super::Rect { x: 5.0, y: 5.0, width: 30.0, height: 20.0 }, widths: [2.0, 3.0, 4.0, 1.0], color: [200, 40, 40, 255] },
+            PaintItem::Clip { rect: super::super::Rect { x: 8.0, y: 8.0, width: 24.0, height: 14.0 } },
+            PaintItem::Bg { rect: super::super::Rect { x: 0.0, y: 0.0, width: 40.0, height: 60.0 }, color: [240, 240, 0, 255], radius: 0.0 },
+            PaintItem::PopClip,
+            PaintItem::Image {
+                rect: super::super::Rect { x: 10.0, y: 30.0, width: 8.0, height: 8.0 },
+                paint_rect: super::super::Rect { x: 10.0, y: 30.0, width: 8.0, height: 8.0 },
+                image: DecodedImage::new(2, 2, vec![1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255]),
+            },
+            PaintItem::Replaced {
+                rect: super::super::Rect { x: 25.0, y: 40.0, width: 10.0, height: 12.0 },
+                alt: Some(("alt".into(), 16.0, false, 20.0, [0, 0, 0, 255])),
+                fill_placeholder: true,
+            },
+            PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0 },
+        ];
+        let fonts = crate::diting_fonts::font_book();
+        let mut full = Canvas::new_filled(40, 60, [255, 255, 255, 255]);
+        execute(&items, &fonts, &mut full);
+        let mut band = Canvas::new_filled(40, 60, [255, 255, 255, 255]);
+        execute_band(&items, &fonts, &mut band, 0.0, 0.0);
+        assert_eq!(full.data, band.data, "dy=0 band paint equals execute");
+    }
+
+    /// A band at dy=100 reproduces exactly rows [100, 180) of the full
+    /// render — the viewport-frame contract AginxOS's screencast builds on.
+    #[test]
+    fn band_capture_equals_window_of_full_render() {
+        let items = vec![
+            PaintItem::Bg { rect: super::super::Rect { x: 0.0, y: 0.0, width: 40.0, height: 300.0 }, color: [30, 60, 90, 255], radius: 0.0 },
+            PaintItem::Bg { rect: super::super::Rect { x: 4.0, y: 120.0, width: 32.0, height: 40.0 }, color: [200, 40, 40, 255], radius: 0.0 },
+            PaintItem::Border { rect: super::super::Rect { x: 6.0, y: 240.0, width: 28.0, height: 30.0 }, widths: [3.0, 3.0, 3.0, 3.0], color: [0, 200, 0, 255] },
+        ];
+        let fonts = crate::diting_fonts::font_book();
+        let mut full = Canvas::new_filled(40, 300, [255, 255, 255, 255]);
+        execute(&items, &fonts, &mut full);
+        let mut band = Canvas::new_filled(40, 80, [255, 255, 255, 255]);
+        execute_band(&items, &fonts, &mut band, 0.0, 100.0);
+        for y in 0..80 {
+            for x in 0..40 {
+                let f = &full.data[((y + 100) * 40 + x) * 4..((y + 100) * 40 + x) * 4 + 4];
+                let b = &band.data[(y * 40 + x) * 4..(y * 40 + x) * 4 + 4];
+                assert_eq!(f, b, "band row {y} must equal full row {}", y + 100);
+            }
+        }
+    }
+
+    /// A clip opened above the band and closed inside it stays paired and
+    /// still cuts: the clip rect translates with the band, so content
+    /// beyond the clip's page-space edge stays out even though the clip's
+    /// own bounds are far above the canvas.
+    #[test]
+    fn clip_spanning_band_stays_paired_and_cuts() {
+        let items = vec![
+            PaintItem::Clip { rect: super::super::Rect { x: 0.0, y: 0.0, width: 40.0, height: 130.0 } },
+            PaintItem::Bg { rect: super::super::Rect { x: 0.0, y: 50.0, width: 40.0, height: 100.0 }, color: [0, 200, 0, 255], radius: 0.0 },
+            PaintItem::PopClip,
+        ];
+        let fonts = crate::diting_fonts::font_book();
+        let mut band = Canvas::new_filled(40, 80, [255, 255, 255, 255]);
+        execute_band(&items, &fonts, &mut band, 0.0, 100.0);
+        // Clip page [0,130) → band [-100,30): green bg page [50,150) → band
+        // [-50,50), clipped to rows [0,30).
+        assert_eq!(px(&band, 20, 29), [0, 200, 0, 255], "clipped green inside the band");
+        assert_eq!(px(&band, 20, 30), [255, 255, 255, 255], "clip's page-space edge still cuts");
+        // The stack must have drained: a later fill fills the whole canvas.
+        band.fill_rect(0, 0, 40, 80, [0, 0, 255, 255]);
+        assert_eq!(px(&band, 0, 0), [0, 0, 255, 255], "clip popped, stack drained");
+    }
+
+    /// Text whose line box straddles the band's top edge keeps its ink in
+    /// the band (the estimate's one-line top slack), and text far below is
+    /// skipped without polluting the canvas.
+    #[test]
+    fn text_band_edges() {
+        let fonts = crate::diting_fonts::font_book();
+        // A tall low-content page: only two text leaves, one near the band.
+        let items = vec![
+            PaintItem::Text { text: "edge".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 96.0, wrap_at: 36.0 },
+            PaintItem::Text { text: "far".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 500.0, wrap_at: 36.0 },
+        ];
+        let mut band = Canvas::new_filled(40, 80, [255, 255, 255, 255]);
+        execute_band(&items, &fonts, &mut band, 0.0, 100.0);
+        let ink = band.data.chunks_exact(4).any(|p| p[0] < 128);
+        assert!(ink, "straddling text must paint into the band");
+        // The far text must not have painted anything (only "edge" ink).
+        let dark_rows: Vec<usize> = (0..80)
+            .filter(|&y| (0..40).any(|x| band.data[(y * 40 + x) * 4] < 128))
+            .collect();
+        assert!(dark_rows.iter().all(|&y| y < 25), "no ink from the far-below text: {dark_rows:?}");
     }
 }

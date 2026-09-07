@@ -3384,8 +3384,8 @@
         // Ours: http(s) src resolved through the injected byte table.
         let html = r#"<body><img id="t" src="https://cdn.example.com/hero.png" width="100" height="50"></body>"#;
         let sheet = "body { margin: 0; }";
-        let mut net: HashMap<String, Vec<u8>> = HashMap::new();
-        net.insert("https://cdn.example.com/hero.png".to_string(), png_bytes);
+        let mut net: HashMap<String, std::sync::Arc<Vec<u8>>> = HashMap::new();
+        net.insert("https://cdn.example.com/hero.png".to_string(), std::sync::Arc::new(png_bytes));
 
         let tree = crate::diting_dom::tree_sink::parse_html(html);
         let rules = diting_css::parse_stylesheet(sheet);
@@ -3452,8 +3452,8 @@
         // Ours: https src + JPEG body in the table.
         let html = r#"<body><img id="t" src="https://cdn.example.com/photo.jpg" width="100" height="50"></body>"#;
         let sheet = "body { margin: 0; }";
-        let mut net: HashMap<String, Vec<u8>> = HashMap::new();
-        net.insert("https://cdn.example.com/photo.jpg".to_string(), jpeg_bytes);
+        let mut net: HashMap<String, std::sync::Arc<Vec<u8>>> = HashMap::new();
+        net.insert("https://cdn.example.com/photo.jpg".to_string(), std::sync::Arc::new(jpeg_bytes));
         let tree = crate::diting_dom::tree_sink::parse_html(html);
         let rules = diting_css::parse_stylesheet(sheet);
         let styles = our_styles(&tree, &rules);

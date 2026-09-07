@@ -1711,6 +1711,68 @@ impl Page {
         self.viewport_override
     }
 
+    /// The viewport every frame-producing surface agrees on: the pinned
+    /// emulation override when valid, else the live realm's persona
+    /// viewport, else the CDP default 1280x720 (what getLayoutMetrics used
+    /// to hard-code — the AginxOS report's P1 mismatch).
+    #[cfg(feature = "screenshot")]
+    pub fn effective_viewport(&self) -> (f32, f32) {
+        if let Some((w, h, _)) = self.viewport_override {
+            if w.is_finite() && w > 0.0 && h.is_finite() && h > 0.0 {
+                return (w, h);
+            }
+        }
+        if let Some(js) = &self.js {
+            return js.with_state(|st| st.viewport);
+        }
+        (1280.0, 720.0)
+    }
+
+    /// One viewport-band frame from the live realm's cached layout (band
+    /// paint; no outerHTML re-parse). Returns the frame plus the img URLs
+    /// the caller should fetch (async, page client) and store via
+    /// [`Self::store_band_image`] before calling again.
+    #[cfg(feature = "screenshot")]
+    pub fn viewport_band_frame(
+        &self,
+        scroll_x: f32,
+        scroll_y: f32,
+        viewport: (f32, f32),
+    ) -> Option<(crate::diting_js::ops::BandFrame, Vec<String>)> {
+        let js = self.js.as_ref()?;
+        js.with_state(|st| crate::diting_js::ops::band_frame(st, scroll_x, scroll_y, viewport))
+    }
+
+    /// Store a fetched image body for band paint (FIFO-capped; drops the
+    /// layout cache since intrinsic sizes can reflow placeholder boxes).
+    #[cfg(feature = "screenshot")]
+    pub fn store_band_image(&self, url: String, bytes: Vec<u8>) {
+        if let Some(js) = &self.js {
+            js.with_state_mut(|st| crate::diting_js::ops::store_image_bytes(st, url, bytes));
+        }
+    }
+
+    /// The root scroller's mirrored offset (screencast damage signatures and
+    /// frame metadata).
+    #[cfg(feature = "screenshot")]
+    pub fn scroll_offset(&self) -> (f32, f32) {
+        self.js
+            .as_ref()
+            .map(|js| js.with_state(|st| st.scroll_offset))
+            .unwrap_or((0.0, 0.0))
+    }
+
+    /// The live tree's mutation epoch — part of the screencast damage
+    /// signature, so DOM changes retrigger frames while a static scroll
+    /// position does not.
+    #[cfg(feature = "screenshot")]
+    pub fn dom_epoch(&self) -> u64 {
+        self.js
+            .as_ref()
+            .and_then(|js| js.with_state(|st| st.dom.as_ref().map(|d| d.epoch())))
+            .unwrap_or(0)
+    }
+
     /// Drop the override and return to the persona viewport everywhere.
     pub fn clear_viewport_override(&mut self) {
         self.viewport_override = None;

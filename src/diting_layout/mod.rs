@@ -2726,7 +2726,7 @@ pub fn layout_dom_with_paint_and_images(
     fonts: &FontBook,
     viewport_width: f32,
     viewport_height: f32,
-    network_bytes: Option<&HashMap<String, Vec<u8>>>,
+    network_bytes: Option<&HashMap<String, std::sync::Arc<Vec<u8>>>>,
 ) -> (HashMap<NodeId, Rect>, Vec<PaintItem>) {
     let (rects, items, _order) = layout_dom_with_paint_order_and_images(
         tree,
@@ -2966,7 +2966,7 @@ pub fn layout_dom_with_paint_order_and_images(
     fonts: &FontBook,
     viewport_width: f32,
     viewport_height: f32,
-    network_bytes: Option<&HashMap<String, Vec<u8>>>,
+    network_bytes: Option<&HashMap<String, std::sync::Arc<Vec<u8>>>>,
 ) -> (HashMap<NodeId, Rect>, Vec<PaintItem>, Vec<NodeId>) {
     let mut taffy_tree = TaffyTree::new();
     let mut node_map: HashMap<taffy::tree::NodeId, NodeId> = HashMap::new();
@@ -2982,7 +2982,7 @@ pub fn layout_dom_with_paint_order_and_images(
     // ImageCache — data: URLs decode inline, http(s) URLs consult the
     // fetched-byte table; results are cached so repeated srcs and layout
     // re-runs decode once. Unresolvable imgs keep the batch-5a placeholder.
-    let empty: HashMap<String, Vec<u8>> = HashMap::new();
+    let empty: HashMap<String, std::sync::Arc<Vec<u8>>> = HashMap::new();
     let cache = image::ImageCache::with_network(network_bytes.unwrap_or(&empty));
     let mut images: HashMap<NodeId, DecodedImage> = HashMap::new();
     fn scan_images(

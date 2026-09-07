@@ -74,6 +74,7 @@ dependencies = [
  "deno_core",
  "deno_error",
  "encoding_rs",
+ "fontique",
  "futures",
  "futures-util",
  "getrandom 0.2.17",

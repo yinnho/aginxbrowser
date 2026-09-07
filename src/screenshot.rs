@@ -573,11 +573,11 @@ pub fn render_html_to_png_diting(
 
     // Image bytes: everything non-stylesheet the prefetch pass fetched
     // (already keyed by absolute URL, which is what ImageCache looks up).
-    let network_bytes: HashMap<String, Vec<u8>> = resources
+    let network_bytes: HashMap<String, std::sync::Arc<Vec<u8>>> = resources
         .map(|res| {
             res.iter()
                 .filter(|(k, v)| (!css_urls.contains(k.as_str()) && !k.ends_with(".css")) && !v.is_empty())
-                .map(|(k, v)| (k.clone(), v.as_ref().clone()))
+                .map(|(k, v)| (k.clone(), std::sync::Arc::clone(v)))
                 .collect()
         })
         .unwrap_or_default();

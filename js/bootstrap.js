@@ -2785,20 +2785,45 @@ class Element extends Node {
   // We track the offset so scrollTop/scrollLeft round-trip, and fire a scroll
   // event on direct assignment — lazy loaders that set `el.scrollTop = N` rely
   // on that event, and scrollTo/scrollBy below would otherwise be its only source.
-  get scrollTop() { return this._scrollTop || 0; }
+  // CSSOM View: in standards mode the body element proxies root scrolling to
+  // the document's scrolling element, so body.scrollTop/Left read and write
+  // the SAME scroll box as documentElement (two wrappers, one offset).
+  _rootScroller() {
+    if (this.tagName === 'BODY') {
+      const root = globalThis.document && globalThis.document.documentElement;
+      if (root && root !== this) return root;
+    }
+    return this;
+  }
+  get scrollTop() { return this._rootScroller()._scrollTop || 0; }
   set scrollTop(v) {
     v = +v;
     const nv = Number.isFinite(v) && v > 0 ? v : 0;
+    const target = this._rootScroller();
+    if (target !== this) { target.scrollTop = nv; return; }
     const changed = nv !== (this._scrollTop || 0);
     this._scrollTop = nv;
+    // Viewport-root mirror: publish the root scroller offset to the native
+    // layout state so the CDP frame pump paints the right viewport band.
+    // The engine has ONE root scroll box (html/body share the viewport
+    // scroll), so both roots write the same offset — unlike element-level
+    // scrolling, which stays wrapper-local.
+    if (changed && this._isViewportRoot()) {
+      try { _domRaw('set_scroll_offset', String(this._scrollLeft || 0), String(nv)); } catch (e) {}
+    }
     if (changed && !this._scrollSuppress) this._fireScroll();
   }
-  get scrollLeft() { return this._scrollLeft || 0; }
+  get scrollLeft() { return this._rootScroller()._scrollLeft || 0; }
   set scrollLeft(v) {
     v = +v;
     const nv = Number.isFinite(v) && v > 0 ? v : 0;
+    const target = this._rootScroller();
+    if (target !== this) { target.scrollLeft = nv; return; }
     const changed = nv !== (this._scrollLeft || 0);
     this._scrollLeft = nv;
+    if (changed && this._isViewportRoot()) {
+      try { _domRaw('set_scroll_offset', String(nv), String(this._scrollTop || 0)); } catch (e) {}
+    }
     if (changed && !this._scrollSuppress) this._fireScroll();
   }
   getBoundingClientRect() {

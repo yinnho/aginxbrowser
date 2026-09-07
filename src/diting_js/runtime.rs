@@ -360,7 +360,17 @@ impl JsRuntime {
     }
 
     pub fn set_dom(&self, dom: DomTree) {
-        self.state.borrow_mut().dom = Some(dom);
+        let mut st = self.state.borrow_mut();
+        st.dom = Some(dom);
+        // New document: the previous page's scroll offset and image bodies
+        // mean nothing here (stale URLs would simply miss, but they'd hold
+        // memory until the entry cap evicts them).
+        #[cfg(feature = "screenshot")]
+        {
+            st.scroll_offset = (0.0, 0.0);
+            st.image_bytes.borrow_mut().clear();
+            st.image_order.borrow_mut().clear();
+        }
     }
 
     pub fn set_url(&self, url: &str) {
@@ -1643,6 +1653,24 @@ impl JsRuntime {
     pub fn with_dom<R>(&self, f: impl FnOnce(&DomTree) -> R) -> Option<R> {
         let state = self.state.borrow();
         state.dom.as_ref().map(f)
+    }
+
+    /// Read access to the shared JS state (scroll offset mirror, image byte
+    /// table, viewport) for the band-paint frame paths. The closure must not
+    /// re-enter the runtime (same contract as `with_dom`).
+    #[cfg(feature = "screenshot")]
+    pub fn with_state<R>(&self, f: impl FnOnce(&JsState) -> R) -> R {
+        let state = self.state.borrow();
+        f(&state)
+    }
+
+    /// Mutating variant of [`with_state`]. Field writes that affect layout
+    /// (e.g. the image byte table) must also drop `layout_cache` —
+    /// `ops::store_image_bytes` already does.
+    #[cfg(feature = "screenshot")]
+    pub fn with_state_mut<R>(&self, f: impl FnOnce(&mut JsState) -> R) -> R {
+        let mut state = self.state.borrow_mut();
+        f(&mut state)
     }
 
     #[allow(dead_code)] // borrow-preserving DOM read; with_dom covers current callers

@@ -118,71 +118,105 @@ async fn connection_loop(socket: WebSocket, page_mode: bool) {
         ctx.default_page = Some(page_id);
     }
 
-    while let Some(msg) = receiver.next().await {
-        let msg = match msg {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::debug!("CDP: socket error: {e}");
-                break;
-            }
-        };
-        match msg {
-            Message::Text(text) => {
-                let req: CdpRequest = match serde_json::from_str(text.as_str()) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::warn!("CDP: unparseable request: {e}");
-                        continue;
+    // Screencast frame pump: 33 ms cadence (~30fps ceiling), skipped while
+    // no page has an armed subscription (the guard keeps idle connections at
+    // zero timer wakeups) and `Skip` keeps a slow frame from stampeding
+    // ticks. Frames are produced on this thread — Page is !Send.
+    let mut pump = tokio::time::interval(std::time::Duration::from_millis(33));
+    pump.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    #[cfg(feature = "screenshot")]
+    let mut has_screencast;
+    #[cfg(not(feature = "screenshot"))]
+    let has_screencast = false;
+
+    loop {
+        #[cfg(feature = "screenshot")]
+        {
+            has_screencast = !ctx.screencast.is_empty();
+        }
+        tokio::select! {
+            msg = receiver.next() => {
+                let msg = match msg {
+                    Some(Ok(m)) => m,
+                    Some(Err(e)) => {
+                        tracing::debug!("CDP: socket error: {e}");
+                        break;
                     }
+                    None => break,
                 };
-                let response = dispatch::dispatch(&req, &mut ctx).await;
+                match msg {
+                    Message::Text(text) => {
+                        let req: CdpRequest = match serde_json::from_str(text.as_str()) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                tracing::warn!("CDP: unparseable request: {e}");
+                                continue;
+                            }
+                        };
+                        let response = dispatch::dispatch(&req, &mut ctx).await;
 
-                // Chrome emits Target.attachedToTarget BEFORE the createTarget /
-                // attachToTarget response. Playwright's doCreateNewPage looks up
-                // the new page in its internal _crPages map synchronously right
-                // after the response resolves, and that map is only populated by
-                // the attachedToTarget event — so flush the event first or the
-                // lookup finds nothing and newPage() throws.
-                let events_first = matches!(
-                    req.method.as_str(),
-                    "Target.createTarget"
-                        | "Target.attachToTarget"
-                        | "Target.attachToBrowserTarget"
-                );
+                        // Chrome emits Target.attachedToTarget BEFORE the createTarget /
+                        // attachToTarget response. Playwright's doCreateNewPage looks up
+                        // the new page in its internal _crPages map synchronously right
+                        // after the response resolves, and that map is only populated by
+                        // the attachedToTarget event — so flush the event first or the
+                        // lookup finds nothing and newPage() throws.
+                        let events_first = matches!(
+                            req.method.as_str(),
+                            "Target.createTarget"
+                                | "Target.attachToTarget"
+                                | "Target.attachToBrowserTarget"
+                        );
 
-                let mut out = Vec::new();
-                let mut events = std::mem::take(&mut ctx.pending_events);
-                let push_events = |out: &mut Vec<String>, events: &mut Vec<crate::diting_cdp::types::CdpEvent>| {
-                    for ev in events.drain(..) {
-                        if let Ok(line) = serde_json::to_string(&ev) {
-                            out.push(line);
+                        let mut out = Vec::new();
+                        let mut events = std::mem::take(&mut ctx.pending_events);
+                        let push_events = |out: &mut Vec<String>, events: &mut Vec<crate::diting_cdp::types::CdpEvent>| {
+                            for ev in events.drain(..) {
+                                if let Ok(line) = serde_json::to_string(&ev) {
+                                    out.push(line);
+                                }
+                            }
+                        };
+                        if events_first {
+                            push_events(&mut out, &mut events);
+                            if let Ok(line) = serde_json::to_string(&response) {
+                                out.push(line);
+                            }
+                        } else {
+                            if let Ok(line) = serde_json::to_string(&response) {
+                                out.push(line);
+                            }
+                            push_events(&mut out, &mut events);
+                        }
+                        for line in out {
+                            if sender.send(Message::Text(line)).await.is_err() {
+                                return;
+                            }
                         }
                     }
-                };
-                if events_first {
-                    push_events(&mut out, &mut events);
-                    if let Ok(line) = serde_json::to_string(&response) {
-                        out.push(line);
+                    Message::Ping(payload) => {
+                        if sender.send(Message::Pong(payload)).await.is_err() {
+                            return;
+                        }
                     }
-                } else {
-                    if let Ok(line) = serde_json::to_string(&response) {
-                        out.push(line);
-                    }
-                    push_events(&mut out, &mut events);
+                    Message::Close(_) => break,
+                    Message::Binary(_) | Message::Pong(_) => {}
                 }
-                for line in out {
-                    if sender.send(Message::Text(line.into())).await.is_err() {
-                        return;
+            }
+            _ = pump.tick(), if has_screencast => {
+                #[cfg(feature = "screenshot")]
+                {
+                    crate::diting_cdp::domains::page::pump_screencast_frames(&mut ctx).await;
+                    let events = std::mem::take(&mut ctx.pending_events);
+                    for ev in events {
+                        if let Ok(line) = serde_json::to_string(&ev) {
+                            if sender.send(Message::Text(line)).await.is_err() {
+                                return;
+                            }
+                        }
                     }
                 }
             }
-            Message::Ping(payload) => {
-                if sender.send(Message::Pong(payload)).await.is_err() {
-                    return;
-                }
-            }
-            Message::Close(_) => break,
-            Message::Binary(_) | Message::Pong(_) => {}
         }
     }
 }

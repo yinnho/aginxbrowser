@@ -49,6 +49,10 @@ screenshot = [
     # of the 3a text cross-check (DocumentConfig.font_ctx injection with
     # system_fonts disabled). Same version/features blitz pins.
     "dep:parley",
+    # musl cross builds cannot link fontconfig at build time (no pkg-config
+    # sysroot). dlopen defers libfontconfig to runtime; fontique degrades
+    # gracefully when it is absent (bundled CJK fonts carry the render).
+    "fontique/fontconfig-dlopen",
 ]
 
 [dependencies]
@@ -86,6 +90,8 @@ swash = { version = "0.2", optional = true, default-features = false, features =
 # cross-check. Mirrors blitz's own declaration exactly (default-features
 # false, std) so the unified graph can't drift blitz's parley behavior.
 parley = { version = "0.10", optional = true, default-features = false, features = ["std"] }
+# Runtime-dlopen fontconfig for musl cross builds (see `screenshot` feature).
+fontique = { version = "0.10", optional = true }
 # --- async runtime ---
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"

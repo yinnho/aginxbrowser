@@ -51,7 +51,7 @@ impl DecodedImage {
 ///   miss (the img keeps its 5a placeholder); nothing here touches the
 ///   network.
 pub struct ImageCache<'a> {
-    network_bytes: Option<&'a HashMap<String, Vec<u8>>>,
+    network_bytes: Option<&'a HashMap<String, std::sync::Arc<Vec<u8>>>>,
     cache: RefCell<HashMap<String, Arc<DecodedImage>>>,
 }
 
@@ -64,7 +64,7 @@ impl Default for ImageCache<'_> {
 impl<'a> ImageCache<'a> {
     /// A cache that also resolves http(s) sources against `bytes`
     /// (absolute URL → response body).
-    pub fn with_network(bytes: &'a HashMap<String, Vec<u8>>) -> Self {
+    pub fn with_network(bytes: &'a HashMap<String, std::sync::Arc<Vec<u8>>>) -> Self {
         Self { network_bytes: Some(bytes), cache: RefCell::new(HashMap::new()) }
     }
 
@@ -363,9 +363,9 @@ mod tests {
     #[test]
     fn network_sources_resolve_from_injected_bytes() {
         let (png_bytes, _img) = two_by_one_png();
-        let mut bytes = HashMap::new();
-        bytes.insert("https://example.com/a.png".to_string(), png_bytes.clone());
-        bytes.insert("https://example.com/bad.png".to_string(), b"not a png".to_vec());
+        let mut bytes: HashMap<String, std::sync::Arc<Vec<u8>>> = HashMap::new();
+        bytes.insert("https://example.com/a.png".to_string(), std::sync::Arc::new(png_bytes.clone()));
+        bytes.insert("https://example.com/bad.png".to_string(), std::sync::Arc::new(b"not a png".to_vec()));
 
         let cache = ImageCache::with_network(&bytes);
         let hit = cache.resolve("https://example.com/a.png").expect("fetched PNG decodes");

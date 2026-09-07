@@ -37,6 +37,31 @@ pub struct FetchInterceptState {
     pub pending: Vec<PendingPause>,
 }
 
+/// One `Page.startScreencast` subscription. Lives on the CdpContext (not the
+/// Page) so it dies with the WebSocket connection, like `fetch_intercept`.
+/// Keyed by page id; events carry the session that armed it.
+#[derive(Clone, Debug)]
+#[cfg(feature = "screenshot")]
+pub struct ScreencastState {
+    /// The CDP session that armed the subscription; frames carry it so a
+    /// second connection's session filter doesn't swallow them.
+    pub session_id: Option<String>,
+    pub format: String,
+    /// JPEG quality 0-100; ignored for png.
+    pub quality: u8,
+    pub max_width: u32,
+    pub max_height: u32,
+    pub every_nth_frame: u32,
+    pub frame_seq: u64,
+    /// A frame is in flight until the client acks (`Page.screencastFrameAck`);
+    /// while set, the pump skips this page (Chrome's backpressure).
+    pub outstanding_ack: bool,
+    /// Damage signature of the last emitted frame: (dom epoch, scroll_x,
+    /// scroll_y, viewport w, h). A tick with an unchanged signature emits
+    /// nothing — static pages cost zero frames.
+    pub last_damage: Option<(u64, f32, f32, f32, f32)>,
+}
+
 pub struct CdpContext {
     pub pages: Vec<Page>,
     pub sessions: HashMap<String, String>, // session_id -> page_id
@@ -78,6 +103,10 @@ pub struct CdpContext {
     /// Fetch-intercept state per page (`Fetch.enable` arms it). Lives on the
     /// context, not the Page, so it dies with the WebSocket connection.
     pub fetch_intercept: HashMap<String, FetchInterceptState>,
+    /// Active screencast subscriptions per page (`Page.startScreencast`).
+    /// Same connection-scoped lifetime as `fetch_intercept`.
+    #[cfg(feature = "screenshot")]
+    pub screencast: HashMap<String, ScreencastState>,
     /// Bridge-unique pause ids (`fi-{N}`) — independent of the engine's
     /// per-realm `intercept-{N}` ids, which restart at 1 after navigation.
     pub fetch_pause_counter: u64,
@@ -116,6 +145,8 @@ impl CdpContext {
             next_isolated_context_id: 100,
             fetch_intercept: HashMap::new(),
             fetch_pause_counter: 0,
+            #[cfg(feature = "screenshot")]
+            screencast: HashMap::new(),
             default_page: None,
         }
     }
@@ -3124,5 +3155,328 @@ mod tests {
         // answer too late, and its resolution degrades to a no-op error.
         assert_eq!(paused_request_ids(&ctx), vec!["fi-1".to_string()]);
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    // ---- Viewport band capture + screencast (AginxOS P0) ----
+    #[cfg(feature = "screenshot")]
+    use image::GenericImageView;
+
+    /// Page + session already navigated to a data: URL, ready for Page.* /
+    /// Emulation.* dispatches on the session.
+    #[cfg(feature = "screenshot")]
+    async fn band_setup(html: &str) -> (CdpContext, String) {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session = "sess-shot".to_string();
+        ctx.sessions.insert(session.clone(), page_id);
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": format!("data:text/html,{}", html) }),
+            session_id: Some(session.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+        (ctx, session)
+    }
+
+    #[cfg(feature = "screenshot")]
+    async fn band_dispatch(
+        ctx: &mut CdpContext,
+        session: &str,
+        id: u64,
+        method: &str,
+        params: serde_json::Value,
+    ) -> crate::diting_cdp::types::CdpResponse {
+        dispatch(
+            &CdpRequest {
+                id,
+                method: method.to_string(),
+                params,
+                session_id: Some(session.to_string()),
+            },
+            ctx,
+        )
+        .await
+    }
+
+    /// Three stacked full-width bands, 500px each: red, green, blue.
+    #[cfg(feature = "screenshot")]
+    const BAND_PAGE: &str = "<html><body style=\"margin:0\">\
+<div style=\"height:500px;background:rgb(255,0,0)\"></div>\
+<div style=\"height:500px;background:rgb(0,255,0)\"></div>\
+<div style=\"height:500px;background:rgb(0,0,255)\"></div>\
+</body></html>";
+
+    #[cfg(feature = "screenshot")]
+    fn decoded_frame(resp: &crate::diting_cdp::types::CdpResponse) -> image::DynamicImage {
+        let data = resp.result.as_ref().expect("result")["data"]
+            .as_str()
+            .expect("base64 data")
+            .to_string();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&data)
+            .expect("base64");
+        image::load_from_memory(&bytes).expect("decodable frame")
+    }
+
+    #[cfg(feature = "screenshot")]
+    async fn set_viewport_320x200(
+        ctx: &mut CdpContext,
+        session: &str,
+    ) {
+        let r = futures::executor::block_on(band_dispatch(
+            ctx,
+            session,
+            2,
+            "Emulation.setDeviceMetricsOverride",
+            json!({ "width": 320, "height": 200, "deviceScaleFactor": 1, "mobile": false }),
+        ));
+        assert!(r.error.is_none(), "setDeviceMetricsOverride: {:?}", r.error);
+    }
+
+    #[cfg(feature = "screenshot")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn capture_screenshot_no_params_keeps_legacy_full_page() {
+        let (mut ctx, session) = band_setup(BAND_PAGE).await;
+        let resp = band_dispatch(&mut ctx, &session, 3, "Page.captureScreenshot", json!({})).await;
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let img = decoded_frame(&resp);
+        // Legacy path pins 1280-wide, full-page render — clients that don't
+        // opt into viewport capture (Puppeteer/Playwright defaults, the HTTP
+        // /screenshot surface) must not see any change.
+        assert_eq!(img.width(), 1280);
+        assert!(img.height() >= 720, "full-page render, got {}", img.height());
+    }
+
+    #[cfg(feature = "screenshot")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn capture_screenshot_beyond_false_paints_viewport_band() {
+        let (mut ctx, session) = band_setup(BAND_PAGE).await;
+        set_viewport_320x200(&mut ctx, &session).await;
+
+        // Unscrolled: the band is the top 200px — red.
+        let resp = band_dispatch(
+            &mut ctx,
+            &session,
+            3,
+            "Page.captureScreenshot",
+            json!({ "captureBeyondViewport": false }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let img = decoded_frame(&resp);
+        assert_eq!((img.width(), img.height()), (320, 200));
+        let px = img.get_pixel(10, 10);
+        assert_eq!((px[0], px[1], px[2]), (255, 0, 0), "top band must be red");
+
+        // Scroll (pure re-blit): the band follows the root scroll offset.
+        let resp = band_dispatch(
+            &mut ctx,
+            &session,
+            4,
+            "Runtime.evaluate",
+            json!({ "expression": "window.scrollTo(0, 500)", "returnByValue": true }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "scrollTo: {:?}", resp.error);
+        let resp = band_dispatch(
+            &mut ctx,
+            &session,
+            5,
+            "Page.captureScreenshot",
+            json!({ "captureBeyondViewport": false }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let img = decoded_frame(&resp);
+        let px = img.get_pixel(10, 10);
+        assert_eq!((px[0], px[1], px[2]), (0, 255, 0), "scrolled band must be green");
+    }
+
+    #[cfg(feature = "screenshot")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn capture_screenshot_clip_semantics_split_by_beyond_viewport() {
+        let (mut ctx, session) = band_setup(BAND_PAGE).await;
+        set_viewport_320x200(&mut ctx, &session).await;
+
+        // Scroll to green so the two clip coordinate systems actually
+        // disagree: Chrome's contract is clip viewport-relative when
+        // captureBeyondViewport is false (Playwright pins it to the current
+        // view), page-absolute when true (Puppeteer fullPage/region shape).
+        let resp = band_dispatch(
+            &mut ctx,
+            &session,
+            3,
+            "Runtime.evaluate",
+            json!({ "expression": "window.scrollTo(0, 500)", "returnByValue": true }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "scrollTo: {:?}", resp.error);
+
+        // beyond:true — clip y:1000 is page-absolute: the blue third,
+        // regardless of the scroll.
+        let resp = band_dispatch(
+            &mut ctx,
+            &session,
+            4,
+            "Page.captureScreenshot",
+            json!({
+                "captureBeyondViewport": true,
+                "clip": { "x": 0, "y": 1000, "width": 160, "height": 100, "scale": 1 }
+            }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let img = decoded_frame(&resp);
+        assert_eq!((img.width(), img.height()), (160, 100));
+        let px = img.get_pixel(5, 5);
+        assert_eq!((px[0], px[1], px[2]), (0, 0, 255), "page-absolute clip must be blue");
+
+        // beyond:false, same shape but clip{y:0}: viewport-relative must
+        // track the scroll (green); page-absolute would paint red.
+        let resp = band_dispatch(
+            &mut ctx,
+            &session,
+            5,
+            "Page.captureScreenshot",
+            json!({
+                "captureBeyondViewport": false,
+                "clip": { "x": 0, "y": 0, "width": 160, "height": 100, "scale": 1 }
+            }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let img = decoded_frame(&resp);
+        assert_eq!((img.width(), img.height()), (160, 100));
+        let px = img.get_pixel(5, 5);
+        assert_eq!(
+            (px[0], px[1], px[2]),
+            (0, 255, 0),
+            "viewport-relative clip{{y:0}} at scroll 500 must track the scroll (green)"
+        );
+    }
+
+    #[cfg(feature = "screenshot")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn capture_screenshot_rejects_non_unit_scale() {
+        let (mut ctx, session) = band_setup(BAND_PAGE).await;
+        let resp = band_dispatch(
+            &mut ctx,
+            &session,
+            3,
+            "Page.captureScreenshot",
+            json!({
+                "captureBeyondViewport": false,
+                "clip": { "x": 0, "y": 0, "width": 10, "height": 10, "scale": 2 }
+            }),
+        )
+        .await;
+        let err = resp.error.expect("scale != 1 must be a CDP error");
+        assert!(err.message.contains("clip.scale"), "error should name clip.scale: {}", err.message);
+    }
+
+    #[cfg(feature = "screenshot")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn capture_screenshot_jpeg_format_encodes_jpeg() {
+        let (mut ctx, session) = band_setup(BAND_PAGE).await;
+        set_viewport_320x200(&mut ctx, &session).await;
+        let resp = band_dispatch(
+            &mut ctx,
+            &session,
+            3,
+            "Page.captureScreenshot",
+            json!({ "captureBeyondViewport": false, "format": "jpeg" }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let data = resp.result.unwrap()["data"].as_str().unwrap().to_string();
+        let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &data)
+            .expect("base64");
+        assert_eq!(&bytes[..2], &[0xFF, 0xD8], "must be a JPEG stream");
+    }
+
+    #[cfg(feature = "screenshot")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn get_layout_metrics_reports_real_viewport_and_content() {
+        let (mut ctx, session) = band_setup(BAND_PAGE).await;
+        set_viewport_320x200(&mut ctx, &session).await;
+        let resp = band_dispatch(&mut ctx, &session, 3, "Page.getLayoutMetrics", json!({})).await;
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let r = resp.result.unwrap();
+        assert_eq!(r["layoutViewport"]["clientWidth"], 320);
+        assert_eq!(r["layoutViewport"]["clientHeight"], 200);
+        assert_eq!(r["cssLayoutViewport"]["clientWidth"], 320);
+        let content_h = r["contentSize"]["height"].as_f64().unwrap();
+        assert!(
+            (content_h - 1500.0).abs() < 1.0,
+            "content height must be the three 500px bands, got {content_h}"
+        );
+    }
+
+    #[cfg(feature = "screenshot")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn screencast_frames_flow_on_damage_and_ack_gates_pump() {
+        let (mut ctx, session) = band_setup(
+            "<html><body style=\"margin:0\"><div style=\"height:900px;background:rgb(255,0,0)\"></div></body></html>",
+        )
+        .await;
+        set_viewport_320x200(&mut ctx, &session).await;
+
+        // startScreencast emits the first frame immediately (Chrome parity).
+        let resp = band_dispatch(
+            &mut ctx,
+            &session,
+            3,
+            "Page.startScreencast",
+            json!({ "format": "png", "maxWidth": 640, "maxHeight": 640 }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "startScreencast: {:?}", resp.error);
+        let frames: Vec<_> = ctx
+            .pending_events
+            .iter()
+            .filter(|e| e.method == "Page.screencastFrame")
+            .collect();
+        assert_eq!(frames.len(), 1, "first frame must arrive with start");
+        assert_eq!(frames[0].params["metadata"]["deviceWidth"], 320);
+        assert_eq!(frames[0].params["metadata"]["scrollOffsetY"], 0);
+        ctx.pending_events.clear();
+
+        // Frame in flight (no ack yet): the pump must not emit.
+        crate::diting_cdp::domains::page::pump_screencast_frames(&mut ctx).await;
+        assert!(
+            !ctx.pending_events.iter().any(|e| e.method == "Page.screencastFrame"),
+            "outstanding ack must gate the pump"
+        );
+
+        // Ack clears the gate; with no damage since, still no frame.
+        let resp =
+            band_dispatch(&mut ctx, &session, 4, "Page.screencastFrameAck", json!({ "sessionId": 1 }))
+                .await;
+        assert!(resp.error.is_none(), "ack: {:?}", resp.error);
+        crate::diting_cdp::domains::page::pump_screencast_frames(&mut ctx).await;
+        assert!(
+            !ctx.pending_events.iter().any(|e| e.method == "Page.screencastFrame"),
+            "unchanged damage signature must not re-emit"
+        );
+
+        // Scrolling is damage: exactly one new frame, at the new offset.
+        let resp = band_dispatch(
+            &mut ctx,
+            &session,
+            5,
+            "Runtime.evaluate",
+            json!({ "expression": "window.scrollTo(0, 600)", "returnByValue": true }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "scrollTo: {:?}", resp.error);
+        crate::diting_cdp::domains::page::pump_screencast_frames(&mut ctx).await;
+        let frames: Vec<_> = ctx
+            .pending_events
+            .iter()
+            .filter(|e| e.method == "Page.screencastFrame")
+            .collect();
+        assert_eq!(frames.len(), 1, "damage must produce exactly one frame");
+        assert_eq!(frames[0].params["metadata"]["scrollOffsetY"], 600);
     }
 }
