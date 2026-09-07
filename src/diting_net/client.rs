@@ -870,6 +870,27 @@ impl HttpClient {
         Err(err)
     }
 
+    /// Legacy-TLS fallback for scripted fetch()/XHR (`op_fetch_url`): the op
+    /// walks redirects on a raw reqwest client it obtained via
+    /// `request_client()` and has no retry of its own, so a transport
+    /// failure there hands the error string here and gets the same
+    /// one-attempt BoringSSL escape hatch the subresource loaders use —
+    /// same guards (GET/HEAD only, `validate_url` re-check, per-hop
+    /// re-validation inside the stealth redirect walk), same shared cookie
+    /// jar and identity sync. `Err` carries the original transport error,
+    /// or the combined message when the legacy attempt fired and failed
+    /// too (the `legacy TLS transport` marker is how tests prove the
+    /// fallback actually ran).
+    pub async fn scripted_fetch_fallback(
+        &self,
+        method: &Method,
+        url: &Url,
+        transport_err: &str,
+    ) -> Result<Response, NetError> {
+        self.retry_via_legacy_tls(method.clone(), url, NetError::Network(transport_err.to_string()))
+            .await
+    }
+
     /// Build the legacy transport on first fallback need, mirroring this
     /// client's cookie jar, proxy and private-network posture. wreq does
     /// not speak SOCKS5 (the #160 shape), so a SOCKS proxy leaves the
@@ -1793,6 +1814,45 @@ mod tests {
         assert!(
             !msg.contains("legacy TLS transport"),
             "POST must not be retried (double-submit), got: {msg}"
+        );
+    }
+
+    /// The op_fetch_url entry point takes a raw reqwest error string, not a
+    /// NetError — same closed-port probe, same markers, proving the helper
+    /// forwards into the guarded retry.
+    #[cfg(feature = "stealth")]
+    #[tokio::test]
+    async fn scripted_fetch_fallback_fires_for_get() {
+        let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+        let url = Url::parse("http://127.0.0.1:1/dead").unwrap();
+        let err = client
+            .scripted_fetch_fallback(&Method::GET, &url, "error sending request")
+            .await
+            .expect_err("closed port must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("legacy TLS transport"),
+            "scripted GET must reach the legacy retry, got: {msg}"
+        );
+    }
+
+    #[cfg(feature = "stealth")]
+    #[tokio::test]
+    async fn scripted_fetch_fallback_skips_post() {
+        let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+        let url = Url::parse("http://127.0.0.1:1/submit").unwrap();
+        let err = client
+            .scripted_fetch_fallback(&Method::POST, &url, "error sending request")
+            .await
+            .expect_err("closed port must fail");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("legacy TLS transport"),
+            "scripted POST must not be retried, got: {msg}"
+        );
+        assert!(
+            msg.contains("error sending request"),
+            "guard skip must surface the original transport error, got: {msg}"
         );
     }
 

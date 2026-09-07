@@ -1832,6 +1832,15 @@ fn cors_response_allows(
     }
 }
 
+/// op_fetch_url's terminal response. The manual redirect walk yields a live
+/// reqwest response; the legacy-TLS fallback (transport failure on the raw
+/// client) yields an already-buffered engine response whose redirects were
+/// resolved — and per-hop revalidated — inside the HttpClient.
+enum OpFetchOutcome {
+    Live(reqwest::Response),
+    Buffered(crate::diting_net::Response),
+}
+
 #[op2(async(deferred), fast)]
 #[string]
 async fn op_fetch_url(
@@ -2191,12 +2200,46 @@ async fn op_fetch_url(
             counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
-        let resp = req.send().await.map_err(|e| {
-            if let Some(ref counter) = in_flight {
-                counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                if let Some(ref counter) = in_flight {
+                    counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                // Scripted fetch()/XHR walked this far on a raw reqwest
+                // client with no retry of its own — the one subresource path
+                // the Tier2 fallback didn't cover (the g.alicdn.com shape:
+                // plain rustls dies on the handshake, the stealth stack's
+                // BoringSSL connects). A GET/HEAD transport failure gets the
+                // same one-shot legacy-TLS escape hatch the script and
+                // stylesheet loaders use; per-hop JS headers (Origin,
+                // Referer, sec-fetch-*) do not ride the retry — the accepted
+                // cost of an escape hatch, mirrored in client.rs. POST keeps
+                // failing with its original error (double-submit risk).
+                let fallback = match http_client.as_ref() {
+                    Some(hc)
+                        if current_method == reqwest::Method::GET
+                            || current_method == reqwest::Method::HEAD =>
+                    {
+                        match url::Url::parse(&current_url) {
+                            Ok(u) => Some(
+                                hc.scripted_fetch_fallback(&current_method, &u, &e.to_string())
+                                    .await,
+                            ),
+                            Err(_) => None,
+                        }
+                    }
+                    _ => None,
+                };
+                match fallback {
+                    Some(Ok(buffered)) => break OpFetchOutcome::Buffered(buffered),
+                    Some(Err(fallback_err)) => {
+                        return Err(deno_error::JsErrorBox::generic(fallback_err.to_string()))
+                    }
+                    None => return Err(deno_error::JsErrorBox::generic(e.to_string())),
+                }
             }
-            deno_error::JsErrorBox::generic(e.to_string())
-        })?;
+        };
 
         if let Some(ref counter) = in_flight {
             counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -2215,7 +2258,7 @@ async fn op_fetch_url(
         }
 
         if !resp.status().is_redirection() {
-            break resp;
+            break OpFetchOutcome::Live(resp);
         }
 
         let location_header = resp
@@ -2225,16 +2268,16 @@ async fn op_fetch_url(
             .map(str::to_string);
         let Some(location) = location_header else {
             // 3xx without a Location header is not actually a redirect.
-            break resp;
+            break OpFetchOutcome::Live(resp);
         };
 
         let base = match url::Url::parse(&current_url) {
             Ok(b) => b,
-            Err(_) => break resp,
+            Err(_) => break OpFetchOutcome::Live(resp),
         };
         let next_url = match base.join(&location) {
             Ok(u) => u,
-            Err(_) => break resp,
+            Err(_) => break OpFetchOutcome::Live(resp),
         };
 
         // Re-validate every redirect target against the SSRF policy.
@@ -2274,13 +2317,28 @@ async fn op_fetch_url(
         current_url = next_url.to_string();
     };
 
-    let status = response.status().as_u16();
-
-    let resp_headers: std::collections::HashMap<String, String> = response
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-        .collect();
+    // The legacy fallback resolved (and revalidated) its redirects inside
+    // the HttpClient; adopt its final URL so the CORS check and the passive
+    // observers below see where the content actually came from.
+    let (status, resp_headers, buffered_body): (
+        u16,
+        std::collections::HashMap<String, String>,
+        Option<Vec<u8>>,
+    ) = match &response {
+        OpFetchOutcome::Live(r) => {
+            let status = r.status().as_u16();
+            let headers = r
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            (status, headers, None)
+        }
+        OpFetchOutcome::Buffered(r) => {
+            current_url = r.url.to_string();
+            (r.status, r.headers.clone(), Some(r.body.clone()))
+        }
+    };
 
     let final_is_cross_origin = request_origin(&current_url)
         .map(|o| o != page_origin)
@@ -2329,20 +2387,44 @@ async fn op_fetch_url(
             )));
         }
     }
-    let mut resp_bytes: Vec<u8> = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| deno_error::JsErrorBox::generic(e.to_string()))?
-    {
-        resp_bytes.extend_from_slice(&chunk);
-        if resp_bytes.len() > body_limit {
-            return Err(deno_error::JsErrorBox::generic(format!(
-                "fetch response body exceeded limit of {} bytes",
-                body_limit
-            )));
+    let resp_bytes: Vec<u8> = match buffered_body {
+        // The fallback pre-buffered its body; the per-chunk cap the
+        // streaming path enforces applies to it as one shot.
+        Some(bytes) => {
+            if bytes.len() > body_limit {
+                return Err(deno_error::JsErrorBox::generic(format!(
+                    "fetch response body exceeded limit of {} bytes",
+                    body_limit
+                )));
+            }
+            bytes
         }
-    }
+        None => {
+            // buffered_body is Some exactly for the Buffered outcome, so
+            // streaming here implies Live.
+            let live = match &mut response {
+                OpFetchOutcome::Live(r) => r,
+                OpFetchOutcome::Buffered(_) => {
+                    unreachable!("buffered bodies never take the streaming path")
+                }
+            };
+            let mut bytes: Vec<u8> = Vec::new();
+            while let Some(chunk) = live
+                .chunk()
+                .await
+                .map_err(|e| deno_error::JsErrorBox::generic(e.to_string()))?
+            {
+                bytes.extend_from_slice(&chunk);
+                if bytes.len() > body_limit {
+                    return Err(deno_error::JsErrorBox::generic(format!(
+                        "fetch response body exceeded limit of {} bytes",
+                        body_limit
+                    )));
+                }
+            }
+            bytes
+        }
+    };
     // Chromium DevTools body policy (Chrome 152 verified, obscura #791): a
     // declared non-UTF-8 charset (GBK) decodes to text with base64Encoded=false;
     // opaque or undecodable bodies travel base64 byte-exact.

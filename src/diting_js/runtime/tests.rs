@@ -2586,6 +2586,86 @@
         assert_eq!(v, serde_json::json!("blocked:net::ERR_FAILED"));
     }
 
+    /// op_fetch_url walks redirects on a raw reqwest client — the one
+    /// subresource path that had no Tier2 legacy-TLS fallback (the
+    /// g.alicdn.com shape: plain rustls dies on the handshake, the stealth
+    /// stack's BoringSSL connects). A closed port fails both transports
+    /// fast; the JS-visible rejection must carry the legacy marker for GET
+    /// (fallback fired) and must NOT for POST (double-submit guard).
+    #[cfg(feature = "stealth")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_transport_failure_falls_back_to_legacy_tls() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_http_client(std::sync::Arc::new(crate::diting_net::HttpClient::with_full_options(
+            std::sync::Arc::new(crate::diting_net::CookieJar::new()),
+            None,
+            true,
+        )));
+
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    try {
+                        await fetch("http://127.0.0.1:1/dead");
+                        return "unexpectedly-resolved";
+                    } catch (e) {
+                        return "rejected:" + (e && e.message);
+                    }
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let msg = result.value.unwrap().as_str().unwrap_or_default().to_string();
+        assert!(
+            msg.contains("legacy TLS transport"),
+            "GET transport failure must surface the legacy fallback attempt, got: {msg}"
+        );
+    }
+
+    #[cfg(feature = "stealth")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_transport_failure_post_keeps_original_error() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_http_client(std::sync::Arc::new(crate::diting_net::HttpClient::with_full_options(
+            std::sync::Arc::new(crate::diting_net::CookieJar::new()),
+            None,
+            true,
+        )));
+
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    try {
+                        await fetch("http://127.0.0.1:1/submit", { method: "POST", body: "k=v" });
+                        return "unexpectedly-resolved";
+                    } catch (e) {
+                        return "rejected:" + (e && e.message);
+                    }
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let msg = result.value.unwrap().as_str().unwrap_or_default().to_string();
+        assert!(
+            msg.starts_with("rejected:") && !msg.contains("legacy TLS transport"),
+            "POST must fail with its original transport error, got: {msg}"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn test_fetch_url_input_decodes_binary_body_base64() {
         // Serves a binary body from a real local server: the bootstrap deletes
