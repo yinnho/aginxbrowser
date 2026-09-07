@@ -843,6 +843,21 @@ async fn doctor_handler(Query(params): Query<DoctorParams>) -> impl IntoResponse
             .unwrap_or(false),
     });
 
+    // Live engine health, not a static list: an agent deciding between
+    // engines wants to know who is benched by a CAPTCHA right now.
+    let search_engines: Vec<serde_json::Value> = server::search_engine_health()
+        .await
+        .into_iter()
+        .map(|e| {
+            serde_json::json!({
+                "name": e.name,
+                "suspended": e.suspended,
+                "suspend_remaining_secs": if e.suspended { Some(e.suspend_remaining_secs) } else { None },
+                "captcha_count": e.captcha_count,
+            })
+        })
+        .collect();
+
     let probe = if params.probe.unwrap_or(false) {
         let probe_url = std::env::var("AGINXBROWSER_DOCTOR_URL")
             .unwrap_or_else(|_| "https://example.com".to_string());
@@ -895,12 +910,7 @@ async fn doctor_handler(Query(params): Query<DoctorParams>) -> impl IntoResponse
         "engine": "diting",
         "version": env!("CARGO_PKG_VERSION"),
         "capabilities": capabilities,
-        "search_engines": [
-            "baidu", "bing", "sogou", "sogou_wechat", "duckduckgo",
-            "stackexchange", "github", "arxiv",
-            "bing_news", "huggingface", "npm", "pypi",
-            "baidu_images", "bing_images"
-        ],
+        "search_engines": search_engines,
         "endpoints": [
             "/health", "/doctor", "/fetch", "/click", "/eval", "/search",
             "/download", "/v1/scrape", "/session/create", "/session/list",

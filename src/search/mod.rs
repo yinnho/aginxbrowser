@@ -238,6 +238,41 @@ impl SearchEngineRegistry {
             s.resume_at.is_some() || s.captcha_count > 0
         });
     }
+
+    /// Live per-engine suspension state for /doctor: who is currently
+    /// benched, until when, and how many CAPTCHAs stacked up.
+    pub async fn health_snapshot(&self) -> Vec<EngineHealth> {
+        self.cleanup_suspensions().await;
+        let state = self.state.read().await;
+        let now = std::time::Instant::now();
+        self.engines
+            .iter()
+            .map(|e| {
+                let name = e.name();
+                let (suspended, remaining, count) = match state.get(name) {
+                    Some(s) => match s.resume_at {
+                        Some(t) if t > now => (true, (t - now).as_secs(), s.captcha_count),
+                        _ => (false, 0, s.captcha_count),
+                    },
+                    None => (false, 0, 0),
+                };
+                EngineHealth {
+                    name: name.to_string(),
+                    suspended,
+                    suspend_remaining_secs: remaining,
+                    captcha_count: count,
+                }
+            })
+            .collect()
+    }
+}
+
+/// One engine's health row for /doctor.
+pub struct EngineHealth {
+    pub name: String,
+    pub suspended: bool,
+    pub suspend_remaining_secs: u64,
+    pub captcha_count: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -760,6 +795,17 @@ mod tests {
         assert_eq!(merged[1].title, "Low");
     }
 
+    // ---- health_snapshot (suspension state /doctor reports) ----
+
+    #[tokio::test]
+    async fn health_snapshot_lists_every_registered_engine_healthy_by_default() {
+        let registry = SearchEngineRegistry::new();
+        let rows = registry.health_snapshot().await;
+        assert!(rows.len() >= 14, "expected all engines, got {}", rows.len());
+        assert!(rows.iter().all(|r| !r.suspended && r.captcha_count == 0));
+        assert!(rows.iter().any(|r| r.name == "bing_images"));
+    }
+
     #[test]
     fn merge_truncates_to_max_results() {
         let results: Vec<RawSearchResult> = (0..5)
@@ -786,6 +832,27 @@ mod tests {
 // ---------------------------------------------------------------------------
 // Direct-first proxy fallback (auto mode)
 // ---------------------------------------------------------------------------
+
+/// Flatten a reqwest error's source chain (hyper/tokio causes) into one
+/// string — the top-level Display alone hides whether a failure was
+/// connect/timeout/TLS, which is the one bit remote diagnosis needs.
+fn err_chain(e: &reqwest::Error) -> String {
+    let mut out = e.to_string();
+    let mut src = std::error::Error::source(e);
+    while let Some(s) = src {
+        out.push_str(" <- ");
+        out.push_str(&s.to_string());
+        src = s.source();
+    }
+    out
+}
+
+/// Log the first `chars` of a rejected body so operators can see WHAT came
+/// back (challenge page? portal? empty?) from an instance far away.
+fn log_rejected_body(url: &str, path: &str, body: &str) {
+    let head: String = body.chars().take(200).collect();
+    tracing::warn!("search: {path} body failed validation for {url} (len={}): {head:?}", body.len());
+}
 
 /// Fetch `url` with GET, **direct first**; retry through the proxy when the
 /// direct attempt fails at transport level (connect/timeout — the signature
@@ -834,6 +901,7 @@ where
                 if body_ok(&body) {
                     return Ok(body);
                 }
+                log_rejected_body(url, "direct", &body);
                 last_err = "direct: body failed validation (geo-substituted?)".into();
                 None
             }
@@ -843,7 +911,7 @@ where
             }
         },
         Err(e) => {
-            last_err = format!("direct: {e}");
+            last_err = format!("direct: {}", err_chain(&e));
             None
         }
     };
@@ -865,15 +933,19 @@ where
         return match req.send().await {
             Ok(resp) => match resp.text().await {
                 Ok(body) if body_ok(&body) => Ok(body),
-                Ok(_) => Err(SearchEngineError::Transient(
-                    "proxy: body failed validation too (challenge/portal on both paths)".into(),
-                )),
+                Ok(body) => {
+                    log_rejected_body(url, "proxy", &body);
+                    Err(SearchEngineError::Transient(
+                        "proxy: body failed validation too (challenge/portal on both paths)".into(),
+                    ))
+                }
                 Err(e) => Err(SearchEngineError::Transient(format!(
                     "proxy: read body failed: {e}"
                 ))),
             },
             Err(e) => Err(SearchEngineError::Transient(format!(
-                "direct ({last_err}) + proxy: {e}"
+                "direct ({last_err}) + proxy: {}",
+                err_chain(&e)
             ))),
         };
     }

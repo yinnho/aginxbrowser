@@ -768,11 +768,19 @@ fn base64_png(bytes: &[u8]) -> String {
     STANDARD.encode(bytes)
 }
 
+/// Shared search engine registry. LazyLock so engine clients (reqwest/wreq)
+/// are built once on first use.
+pub(crate) static SEARCH_REGISTRY: std::sync::LazyLock<crate::search::SearchEngineRegistry> =
+    std::sync::LazyLock::new(crate::search::SearchEngineRegistry::new);
+
+/// Live per-engine suspension state for /doctor.
+pub(crate) async fn search_engine_health() -> Vec<crate::search::EngineHealth> {
+    SEARCH_REGISTRY.health_snapshot().await
+}
+
 /// /search: native search across Baidu/Bing/Sogou/Google, optionally grab body for top N results.
 pub async fn do_search(req: SearchRequest) -> Result<SearchResponse, SearchError> {
     // Step 1: native search via built-in engines.
-    static REGISTRY: std::sync::LazyLock<crate::search::SearchEngineRegistry> =
-        std::sync::LazyLock::new(crate::search::SearchEngineRegistry::new);
     let params = crate::search::SearchParams {
         language: req.language.clone(),
         pageno: 1,
@@ -782,7 +790,7 @@ pub async fn do_search(req: SearchRequest) -> Result<SearchResponse, SearchError
     };
 
     let (mut items, number_of_results, captcha_events) =
-        crate::search::native_search(&REGISTRY, &req.q, params, &req.categories, req.max_results).await;
+        crate::search::native_search(&SEARCH_REGISTRY, &req.q, params, &req.categories, req.max_results).await;
 
     // Step 2: optionally grab body for the top fetch_top results (concurrent).
     // Each fetch runs in its own blocking thread + current-thread runtime
