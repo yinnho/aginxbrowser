@@ -3395,6 +3395,35 @@ mod tests {
         assert_eq!(&bytes[..2], &[0xFF, 0xD8], "must be a JPEG stream");
     }
 
+    // AginxOS real-device release blocker: `format:"jpeg"` with no clip (the
+    // Puppeteer fullPage shape) used to hand the encoded PNG bytes to
+    // RgbaImage::from_raw as if they were raw pixels — "frame buffer size
+    // mismatch", 3/3 on their 1080×10728 page. Any page dies the same way
+    // (the buffer is compressed bytes, never w*h*4); theirs just found it.
+    // The legacy path must decode, then re-encode.
+    #[cfg(feature = "screenshot")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn capture_screenshot_legacy_jpeg_encodes_jpeg() {
+        let (mut ctx, session) = band_setup(BAND_PAGE).await;
+        let resp = band_dispatch(
+            &mut ctx,
+            &session,
+            3,
+            "Page.captureScreenshot",
+            json!({ "format": "jpeg", "quality": 80 }),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "legacy jpeg must not die on the buffer mismatch: {:?}",
+            resp.error
+        );
+        let data = resp.result.unwrap()["data"].as_str().unwrap().to_string();
+        let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &data)
+            .expect("base64");
+        assert_eq!(&bytes[..2], &[0xFF, 0xD8], "must be a JPEG stream");
+    }
+
     #[cfg(feature = "screenshot")]
     #[tokio::test(flavor = "current_thread")]
     async fn get_layout_metrics_reports_real_viewport_and_content() {
@@ -3478,5 +3507,44 @@ mod tests {
             .collect();
         assert_eq!(frames.len(), 1, "damage must produce exactly one frame");
         assert_eq!(frames[0].params["metadata"]["scrollOffsetY"], 600);
+    }
+
+    // AginxOS real-device follow-up: the pump tick must advance the page's JS
+    // event loop, or a page that damages itself (setInterval mutation) shows
+    // no new frames to a silent client — dispatch is otherwise the loop's only
+    // poller, and their frames flowed only after a heartbeat evaluate. No
+    // Runtime.evaluate may run between the ack and the pump call: the timer's
+    // mutation has to come from the settle inside the pump itself.
+    #[cfg(feature = "screenshot")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn screencast_pump_advances_page_timers_for_silent_clients() {
+        let (mut ctx, session) = band_setup(
+            "<html><body style=\"margin:0\"><div id=t style=\"height:200px\">x</div>\
+             <script>setInterval(function(){document.getElementById('t').textContent += 'x';}, 20)</script></body></html>",
+        )
+        .await;
+        set_viewport_320x200(&mut ctx, &session).await;
+
+        let resp =
+            band_dispatch(&mut ctx, &session, 3, "Page.startScreencast", json!({})).await;
+        assert!(resp.error.is_none(), "startScreencast: {:?}", resp.error);
+        ctx.pending_events.clear();
+        // Ack the first frame (delivered inline with start) so the pump is armed.
+        let resp =
+            band_dispatch(&mut ctx, &session, 4, "Page.screencastFrameAck", json!({ "sessionId": 1 }))
+                .await;
+        assert!(resp.error.is_none(), "ack: {:?}", resp.error);
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        crate::diting_cdp::domains::page::pump_screencast_frames(&mut ctx).await;
+        let frames = ctx
+            .pending_events
+            .iter()
+            .filter(|e| e.method == "Page.screencastFrame")
+            .count();
+        assert_eq!(
+            frames, 1,
+            "page-driven timer damage must emit a frame without any client message"
+        );
     }
 }

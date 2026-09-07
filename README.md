@@ -264,6 +264,8 @@ cargo build --release --features stealth,screenshot
 
 Requirements: Rust 1.78+; the V8 static library downloads automatically on first build. The stealth feature additionally needs `go`, `cmake`, and a C++ compiler. The screenshot feature ships with a bundled CJK font subset (GB2312 + common symbols) — no system fonts required for correct Chinese rendering.
 
+If your network can't reach the rusty_v8 CDN (build hangs with zero progress after "downloading v8"), pre-fill `~/.cache/rusty_v8` with the `librusty_v8.a.gz` for your version (fetch it from any reachable mirror/host and gunzip into place) and the build script skips the download.
+
 ## Runtime Environment Variables
 
 | Variable | Default | Description |

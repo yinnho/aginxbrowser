@@ -264,6 +264,8 @@ cargo build --release --features stealth,screenshot
 
 依赖：Rust 1.78+，首次编译自动下载 V8 静态库（需网络）。启用 stealth 需额外 `go`、`cmake`、C++ 编译器。启用 screenshot 自带 CJK 字体子集（GB2312 + 常用符号）——正确渲染中文无需服务器装任何字体。
 
+若网络对 rusty_v8 CDN 黑洞（下载 v8 卡住零进度），预填 `~/.cache/rusty_v8`（从可达的镜像/主机取对应版本的 `librusty_v8.a.gz` 解压到位）即可跳过下载。
+
 ## 运行时环境变量
 
 | 变量 | 默认 | 说明 |

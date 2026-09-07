@@ -567,8 +567,13 @@ pub async fn handle(
                         None,
                     )
                     .map_err(|e| format!("screenshot failed: {e}"))?;
+                    // The legacy path renders to an encoded PNG, so a jpeg
+                    // request decodes before re-encoding — handing the PNG
+                    // bytes to `RgbaImage::from_raw` as raw pixels is the
+                    // "frame buffer size mismatch" crash (any no-clip jpeg
+                    // capture died 3/3 on the AginxOS real-device report).
                     let data = if format == "jpeg" || format == "jpg" {
-                        encode_frame("jpeg", 100, rendered.pixel_width, rendered.pixel_height, rendered.png)?
+                        encode_legacy_jpeg(&rendered.png, quality_param(&params))?
                     } else {
                         rendered.png
                     };
@@ -728,6 +733,20 @@ fn quality_param(params: &Value) -> u8 {
         .clamp(0, 100) as u8
 }
 
+/// Re-encode an already-encoded PNG as jpeg for the legacy full-page path,
+/// whose renderer hands back `RenderedScreenshot::png` (compressed bytes, not
+/// a raw frame buffer — that distinction is the whole point of this helper).
+#[cfg(feature = "screenshot")]
+fn encode_legacy_jpeg(png: &[u8], quality: u8) -> Result<Vec<u8>, String> {
+    let img = image::load_from_memory(png).map_err(|e| format!("jpeg decode: {e}"))?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality);
+    img.to_rgb8()
+        .write_with_encoder(encoder)
+        .map_err(|e| format!("jpeg encode: {e}"))?;
+    Ok(out.into_inner())
+}
+
 /// Encode a band frame as png (default) or jpeg (`quality`), mirroring the
 /// render path's encoder settings.
 #[cfg(feature = "screenshot")]
@@ -857,6 +876,12 @@ async fn fetch_band_images(page: &crate::diting_browser::Page, base_url: &str, u
 /// (dom epoch, scroll, viewport): a static page costs zero frames, a scroll
 /// or mutation re-blits — frame cost is independent of page height.
 #[cfg(feature = "screenshot")]
+/// Per-tick JS settle budget for armed screencast pages: long enough for a
+/// due timer to fire inside the poll, short enough that several armed pages
+/// still fit inside the 33 ms pump cadence.
+const SCREENCEAST_SETTLE_MS: u64 = 5;
+
+#[cfg(feature = "screenshot")]
 pub(crate) async fn pump_screencast_frames(ctx: &mut CdpContext) {
     if ctx.screencast.is_empty() {
         return;
@@ -867,6 +892,16 @@ pub(crate) async fn pump_screencast_frames(ctx: &mut CdpContext) {
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     for (page_id, mut st) in entries {
+        // Drive the page's JS event loop a notch so page-driven damage
+        // (timers, animations) progresses without a client message: dispatch
+        // is otherwise the loop's only poller, and a silent connection
+        // freezes a self-updating page — frames flowed only after a
+        // heartbeat evaluate on the AginxOS real-device report. Runs before
+        // the ack gate on purpose: a slow-acking client must not freeze the
+        // page's own time. Idle pages return from settle immediately.
+        if let Some(page) = ctx.get_page_mut(&page_id) {
+            page.settle(SCREENCEAST_SETTLE_MS).await;
+        }
         if st.outstanding_ack {
             continue;
         }
