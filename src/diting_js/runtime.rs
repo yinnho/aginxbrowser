@@ -411,6 +411,12 @@ impl JsRuntime {
         self.state.borrow_mut().pending_navigation.take()
     }
 
+    /// Whether page JS ran `document.write()` since the last drain (see
+    /// `JsState::pending_write_nav`).
+    pub fn take_pending_write_nav(&self) -> bool {
+        self.state.borrow_mut().pending_write_nav.replace(false)
+    }
+
     /// Whether any dynamic `<script src>` fetch is still in flight. Dynamic
     /// scripts ride the op-level client cache, invisible to the page-level
     /// http_client's active_requests() counter, so the settle loop asks here

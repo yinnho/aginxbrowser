@@ -369,6 +369,7 @@ pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
 
     drain_binding_calls(ctx);
     drain_console_calls(ctx);
+    drain_write_navs(ctx);
     let settle_pages = drain_intercept_calls(ctx);
     // Run the continuations of every fetch the drain just answered itself.
     // Nothing else polls the event loop between commands, so without this the
@@ -469,8 +470,9 @@ pub(crate) fn drain_binding_calls(ctx: &mut CdpContext) {
 }
 
 // Drain every page's console-call queue (filled when page JS calls
-// `console.log`/`warn`/`error`, which the bootstrap shim routes through
-// `op_console_msg`) and turn each into a `Runtime.consoleAPICalled` CDP event.
+// `console.log`/`warn`/`error`/`debug`, which the bootstrap shim routes
+// through `op_console_msg`) and turn each into a `Runtime.consoleAPICalled`
+// CDP event.
 // Called after every dispatch, right after `drain_binding_calls`, so console
 // output produced during a CDP handler becomes visible to the client on the
 // same turn.
@@ -504,6 +506,7 @@ pub(crate) fn drain_console_calls(ctx: &mut CdpContext) {
             let cdp_type = match level.as_str() {
                 "warn" => "warning",
                 "error" => "error",
+                "debug" => "debug",
                 _ => "log",
             };
             for session_id in page_sessions {
@@ -527,6 +530,46 @@ pub(crate) fn drain_console_calls(ctx: &mut CdpContext) {
         }
     }
     ctx.pending_events.extend(events);
+}
+
+// Drain pages that ran `document.write()` and re-emit the post-navigation
+// event sequence for each: that parse produced a fresh document, so
+// DOMContentLoaded/load fire again (Playwright's setContent blocks on the
+// fresh `load` after its tag console message resets the frame's lifecycle).
+// Runs AFTER `drain_console_calls` by contract — the tag message must be
+// delivered first, or the load events land before the lifecycle reset and
+// Playwright clears them, then waits forever (the 30s setContent timeout).
+fn drain_write_navs(ctx: &mut CdpContext) {
+    let mut page_to_sessions: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (session_id, page_id) in &ctx.sessions {
+        page_to_sessions
+            .entry(page_id.as_str())
+            .or_default()
+            .push(session_id.as_str());
+    }
+    for sessions in page_to_sessions.values_mut() {
+        sessions.sort_unstable();
+    }
+
+    let mut writers: Vec<(String, Vec<String>)> = Vec::new();
+    for page in &mut ctx.pages {
+        if page.take_pending_write_nav() {
+            let sessions = page_to_sessions
+                .get(page.id.as_str())
+                .map(|ss| ss.iter().map(|s| s.to_string()).collect())
+                .unwrap_or_default();
+            writers.push((page.id.clone(), sessions));
+        }
+    }
+    for (page_id, sessions) in writers {
+        if sessions.is_empty() {
+            domains::page::emit_navigation_for_page(ctx, &None, &page_id);
+        } else {
+            for sid in sessions {
+                domains::page::emit_navigation_for_page(ctx, &Some(sid), &page_id);
+            }
+        }
+    }
 }
 
 // Drain every armed page's intercept channel and surface parked requests as
@@ -779,6 +822,114 @@ mod tests {
         assert_eq!(
             thrown.params["exceptionDetails"]["exception"]["description"],
             "Error: kaboom"
+        );
+    }
+
+    // Playwright's setContent sync signal: its injection script runs
+    // document.open(); console.debug("--playwright--set--content--…");
+    // document.write(html); document.close(); and the client blocks until a
+    // console message whose text starts with that tag arrives. A swallowed
+    // debug() left every setContent timing out at 30s.
+    #[tokio::test(flavor = "current_thread")]
+    async fn console_debug_flows_to_console_api_called_with_debug_type() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-1".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        // A real document initializes the V8 isolate (create_page blanks it),
+        // so the evaluate below actually runs in a live runtime.
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": "data:text/html,<html><body>hi</body></html>" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        let req = CdpRequest {
+            id: 2,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression":
+                    "console.debug('--playwright--set--content--page-1--1--')",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&req, &mut ctx).await;
+        assert!(resp.error.is_none(), "unexpected CDP error: {:?}", resp.error);
+
+        let ev = ctx
+            .pending_events
+            .iter()
+            .find(|e| e.method == "Runtime.consoleAPICalled")
+            .expect("console.debug must reach the client as Runtime.consoleAPICalled");
+        assert_eq!(ev.session_id.as_deref(), Some(session_id.as_str()));
+        assert_eq!(ev.params["type"], "debug");
+        let text = ev.params["args"][0]
+            .get("value")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            text.starts_with("--playwright--set--content--"),
+            "console message text must carry the tag verbatim, got: {text}"
+        );
+    }
+
+    // Playwright's setContent runs document.open(); console.debug(tag);
+    // document.write(html); document.close() and waits on a FRESH `load`
+    // after the tag message clears the frame's lifecycle state. The load
+    // events must therefore be queued AFTER the console message — a load
+    // emitted first is cleared on tag arrival and waited on forever.
+    #[tokio::test(flavor = "current_thread")]
+    async fn document_write_emits_load_lifecycle_after_the_tag_console() {
+        let tag = "--playwright--set--content--page-1--1--";
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-1".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": "data:text/html,<html><body>old</body></html>" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+        ctx.pending_events.clear();
+
+        let req = CdpRequest {
+            id: 2,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": format!(
+                    "document.open(); console.debug('{tag}'); \
+                     document.write('<p>fresh</p>'); document.close();"
+                ),
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&req, &mut ctx).await;
+        assert!(resp.error.is_none(), "unexpected CDP error: {:?}", resp.error);
+
+        let tag_pos = ctx
+            .pending_events
+            .iter()
+            .position(|e| {
+                e.method == "Runtime.consoleAPICalled"
+                    && e.params["args"][0]["value"] == tag
+            })
+            .expect("tag console message must be emitted");
+        let load_pos = ctx
+            .pending_events
+            .iter()
+            .position(|e| e.method == "Page.lifecycleEvent" && e.params["name"] == "load")
+            .expect("document.write must emit a fresh load lifecycle event");
+        assert!(
+            load_pos > tag_pos,
+            "load lifecycle ({load_pos}) must be queued after the tag console ({tag_pos})"
         );
     }
 

@@ -2339,6 +2339,13 @@ impl Page {
         }
     }
 
+    pub fn take_pending_write_nav(&self) -> bool {
+        match &self.js {
+            Some(js) => js.take_pending_write_nav(),
+            None => false,
+        }
+    }
+
     #[allow(dead_code)] // CDP Runtime.addBinding parity — drained as bindingCalled events
     pub fn take_pending_binding_calls(&self) -> Vec<(String, String)> {
         if let Some(js) = &self.js {

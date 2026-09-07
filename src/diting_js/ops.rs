@@ -86,6 +86,12 @@ pub struct JsState {
     // emitted as `Runtime.consoleAPICalled` events so console output is
     // visible to Playwright/Puppeteer instead of only the tracing log.
     pub pending_console_calls: Vec<(String, String, String)>,
+    /// Set when page JS fed `document.write()` — per HTML spec that parse
+    /// produces a fresh document whose `load` fires again (Playwright's
+    /// setContent waits on it). Drained by the CDP layer after the console
+    /// drain so the setContent tag message clears the frame's lifecycle
+    /// state before the new load events land.
+    pub pending_write_nav: std::cell::Cell<bool>,
     /// Dialog policy applied by `op_dialog` to subsequent window.confirm/
     /// prompt calls (alert has no answer). Default false = auto-dismiss, so
     /// dialogs can never block: the thread that would show the dialog is the
@@ -264,6 +270,7 @@ impl JsState {
             intercept_enabled: false,
             pending_binding_calls: Vec::new(),
             pending_console_calls: Vec::new(),
+            pending_write_nav: std::cell::Cell::new(false),
             dialog_accept: false,
             dialog_prompt_text: None,
             write_stream: std::cell::RefCell::new(None),
@@ -764,6 +771,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         // here: insertion must go through Node.appendChild on the JS side,
         // which also reports the mutation and runs written scripts.
         "document_write" => {
+            gs.pending_write_nav.set(true);
             let mut slot = gs.write_stream.borrow_mut();
             let stream = slot.get_or_insert_with(crate::diting_js::write_stream::DocumentWriteStream::new);
             let pairs: Vec<[i32; 2]> = stream

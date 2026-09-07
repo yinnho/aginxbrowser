@@ -332,7 +332,8 @@ const _consoleFn = (level, args) => {
 globalThis.console = {
   log: (...a) => _consoleFn("log", a), warn: (...a) => _consoleFn("warn", a),
   error: (...a) => _consoleFn("error", a), info: (...a) => _consoleFn("log", a),
-  debug: () => {}, dir: () => {}, trace: () => {}, table: () => {}, group: () => {},
+  debug: (...a) => _consoleFn("debug", a),
+  dir: () => {}, trace: () => {}, table: () => {}, group: () => {},
   groupEnd: () => {}, groupCollapsed: () => {}, time: () => {}, timeEnd: () => {},
   timeLog: () => {}, count: () => {}, countReset: () => {}, clear: () => {},
   assert: (c, ...a) => { if (!c) _consoleFn("error", ["Assertion failed:", ...a]); },
