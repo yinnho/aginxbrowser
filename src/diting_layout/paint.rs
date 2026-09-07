@@ -141,12 +141,12 @@ impl Canvas {
     }
 
     /// Pop the innermost clip.
-    fn pop_clip(&mut self) {
+    pub(crate) fn pop_clip(&mut self) {
         self.clip.pop();
     }
 
     /// Push a clip rect (intersected with the current one).
-    fn push_clip(&mut self, x0: i64, y0: i64, x1: i64, y1: i64) {
+    pub(crate) fn push_clip(&mut self, x0: i64, y0: i64, x1: i64, y1: i64) {
         let (cx0, cy0, cx1, cy1) = self.allowed();
         let r = (cx0.max(x0), cy0.max(y0), cx1.min(x1), cy1.min(y1));
         self.clip.push(if r.2 < r.0 || r.3 < r.1 {
@@ -578,6 +578,15 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                         out.pop_clip();
                     }
                 }
+            }
+            PaintItem::Svg { rect, render } => {
+                // Same band prefilter as Replaced: the svg painter clips to
+                // the element box anyway, this just skips rasterizing an
+                // off-band subtree.
+                if rect.y + rect.height <= dy || rect.y >= dy + out.height as f32 {
+                    continue;
+                }
+                super::svg::paint_svg(render, rect, fonts, out, dx, dy);
             }
             PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at } => {
                 if !text_reaches_band(*y, text, *font_size, *wrap_at, *line_height, dy, out.height as i64) {

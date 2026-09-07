@@ -38,6 +38,7 @@ use crate::diting_dom::tree::{DomTree, NodeId};
 
 pub mod image;
 pub mod paint;
+pub mod svg;
 pub mod text;
 pub use image::DecodedImage;
 pub use text::FontBook;
@@ -869,11 +870,16 @@ fn run_wrapper_style() -> Style {    Style {
 /// family: an unstyled control used to fall through to the plain-block path
 /// and measure 0×N (no content to lay out), which reads as "invisible" to
 /// every rect-based consumer — Playwright's actionability loop waits forever
-/// on a zero-height input (obscura#807 class).
+/// on a zero-height input (obscura#807 class). `svg` joins for the same
+/// reason plus a stronger one: its children are shapes/text in viewBox
+/// user units, not flow content — flowing them is the text-leak bug the
+/// AginxOS svg batch starts from. The subtree compiles to paint ops at
+/// collect time instead (see [`svg::compile_svg`]).
 fn is_replaced_tag(tag: &str) -> bool {
     matches!(
         tag,
         "img" | "video" | "iframe" | "canvas" | "object" | "embed" | "input" | "textarea"
+            | "svg"
     )
 }
 
@@ -1111,6 +1117,29 @@ fn build_replaced_leaf(
         "video" | "iframe" | "embed" | "object" => {
             (aw.unwrap_or(300.0), ah.unwrap_or(150.0), false)
         }
+        // svg: the viewBox IS the intrinsic size/ratio — the element box
+        // maps onto it at paint (that map is the zoom semantics of this
+        // batch). Attr w/h override per-axis and back-fill through the
+        // viewBox ratio; no viewBox: attr-or-300×150 like the others.
+        "svg" => {
+            let vb = tree
+                .with_node(id, |n| n.get_attribute("viewBox").map(|v| v.to_string()))
+                .flatten()
+                .and_then(|v| svg::parse_view_box(&v));
+            match vb {
+                Some((_, _, vw, vh)) => {
+                    let r = vw / vh;
+                    let (w, h) = match (aw, ah) {
+                        (Some(w), Some(h)) if h > 0.0 => (w, h),
+                        (Some(w), None) => (w, w / r),
+                        (None, Some(h)) => (h * r, h),
+                        _ => (vw, vh),
+                    };
+                    (w, h, true)
+                }
+                None => (aw.unwrap_or(300.0), ah.unwrap_or(150.0), false),
+            }
+        }
         // img: attrs override the decoded image per-axis, the image ratio
         // back-fills a free axis; with nothing at all, 300×150.
         _ => {
@@ -1130,11 +1159,12 @@ fn build_replaced_leaf(
         }
     };
 
-    // Attrs block ratio transfer only for img: width/height attrs are
+    // Attrs block ratio transfer for img and svg: width/height attrs are
     // presentational-hint DECLARATIONS, so a CSS override of one axis does
     // not re-derive the other (#cssw stays 100×200, not 100×50). Canvas
     // attrs ARE the intrinsic size and never block.
-    let (attr_dw, attr_dh) = if tag == "img" { (aw.is_some(), ah.is_some()) } else { (false, false) };
+    let (attr_dw, attr_dh) =
+        if tag == "img" || tag == "svg" { (aw.is_some(), ah.is_some()) } else { (false, false) };
     let ratio = ratio_transfer.then(|| nat_w / nat_h);
     let css_w_px = match style.width {
         Some(crate::diting_css::Length::Px(w)) => Some(w),
@@ -2652,6 +2682,15 @@ pub enum PaintItem {
         alt: Option<(String, f32, bool, f32, [u8; 4])>,
         fill_placeholder: bool,
     },
+    /// A compiled svg subtree painted into its replaced box (svg v1): the
+    /// op list is in viewBox user units with group transforms pre-flattened
+    /// at collect time; paint maps it through the box (element sizing IS
+    /// the zoom). Arc because the item list is cloned per band paint and
+    /// the op list is immutable from here on.
+    Svg {
+        rect: Rect,
+        render: std::sync::Arc<svg::SvgRender>,
+    },
     /// Begin clipping descendants to `rect` (the padding box of an
     /// overflow-clipping element) until the matching [`PaintItem::PopClip`].
     /// The flat item list carries the tree's clip structure in document
@@ -3709,7 +3748,19 @@ pub fn layout_dom_with_paint_order_and_images(
                 .flatten()
                 .unwrap_or(false);
             if replaced {
-                if let Some(img) = images.get(dom_id) {
+                // svg: the subtree compiles to paint ops here — never the
+                // image path, never the placeholder (an empty svg still
+                // renders its element box, matching Chrome).
+                let is_svg = tree
+                    .with_node(*dom_id, |n| {
+                        n.as_element().map(|e| e.local.to_string() == "svg")
+                    })
+                    .flatten()
+                    .unwrap_or(false);
+                if is_svg {
+                    let render = std::sync::Arc::new(svg::compile_svg(tree, styles, *dom_id));
+                    items.push(PaintItem::Svg { rect, render });
+                } else if let Some(img) = images.get(dom_id) {
                     let st = styles.get(dom_id);
                     let fit = st.and_then(|s| s.object_fit).unwrap_or(ObjectFit::Fill);
                     let pos = st

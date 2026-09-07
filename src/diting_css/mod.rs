@@ -461,6 +461,17 @@ pub struct ComputedStyle {
     /// the layout engine needing table/list box types (obscura #771).
     pub display_from_ua: bool,
     pub color: Option<Color>,
+    /// SVG paint properties (svg v1). Deliberately NON-inherited here: the
+    /// svg subtree compiler does paint inheritance itself, because CSS
+    /// presentation-attribute priority (own CSS > own attr > inherited CSS)
+    /// needs to distinguish "declared on this element" from "inherited",
+    /// which a merged ComputedStyle can't. `None` = nothing declared on this
+    /// element; the svg compiler seeds unset chains with the SVG initial
+    /// values (fill black, stroke none, width 1).
+    pub svg_fill: Option<SvgPaint>,
+    pub svg_stroke: Option<SvgPaint>,
+    pub svg_stroke_width: Option<f32>,
+    pub svg_dasharray: Option<Vec<f32>>,
     pub background_color: Option<Color>,
     /// Shorthand sides in CSS order (top right bottom left), already expanded.
     pub margin: Sides,
@@ -765,6 +776,16 @@ impl Default for Display {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color(pub u8, pub u8, pub u8, pub u8);
+
+/// An SVG paint value (svg v1): a resolved color, or `currentColor` which
+/// stays symbolic through the cascade and resolves against the element's
+/// inherited `color` when the svg compiler flattens the subtree. "none" is
+/// stored as a fully transparent color — both mean "draw nothing".
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SvgPaint {
+    Color(Color),
+    CurrentColor,
+}
 
 /// A computed length (batch 2e). `Px` is fully resolved — em/rem were folded
 /// in during the cascade (em against the element's own font-size, rem
@@ -1463,6 +1484,53 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             true
         }
         "color" => parse_color(v).map(|c| style.color = Some(c)).is_some(),
+        // SVG presentation properties (svg v1): they cascade like any other
+        // property — archify-class diagrams color shapes through classes +
+        // custom properties (`fill: var(--frontend-fill)`), so the values
+        // arrive here var()-substituted. `none` maps to a fully transparent
+        // paint (both mean "draw nothing"); `currentColor` stays symbolic
+        // and resolves against the element's inherited `color` at svg
+        // compile time. url(#paint) references (gradients/patterns) drop
+        // the declaration, falling back to inherited/attribute/default.
+        "fill" | "stroke" => {
+            let paint = if v.eq_ignore_ascii_case("none") {
+                SvgPaint::Color(Color(0, 0, 0, 0))
+            } else if v.eq_ignore_ascii_case("currentColor") {
+                SvgPaint::CurrentColor
+            } else {
+                match parse_color(v) {
+                    Some(c) => SvgPaint::Color(c),
+                    None => return false,
+                }
+            };
+            if name == "fill" {
+                style.svg_fill = Some(paint);
+            } else {
+                style.svg_stroke = Some(paint);
+            }
+            true
+        }
+        "stroke-width" => match v.parse::<f32>() {
+            Ok(w) if w.is_finite() && w >= 0.0 => {
+                style.svg_stroke_width = Some(w);
+                true
+            }
+            _ => false,
+        },
+        "stroke-dasharray" => {
+            let list: Option<Vec<f32>> = v
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .filter(|t| !t.is_empty())
+                .map(|t| t.parse::<f32>().ok().filter(|n| n.is_finite() && *n >= 0.0))
+                .collect();
+            match list {
+                Some(l) if !l.is_empty() => {
+                    style.svg_dasharray = Some(l);
+                    true
+                }
+                _ => false,
+            }
+        }
         // Raw passthrough: no parsed form, no layout effect — the CSSOM
         // layer reports it verbatim (var() already substituted upstream).
         "background-image" => {
