@@ -51,7 +51,8 @@ jobs:
 
   # AginxOS pulls this asset on device first-boot: bare static binary +
   # sha256 (agpkg convention), so NO features — stealth (BoringSSL) and
-  # screenshot (fontconfig) must stay opt-in.
+  # screenshot stay opt-in. The screenshot-enabled variant for the same
+  # device lives in build-musl-screenshot below.
   build-musl:
     runs-on: ubuntu-latest
     steps:
@@ -82,3 +83,56 @@ jobs:
           files: |
             aginxbrowser-*-aarch64-unknown-linux-musl
             aginxbrowser-*-aarch64-unknown-linux-musl.sha256
+
+  # The AginxOS engine build: same aarch64 musl static target and agpkg
+  # shape as build-musl, but WITH `--features screenshot` — the pure diting
+  # render stack (zero blitz since the feature split), so the device gets
+  # rendering without a self-build. fontique's fontconfig-dlopen (in the
+  # screenshot feature) keeps the cross build free of a pkg-config sysroot;
+  # libfontconfig stays optional at runtime, bundled CJK fonts carry the
+  # render (AginxOS-verified on device). workflow_dispatch builds main HEAD
+  # without touching any release (the actions artifact carries the binary).
+  build-musl-screenshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+      - name: Install zig
+        run: |
+          curl -fsSL https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz | sudo tar -xJ -C /opt
+          echo "/opt/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64-unknown-linux-musl-screenshot
+      - name: Build
+        run: cargo zigbuild --release --target aarch64-unknown-linux-musl --features screenshot
+      - name: Package
+        run: |
+          ver=${GITHUB_REF_NAME#v}
+          case "$GITHUB_REF" in
+            refs/tags/*) ;;
+            *) ver="main-$(git rev-parse --short HEAD)" ;;
+          esac
+          bin=aginxbrowser-$ver-aarch64-unknown-linux-musl-screenshot
+          cp target/aarch64-unknown-linux-musl/release/aginxbrowser "$bin"
+          shasum -a 256 "$bin" > "$bin.sha256"
+      - name: Upload actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aginxbrowser-aarch64-musl-screenshot
+          path: |
+            aginxbrowser-*-aarch64-unknown-linux-musl-screenshot
+            aginxbrowser-*-aarch64-unknown-linux-musl-screenshot.sha256
+          retention-days: 7
+      - name: Upload release assets (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            aginxbrowser-*-aarch64-unknown-linux-musl-screenshot
+            aginxbrowser-*-aarch64-unknown-linux-musl-screenshot.sha256
