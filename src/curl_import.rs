@@ -282,6 +282,29 @@ fn split_cookie_pairs(header: &str) -> Vec<String> {
         .collect()
 }
 
+/// Widen a copied Cookie header's bare `name=value` pairs to the URL's
+/// registrable domain. Header pairs carry no Domain attribute, and the copy
+/// is usually made on a different subdomain than the ones the site's data
+/// APIs live on (taobao shops: the page is shopN.taobao.com but its data
+/// comes from h5api.m.taobao.com — host-only anchoring sent that POST zero
+/// cookies and MTop answered FAIL_SYS_ILLEGAL_ACCESS with an empty body).
+/// The real browser held almost all of these as registrable-domain cookies;
+/// anchoring there is the best reconstruction of the attribute the header
+/// dropped.
+fn widen_cookie_scope(cookies: Vec<String>, url: &str) -> Vec<String> {
+    let Some(host) = url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+    else {
+        return cookies;
+    };
+    let domain = crate::rate::registrable_domain(&host);
+    cookies
+        .into_iter()
+        .map(|c| format!("{}; Domain={}; Path=/", c, domain))
+        .collect()
+}
+
 /// Parse a copied cURL command and turn its login state into a live session
 /// navigating to the copied URL. Shared by the HTTP `/import/curl` endpoint
 /// and the MCP `import_curl` tool so the two can't drift.
@@ -310,7 +333,16 @@ pub async fn create_session_from_curl(cmd: &str, use_proxy: bool) -> Result<serd
 
     let mut mgr = crate::session::SESSIONS.lock().await;
     mgr.evict_expired();
-    let id = mgr.create(Some(&parsed.url), use_proxy, parsed.cookies, None, None, None, false, false);
+    let id = mgr.create(
+        Some(&parsed.url),
+        use_proxy,
+        widen_cookie_scope(parsed.cookies, &parsed.url),
+        None,
+        None,
+        None,
+        false,
+        false,
+    );
     let expires_in_secs = mgr.expires_in_secs(&id);
     Ok(serde_json::json!({
         "session_id": id,
@@ -322,9 +354,9 @@ pub async fn create_session_from_curl(cmd: &str, use_proxy: bool) -> Result<serd
         "user_agent": ua,
         "authorization_prefix": authorization,
         "expires_in_secs": expires_in_secs,
-        // Cookies are anchored on the copied request's host; other
-        // subdomains of the site may re-authenticate — that is the site's
-        // device-binding, not a lost credential.
+        // Cookie pairs are scoped to the registrable domain (taobao.com),
+        // since the real browser held them domain-wide and the site's data
+        // APIs usually live on a sibling subdomain of the copied URL.
         "note": "login state injected; navigate with session tools",
     }))
 }
@@ -417,15 +449,39 @@ mod tests {
     }
 
     #[test]
-    fn bare_entries_anchor_on_the_request_host() {
-        // The session layer anchors bare name=value pairs at the create
-        // URL; copied requests replay against the same host Chrome sent
-        // them to, so host-only anchoring is the faithful default.
+    fn bare_pairs_widen_to_the_registrable_domain() {
+        // The copy was made on one subdomain; the site's data APIs usually
+        // live on a sibling (taobao shops: page on shopN.taobao.com, MTop
+        // POST on h5api.m.taobao.com — host-only anchoring sent that POST
+        // zero cookies and MTop answered FAIL_SYS_ILLEGAL_ACCESS).
         let p = parse_curl(BASH).unwrap();
-        for entry in &p.cookies {
-            let (full, anchor) = crate::server::normalize_cookie_entry(entry, &p.url);
-            assert!(full.contains("Domain=www.example.com"), "{full}");
-            assert_eq!(anchor, p.url);
-        }
+        let widened = widen_cookie_scope(p.cookies.clone(), &p.url);
+        assert!(widened.iter().all(|c| c.ends_with("; Domain=example.com; Path=/")), "{widened:?}");
+        // Interop: the session layer anchors a Domain= entry at its own
+        // domain, which is what makes the cookie reach sibling subdomains.
+        let (full, anchor) = crate::server::normalize_cookie_entry(&widened[0], &p.url);
+        assert!(full.contains("Domain=example.com"), "{full}");
+        assert_eq!(anchor, "https://example.com/");
+
+        let shop = parse_curl(
+            r#"curl 'https://shop437121404.taobao.com/category.htm' -H 'cookie: unb=3468643797; cookie2=1'"#,
+        )
+        .unwrap();
+        let widened = widen_cookie_scope(shop.cookies, &shop.url);
+        assert!(widened.iter().all(|c| c.ends_with("; Domain=taobao.com; Path=/")), "{widened:?}");
+    }
+
+    #[test]
+    fn widening_honors_multi_part_suffixes() {
+        let p = parse_curl(r#"curl 'https://www.example.co.uk/account' -H 'cookie: sid=S1'"#).unwrap();
+        let widened = widen_cookie_scope(p.cookies, &p.url);
+        assert_eq!(widened, vec!["sid=S1; Domain=example.co.uk; Path=/".to_string()]);
+    }
+
+    #[test]
+    fn two_label_hosts_anchor_directly() {
+        let p = parse_curl(r#"curl 'https://example.com/' -H 'cookie: sid=S1'"#).unwrap();
+        let widened = widen_cookie_scope(p.cookies, &p.url);
+        assert_eq!(widened, vec!["sid=S1; Domain=example.com; Path=/".to_string()]);
     }
 }

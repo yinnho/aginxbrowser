@@ -122,6 +122,14 @@ pub fn check_page_budget(loaded: u32) -> Result<(), String> {
 /// registrants, e.g. everything under .co.uk); every other host buckets by
 /// its last two labels.
 fn site_bucket(host: &str) -> String {
+    registrable_domain(host)
+}
+
+/// The registrable domain (eTLD+1 without a public-suffix list) of a host:
+/// last two labels, widened to three for the common multi-part suffixes.
+/// Shared with import-curl, which needs the same "which subdomains is this
+/// site really one site" answer for cookie scoping.
+pub(crate) fn registrable_domain(host: &str) -> String {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     let labels: Vec<&str> = host.split('.').collect();
     if labels.len() <= 2 {
