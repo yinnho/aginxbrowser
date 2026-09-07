@@ -4098,6 +4098,66 @@
         );
     }
 
+    /// Chrome ends every elementsFromPoint stack with `<body>` then `<html>`;
+    /// both span the viewport, so they are appended after the ranked
+    /// descendants, never ranked among them — ranking a viewport-spanning
+    /// box would shadow every real descendant in elementFromPoint
+    /// (absorbing obscura PR #848's append-not-rank resolution).
+    #[test]
+    #[cfg(feature = "screenshot")]
+    fn test_elements_from_point_appends_body_and_html() {
+        let mut rt = setup_runtime(r#"<html><head><style>
+          .dialog { position: absolute; top: 100px; left: 100px; width: 400px; height: 200px; }
+        </style></head><body>
+        <div class="dialog"></div>
+        </body></html>"#);
+        let stack = rt
+            .evaluate(
+                r#"(function() {
+                    const d = document.querySelector('.dialog');
+                    const r = d.getBoundingClientRect();
+                    return document
+                        .elementsFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+                        .map((el) => el.tagName + (el.className ? '.' + el.className : ''))
+                        .join('|');
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(
+            stack,
+            serde_json::json!("DIV.dialog|BODY|HTML"),
+            "stack must end with BODY then HTML, got {stack}"
+        );
+    }
+
+    /// A `display: none` element generates no box, so it cannot be hit however
+    /// high its z-index: the zero-size rect filter runs before ranking ever
+    /// sees it. Pinning this because a boxless element entering the ranking
+    /// would win by accident (obscura PR #848's second test, same shape).
+    #[test]
+    #[cfg(feature = "screenshot")]
+    fn test_element_from_point_ignores_display_none_sibling() {
+        let mut rt = setup_runtime(r#"<html><head><style>
+          .real { position: absolute; top: 100px; left: 100px; width: 200px; height: 100px; }
+          .hidden { position: absolute; top: 100px; left: 100px; width: 200px; height: 100px; z-index: 9999; display: none; }
+        </style></head><body>
+        <div class="hidden"></div><div class="real"></div>
+        </body></html>"#);
+        let hit = rt
+            .evaluate(
+                r#"(function() {
+                    const r = document.querySelector('.real').getBoundingClientRect();
+                    return document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)?.className;
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(
+            hit,
+            serde_json::json!("real"),
+            "a display:none sibling must never take the hit, got {hit}"
+        );
+    }
+
     #[test]
     #[cfg(feature = "screenshot")]
     fn test_element_from_point_in_viewport_returns_body() {
@@ -4402,9 +4462,13 @@
 
     #[test]
     fn test_elements_from_point_returns_array() {
+        // Length 2, not 1: Chrome answers [BODY, HTML] on a bare page (the
+        // old expectation of 1 encoded our pre-append behaviour, not the
+        // web's — same correction as obscura PR #848, measured against
+        // headless Chrome rather than assumed).
         let mut rt = setup_runtime("<html><body></body></html>");
         let len_in = rt.evaluate("document.elementsFromPoint(10, 10).length").unwrap();
-        assert_eq!(len_in.as_f64().unwrap() as i64, 1);
+        assert_eq!(len_in.as_f64().unwrap() as i64, 2);
         let len_out = rt.evaluate("document.elementsFromPoint(-1, -1).length").unwrap();
         assert_eq!(len_out.as_f64().unwrap() as i64, 0);
     }

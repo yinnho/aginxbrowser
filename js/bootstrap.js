@@ -10358,9 +10358,21 @@ if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
   Document.prototype.elementsFromPoint = function(x, y) {
     var cands = __ditingHitCandidates.call(this, x, y);
     if (cands === null) return [];
-    if (cands.length) return cands;
-    var el = this.elementFromPoint(x, y); // body fallback, as before
-    return el ? [el] : [];
+    if (!cands.length) {
+      var el = this.elementFromPoint(x, y); // body fallback, as before
+      if (el) cands.push(el);
+    }
+    // Chrome ends the stack with <body> then <html> (obscura PR #848): both
+    // span the viewport, so putting them into the ranked candidate set
+    // would shadow every real descendant in elementFromPoint — hence
+    // appended after the ranked descendants, never ranked among them. The
+    // point was already bounds-checked against the viewport, so both
+    // contain it.
+    var roots = [this.body, this.documentElement];
+    for (var ri = 0; ri < roots.length; ri++) {
+      if (roots[ri] && cands.indexOf(roots[ri]) === -1) cands.push(roots[ri]);
+    }
+    return cands;
   };
   // Shared candidate walk: every non-root element whose rect contains
   // (x, y), sorted front-to-back by (paint rank, document order). Invalid
