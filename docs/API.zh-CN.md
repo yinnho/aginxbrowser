@@ -686,6 +686,38 @@ curl -sS -X POST http://127.0.0.1:8089/session/create \
 
 > 🔒 托管实例**不落盘**任何 cookie——cookie 只在会话内存里，会话 8 分钟空闲回收即清。登录态由调用方自己持有（建议用小号，别用主账号）。
 
+### POST /import/curl
+
+把 DevTools **"Copy as cURL"** 一键变成登录会话——无头引擎上不装任何东西就能走通的凭证搬运路子（不要扩展、不开调试端口）。难的那半（验证码、短信、滑块）人在自己的 Chrome 里做掉：登录后打开 DevTools → Network，右键任意一条带登录态的请求 → Copy → Copy as cURL，把命令粘过来。引擎解析出 Cookie 头 / `-b` 里的 cookie，注进新会话，并停在复制的那条请求的 URL 上——agent 从人停下的地方继续，不用密码也不用再登录一次。bash、PowerShell、cmd 三种复制格式都认。
+
+**请求字段：**
+
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| curl | string | ✅ | — | 复制来的 cURL 命令 |
+| use_proxy | bool | | `false` | 会话流量走 `AGINXBROWSER_PROXY` 代理 |
+
+**响应：**
+
+```json
+{
+  "session_id": "s_1",
+  "url": "https://example.com/member/home",
+  "host": "example.com",
+  "cookie_count": 12,
+  "method": "GET",
+  "has_body": false,
+  "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/145.0.0.0",
+  "authorization_prefix": "Bearer eyJhbGciOi…",
+  "expires_in_secs": 480,
+  "note": "login state injected; navigate with session tools"
+}
+```
+
+`session_id` 就是普通会话，session API / MCP session 工具随便使。`authorization_prefix` 只回前 16 个字符（完整头本身就是凭证，响应里永远不整段回显 cookie）。`method`/`has_body` 说明复制的是哪类请求。cookie 锚定在复制请求的 host 上；同站其他子域可能要重新认证——那是站点的设备绑定，不是凭证丢了。
+
+**实操建议**：登录后的页面上挑一条 XHR 复制，cookie 往往最全（document 请求有时缺 `httpOnly` 的 API 会话对）。`-b FILE` 的 cookie 文件会直接报错——服务器读不到你的磁盘。粘过来的命令当密码对待：它原样携带登录态。
+
 ### POST /session/{id}/clone
 
 从现役会话派生一个新会话，完整带走登录态——cookie、`localStorage`/`sessionStorage`、视口设置、弹窗策略、代理和 keepalive 开关——原会话原样不动。危险操作前先克隆存档，或同一登录态并行开多个会话。以前手工「`session_cookies` 导出 → `session_create` 回灌」的路子，手一滑把好的登录态改坏过；这条路不再需要。
@@ -782,7 +814,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 
 `--mcp` 模式走 stdio 协议，不启动 HTTP 服务器，通过 stdin/stdout 与 MCP 客户端通信。
 
-### 提供的工具（27 个）
+### 提供的工具（28 个）
 
 #### 基础工具
 
@@ -800,6 +832,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 | 工具 | 说明 |
 |------|------|
 | `session_create` | 创建交互式浏览器会话；`persistent: true` 时登录态落盘，闲置过期甚至服务重启后同一个 `session_id` 带登录态复活 |
+| `import_curl` | 粘一条 DevTools "Copy as cURL" 命令 → 直接得到带该站 cookie 的活会话，停在复制请求的 URL 上——人在自己 Chrome 里把验证码/短信做掉，agent 从那里继续；bash/PowerShell/cmd 格式都认 |
 | `session_clone` | 从现役会话派生新会话，完整带走登录态（cookie + storage + viewport + 弹窗策略），原会话不动——危险操作前先存档，或同一登录态并行开多会话 |
 | `session_list` | 列出存活会话（空闲时长 + 剩余寿命，能复用就别新建） |
 | `session_navigate` | 会话内导航到新 URL |

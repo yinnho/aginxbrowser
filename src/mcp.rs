@@ -391,6 +391,18 @@ pub struct SessionCloseParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ImportCurlParams {
+    /// A "Copy as cURL" command pasted from Chrome DevTools (Network panel →
+    /// right-click any authenticated request). bash, PowerShell and cmd
+    /// flavors all parse; the cookie set is injected and the session
+    /// navigates to the copied request's URL.
+    pub curl: String,
+    /// Route the session's traffic through the engine proxy.
+    #[serde(default)]
+    pub use_proxy: bool,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct CacheParams {
     /// Full-text search over cached page contents, titles, URLs and past search queries. Omit to list the latest rows.
     #[serde(default)]
@@ -1044,6 +1056,22 @@ naming the selector/predicate on expiry. Exactly one of selector/predicate.",
             reply,
         }).await {
             Ok(text) => text,
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Import login state from a real browser in one paste. The human logs into a \
+site in their own Chrome (solving the CAPTCHA/SMS once), opens DevTools → Network, right-clicks \
+any authenticated request → \"Copy as cURL\", and passes the command here. Returns a live \
+session_id already carrying that site's cookies and sitting on the copied request's URL — the \
+agent continues from where the human left off, no password or second login needed. Works with \
+bash, PowerShell and cmd copy flavors.",
+        annotations(title = "Import Login From cURL")
+    )]
+    async fn import_curl(&self, Parameters(params): Parameters<ImportCurlParams>) -> String {
+        match crate::curl_import::create_session_from_curl(&params.curl, params.use_proxy).await {
+            Ok(v) => v.to_string(),
             Err(e) => json!({ "error": e }).to_string(),
         }
     }

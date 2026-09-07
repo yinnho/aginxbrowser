@@ -80,7 +80,7 @@ Agent 是照着浏览器说的话行事的，所以响应里要写清楚实际�
 - **JS 数据提取**：`js_extract` 参数，从 SPA 提 `window.__INITIAL_STATE__` 等结构化数据
 - **截图渲染**：`/screenshot` 端点（`--features screenshot`），JS 渲染后的 DOM 用自有的 diting 引擎出 PNG——纯 CPU，无 Chromium，agent 的视觉输入
 - **TLS 指纹伪装**：stealth 模式模拟 Chrome145/Firefox133/Safari/Edge，可按请求切换
-- **MCP Server**：`--mcp` 模式暴露 27 个工具（fetch/eval/click/search/download/cache + session + 截图工具），Claude Code / Claude Desktop / Cursor 直接调用
+- **MCP Server**：`--mcp` 模式暴露 28 个工具（fetch/eval/click/search/download/cache + session + 截图工具），Claude Code / Claude Desktop / Cursor 直接调用
 - **Firecrawl 兼容**：`/v1/scrape` 端点，现有 Firecrawl 客户端改 base URL 即可迁移
 - **DNS 重绑定防护**：内置 SSRF 防护 + 解析后 IP 校验
 
@@ -203,7 +203,7 @@ aginxbrowser/
     ├── main.rs              # HTTP 服务入口与路由
     ├── server.rs            # 业务层（fetch/click/eval/search）
     ├── session.rs           # 交互式浏览器会话
-    ├── mcp.rs               # MCP Server（27 个工具）
+    ├── mcp.rs               # MCP Server（28 个工具）
     ├── render.rs            # 分层渲染（HTTP 直取 → diting 浏览器引擎）
     ├── store.rs             # 本地 fetch/搜索缓存（SQLite FTS5、漂移哈希）
     ├── download.rs          # 流式文件下载（sha256、断点续传）
@@ -301,7 +301,7 @@ cargo build --release --features stealth,screenshot
 
 包含：
 - 全部 33 个 HTTP 端点（`/fetch`、`/search`、`/screenshot`、`/download`、`/v1/scrape`、`/doctor`、18 个 session 端点、CDP 发现、MCP 传输）
-- MCP Server 的 27 个工具及参数
+- MCP Server 的 28 个工具及参数
 - Claude Code / Claude Desktop / Cursor 客户端配置
 - 环境变量、错误码、站点抓取示例
 

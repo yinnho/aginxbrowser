@@ -15,6 +15,7 @@ mod browser;
 mod captcha;
 mod config;
 mod cookie;
+mod curl_import;
 mod doctor_cli;
 mod download;
 mod error;
@@ -623,6 +624,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/scrape", post(firecrawl_compat::scrape_handler))
         .route("/session/create", post(session_create_handler))
         .route("/session/:id/clone", post(session_clone_handler))
+        .route("/import/curl", post(import_curl_handler))
         .route("/session/list", get(session_list_handler))
         .route("/session/:id/navigate", post(session_navigate_handler))
         .route("/session/:id/state", post(session_state_handler))
@@ -901,7 +903,8 @@ async fn doctor_handler(Query(params): Query<DoctorParams>) -> impl IntoResponse
         ],
         "endpoints": [
             "/health", "/doctor", "/fetch", "/click", "/eval", "/search",
-            "/download", "/v1/scrape", "/session/create", "/session/list", "/mcp"
+            "/download", "/v1/scrape", "/session/create", "/session/list",
+            "/import/curl", "/mcp"
         ],
         "probe": probe,
     }))
@@ -1097,6 +1100,26 @@ async fn session_create_handler(Json(req): Json<SessionCreateRequest>) -> Result
         url: req.url,
         persistent: req.persistent,
     })))
+}
+
+/// Credential transfer from a real browser: paste a DevTools "Copy as cURL"
+/// command (any authenticated request from the Network panel) and get back a
+/// session already carrying that login state. The human solves the CAPTCHA /
+/// SMS once in Chrome; the agent picks up from there.
+#[derive(Debug, Deserialize)]
+pub struct ImportCurlRequest {
+    /// The full copied cURL command (bash, PowerShell or cmd flavor).
+    pub curl: String,
+    /// Route the session's traffic through the engine proxy.
+    #[serde(default)]
+    pub use_proxy: bool,
+}
+
+async fn import_curl_handler(Json(req): Json<ImportCurlRequest>) -> Result<impl IntoResponse, AppError> {
+    let v = curl_import::create_session_from_curl(&req.curl, req.use_proxy)
+        .await
+        .map_err(AppError::BadRequest)?;
+    Ok((StatusCode::OK, Json(v)))
 }
 
 /// Derive a session carrying the source's login state (cookies + storage +

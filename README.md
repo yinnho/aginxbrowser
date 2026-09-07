@@ -80,7 +80,7 @@ The [local cache](#capabilities) builds on the same idea: search hits come back 
 - **JS data extraction**: `js_extract` pulls `window.__INITIAL_STATE__` and other structured data out of SPAs
 - **Screenshot rendering**: `/screenshot` endpoint (opt-in `--features screenshot`) paints the JS-rendered DOM with the diting rendering engine — pure CPU, no Chromium — to PNG. Vision input for agents
 - **TLS fingerprint spoofing**: stealth mode impersonates Chrome145/Firefox133/Safari/Edge, switchable per request
-- **MCP server**: `--mcp` mode exposes 27 tools (fetch/eval/search/download/cache + session + screenshot tools) — Claude Code / Claude Desktop / Cursor call them directly
+- **MCP server**: `--mcp` mode exposes 28 tools (fetch/eval/search/download/cache + session + screenshot tools) — Claude Code / Claude Desktop / Cursor call them directly
 - **Firecrawl compatible**: `/v1/scrape` endpoint — existing Firecrawl clients migrate by changing the base URL
 - **DNS rebinding protection**: built-in SSRF guard + post-resolution IP validation
 
@@ -203,7 +203,7 @@ aginxbrowser/
     ├── main.rs              # HTTP service entry & routing
     ├── server.rs            # Business layer (fetch/click/eval/search)
     ├── session.rs           # Interactive browser sessions
-    ├── mcp.rs               # MCP server (27 tools)
+    ├── mcp.rs               # MCP server (28 tools)
     ├── render.rs            # Tiered rendering (HTTP direct → diting browser engine)
     ├── store.rs             # Local fetch/search cache (SQLite FTS5, drift hashes)
     ├── download.rs          # Streaming file download (sha256, resume)
@@ -301,7 +301,7 @@ If your network can't reach the rusty_v8 CDN (build hangs with zero progress aft
 
 Covers:
 - All 33 HTTP endpoints (`/fetch`, `/search`, `/screenshot`, `/download`, `/v1/scrape`, `/doctor`, 18 session endpoints, CDP discovery, MCP transport)
-- All 27 MCP server tools and their parameters
+- All 28 MCP server tools and their parameters
 - Claude Code / Claude Desktop / Cursor client configuration
 - Environment variables, error codes, per-site scraping examples
 

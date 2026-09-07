@@ -556,6 +556,38 @@ Create an interactive browser session.
 {"session_id": "s_1", "url": "https://example.com/"}
 ```
 
+### POST /import/curl
+
+Turn a DevTools **"Copy as cURL"** command into a logged-in browser session — the credential-transfer path that works on a stock headless engine (no extension, no debug port). The human does the hard part of a login (CAPTCHA, SMS, slider) in their own Chrome, opens DevTools → Network, right-clicks any authenticated request → *Copy* → *Copy as cURL*, and pastes the command here. The engine parses out the Cookie header / `-b` jar, injects it into a fresh session anchored at the copied request's URL — the agent continues from where the human left off, no password or second login. bash, PowerShell and cmd copy flavors all parse.
+
+**Request fields:**
+
+| Field | Type | Required | Default | Description |
+|------|------|------|------|------|
+| curl | string | ✅ | — | The copied cURL command |
+| use_proxy | bool | | `false` | Route the session's traffic through the `AGINXBROWSER_PROXY` proxy |
+
+**Response:**
+
+```json
+{
+  "session_id": "s_1",
+  "url": "https://example.com/member/home",
+  "host": "example.com",
+  "cookie_count": 12,
+  "method": "GET",
+  "has_body": false,
+  "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/145.0.0.0",
+  "authorization_prefix": "Bearer eyJhbGciOi…",
+  "expires_in_secs": 480,
+  "note": "login state injected; navigate with session tools"
+}
+```
+
+The `session_id` is an ordinary session — drive it with the session API or the MCP session tools. `authorization_prefix` previews only the first 16 chars (the full header is a credential; the response never echoes whole cookies). `method`/`has_body` report what kind of request was copied. Cookies anchor on the copied request's host; other subdomains of the site may re-authenticate — that is the site's device binding, not a lost credential.
+
+**Tips**: an XHR on the logged-in page usually carries the most complete cookie set (document requests sometimes miss the `httpOnly` API-session pair). `-b FILE` cookie jars are rejected — the server cannot read your disk. Treat a pasted command like a password: it carries the login state verbatim.
+
 ### POST /session/{id}/clone
 
 Derive a new session carrying the source's full login state — cookies, `localStorage`/`sessionStorage`, viewport pin, dialog policy, proxy and keepalive flags — with the source left untouched. Use it to snapshot a logged-in state before risky actions, or to run the same login in parallel sessions. The manual `cookies` → `session/create` round-trip this replaces is where a hand-edited cookie string clobbers a working login.
@@ -1081,7 +1113,7 @@ The streamable HTTP transport follows the protocol's dual session semantics — 
 
 Browser sessions (`session_create` & co.) are shared across MCP sessions by design: two MCP clients on the same server can list (`session_list`) and reuse the same browser session IDs, which is what makes "one instance per machine, every agent shares it" work. For a self-hosted instance reached over a LAN IP or a Docker hostname (not `localhost`/`127.0.0.1`), add the hostname to `AGINXBROWSER_MCP_ALLOWED_HOSTS` — the transport validates the `Host` header as DNS-rebinding protection and rejects unlisted hosts with `403`.
 
-### Provided Tools (27)
+### Provided Tools (28)
 
 #### Core Tools
 
@@ -1099,6 +1131,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | Tool | Description |
 |------|------|
 | `session_create` | Create an interactive browser session; with `persistent: true` the login state survives idle eviction and server restarts — the same `session_id` revives logged-in |
+| `import_curl` | Paste a DevTools "Copy as cURL" command → a live session already carrying that site's cookies, anchored at the copied request's URL — the human logs in (CAPTCHA/SMS once) in their own Chrome, the agent continues from there; bash/PowerShell/cmd flavors all parse |
 | `session_clone` | Derive a new session carrying the full login state (cookies + storage + viewport + dialog policy); the source stays untouched — snapshot before risky actions, or run one login in parallel |
 | `session_list` | List live sessions with idle age and time left before auto-eviction (discover one to reuse) |
 | `session_navigate` | Navigate to a new URL within a session |
