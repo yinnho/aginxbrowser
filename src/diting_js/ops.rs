@@ -154,6 +154,15 @@ pub struct JsState {
     /// Layout is scroll-blind, so this never feeds the layout cache.
     #[cfg(feature = "screenshot")]
     pub(crate) scroll_offset: (f32, f32),
+    /// Layout invalidation revision: bumped wherever `layout_cache` is
+    /// dropped. The DomTree epoch is a tree-shape stamp — attribute-level
+    /// writes (style/class/attr) clear the cache without allocating nodes,
+    /// so the epoch alone never sees them. Consumers deciding "did layout
+    /// change" from the epoch (the screencast damage signature) must fold
+    /// this rev in, or a style change freezes the cast while layout probes
+    /// report fresh geometry (the AginxOS five-mutation report).
+    #[cfg(feature = "screenshot")]
+    pub(crate) layout_rev: std::cell::Cell<u64>,
     /// Absolute-URL → fetched image body, filled on demand by the CDP
     /// viewport capture / screencast pump so band paint renders real rasters
     /// instead of placeholders (the outerHTML re-render path pre-fetches;
@@ -230,6 +239,16 @@ pub(crate) fn fetch_body_byte_limit() -> usize {
 }
 
 impl JsState {
+    /// Drop the memoized layout run and stamp the invalidation revision.
+    /// Every cache-drop site must go through here — a bare cache drop hides
+    /// the invalidation from epoch-keyed consumers like the screencast
+    /// pump's damage signature.
+    #[cfg(feature = "screenshot")]
+    pub(crate) fn drop_layout(&self) {
+        *self.layout_cache.borrow_mut() = None;
+        self.layout_rev.set(self.layout_rev.get().wrapping_add(1));
+    }
+
     pub fn new() -> Self {
         JsState {
             dom: None,
@@ -265,6 +284,8 @@ impl JsState {
             viewport: (1920.0, 1000.0),
             #[cfg(feature = "screenshot")]
             scroll_offset: (0.0, 0.0),
+            #[cfg(feature = "screenshot")]
+            layout_rev: std::cell::Cell::new(0),
             #[cfg(feature = "screenshot")]
             image_bytes: std::cell::RefCell::new(HashMap::new()),
             #[cfg(feature = "screenshot")]
@@ -462,7 +483,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             | "document_write_reset"
     ) {
         let gs = state.borrow::<SharedState>().clone();
-        *gs.borrow().layout_cache.borrow_mut() = None;
+        gs.borrow().drop_layout();
     }
     // Persona viewport: needs a mutable borrow, so it runs before the main
     // read-only `gs` alias below (same pattern as set_document_title).
@@ -475,7 +496,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             let mut gs = gs.borrow_mut();
             gs.viewport = (w, h);
             // Any rects memoized under the old ICB are stale now.
-            *gs.layout_cache.borrow_mut() = None;
+            gs.drop_layout();
         }
         return "ok".into();
     }
@@ -1329,7 +1350,7 @@ pub(crate) fn store_image_bytes(gs: &mut JsState, url: String, bytes: Vec<u8>) {
     map.insert(url.clone(), std::sync::Arc::new(bytes));
     drop(map);
     gs.image_order.borrow_mut().push_back(url);
-    *gs.layout_cache.borrow_mut() = None;
+    gs.drop_layout();
 }
 
 /// The property table the `computed_style` snapshot serializes — every

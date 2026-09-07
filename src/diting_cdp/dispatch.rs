@@ -56,10 +56,12 @@ pub struct ScreencastState {
     /// A frame is in flight until the client acks (`Page.screencastFrameAck`);
     /// while set, the pump skips this page (Chrome's backpressure).
     pub outstanding_ack: bool,
-    /// Damage signature of the last emitted frame: (dom epoch, scroll_x,
-    /// scroll_y, viewport w, h). A tick with an unchanged signature emits
-    /// nothing — static pages cost zero frames.
-    pub last_damage: Option<(u64, f32, f32, f32, f32)>,
+    /// Damage signature of the last emitted frame: (dom epoch, layout rev,
+    /// scroll_x, scroll_y, viewport w, h). A tick with an unchanged
+    /// signature emits nothing — static pages cost zero frames. The layout
+    /// rev covers attribute-level mutations, which clear the layout cache
+    /// without moving the tree-shape epoch.
+    pub last_damage: Option<(u64, u64, f32, f32, f32, f32)>,
 }
 
 pub struct CdpContext {
@@ -3507,6 +3509,64 @@ mod tests {
             .collect();
         assert_eq!(frames.len(), 1, "damage must produce exactly one frame");
         assert_eq!(frames[0].params["metadata"]["scrollOffsetY"], 600);
+    }
+
+    // AginxOS five-mutation report: the damage signature keyed on the tree
+    // epoch alone, but attribute-level writes (style/class/attr) drop the
+    // layout cache without allocating nodes — so the epoch never moved and
+    // the pump served frozen frames while clientWidth probes reported fresh
+    // geometry. The signature now folds in the layout invalidation rev, so a
+    // bare style write must re-arm the cast. Structural mutations were never
+    // affected (they bump the epoch by allocating).
+    #[cfg(feature = "screenshot")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn screencast_attr_mutation_is_damage_not_freeze() {
+        let (mut ctx, session) = band_setup(
+            "<html><body style=\"margin:0\"><div id=t style=\"height:900px;background:rgb(255,0,0)\"></div></body></html>",
+        )
+        .await;
+        set_viewport_320x200(&mut ctx, &session).await;
+
+        let resp = band_dispatch(
+            &mut ctx,
+            &session,
+            3,
+            "Page.startScreencast",
+            json!({ "format": "png", "maxWidth": 640, "maxHeight": 640 }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "startScreencast: {:?}", resp.error);
+        ctx.pending_events.clear();
+        let resp =
+            band_dispatch(&mut ctx, &session, 4, "Page.screencastFrameAck", json!({ "sessionId": 1 }))
+                .await;
+        assert!(resp.error.is_none(), "ack: {:?}", resp.error);
+        crate::diting_cdp::domains::page::pump_screencast_frames(&mut ctx).await;
+        assert!(
+            !ctx.pending_events.iter().any(|e| e.method == "Page.screencastFrame"),
+            "no mutation yet: no frame"
+        );
+
+        // Attribute-level write only — no node allocation, no tree epoch move.
+        let resp = band_dispatch(
+            &mut ctx,
+            &session,
+            5,
+            "Runtime.evaluate",
+            json!({
+                "expression": "document.getElementById('t').style.background = 'rgb(0,0,255)'",
+                "returnByValue": true
+            }),
+        )
+        .await;
+        assert!(resp.error.is_none(), "style write: {:?}", resp.error);
+        crate::diting_cdp::domains::page::pump_screencast_frames(&mut ctx).await;
+        let frames: Vec<_> = ctx
+            .pending_events
+            .iter()
+            .filter(|e| e.method == "Page.screencastFrame")
+            .collect();
+        assert_eq!(frames.len(), 1, "style write is damage: exactly one new frame");
     }
 
     // AginxOS real-device follow-up: the pump tick must advance the page's JS

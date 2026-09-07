@@ -1,4 +1,3 @@
-use crate::diting_browser::lifecycle::LifecycleState;
 use crate::diting_js::runtime::{EvalOutcome, ExceptionInfo, RemoteObjectInfo};
 use serde_json::{json, Value};
 

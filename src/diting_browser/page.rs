@@ -1773,6 +1773,19 @@ impl Page {
             .unwrap_or(0)
     }
 
+    /// Layout invalidation revision — the other half of the screencast damage
+    /// signature. The tree epoch above is a shape stamp: attribute-level
+    /// writes (style/class/attr) drop the layout cache without allocating
+    /// nodes, so without this rev a style change freezes the cast while
+    /// layout probes report fresh geometry.
+    #[cfg(feature = "screenshot")]
+    pub fn layout_rev(&self) -> u64 {
+        self.js
+            .as_ref()
+            .and_then(|js| js.with_state(|st| Some(st.layout_rev.get())))
+            .unwrap_or(0)
+    }
+
     /// Drop the override and return to the persona viewport everywhere.
     pub fn clear_viewport_override(&mut self) {
         self.viewport_override = None;
