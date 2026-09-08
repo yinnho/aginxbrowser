@@ -87,6 +87,8 @@ pub struct RenderedDataflow {
     pub flows: usize,
     /// Route presets the engine substituted, in canonical flow order.
     pub repairs: Vec<RouteRepair>,
+    /// Composition audit over the placed geometry (profile-independent).
+    pub composition: super::checks::Composition,
 }
 
 /// The canonicalized document: nodes sort (stage, row, yOffset, id), flows
@@ -253,6 +255,44 @@ pub fn render_dataflow(
         .collect();
 
     let svg = emit_svg(&doc, &laid, &placed, view_box, &legend, theme);
+
+    // Composition audit: stage frames are the containers a flow may cross
+    // perpendicularly but never borrow as a corridor. Readability mirrors
+    // the emission's fitted-font call for the primary node label.
+    let routes: Vec<super::checks::AuditRoute> = doc
+        .flows
+        .iter()
+        .zip(&placed)
+        .map(|(flow, (_, _, points, label))| super::checks::AuditRoute {
+            name: flow_name(flow),
+            from: flow.from.clone(),
+            to: flow.to.clone(),
+            points: points.clone(),
+            label: *label,
+        })
+        .collect();
+    let frames: Vec<super::checks::AuditFrame> = (0..doc.stages.len())
+        .map(|i| super::checks::AuditFrame {
+            kind: "stage",
+            label: doc.stages[i].label.clone(),
+            rect: stage_frame(i, &laid),
+            radius: STAGE_FRAME_RX,
+        })
+        .collect();
+    let min_label_font = doc
+        .nodes
+        .iter()
+        .map(|n| fitted_font(&n.label, NODE_W - 160, LABEL_PREFERRED, LABEL_MIN))
+        .min();
+    let composition = super::checks::audit(&super::checks::AuditScene {
+        routes: &routes,
+        frames: &frames,
+        readability: min_label_font.map(|f| super::checks::Readability {
+            view_box_w: view_box[0],
+            min_label_font: f,
+        }),
+    });
+
     Ok(RenderedDataflow {
         svg,
         title: doc.title.to_string(),
@@ -261,6 +301,7 @@ pub fn render_dataflow(
         nodes: doc.nodes.len(),
         flows: doc.flows.len(),
         repairs,
+        composition,
     })
 }
 
@@ -294,6 +335,17 @@ fn flow_label_width(label: &str, classification: Option<&str>) -> i32 {
 
 fn stage_x(i: usize) -> i32 {
     LEFT_X + i as i32 * COL_GAP
+}
+
+/// A stage's frame rect, centered on the stage's column lattice. Shared by
+/// emission and the composition audit so the two cannot drift.
+fn stage_frame(i: usize, laid: &Laid) -> Rect {
+    Rect {
+        x: stage_x(i) - STAGE_FRAME_PAD,
+        y: STAGE_Y,
+        w: STAGE_FRAME_PAD * 2,
+        h: laid.frame_bottom - STAGE_Y,
+    }
 }
 
 fn stage_col_xs() -> [i32; COLUMN_COUNT] {
@@ -438,20 +490,20 @@ fn emit_svg(
     // Stage frames + titles (behind everything: frames contain their nodes,
     // so flows paint over the frame, never around it).
     for (i, stage) in doc.stages.iter().enumerate() {
-        let x = stage_x(i);
+        let Rect { x, y, w, h } = stage_frame(i, laid);
         s.push_str(&format!(
             "<rect data-stage=\"{i}\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"{}\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1\"/>",
-            tx(x - STAGE_FRAME_PAD),
-            tx(STAGE_Y),
-            tx(STAGE_FRAME_PAD * 2),
-            tx(laid.frame_bottom - STAGE_Y),
+            tx(x),
+            tx(y),
+            tx(w),
+            tx(h),
             tx(STAGE_FRAME_RX),
             theme.panel,
             theme.frame
         ));
         s.push_str(&format!(
             "<text x=\"{}\" y=\"{}\" font-size=\"9\" font-weight=\"600\" fill=\"{}\" text-anchor=\"middle\">{:02} / {}</text>",
-            tx(x),
+            tx(x + STAGE_FRAME_PAD),
             tx(STAGE_TITLE_Y),
             theme.ink_soft,
             i + 1,

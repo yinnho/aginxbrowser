@@ -97,6 +97,8 @@ pub struct RenderedLifecycle {
     pub transitions: usize,
     /// Route presets the engine substituted, in canonical transition order.
     pub repairs: Vec<RouteRepair>,
+    /// Composition audit over the placed geometry (profile-independent).
+    pub composition: super::checks::Composition,
 }
 
 /// The canonicalized document: states sort (band, col, yOffset, id) with
@@ -291,6 +293,38 @@ pub fn render_lifecycle(
         .collect();
 
     let svg = emit_svg(&doc, &laid, &placed, view_box, &legend, theme);
+
+    // Composition audit: the bands are dashed reading guides, not
+    // containers, so this family supplies routes but no frames.
+    // Readability mirrors the emission's fitted-font call for the primary
+    // state label.
+    let routes: Vec<super::checks::AuditRoute> = doc
+        .transitions
+        .iter()
+        .zip(&placed)
+        .map(|(transition, (_, _, points, label))| super::checks::AuditRoute {
+            name: transition_name(transition),
+            from: transition.from.clone(),
+            to: transition.to.clone(),
+            points: points.clone(),
+            label: *label,
+        })
+        .collect();
+    let min_label_font = doc
+        .states
+        .iter()
+        .zip(&laid.rects)
+        .map(|(s, rect)| fitted_font(&s.label, rect.w - 160, LABEL_PREFERRED, LABEL_MIN))
+        .min();
+    let composition = super::checks::audit(&super::checks::AuditScene {
+        routes: &routes,
+        frames: &[],
+        readability: min_label_font.map(|f| super::checks::Readability {
+            view_box_w: view_box[0],
+            min_label_font: f,
+        }),
+    });
+
     Ok(RenderedLifecycle {
         svg,
         title: doc.title.to_string(),
@@ -299,6 +333,7 @@ pub fn render_lifecycle(
         states: doc.states.len(),
         transitions: doc.transitions.len(),
         repairs,
+        composition,
     })
 }
 

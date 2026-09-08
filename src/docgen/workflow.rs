@@ -139,6 +139,8 @@ pub struct RenderedWorkflow {
     pub edges: usize,
     /// Route presets the engine substituted, in canonical edge order.
     pub repairs: Vec<RouteRepair>,
+    /// Composition audit over the placed geometry (profile-independent).
+    pub composition: super::checks::Composition,
 }
 
 /// The canonicalized document: every collection in its deterministic order.
@@ -501,6 +503,54 @@ fn compile_once(
     ];
 
     let svg = emit_svg(doc, &laid, &placed, view_box, &legend_rows, legend_y, theme);
+
+    // Composition audit over the placed world. Phase bands and group frames
+    // are the composition containers (lanes are the routing substrate, not
+    // a frame — channels ride along their gaps by design); readability
+    // tracks the primary node-label font, mirroring the emission's call.
+    let routes: Vec<super::checks::AuditRoute> = doc
+        .edges
+        .iter()
+        .zip(&placed)
+        .map(|(edge, (_, _, points, label))| super::checks::AuditRoute {
+            name: edge_name(edge),
+            from: edge.from.clone(),
+            to: edge.to.clone(),
+            points: points.clone(),
+            label: *label,
+        })
+        .collect();
+    let mut frames: Vec<super::checks::AuditFrame> = doc
+        .phases
+        .iter()
+        .zip(&band_rects)
+        .map(|(phase, rect)| super::checks::AuditFrame {
+            kind: "phase",
+            label: phase.label.clone(),
+            rect: *rect,
+            radius: 40,
+        })
+        .collect();
+    frames.extend(doc.groups.iter().map(|group| super::checks::AuditFrame {
+        kind: "group",
+        label: group.label.clone(),
+        rect: group_rect(doc, group, &laid),
+        radius: 90,
+    }));
+    let min_label_font = doc
+        .nodes
+        .iter()
+        .map(|n| fitted_font(&n.label, NODE_W - LABEL_RESERVE, LABEL_PREFERRED, LABEL_MIN))
+        .min();
+    let composition = super::checks::audit(&super::checks::AuditScene {
+        routes: &routes,
+        frames: &frames,
+        readability: min_label_font.map(|f| super::checks::Readability {
+            view_box_w: view_box[0],
+            min_label_font: f,
+        }),
+    });
+
     Ok(RenderedWorkflow {
         svg,
         title: doc.title.to_string(),
@@ -509,7 +559,19 @@ fn compile_once(
         nodes: doc.nodes.len(),
         edges: doc.edges.len(),
         repairs,
+        composition,
     })
+}
+
+/// A group's frame rect: the lane's column span inset below the lane title.
+/// Shared by emission and the composition audit so the two cannot drift.
+fn group_rect(doc: &Canon, group: &NodeGroup, laid: &Laid) -> Rect {
+    let lane = doc.lane_index[group.lane.as_str()];
+    let (gx, gw) = group_bounds(doc, group, &laid.col_xs);
+    let fy = laid.lane_tops[lane] + LANE_TITLE_H + GROUP_FRAME_TOP_INSET;
+    let gh =
+        laid.lane_heights[lane] - LANE_TITLE_H - GROUP_FRAME_TOP_INSET - GROUP_FRAME_BOTTOM_INSET;
+    Rect { x: gx, y: fy, w: gw, h: gh }
 }
 
 fn edge_name(edge: &WorkflowEdge) -> String {
@@ -1175,12 +1237,8 @@ fn emit_svg(
 
     // Groups.
     for group in &doc.groups {
-        let lane = doc.lane_index[group.lane.as_str()];
-        let (gx, gw) = group_bounds(doc, group, &laid.col_xs);
-        let fy = laid.lane_tops[lane] + LANE_TITLE_H + GROUP_FRAME_TOP_INSET;
-        let gh = laid.lane_heights[lane] - LANE_TITLE_H - GROUP_FRAME_TOP_INSET
-            - GROUP_FRAME_BOTTOM_INSET;
         let security = group.variant.as_deref() == Some("security");
+        let Rect { x: gx, y: fy, w: gw, h: gh } = group_rect(doc, group, laid);
         s.push_str(&format!(
             "<rect data-group-id=\"{}\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"9\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1\"/>",
             esc(&group.id),

@@ -45,6 +45,8 @@ pub struct RenderedSequence {
     pub view_box: [i32; 2],
     pub participants: usize,
     pub messages: usize,
+    /// Composition audit over the placed geometry (profile-independent).
+    pub composition: super::checks::Composition,
 }
 
 /// A participant's center-x on the column lattice.
@@ -137,6 +139,9 @@ pub fn render_sequence(
     let height = lifeline_bottom + BOTTOM_PAD;
 
     let mut svg = String::with_capacity(4096);
+    // Audit records: one horizontal run per message row, collected during
+    // emission so the audit and the drawn geometry cannot drift.
+    let mut audit_routes: Vec<super::checks::AuditRoute> = Vec::new();
     svg.push_str(&format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {} {}\" role=\"img\" aria-label=\"{}\">",
         tx(width),
@@ -220,6 +225,22 @@ pub fn render_sequence(
         let units = text_units(&m.label) as i32;
         let label_w = (340).max(units * 52 + 120);
         let center = (start + end) / 2;
+        audit_routes.push(super::checks::AuditRoute {
+            name: if m.label.trim().is_empty() {
+                format!("{}->{}", m.from, m.to)
+            } else {
+                m.label.trim().to_string()
+            },
+            from: m.from.clone(),
+            to: m.to.clone(),
+            points: vec![(start, y), (end, y)],
+            label: Some(super::graph::Rect {
+                x: center - label_w / 2,
+                y: y - 200,
+                w: label_w,
+                h: LABEL_H,
+            }),
+        });
         svg.push_str(&format!(
             "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"3\" fill=\"{}\" fill-opacity=\"0.85\"/>",
             tx(center - label_w / 2),
@@ -294,12 +315,32 @@ pub fn render_sequence(
     }
 
     svg.push_str("</svg>");
+
+    // Composition audit: message rows have unique ys, so crossings and
+    // corridors are structurally absent — this contributes label clearance
+    // and readability. Readability mirrors the emission's fitted-font call
+    // for the primary participant label.
+    let min_label_font = spec
+        .participants
+        .iter()
+        .map(|p| fitted_font(&p.label, available, LABEL_PREFERRED, LABEL_MIN))
+        .min();
+    let composition = super::checks::audit(&super::checks::AuditScene {
+        routes: &audit_routes,
+        frames: &[],
+        readability: min_label_font.map(|f| super::checks::Readability {
+            view_box_w: width,
+            min_label_font: f,
+        }),
+    });
+
     Ok(RenderedSequence {
         svg,
         title: spec.title.trim().to_string(),
         view_box: [width / 10, height / 10],
         participants: spec.participants.len(),
         messages: spec.messages.len(),
+        composition,
     })
 }
 

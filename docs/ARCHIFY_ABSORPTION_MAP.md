@@ -331,6 +331,51 @@ adapter 只留词汇（kinds/variants）和排版（字号线型/虚线模式）
 - 测试：docgen +10（theme 4、sigil 4、preset 换装 1、lifecycle 章位 1）；
   全量 850→860/0/1；clippy 62 持平（`--bin` 口径）。
 
+## 4h. 批6c 闭环（2026-09-09）：showcase 档门 + mermaid 通道
+
+精美层第三刀：把参考的 check-render-output.mjs + geometry.mjs 质量门收进引擎，
+外加把 mermaid 的位置说清楚。
+
+- **质量轴 receipt-only（本批最大的架构决定）**：quality 参数只改回执不改字节
+  ——svg 上**没有** data-quality 之类的属性，13 个门哈希一个没动、零重冻结，
+  same-input-same-bytes 合同照旧（专门一条测试钉死两档 sha 相等）。标准档
+  把 findings 记 warning（border run 例外，永远 error），showcase 档全部
+  error——`render_markdown(quality:"showcase")` 就是 agent 发货前看的交付门。
+- **in-process 审计（对参考的第一处偏离，记档）**：参考是发完 SVG 再 re-parse
+  回来量；我们的 adapter 手里本来就攥着放好的几何（routes/labels/frames），
+  所以 `src/docgen/checks.rs` 直接在放置几何上跑，整数 0.1px，全程 adapter
+  顺序迭代保证确定性。九项检查全套：proper crossing（严格内部穿越，共享
+  语义端点的 pair 豁免——fan-out 是真拓扑）、ambiguous corridor（共线 ≥8px
+  取最长）、border run（路由贴框边借道，圆角按半径裁掉、角落碰一下不算，
+  任何档都硬错）、label clearance（对**别人家**路由量，自家豁免；标准 2px/
+  showcase 4px）、rhythm（micro <8px 任意位置、interior <16px 首尾段豁免；
+  bends>2 和 stretch>135% 只是 metrics 不进 issues）、desktop readability
+  （930px 阅读宽投影、6px 地板）。
+- **各族供帧**：workflow = 相位带 + group 框（`group_rect()` 发射/审计共用，
+  lanes **故意不给**——lane 是路由基材，通道就设计在 lane 缝里）；dataflow =
+  stage 框（`stage_frame()` 共用）；architecture = boundary 框；lifecycle
+  **无框**（band 是虚线阅读导轨不是容器，第二处记档偏离）；sequence 无框。
+  readability 输入只取**主节点标签**（fitted_font 镜像发射时的调用），子标签
+  和框标题不算。
+- **mermaid 通道（第二件事）**：映射表写进 render_markdown 工具描述——
+  flowchart/graph→workflow、sequenceDiagram→sequence、stateDiagram-v2→
+  lifecycle、erDiagram/class→architecture，agent 读拓扑自己改写成零坐标
+  archify JSON。引擎**只收 archify JSON**，零 mermaid 解析（全自主开发原则：
+  不引 mermaid 依赖，也不 fork）。
+- **语料一次过 showcase**：9 篇全 pass、零 findings，没有真实构图缺陷要修，
+  也不用碰冻结表。两条新门测试：corpus showcase 全绿 + 两档字节相等。
+- **dogfood（真 /mcp 面）**：corpus 双档渲染核对 receipt/checks 行；造一篇
+  24 参与者的超宽 sequence——投影字号 3.8px，标准档 pass+warning、showcase
+  档 fail+error，同一几何同一指标，通道全程可见。顺手验了坏 quality 名的
+  结构化报错和 showcase×dark×blueprint 三参组合。
+- **踩坑两枚**：合成测试里 `Rect{0,0,100,100}` 在 0.1px 世界是 10px，路由
+  坐标全在框外、zig 中段 5px 掉进 micro 档——测试常量要按 tenths 放大；
+  workflow 列 rank 封顶 0..=5，想造超宽触发 readability 得走 sequence
+  （参与者数无上界）。
+- 测试：docgen +11（checks 9 + 门 2）→ 81；全量 860→871/0/1；clippy 持平
+  63（`--bin` 口径——stash 空树实测基线就是 63，先前记的 62 是工作区里
+  另一桩在途改动压掉了一条 warning 的假基线）。
+
 ## 5. 分批（按总纲排序）
 
 - **批1（技术·引擎前置）**：`:scope` 选择器 + archify artifact viewer smoke 探针 →
@@ -349,8 +394,11 @@ adapter 只留词汇（kinds/variants）和排版（字号线型/虚线模式）
 - **批6b（精美·preset+SIGIL）** ✅ 闭环 2026-09-09（见 §4g）：四 preset 家族
   正交于 theme + SIGIL 13 形状语义章 + 门第三次重冻结（9 亮 + 2 暗 + 2 preset
   反别名）。
-- **批6c+（精美）**：showcase 档门、字号/间距节奏常数、brand-marks、
-  mermaid 通道、story/Passport/Route Probe、viewer runtime。
+- **批6c（精美·档门）** ✅ 闭环 2026-09-09（见 §4h）：composition audit
+  in-process 移植（receipt-only 质量轴，13 哈希零重冻结）+ mermaid 通道
+  （工具描述映射，引擎只收 archify JSON）。
+- **批6d+（精美）**：viewer runtime、brand-marks、story/Passport/Route Probe。
+  字号/间距节奏的地板值已随 6c 落进审计侧；emission 侧常数再动即重冻结。
 
 ## 6. 已读 / 未读（诚实账）
 

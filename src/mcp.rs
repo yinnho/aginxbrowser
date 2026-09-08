@@ -334,6 +334,12 @@ pub struct RenderMarkdownParams {
     /// session (local and free) so session_screenshot / session_state can
     /// verify the artifact
     pub session_id: Option<String>,
+    /// Quality profile for the composition audit: "standard" (default) or
+    /// "showcase" — the delivery gate. The audit grades route crossings,
+    /// corridors, label clearance, rhythm, and projected text size in the
+    /// receipt (diagrams[].composition); it never changes the artifact
+    /// bytes, only how findings are severity-rated
+    pub quality: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -1138,10 +1144,11 @@ bash, PowerShell and cmd copy flavors.",
     }
 
     #[tool(
-        description = "Render a markdown document into a deterministic, self-contained HTML artifact - the document layer, so the agent never writes HTML by hand. Prose rides a plain offline shell (no fonts, no scripts); archify fenced code blocks carry typed zero-coordinate diagram JSON (sequence, workflow, architecture, dataflow, lifecycle families) and render to inline SVG via the layout engine. Same input, same bytes: the receipt carries the sha256 so determinism is verifiable. theme picks light (default) or dark; preset picks the palette family — classic (default), signal-flow, blueprint, editorial — orthogonal to theme; colors bake at generation time (presentation attributes, not CSS variables), and the receipt records both preset and theme. A broken diagram degrades to a visible code block and lands in receipt.diagnostics; an authored route preset that cannot be honored is self-repaired to a verified semantic substitute and disclosed in receipt diagrams[].repairs - the document still renders. With session_id the artifact is also loaded into that session (local, free) and the reply carries viewport acceptance: scroll extents measured in the live session and graded fits/tall/wide/oversized, telling the agent how to read the page back. Diagram vocabulary adapted from archify (MIT).",
+        description = "Render a markdown document into a deterministic, self-contained HTML artifact - the document layer, so the agent never writes HTML by hand. Prose rides a plain offline shell (no fonts, no scripts); archify fenced code blocks carry typed zero-coordinate diagram JSON (sequence, workflow, architecture, dataflow, lifecycle families) and render to inline SVG via the layout engine. Same input, same bytes: the receipt carries the sha256 so determinism is verifiable. theme picks light (default) or dark; preset picks the palette family — classic (default), signal-flow, blueprint, editorial — orthogonal to theme; colors bake at generation time (presentation attributes, not CSS variables), and the receipt records both preset and theme. quality picks the composition audit profile — standard (default) or showcase, the delivery gate: the receipt's diagrams[].composition grades route crossings, ambiguous corridors, label clearance (2px standard / 4px showcase), route rhythm, and node text projected to the 930px reader width; the audit never changes the artifact bytes. Mermaid sources are the agent's job to translate, not the engine's: flowchart/graph → workflow (lanes + columns), sequenceDiagram → sequence, stateDiagram-v2 → lifecycle (bands), erDiagram/class → architecture (grid + boundaries) — read the topology and emit the matching zero-coordinate archify JSON; the engine accepts only archify JSON. A broken diagram degrades to a visible code block and lands in receipt.diagnostics; an authored route preset that cannot be honored is self-repaired to a verified semantic substitute and disclosed in receipt diagrams[].repairs - the document still renders. With session_id the artifact is also loaded into that session (local, free) and the reply carries viewport acceptance: scroll extents measured in the live session and graded fits/tall/wide/oversized, telling the agent how to read the page back. Diagram vocabulary adapted from archify (MIT).",
         annotations(title = "Render Markdown")
     )]
     async fn render_markdown(&self, Parameters(params): Parameters<RenderMarkdownParams>) -> String {
+        use crate::docgen::checks::Quality;
         use crate::docgen::theme::Theme;
         // (preset, mode) → theme. One-sided requests fill in the classic/
         // light defaults; the all-default request keeps riding render(),
@@ -1168,10 +1175,28 @@ bash, PowerShell and cmd copy flavors.",
                     })
             }
         };
-        let rendered = match resolved {
-            Err(e) => return json!({ "error": e }).to_string(),
-            Ok(None) => crate::docgen::render(&params.markdown),
-            Ok(Some(theme)) => crate::docgen::render_with_theme(&params.markdown, theme),
+        let quality = params.quality.as_deref().map_or(
+            Ok(crate::docgen::checks::Quality::Standard),
+            |name| {
+                crate::docgen::checks::Quality::by_name(name).ok_or_else(|| {
+                    format!("unknown quality \"{name}\" — expected one of: standard, showcase")
+                })
+            },
+        );
+        let rendered = match (resolved, quality) {
+            (Err(e), _) | (_, Err(e)) => return json!({ "error": e }).to_string(),
+            (Ok(theme), Ok(Quality::Standard)) if theme.is_none() => {
+                crate::docgen::render(&params.markdown)
+            }
+            (Ok(None), Ok(quality)) => {
+                crate::docgen::render_with_quality(&params.markdown, &crate::docgen::theme::LIGHT, quality)
+            }
+            (Ok(Some(theme)), Ok(Quality::Standard)) => {
+                crate::docgen::render_with_theme(&params.markdown, theme)
+            }
+            (Ok(Some(theme)), Ok(quality)) => {
+                crate::docgen::render_with_quality(&params.markdown, theme, quality)
+            }
         };
         let crate::docgen::RenderOutcome { html, receipt } = rendered;
         match params.session_id {

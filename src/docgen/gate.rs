@@ -9,7 +9,7 @@
 
 use sha2::{Digest, Sha256};
 
-use super::{render, render_with_theme, theme};
+use super::{render, render_with_quality, render_with_theme, theme, checks::Quality};
 
 const CHECKOUT: &str = r#"# Checkout
 
@@ -273,6 +273,59 @@ fn first_pass_corpus_is_clean() {
             })
             .sum();
         assert_eq!(repaired, 0, "{name}: attempt-1 must not need repairs");
+    }
+}
+
+/// The showcase bar on the corpus: the same attempt-1 documents, graded at
+/// the delivery profile, must report zero findings. A corpus document
+/// failing showcase is a composition regression (or an over-strict check)
+/// — never a quiet pass.
+#[test]
+fn corpus_passes_the_showcase_audit() {
+    for (name, md) in CORPUS {
+        let outcome = render_with_quality(md, &theme::LIGHT, Quality::Showcase);
+        for d in outcome.receipt["diagrams"].as_array().unwrap() {
+            let c = &d["composition"];
+            assert_eq!(
+                c["status"], "pass",
+                "{name} diagram {}: {:?}",
+                d["index"], c["issues"]
+            );
+            assert!(
+                c["issues"].as_array().unwrap().is_empty(),
+                "{name} diagram {}: {:?}",
+                d["index"],
+                c["issues"]
+            );
+        }
+        // And the receipt's aggregate line agrees.
+        assert!(
+            outcome.receipt["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c.as_str().unwrap_or("").contains("composition audit (showcase): clean")),
+            "{name}: aggregate audit line missing: {:?}",
+            outcome.receipt["checks"]
+        );
+    }
+}
+
+/// The quality axis is report-only: standard and showcase render the exact
+/// same artifact bytes, and only the receipt differs. This is what lets the
+/// delivery gate flip without invalidating every cached artifact.
+#[test]
+fn quality_profiles_do_not_change_the_artifact() {
+    for (name, md) in CORPUS {
+        let standard = render(md);
+        let showcase = render_with_quality(md, &theme::LIGHT, Quality::Showcase);
+        assert_eq!(
+            standard.html, showcase.html,
+            "{name}: showcase must not touch the bytes"
+        );
+        assert_eq!(standard.receipt["sha256"], showcase.receipt["sha256"]);
+        assert_eq!(standard.receipt["quality"], "standard");
+        assert_eq!(showcase.receipt["quality"], "showcase");
     }
 }
 

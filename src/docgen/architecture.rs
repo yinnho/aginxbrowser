@@ -89,6 +89,8 @@ pub struct RenderedArchitecture {
     pub connections: usize,
     /// Route presets the engine substituted, in canonical connection order.
     pub repairs: Vec<RouteRepair>,
+    /// Composition audit over the placed geometry (profile-independent).
+    pub composition: super::checks::Composition,
 }
 
 /// The canonicalized document: components sort (row, col, id), connections
@@ -265,6 +267,49 @@ pub fn render_architecture(
         .collect();
 
     let svg = emit_svg(&doc, &laid, &placed, view_box, &legend, theme);
+
+    // Composition audit: boundaries are the containers a connection may
+    // cross perpendicularly but never borrow as a corridor. Readability
+    // mirrors the emission's fitted-font call for the primary component
+    // label (boundary captions are auxiliary, like the reference's context
+    // text, and are deliberately outside the node-text floor).
+    let routes: Vec<super::checks::AuditRoute> = doc
+        .connections
+        .iter()
+        .zip(&placed)
+        .map(|(connection, (_, _, points, label))| super::checks::AuditRoute {
+            name: connection_name(connection),
+            from: connection.from.clone(),
+            to: connection.to.clone(),
+            points: points.clone(),
+            label: *label,
+        })
+        .collect();
+    let frames: Vec<super::checks::AuditFrame> = laid
+        .boundaries
+        .iter()
+        .map(|b| super::checks::AuditFrame {
+            kind: "boundary",
+            label: b.label.clone(),
+            rect: b.rect,
+            radius: 90,
+        })
+        .collect();
+    let min_label_font = doc
+        .components
+        .iter()
+        .zip(&laid.rects)
+        .map(|(c, rect)| fitted_font(&c.label, rect.w - 160, LABEL_PREFERRED, LABEL_MIN))
+        .min();
+    let composition = super::checks::audit(&super::checks::AuditScene {
+        routes: &routes,
+        frames: &frames,
+        readability: min_label_font.map(|f| super::checks::Readability {
+            view_box_w: view_box[0],
+            min_label_font: f,
+        }),
+    });
+
     Ok(RenderedArchitecture {
         svg,
         title: doc.title.to_string(),
@@ -273,6 +318,7 @@ pub fn render_architecture(
         boundaries: doc.boundaries.len(),
         connections: doc.connections.len(),
         repairs,
+        composition,
     })
 }
 

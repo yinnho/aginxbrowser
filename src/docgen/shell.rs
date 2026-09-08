@@ -39,6 +39,9 @@ pub struct FenceOutcome {
     /// Route presets the engine substituted on this diagram's behalf,
     /// disclosed per-edge (the graph-routed families).
     pub repairs: Vec<RouteRepair>,
+    /// Composition audit over the placed geometry; None when the fence
+    /// failed before a diagram existed.
+    pub composition: Option<super::checks::Composition>,
 }
 
 /// A rendered fence, in family-agnostic terms for the figure splice.
@@ -48,6 +51,7 @@ struct FenceDiagram {
     title: String,
     facts: Vec<String>,
     repairs: Vec<RouteRepair>,
+    composition: super::checks::Composition,
 }
 
 /// Parse one fence body. The family is the declared `diagram_type`, or the
@@ -94,6 +98,7 @@ fn parse_fence(body: &str, theme: &'static Theme) -> Result<FenceDiagram, Vec<St
                 svg: r.svg,
                 title: r.title,
                 repairs: Vec::new(),
+                composition: r.composition,
             })
         }
         ("workflow", _, Some(spec), ..) => {
@@ -113,6 +118,7 @@ fn parse_fence(body: &str, theme: &'static Theme) -> Result<FenceDiagram, Vec<St
                 svg: r.svg,
                 title: r.title,
                 repairs: r.repairs,
+                composition: r.composition,
             })
         }
         ("dataflow", _, _, Some(spec), ..) => {
@@ -132,6 +138,7 @@ fn parse_fence(body: &str, theme: &'static Theme) -> Result<FenceDiagram, Vec<St
                 svg: r.svg,
                 title: r.title,
                 repairs: r.repairs,
+                composition: r.composition,
             })
         }
         ("lifecycle", _, _, _, Some(spec), _) => {
@@ -151,6 +158,7 @@ fn parse_fence(body: &str, theme: &'static Theme) -> Result<FenceDiagram, Vec<St
                 svg: r.svg,
                 title: r.title,
                 repairs: r.repairs,
+                composition: r.composition,
             })
         }
         ("architecture", .., Some(spec)) => {
@@ -170,6 +178,7 @@ fn parse_fence(body: &str, theme: &'static Theme) -> Result<FenceDiagram, Vec<St
                 svg: r.svg,
                 title: r.title,
                 repairs: r.repairs,
+                composition: r.composition,
             })
         }
         ("sequence", None, ..) => Err(vec![
@@ -266,6 +275,7 @@ pub fn render(markdown: &str, theme: &'static Theme) -> RenderedDoc {
                                 title: Some(d.title.clone()),
                                 detail: d.facts,
                                 repairs: d.repairs,
+                                composition: Some(d.composition),
                             });
                             if doc_title.is_none() {
                                 doc_title = Some(d.title);
@@ -286,6 +296,7 @@ pub fn render(markdown: &str, theme: &'static Theme) -> RenderedDoc {
                                 title: None,
                                 detail: problems,
                                 repairs: Vec::new(),
+                                composition: None,
                             });
                         }
                     }

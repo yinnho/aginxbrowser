@@ -11,6 +11,7 @@
 //! emission.
 
 pub mod architecture;
+pub mod checks;
 pub mod dataflow;
 pub mod graph;
 #[cfg(test)]
@@ -51,6 +52,19 @@ pub fn render(markdown: &str) -> RenderOutcome {
 /// same markdown + same theme = same bytes, and the receipt names it so a
 /// cached artifact is never mistaken for another theme's.
 pub fn render_with_theme(markdown: &str, theme: &'static theme::Theme) -> RenderOutcome {
+    render_with_quality(markdown, theme, checks::Quality::Standard)
+}
+
+/// Render with an explicit theme and quality profile. The profile grades
+/// the receipt, never the artifact: the composition audit runs in process
+/// over the placed geometry and `quality` only sets how its findings are
+/// severity-rated (border runs fail every profile; showcase fails on any
+/// finding). The emitted bytes are identical across profiles.
+pub fn render_with_quality(
+    markdown: &str,
+    theme: &'static theme::Theme,
+    quality: checks::Quality,
+) -> RenderOutcome {
     let doc = shell::render(markdown, theme);
 
     let rendered: Vec<&shell::FenceOutcome> = doc.fences.iter().filter(|f| f.ok).collect();
@@ -83,6 +97,31 @@ pub fn render_with_theme(markdown: &str, theme: &'static theme::Theme) -> Render
             if repaired_count == 1 { "" } else { "s" }
         ));
     }
+    let audited: Vec<(&shell::FenceOutcome, usize)> = doc
+        .fences
+        .iter()
+        .filter_map(|f| f.composition.as_ref().map(|c| (f, c.findings(quality))))
+        .collect();
+    let findings: usize = audited.iter().map(|(_, n)| n).sum();
+    if !audited.is_empty() {
+        if findings == 0 {
+            checks.push(format!(
+                "composition audit ({}): clean across {} diagram{}",
+                quality.name(),
+                audited.len(),
+                if audited.len() == 1 { "" } else { "s" }
+            ));
+        } else {
+            checks.push(format!(
+                "composition audit ({}): {} finding{} across {} diagram{} (diagrams[].composition)",
+                quality.name(),
+                findings,
+                if findings == 1 { "" } else { "s" },
+                audited.len(),
+                if audited.len() == 1 { "" } else { "s" }
+            ));
+        }
+    }
 
     let diagnostics: Vec<String> = failed
         .iter()
@@ -107,6 +146,9 @@ pub fn render_with_theme(markdown: &str, theme: &'static theme::Theme) -> Render
             if !f.repairs.is_empty() {
                 v["repairs"] = serde_json::to_value(&f.repairs).unwrap_or(Value::Null);
             }
+            if let Some(c) = &f.composition {
+                v["composition"] = c.report(quality);
+            }
             v
         })
         .collect();
@@ -119,6 +161,7 @@ pub fn render_with_theme(markdown: &str, theme: &'static theme::Theme) -> Render
         "bytes": doc.html.len(),
         "preset": theme.preset,
         "theme": theme.name,
+        "quality": quality.name(),
         "diagrams": diagrams,
         "checks": checks,
         "diagnostics": diagnostics,
