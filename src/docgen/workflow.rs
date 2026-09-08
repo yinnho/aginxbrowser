@@ -24,6 +24,7 @@ use super::spec::{
     text_units, Lane, NodeGroup, Phase, WorkflowEdge, WorkflowNode, WorkflowSpec,
     workflow_node_height,
 };
+use super::theme::Theme;
 use super::tx;
 
 // ---------------------------------------------------------------------------
@@ -225,12 +226,15 @@ enum CompileError {
 /// Render a validated workflow spec. Infeasibility the bounded feedback loop
 /// cannot repair comes back as problems; the caller falls the fence back to a
 /// code block.
-pub fn render_workflow(spec: &WorkflowSpec) -> Result<RenderedWorkflow, Vec<String>> {
+pub fn render_workflow(
+    spec: &WorkflowSpec,
+    theme: &'static Theme,
+) -> Result<RenderedWorkflow, Vec<String>> {
     let doc = canon(spec);
     let mut rank_gaps: BTreeMap<(usize, usize), i32> = BTreeMap::new();
     let mut lane_gap_min = 0;
     for round in 0..=MAX_FEEDBACK_ROUNDS {
-        match compile_once(&doc, &rank_gaps, lane_gap_min) {
+        match compile_once(&doc, &rank_gaps, lane_gap_min, theme) {
             Ok(done) => return Ok(done),
             Err(CompileError::Feedback(Feedback::RankGap {
                 from_col,
@@ -286,6 +290,7 @@ fn compile_once(
     doc: &Canon,
     rank_gaps: &BTreeMap<(usize, usize), i32>,
     lane_gap_min: i32,
+    theme: &'static Theme,
 ) -> Result<RenderedWorkflow, CompileError> {
     let col_xs = solve_columns(&constraints(doc, rank_gaps));
     let col_xs = post_pass_shifts(doc, col_xs);
@@ -494,7 +499,7 @@ fn compile_once(
         auto_height.max(bounds.3 + VB_BOTTOM_MARGIN),
     ];
 
-    let svg = emit_svg(doc, &laid, &placed, view_box, &legend_rows, legend_y);
+    let svg = emit_svg(doc, &laid, &placed, view_box, &legend_rows, legend_y, theme);
     Ok(RenderedWorkflow {
         svg,
         title: doc.title.to_string(),
@@ -1063,26 +1068,16 @@ fn pack_legend_rows(entries: &[(usize, i32)], width: i32) -> Vec<Vec<(i32, i32, 
 // SVG emission
 // ---------------------------------------------------------------------------
 
-fn kind_palette(kind: &str) -> (&'static str, &'static str, &'static str) {
-    match kind {
-        "frontend" => ("#dbeafe", "#2563eb", "#1e40af"),
-        "backend" => ("#dcfce7", "#16a34a", "#166534"),
-        "database" => ("#fef3c7", "#d97706", "#92400e"),
-        "cloud" => ("#e0e7ff", "#4f46e5", "#3730a3"),
-        "security" => ("#fee2e2", "#dc2626", "#991b1b"),
-        "messagebus" => ("#f3e8ff", "#9333ea", "#6b21a8"),
-        _ => ("#f4f4f5", "#71717a", "#3f3f46"),
-    }
-}
-
-/// (stroke, width, dash, label fill) per edge variant — the sequence table.
-fn variant_style(variant: &str) -> (&'static str, i32, Option<&'static str>, &'static str) {
+/// (stroke, width, dash, label fill) per edge variant — the sequence table,
+/// with the grid families' plain default (no accent label). Sizes and dash
+/// patterns are this adapter's typography; colors come from the theme.
+fn variant_style(theme: &Theme, variant: &str) -> (&'static str, i32, Option<&'static str>, &'static str) {
     match variant {
-        "emphasis" => ("#18181b", 18, None, "#18181b"),
-        "security" => ("#dc2626", 14, None, "#dc2626"),
-        "dashed" => ("#9333ea", 14, Some("6 4"), "#9333ea"),
-        "return" => ("#71717a", 14, Some("3 5"), "#71717a"),
-        _ => ("#52525b", 14, None, "#52525b"),
+        "emphasis" => (theme.ink, 18, None, theme.ink),
+        "security" => (theme.danger, 14, None, theme.danger),
+        "dashed" => (theme.skip, 14, Some("6 4"), theme.skip),
+        "return" => (theme.ink_muted, 14, Some("3 5"), theme.ink_muted),
+        _ => (theme.ink_soft, 14, None, theme.ink_soft),
     }
 }
 
@@ -1107,6 +1102,7 @@ fn emit_svg(
     view_box: [i32; 2],
     legend_rows: &[Vec<(i32, i32, usize)>],
     legend_y: i32,
+    theme: &'static Theme,
 ) -> String {
     let mut s = String::with_capacity(8192);
     s.push_str(&format!(
@@ -1127,19 +1123,20 @@ fn emit_svg(
         };
         let exception = lane.variant.as_deref() == Some("exception");
         s.push_str(&format!(
-            "<rect data-lane-id=\"{}\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"10\" fill=\"#fafafa\" stroke=\"{}\" stroke-width=\"1\"/>",
+            "<rect data-lane-id=\"{}\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"10\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1\"/>",
             esc(&lane.id),
             tx(LANE_X),
             tx(y),
             tx(laid.lane_w),
             tx(h),
-            if exception { "#dc2626" } else { "#d4d4d8" }
+            theme.panel,
+            if exception { theme.danger } else { theme.frame }
         ));
         s.push_str(&format!(
             "<text x=\"{}\" y=\"{}\" font-size=\"10\" font-weight=\"600\" fill=\"{}\">{} / {}</text>",
             tx(LANE_X + 140),
             tx(y + 220),
-            if exception { "#dc2626" } else { "#52525b" },
+            if exception { theme.danger } else { theme.ink_soft },
             esc(&prefix),
             esc(&lane.label)
         ));
@@ -1149,21 +1146,23 @@ fn emit_svg(
     for phase in &doc.phases {
         let (x, width) = phase_span(phase, &laid.col_xs);
         let accent = if phase.variant.as_deref() == Some("security") {
-            "#dc2626"
+            theme.danger
         } else {
-            "#52525b"
+            theme.ink_soft
         };
         s.push_str(&format!(
-            "<line x1=\"{}\" y1=\"35\" x2=\"{}\" y2=\"35\" stroke=\"#71717a\" stroke-width=\"1.1\"/>",
+            "<line x1=\"{}\" y1=\"35\" x2=\"{}\" y2=\"35\" stroke=\"{}\" stroke-width=\"1.1\"/>",
             tx(x),
-            tx(x + width)
+            tx(x + width),
+            theme.ink_muted
         ));
         s.push_str(&format!(
-            "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"4\" fill=\"#ffffff\"/>",
+            "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"4\" fill=\"{}\"/>",
             tx(x),
             tx(PHASE_BAND_Y),
             tx(width),
-            tx(PHASE_BAND_H)
+            tx(PHASE_BAND_H),
+            theme.panel_alt
         ));
         s.push_str(&format!(
             "<text x=\"{}\" y=\"39\" font-size=\"8\" font-weight=\"600\" fill=\"{}\" text-anchor=\"middle\">{}</text>",
@@ -1188,14 +1187,14 @@ fn emit_svg(
             tx(fy),
             tx(gw),
             tx(gh),
-            if security { "#fef2f2" } else { "#ffffff" },
-            if security { "#dc2626" } else { "#a1a1aa" }
+            if security { theme.panel_danger } else { theme.panel_alt },
+            if security { theme.danger } else { theme.guide }
         ));
         s.push_str(&format!(
             "<text x=\"{}\" y=\"{}\" font-size=\"7\" font-weight=\"600\" fill=\"{}\">{}</text>",
             tx(gx + GROUP_LABEL_X_INSET),
             tx(fy + GROUP_LABEL_BASELINE_OFFSET),
-            if security { "#dc2626" } else { "#52525b" },
+            if security { theme.danger } else { theme.ink_soft },
             esc(&group.label)
         ));
     }
@@ -1204,7 +1203,7 @@ fn emit_svg(
     for (i, edge) in doc.edges.iter().enumerate() {
         let (_, _, points, _) = &placed[i];
         let variant = edge.variant.as_deref().unwrap_or("default");
-        let (stroke, stroke_w, dash, _) = variant_style(variant);
+        let (stroke, stroke_w, dash, _) = variant_style(theme, variant);
         let dash_attr = dash.map_or(String::new(), |d| format!(" stroke-dasharray=\"{d}\""));
         s.push_str(&format!(
             "<path data-from=\"{}\" data-to=\"{}\" d=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\"{}/>",
@@ -1221,7 +1220,7 @@ fn emit_svg(
     // Nodes.
     for (i, node) in doc.nodes.iter().enumerate() {
         let rect = &laid.rects[i];
-        let (fill, stroke, text_fill) = kind_palette(&node.kind);
+        let node_colors = theme.node(&node.kind);
         s.push_str(&format!("<g data-node-id=\"{}\">", esc(&node.id)));
         s.push_str(&format!(
             "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"6\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1.5\"/>",
@@ -1229,25 +1228,27 @@ fn emit_svg(
             tx(rect.y),
             tx(rect.w),
             tx(rect.h),
-            fill,
-            stroke
+            node_colors.fill,
+            node_colors.stroke
         ));
         let label_font =
             fitted_font(&node.label, NODE_W - LABEL_RESERVE, LABEL_PREFERRED, LABEL_MIN);
         s.push_str(&format!(
-            "<text x=\"{}\" y=\"{}\" font-size=\"{}\" font-weight=\"600\" fill=\"#18181b\" text-anchor=\"middle\">{}</text>",
+            "<text x=\"{}\" y=\"{}\" font-size=\"{}\" font-weight=\"600\" fill=\"{}\" text-anchor=\"middle\">{}</text>",
             tx(rect.cx()),
             tx(rect.y + 210),
             tx(label_font),
+            theme.ink,
             esc(&node.label)
         ));
         if let Some(sub) = node.sublabel.as_deref().filter(|s| !s.trim().is_empty()) {
             let sub_font = fitted_font(sub, NODE_W, SUB_PREFERRED, SUB_MIN);
             s.push_str(&format!(
-                "<text x=\"{}\" y=\"{}\" font-size=\"{}\" fill=\"#71717a\" text-anchor=\"middle\">{}</text>",
+                "<text x=\"{}\" y=\"{}\" font-size=\"{}\" fill=\"{}\" text-anchor=\"middle\">{}</text>",
                 tx(rect.cx()),
                 tx(rect.y + 380),
                 tx(sub_font),
+                theme.ink_muted,
                 esc(sub)
             ));
         }
@@ -1258,7 +1259,7 @@ fn emit_svg(
                 tx(rect.cx()),
                 tx(rect.y + rect.h - 120),
                 tx(tag_font),
-                text_fill,
+                node_colors.text,
                 esc(tag)
             ));
         }
@@ -1271,14 +1272,15 @@ fn emit_svg(
         let (_, _, points, lrect) = &placed[i];
         let Some(lr) = lrect else { continue };
         let at = label_point(points);
-        let (_, _, _, label_fill) = variant_style(edge.variant.as_deref().unwrap_or("default"));
+        let (_, _, _, label_fill) = variant_style(theme, edge.variant.as_deref().unwrap_or("default"));
         s.push_str(&format!(
-            "<g data-from=\"{}\" data-to=\"{}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"14\" rx=\"3\" fill=\"#ffffff\"/><text x=\"{}\" y=\"{}\" font-size=\"8\" fill=\"{}\" text-anchor=\"middle\">{}</text></g>",
+            "<g data-from=\"{}\" data-to=\"{}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"14\" rx=\"3\" fill=\"{}\"/><text x=\"{}\" y=\"{}\" font-size=\"8\" fill=\"{}\" text-anchor=\"middle\">{}</text></g>",
             esc(&edge.from),
             esc(&edge.to),
             tx(lr.x),
             tx(lr.y),
             tx(lr.w),
+            theme.panel_alt,
             tx(at.0),
             tx(at.1),
             label_fill,
@@ -1292,24 +1294,26 @@ fn emit_svg(
             let baseline = legend_y - (legend_rows.len() as i32 - 1 - row as i32) * LEGEND_ROW_H;
             if row == 0 {
                 s.push_str(&format!(
-                    "<text x=\"{}\" y=\"{}\" font-size=\"7\" font-weight=\"600\" fill=\"#52525b\">Legend</text>",
+                    "<text x=\"{}\" y=\"{}\" font-size=\"7\" font-weight=\"600\" fill=\"{}\">Legend</text>",
                     tx(LEGEND_X),
-                    tx(baseline)
+                    tx(baseline),
+                    theme.ink_soft
                 ));
             }
             for &(x, _w, idx) in entries {
                 let (kind, label) = LEGEND_CATALOG[idx];
-                let (fill, stroke, _) = kind_palette(kind);
+                let swatch = theme.node(kind);
                 s.push_str(&format!(
-                    "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"2\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1\"/><text x=\"{}\" y=\"{}\" font-size=\"7\" fill=\"#52525b\">{}</text>",
+                    "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"2\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1\"/><text x=\"{}\" y=\"{}\" font-size=\"7\" fill=\"{}\">{}</text>",
                     tx(x),
                     tx(baseline - 80),
                     tx(LEGEND_SWATCH_W),
                     tx(LEGEND_SWATCH_H),
-                    fill,
-                    stroke,
+                    swatch.fill,
+                    swatch.stroke,
                     tx(x + LEGEND_SWATCH_W + LEGEND_SWATCH_TEXT_GAP),
                     tx(baseline),
+                    theme.ink_soft,
                     esc(label)
                 ));
             }
@@ -1349,6 +1353,7 @@ fn arrowhead(points: &[Pt], fill: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::theme::LIGHT;
 
     const SPEC_JSON: &str = r#"{
         "title": "Checkout",
@@ -1377,8 +1382,8 @@ mod tests {
 
     #[test]
     fn two_lane_pipeline_renders_deterministically() {
-        let a = render_workflow(&spec()).unwrap();
-        let b = render_workflow(&spec()).unwrap();
+        let a = render_workflow(&spec(), &LIGHT).unwrap();
+        let b = render_workflow(&spec(), &LIGHT).unwrap();
         assert_eq!(a.svg, b.svg, "same input, same bytes");
         assert_eq!((a.lanes, a.nodes, a.edges), (2, 4, 3));
         assert!(a.svg.contains("data-lane-id=\"web\""));
@@ -1422,8 +1427,8 @@ mod tests {
         .unwrap();
         assert!(super::super::spec::validate_workflow(&shuffled).is_empty());
         assert_eq!(
-            render_workflow(&spec()).unwrap().svg,
-            render_workflow(&shuffled).unwrap().svg
+            render_workflow(&spec(), &LIGHT).unwrap().svg,
+            render_workflow(&shuffled, &LIGHT).unwrap().svg
         );
     }
 
@@ -1440,7 +1445,7 @@ mod tests {
             from_side: None,
             to_side: None,
         });
-        let rendered = render_workflow(&s).unwrap();
+        let rendered = render_workflow(&s, &LIGHT).unwrap();
         let path = rendered
             .svg
             .split("data-from=\"db\" data-to=\"cart\"")
@@ -1475,7 +1480,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let rendered = render_workflow(&s).unwrap();
+        let rendered = render_workflow(&s, &LIGHT).unwrap();
         // Node tops sit at y=93; the channel rides the top corridor 16px
         // above the lane top (52-16=36).
         assert!(
@@ -1507,7 +1512,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let rendered = render_workflow(&s).unwrap();
+        let rendered = render_workflow(&s, &LIGHT).unwrap();
         assert_eq!(rendered.repairs.len(), 1);
         assert_eq!(rendered.repairs[0].edge, "b->a");
         assert_eq!(rendered.repairs[0].requested, "return-left");
@@ -1534,7 +1539,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let rendered = render_workflow(&s).unwrap();
+        let rendered = render_workflow(&s, &LIGHT).unwrap();
         assert!(
             rendered.repairs.is_empty(),
             "up-channel must stay feasible above the band: {:?}",

@@ -321,6 +321,10 @@ pub struct RenderMarkdownParams {
     /// fenced code blocks carry typed zero-coordinate diagram JSON and
     /// render to inline SVG.
     pub markdown: String,
+    /// Color theme: "light" (default) or "dark" — the shell background/
+    /// foreground and every SVG palette slot swap together; the receipt
+    /// records which theme produced the bytes
+    pub theme: Option<String>,
     /// Optional session ID: also load the rendered HTML into that live
     /// session (local and free) so session_screenshot / session_state can
     /// verify the artifact
@@ -1129,11 +1133,26 @@ bash, PowerShell and cmd copy flavors.",
     }
 
     #[tool(
-        description = "Render a markdown document into a deterministic, self-contained HTML artifact - the document layer, so the agent never writes HTML by hand. Prose rides a plain offline shell (no fonts, no scripts); archify fenced code blocks carry typed zero-coordinate diagram JSON (sequence and workflow families) and render to inline SVG via the layout engine. Same input, same bytes: the receipt carries the sha256 so determinism is verifiable. A broken diagram degrades to a visible code block and lands in receipt.diagnostics; an authored route preset that cannot be honored is self-repaired to a verified semantic substitute and disclosed in receipt diagrams[].repairs - the document still renders. With session_id the artifact is also loaded into that session (local, free) and the reply carries viewport acceptance: scroll extents measured in the live session and graded fits/tall/wide/oversized, telling the agent how to read the page back. Diagram vocabulary adapted from archify (MIT).",
+        description = "Render a markdown document into a deterministic, self-contained HTML artifact - the document layer, so the agent never writes HTML by hand. Prose rides a plain offline shell (no fonts, no scripts); archify fenced code blocks carry typed zero-coordinate diagram JSON (sequence, workflow, architecture, dataflow, lifecycle families) and render to inline SVG via the layout engine. Same input, same bytes: the receipt carries the sha256 so determinism is verifiable. theme picks the palette - light (default) or dark - swapping the shell colors and every SVG color slot together; colors bake at generation time (presentation attributes, not CSS variables), and the receipt records the theme name. A broken diagram degrades to a visible code block and lands in receipt.diagnostics; an authored route preset that cannot be honored is self-repaired to a verified semantic substitute and disclosed in receipt diagrams[].repairs - the document still renders. With session_id the artifact is also loaded into that session (local, free) and the reply carries viewport acceptance: scroll extents measured in the live session and graded fits/tall/wide/oversized, telling the agent how to read the page back. Diagram vocabulary adapted from archify (MIT).",
         annotations(title = "Render Markdown")
     )]
     async fn render_markdown(&self, Parameters(params): Parameters<RenderMarkdownParams>) -> String {
-        let crate::docgen::RenderOutcome { html, receipt } = crate::docgen::render(&params.markdown);
+        let rendered = match params.theme.as_deref() {
+            None => crate::docgen::render(&params.markdown),
+            Some(name) => match crate::docgen::theme::Theme::by_name(name) {
+                Some(theme) => crate::docgen::render_with_theme(&params.markdown, theme),
+                None => {
+                    return json!({
+                        "error": format!(
+                            "unknown theme \"{name}\" — expected one of: {}",
+                            crate::docgen::theme::Theme::names().join(", ")
+                        )
+                    })
+                    .to_string()
+                }
+            },
+        };
+        let crate::docgen::RenderOutcome { html, receipt } = rendered;
         match params.session_id {
             None => json!({ "receipt": receipt, "html": html }).to_string(),
             Some(sid) => {

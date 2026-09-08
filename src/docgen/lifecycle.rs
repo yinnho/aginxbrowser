@@ -26,6 +26,7 @@ use super::spec::{
     lifecycle_band, text_units, LifecycleBand, LifecycleLane, LifecycleSpec, LifecycleState,
     LifecycleTransition,
 };
+use super::theme::Theme;
 use super::tx;
 
 // ---------------------------------------------------------------------------
@@ -170,7 +171,10 @@ fn col_x(band: LifecycleBand, col: u8) -> i32 {
 /// Render a validated lifecycle spec. Infeasibility is terminal (the bands
 /// are fixed): the transition names its dead end and the caller falls the
 /// fence back to a code block.
-pub fn render_lifecycle(spec: &LifecycleSpec) -> Result<RenderedLifecycle, Vec<String>> {
+pub fn render_lifecycle(
+    spec: &LifecycleSpec,
+    theme: &'static Theme,
+) -> Result<RenderedLifecycle, Vec<String>> {
     let doc = canon(spec);
     let mut laid = layout(&doc);
 
@@ -285,7 +289,7 @@ pub fn render_lifecycle(spec: &LifecycleSpec) -> Result<RenderedLifecycle, Vec<S
         .map(|(i, _)| i)
         .collect();
 
-    let svg = emit_svg(&doc, &laid, &placed, view_box, &legend);
+    let svg = emit_svg(&doc, &laid, &placed, view_box, &legend, theme);
     Ok(RenderedLifecycle {
         svg,
         title: doc.title.to_string(),
@@ -491,29 +495,34 @@ fn measured_bounds(
 // SVG emission
 // ---------------------------------------------------------------------------
 
-/// (fill, stroke) per state kind — the reference palette. External is white
-/// with a dashed border.
-fn state_palette(kind: &str) -> (&'static str, &'static str) {
-    match kind {
-        "start" => ("#dbeafe", "#2563eb"),
-        "active" => ("#e0e7ff", "#4f46e5"),
-        "waiting" => ("#fef3c7", "#d97706"),
-        "decision" => ("#f3e8ff", "#9333ea"),
-        "success" => ("#dcfce7", "#16a34a"),
-        "failure" => ("#fee2e2", "#dc2626"),
-        "neutral" => ("#f4f4f5", "#71717a"),
-        _ => ("#ffffff", "#71717a"),
-    }
+/// (fill, stroke) per state kind — the reference palette mapped onto the
+/// theme's kind slots (start rides frontend, active cloud, waiting database,
+/// decision messagebus, success backend, failure security; the unlabeled
+/// fallback is the plain slot). External keeps its dashed border.
+fn state_palette(theme: &Theme, kind: &str) -> (&'static str, &'static str) {
+    let slot = match kind {
+        "start" => "frontend",
+        "active" => "cloud",
+        "waiting" => "database",
+        "decision" => "messagebus",
+        "success" => "backend",
+        "failure" => "security",
+        "neutral" => "neutral",
+        _ => "plain",
+    };
+    let colors = theme.node(slot);
+    (colors.fill, colors.stroke)
 }
 
 /// (stroke, width, dash, label fill) per transition variant — emphasis
-/// rides heavier (2px vs 1.1px) exactly like the reference.
-fn variant_style(variant: &str) -> (&'static str, i32, Option<&'static str>, &'static str) {
+/// rides heavier (2px vs 1.1px) exactly like the reference. Sizes and dash
+/// patterns are this adapter's typography; colors come from the theme.
+fn variant_style(theme: &Theme, variant: &str) -> (&'static str, i32, Option<&'static str>, &'static str) {
     match variant {
-        "emphasis" => ("#18181b", 20, None, "#18181b"),
-        "security" => ("#dc2626", 11, None, "#dc2626"),
-        "dashed" => ("#9333ea", 11, Some("6 4"), "#9333ea"),
-        _ => ("#52525b", 11, None, "#52525b"),
+        "emphasis" => (theme.ink, 20, None, theme.ink),
+        "security" => (theme.danger, 11, None, theme.danger),
+        "dashed" => (theme.skip, 11, Some("6 4"), theme.skip),
+        _ => (theme.ink_soft, 11, None, theme.ink_soft),
     }
 }
 
@@ -537,6 +546,7 @@ fn emit_svg(
     placed: &[(usize, usize, Vec<Pt>, Option<Rect>)],
     view_box: [i32; 2],
     legend: &[usize],
+    theme: &'static Theme,
 ) -> String {
     let mut s = String::with_capacity(8192);
     s.push_str(&format!(
@@ -549,17 +559,19 @@ fn emit_svg(
     // Band rails + titles (dashed guides, behind everything).
     for (bi, &rail_y) in RAIL_YS.iter().enumerate() {
         s.push_str(&format!(
-            "<line data-band=\"{}\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"#a1a1aa\" stroke-width=\"0.8\" stroke-dasharray=\"3 8\"/>",
+            "<line data-band=\"{}\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"{}\" stroke-width=\"0.8\" stroke-dasharray=\"3 8\"/>",
             ["phase", "event", "outcome"][bi],
             tx(RAIL_X),
             tx(rail_y),
             tx(view_box[0] - RAIL_X),
-            tx(rail_y)
+            tx(rail_y),
+            theme.guide
         ));
         s.push_str(&format!(
-            "<text x=\"{}\" y=\"{}\" font-size=\"10\" font-weight=\"600\" fill=\"#52525b\">{:02} / {}</text>",
+            "<text x=\"{}\" y=\"{}\" font-size=\"10\" font-weight=\"600\" fill=\"{}\">{:02} / {}</text>",
             tx(RAIL_X),
             tx(rail_y - 120),
+            theme.ink_soft,
             bi + 1,
             esc(&laid.band_titles[bi])
         ));
@@ -568,11 +580,12 @@ fn emit_svg(
     // Phase spine along the phase-state bottoms.
     if let Some((start, end)) = laid.spine {
         s.push_str(&format!(
-            "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"#18181b\" stroke-width=\"2.2\"/>",
+            "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"{}\" stroke-width=\"2.2\"/>",
             tx(start),
             tx(1260 + 310),
             tx(end),
-            tx(1260 + 310)
+            tx(1260 + 310),
+            theme.ink
         ));
     }
 
@@ -580,7 +593,7 @@ fn emit_svg(
     for (i, transition) in doc.transitions.iter().enumerate() {
         let (_, _, points, _) = &placed[i];
         let (stroke, stroke_w, dash, _) =
-            variant_style(transition.variant.as_deref().unwrap_or("default"));
+            variant_style(theme, transition.variant.as_deref().unwrap_or("default"));
         let dash_attr = dash.map_or(String::new(), |d| format!(" stroke-dasharray=\"{d}\""));
         s.push_str(&format!(
             "<path data-from=\"{}\" data-to=\"{}\" d=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\"{}/>",
@@ -597,7 +610,7 @@ fn emit_svg(
     // States.
     for (i, state) in doc.states.iter().enumerate() {
         let rect = &laid.rects[i];
-        let (fill, stroke) = state_palette(&state.kind);
+        let (fill, stroke) = state_palette(theme, &state.kind);
         let external = state.kind == "external";
         let dash_attr = if external {
             " stroke-dasharray=\"4 3\""
@@ -617,37 +630,41 @@ fn emit_svg(
         ));
         if let Some(step) = state.step.as_deref().filter(|s| !s.trim().is_empty()) {
             s.push_str(&format!(
-                "<text x=\"{}\" y=\"{}\" font-size=\"7\" font-weight=\"700\" fill=\"#71717a\">{}</text>",
+                "<text x=\"{}\" y=\"{}\" font-size=\"7\" font-weight=\"700\" fill=\"{}\">{}</text>",
                 tx(rect.x + 100),
                 tx(rect.y + 140),
+                theme.ink_muted,
                 esc(step)
             ));
         }
         let label_font = fitted_font(&state.label, rect.w - 160, LABEL_PREFERRED, LABEL_MIN);
         s.push_str(&format!(
-            "<text x=\"{}\" y=\"{}\" font-size=\"{}\" font-weight=\"600\" fill=\"#18181b\" text-anchor=\"middle\">{}</text>",
+            "<text x=\"{}\" y=\"{}\" font-size=\"{}\" font-weight=\"600\" fill=\"{}\" text-anchor=\"middle\">{}</text>",
             tx(rect.cx()),
             tx(rect.y + 340),
             tx(label_font),
+            theme.ink,
             esc(&state.label)
         ));
         if let Some(sub) = state.sublabel.as_deref().filter(|s| !s.trim().is_empty()) {
             let sub_font = fitted_font(sub, rect.w, SUB_PREFERRED, SUB_MIN);
             s.push_str(&format!(
-                "<text x=\"{}\" y=\"{}\" font-size=\"{}\" fill=\"#71717a\" text-anchor=\"middle\">{}</text>",
+                "<text x=\"{}\" y=\"{}\" font-size=\"{}\" fill=\"{}\" text-anchor=\"middle\">{}</text>",
                 tx(rect.cx()),
                 tx(rect.y + 450),
                 tx(sub_font),
+                theme.ink_muted,
                 esc(sub)
             ));
         }
         if let Some(tag) = state.tag.as_deref().filter(|t| !t.trim().is_empty()) {
             let tag_font = fitted_font(tag, rect.w, SUB_PREFERRED, SUB_MIN);
             s.push_str(&format!(
-                "<text x=\"{}\" y=\"{}\" font-size=\"{}\" fill=\"#71717a\" text-anchor=\"middle\">{}</text>",
+                "<text x=\"{}\" y=\"{}\" font-size=\"{}\" fill=\"{}\" text-anchor=\"middle\">{}</text>",
                 tx(rect.cx()),
                 tx(rect.y + rect.h - 100),
                 tx(tag_font),
+                theme.ink_muted,
                 esc(tag)
             ));
         }
@@ -673,7 +690,7 @@ fn emit_svg(
             .as_deref()
             .is_some_and(|n| !n.trim().is_empty());
         let (_, _, _, label_fill) =
-            variant_style(transition.variant.as_deref().unwrap_or("default"));
+            variant_style(theme, transition.variant.as_deref().unwrap_or("default"));
         let h = if has_note { 300 } else { 160 };
         let label_line = has_label.then(|| {
             format!(
@@ -686,20 +703,22 @@ fn emit_svg(
         });
         let note_line = has_note.then(|| {
             format!(
-                "<text x=\"{}\" y=\"{}\" font-size=\"6\" fill=\"#71717a\" text-anchor=\"middle\">{}</text>",
+                "<text x=\"{}\" y=\"{}\" font-size=\"6\" fill=\"{}\" text-anchor=\"middle\">{}</text>",
                 tx(at.0),
                 tx(at.1 + 180),
+                theme.ink_muted,
                 esc(transition.note.as_deref().unwrap_or(""))
             )
         });
         s.push_str(&format!(
-            "<g data-from=\"{}\" data-to=\"{}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"3\" fill=\"#ffffff\"/>{}{}</g>",
+            "<g data-from=\"{}\" data-to=\"{}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"3\" fill=\"{}\"/>{}{}</g>",
             esc(&transition.from),
             esc(&transition.to),
             tx(at.0 - w / 2),
             tx(at.1 - 110),
             tx(w),
             tx(h),
+            theme.panel_alt,
             label_line.as_deref().unwrap_or(""),
             note_line.as_deref().unwrap_or("")
         ));
@@ -710,14 +729,14 @@ fn emit_svg(
         let mut x = LEGEND_X;
         for &idx in legend {
             let (kind, label) = LEGEND_CATALOG[idx];
-            let (fill, stroke) = state_palette(kind);
+            let (fill, stroke) = state_palette(theme, kind);
             let dash_attr = if kind == "external" {
                 " stroke-dasharray=\"4 3\""
             } else {
                 ""
             };
             s.push_str(&format!(
-                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"2\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1\"{}/><text x=\"{}\" y=\"{}\" font-size=\"7\" fill=\"#52525b\">{}</text>",
+                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"2\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1\"{}/><text x=\"{}\" y=\"{}\" font-size=\"7\" fill=\"{}\">{}</text>",
                 tx(x),
                 tx(laid.legend_baseline - 80),
                 tx(LEGEND_SWATCH_W),
@@ -727,6 +746,7 @@ fn emit_svg(
                 dash_attr,
                 tx(x + LEGEND_SWATCH_W + LEGEND_SWATCH_TEXT_GAP),
                 tx(laid.legend_baseline),
+                theme.ink_soft,
                 esc(label)
             ));
             x += LEGEND_SWATCH_W
@@ -769,6 +789,7 @@ fn arrowhead(points: &[Pt], fill: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::theme::LIGHT;
 
     const SPEC_JSON: &str = r#"{
         "title": "Deploy",
@@ -796,8 +817,8 @@ mod tests {
 
     #[test]
     fn three_band_lifecycle_renders_deterministically() {
-        let a = render_lifecycle(&spec()).unwrap();
-        let b = render_lifecycle(&spec()).unwrap();
+        let a = render_lifecycle(&spec(), &LIGHT).unwrap();
+        let b = render_lifecycle(&spec(), &LIGHT).unwrap();
         assert_eq!(a.svg, b.svg, "same input, same bytes");
         assert_eq!((a.lanes, a.states, a.transitions), (3, 3, 2));
         assert!(a.repairs.is_empty(), "{:?}", a.repairs);
@@ -864,8 +885,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            render_lifecycle(&spec()).unwrap().svg,
-            render_lifecycle(&same_lanes).unwrap().svg
+            render_lifecycle(&spec(), &LIGHT).unwrap().svg,
+            render_lifecycle(&same_lanes, &LIGHT).unwrap().svg
         );
     }
 
@@ -874,7 +895,7 @@ mod tests {
         // e1 (event col1) → o1 (outcome col1) share a column center (556),
         // so the drop preset's corridor run collapses and the dive renders
         // as one straight vertical — no repair needed.
-        let rendered = render_lifecycle(&spec()).unwrap();
+        let rendered = render_lifecycle(&spec(), &LIGHT).unwrap();
         let path = rendered
             .svg
             .split("data-from=\"e1\" data-to=\"o1\"")

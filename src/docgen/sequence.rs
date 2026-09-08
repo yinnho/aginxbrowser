@@ -12,6 +12,7 @@
 //! explicit triangles, not `<marker>` references, for the same reason.
 
 use super::spec::{text_units, SequenceSpec};
+use super::theme::Theme;
 
 // Tenths of a pixel. PX = /10.
 const TOP_Y: i32 = 720;
@@ -68,26 +69,15 @@ fn overflows_at_minimum(text: &str, available: i32, minimum: i32) -> bool {
     units * TEXT_WIDTH_FACTOR * minimum > available * 10
 }
 
-fn fill_stroke(kind: &str) -> (&'static str, &'static str) {
-    match kind {
-        "frontend" => ("#dbeafe", "#2563eb"),
-        "backend" => ("#dcfce7", "#16a34a"),
-        "database" => ("#fef3c7", "#d97706"),
-        "cloud" => ("#e0e7ff", "#4f46e5"),
-        "security" => ("#fee2e2", "#dc2626"),
-        "messagebus" => ("#f3e8ff", "#9333ea"),
-        _ => ("#f4f4f5", "#71717a"),
-    }
-}
-
-/// (stroke, width, dash, text fill) per message variant.
-fn variant_style(variant: &str) -> (&'static str, i32, Option<&'static str>, &'static str) {
+/// (stroke, width, dash, text fill) per message variant — sizes and dash
+/// patterns are this adapter's typography; the colors come from the theme.
+fn variant_style(theme: &Theme, variant: &str) -> (&'static str, i32, Option<&'static str>, &'static str) {
     match variant {
-        "emphasis" => ("#18181b", 18, None, "#18181b"),
-        "security" => ("#dc2626", 14, None, "#dc2626"),
-        "dashed" => ("#9333ea", 14, Some("6 4"), "#9333ea"),
-        "return" => ("#71717a", 14, Some("3 5"), "#71717a"),
-        _ => ("#52525b", 14, None, "#2563eb"),
+        "emphasis" => (theme.ink, 18, None, theme.ink),
+        "security" => (theme.danger, 14, None, theme.danger),
+        "dashed" => (theme.skip, 14, Some("6 4"), theme.skip),
+        "return" => (theme.ink_muted, 14, Some("3 5"), theme.ink_muted),
+        _ => (theme.ink_soft, 14, None, theme.edge_label),
     }
 }
 
@@ -108,7 +98,10 @@ fn esc(s: &str) -> String {
 /// Render a validated spec. Geometry-level failures (labels no shrink can
 /// rescue) come back as problems for the receipt; the caller falls the
 /// fence back to a code block.
-pub fn render_sequence(spec: &SequenceSpec) -> Result<RenderedSequence, Vec<String>> {
+pub fn render_sequence(
+    spec: &SequenceSpec,
+    theme: &'static Theme,
+) -> Result<RenderedSequence, Vec<String>> {
     let mut problems = Vec::new();
     let available = PARTICIPANT_W - TEXT_PADDING;
     for p in &spec.participants {
@@ -154,20 +147,22 @@ pub fn render_sequence(spec: &SequenceSpec) -> Result<RenderedSequence, Vec<Stri
     // (archify's paint order — participant boxes must cover their lifeline
     // stubs).
     svg.push_str(&format!(
-        "<text x=\"{}\" y=\"{}\" font-size=\"13\" font-weight=\"600\" fill=\"#18181b\" text-anchor=\"middle\">{}</text>",
+        "<text x=\"{}\" y=\"{}\" font-size=\"13\" font-weight=\"600\" fill=\"{}\" text-anchor=\"middle\">{}</text>",
         tx(width / 2),
         tx(TITLE_Y),
+        theme.ink,
         esc(spec.title.trim())
     ));
 
     for (i, _) in spec.participants.iter().enumerate() {
         let x = cx(i);
         svg.push_str(&format!(
-            "<path d=\"M {} {} L {} {}\" stroke=\"#a1a1aa\" stroke-width=\"0.8\" stroke-dasharray=\"3 7\" fill=\"none\"/>",
+            "<path d=\"M {} {} L {} {}\" stroke=\"{}\" stroke-width=\"0.8\" stroke-dasharray=\"3 7\" fill=\"none\"/>",
             tx(x),
             tx(LIFELINE_TOP),
             tx(x),
-            tx(lifeline_bottom)
+            tx(lifeline_bottom),
+            theme.guide
         ));
     }
 
@@ -189,7 +184,7 @@ pub fn render_sequence(spec: &SequenceSpec) -> Result<RenderedSequence, Vec<Stri
         let end = to_x - dir * ARROW_INSET;
         let head_base = end - dir * HEAD_LEN;
         let variant = m.variant.as_deref().unwrap_or("default");
-        let (stroke, stroke_w, dash, text_fill) = variant_style(variant);
+        let (stroke, stroke_w, dash, text_fill) = variant_style(theme, variant);
 
         svg.push_str(&format!(
             "<g data-message-index=\"{}\" data-from=\"{}\" data-to=\"{}\" data-variant=\"{}\">",
@@ -225,11 +220,12 @@ pub fn render_sequence(spec: &SequenceSpec) -> Result<RenderedSequence, Vec<Stri
         let label_w = (340).max(units * 52 + 120);
         let center = (start + end) / 2;
         svg.push_str(&format!(
-            "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"3\" fill=\"#ffffff\" fill-opacity=\"0.85\"/>",
+            "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"3\" fill=\"{}\" fill-opacity=\"0.85\"/>",
             tx(center - label_w / 2),
             tx(y - 200),
             tx(label_w),
-            tx(LABEL_H)
+            tx(LABEL_H),
+            theme.panel_alt
         ));
         svg.push_str(&format!(
             "<text x=\"{}\" y=\"{}\" font-size=\"9\" fill=\"{}\" text-anchor=\"middle\">{}</text>",
@@ -240,9 +236,10 @@ pub fn render_sequence(spec: &SequenceSpec) -> Result<RenderedSequence, Vec<Stri
         ));
         if let Some(note) = &m.note {
             svg.push_str(&format!(
-                "<text x=\"{}\" y=\"{}\" font-size=\"7\" fill=\"#71717a\">{}</text>",
+                "<text x=\"{}\" y=\"{}\" font-size=\"7\" fill=\"{}\">{}</text>",
                 tx(start.min(end) + 120),
                 tx(y + 180),
+                theme.ink_muted,
                 esc(note.trim())
             ));
         }
@@ -251,7 +248,7 @@ pub fn render_sequence(spec: &SequenceSpec) -> Result<RenderedSequence, Vec<Stri
 
     for (i, p) in spec.participants.iter().enumerate() {
         let x = cx(i);
-        let (fill, stroke) = fill_stroke(&p.kind);
+        let node = theme.node(&p.kind);
         let label_font = fitted_font(&p.label, available, LABEL_PREFERRED, LABEL_MIN);
         svg.push_str(&format!(
             "<g data-participant-id=\"{}\" data-kind=\"{}\">",
@@ -264,23 +261,25 @@ pub fn render_sequence(spec: &SequenceSpec) -> Result<RenderedSequence, Vec<Stri
             tx(TOP_Y),
             tx(PARTICIPANT_W),
             tx(PARTICIPANT_H),
-            fill,
-            stroke
+            node.fill,
+            node.stroke
         ));
         svg.push_str(&format!(
-            "<text x=\"{}\" y=\"{}\" font-size=\"{}\" font-weight=\"600\" fill=\"#18181b\" text-anchor=\"middle\">{}</text>",
+            "<text x=\"{}\" y=\"{}\" font-size=\"{}\" font-weight=\"600\" fill=\"{}\" text-anchor=\"middle\">{}</text>",
             tx(x),
             tx(TOP_Y + 220),
             tx(label_font),
+            theme.ink,
             esc(p.label.trim())
         ));
         if let Some(sub) = &p.sublabel {
             let sub_font = fitted_font(sub, available, SUBLABEL_PREFERRED, SUBLABEL_MIN);
             svg.push_str(&format!(
-                "<text x=\"{}\" y=\"{}\" font-size=\"{}\" fill=\"#71717a\" text-anchor=\"middle\">{}</text>",
+                "<text x=\"{}\" y=\"{}\" font-size=\"{}\" fill=\"{}\" text-anchor=\"middle\">{}</text>",
                 tx(x),
                 tx(TOP_Y + 390),
                 tx(sub_font),
+                theme.ink_muted,
                 esc(sub.trim())
             ));
         }
@@ -300,6 +299,7 @@ pub fn render_sequence(spec: &SequenceSpec) -> Result<RenderedSequence, Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::theme::LIGHT;
 
     fn spec(json: &str) -> SequenceSpec {
         let s: SequenceSpec = serde_json::from_str(json).unwrap();
@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn geometry_is_fixed_column_fixed_row() {
-        let r = render_sequence(&minimal()).unwrap();
+        let r = render_sequence(&minimal(), &LIGHT).unwrap();
         // 2 participants: width = cx(1) + W/2 + 40 = 213 + 43 + 40 = 296.
         // 2 messages: height = 142 + 30 + 30 + 40 + 48 = 290.
         assert_eq!(r.view_box, [296, 290]);
@@ -337,15 +337,15 @@ mod tests {
 
     #[test]
     fn left_going_message_flips_insets() {
-        let r = render_sequence(&minimal()).unwrap();
+        let r = render_sequence(&minimal(), &LIGHT).unwrap();
         // pong goes b→a: start = 213-7 = 206, head base = 105+7+8 = 120.
         assert!(r.svg.contains("M 206 202 L 120 202"), "left arrow missing");
     }
 
     #[test]
     fn identical_input_produces_identical_bytes() {
-        let a = render_sequence(&minimal()).unwrap().svg;
-        let b = render_sequence(&minimal()).unwrap().svg;
+        let a = render_sequence(&minimal(), &LIGHT).unwrap().svg;
+        let b = render_sequence(&minimal(), &LIGHT).unwrap().svg;
         assert_eq!(a, b);
         assert_eq!(a.matches("<svg").count(), 1);
     }
@@ -360,7 +360,7 @@ mod tests {
                "messages":[{{"from":"a","to":"b","label":"x"}}]}}"#,
             "x".repeat(16)
         ));
-        assert!(render_sequence(&fits).is_ok());
+        assert!(render_sequence(&fits, &LIGHT).is_ok());
         let rejects = spec(&format!(
             r#"{{"title":"T","participants":[
                 {{"id":"a","type":"frontend","label":"{}"}},
@@ -368,7 +368,7 @@ mod tests {
                "messages":[{{"from":"a","to":"b","label":"x"}}]}}"#,
             "x".repeat(17)
         ));
-        let problems = render_sequence(&rejects).unwrap_err();
+        let problems = render_sequence(&rejects, &LIGHT).unwrap_err();
         assert!(problems[0].contains("cannot fit"), "{problems:?}");
     }
 
@@ -381,7 +381,7 @@ mod tests {
                 {"id":"b","type":"database","label":"Postgres"}],
                "messages":[{"from":"a","to":"b","label":"查询"}]}"#,
         );
-        let r = render_sequence(&s).unwrap();
+        let r = render_sequence(&s, &LIGHT).unwrap();
         assert!(r.svg.contains("读取缓存"));
         assert!(r.svg.contains("查询"));
     }
@@ -398,7 +398,7 @@ mod tests {
                    {"from":"a","to":"b","label":"d","variant":"dashed"},
                    {"from":"b","to":"a","label":"r","variant":"return"}]}"#,
         );
-        let svg = render_sequence(&s).unwrap().svg;
+        let svg = render_sequence(&s, &LIGHT).unwrap().svg;
         assert!(svg.contains("stroke-width=\"1.8\""));
         assert!(svg.contains("#dc2626"));
         assert!(svg.contains("stroke-dasharray=\"6 4\""));

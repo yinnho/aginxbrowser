@@ -260,6 +260,35 @@ SQLite cache。
   即三族 SVG 被自家 diting 解析-布局-缩放链真渲染过一遍。
 - 测试：docgen 42→55；全量 `--features screenshot` 832→845/0/1；clippy 62 持平。
 
+## 4f. 批6a 闭环（2026-09-08）：CSS 主题层（light/dark 常量表）
+
+精美层第一刀。数据不函数：`theme.rs` 两张 `&'static Theme` 常量表（LIGHT/DARK），
+adapter 只留词汇（kinds/variants）和排版（字号线型/虚线模式），颜色一律从 theme 走。
+
+- **烤值不烤规则（大分岔，记档）**：参考实现是 template.html 运行时 `data-theme`
+  切换 + CSS 变量；我们 diting 的 SVG 绘制根本不走 CSS 通道，所以颜色在**生成时**
+  烤进 presentation attributes，不用 var()/custom properties。`<html data-theme="...">`
+  保留——出处钩子，不做运行时换肤。同一个 markdown 选不同 theme 出两份不同字节，
+  这才是确定性友好（各自可冻结、可验哈希）。
+- **LIGHT = 历史字面值逐值对齐**：所以 light 语料字节唯一漂移就是根元素多了
+  `data-theme="light"` 属性，9 篇门哈希**有意重冻结**（§4d 流程照走：一次 panic
+  收齐全部漂移值再钉）。DARK = zinc-950 重映射（page_bg #09090b、ink #f4f4f5、
+  各 kind 槽 950 填充/400 描边/200 文字）。
+- **Theme 结构**：prose 5 槽（壳用）+ ink 12 槽（ink/muted/soft/guide/edge_label/
+  danger/skip/panel/panel_alt/panel_danger/frame）+ 8 个 NodeColors{fill,stroke,text}
+  kind 槽。`Theme::node(kind)` 未知→neutral、"plain"→plain；`by_name("light"|"dark")`。
+  lifecycle 的 state_palette 是 kind→kind 槽位映射（start→frontend…），不持有颜色。
+- **接线面**：`render_with_theme(md, &'static Theme)`（`render()` 仍是 LIGHT 缺省），
+  receipt 记 `"theme"`；MCP `render_markdown` 加 `theme` 参数，坏名字报错并列出
+  合法值。`&'static` 穿线让 helper 直接回 `&'static str`，免 String 分配。
+- **门加暗档**：DARK_CORPUS 两篇（dogfood/seq-five）冻结 + **light≠dark 反别名
+  断言**——暗渲染等于亮渲染说明 theme 断流，必须炸。
+- **dogfood（真 /mcp 面）**：theme=dark + session 装载 → tier tall、diting 截图
+  肉眼验收：暗底白字、Client 深海军蓝/Server 墨绿（frontend/backend 槽的 950/400
+  映射）、ping/pong 箭头遮罩可读，无瑕疵。
+- 卫生：十六进制颜色只在 theme.rs（96 处）+ 各族测试断言里；测试基线 845→850/0/1，
+  clippy 62 持平（`--bin` 口径）。
+
 ## 5. 分批（按总纲排序）
 
 - **批1（技术·引擎前置）**：`:scope` 选择器 + archify artifact viewer smoke 探针 →
@@ -273,7 +302,9 @@ SQLite cache。
   相位带障碍语义 + 视口验收分级 + firstPassUsable 语料冻结门。三族 adapter 延批5。
 - **批5（技术·三族）** ✅ 闭环 2026-09-08（见 §4e）：dataflow/lifecycle/architecture
   三族 adapter + graph.rs grid 边口 + 壳五族路由 + 门语料 9 篇。
-- **批6+（精美）**：CSS 主题层、visual preset 数据化、showcase 档门、字号/间距节奏
+- **批6a（精美·主题）** ✅ 闭环 2026-09-08（见 §4f）：light/dark 常量表 + 生成时
+  烤值 + render_markdown theme 参数 + 门 9 亮有意重冻结 + 2 暗档反别名。
+- **批6b+（精美）**：visual preset 数据化、showcase 档门、字号/间距节奏
   常数、SIGIL 精修、brand-marks、mermaid 通道、story/Passport/Route Probe。
 
 ## 6. 已读 / 未读（诚实账）

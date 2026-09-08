@@ -19,6 +19,7 @@ pub mod lifecycle;
 pub mod sequence;
 pub mod shell;
 pub mod spec;
+pub mod theme;
 pub mod workflow;
 
 use serde_json::{json, Value};
@@ -40,10 +41,16 @@ pub struct RenderOutcome {
     pub receipt: Value,
 }
 
-/// Render a markdown document into a self-contained HTML artifact plus a
-/// receipt (checks, diagnostics, sha256 of the artifact bytes).
+/// Render with the default (light) theme — the historical palette.
 pub fn render(markdown: &str) -> RenderOutcome {
-    let doc = shell::render(markdown);
+    render_with_theme(markdown, &theme::LIGHT)
+}
+
+/// Render with an explicit theme. The theme is part of the render input:
+/// same markdown + same theme = same bytes, and the receipt names it so a
+/// cached artifact is never mistaken for another theme's.
+pub fn render_with_theme(markdown: &str, theme: &'static theme::Theme) -> RenderOutcome {
+    let doc = shell::render(markdown, theme);
 
     let rendered: Vec<&shell::FenceOutcome> = doc.fences.iter().filter(|f| f.ok).collect();
     let failed: Vec<&shell::FenceOutcome> = doc.fences.iter().filter(|f| !f.ok).collect();
@@ -109,6 +116,7 @@ pub fn render(markdown: &str) -> RenderOutcome {
 
     let receipt = json!({
         "bytes": doc.html.len(),
+        "theme": theme.name,
         "diagrams": diagrams,
         "checks": checks,
         "diagnostics": diagnostics,
@@ -123,6 +131,7 @@ pub fn render(markdown: &str) -> RenderOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::theme::DARK;
 
     const DOC: &str = "# Deploy flow\n\nProse before.\n\n```archify\n{\"sequence\":{\"title\":\"Cache miss\",\"participants\":[\n  {\"id\":\"user\",\"type\":\"external\",\"label\":\"User\"},\n  {\"id\":\"api\",\"type\":\"backend\",\"label\":\"API\"},\n  {\"id\":\"redis\",\"type\":\"database\",\"label\":\"Redis\",\"sublabel\":\"cache\"}],\n \"messages\":[\n  {\"from\":\"user\",\"to\":\"api\",\"label\":\"GET /x\",\"variant\":\"emphasis\"},\n  {\"from\":\"api\",\"to\":\"redis\",\"label\":\"read cache\"},\n  {\"from\":\"redis\",\"to\":\"api\",\"label\":\"miss\",\"variant\":\"return\"}]}}\n```\n\nProse after.\n";
 
@@ -258,6 +267,35 @@ mod tests {
         assert!(a.html.contains("data-boundary-label=\"VPC\""));
         assert!(a.html.contains("data-node-id=\"api\""));
         assert!(a.html.contains("data-from=\"web\" data-to=\"api\""));
+    }
+
+    #[test]
+    fn theme_swaps_the_artifact_deterministically() {
+        let light = render(DOC);
+        let dark = render_with_theme(DOC, &DARK);
+        // Same input, different theme: different bytes, both deterministic.
+        assert_ne!(light.html, dark.html);
+        assert_eq!(dark.html, render_with_theme(DOC, &DARK).html);
+        assert_eq!(light.receipt["theme"], "light");
+        assert_eq!(dark.receipt["theme"], "dark");
+        // The shell carries the theme as provenance and bakes its colors.
+        assert!(dark.html.contains("<html data-theme=\"dark\">"));
+        assert!(dark.html.contains("background:#09090b"));
+        assert!(light.html.contains("<html data-theme=\"light\">"));
+        assert!(light.html.contains("background:#ffffff"));
+        // Diagram ink follows the theme, not just the prose shell.
+        assert!(dark.html.contains("#f4f4f5"), "dark ink must appear in SVG");
+        // Geometry is theme-invariant: same viewBox facts either way.
+        let vb = |r: &RenderOutcome| {
+            r.receipt["diagrams"][0]["facts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find_map(|f| f.as_str().and_then(|s| s.strip_prefix("viewBox=")))
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(vb(&light), vb(&dark));
     }
 
     #[test]

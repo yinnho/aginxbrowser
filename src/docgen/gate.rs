@@ -9,7 +9,7 @@
 
 use sha2::{Digest, Sha256};
 
-use super::render;
+use super::{render, render_with_theme, theme};
 
 const CHECKOUT: &str = r#"# Checkout
 
@@ -214,19 +214,32 @@ const CORPUS: [(&str, &str); 9] = [
     ("architecture-edge", ARCHITECTURE_EDGE),
 ];
 
-/// Frozen attempt-1 sha256s. A mismatch means geometry changed; if that
-/// change is deliberate, re-freeze this table consciously — the point of
-/// the gate is that "the numbers moved" is never a surprise.
+/// Frozen attempt-1 sha256s (light theme). A mismatch means geometry or
+/// palette changed; if that change is deliberate, re-freeze this table
+/// consciously — the point of the gate is that "the numbers moved" is never
+/// a surprise. Last re-freeze: 批6a theme layer (light values are the
+/// historical literals value-for-value, so the only light drift is the
+/// `<html data-theme="light">` provenance attribute).
 const FROZEN: [(&str, &str); 9] = [
-    ("checkout", "641633976ca6f4cd3a624991adb64277eaa1976fbc267dbcc17cf5cff80ecf60"),
-    ("index-build", "ca9071e0c063da0b47a9264bcf02cfde82fec351343d84ea8daa04bc9cbeefd3"),
-    ("dogfood", "dd8a9e43d42f99bfe64568cf80fb235025d6e542c01b0344086d09abb947fe77"),
-    ("cjk", "4176a2822cb2e8dc3330a7e4666d3fbd5634f1d6003696265a5ae30ef92165a8"),
-    ("seq-five", "99f0a486dad001b112272a137141565b2fb32c7bbf3194b2ee7335b5a3a60dcb"),
-    ("seq-min", "ff1cac525bbf7fc5a71ebbdf753cf928f6a657dd644c4d21fe7f24887bfe3c33"),
-    ("dataflow-ingest", "f6e7d655cf4c4f12fe1f83b8a53e8a7b6472b1db0fa11a90957fe31fa0f3e873"),
-    ("lifecycle-release", "a3df3ef9f1e08a8cd2fef9097cb80a033636986bbf15bdbf0adf9f8efcc49314"),
-    ("architecture-edge", "1b3056495ef9a2cb9e3310e317d46892d2e829b9ac3131dc45fda4c62d52d122"),
+    ("checkout", "4c4f84851f03ef826a9bf46965a06776b33d1d5a5c97e3f6492c2401b62d3eb1"),
+    ("index-build", "ef37b77499b3ecafaa0ee36c86aa67d370fd7cbd58ea044f1552ccfdc70238e7"),
+    ("dogfood", "b6c3ab662fea4f2895e171116aae9ac8b64540d299ab022810a9bc68bd20a682"),
+    ("cjk", "9683b15f3cd0d5b5f8ad75ea2d814ad3f68383c4f557201ebd98200384aa629c"),
+    ("seq-five", "30074ffb8b20cf7483e569fb0b08faf016cb29bd8c5672a67f34f2104d168faf"),
+    ("seq-min", "4d9197c3bba3cae5e9fe9fa1eb7eb841c0834422a91c932ea0b43121d40b3282"),
+    ("dataflow-ingest", "b45ce8d83e843edb20f2465f07ea87c625b54583c4b1e6c07b0c0d2fb761c8e1"),
+    ("lifecycle-release", "6ae63641e93e4f57e44373c8505c0c50cff49ce4d9181cac0f191aa9358b59f0"),
+    ("architecture-edge", "bac5312616926e3af5faee6774c9cdaf12f7be0aee3e42a343c79d936cb053e0"),
+];
+
+/// Dark-theme corpus: the two richest documents re-rendered under DARK, so
+/// the remap is frozen too — a light-only gate would let the dark palette
+/// drift invisibly. Same corpus markdown, same zero-diagnostic contract.
+const DARK_CORPUS: [&str; 2] = [DOGFOOD, SEQ_FIVE];
+
+const FROZEN_DARK: [(&str, &str); 2] = [
+    ("dogfood", "ea9a28d7b19620e8636fe5e477a9bcd65175f0f778385b8ae61c23023a27c318"),
+    ("seq-five", "bf3462742c8e06fd3b73d764e823cf06b10b8fb228edf8d3ffeb8333bacf29f8"),
 ];
 
 #[test]
@@ -272,4 +285,36 @@ fn first_pass_corpus_bytes_are_frozen() {
         "corpus bytes drifted — pin these: {}",
         drift.join(" ")
     );
+}
+
+/// Same freeze discipline for the dark palette, and the two themes must
+/// never alias: a dark render equal to its light render means the theme
+/// stopped flowing into the artifact.
+#[test]
+fn dark_corpus_bytes_are_frozen_and_distinct() {
+    let names = ["dogfood", "seq-five"];
+    for (i, md) in DARK_CORPUS.iter().enumerate() {
+        let light = render(md).html;
+        let dark = render_with_theme(md, &theme::DARK).html;
+        assert_ne!(
+            light, dark,
+            "{}: dark render must differ from light",
+            names[i]
+        );
+        assert!(
+            dark.contains("data-theme=\"dark\""),
+            "{}: dark provenance attribute missing",
+            names[i]
+        );
+        let mut h = Sha256::new();
+        h.update(dark.as_bytes());
+        let hash = format!("{:x}", h.finalize());
+        assert_eq!(
+            hash,
+            FROZEN_DARK[i].1,
+            "{}: dark bytes drifted — pin this: (\"{}\", \"{hash}\")",
+            names[i],
+            FROZEN_DARK[i].0
+        );
+    }
 }

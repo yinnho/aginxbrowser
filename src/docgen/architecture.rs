@@ -23,6 +23,7 @@ use super::graph::{
     RouteError, RouteKind, RouteRepair, RouteRequest, RouteScene, Side, COLUMN_COUNT,
 };
 use super::spec::{text_units, ArchBoundary, ArchComponent, ArchConnection, ArchitectureSpec, ArchLayout};
+use super::theme::Theme;
 use super::tx;
 
 // ---------------------------------------------------------------------------
@@ -139,7 +140,10 @@ fn canon<'a>(spec: &'a ArchitectureSpec) -> Canon<'a> {
 /// Render a validated architecture spec. Infeasibility is terminal (the
 /// grid is fixed): the connection names its dead end and the caller falls
 /// the fence back to a code block.
-pub fn render_architecture(spec: &ArchitectureSpec) -> Result<RenderedArchitecture, Vec<String>> {
+pub fn render_architecture(
+    spec: &ArchitectureSpec,
+    theme: &'static Theme,
+) -> Result<RenderedArchitecture, Vec<String>> {
     let doc = canon(spec);
     let laid = layout(&doc, &spec.layout);
 
@@ -259,7 +263,7 @@ pub fn render_architecture(spec: &ArchitectureSpec) -> Result<RenderedArchitectu
         .map(|(i, _)| i)
         .collect();
 
-    let svg = emit_svg(&doc, &laid, &placed, view_box, &legend);
+    let svg = emit_svg(&doc, &laid, &placed, view_box, &legend, theme);
     Ok(RenderedArchitecture {
         svg,
         title: doc.title.to_string(),
@@ -486,26 +490,15 @@ fn measured_bounds(
 // SVG emission
 // ---------------------------------------------------------------------------
 
-fn kind_palette(kind: &str) -> (&'static str, &'static str, &'static str) {
-    match kind {
-        "frontend" => ("#dbeafe", "#2563eb", "#1e40af"),
-        "backend" => ("#dcfce7", "#16a34a", "#166534"),
-        "database" => ("#fef3c7", "#d97706", "#92400e"),
-        "cloud" => ("#e0e7ff", "#4f46e5", "#3730a3"),
-        "security" => ("#fee2e2", "#dc2626", "#991b1b"),
-        "messagebus" => ("#f3e8ff", "#9333ea", "#6b21a8"),
-        _ => ("#f4f4f5", "#71717a", "#3f3f46"),
-    }
-}
-
 /// (stroke, width, dash, label fill) per connection variant — the sequence
-/// table minus `return`, which is sequence/workflow vocabulary.
-fn variant_style(variant: &str) -> (&'static str, i32, Option<&'static str>, &'static str) {
+/// table minus `return`, which is sequence/workflow vocabulary. Sizes and
+/// dash patterns are this adapter's typography; colors come from the theme.
+fn variant_style(theme: &Theme, variant: &str) -> (&'static str, i32, Option<&'static str>, &'static str) {
     match variant {
-        "emphasis" => ("#18181b", 18, None, "#18181b"),
-        "security" => ("#dc2626", 14, None, "#dc2626"),
-        "dashed" => ("#9333ea", 14, Some("6 4"), "#9333ea"),
-        _ => ("#52525b", 14, None, "#52525b"),
+        "emphasis" => (theme.ink, 18, None, theme.ink),
+        "security" => (theme.danger, 14, None, theme.danger),
+        "dashed" => (theme.skip, 14, Some("6 4"), theme.skip),
+        _ => (theme.ink_soft, 14, None, theme.ink_soft),
     }
 }
 
@@ -529,6 +522,7 @@ fn emit_svg(
     placed: &[(usize, usize, Vec<Pt>, Option<Rect>)],
     view_box: [i32; 2],
     legend: &[usize],
+    theme: &'static Theme,
 ) -> String {
     let mut s = String::with_capacity(8192);
     s.push_str(&format!(
@@ -541,9 +535,9 @@ fn emit_svg(
     // Boundary frames (behind everything: connections cross them freely).
     for boundary in &laid.boundaries {
         let (fill, stroke) = if boundary.security {
-            ("#fef2f2", "#dc2626")
+            (theme.panel_danger, theme.danger)
         } else {
-            ("#fafafa", "#a1a1aa")
+            (theme.panel, theme.guide)
         };
         let dash_attr = if boundary.security {
             ""
@@ -567,7 +561,7 @@ fn emit_svg(
     for (i, connection) in doc.connections.iter().enumerate() {
         let (_, _, points, _) = &placed[i];
         let (stroke, stroke_w, dash, _) =
-            variant_style(connection.variant.as_deref().unwrap_or("default"));
+            variant_style(theme, connection.variant.as_deref().unwrap_or("default"));
         let dash_attr = dash.map_or(String::new(), |d| format!(" stroke-dasharray=\"{d}\""));
         s.push_str(&format!(
             "<path data-from=\"{}\" data-to=\"{}\" d=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\"{}/>",
@@ -584,7 +578,7 @@ fn emit_svg(
     // Components.
     for (i, component) in doc.components.iter().enumerate() {
         let rect = &laid.rects[i];
-        let (fill, stroke, text_fill) = kind_palette(&component.kind);
+        let component_colors = theme.node(&component.kind);
         s.push_str(&format!("<g data-node-id=\"{}\">", esc(&component.id)));
         s.push_str(&format!(
             "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"6\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1.5\"/>",
@@ -592,24 +586,26 @@ fn emit_svg(
             tx(rect.y),
             tx(rect.w),
             tx(rect.h),
-            fill,
-            stroke
+            component_colors.fill,
+            component_colors.stroke
         ));
         let label_font = fitted_font(&component.label, rect.w - 160, LABEL_PREFERRED, LABEL_MIN);
         s.push_str(&format!(
-            "<text x=\"{}\" y=\"{}\" font-size=\"{}\" font-weight=\"600\" fill=\"#18181b\" text-anchor=\"middle\">{}</text>",
+            "<text x=\"{}\" y=\"{}\" font-size=\"{}\" font-weight=\"600\" fill=\"{}\" text-anchor=\"middle\">{}</text>",
             tx(rect.cx()),
             tx(rect.y + 340),
             tx(label_font),
+            theme.ink,
             esc(&component.label)
         ));
         if let Some(sub) = component.sublabel.as_deref().filter(|s| !s.trim().is_empty()) {
             let sub_font = fitted_font(sub, rect.w, SUB_PREFERRED, SUB_MIN);
             s.push_str(&format!(
-                "<text x=\"{}\" y=\"{}\" font-size=\"{}\" fill=\"#71717a\" text-anchor=\"middle\">{}</text>",
+                "<text x=\"{}\" y=\"{}\" font-size=\"{}\" fill=\"{}\" text-anchor=\"middle\">{}</text>",
                 tx(rect.cx()),
                 tx(rect.y + 450),
                 tx(sub_font),
+                theme.ink_muted,
                 esc(sub)
             ));
         }
@@ -620,7 +616,7 @@ fn emit_svg(
                 tx(rect.cx()),
                 tx(rect.y + rect.h - 100),
                 tx(tag_font),
-                text_fill,
+                component_colors.text,
                 esc(tag)
             ));
         }
@@ -636,14 +632,15 @@ fn emit_svg(
         let at = label_point(points);
         let w = (text_units(label) as i32 * LABEL_WIDTH_FACTOR + LABEL_WIDTH_PAD).max(LABEL_WIDTH_MIN);
         let (_, _, _, label_fill) =
-            variant_style(connection.variant.as_deref().unwrap_or("default"));
+            variant_style(theme, connection.variant.as_deref().unwrap_or("default"));
         s.push_str(&format!(
-            "<g data-from=\"{}\" data-to=\"{}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"16\" rx=\"3\" fill=\"#ffffff\"/><text x=\"{}\" y=\"{}\" font-size=\"8\" fill=\"{}\" text-anchor=\"middle\">{}</text></g>",
+            "<g data-from=\"{}\" data-to=\"{}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"16\" rx=\"3\" fill=\"{}\"/><text x=\"{}\" y=\"{}\" font-size=\"8\" fill=\"{}\" text-anchor=\"middle\">{}</text></g>",
             esc(&connection.from),
             esc(&connection.to),
             tx(at.0 - w / 2),
             tx(at.1 - 110),
             tx(w),
+            theme.panel_alt,
             tx(at.0),
             tx(at.1 + 30),
             label_fill,
@@ -657,7 +654,7 @@ fn emit_svg(
             "<text x=\"{}\" y=\"{}\" font-size=\"7\" font-weight=\"600\" fill=\"{}\">{}</text>",
             tx(boundary.rect.x + 100),
             tx(boundary.rect.y + 160),
-            if boundary.security { "#dc2626" } else { "#52525b" },
+            if boundary.security { theme.danger } else { theme.ink_soft },
             esc(&boundary.label)
         ));
     }
@@ -667,17 +664,18 @@ fn emit_svg(
         let mut x = LEGEND_X;
         for &idx in legend {
             let (kind, label) = LEGEND_CATALOG[idx];
-            let (fill, stroke, _) = kind_palette(kind);
+            let swatch = theme.node(kind);
             s.push_str(&format!(
-                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"2\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1\"/><text x=\"{}\" y=\"{}\" font-size=\"7\" fill=\"#52525b\">{}</text>",
+                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"2\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1\"/><text x=\"{}\" y=\"{}\" font-size=\"7\" fill=\"{}\">{}</text>",
                 tx(x),
                 tx(laid.legend_baseline - 80),
                 tx(LEGEND_SWATCH_W),
                 tx(LEGEND_SWATCH_H),
-                fill,
-                stroke,
+                swatch.fill,
+                swatch.stroke,
                 tx(x + LEGEND_SWATCH_W + LEGEND_SWATCH_TEXT_GAP),
                 tx(laid.legend_baseline),
+                theme.ink_soft,
                 esc(label)
             ));
             x += LEGEND_SWATCH_W
@@ -720,6 +718,7 @@ fn arrowhead(points: &[Pt], fill: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::theme::LIGHT;
 
     const SPEC_JSON: &str = r#"{
         "title": "Deployment",
@@ -749,8 +748,8 @@ mod tests {
 
     #[test]
     fn deployment_grid_renders_deterministically() {
-        let a = render_architecture(&spec()).unwrap();
-        let b = render_architecture(&spec()).unwrap();
+        let a = render_architecture(&spec(), &LIGHT).unwrap();
+        let b = render_architecture(&spec(), &LIGHT).unwrap();
         assert_eq!(a.svg, b.svg, "same input, same bytes");
         assert_eq!((a.components, a.boundaries, a.connections), (4, 2, 4));
         assert!(a.repairs.is_empty(), "{:?}", a.repairs);
@@ -798,8 +797,8 @@ mod tests {
         .unwrap();
         assert!(super::super::spec::validate_architecture(&shuffled).is_empty());
         assert_eq!(
-            render_architecture(&spec()).unwrap().svg,
-            render_architecture(&shuffled).unwrap().svg
+            render_architecture(&spec(), &LIGHT).unwrap().svg,
+            render_architecture(&shuffled, &LIGHT).unwrap().svg
         );
     }
 
@@ -807,7 +806,7 @@ mod tests {
     fn orthogonal_h_honors_the_single_bend() {
         // web → cdn are row neighbors: the orthogonal-h preset collapses to
         // one straight horizontal segment (no intermediate bend points).
-        let rendered = render_architecture(&spec()).unwrap();
+        let rendered = render_architecture(&spec(), &LIGHT).unwrap();
         let path = rendered
             .svg
             .split("data-from=\"web\" data-to=\"cdn\"")

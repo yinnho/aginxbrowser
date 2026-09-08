@@ -20,6 +20,7 @@ use super::spec::{
     validate_architecture, validate_dataflow, validate_lifecycle, validate_sequence,
     validate_workflow, DiagramSpec,
 };
+use super::theme::Theme;
 use super::workflow::render_workflow;
 
 /// The info string that routes a fence to the diagram pipeline.
@@ -51,7 +52,7 @@ struct FenceDiagram {
 
 /// Parse one fence body. The family is the declared `diagram_type`, or the
 /// one object actually present when it is not declared.
-fn parse_fence(body: &str) -> Result<FenceDiagram, Vec<String>> {
+fn parse_fence(body: &str, theme: &'static Theme) -> Result<FenceDiagram, Vec<String>> {
     let parsed: DiagramSpec =
         serde_json::from_str(body).map_err(|e| vec![format!("JSON parse error: {e}")])?;
     let diagram_type = match (
@@ -82,7 +83,7 @@ fn parse_fence(body: &str) -> Result<FenceDiagram, Vec<String>> {
             if !problems.is_empty() {
                 return Err(problems);
             }
-            let r = render_sequence(spec)?;
+            let r = render_sequence(spec, theme)?;
             Ok(FenceDiagram {
                 kind: "sequence",
                 facts: vec![
@@ -100,7 +101,7 @@ fn parse_fence(body: &str) -> Result<FenceDiagram, Vec<String>> {
             if !problems.is_empty() {
                 return Err(problems);
             }
-            let r = render_workflow(spec)?;
+            let r = render_workflow(spec, theme)?;
             Ok(FenceDiagram {
                 kind: "workflow",
                 facts: vec![
@@ -119,7 +120,7 @@ fn parse_fence(body: &str) -> Result<FenceDiagram, Vec<String>> {
             if !problems.is_empty() {
                 return Err(problems);
             }
-            let r = render_dataflow(spec)?;
+            let r = render_dataflow(spec, theme)?;
             Ok(FenceDiagram {
                 kind: "dataflow",
                 facts: vec![
@@ -138,7 +139,7 @@ fn parse_fence(body: &str) -> Result<FenceDiagram, Vec<String>> {
             if !problems.is_empty() {
                 return Err(problems);
             }
-            let r = render_lifecycle(spec)?;
+            let r = render_lifecycle(spec, theme)?;
             Ok(FenceDiagram {
                 kind: "lifecycle",
                 facts: vec![
@@ -157,7 +158,7 @@ fn parse_fence(body: &str) -> Result<FenceDiagram, Vec<String>> {
             if !problems.is_empty() {
                 return Err(problems);
             }
-            let r = render_architecture(spec)?;
+            let r = render_architecture(spec, theme)?;
             Ok(FenceDiagram {
                 kind: "architecture",
                 facts: vec![
@@ -210,7 +211,7 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-pub fn render(markdown: &str) -> RenderedDoc {
+pub fn render(markdown: &str, theme: &'static Theme) -> RenderedDoc {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
@@ -250,7 +251,7 @@ pub fn render(markdown: &str) -> RenderedDoc {
                     // Parse errors, then spec validation (document-order
                     // problems), then the adapter's geometry checks — the
                     // family router chains all three.
-                    match parse_fence(&raw) {
+                    match parse_fence(&raw, theme) {
                         Ok(d) => {
                             body.push_str(&format!(
                                 "<figure class=\"agx-diagram\" data-diagram-type=\"{}\" data-diagram-index=\"{index}\" data-diagram-title=\"{}\">{}</figure>",
@@ -313,21 +314,41 @@ pub fn render(markdown: &str) -> RenderedDoc {
 
     let title = doc_title.unwrap_or_else(|| "Document".to_string());
     let html = format!(
-        "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n<title>{}</title>\n<style>{}</style>\n</head>\n<body>\n{}</body>\n</html>\n",
+        "<!DOCTYPE html>\n<html data-theme=\"{}\">\n<head>\n<meta charset=\"utf-8\">\n<title>{}</title>\n<style>{}</style>\n</head>\n<body>\n{}</body>\n</html>\n",
+        theme.name,
         html_escape(&title),
-        SHELL_CSS,
+        shell_css(theme),
         body
     );
     RenderedDoc { html, fences }
 }
 
-/// The plain-Jane shell (批2: 素颜). One style element, no fonts fetched,
-/// no scripts — the artifact is offline and self-contained by construction.
-const SHELL_CSS: &str = "body{max-width:920px;margin:2rem auto;padding:0 1rem;font:16px/1.65 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,'PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;color:#18181b;background:#fff}figure.agx-diagram{margin:2.5rem 0}figure.agx-diagram svg{width:100%;height:auto;display:block}pre{background:#f4f4f5;padding:1rem 1.25rem;border-radius:8px;overflow-x:auto;font-size:.875rem;line-height:1.5}code,pre,kbd,samp{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}code{background:#f4f4f5;padding:.1em .35em;border-radius:4px;font-size:.875em}pre code{background:none;padding:0}table{border-collapse:collapse;margin:1rem 0}th,td{border:1px solid #e4e4e7;padding:.375rem .625rem;text-align:left}img{max-width:100%}blockquote{margin:1rem 0;padding:.25rem 1rem;border-left:3px solid #e4e4e7;color:#52525b}h1,h2{line-height:1.25}hr{border:none;border-top:1px solid #e4e4e7;margin:2rem 0}";
+/// The shell stylesheet with the theme's five prose colors baked in. No CSS
+/// custom properties: the artifact is a static deterministic file rendered
+/// by diting, whose SVG paint reads presentation attributes — theme values
+/// interpolate at generation time, not runtime (archify's data-theme +
+/// custom-property re-theming is the future viewer runtime's mechanism, and
+/// the data-theme attribute above is its hook).
+fn shell_css(t: &Theme) -> String {
+    format!("body{{max-width:920px;margin:2rem auto;padding:0 1rem;font:16px/1.65 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,'PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;color:{page_fg};background:{page_bg}}}figure.agx-diagram{{margin:2.5rem 0}}figure.agx-diagram svg{{width:100%;height:auto;display:block}}pre{{background:{code_bg};padding:1rem 1.25rem;border-radius:8px;overflow-x:auto;font-size:.875rem;line-height:1.5}}code,pre,kbd,samp{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}}code{{background:{code_bg};padding:.1em .35em;border-radius:4px;font-size:.875em}}pre code{{background:none;padding:0}}table{{border-collapse:collapse;margin:1rem 0}}th,td{{border:1px solid {border};padding:.375rem .625rem;text-align:left}}img{{max-width:100%}}blockquote{{margin:1rem 0;padding:.25rem 1rem;border-left:3px solid {border};color:{quote_fg}}}h1,h2{{line-height:1.25}}hr{{border:none;border-top:1px solid {border};margin:2rem 0}}",
+        page_fg = t.page_fg,
+        page_bg = t.page_bg,
+        code_bg = t.code_bg,
+        border = t.border,
+        quote_fg = t.quote_fg,
+    )
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::theme::LIGHT;
+
+    // Every shell test rides the default (light) theme; theme behavior has
+    // its own coverage in mod/theme tests.
+    fn render(markdown: &str) -> RenderedDoc {
+        super::render(markdown, &LIGHT)
+    }
 
     const SEQ: &str = r#"{"sequence":{"title":"Ping","participants":[
         {"id":"a","type":"frontend","label":"Client"},

@@ -22,6 +22,7 @@ use super::graph::{
     RouteError, RouteKind, RouteRepair, RouteRequest, RouteScene, Side, COLUMN_COUNT, PX,
 };
 use super::spec::{text_units, DataflowFlow, DataflowNode, DataflowSpec};
+use super::theme::Theme;
 use super::tx;
 
 // ---------------------------------------------------------------------------
@@ -133,7 +134,10 @@ fn canon<'a>(spec: &'a DataflowSpec) -> Canon<'a> {
 /// Render a validated dataflow spec. Infeasibility is terminal (no feedback
 /// loop on a fixed grid): the flow names its dead end and the caller falls
 /// the fence back to a code block.
-pub fn render_dataflow(spec: &DataflowSpec) -> Result<RenderedDataflow, Vec<String>> {
+pub fn render_dataflow(
+    spec: &DataflowSpec,
+    theme: &'static Theme,
+) -> Result<RenderedDataflow, Vec<String>> {
     let doc = canon(spec);
     let laid = layout(&doc);
 
@@ -247,7 +251,7 @@ pub fn render_dataflow(spec: &DataflowSpec) -> Result<RenderedDataflow, Vec<Stri
         .map(|(i, _)| i)
         .collect();
 
-    let svg = emit_svg(&doc, &laid, &placed, view_box, &legend);
+    let svg = emit_svg(&doc, &laid, &placed, view_box, &legend, theme);
     Ok(RenderedDataflow {
         svg,
         title: doc.title.to_string(),
@@ -388,26 +392,15 @@ fn measured_bounds(
 // SVG emission
 // ---------------------------------------------------------------------------
 
-fn kind_palette(kind: &str) -> (&'static str, &'static str, &'static str) {
-    match kind {
-        "frontend" => ("#dbeafe", "#2563eb", "#1e40af"),
-        "backend" => ("#dcfce7", "#16a34a", "#166534"),
-        "database" => ("#fef3c7", "#d97706", "#92400e"),
-        "cloud" => ("#e0e7ff", "#4f46e5", "#3730a3"),
-        "security" => ("#fee2e2", "#dc2626", "#991b1b"),
-        "messagebus" => ("#f3e8ff", "#9333ea", "#6b21a8"),
-        _ => ("#f4f4f5", "#71717a", "#3f3f46"),
-    }
-}
-
 /// (stroke, width, dash, label fill) per flow variant — emphasis rides
-/// heavier (1.8px vs 1.4px) exactly like the reference.
-fn variant_style(variant: &str) -> (&'static str, i32, Option<&'static str>, &'static str) {
+/// heavier (1.8px vs 1.4px) exactly like the reference. Sizes and dash
+/// patterns are this adapter's typography; colors come from the theme.
+fn variant_style(theme: &Theme, variant: &str) -> (&'static str, i32, Option<&'static str>, &'static str) {
     match variant {
-        "emphasis" => ("#18181b", 18, None, "#18181b"),
-        "security" => ("#dc2626", 14, None, "#dc2626"),
-        "dashed" => ("#9333ea", 14, Some("6 4"), "#9333ea"),
-        _ => ("#52525b", 14, None, "#52525b"),
+        "emphasis" => (theme.ink, 18, None, theme.ink),
+        "security" => (theme.danger, 14, None, theme.danger),
+        "dashed" => (theme.skip, 14, Some("6 4"), theme.skip),
+        _ => (theme.ink_soft, 14, None, theme.ink_soft),
     }
 }
 
@@ -431,6 +424,7 @@ fn emit_svg(
     placed: &[(usize, usize, Vec<Pt>, Option<Rect>)],
     view_box: [i32; 2],
     legend: &[usize],
+    theme: &'static Theme,
 ) -> String {
     let mut s = String::with_capacity(8192);
     s.push_str(&format!(
@@ -445,17 +439,20 @@ fn emit_svg(
     for (i, stage) in doc.stages.iter().enumerate() {
         let x = stage_x(i);
         s.push_str(&format!(
-            "<rect data-stage=\"{i}\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"{}\" fill=\"#fafafa\" stroke=\"#d4d4d8\" stroke-width=\"1\"/>",
+            "<rect data-stage=\"{i}\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"{}\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1\"/>",
             tx(x - STAGE_FRAME_PAD),
             tx(STAGE_Y),
             tx(STAGE_FRAME_PAD * 2),
             tx(laid.frame_bottom - STAGE_Y),
-            tx(STAGE_FRAME_RX)
+            tx(STAGE_FRAME_RX),
+            theme.panel,
+            theme.frame
         ));
         s.push_str(&format!(
-            "<text x=\"{}\" y=\"{}\" font-size=\"9\" font-weight=\"600\" fill=\"#52525b\" text-anchor=\"middle\">{:02} / {}</text>",
+            "<text x=\"{}\" y=\"{}\" font-size=\"9\" font-weight=\"600\" fill=\"{}\" text-anchor=\"middle\">{:02} / {}</text>",
             tx(x),
             tx(STAGE_TITLE_Y),
+            theme.ink_soft,
             i + 1,
             esc(stage.label.trim())
         ));
@@ -464,7 +461,7 @@ fn emit_svg(
     // Flow paths + arrowheads.
     for (i, flow) in doc.flows.iter().enumerate() {
         let (_, _, points, _) = &placed[i];
-        let (stroke, stroke_w, dash, _) = variant_style(flow.variant.as_deref().unwrap_or("default"));
+        let (stroke, stroke_w, dash, _) = variant_style(theme, flow.variant.as_deref().unwrap_or("default"));
         let dash_attr = dash.map_or(String::new(), |d| format!(" stroke-dasharray=\"{d}\""));
         s.push_str(&format!(
             "<path data-from=\"{}\" data-to=\"{}\" d=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\"{}/>",
@@ -481,7 +478,7 @@ fn emit_svg(
     // Nodes.
     for (i, node) in doc.nodes.iter().enumerate() {
         let rect = &laid.rects[i];
-        let (fill, stroke, text_fill) = kind_palette(&node.kind);
+        let node_colors = theme.node(&node.kind);
         s.push_str(&format!("<g data-node-id=\"{}\">", esc(&node.id)));
         s.push_str(&format!(
             "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"6\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1.5\"/>",
@@ -489,24 +486,26 @@ fn emit_svg(
             tx(rect.y),
             tx(rect.w),
             tx(rect.h),
-            fill,
-            stroke
+            node_colors.fill,
+            node_colors.stroke
         ));
         let label_font = fitted_font(&node.label, NODE_W - 160, LABEL_PREFERRED, LABEL_MIN);
         s.push_str(&format!(
-            "<text x=\"{}\" y=\"{}\" font-size=\"{}\" font-weight=\"600\" fill=\"#18181b\" text-anchor=\"middle\">{}</text>",
+            "<text x=\"{}\" y=\"{}\" font-size=\"{}\" font-weight=\"600\" fill=\"{}\" text-anchor=\"middle\">{}</text>",
             tx(rect.cx()),
             tx(rect.y + 210),
             tx(label_font),
+            theme.ink,
             esc(&node.label)
         ));
         if let Some(sub) = node.sublabel.as_deref().filter(|s| !s.trim().is_empty()) {
             let sub_font = fitted_font(sub, NODE_W, SUB_PREFERRED, SUB_MIN);
             s.push_str(&format!(
-                "<text x=\"{}\" y=\"{}\" font-size=\"{}\" fill=\"#71717a\" text-anchor=\"middle\">{}</text>",
+                "<text x=\"{}\" y=\"{}\" font-size=\"{}\" fill=\"{}\" text-anchor=\"middle\">{}</text>",
                 tx(rect.cx()),
                 tx(rect.y + 370),
                 tx(sub_font),
+                theme.ink_muted,
                 esc(sub)
             ));
         }
@@ -517,7 +516,7 @@ fn emit_svg(
                 tx(rect.cx()),
                 tx(rect.y + NODE_H - 110),
                 tx(tag_font),
-                text_fill,
+                node_colors.text,
                 esc(tag)
             ));
         }
@@ -533,24 +532,26 @@ fn emit_svg(
             .classification
             .as_deref()
             .is_some_and(|c| !c.trim().is_empty());
-        let (_, _, _, label_fill) = variant_style(flow.variant.as_deref().unwrap_or("default"));
+        let (_, _, _, label_fill) = variant_style(theme, flow.variant.as_deref().unwrap_or("default"));
         let h = if has_class { 300 } else { 160 };
         let class_line = has_class.then(|| {
             format!(
-                "<text x=\"{}\" y=\"{}\" font-size=\"6\" fill=\"#71717a\" text-anchor=\"middle\">{}</text>",
+                "<text x=\"{}\" y=\"{}\" font-size=\"6\" fill=\"{}\" text-anchor=\"middle\">{}</text>",
                 tx(at.0),
                 tx(at.1 + 180),
+                theme.ink_muted,
                 esc(flow.classification.as_deref().unwrap_or(""))
             )
         });
         s.push_str(&format!(
-            "<g data-from=\"{}\" data-to=\"{}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"3\" fill=\"#ffffff\"/><text x=\"{}\" y=\"{}\" font-size=\"8\" fill=\"{}\" text-anchor=\"middle\">{}</text>{}</g>",
+            "<g data-from=\"{}\" data-to=\"{}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"3\" fill=\"{}\"/><text x=\"{}\" y=\"{}\" font-size=\"8\" fill=\"{}\" text-anchor=\"middle\">{}</text>{}</g>",
             esc(&flow.from),
             esc(&flow.to),
             tx(at.0 - w / 2),
             tx(at.1 - 110),
             tx(w),
             tx(h),
+            theme.panel_alt,
             tx(at.0),
             tx(at.1 + 30),
             label_fill,
@@ -564,10 +565,10 @@ fn emit_svg(
         let mut x = LEGEND_X;
         for &idx in legend {
             let (variant, label) = LEGEND_CATALOG[idx];
-            let (stroke, width, dash, _) = variant_style(variant);
+            let (stroke, width, dash, _) = variant_style(theme, variant);
             let dash_attr = dash.map_or(String::new(), |d| format!(" stroke-dasharray=\"{d}\""));
             s.push_str(&format!(
-                "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"{}\" stroke-width=\"{}\"{}/><text x=\"{}\" y=\"{}\" font-size=\"7\" fill=\"#52525b\">{}</text>",
+                "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"{}\" stroke-width=\"{}\"{}/><text x=\"{}\" y=\"{}\" font-size=\"7\" fill=\"{}\">{}</text>",
                 tx(x),
                 tx(laid.legend_baseline - 30),
                 tx(x + LEGEND_SWATCH_W),
@@ -577,6 +578,7 @@ fn emit_svg(
                 dash_attr,
                 tx(x + LEGEND_SWATCH_W + LEGEND_SWATCH_TEXT_GAP),
                 tx(laid.legend_baseline),
+                theme.ink_soft,
                 esc(label)
             ));
             x += LEGEND_SWATCH_W
@@ -619,6 +621,7 @@ fn arrowhead(points: &[Pt], fill: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::theme::LIGHT;
 
     const SPEC_JSON: &str = r#"{
         "title": "Pipeline",
@@ -648,8 +651,8 @@ mod tests {
 
     #[test]
     fn stage_pipeline_renders_deterministically() {
-        let a = render_dataflow(&spec()).unwrap();
-        let b = render_dataflow(&spec()).unwrap();
+        let a = render_dataflow(&spec(), &LIGHT).unwrap();
+        let b = render_dataflow(&spec(), &LIGHT).unwrap();
         assert_eq!(a.svg, b.svg, "same input, same bytes");
         assert_eq!((a.stages, a.nodes, a.flows), (3, 4, 3));
         assert!(a.repairs.is_empty(), "{:?}", a.repairs);
@@ -694,8 +697,8 @@ mod tests {
         .unwrap();
         assert!(super::super::spec::validate_dataflow(&shuffled).is_empty());
         assert_eq!(
-            render_dataflow(&spec()).unwrap().svg,
-            render_dataflow(&shuffled).unwrap().svg
+            render_dataflow(&spec(), &LIGHT).unwrap().svg,
+            render_dataflow(&shuffled, &LIGHT).unwrap().svg
         );
     }
 
@@ -720,7 +723,7 @@ mod tests {
         )
         .unwrap();
         assert!(super::super::spec::validate_dataflow(&s).is_empty());
-        let rendered = render_dataflow(&s).unwrap();
+        let rendered = render_dataflow(&s, &LIGHT).unwrap();
         assert_eq!(rendered.repairs.len(), 1, "{:?}", rendered.repairs);
         assert_eq!(rendered.repairs[0].edge, "a->b");
         assert_eq!(rendered.repairs[0].requested, "vertical-channel");
@@ -757,7 +760,7 @@ mod tests {
         )
         .unwrap();
         assert!(super::super::spec::validate_dataflow(&s).is_empty());
-        let rendered = render_dataflow(&s).unwrap();
+        let rendered = render_dataflow(&s, &LIGHT).unwrap();
         assert_eq!(rendered.repairs.len(), 1, "{:?}", rendered.repairs);
         assert_eq!(rendered.repairs[0].requested, "top-channel");
         assert_eq!(rendered.repairs[0].substituted, "bottom-channel");
