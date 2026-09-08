@@ -410,6 +410,86 @@
         assert_eq!(count_doc.as_f64().unwrap() as i64, 2);
     }
 
+    /// `:scope` must bind to the element a query is rooted at — the archify
+    /// viewer's Intent Trace does `container.querySelector(':scope > svg')`
+    /// and used to get null back, killing its IIFU with a TypeError.
+    #[test]
+    fn scope_pseudo_class_binds_to_query_root() {
+        let mut rt = setup_runtime(
+            r#"<div id="a"><svg id="direct"></svg><div><svg id="deep"></svg></div></div>
+               <div id="b"><svg id="other"></svg></div>"#,
+        );
+        let direct = rt
+            .evaluate(
+                "document.getElementById('a').querySelector(':scope > svg') ? 'yes' : 'no'",
+            )
+            .unwrap();
+        assert_eq!(direct, serde_json::json!("yes"));
+
+        let deep_excluded = rt
+            .evaluate("document.getElementById('a').querySelectorAll(':scope > svg').length")
+            .unwrap();
+        assert_eq!(deep_excluded.as_f64().unwrap() as i64, 1);
+
+        // :scope in matches() is the element itself — the feature-detect idiom.
+        let self_match = rt
+            .evaluate("document.getElementById('a').matches(':scope')")
+            .unwrap();
+        assert_eq!(self_match, serde_json::json!(true));
+        let class_match = rt
+            .evaluate("document.getElementById('a').matches(':scope#a')")
+            .unwrap();
+        assert_eq!(class_match, serde_json::json!(true));
+
+        // Document-rooted :scope means the document element (html).
+        let doc_scope = rt
+            .evaluate("document.querySelector(':scope') === document.documentElement")
+            .unwrap();
+        assert_eq!(doc_scope, serde_json::json!(true));
+    }
+
+    /// `svg.viewBox` must reflect as an animated rect on the fit-to-viewbox
+    /// SVG elements — the archify viewer's export path reads
+    /// `svg.viewBox.baseVal.width` directly, so an undefined `viewBox`
+    /// crashes one property later (found by the artifact viewer smoke probe).
+    #[test]
+    fn svg_viewbox_reflects_animated_rect() {
+        let mut rt = setup_runtime(
+            r#"<svg id="a" viewBox="0 0 880 588"></svg><svg id="b"></svg><div id="h"></div>"#,
+        );
+        let w = rt
+            .evaluate("document.getElementById('a').viewBox.baseVal.width")
+            .unwrap();
+        assert_eq!(w.as_f64().unwrap(), 880.0);
+        let h = rt
+            .evaluate("document.getElementById('a').viewBox.animVal.height")
+            .unwrap();
+        assert_eq!(h.as_f64().unwrap(), 588.0);
+
+        // Missing attribute: still an animated rect, all zeros (Chrome shape).
+        let absent = rt
+            .evaluate("var vb = document.getElementById('b').viewBox.baseVal; vb.x + ',' + vb.y + ',' + vb.width + ',' + vb.height")
+            .unwrap();
+        assert_eq!(absent, serde_json::json!("0,0,0,0"));
+
+        // Malformed attribute parses as absent, not as garbage.
+        let bad = rt
+            .evaluate("document.getElementById('b').setAttribute('viewBox','10 20 100'); document.getElementById('b').viewBox.baseVal.width")
+            .unwrap();
+        assert_eq!(bad.as_f64().unwrap(), 0.0);
+        let good = rt
+            .evaluate("document.getElementById('b').setAttribute('viewBox','10 20 100 50'); var v = document.getElementById('b').viewBox.baseVal; v.x + ',' + v.width")
+            .unwrap();
+        assert_eq!(good, serde_json::json!("10,100"));
+
+        // HTML elements keep no viewBox (Chrome exposes it only on the
+        // fit-to-viewbox SVG tags).
+        let html = rt
+            .evaluate("document.getElementById('h').viewBox === undefined")
+            .unwrap();
+        assert_eq!(html, serde_json::json!(true));
+    }
+
     /// Regression for #105: `document.forms` / `images` / `links` must be
     /// live, not hardcoded `[]`. jQuery 1.x's submit-event setup iterates
     /// `document.forms` and crashes when it's empty for pages that have forms.

@@ -1926,6 +1926,13 @@ class Element extends Node {
       if (rest === "") return true;
       return this.matches(rest);
     }
+    // `:scope` in matches() means this element (el.matches(':scope') is true).
+    // The parent-scoped querySelectorAll emulation below would scope it to the
+    // parent instead, so route :scope selectors through the native
+    // single-element match where :scope is bound to the element itself.
+    if (typeof s === "string" && s.indexOf(":scope") !== -1) {
+      return _dom("matches_selector", this._nid, s) === "1";
+    }
     const parent = this.parentNode;
     if (!parent || !parent.querySelectorAll) return false;
     const matches = parent.querySelectorAll(s);
@@ -7574,6 +7581,28 @@ globalThis.HTMLDetailsElement = _htmlInterface('HTMLDetailsElement', ['details']
 globalThis.HTMLDialogElement = _htmlInterface('HTMLDialogElement', ['dialog']);
 globalThis.SVGElement = Element;
 globalThis.SVGSVGElement = Element;
+// Chrome exposes `viewBox` on the fit-to-viewbox SVG elements (svg, marker,
+// pattern, view) as an animated rect — never undefined on those elements, and
+// an all-zero baseVal when the attribute is absent or malformed. Export and
+// rasterize code leans on exactly that shape (`svg.viewBox.baseVal.width`),
+// so a missing reflection reads as a crash one property later.
+Object.defineProperty(Element.prototype, "viewBox", {
+  configurable: true,
+  get() {
+    const ln = this.localName;
+    if (ln !== "svg" && ln !== "marker" && ln !== "pattern" && ln !== "view") {
+      return undefined;
+    }
+    const parts = (this.getAttribute("viewBox") || "").trim().split(/[\s,]+/);
+    let v = [0, 0, 0, 0];
+    if (parts.length === 4 &&
+        parts.every((p) => p !== "" && !isNaN(Number(p)))) {
+      v = parts.map(Number);
+    }
+    const rect = { x: v[0], y: v[1], width: v[2], height: v[3] };
+    return { baseVal: rect, animVal: rect };
+  },
+});
 // API-tamper probes check these globals exist with the listed methods on
 // their prototypes (e.g. `SVGTextContentElement.prototype.getExtentOfChar`).
 globalThis.SVGGraphicsElement = class SVGGraphicsElement extends Element {

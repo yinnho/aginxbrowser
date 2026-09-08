@@ -687,6 +687,7 @@ impl DomTree {
             NeedsSelectorFlags::No,
             MatchingForInvalidation::No,
         );
+        self.bind_query_scope(&mut context, root);
 
         for desc_id in self.descendants(root) {
             let is_element = self.with_node(desc_id, |n| n.is_element()).unwrap_or(false);
@@ -714,6 +715,22 @@ impl DomTree {
         }
     }
 
+    // `:scope` in a query rooted at an element is that element (the DOM spec's
+    // scoping node for querySelector/querySelectorAll). A document-rooted
+    // query leaves the scope unset, where the selectors crate falls back to
+    // the root element — which is exactly how browsers resolve
+    // `document.querySelector(':scope ...')` (it means html).
+    fn bind_query_scope(
+        &self,
+        context: &mut MatchingContext<'_, DitingSelector>,
+        root: NodeId,
+    ) {
+        let is_element = self.with_node(root, |n| n.is_element()).unwrap_or(false);
+        if is_element {
+            context.scope_element = Some(DomElement::new(self, root).opaque());
+        }
+    }
+
     pub fn query_selector_all_from(&self, root: NodeId, selector: &str) -> Result<Vec<NodeId>, String> {
         let selector_list = parse_selector(selector)?;
         let mut caches = selectors::context::SelectorCaches::default();
@@ -725,6 +742,7 @@ impl DomTree {
             NeedsSelectorFlags::No,
             MatchingForInvalidation::No,
         );
+        self.bind_query_scope(&mut context, root);
         let mut results = Vec::new();
 
         for desc_id in self.descendants(root) {
@@ -759,10 +777,14 @@ impl DomTree {
             MatchingMode::Normal,
             None,
             &mut caches,
-            QuirksMode::NoQuirks,
+            self.selector_quirks_mode(),
             NeedsSelectorFlags::No,
             MatchingForInvalidation::No,
         );
+        // Element.matches() scopes `:scope` to the element being tested —
+        // `el.matches(':scope')` is true and is the idiom libraries use to
+        // feature-detect :scope support.
+        context.scope_element = Some(DomElement::new(self, nid).opaque());
         Ok(selectors::matching::matches_selector_list(
             &selector_list,
             &DomElement::new(self, nid),
@@ -1267,6 +1289,89 @@ mod tests {
         assert!(tree.query_selector_from(root, ".x").unwrap().is_none());
         // `span` finds the child.
         assert!(tree.query_selector_from(root, "span").unwrap().is_some());
+    }
+
+    #[test]
+    fn test_scope_child_combinator_scoped_to_query_root() {
+        // The archify viewer pattern: container.querySelector(':scope > svg')
+        // must find the container's direct svg child — not svgs in a sibling
+        // container, not svgs deeper inside.
+        let tree = parse_html(
+            r#"<html><body>
+                <div id="a"><svg id="direct"></svg><div><svg id="deep"></svg></div></div>
+                <div id="b"><svg id="other"></svg></div>
+            </body></html>"#,
+        );
+        let a = tree.get_element_by_id("a").unwrap();
+        let hit = tree
+            .query_selector_from(a, ":scope > svg")
+            .unwrap()
+            .expect("direct svg child of #a");
+        assert_eq!(
+            tree.get_element_by_id("direct"),
+            Some(hit),
+            "must be the direct child, not the deep or sibling svg"
+        );
+
+        let direct_only = tree.query_selector_all_from(a, ":scope > svg").unwrap();
+        assert_eq!(direct_only.len(), 1);
+    }
+
+    #[test]
+    fn test_scope_descendant_combinator_and_bare_form() {
+        let tree = parse_html(
+            r#"<html><body>
+                <div id="a"><span class="x"></span><section><span class="x"></span></section></div>
+                <span class="x"></span>
+            </body></html>"#,
+        );
+        let a = tree.get_element_by_id("a").unwrap();
+        // `:scope .x` = every .x in the subtree (both depths)...
+        assert_eq!(tree.query_selector_all_from(a, ":scope .x").unwrap().len(), 2);
+        // ...while a document-rooted query sees all three.
+        assert_eq!(tree.query_selector_all(":scope .x").unwrap().len(), 3);
+
+        // Bare `:scope` from an element root matches nothing: the scope
+        // element itself is not among its own descendants.
+        assert!(tree.query_selector_from(a, ":scope").unwrap().is_none());
+        assert!(tree.query_selector_all_from(a, ":scope").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_scope_from_document_root_means_html() {
+        // Document-rooted queries leave the scope unset, where :scope falls
+        // back to the root element — the browser behavior for
+        // document.querySelector(':scope ...').
+        let tree = parse_html(r#"<html><body><svg id="top"></svg><div><svg id="nested"></svg></div></body></html>"#);
+        assert_eq!(
+            tree.query_selector(":scope").unwrap(),
+            tree.query_selector("html").unwrap(),
+            "bare :scope from the document is the document element"
+        );
+        let hit = tree
+            .query_selector(":scope > body")
+            .unwrap()
+            .expect("body is the document element's direct child");
+        assert_eq!(
+            tree.query_selector("body").unwrap(),
+            Some(hit),
+            ":scope from the document means html, so :scope > body resolves"
+        );
+    }
+
+    #[test]
+    fn test_matches_selector_binds_scope_to_element() {
+        // Element.matches semantics: :scope is the tested element.
+        let tree = parse_html(r#"<html><body><div id="hit" class="panel"><span></span></div></body></html>"#);
+        let hit = tree.get_element_by_id("hit").unwrap();
+        assert!(tree.matches_selector(hit, ":scope").unwrap());
+        assert!(tree.matches_selector(hit, ":scope.panel").unwrap());
+        assert!(!tree.matches_selector(hit, ":scope.missing").unwrap());
+        // With :scope bound to the tested element, a child combinator off it
+        // can only be false: nothing is its own parent. `span.matches
+        // (':scope > span')` asks whether span's parent is span.
+        let span = tree.query_selector("span").unwrap().expect("the span");
+        assert!(!tree.matches_selector(span, ":scope > span").unwrap());
     }
 
     #[test]

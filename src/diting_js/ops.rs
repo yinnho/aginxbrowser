@@ -609,6 +609,13 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 .map(|ids| ids.iter().map(|id| id.index() as i32).collect()).unwrap_or_default();
             serde_json::to_string(&ids).unwrap_or("[]".into())
         }
+        // Single-element match with `:scope` bound to the element itself
+        // (Element.matches semantics). "0" on a parse error, mirroring how the
+        // query ops return empty results rather than surfacing the error.
+        "matches_selector" => {
+            let nid = arg1.parse::<u32>().unwrap_or(0);
+            if dom.matches_selector(NodeId::new(nid), &arg2).unwrap_or(false) { "1".into() } else { "0".into() }
+        }
         "node_type" => {
             let nid = arg1.parse::<u32>().unwrap_or(0);
             dom.get_node(NodeId::new(nid)).map(|n| match &n.data {
