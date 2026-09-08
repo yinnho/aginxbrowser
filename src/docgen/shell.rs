@@ -11,8 +11,9 @@
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use pulldown_cmark::html::push_html;
 
-use super::spec::{validate_sequence, DiagramSpec, SequenceSpec};
+use super::spec::{validate_sequence, validate_workflow, DiagramSpec};
 use super::sequence::render_sequence;
+use super::workflow::render_workflow;
 
 /// The info string that routes a fence to the diagram pipeline.
 const FENCE_LANG: &str = "archify";
@@ -21,9 +22,84 @@ pub struct FenceOutcome {
     /// 0-based fence ordinal in document order.
     pub index: usize,
     pub ok: bool,
+    /// Diagram family ("sequence"/"workflow"); empty when the fence failed
+    /// before routing resolved.
+    pub kind: &'static str,
     pub title: Option<String>,
     /// Structured facts for the receipt when ok; problems when not.
     pub detail: Vec<String>,
+}
+
+/// A rendered fence, in family-agnostic terms for the figure splice.
+struct FenceDiagram {
+    kind: &'static str,
+    svg: String,
+    title: String,
+    facts: Vec<String>,
+}
+
+/// Parse one fence body. The family is the declared `diagram_type`, or the
+/// one object actually present when it is not declared.
+fn parse_fence(body: &str) -> Result<FenceDiagram, Vec<String>> {
+    let parsed: DiagramSpec =
+        serde_json::from_str(body).map_err(|e| vec![format!("JSON parse error: {e}")])?;
+    let diagram_type = match (
+        parsed.diagram_type.as_deref(),
+        parsed.sequence.is_some(),
+        parsed.workflow.is_some(),
+    ) {
+        (Some(t), _, _) => t.to_string(),
+        (None, false, true) => "workflow".to_string(),
+        (None, _, _) => "sequence".to_string(),
+    };
+    match (diagram_type.as_str(), parsed.sequence, parsed.workflow) {
+        ("sequence", Some(spec), _) => {
+            let problems = validate_sequence(&spec);
+            if !problems.is_empty() {
+                return Err(problems);
+            }
+            let r = render_sequence(&spec)?;
+            Ok(FenceDiagram {
+                kind: "sequence",
+                facts: vec![
+                    format!("participants={}", r.participants),
+                    format!("messages={}", r.messages),
+                    format!("viewBox={}x{}", r.view_box[0], r.view_box[1]),
+                ],
+                svg: r.svg,
+                title: r.title,
+            })
+        }
+        ("workflow", _, Some(spec)) => {
+            let problems = validate_workflow(&spec);
+            if !problems.is_empty() {
+                return Err(problems);
+            }
+            let r = render_workflow(&spec)?;
+            Ok(FenceDiagram {
+                kind: "workflow",
+                facts: vec![
+                    format!("lanes={}", r.lanes),
+                    format!("nodes={}", r.nodes),
+                    format!("edges={}", r.edges),
+                    format!("viewBox={}x{}", r.view_box[0], r.view_box[1]),
+                ],
+                svg: r.svg,
+                title: r.title,
+            })
+        }
+        ("sequence", None, _) => Err(vec![
+            "a sequence diagram needs a \"sequence\" object with title, participants, messages"
+                .to_string(),
+        ]),
+        ("workflow", None, _) => Err(vec![
+            "a workflow diagram needs a \"workflow\" object with title, lanes, nodes, edges"
+                .to_string(),
+        ]),
+        (other, _, _) => Err(vec![format!(
+            "unknown diagram_type \"{other}\" — v1 renders \"sequence\" and \"workflow\""
+        )]),
+    }
 }
 
 pub struct RenderedDoc {
@@ -37,23 +113,6 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
-}
-
-/// Parse one fence body. Ok(spec) when the JSON names a family we render.
-fn parse_fence(body: &str) -> Result<SequenceSpec, Vec<String>> {
-    let parsed: DiagramSpec = serde_json::from_str(body).map_err(|e| {
-        vec![format!("JSON parse error: {e}")]
-    })?;
-    let diagram_type = parsed.diagram_type.as_deref().unwrap_or("sequence");
-    match (diagram_type, parsed.sequence) {
-        ("sequence", Some(seq)) => Ok(seq),
-        ("sequence", None) => Err(vec![
-            "a sequence diagram needs a \"sequence\" object with title, participants, messages".to_string(),
-        ]),
-        (other, _) => Err(vec![format!(
-            "unknown diagram_type \"{other}\" — v1 renders \"sequence\""
-        )]),
-    }
 }
 
 pub fn render(markdown: &str) -> RenderedDoc {
@@ -94,35 +153,25 @@ pub fn render(markdown: &str) -> RenderedDoc {
                     flush(&mut plain, &mut body);
                     let index = fences.len();
                     // Parse errors, then spec validation (document-order
-                    // problems), then the adapter's geometry checks (labels
-                    // no shrink can save).
-                    let outcome = parse_fence(&raw).and_then(|spec| {
-                        let problems = validate_sequence(&spec);
-                        if problems.is_empty() {
-                            render_sequence(&spec)
-                        } else {
-                            Err(problems)
-                        }
-                    });
-                    match outcome {
-                        Ok(rendered) => {
+                    // problems), then the adapter's geometry checks — the
+                    // family router chains all three.
+                    match parse_fence(&raw) {
+                        Ok(d) => {
                             body.push_str(&format!(
-                                "<figure class=\"agx-diagram\" data-diagram-type=\"sequence\" data-diagram-index=\"{index}\" data-diagram-title=\"{}\">{}</figure>",
-                                html_escape(&rendered.title),
-                                rendered.svg
+                                "<figure class=\"agx-diagram\" data-diagram-type=\"{}\" data-diagram-index=\"{index}\" data-diagram-title=\"{}\">{}</figure>",
+                                d.kind,
+                                html_escape(&d.title),
+                                d.svg
                             ));
                             fences.push(FenceOutcome {
                                 index,
                                 ok: true,
-                                title: Some(rendered.title.clone()),
-                                detail: vec![
-                                    format!("participants={}", rendered.participants),
-                                    format!("messages={}", rendered.messages),
-                                    format!("viewBox={}x{}", rendered.view_box[0], rendered.view_box[1]),
-                                ],
+                                kind: d.kind,
+                                title: Some(d.title.clone()),
+                                detail: d.facts,
                             });
                             if doc_title.is_none() {
-                                doc_title = Some(rendered.title);
+                                doc_title = Some(d.title);
                             }
                         }
                         Err(problems) => {
@@ -136,6 +185,7 @@ pub fn render(markdown: &str) -> RenderedDoc {
                             fences.push(FenceOutcome {
                                 index,
                                 ok: false,
+                                kind: "",
                                 title: None,
                                 detail: problems,
                             });

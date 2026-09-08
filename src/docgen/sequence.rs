@@ -93,13 +93,7 @@ fn variant_style(variant: &str) -> (&'static str, i32, Option<&'static str>, &'s
 
 /// Format tenths as a compact decimal: integer when whole, one place when
 /// not. `{:.1}` on an exact x/10 rounds correctly, so bytes are stable.
-fn tx(t: i32) -> String {
-    if t % 10 == 0 {
-        format!("{}", t / 10)
-    } else {
-        format!("{:.1}", t as f64 / 10.0)
-    }
-}
+use super::tx;
 
 /// XML-escape text content and attribute values; collapse newlines/tabs so
 /// a label never smuggles structure into single-line `<text>`.

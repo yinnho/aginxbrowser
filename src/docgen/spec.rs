@@ -28,13 +28,340 @@ pub const PARTICIPANT_KINDS: [&str; 7] = [
 pub const MESSAGE_VARIANTS: [&str; 5] = ["default", "emphasis", "security", "dashed", "return"];
 
 /// A ```archify fence body: one typed diagram. `diagram_type` routes to the
-/// family adapter; v1 implements `sequence`.
+/// family adapter; v1 implements `sequence` and `workflow`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiagramSpec {
     #[serde(default)]
     pub diagram_type: Option<String>,
     pub sequence: Option<SequenceSpec>,
+    pub workflow: Option<WorkflowSpec>,
+}
+
+// ---------------------------------------------------------------------------
+// workflow family
+//
+// The swimlane contract: lanes stack vertically, columns (0..=5) are ranks
+// flowing left to right. Every coordinate is derived — the author writes
+// which lane and which rank, the engine solves positions, routes orthogonal
+// edges, and places labels. `yOffset` (px, may be negative) is the one
+// vertical escape hatch for stacking nodes that share a lane and column.
+// ---------------------------------------------------------------------------
+
+/// Route presets an edge may request; `auto` lets the router plan.
+pub const EDGE_ROUTES: [&str; 7] = [
+    "auto",
+    "straight",
+    "drop",
+    "outside-right",
+    "return-left",
+    "bottom-channel",
+    "up-channel",
+];
+
+/// Endpoint sides an edge may author; both default to automatic.
+pub const ENDPOINT_SIDES: [&str; 4] = ["left", "right", "top", "bottom"];
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowSpec {
+    pub title: String,
+    pub lanes: Vec<Lane>,
+    pub nodes: Vec<WorkflowNode>,
+    pub edges: Vec<WorkflowEdge>,
+    #[serde(default)]
+    pub phases: Vec<Phase>,
+    #[serde(default)]
+    pub groups: Vec<NodeGroup>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Lane {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub variant: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct WorkflowNode {
+    pub id: String,
+    pub lane: String,
+    pub col: u8,
+    pub label: String,
+    #[serde(default)]
+    pub sublabel: Option<String>,
+    #[serde(default)]
+    pub tag: Option<String>,
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub y_offset: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct WorkflowEdge {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub variant: Option<String>,
+    #[serde(default)]
+    pub route: Option<String>,
+    #[serde(default)]
+    pub from_side: Option<String>,
+    #[serde(default)]
+    pub to_side: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Phase {
+    pub id: String,
+    pub label: String,
+    pub from_col: u8,
+    pub to_col: u8,
+    #[serde(default)]
+    pub variant: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct NodeGroup {
+    pub id: String,
+    pub lane: String,
+    pub label: String,
+    pub from_col: u8,
+    pub to_col: u8,
+    #[serde(default)]
+    pub variant: Option<String>,
+}
+
+/// Node height model shared by validation and layout: 52px, or 68px when the
+/// node carries a tag strip.
+pub fn workflow_node_height(node: &WorkflowNode) -> i32 {
+    if node.tag.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+        68
+    } else {
+        52
+    }
+}
+
+/// Do two nodes sharing a lane and column overlap vertically (8px clearance)?
+fn vertical_intervals_overlap(a: &WorkflowNode, b: &WorkflowNode, clearance: i32) -> bool {
+    let da = a.y_offset.unwrap_or(0);
+    let db = b.y_offset.unwrap_or(0);
+    (da - db).abs() < (workflow_node_height(a) + workflow_node_height(b)) / 2 + clearance
+}
+
+/// Structural validation in document order. Geometry the solver owns (column
+/// widths, route feasibility) is checked later, during layout.
+pub fn validate_workflow(spec: &WorkflowSpec) -> Vec<String> {
+    let mut problems = Vec::new();
+    if spec.title.trim().is_empty() {
+        problems.push("title must not be empty".to_string());
+    }
+    if spec.lanes.is_empty() {
+        problems.push("a workflow needs at least 1 lane".to_string());
+    }
+    if spec.nodes.len() < 2 {
+        problems.push(format!(
+            "a workflow needs at least 2 nodes, got {}",
+            spec.nodes.len()
+        ));
+    }
+    if spec.edges.is_empty() {
+        problems.push("a workflow needs at least 1 edge".to_string());
+    }
+
+    let mut lanes = std::collections::HashSet::new();
+    for lane in &spec.lanes {
+        if !valid_id(&lane.id) {
+            problems.push(format!(
+                "lane id \"{}\" must match [a-zA-Z][a-zA-Z0-9_-]*",
+                lane.id
+            ));
+        }
+        if !lanes.insert(lane.id.as_str()) {
+            problems.push(format!("lane id \"{}\" is used twice", lane.id));
+        }
+        if lane.label.trim().is_empty() {
+            problems.push(format!("lane \"{}\" must have a label", lane.id));
+        }
+        if let Some(v) = &lane.variant {
+            if v != "exception" {
+                problems.push(format!(
+                    "lane \"{}\" has unknown variant \"{v}\" (only \"exception\")",
+                    lane.id
+                ));
+            }
+        }
+    }
+
+    let mut node_ids = std::collections::HashSet::new();
+    for node in &spec.nodes {
+        if !valid_id(&node.id) {
+            problems.push(format!(
+                "node id \"{}\" must match [a-zA-Z][a-zA-Z0-9_-]*",
+                node.id
+            ));
+        }
+        if !node_ids.insert(node.id.as_str()) {
+            problems.push(format!("node id \"{}\" is used twice", node.id));
+        }
+        if !lanes.contains(node.lane.as_str()) {
+            problems.push(format!(
+                "node \"{}\" sits in unknown lane \"{}\"",
+                node.id, node.lane
+            ));
+        }
+        if node.col > 5 {
+            problems.push(format!(
+                "node \"{}\" has column {} — ranks are 0..=5",
+                node.id, node.col
+            ));
+        }
+        if !PARTICIPANT_KINDS.contains(&node.kind.as_str()) {
+            problems.push(format!(
+                "node \"{}\" has unknown type \"{}\" (one of: {})",
+                node.id,
+                node.kind,
+                PARTICIPANT_KINDS.join(", ")
+            ));
+        }
+        if node.label.trim().is_empty() {
+            problems.push(format!("node \"{}\" must have a label", node.id));
+        }
+    }
+
+    // Same-lane same-column collisions only (cross-column separation is the
+    // solver's job).
+    for (i, a) in spec.nodes.iter().enumerate() {
+        for b in &spec.nodes[i + 1..] {
+            if a.lane != b.lane || a.col != b.col {
+                continue;
+            }
+            if vertical_intervals_overlap(a, b, 8) {
+                problems.push(format!(
+                    "nodes \"{}\" and \"{}\" share lane \"{}\" column {} and overlap vertically — separate them with yOffset",
+                    a.id, b.id, a.lane, a.col
+                ));
+            }
+        }
+    }
+
+    for edge in &spec.edges {
+        let name = edge
+            .id
+            .clone()
+            .unwrap_or_else(|| format!("{}->{}", edge.from, edge.to));
+        if !node_ids.contains(edge.from.as_str()) {
+            problems.push(format!("edge \"{name}\" starts at unknown node \"{}\"", edge.from));
+        }
+        if !node_ids.contains(edge.to.as_str()) {
+            problems.push(format!("edge \"{name}\" ends at unknown node \"{}\"", edge.to));
+        }
+        if let Some(route) = &edge.route {
+            if !EDGE_ROUTES.contains(&route.as_str()) {
+                problems.push(format!(
+                    "edge \"{name}\" has unknown route \"{route}\" (one of: {})",
+                    EDGE_ROUTES.join(", ")
+                ));
+            }
+        }
+        for (field, side) in [("fromSide", &edge.from_side), ("toSide", &edge.to_side)] {
+            if let Some(side) = side {
+                if !ENDPOINT_SIDES.contains(&side.as_str()) {
+                    problems.push(format!(
+                        "edge \"{name}\" has unknown {field} \"{side}\" (one of: {})",
+                        ENDPOINT_SIDES.join(", ")
+                    ));
+                }
+            }
+        }
+        if let Some(v) = &edge.variant {
+            if !MESSAGE_VARIANTS.contains(&v.as_str()) {
+                problems.push(format!(
+                    "edge \"{name}\" has unknown variant \"{v}\" (one of: {})",
+                    MESSAGE_VARIANTS.join(", ")
+                ));
+            }
+        }
+    }
+
+    let mut phase_ids = std::collections::HashSet::new();
+    let mut phase_spans: Vec<(u8, u8, &str)> = Vec::new();
+    for phase in &spec.phases {
+        if !phase_ids.insert(phase.id.as_str()) {
+            problems.push(format!("phase id \"{}\" is used twice", phase.id));
+        }
+        if phase.label.trim().is_empty() {
+            problems.push(format!("phase \"{}\" must have a label", phase.id));
+        }
+        if phase.from_col > phase.to_col {
+            problems.push(format!(
+                "phase \"{}\" spans columns {}..{} backwards — fromCol must be ≤ toCol",
+                phase.id, phase.from_col, phase.to_col
+            ));
+        }
+        phase_spans.push((phase.from_col, phase.to_col, &phase.id));
+    }
+    phase_spans.sort();
+    for pair in phase_spans.windows(2) {
+        if pair[0].1 >= pair[1].0 {
+            problems.push(format!(
+                "phases \"{}\" and \"{}\" overlap in columns",
+                pair[0].2, pair[1].2
+            ));
+        }
+    }
+
+    let mut group_ids = std::collections::HashSet::new();
+    for group in &spec.groups {
+        if !group_ids.insert(group.id.as_str()) {
+            problems.push(format!("group id \"{}\" is used twice", group.id));
+        }
+        if !lanes.contains(group.lane.as_str()) {
+            problems.push(format!(
+                "group \"{}\" sits in unknown lane \"{}\"",
+                group.id, group.lane
+            ));
+        }
+        if group.from_col > group.to_col {
+            problems.push(format!(
+                "group \"{}\" spans columns {}..{} backwards — fromCol must be ≤ toCol",
+                group.id, group.from_col, group.to_col
+            ));
+        }
+        if group.label.trim().is_empty() {
+            problems.push(format!("group \"{}\" must have a label", group.id));
+        }
+        if let Some(v) = &group.variant {
+            if v != "security" {
+                problems.push(format!(
+                    "group \"{}\" has unknown variant \"{v}\" (only \"security\")",
+                    group.id
+                ));
+            }
+        }
+        let has_member = spec
+            .nodes
+            .iter()
+            .any(|n| n.lane == group.lane && n.col >= group.from_col && n.col <= group.to_col);
+        if !has_member {
+            problems.push(format!(
+                "group \"{}\" contains no nodes — narrow its column range or drop it",
+                group.id
+            ));
+        }
+    }
+    problems
 }
 
 #[derive(Debug, Deserialize)]

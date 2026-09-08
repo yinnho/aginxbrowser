@@ -143,15 +143,53 @@ SQLite cache。
 算术用不上 Sugiyama，先竖切把合同/壳/工具面钉死，批3 图布局引擎以 sequence 为
 第一个"无需它"的反例校准机制/策略边界。
 
+## 4c. 批3 闭环（2026-09-08）：图布局引擎 + workflow adapter
+
+机制/策略分离第一次真跑通：
+
+- `docgen/graph.rs`（机制）：矩形/线段谓词、rank 列约束求解（前向传播+后继拖拽）、
+  9 族正交路由候选 + 字典序 CandidateCost（forward_reverse → crossings → corridor →
+  label_deficit → interior_rhythm → bends → stretch → canvas_growth → port_displacement
+  → ordinal）、有界 outside-right 升级（7 探测×24 二分）、标签摆放（横优先/长优先/
+  早优先，横段抬 10px）。`docgen/workflow.rs`（策略，~1300 行）：lane/col 语义 →
+  约束/走廊/场景；canon() 四集合稳定排序（节点 lane,col,id；边 id,from,to,label,
+  route；相位 fromCol,toCol,id；分组 lane,fromCol,toCol,id；lane 保持文档序——作者
+  的堆叠就是 spec）；compile_once = 约束装配 → solve_columns → 三趟后移（首列让位/
+  顶侧端点让 lane 头标签/内容左地板）→ 垂直算术 → legend 行打包 → 逐边路由累积
+  PlacedRoute → 实测边界 → viewBox 定稿。
+- 整数 0.1px 纪律兑现：谓词全精确比较，参考实现围着 float 漂移修的 epsilon 栅栏
+  在这里不存在；唯一无理量 hypot 在叶子处一次取整。反馈环 4 轮（rank_gaps BTreeMap
+  严格增长否则判 wedge）；反馈要 32px（RANK_GAP_CLEARANCE）比约束装配的静态 28px
+  高一档——参考实现同款语义差。
+- v1 分岔（故意不做，留账）：绝对 pin（via/channelX/channelY/labelAt）、authored 节点
+  尺寸、bias/role 豁免/mainPath/showcase、channel-label 机制（带标签对向直边静态撑宽
+  rank gap——参考实现拖到反馈第 2 轮，同一不动点）、port_spread 只作用于 pair 0
+  （参考两端都散）、升级二分 24 次@0.1px vs 参考 53@0.001、箭头显式三角不用 marker
+  （diting svg v1 不画 marker ref）、legend 自打包、exception lane=红描红字。
+- shell.rs 家族路由：diagram_type 声明优先，未声明时按在场对象推断（仅 workflow 在场
+  → workflow，否则 sequence）；FenceOutcome 带 kind，receipt diagrams.type 真值。
+- dogfood（自家用引擎，/mcp 全链）：3 lane/7 节点/8 边/2 相位/1 分组渲染，receipt
+  零诊断；diting 截图 1170×2452 视觉判读通过；live DOM 复核 EX / Repair 前缀、
+  receipt 通道 `M 746.4 94 L 746.4 66 L 94 66 L 94 94`（节点顶上方 28px）。
+- dogfood 抓到的真发现：**same-lane 同 yOffset 的向后边配 return-left 必然
+  PresetConflict**——from 腿跑在 from.cy==to.cy 上，为绕到 to 左侧必穿 to 盒，
+  route_clears_endpoint_nodes 全 pair 拒收。这是合同不是 bug：诊断点名边并建议
+  auto（顶走廊候选手工验证可行）。作者守则=同行回边用 up-channel/drop；批4 修复
+  循环把这个诊断→改写闭环自动化。
+- 已知残差（记精美/后续）：可行性门不看相位框（up-channel 可视觉穿过相位带，
+  dogfood 截图所见）；标签-相位/分组框间距未进 cost。
+- 测试：docgen 36 单测（graph 10 + workflow 4 + 壳往返 1 + 批2 21）；全量
+  `--features screenshot` 825/0/1；clippy docgen 零提及。
+
 ## 5. 分批（按总纲排序）
 
 - **批1（技术·引擎前置）**：`:scope` 选择器 + archify artifact viewer smoke 探针 →
   引擎洞清单。
 - **批2（技术·竖切）** ✅ 闭环 2026-09-08（见 §4b）：`src/docgen/` + sequence adapter（固定列算术+自动 y 堆叠）+
   壳 v1（素颜）+ render_markdown 工具 + SetContent 会话装载。geometry 核心/standard 档门延批3。
-- **批3（技术·核心）**：图布局引擎（分层 rank/排序/坐标 + 正交路由 + 标签摆放，
-  确定性纪律全程）+ workflow adapter（lane/col 约束）为首个消费者。
-  workflow-compiler 作参考实现精读。
+- **批3（技术·核心）** ✅ 闭环 2026-09-08（见 §4c）：graph.rs 布局引擎（整数 0.1px、
+  9 族正交路由、字典序 cost、有界升级）+ workflow adapter（lane/col 约束）+ 家族路由。
+  workflow-compiler 精读完成。
 - **批4（流程）**：自修循环全量（诊断→verified 修复→复验→升级 LLM）、receipt/视口
   验收接线、firstPassUsable benchmark 交付门、architecture/dataflow/lifecycle adapter
   补齐。

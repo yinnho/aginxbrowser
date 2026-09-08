@@ -10,12 +10,25 @@
 //! this module owns the zero-coordinate contract and the deterministic
 //! emission.
 
+pub mod graph;
 pub mod sequence;
 pub mod shell;
 pub mod spec;
+pub mod workflow;
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+
+/// Format tenths-of-a-pixel as a compact decimal: integer when whole, one
+/// place when not. `{:.1}` on an exact x/10 rounds correctly, so bytes are
+/// stable.
+pub(crate) fn tx(t: i32) -> String {
+    if t % 10 == 0 {
+        format!("{}", t / 10)
+    } else {
+        format!("{:.1}", t as f64 / 10.0)
+    }
+}
 
 pub struct RenderOutcome {
     pub html: String,
@@ -61,7 +74,7 @@ pub fn render(markdown: &str) -> RenderOutcome {
         .map(|f| {
             json!({
                 "index": f.index,
-                "type": "sequence",
+                "type": f.kind,
                 "title": f.title,
                 "facts": f.detail,
             })
@@ -137,6 +150,25 @@ mod tests {
             .contains("fence #1"));
         // Document still emits, with the fence as a code block.
         assert!(r.html.contains("language-archify"));
+    }
+
+    #[test]
+    fn workflow_fence_round_trips_through_the_shell() {
+        let md = "# Deploy\n\n```archify\n{\"workflow\":{\"title\":\"Release\",\"lanes\":[\n  {\"id\":\"dev\",\"label\":\"Dev\"},\n  {\"id\":\"ops\",\"label\":\"Ops\",\"variant\":\"exception\"}],\n \"nodes\":[\n  {\"id\":\"build\",\"lane\":\"dev\",\"col\":0,\"label\":\"Build\",\"type\":\"backend\"},\n  {\"id\":\"ship\",\"lane\":\"dev\",\"col\":1,\"label\":\"Ship\",\"type\":\"backend\"},\n  {\"id\":\"rollback\",\"lane\":\"ops\",\"col\":1,\"label\":\"Rollback\",\"type\":\"security\"}],\n \"edges\":[\n  {\"from\":\"build\",\"to\":\"ship\",\"label\":\"ci pass\"},\n  {\"from\":\"ship\",\"to\":\"rollback\",\"label\":\"500s\",\"variant\":\"security\"}]}}\n```\n";
+        let a = render(md);
+        let b = render(md);
+        assert_eq!(a.html, b.html, "same input, same bytes");
+        assert_eq!(a.receipt["diagnostics"].as_array().unwrap().len(), 0);
+        assert_eq!(a.receipt["diagrams"][0]["type"], "workflow");
+        let facts = a.receipt["diagrams"][0]["facts"].as_array().unwrap();
+        assert!(facts.iter().any(|f| f.as_str().unwrap().contains("lanes=2")));
+        assert!(facts.iter().any(|f| f.as_str().unwrap().contains("edges=2")));
+        assert!(facts.iter().any(|f| f.as_str().unwrap().starts_with("viewBox=")));
+        // Structural assertions on the artifact itself.
+        assert!(a.html.contains("data-diagram-type=\"workflow\""));
+        assert!(a.html.contains("data-lane-id=\"ops\""));
+        assert!(a.html.contains("data-node-id=\"rollback\""));
+        assert!(a.html.contains("data-from=\"ship\" data-to=\"rollback\""));
     }
 
     #[test]
