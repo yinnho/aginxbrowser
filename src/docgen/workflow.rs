@@ -26,6 +26,7 @@ use super::spec::{
 };
 use super::theme::Theme;
 use super::tx;
+use super::sigil;
 
 // ---------------------------------------------------------------------------
 // constants (archify px × 10)
@@ -1231,6 +1232,7 @@ fn emit_svg(
             node_colors.fill,
             node_colors.stroke
         ));
+        s.push_str(&sigil::sigil(&node.kind, rect.x + 60, rect.y + 60, theme));
         let label_font =
             fitted_font(&node.label, NODE_W - LABEL_RESERVE, LABEL_PREFERRED, LABEL_MIN);
         s.push_str(&format!(

@@ -11,6 +11,7 @@
 //! (diting svg v1) draws attributes without a CSS pass. Arrowheads are
 //! explicit triangles, not `<marker>` references, for the same reason.
 
+use super::sigil;
 use super::spec::{text_units, SequenceSpec};
 use super::theme::Theme;
 
@@ -263,6 +264,12 @@ pub fn render_sequence(
             tx(PARTICIPANT_H),
             node.fill,
             node.stroke
+        ));
+        svg.push_str(&sigil::sigil(
+            &p.kind,
+            x - PARTICIPANT_W / 2 + 60,
+            TOP_Y + 60,
+            theme,
         ));
         svg.push_str(&format!(
             "<text x=\"{}\" y=\"{}\" font-size=\"{}\" font-weight=\"600\" fill=\"{}\" text-anchor=\"middle\">{}</text>",

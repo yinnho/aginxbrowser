@@ -25,6 +25,7 @@ use super::graph::{
 use super::spec::{text_units, ArchBoundary, ArchComponent, ArchConnection, ArchitectureSpec, ArchLayout};
 use super::theme::Theme;
 use super::tx;
+use super::sigil;
 
 // ---------------------------------------------------------------------------
 // constants (archify px × 10)
@@ -588,6 +589,12 @@ fn emit_svg(
             tx(rect.h),
             component_colors.fill,
             component_colors.stroke
+        ));
+        s.push_str(&sigil::sigil(
+            &component.kind,
+            rect.x + 60,
+            rect.y + 60,
+            theme
         ));
         let label_font = fitted_font(&component.label, rect.w - 160, LABEL_PREFERRED, LABEL_MIN);
         s.push_str(&format!(

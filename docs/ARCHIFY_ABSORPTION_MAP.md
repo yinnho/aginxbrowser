@@ -289,6 +289,48 @@ adapter 只留词汇（kinds/variants）和排版（字号线型/虚线模式）
 - 卫生：十六进制颜色只在 theme.rs（96 处）+ 各族测试断言里；测试基线 845→850/0/1，
   clippy 62 持平（`--bin` 口径）。
 
+## 4g. 批6b 闭环（2026-09-09）：visual preset 数据化 + SIGIL 系统
+
+精美层第二刀，两件事：preset 家族把「主题×画风」拆成正交两轴，SIGIL 给每个
+节点盖语义章。
+
+- **preset = 正交于 theme 的第二轴**：classic/signal-flow/blueprint/editorial
+  × light/dark 八组合，`Theme::resolve(preset, mode)` 出 `&'static Theme`
+  （const 表 + rvalue promotion，不需要 static）；classic 就是历史值原样，
+  唯一差异是表里多了 `preset: "classic"` 名��字段，所以老调用零漂移。三张
+  新表离线从参考 CSS 生成：rgba 全部对 --bg 合成成 6 位 hex（diting 不吃
+  rgba），neutral 槽复用 external 变量。MCP `render_markdown` 加 `preset`
+  参数（与 theme 正交，坏名字报错并列合法值）；shell 根元素加 `data-preset`，
+  和 data-theme 一样是出处钩子不做运行时换肤。
+- **SIGIL：13 种 16×16 语义章**：七类技术件（frontend 浏览窗 / backend
+  括号 / database 圆柱 / cloud / security 盾 / messagebus 总线 / external
+  出界框）+ 五态（start/active/waiting/success/failure）+ neutral 兜底。
+  `data-sigil` 记的是**形状名**，tone 表只管借色——waiting 是沙漏形状借
+  cloud 槽的色，不是 database 形状。这个坑我自己踩的：lifecycle 测试断言
+  写成 `data-sigil="database"`，split 不中直接 unwrap 炸，才把「形状归形状、
+  色归色」这条分界掰清楚。
+- **两处离线归一化（diting parse_path 逼的，记档可审计）**：没有 `S` 臂
+  （`_ => break` 静默截断）→ database 两段 `s` 展开成显式 `c`（反射
+  c1' = 2·P0 − prev_c2）；`A` 退化成端点弦会把 cloud 压成六边形 → 三段
+  圆弧按 SVG 规范 F.6.5 预抬成三次贝塞尔。另有烤值两枚：参考 CSS 在
+  scale(0.6875) 组里写 stroke-width 1.35，真浏览器按 CTM 缩成 ~0.93px，
+  diting 不按组变换缩 stroke，直接烤 0.93；0.76 透明度烤成 7 位 hex 尾
+  字节 c2。
+- **盖位**：sequence/workflow/dataflow/architecture 一律节点框左上
+  (+6,+6)；lifecycle 例外走**右上**（步号占左上），插在 rect 之后、步号
+  文本之前。
+- **门第三次重冻结**：sigil 让 9 篇亮档全漂 + data-preset 属性，一次
+  panic 收齐 13 个钉（9 亮重钉 + 2 暗重钉 + 新 PRESET_CORPUS 2 篇：
+  dogfood/signal-flow-dark、seq-five/blueprint-light）。暗档和 preset 档
+  各带反别名断言——preset 渲染等于同 mode 的 classic 渲染 = palette 断流，
+  必须炸。
+- **dogfood（真 /mcp 面）**：preset=signal-flow + theme=dark 渲染 Receipt
+  图，诊断 0；装进会话 diting 全页截图肉眼验收：workflow 节点章在左上、
+  lifecycle 章在右上，13 种形状可辨认没糊成坨，signal-flow 暗色协调、
+  章与文字无碰撞。
+- 测试：docgen +10（theme 4、sigil 4、preset 换装 1、lifecycle 章位 1）；
+  全量 850→860/0/1；clippy 62 持平（`--bin` 口径）。
+
 ## 5. 分批（按总纲排序）
 
 - **批1（技术·引擎前置）**：`:scope` 选择器 + archify artifact viewer smoke 探针 →
@@ -304,8 +346,11 @@ adapter 只留词汇（kinds/variants）和排版（字号线型/虚线模式）
   三族 adapter + graph.rs grid 边口 + 壳五族路由 + 门语料 9 篇。
 - **批6a（精美·主题）** ✅ 闭环 2026-09-08（见 §4f）：light/dark 常量表 + 生成时
   烤值 + render_markdown theme 参数 + 门 9 亮有意重冻结 + 2 暗档反别名。
-- **批6b+（精美）**：visual preset 数据化、showcase 档门、字号/间距节奏
-  常数、SIGIL 精修、brand-marks、mermaid 通道、story/Passport/Route Probe。
+- **批6b（精美·preset+SIGIL）** ✅ 闭环 2026-09-09（见 §4g）：四 preset 家族
+  正交于 theme + SIGIL 13 形状语义章 + 门第三次重冻结（9 亮 + 2 暗 + 2 preset
+  反别名）。
+- **批6c+（精美）**：showcase 档门、字号/间距节奏常数、brand-marks、
+  mermaid 通道、story/Passport/Route Probe、viewer runtime。
 
 ## 6. 已读 / 未读（诚实账）
 

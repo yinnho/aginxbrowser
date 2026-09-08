@@ -18,6 +18,7 @@ mod gate;
 pub mod lifecycle;
 pub mod sequence;
 pub mod shell;
+pub mod sigil;
 pub mod spec;
 pub mod theme;
 pub mod workflow;
@@ -116,6 +117,7 @@ pub fn render_with_theme(markdown: &str, theme: &'static theme::Theme) -> Render
 
     let receipt = json!({
         "bytes": doc.html.len(),
+        "preset": theme.preset,
         "theme": theme.name,
         "diagrams": diagrams,
         "checks": checks,
@@ -279,9 +281,9 @@ mod tests {
         assert_eq!(light.receipt["theme"], "light");
         assert_eq!(dark.receipt["theme"], "dark");
         // The shell carries the theme as provenance and bakes its colors.
-        assert!(dark.html.contains("<html data-theme=\"dark\">"));
+        assert!(dark.html.contains("<html data-theme=\"dark\" data-preset=\"classic\">"));
         assert!(dark.html.contains("background:#09090b"));
-        assert!(light.html.contains("<html data-theme=\"light\">"));
+        assert!(light.html.contains("<html data-theme=\"light\" data-preset=\"classic\">"));
         assert!(light.html.contains("background:#ffffff"));
         // Diagram ink follows the theme, not just the prose shell.
         assert!(dark.html.contains("#f4f4f5"), "dark ink must appear in SVG");
@@ -296,6 +298,25 @@ mod tests {
                 .to_string()
         };
         assert_eq!(vb(&light), vb(&dark));
+    }
+
+    #[test]
+    fn preset_swaps_the_palette_orthogonally_to_theme() {
+        use super::theme;
+        let classic = render_with_theme(DOC, &theme::DARK);
+        let flow = render_with_theme(DOC, &theme::SIGNAL_FLOW_DARK);
+        // Same mode, different preset family: different bytes, deterministic.
+        assert_ne!(classic.html, flow.html);
+        assert_eq!(flow.html, render_with_theme(DOC, &theme::SIGNAL_FLOW_DARK).html);
+        assert_eq!(classic.receipt["preset"], "classic");
+        assert_eq!(flow.receipt["preset"], "signal-flow");
+        assert_eq!(flow.receipt["theme"], "dark");
+        assert!(flow.html.contains("<html data-theme=\"dark\" data-preset=\"signal-flow\">"));
+        // The preset palette really flows into the SVG.
+        assert!(flow.html.contains(theme::SIGNAL_FLOW_DARK.ink));
+        assert!(!flow.html.contains(theme::DARK.ink));
+        // And every node now carries a semantic sigil stamp.
+        assert!(flow.html.contains("data-sigil=\""));
     }
 
     #[test]

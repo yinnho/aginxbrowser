@@ -325,6 +325,11 @@ pub struct RenderMarkdownParams {
     /// foreground and every SVG palette slot swap together; the receipt
     /// records which theme produced the bytes
     pub theme: Option<String>,
+    /// Visual preset: "classic" (default), "signal-flow", "blueprint", or
+    /// "editorial" — a palette family orthogonal to theme (each preset
+    /// exists in both light and dark). The receipt records preset and
+    /// theme separately
+    pub preset: Option<String>,
     /// Optional session ID: also load the rendered HTML into that live
     /// session (local and free) so session_screenshot / session_state can
     /// verify the artifact
@@ -1133,24 +1138,40 @@ bash, PowerShell and cmd copy flavors.",
     }
 
     #[tool(
-        description = "Render a markdown document into a deterministic, self-contained HTML artifact - the document layer, so the agent never writes HTML by hand. Prose rides a plain offline shell (no fonts, no scripts); archify fenced code blocks carry typed zero-coordinate diagram JSON (sequence, workflow, architecture, dataflow, lifecycle families) and render to inline SVG via the layout engine. Same input, same bytes: the receipt carries the sha256 so determinism is verifiable. theme picks the palette - light (default) or dark - swapping the shell colors and every SVG color slot together; colors bake at generation time (presentation attributes, not CSS variables), and the receipt records the theme name. A broken diagram degrades to a visible code block and lands in receipt.diagnostics; an authored route preset that cannot be honored is self-repaired to a verified semantic substitute and disclosed in receipt diagrams[].repairs - the document still renders. With session_id the artifact is also loaded into that session (local, free) and the reply carries viewport acceptance: scroll extents measured in the live session and graded fits/tall/wide/oversized, telling the agent how to read the page back. Diagram vocabulary adapted from archify (MIT).",
+        description = "Render a markdown document into a deterministic, self-contained HTML artifact - the document layer, so the agent never writes HTML by hand. Prose rides a plain offline shell (no fonts, no scripts); archify fenced code blocks carry typed zero-coordinate diagram JSON (sequence, workflow, architecture, dataflow, lifecycle families) and render to inline SVG via the layout engine. Same input, same bytes: the receipt carries the sha256 so determinism is verifiable. theme picks light (default) or dark; preset picks the palette family — classic (default), signal-flow, blueprint, editorial — orthogonal to theme; colors bake at generation time (presentation attributes, not CSS variables), and the receipt records both preset and theme. A broken diagram degrades to a visible code block and lands in receipt.diagnostics; an authored route preset that cannot be honored is self-repaired to a verified semantic substitute and disclosed in receipt diagrams[].repairs - the document still renders. With session_id the artifact is also loaded into that session (local, free) and the reply carries viewport acceptance: scroll extents measured in the live session and graded fits/tall/wide/oversized, telling the agent how to read the page back. Diagram vocabulary adapted from archify (MIT).",
         annotations(title = "Render Markdown")
     )]
     async fn render_markdown(&self, Parameters(params): Parameters<RenderMarkdownParams>) -> String {
-        let rendered = match params.theme.as_deref() {
-            None => crate::docgen::render(&params.markdown),
-            Some(name) => match crate::docgen::theme::Theme::by_name(name) {
-                Some(theme) => crate::docgen::render_with_theme(&params.markdown, theme),
-                None => {
-                    return json!({
-                        "error": format!(
-                            "unknown theme \"{name}\" — expected one of: {}",
-                            crate::docgen::theme::Theme::names().join(", ")
+        use crate::docgen::theme::Theme;
+        // (preset, mode) → theme. One-sided requests fill in the classic/
+        // light defaults; the all-default request keeps riding render(),
+        // the historical entry point.
+        let resolved: Result<Option<&'static Theme>, String> = match (&params.preset, &params.theme)
+        {
+            (None, None) => Ok(None),
+            (None, Some(mode)) => Theme::by_name(mode).map(Some).ok_or_else(|| {
+                format!(
+                    "unknown theme \"{mode}\" — expected one of: {}",
+                    Theme::names().join(", ")
+                )
+            }),
+            (Some(preset), mode) => {
+                Theme::resolve(preset, mode.as_deref().unwrap_or("light"))
+                    .map(Some)
+                    .ok_or_else(|| {
+                        format!(
+                            "unknown preset \"{preset}\" or theme \"{}\" — presets: {}; themes: {}",
+                            mode.as_deref().unwrap_or("light"),
+                            Theme::presets().join(", "),
+                            Theme::names().join(", ")
                         )
                     })
-                    .to_string()
-                }
-            },
+            }
+        };
+        let rendered = match resolved {
+            Err(e) => return json!({ "error": e }).to_string(),
+            Ok(None) => crate::docgen::render(&params.markdown),
+            Ok(Some(theme)) => crate::docgen::render_with_theme(&params.markdown, theme),
         };
         let crate::docgen::RenderOutcome { html, receipt } = rendered;
         match params.session_id {

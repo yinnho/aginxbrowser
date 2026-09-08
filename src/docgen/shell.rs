@@ -314,8 +314,9 @@ pub fn render(markdown: &str, theme: &'static Theme) -> RenderedDoc {
 
     let title = doc_title.unwrap_or_else(|| "Document".to_string());
     let html = format!(
-        "<!DOCTYPE html>\n<html data-theme=\"{}\">\n<head>\n<meta charset=\"utf-8\">\n<title>{}</title>\n<style>{}</style>\n</head>\n<body>\n{}</body>\n</html>\n",
+        "<!DOCTYPE html>\n<html data-theme=\"{}\" data-preset=\"{}\">\n<head>\n<meta charset=\"utf-8\">\n<title>{}</title>\n<style>{}</style>\n</head>\n<body>\n{}</body>\n</html>\n",
         theme.name,
+        theme.preset,
         html_escape(&title),
         shell_css(theme),
         body

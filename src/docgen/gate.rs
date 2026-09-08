@@ -217,19 +217,19 @@ const CORPUS: [(&str, &str); 9] = [
 /// Frozen attempt-1 sha256s (light theme). A mismatch means geometry or
 /// palette changed; if that change is deliberate, re-freeze this table
 /// consciously — the point of the gate is that "the numbers moved" is never
-/// a surprise. Last re-freeze: 批6a theme layer (light values are the
-/// historical literals value-for-value, so the only light drift is the
-/// `<html data-theme="light">` provenance attribute).
+/// a surprise. Last re-freeze: 批6b preset+sigil layer (every node gains a
+/// semantic sigil stamp and the html tag gains data-preset; classic values
+/// themselves are unchanged).
 const FROZEN: [(&str, &str); 9] = [
-    ("checkout", "4c4f84851f03ef826a9bf46965a06776b33d1d5a5c97e3f6492c2401b62d3eb1"),
-    ("index-build", "ef37b77499b3ecafaa0ee36c86aa67d370fd7cbd58ea044f1552ccfdc70238e7"),
-    ("dogfood", "b6c3ab662fea4f2895e171116aae9ac8b64540d299ab022810a9bc68bd20a682"),
-    ("cjk", "9683b15f3cd0d5b5f8ad75ea2d814ad3f68383c4f557201ebd98200384aa629c"),
-    ("seq-five", "30074ffb8b20cf7483e569fb0b08faf016cb29bd8c5672a67f34f2104d168faf"),
-    ("seq-min", "4d9197c3bba3cae5e9fe9fa1eb7eb841c0834422a91c932ea0b43121d40b3282"),
-    ("dataflow-ingest", "b45ce8d83e843edb20f2465f07ea87c625b54583c4b1e6c07b0c0d2fb761c8e1"),
-    ("lifecycle-release", "6ae63641e93e4f57e44373c8505c0c50cff49ce4d9181cac0f191aa9358b59f0"),
-    ("architecture-edge", "bac5312616926e3af5faee6774c9cdaf12f7be0aee3e42a343c79d936cb053e0"),
+    ("checkout", "4b3fb05e81d5d82b9700d61b3a654a8f44b2b83ce4f41c51d83ab26cc05f79fa"),
+    ("index-build", "f2e66a7c43e96955cbf7d426f3bafde95e98339ed1d234127cd4d9a0f6c66c83"),
+    ("dogfood", "697db655881704f9e0a82c93fa5a46d706c795ad8e5178e27f49542a33694729"),
+    ("cjk", "48ef00bb6cac9a862ce889193d7248fceb54aaa214ce1c8d4a86195ceff6b6d5"),
+    ("seq-five", "9a5e6be0d16854fac1cfecfee5a6186ed424148fabe5a7e034dadf339216fff1"),
+    ("seq-min", "9350c4342b49b8cda009fa82af7fc53b13da91655053e5f2baca64b246fe244d"),
+    ("dataflow-ingest", "308c185190d3f945822c89b3a6e7194bb284c6071ffaae72ba10f53a5801d117"),
+    ("lifecycle-release", "28022abeb45469eb657de784f0f903fbea0080029596fc5dbbe43f7a8e307326"),
+    ("architecture-edge", "ac8f3cb36d3254378197330640e410bf7053ec7adf39cf4aaaa73e4b04c5aa6d"),
 ];
 
 /// Dark-theme corpus: the two richest documents re-rendered under DARK, so
@@ -238,8 +238,22 @@ const FROZEN: [(&str, &str); 9] = [
 const DARK_CORPUS: [&str; 2] = [DOGFOOD, SEQ_FIVE];
 
 const FROZEN_DARK: [(&str, &str); 2] = [
-    ("dogfood", "ea9a28d7b19620e8636fe5e477a9bcd65175f0f778385b8ae61c23023a27c318"),
-    ("seq-five", "bf3462742c8e06fd3b73d764e823cf06b10b8fb228edf8d3ffeb8333bacf29f8"),
+    ("dogfood", "892f92ea1fde213f2ef7a9904bb1e3a6c0b1bc823d82b6f0c8b4089bf2537c06"),
+    ("seq-five", "dd20d3f19f20cf7bb5099b898b260a9b086ae51b0cf055ce9818b28354bd7779"),
+];
+
+/// Preset corpus: one document under each non-classic palette family, in a
+/// different mode, paired with its same-mode classic baseline. The preset
+/// tables are generator output — this freeze is what makes a typo in those
+/// tables a conscious re-freeze instead of silent drift.
+const PRESET_CORPUS: [(&str, &str, &theme::Theme, &theme::Theme); 2] = [
+    ("dogfood/signal-flow-dark", DOGFOOD, &theme::SIGNAL_FLOW_DARK, &theme::DARK),
+    ("seq-five/blueprint-light", SEQ_FIVE, &theme::BLUEPRINT_LIGHT, &theme::LIGHT),
+];
+
+const FROZEN_PRESET: [(&str, &str); 2] = [
+    ("dogfood/signal-flow-dark", "d7084469d16f41284e4bb3272a5c65754ca1145c54f936a2583b3c09c671d672"),
+    ("seq-five/blueprint-light", "c84125deac8818d688ec029eeea869873a186065e85a00b113d338cd9f1e6130"),
 ];
 
 #[test]
@@ -289,32 +303,82 @@ fn first_pass_corpus_bytes_are_frozen() {
 
 /// Same freeze discipline for the dark palette, and the two themes must
 /// never alias: a dark render equal to its light render means the theme
-/// stopped flowing into the artifact.
+/// stopped flowing into the artifact. All drift collects into one panic so
+/// a re-freeze pins every entry in a single run.
 #[test]
 fn dark_corpus_bytes_are_frozen_and_distinct() {
     let names = ["dogfood", "seq-five"];
-    for (i, md) in DARK_CORPUS.iter().enumerate() {
-        let light = render(md).html;
-        let dark = render_with_theme(md, &theme::DARK).html;
-        assert_ne!(
-            light, dark,
-            "{}: dark render must differ from light",
-            names[i]
-        );
+    let computed: Vec<(&str, String)> = DARK_CORPUS
+        .iter()
+        .enumerate()
+        .map(|(i, &md)| {
+            let light = render(md).html;
+            let dark = render_with_theme(md, &theme::DARK).html;
+            assert_ne!(
+                light, dark,
+                "{}: dark render must differ from light",
+                names[i]
+            );
+            assert!(
+                dark.contains("data-theme=\"dark\""),
+                "{}: dark provenance attribute missing",
+                names[i]
+            );
+            let mut h = Sha256::new();
+            h.update(dark.as_bytes());
+            (names[i], format!("{:x}", h.finalize()))
+        })
+        .collect();
+    let drift: Vec<String> = computed
+        .iter()
+        .zip(FROZEN_DARK.iter())
+        .filter(|((_, hash), &(_, frozen))| hash.as_str() != frozen)
+        .map(|((name, hash), _)| format!("(\"{name}\", \"{hash}\"),"))
+        .collect();
+    assert!(
+        drift.is_empty(),
+        "dark corpus bytes drifted — pin these: {}",
+        drift.join(" ")
+    );
+}
+
+/// Freeze discipline for the preset families, plus their anti-aliasing
+/// contract: a preset render equal to its same-mode classic render means
+/// the preset palette stopped flowing into the artifact.
+#[test]
+fn preset_corpus_bytes_are_frozen_and_distinct() {
+    let computed: Vec<(&str, String, String)> = PRESET_CORPUS
+        .iter()
+        .map(|&(key, md, preset, _)| {
+            let rendered = render_with_theme(md, preset);
+            let mut h = Sha256::new();
+            h.update(rendered.html.as_bytes());
+            (key, rendered.html, format!("{:x}", h.finalize()))
+        })
+        .collect();
+    let drift: Vec<String> = computed
+        .iter()
+        .zip(FROZEN_PRESET.iter())
+        .filter(|((_, _, hash), &(_, frozen))| hash.as_str() != frozen)
+        .map(|((key, _, hash), _)| format!("(\"{key}\", \"{hash}\"),"))
+        .collect();
+    assert!(
+        drift.is_empty(),
+        "preset corpus bytes drifted — pin these: {}",
+        drift.join(" ")
+    );
+    // Wiring, checked once the freeze holds: the preset reaches the shell
+    // as provenance and the palette stays distinct from classic in-mode.
+    for (i, &(key, md, preset, classic)) in PRESET_CORPUS.iter().enumerate() {
+        let html = &computed[i].1;
         assert!(
-            dark.contains("data-theme=\"dark\""),
-            "{}: dark provenance attribute missing",
-            names[i]
+            html.contains(&format!("data-preset=\"{}\"", preset.preset)),
+            "{key}: preset provenance attribute missing"
         );
-        let mut h = Sha256::new();
-        h.update(dark.as_bytes());
-        let hash = format!("{:x}", h.finalize());
-        assert_eq!(
-            hash,
-            FROZEN_DARK[i].1,
-            "{}: dark bytes drifted — pin this: (\"{}\", \"{hash}\")",
-            names[i],
-            FROZEN_DARK[i].0
+        assert_ne!(
+            html.as_str(),
+            render_with_theme(md, classic).html.as_str(),
+            "{key}: preset render must differ from its classic baseline"
         );
     }
 }

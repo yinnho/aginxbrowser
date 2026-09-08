@@ -28,6 +28,7 @@ use super::spec::{
 };
 use super::theme::Theme;
 use super::tx;
+use super::sigil;
 
 // ---------------------------------------------------------------------------
 // constants (archify px × 10)
@@ -628,6 +629,13 @@ fn emit_svg(
             stroke,
             dash_attr
         ));
+        // Top-right: the step number owns the top-left in this family.
+        s.push_str(&sigil::sigil(
+            &state.kind,
+            rect.x + rect.w - 170,
+            rect.y + 60,
+            theme
+        ));
         if let Some(step) = state.step.as_deref().filter(|s| !s.trim().is_empty()) {
             s.push_str(&format!(
                 "<text x=\"{}\" y=\"{}\" font-size=\"7\" font-weight=\"700\" fill=\"{}\">{}</text>",
@@ -909,5 +917,56 @@ mod tests {
             "drop dive missing: {path}"
         );
         assert!(rendered.repairs.is_empty());
+    }
+
+    #[test]
+    fn sigil_owns_the_top_right_corner() {
+        // The step number owns the top-left in this family, so the semantic
+        // sigil rides the top-right: its translate must track the rect's
+        // right edge. e1 is a "waiting" state — its own hourglass shape,
+        // borrowing the cloud slot's color.
+        let rendered = render_lifecycle(&spec(), &LIGHT).unwrap();
+        let g = rendered
+            .svg
+            .split("data-node-id=\"e1\"")
+            .nth(1)
+            .unwrap()
+            .split("</g>")
+            .next()
+            .unwrap();
+        let field = |k: &str| -> f64 {
+            g.split(&format!("{k}=\""))
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap()
+        };
+        let (x, y, w) = (field("x"), field("y"), field("width"));
+        let t = g
+            .split("data-sigil=\"waiting\" transform=\"translate(")
+            .nth(1)
+            .unwrap()
+            .split(')')
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .map(|v| v.parse::<f64>().unwrap())
+            .collect::<Vec<f64>>();
+        assert_eq!(t.len(), 2, "sigil translate malformed: {g}");
+        assert!(
+            (t[0] - (x + w - 17.0)).abs() < 0.05,
+            "sigil x {} not at right edge {}/{}",
+            t[0],
+            x,
+            w
+        );
+        assert!(
+            (t[1] - (y + 6.0)).abs() < 0.05,
+            "sigil y {} not at top edge {y}",
+            t[1]
+        );
     }
 }
