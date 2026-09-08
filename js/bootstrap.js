@@ -10472,9 +10472,15 @@ globalThis.__diting_setPersona = function() {
 // hover answers to coarse/none: a phone-sized viewport answering
 // `pointer: fine` is a contradiction a fingerprint script can cross-check
 // against maxTouchPoints, so those move together.
-globalThis.__diting_setViewport = function(w, h, mobile) {
+// devicePixelRatio follows the same split: the 4th arg (CDP
+// setDeviceMetricsOverride's deviceScaleFactor) pins what scripts see when
+// > 0, 0 restores the persona's (Chromium's "0 = default"), undefined
+// leaves it untouched.
+globalThis.__diting_setViewport = function(w, h, mobile, dpr) {
   globalThis.innerWidth = w; globalThis.innerHeight = h;
   globalThis.outerWidth = w; globalThis.outerHeight = h;
+  if (typeof dpr === 'number' && dpr > 0) globalThis.devicePixelRatio = dpr;
+  else if (dpr === 0) globalThis.devicePixelRatio = _fp('dpr') || (globalThis.screen.width >= 2560 ? 2 : 1);
   globalThis.visualViewport = {
     width: w, height: h, offsetLeft: 0, offsetTop: 0, scale: 1,
     addEventListener() {}, removeEventListener() {},

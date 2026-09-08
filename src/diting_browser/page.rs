@@ -212,6 +212,10 @@ pub struct Page {
     /// `__diting_setPersona`) — the override has to be replayed after that
     /// or the page silently flips back mid-session.
     viewport_override: Option<(f32, f32, bool)>,
+    /// devicePixelRatio pin from the same override (CDP deviceScaleFactor
+    /// above zero); None keeps the persona's dpr reporting through. Rides
+    /// the same replay as `viewport_override`.
+    dpr_override: Option<f64>,
     /// 32-bit seed the JS persona draws its hardware identity from
     /// (screen/dpr/GPU/canvas). Lives on the Page because every navigation
     /// rebuilds the realm and `__diting_init` self-deletes after drawing a
@@ -351,6 +355,7 @@ impl Page {
             network_event_counter: 0,
             session_storage: None,
             viewport_override: None,
+            dpr_override: None,
             fp_seed: u64::from_be_bytes(
                 uuid::Uuid::new_v4().into_bytes()[..8].try_into().unwrap(),
             ),
@@ -1700,8 +1705,9 @@ impl Page {
     /// visualViewport move, matchMedia answers coarse-pointer/hover-none
     /// when `mobile`, and the layout ICB (element rects, @media cascade)
     /// follows via the same set_viewport op the persona publishes through.
-    pub fn set_viewport_override(&mut self, w: f32, h: f32, mobile: bool) {
+    pub fn set_viewport_override(&mut self, w: f32, h: f32, mobile: bool, dpr: Option<f64>) {
         self.viewport_override = Some((w, h, mobile));
+        self.dpr_override = dpr.filter(|d| *d > 0.0);
         self.apply_viewport_override();
     }
 
@@ -1789,6 +1795,7 @@ impl Page {
     /// Drop the override and return to the persona viewport everywhere.
     pub fn clear_viewport_override(&mut self) {
         self.viewport_override = None;
+        self.dpr_override = None;
         if let Some(js) = &mut self.js {
             let _ = js.execute_script("<viewport>", "__diting_clearViewport()");
         }
@@ -1798,10 +1805,13 @@ impl Page {
     /// is set, so navigation on a default session costs one branch.
     fn apply_viewport_override(&mut self) {
         let Some((w, h, mobile)) = self.viewport_override else { return; };
+        // 0 = "persona default" per the CDP deviceScaleFactor semantics the
+        // bootstrap side implements; a pinned dpr rides every replay.
+        let dpr = self.dpr_override.map(|d| d.to_string()).unwrap_or_else(|| "0".into());
         if let Some(js) = &mut self.js {
             let _ = js.execute_script(
                 "<viewport>",
-                &format!("__diting_setViewport({w}, {h}, {mobile})"),
+                &format!("__diting_setViewport({w}, {h}, {mobile}, {dpr})"),
             );
         }
     }
@@ -3541,14 +3551,21 @@ mod tests {
             ("/b", 200, page_html("y")),
         ]);
         let mut p = test_page();
-        p.set_viewport_override(375.0, 667.0, true);
+        p.set_viewport_override(375.0, 667.0, true, Some(2.625));
         p.navigate(&format!("http://127.0.0.1:{port}/a"))
             .await
             .unwrap();
+        // The persona dpr, sampled with no override pinned.
+        p.clear_viewport_override();
+        let persona_dpr = p.evaluate("devicePixelRatio").as_f64().unwrap();
+        p.set_viewport_override(375.0, 667.0, true, Some(2.625));
 
-        // Scripts see the emulated window.
+        // Scripts see the emulated window — inner* and the pinned dpr (CDP
+        // deviceScaleFactor semantics: what scripts report, not the persona's
+        // panel).
         assert_eq!(p.evaluate("innerWidth").as_f64(), Some(375.0));
         assert_eq!(p.evaluate("innerHeight").as_f64(), Some(667.0));
+        assert_eq!(p.evaluate("devicePixelRatio").as_f64(), Some(2.625));
         assert_eq!(
             p.evaluate("matchMedia('(max-width:600px)').matches"),
             serde_json::json!(true)
@@ -3581,15 +3598,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(p.evaluate("innerWidth").as_f64(), Some(375.0));
+        assert_eq!(p.evaluate("devicePixelRatio").as_f64(), Some(2.625));
         assert_eq!(
             p.evaluate("matchMedia('(pointer:coarse)').matches"),
             serde_json::json!(true)
         );
 
-        // Clearing returns the persona viewport and desktop answers.
+        // Clearing returns the persona viewport, desktop answers, and the
+        // persona dpr.
         p.clear_viewport_override();
         let w = p.evaluate("innerWidth").as_f64().unwrap();
         assert!(w > 600.0, "persona viewport restored, got {w}");
+        assert_eq!(p.evaluate("devicePixelRatio").as_f64(), Some(persona_dpr));
         assert_eq!(
             p.evaluate("matchMedia('(pointer:coarse)').matches"),
             serde_json::json!(false)

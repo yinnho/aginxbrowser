@@ -93,3 +93,20 @@ blitz；参照管线独立 opt-in `blitz-reference`（设备构建永不开）�
 构建命令不变。fontique/fontconfig-dlopen patch 仍需（fontique 是 diting 运行时
 依赖）。二进制体积降幅未测，AginxOS 下次出包记录 strip 后对比。交接细节见
 `~/Documents/aginx/aginxbrowser-zero-blitz-build.md`。
+
+---
+
+## 更新 2026-09-08 — P1 坐标世界收尾（dpr 语义落地）
+
+P1 四条全部闭环。getLayoutMetrics 真值已随视口帧流上 v0.2.11；本批补上最后一块：
+`Emulation.setDeviceMetricsOverride` 的 `deviceScaleFactor` 从"校验后丢弃"改为真
+生效——>0 钉住 `window.devicePixelRatio`（跨导航存活），=0 回 persona 默认
+（Chromium 的"0 = default"）。同批加了两个钉回归的测试：dpr 钉定/回退、
+gBCR 圆心点 dispatchMouseEvent 命中（= 设备触摸→点击链路的引擎侧验收）。
+
+坐标语义说明（四坐标消费者同源、Pixel 5 面板 1:1 配方、已知差异）见交接文档
+`~/Documents/aginx/aginxbrowser-coordinate-world.md`。要点：override 之后
+innerWidth/gBCR/elementFromPoint/抓帧/getLayoutMetrics 全读同一个视口，
+dpr 只影响脚本可见的报告值、不影响成像（恒 1 CSS px = 1 图像像素）；
+screen.* 跟 persona 不跟 override（stealth 立场），screenWidth/screenHeight
+参数校验后暂不生效。

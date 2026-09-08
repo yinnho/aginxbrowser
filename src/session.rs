@@ -1387,7 +1387,7 @@ fn session_thread(
                             };
                             let w = width.map(|v| v as f32).unwrap_or(current.0);
                             let h = height.map(|v| v as f32).unwrap_or(current.1);
-                            page.set_viewport_override(w, h, mobile);
+                            page.set_viewport_override(w, h, mobile, None);
                             let val = serde_json::json!({
                                 "width": w as u32,
                                 "height": h as u32,

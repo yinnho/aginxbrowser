@@ -3387,6 +3387,115 @@ mod tests {
         assert!(r.error.is_none(), "setDeviceMetricsOverride: {:?}", r.error);
     }
 
+    /// deviceScaleFactor pins what scripts see (window.devicePixelRatio);
+    /// 0 restores the persona's — Chromium's "0 = default" — while the
+    /// emulated dimensions stay (width/height 0 = keep).
+    #[cfg(feature = "screenshot")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn device_metrics_override_pins_device_pixel_ratio() {
+        let (mut ctx, session) = band_setup(BAND_PAGE).await;
+        let persona_dpr = band_dispatch(&mut ctx, &session, 2, "Runtime.evaluate",
+            json!({ "expression": "devicePixelRatio", "returnByValue": true }))
+            .await
+            .result
+            .expect("result")["result"]["value"]
+            .as_f64()
+            .expect("numeric dpr");
+
+        let r = band_dispatch(
+            &mut ctx,
+            &session,
+            3,
+            "Emulation.setDeviceMetricsOverride",
+            json!({ "width": 320, "height": 200, "deviceScaleFactor": 2.625, "mobile": false }),
+        )
+        .await;
+        assert!(r.error.is_none(), "override: {:?}", r.error);
+        let v = band_dispatch(&mut ctx, &session, 4, "Runtime.evaluate",
+            json!({ "expression": "devicePixelRatio", "returnByValue": true }))
+            .await
+            .result
+            .expect("result");
+        assert_eq!(v["result"]["value"].as_f64(), Some(2.625));
+
+        // dsf 0 = default: the persona dpr returns, the pinned 320x200 stays.
+        let r = band_dispatch(
+            &mut ctx,
+            &session,
+            5,
+            "Emulation.setDeviceMetricsOverride",
+            json!({ "width": 0, "height": 0, "deviceScaleFactor": 0, "mobile": false }),
+        )
+        .await;
+        assert!(r.error.is_none(), "dsf-0 override: {:?}", r.error);
+        let v = band_dispatch(&mut ctx, &session, 6, "Runtime.evaluate",
+            json!({ "expression": "[devicePixelRatio, innerWidth]", "returnByValue": true }))
+            .await
+            .result
+            .expect("result");
+        assert_eq!(v["result"]["value"][0].as_f64(), Some(persona_dpr));
+        assert_eq!(v["result"]["value"][1].as_f64(), Some(320.0));
+    }
+
+    /// Input.dispatchMouseEvent consumes the same coordinate world the layout
+    /// reports: a click at a getBoundingClientRect-derived point must land on
+    /// the element (AginxOS P1 — panel px = CSS px once the viewport override
+    /// matches the panel, no ratio math anywhere).
+    #[cfg(feature = "screenshot")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn mouse_click_lands_on_layout_coordinates() {
+        let html = "<html><body style=\"margin:0\">\
+<button id=b style=\"position:absolute;left:100px;top:120px;width:80px;height:30px\" \
+onclick=\"globalThis.__hits=(globalThis.__hits||0)+1\">go</button></body></html>";
+        let (mut ctx, session) = band_setup(html).await;
+        set_viewport_320x200(&mut ctx, &session).await;
+
+        let g = band_dispatch(
+            &mut ctx,
+            &session,
+            3,
+            "Runtime.evaluate",
+            json!({
+                "expression":
+                    "JSON.stringify(document.getElementById('b').getBoundingClientRect())",
+                "returnByValue": true,
+            }),
+        )
+        .await;
+        let rect: serde_json::Value = serde_json::from_str(
+            g.result.expect("result")["result"]["value"].as_str().expect("rect json"),
+        )
+        .expect("parse rect");
+        let cx = rect["x"].as_f64().unwrap() + rect["width"].as_f64().unwrap() / 2.0;
+        let cy = rect["y"].as_f64().unwrap() + rect["height"].as_f64().unwrap() / 2.0;
+
+        for (i, ty) in ["mousePressed", "mouseReleased"].iter().enumerate() {
+            let r = band_dispatch(
+                &mut ctx,
+                &session,
+                4 + i as u64,
+                "Input.dispatchMouseEvent",
+                json!({ "type": ty, "x": cx, "y": cy, "button": "left", "clickCount": 1 }),
+            )
+            .await;
+            assert!(r.error.is_none(), "dispatchMouseEvent {ty}: {:?}", r.error);
+        }
+
+        let v = band_dispatch(
+            &mut ctx,
+            &session,
+            6,
+            "Runtime.evaluate",
+            json!({ "expression": "globalThis.__hits", "returnByValue": true }),
+        )
+        .await;
+        assert_eq!(
+            v.result.expect("result")["result"]["value"].as_f64(),
+            Some(1.0),
+            "click at the gBCR point hit the button"
+        );
+    }
+
     #[cfg(feature = "screenshot")]
     #[tokio::test(flavor = "current_thread")]
     async fn capture_screenshot_no_params_keeps_legacy_full_page() {

@@ -88,6 +88,9 @@ pub async fn handle(
             optional_metric_dimension(params, "screenHeight")?;
             if let Some(page) = ctx.get_session_page_mut(session_id) {
                 let keep = |v: u32| if v == 0 { None } else { Some(v) };
+                // deviceScaleFactor: > 0 pins window.devicePixelRatio; 0 is
+                // Chromium's "use the default" — the persona's dpr here.
+                let dpr = if device_scale_factor == 0.0 { None } else { Some(device_scale_factor) };
                 let current = page.evaluate_with_timeout(
                     "innerWidth",
                     std::time::Duration::from_secs(2),
@@ -102,7 +105,7 @@ pub async fn handle(
                 let h = keep(height)
                     .or_else(|| current_h.as_f64().map(|v| v as u32))
                     .unwrap_or(800);
-                page.set_viewport_override(w as f32, h as f32, mobile);
+                page.set_viewport_override(w as f32, h as f32, mobile, dpr);
             }
             Ok(json!({}))
         }

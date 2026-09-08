@@ -100,9 +100,10 @@ impl Page {
         self.inner.evaluate_with_timeout(expression, timeout)
     }
 
-    /// Pin the viewport (device emulation); survives navigation.
-    pub fn set_viewport_override(&mut self, w: f32, h: f32, mobile: bool) {
-        self.inner.set_viewport_override(w, h, mobile);
+    /// Pin the viewport (device emulation); survives navigation. `dpr` pins
+    /// `window.devicePixelRatio` when > 0, None keeps the persona's.
+    pub fn set_viewport_override(&mut self, w: f32, h: f32, mobile: bool, dpr: Option<f64>) {
+        self.inner.set_viewport_override(w, h, mobile, dpr);
     }
 
     pub fn viewport_override(&self) -> Option<(f32, f32, bool)> {
