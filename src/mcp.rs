@@ -1262,7 +1262,10 @@ fn stamped(text: String, mgr: &session::SessionManager, sid: &str) -> String {
     }
 }
 
-#[tool_handler]
+// Identify as the product, not the framework: the macro's default
+// Implementation::from_build_env() reads rmcp's own crate name, so every
+// handshake said "rmcp/1.7.0". Version comes from our CARGO_PKG_VERSION.
+#[tool_handler(name = "aginxbrowser")]
 impl ServerHandler for AginxBrowserMcp {}
 
 // ============================================================================
