@@ -1989,6 +1989,11 @@ impl Page {
                 Err(e) => {
                     let preview: String = expression.chars().take(120).collect();
                     tracing::warn!("evaluate_for_cdp error for '{}': {}", preview, e);
+                    // The outcome variant exists to NOT collapse failures into
+                    // a silent undefined (that's the plain variant's job) — a
+                    // watchdog timeout folded to `value: null` here made an
+                    // eval overrun indistinguishable from a genuine null
+                    // return. Surface it as an exception instead.
                     crate::diting_js::runtime::EvalOutcome {
                         info: crate::diting_js::runtime::RemoteObjectInfo {
                             js_type: "undefined".into(),
@@ -1998,7 +2003,15 @@ impl Page {
                             object_id: None,
                             value: None,
                         },
-                        exception: None,
+                        exception: Some(crate::diting_js::runtime::ExceptionInfo {
+                            text: "Uncaught".into(),
+                            description: e,
+                            class_name: String::new(),
+                            object_id: None,
+                            stack_first: None,
+                            line: None,
+                            col: None,
+                        }),
                     }
                 }
             }
@@ -2055,7 +2068,15 @@ impl Page {
                             object_id: None,
                             value: None,
                         },
-                        exception: None,
+                        exception: Some(crate::diting_js::runtime::ExceptionInfo {
+                            text: "Uncaught".into(),
+                            description: e,
+                            class_name: String::new(),
+                            object_id: None,
+                            stack_first: None,
+                            line: None,
+                            col: None,
+                        }),
                     }
                 }
             }

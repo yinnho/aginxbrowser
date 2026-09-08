@@ -963,18 +963,10 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         "layout_rect" => {
             let nid = match parse_nid(&arg1) { Some(id) => id, None => return "null".into() };
             let epoch = dom.epoch();
-            let cache_hit = gs.layout_cache.borrow().as_ref().and_then(|(e, (m, _, _, _))| {
+            ensure_layout_run(&gs, dom, epoch);
+            let rect = gs.layout_cache.borrow().as_ref().and_then(|(e, (m, ..))| {
                 if *e == epoch { m.get(&nid).copied() } else { None }
             });
-            let rect = match cache_hit {
-                Some(r) => Some(r),
-                None => {
-                    let (rects, order, styles, items) = layout_run_all(&gs, dom);
-                    let r = rects.get(&nid).copied();
-                    *gs.layout_cache.borrow_mut() = Some((epoch, (rects, order, styles, items)));
-                    r
-                }
-            };
             match rect {
                 Some([x, y, w, h]) => format!("[{},{},{},{}]", x, y, w, h),
                 None => "null".into(),
@@ -988,17 +980,11 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         #[cfg(feature = "screenshot")]
         "paint_order" => {
             let epoch = dom.epoch();
-            let cached = gs.layout_cache.borrow().as_ref().and_then(|(e, (_, o, _, _))| {
+            ensure_layout_run(&gs, dom, epoch);
+            let order = gs.layout_cache.borrow().as_ref().and_then(|(e, (_, o, ..))| {
                 if *e == epoch { Some(o.clone()) } else { None }
             });
-            let order = match cached {
-                Some(o) => o,
-                None => {
-                    let (rects, order, styles, items) = layout_run_all(&gs, dom);
-                    *gs.layout_cache.borrow_mut() = Some((epoch, (rects, order.clone(), styles, items)));
-                    order
-                }
-            };
+            let order = order.unwrap_or_default();
             let mut s = String::with_capacity(order.len() * 8 + 2);
             s.push('[');
             for (i, id) in order.iter().enumerate() {
@@ -1023,11 +1009,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         "scroll_extent" => {
             let nid = match parse_nid(&arg1) { Some(id) => id, None => return "null".into() };
             let epoch = dom.epoch();
-            let fresh = gs.layout_cache.borrow().as_ref().map(|(e, _)| *e == epoch) != Some(true);
-            if fresh {
-                let run = layout_run_all(&gs, dom);
-                *gs.layout_cache.borrow_mut() = Some((epoch, run));
-            }
+            ensure_layout_run(&gs, dom, epoch);
             let guard = gs.layout_cache.borrow();
             let Some((_, (rects, ..))) = guard.as_ref().filter(|(e, _)| *e == epoch) else {
                 return "null".into();
@@ -1083,14 +1065,9 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 })
                 .flatten();
             let epoch = dom.epoch();
-            let cached = gs.layout_cache.borrow().as_ref().and_then(|(e, (_, _, s, _))| {
+            ensure_layout_run(&gs, dom, epoch);
+            let style = gs.layout_cache.borrow().as_ref().and_then(|(e, (_, _, s, _))| {
                 if *e == epoch { s.get(&nid).cloned() } else { None }
-            });
-            let style = cached.or_else(|| {
-                let run = layout_run_all(&gs, dom);
-                let s = run.2.get(&nid).cloned();
-                *gs.layout_cache.borrow_mut() = Some((epoch, run));
-                s
             });
             match style {
                 Some(s) => {
@@ -1226,6 +1203,26 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
     )
 }
 
+/// Run one layout pass only when the memoized run is stale for the tree's
+/// current epoch; callers then read their slice from the (now fresh) cache.
+///
+/// Freshness must be checked separately from membership: a nid absent from
+/// the rects map is a legitimate miss on a FRESH cache (boxless element —
+/// <head>, display:none, svg children under the svg v1 one-box model).
+/// Treating "absent" as "stale" re-ran the whole page layout per boxless
+/// lookup; on svg-heavy pages (archify artifacts: ~530 boxless svg nodes) a
+/// single elementFromPoint walk re-laid-out the page hundreds of times and
+/// tripped the 10s eval watchdog — surfacing as silent `null` eval results
+/// and dead clicks.
+#[cfg(feature = "screenshot")]
+fn ensure_layout_run(gs: &JsState, dom: &DomTree, epoch: u64) {
+    let stale = gs.layout_cache.borrow().as_ref().map(|(e, _)| *e == epoch) != Some(true);
+    if stale {
+        let run = layout_run_all(gs, dom);
+        *gs.layout_cache.borrow_mut() = Some((epoch, run));
+    }
+}
+
 /// One viewport-band frame: RGBA pixels plus the scroll offset actually
 /// painted and the document's scrollable extent.
 #[cfg(feature = "screenshot")]
@@ -1269,11 +1266,7 @@ pub(crate) fn band_frame(
     let vh = if viewport.1.is_finite() { viewport.1.max(1.0) } else { 1.0 }.min(MAX_BAND);
 
     let epoch = dom.epoch();
-    let fresh = gs.layout_cache.borrow().as_ref().map(|(e, _)| *e == epoch) != Some(true);
-    if fresh {
-        let run = layout_run_all(gs, dom);
-        *gs.layout_cache.borrow_mut() = Some((epoch, run));
-    }
+    ensure_layout_run(gs, dom, epoch);
     let guard = gs.layout_cache.borrow();
     let (_, (rects, _, _, items)) = guard.as_ref().filter(|(e, _)| *e == epoch)?;
 

@@ -4238,6 +4238,73 @@
         );
     }
 
+    /// A nid absent from the rects map is a legitimate miss on a fresh cache
+    /// (<head>, display:none subtrees, svg children under the svg v1 one-box
+    /// model) — not a staleness signal. Conflating the two re-ran the
+    /// whole-page layout once per boxless lookup; on svg-heavy pages (archify
+    /// workflow artifacts: ~530 boxless svg nodes) a single elementFromPoint
+    /// walk re-laid-out the tree hundreds of times and tripped the 10s eval
+    /// watchdog, surfacing as silent `null` eval results and dead clicks.
+    /// The timing itself isn't unit-assertable without wall-clock flakiness,
+    /// so this pins the semantics: hit testing stays correct on a
+    /// boxless-heavy DOM, both on first layout and after an epoch bump.
+    #[test]
+    #[cfg(feature = "screenshot")]
+    fn test_element_from_point_on_boxless_heavy_dom() {
+        let mut circles = String::new();
+        for i in 0..200 {
+            circles.push_str(&format!(
+                "<circle cx=\"{}\" cy=\"{}\" r=\"4\"/>\n",
+                20 + (i % 20) * 19,
+                20 + (i / 20) * 19
+            ));
+        }
+        let html = format!(
+            r#"<html><head><style>
+          .panel {{ position: absolute; top: 40px; left: 40px; width: 200px; height: 100px; }}
+          .ghost {{ position: absolute; top: 40px; left: 40px; width: 200px; height: 100px; display: none; }}
+          svg {{ position: absolute; top: 0; left: 0; }}
+        </style></head><body>
+        <svg width="400" height="400" viewBox="0 0 400 400">{circles}</svg>
+        <div class="ghost"></div><div class="panel"></div>
+        </body></html>"#
+        );
+        let mut rt = setup_runtime(&html);
+        let probe = |rt: &mut JsRuntime| {
+            let v = rt
+                .evaluate(
+                    r#"(function() {
+                    const p = document.querySelector('.panel').getBoundingClientRect();
+                    const hit = document.elementFromPoint(p.left + p.width / 2, p.top + p.height / 2);
+                    const circles = document.querySelectorAll('circle').length;
+                    // boxless elements must not poison the walk: 200 svg
+                    // children + a display:none sibling all lack rects
+                    const second = document.elementFromPoint(370, 380);
+                    return JSON.stringify({
+                        hit: hit ? hit.className || hit.tagName : null,
+                        circles,
+                        svgArea: second ? second.tagName : null,
+                    });
+                })()"#,
+                )
+                .unwrap();
+            serde_json::from_str::<serde_json::Value>(v.as_str().unwrap()).unwrap()
+        };
+        let first = probe(&mut rt);
+        assert_eq!(first["circles"], serde_json::json!(200));
+        assert_eq!(first["hit"], serde_json::json!("panel"));
+        assert_eq!(first["svgArea"], serde_json::json!("SVG"));
+
+        // Mutate: the epoch bumps, the memoized run must be re-run (not
+        // served from the stale cache), and the panel must move accordingly.
+        rt.evaluate(
+            r#"document.querySelector('.panel').style.top = '300px'; 'ok'"#,
+        )
+        .unwrap();
+        let after = probe(&mut rt);
+        assert_eq!(after["hit"], serde_json::json!("panel"));
+    }
+
     #[test]
     #[cfg(feature = "screenshot")]
     fn test_element_from_point_in_viewport_returns_body() {
