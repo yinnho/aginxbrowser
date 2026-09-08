@@ -7,16 +7,34 @@ use super::{SearchParams, RawSearchResult, SearchEngine, SearchEngineError};
 /// JS shells to every user-agent (the GSA trick our google.rs relied on died
 /// in Aug 2026). "general" category source.
 ///
-/// Connectivity: html.duckduckgo.com is unreachable from CN networks — direct
-/// first, then falls back through AGINXBROWSER_PROXY when configured (see
-/// `get_direct_first_if`).
-pub struct DuckDuckGoEngine;
+/// Connectivity: html.duckduckgo.com is unreachable from CN networks, and the
+/// relay/exit IPs we share with other tenants get anomaly-flagged regardless
+/// of UA. Stealth builds fetch through the wreq client (emulated Chrome
+/// TLS+UA — the plain-reqwest fingerprint was the other half of the anomaly
+/// trigger; SearXNG migrated its whole fleet to curl_cffi for the same
+/// reason): direct first, then AGINXBROWSER_PROXY. Non-stealth builds keep
+/// the plain reqwest path.
+pub struct DuckDuckGoEngine {
+    #[cfg(feature = "stealth")]
+    stealth: std::sync::Arc<crate::diting_net::wreq_client::StealthHttpClient>,
+    #[cfg(feature = "stealth")]
+    stealth_proxied: Option<std::sync::Arc<crate::diting_net::wreq_client::StealthHttpClient>>,
+}
 
 impl DuckDuckGoEngine {
     pub fn new() -> Self {
-        DuckDuckGoEngine
+        DuckDuckGoEngine {
+            // No UA override: the coherent built-in Chrome TLS+UA identity is
+            // the entire point of the stealth client.
+            #[cfg(feature = "stealth")]
+            stealth: super::build_stealth_client(false),
+            #[cfg(feature = "stealth")]
+            stealth_proxied: crate::config::proxy_from_env()
+                .map(|_| super::build_stealth_client(true)),
+        }
     }
 
+    #[cfg(not(feature = "stealth"))]
     fn proxied_client() -> Option<reqwest::Client> {
         crate::config::proxy_from_env().map(|proxy| {
             let proxy_str = if proxy.starts_with("socks5://") && !proxy.starts_with("socks5h://") {
@@ -36,8 +54,74 @@ impl DuckDuckGoEngine {
                 .expect("failed to build proxied reqwest client for duckduckgo")
         })
     }
+
+    /// Direct first (stealth Chrome fingerprint); a body without result
+    /// anchors falls through to the proxied attempt. A flagged exit IP still
+    /// returns a real 200 DDG page — the returned body is unvalidated so the
+    /// caller's anomaly check can classify it.
+    #[cfg(feature = "stealth")]
+    async fn fetch_results_html(&self, url: &str) -> Result<String, SearchEngineError> {
+        let mut rejected: Option<String> = None;
+        let mut last_err: Option<SearchEngineError> = None;
+        // 12s cap on the direct attempt (parity with the plain path's client):
+        // GFW blackholes DDG SYNs, and without a cap the built-in 30s client
+        // timeout burns before the proxied attempt even starts.
+        let direct = tokio::time::timeout(
+            std::time::Duration::from_secs(12),
+            super::stealth_fetch(self.stealth.as_ref(), url),
+        )
+        .await;
+        match direct {
+            Ok(Ok((body, _))) if has_results(&body) => return Ok(body),
+            Ok(Ok((body, _))) => {
+                super::log_rejected_body(url, "stealth-direct", &body);
+                rejected = Some(body);
+            }
+            Ok(Err(e)) => {
+                tracing::debug!("duckduckgo: direct stealth attempt failed: {e:?}");
+                last_err = Some(e);
+            }
+            Err(_) => {
+                last_err = Some(SearchEngineError::Transient(
+                    "direct attempt timed out (12s)".into(),
+                ));
+            }
+        }
+        if let Some(ref proxied) = self.stealth_proxied {
+            return match super::stealth_fetch(proxied.as_ref(), url).await {
+                Ok((body, _)) => {
+                    if !has_results(&body) {
+                        super::log_rejected_body(url, "stealth-proxy", &body);
+                    }
+                    Ok(body)
+                }
+                Err(e) => Err(SearchEngineError::Transient(format!(
+                    "direct ({last_err:?}) + proxy: {e:?}"
+                ))),
+            };
+        }
+        // Unproxied deployment: hand back whatever the direct attempt
+        // produced so the caller's anomaly check can classify it.
+        if let Some(body) = rejected {
+            return Ok(body);
+        }
+        Err(last_err
+            .unwrap_or_else(|| SearchEngineError::Transient("no fetch path succeeded".into())))
+    }
+
+    #[cfg(not(feature = "stealth"))]
+    async fn fetch_results_html(&self, url: &str) -> Result<String, SearchEngineError> {
+        super::get_direct_first_if(url, DDG_HEADERS, Self::proxied_client, has_results).await
+    }
 }
 
+/// Result pages carry `a.result__a` anchors; anomaly challenges are real DDG
+/// pages (14KB+) with zero of them.
+fn has_results(body: &str) -> bool {
+    body.contains("result__a")
+}
+
+#[cfg(not(feature = "stealth"))]
 const DDG_HEADERS: &[(&str, &str)] = &[(
     "User-Agent",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
@@ -65,14 +149,11 @@ impl SearchEngine for DuckDuckGoEngine {
             page,
         );
 
-        // body_ok = page contains result anchors; a challenge/portal page
-        // (anomaly detection) fails this and drives the proxy retry.
-        fn has_results(body: &str) -> bool {
-            body.contains("result__a")
-        }
-        let body = super::get_direct_first_if(&url, DDG_HEADERS, Self::proxied_client, has_results)
-            .await?;
-        if body.contains("anomaly") && !body.contains("result__a") {
+        let body = self.fetch_results_html(&url).await?;
+        // Anomaly challenge: flagged IPs still get a real 200 DDG page, just
+        // with zero results. Report as Captcha so the suspension ladder
+        // engages instead of hammering the flag.
+        if body.contains("anomaly") && !has_results(&body) {
             return Err(SearchEngineError::Captcha {
                 url: url.clone(),
                 captcha_type: Some(crate::captcha::CaptchaType::Unknown),
