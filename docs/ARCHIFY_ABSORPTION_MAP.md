@@ -218,6 +218,48 @@ SQLite cache。
 分岔记录：architecture/dataflow/lifecycle 三族 adapter 延批5——机制（graph.rs
 谓词/路由/升级 + 修复阶梯）已就绪，纯 adapter 活，随精美层一起做。
 
+## 4e. 批5 闭环（2026-09-08）：dataflow/lifecycle/architecture 三族 adapter
+
+批4 延下来的三族 adapter 这次全部落地，docgen 从 workflow 单族扩成五族：
+
+- **spec 三型**：DataflowSpec（stages 2..=5 + stage/row/yOffset 节点 + flows）、
+  LifecycleSpec（lanes + states 按 Phase/Event/Outcome 三带分列 + transitions）、
+  ArchitectureSpec（row/col 组件 + boundaries(wraps) + connections + layout 旋钮）。
+  各带校验器与路由词表；lifecycle 的带几何（cy/w/h/cols）常量进 spec.rs 共享。
+- **三族都是固定格点**：dataflow stage_x(i)=1000+i·2150、节点 1120×580、
+  ROW_YS 五行；lifecycle Phase/Event/Outcome 带内 COL_PITCH=1540；architecture
+  默认 cell 130×64px、gap 30/40px。格点固定 ⇒ 无 gap 可放宽 ⇒ Feedback 终态化：
+  不可行直接诊断，preset 失配先走各族替换阶梯（dataflow：
+  vertical-channel→bottom/top-channel→auto；lifecycle：drop→bottom/top、
+  left↔right→auto；architecture：orthogonal-h↔v→auto），首个过门替身胜、
+  repairs 披露。语料文档全 auto 构造，attempt-1 结构性不可能出修复。
+- **大分岔（记档）**：三族一律 **不用带障碍**——与 workflow 相位带相反。节点
+  住在 stage/boundary 框里面，框是背景画法（先画框后画线），连线穿框读作
+  "穿过这个区域"，正是 deployment 视图的语义。obstacles=&[] 全族通用。
+- **graph.rs 扩口**：`plan_grid_edge(req, scene, ladder)`（auto 短路 plan_route；
+  authored 名字 intern 进 PRESETS 换 'static）；preset_via 补 channel 别名
+  （top-channel=up-channel、vertical/left/right-channel）与 orthogonal-h/v
+  狗腿。逐边局部走廊：dataflow 上 24/下 26/侧 20px，lifecycle/architecture
+  上 28/下 34/侧 36/20px。
+- **单位纪律（踩坑 ×3，都修在闭环里）**：常量段是"archify px × 10"（已 tenths），
+  authored 旋钮是 px、进引擎 ×10——architecture 的 layout() 曾把默认 cell 也
+  ×10 炸成 1300px 单元格，map_or 分流修掉；dataflow 的 measured_bounds 曾用
+  content_h 做种子、viewBox 又加 CANVAS_MARGIN 双计成 630≠614，改种
+  frame_bottom。第三个坑在 graph.rs：outside-right 升级探测到 ~80k tenths，
+  折叠判定的 delta² 乘积 i32 溢出 panic——cross/forward 转 i64，字节中性
+  （旧六哈希不变）。机制注记：升级按死侧对逐对跑，即使别的侧对已经成功。
+- **标签宽度 vs 格隙**：w=max(MIN, units·49+120)（dataflow MIN=34px，余 32px）。
+  7 字标签 463px 宽，同行相邻格隙只有 30px——这种边自动走顶/底走廊，不是
+  修复。architecture 测试 fixture 因此把 web→cdn 的 "assets" 标签删了。
+- **壳路由五族**：6 元组推断（sequence/workflow/dataflow/lifecycle/architecture）。
+- **门冻结 6→9 篇**：dataflow-ingest/lifecycle-release/architecture-edge 全 auto
+  构造，attempt-1 零诊断零修复，哈希入表。
+- **dogfood（真 /mcp 面）**：三篇语料过 render_markdown——诊断 0、修复 0、
+  sha256 与进程内门哈希逐字节一致；lifecycle 进活会话（session_create →
+  SetContent → VIEWPORT_PROBE）diagrams=1、minScale 0.987、tier fits（1920×1000），
+  即三族 SVG 被自家 diting 解析-布局-缩放链真渲染过一遍。
+- 测试：docgen 42→55；全量 `--features screenshot` 832→845/0/1；clippy 62 持平。
+
 ## 5. 分批（按总纲排序）
 
 - **批1（技术·引擎前置）**：`:scope` 选择器 + archify artifact viewer smoke 探针 →
@@ -229,15 +271,16 @@ SQLite cache。
   workflow-compiler 精读完成。
 - **批4（流程）** ✅ 闭环 2026-09-08（见 §4d）：preset 修复阶梯（披露进 repairs）+
   相位带障碍语义 + 视口验收分级 + firstPassUsable 语料冻结门。三族 adapter 延批5。
-- **批5+（精美）**：CSS 主题层、visual preset 数据化、showcase 档门、字号/间距节奏
-  常数、SIGIL 精修、brand-marks、mermaid 通道、story/Passport/Route Probe、
-  architecture/dataflow/lifecycle 三族 adapter。
+- **批5（技术·三族）** ✅ 闭环 2026-09-08（见 §4e）：dataflow/lifecycle/architecture
+  三族 adapter + graph.rs grid 边口 + 壳五族路由 + 门语料 9 篇。
+- **批6+（精美）**：CSS 主题层、visual preset 数据化、showcase 档门、字号/间距节奏
+  常数、SIGIL 精修、brand-marks、mermaid 通道、story/Passport/Route Probe。
 
 ## 6. 已读 / 未读（诚实账）
 
 已读全文：SKILL.md、authoring/delivery/viewer-runtime 合同、benchmark README、
 geometry.mjs、text-fit、diagnostics、utils、validator、grid、sequence 渲染器全文、
-common+workflow schema、template 结构+:3642 现场、cli.writeDiagram。
-未细读（各批开工前必读）：architecture/dataflow/lifecycle 渲染器全文、
-workflow-compiler 4400 行细节、i18n 目录、legend 内部、bin/archify.mjs 工件检查器、
-engineering-profiles、delta、migrations。
+common+workflow schema、template 结构+:3642 现场、cli.writeDiagram；
+批5 又读了 architecture/dataflow/lifecycle 渲染器全文。
+未细读（开工前必读）：workflow-compiler 4400 行细节、i18n 目录、legend 内部、
+bin/archify.mjs 工件检查器、engineering-profiles、delta、migrations。

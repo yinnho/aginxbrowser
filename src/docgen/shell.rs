@@ -11,9 +11,16 @@
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use pulldown_cmark::html::push_html;
 
-use super::spec::{validate_sequence, validate_workflow, DiagramSpec};
+use super::architecture::render_architecture;
+use super::dataflow::render_dataflow;
+use super::graph::RouteRepair;
+use super::lifecycle::render_lifecycle;
 use super::sequence::render_sequence;
-use super::workflow::{render_workflow, RouteRepair};
+use super::spec::{
+    validate_architecture, validate_dataflow, validate_lifecycle, validate_sequence,
+    validate_workflow, DiagramSpec,
+};
+use super::workflow::render_workflow;
 
 /// The info string that routes a fence to the diagram pipeline.
 const FENCE_LANG: &str = "archify";
@@ -29,7 +36,7 @@ pub struct FenceOutcome {
     /// Structured facts for the receipt when ok; problems when not.
     pub detail: Vec<String>,
     /// Route presets the engine substituted on this diagram's behalf,
-    /// disclosed per-edge (workflow only).
+    /// disclosed per-edge (the graph-routed families).
     pub repairs: Vec<RouteRepair>,
 }
 
@@ -51,18 +58,31 @@ fn parse_fence(body: &str) -> Result<FenceDiagram, Vec<String>> {
         parsed.diagram_type.as_deref(),
         parsed.sequence.is_some(),
         parsed.workflow.is_some(),
+        parsed.dataflow.is_some(),
+        parsed.lifecycle.is_some(),
+        parsed.architecture.is_some(),
     ) {
-        (Some(t), _, _) => t.to_string(),
-        (None, false, true) => "workflow".to_string(),
-        (None, _, _) => "sequence".to_string(),
+        (Some(t), _, _, _, _, _) => t.to_string(),
+        (None, false, false, false, false, true) => "architecture".to_string(),
+        (None, false, false, false, true, false) => "lifecycle".to_string(),
+        (None, false, false, true, false, false) => "dataflow".to_string(),
+        (None, false, true, false, false, false) => "workflow".to_string(),
+        (None, _, _, _, _, _) => "sequence".to_string(),
     };
-    match (diagram_type.as_str(), parsed.sequence, parsed.workflow) {
-        ("sequence", Some(spec), _) => {
-            let problems = validate_sequence(&spec);
+    match (
+        diagram_type.as_str(),
+        &parsed.sequence,
+        &parsed.workflow,
+        &parsed.dataflow,
+        &parsed.lifecycle,
+        &parsed.architecture,
+    ) {
+        ("sequence", Some(spec), ..) => {
+            let problems = validate_sequence(spec);
             if !problems.is_empty() {
                 return Err(problems);
             }
-            let r = render_sequence(&spec)?;
+            let r = render_sequence(spec)?;
             Ok(FenceDiagram {
                 kind: "sequence",
                 facts: vec![
@@ -75,12 +95,12 @@ fn parse_fence(body: &str) -> Result<FenceDiagram, Vec<String>> {
                 repairs: Vec::new(),
             })
         }
-        ("workflow", _, Some(spec)) => {
-            let problems = validate_workflow(&spec);
+        ("workflow", _, Some(spec), ..) => {
+            let problems = validate_workflow(spec);
             if !problems.is_empty() {
                 return Err(problems);
             }
-            let r = render_workflow(&spec)?;
+            let r = render_workflow(spec)?;
             Ok(FenceDiagram {
                 kind: "workflow",
                 facts: vec![
@@ -94,16 +114,85 @@ fn parse_fence(body: &str) -> Result<FenceDiagram, Vec<String>> {
                 repairs: r.repairs,
             })
         }
-        ("sequence", None, _) => Err(vec![
+        ("dataflow", _, _, Some(spec), ..) => {
+            let problems = validate_dataflow(spec);
+            if !problems.is_empty() {
+                return Err(problems);
+            }
+            let r = render_dataflow(spec)?;
+            Ok(FenceDiagram {
+                kind: "dataflow",
+                facts: vec![
+                    format!("stages={}", r.stages),
+                    format!("nodes={}", r.nodes),
+                    format!("flows={}", r.flows),
+                    format!("viewBox={}x{}", r.view_box[0], r.view_box[1]),
+                ],
+                svg: r.svg,
+                title: r.title,
+                repairs: r.repairs,
+            })
+        }
+        ("lifecycle", _, _, _, Some(spec), _) => {
+            let problems = validate_lifecycle(spec);
+            if !problems.is_empty() {
+                return Err(problems);
+            }
+            let r = render_lifecycle(spec)?;
+            Ok(FenceDiagram {
+                kind: "lifecycle",
+                facts: vec![
+                    format!("lanes={}", r.lanes),
+                    format!("states={}", r.states),
+                    format!("transitions={}", r.transitions),
+                    format!("viewBox={}x{}", r.view_box[0], r.view_box[1]),
+                ],
+                svg: r.svg,
+                title: r.title,
+                repairs: r.repairs,
+            })
+        }
+        ("architecture", .., Some(spec)) => {
+            let problems = validate_architecture(spec);
+            if !problems.is_empty() {
+                return Err(problems);
+            }
+            let r = render_architecture(spec)?;
+            Ok(FenceDiagram {
+                kind: "architecture",
+                facts: vec![
+                    format!("components={}", r.components),
+                    format!("boundaries={}", r.boundaries),
+                    format!("connections={}", r.connections),
+                    format!("viewBox={}x{}", r.view_box[0], r.view_box[1]),
+                ],
+                svg: r.svg,
+                title: r.title,
+                repairs: r.repairs,
+            })
+        }
+        ("sequence", None, ..) => Err(vec![
             "a sequence diagram needs a \"sequence\" object with title, participants, messages"
                 .to_string(),
         ]),
-        ("workflow", None, _) => Err(vec![
+        ("workflow", _, None, ..) => Err(vec![
             "a workflow diagram needs a \"workflow\" object with title, lanes, nodes, edges"
                 .to_string(),
         ]),
-        (other, _, _) => Err(vec![format!(
-            "unknown diagram_type \"{other}\" — v1 renders \"sequence\" and \"workflow\""
+        ("dataflow", _, _, None, ..) => Err(vec![
+            "a dataflow diagram needs a \"dataflow\" object with title, stages, nodes, flows"
+                .to_string(),
+        ]),
+        ("lifecycle", _, _, _, None, _) => Err(vec![
+            "a lifecycle diagram needs a \"lifecycle\" object with title, lanes, states, transitions"
+                .to_string(),
+        ]),
+        ("architecture", .., None) => Err(vec![
+            "an architecture diagram needs an \"architecture\" object with title, components, boundaries, connections"
+                .to_string(),
+        ]),
+        (other, ..) => Err(vec![format!(
+            "unknown diagram_type \"{other}\" — v1 renders \"sequence\", \"workflow\", \"dataflow\", \"lifecycle\", and \"architecture\""
         )]),
     }
 }

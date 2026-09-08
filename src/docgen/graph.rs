@@ -283,8 +283,12 @@ pub fn normalize_route_points(points: &[Pt]) -> Vec<Pt> {
         while out.len() >= 2 {
             let a = out[out.len() - 2];
             let b = out[out.len() - 1];
-            let cross = (b.0 - a.0) * (p.1 - b.1) - (b.1 - a.1) * (p.0 - b.0);
-            let forward = (b.0 - a.0) * (p.0 - b.0) + (b.1 - a.1) * (p.1 - b.1);
+            // i64: outside-right escalation probes reach ~80k tenths, and the
+            // fold products scale as delta² — i32 overflows there.
+            let cross = (b.0 - a.0) as i64 * (p.1 - b.1) as i64
+                - (b.1 - a.1) as i64 * (p.0 - b.0) as i64;
+            let forward = (b.0 - a.0) as i64 * (p.0 - b.0) as i64
+                + (b.1 - a.1) as i64 * (p.1 - b.1) as i64;
             if cross == 0 && forward >= 0 {
                 out.pop();
             } else {
@@ -508,6 +512,55 @@ pub struct PlannedRoute {
     pub points: Vec<Pt>,
 }
 
+/// A disclosed engine self-repair: the authored preset was geometrically
+/// infeasible, and this verified substitute (planned through the same
+/// readability gates as any route) took its place.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct RouteRepair {
+    pub edge: String,
+    pub requested: String,
+    pub substituted: String,
+}
+
+/// Plan one edge for a fixed-grid family (dataflow/lifecycle/architecture):
+/// try the authored preset, and when it is geometrically infeasible walk the
+/// family's semantic substitution ladder — every substitute planned through
+/// the same feasibility gates, first verified wins. The caller names the
+/// edge and builds the disclosure. Feedback is terminal here (a fixed grid
+/// has no gap to widen), so it surfaces as the error.
+#[allow(clippy::type_complexity)] // the (requested, substituted) disclosure pair
+pub fn plan_grid_edge(
+    mut req: RouteRequest,
+    scene: &RouteScene,
+    ladder: fn(&str) -> &'static [&'static str],
+) -> Result<(PlannedRoute, Option<(&'static str, &'static str)>), RouteError> {
+    let authored = match req.route {
+        RouteKind::Preset(name) => name,
+        RouteKind::Auto => return plan_route(&req, scene).map(|p| (p, None)),
+    };
+    // Intern into the preset vocabulary: validation guarantees the name is
+    // one of PRESETS, and the disclosure/error carry 'static.
+    let authored: &'static str = PRESETS
+        .iter()
+        .find(|p| **p == authored)
+        .copied()
+        .unwrap_or("auto");
+    if let Ok(planned) = plan_route(&req, scene) {
+        return Ok((planned, None));
+    }
+    for sub in ladder(authored) {
+        req.route = if *sub == "auto" {
+            RouteKind::Auto
+        } else {
+            RouteKind::Preset(sub)
+        };
+        if let Ok(planned) = plan_route(&req, scene) {
+            return Ok((planned, Some((authored, sub))));
+        }
+    }
+    Err(RouteError::PresetConflict { preset: authored })
+}
+
 /// Field order IS the cost priority (archify's
 /// READABLE_CANDIDATE_COST_PRIORITY, minus the legacy-visual-continuity
 /// term — we have no legacy to stay continuous with).
@@ -537,13 +590,24 @@ const FAMILIES: [&str; 9] = [
     "bottom-corridor",
 ];
 
-const PRESETS: [&str; 6] = [
+/// Route preset names across the family vocabularies. The channel names
+/// beyond the workflow six are aliases riding the same adapter-supplied
+/// corridors (`top-channel` is `up-channel` under the dataflow/lifecycle
+/// naming; `left`/`right`/`vertical-channel` are vertical runs);
+/// `orthogonal-h/v` are the architecture doglegs.
+const PRESETS: [&str; 12] = [
     "straight",
     "drop",
     "outside-right",
     "return-left",
     "bottom-channel",
     "up-channel",
+    "top-channel",
+    "vertical-channel",
+    "left-channel",
+    "right-channel",
+    "orthogonal-h",
+    "orthogonal-v",
 ];
 
 pub struct RouteRequest<'a> {
@@ -746,10 +810,24 @@ fn preset_via(req: &RouteRequest, name: &str, start: Pt, end: Pt) -> Vec<Pt> {
             (start.0, req.corridors.bottom_y),
             (end.0, req.corridors.bottom_y),
         ],
-        "up-channel" => vec![
+        "up-channel" | "top-channel" => vec![
             (start.0, req.corridors.top_y),
             (end.0, req.corridors.top_y),
         ],
+        "vertical-channel" => {
+            let x = (start.0 + end.0) / 2;
+            vec![(x, start.1), (x, end.1)]
+        }
+        "left-channel" => vec![
+            (req.corridors.outside_left_x, start.1),
+            (req.corridors.outside_left_x, end.1),
+        ],
+        "right-channel" => vec![
+            (req.corridors.outside_right_x, start.1),
+            (req.corridors.outside_right_x, end.1),
+        ],
+        "orthogonal-h" => vec![(end.0, start.1)],
+        "orthogonal-v" => vec![(start.0, end.1)],
         _ => Vec::new(),
     }
 }

@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 use super::graph::{
     anchor, default_sides, label_point, label_rect, plan_route, polyline_d, solve_columns,
     ColConstraint, Feedback, PlacedRoute, PlannedRoute, Pt, Rect, RouteError, RouteKind,
-    RouteRequest, RouteScene, Side, COLUMN_COUNT, PX,
+    RouteRepair, RouteRequest, RouteScene, Side, COLUMN_COUNT, PX,
 };
 use super::spec::{
     text_units, Lane, NodeGroup, Phase, WorkflowEdge, WorkflowNode, WorkflowSpec,
@@ -125,16 +125,6 @@ const LEGEND_CATALOG: [(&str, &str); 7] = [
     ("cloud", "Cloud"),
     ("external", "External"),
 ];
-
-/// A disclosed engine self-repair: the authored preset was geometrically
-/// infeasible, and this verified substitute (planned through the same
-/// readability gates as any route) took its place.
-#[derive(Clone, Debug, serde::Serialize)]
-pub struct RouteRepair {
-    pub edge: String,
-    pub requested: String,
-    pub substituted: String,
-}
 
 #[derive(Debug)]
 pub struct RenderedWorkflow {

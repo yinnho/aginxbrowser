@@ -10,9 +10,12 @@
 //! this module owns the zero-coordinate contract and the deterministic
 //! emission.
 
+pub mod architecture;
+pub mod dataflow;
 pub mod graph;
 #[cfg(test)]
 mod gate;
+pub mod lifecycle;
 pub mod sequence;
 pub mod shell;
 pub mod spec;
@@ -188,6 +191,73 @@ mod tests {
         assert!(a.html.contains("data-lane-id=\"ops\""));
         assert!(a.html.contains("data-node-id=\"rollback\""));
         assert!(a.html.contains("data-from=\"ship\" data-to=\"rollback\""));
+    }
+
+    #[test]
+    fn dataflow_fence_round_trips_through_the_shell() {
+        let md = "# ETL\n\n```archify\n{\"dataflow\":{\"title\":\"Pipeline\",\"stages\":[\n  {\"label\":\"In\"},{\"label\":\"Out\"}],\n \"nodes\":[\n  {\"id\":\"src\",\"type\":\"external\",\"label\":\"Source\",\"stage\":0,\"row\":0},\n  {\"id\":\"sink\",\"type\":\"database\",\"label\":\"Store\",\"stage\":1,\"row\":1}],\n \"flows\":[{\"from\":\"src\",\"to\":\"sink\",\"label\":\"rows\"}]}}\n```\n";
+        let a = render(md);
+        let b = render(md);
+        assert_eq!(a.html, b.html, "same input, same bytes");
+        assert_eq!(a.receipt["diagnostics"].as_array().unwrap().len(), 0);
+        assert_eq!(a.receipt["diagrams"][0]["type"], "dataflow");
+        let facts = a.receipt["diagrams"][0]["facts"].as_array().unwrap();
+        assert!(facts.iter().any(|f| f.as_str().unwrap().contains("stages=2")));
+        assert!(facts.iter().any(|f| f.as_str().unwrap().contains("flows=1")));
+        assert!(facts.iter().any(|f| f.as_str().unwrap().starts_with("viewBox=")));
+        // Structural assertions on the artifact itself.
+        assert!(a.html.contains("data-diagram-type=\"dataflow\""));
+        assert!(a.html.contains("data-stage=\"0\""));
+        assert!(a.html.contains("data-node-id=\"sink\""));
+        assert!(a.html.contains("data-from=\"src\" data-to=\"sink\""));
+    }
+
+    #[test]
+    fn lifecycle_fence_round_trips_through_the_shell() {
+        let md = "# Orders\n\n```archify\n{\"lifecycle\":{\"title\":\"Order\",\"lanes\":[\n  {\"id\":\"main\",\"label\":\"Fulfillment\"}],\n \"states\":[\n  {\"id\":\"new\",\"type\":\"start\",\"label\":\"New\",\"lane\":\"main\",\"col\":0},\n  {\"id\":\"done\",\"type\":\"success\",\"label\":\"Done\",\"lane\":\"main\",\"col\":2}],\n \"transitions\":[{\"from\":\"new\",\"to\":\"done\",\"label\":\"ship\"}]}}\n```\n";
+        let a = render(md);
+        let b = render(md);
+        assert_eq!(a.html, b.html, "same input, same bytes");
+        assert_eq!(a.receipt["diagnostics"].as_array().unwrap().len(), 0);
+        assert_eq!(a.receipt["diagrams"][0]["type"], "lifecycle");
+        let facts = a.receipt["diagrams"][0]["facts"].as_array().unwrap();
+        assert!(facts.iter().any(|f| f.as_str().unwrap().contains("states=2")));
+        assert!(facts
+            .iter()
+            .any(|f| f.as_str().unwrap().contains("transitions=1")));
+        assert!(facts.iter().any(|f| f.as_str().unwrap().starts_with("viewBox=")));
+        // Structural assertions on the artifact itself.
+        assert!(a.html.contains("data-diagram-type=\"lifecycle\""));
+        assert!(a.html.contains("data-band=\"phase\""));
+        assert!(a.html.contains("01 / Fulfillment"));
+        assert!(a.html.contains("data-node-id=\"done\""));
+        assert!(a.html.contains("data-from=\"new\" data-to=\"done\""));
+    }
+
+    #[test]
+    fn architecture_fence_round_trips_through_the_shell() {
+        let md = "# Site\n\n```archify\n{\"architecture\":{\"title\":\"Site\",\"components\":[\n  {\"id\":\"web\",\"type\":\"frontend\",\"label\":\"Web\",\"row\":0,\"col\":0},\n  {\"id\":\"api\",\"type\":\"backend\",\"label\":\"API\",\"row\":1,\"col\":1}],\n \"boundaries\":[{\"kind\":\"region\",\"label\":\"VPC\",\"wraps\":[\"api\"]}],\n \"connections\":[{\"from\":\"web\",\"to\":\"api\",\"label\":\"https\"}]}}\n```\n";
+        let a = render(md);
+        let b = render(md);
+        assert_eq!(a.html, b.html, "same input, same bytes");
+        assert_eq!(a.receipt["diagnostics"].as_array().unwrap().len(), 0);
+        assert_eq!(a.receipt["diagrams"][0]["type"], "architecture");
+        let facts = a.receipt["diagrams"][0]["facts"].as_array().unwrap();
+        assert!(facts
+            .iter()
+            .any(|f| f.as_str().unwrap().contains("components=2")));
+        assert!(facts
+            .iter()
+            .any(|f| f.as_str().unwrap().contains("boundaries=1")));
+        assert!(facts
+            .iter()
+            .any(|f| f.as_str().unwrap().contains("connections=1")));
+        assert!(facts.iter().any(|f| f.as_str().unwrap().starts_with("viewBox=")));
+        // Structural assertions on the artifact itself.
+        assert!(a.html.contains("data-diagram-type=\"architecture\""));
+        assert!(a.html.contains("data-boundary-label=\"VPC\""));
+        assert!(a.html.contains("data-node-id=\"api\""));
+        assert!(a.html.contains("data-from=\"web\" data-to=\"api\""));
     }
 
     #[test]

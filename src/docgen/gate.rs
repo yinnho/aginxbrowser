@@ -138,27 +138,95 @@ const SEQ_MIN: &str = r#"```archify
 ```
 "#;
 
+const DATAFLOW_INGEST: &str = r#"# Search ingest
+
+Three stages with a dashed skip edge around the middle stage.
+
+```archify
+{"dataflow":{"title":"Search ingest","stages":[
+  {"label":"Collect"},{"label":"Index"},{"label":"Serve"}],
+ "nodes":[
+  {"id":"crawl","type":"frontend","label":"Crawler","stage":0,"row":0,"tag":"tier1"},
+  {"id":"store","type":"database","label":"Raw store","stage":1,"row":0,"sublabel":"objects"},
+  {"id":"index","type":"backend","label":"Indexer","stage":1,"row":2},
+  {"id":"query","type":"cloud","label":"Query API","stage":2,"row":2}],
+ "flows":[
+  {"from":"crawl","to":"index","label":"skip","variant":"dashed"},
+  {"from":"crawl","to":"store","label":"pages"},
+  {"from":"index","to":"query","label":"shards"},
+  {"from":"store","to":"index","label":"docs"}]}}
+```
+"#;
+
+const LIFECYCLE_RELEASE: &str = r#"# Release
+
+The rollout across all three bands, with an on-call detour and a retry loop.
+
+```archify
+{"lifecycle":{"title":"Release","lanes":[
+  {"id":"main","label":"Rollout"},
+  {"id":"ops","label":"On-call"},
+  {"id":"terminal","label":"End states"}],
+ "states":[
+  {"id":"build","type":"start","label":"Build","lane":"main","col":0,"step":"01"},
+  {"id":"stage","type":"active","label":"Staging","lane":"main","col":1},
+  {"id":"alarm","type":"waiting","label":"Alert","lane":"ops","col":1,"sublabel":"page"},
+  {"id":"rollback","type":"failure","label":"Rollback","lane":"ops","col":2},
+  {"id":"live","type":"success","label":"Live","lane":"terminal","col":1}],
+ "transitions":[
+  {"from":"alarm","to":"rollback","label":"auto"},
+  {"from":"build","to":"stage","label":"promote"},
+  {"from":"rollback","to":"build","label":"retry","variant":"dashed"},
+  {"from":"stage","to":"alarm","label":"errors","variant":"security"},
+  {"from":"stage","to":"live","label":"pass"}]}}
+```
+"#;
+
+const ARCHITECTURE_EDGE: &str = r#"```archify
+{"architecture":{"title":"Edge serving","components":[
+  {"id":"dns","type":"cloud","label":"DNS","row":0,"col":0},
+  {"id":"lb","type":"cloud","label":"Load balancer","row":0,"col":1},
+  {"id":"web","type":"frontend","label":"Web","row":1,"col":1},
+  {"id":"api","type":"backend","label":"API","row":1,"col":2},
+  {"id":"db","type":"database","label":"Primary DB","row":2,"col":2}],
+ "boundaries":[
+  {"kind":"security-group","label":"Private subnet","wraps":["api","db"]}],
+ "connections":[
+  {"from":"api","to":"db","label":"sql"},
+  {"from":"dns","to":"lb","label":"resolve"},
+  {"from":"lb","to":"web","label":"http"},
+  {"from":"web","to":"api","label":"json"},
+  {"from":"web","to":"db","label":"cache miss","variant":"dashed"}]}}
+```
+"#;
+
 /// (name, markdown) — the corpus. Attempt-1 for every entry must be clean:
 /// no diagnostics, no repairs, bytes frozen.
-const CORPUS: [(&str, &str); 6] = [
+const CORPUS: [(&str, &str); 9] = [
     ("checkout", CHECKOUT),
     ("index-build", INDEX_BUILD),
     ("dogfood", DOGFOOD),
     ("cjk", CJK),
     ("seq-five", SEQ_FIVE),
     ("seq-min", SEQ_MIN),
+    ("dataflow-ingest", DATAFLOW_INGEST),
+    ("lifecycle-release", LIFECYCLE_RELEASE),
+    ("architecture-edge", ARCHITECTURE_EDGE),
 ];
 
 /// Frozen attempt-1 sha256s. A mismatch means geometry changed; if that
 /// change is deliberate, re-freeze this table consciously — the point of
 /// the gate is that "the numbers moved" is never a surprise.
-const FROZEN: [(&str, &str); 6] = [
+const FROZEN: [(&str, &str); 9] = [
     ("checkout", "641633976ca6f4cd3a624991adb64277eaa1976fbc267dbcc17cf5cff80ecf60"),
     ("index-build", "ca9071e0c063da0b47a9264bcf02cfde82fec351343d84ea8daa04bc9cbeefd3"),
     ("dogfood", "dd8a9e43d42f99bfe64568cf80fb235025d6e542c01b0344086d09abb947fe77"),
     ("cjk", "4176a2822cb2e8dc3330a7e4666d3fbd5634f1d6003696265a5ae30ef92165a8"),
     ("seq-five", "99f0a486dad001b112272a137141565b2fb32c7bbf3194b2ee7335b5a3a60dcb"),
     ("seq-min", "ff1cac525bbf7fc5a71ebbdf753cf928f6a657dd644c4d21fe7f24887bfe3c33"),
+    ("dataflow-ingest", "f6e7d655cf4c4f12fe1f83b8a53e8a7b6472b1db0fa11a90957fe31fa0f3e873"),
+    ("lifecycle-release", "a3df3ef9f1e08a8cd2fef9097cb80a033636986bbf15bdbf0adf9f8efcc49314"),
+    ("architecture-edge", "1b3056495ef9a2cb9e3310e317d46892d2e829b9ac3131dc45fda4c62d52d122"),
 ];
 
 #[test]
