@@ -42,7 +42,8 @@ jobs:
           cp README.md docs/install.md "$dir/"
           tar czf "$dir.tar.gz" "$dir"
           shasum -a 256 "$dir.tar.gz" > "$dir.tar.gz.sha256"
-      - name: Upload artifacts
+      - name: Upload release assets (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
