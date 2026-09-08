@@ -376,6 +376,49 @@ adapter 只留词汇（kinds/variants）和排版（字号线型/虚线模式）
   63（`--bin` 口径——stash 空树实测基线就是 63，先前记的 62 是工作区里
   另一桩在途改动压掉了一条 warning 的假基线）。
 
+## 4i. 批6d 闭环（2026-09-09）：viewer runtime v1（focus + views tab + 壳内联 JS）
+
+精美层第四刀：文档从"静态看"变成"可以点"。viewer runtime 合同里 v1 该有的三件
+事——focus（点节点看 ego 图）、views tab strip（信封级命名子图）、agent 驱动面
+（`window.agxViewer`）——全部落地，且**渐进增强**：不带 views 的文档零 JS 零异常，
+工件仍然是一个确定性静态文件。
+
+- **opacity 通道（diting svg 三件套）**：压暗走 `opacity` presentation attribute，
+  不走 fill 半透明——因为一条路由的 path 和标签 mask 要一起淡，改色得逐元素换色。
+  `Ctx.opacity` 随 transform 栈累乘、乘进每次 paint 的 fill/stroke alpha，clamp01、
+  NaN 归 1.0（对齐 Firefox 语义）、alpha=0 的 paint 直接不发（5 场景单测钉死）。
+  这也是 svg v1 引擎第一次有组透明度。
+- **信封级 `views: [{id,label,nodes}]`**：家族无关（sequence 的 participants 和
+  workflow 的 nodes 一视同仁），`validate_views` 三查（重复 id / 空表 / 未知节点
+  ——未知节点是 diagnostic，fence 回落代码块）。发射时 tab strip + JSON 数据岛
+  坐进 figure；数据岛里 `<` 转义成 `<`，label 再敌意也关不掉 script 标签
+  （专门一条敌意测试）。**views 不碰图几何**��同一 fence 带 views 与否，svg 字节
+  相等（测试钉死）。
+- **VIEWER_JS（纯 ES5 尾部内联，一次一份）**：dim=0.12；节点=[data-node-id]
+  +[data-participant-id]（sequence 生命线带 participant id，focus 点亮整列）；
+  view 语义=子图（路由**两端**都在集合内才亮）；focus 语义=ego 图（自身+直接
+  邻居+**触及** focus 的路由——邻居互连的边不算）。tab 按钮 aria-selected 跟随。
+  `window.agxViewer = {focus(i,id), view(i,id), state(i)}` 是 agent 驱动面，
+  按钮点击和它走同一段状态机。
+- **门第四次重冻结（有意）**：sequence 生命线多了 `data-participant-id`、壳样式表
+  多了 tab 样式——13 哈希（9 亮+2 暗+2 preset）全部照 §4d 流程一次 panic 重钉。
+  另有两处 VIEWER_JS 编辑（dogfood 修的，见下）不进门：门语料 9 篇均无 views，
+  viewer script 根本不发���。
+- **dogfood（/mcp 全链 22/22，修出两个真 bug）**：rmcp streamable HTTP 得先
+  initialize 拿 Mcp-Session-Id 再 notifications/initialized，之后 tools/call 的
+  响应是 SSE（首行可能是空 keep-alive）。探针：render → agxViewer.view/focus →
+  state 断言 → session_screenshot 三连字节对比。两个真洞：① state() 的 litRoutes
+  把一条边报两遍——路由发射成 path+标签组两个都带 [data-from][data-to] 的元素，
+  按元素 push 没去重；② focus 模式 routeOn 用了 `lit[f]||lit[t]`，邻居↔邻居的边
+  也亮了（4 条全亮），ego 图应只亮触及 focus 的 2 条——改成 `f===focusId ||
+  t===focusId`。**顺带闭环了批290 的最大遗留未知**：diting 在 JS setAttribute
+  ("opacity") 变异 SVG 子树后确实重编译重绘（截图字节 all 31506 → view 35737 →
+  focus 35517），attr 级冻结那条路是通的。三张截图���眼复核：Happy path 下
+  Rollback+泳道+图例 12% 幽灵态、主链路全对比度，压暗可读。
+- **测试**：docgen +8（信封 3 + 壳 5 含敌意岛/无 viewer/几何不动）+ sequence
+  几何计数 2→4 + svg opacity 5 + receipt views 1 → 全量 871→879/0/1；clippy
+  持平 63。
+
 ## 5. 分批（按总纲排序）
 
 - **批1（技术·引擎前置）**：`:scope` 选择器 + archify artifact viewer smoke 探针 →
@@ -397,7 +440,11 @@ adapter 只留词汇（kinds/variants）和排版（字号线型/虚线模式）
 - **批6c（精美·档门）** ✅ 闭环 2026-09-09（见 §4h）：composition audit
   in-process 移植（receipt-only 质量轴，13 哈希零重冻结）+ mermaid 通道
   （工具描述映射，引擎只收 archify JSON）。
-- **批6d+（精美）**：viewer runtime、brand-marks、story/Passport/Route Probe。
+- **批6d（精美·viewer）** ✅ 闭环 2026-09-09（见 §4i）：opacity 三件套 +
+  信封级 views + VIEWER_JS（focus ego/view 子图/agxViewer 驱动面）+ 门第四次
+  重冻结 + /mcp dogfood 22/22（attr 变异重绘实证、修出 litRoutes 重复和
+  routeOn ego 语义两洞）。
+- **批6e+（精美）**：brand-marks、story/Passport/Route Probe。
   字号/间距节奏的地板值已随 6c 落进审计侧；emission 侧常数再动即重冻结。
 
 ## 6. 已读 / 未读（诚实账）

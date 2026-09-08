@@ -217,19 +217,19 @@ const CORPUS: [(&str, &str); 9] = [
 /// Frozen attempt-1 sha256s (light theme). A mismatch means geometry or
 /// palette changed; if that change is deliberate, re-freeze this table
 /// consciously — the point of the gate is that "the numbers moved" is never
-/// a surprise. Last re-freeze: 批6b preset+sigil layer (every node gains a
-/// semantic sigil stamp and the html tag gains data-preset; classic values
-/// themselves are unchanged).
+/// a surprise. Last re-freeze: 批6d viewer runtime (sequence lifelines gain
+/// data-participant-id for focus, and the shell stylesheet gains the
+/// guided-view tab styles — every document's <style> bytes move).
 const FROZEN: [(&str, &str); 9] = [
-    ("checkout", "4b3fb05e81d5d82b9700d61b3a654a8f44b2b83ce4f41c51d83ab26cc05f79fa"),
-    ("index-build", "f2e66a7c43e96955cbf7d426f3bafde95e98339ed1d234127cd4d9a0f6c66c83"),
-    ("dogfood", "697db655881704f9e0a82c93fa5a46d706c795ad8e5178e27f49542a33694729"),
-    ("cjk", "48ef00bb6cac9a862ce889193d7248fceb54aaa214ce1c8d4a86195ceff6b6d5"),
-    ("seq-five", "9a5e6be0d16854fac1cfecfee5a6186ed424148fabe5a7e034dadf339216fff1"),
-    ("seq-min", "9350c4342b49b8cda009fa82af7fc53b13da91655053e5f2baca64b246fe244d"),
-    ("dataflow-ingest", "308c185190d3f945822c89b3a6e7194bb284c6071ffaae72ba10f53a5801d117"),
-    ("lifecycle-release", "28022abeb45469eb657de784f0f903fbea0080029596fc5dbbe43f7a8e307326"),
-    ("architecture-edge", "ac8f3cb36d3254378197330640e410bf7053ec7adf39cf4aaaa73e4b04c5aa6d"),
+    ("checkout", "47862b4868f29c15351f7a835f67ad5bd0d611320578063e13612ed33f015e15"),
+    ("index-build", "96e8ee1d402e3a0b342b047e74b16601210b76d8f77750392c60a77fd3df627f"),
+    ("dogfood", "e578f29dd3b6fd7dd38d134919e1dc5bf3ffda6749444c1c557ff1342a30ecbe"),
+    ("cjk", "d24cb514a2a58a7df07bd547d400da6957182b8a1046964509577b441ce83d8a"),
+    ("seq-five", "f8b09d1e9895d76dc6d5f0da49154b1629dc39f97eea5101dc9812f5561bb855"),
+    ("seq-min", "1ce4388adbe6924c2fb703f1374845afb1af7ba9427c96bc323b382bb4d290df"),
+    ("dataflow-ingest", "8b4a8a7245250f5b4d2be68630f843ee09e56f1729218356c1e4a9ed37ca86bc"),
+    ("lifecycle-release", "de6b2d40bc5d173790f31d840f7791ad1cf82d190dce18d1a317c22dd281fe30"),
+    ("architecture-edge", "8b082e6e873251339ab3895a62972c453a0ade8bb2d0d2c18c49eb282b54b65d"),
 ];
 
 /// Dark-theme corpus: the two richest documents re-rendered under DARK, so
@@ -238,8 +238,8 @@ const FROZEN: [(&str, &str); 9] = [
 const DARK_CORPUS: [&str; 2] = [DOGFOOD, SEQ_FIVE];
 
 const FROZEN_DARK: [(&str, &str); 2] = [
-    ("dogfood", "892f92ea1fde213f2ef7a9904bb1e3a6c0b1bc823d82b6f0c8b4089bf2537c06"),
-    ("seq-five", "dd20d3f19f20cf7bb5099b898b260a9b086ae51b0cf055ce9818b28354bd7779"),
+    ("dogfood", "8ec91238ddfef0ba09dac2c82406f5fc57e2c9c7c72424965498323f9361b068"),
+    ("seq-five", "a65e39ece6f2fdbc2d38384942f27a55bcf87fa51407b4de46d6615b7e72f5d0"),
 ];
 
 /// Preset corpus: one document under each non-classic palette family, in a
@@ -252,8 +252,8 @@ const PRESET_CORPUS: [(&str, &str, &theme::Theme, &theme::Theme); 2] = [
 ];
 
 const FROZEN_PRESET: [(&str, &str); 2] = [
-    ("dogfood/signal-flow-dark", "d7084469d16f41284e4bb3272a5c65754ca1145c54f936a2583b3c09c671d672"),
-    ("seq-five/blueprint-light", "c84125deac8818d688ec029eeea869873a186065e85a00b113d338cd9f1e6130"),
+    ("dogfood/signal-flow-dark", "2a2c753d021d3dd8b1e359d918b02130d5524fd26531ec75b13c0d61ff29f68a"),
+    ("seq-five/blueprint-light", "f6c3471be1297de9b2d967669799a08b46569c8f9ed5850c7b76491c2ad5cfd2"),
 ];
 
 #[test]

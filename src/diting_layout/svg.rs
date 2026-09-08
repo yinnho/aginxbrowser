@@ -126,6 +126,7 @@ pub fn compile_svg(
         dash: None,
         font_size: styles.get(&root).and_then(|s| s.font_size).unwrap_or(16.0),
         bold: styles.get(&root).and_then(|s| s.font_weight).is_some_and(|w| w >= 600),
+        opacity: 1.0,
     };
     walk(tree, styles, root, ctx, &markers, &mut out.ops);
     out
@@ -155,6 +156,11 @@ struct Ctx {
     dash: Option<Vec<f32>>,
     font_size: f32,
     bold: bool,
+    /// Accumulated group `opacity` (ancestor product). SVG composites a
+    /// group's opacity as a unit; multiplying per element is the flat
+    /// approximation — identical whenever one factor covers the subtree,
+    /// which is how authored artifacts and dimming viewers use it.
+    opacity: f32,
 }
 
 const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
@@ -283,6 +289,14 @@ fn walk(
         .unwrap_or(false);
     let bold = attr_bold || cs.font_weight.is_some_and(|w| w >= 600) || ctx.bold;
 
+    // Opacity: `opacity` composes down the subtree (accumulated in Ctx);
+    // `fill-opacity`/`stroke-opacity` scale only this element's own paints.
+    // All three clamp to [0, 1]; anything unparsable falls back to opaque.
+    let clamp01 = |v: Option<f32>| v.filter(|o| o.is_finite()).unwrap_or(1.0).clamp(0.0, 1.0);
+    let group_op = clamp01(attr_f(tree, id, "opacity"));
+    let fill_op = clamp01(attr_f(tree, id, "fill-opacity"));
+    let stroke_op = clamp01(attr_f(tree, id, "stroke-opacity"));
+
     let next = Ctx {
         m,
         fill: fill.or(ctx.fill),
@@ -291,13 +305,27 @@ fn walk(
         dash: dash.clone().or(ctx.dash),
         font_size,
         bold,
+        opacity: ctx.opacity * group_op,
     };
 
     // Resolve paints for THIS element's shapes. Draw-time defaults are the
     // SVG initial values: fill = opaque black, stroke = none ("none" itself
     // folds to alpha 0 and the emitters filter it out).
-    let fill_rgba = Some(next.fill.map(|p| rgba(p, cs.color)).unwrap_or([0, 0, 0, 255]));
-    let stroke_rgba = next.stroke.map(|p| rgba(p, cs.color));
+    let dim_fill = |mut c: [u8; 4]| {
+        c[3] = (c[3] as f32 * next.opacity * fill_op).round() as u8;
+        c
+    };
+    let dim_stroke = |mut c: [u8; 4]| {
+        c[3] = (c[3] as f32 * next.opacity * stroke_op).round() as u8;
+        c
+    };
+    let fill_rgba = Some(
+        dim_fill(next.fill.map(|p| rgba(p, cs.color)).unwrap_or([0, 0, 0, 255])),
+    );
+    let stroke_rgba = next
+        .stroke
+        .map(|p| rgba(p, cs.color))
+        .map(dim_stroke);
     let sw = stroke_w.unwrap_or(1.0);
 
     let map_all = |pts: &[(f32, f32)]| pts.iter().map(|&p| apply(&m, p)).collect::<Vec<_>>();
@@ -1246,6 +1274,61 @@ mod tests {
                 assert_eq!(poly.len(), 48, "circle is a 48-gon");
             }
             other => panic!("fill=none circle emits only the inherited stroke: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn opacity_attrs_scale_alpha() {
+        // Group opacity composes down the subtree and multiplies into every
+        // paint's alpha; nested groups multiply.
+        let r = compile_of(
+            r##"<svg viewBox="0 0 10 10"><g opacity="0.5"><g opacity="0.5"><rect x="0" y="0" width="4" height="4" fill="#0000ff"/></g><rect x="5" y="0" width="4" height="4" fill="#0000ff"/></g></svg>"##,
+        );
+        match r.ops.as_slice() {
+            [SvgOp::Fill { color: inner, .. }, SvgOp::Fill { color: outer, .. }] => {
+                assert_eq!(inner[3], 64, "0.5 * 0.5 * 255 rounds to 64: {inner:?}");
+                assert_eq!(outer[3], 128, "single 0.5 * 255 rounds to 128: {outer:?}");
+            }
+            other => panic!("two fills expected: {other:?}"),
+        }
+
+        // fill-opacity / stroke-opacity scale only their own channel, and
+        // compose with the group factor.
+        let r = compile_of(
+            r##"<svg viewBox="0 0 10 10"><g opacity="0.5"><rect x="0" y="0" width="4" height="4" fill="#ff0000" fill-opacity="0.5" stroke="#00ff00" stroke-opacity="0.25" stroke-width="1"/></g></svg>"##,
+        );
+        match r.ops.as_slice() {
+            [SvgOp::Fill { color, .. }, SvgOp::Stroke { color: sc, .. }] => {
+                assert_eq!(color[3], 64, "0.5 group * 0.5 fill = 0.25: {color:?}");
+                assert_eq!(sc[3], 32, "0.5 group * 0.25 stroke = 0.125: {sc:?}");
+            }
+            other => panic!("fill+stroke expected: {other:?}"),
+        }
+
+        // opacity="0" folds to alpha 0 and the emitters filter it out —
+        // the dimming viewer's "hidden" state needs a real absence.
+        let r = compile_of(
+            r##"<svg viewBox="0 0 10 10"><rect x="0" y="0" width="4" height="4" fill="#ff0000" opacity="0"/></svg>"##,
+        );
+        assert!(r.ops.is_empty(), "fully transparent shape draws nothing: {:?}", r.ops);
+
+        // Text rides fill_rgba, so a dimmed group dims its labels too.
+        let r = compile_of(
+            r#"<svg viewBox="0 0 10 10"><g opacity="0.12"><text x="1" y="5">hi</text></g></svg>"#,
+        );
+        match r.ops.as_slice() {
+            [SvgOp::Text { color, .. }] => assert_eq!(color[3], 31, "0.12 * 255 rounds to 31"),
+            other => panic!("one text op expected: {other:?}"),
+        }
+
+        // No opacity attrs anywhere = fully opaque, bytes of behavior
+        // unchanged (255 stays 255 — the pre-existing default).
+        let r = compile_of(
+            r##"<svg viewBox="0 0 10 10"><rect x="0" y="0" width="4" height="4" fill="#123456"/></svg>"##,
+        );
+        match r.ops.as_slice() {
+            [SvgOp::Fill { color, .. }] => assert_eq!(*color, [0x12, 0x34, 0x56, 255]),
+            other => panic!("one fill op expected: {other:?}"),
         }
     }
 

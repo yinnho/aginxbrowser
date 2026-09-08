@@ -146,6 +146,11 @@ pub fn render_with_quality(
             if !f.repairs.is_empty() {
                 v["repairs"] = serde_json::to_value(&f.repairs).unwrap_or(Value::Null);
             }
+            if !f.views.is_empty() {
+                // The viewer tabs this artifact carries, so a caller can
+                // verify what is focusable without loading the document.
+                v["views"] = serde_json::to_value(&f.views).unwrap_or(Value::Null);
+            }
             if let Some(c) = &f.composition {
                 v["composition"] = c.report(quality);
             }
@@ -312,6 +317,25 @@ mod tests {
         assert!(a.html.contains("data-boundary-label=\"VPC\""));
         assert!(a.html.contains("data-node-id=\"api\""));
         assert!(a.html.contains("data-from=\"web\" data-to=\"api\""));
+    }
+
+    #[test]
+    fn receipt_lists_guided_views() {
+        let md = "# T\n\n```archify\n{\"sequence\":{\"title\":\"Ping\",\"participants\":[{\"id\":\"a\",\"type\":\"frontend\",\"label\":\"A\"},{\"id\":\"b\",\"type\":\"backend\",\"label\":\"B\"}],\"messages\":[{\"from\":\"a\",\"to\":\"b\",\"label\":\"ping\"}]},\"views\":[{\"id\":\"v\",\"label\":\"Both\",\"nodes\":[\"a\",\"b\"]}]}\n```\n";
+        let r = render(md);
+        assert_eq!(r.receipt["diagnostics"].as_array().unwrap().len(), 0);
+        let views = r.receipt["diagrams"][0]["views"].as_array().unwrap();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0]["id"], "v");
+        assert_eq!(views[0]["label"], "Both");
+        assert_eq!(views[0]["nodes"][1], "b");
+        // The artifact carries the same tabs (id + label in the strip).
+        assert!(r
+            .html
+            .contains("data-view-id=\"v\" aria-selected=\"false\">Both</button>"));
+        // Without views the receipt key stays absent.
+        let plain = render("# T\n\n```archify\n{\"sequence\":{\"title\":\"Ping\",\"participants\":[{\"id\":\"a\",\"type\":\"frontend\",\"label\":\"A\"},{\"id\":\"b\",\"type\":\"backend\",\"label\":\"B\"}],\"messages\":[{\"from\":\"a\",\"to\":\"b\",\"label\":\"ping\"}]}}\n```\n");
+        assert!(plain.receipt["diagrams"][0].get("views").is_none());
     }
 
     #[test]

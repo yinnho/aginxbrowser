@@ -9,7 +9,7 @@
 //! (MIT), whose sequence renderer is the reference implementation — minus
 //! its explicit `y`/`from`/`to` coordinates, which we compute instead.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The seven participant kinds archify defines. Order matters only for
 /// error messages; lookups are by string.
@@ -40,6 +40,49 @@ pub struct DiagramSpec {
     pub dataflow: Option<DataflowSpec>,
     pub lifecycle: Option<LifecycleSpec>,
     pub architecture: Option<ArchitectureSpec>,
+    /// Named node subsets the viewer offers as tabs (archify's guided
+    /// views). Family-agnostic: `nodes` resolve against the active
+    /// family's node ids — participants for sequence, nodes/states/
+    /// components for the grid families.
+    #[serde(default)]
+    pub views: Option<Vec<View>>,
+}
+
+/// One guided view: a tab that lights the member nodes plus the routes
+/// running between them (subgraph semantics), dimming the rest.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct View {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub nodes: Vec<String>,
+}
+
+/// Document-order validation of a fence's views against the active
+/// family's node-id space. Unknown nodes are a fence-level problem (the
+/// document falls back to a code block, same contract as spec problems).
+pub fn validate_views(views: &[View], known_ids: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    for view in views {
+        if seen.contains(&view.id.as_str()) {
+            out.push(format!("duplicate view id \"{}\"", view.id));
+        }
+        seen.push(view.id.as_str());
+        if view.nodes.is_empty() {
+            out.push(format!("view \"{}\" lists no nodes", view.id));
+        }
+        for node in &view.nodes {
+            if !known_ids.contains(&node.as_str()) {
+                out.push(format!(
+                    "view \"{}\" references unknown node \"{node}\"",
+                    view.id
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// Edge variants shared by the dataflow/lifecycle/architecture relations
@@ -1347,5 +1390,22 @@ mod tests {
         assert_eq!(text_units("GET /dashboard"), 14);
         // Variation selectors are width-zero.
         assert_eq!(text_units("a\u{FE0F}"), 1);
+    }
+
+    #[test]
+    fn views_validate_against_node_ids() {
+        let v = |id: &str, nodes: &[&str]| View {
+            id: id.to_string(),
+            label: id.to_string(),
+            nodes: nodes.iter().map(|s| s.to_string()).collect(),
+        };
+        assert!(validate_views(&[v("core", &["a", "b"])], &["a", "b"]).is_empty());
+        // Duplicate id, empty node list, unknown node — reported in order.
+        let problems =
+            validate_views(&[v("core", &["a"]), v("core", &[]), v("side", &["z"])], &["a", "b"]);
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert!(problems[0].contains("duplicate view id \"core\""));
+        assert!(problems[1].contains("lists no nodes"));
+        assert!(problems[2].contains("unknown node \"z\""));
     }
 }

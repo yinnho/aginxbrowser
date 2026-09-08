@@ -160,10 +160,13 @@ pub fn render_sequence(
         esc(spec.title.trim())
     ));
 
-    for (i, _) in spec.participants.iter().enumerate() {
+    for (i, p) in spec.participants.iter().enumerate() {
         let x = cx(i);
+        // The lifeline carries the participant id so the viewer's focus
+        // lights the whole column (box + line), not just the head.
         svg.push_str(&format!(
-            "<path d=\"M {} {} L {} {}\" stroke=\"{}\" stroke-width=\"0.8\" stroke-dasharray=\"3 7\" fill=\"none\"/>",
+            "<path data-participant-id=\"{}\" d=\"M {} {} L {} {}\" stroke=\"{}\" stroke-width=\"0.8\" stroke-dasharray=\"3 7\" fill=\"none\"/>",
+            esc(&p.id),
             tx(x),
             tx(LIFELINE_TOP),
             tx(x),
@@ -371,10 +374,12 @@ mod tests {
         // 2 participants: width = cx(1) + W/2 + 40 = 213 + 43 + 40 = 296.
         // 2 messages: height = 142 + 30 + 30 + 40 + 48 = 290.
         assert_eq!(r.view_box, [296, 290]);
-        // Lifelines exist for both; 2 message groups; 2 participant groups.
+        // Lifelines exist for both; 2 message groups; 2 participant groups
+        // (the lifeline carries the participant id too, so focus lights the
+        // whole column — 4 tagged elements).
         assert_eq!(r.svg.matches("stroke-dasharray=\"3 7\"").count(), 2);
         assert_eq!(r.svg.matches("data-message-index").count(), 2);
-        assert_eq!(r.svg.matches("data-participant-id").count(), 2);
+        assert_eq!(r.svg.matches("data-participant-id").count(), 4);
         // Right-going first message: start 7px right of a's center (105),
         // line stops one head-length (8px) short of the inset target.
         assert!(
