@@ -17,8 +17,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use super::graph::{
     anchor, default_sides, label_point, label_rect, plan_route, polyline_d, solve_columns,
-    ColConstraint, Feedback, PlacedRoute, Pt, Rect, RouteError, RouteKind, RouteRequest,
-    RouteScene, Side, COLUMN_COUNT, PX,
+    ColConstraint, Feedback, PlacedRoute, PlannedRoute, Pt, Rect, RouteError, RouteKind,
+    RouteRequest, RouteScene, Side, COLUMN_COUNT, PX,
 };
 use super::spec::{
     text_units, Lane, NodeGroup, Phase, WorkflowEdge, WorkflowNode, WorkflowSpec,
@@ -107,6 +107,13 @@ const VB_RIGHT_MARGIN: i32 = 160;
 const VB_BOTTOM_MARGIN: i32 = 180;
 /// Bounded feedback rounds (archify: 3 after the initial attempt).
 const MAX_FEEDBACK_ROUNDS: usize = 3;
+/// The phase band strip: horizontal route runs and labels clear it, vertical
+/// legs cross it freely (passing through a phase reads as flow, running
+/// inside it reads as belonging to it).
+const PHASE_BAND_Y: i32 = 270;
+const PHASE_BAND_H: i32 = 160;
+/// With phases present, the top corridor rides above the band.
+const TOP_BAND_CLEARANCE: i32 = 40;
 
 /// Legend catalog order (archify's workflow catalog, not the kind registry).
 const LEGEND_CATALOG: [(&str, &str); 7] = [
@@ -119,6 +126,16 @@ const LEGEND_CATALOG: [(&str, &str); 7] = [
     ("external", "External"),
 ];
 
+/// A disclosed engine self-repair: the authored preset was geometrically
+/// infeasible, and this verified substitute (planned through the same
+/// readability gates as any route) took its place.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct RouteRepair {
+    pub edge: String,
+    pub requested: String,
+    pub substituted: String,
+}
+
 #[derive(Debug)]
 pub struct RenderedWorkflow {
     pub svg: String,
@@ -128,6 +145,8 @@ pub struct RenderedWorkflow {
     pub lanes: usize,
     pub nodes: usize,
     pub edges: usize,
+    /// Route presets the engine substituted, in canonical edge order.
+    pub repairs: Vec<RouteRepair>,
 }
 
 /// The canonicalized document: every collection in its deterministic order.
@@ -281,6 +300,19 @@ fn compile_once(
     let col_xs = solve_columns(&constraints(doc, rank_gaps));
     let col_xs = post_pass_shifts(doc, col_xs);
     let laid = vertical_math(doc, col_xs, lane_gap_min);
+    let band_rects: Vec<Rect> = doc
+        .phases
+        .iter()
+        .map(|phase| {
+            let (x, w) = phase_span(phase, &laid.col_xs);
+            Rect {
+                x,
+                y: PHASE_BAND_Y,
+                w,
+                h: PHASE_BAND_H,
+            }
+        })
+        .collect();
 
     // Legend: kinds present, in catalog order, packed into rows.
     let legend_entries: Vec<(usize, i32)> = LEGEND_CATALOG
@@ -315,6 +347,7 @@ fn compile_once(
 
     // Route every edge in canonical order, accumulating the placed world.
     let mut placed: Vec<(usize, usize, Vec<Pt>, Option<Rect>)> = Vec::new();
+    let mut repairs: Vec<RouteRepair> = Vec::new();
     let ports = port_spread(doc, &laid);
     for (ei, edge) in doc.edges.iter().enumerate() {
         let &from_idx = doc
@@ -340,6 +373,7 @@ fn compile_once(
             .collect();
         let scene = RouteScene {
             nodes: &laid.rects,
+            obstacles: &band_rects,
             placed: &scene_placed,
             canvas: (minimum_canvas_width, auto_height),
         };
@@ -347,7 +381,13 @@ fn compile_once(
         let gap_a = laid.lane_tops[from_lane] + laid.lane_heights[from_lane];
         let gap_b = laid.lane_tops[to_lane];
         let label_width = edge.label.as_deref().map(edge_label_width);
-        let req = RouteRequest {
+        let authored_route = edge.route.as_deref().unwrap_or("auto");
+        let mut top_y = 80.max(laid.lane_tops[from_lane].min(laid.lane_tops[to_lane]) - 160);
+        if !band_rects.is_empty() {
+            // The corridor rides above the phase band instead of through it.
+            top_y = top_y.min(PHASE_BAND_Y - TOP_BAND_CLEARANCE);
+        }
+        let mut req = RouteRequest {
             from_idx,
             to_idx,
             from: &laid.rects[from_idx],
@@ -360,9 +400,10 @@ fn compile_once(
             label_width,
             from_side_authored: edge.from_side.as_deref().and_then(Side::parse),
             to_side_authored: edge.to_side.as_deref().and_then(Side::parse),
-            route: match edge.route.as_deref() {
-                Some(r) if r != "auto" => RouteKind::Preset(r),
-                _ => RouteKind::Auto,
+            route: if authored_route != "auto" {
+                RouteKind::Preset(authored_route)
+            } else {
+                RouteKind::Auto
             },
             corridors: super::graph::Corridors {
                 lane_gap_y: if same_lane {
@@ -370,7 +411,7 @@ fn compile_once(
                 } else {
                     gap_a + (gap_b - gap_a) / 2
                 },
-                top_y: 80.max(laid.lane_tops[from_lane].min(laid.lane_tops[to_lane]) - 160),
+                top_y,
                 bottom_y: (laid.lane_tops[from_lane] + laid.lane_heights[from_lane])
                     .max(laid.lane_tops[to_lane] + laid.lane_heights[to_lane])
                     + 160,
@@ -395,12 +436,56 @@ fn compile_once(
                 )]))
             }
             Err(RouteError::PresetConflict { preset }) => {
-                return Err(CompileError::Problems(vec![format!(
-                    "edge \"{}\" requests route \"{}\" but no side pair honors it under \
-                     the readability constraints — try \"auto\"",
-                    edge_name(edge),
-                    preset
-                )]))
+                // Engine self-repair: the authored shape cannot be honored,
+                // so walk the semantic substitution ladder. Every substitute
+                // is planned through the same feasibility gates — a repair
+                // only lands when verified — and each one is disclosed in
+                // the receipt, never silently applied.
+                let mut repaired: Option<(&'static str, PlannedRoute)> = None;
+                let mut pending_feedback: Option<Feedback> = None;
+                for sub in repair_ladder(authored_route) {
+                    req.route = if *sub == "auto" {
+                        RouteKind::Auto
+                    } else {
+                        RouteKind::Preset(sub)
+                    };
+                    match plan_route(&req, &scene) {
+                        Ok(planned) => {
+                            repaired = Some((sub, planned));
+                            break;
+                        }
+                        // A substitute demanding a wider gap is worth a
+                        // re-solve; remember the first one and keep walking.
+                        Err(RouteError::Feedback(f)) => {
+                            pending_feedback = pending_feedback.or(Some(f))
+                        }
+                        Err(_) => {}
+                    }
+                }
+                match repaired {
+                    Some((sub, planned)) => {
+                        repairs.push(RouteRepair {
+                            edge: edge_name(edge),
+                            requested: preset.to_string(),
+                            substituted: sub.to_string(),
+                        });
+                        let label =
+                            label_width.map(|w| label_rect(w, label_point(&planned.points)));
+                        placed.push((from_idx, to_idx, planned.points, label));
+                    }
+                    None => match pending_feedback {
+                        Some(f) => return Err(CompileError::Feedback(f)),
+                        None => {
+                            return Err(CompileError::Problems(vec![format!(
+                                "edge \"{}\" requests route \"{}\" but no side pair honors it \
+                                 and no semantic substitute fits — split its endpoints across \
+                                 lanes or column offsets",
+                                edge_name(edge),
+                                preset
+                            )]))
+                        }
+                    },
+                }
             }
         }
     }
@@ -427,6 +512,7 @@ fn compile_once(
         lanes: doc.lanes.len(),
         nodes: doc.nodes.len(),
         edges: doc.edges.len(),
+        repairs,
     })
 }
 
@@ -434,6 +520,21 @@ fn edge_name(edge: &WorkflowEdge) -> String {
     edge.id
         .clone()
         .unwrap_or_else(|| format!("{}->{}", edge.from, edge.to))
+}
+
+/// Semantic substitution ladder for an infeasible preset: keep the edge's
+/// reading (backward flow stays a detour, a dive stays low) while dropping
+/// the exact shape that cannot be honored. First verified substitute wins.
+fn repair_ladder(route: &str) -> &'static [&'static str] {
+    match route {
+        "straight" => &["auto"],
+        "return-left" => &["up-channel", "bottom-channel"],
+        "outside-right" => &["auto"],
+        "drop" => &["bottom-channel", "up-channel"],
+        "bottom-channel" => &["up-channel"],
+        "up-channel" => &["bottom-channel"],
+        _ => &[],
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -899,8 +1000,15 @@ fn measured_bounds(
     }
     for phase in &doc.phases {
         let (x, width) = phase_span(phase, &laid.col_xs);
-        include(x, 270, &mut left, &mut top, &mut right, &mut bottom);
-        include(x + width, 430, &mut left, &mut top, &mut right, &mut bottom);
+        include(x, PHASE_BAND_Y, &mut left, &mut top, &mut right, &mut bottom);
+        include(
+            x + width,
+            PHASE_BAND_Y + PHASE_BAND_H,
+            &mut left,
+            &mut top,
+            &mut right,
+            &mut bottom,
+        );
     }
     for group in &doc.groups {
         let lane = doc.lane_index[group.lane.as_str()];
@@ -1061,9 +1169,11 @@ fn emit_svg(
             tx(x + width)
         ));
         s.push_str(&format!(
-            "<rect x=\"{}\" y=\"27\" width=\"{}\" height=\"16\" rx=\"4\" fill=\"#ffffff\"/>",
+            "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"4\" fill=\"#ffffff\"/>",
             tx(x),
-            tx(width)
+            tx(PHASE_BAND_Y),
+            tx(width),
+            tx(PHASE_BAND_H)
         ));
         s.push_str(&format!(
             "<text x=\"{}\" y=\"39\" font-size=\"8\" font-weight=\"600\" fill=\"{}\" text-anchor=\"middle\">{}</text>",
@@ -1376,11 +1486,74 @@ mod tests {
         )
         .unwrap();
         let rendered = render_workflow(&s).unwrap();
-        // Node tops sit at y=93 (lane 52 + title 30 + centering); the channel
-        // runs 28px above them at y=65.
+        // Node tops sit at y=93; the channel rides the top corridor 16px
+        // above the lane top (52-16=36).
         assert!(
-            rendered.svg.contains(" 65 L "),
+            rendered.svg.contains(" 36 L "),
             "channel leg missing: {}",
+            rendered.svg
+        );
+    }
+
+    #[test]
+    fn same_row_return_left_is_repaired_and_disclosed() {
+        // The 批3 dogfood finding, now automated: same-lane same-yOffset
+        // backward edge with return-left is geometrically impossible (the
+        // from-leg runs at to.cy and must cross the target box), so the
+        // engine substitutes a verified semantic neighbor and discloses it
+        // instead of failing the document.
+        let s: WorkflowSpec = serde_json::from_str(
+            r#"{
+                "title": "Loop",
+                "lanes": [{"id": "svc", "label": "Services"}],
+                "nodes": [
+                    {"id": "a", "lane": "svc", "col": 0, "label": "A", "type": "backend"},
+                    {"id": "b", "lane": "svc", "col": 1, "label": "B", "type": "backend"}
+                ],
+                "edges": [
+                    {"from": "a", "to": "b", "label": "work"},
+                    {"from": "b", "to": "a", "label": "receipt", "variant": "dashed", "route": "return-left"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let rendered = render_workflow(&s).unwrap();
+        assert_eq!(rendered.repairs.len(), 1);
+        assert_eq!(rendered.repairs[0].edge, "b->a");
+        assert_eq!(rendered.repairs[0].requested, "return-left");
+        assert_eq!(rendered.repairs[0].substituted, "up-channel");
+        // The substituted channel is really drawn above the nodes.
+        assert!(rendered.svg.contains(" 36 L "));
+    }
+
+    #[test]
+    fn top_corridor_rides_above_the_phase_band() {
+        let s: WorkflowSpec = serde_json::from_str(
+            r#"{
+                "title": "Phased",
+                "lanes": [{"id": "svc", "label": "Services"}],
+                "nodes": [
+                    {"id": "a", "lane": "svc", "col": 0, "label": "A", "type": "backend"},
+                    {"id": "b", "lane": "svc", "col": 1, "label": "B", "type": "backend"}
+                ],
+                "edges": [
+                    {"from": "a", "to": "b", "label": "work"},
+                    {"from": "b", "to": "a", "route": "up-channel", "variant": "return"}
+                ],
+                "phases": [{"id": "p1", "label": "Whole run", "fromCol": 0, "toCol": 1}]
+            }"#,
+        )
+        .unwrap();
+        let rendered = render_workflow(&s).unwrap();
+        assert!(
+            rendered.repairs.is_empty(),
+            "up-channel must stay feasible above the band: {:?}",
+            rendered.repairs
+        );
+        // Band occupies y 27..43; the channel runs at 23 (270-40 clearance).
+        assert!(
+            rendered.svg.contains(" 23 L "),
+            "channel above band missing: {}",
             rendered.svg
         );
     }

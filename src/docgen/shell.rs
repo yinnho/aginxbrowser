@@ -13,7 +13,7 @@ use pulldown_cmark::html::push_html;
 
 use super::spec::{validate_sequence, validate_workflow, DiagramSpec};
 use super::sequence::render_sequence;
-use super::workflow::render_workflow;
+use super::workflow::{render_workflow, RouteRepair};
 
 /// The info string that routes a fence to the diagram pipeline.
 const FENCE_LANG: &str = "archify";
@@ -28,6 +28,9 @@ pub struct FenceOutcome {
     pub title: Option<String>,
     /// Structured facts for the receipt when ok; problems when not.
     pub detail: Vec<String>,
+    /// Route presets the engine substituted on this diagram's behalf,
+    /// disclosed per-edge (workflow only).
+    pub repairs: Vec<RouteRepair>,
 }
 
 /// A rendered fence, in family-agnostic terms for the figure splice.
@@ -36,6 +39,7 @@ struct FenceDiagram {
     svg: String,
     title: String,
     facts: Vec<String>,
+    repairs: Vec<RouteRepair>,
 }
 
 /// Parse one fence body. The family is the declared `diagram_type`, or the
@@ -68,6 +72,7 @@ fn parse_fence(body: &str) -> Result<FenceDiagram, Vec<String>> {
                 ],
                 svg: r.svg,
                 title: r.title,
+                repairs: Vec::new(),
             })
         }
         ("workflow", _, Some(spec)) => {
@@ -86,6 +91,7 @@ fn parse_fence(body: &str) -> Result<FenceDiagram, Vec<String>> {
                 ],
                 svg: r.svg,
                 title: r.title,
+                repairs: r.repairs,
             })
         }
         ("sequence", None, _) => Err(vec![
@@ -169,6 +175,7 @@ pub fn render(markdown: &str) -> RenderedDoc {
                                 kind: d.kind,
                                 title: Some(d.title.clone()),
                                 detail: d.facts,
+                                repairs: d.repairs,
                             });
                             if doc_title.is_none() {
                                 doc_title = Some(d.title);
@@ -188,6 +195,7 @@ pub fn render(markdown: &str) -> RenderedDoc {
                                 kind: "",
                                 title: None,
                                 detail: problems,
+                                repairs: Vec::new(),
                             });
                         }
                     }

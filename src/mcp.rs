@@ -1129,7 +1129,7 @@ bash, PowerShell and cmd copy flavors.",
     }
 
     #[tool(
-        description = "Render a markdown document into a deterministic, self-contained HTML artifact - the document layer, so the agent never writes HTML by hand. Prose rides a plain offline shell (no fonts, no scripts); archify fenced code blocks carry typed zero-coordinate diagram JSON (v1: sequence diagrams) and render to inline SVG with fixed-column layout arithmetic. Same input, same bytes: the receipt carries the sha256 so determinism is verifiable. A broken diagram degrades to a visible code block and lands in receipt.diagnostics instead of failing the document. Returns {receipt, html}; with session_id the artifact is also loaded into that session (local, free) for session_screenshot verification. Diagram vocabulary adapted from archify (MIT).",
+        description = "Render a markdown document into a deterministic, self-contained HTML artifact - the document layer, so the agent never writes HTML by hand. Prose rides a plain offline shell (no fonts, no scripts); archify fenced code blocks carry typed zero-coordinate diagram JSON (sequence and workflow families) and render to inline SVG via the layout engine. Same input, same bytes: the receipt carries the sha256 so determinism is verifiable. A broken diagram degrades to a visible code block and lands in receipt.diagnostics; an authored route preset that cannot be honored is self-repaired to a verified semantic substitute and disclosed in receipt diagrams[].repairs - the document still renders. With session_id the artifact is also loaded into that session (local, free) and the reply carries viewport acceptance: scroll extents measured in the live session and graded fits/tall/wide/oversized, telling the agent how to read the page back. Diagram vocabulary adapted from archify (MIT).",
         annotations(title = "Render Markdown")
     )]
     async fn render_markdown(&self, Parameters(params): Parameters<RenderMarkdownParams>) -> String {
@@ -1145,16 +1145,98 @@ bash, PowerShell and cmd copy flavors.",
                     })
                     .await
                 {
-                    Ok(loaded) => stamped_json(
-                        json!({ "receipt": receipt, "loaded": loaded }),
-                        &mgr,
-                        &sid,
-                    ),
+                    Ok(loaded) => {
+                        // Viewport acceptance: measure the loaded artifact in
+                        // the live session (engine truth, not a projection)
+                        // so the agent knows how to read it back — done,
+                        // full-page screenshot, or widen first.
+                        let measured = mgr
+                            .send(&sid, |reply| SessionCommand::Eval {
+                                script: VIEWPORT_PROBE.to_string(),
+                                reply,
+                            })
+                            .await
+                            .ok();
+                        let mut receipt = receipt;
+                        let viewport = measured.map(|v| {
+                            let graded = grade_viewport(&v);
+                            if let Some(checks) = receipt
+                                .get_mut("checks")
+                                .and_then(Value::as_array_mut)
+                            {
+                                checks.push(json!(format!(
+                                    "viewport acceptance: {} (scroll {}x{} vs viewport {}x{})",
+                                    graded["tier"].as_str().unwrap_or("?"),
+                                    graded["scrollWidth"], graded["scrollHeight"],
+                                    graded["innerWidth"], graded["innerHeight"],
+                                )));
+                            }
+                            graded
+                        });
+                        let mut reply = json!({ "receipt": receipt, "loaded": loaded });
+                        if let Some(v) = viewport {
+                            reply["viewport"] = v;
+                        }
+                        stamped_json(reply, &mgr, &sid)
+                    }
                     Err(e) => json!({ "receipt": receipt, "error": e }).to_string(),
                 }
             }
         }
     }
+}
+
+/// Live-session measurement behind render_markdown's viewport acceptance:
+/// document scroll extents, diagram count, and how far the widest diagram
+/// was scaled down (drawn width vs viewBox width — the legibility signal).
+const VIEWPORT_PROBE: &str = r#"(function(){
+    var d = document.documentElement;
+    var figs = document.querySelectorAll('figure.agx-diagram svg');
+    var scales = [];
+    for (var i = 0; i < figs.length; i++) {
+        var vb = (figs[i].getAttribute('viewBox') || '').trim().split(/\s+/);
+        var r = figs[i].getBoundingClientRect();
+        if (vb.length === 4 && Number(vb[2]) > 0 && r.width > 0) {
+            scales.push(r.width / Number(vb[2]));
+        }
+    }
+    var minScale = null;
+    for (var j = 0; j < scales.length; j++) {
+        if (minScale === null || scales[j] < minScale) minScale = scales[j];
+    }
+    return {
+        innerWidth: innerWidth, innerHeight: innerHeight,
+        scrollWidth: d.scrollWidth, scrollHeight: d.scrollHeight,
+        diagrams: figs.length, minScale: minScale
+    };
+})()"#;
+
+/// Grade measured extents into the agent-facing tier: how to read the page
+/// back, not whether it is "good" — tall means full-page screenshot, wide
+/// means widen the viewport or accept horizontal scroll.
+fn grade_viewport(v: &Value) -> Value {
+    let get = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0);
+    let (iw, ih, sw, sh) = (
+        get("innerWidth"),
+        get("innerHeight"),
+        get("scrollWidth"),
+        get("scrollHeight"),
+    );
+    let tier = match (sw > iw, sh > ih) {
+        (false, false) => "fits",
+        (false, true) => "tall",
+        (true, false) => "wide",
+        (true, true) => "oversized",
+    };
+    json!({
+        "innerWidth": iw,
+        "innerHeight": ih,
+        "scrollWidth": sw,
+        "scrollHeight": sh,
+        "diagrams": get("diagrams"),
+        "minScale": v.get("minScale").cloned().unwrap_or(Value::Null),
+        "tier": tier,
+    })
 }
 
 /// Feedback ③: session_* responses carry the session's remaining idle
@@ -1232,4 +1314,30 @@ pub fn mcp_http_service() -> StreamableHttpService<AginxBrowserMcp, LocalSession
         Arc::new(LocalSessionManager::default()),
         config,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn viewport_tiers_classify_the_readback_strategy() {
+        let probe = |iw: i64, ih: i64, sw: i64, sh: i64| {
+            grade_viewport(&json!({
+                "innerWidth": iw, "innerHeight": ih,
+                "scrollWidth": sw, "scrollHeight": sh,
+                "diagrams": 1, "minScale": 0.25,
+            }))
+        };
+        assert_eq!(probe(1280, 1000, 1280, 900)["tier"], "fits");
+        assert_eq!(probe(1280, 1000, 1280, 2452)["tier"], "tall");
+        assert_eq!(probe(1280, 1000, 2200, 900)["tier"], "wide");
+        assert_eq!(probe(1280, 1000, 2200, 2452)["tier"], "oversized");
+        // Facts pass through for the agent to reason with.
+        let graded = probe(1280, 1000, 1280, 2452);
+        assert_eq!(graded["minScale"], json!(0.25));
+        assert_eq!(graded["diagrams"], json!(1));
+        // Missing numbers degrade to zeros, not a panic.
+        assert_eq!(grade_viewport(&json!({}))["tier"], "fits");
+    }
 }

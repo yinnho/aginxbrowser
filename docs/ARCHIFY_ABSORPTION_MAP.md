@@ -181,6 +181,43 @@ SQLite cache。
 - 测试：docgen 36 单测（graph 10 + workflow 4 + 壳往返 1 + 批2 21）；全量
   `--features screenshot` 825/0/1；clippy docgen 零提及。
 
+## 4d. 批4 闭环（2026-09-08）：修复阶梯 + 带障碍 + 视口验收 + firstPassUsable 门
+
+批3 收尾时的两个"记批4"残差这次都闭环了，外加交付门：
+
+- **修复阶梯（repair ladder）**：preset 冲突不再直接升级诊断，先走语义替换阶梯
+  ——每个替身仍过同一套可行性门重新规划，首个可行者胜；替身的 Feedback 错误
+  记住（记第一个），阶梯耗尽才升级诊断。阶梯：`straight→auto`、
+  `return-left→up-channel/bottom-channel`、`outside-right→auto`、
+  `drop→bottom-channel/up-channel`、`bottom-channel→up-channel`、
+  `up-channel→bottom-channel`。披露进 receipt `diagrams[].repairs`
+  （{edge, requested, substituted}），checks 加一行自修计数——修了就说修了。
+- **相位带进可行性门**：带不是硬障碍。竖直腿合法穿越（穿过相位读作流经，
+  沿带跑读作属于）；横段（退化为 0 高矩形，gap 20）和标签矩形
+  （LABEL_TOLERANCE −20）必须清带。有相位时 top_y 钳到带上方
+  （PHASE_BAND_Y 270 − 40 = 230），up-channel 顶走廊不再视觉穿带。
+- **preset 走廊语义（踩坑）**：channel 类 preset 的 via 骑 adapter 走廊
+  （req.corridors.top_y/bottom_y），不做局部算术。机制/策略分的直接后果：
+  测试 fixture 若把 top_y 供在节点顶以下，横跑穿节点体，门（正确地）拒收
+  PresetConflict——真 adapter 永远把走廊供在 lane 顶之上/底之下。
+- **视口验收**：render_markdown 带 session 时，SetContent 后追一次
+  SessionCommand::Eval 跑 VIEWPORT_PROBE（innerWidth/innerHeight/scrollWidth/
+  scrollHeight/diagrams/minScale——最宽图缩放比，可读性信号），grade_viewport
+  分级 fits/tall/wide/oversized 进 reply.viewport，receipt.checks 加一行。
+  分级是"怎么读回"不是"好不好"：tall=全页截图，wide=先放宽视口。
+- **firstPassUsable 交付门（gate.rs，测试即门）**：6 篇语料（checkout/
+  index-build/dogfood/cjk/seq-five/seq-min）attempt-1 必须零诊断零修复，
+  sha256 冻结成表——几何动一下就是有意识的 re-freeze，不是漂移。冻结技巧：
+  先让测试收集全部 drift 一次性 panic 出完整表，再钉，省 6 轮编译。
+- **dogfood（原批3 失败案做 fixture，/mcp 全链）**：sha→md 配 return-left
+  （批3 抓到的必然冲突案）→ 自动换 up-channel，repairs 披露，viewport fits
+  （1440×820），截图视觉判读通过（通道骑相位带上方）。
+- 测试：docgen 42 单测；全量 `--features screenshot` 832/0/1（+7：阶梯 2 +
+  带 2 + 门 2 + 视口 1）；clippy 62 持平。
+
+分岔记录：architecture/dataflow/lifecycle 三族 adapter 延批5——机制（graph.rs
+谓词/路由/升级 + 修复阶梯）已就绪，纯 adapter 活，随精美层一起做。
+
 ## 5. 分批（按总纲排序）
 
 - **批1（技术·引擎前置）**：`:scope` 选择器 + archify artifact viewer smoke 探针 →
@@ -190,11 +227,11 @@ SQLite cache。
 - **批3（技术·核心）** ✅ 闭环 2026-09-08（见 §4c）：graph.rs 布局引擎（整数 0.1px、
   9 族正交路由、字典序 cost、有界升级）+ workflow adapter（lane/col 约束）+ 家族路由。
   workflow-compiler 精读完成。
-- **批4（流程）**：自修循环全量（诊断→verified 修复→复验→升级 LLM）、receipt/视口
-  验收接线、firstPassUsable benchmark 交付门、architecture/dataflow/lifecycle adapter
-  补齐。
+- **批4（流程）** ✅ 闭环 2026-09-08（见 §4d）：preset 修复阶梯（披露进 repairs）+
+  相位带障碍语义 + 视口验收分级 + firstPassUsable 语料冻结门。三族 adapter 延批5。
 - **批5+（精美）**：CSS 主题层、visual preset 数据化、showcase 档门、字号/间距节奏
-  常数、SIGIL 精修、brand-marks、mermaid 通道、story/Passport/Route Probe。
+  常数、SIGIL 精修、brand-marks、mermaid 通道、story/Passport/Route Probe、
+  architecture/dataflow/lifecycle 三族 adapter。
 
 ## 6. 已读 / 未读（诚实账）
 

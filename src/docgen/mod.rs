@@ -11,6 +11,8 @@
 //! emission.
 
 pub mod graph;
+#[cfg(test)]
+mod gate;
 pub mod sequence;
 pub mod shell;
 pub mod spec;
@@ -57,6 +59,19 @@ pub fn render(markdown: &str) -> RenderOutcome {
     if failed.is_empty() && !doc.fences.is_empty() {
         checks.push("all fences parsed and validated clean".to_string());
     }
+    let repaired_count: usize = doc
+        .fences
+        .iter()
+        .filter(|f| f.ok)
+        .map(|f| f.repairs.len())
+        .sum();
+    if repaired_count > 0 {
+        checks.push(format!(
+            "{} route preset{} self-repaired and disclosed (diagrams[].repairs)",
+            repaired_count,
+            if repaired_count == 1 { "" } else { "s" }
+        ));
+    }
 
     let diagnostics: Vec<String> = failed
         .iter()
@@ -72,12 +87,16 @@ pub fn render(markdown: &str) -> RenderOutcome {
         .iter()
         .filter(|f| f.ok)
         .map(|f| {
-            json!({
+            let mut v = json!({
                 "index": f.index,
                 "type": f.kind,
                 "title": f.title,
                 "facts": f.detail,
-            })
+            });
+            if !f.repairs.is_empty() {
+                v["repairs"] = serde_json::to_value(&f.repairs).unwrap_or(Value::Null);
+            }
+            v
         })
         .collect();
 

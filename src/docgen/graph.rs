@@ -462,6 +462,9 @@ pub struct Corridors {
 pub struct RouteScene<'a> {
     /// All node rectangles; the request names its endpoints by index.
     pub nodes: &'a [Rect],
+    /// Band obstacles (phase strips in the workflow family): horizontal
+    /// runs and labels must clear them; vertical legs may cross.
+    pub obstacles: &'a [Rect],
     pub placed: &'a [PlacedRoute],
     /// (minimum canvas width, current canvas height) for growth costs and
     /// the origin-fits check.
@@ -724,6 +727,9 @@ fn plan_preset(
     Err(RouteError::PresetConflict { preset })
 }
 
+/// Preset vias. The channels ride the adapter's corridors, not local
+/// arithmetic: policy owns where a channel runs, the mechanism only
+/// enforces readability.
 fn preset_via(req: &RouteRequest, name: &str, start: Pt, end: Pt) -> Vec<Pt> {
     match name {
         "straight" => Vec::new(),
@@ -736,14 +742,14 @@ fn preset_via(req: &RouteRequest, name: &str, start: Pt, end: Pt) -> Vec<Pt> {
             let x = req.from.x.min(req.to.x) - 280;
             vec![(x, start.1), (x, end.1)]
         }
-        "bottom-channel" => {
-            let y = req.from.bottom().max(req.to.bottom()) + 320;
-            vec![(start.0, y), (end.0, y)]
-        }
-        "up-channel" => {
-            let y = req.from.y.min(req.to.y) - 280;
-            vec![(start.0, y), (end.0, y)]
-        }
+        "bottom-channel" => vec![
+            (start.0, req.corridors.bottom_y),
+            (end.0, req.corridors.bottom_y),
+        ],
+        "up-channel" => vec![
+            (start.0, req.corridors.top_y),
+            (end.0, req.corridors.top_y),
+        ],
         _ => Vec::new(),
     }
 }
@@ -816,6 +822,7 @@ fn feasible(req: &RouteRequest, scene: &RouteScene, points: &[Pt], from_side: Si
         && route_meets_hard_rhythm(points)
         && route_clears_endpoint_nodes(points, req.from, req.to)
         && route_clears_unrelated_nodes(req, scene, points)
+        && route_clears_obstacles(scene, points)
         && route_label_clears_nodes(req, scene, points)
         && route_clears_placed_labels(req, scene, points)
         && points.iter().all(|&p| p.0 >= 0 && p.1 >= 0)
@@ -835,12 +842,39 @@ fn route_clears_unrelated_nodes(req: &RouteRequest, scene: &RouteScene, points: 
     true
 }
 
+/// Band obstacles block horizontal runs but not vertical legs: a leg
+/// crossing a phase strip reads as passing through the phase, while a
+/// channel running inside the strip reads as belonging to it.
+fn route_clears_obstacles(scene: &RouteScene, points: &[Pt]) -> bool {
+    for band in scene.obstacles {
+        for w in points.windows(2) {
+            if w[0].1 != w[1].1 {
+                continue;
+            }
+            let seg = Rect {
+                x: w[0].0.min(w[1].0),
+                y: w[0].1,
+                w: (w[1].0 - w[0].0).abs(),
+                h: 0,
+            };
+            if rects_overlap(&seg, band, 20) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn route_label_clears_nodes(req: &RouteRequest, scene: &RouteScene, points: &[Pt]) -> bool {
     let Some(w) = req.label_width else {
         return true;
     };
     let rect = label_rect(w, label_point(points));
     scene.nodes.iter().all(|n| !rects_overlap(&rect, n, LABEL_TOLERANCE))
+        && scene
+            .obstacles
+            .iter()
+            .all(|o| !rects_overlap(&rect, o, LABEL_TOLERANCE))
 }
 
 fn route_clears_placed_labels(req: &RouteRequest, scene: &RouteScene, points: &[Pt]) -> bool {
@@ -1227,6 +1261,7 @@ mod tests {
         let to = rect(2000, 0, 920, 520);
         let scene = RouteScene {
             nodes: &[from, to],
+            obstacles: &[],
             placed: &[],
             canvas: (4000, 2000),
         };
@@ -1269,6 +1304,7 @@ mod tests {
         let obstacle = rect(1800, 100, 320, 320);
         let scene = RouteScene {
             nodes: &[from, to, obstacle],
+            obstacles: &[],
             placed: &[],
             canvas: (5000, 2000),
         };
@@ -1312,10 +1348,11 @@ mod tests {
 
     #[test]
     fn preset_routes_honor_their_shape() {
-        let from = rect(400, 0, 920, 520);
-        let to = rect(3000, 600, 920, 520);
+        let from = rect(400, 400, 920, 520);
+        let to = rect(3000, 1000, 920, 520);
         let scene = RouteScene {
             nodes: &[from, to],
+            obstacles: &[],
             placed: &[],
             canvas: (5000, 2000),
         };
@@ -1334,9 +1371,9 @@ mod tests {
             to_side_authored: None,
             route,
             corridors: Corridors {
-                lane_gap_y: -160,
+                lane_gap_y: 960,
                 top_y: 80,
-                bottom_y: 1200,
+                bottom_y: 1600,
                 outside_left_x: 200,
                 outside_right_x: 4200,
             },
@@ -1350,12 +1387,120 @@ mod tests {
             "return-left channel missing: {:?}",
             planned.points
         );
-        // bottom-channel runs along y = max(bottom)+32.
+        // Channels ride the corridors the adapter supplies — top_y above the
+        // node tops, bottom_y below the node bottoms, or the run crosses a
+        // node and the gate (correctly) refuses.
         let planned = plan_route(&mk(RouteKind::Preset("bottom-channel")), &scene).unwrap();
         assert!(
-            planned.points.iter().any(|&p| p.1 == to.bottom() + 320),
+            planned.points.iter().any(|&p| p.1 == 1600),
             "bottom channel corridor missing: {:?}",
             planned.points
         );
+        let planned = plan_route(&mk(RouteKind::Preset("up-channel")), &scene).unwrap();
+        assert!(
+            planned.points.iter().any(|&p| p.1 == 80),
+            "up channel corridor missing: {:?}",
+            planned.points
+        );
+    }
+
+    #[test]
+    fn band_obstacles_block_horizontal_runs_not_vertical_legs() {
+        // A phase band sits between two facing nodes at the height both the
+        // straight line and the top corridor would run; every surviving
+        // route must cross it vertically, never run inside it.
+        let from = rect(0, 0, 920, 520);
+        let to = rect(3000, 0, 920, 520);
+        let band = rect(1000, 100, 1200, 300);
+        let scene = RouteScene {
+            nodes: &[from, to],
+            obstacles: &[band],
+            placed: &[],
+            canvas: (5000, 2000),
+        };
+        let req = RouteRequest {
+            from_idx: 0,
+            to_idx: 1,
+            from: &from,
+            to: &to,
+            from_col: 0,
+            to_col: 2,
+            forward: true,
+            cross_lane: false,
+            lane_gap: 200,
+            label_width: None,
+            from_side_authored: None,
+            to_side_authored: None,
+            route: RouteKind::Auto,
+            corridors: Corridors {
+                lane_gap_y: -160,
+                top_y: 200, // deliberately inside the band
+                bottom_y: 1000,
+                outside_left_x: -200,
+                outside_right_x: 4200,
+            },
+            col_xs: solve_columns(&[]),
+            primary_ports: None,
+        };
+        let planned = plan_route(&req, &scene).unwrap();
+        for w in planned.points.windows(2) {
+            if w[0].1 == w[1].1 {
+                let seg = Rect {
+                    x: w[0].0.min(w[1].0),
+                    y: w[0].1,
+                    w: (w[1].0 - w[0].0).abs(),
+                    h: 0,
+                };
+                assert!(
+                    !rects_overlap(&seg, &band, 20),
+                    "horizontal run inside the band: {:?}",
+                    planned.points
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn labels_may_not_park_on_a_band() {
+        let from = rect(0, 0, 920, 520);
+        let to = rect(3000, 0, 920, 520);
+        let band = rect(1000, 100, 1200, 300);
+        let scene = RouteScene {
+            nodes: &[from, to],
+            obstacles: &[band],
+            placed: &[],
+            canvas: (5000, 2000),
+        };
+        let mut req = RouteRequest {
+            from_idx: 0,
+            to_idx: 1,
+            from: &from,
+            to: &to,
+            from_col: 0,
+            to_col: 2,
+            forward: true,
+            cross_lane: false,
+            lane_gap: 200,
+            label_width: Some(436),
+            from_side_authored: None,
+            to_side_authored: None,
+            route: RouteKind::Auto,
+            corridors: Corridors {
+                lane_gap_y: -160,
+                top_y: 80,
+                bottom_y: 1000,
+                outside_left_x: -200,
+                outside_right_x: 4200,
+            },
+            col_xs: solve_columns(&[]),
+            primary_ports: None,
+        };
+        // A route running 5px below the band is clear, but its lifted label
+        // rect lands inside the band — infeasible with a label, fine
+        // without one.
+        let below_band = [(0, 450), (3900, 450)];
+        assert!(!feasible(&req, &scene, &below_band, Side::Right, Side::Left));
+        req.label_width = None;
+        assert!(feasible(&req, &scene, &below_band, Side::Right, Side::Left));
     }
 }
