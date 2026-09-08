@@ -53,8 +53,15 @@ jobs:
   # sha256 (agpkg convention), so NO features — stealth (BoringSSL) and
   # screenshot stay opt-in. The screenshot-enabled variant for the same
   # device lives in build-musl-screenshot below.
+  #
+  # v0.2.10 postmortem: build.rs embeds a V8 snapshot of bootstrap.js, and
+  # V8 snapshots are architecture-specific — cross-building on an x86_64
+  # runner baked an x86_64 snapshot into the aarch64 binary (instant
+  # SIGSEGV, zero output, found on a Pixel 5). These jobs now run on native
+  # arm64 runners so the snapshot matches the target, and smoke-run the
+  # actual artifact before it ships.
   build-musl:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -62,27 +69,54 @@ jobs:
           targets: aarch64-unknown-linux-musl
       - name: Install zig
         run: |
-          curl -fsSL https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz | sudo tar -xJ -C /opt
-          echo "/opt/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
+          curl -fsSL https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz | sudo tar -xJ -C /opt
+          echo "/opt/zig-aarch64-linux-0.16.0" >> "$GITHUB_PATH"
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-zigbuild
       - uses: Swatinem/rust-cache@v2
         with:
-          key: aarch64-unknown-linux-musl
+          key: aarch64-unknown-linux-musl-arm64
       - name: Build
         run: cargo zigbuild --release --target aarch64-unknown-linux-musl
+        env:
+          # Keep the symbol table so the -debug twin can attribute crashes
+          # (device kernels don't log userspace segfaults); the shipped
+          # binary is stripped from this copy in Package.
+          CARGO_PROFILE_RELEASE_STRIP: "false"
       - name: Package
         run: |
           bin=aginxbrowser-v${GITHUB_REF_NAME#v}-aarch64-unknown-linux-musl
           cp target/aarch64-unknown-linux-musl/release/aginxbrowser "$bin"
+          cp "$bin" "$bin-debug"
+          strip "$bin"
           shasum -a 256 "$bin" > "$bin.sha256"
-      - name: Upload artifacts
+          shasum -a 256 "$bin-debug" > "$bin-debug.sha256"
+          echo "bin=$bin" >> "$GITHUB_ENV"
+      - name: Smoke run
+        run: |
+          timeout 15 "./$bin" > smoke.log 2>&1 || true
+          grep -q "listening on" smoke.log || { echo "--- smoke output ---"; cat smoke.log; exit 1; }
+          head -1 smoke.log
+      - name: Upload actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aginxbrowser-aarch64-musl
+          path: |
+            aginxbrowser-*-aarch64-unknown-linux-musl
+            aginxbrowser-*-aarch64-unknown-linux-musl-debug
+            aginxbrowser-*-aarch64-unknown-linux-musl.sha256
+            aginxbrowser-*-aarch64-unknown-linux-musl-debug.sha256
+          retention-days: 7
+      - name: Upload release assets (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
             aginxbrowser-*-aarch64-unknown-linux-musl
+            aginxbrowser-*-aarch64-unknown-linux-musl-debug
             aginxbrowser-*-aarch64-unknown-linux-musl.sha256
+            aginxbrowser-*-aarch64-unknown-linux-musl-debug.sha256
 
   # The AginxOS engine build: same aarch64 musl static target and agpkg
   # shape as build-musl, but WITH `--features screenshot` — the pure diting
@@ -92,8 +126,9 @@ jobs:
   # libfontconfig stays optional at runtime, bundled CJK fonts carry the
   # render (AginxOS-verified on device). workflow_dispatch builds main HEAD
   # without touching any release (the actions artifact carries the binary).
+  # Same arm64-native + smoke discipline as build-musl (see postmortem there).
   build-musl-screenshot:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -101,16 +136,18 @@ jobs:
           targets: aarch64-unknown-linux-musl
       - name: Install zig
         run: |
-          curl -fsSL https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz | sudo tar -xJ -C /opt
-          echo "/opt/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
+          curl -fsSL https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz | sudo tar -xJ -C /opt
+          echo "/opt/zig-aarch64-linux-0.16.0" >> "$GITHUB_PATH"
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-zigbuild
       - uses: Swatinem/rust-cache@v2
         with:
-          key: aarch64-unknown-linux-musl-screenshot
+          key: aarch64-unknown-linux-musl-screenshot-arm64
       - name: Build
         run: cargo zigbuild --release --target aarch64-unknown-linux-musl --features screenshot
+        env:
+          CARGO_PROFILE_RELEASE_STRIP: "false"
       - name: Package
         run: |
           ver=${GITHUB_REF_NAME#v}
@@ -120,14 +157,25 @@ jobs:
           esac
           bin=aginxbrowser-$ver-aarch64-unknown-linux-musl-screenshot
           cp target/aarch64-unknown-linux-musl/release/aginxbrowser "$bin"
+          cp "$bin" "$bin-debug"
+          strip "$bin"
           shasum -a 256 "$bin" > "$bin.sha256"
+          shasum -a 256 "$bin-debug" > "$bin-debug.sha256"
+          echo "bin=$bin" >> "$GITHUB_ENV"
+      - name: Smoke run
+        run: |
+          timeout 15 "./$bin" > smoke.log 2>&1 || true
+          grep -q "listening on" smoke.log || { echo "--- smoke output ---"; cat smoke.log; exit 1; }
+          head -1 smoke.log
       - name: Upload actions artifact
         uses: actions/upload-artifact@v4
         with:
           name: aginxbrowser-aarch64-musl-screenshot
           path: |
             aginxbrowser-*-aarch64-unknown-linux-musl-screenshot
+            aginxbrowser-*-aarch64-unknown-linux-musl-screenshot-debug
             aginxbrowser-*-aarch64-unknown-linux-musl-screenshot.sha256
+            aginxbrowser-*-aarch64-unknown-linux-musl-screenshot-debug.sha256
           retention-days: 7
       - name: Upload release assets (tag pushes only)
         if: startsWith(github.ref, 'refs/tags/')
@@ -135,4 +183,6 @@ jobs:
         with:
           files: |
             aginxbrowser-*-aarch64-unknown-linux-musl-screenshot
+            aginxbrowser-*-aarch64-unknown-linux-musl-screenshot-debug
             aginxbrowser-*-aarch64-unknown-linux-musl-screenshot.sha256
+            aginxbrowser-*-aarch64-unknown-linux-musl-screenshot-debug.sha256
