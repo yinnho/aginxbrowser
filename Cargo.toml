@@ -131,6 +131,11 @@ serde_json = "1"
 anyhow = "1"
 thiserror = "1"
 
+# --- docgen (render_markdown): markdown event stream + HTML emission ---
+# Parser-only infrastructure (html5ever precedent); diagram vocabulary and
+# layout arithmetic adapted from archify (MIT).
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+
 # --- tracing ---
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

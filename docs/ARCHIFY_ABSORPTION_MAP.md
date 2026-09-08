@@ -107,14 +107,48 @@ SQLite cache。
 5. 渲染质量残留（精美层，批5+ 再议，按总纲「精美最后」）：截图 1280×~1200 三张，
    toolbar/节点/箭头/标签/图例/boundary 全渲染，仅个别标签重叠的观感问题。
 
+## 4b. 批2 竖切闭环（2026-09-08）
+
+设计定案（用户批准）：**入口严格 markdown、内核严格 JSON**。agent 只给 markdown；
+```archify fenced 块里是零坐标类型化 JSON（serde 强类型），散文走文档壳。bare fence
+（无散文）= 纯图产物，同样入口。渲染词表设计参考 archify（MIT）。
+
+落盘：
+
+- `src/docgen/{mod,spec,sequence,shell}.rs`。mod=render→{html, receipt{checks,
+  diagnostics, sha256}}；spec=类型化合同+validate_sequence（文档序诊断）+text_units
+  （全角计 2、variation selector 计 0）；sequence=固定列算术 adapter（整数 0.1px i32，
+  常量表 TOP_Y/PARTICIPANT_W/COL_GAP…，所有 x/y 由 adapter 算出，spec 零坐标）；
+  shell=pulldown-cmark 0.13（html feature only，基建判定同 html5ever 先例）流式转
+  HTML+fence 拦截。坏 fence 降级为可见代码块+diagnostics，文档不炸。
+- SVG 纯表现属性：无 `<style>` 块（内联 style 泄漏全文档；diting svg v1 画属性不走
+  CSS pass）、箭头显式 `<path>` 三角不用 `<marker>`、绘制序 title→lifelines→messages
+  →participants 压顶。
+- `render_markdown` MCP 工具（{markdown, session_id?}）：无 session 返回
+  {receipt, html}；带 session 经 `SessionCommand::SetContent` 装进会话——base64
+  data URL 走 page.goto 同一加载路径（无预算/无限频，本地免费），清 element_map，
+  RecordedAction::SetContent 进回放日志，reply 只回 {bytes, title} 不回显 HTML。
+
+金测三条全过 + dogfood：
+
+- 同输入同 sha256：单测两跑字节相等；**MCP 线上两次 tools/call 哈希一致**
+  （4a8c5c29…，8006 bytes）——确定性跨网络面成立。
+- 结构断言：viewBox=常量算术可预测（3 参与者 404×320），全部 path 锚点 x 有界。
+- dogfood（中文散文+5 参与者 9 消息四变体+注释+表格，920×1164 全页截图）视觉判读
+  零缺陷：CJK 无豆腐、emphasis/return/dashed 可辨、生命线/箭头/箭头三角齐全、表格
+  带边框。残差（个别标签贴边）记批5 精美层。
+- 测试：docgen 21 个单测；全量 `--features screenshot` 810/0/1；clippy docgen 零新警。
+
+分岔记录：原批2 清单里的 geometry 核心+standard 档门延入批3——sequence 族固定列
+算术用不上 Sugiyama，先竖切把合同/壳/工具面钉死，批3 图布局引擎以 sequence 为
+第一个"无需它"的反例校准机制/策略边界。
+
 ## 5. 分批（按总纲排序）
 
 - **批1（技术·引擎前置）**：`:scope` 选择器 + archify artifact viewer smoke 探针 →
   引擎洞清单。
-- **批2（技术·竖切）**：`src/docgen/` + sequence adapter（固定列算术+自动 y 堆叠）+
-  geometry 核心 + standard 档门 + 壳 v1（素颜）+ render_markdown 工具。
-  **金测三条**：同输入同 sha256；门全绿；结构断言（SVG 含该有节点/边/标签，几何有界）。
-  不做像素对照——那是精美标准，且自动布局坐标本应与 archify 分岔。
+- **批2（技术·竖切）** ✅ 闭环 2026-09-08（见 §4b）：`src/docgen/` + sequence adapter（固定列算术+自动 y 堆叠）+
+  壳 v1（素颜）+ render_markdown 工具 + SetContent 会话装载。geometry 核心/standard 档门延批3。
 - **批3（技术·核心）**：图布局引擎（分层 rank/排序/坐标 + 正交路由 + 标签摆放，
   确定性纪律全程）+ workflow adapter（lane/col 约束）为首个消费者。
   workflow-compiler 作参考实现精读。

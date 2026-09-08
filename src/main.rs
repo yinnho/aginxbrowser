@@ -17,6 +17,7 @@ mod config;
 mod cookie;
 mod curl_import;
 mod doctor_cli;
+mod docgen;
 mod download;
 mod error;
 mod firecrawl_compat;

@@ -185,6 +185,13 @@ pub enum SessionCommand {
         url: String,
         reply: oneshot::Sender<Result<SessionNavResponse, String>>,
     },
+    /// Load literal HTML as the page's content (local, free — no network,
+    /// no page budget, no rate gate). Same load path as a navigation so
+    /// DOM/JS state machinery treats it as a real page.
+    SetContent {
+        html: String,
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
     State {
         reply: oneshot::Sender<Result<String, String>>,
     },
@@ -385,6 +392,7 @@ pub struct SessionListEntry {
 pub enum RecordedAction {
     Create { url: Option<String>, use_proxy: bool, cookies: Vec<String>, #[serde(skip_serializing_if = "Option::is_none")] storage: Option<Value> },
     Navigate { url: String, ok: bool },
+    SetContent { html: String, ok: bool },
     Click { index: usize, ok: bool },
     #[serde(rename = "click_xy")]
     ClickXY { x: f64, y: f64, ok: bool },
@@ -1263,6 +1271,40 @@ fn session_thread(
                             recorder.push(RecordedAction::Navigate {
                                 ok: result.is_ok(),
                                 url,
+                            });
+                            let _ = reply.send(result);
+                        }
+
+                        SessionCommand::SetContent { html, reply } => {
+                            // Local bytes on the same load path as a
+                            // navigation: base64 data URL (no escaping
+                            // games with # , % in the HTML), decoded by
+                            // the nav layer. pages_loaded stays put —
+                            // nothing walked the network, so the page
+                            // budget doesn't spend here.
+                            use base64::{engine::general_purpose::STANDARD, Engine as _};
+                            let url = format!(
+                                "data:text/html;base64,{}",
+                                STANDARD.encode(html.as_bytes())
+                            );
+                            let result = match page.goto(&url).await {
+                                Ok(()) => {
+                                    let title = page
+                                        .evaluate("document.title")
+                                        .as_str()
+                                        .filter(|s| !s.is_empty())
+                                        .map(|s| s.to_string());
+                                    element_map.clear();
+                                    Ok(serde_json::json!({
+                                        "bytes": html.len(),
+                                        "title": title,
+                                    }))
+                                }
+                                Err(e) => Err(format!("setContent failed: {}", e)),
+                            };
+                            recorder.push(RecordedAction::SetContent {
+                                ok: result.is_ok(),
+                                html,
                             });
                             let _ = reply.send(result);
                         }
@@ -2383,6 +2425,70 @@ mod tests {
         assert!(
             exported.contains("\"viewport\""),
             "export must record the viewport action, got: {exported}"
+        );
+
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
+    #[tokio::test]
+    async fn set_content_loads_local_html_as_a_real_page() {
+        let _net = crate::server::test_util::net_env_guard();
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(Some("about:blank"), false, vec![], None, None, None, false, false);
+
+        let html = "<html><head><title>Doc</title></head>\
+             <body><button id=\"b\">hello</button><script>window.__ran=1</script></body></html>"
+            .to_string();
+        let r = mgr
+            .send(&sid, |reply| SessionCommand::SetContent {
+                html: html.clone(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(r["bytes"].as_u64(), Some(html.len() as u64));
+        assert_eq!(r["title"].as_str(), Some("Doc"));
+
+        // It is a real page: scripts ran, DOM state is extractable.
+        let ran = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "window.__ran".to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(ran.as_i64(), Some(1));
+        let state = mgr
+            .send(&sid, |reply| SessionCommand::State { reply })
+            .await
+            .unwrap();
+        assert!(state.contains("hello"), "state must see the DOM, got: {state}");
+
+        // A later SetContent replaces the page (old DOM gone).
+        mgr.send(&sid, |reply| SessionCommand::SetContent {
+            html: "<html><head><title>Two</title></head><body><p>second</p></body></html>"
+                .to_string(),
+            reply,
+        })
+        .await
+        .unwrap();
+        let title = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "document.title".to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(title.as_str(), Some("Two"));
+
+        // Recorded so replay scripts restore the content.
+        let exported = mgr
+            .send(&sid, |reply| SessionCommand::Export { reply })
+            .await
+            .unwrap();
+        assert!(
+            exported.contains("set_content"),
+            "export must record the setContent action, got: {exported}"
         );
 
         assert!(mgr.close_and_wait(&sid).await);

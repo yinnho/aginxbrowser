@@ -316,6 +316,18 @@ pub struct SessionEvalParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct RenderMarkdownParams {
+    /// Full markdown document. Prose rides a plain offline shell; archify
+    /// fenced code blocks carry typed zero-coordinate diagram JSON and
+    /// render to inline SVG.
+    pub markdown: String,
+    /// Optional session ID: also load the rendered HTML into that live
+    /// session (local and free) so session_screenshot / session_state can
+    /// verify the artifact
+    pub session_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SessionViewportParams {
     /// Session ID
     pub session_id: String,
@@ -1114,6 +1126,34 @@ bash, PowerShell and cmd copy flavors.",
         let mut mgr = session::SESSIONS.lock().await;
         mgr.close(&params.session_id);
         json!({ "ok": true }).to_string()
+    }
+
+    #[tool(
+        description = "Render a markdown document into a deterministic, self-contained HTML artifact - the document layer, so the agent never writes HTML by hand. Prose rides a plain offline shell (no fonts, no scripts); archify fenced code blocks carry typed zero-coordinate diagram JSON (v1: sequence diagrams) and render to inline SVG with fixed-column layout arithmetic. Same input, same bytes: the receipt carries the sha256 so determinism is verifiable. A broken diagram degrades to a visible code block and lands in receipt.diagnostics instead of failing the document. Returns {receipt, html}; with session_id the artifact is also loaded into that session (local, free) for session_screenshot verification. Diagram vocabulary adapted from archify (MIT).",
+        annotations(title = "Render Markdown")
+    )]
+    async fn render_markdown(&self, Parameters(params): Parameters<RenderMarkdownParams>) -> String {
+        let crate::docgen::RenderOutcome { html, receipt } = crate::docgen::render(&params.markdown);
+        match params.session_id {
+            None => json!({ "receipt": receipt, "html": html }).to_string(),
+            Some(sid) => {
+                let mut mgr = session::SESSIONS.lock().await;
+                match mgr
+                    .send(&sid, |reply| SessionCommand::SetContent {
+                        html: html.clone(),
+                        reply,
+                    })
+                    .await
+                {
+                    Ok(loaded) => stamped_json(
+                        json!({ "receipt": receipt, "loaded": loaded }),
+                        &mgr,
+                        &sid,
+                    ),
+                    Err(e) => json!({ "receipt": receipt, "error": e }).to_string(),
+                }
+            }
+        }
     }
 }
 
