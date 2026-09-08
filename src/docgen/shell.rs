@@ -308,8 +308,17 @@ pub fn render(markdown: &str, theme: &'static Theme) -> RenderedDoc {
                                         html_escape(&v.label)
                                     ));
                                 }
-                                t.push_str("</div><script type=\"application/json\" \
-                                            class=\"agx-views-data\">");
+                                t.push_str("</div>");
+                                // Story captions: one authored note per view, shown
+                                // under the strip while that view is active. The
+                                // element only ships when some view has a note.
+                                if d.views.iter().any(|v| v.note.is_some()) {
+                                    t.push_str("<div class=\"agx-view-note\" hidden></div>");
+                                }
+                                t.push_str(
+                                    "<script type=\"application/json\" \
+                                     class=\"agx-views-data\">",
+                                );
                                 let json = serde_json::to_string(&d.views)
                                     .unwrap_or_default()
                                     .replace('<', "\\u003c");
@@ -403,8 +412,12 @@ pub fn render(markdown: &str, theme: &'static Theme) -> RenderedDoc {
 /// `opacity` presentation attribute (the engine's svg paint reads attrs, and
 /// opacity multiplies into every paint's alpha). Views light the member
 /// nodes plus routes whose endpoints are both members (subgraph); focus
-/// lights a node, its neighbors, and the routes touching it (ego). The
-/// artifact is fully static without this script — clicking is progressive.
+/// lights a node, its neighbors, and the routes touching it (ego); route
+/// lights the shortest authored directed path between two nodes and reach
+/// lights the authored upstream/downstream closure (both BFS over the
+/// emitted edge attributes — the receipt and signal live entirely in the
+/// viewer layer). The artifact is fully static without this script —
+/// clicking is progressive.
 const VIEWER_JS: &str = r#""use strict";
 (function () {
   var DIM = "0.12";
@@ -426,9 +439,84 @@ const VIEWER_JS: &str = r#""use strict";
     }
     var nodes = svg.querySelectorAll("[data-node-id],[data-participant-id]");
     var routes = svg.querySelectorAll("[data-from][data-to]");
-    var mode = "all"; // "all" | "view" | "focus"
+    var mode = "all"; // "all" | "view" | "focus" | "route" | "reach"
     var viewId = null;
     var focusId = null;
+    var routePath = null;   // node-id array of the traced route
+    var reachId = null;     // reach origin
+    var reachDir = null;    // "up" | "down"
+
+    // The authored directed graph, deduped from the route elements (one
+    // edge paints as several elements). Element order keeps BFS deterministic.
+    var ADJ = {};  // from -> [to]
+    var RADJ = {}; // to -> [from]
+    (function () {
+      var seen = {};
+      for (var i = 0; i < routes.length; i++) {
+        var f = routes[i].getAttribute("data-from");
+        var t = routes[i].getAttribute("data-to");
+        var key = f + "->" + t;
+        if (seen[key]) { continue; }
+        seen[key] = true;
+        (ADJ[f] = ADJ[f] || []).push(t);
+        (RADJ[t] = RADJ[t] || []).push(f);
+      }
+    })();
+
+    function shortestRoute(src, dst) {
+      var prev = {};
+      var queue = [src];
+      prev[src] = null;
+      while (queue.length) {
+        var cur = queue.shift();
+        if (cur === dst) { break; }
+        var outs = ADJ[cur] || [];
+        for (var i = 0; i < outs.length; i++) {
+          var nxt = outs[i];
+          if (prev[nxt] !== undefined) { continue; }
+          prev[nxt] = cur;
+          queue.push(nxt);
+        }
+      }
+      if (prev[dst] === undefined) { return null; }
+      var path = [];
+      var walk = dst;
+      while (walk !== null) { path.push(walk); walk = prev[walk]; }
+      return path.reverse();
+    }
+
+    function closureOf(src, adj) {
+      var seen = {};
+      var order = [];
+      var queue = [src];
+      seen[src] = true;
+      while (queue.length) {
+        var cur = queue.shift();
+        var outs = adj[cur] || [];
+        for (var i = 0; i < outs.length; i++) {
+          var nxt = outs[i];
+          if (seen[nxt]) { continue; }
+          seen[nxt] = true;
+          order.push(nxt);
+          queue.push(nxt);
+        }
+      }
+      return { seen: seen, order: order };
+    }
+
+    // Directed edges participating in a closure, deduped (adjacency is
+    // already deduped, so every in-closure step counts once).
+    function inducedLinks(seen, adj) {
+      var n = 0;
+      for (var k in seen) {
+        if (!seen.hasOwnProperty(k)) { continue; }
+        var outs = adj[k] || [];
+        for (var i = 0; i < outs.length; i++) {
+          if (seen[outs[i]]) { n++; }
+        }
+      }
+      return n;
+    }
 
     function nodeIdOf(el) {
       return el.getAttribute("data-node-id") ||
@@ -459,6 +547,13 @@ const VIEWER_JS: &str = r#""use strict";
           if (t === focusId) { lit[f] = true; }
         }
       }
+      if (mode === "route" && routePath) {
+        for (i = 0; i < routePath.length; i++) { lit[routePath[i]] = true; }
+      }
+      if (mode === "reach" && reachId) {
+        var cl = closureOf(reachId, reachDir === "up" ? RADJ : ADJ);
+        return cl.seen;
+      }
       return lit;
     }
     function routeOn(lit, f, t) {
@@ -466,6 +561,18 @@ const VIEWER_JS: &str = r#""use strict";
       // Focus lights the routes that touch the focused node — an edge
       // between two of its neighbors is not part of the ego graph.
       if (mode === "focus") { return f === focusId || t === focusId; }
+      // Route lights only the hops of the traced path, in authored direction.
+      if (mode === "route" && routePath) {
+        for (var i = 0; i + 1 < routePath.length; i++) {
+          if (routePath[i] === f && routePath[i + 1] === t) { return true; }
+        }
+        return false;
+      }
+      // Reach lights the edges that participate in the closure: leaving a
+      // downstream member, or entering an upstream one.
+      if (mode === "reach" && lit) {
+        return reachDir === "up" ? !!lit[t] : !!lit[f];
+      }
       return true;
     }
     function apply() {
@@ -500,12 +607,30 @@ const VIEWER_JS: &str = r#""use strict";
         btns[i].className = mine ? "agx-view is-on" : "agx-view";
         btns[i].setAttribute("aria-selected", mine ? "true" : "false");
       }
+      // Story caption: the active view's authored note, when it has one.
+      var noteEl = fig.querySelector(".agx-view-note");
+      if (noteEl) {
+        var note = null;
+        if (mode === "view" && views) {
+          for (var k = 0; k < views.length; k++) {
+            if (views[k].id === viewId) { note = views[k].note || null; }
+          }
+        }
+        if (note) {
+          noteEl.textContent = note;
+          noteEl.removeAttribute("hidden");
+        } else {
+          noteEl.textContent = "";
+          noteEl.setAttribute("hidden", "");
+        }
+      }
     }
     function setFocus(id) {
       if (id === null || id === undefined ||
           (mode === "focus" && focusId === id)) {
         mode = "all"; focusId = null;
       } else { mode = "focus"; focusId = id; viewId = null; }
+      routePath = null; reachId = null; reachDir = null;
       apply();
     }
     function setView(id) {
@@ -513,7 +638,39 @@ const VIEWER_JS: &str = r#""use strict";
           (mode === "view" && viewId === id)) {
         mode = "all"; viewId = null;
       } else { mode = "view"; viewId = id; focusId = null; }
+      routePath = null; reachId = null; reachDir = null;
       apply();
+    }
+    function setRoute(from, to) {
+      if (!from || !to) {
+        mode = "all"; routePath = null; apply();
+        return null;
+      }
+      var path = shortestRoute(from, to);
+      // Unreachable leaves the current state untouched — the answer is null.
+      if (!path) { return null; }
+      mode = "route"; routePath = path;
+      viewId = null; focusId = null; reachId = null; reachDir = null;
+      apply();
+      return path;
+    }
+    function setReach(id, dir) {
+      if (!id) {
+        mode = "all"; reachId = null; reachDir = null; apply();
+        return null;
+      }
+      var d = (dir === "up" || dir === "upstream") ? "up" :
+        (dir === "down" || dir === "downstream") ? "down" : null;
+      if (!d) { return null; }
+      mode = "reach"; reachId = id; reachDir = d;
+      viewId = null; focusId = null; routePath = null;
+      var cl = closureOf(id, d === "up" ? RADJ : ADJ);
+      apply();
+      return {
+        id: id, direction: d,
+        nodes: [id].concat(cl.order),
+        links: inducedLinks(cl.seen, d === "up" ? RADJ : ADJ)
+      };
     }
     function state() {
       var lit = litSet();
@@ -536,6 +693,8 @@ const VIEWER_JS: &str = r#""use strict";
       }
       return {
         mode: mode, view: viewId, focus: focusId,
+        route: mode === "route" ? routePath : null,
+        reach: reachId ? { id: reachId, direction: reachDir } : null,
         views: views || [], lit: litNodes, litRoutes: litRoutes,
         dimmed: mode !== "all"
       };
@@ -555,12 +714,17 @@ const VIEWER_JS: &str = r#""use strict";
         el.addEventListener("click", function () { setFocus(nodeIdOf(el)); });
       })(nodes[i]);
     }
-    REG[idx] = { focus: setFocus, view: setView, state: state };
+    REG[idx] = {
+      focus: setFocus, view: setView,
+      route: setRoute, reach: setReach, state: state
+    };
   }
   if (!window.agxViewer) {
     window.agxViewer = {
       focus: function (i, id) { if (REG[i]) { REG[i].focus(id); } },
       view: function (i, id) { if (REG[i]) { REG[i].view(id); } },
+      route: function (i, from, to) { return REG[i] ? REG[i].route(from, to) : null; },
+      reach: function (i, id, dir) { return REG[i] ? REG[i].reach(id, dir) : null; },
       state: function (i) { return REG[i] ? REG[i].state() : null; }
     };
   }
@@ -576,7 +740,7 @@ const VIEWER_JS: &str = r#""use strict";
 /// custom-property re-theming is the future viewer runtime's mechanism, and
 /// the data-theme attribute above is its hook).
 fn shell_css(t: &Theme) -> String {
-    format!("body{{max-width:920px;margin:2rem auto;padding:0 1rem;font:16px/1.65 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,'PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;color:{page_fg};background:{page_bg}}}figure.agx-diagram{{margin:2.5rem 0}}figure.agx-diagram svg{{width:100%;height:auto;display:block}}.agx-views{{margin:0 0 .75rem}}button.agx-view{{display:inline-block;font-family:inherit;font-size:12px;font-weight:600;color:{page_fg};background:{code_bg};border:1px solid {border};border-radius:999px;padding:.25rem .7rem;margin:0 .25rem .25rem 0;cursor:pointer}}button.agx-view.is-on{{background:{page_fg};color:{page_bg};border-color:{page_fg}}}pre{{background:{code_bg};padding:1rem 1.25rem;border-radius:8px;overflow-x:auto;font-size:.875rem;line-height:1.5}}code,pre,kbd,samp{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}}code{{background:{code_bg};padding:.1em .35em;border-radius:4px;font-size:.875em}}pre code{{background:none;padding:0}}table{{border-collapse:collapse;margin:1rem 0}}th,td{{border:1px solid {border};padding:.375rem .625rem;text-align:left}}img{{max-width:100%}}blockquote{{margin:1rem 0;padding:.25rem 1rem;border-left:3px solid {border};color:{quote_fg}}}h1,h2{{line-height:1.25}}hr{{border:none;border-top:1px solid {border};margin:2rem 0}}",
+    format!("body{{max-width:920px;margin:2rem auto;padding:0 1rem;font:16px/1.65 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,'PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;color:{page_fg};background:{page_bg}}}figure.agx-diagram{{margin:2.5rem 0}}figure.agx-diagram svg{{width:100%;height:auto;display:block}}.agx-views{{margin:0 0 .75rem}}button.agx-view{{display:inline-block;font-family:inherit;font-size:12px;font-weight:600;color:{page_fg};background:{code_bg};border:1px solid {border};border-radius:999px;padding:.25rem .7rem;margin:0 .25rem .25rem 0;cursor:pointer}}button.agx-view.is-on{{background:{page_fg};color:{page_bg};border-color:{page_fg}}}.agx-view-note{{margin:.25rem 0 .75rem;color:{quote_fg};font-size:13px;line-height:1.5;max-width:60ch}}.agx-view-note[hidden]{{display:none}}pre{{background:{code_bg};padding:1rem 1.25rem;border-radius:8px;overflow-x:auto;font-size:.875rem;line-height:1.5}}code,pre,kbd,samp{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}}code{{background:{code_bg};padding:.1em .35em;border-radius:4px;font-size:.875em}}pre code{{background:none;padding:0}}table{{border-collapse:collapse;margin:1rem 0}}th,td{{border:1px solid {border};padding:.375rem .625rem;text-align:left}}img{{max-width:100%}}blockquote{{margin:1rem 0;padding:.25rem 1rem;border-left:3px solid {border};color:{quote_fg}}}h1,h2{{line-height:1.25}}hr{{border:none;border-top:1px solid {border};margin:2rem 0}}",
         page_fg = t.page_fg,
         page_bg = t.page_bg,
         code_bg = t.code_bg,
@@ -671,6 +835,40 @@ mod tests {
         format!(
             "{base},\"views\":[{{\"id\":\"client\",\"label\":\"Client side\",\"nodes\":[\"a\"]}}]}}"
         )
+    }
+
+    fn seq_with_noted_view() -> String {
+        let base = SEQ.strip_suffix('}').unwrap();
+        format!(
+            "{base},\"views\":[{{\"id\":\"client\",\"label\":\"Client side\",\"nodes\":[\"a\"],\
+             \"note\":\"One actor, outbound only.\"}}]}}"
+        )
+    }
+
+    #[test]
+    fn view_note_rides_the_island_and_ships_a_caption() {
+        let doc = render(&format!("```archify\n{}\n```\n", seq_with_noted_view()));
+        // The note rides the JSON island (the viewer fills the caption from
+        // it; the bytes never carry the note as pre-rendered text).
+        assert!(doc.html.contains("One actor, outbound only."));
+        assert!(doc.html.contains("<div class=\"agx-view-note\" hidden></div>"));
+        assert_eq!(doc.fences[0].views[0].note.as_deref(), Some("One actor, outbound only."));
+    }
+
+    #[test]
+    fn views_without_notes_ship_no_caption_element() {
+        let doc = render(&format!("```archify\n{}\n```\n", seq_with_views()));
+        // The viewer script mentions the caption selector unconditionally;
+        // what must be absent without notes is the element itself.
+        assert!(!doc.html.contains("<div class=\"agx-view-note\""));
+        assert!(doc.fences[0].views[0].note.is_none());
+    }
+
+    #[test]
+    fn viewer_surface_exposes_route_and_reach() {
+        let doc = render(&format!("```archify\n{}\n```\n", seq_with_views()));
+        assert!(doc.html.contains("route: function"));
+        assert!(doc.html.contains("reach: function"));
     }
 
     #[test]

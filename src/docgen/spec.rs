@@ -49,7 +49,9 @@ pub struct DiagramSpec {
 }
 
 /// One guided view: a tab that lights the member nodes plus the routes
-/// running between them (subgraph semantics), dimming the rest.
+/// running between them (subgraph semantics), dimming the rest. `note` is
+/// the story layer — one sentence of authored narrative shown as a caption
+/// while the view is active (archify's guided-view note).
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct View {
@@ -57,6 +59,8 @@ pub struct View {
     pub label: String,
     #[serde(default)]
     pub nodes: Vec<String>,
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// Document-order validation of a fence's views against the active
@@ -1398,6 +1402,7 @@ mod tests {
             id: id.to_string(),
             label: id.to_string(),
             nodes: nodes.iter().map(|s| s.to_string()).collect(),
+            note: None,
         };
         assert!(validate_views(&[v("core", &["a", "b"])], &["a", "b"]).is_empty());
         // Duplicate id, empty node list, unknown node — reported in order.

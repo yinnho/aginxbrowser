@@ -419,6 +419,53 @@ adapter 只留词汇（kinds/variants）和排版（字号线型/虚线模式）
   几何计数 2→4 + svg opacity 5 + receipt views 1 → 全量 871→879/0/1；clippy
   持平 63。
 
+## 4j. 批6e 闭环（2026-09-09）：viewer 查询层（route probe + reach + story note）
+
+批6d 给了"点着看"，这刀给"问着查"——agent 不用肉眼读图，直接向 viewer 提两个
+图论问题，外加把参考件 story 数据底座里唯一属于 v1 的字��收进来。范围裁决先做：
+读了 /tmp/archify-lab/v1.html（参考 artifact），story 的底座就是 guided-views 岛
+（focus+note），播放机是纯动画层，diting v1 没有 CSS animation，而且 **agent 本身
+就是播放机**——顺序调 view() 就是逐幕播放，缓案；Passport 面板大头是 DOM UI +
+evidence 展示，agent 手里的 receipt 早有全部节点元数据，只有 live reach 查询值得
+拿，缓案面板取查询；brand-marks 是 2.5k 真 logo 资产，零网络 v1 拿不下，缓案。
+
+- **`agxViewer.route(i,from,to)`**：BFS 最短**有向**路径（prev 链回溯，`prev[src]=null`
+  哨兵防自环死循环），点亮路径节点+**连续跳**的边（`routePath[i]===f &&
+  routePath[i+1]===t`，路径复用的边只亮真正相邻那对），返回路径数组。不可达返回
+  null 且**状态一动不动**（先查可达再改 mode，写反了就是"查失败把图清了"）。
+  `route(i)` 无参清空回 all。route 到自己=[自己]，0 条边。
+- **`agxViewer.reach(i,id,"down"|"down"stream 长短名都收|"up"|"upstream")`**：BFS
+  闭包，返回 `{id,direction,nodes,links}`——nodes 是 [起点].concat(BFS 序)
+  （确定性来自元素顺序），links 是诱导边计数。方向感知点边：down 亮"从闭包成员
+  出发"的边（`lit[f]`），up 亮"进闭包成员"的边（`lit[t]`）。坏方向 null 状态不动。
+- **邻接图在 viewer 里现建**：init 时从路由元素去重建 ADJ/RADJ（一条边发射成
+  path+标签组多个元素，按 `f+"->"+t` 键去重）。与参考件"receipt and signal live
+  entirely in the viewer layer"立场一致——引擎只管把 data-from/data-to 属性
+  发够。
+- **story note**：`View.note: Option<String>` 随数据岛 JSON 走（serde 白捡）；
+  caption 元素 `<div class="agx-view-note" hidden>` 仅当**任一** view 有 note 才
+  发射（零 note 文档一个多余 div 都不出，测试钉的是发射形式 `<div class=`——
+  VIEWER_JS 文本里本来就含 `.agx-view-note` 选择器，断言裸类名恒假，踩过）。
+  apply() 只在 view 模式且有 note 时填充+去 hidden。
+- **mode 五态互斥**：all/view/focus/route/reach，setFocus/setView/setRoute/
+  setReach 尾部互相清对方字段——dogfood 里专门验了 view 清 route、focus 清 reach、
+  caption 在 focus 下隐藏。
+- **门第五次重冻结（有意）**：壳样式表多了 `.agx-view-note` 两条规则 → 每篇文档
+  `<style>` 字节移动 → 13 哈希全重钉。门语料无 views，VIEWER_JS 本体变化照旧
+  不进门。
+- **dogfood（/mcp 全链 29/29 首跑全绿，零修出 bug）**：fixture 故意造了环
+  （build→test→ship→rollback→build）+ 孤立节点 audit（无边）——route 不可达
+  返回 null 状态不动、build→ship 走 test 两跳不绕环、自环 [self]；reach 孤立
+  节点=自身 0 边、build down=整环 4 节点 4 边 BFS 序、upstream 长名归一；off-path
+  节点 opacity=0.12 落地（读回 g 元素属性验的）；route/reach 截图字节互异；
+  零 console error。两截图肉眼复核：route 下 Rollback/Audit/泳道幽灵态，reach 下
+  环上四节点全亮只 Audit 幽灵。
+- **测试**：壳 +3（note 随岛+caption 元素 / 无 note 无元素 / agxViewer 面有
+  route/reach）→ docgen 88→91 → 全量 879→882/0/1；clippy 持平 63。
+- **MCP 面**：render_markdown 描述补 route/reach 语义 + views 的 note?（描述串里
+  方向写 `down|up`——带引号会提前终止 description 字符串，rmcp 宏直接炸
+  E0599，踩过）。
+
 ## 5. 分批（按总纲排序）
 
 - **批1（技术·引擎前置）**：`:scope` 选择器 + archify artifact viewer smoke 探针 →
@@ -444,7 +491,11 @@ adapter 只留词汇（kinds/variants）和排版（字号线型/虚线模式）
   信封级 views + VIEWER_JS（focus ego/view 子图/agxViewer 驱动面）+ 门第四次
   重冻结 + /mcp dogfood 22/22（attr 变异重绘实证、修出 litRoutes 重复和
   routeOn ego 语义两洞）。
-- **批6e+（精美）**：brand-marks、story/Passport/Route Probe。
+- **批6e（精美·查询层）** ✅ 闭环 2026-09-09（见 §4j）：route probe（BFS 最短
+  有向路径，不可达 null 状态不动）+ reach（上下游闭包 {nodes,links}）+ story note
+  （View.note 随数据岛，caption 仅 view 模式）+ 门第五次重冻结 + /mcp dogfood
+  29/29 首跑全绿。story 播放（agent 就是播放机）/Passport 面板（receipt 已有
+  元数据）/brand-marks（2.5k 真 logo 资产，零网络 v1 拿不下）记缓案。
   字号/间距节奏的地板值已随 6c 落进审计侧；emission 侧常数再动即重冻结。
 
 ## 6. 已读 / 未读（诚实账）
