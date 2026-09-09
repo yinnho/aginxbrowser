@@ -1145,7 +1145,11 @@ class Node {
     // Per DOM spec, inserting a DocumentFragment inserts its CHILDREN — the
     // fragment itself never enters the tree (a `#document-fragment` visible
     // in body.childNodes is an instant bot tell).
-    if (c.nodeType === 11 && c.nodeName === '#document-fragment') {
+    // A ShadowRoot has nodeName '#document-fragment' too but must NOT be
+    // unwrapped — splicing its children out would destructively move the
+    // whole shadow tree into the light parent. The guard falls it through
+    // to the plain append path, which the tree side rejects.
+    if (c.nodeType === 11 && c.nodeName === '#document-fragment' && !(c instanceof globalThis.ShadowRoot)) {
       const kids = Array.from(c.childNodes);
       for (const k of kids) this.appendChild(k);
       if (globalThis.__mutationObservers?.length) {
@@ -1171,7 +1175,9 @@ class Node {
   replaceChild(newChild, oldChild) {
     if (!oldChild || !newChild) return oldChild;
     // A DocumentFragment is replaced by its children, in order (DOM spec).
-    if (newChild.nodeType === 11 && newChild.nodeName === '#document-fragment') {
+    // A ShadowRoot (same nodeType/nodeName) must not be unwrapped — see
+    // appendChild; the plain path below is rejected by the tree.
+    if (newChild.nodeType === 11 && newChild.nodeName === '#document-fragment' && !(newChild instanceof globalThis.ShadowRoot)) {
       const kids = Array.from(newChild.childNodes);
       for (const k of kids) this.insertBefore(k, oldChild);
       this.removeChild(oldChild);
@@ -1188,7 +1194,7 @@ class Node {
   insertBefore(n, ref) {
     if (!n) return n;
     if (!ref) { this.appendChild(n); return n; }
-    if (n.nodeType === 11 && n.nodeName === '#document-fragment') {
+    if (n.nodeType === 11 && n.nodeName === '#document-fragment' && !(n instanceof globalThis.ShadowRoot)) {
       const kids = Array.from(n.childNodes);
       for (const k of kids) this.insertBefore(k, ref);
       return n;
@@ -1255,7 +1261,11 @@ class Node {
     // -1 => this precedes other => other FOLLOWS this(4); +1 => this PRECEDING(2)).
     return (+_dom("compare_order", this._nid, other._nid) < 0) ? 4 : 2;
   }
-  getRootNode() { return globalThis.document; }
+  getRootNode(opts) {
+    const composed = !!(opts && opts.composed);
+    const nid = +(composed ? _dom("shadow_including_root", this._nid) : _dom("tree_scope_root", this._nid));
+    return (nid >= 0 ? _wrap(nid) : null) || this;
+  }
   normalize() {
     // Merge adjacent exclusive Text nodes, drop empty ones, recurse. Detached
     // removed nodes keep their own data (read from the backing node by nid).
@@ -2976,6 +2986,9 @@ class Element extends Node {
     var node = this;
     while (node) {
       if (node.nodeType === 9) return true;
+      // A ShadowRoot's own parentNode is null; connectivity crosses to the
+      // host (shadow-including connectivity).
+      if (node.nodeType === 11 && node.host) { node = node.host; continue; }
       node = node.parentNode;
     }
     return false;
@@ -5193,6 +5206,7 @@ if (!('isConnected' in Node.prototype)) {
       let node = this;
       while (node) {
         if (node.nodeType === 9) return true; // Document node
+        if (node.nodeType === 11 && node.host) { node = node.host; continue; } // ShadowRoot -> host
         node = node.parentNode;
       }
       return false;
@@ -5942,7 +5956,34 @@ globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNode
   }
 };
 
-globalThis.ShadowRoot = class ShadowRoot extends DocumentFragment {};
+// A native shadow root: a real arena node with its own child list (kept out
+// of the host's light-tree links — see attach_shadow_root on the Rust side),
+// so the inherited nid-based Node methods (innerHTML, appendChild,
+// querySelector, ...) operate on the shadow tree directly. Constructed only
+// by Element.prototype.attachShadow; there is no public constructor.
+globalThis.ShadowRoot = class ShadowRoot extends DocumentFragment {
+  constructor(nid, host, options) {
+    if (host == null) throw new TypeError('Illegal constructor.');
+    super(nid);
+    this._host = host;
+    this._mode = options && options.mode === 'closed' ? 'closed' : 'open';
+    this._delegatesFocus = !!(options && options.delegatesFocus);
+    this._slotAssignment = options && options.slotAssignment === 'manual' ? 'manual' : 'named';
+    this._clonable = !!(options && options.clonable);
+    this._serializable = !!(options && options.serializable);
+  }
+  get host() { return this._host; }
+  get mode() { return this._mode; }
+  get delegatesFocus() { return this._delegatesFocus; }
+  get slotAssignment() { return this._slotAssignment; }
+  get clonable() { return this._clonable; }
+  get serializable() { return this._serializable; }
+  get activeElement() { return null; }
+  get styleSheets() { return []; }
+  cloneNode() { throw new DOMException('Failed to execute cloneNode on Node: ShadowRoot nodes are not clonable.', 'NotSupportedError'); }
+  setHTMLUnsafe(v) { this.innerHTML = String(v == null ? "" : v); }
+  getHTML() { return this.innerHTML; }
+};
 // Constructible-stylesheet adoption, mirroring Document.adoptedStyleSheets.
 Object.defineProperty(globalThis.ShadowRoot.prototype, 'adoptedStyleSheets', {
   get() { return this._adoptedStyleSheets || []; },
@@ -7676,18 +7717,45 @@ globalThis.HTMLPreElement = _htmlInterface('HTMLPreElement', ['pre']);
 globalThis.HTMLHeadingElement = _htmlInterface('HTMLHeadingElement', ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
 globalThis.HTMLTemplateElement = _htmlInterface('HTMLTemplateElement', ['template']);
 globalThis.HTMLSlotElement = _htmlInterface('HTMLSlotElement', ['slot']);
-// Slot assignment APIs (obscura #930 family). There is no shadow DOM here,
-// and assignment only ever happens inside a shadow tree — so the spec
-// answer for every call in this engine is an empty array. The stub is the
-// contract-correct behavior, not a lie: it lets feature-detect code
-// (`typeof slot.assignedElements === 'function'`) take its slot-aware
-// path instead of crashing on undefined.
-HTMLSlotElement.prototype.assignedElements = function () { return []; };
-HTMLSlotElement.prototype.assignedNodes = function () { return []; };
+// Slot assignment over native shadow trees: the Rust tree computes the
+// assignment (exact names, first same-name slot in shadow-tree order wins,
+// fallback children when nothing is assigned). "null" from the op means
+// "not a slot in a shadow tree" — spec: no assignment AND no fallback —
+// while "[]" means in-shadow-but-unassigned, where the fallback applies.
+// flatten walks nested slots here in JS with a seen-set guard.
+HTMLSlotElement.prototype.assignedNodes = function assignedNodes(opts) {
+  const flatten = !!(opts && opts.flatten);
+  const out = [];
+  const seen = new Set();
+  const walk = (el) => {
+    if (seen.has(el)) return;
+    seen.add(el);
+    const raw = _domParse("assigned_nodes", el._nid);
+    let kids;
+    if (raw === null || raw === undefined) kids = [];
+    else if (raw.length) kids = raw;
+    else kids = Array.from(el.childNodes || []).map((c) => c._nid);
+    for (const kid of kids) {
+      const w = _wrap(kid);
+      if (!w) continue;
+      if (flatten && w.nodeType === 1 && w.localName === 'slot') walk(w);
+      else out.push(w);
+    }
+  };
+  walk(this);
+  return out;
+};
+HTMLSlotElement.prototype.assignedElements = function assignedElements(opts) {
+  return this.assignedNodes(opts).filter((n) => n.nodeType === 1);
+};
 _markNative(HTMLSlotElement.prototype.assignedElements);
 _markNative(HTMLSlotElement.prototype.assignedNodes);
 Object.defineProperty(Element.prototype, 'assignedSlots', {
-  get() { return []; },
+  get() {
+    const s = +_dom("assigned_slot", this._nid);
+    const w = s >= 0 ? _wrap(s) : null;
+    return w ? [w] : [];
+  },
   configurable: true,
 });
 globalThis.HTMLOptionElement = _htmlInterface('HTMLOptionElement', ['option']);
@@ -8654,95 +8722,23 @@ Element.prototype.attachShadow = function attachShadow(opts) {
   if (this._shadowRoot) {
     throw new DOMException('Failed to execute attachShadow on Element: the element already hosts a shadow tree.', 'NotSupportedError');
   }
-  const host = this;
-  const children = [];
-  const shadow = {
-    mode: opts.mode,
-    host: host,
-    get innerHTML() { return children.map(c => c.outerHTML || c.textContent || '').join(''); },
-    set innerHTML(v) {
-      children.length = 0;
-      if (v) {
-        const tmp = document.createElement('div');
-        tmp.innerHTML = v;
-        for (let i = 0; i < tmp.childNodes.length; i++) children.push(tmp.childNodes[i]);
-      }
-    },
-    get childNodes() { return children; },
-    get firstChild() { return children[0] || null; },
-    get lastChild() { return children[children.length - 1] || null; },
-    get firstElementChild() { return children.find(c => c.nodeType === 1) || null; },
-    get children() { return children.filter(c => c.nodeType === 1); },
-    appendChild(c) {
-      if (c) {
-        children.push(c);
-        try { c.parentNode = shadow; } catch (_) { /* parentNode is getter-only on Node, ignore */ }
-      }
-      return c;
-    },
-    insertBefore(n, ref) {
-      if (!n) return n;
-      if (!ref) { shadow.appendChild(n); return n; }
-      const idx = children.indexOf(ref);
-      if (idx >= 0) {
-        children.splice(idx, 0, n);
-        try { n.parentNode = shadow; } catch (_) {}
-      }
-      else shadow.appendChild(n);
-      return n;
-    },
-    removeChild(c) { const idx = children.indexOf(c); if (idx >= 0) children.splice(idx, 1); return c; },
-    replaceChild(n, o) {
-      const idx = children.indexOf(o);
-      if (idx >= 0) {
-        children[idx] = n;
-        try { n.parentNode = shadow; } catch (_) {}
-      }
-      return o;
-    },
-    querySelector(s) {
-      for (const c of children) {
-        if (c.matches && c.matches(s)) return c;
-        if (c.querySelector) { const r = c.querySelector(s); if (r) return r; }
-      }
-      return null;
-    },
-    querySelectorAll(s) {
-      const results = [];
-      for (const c of children) {
-        if (c.matches && c.matches(s)) results.push(c);
-        if (c.querySelectorAll) results.push(...c.querySelectorAll(s));
-      }
-      return results;
-    },
-    getElementById(id) { return shadow.querySelector('#' + id); },
-    contains(n) { return children.includes(n); },
-    getRootNode() { return shadow; },
-    get ownerDocument() { return document; },
-    get nodeType() { return 11; }, // DOCUMENT_FRAGMENT_NODE
-    get nodeName() { return '#document-fragment'; },
-    addEventListener() {}, removeEventListener() {}, dispatchEvent() { return true; },
-    setHTMLUnsafe(v) { this.innerHTML = String(v == null ? "" : v); },
-    getHTML() { return this.innerHTML; },
-    // Own textContent: ShadowRoot now extends DocumentFragment, so without
-    // these the inherited Node accessors run against this._nid. The setter in
-    // particular would target the host document and wipe it. Operate on the
-    // shadow's own `children` store instead.
-    get textContent() { return children.map(c => c.textContent || "").join(""); },
-    set textContent(v) {
-      children.length = 0;
-      if (v != null && v !== "") children.push(document.createTextNode(String(v)));
-    },
-    hasChildNodes() { return children.length > 0; },
-    // A detached fragment id backs any inherited nid-based method we do not
-    // override, so they stay non-destructive (operate on an empty fragment)
-    // rather than falling through to node 0 / the document.
-    _nid: +_dom("create_document_fragment"),
-    activeElement: null,
-    get styleSheets() { return []; },
-    cloneNode() { throw new DOMException('Failed to execute cloneNode on Node: ShadowRoot nodes are not clonable.', 'NotSupportedError'); },
-  };
-  Object.setPrototypeOf(shadow, ShadowRoot.prototype);
+  // Native root: the op registers a real arena node (its own child list,
+  // out of the host's light-tree links). The wrapper is cached under the
+  // root nid BEFORE anything else can wrap it — _wrap dispatches on
+  // node_type and a shadow root reads as 9/Document to it, so without this
+  // entry every later access would mint a Document wrapper instead of
+  // returning this ShadowRoot.
+  const rootNid = _OPS.op_shadow_attach(this._nid, _mode);
+  // -2 = the tree already has a root for this host (the wrapper-level
+  // `_shadowRoot` check above misses a host whose wrapper was rebuilt).
+  if (rootNid === -2) {
+    throw new DOMException('Failed to execute attachShadow on Element: the element already hosts a shadow tree.', 'NotSupportedError');
+  }
+  if (rootNid < 0) {
+    throw new DOMException('Failed to execute attachShadow on Element: this element does not support attachShadow', 'NotSupportedError');
+  }
+  const shadow = new ShadowRoot(rootNid, this, opts);
+  _cache.set(rootNid, shadow);
   this._shadowRoot = shadow;
   return shadow;
 };

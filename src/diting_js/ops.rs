@@ -8,7 +8,7 @@ use deno_core::op2;
 use deno_core::OpState;
 use deno_core::Extension;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use crate::diting_dom::{DomTree, NodeData, NodeId};
+use crate::diting_dom::{AttachShadowError, DomTree, NodeData, NodeId, ShadowRootMode};
 use html5ever::namespace_url;
 use crate::diting_net::{CookieJar, HttpClient};
 use url::Url;
@@ -475,6 +475,30 @@ fn op_blob_revoke(state: &OpState, #[string] id: String) {
     shared.borrow().blob_store.borrow_mut().remove(&id);
 }
 
+/// Attach a native shadow root to a host element (`Element.prototype.attachShadow`).
+/// Returns the root's node id, or -2 when the host already has a shadow root
+/// (JS maps that to the spec's NotSupportedError) and -1 for any other failure
+/// (missing DOM, non-element host, bad mode).
+#[op2(fast)]
+fn op_shadow_attach(state: &OpState, host_nid: u32, #[string] mode: String) -> i32 {
+    let gs = state.borrow::<SharedState>().clone();
+    let gs = gs.borrow();
+    let dom = match &gs.dom {
+        Some(d) => d,
+        None => return -1,
+    };
+    let mode = match mode.as_str() {
+        "open" => ShadowRootMode::Open,
+        "closed" => ShadowRootMode::Closed,
+        _ => return -1,
+    };
+    match dom.attach_shadow_root(NodeId::new(host_nid), mode) {
+        Ok(root) => root.raw() as i32,
+        Err(AttachShadowError::HostAlreadyHasShadowRoot) => -2,
+        Err(_) => -1,
+    }
+}
+
 #[op2]
 #[string]
 fn op_dom(state: &OpState, #[string] cmd: String, #[string] arg1: String, #[string] arg2: String) -> String {
@@ -695,6 +719,42 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             dom.prev_in_subtree(root, current)
                 .map(|id| id.index().to_string())
                 .unwrap_or("-1".into())
+        }
+        // Root of the local tree scope: ordinary parents only, so a shadow
+        // descendant resolves to its ShadowRoot (getRootNode default).
+        "tree_scope_root" => {
+            let nid = arg1.parse::<u32>().unwrap_or(0);
+            dom.tree_scope_root(NodeId::new(nid))
+                .map(|id| id.index().to_string())
+                .unwrap_or("-1".into())
+        }
+        // Topmost root after crossing ShadowRoot-to-host edges
+        // (getRootNode({ composed: true })).
+        "shadow_including_root" => {
+            let nid = arg1.parse::<u32>().unwrap_or(0);
+            dom.shadow_including_root(NodeId::new(nid))
+                .map(|id| id.index().to_string())
+                .unwrap_or("-1".into())
+        }
+        "assigned_slot" => {
+            let nid = arg1.parse::<u32>().unwrap_or(0);
+            dom.assigned_slot(NodeId::new(nid))
+                .map(|id| id.index().to_string())
+                .unwrap_or("-1".into())
+        }
+        "assigned_nodes" => {
+            let nid = arg1.parse::<u32>().unwrap_or(0);
+            // "null" vs "[]": a slot outside any shadow tree has no
+            // assignment AND no fallback; a slot inside one that nothing is
+            // assigned to serves its fallback children (the JS side reads
+            // the distinction).
+            match dom.assigned_nodes(NodeId::new(nid)) {
+                Some(ids) => serde_json::to_string(
+                    &ids.iter().map(|id| id.index()).collect::<Vec<_>>(),
+                )
+                .unwrap_or("[]".into()),
+                None => "null".into(),
+            }
         }
         "child_nodes" => {
             let nid = arg1.parse::<u32>().unwrap_or(0);
@@ -3451,6 +3511,7 @@ pub fn build_extension() -> Extension {
         name: "diting_dom",
         ops: std::borrow::Cow::Owned(vec![
             op_dom(),
+            op_shadow_attach(),
             op_console_msg(),
             op_dialog(),
             op_script_mark_started(),

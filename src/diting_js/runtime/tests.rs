@@ -503,10 +503,10 @@
         assert_eq!(rt.evaluate("document.links.length").unwrap().as_f64().unwrap() as i64, 1);
     }
 
-    /// obscura #930 family: slot assignment APIs exist and answer the
-    /// spec-correct empty array (assignment only happens inside shadow
-    /// trees, which this engine does not have) — feature-detect code gets
-    /// a function, not `undefined`.
+    /// obscura #930 family: slot assignment APIs exist. A slot OUTSIDE any
+    /// shadow tree has no assignment and no fallback — the spec-correct
+    /// answer is empty, which keeps feature-detect code on its slot-aware
+    /// path instead of crashing on `undefined`.
     #[test]
     fn slot_assignment_apis_are_present_and_empty() {
         let mut rt = setup_runtime(r#"<slot id="s"><span id="c"></span></slot>"#);
@@ -523,6 +523,141 @@
             .evaluate("document.getElementById('s') instanceof HTMLSlotElement")
             .unwrap();
         assert_eq!(is_slot, serde_json::json!(true));
+    }
+
+    #[test]
+    /// Native shadow trees: attachShadow registers a real arena root with
+    /// its own child list, so the ordinary nid-based Node methods operate on
+    /// the shadow tree — while the light tree, document queries, and shadow
+    /// queries each stay inside their own scope.
+    #[test]
+    fn attach_shadow_builds_a_real_scoped_tree() {
+        let mut rt = setup_runtime(r#"<div id="host"><span id="light">L</span></div>"#);
+        let out = rt
+            .evaluate(
+                "const host = document.getElementById('host'); \
+                 const sr = host.attachShadow({ mode: 'open' }); \
+                 sr.innerHTML = '<p id=\"shadow-p\">S</p>'; \
+                 [ \
+                   sr instanceof ShadowRoot, \
+                   sr instanceof DocumentFragment, \
+                   sr.nodeType, \
+                   sr.nodeName, \
+                   sr.host === host, \
+                   host.shadowRoot === sr, \
+                   sr.querySelector('#shadow-p').textContent, \
+                   document.querySelector('#shadow-p') === null, \
+                   document.getElementById('shadow-p') === null, \
+                   host.querySelector('#light') !== null, \
+                   sr.querySelector('#light') === null, \
+                   sr.firstChild.nodeType, \
+                   sr.textContent \
+                 ].join('|')",
+            )
+            .unwrap();
+        assert_eq!(
+            out,
+            serde_json::json!("true|true|11|#document-fragment|true|true|S|true|true|true|true|1|S")
+        );
+    }
+
+    /// Shadow-root identity contract: closed mode hides the root from the
+    /// host property, getRootNode answers per scope (default stops at the
+    /// ShadowRoot, composed crosses the host edge), connectivity follows the
+    /// host, re-attachment throws, and there is no public constructor.
+    #[test]
+    fn shadow_root_identity_get_root_and_connectivity() {
+        let mut rt = setup_runtime(r#"<div id="host"></div>"#);
+        let out = rt
+            .evaluate(
+                "const host = document.getElementById('host'); \
+                 const sr = host.attachShadow({ mode: 'closed' }); \
+                 sr.innerHTML = '<span id=\"in-shadow\"></span>'; \
+                 const inner = sr.querySelector('#in-shadow'); \
+                 const results = [ \
+                   host.shadowRoot === null, \
+                   inner.getRootNode() === sr, \
+                   inner.getRootNode({ composed: true }) === document, \
+                   inner.isConnected === true, \
+                   sr.isConnected === true \
+                 ]; \
+                 try { host.attachShadow({ mode: 'open' }); results.push(false); } \
+                 catch (e) { results.push(e.name === 'NotSupportedError'); } \
+                 try { new ShadowRoot(); results.push(false); } \
+                 catch (e) { results.push(e instanceof TypeError); } \
+                 results.join('|')",
+            )
+            .unwrap();
+        assert_eq!(out, serde_json::json!("true|true|true|true|true|true|true"));
+    }
+
+    /// The DocumentFragment-unwrap paths (appendChild/insertBefore/
+    /// replaceChild) splice a fragment's children into the parent — a
+    /// ShadowRoot shares nodeType/nodeName with a fragment and must NOT be
+    /// unwrapped, or appending a root would destructively empty the shadow
+    /// tree. Detached hosts: content is connected exactly when the host is.
+    #[test]
+    fn shadow_content_is_never_unwrapped_and_follows_host_connectivity() {
+        let mut rt = setup_runtime(r#"<div id="host"></div>"#);
+        let out = rt
+            .evaluate(
+                "const host = document.getElementById('host'); \
+                 const sr = host.attachShadow({ mode: 'open' }); \
+                 sr.innerHTML = '<b>one</b>'; \
+                 document.body.appendChild(sr); \
+                 const guardHeld = sr.innerHTML === '<b>one</b>' \
+                   && document.body.querySelector('b') === null; \
+                 const detached = document.createElement('div'); \
+                 const sr2 = detached.attachShadow({ mode: 'open' }); \
+                 sr2.innerHTML = '<i>x</i>'; \
+                 const inner = sr2.querySelector('i'); \
+                 const whileDetached = inner.isConnected === false; \
+                 document.body.appendChild(detached); \
+                 [guardHeld, whileDetached, inner.isConnected === true].join('|')",
+            )
+            .unwrap();
+        assert_eq!(out, serde_json::json!("true|true|true"));
+    }
+
+    /// Slot assignment real values over a native shadow tree: exact name
+    /// matching (slot attr ↔ slot name), first unnamed slot absorbs
+    /// nameless light children, an unreferenced name leaves assignedSlots
+    /// empty, and an unassigned slot serves its fallback children.
+    #[test]
+    fn slot_assignment_serves_light_children_through_the_shadow() {
+        let mut rt = setup_runtime(
+            r#"<my-host id="h"><span slot="a" id="sa">A</span><span id="anon">B</span><span slot="nobody" id="nb"></span></my-host>"#,
+        );
+        let out = rt
+            .evaluate(
+                "const host = document.getElementById('h'); \
+                 const sr = host.attachShadow({ mode: 'open' }); \
+                 sr.innerHTML = '<slot name=\"a\"></slot><slot id=\"def\"></slot><slot name=\"ghost\">fallback</slot>'; \
+                 const named = sr.querySelector('slot[name=\"a\"]'); \
+                 const def = sr.getElementById('def'); \
+                 const ghost = sr.querySelector('slot[name=\"ghost\"]'); \
+                 const sa = document.getElementById('sa'); \
+                 const anon = document.getElementById('anon'); \
+                 const nb = document.getElementById('nb'); \
+                 [ \
+                   named.assignedNodes().length, \
+                   named.assignedNodes()[0] === sa, \
+                   named.assignedElements().length, \
+                   JSON.stringify(sa.assignedSlots.map(s => s.getAttribute('name'))), \
+                   JSON.stringify(nb.assignedSlots), \
+                   def.assignedNodes().length, \
+                   def.assignedNodes()[0] === anon, \
+                   def.assignedElements().length, \
+                   ghost.assignedNodes().length, \
+                   ghost.assignedNodes()[0].textContent, \
+                   ghost.assignedElements().length \
+                 ].join('|')",
+            )
+            .unwrap();
+        assert_eq!(
+            out,
+            serde_json::json!("1|true|1|[\"a\"]|[]|1|true|1|1|fallback|0")
+        );
     }
 
     /// Regression for #105: `HTMLFormElement` must expose `.elements` so
