@@ -16,8 +16,17 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
+            features: stealth,screenshot
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            features: stealth,screenshot
+          # Windows v1: no `stealth` — the wreq/BoringSSL toolchain (cmake +
+          # perl + Go-generated asm) is a separate bring-up; plain reqwest TLS
+          # still works, disclose in the release notes. The package/smoke
+          # steps below carry the .exe / PowerShell differences.
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            features: screenshot
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -31,15 +40,37 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: Build
-        run: cargo build --release --features stealth,screenshot --target ${{ matrix.target }}
+        run: cargo build --release --features ${{ matrix.features }} --target ${{ matrix.target }}
       - name: Package
+        shell: bash
         run: |
           dir=aginxbrowser-v${GITHUB_REF_NAME#v}-${{ matrix.target }}
           mkdir "$dir"
-          cp "target/${{ matrix.target }}/release/aginxbrowser" "$dir/"
+          bin=aginxbrowser
+          if [ "${{ runner.os }}" = "Windows" ]; then bin=aginxbrowser.exe; fi
+          cp "target/${{ matrix.target }}/release/$bin" "$dir/"
           cp README.md docs/install.md "$dir/"
           tar czf "$dir.tar.gz" "$dir"
-          shasum -a 256 "$dir.tar.gz" > "$dir.tar.gz.sha256"
+          # macOS has shasum (no sha256sum); git-bash has sha256sum — try both.
+          if command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$dir.tar.gz" > "$dir.tar.gz.sha256"
+          else
+            sha256sum "$dir.tar.gz" > "$dir.tar.gz.sha256"
+          fi
+      # Windows has no `timeout(1)` wrapper (timeout.exe is a sleep), and the
+      # default step shell there is PowerShell — start the exe detached,
+      # sample both output streams, then kill it.
+      - name: Smoke run (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $p = Start-Process -FilePath "target/${{ matrix.target }}/release/aginxbrowser.exe" `
+            -RedirectStandardOutput smoke.out -RedirectStandardError smoke.err -PassThru
+          Start-Sleep -Seconds 10
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          $log = (Get-Content smoke.out -Raw) + (Get-Content smoke.err -Raw)
+          if ($log -notmatch "listening on") { Write-Output "--- smoke output ---"; Write-Output $log; exit 1 }
+          Write-Output (($log -split "`n") | Select-Object -First 1)
       - name: Upload release assets (tag pushes only)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2

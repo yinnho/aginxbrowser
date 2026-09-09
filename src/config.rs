@@ -207,7 +207,16 @@ pub fn app_data_dir() -> Option<std::path::PathBuf> {
                 .join("Library/Application Support/aginxbrowser")
         })
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        // %LOCALAPPDATA%\aginxbrowser. HOME is absent when the server runs
+        // from PowerShell/cmd (only git-bash sets it), and falling back to
+        // the working directory is the exact leak this function exists to
+        // prevent.
+        std::env::var_os("LOCALAPPDATA")
+            .map(|d| std::path::PathBuf::from(d).join("aginxbrowser"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
             if !xdg.is_empty() {

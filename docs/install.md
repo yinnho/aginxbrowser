@@ -130,24 +130,24 @@ aginxbrowser doctor   # features + bundled fonts + env posture + one egress prob
 
 ### Option C′: Manual prebuilt download
 
-Prebuilt binaries for v0.2.5 (macOS Apple Silicon / macOS Intel / Linux x86_64):
+Prebuilt binaries per release (macOS Apple Silicon / Linux x86_64 / Windows x86_64; Windows assets ship from v0.3.1 — the Intel-macOS asset was dropped in v0.2.10, its baked V8 snapshot carried the wrong architecture):
 
 ```bash
-VER=v0.2.5
+VER=v0.3.1
 OS=$(uname -s); ARCH=$(uname -m)
 case "$OS-$ARCH" in
-  Darwin-arm64) T=aarch64-apple-darwin ;;
-  Darwin-x86_64) T=x86_64-apple-darwin ;;
-  Linux-x86_64) T=x86_64-unknown-linux-gnu ;;
+  Darwin-arm64)  T=aarch64-apple-darwin ;;
+  Linux-x86_64)  T=x86_64-unknown-linux-gnu ;;
+  MINGW*-x86_64) T=x86_64-pc-windows-msvc ;;   # git-bash; PowerShell users: pick the asset by hand
   *) echo "unsupported: $OS-$ARCH"; exit 1 ;;
 esac
 curl -fsSL -o aginxbrowser.tar.gz \
   "https://github.com/yinnho/aginxbrowser/releases/download/${VER}/aginxbrowser-${VER}-${T}.tar.gz"
 tar xzf aginxbrowser.tar.gz && cd aginxbrowser-${VER}-${T}
-./aginxbrowser   # serves the HTTP API on 0.0.0.0:8089 by default
+./aginxbrowser   # serves the HTTP API on 0.0.0.0:8089 by default (.exe on Windows)
 ```
 
-Verify the download with the matching `.sha256` file in the same release.
+Verify the download with the matching `.sha256` file in the same release. The Windows build carries `screenshot` but not `stealth` (BoringSSL bring-up on that target is pending) — `doctor` reports the compiled-in feature set.
 
 ### Option D: Build from source
 

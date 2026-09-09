@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
-use std::os::unix::fs::OpenOptionsExt;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -2773,11 +2772,26 @@ fn op_storage_write(#[string] origin: &str, #[string] json: &str) {
     // 0600 to match the cookie store — this file carries login tokens too
     // (the xinzao-class session shape).
     let tmp = path.with_extension("tmp");
+    #[cfg(unix)]
+    let write_ok = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .and_then(|mut f| f.write_all(payload.as_bytes()))
+            .is_ok()
+    };
+    // Windows has no mode bits; the file lives in the per-user app-data
+    // directory (config::app_data_dir), whose ACLs already scope it to the
+    // user.
+    #[cfg(not(unix))]
     let write_ok = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .mode(0o600)
         .open(&tmp)
         .and_then(|mut f| f.write_all(payload.as_bytes()))
         .is_ok();

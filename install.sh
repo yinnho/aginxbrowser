@@ -26,7 +26,9 @@ arch=$(uname -m)
 case "$os" in
     Darwin) vendor="apple-darwin" ;;
     Linux)  vendor="unknown-linux-gnu" ;;
-    *) say "unsupported OS: $os (macOS and Linux only)"; exit 1 ;;
+    # git-bash / MSYS / Cygwin on Windows (uname -s is MINGW64_NT-... there)
+    MINGW*|MSYS*|CYGWIN*) vendor="pc-windows-msvc" ;;
+    *) say "unsupported OS: $os (macOS, Linux, and Windows git-bash only)"; exit 1 ;;
 esac
 case "$arch" in
     x86_64|amd64)  cpu="x86_64" ;;
@@ -82,22 +84,28 @@ say ">> sha256 ok"
 # ---- install ---------------------------------------------------------------
 bindir="${AGINXBROWSER_BIN_DIR:-${PREFIX:-}}"
 if [ -z "$bindir" ]; then
-    if [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
+    # git-bash /usr/local/bin lives inside the Git install dir and is not on
+    # PATH — the per-user bin is the sane default there.
+    if [ "$vendor" = "pc-windows-msvc" ]; then
+        bindir="$HOME/.local/bin"
+    elif [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
         bindir=/usr/local/bin
     else
         bindir="$HOME/.local/bin"
     fi
 fi
 mkdir -p "$bindir"
-# tarballs are one directory deep: aginxbrowser-vX.Y.Z-target/aginxbrowser
+# tarballs are one directory deep: aginxbrowser-vX.Y.Z-target/aginxbrowser[.exe]
+bin=aginxbrowser
+if [ "$vendor" = "pc-windows-msvc" ]; then bin=aginxbrowser.exe; fi
 tar -xzf "$tmp/$asset" -C "$tmp"
-src=$(find "$tmp" -mindepth 2 -maxdepth 2 -name aginxbrowser -type f | head -1)
+src=$(find "$tmp" -mindepth 2 -maxdepth 2 -name "$bin" -type f | head -1)
 [ -n "$src" ] || { say "binary not found inside $asset"; exit 1; }
-install -m 0755 "$src" "$bindir/aginxbrowser" 2>/dev/null || { cp "$src" "$bindir/aginxbrowser" && chmod 0755 "$bindir/aginxbrowser"; }
-say ">> installed: $bindir/aginxbrowser"
+install -m 0755 "$src" "$bindir/$bin" 2>/dev/null || { cp "$src" "$bindir/$bin" && chmod 0755 "$bindir/$bin"; }
+say ">> installed: $bindir/$bin"
 
 # ---- doctor ----------------------------------------------------------------
-if "$bindir/aginxbrowser" doctor; then
+if "$bindir/$bin" doctor; then
     :
 else
     say ">> installed, but doctor reported a problem above (often just egress"
@@ -105,7 +113,7 @@ else
 fi
 
 say ""
-say "    start a server:   $bindir/aginxbrowser            # HTTP API on 0.0.0.0:8089"
+say "    start a server:   $bindir/$bin                # HTTP API on 0.0.0.0:8089"
 say "    register in claude code:"
 say "      claude mcp add aginxbrowser --transport http http://127.0.0.1:8089/mcp"
 say "    docs: https://github.com/$repo/blob/main/docs/API.md"
