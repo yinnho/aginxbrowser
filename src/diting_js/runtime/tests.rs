@@ -889,6 +889,56 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn fetch_data_and_blob_urls_resolve_locally() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // obscura #907 family: fetch()/XHR on data: and blob: URLs. These
+        // never touch the HTTP client (it cannot fetch either scheme) — the
+        // data: processor decodes inline bytes, and createObjectURL feeds a
+        // registry fetch reads back. The old createObjectURL was a fake stub
+        // whose URL nothing could resolve.
+        let script = r#"async () => {
+            const out = [];
+            const t = await fetch('data:text/plain,hello%20w%C3%B6rld');
+            out.push(t.status, t.headers.get('content-type'), await t.text());
+            const j = await fetch('data:application/json;base64,eyJhIjoxfQ==');
+            out.push(j.headers.get('content-type'), await j.text());
+            const b = new Blob([new Uint8Array([104, 105])], { type: 'text/x-custom' });
+            const u = URL.createObjectURL(b);
+            out.push(typeof u === 'string' && u.startsWith('blob:'));
+            const r = await fetch(u);
+            out.push(r.status, r.headers.get('content-type'), await r.text());
+            URL.revokeObjectURL(u);
+            let revoked = false;
+            try { await fetch(u); } catch (e) { revoked = true; }
+            out.push(revoked);
+            // XHR rides the same fetch branch.
+            const xhrText = await new Promise((res, rej) => {
+                const x = new XMLHttpRequest();
+                x.open('GET', 'data:text/plain,xhr%21');
+                x.onload = () => res(x.responseText + ':' + x.status);
+                x.onerror = () => rej(new Error('xhr data: fetch failed'));
+                x.send();
+            });
+            out.push(xhrText);
+            return out;
+        }"#;
+        let result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!([
+                200, "text/plain", "hello wörld",
+                "application/json", "{\"a\":1}",
+                true, 200, "text/x-custom", "hi",
+                true,
+                "xhr!:200"
+            ])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn test_subtle_digest_variants_and_rejection() {
         let mut rt = setup_runtime("<html><body></body></html>");
         // SHA-512/224 and SHA-512/256 were silently falling through to SHA-256,

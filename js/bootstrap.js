@@ -4453,6 +4453,59 @@ function _installWasmStreamingFallback() {
 }
 _installWasmStreamingFallback();
 
+// WHATWG data: URL processor, byte-level. fetch()/XHR take this branch
+// because the HTTP client behind op_fetch_url cannot fetch the data: scheme
+// (scripts and images already had their own decoders). Returns
+// { bytes, mime }; throws TypeError on malformed input like Chrome does.
+function _dataUrlBytes(url) {
+  const comma = url.indexOf(',');
+  if (comma < 0) throw new TypeError('Invalid data: URL');
+  let parts = url.slice(5, comma).toLowerCase().split(';');
+  const isBase64 = parts[parts.length - 1] === 'base64';
+  if (isBase64) parts = parts.slice(0, -1);
+  let mime = parts.join(';');
+  if (!mime) mime = 'text/plain;charset=us-ascii';
+  const payload = url.slice(comma + 1);
+  let bytes;
+  if (isBase64) {
+    const encoded = payload.replace(/[\r\n\t\f ]/g, '');
+    const rem = encoded.length % 4;
+    if (rem === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
+      throw new TypeError('Invalid data: URL base64 payload');
+    }
+    bytes = _base64ToUint8Array(rem ? encoded + '='.repeat(4 - rem) : encoded);
+  } else {
+    bytes = _percentDecodeToBytes(payload);
+  }
+  return { bytes, mime };
+}
+
+// Percent-decode a data: payload to raw bytes: %XX escapes become single
+// bytes; every other character contributes its UTF-8 encoding (browsers run
+// the URL through UTF-8 first, so unescaped non-ASCII lands here too).
+function _percentDecodeToBytes(s) {
+  const bytes = [];
+  let buf = '';
+  const flush = () => {
+    if (buf) {
+      const enc = new TextEncoder().encode(buf);
+      for (let i = 0; i < enc.length; i++) bytes.push(enc[i]);
+      buf = '';
+    }
+  };
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === '%' && /^[0-9a-fA-F]{2}$/.test(s.slice(i + 1, i + 3))) {
+      flush();
+      bytes.push(parseInt(s.slice(i + 1, i + 3), 16));
+      i += 2;
+    } else {
+      buf += s[i];
+    }
+  }
+  flush();
+  return new Uint8Array(bytes);
+}
+
 globalThis.fetch = async (input, init = {}) => {
   let url = typeof input === "string"
     ? input
@@ -4466,6 +4519,43 @@ globalThis.fetch = async (input, init = {}) => {
     } catch(e) { /* keep as-is if URL resolution fails */ }
   }
   const method = init.method || (input instanceof Request ? input.method : "GET");
+  // data:/blob: never reach the HTTP client — it cannot fetch either scheme
+  // (obscura #907 family). data: carries its MIME inline; blob: reads the
+  // synchronous registry the real createObjectURL (in the Worker section
+  // below) writes — the Blob itself with its _bytes, unlike the async
+  // __blobStore text() copy which can lag a fetch issued right after
+  // createObjectURL. Chrome rejects non-GET data: fetches.
+  if (/^data:/i.test(url)) {
+    if (method !== 'GET') {
+      throw new TypeError("Fetching data: URLs with a method other than GET is unsupported");
+    }
+    const r = _dataUrlBytes(url);
+    return new Response(r.bytes, {
+      status: 200,
+      statusText: "OK",
+      headers: { 'content-type': r.mime },
+      type: "basic",
+      url,
+      redirected: false,
+    });
+  }
+  if (/^blob:/i.test(url)) {
+    const blob = globalThis.__blobObjs && globalThis.__blobObjs[url];
+    if (!blob || !(blob._bytes instanceof Uint8Array)) {
+      throw new TypeError('Failed to fetch: ' + url);
+    }
+    // Copy: Chrome snapshots blob contents at fetch time; sharing the stored
+    // buffer would let one consumed Response's detach alias every later one.
+    const bytes = new Uint8Array(blob._bytes);
+    return new Response(bytes, {
+      status: 200,
+      statusText: "OK",
+      headers: blob.type ? { 'content-type': blob.type } : {},
+      type: "basic",
+      url,
+      redirected: false,
+    });
+  }
   const hdrObj = init.headers instanceof Headers ? Object.fromEntries(init.headers.entries()) : Object.assign({}, init.headers || {});
   // fetch(request) with no explicit init.body inherits the Request's body
   // (upstream #716 split, item: "A Request object's inherited body is also
