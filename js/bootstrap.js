@@ -970,6 +970,14 @@ function __prepareInsertedScript(script) {
           let body;
           if (fullUrl.startsWith('data:')) {
             body = _decodeDataScriptUrl(fullUrl);
+          } else if (fullUrl.startsWith('blob:')) {
+            // Classic scripts stay MIME-blind (their HTTP path never checked
+            // a content-type either); the body lives in __blobObjs.
+            const b = globalThis.__blobObjs && globalThis.__blobObjs[fullUrl];
+            if (!b || !(b._bytes instanceof Uint8Array)) {
+              throw new TypeError('Failed to fetch script: ' + fullUrl);
+            }
+            body = new TextDecoder().decode(b._bytes);
           } else {
             // Bracket the fetch so the settle loop keeps pumping past its
             // fast-path deadline while this script is still in flight.
@@ -9517,12 +9525,23 @@ URL.createObjectURL = function(blob) {
   }
   const id = 'blob:' + origin + '/' + u;
   globalThis.__blobObjs[id] = blob;
+  // Mirror into the Rust-side registry: import() and <script type=module>
+  // of blob: URLs resolve through the module loader, which runs outside
+  // this realm and cannot reach __blobObjs. Best-effort — the JS-side table
+  // stays authoritative for fetch()/Worker.
+  try {
+    _OPS.op_blob_register(
+      id,
+      blob._bytes instanceof Uint8Array ? blob._bytes : new Uint8Array(0),
+      String(blob.type || ''));
+  } catch (_) {}
   blob.text().then(text => { globalThis.__blobStore[id] = text; });
   return id;
 };
 URL.revokeObjectURL = function(url) {
   delete globalThis.__blobStore[url];
   delete globalThis.__blobObjs[url];
+  try { _OPS.op_blob_revoke(url); } catch (_) {}
 };
 
 // Window-level scrolling (upstream #468). The dominant infinite-scroll idiom

@@ -5300,6 +5300,100 @@
         assert_eq!(result.value.unwrap(), serde_json::json!([2, 1]));
     }
 
+    // b12405d closed fetch()/XHR and classic <script src=data:>; the module
+    // path was the remaining gap — import() and <script type=module> died in
+    // the Rust module loader (validate_fetch_url/reqwest). The loader now
+    // resolves data: locally, with Chromium's module MIME gate: empty essence
+    // reads as text/plain and is refused, classic-style MIME blindness does
+    // not apply here.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_dynamic_import_data_url_module() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"async () => {
+            const out = {};
+            const imp = (k, u) => import(u)
+                .then(m => { out[k] = String(m.default) + ':' + m.n; })
+                .catch(e => { out[k] = 'ERR'; });
+            await imp('a', 'data:text/javascript,export default 41; export const n = 1;');
+            await imp('b', 'data:application/javascript;base64,ZXhwb3J0IGRlZmF1bHQgNDI7IGV4cG9ydCBjb25zdCBuID0gMjs=');
+            // A charset param between the essence and the payload is fine.
+            await imp('c', 'data:text/javascript;charset=utf-8,export default 43; export const n = 4;');
+            await imp('d', 'data:,export default 1;');
+            await imp('e', 'data:text/plain,export default 1;');
+            return out;
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let out = result.value.unwrap();
+        assert_eq!(out["a"], "41:1");
+        assert_eq!(out["b"], "42:2");
+        assert_eq!(out["c"], "43:4");
+        // Empty essence reads as text/plain and is refused, like Chrome.
+        assert_eq!(out["d"], "ERR");
+        assert_eq!(out["e"], "ERR");
+    }
+
+    // import(blob:) resolves through the Rust-side mirror of
+    // URL.createObjectURL: works after create, rejects after revoke, and a
+    // non-JavaScript blob type is refused like Chrome refuses it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_dynamic_import_blob_url_module() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"async () => {
+            const out = {};
+            const url = URL.createObjectURL(
+                new Blob(['export default 7; export const n = 3;'], { type: 'text/javascript' }));
+            try {
+                const m = await import(url);
+                out.ok = String(m.default) + ':' + m.n;
+            } catch (e) { out.ok = 'ERR'; }
+            // Revoked before it was ever imported: the fetch reaches the
+            // mirror and misses, like Chrome. (A URL imported once and then
+            // revoked keeps resolving from the module map — also Chrome.)
+            const dead = URL.createObjectURL(
+                new Blob(['export default 9;'], { type: 'text/javascript' }));
+            URL.revokeObjectURL(dead);
+            try { await import(dead); out.after = 'resolved'; }
+            catch (e) { out.after = 'rejected'; }
+            const u2 = URL.createObjectURL(new Blob(['export default 1;'], { type: 'text/plain' }));
+            try { await import(u2); out.mime = 'resolved'; }
+            catch (e) { out.mime = 'rejected'; }
+            return out;
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let out = result.value.unwrap();
+        assert_eq!(out["ok"], "7:3");
+        assert_eq!(out["after"], "rejected");
+        assert_eq!(out["mime"], "rejected");
+    }
+
+    // Classic dynamic <script src="blob:"> executes the blob body (no MIME
+    // gate, like every other classic path); a revoked URL fires error and
+    // evaluates nothing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_dynamic_blob_url_script_executes() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"async () => {
+            let loads = 0, errors = 0;
+            const url = URL.createObjectURL(
+                new Blob(['window.__bs = 5;'], { type: 'text/javascript' }));
+            const s = document.createElement('script');
+            s.setAttribute('src', url);
+            s.addEventListener('load', () => loads++);
+            s.addEventListener('error', () => errors++);
+            document.body.appendChild(s);
+            const dead = URL.createObjectURL(new Blob(['window.__dead = 1;']));
+            URL.revokeObjectURL(dead);
+            const s2 = document.createElement('script');
+            s2.setAttribute('src', dead);
+            s2.addEventListener('error', () => errors++);
+            document.body.appendChild(s2);
+            await new Promise(r => setTimeout(r, 20));
+            return [window.__bs, window.__dead === undefined, loads, errors];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(result.value.unwrap(), serde_json::json!([5, true, 1, 1]));
+    }
+
     /// Upstream f61493f: the HTML script-fetch algorithm treats an
     /// unsuccessful HTTP response as a network error. A 404 body (here, one
     /// that would clobber a global if it ran) must never become script source.

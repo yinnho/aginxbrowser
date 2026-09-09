@@ -272,11 +272,13 @@ impl JsRuntime {
         let state = Rc::new(RefCell::new(JsState::new()));
         let state_clone = state.clone();
         let import_map = state.borrow().import_map.clone();
+        let blob_store = state.borrow().blob_store.clone();
 
         let module_loader = Rc::new(DitingModuleLoader::with_proxy_and_import_map(
             base_url,
             proxy_url,
             import_map.clone(),
+            blob_store,
         ));
 
         // Must stay alive through the deno_core::JsRuntime::new call inside

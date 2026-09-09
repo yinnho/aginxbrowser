@@ -1,11 +1,9 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
+use std::os::unix::fs::OpenOptionsExt;
 use std::rc::Rc;
 use std::sync::Arc;
-
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 
 use deno_core::op2;
 use deno_core::OpState;
@@ -112,6 +110,11 @@ pub struct JsState {
     /// Window-global import-map state shared by parser-discovered scripts,
     /// dynamically inserted import maps, and the module loader.
     pub(crate) import_map: Rc<RefCell<crate::diting_js::import_map::ImportMap>>,
+    /// Blob bodies mirrored from JS `URL.createObjectURL` (blob URL → bytes
+    /// + MIME), shared with the module loader so `import("blob:…")` and
+    /// `<script type=module src="blob:…">` resolve URLs no HTTP client can
+    /// fetch. Realm-scoped like the JS-side `__blobObjs`.
+    pub(crate) blob_store: Rc<RefCell<HashMap<String, (Vec<u8>, String)>>>,
     /// In-flight dynamic `<script src>` fetches. Dynamic scripts fetch via the
     /// op-level reqwest client, invisible to the page-level http_client's
     /// active_requests() counter — without this, the post-script settle loop
@@ -276,6 +279,7 @@ impl JsState {
             write_stream: std::cell::RefCell::new(None),
             already_started_scripts: RefCell::new(HashSet::new()),
             import_map: Rc::new(RefCell::new(crate::diting_js::import_map::ImportMap::default())),
+            blob_store: Rc::new(RefCell::new(HashMap::new())),
             dynamic_script_fetches: std::cell::Cell::new(0),
             callbacks: None,
             network_response_bodies: std::collections::HashMap::new(),
@@ -442,6 +446,28 @@ fn op_dyn_script_fetch_end(state: &OpState) {
     let shared = state.borrow::<SharedState>().clone();
     let state = shared.borrow();
     state.dynamic_script_fetches.set(state.dynamic_script_fetches.get().saturating_sub(1));
+}
+
+/// Mirror a `URL.createObjectURL` registration into the Rust-side blob
+/// table. The JS-side `__blobObjs` map is unreachable from the module
+/// loader (which resolves outside the realm), so `import("blob:…")` and
+/// `<script type=module src="blob:…">` resolve through this mirror.
+#[op2(fast)]
+fn op_blob_register(
+    state: &OpState,
+    #[string] id: String,
+    #[buffer] bytes: &[u8],
+    #[string] mime: String,
+) {
+    let shared = state.borrow::<SharedState>().clone();
+    shared.borrow().blob_store.borrow_mut().insert(id, (bytes.to_vec(), mime));
+}
+
+/// Drop a mirrored blob registration (`URL.revokeObjectURL`).
+#[op2(fast)]
+fn op_blob_revoke(state: &OpState, #[string] id: String) {
+    let shared = state.borrow::<SharedState>().clone();
+    shared.borrow().blob_store.borrow_mut().remove(&id);
 }
 
 #[op2]
@@ -3342,6 +3368,8 @@ pub fn build_extension() -> Extension {
             op_script_try_start(),
             op_dyn_script_fetch_begin(),
             op_dyn_script_fetch_end(),
+            op_blob_register(),
+            op_blob_revoke(),
             op_fetch_url(),
             op_get_cookies(),
             op_set_cookie(),
