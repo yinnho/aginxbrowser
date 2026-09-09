@@ -863,6 +863,99 @@
         assert_eq!(href, serde_json::json!("http://example.com/test"));
     }
 
+    /// The tmall report's P0-①: `window.isSecureContext` read undefined on an
+    /// HTTPS page, the security SDK printed "未使用 HTTPS" and walked its
+    /// degraded branch. The property must exist as a boolean and track the
+    /// live URL (Secure Contexts: https/wss secure, http/ws only on the
+    /// localhost family, data:/file: secure, blob: inherits the inner scheme).
+    #[test]
+    fn test_is_secure_context() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // Plain http off localhost: exists, boolean, false.
+        let out = rt
+            .evaluate("typeof isSecureContext + '|' + String(isSecureContext)")
+            .unwrap();
+        assert_eq!(out, serde_json::json!("boolean|false"));
+
+        rt.set_url("https://shop.world.tmall.com/shop/view_shop.htm");
+        assert_eq!(
+            rt.evaluate("String(isSecureContext)").unwrap(),
+            serde_json::json!("true"),
+            "https pages are secure contexts"
+        );
+
+        // The localhost family is potentially trustworthy over plain http.
+        rt.set_url("http://localhost:3000/");
+        assert_eq!(rt.evaluate("String(isSecureContext)").unwrap(), serde_json::json!("true"));
+        rt.set_url("http://127.0.0.1:8089/");
+        assert_eq!(rt.evaluate("String(isSecureContext)").unwrap(), serde_json::json!("true"));
+
+        // data: is secure; a blob: URL inherits its inner scheme.
+        rt.set_url("data:text/html,<p>x</p>");
+        assert_eq!(rt.evaluate("String(isSecureContext)").unwrap(), serde_json::json!("true"));
+        rt.set_url("blob:https://shop.world.tmall.com/uuid-1");
+        assert_eq!(rt.evaluate("String(isSecureContext)").unwrap(), serde_json::json!("true"));
+    }
+
+    /// Response.url/redirected must follow Chrome semantics (final URL after
+    /// redirects, `redirected` true when hops were followed). The tmall
+    /// report's mtop API redirected into `_____tmd_____/punish` while the
+    /// fetch row still claimed the API URL — the visibility hole behind the
+    /// "promise pending with no signal" diagnosis.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_reports_final_url_and_redirected_flag() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            // Hop 1: /start answers 302 -> /landing. Hop 2: /landing answers 200.
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 302 Found\r\nlocation: /landing\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .unwrap();
+            stream.flush().unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok")
+                .unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/test", port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const r = await fetch('/start');
+                    return { url: r.url, redirected: String(r.redirected), body: await r.text() };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!({
+                "url": format!("http://127.0.0.1:{}/landing", port),
+                "redirected": "true",
+                "body": "ok",
+            })
+        );
+    }
+
     #[test]
     fn test_button_click_dispatches_listener() {
         let mut rt = setup_runtime(r#"<button id="go">Go</button>"#);

@@ -93,6 +93,22 @@ pub fn media_kind(url: &str, mime: Option<&str>) -> Option<&'static str> {
         .map(|(_, kind)| *kind)
 }
 
+/// Anti-bot challenge endpoints the engine can recognize by URL shape.
+/// These answer 200 with a challenge page, so status alone reads as success
+/// — exactly the shape that left an mtop promise pending with no signal
+/// (the tmall report: the API redirect into `_____tmd_____/punish` looked
+/// like a normal response row). Returns the short challenge tag.
+pub fn challenge_kind(url: &str) -> Option<&'static str> {
+    // TMD (taobao/tmall anti-bot): the punish path lands the challenge page.
+    // Path-shaped — query/fragment stripped first, same convention as
+    // media_kind — so a mere query param naming the marker never trips it.
+    let bare = url.split(['?', '#']).next().unwrap_or(url);
+    if bare.to_ascii_lowercase().contains("_____tmd_____/punish") {
+        return Some("punish");
+    }
+    None
+}
+
 /// Compact one-line-per-request view for agents: method/url/status/type/size.
 /// `status: 0` rows carry the reason they never produced a servable response
 /// (SSRF block, CORS refusal, transport failure) in `error`.
@@ -109,6 +125,9 @@ pub fn compact_events(events: &[NetworkEvent]) -> Vec<Value> {
             });
             if let Some(error) = &e.error {
                 row["error"] = json!(error);
+            }
+            if let Some(kind) = challenge_kind(&e.url) {
+                row["challenge"] = json!(kind);
             }
             row
         })
@@ -463,6 +482,38 @@ mod tests {
         assert!(
             rows[1].get("error").is_none(),
             "successful rows stay lean — no null error field"
+        );
+    }
+
+    #[test]
+    fn compact_events_marks_challenge_rows() {
+        // The tmall report shape: the mtop API redirect lands on a punish
+        // page that answers 200 — status alone reads as success, so the
+        // row needs the explicit challenge tag.
+        let mut punished = event(
+            "https://h5api.m.tmall.com/h5/mtop.taobao.shop.simple.item.fetch/1.0/_____tmd_____/punish",
+            "Fetch",
+            200,
+            1.0,
+        );
+        punished.error = None;
+        let api = event(
+            "https://h5api.m.tmall.com/h5/mtop.taobao.shop.simple.item.fetch/1.0/",
+            "Fetch",
+            200,
+            2.0,
+        );
+        let rows = compact_events(&[punished, api]);
+        assert_eq!(rows[0].get("challenge"), Some(&json!("punish")));
+        assert!(
+            rows[1].get("challenge").is_none(),
+            "ordinary rows carry no challenge field"
+        );
+        // Path-shaped, not substring-anywhere: a query param mentioning the
+        // marker must not trip it.
+        assert_eq!(
+            challenge_kind("https://shop.example/search?q=_____tmd_____/punish"),
+            None
         );
     }
 

@@ -2206,6 +2206,12 @@ async fn op_fetch_url(
     let mut current_method = req_method;
     let mut current_body = body_bytes;
     let mut redirects_followed: usize = 0;
+    // Every hop target, in order — bounded by FETCH_REDIRECT_LIMIT because
+    // the walk stops there. Surfaced on the success JSON (and the
+    // redirect-shaped failures) so JS consumers can see where a fetch that
+    // "went somewhere else" actually went; the walk stops at the limit so
+    // the vec needs no separate cap.
+    let mut redirect_chain: Vec<String> = Vec::new();
 
     // Passive on_request observers (upstream #408): fire with the request as
     // the script shaped it, once, before the first hop goes out.
@@ -2415,10 +2421,12 @@ async fn op_fetch_url(
                 "headers": {},
                 "blocked": true,
                 "error": error,
+                "redirect_chain": redirect_chain,
             })
             .to_string());
         }
 
+        redirect_chain.push(next_url.to_string());
         redirects_followed += 1;
         if redirects_followed > FETCH_REDIRECT_LIMIT {
             let error = format!("Too many redirects (>{})", FETCH_REDIRECT_LIMIT);
@@ -2430,6 +2438,7 @@ async fn op_fetch_url(
                 "headers": {},
                 "blocked": true,
                 "error": error,
+                "redirect_chain": redirect_chain,
             })
             .to_string());
         }
@@ -2646,6 +2655,9 @@ async fn op_fetch_url(
         "body": stored_text.unwrap_or_default(),
         "bodyBase64": resp_body_base64,
         "url": url,
+        "final_url": current_url,
+        "redirected": redirects_followed > 0,
+        "redirect_chain": redirect_chain,
         "headers": resp_headers,
     })
     .to_string())

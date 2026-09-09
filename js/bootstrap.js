@@ -996,9 +996,15 @@ function __prepareInsertedScript(script) {
                 // the reason rides parsed.error (SSRF/pattern block) or
                 // parsed.corsError (post-response CORS gate). Dropping it
                 // printed a bare "HTTP 0" that read like a server-side
-                // failure (the taobao eg.js chase).
+                // failure (the taobao eg.js chase). The final URL rides
+                // parsed.url for the redirect-shaped refusals — a chain
+                // that ends somewhere other than the src is half the
+                // diagnosis.
                 const why = parsed.error || parsed.corsError;
-                throw new Error('HTTP ' + (parsed.status || 0) + (why ? ': ' + why : ''));
+                let msg = 'HTTP ' + (parsed.status || 0) + (why ? ': ' + why : '');
+                const fin = parsed.final_url || parsed.url;
+                if (fin && fin !== fullUrl) msg += ' -> ' + fin;
+                throw new Error(msg);
               }
               body = parsed.body;
             } finally {
@@ -3851,6 +3857,35 @@ Object.defineProperty(globalThis, 'location', {
   enumerable: true,
 });
 
+// Secure Contexts (W3C §is-origin-potentially-trustworthy): https/wss are
+// secure, plain http/ws only on the localhost family, data:/file:/blob:
+// inheriting a secure scheme. Computed per access off the live URL — the
+// property can't be baked into the snapshot because navigation changes the
+// answer. Real pages check this before generating risk params (Tmall's AWSC
+// prints "未使用 HTTPS" and walks its degraded branch when it reads
+// undefined), so the getter must exist on window, not just the worker scope.
+Object.defineProperty(globalThis, 'isSecureContext', {
+  get() {
+    let u;
+    try { u = new URL(__currentUrl()); } catch { return false; }
+    if (u.protocol === 'https:' || u.protocol === 'wss:') return true;
+    if (u.protocol === 'data:' || u.protocol === 'file:') return true;
+    if (u.protocol === 'blob:') {
+      try { return new URL(u.protocol === 'blob:' ? u.href.slice(5) : u.href).protocol === 'https:'; }
+      catch { return false; }
+    }
+    if (u.protocol === 'http:' || u.protocol === 'ws:') {
+      const h = u.hostname;
+      return h === 'localhost' || h.endsWith('.localhost')
+        || h === '::1' || h === '[::1]'
+        || /^127\./.test(h) || h === '0.0.0.0';
+    }
+    return false;
+  },
+  configurable: true,
+  enumerable: true,
+});
+
 globalThis.window = globalThis;
 globalThis.self = globalThis;
 globalThis.top = globalThis;
@@ -4663,8 +4698,13 @@ globalThis.fetch = async (input, init = {}) => {
     statusText: "",
     headers: parsed.headers || {},
     type: respType,
-    url: parsed.url || url,
-    redirected: false,
+    // Chrome: Response.url is the FINAL URL after redirects and `redirected`
+    // is true whenever one was followed. The op used to report only the
+    // original URL, so a fetch() that mtop followed into a punish page read
+    // as if it had landed on the API itself (the tmall report chased exactly
+    // that ghost).
+    url: parsed.final_url || parsed.url || url,
+    redirected: !!parsed.redirected,
   });
 };
 

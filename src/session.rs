@@ -1615,6 +1615,18 @@ fn session_thread(
                                     "total": events.len(),
                                     "requests": crate::har::compact_events(events),
                                 });
+                                // Anti-bot challenges answer 200, so they
+                                // hide among successful rows — surface the
+                                // count at the top level so an agent that
+                                // just asks "did we get punished" doesn't
+                                // have to scan every URL.
+                                let challenges = events
+                                    .iter()
+                                    .filter(|e| crate::har::challenge_kind(&e.url).is_some())
+                                    .count();
+                                if challenges > 0 {
+                                    payload["challenges"] = json!(challenges);
+                                }
                                 if include_bodies {
                                     let body_of = |rid: &str| page.inner.get_response_body(rid);
                                     let filters = url_contains
