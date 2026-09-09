@@ -31,6 +31,7 @@
 | 依赖 | 单二进制，无 Chromium | Chromium ~500MB | Docker ~1GB | Chromium |
 | 看得见（截图） | ✅ 内置 diting 渲染引擎 | 需 Chromium | ❌ | 需 Chromium |
 | 读得懂 | markdown + js_extract + fetch 回执 | 要自己写 | markdown | 要自己写 |
+| 写得出文档 | ✅ `render_markdown`：确定性 HTML + 内联 SVG 图 | ❌ | ❌ | ❌ |
 | 找得到（搜索） | ✅ 15 引擎 7 分类聚合 | ❌ | ❌ | ❌ |
 | 操得了 | session 索引化交互 | DevTools API | ❌ | LLM 驱动 |
 | 记得住 | ✅ 本地 fetch/搜索缓存（SQLite FTS5） | ❌ | 爬虫缓存 | ❌ |
@@ -49,7 +50,7 @@ Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操
 
 - **🔐 真实 TLS 指纹** — stealth 模式用 BoringSSL 复刻 Chrome145 / Firefox133 / Safari / Edge 的完整 TLS 握手（不是只改 UA），可按请求切换；Cloudflare Turnstile 挑战页自动等 `cf_clearance`。无指纹引擎碰反爬就是 403，我们穿过去。
 - **🤝 有状态交互 Session** — 登录态可注入可导出（`session_create(cookies=...)` ↔ `session_cookies`），跨翻页、跨多步流程不断；`persistent: true` 连闲置过期和服务重启都能扛过去，同一个 session_id 复活时还带着登录态。一次性引擎抓完即弃，做不了「登录 → 操作 → 再操作」。
-- **🔌 MCP 原生** — 27 个工具是一等公民（不是 CDP 套壳），Claude Code / Cursor / Claude Desktop 一行接入。HTTP + MCP 双协议之外还有 CDP 桥，DevTools 生态照样能用。
+- **🔌 MCP 原生** — 29 个工具是一等公民（不是 CDP 套壳），Claude Code / Cursor / Claude Desktop 一行接入。HTTP + MCP 双协议之外还有 CDP 桥，DevTools 生态照样能用。
 
 > 参照：Cloudflare 的 Kitesurf 明确不做真实 TLS 指纹协商、不做持久认证会话——反爬与登录正是 AginxBrowser 的地盘。
 
@@ -78,15 +79,16 @@ Agent 是照着浏览器说的话行事的，所以响应里要写清楚实际�
 - **记得住本地缓存**：每次 fetch/搜索自动进 SQLite（FTS5），落 `~/.aginxbrowser/cache.db`。`cache` 工具从 Agent 已读过的内容里找答案，不再重付网络时间：全文检索支持中文逐字匹配、关键词×新鲜度融合排序、`[§ 标题]` 小节感知摘要、每 URL 内容哈希测漂移、TTL 有界、共享部署可按 session 隔离
 - **CAPTCHA 处理**：类型识别 + Cloudflare 挑战自动等待 + 可选 2captcha 解算，搜索不卡验证页
 - **JS 数据提取**：`js_extract` 参数，从 SPA 提 `window.__INITIAL_STATE__` 等结构化数据
+- **文档生成**：`render_markdown` 把 markdown 渲成一份确定性的自包含 HTML——文档这层 agent 不用手写 HTML 了。正文走纯离线壳（无字体无脚本）；围栏代码块标成 `archify` 的话，里面放带类型的零坐标图 JSON（sequence / workflow / architecture / dataflow / lifecycle 五族），布局引擎直接出内联 SVG。同一份输入出同一份字节，回执带 sha256，确定性可以验。`theme` 明暗、`preset` 配色族（classic / signal-flow / blueprint / editorial）在生成时烤进产物；`quality:"showcase"` 是交付档，审计连线路交叉、标签净空、节奏都打分，但不动产物字节。图上还能挂 views 引导页签，点节点亮 ego 图、点页签亮子图，`window.agxViewer` 还能编程查 route（两点最短路径）和 reach（上下游闭包）。传 `session_id` 的话产物直接装进活会话，回执告诉你这页在视口里是 fits 还是 tall/wide。Mermaid 源码归 agent 翻译成 archify JSON，引擎只收 archify JSON。图词汇表改编自 archify（MIT）
 - **截图渲染**：`/screenshot` 端点（`--features screenshot`），JS 渲染后的 DOM 用自有的 diting 引擎出 PNG——纯 CPU，无 Chromium，agent 的视觉输入
 - **TLS 指纹伪装**：stealth 模式模拟 Chrome145/Firefox133/Safari/Edge，可按请求切换
-- **MCP Server**：`--mcp` 模式暴露 28 个工具（fetch/eval/click/search/download/cache + session + 截图工具），Claude Code / Claude Desktop / Cursor 直接调用
+- **MCP Server**：`--mcp` 模式暴露 29 个工具（fetch/eval/click/search/download/cache + session + 截图 + 文档生成工具），Claude Code / Claude Desktop / Cursor 直接调用
 - **Firecrawl 兼容**：`/v1/scrape` 端点，现有 Firecrawl 客户端改 base URL 即可迁移
 - **DNS 重绑定防护**：内置 SSRF 防护 + 解析后 IP 校验
 
 ## 是浏览器，不是爬虫
 
-AginxBrowser 干的是**实时��信息**：agent 带着问题来，读几页，拿着答案走。它不是爬虫工具，而且产品形态上就让它变不成爬虫：
+AginxBrowser 干的是**实时获取信息**：agent 带着问题来，读几页，拿着答案走。它不是爬虫工具，而且产品形态上就让它变不成爬虫：
 
 - **robots.txt 默认不查。** RFC 9309 解析器是内置的，但实时取信息不是爬虫，不默认守爬虫的规矩；想守的运维设 `AGINXBROWSER_HONOR_ROBOTS=1` 自行打开。
 - **没有"抓全站"的 API。** 没有 crawl 端点，没有链接递归——每一页都是 agent 明确要的那一页。
@@ -203,7 +205,8 @@ aginxbrowser/
     ├── main.rs              # HTTP 服务入口与路由
     ├── server.rs            # 业务层（fetch/click/eval/search）
     ├── session.rs           # 交互式浏览器会话
-    ├── mcp.rs               # MCP Server（28 个工具）
+    ├── mcp.rs               # MCP Server（29 个工具）
+    ├── docgen/              # 文档层：markdown → 确定性 HTML + 内联 SVG 图
     ├── render.rs            # 分层渲染（HTTP 直取 → diting 浏览器引擎）
     ├── store.rs             # 本地 fetch/搜索缓存（SQLite FTS5、漂移哈希）
     ├── download.rs          # 流式文件下载（sha256、断点续传）
@@ -275,13 +278,13 @@ cargo build --release --features stealth,screenshot
 | `AGINXBROWSER_UA` | Linux Chrome145 | 伪装 UA |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language 头 |
 | `AGINXBROWSER_PROXY` | 无 | 可选回退代理。被墙源引擎（Google/Bing News/Hugging Face）先直连、失败才走此代理——海外部署无需配置；单次请求也可传 `use_proxy:true` 走代理。浏览器/session/CDP 导航到已知被墙域名（wikipedia.org、github.com 等）会自动走代理。引擎故意无视标准 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`（给别的工具设没问题），启动时见到会打警告 |
-| `AGINXBROWSER_NAV_CHAIN_LIMIT` | `10` | JS 导航链上限：页面经 `location`/表单连跳多少个文档后导航中止。计数含最初文档（10 = 首文档 + 9 跳）。���法长链（跨提供商 SSO 跳转）可调高；HTTP 3xx 重定向单独算额度（20，按 Fetch spec/浏览器对齐） |
+| `AGINXBROWSER_NAV_CHAIN_LIMIT` | `10` | JS 导航链上限：页面经 `location`/表单连跳多少个文档后导航中止。计数含最初文档（10 = 首文档 + 9 跳）。合法长链（跨提供商 SSO 跳转）可调高；HTTP 3xx 重定向单独算额度（20，按 Fetch spec/浏览器对齐） |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 进程内缓存 TTL，`0` 禁用 |
 | `AGINXBROWSER_HONOR_ROBOTS` | 未设 | `/fetch`、`/screenshot`、`/download` 和 MCP 工具默认不查 robots.txt；设 `1` 打开（运维自选） |
 | `AGINXBROWSER_ALLOW_FILE_ACCESS` | 未设 | 打开 `file://` 读取——导航、子资源、`/fetch`、CDP `setFileInputFiles`。等价于 `--allow-file-access` 命令行开关。默认关：服务默认绑 0.0.0.0，开了门等于把本地文件交给任何够得着端口的人。本地开发机再设，托管实例别设 |
 | `AGINXBROWSER_ALLOW_PRIVATE_NETWORK` | 未设 | 打开回环/RFC1918/链路本地地址的抓取（SSRF 门）。等价于 `--allow-private-network` 命令行开关——仅开发机 |
 | `AGINXBROWSER_ROBOTS_TTL_SECS` | `3600` | 每主机 robots.txt 策略缓存 TTL |
-| `AGINXBROWSER_DOMAIN_RATE_PER_MIN` | `20` | 单注册域每分钟页面数上限（子域名共额度���，超限返回 429；`0` 关闭。见「是浏览器，不是爬虫」 |
+| `AGINXBROWSER_DOMAIN_RATE_PER_MIN` | `20` | 单注册域每分钟页面数上限（子域名共用额度，超限返回 429；`0` 关闭。见「是浏览器，不是爬虫」 |
 | `AGINXBROWSER_SESSION_PAGE_LIMIT` | `200` | 单个交互 session 可走的页面总数上限（换页的点击也计），超限后续导航被拒，当前页仍可操作；`0` 关闭 |
 | `AGINXBROWSER_MCP_ALLOWED_HOSTS` | 无 | `/mcp` 额外放行的 `Host`（逗号分隔）。传输层的 DNS 重绑定防护默认只认回环地址，局域网 IP 或 Docker 主机名调用本实例时需加上 |
 | `AGINXBROWSER_STORE` | 开 | 本地 fetch/搜索缓存；`0`/`false`/`off` 关闭 |
@@ -303,7 +306,7 @@ cargo build --release --features stealth,screenshot
 
 包含：
 - 全部 33 个 HTTP 端点（`/fetch`、`/search`、`/screenshot`、`/download`、`/v1/scrape`、`/doctor`、18 个 session 端点、CDP 发现、MCP 传输）
-- MCP Server 的 28 个工具及参数
+- MCP Server 的 29 个工具及参数
 - Claude Code / Claude Desktop / Cursor 客户端配置
 - 环境变量、错误码、站点抓取示例
 

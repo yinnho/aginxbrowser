@@ -31,6 +31,7 @@ Existing "browser automation" was built for humans or for one-shot scraping — 
 | Dependencies | Single binary, no Chromium | Chromium ~500MB | Docker ~1GB | Chromium |
 | Sees (screenshots) | ✅ built-in diting rendering engine | Needs Chromium | ❌ | Needs Chromium |
 | Reads | markdown + js_extract + fetch receipts | DIY | markdown | DIY |
+| Writes documents | ✅ `render_markdown`: deterministic HTML + inline-SVG diagrams | ❌ | ❌ | ❌ |
 | Finds (search) | ✅ 15 engines, 7 categories, merged | ❌ | ❌ | ❌ |
 | Acts | indexed session interaction | DevTools API | ❌ | LLM-driven |
 | Remembers | ✅ local fetch/search cache (SQLite FTS5) | ❌ | crawl cache | ❌ |
@@ -49,7 +50,7 @@ Most new "agent browsers" are stateless, fingerprint-less one-shot renderers —
 
 - **🔐 Real TLS fingerprints** — stealth mode replicates the complete Chrome145 / Firefox133 / Safari / Edge TLS handshakes via BoringSSL (not just a UA string), switchable per request; Cloudflare Turnstile challenges wait automatically for `cf_clearance`. Fingerprint-less engines eat 403s — we get through.
 - **🤝 Stateful interactive sessions** — login state injectable and exportable (`session_create(cookies=...)` ↔ `session_cookies`), surviving pagination and multi-step flows; `persistent: true` even survives idle eviction and server restarts — the same session id comes back logged in. One-shot engines throw state away.
-- **🔌 MCP native** — 27 tools as first-class citizens (not a CDP shim). Claude Code / Cursor / Claude Desktop connect in one line. HTTP + MCP dual protocol — plus a CDP bridge, so the DevTools ecosystem works too.
+- **🔌 MCP native** — 29 tools as first-class citizens (not a CDP shim). Claude Code / Cursor / Claude Desktop connect in one line. HTTP + MCP dual protocol — plus a CDP bridge, so the DevTools ecosystem works too.
 
 > Reference point: Cloudflare's Kitesurf explicitly ships neither real TLS-fingerprint negotiation nor persistent auth sessions — anti-bot and login territory is exactly where AginxBrowser plays.
 
@@ -78,9 +79,10 @@ The [local cache](#capabilities) builds on the same idea: search hits come back 
 - **Local cache that remembers**: every fetch/search lands in SQLite (FTS5) at `~/.aginxbrowser/cache.db`. The `cache` tool re-answers from what the agent already read instead of re-paying network time: full-text search with CJK substring matching, keyword × freshness fusion ranking, `[§ heading]` section-aware snippets, per-URL content hashes for drift detection, TTL-bounded, per-session scoping for shared deployments
 - **CAPTCHA handling**: type detection with automatic Cloudflare challenge wait and optional 2captcha integration — search never stalls on verification pages
 - **JS data extraction**: `js_extract` pulls `window.__INITIAL_STATE__` and other structured data out of SPAs
+- **Document generation**: `render_markdown` turns markdown into a deterministic, self-contained HTML artifact — the document layer, so agents never write HTML by hand. Prose rides a plain offline shell (no fonts, no scripts); fenced `archify` blocks carry typed zero-coordinate diagram JSON (sequence / workflow / architecture / dataflow / lifecycle families) and render to inline SVG via the layout engine. Same input, same bytes — the receipt carries the sha256 so determinism is verifiable. `theme` (light/dark) and `preset` (classic / signal-flow / blueprint / editorial) bake colors at generation time; `quality: "showcase"` is the delivery gate, grading route crossings, label clearance and rhythm without touching the artifact bytes. Guided-view tabs plus `window.agxViewer` (`focus` / ego / `route` / `reach`) make the artifact interactive; with `session_id` it loads into a live session and the reply grades how it fits the viewport (fits/tall/wide/oversized). Mermaid sources are the agent's job to translate into archify JSON, not the engine's. Diagram vocabulary adapted from archify (MIT)
 - **Screenshot rendering**: `/screenshot` endpoint (opt-in `--features screenshot`) paints the JS-rendered DOM with the diting rendering engine — pure CPU, no Chromium — to PNG. Vision input for agents
 - **TLS fingerprint spoofing**: stealth mode impersonates Chrome145/Firefox133/Safari/Edge, switchable per request
-- **MCP server**: `--mcp` mode exposes 28 tools (fetch/eval/search/download/cache + session + screenshot tools) — Claude Code / Claude Desktop / Cursor call them directly
+- **MCP server**: `--mcp` mode exposes 29 tools (fetch/eval/search/download/cache + session + screenshot + docgen tools) — Claude Code / Claude Desktop / Cursor call them directly
 - **Firecrawl compatible**: `/v1/scrape` endpoint — existing Firecrawl clients migrate by changing the base URL
 - **DNS rebinding protection**: built-in SSRF guard + post-resolution IP validation
 
@@ -203,7 +205,8 @@ aginxbrowser/
     ├── main.rs              # HTTP service entry & routing
     ├── server.rs            # Business layer (fetch/click/eval/search)
     ├── session.rs           # Interactive browser sessions
-    ├── mcp.rs               # MCP server (28 tools)
+    ├── mcp.rs               # MCP server (29 tools)
+    ├── docgen/              # Document layer: markdown → deterministic HTML + inline-SVG diagrams
     ├── render.rs            # Tiered rendering (HTTP direct → diting browser engine)
     ├── store.rs             # Local fetch/search cache (SQLite FTS5, drift hashes)
     ├── download.rs          # Streaming file download (sha256, resume)
@@ -303,7 +306,7 @@ If your network can't reach the rusty_v8 CDN (build hangs with zero progress aft
 
 Covers:
 - All 33 HTTP endpoints (`/fetch`, `/search`, `/screenshot`, `/download`, `/v1/scrape`, `/doctor`, 18 session endpoints, CDP discovery, MCP transport)
-- All 28 MCP server tools and their parameters
+- All 29 MCP server tools and their parameters
 - Claude Code / Claude Desktop / Cursor client configuration
 - Environment variables, error codes, per-site scraping examples
 

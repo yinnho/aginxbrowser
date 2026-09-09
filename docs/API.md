@@ -1113,7 +1113,7 @@ The streamable HTTP transport follows the protocol's dual session semantics — 
 
 Browser sessions (`session_create` & co.) are shared across MCP sessions by design: two MCP clients on the same server can list (`session_list`) and reuse the same browser session IDs, which is what makes "one instance per machine, every agent shares it" work. For a self-hosted instance reached over a LAN IP or a Docker hostname (not `localhost`/`127.0.0.1`), add the hostname to `AGINXBROWSER_MCP_ALLOWED_HOSTS` — the transport validates the `Host` header as DNS-rebinding protection and rejects unlisted hosts with `403`.
 
-### Provided Tools (28)
+### Provided Tools (29)
 
 #### Core Tools
 
@@ -1125,6 +1125,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `search` | Multi-engine aggregated search (Baidu/Bing/Sogou/Sogou WeChat/Google) |
 | `download` | Stream a file to disk with SHA-256 and resume support |
 | `cache` | Query the local cache of fetched pages and past searches (full-text incl. CJK, full-content `get`, stats, filtered clear) |
+| `render_markdown` | Render markdown into a deterministic, self-contained HTML document; fenced `archify` blocks (typed diagram JSON — sequence / workflow / architecture / dataflow / lifecycle) become inline-SVG diagrams; `theme`/`preset`/`quality` (showcase audit) and optional `session_id` viewport grading |
 
 #### Session Tools
 
@@ -1167,6 +1168,18 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | render_tier | string | | `"auto"` | Rendering strategy: `auto` / `http` / `obscura` |
 | tls_fingerprint | string | | `null` | TLS fingerprint |
 | js_extract | object | | `null` | JS data extraction: `{expression, timeout_ms}` |
+
+#### `render_markdown` Parameters
+
+| Parameter | Type | Required | Default | Description |
+|------|------|------|------|------|
+| markdown | string | ✅ | — | Markdown source. Fenced code blocks tagged `archify` carry typed zero-coordinate diagram JSON (`sequence` / `workflow` / `architecture` / `dataflow` / `lifecycle`) rendered to inline SVG by the layout engine; Mermaid sources must be translated to archify JSON by the caller |
+| theme | string | | `"light"` | Color scheme: `light` / `dark` — baked into the artifact at generation time |
+| preset | string | | `"classic"` | Visual preset: `classic` / `signal-flow` / `blueprint` / `editorial` |
+| quality | string | | `"standard"` | `showcase` runs the delivery-gate composition audit (route crossings, label clearance, rhythm) — it grades the artifact without changing a byte |
+| session_id | string | | `null` | Load the finished artifact into a live interactive session; the reply grades how it fits the viewport (`fits` / `tall` / `wide` / `oversized`) |
+
+The output is deterministic — same input, same bytes — and the receipt carries the artifact's `sha256` so that's verifiable. Guided-view tabs and the `window.agxViewer` runtime (`focus` / ego views / `route` / `reach`) ship inside the artifact. Diagram vocabulary adapted from archify (MIT, itself based on Cocoon-AI's architecture-diagram-generator).
 
 #### `session_create` Parameters
 
