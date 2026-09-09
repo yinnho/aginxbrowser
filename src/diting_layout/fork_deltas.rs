@@ -1369,3 +1369,117 @@ fn per_side_border_width_longhand_zeroes_one_side() {
         "border-top-width: 0 erases only the top side (CSS order top right bottom left)"
     );
 }
+
+/// `resolve_img_source` absolutizes against the document base (the
+/// requirements-aginxos P2 residual gap): data: URLs pass through untouched,
+/// an absolute src canonicalizes through `Url::parse` (the same normalizer
+/// the fetchers' `base.join` applies, so lookup keys match on both sides),
+/// and a relative src joins the base. No base — or an unparseable base —
+/// keeps the raw attr, preserving the pre-base pass-through.
+#[test]
+fn resolve_img_source_absolutizes_relative_srcs() {
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::resolve_img_source;
+
+    let tree = parse_html(r#"<html><body><img src="img/dot.png"></body></html>"#);
+    let img = tree.query_selector("img").unwrap().unwrap();
+    assert_eq!(
+        resolve_img_source(&tree, img, 800.0, Some("https://example.com/dir/page.html")).as_deref(),
+        Some("https://example.com/dir/img/dot.png"),
+        "relative src joins the document base"
+    );
+    assert_eq!(
+        resolve_img_source(&tree, img, 800.0, None).as_deref(),
+        Some("img/dot.png"),
+        "no base keeps the raw attr"
+    );
+    assert_eq!(
+        resolve_img_source(&tree, img, 800.0, Some("not a url")).as_deref(),
+        Some("img/dot.png"),
+        "unparseable base behaves like no base"
+    );
+
+    let tree = parse_html(r#"<html><body><img src="data:image/png;base64,AAAA"></body></html>"#);
+    let img = tree.query_selector("img").unwrap().unwrap();
+    assert_eq!(
+        resolve_img_source(&tree, img, 800.0, Some("https://example.com/")).as_deref(),
+        Some("data:image/png;base64,AAAA"),
+        "data: URLs are self-contained"
+    );
+
+    // Url::parse canonicalizes (host lowercase, path case kept).
+    let tree = parse_html(r#"<html><body><img src="https://CDN.example.com/x.PNG"></body></html>"#);
+    let img = tree.query_selector("img").unwrap().unwrap();
+    assert_eq!(
+        resolve_img_source(&tree, img, 800.0, Some("https://example.com/")).as_deref(),
+        Some("https://cdn.example.com/x.PNG"),
+        "absolute src canonicalizes like the fetchers' join"
+    );
+}
+
+/// The end-to-end half of the same fix: a relative `<img src>` must hit the
+/// fetched-byte table's ABSOLUTE key once the base flows in. Before, the
+/// prefetcher fetched `https://…/dot.png` and keyed the table by that URL
+/// while the layout looked up the raw "dot.png" attr — the raster sat in the
+/// table unpainted (gray placeholder) on http and file pages alike.
+#[test]
+fn relative_img_src_hits_absolute_keyed_byte_table() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::PaintItem;
+
+    // 2×1 PNG, red | blue (the pixel pattern image.rs tests pin).
+    let rgba = vec![200u8, 40, 40, 255, 40, 40, 200, 255];
+    let mut png_bytes = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut png_bytes, 2u32, 1u32);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut writer = enc.write_header().unwrap();
+        writer.write_image_data(&rgba).unwrap();
+    }
+
+    let html = r#"<html><body><img src="dot.png"></body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for("", (800.0, 600.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+
+    let mut net: std::collections::HashMap<String, std::sync::Arc<Vec<u8>>> =
+        std::collections::HashMap::new();
+    net.insert(
+        "https://example.com/dir/dot.png".to_string(),
+        std::sync::Arc::new(png_bytes),
+    );
+
+    // No base: the raw "dot.png" key misses the table — placeholder path,
+    // no Image item.
+    let (_, items) = crate::diting_layout::layout_dom_with_paint_and_images(
+        &tree,
+        &styles,
+        &crate::diting_fonts::font_book(),
+        800.0,
+        600.0,
+        Some(&net),
+        None,
+    );
+    assert!(
+        !items.iter().any(|it| matches!(it, PaintItem::Image { .. })),
+        "raw src must miss the absolute-keyed table"
+    );
+
+    // With the document URL as base: "dot.png" joins to the table's key and
+    // the raster paints.
+    let (_, items) = crate::diting_layout::layout_dom_with_paint_and_images(
+        &tree,
+        &styles,
+        &crate::diting_fonts::font_book(),
+        800.0,
+        600.0,
+        Some(&net),
+        Some("https://example.com/dir/page.html"),
+    );
+    assert!(
+        items.iter().any(|it| matches!(it, PaintItem::Image { .. })),
+        "base-joined src must reach the fetched bytes"
+    );
+}

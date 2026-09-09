@@ -3391,7 +3391,7 @@
         let rules = diting_css::parse_stylesheet(sheet);
         let styles = our_styles(&tree, &rules);
         let (_rects, items) =
-            layout_dom_with_paint_and_images(&tree, &styles, &fixture_fonts(), VW, VH, Some(&net));
+            layout_dom_with_paint_and_images(&tree, &styles, &fixture_fonts(), VW, VH, Some(&net), None);
         assert!(
             items.iter().any(|i| matches!(i, PaintItem::Image { .. })),
             "network img resolves to an Image item"
@@ -3458,7 +3458,7 @@
         let rules = diting_css::parse_stylesheet(sheet);
         let styles = our_styles(&tree, &rules);
         let (_rects, items) =
-            layout_dom_with_paint_and_images(&tree, &styles, &fixture_fonts(), VW, VH, Some(&net));
+            layout_dom_with_paint_and_images(&tree, &styles, &fixture_fonts(), VW, VH, Some(&net), None);
         let mut ours = paint::Canvas::new_filled(w as usize, h as usize, [255, 255, 255, 255]);
         paint::execute(&items, &fixture_fonts(), &mut ours);
 
@@ -3510,7 +3510,7 @@
     fn img_source(html: &str) -> Option<String> {
         let tree = crate::diting_dom::tree_sink::parse_html(html);
         let img = tree.query_selector("img").unwrap().unwrap();
-        resolve_img_source(&tree, img, 1280.0)
+        resolve_img_source(&tree, img, 1280.0, None)
     }
 
     #[test]
@@ -3549,7 +3549,7 @@
         // Narrow viewport skips the desktop source.
         let tree = crate::diting_dom::tree_sink::parse_html(html);
         let img = tree.query_selector("img").unwrap().unwrap();
-        let narrow = resolve_img_source(&tree, img, 600.0);
+        let narrow = resolve_img_source(&tree, img, 600.0, None);
         assert_eq!(narrow.as_deref(), Some("tablet.png"));
 
         // No media attr → matches everything; first source still wins.

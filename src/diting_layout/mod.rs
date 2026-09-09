@@ -883,14 +883,46 @@ fn is_replaced_tag(tag: &str) -> bool {
     )
 }
 
+/// Canonicalize an `<img>`-shaped URL against the document base. The byte
+/// tables both fetch paths key (`ImageCache::network_bytes`, the screenshot
+/// prefetch, the band-pump's `image_bytes`) hold ABSOLUTE URLs, so a
+/// relative `src="dot.png"` that passes through raw never matches its own
+/// fetched body — the img paints a placeholder while the bytes sit in the
+/// table. Resolution follows the fetchers' own join (`base.join(raw)`), so
+/// both sides produce the same canonical `Url` string. data:/blob: are
+/// self-contained and pass through; an already-absolute src canonicalizes
+/// through `Url::parse` (same normalizer `join` applies); without a base —
+/// or against an unparseable base — the raw string survives unchanged,
+/// preserving the pre-base pass-through (miss → placeholder).
+fn absolutize_img_src(raw: &str, base_url: Option<&str>) -> String {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.starts_with("data:") || raw.starts_with("blob:") {
+        return raw.to_string();
+    }
+    if let Ok(u) = url::Url::parse(raw) {
+        return u.to_string();
+    }
+    match base_url
+        .and_then(|b| url::Url::parse(b).ok())
+        .and_then(|b| b.join(raw).ok())
+    {
+        Some(joined) => joined.to_string(),
+        None => raw.to_string(),
+    }
+}
+
 /// The URL an `<img>` should load: its `<picture>` parent's first matching
 /// `<source>` candidate when present (media query evaluated at the layout
 /// viewport), else the img's own srcset selection, else plain `src`
-/// (HTML §4.8.4.3.9, product-simplified). None → the placeholder path.
+/// (HTML §4.8.4.3.9, product-simplified). `base_url` is the owner
+/// document's URL — relative sources absolutize against it (see
+/// [`absolutize_img_src`]) so the returned string is the key the fetched
+/// byte tables use. None → the placeholder path.
 pub fn resolve_img_source(
     tree: &DomTree,
     img: NodeId,
     viewport_width: f32,
+    base_url: Option<&str>,
 ) -> Option<String> {
     let attr = |id: NodeId, name: &str| {
         tree.with_node(id, |n| n.get_attribute(name).map(|v| v.to_string()))
@@ -927,7 +959,7 @@ pub fn resolve_img_source(
                 if let Some(srcset) = attr(child, "srcset") {
                     let cands = image::parse_srcset(&srcset);
                     if let Some(c) = image::select_srcset_candidate(&cands, viewport_width) {
-                        return normalize_candidate_url(tree, child, &c.url);
+                        return Some(absolutize_img_src(&c.url, base_url));
                     }
                 }
                 // type="image/webp" etc.: without the candidate set matching
@@ -939,19 +971,11 @@ pub fn resolve_img_source(
     if let Some(srcset) = attr(img, "srcset") {
         let cands = image::parse_srcset(&srcset);
         if let Some(c) = image::select_srcset_candidate(&cands, viewport_width) {
-            return normalize_candidate_url(tree, img, &c.url);
+            return Some(absolutize_img_src(&c.url, base_url));
         }
     }
 
-    attr(img, "src")
-}
-
-/// Relative candidate URLs resolve against the document base (the img's
-/// owner document URL lives outside the tree, so we approximate with the
-/// page URL recorded on nothing here — callers pass absolute URLs for
-/// network fetches; data: URLs are self-contained and pass through).
-fn normalize_candidate_url(_tree: &DomTree, _source: NodeId, url: &str) -> Option<String> {
-    Some(url.to_string())
+    attr(img, "src").map(|s| absolutize_img_src(&s, base_url))
 }
 
 /// Minimal media-query width gate for `<source media>`: supports the two
@@ -2751,14 +2775,25 @@ pub fn layout_dom_with_paint(
     viewport_width: f32,
     viewport_height: f32,
 ) -> (HashMap<NodeId, Rect>, Vec<PaintItem>) {
-    layout_dom_with_paint_and_images(tree, styles, fonts, viewport_width, viewport_height, None)
+    layout_dom_with_paint_and_images(
+        tree,
+        styles,
+        fonts,
+        viewport_width,
+        viewport_height,
+        None,
+        None,
+    )
 }
 
 /// [`layout_dom_with_paint`] with an injected table of fetched image bodies
-/// (batch 6c): absolute `http(s)` URL → response body. `<img src>` entries
-/// pointing at those URLs decode like data: URLs (PNG only); misses keep
-/// the placeholder. The fetch itself is the caller's job — the screenshot
-/// prefetch pass fills this from diting_net.
+/// (batch 6c): absolute `http(s)`/`file` URL → response body. `<img src>`
+/// entries pointing at those URLs decode like data: URLs (PNG only); misses
+/// keep the placeholder. The fetch itself is the caller's job — the screenshot
+/// prefetch pass fills this from diting_net. `base_url` is the document URL
+/// relative srcs resolve against to reach the table's absolute keys (same
+/// join the fetchers used).
+#[allow(clippy::too_many_arguments)]
 pub fn layout_dom_with_paint_and_images(
     tree: &DomTree,
     styles: &HashMap<NodeId, ComputedStyle>,
@@ -2766,6 +2801,7 @@ pub fn layout_dom_with_paint_and_images(
     viewport_width: f32,
     viewport_height: f32,
     network_bytes: Option<&HashMap<String, std::sync::Arc<Vec<u8>>>>,
+    base_url: Option<&str>,
 ) -> (HashMap<NodeId, Rect>, Vec<PaintItem>) {
     let (rects, items, _order) = layout_dom_with_paint_order_and_images(
         tree,
@@ -2774,6 +2810,7 @@ pub fn layout_dom_with_paint_and_images(
         viewport_width,
         viewport_height,
         network_bytes,
+        base_url,
     );
     (rects, items)
 }
@@ -3006,6 +3043,7 @@ pub fn layout_dom_with_paint_order_and_images(
     viewport_width: f32,
     viewport_height: f32,
     network_bytes: Option<&HashMap<String, std::sync::Arc<Vec<u8>>>>,
+    base_url: Option<&str>,
 ) -> (HashMap<NodeId, Rect>, Vec<PaintItem>, Vec<NodeId>) {
     let mut taffy_tree = TaffyTree::new();
     let mut node_map: HashMap<taffy::tree::NodeId, NodeId> = HashMap::new();
@@ -3030,23 +3068,24 @@ pub fn layout_dom_with_paint_order_and_images(
         cache: &image::ImageCache,
         images: &mut HashMap<NodeId, DecodedImage>,
         viewport_width: f32,
+        base_url: Option<&str>,
     ) {
         let is_img = tree
             .with_node(id, |n| n.as_element().map(|e| e.local.to_string() == "img"))
             .flatten()
             .unwrap_or(false);
         if is_img {
-            let src = resolve_img_source(tree, id, viewport_width);
+            let src = resolve_img_source(tree, id, viewport_width, base_url);
             if let Some(img) = src.as_deref().and_then(|s| cache.resolve(s)) {
                 images.insert(id, (*img).clone());
             }
         }
         for child in tree.children(id) {
-            scan_images(tree, child, cache, images, viewport_width);
+            scan_images(tree, child, cache, images, viewport_width, base_url);
         }
     }
     if let Some(root_id) = &root {
-        scan_images(tree, *root_id, &cache, &mut images, viewport_width);
+        scan_images(tree, *root_id, &cache, &mut images, viewport_width, base_url);
     }
 
     let mut rects = HashMap::new();

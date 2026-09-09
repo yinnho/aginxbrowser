@@ -270,7 +270,7 @@ pub async fn prefetch_render_resources(
 #[allow(clippy::too_many_arguments)]
 pub fn render_html_to_png_diting(
     html: &str,
-    base_url: &str, // stylesheet hrefs resolve against it; img-URL normalization is still 挂账 in ImageCache
+    base_url: &str, // stylesheet hrefs AND relative img srcs resolve against it
     width: u32,
     height: u32,
     _scale: f32,
@@ -316,8 +316,9 @@ pub fn render_html_to_png_diting(
     let styles = crate::diting_layout::compute_styles(&tree, &rules);
     let fonts = crate::diting_fonts::font_book();
 
-    // Image bytes: everything non-stylesheet the prefetch pass fetched
-    // (already keyed by absolute URL, which is what ImageCache looks up).
+    // Image bytes: everything non-stylesheet the prefetch pass fetched,
+    // keyed by absolute URL — the same key `resolve_img_source` produces by
+    // joining relative srcs against `base_url`.
     let network_bytes: HashMap<String, std::sync::Arc<Vec<u8>>> = resources
         .map(|res| {
             res.iter()
@@ -334,6 +335,7 @@ pub fn render_html_to_png_diting(
         width as f32,
         height as f32,
         net_ref,
+        Some(base_url),
     );
 
     // Content height for full_page: the deepest laid-out bottom edge.

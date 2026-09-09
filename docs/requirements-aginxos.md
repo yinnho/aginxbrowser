@@ -56,7 +56,7 @@ data: URL 可用，但大页面 base64 很笨重。
 
 - 网络层单一卡点：`fetch_file_url`（reqwest 主管线、stealth 文档请求、stealth 重定向
   跳转三条路都汇到这里）进门先查开关。这同时修掉一个真洞：改之前**网络层对 file://
-  无门禁**——绕过三个 CDP gate 的入口（MCP session_create、/fetch、子资���）都能直接
+  无门禁**——绕过三个 CDP gate 的入口（MCP session_create、/fetch、子资源）都能直接
   读本地文件，而服务默认绑 0.0.0.0。现在默认全拒，错误文案点名真实开关。
 - 三个 CDP gate（`Page.navigate`/`Target.createTarget`/`DOM.setFileInputFiles`）改读
   同一开关；`BrowserContext.allow_file_access` 死字段（从未有任何入口能置 true）删除。
@@ -66,8 +66,11 @@ data: URL 可用，但大页面 base64 很笨重。
   原来只收 http/https，本地页的 css/img 根本进不了预取清单，抓出来的图是"黑标题+灰占位"
   （live DOM 却是红的——探针只查 computed style 查不出这个）。现在 file 页的子资源按
   同 scheme+开关开收进预取，截图与 http 页逐像素等价（红 h1 像素数 1262 两边一致）。
-  残留一个 http/file 共有的老洞：img 相对 src �� ImageCache 里不归一化成绝对 URL，
-  解码 miss 画占位框，与 file:// 无关，照旧挂账。
+  原来记的"http/file 共有老洞：img 相对 src 不归一化成绝对 URL、解码 miss 画占位框"
+  已闭环（#317）：`resolve_img_source` 拿文档 base 把相对 src join 成绝对 URL（空/
+  data:/blob: 直通，无 base 保原样），静态截图、live 带画 missing 检查、CDP 带抓
+  三条消费链共用这一个归一化点。同一 fixture http/file 双跑，dot.png 蓝色像素
+  256（=16×16 整图）两条传输都在，红 h1 1262 无回归。
 - 边界（与 Chrome 对齐故意的）：页面 JS 的 `fetch()/XHR/import` 走 reqwest，reqwest
   不做 file://，所以**页面脚本**读不了本地文件（Chrome 里 file:// fetch 也被 CORS
   挡）；`file://` 带 remote host（`file://example.com/x`）拒。POST 到 file:// 按 GET

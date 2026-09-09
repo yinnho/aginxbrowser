@@ -1200,6 +1200,7 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
         viewport_width,
         viewport_height,
         network_bytes,
+        Some(gs.url.as_str()),
     );
     drop(bytes_map);
     (
@@ -1307,13 +1308,18 @@ pub(crate) fn band_frame(
     let dy = (if scroll_y.is_finite() { scroll_y.max(0.0) } else { 0.0 })
         .min((content_h - vh).max(0.0));
 
-    // Images the page references but the byte table lacks.
+    // Images the page references but the byte table lacks. Sources come
+    // back absolutized against the document URL (resolve_img_source's base
+    // join), so the missing entries are directly fetchable and match the
+    // table's absolute keys on the re-blit.
     let mut missing: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Ok(imgs) = dom.query_selector_all("img") {
         let table = gs.image_bytes.borrow();
         for nid in imgs {
-            if let Some(src) = crate::diting_layout::resolve_img_source(dom, nid, vw) {
+            if let Some(src) =
+                crate::diting_layout::resolve_img_source(dom, nid, vw, Some(gs.url.as_str()))
+            {
                 if !table.contains_key(&src) && seen.insert(src.clone()) {
                     missing.push(src);
                 }
