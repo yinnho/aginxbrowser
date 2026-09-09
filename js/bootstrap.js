@@ -992,7 +992,13 @@ function __prepareInsertedScript(script) {
               const raw = await _OPS.op_fetch_url(fullUrl, "GET", "{}", "", pageOrigin, "no-cors", "include");
               const parsed = JSON.parse(raw);
               if (!(parsed.status >= 200 && parsed.status <= 299)) {
-                throw new Error('HTTP ' + (parsed.status || 0));
+                // status 0 means the op refused before any wire traffic —
+                // the reason rides parsed.error (SSRF/pattern block) or
+                // parsed.corsError (post-response CORS gate). Dropping it
+                // printed a bare "HTTP 0" that read like a server-side
+                // failure (the taobao eg.js chase).
+                const why = parsed.error || parsed.corsError;
+                throw new Error('HTTP ' + (parsed.status || 0) + (why ? ': ' + why : ''));
               }
               body = parsed.body;
             } finally {
@@ -1009,7 +1015,7 @@ function __prepareInsertedScript(script) {
         if (typeof script.onload === 'function') try { script.onload(new Event('load')); } catch(e) {}
           try { script.dispatchEvent(new Event('load')); } catch(e) {}
       } catch(e) {
-        console.error('Dynamic script fetch error:', e.message);
+        console.error('Dynamic script fetch error (' + fullUrl + '):', e.message);
         // Mirror the load path: both the onerror property and registered
         // listeners fire (a listener-only consumer must still see failures).
         const ev = new Event('error');

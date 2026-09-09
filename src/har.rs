@@ -94,17 +94,23 @@ pub fn media_kind(url: &str, mime: Option<&str>) -> Option<&'static str> {
 }
 
 /// Compact one-line-per-request view for agents: method/url/status/type/size.
+/// `status: 0` rows carry the reason they never produced a servable response
+/// (SSRF block, CORS refusal, transport failure) in `error`.
 pub fn compact_events(events: &[NetworkEvent]) -> Vec<Value> {
     events
         .iter()
         .map(|e| {
-            json!({
+            let mut row = json!({
                 "method": e.method,
                 "url": e.url,
                 "status": e.status,
                 "type": e.resource_type,
                 "size": e.body_size,
-            })
+            });
+            if let Some(error) = &e.error {
+                row["error"] = json!(error);
+            }
+            row
         })
         .collect()
 }
@@ -350,6 +356,7 @@ mod tests {
             response_headers: std::sync::Arc::new(HashMap::new()),
             body_size: 0,
             timestamp: ts,
+            error: None,
         }
     }
 
@@ -380,6 +387,19 @@ mod tests {
         assert_eq!(media_kind("https://cdn.example/app.js", None), None);
         // A .ts page route is only media when the path really ends in .ts.
         assert_eq!(media_kind("https://cdn.example/ts", None), None);
+    }
+
+    #[test]
+    fn compact_events_carries_failure_reason_on_status_zero_rows() {
+        let mut failed = event("https://h5api.example.com/rest", "Fetch", 0, 1.0);
+        failed.error = Some("CORS error: Origin 'https://shop.example' not in Access-Control-Allow-Origin ''".into());
+        let ok = event("https://shop.example/", "Document", 200, 2.0);
+        let rows = compact_events(&[failed, ok]);
+        assert!(rows[0].get("error").is_some(), "status-0 row must carry its reason");
+        assert!(
+            rows[1].get("error").is_none(),
+            "successful rows stay lean — no null error field"
+        );
     }
 
     #[test]

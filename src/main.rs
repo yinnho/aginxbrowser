@@ -455,10 +455,11 @@ pub struct SessionCreateRequest {
     pub url: Option<String>,
     #[serde(default)]
     pub use_proxy: bool,
-    /// Cookies to inject before navigation (`["name=value", ...]`). Lets a
-    /// session start already logged-in. Round-trips with
-    /// GET /session/:id/cookies.
-    #[serde(default)]
+    /// Cookies to inject before navigation. Entries are `"name=value"`
+    /// strings or CDP-style objects `{"name","value","domain",...}` —
+    /// browser-exported login state arrives in the object shape.
+    /// Round-trips with GET /session/:id/cookies.
+    #[serde(default, deserialize_with = "crate::server::cookie_list_from_json")]
     pub cookies: Vec<String>,
     /// Web Storage to inject after the initial navigation lands:
     /// `{"local_storage": {"k":"v"}, "session_storage": {"k":"v"}}`.

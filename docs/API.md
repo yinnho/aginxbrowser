@@ -840,10 +840,14 @@ The session's network request log for the current page — every document, subre
   "total": 14,
   "requests": [
     {"method":"GET","url":"https://example.com/watch","status":200,"type":"Document","size":51234},
-    {"method":"GET","url":"https://cdn.example/api/resolve","status":200,"type":"Fetch","size":210}
+    {"method":"GET","url":"https://cdn.example/api/resolve","status":200,"type":"Fetch","size":210},
+    {"method":"GET","url":"https://h5api.example.com/rest","status":0,"type":"Fetch","size":0,
+     "error":"CORS error: Origin 'https://example.com' not in Access-Control-Allow-Origin ''"}
   ]
 }
 ```
+
+`status: 0` rows are requests that never produced a servable response — SSRF-blocked, URL-blocklisted, CORS-refused, or dead at the transport layer. The `error` field says which, so a page whose API calls all die at a gate no longer reads as "never issued a request".
 
 **Response (`?filter=media`)** — the playback-link sniffer. Links embedded in page HTML are often decoys; these are the requests the player actually made, so they are what plays:
 

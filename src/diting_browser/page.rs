@@ -126,6 +126,10 @@ pub struct NetworkEvent {
     pub response_headers: Arc<std::collections::HashMap<String, String>>,
     pub body_size: usize,
     pub timestamp: f64,
+    /// Set on `status: 0` script-initiated rows that never produced a
+    /// servable response (SSRF block, CORS refusal, transport failure).
+    /// Navigation/subresource rows leave it `None`.
+    pub error: Option<String>,
 }
 
 /// A response body retained for `get_response_body` (upstream #360). Bodies
@@ -2156,6 +2160,7 @@ impl Page {
             response_headers: Arc::new(response_headers.clone()),
             body_size,
             timestamp,
+            error: None,
         });
         request_id
     }
@@ -2307,6 +2312,7 @@ impl Page {
                 response_headers: Arc::new(ev.response_headers),
                 body_size: ev.body_size,
                 timestamp: ev.timestamp,
+                error: ev.error,
             });
         }
     }

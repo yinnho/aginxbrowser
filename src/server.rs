@@ -1207,4 +1207,24 @@ mod cookie_injection_tests {
         let err = serde_json::from_str::<Wrapper>(r#"{"cookies":[42]}"#);
         assert!(err.is_err(), "non-string non-object entries must be rejected");
     }
+
+    // 0.3.0 shipped a 422 on POST /session/create with CDP-style cookie
+    // objects: every other cookies-bearing struct had the dual-format
+    // deserializer, SessionCreateRequest was the one missed. This is the
+    // reporter's exact no-credential repro (API.md documents `string[] |
+    // object[]`).
+    #[test]
+    fn session_create_request_accepts_cookie_objects() {
+        let req: crate::SessionCreateRequest = serde_json::from_str(
+            r#"{"cookies":[{"name":"compat_test","value":"not-a-credential",
+                "domain":".tmall.com","path":"/","secure":true}],
+                "persistent":false}"#,
+        )
+        .expect("CDP-style cookie objects must deserialize, not 422");
+        assert_eq!(req.cookies.len(), 1);
+        assert_eq!(
+            req.cookies[0],
+            "compat_test=not-a-credential; Domain=.tmall.com; Path=/; Secure"
+        );
+    }
 }

@@ -2773,6 +2773,113 @@
         assert_eq!(v, serde_json::json!("blocked:net::ERR_FAILED"));
     }
 
+    /// The taobao shop-SPA report (0.3.0): a blocked or CORS-refused fetch
+    /// left NO row in the network log, so a page whose API calls all died at
+    /// the SSRF gate read as "never issued a request". The early exit must
+    /// record a status-0 js_network_event carrying the reason.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn ssrf_blocked_fetch_records_status_zero_event_with_reason() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    try {
+                        await fetch("http://127.0.0.1:9/secret");
+                        return "not-blocked";
+                    } catch (e) {
+                        return "rejected";
+                    }
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.value.unwrap(), serde_json::json!("rejected"));
+
+        let events = rt.take_js_network_events();
+        let blocked = events
+            .iter()
+            .find(|e| e.url.contains("127.0.0.1:9"))
+            .expect("SSRF-blocked fetch must leave a network event");
+        assert_eq!(blocked.status, 0);
+        let error = blocked.error.as_deref().unwrap_or("");
+        assert!(
+            error.contains("private/internal IP address"),
+            "event must carry the block reason, got: {error}"
+        );
+    }
+
+    /// The punished-mtop shape: the response body arrives but carries no
+    /// Access-Control-Allow-Origin, so the post-response CORS gate refuses it
+    /// — status 0 to JS, and (before this fix) invisible in /network. The
+    /// refusal must record a status-0 event with the CORS reason.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn cors_refused_fetch_records_status_zero_event_with_reason() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let body = b"{}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url("https://example.com/page");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    try {
+                        await fetch("http://127.0.0.1:PORT/api");
+                        return "not-blocked";
+                    } catch (e) {
+                        return "rejected:" + (e && e.message);
+                    }
+                }"#
+                .replace("PORT", &port.to_string())
+                .as_str(),
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let msg = result.value.unwrap().as_str().unwrap_or_default().to_string();
+        assert!(msg.starts_with("rejected:Failed to fetch"), "got: {msg}");
+
+        let events = rt.take_js_network_events();
+        let refused = events
+            .iter()
+            .find(|e| e.url.contains(&format!(":{port}/api")))
+            .expect("CORS-refused fetch must leave a network event");
+        assert_eq!(refused.status, 0);
+        let error = refused.error.as_deref().unwrap_or("");
+        assert!(
+            error.contains("CORS error"),
+            "event must carry the CORS reason, got: {error}"
+        );
+    }
+
     /// op_fetch_url walks redirects on a raw reqwest client — the one
     /// subresource path that had no Tier2 legacy-TLS fallback (the
     /// g.alicdn.com shape: plain rustls dies on the handshake, the stealth

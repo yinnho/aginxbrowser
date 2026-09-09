@@ -202,6 +202,12 @@ pub struct JsNetworkEvent {
     pub response_headers: HashMap<String, String>,
     pub body_size: usize,
     pub timestamp: f64,
+    /// Why a `status: 0` entry never produced a servable response — SSRF
+    /// block, CORS refusal, transport failure. Chrome DevTools annotates
+    /// failed rows with the reason; without it a page whose API calls all
+    /// die here reads as "never issued a request" (the taobao shop-SPA
+    /// report chased exactly that ghost).
+    pub error: Option<String>,
 }
 
 /// A response body retained for `Network.getResponseBody`. Bodies are
@@ -1896,6 +1902,7 @@ async fn op_fetch_url(
 
     if let Ok(parsed_url) = url::Url::parse(&url) {
         if let Err(e) = validate_fetch_url(&parsed_url) {
+            record_failed_fetch(&state, &url, &method, e.clone());
             return Ok(serde_json::json!({
                 "status": 0,
                 "body": "",
@@ -1920,21 +1927,17 @@ async fn op_fetch_url(
         })
         .unwrap_or(false);
 
-    let (cookie_jar, in_flight, intercept_tx, proxy_url, http_client, callbacks, document_url) = {
+    let (cookie_jar, in_flight, intercept_tx, proxy_url, http_client, callbacks, document_url, blocked_pattern) = {
         let state_borrow = state.borrow();
         let gs = state_borrow.borrow::<SharedState>().clone();
         let gs = gs.borrow_mut();
-        for pattern in &gs.blocked_urls {
-            if pattern == "*" || url.contains(pattern) || glob_match(pattern, &url) {
-                return Ok(serde_json::json!({
-                    "status": 0,
-                    "body": "",
-                    "url": url,
-                    "headers": {},
-                    "blocked": true,
-                }).to_string());
-            }
-        }
+        // Recorded after the scope closes — record_failed_fetch re-borrows
+        // this state, which cannot nest under the held borrow_mut.
+        let blocked_pattern = gs
+            .blocked_urls
+            .iter()
+            .find(|p| *p == "*" || url.contains(p.as_str()) || glob_match(p, &url))
+            .cloned();
         let jar = gs.cookie_jar.clone();
         let in_flight = gs.http_client.as_ref().map(|c| c.in_flight.clone());
         // #139: thread the configured proxy through to the per-request
@@ -1947,8 +1950,23 @@ async fn op_fetch_url(
         } else {
             None
         };
-        (jar, in_flight, itx, proxy_url, gs.http_client.clone(), gs.callbacks.clone(), gs.url.clone())
+        (jar, in_flight, itx, proxy_url, gs.http_client.clone(), gs.callbacks.clone(), gs.url.clone(), blocked_pattern)
     };
+    if let Some(pattern) = blocked_pattern {
+        record_failed_fetch(
+            &state,
+            &url,
+            &method,
+            format!("blocked by Network.setBlockedURLs pattern: {pattern}"),
+        );
+        return Ok(serde_json::json!({
+            "status": 0,
+            "body": "",
+            "url": url,
+            "headers": {},
+            "blocked": true,
+        }).to_string());
+    }
 
     let mut override_url: Option<String> = None;
     let mut override_method: Option<String> = None;
@@ -1986,6 +2004,7 @@ async fn op_fetch_url(
                     }).to_string());
                 }
                 Ok(Ok(InterceptResolution::Fail { reason })) => {
+                    record_failed_fetch(&state, &url, &method, reason.clone());
                     return Ok(serde_json::json!({
                         "status": 0,
                         "body": "",
@@ -2016,12 +2035,14 @@ async fn op_fetch_url(
     let url = if let Some(new_url) = override_url {
         if let Ok(parsed) = url::Url::parse(&new_url) {
             if let Err(reason) = validate_fetch_url(&parsed) {
+                let error = format!("Intercept rewrite to forbidden URL blocked: {}", reason);
+                record_failed_fetch(&state, &new_url, &method, error.clone());
                 return Ok(serde_json::json!({
                     "status": 0,
                     "body": "",
                     "url": new_url,
                     "blocked": true,
-                    "error": format!("Intercept rewrite to forbidden URL blocked: {}", reason),
+                    "error": error,
                 }).to_string());
             }
         }
@@ -2273,9 +2294,13 @@ async fn op_fetch_url(
                 match fallback {
                     Some(Ok(buffered)) => break OpFetchOutcome::Buffered(buffered),
                     Some(Err(fallback_err)) => {
+                        record_failed_fetch(&state, &current_url, current_method.as_str(), fallback_err.to_string());
                         return Err(deno_error::JsErrorBox::generic(fallback_err.to_string()))
                     }
-                    None => return Err(deno_error::JsErrorBox::generic(e.to_string())),
+                    None => {
+                        record_failed_fetch(&state, &current_url, current_method.as_str(), e.to_string());
+                        return Err(deno_error::JsErrorBox::generic(e.to_string()))
+                    }
                 }
             }
         };
@@ -2321,26 +2346,30 @@ async fn op_fetch_url(
 
         // Re-validate every redirect target against the SSRF policy.
         if let Err(reason) = validate_fetch_url(&next_url) {
+            let error = format!("Redirect to forbidden URL blocked: {}", reason);
+            record_failed_fetch(&state, next_url.as_str(), current_method.as_str(), error.clone());
             return Ok(serde_json::json!({
                 "status": 0,
                 "body": "",
                 "url": next_url.to_string(),
                 "headers": {},
                 "blocked": true,
-                "error": format!("Redirect to forbidden URL blocked: {}", reason),
+                "error": error,
             })
             .to_string());
         }
 
         redirects_followed += 1;
         if redirects_followed > FETCH_REDIRECT_LIMIT {
+            let error = format!("Too many redirects (>{})", FETCH_REDIRECT_LIMIT);
+            record_failed_fetch(&state, next_url.as_str(), current_method.as_str(), error.clone());
             return Ok(serde_json::json!({
                 "status": 0,
                 "body": "",
                 "url": next_url.to_string(),
                 "headers": {},
                 "blocked": true,
-                "error": format!("Too many redirects (>{})", FETCH_REDIRECT_LIMIT),
+                "error": error,
             })
             .to_string());
         }
@@ -2389,17 +2418,19 @@ async fn op_fetch_url(
             .unwrap_or("");
 
         if !cors_response_allows(credentials, &page_origin, allowed, allow_credentials) {
+            let error = if credentials == FetchCredentials::Include {
+                format!("CORS error: credentialed request requires Access-Control-Allow-Origin '{}' and Access-Control-Allow-Credentials 'true'", page_origin)
+            } else {
+                format!("CORS error: Origin '{}' not in Access-Control-Allow-Origin '{}'", page_origin, allowed)
+            };
+            record_failed_fetch(&state, &current_url, current_method.as_str(), error.clone());
             return Ok(serde_json::json!({
                 "status": 0,
                 "body": "",
                 "url": url,
                 "headers": {},
                 "corsBlocked": true,
-                "corsError": if credentials == FetchCredentials::Include {
-                    format!("CORS error: credentialed request requires Access-Control-Allow-Origin '{}' and Access-Control-Allow-Credentials 'true'", page_origin)
-                } else {
-                    format!("CORS error: Origin '{}' not in Access-Control-Allow-Origin '{}'", page_origin, allowed)
-                },
+                "corsError": error,
             })
             .to_string());
         }
@@ -2512,6 +2543,7 @@ async fn op_fetch_url(
             response_headers: resp_headers.clone(),
             body_size: resp_bytes.len(),
             timestamp,
+            error: None,
         });
         const MAX_JS_NETWORK_EVENTS: usize = 4096;
         if gs.js_network_events.len() > MAX_JS_NETWORK_EVENTS {
@@ -2573,6 +2605,49 @@ fn glob_match(pattern: &str, url: &str) -> bool {
         return url.starts_with(&pattern[..pattern.len() - 1]);
     }
     url == pattern
+}
+
+/// Record a `status: 0` network event for a fetch that never produced a
+/// servable response — SSRF-blocked, URL-blocklisted, CORS-refused, or dead
+/// at the transport layer. The success path records at the bottom of
+/// `op_fetch_url`; without this companion every early exit vanished from the
+/// session /network log, and a page whose API calls all died here read as
+/// "never issued a request" — exactly the ghost the taobao shop-SPA report
+/// chased (punished mtop XHRs are CORS-refused after the body arrives, so
+/// the whole call site went dark).
+fn record_failed_fetch(
+    state: &Rc<RefCell<OpState>>,
+    url: &str,
+    method: &str,
+    error: String,
+) {
+    let state_borrow = state.borrow();
+    let gs = state_borrow.borrow::<SharedState>().clone();
+    let mut gs = gs.borrow_mut();
+    gs.network_response_body_counter += 1;
+    // Same `fetch-{N}` id space as the success path (no body is stored under
+    // it — there is none to retrieve); keeps ids unique across interleaved
+    // failures and successes.
+    let request_id = format!("fetch-{}", gs.network_response_body_counter);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    gs.js_network_events.push(JsNetworkEvent {
+        request_id,
+        url: url.to_string(),
+        method: method.to_string(),
+        status: 0,
+        response_headers: HashMap::new(),
+        body_size: 0,
+        timestamp,
+        error: Some(error),
+    });
+    const MAX_JS_NETWORK_EVENTS: usize = 4096;
+    if gs.js_network_events.len() > MAX_JS_NETWORK_EVENTS {
+        let overflow = gs.js_network_events.len() - MAX_JS_NETWORK_EVENTS;
+        gs.js_network_events.drain(0..overflow);
+    }
 }
 
 /// Also applied by the ES module loader (obscura #849): dynamic import() is
