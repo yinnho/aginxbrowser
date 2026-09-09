@@ -12,13 +12,23 @@ fn main() {
     // Source revision baked into the binary — /health reports it so a caller
     // can verify doc/tag/binary/source are the same commit without sniffing
     // anything (0.3.0 tmall report P2). "unknown" for git-less builds.
-    let commit = std::process::Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
+    // AGINXBROWSER_BUILD_COMMIT overrides git: the 86quan deploy rsyncs
+    // without .git (by design — the server tree is a build input, not a
+    // checkout), so the deploy step passes the commit explicitly and /health
+    // stops reporting "unknown".
+    let commit = std::env::var("AGINXBROWSER_BUILD_COMMIT")
         .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| {
+            std::process::Command::new("git")
+                .args(["rev-parse", "--short", "HEAD"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        });
     println!("cargo:rustc-env=AGINXBROWSER_BUILD_COMMIT={commit}");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
