@@ -1,9 +1,10 @@
-#![allow(dead_code)]
 use std::sync::Arc;
 use crate::diting_net::CookieJar;
 use serde::{Deserialize, Serialize};
 
-/// A cookie as exposed to the Rust API.
+/// A cookie as exposed to the Rust API. Bin-dead by itself; the round-trip
+/// tests read cookies back through [`CookieStore::get_for_url`].
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cookie {
     pub name: String,
@@ -12,20 +13,6 @@ pub struct Cookie {
     pub path: String,
     pub secure: bool,
     pub http_only: bool,
-}
-
-impl Cookie {
-    /// Create a cookie from name=value pair with defaults.
-    pub fn new(name: impl Into<String>, value: impl Into<String>, domain: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            value: value.into(),
-            domain: domain.into(),
-            path: "/".into(),
-            secure: false,
-            http_only: false,
-        }
-    }
 }
 
 /// Cookie management for a browser session.
@@ -48,22 +35,8 @@ impl CookieStore {
         Ok(())
     }
 
-    /// Get all cookies as a serializable list.
-    pub fn get_all(&self) -> Vec<Cookie> {
-        self.jar.get_all_cookies()
-            .into_iter()
-            .map(|c| Cookie {
-                name: c.name,
-                value: c.value,
-                domain: c.domain,
-                path: c.path,
-                secure: c.secure,
-                http_only: c.http_only,
-            })
-            .collect()
-    }
-
     /// Get cookies for a specific URL.
+    #[allow(dead_code)] // bin-dead; server.rs round-trip test reads cookies back
     pub fn get_for_url(&self, url: &str) -> Result<Vec<Cookie>, crate::error::Error> {
         let parsed = url::Url::parse(url)
             .map_err(|e| crate::error::Error::Internal(e.into()))?;
@@ -83,15 +56,5 @@ impl CookieStore {
                 })
             })
             .collect())
-    }
-
-    /// Save cookies to a file (JSON format).
-    pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), crate::error::Error> {
-        self.jar.save_to_file(path).map_err(|e| crate::error::Error::Internal(e.into()))
-    }
-
-    /// Load cookies from a file.
-    pub fn load_from_file(&self, path: &std::path::Path) -> Result<usize, crate::error::Error> {
-        self.jar.load_from_file(path).map_err(|e| crate::error::Error::Internal(e.into()))
     }
 }

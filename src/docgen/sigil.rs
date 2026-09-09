@@ -23,9 +23,6 @@
 
 use super::theme::Theme;
 
-/// Rendered icon extent in px: the reference default size.
-pub const SIZE: i32 = 11;
-
 /// The kind → shape lookup: the 13 kinds with geometry, everything else
 /// (including unknown kinds) takes the neutral square.
 fn shape_name(kind: &str) -> &'static str {

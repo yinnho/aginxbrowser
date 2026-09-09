@@ -175,7 +175,6 @@ pub struct StealthHttpClient {
     /// the UA to match the TLS fingerprint's advertised platform.
     pub user_agent: RwLock<String>,
     pub accept_language: RwLock<String>,
-    pub in_flight: Arc<std::sync::atomic::AtomicU32>,
     /// When true, `validate_url` lets localhost / RFC1918 / link-local hosts
     /// through on the stealth path too. Mirrors the HttpClient field of the
     /// same name: a context built with the private-network opt-in used to
@@ -319,7 +318,6 @@ impl StealthHttpClient {
                 std::env::var("AGINXBROWSER_ACCEPT_LANGUAGE")
                     .unwrap_or_else(|_| "zh-CN,zh;q=0.9,en;q=0.8".to_string()),
             ),
-            in_flight: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             allow_private_network: false,
         }
     }
@@ -400,11 +398,9 @@ impl StealthHttpClient {
                 req = req.header(k.as_str(), v.as_str());
             }
 
-            self.in_flight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let resp = match send_get_with_connection_reset_retry(req, &current_url).await {
                 Ok(resp) => resp,
                 Err(e) => {
-                    self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                     // Mirror the reqwest path: name an unreachable configured
                     // proxy instead of folding it into "error sending request"
                     // (obscura#491).
@@ -422,7 +418,6 @@ impl StealthHttpClient {
                     });
                 }
             };
-            self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
 
             let status = resp.status();
             tracing::info!("stealth fetch {} -> status {}", current_url, status);
@@ -485,14 +480,6 @@ impl StealthHttpClient {
 
     pub async fn set_accept_language(&self, lang: &str) {
         *self.accept_language.write().await = lang.to_string();
-    }
-
-    pub fn active_requests(&self) -> u32 {
-        self.in_flight.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    pub fn is_network_idle(&self) -> bool {
-        self.active_requests() == 0
     }
 }
 

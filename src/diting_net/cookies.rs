@@ -379,26 +379,6 @@ impl CookieJar {
         cookies.entry(domain).or_default().insert((name, path), entry);
     }
 
-    pub fn delete_cookie(&self, name: &str, domain: &str) {
-        let mut cookies = self.cookies.write().unwrap();
-        if domain.is_empty() {
-            for domain_cookies in cookies.values_mut() {
-                domain_cookies.retain(|_k, e| e.name != name);
-            }
-        } else {
-            let domains_to_try = [
-                domain.to_string(),
-                format!(".{}", domain.trim_start_matches('.')),
-                domain.trim_start_matches('.').to_string(),
-            ];
-            for d in &domains_to_try {
-                if let Some(domain_cookies) = cookies.get_mut(d.as_str()) {
-                    domain_cookies.retain(|_k, e| e.name != name);
-                }
-            }
-        }
-    }
-
     pub fn delete_cookies_filtered(&self, name: &str, domain: &str, path: Option<&str>) {
         let mut cookies = self.cookies.write().unwrap();
         let matches_path = |entry_path: &str| match path {

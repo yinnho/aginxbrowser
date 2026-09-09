@@ -38,13 +38,6 @@ pub struct Attribute {
 }
 
 impl Attribute {
-    pub fn qualified_name(&self) -> String {
-        match &self.name.prefix {
-            Some(prefix) => format!("{}:{}", prefix, self.name.local),
-            None => self.name.local.to_string(),
-        }
-    }
-
     pub fn qualified_name_eq(&self, name: &str) -> bool {
         match &self.name.prefix {
             Some(prefix) => {
@@ -86,7 +79,6 @@ pub enum NodeData {
 
 #[derive(Clone, Debug)]
 pub struct Node {
-    pub id: NodeId,
     pub parent: Option<NodeId>,
     pub first_child: Option<NodeId>,
     pub last_child: Option<NodeId>,
@@ -117,13 +109,6 @@ impl Node {
 
     pub fn attrs(&self) -> Option<&[Attribute]> {
         match &self.data {
-            NodeData::Element { attrs, .. } => Some(attrs),
-            _ => None,
-        }
-    }
-
-    pub fn attrs_mut(&mut self) -> Option<&mut Vec<Attribute>> {
-        match &mut self.data {
             NodeData::Element { attrs, .. } => Some(attrs),
             _ => None,
         }
@@ -217,7 +202,6 @@ pub(crate) struct DomTreeInner {
 impl DomTree {
     pub fn new() -> Self {
         let doc_node = Node {
-            id: NodeId(0),
             parent: None,
             first_child: None,
             last_child: None,
@@ -288,7 +272,6 @@ impl DomTree {
         }
 
         inner.nodes[id.index()] = Some(Node {
-            id,
             parent: None,
             first_child: None,
             last_child: None,

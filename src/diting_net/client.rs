@@ -76,10 +76,7 @@ pub enum ResourceType {
     Script,
     Stylesheet,
     Image,
-    Font,
-    Xhr,
     Fetch,
-    Other,
 }
 
 impl ResourceType {
@@ -89,10 +86,7 @@ impl ResourceType {
             Self::Script => "Script",
             Self::Stylesheet => "Stylesheet",
             Self::Image => "Image",
-            Self::Font => "Font",
-            Self::Xhr => "XHR",
             Self::Fetch => "Fetch",
-            Self::Other => "Other",
         }
     }
 }
@@ -218,6 +212,7 @@ impl Default for CallbackRegistry {
 /// env var keep working unchanged.
 /// True when SSL_CERT_FILE / SSL_CERT_DIR point at a custom CA bundle.
 /// Empty strings count as unset — some environments export them empty.
+#[cfg(feature = "stealth")]
 pub(crate) fn custom_cert_store_requested(
     cert_file: Option<&std::ffi::OsStr>,
     cert_dir: Option<&std::ffi::OsStr>,
@@ -577,7 +572,6 @@ pub struct HttpClient {
     /// so both transports advertise one Accept-Language (obscura #777 class).
     pub accept_language: RwLock<String>,
     pub extra_headers: RwLock<HashMap<String, String>>,
-    pub timeout: Duration,
     pub in_flight: Arc<std::sync::atomic::AtomicU32>,
     pub block_trackers: bool,
     /// When true, `validate_url` lets localhost / RFC1918 / link-local addresses
@@ -629,7 +623,6 @@ impl HttpClient {
             ),
             extra_headers: RwLock::new(HashMap::new()),
             in_flight: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            timeout: Duration::from_secs(30),
             block_trackers: false,
             allow_private_network,
             #[cfg(feature = "stealth")]
@@ -767,10 +760,6 @@ impl HttpClient {
 
     pub async fn fetch(&self, url: &Url) -> Result<Response, NetError> {
         self.fetch_with_method(Method::GET, url, None).await
-    }
-
-    pub async fn post_form(&self, url: &Url, body: &str) -> Result<Response, NetError> {
-        self.fetch_with_method(Method::POST, url, Some(body.as_bytes().to_vec())).await
     }
 
     /// Compute the default `strict-origin-when-cross-origin` referrer for a
@@ -1281,10 +1270,6 @@ impl HttpClient {
     pub fn active_requests(&self) -> u32 {
         self.in_flight.load(std::sync::atomic::Ordering::Relaxed)
     }
-
-    pub fn is_network_idle(&self) -> bool {
-        self.active_requests() == 0
-    }
 }
 
 impl Default for HttpClient {
@@ -1332,9 +1317,6 @@ pub enum NetError {
 
     #[error("Too many redirects: {0}")]
     TooManyRedirects(String),
-
-    #[error("Request blocked: {0}")]
-    Blocked(String),
 }
 
 #[cfg(test)]
