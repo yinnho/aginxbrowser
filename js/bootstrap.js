@@ -7572,6 +7572,20 @@ globalThis.HTMLPreElement = _htmlInterface('HTMLPreElement', ['pre']);
 globalThis.HTMLHeadingElement = _htmlInterface('HTMLHeadingElement', ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
 globalThis.HTMLTemplateElement = _htmlInterface('HTMLTemplateElement', ['template']);
 globalThis.HTMLSlotElement = _htmlInterface('HTMLSlotElement', ['slot']);
+// Slot assignment APIs (obscura #930 family). There is no shadow DOM here,
+// and assignment only ever happens inside a shadow tree — so the spec
+// answer for every call in this engine is an empty array. The stub is the
+// contract-correct behavior, not a lie: it lets feature-detect code
+// (`typeof slot.assignedElements === 'function'`) take its slot-aware
+// path instead of crashing on undefined.
+HTMLSlotElement.prototype.assignedElements = function () { return []; };
+HTMLSlotElement.prototype.assignedNodes = function () { return []; };
+_markNative(HTMLSlotElement.prototype.assignedElements);
+_markNative(HTMLSlotElement.prototype.assignedNodes);
+Object.defineProperty(Element.prototype, 'assignedSlots', {
+  get() { return []; },
+  configurable: true,
+});
 globalThis.HTMLOptionElement = _htmlInterface('HTMLOptionElement', ['option']);
 globalThis.HTMLDataListElement = _htmlInterface('HTMLDataListElement', ['datalist']);
 globalThis.HTMLFieldSetElement = _htmlInterface('HTMLFieldSetElement', ['fieldset']);

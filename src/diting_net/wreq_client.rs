@@ -433,11 +433,7 @@ impl StealthHttpClient {
                 }
             }
 
-            let response_headers: HashMap<String, String> = resp
-                .headers()
-                .iter()
-                .map(|(k, v)| (k.as_str().to_lowercase(), v.to_str().unwrap_or("").to_string()))
-                .collect();
+            let response_headers = crate::diting_net::collect_response_headers(resp.headers());
 
             if status.is_redirection() {
                 if let Some(location) = resp.headers().get("location") {

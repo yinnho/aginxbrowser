@@ -503,6 +503,28 @@
         assert_eq!(rt.evaluate("document.links.length").unwrap().as_f64().unwrap() as i64, 1);
     }
 
+    /// obscura #930 family: slot assignment APIs exist and answer the
+    /// spec-correct empty array (assignment only happens inside shadow
+    /// trees, which this engine does not have) — feature-detect code gets
+    /// a function, not `undefined`.
+    #[test]
+    fn slot_assignment_apis_are_present_and_empty() {
+        let mut rt = setup_runtime(r#"<slot id="s"><span id="c"></span></slot>"#);
+        let assigned = rt
+            .evaluate(
+                "const s = document.getElementById('s'); \
+                 [typeof s.assignedElements, s.assignedElements().length, \
+                  typeof s.assignedNodes, s.assignedNodes().length, \
+                  JSON.stringify(document.getElementById('c').assignedSlots)].join('|')",
+            )
+            .unwrap();
+        assert_eq!(assigned, serde_json::json!("function|0|function|0|[]"));
+        let is_slot = rt
+            .evaluate("document.getElementById('s') instanceof HTMLSlotElement")
+            .unwrap();
+        assert_eq!(is_slot, serde_json::json!(true));
+    }
+
     /// Regression for #105: `HTMLFormElement` must expose `.elements` so
     /// frameworks that probe form field collections work.
     #[test]

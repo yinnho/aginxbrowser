@@ -331,6 +331,24 @@ impl CookieJar {
             None => return,
         };
 
+        // RFC 6265 §5.3 storage model, non-HTTP API write (obscura #915): a
+        // document.cookie write targeting an existing cookie with the same
+        // (domain, name, path) whose http_only flag is set must be silently
+        // ignored — both the plain overwrite and the expiry-delete form
+        // below, which would otherwise let page JS evict a server-set
+        // HttpOnly session cookie. Like every document.cookie failure, the
+        // write is a silent no-op, never an exception.
+        {
+            let cookies = self.cookies.read().unwrap();
+            if cookies
+                .get(&domain)
+                .and_then(|dc| dc.get(&(name.clone(), path.clone())))
+                .is_some_and(|e| e.http_only)
+            {
+                return;
+            }
+        }
+
         if let Some(exp) = expires {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -624,6 +642,63 @@ mod tests {
 
         let header = jar.get_cookie_header(&url);
         assert!(header.contains("session=abc123"));
+    }
+
+    // obscura #915: RFC 6265 §5.3 — a non-HTTP (document.cookie) write must
+    // not overwrite or evict a cookie whose http_only flag is set.
+
+    #[test]
+    fn document_cookie_cannot_overwrite_httponly_cookie() {
+        let jar = CookieJar::new();
+        let url = Url::parse("https://example.com/app/page").unwrap();
+        jar.set_cookie("session=server; Path=/app; HttpOnly", &url);
+
+        jar.set_cookie_from_js("session=pwned; Path=/app", &url);
+
+        let header = jar.get_cookie_header(&url);
+        assert!(
+            header.contains("session=server"),
+            "HttpOnly cookie survives the document.cookie overwrite: {header}"
+        );
+        assert!(
+            !header.contains("pwned"),
+            "the JS payload value must not land: {header}"
+        );
+        // Still invisible to document.cookie reads.
+        let js_view = jar.get_js_visible_cookies(&url);
+        assert!(
+            !js_view.contains("session="),
+            "HttpOnly stays hidden from JS reads: {js_view}"
+        );
+    }
+
+    #[test]
+    fn document_cookie_cannot_delete_httponly_cookie_via_expiry() {
+        let jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        jar.set_cookie("session=server; HttpOnly", &url);
+
+        jar.set_cookie_from_js("session=; Path=/; Max-Age=0", &url);
+        jar.set_cookie_from_js("session=; Expires=Thu, 01 Jan 1970 00:00:00 GMT", &url);
+
+        let header = jar.get_cookie_header(&url);
+        assert!(
+            header.contains("session=server"),
+            "the expiry-delete form must not evict an HttpOnly cookie either: {header}"
+        );
+    }
+
+    #[test]
+    fn document_cookie_still_overwrites_non_httponly_cookie() {
+        let jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        jar.set_cookie("pref=old", &url);
+
+        jar.set_cookie_from_js("pref=new", &url);
+
+        let header = jar.get_cookie_header(&url);
+        assert!(header.contains("pref=new") && !header.contains("old"),
+            "non-HttpOnly cookies keep their normal overwrite semantics: {header}");
     }
 
     #[test]

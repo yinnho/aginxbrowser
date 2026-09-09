@@ -2341,11 +2341,7 @@ async fn op_fetch_url(
     ) = match &response {
         OpFetchOutcome::Live(r) => {
             let status = r.status().as_u16();
-            let headers = r
-                .headers()
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-                .collect();
+            let headers = crate::diting_net::collect_response_headers(r.headers());
             (status, headers, None)
         }
         OpFetchOutcome::Buffered(r) => {
