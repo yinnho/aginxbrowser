@@ -21,6 +21,12 @@ use crate::diting_net::client::{Response, NetError};
 pub const STEALTH_USER_AGENT: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
 
+/// The TLS fingerprint stealth builds present by default. `with_proxy_and_os`
+/// constructs the matching emulation and `/health` reports this string, so
+/// the wire behavior and the reported name cannot drift apart.
+#[cfg(feature = "stealth")]
+pub const DEFAULT_TLS_FINGERPRINT: &str = "chrome145";
+
 /// Map a user-friendly TLS fingerprint name to a wreq `Emulation` variant.
 /// Accepted values (case-insensitive): "chrome145"/"chrome", "chrome131",
 /// "firefox133"/"firefox", "firefox147", "safari17_5"/"safari", "safari18",
@@ -280,7 +286,12 @@ impl StealthHttpClient {
         proxy_url: Option<&str>,
         os_override: Option<wreq_util::EmulationOS>,
     ) -> Self {
-        Self::with_proxy_and_emulation(cookie_jar, proxy_url, os_override, wreq_util::Emulation::Chrome145)
+        Self::with_proxy_and_emulation(
+            cookie_jar,
+            proxy_url,
+            os_override,
+            parse_tls_fingerprint(DEFAULT_TLS_FINGERPRINT).unwrap_or(wreq_util::Emulation::Chrome145),
+        )
     }
 
     /// Build a StealthHttpClient with an explicit TLS `emulation` (browser

@@ -705,19 +705,44 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn health_handler() -> impl IntoResponse {
-    // Cheap liveness check for uptime monitors / load balancers. Includes
-    // compiled-in capabilities so an agent can learn what's available from a
-    // single cheap call (no network probe - see /doctor for that).
-    Json(serde_json::json!({
+    Json(health_body())
+}
+
+/// The /health body, split out so tests can assert on it directly.
+///
+/// Beyond liveness this carries the build identity — version, source commit,
+/// the UA browser traffic presents, the default TLS fingerprint — so "which
+/// binary am I talking to and what is it showing sites" is one cheap call
+/// instead of a traffic sniff (the 0.3.0 tmall report hit exactly that gap:
+/// the UA a session carried didn't match the docs and nothing on the box
+/// could say why — it was an imported session keeping the copied request's
+/// own Chrome UA, by design, but /health couldn't answer either way).
+fn health_body() -> serde_json::Value {
+    // The UA the browser paths carry: the AGINXBROWSER_UA override, else the
+    // pinned persona (see BrowserContext's resolution chain — search-engine
+    // transports keep their own defaults).
+    let ua = std::env::var("AGINXBROWSER_UA").unwrap_or_else(|_| {
+        crate::diting_browser::profiles::select_profile()
+            .user_agent
+            .to_string()
+    });
+    #[cfg(feature = "stealth")]
+    let tls = crate::diting_net::DEFAULT_TLS_FINGERPRINT;
+    #[cfg(not(feature = "stealth"))]
+    let tls = "off";
+    serde_json::json!({
         "status": "ok",
         "engine": "diting",
         "version": env!("CARGO_PKG_VERSION"),
+        "commit": option_env!("AGINXBROWSER_BUILD_COMMIT").unwrap_or("unknown"),
+        "ua": ua,
+        "tls": tls,
         "capabilities": {
             "screenshot": cfg!(feature = "screenshot"),
             "stealth": cfg!(feature = "stealth"),
             "captcha_solver": std::env::var("CAPTCHA_SOLVER_API_KEY").is_ok(),
         }
-    }))
+    })
 }
 
 /// Process start, for the status page's uptime readout.
@@ -1553,6 +1578,24 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 0.3.0 tmall report P2: /health must answer "which build am I talking
+    // to and what is it presenting" — commit, UA, TLS — in one cheap call,
+    // no network probe.
+    #[test]
+    fn health_body_reports_build_identity_and_fingerprint() {
+        let body = health_body();
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        let commit = body["commit"].as_str().expect("commit present");
+        assert!(!commit.is_empty(), "commit is the git short hash or 'unknown'");
+        let ua = body["ua"].as_str().expect("ua present");
+        assert!(ua.contains("Chrome/"), "persona UA expected, got: {ua}");
+        #[cfg(feature = "stealth")]
+        assert_eq!(body["tls"], crate::diting_net::DEFAULT_TLS_FINGERPRINT);
+        #[cfg(not(feature = "stealth"))]
+        assert_eq!(body["tls"], "off");
+    }
 
     fn req(url: &str) -> FetchRequest {
         FetchRequest {

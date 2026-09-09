@@ -49,8 +49,8 @@ pub fn collect_response_headers(
 }
 #[cfg(feature = "stealth")]
 pub use wreq_client::{
-    StealthHttpClient, STEALTH_USER_AGENT, emulation_os_for_ua, parse_tls_fingerprint,
-    warn_on_ua_tls_mismatch,
+    DEFAULT_TLS_FINGERPRINT, StealthHttpClient, STEALTH_USER_AGENT, emulation_os_for_ua,
+    parse_tls_fingerprint, warn_on_ua_tls_mismatch,
 };
 
 /// Serializes tests that read or mutate `AGINXBROWSER_ALLOW_PRIVATE_NETWORK`,

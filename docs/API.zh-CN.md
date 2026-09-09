@@ -13,7 +13,7 @@ cargo build --release
 
 # 验证服务
 curl http://127.0.0.1:8089/health
-# → {"status":"ok","engine":"diting"}
+# → {"status":"ok","engine":"diting","version":"0.3.1","commit":"a1b2c3d",...}
 
 # 抓取页面
 curl -sS -X POST http://127.0.0.1:8089/fetch \
@@ -34,7 +34,7 @@ curl -sS -X POST http://127.0.0.1:8089/session/create \
 
 ### GET /health
 
-健康检查。
+健康检查，同时是构建身份查询：`version` + `commit` 回答"这个二进制是哪份源码"（对照 release tag 即可验证文档/tag/二进制/源码是否同一 commit）；`ua`/`tls` 说明实例对外呈现什么——`ua` 是浏览器流量携带的 UA（`AGINXBROWSER_UA` 覆盖值，否则是指纹池钉住的 persona；导入会话按设计沿用复制请求自带的 UA），`tls` 是默认 TLS 指纹（非 stealth 构建为 `"off"`）。无 git 的构建里 `commit` 为 `"unknown"`。
 
 ```bash
 curl http://127.0.0.1:8089/health
@@ -43,7 +43,15 @@ curl http://127.0.0.1:8089/health
 响应：
 
 ```json
-{"status":"ok","engine":"diting"}
+{
+  "status": "ok",
+  "engine": "diting",
+  "version": "0.3.1",
+  "commit": "a1b2c3d",
+  "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+  "tls": "chrome145",
+  "capabilities": { "screenshot": true, "stealth": true, "captcha_solver": false }
+}
 ```
 
 ---
@@ -993,7 +1001,7 @@ claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
 |------|------|------|
 | `AGINXBROWSER_BIND` | `0.0.0.0:8089` | HTTP 服务监听地址 |
 | `AGINXBROWSER_STEALTH` | 启用 | `0` 关闭 stealth（诊断用） |
-| `AGINXBROWSER_UA` | Linux Chrome145 | 伪装 UA。UA 的浏览器家族/主版本与 TLS 指纹（默认 chrome145）不一致时，启动会打 `fingerprint mismatch` 警告——保持成对一致才能不漏指纹 |
+| `AGINXBROWSER_UA` | macOS Chrome145 persona | 浏览器流量的伪装 UA（指纹池钉住的 persona——本实例实际呈现什么看 `/health` 的 `ua`；搜索引擎传输层另用自己的默认值）。UA 的浏览器家族/主版本与 TLS 指纹（默认 chrome145）不一致时，启动会打 `fingerprint mismatch` 警告——保持成对一致才能不漏指纹 |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 缓存 TTL（秒），`0` 禁用 |
 | `AGINXBROWSER_DOWNLOAD_DIR` | `.` | `/download` 落盘目录 |

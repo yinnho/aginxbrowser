@@ -13,7 +13,7 @@ cargo build --release
 
 # Verify the service
 curl http://127.0.0.1:8089/health
-# → {"status":"ok","engine":"diting"}
+# → {"status":"ok","engine":"diting","version":"0.3.1","commit":"a1b2c3d",...}
 
 # Fetch a page
 curl -sS -X POST http://127.0.0.1:8089/fetch \
@@ -34,7 +34,7 @@ Listens on `0.0.0.0:8089` by default; override via the `AGINXBROWSER_BIND` envir
 
 ### GET /health
 
-Health check.
+Health check. Also the build-identity call: `version` + `commit` answer "which source is this binary" (compare against the release tag to verify doc/tag/binary/source are the same commit), and `ua`/`tls` say what the instance presents to sites — the UA browser traffic carries (`AGINXBROWSER_UA` override, else the pinned persona; imported sessions keep the copied request's own UA by design) and the default TLS fingerprint (`"off"` in non-stealth builds). `commit` is `"unknown"` for git-less builds.
 
 ```bash
 curl http://127.0.0.1:8089/health
@@ -43,7 +43,15 @@ curl http://127.0.0.1:8089/health
 Response:
 
 ```json
-{"status":"ok","engine":"diting"}
+{
+  "status": "ok",
+  "engine": "diting",
+  "version": "0.3.1",
+  "commit": "a1b2c3d",
+  "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+  "tls": "chrome145",
+  "capabilities": { "screenshot": true, "stealth": true, "captcha_solver": false }
+}
 ```
 
 ---
@@ -1309,7 +1317,7 @@ If AginxBrowser is deployed on a remote server, connect through an SSH tunnel:
 |------|------|------|
 | `AGINXBROWSER_BIND` | `0.0.0.0:8089` | HTTP server listen address |
 | `AGINXBROWSER_STEALTH` | Enabled | `0` disables stealth (for diagnostics) |
-| `AGINXBROWSER_UA` | Linux Chrome145 | Spoofed User-Agent. Startup logs a `fingerprint mismatch` warning when the UA's browser family/major version disagrees with the TLS fingerprint (default chrome145) — an intentionally coherent pair avoids a WAF tell |
+| `AGINXBROWSER_UA` | macOS Chrome145 persona | Spoofed User-Agent for browser traffic (a pinned persona from the fingerprint pool — see `/health`'s `ua` for what this instance presents; search-engine transports keep their own defaults). Startup logs a `fingerprint mismatch` warning when the UA's browser family/major version disagrees with the TLS fingerprint (default chrome145) — an intentionally coherent pair avoids a WAF tell |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language header |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL (seconds); `0` disables |
 | `AGINXBROWSER_MCP_ALLOWED_HOSTS` | unset | Extra `Host` values accepted by `/mcp` (comma-separated) — the DNS-rebinding guard defaults to loopback; add your LAN IP / Docker hostname when other machines call the instance |

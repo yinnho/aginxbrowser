@@ -3,6 +3,23 @@ use std::path::PathBuf;
 fn main() {
     println!("cargo:rerun-if-changed=js/bootstrap.js");
     println!("cargo:rerun-if-changed=build.rs");
+    // Re-embed the commit when HEAD moves (branch switches change .git/HEAD;
+    // same-branch commits move .git/refs/heads/<branch> — cargo watches both
+    // when present). Release CI builds from a fresh checkout either way.
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/refs/heads");
+
+    // Source revision baked into the binary — /health reports it so a caller
+    // can verify doc/tag/binary/source are the same commit without sniffing
+    // anything (0.3.0 tmall report P2). "unknown" for git-less builds.
+    let commit = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("cargo:rustc-env=AGINXBROWSER_BUILD_COMMIT={commit}");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let snapshot_path = out_dir.join("DITING_SNAPSHOT.bin");
