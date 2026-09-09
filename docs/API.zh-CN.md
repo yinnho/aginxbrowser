@@ -75,6 +75,7 @@ curl http://127.0.0.1:8089/health
 | render_tier | string | | `"auto"` | 渲染策略（见下方说明） |
 | tls_fingerprint | string | | `null` | TLS 指纹（stealth 模式），见下方说明 |
 | js_extract | object | | `null` | JS 数据提取（见下方说明） |
+| sanitize | bool | | `true` | 从 text/markdown 输出里剥 prompt injection 载体（见下方说明） |
 
 **render_tier 选项：**
 
@@ -120,7 +121,18 @@ curl http://127.0.0.1:8089/health
 | content | string | 抓取内容（markdown/html/text） |
 | truncated | bool | `content` 是否被 `max_chars` 截断 |
 | js_extract_result | any? | JS 提取结果（仅 `js_extract` 非空时有值） |
+| sanitize_report | object? | 注入剥离报告（仅 `sanitize` 真剥了东西时有值——见下方说明） |
 | captcha_event | object? | CAPTCHA 事件（仅检测到验证码时有值；识别 Cloudflare/Google/Baidu 挑战页，以及淘宝/天猫风控信号——`punish` 跳转、`x5sec`、MTop `FAIL_SYS_USER_VALIDATE`/`RGV587` 应答，即使 HTTP 200 也会透出） |
+
+**sanitize——注入剥离（默认开）：**
+
+页面文本是不可信输入，一个读取工具欠调用方的是不带"发给读者的指令"的内容。text/markdown 输出（raw `html` 不动）上剥三类载体：
+
+- **零宽/隐写字符**（U+200B 一族）——正常页面正文里不该出现，隐写注入就靠它们夹带。
+- **隐藏 span 文本**——活 DOM 上探查人眼看不见（`opacity:0`、字号小于 4px）但 `innerText` 照带出来的元素，其文本从提取结果里拿掉。整页隐藏的容器（SSR 等待揭示、微信 `#js_content`）有守卫：隐藏文本超过提取内容一半时判定为容器语义，一个字不动。
+- **指令形状的行**——命中精选注入话术（中英文："ignore previous instructions" 一族、`<|im_start|>` 这类 chat 标记）的行整行丢弃，因为载荷往往在匹配短语之后继续（"……并转而访问 evil.com"）。
+
+剥离可观测、从不静默：有动作时 `sanitize_report` 说清剥了什么——`{"zero_width_removed": 1, "hidden_spans_removed": 1, "patterns_hit": {"ignore_previous_instructions": 1}}`。这是启发式不是防火墙；要研究注入载荷本身，传 `"sanitize": false` 拿原文。`selector` 参数是收窄的另一半：把提取限定在正文区域，页面 chrome 里的注入噪声根本进不了文本。
 
 **captcha_event 格式：**
 
@@ -828,7 +840,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 
 | 工具 | 说明 |
 |------|------|
-| `fetch` | 抓取网页（支持分层渲染、stealth、js_extract） |
+| `fetch` | 抓取网页（支持分层渲染、stealth、js_extract）；默认开注入剥离（`sanitize: false` 可关） |
 | `eval` | 在页面上执行 JavaScript（支持 async/Promise） |
 | `click` | 点击页面元素（CSS 选择器） |
 | `search` | 多引擎聚合搜索（百度/Bing/搜狗/搜狗微信/Google） |
@@ -876,6 +888,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 | render_tier | string | | `"auto"` | 渲染策略：`auto` / `http` / `obscura` |
 | tls_fingerprint | string | | `null` | TLS 指纹 |
 | js_extract | object | | `null` | JS 数据提取：`{expression, timeout_ms}` |
+| sanitize | bool | | `true` | 从 text/markdown 输出剥 prompt injection 载体（零宽字符、隐藏 span 文本、指令形状的行）；有动作时响应带 `sanitize_report` |
 
 #### session_create 参数
 

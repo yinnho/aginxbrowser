@@ -27,6 +27,7 @@ mod page;
 mod rate;
 mod render;
 mod robots;
+mod sanitize;
 mod search;
 mod server;
 mod session;
@@ -101,6 +102,12 @@ pub struct FetchRequest {
     /// `"JSON.stringify(window.__INITIAL_STATE__)"`.
     #[serde(default)]
     pub js_extract: Option<JsExtractConfig>,
+    /// Strip prompt-injection carriers from `content` before it reaches the
+    /// caller (zero-width characters, human-invisible text spans,
+    /// instruction-shaped lines). Default true; set false when studying
+    /// injection content itself. See the `sanitize_report` response field.
+    #[serde(default = "default_true")]
+    pub sanitize: bool,
 }
 
 /// Configuration for JS global extraction after page load.
@@ -142,7 +149,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Deserialize, Default, Clone)]
+#[derive(Debug, Deserialize, Default, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
     #[default]
@@ -212,6 +219,10 @@ pub struct FetchResponse {
     /// URL and `url` the effective one. Always empty on the browser tier.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub redirected_from: Vec<String>,
+    /// What the injection stripper removed — present only when sanitization
+    /// was on and actually stripped something (observable, never silent).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sanitize_report: Option<crate::sanitize::SanitizeReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -921,6 +932,7 @@ async fn doctor_handler(Query(params): Query<DoctorParams>) -> impl IntoResponse
             render_tier: RenderTier::Auto,
             tls_fingerprint: None,
             js_extract: None,
+            sanitize: true,
         };
         // do_fetch drives the real fetch pipeline (build_browser -> goto ->
         // extract) on a local runtime; spawn_blocking because it is !Send and
@@ -1019,7 +1031,6 @@ async fn fetch_handler(Json(req): Json<FetchRequest>) -> Result<impl IntoRespons
     if let Some(cached) = fetch_cache_get(&cache_key) {
         return Ok((StatusCode::OK, Json(cached)));
     }
-
     let resp = smart_fetch(req).await?;
     fetch_cache_put(&cache_key, &resp);
     store::record_fetch(store::REST_OWNER, &resp);
@@ -1029,10 +1040,10 @@ async fn fetch_handler(Json(req): Json<FetchRequest>) -> Result<impl IntoRespons
 /// Cache key: the request fields that change the response.
 fn fetch_cache_key(req: &FetchRequest) -> String {
     format!(
-        "{}|{:?}|{:?}|{}|{:?}|{}|{}|{}|{:?}|{:?}",
+        "{}|{:?}|{:?}|{}|{:?}|{}|{}|{}|{:?}|{:?}|{}",
         req.url, req.format, req.selector, req.use_proxy, req.cookies, req.max_chars,
         req.wait_secs.unwrap_or(0), req.auto_bypass_challenge, req.render_tier,
-        req.tls_fingerprint,
+        req.tls_fingerprint, req.sanitize,
     )
 }
 
@@ -1646,6 +1657,7 @@ mod tests {
             render_tier: RenderTier::Auto,
             tls_fingerprint: None,
             js_extract: None,
+            sanitize: true,
         }
     }
 
@@ -1659,6 +1671,7 @@ mod tests {
             js_extract_result: None,
             tier: None,
             redirected_from: Vec::new(),
+            sanitize_report: None,
         }
     }
 

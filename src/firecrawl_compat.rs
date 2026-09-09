@@ -189,6 +189,9 @@ async fn scrape_with_fetch(
         render_tier: Default::default(),
         tls_fingerprint: req.tls_fingerprint.clone(),
         js_extract: None,
+        // Firecrawl clients run their own pipelines on the content — the
+        // agent-facing sanitize story is ours, not theirs.
+        sanitize: false,
     };
 
     match smart_fetch(fetch_req).await {

@@ -52,6 +52,14 @@ pub struct FetchParams {
     /// JS expression to extract from the page after rendering
     #[serde(default)]
     pub js_extract: Option<JsExtractParams>,
+    /// Strip prompt-injection payloads from the text output (default true):
+    /// zero-width/steganographic characters, instruction-shaped lines
+    /// ("ignore previous instructions", chat markup tokens, CJK variants),
+    /// and text hidden via opacity:0 / tiny fonts. A `sanitize_report`
+    /// field counts what was removed — stripping is observable, never
+    /// silent. Set false for raw output.
+    #[serde(default = "default_true")]
+    pub sanitize: bool,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -547,6 +555,7 @@ impl AginxBrowserMcp {
                 expression: j.expression,
                 timeout_ms: j.timeout_ms,
             }),
+            sanitize: params.sanitize,
         };
 
         match smart_fetch(req).await {
@@ -561,6 +570,9 @@ impl AginxBrowserMcp {
                 });
                 if !resp.redirected_from.is_empty() {
                     out["redirected_from"] = json!(resp.redirected_from);
+                }
+                if let Some(report) = &resp.sanitize_report {
+                    out["sanitize_report"] = json!(report);
                 }
                 out.to_string()
             }

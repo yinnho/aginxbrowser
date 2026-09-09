@@ -75,6 +75,7 @@ Fetch a page and return its content. Supports tiered rendering, automatic Cloudf
 | render_tier | string | | `"auto"` | Rendering strategy (see below) |
 | tls_fingerprint | string | | `null` | TLS fingerprint (stealth mode), see below |
 | js_extract | object | | `null` | JS data extraction (see below) |
+| sanitize | bool | | `true` | Strip prompt-injection carriers from the text/markdown output (see below) |
 
 **`render_tier` options:**
 
@@ -126,7 +127,18 @@ Fetch a page and return its content. Supports tiered rendering, automatic Cloudf
 | tier | string? | Which path served the page: `"http"` (plain HTTP + conversion, ~100ms) or `"browser"` (V8 render) — present under `render_tier: "auto"` too, so callers can see why a fetch was fast or slow |
 | redirected_from | string[]? | The redirect trail: `redirected_from[0]` is the URL you asked for, `url` is where the content actually came from (absent when no redirect happened) |
 | js_extract_result | any? | JS extraction result (only present when `js_extract` is set) |
+| sanitize_report | object? | What the injection stripper removed (only present when `sanitize` fired — see below) |
 | captcha_event | object? | CAPTCHA event (only present when a CAPTCHA is detected; covers Cloudflare/Google/Baidu challenge pages plus Taobao/Tmall risk-control signals — `punish` redirects, `x5sec`, and MTop `FAIL_SYS_USER_VALIDATE`/`RGV587` replies even when they arrive as HTTP 200) |
+
+**`sanitize` — injection stripping (default on):**
+
+Page text is untrusted input, and a reading tool owes its caller content that doesn't carry instructions aimed at the reader. On `text`/`markdown` output (raw `html` is never touched) three carriers are stripped:
+
+- **Zero-width/steganographic characters** (`​` family) — never legitimate page prose.
+- **Hidden-span text** — the live DOM is probed for elements a human can't see (`opacity:0`, sub-4px font) whose text `innerText` happily carries. Whole-hidden containers (SSR-pending reveals, WeChat `#js_content`) are guarded: when hidden text is more than half the extraction, nothing is removed.
+- **Instruction-shaped lines** — lines matching curated injection phrasings (EN/CN: "ignore previous instructions" class, chat markup like `<|im_start|>`) are dropped whole, because the payload continues past the matched phrase.
+
+Removal is observable, never silent: when anything fires, `sanitize_report` says what — `{"zero_width_removed": 1, "hidden_spans_removed": 1, "patterns_hit": {"ignore_previous_instructions": 1}}`. It's a heuristic, not a firewall; to study the payload itself, pass `"sanitize": false`. The `selector` parameter is the CSS-narrowing half of the story: restrict the extraction to the content region and the chrome's injected noise never enters the text at all.
 
 **`captcha_event` format:**
 
@@ -1185,7 +1197,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 
 | Tool | Description |
 |------|------|
-| `fetch` | Fetch a web page (tiered rendering, stealth, js_extract supported) |
+| `fetch` | Fetch a web page (tiered rendering, stealth, js_extract supported); injection stripping on by default (`sanitize: false` opts out) |
 | `eval` | Execute JavaScript on the page (async/Promise supported) |
 | `click` | Click a page element (CSS selector) |
 | `search` | Multi-engine aggregated search (Baidu/Bing/Sogou/Sogou WeChat/Google) |
@@ -1234,6 +1246,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | render_tier | string | | `"auto"` | Rendering strategy: `auto` / `http` / `obscura` |
 | tls_fingerprint | string | | `null` | TLS fingerprint |
 | js_extract | object | | `null` | JS data extraction: `{expression, timeout_ms}` |
+| sanitize | bool | | `true` | Strip prompt-injection carriers (zero-width chars, hidden-span text, instruction-shaped lines) from text/markdown output; response carries a `sanitize_report` when anything fired |
 
 #### `render_markdown` Parameters
 

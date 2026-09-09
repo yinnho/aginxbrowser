@@ -168,6 +168,7 @@ pub async fn http_fetch(
     selector: Option<&str>,
     cookies: &[String],
     max_chars: usize,
+    sanitize: bool,
 ) -> Result<Option<FetchResponse>, String> {
     let parsed = match url::Url::parse(url) {
         Ok(u) => u,
@@ -266,6 +267,18 @@ pub async fn http_fetch(
 
     let captcha_event = crate::captcha::detect_and_maybe_solve(resp.url.as_ref(), &html).await;
 
+    // Injection stripper, same contract as the browser tier. No DOM probe
+    // here (no live page) — zero-width characters and instruction-shaped
+    // lines still apply; hidden-span quarantine needs rendering, and an
+    // `opacity:0` span doesn't survive `strip_html_tags` into text anyway.
+    let (content, sanitize_report) = if format == OutputFormat::Html || !sanitize {
+        (content, None)
+    } else {
+        let (clean, report) = crate::sanitize::sanitize_text(&content, &[]);
+        let report = if report.is_clean() { None } else { Some(report) };
+        (clean, report)
+    };
+
     Ok(Some(FetchResponse {
         url: resp.url.to_string(),
         title,
@@ -279,6 +292,7 @@ pub async fn http_fetch(
             .iter()
             .map(|u| u.to_string())
             .collect(),
+        sanitize_report,
     }))
 }
 
@@ -341,6 +355,7 @@ pub async fn smart_fetch(req: crate::FetchRequest) -> Result<FetchResponse, anyh
             req.selector.as_deref(),
             &req.cookies,
             req.max_chars,
+            req.sanitize,
         )
         .await
         {
@@ -447,6 +462,7 @@ mod tests {
             render_tier: tier,
             tls_fingerprint: None,
             js_extract: None,
+            sanitize: true,
         }
     }
 
@@ -671,6 +687,7 @@ mod tests {
             None,
             &[],
             50000,
+            true,
         )
         .await
         .unwrap();
@@ -695,6 +712,7 @@ mod tests {
             None,
             &[],
             50000,
+            true,
         )
         .await
         .unwrap()
@@ -742,6 +760,7 @@ mod tests {
             None,
             &[],
             50000,
+            true,
         )
         .await
         .unwrap()
@@ -775,6 +794,7 @@ mod tests {
             render_tier: crate::RenderTier::Http,
             tls_fingerprint: None,
             js_extract: None,
+            sanitize: true,
         };
         let err = smart_fetch(req)
             .await
@@ -810,6 +830,7 @@ mod tests {
             None,
             &[],
             50000,
+            true,
         )
         .await
         .unwrap()
