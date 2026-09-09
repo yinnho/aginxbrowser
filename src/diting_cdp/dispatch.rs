@@ -2726,6 +2726,118 @@ mod tests {
             .collect()
     }
 
+    // Serves /app (HTML whose script fetches /api), /api (JSON), and /b
+    // (plain page) — the obscura #920 repro shape at CDP level: the outgoing
+    // document's script-initiated fetch must still surface as Network events
+    // even though the only drain runs after the *next* navigation settles.
+    async fn nav_carry_fixture() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut stream = stream;
+                    let mut buf = vec![0u8; 8192];
+                    if stream.read(&mut buf).await.is_err() {
+                        return;
+                    }
+                    let req = String::from_utf8_lossy(&buf).to_string();
+                    let path = req.split(' ').nth(1).unwrap_or("/");
+                    let (ctype, body) = if path == "/app" {
+                        (
+                            "text/html",
+                            "<html><body><script>fetch('/api').then(r => r.text()).then(t => { window.__got = t; });</script></body></html>".to_string(),
+                        )
+                    } else if path == "/api" {
+                        ("application/json", "{\"v\":1}".to_string())
+                    } else {
+                        ("text/html", "<html><body>next</body></html>".to_string())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        ctype,
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn navigation_carries_outgoing_documents_fetch_events() {
+        let port = nav_carry_fixture().await;
+        // Held across the whole test like `setup` does: concurrent tests
+        // toggle the same env var and a bare loopback nav would race it.
+        let net = crate::server::test_util::net_env_guard();
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-1".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id.clone());
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": format!("http://127.0.0.1:{port}/app") }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        // The script's fetch settles inside the load pipeline, so its event
+        // sits in the JS runtime's queue — the /app drain above could not
+        // have seen it (document/subresource events only).
+        let got = evaluate_expr(2, &session_id, "window.__got", false);
+        let resp = dispatch(&got, &mut ctx).await;
+        assert!(
+            resp.result
+                .as_ref()
+                .and_then(|r| r["result"]["value"].as_str())
+                .is_some(),
+            "script fetch must settle during load: {resp:?}"
+        );
+
+        let first_loader = ctx.current_loader_ids.get(&page_id).cloned().unwrap();
+        ctx.pending_events.clear();
+
+        let nav2 = CdpRequest {
+            id: 3,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": format!("http://127.0.0.1:{port}/b") }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav2, &mut ctx).await.error.is_none());
+
+        // The /api fetch rides in the /b batch, attributed to the /app
+        // loader, and lands before /b's frameNavigated — the order a real
+        // browser produces by streaming the events live.
+        let api_idx = ctx
+            .pending_events
+            .iter()
+            .position(|e| e.method == "Network.requestWillBeSent"
+                && e.params["request"]["url"].as_str().unwrap_or("").ends_with("/api"))
+            .expect("carried /api requestWillBeSent in the /b batch");
+        let b_nav_idx = ctx
+            .pending_events
+            .iter()
+            .position(|e| e.method == "Page.frameNavigated"
+                && e.params["frame"]["url"].as_str().unwrap_or("").ends_with("/b"))
+            .expect("/b frameNavigated");
+        assert!(
+            api_idx < b_nav_idx,
+            "carried events must precede the new document's frameNavigated"
+        );
+        assert_eq!(
+            ctx.pending_events[api_idx].params["loaderId"].as_str().unwrap(),
+            first_loader,
+            "carried events belong to the outgoing document's loader"
+        );
+        drop(net);
+    }
+
     // Serves /doc (HTML with a stylesheet + a dep script + an inline marker),
     // /dep.js and /style.css — the obscura #643 repro shape: arming Fetch
     // interception must never cost the page its static scripts, while

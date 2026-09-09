@@ -68,6 +68,81 @@ fn emit(ctx: &mut CdpContext, method: &str, params: Value, session_id: &Option<S
 /// Shared by `Page.navigate` and the post-eval drain in the Runtime domain
 /// (`emit_post_eval_nav`), so a `location.href = ...` in an evaluated script
 /// produces the same sequence a direct navigation does.
+/// Emit the requestWillBeSent / responseReceived / loadingFinished triple
+/// for one recorded network event. Shared by the post-navigation batch and
+/// by the outgoing document's carried events, which must ride under the
+/// loader they actually belonged to.
+fn emit_network_event(
+    ctx: &mut CdpContext,
+    session_id: &Option<String>,
+    frame_id: &str,
+    loader_id: &str,
+    document_url: &str,
+    ev: &NetworkEvent,
+) {
+    let ts = now_epoch_seconds();
+    let request_id = ev.request_id.clone();
+    emit(
+        ctx,
+        "Network.requestWillBeSent",
+        json!({
+            "requestId": request_id,
+            "loaderId": loader_id,
+            "documentURL": document_url,
+            "request": {
+                "url": ev.url,
+                "method": ev.method,
+                "headers": ev.headers,
+                "initialPriority": "High",
+                "referrerPolicy": "no-referrer-when-downgrade",
+            },
+            "timestamp": ev.timestamp,
+            "wallTime": ts,
+            "initiator": { "type": "other" },
+            "type": ev.resource_type,
+            "frameId": frame_id,
+            "hasUserGesture": false,
+        }),
+        session_id,
+    );
+    emit(
+        ctx,
+        "Network.responseReceived",
+        json!({
+            "requestId": request_id,
+            "loaderId": loader_id,
+            "timestamp": ev.timestamp,
+            "type": ev.resource_type,
+            "response": {
+                "url": ev.url,
+                "status": ev.status,
+                "statusText": "",
+                "headers": ev.response_headers.as_ref(),
+                "mimeType": "text/html",
+                "connectionReused": false,
+                "connectionId": 0,
+                "encodedDataLength": ev.body_size,
+                "securityState": "secure",
+                "protocol": "http/1.1",
+                "fromDiskCache": false,
+                "fromServiceWorker": false,
+            },
+            "frameId": frame_id,
+        }),
+        session_id,
+    );
+    emit(
+        ctx,
+        "Network.loadingFinished",
+        json!({
+            "requestId": request_id,
+            "timestamp": ev.timestamp,
+            "encodedDataLength": ev.body_size,
+        }),
+        session_id,
+    );
+}
+
 pub(crate) fn emit_navigation_events(
     ctx: &mut CdpContext,
     session_id: &Option<String>,
@@ -98,66 +173,7 @@ pub(crate) fn emit_navigation_events(
     );
 
     for ev in network_events {
-        let request_id = ev.request_id.clone();
-        emit(
-            ctx,
-            "Network.requestWillBeSent",
-            json!({
-                "requestId": request_id,
-                "loaderId": loader_id,
-                "documentURL": page_url,
-                "request": {
-                    "url": ev.url,
-                    "method": ev.method,
-                    "headers": ev.headers,
-                    "initialPriority": "High",
-                    "referrerPolicy": "no-referrer-when-downgrade",
-                },
-                "timestamp": ev.timestamp,
-                "wallTime": ts,
-                "initiator": { "type": "other" },
-                "type": ev.resource_type,
-                "frameId": frame_id,
-                "hasUserGesture": false,
-            }),
-            session_id,
-        );
-        emit(
-            ctx,
-            "Network.responseReceived",
-            json!({
-                "requestId": request_id,
-                "loaderId": loader_id,
-                "timestamp": ev.timestamp,
-                "type": ev.resource_type,
-                "response": {
-                    "url": ev.url,
-                    "status": ev.status,
-                    "statusText": "",
-                    "headers": ev.response_headers.as_ref(),
-                    "mimeType": "text/html",
-                    "connectionReused": false,
-                    "connectionId": 0,
-                    "encodedDataLength": ev.body_size,
-                    "securityState": "secure",
-                    "protocol": "http/1.1",
-                    "fromDiskCache": false,
-                    "fromServiceWorker": false,
-                },
-                "frameId": frame_id,
-            }),
-            session_id,
-        );
-        emit(
-            ctx,
-            "Network.loadingFinished",
-            json!({
-                "requestId": request_id,
-                "timestamp": ev.timestamp,
-                "encodedDataLength": ev.body_size,
-            }),
-            session_id,
-        );
+        emit_network_event(ctx, session_id, frame_id, loader_id, page_url, ev);
     }
 
     emit(
@@ -256,7 +272,7 @@ pub(crate) fn emit_navigation_for_page(
     session_id: &Option<String>,
     page_id: &str,
 ) -> (String, String) {
-    let (frame_id, url_str, network_events, reached_idle) = {
+    let (frame_id, url_str, network_events, reached_idle, carried, carried_url) = {
         let Some(page) = ctx.get_page_mut(page_id) else {
             return (String::new(), String::new());
         };
@@ -265,8 +281,26 @@ pub(crate) fn emit_navigation_for_page(
             page.url_string(),
             page.network_events.drain(..).collect::<Vec<_>>(),
             page.lifecycle == LifecycleState::NetworkIdle,
+            std::mem::take(&mut page.carried_network_events),
+            page.carried_network_url.clone(),
         )
     };
+    // The outgoing document's network events — including its script-initiated
+    // fetch/XHR, which only ever sat in the JS runtime's queue — were carried
+    // across this navigation by the page layer. Emit them first, under the
+    // loader they belonged to (still the current one here), so a client sees
+    // them before the new document's frameNavigated — the same ordering as a
+    // browser where those events streamed live (obscura #920 shape).
+    if !carried.is_empty() {
+        let old_loader = ctx
+            .current_loader_ids
+            .get(page_id)
+            .cloned()
+            .unwrap_or_default();
+        for ev in &carried {
+            emit_network_event(ctx, session_id, &frame_id, &old_loader, &carried_url, ev);
+        }
+    }
     let loader_id = format!("loader-{}", uuid::Uuid::new_v4());
     ctx.current_loader_ids
         .insert(page_id.to_string(), loader_id.clone());

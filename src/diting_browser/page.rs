@@ -243,6 +243,15 @@ pub struct Page {
     pub history: Vec<String>,
     pub history_index: usize,
     pub network_events: Vec<NetworkEvent>,
+    /// Events of the outgoing document, carried across the per-navigation
+    /// reset of `network_events` (and the JS runtime swap) so the CDP drain
+    /// — which only runs after the new document settles — can still emit
+    /// them. Filled at the top of `navigate_single`; consumed by the CDP
+    /// navigation emitter.
+    pub(crate) carried_network_events: Vec<NetworkEvent>,
+    /// The outgoing document's URL, kept beside the carried events so they
+    /// can be emitted attributed to the document they belonged to.
+    pub(crate) carried_network_url: String,
     network_event_counter: u32,
     /// Passive on_request/on_response callbacks, scoped to this page (upstream
     /// issue #408): they fire for document/subresource fetches this Page makes
@@ -352,6 +361,8 @@ impl Page {
             history: Vec::new(),
             history_index: 0,
             network_events: Vec::new(),
+            carried_network_events: Vec::new(),
+            carried_network_url: String::new(),
             network_event_counter: 0,
             session_storage: None,
             viewport_override: None,
@@ -1341,9 +1352,20 @@ impl Page {
     ) -> Result<(), PageError> {
         let url = Url::parse(url_str).map_err(|e| PageError::InvalidUrl(e.to_string()))?;
 
+        // The outgoing document's events must outlive this navigation: the
+        // CDP drain that emits Network events only runs after the new
+        // document settles, `network_events` is reset below, and `init_js`
+        // swaps the runtime whose queue still holds script-initiated
+        // fetch/XHR events. Sync those into the page-side list now and
+        // carry the whole thing across (obscura #920 shape — and broader
+        // than the history-jump case there: every navigation dropped them).
+        self.sync_js_network_events();
+        self.carried_network_url = self.url_string();
+        let mut outgoing = std::mem::take(&mut self.network_events);
+        self.carried_network_events.append(&mut outgoing);
+
         self.lifecycle = LifecycleState::Loading;
         self.url = Some(url.clone());
-        self.network_events.clear();
 
         if url.scheme() == "about" {
             self.navigate_blank();
