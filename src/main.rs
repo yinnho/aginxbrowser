@@ -108,6 +108,12 @@ pub struct FetchRequest {
     /// injection content itself. See the `sanitize_report` response field.
     #[serde(default = "default_true")]
     pub sanitize: bool,
+    /// Return the bodies of background XHR/fetch requests the page issued,
+    /// as the `xhr` response array. Each entry is a URL substring an entry
+    /// must contain; an empty array matches every XHR/fetch. Forces the
+    /// browser tier (script-initiated requests only exist post-JS).
+    #[serde(default)]
+    pub capture_xhr: Option<Vec<String>>,
 }
 
 /// Configuration for JS global extraction after page load.
@@ -223,6 +229,11 @@ pub struct FetchResponse {
     /// was on and actually stripped something (observable, never silent).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sanitize_report: Option<crate::sanitize::SanitizeReport>,
+    /// Background XHR/fetch responses captured for `capture_xhr` requests:
+    /// `[{url, method, status, mime, body, body_truncated}]` — the page's
+    /// own API face, usually cleaner than the rendered DOM.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub xhr: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -933,6 +944,7 @@ async fn doctor_handler(Query(params): Query<DoctorParams>) -> impl IntoResponse
             tls_fingerprint: None,
             js_extract: None,
             sanitize: true,
+            capture_xhr: None,
         };
         // do_fetch drives the real fetch pipeline (build_browser -> goto ->
         // extract) on a local runtime; spawn_blocking because it is !Send and
@@ -1040,10 +1052,10 @@ async fn fetch_handler(Json(req): Json<FetchRequest>) -> Result<impl IntoRespons
 /// Cache key: the request fields that change the response.
 fn fetch_cache_key(req: &FetchRequest) -> String {
     format!(
-        "{}|{:?}|{:?}|{}|{:?}|{}|{}|{}|{:?}|{:?}|{}",
+        "{}|{:?}|{:?}|{}|{:?}|{}|{}|{}|{:?}|{:?}|{}|{:?}",
         req.url, req.format, req.selector, req.use_proxy, req.cookies, req.max_chars,
         req.wait_secs.unwrap_or(0), req.auto_bypass_challenge, req.render_tier,
-        req.tls_fingerprint, req.sanitize,
+        req.tls_fingerprint, req.sanitize, req.capture_xhr,
     )
 }
 
@@ -1393,10 +1405,21 @@ struct SessionNetworkQuery {
     /// requests the page actually issued; anything else lists all traffic.
     #[serde(default)]
     filter: Option<String>,
+    /// Add an `xhr` array of background API responses (the page's own fetch/
+    /// XHR traffic with retained bodies) alongside the request rows.
+    #[serde(default)]
+    include_bodies: Option<bool>,
+    /// Narrow the `xhr` array to URLs containing this substring.
+    #[serde(default)]
+    url_contains: Option<String>,
+    /// Per-body character cap for the `xhr` array (default 4000).
+    #[serde(default)]
+    body_max_chars: Option<usize>,
 }
 
 /// The session's network request log: `?filter=media` is the playback-link
-/// sniffer; the default returns compact rows for every request.
+/// sniffer; the default returns compact rows for every request, plus an
+/// `xhr` array of background API responses when `include_bodies=true`.
 async fn session_network_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     axum::extract::Query(q): axum::extract::Query<SessionNetworkQuery>,
@@ -1405,6 +1428,9 @@ async fn session_network_handler(
     let text = mgr
         .send(&id, |reply| session::SessionCommand::Network {
             media_only: q.filter.as_deref() == Some("media"),
+            include_bodies: q.include_bodies.unwrap_or(false),
+            url_contains: q.url_contains,
+            body_max_chars: q.body_max_chars.unwrap_or(4000),
             reply,
         })
         .await
@@ -1658,6 +1684,7 @@ mod tests {
             tls_fingerprint: None,
             js_extract: None,
             sanitize: true,
+            capture_xhr: None,
         }
     }
 
@@ -1672,6 +1699,7 @@ mod tests {
             tier: None,
             redirected_from: Vec::new(),
             sanitize_report: None,
+            xhr: Vec::new(),
         }
     }
 

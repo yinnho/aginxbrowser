@@ -76,6 +76,7 @@ curl http://127.0.0.1:8089/health
 | tls_fingerprint | string | | `null` | TLS 指纹（stealth 模式），见下方说明 |
 | js_extract | object | | `null` | JS 数据提取（见下方说明） |
 | sanitize | bool | | `true` | 从 text/markdown 输出里剥 prompt injection 载体（见下方说明） |
+| capture_xhr | string[] | | `null` | 把页面自己发的 XHR/fetch 响应体作为一等公民 `xhr` 字段返回。条目是 URL 子串；`[]` = 全部 XHR/fetch。会强制走浏览器层 |
 
 **render_tier 选项：**
 
@@ -122,6 +123,7 @@ curl http://127.0.0.1:8089/health
 | truncated | bool | `content` 是否被 `max_chars` 截断 |
 | js_extract_result | any? | JS 提取结果（仅 `js_extract` 非空时有值） |
 | sanitize_report | object? | 注入剥离报告（仅 `sanitize` 真剥了东西时有值——见下方说明） |
+| xhr | object[] | 脚本发起的响应体（仅 `capture_xhr` 非空时有值——见下方说明） |
 | captcha_event | object? | CAPTCHA 事件（仅检测到验证码时有值；识别 Cloudflare/Google/Baidu 挑战页，以及淘宝/天猫风控信号——`punish` 跳转、`x5sec`、MTop `FAIL_SYS_USER_VALIDATE`/`RGV587` 应答，即使 HTTP 200 也会透出） |
 
 **sanitize——注入剥离（默认开）：**
@@ -133,6 +135,18 @@ curl http://127.0.0.1:8089/health
 - **指令形状的行**——命中精选注入话术（中英文："ignore previous instructions" 一族、`<|im_start|>` 这类 chat 标记）的行整行丢弃，因为载荷往往在匹配短语之后继续（"……并转而访问 evil.com"）。
 
 剥离可观测、从不静默：有动作时 `sanitize_report` 说清剥了什么——`{"zero_width_removed": 1, "hidden_spans_removed": 1, "patterns_hit": {"ignore_previous_instructions": 1}}`。这是启发式不是防火墙；要研究注入载荷本身，传 `"sanitize": false` 拿原文。`selector` 参数是收窄的另一半：把提取限定在正文区域，页面 chrome 里的注入噪声根本进不了文本。
+
+**capture_xhr——页面自己的 API 面：**
+
+JS 重页面最干净的读法常常不是啃渲染后的 DOM，而是页面自己调的那批 JSON API。`capture_xhr` 把这些响应体随正文一起返回：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8089/fetch \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://spa.example.com/list","capture_xhr":["/api/"],"wait_secs":2}'
+```
+
+每行形如 `{"url", "method", "status", "mime", "body", "body_truncated"}`。每条 body 上限 `min(max_chars, 8000)` 字符、最多 20 条，页面的 API 流量淹不了上下文；二进制（base64）body 跳过。`wait_secs` 在这里有用：页面的 fetch 要一点时间才落进网络日志。
 
 **captcha_event 格式：**
 
@@ -840,7 +854,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 
 | 工具 | 说明 |
 |------|------|
-| `fetch` | 抓取网页（支持分层渲染、stealth、js_extract）；默认开注入剥离（`sanitize: false` 可关） |
+| `fetch` | 抓取网页（支持分层渲染、stealth、js_extract）；默认开注入剥离（`sanitize: false` 可关），`capture_xhr` 把页面自己调的 API 响应体随正文一起返回 |
 | `eval` | 在页面上执行 JavaScript（支持 async/Promise） |
 | `click` | 点击页面元素（CSS 选择器） |
 | `search` | 多引擎聚合搜索（百度/Bing/搜狗/搜狗微信/Google） |
@@ -870,7 +884,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 | `session_viewport` | 设会话视口（设备模拟）：media query 重算，`mobile: true` 翻 `pointer: coarse`/`hover: none`；设置活过导航 |
 | `session_screenshot` | 截会话**当前** DOM 状态（含 click/eval 后的突变）为 base64 PNG；可选 `width`/`height`/`full_page`/`selector` |
 | `session_wait` | 等 CSS 选择器命中或 JS 谓词为真，带超时——等待期间页面事件循环照常跑，替代瞎 sleep |
-| `session_network` | 读会话网络请求日志；`filter: "media"` 从页面真实发出的请求里提播放/直播链接（m3u8、mp4…）——拿真视频直链靠它 |
+| `session_network` | 读会话网络请求日志；`filter: "media"` 从页面真实发出的请求里提播放/直播链接（m3u8、mp4…）——拿真视频直链靠它。`include_bodies: true` 加一个 `xhr` 数组带页面脚本发起的响应体（它自己的 API 面），`url_contains` 收窄 |
 | `session_export` | 导出会话录制的动作（默认出可回放的 curl 脚本；`format=jsonl` 出原始日志） |
 | `session_close` | 关闭会话（persistent 会话顺带删落盘登录快照——空闲过期保留，显式关闭不留） |
 
@@ -889,6 +903,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 | tls_fingerprint | string | | `null` | TLS 指纹 |
 | js_extract | object | | `null` | JS 数据提取：`{expression, timeout_ms}` |
 | sanitize | bool | | `true` | 从 text/markdown 输出剥 prompt injection 载体（零宽字符、隐藏 span 文本、指令形状的行）；有动作时响应带 `sanitize_report` |
+| capture_xhr | string[] | | `null` | 把页面脚本发起的 XHR/fetch 响应体作为一等公民 `xhr` 数组返回。条目是 URL 子串；`[]` = 全部 |
 
 #### session_create 参数
 
@@ -906,7 +921,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 
 #### session 操作参数
 
-所有 session 操作都需要 `session_id` 参数。`click`/`input` 需要 `index`（从 `session_state` 获取），`input` 还需要 `text`，`eval` 需要 `script`，`navigate` 需要 `url`，`clone` 只要源会话 id。带可选参数的工具：`click_xy` 要 `x`/`y`（可选 `button`、`click_count`）；`drag` 要 `from`/`to`（可选 `steps`、`delay_ms`）；`viewport` 收 `width`/`height`/`mobile`（都可选，缺省保持当前值）；`screenshot` 收 `width`/`height`/`full_page`/`selector`/`selector_all`；`wait` 的 `selector`/`predicate` 二选一，加 `timeout_ms`（默认 10000，上限 120000）；`export` 收 `format`（默认 `bash` / `jsonl`）；`network` 收 `filter: "media"`；`dialog` 收 `action`（`list`/`accept`/`dismiss`）加可选 `prompt_text`；`console` 收 `level`/`since_ts`/`url_contains`/`limit`；`storage`/`cookies` 只要 `session_id`。
+所有 session 操作都需要 `session_id` 参数。`click`/`input` 需要 `index`（从 `session_state` 获取），`input` 还需要 `text`，`eval` 需要 `script`，`navigate` 需要 `url`，`clone` 只要源会话 id。带可选参数的工具：`click_xy` 要 `x`/`y`（可选 `button`、`click_count`）；`drag` 要 `from`/`to`（可选 `steps`、`delay_ms`）；`viewport` 收 `width`/`height`/`mobile`（都可选，缺省保持当前值）；`screenshot` 收 `width`/`height`/`full_page`/`selector`/`selector_all`；`wait` 的 `selector`/`predicate` 二选一，加 `timeout_ms`（默认 10000，上限 120000）；`export` 收 `format`（默认 `bash` / `jsonl`）；`network` 收 `filter: "media"` 或 `include_bodies: true`（加 `url_contains`/`body_max_chars`）；`dialog` 收 `action`（`list`/`accept`/`dismiss`）加可选 `prompt_text`；`console` 收 `level`/`since_ts`/`url_contains`/`limit`；`storage`/`cookies` 只要 `session_id`。
 
 ### 客户端配置
 

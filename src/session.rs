@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::page::Page;
@@ -304,9 +304,15 @@ pub enum SessionCommand {
     /// — playback links extracted from requests the page actually issued
     /// (via "network"), merged with DOM-observed media-element and player
     /// iframe sources the engine never fetches (via "dom" candidates);
-    /// otherwise `{"url","total","requests":[...]}` compact rows.
+    /// otherwise `{"url","total","requests":[...]}` compact rows, plus an
+    /// `xhr` array of background API responses when `include_bodies` is set
+    /// (Scrapling's capture_xhr insight: the page's own API face is the
+    /// clean structured read).
     Network {
         media_only: bool,
+        include_bodies: bool,
+        url_contains: Option<String>,
+        body_max_chars: usize,
         reply: oneshot::Sender<Result<String, String>>,
     },
     /// Export the current page's traffic as a HAR 1.2 JSON document
@@ -1580,7 +1586,7 @@ fn session_thread(
                             let _ = reply.send(Ok(jsonl));
                         }
 
-                        SessionCommand::Network { media_only, reply } => {
+                        SessionCommand::Network { media_only, include_bodies, url_contains, body_max_chars, reply } => {
                             page.inner.sync_js_network_events();
                             let payload = if media_only {
                                 // Media elements and player iframes are never
@@ -1604,11 +1610,22 @@ fn session_thread(
                                 })
                             } else {
                                 let events = &page.inner.network_events;
-                                serde_json::json!({
+                                let mut payload = serde_json::json!({
                                     "url": page.url(),
                                     "total": events.len(),
                                     "requests": crate::har::compact_events(events),
-                                })
+                                });
+                                if include_bodies {
+                                    let body_of = |rid: &str| page.inner.get_response_body(rid);
+                                    let filters = url_contains
+                                        .as_deref()
+                                        .map(|s| vec![s.to_string()])
+                                        .unwrap_or_default();
+                                    payload["xhr"] = json!(crate::har::xhr_bodies(
+                                        events, &filters, body_max_chars, &body_of
+                                    ));
+                                }
+                                payload
                             };
                             let _ = reply.send(Ok(payload.to_string()));
                         }
@@ -3813,7 +3830,7 @@ mod tests {
             .unwrap();
 
         let media = mgr
-            .send(&sid, |reply| SessionCommand::Network { media_only: true, reply })
+            .send(&sid, |reply| SessionCommand::Network { media_only: true, include_bodies: false, url_contains: None, body_max_chars: 0, reply })
             .await
             .unwrap();
         let media: Value = serde_json::from_str(&media).unwrap();
@@ -3847,7 +3864,7 @@ mod tests {
         );
 
         let all = mgr
-            .send(&sid, |reply| SessionCommand::Network { media_only: false, reply })
+            .send(&sid, |reply| SessionCommand::Network { media_only: false, include_bodies: false, url_contains: None, body_max_chars: 0, reply })
             .await
             .unwrap();
         let all: Value = serde_json::from_str(&all).unwrap();
@@ -3855,6 +3872,33 @@ mod tests {
             all["total"].as_u64().unwrap() >= 2,
             "document + script fetch: {all}"
         );
+        assert!(
+            all.get("xhr").is_none(),
+            "no xhr array unless include_bodies asks for it: {all}"
+        );
+
+        // include_bodies: the page's own API responses ride along as a
+        // sibling `xhr` array, narrowed by url_contains.
+        let xhrs = mgr
+            .send(&sid, |reply| SessionCommand::Network {
+                media_only: false,
+                include_bodies: true,
+                url_contains: Some("/v/".to_string()),
+                body_max_chars: 100,
+                reply,
+            })
+            .await
+            .unwrap();
+        let xhrs: Value = serde_json::from_str(&xhrs).unwrap();
+        let arr = xhrs["xhr"].as_array().expect("xhr array");
+        assert_eq!(arr.len(), 1, "the script-initiated fetch only: {xhrs}");
+        assert!(
+            arr[0]["url"].as_str().unwrap().ends_with("/v/master.m3u8?token=1"),
+            "entry carries the request URL: {xhrs}"
+        );
+        assert_eq!(arr[0]["status"], 200);
+        assert_eq!(arr[0]["body"], "#EXTM3U");
+        assert_eq!(arr[0]["body_truncated"], false);
 
         let har = mgr
             .send(&sid, |reply| SessionCommand::Har { reply })

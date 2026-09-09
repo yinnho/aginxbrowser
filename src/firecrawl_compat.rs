@@ -192,6 +192,7 @@ async fn scrape_with_fetch(
         // Firecrawl clients run their own pipelines on the content — the
         // agent-facing sanitize story is ours, not theirs.
         sanitize: false,
+        capture_xhr: None,
     };
 
     match smart_fetch(fetch_req).await {

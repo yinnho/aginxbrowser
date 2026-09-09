@@ -293,6 +293,7 @@ pub async fn http_fetch(
             .map(|u| u.to_string())
             .collect(),
         sanitize_report,
+        xhr: Vec::new(),
     }))
 }
 
@@ -326,6 +327,11 @@ fn tier1_host_blocklisted(url: &str) -> bool {
 
 /// Decide whether Tier 1 (HTTP) should be attempted at all for this request.
 fn tier1_eligible(req: &crate::FetchRequest) -> bool {
+    // capture_xhr reads script-initiated requests — they only exist after
+    // JS runs, so the HTTP tier (no JS) can never serve it.
+    if req.capture_xhr.is_some() {
+        return false;
+    }
     match req.render_tier {
         RenderTier::Obscura => false,
         RenderTier::Auto => !tier1_host_blocklisted(&req.url),
@@ -463,6 +469,7 @@ mod tests {
             tls_fingerprint: None,
             js_extract: None,
             sanitize: true,
+            capture_xhr: None,
         }
     }
 
@@ -795,6 +802,7 @@ mod tests {
             tls_fingerprint: None,
             js_extract: None,
             sanitize: true,
+            capture_xhr: None,
         };
         let err = smart_fetch(req)
             .await

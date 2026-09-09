@@ -60,6 +60,12 @@ pub struct FetchParams {
     /// silent. Set false for raw output.
     #[serde(default = "default_true")]
     pub sanitize: bool,
+    /// Capture script-initiated API responses: a list of URL substrings
+    /// (e.g. ["/api/"]) whose matching fetch/XHR bodies come back in an
+    /// `xhr` array; an empty list captures every XHR/Fetch. Forces browser
+    /// rendering (script-initiated requests only exist after JS runs).
+    #[serde(default)]
+    pub capture_xhr: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -427,6 +433,17 @@ pub struct SessionNetworkParams {
     /// "media" extracts playback/stream links (m3u8/HLS, mp4, dash, ...) from the requests the page actually issued - the reliable way to get a real video link, since URLs embedded in page HTML are often decoys. Media elements and player iframes the engine never fetches (video/audio/source src, iframe src) are merged in as candidates: entries carry via="network" (confirmed requests) or via="dom" (candidates, with their tag; iframes surface as kind "iframe" - player pages to navigate or sniff inside, not playable URLs). Omit to list every request as compact rows.
     #[serde(default)]
     pub filter: Option<String>,
+    /// Add an `xhr` array of background API responses (the page's own fetch/XHR
+    /// traffic with retained bodies) alongside the request rows — the page's
+    /// API face is often the cleanest structured read of its data.
+    #[serde(default)]
+    pub include_bodies: Option<bool>,
+    /// Narrow the `xhr` array to URLs containing this substring.
+    #[serde(default)]
+    pub url_contains: Option<String>,
+    /// Per-body character cap for the `xhr` array (default 4000).
+    #[serde(default)]
+    pub body_max_chars: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -556,6 +573,7 @@ impl AginxBrowserMcp {
                 timeout_ms: j.timeout_ms,
             }),
             sanitize: params.sanitize,
+            capture_xhr: params.capture_xhr,
         };
 
         match smart_fetch(req).await {
@@ -573,6 +591,9 @@ impl AginxBrowserMcp {
                 }
                 if let Some(report) = &resp.sanitize_report {
                     out["sanitize_report"] = json!(report);
+                }
+                if !resp.xhr.is_empty() {
+                    out["xhr"] = json!(resp.xhr);
                 }
                 out.to_string()
             }
@@ -1105,6 +1126,9 @@ naming the selector/predicate on expiry. Exactly one of selector/predicate.",
         let mut mgr = session::SESSIONS.lock().await;
         match mgr.send(&params.session_id, |reply| SessionCommand::Network {
             media_only: params.filter.as_deref() == Some("media"),
+            include_bodies: params.include_bodies.unwrap_or(false),
+            url_contains: params.url_contains,
+            body_max_chars: params.body_max_chars.unwrap_or(4000),
             reply,
         }).await {
             Ok(text) => text,

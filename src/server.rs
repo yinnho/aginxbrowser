@@ -587,6 +587,24 @@ pub fn do_fetch(req: FetchRequest) -> Result<FetchResponse> {
                 crate::captcha::detect_and_maybe_solve(&final_url, &html_snapshot).await
             };
 
+            // Background API capture (capture_xhr): the page's own XHR/fetch
+            // responses — usually the clean structured face, an order of
+            // magnitude cheaper to read than the rendered DOM. Per-body cap
+            // rides `max_chars` (the LLM-context knob), bounded so 20 bodies
+            // can't each claim the full default.
+            let xhr = if let Some(filters) = req.capture_xhr.as_ref() {
+                page.inner.sync_js_network_events();
+                let body_cap = req.max_chars.min(8_000);
+                crate::har::xhr_bodies(
+                    &page.inner.network_events,
+                    filters,
+                    body_cap,
+                    &|rid| page.inner.get_response_body(rid),
+                )
+            } else {
+                Vec::new()
+            };
+
             Ok(FetchResponse {
                 url: page.url(),
                 title,
@@ -597,6 +615,7 @@ pub fn do_fetch(req: FetchRequest) -> Result<FetchResponse> {
                 tier: Some("browser"),
                 redirected_from: Vec::new(),
                 sanitize_report,
+                xhr,
             })
         })
     })
@@ -1207,6 +1226,7 @@ mod sanitize_fetch_tests {
             tls_fingerprint: None,
             js_extract: None,
             sanitize,
+            capture_xhr: None,
         }
     }
 
@@ -1287,6 +1307,44 @@ mod sanitize_fetch_tests {
             "nothing was stripped, so no report: {:?}",
             resp.sanitize_report
         );
+    }
+
+    /// capture_xhr: the page's own API face as a first-class response field.
+    /// The script-initiated fetch body arrives in `xhr`; the rendered text is
+    /// still there for everything not behind an API.
+    #[test]
+    fn fetch_capture_xhr_returns_script_initiated_bodies() {
+        let _net = net_env_guard();
+        let (port, _hits) = recording_server(&[
+            (
+                "GET /app",
+                "<html><body><div id='root'>shell</div>\
+                 <script>fetch('/api/data').then(function(r){return r.text()})\
+                 .then(function(t){document.getElementById('root').textContent='loaded';});\
+                 </script></body></html>",
+            ),
+            ("GET /api/data", "{\"items\":[{\"price\":42}]}"),
+        ]);
+
+        let mut req = fetch_req(format!("http://127.0.0.1:{port}/app"), true);
+        req.wait_secs = Some(2);
+        req.capture_xhr = Some(vec!["/api".to_string()]);
+        let resp = do_fetch(req).unwrap();
+
+        assert_eq!(resp.tier.as_deref(), Some("browser"));
+        assert_eq!(resp.xhr.len(), 1, "one matching XHR body: {:?}", resp.xhr);
+        assert!(
+            resp.xhr[0]["url"].as_str().unwrap().ends_with("/api/data"),
+            "url carries the request target: {:?}",
+            resp.xhr[0]
+        );
+        assert_eq!(resp.xhr[0]["status"], 200);
+        assert!(
+            resp.xhr[0]["body"].as_str().unwrap().contains("\"price\":42"),
+            "retained body rides along: {:?}",
+            resp.xhr[0]
+        );
+        assert_eq!(resp.xhr[0]["body_truncated"], false);
     }
 }
 

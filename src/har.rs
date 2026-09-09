@@ -115,6 +115,70 @@ pub fn compact_events(events: &[NetworkEvent]) -> Vec<Value> {
         .collect()
 }
 
+/// XHR/fetch rows with their retained response bodies — the page's own API
+/// face (Scrapling's `capture_xhr` insight: the background API a page calls
+/// is the clean structured read, an order of magnitude cheaper than chewing
+/// the rendered DOM). `url_substrings` filters (`[]` = every XHR/fetch);
+/// `body_of` is the page's retained-body lookup. Text-stored bodies only —
+/// the DevTools retention policy keeps replacement-free text as strings,
+/// and base64 rows are binary assets an agent can't read as JSON anyway.
+/// Capped: bodies are big, and 20 is more APIs than any one page has.
+pub fn xhr_bodies(
+    events: &[NetworkEvent],
+    url_substrings: &[String],
+    body_max_chars: usize,
+    body_of: &dyn Fn(&str) -> Option<StoredResponseBody>,
+) -> Vec<Value> {
+    const MAX_ENTRIES: usize = 20;
+    let mut out = Vec::new();
+    for e in events {
+        if out.len() >= MAX_ENTRIES {
+            tracing::warn!("xhr_bodies: more than {MAX_ENTRIES} matching requests, dropping the tail");
+            break;
+        }
+        if e.resource_type != "XHR" && e.resource_type != "Fetch" {
+            continue;
+        }
+        if e.status == 0 || e.error.is_some() {
+            continue;
+        }
+        if !url_substrings.is_empty()
+            && !url_substrings.iter().any(|s| e.url.contains(s.as_str()))
+        {
+            continue;
+        }
+        let Some(body) = body_of(&e.request_id) else {
+            continue;
+        };
+        if body.base64_encoded {
+            continue;
+        }
+        let mime = e
+            .response_headers
+            .get("content-type")
+            .cloned()
+            .unwrap_or_default();
+        let (body_text, body_truncated) =
+            if body_max_chars > 0 && body.body.chars().count() > body_max_chars {
+                (
+                    body.body.chars().take(body_max_chars).collect::<String>(),
+                    true,
+                )
+            } else {
+                (body.body.clone(), false)
+            };
+        out.push(json!({
+            "url": e.url,
+            "method": e.method,
+            "status": e.status,
+            "mime": mime,
+            "body": body_text,
+            "body_truncated": body_truncated,
+        }));
+    }
+    out
+}
+
 /// Media requests only, with the classification tag and response MIME. This
 /// is the playback-link sniffer surface: every entry is a request the page
 /// actually issued, not a URL scraped out of markup.
@@ -400,6 +464,62 @@ mod tests {
             rows[1].get("error").is_none(),
             "successful rows stay lean — no null error field"
         );
+    }
+
+    #[test]
+    fn xhr_bodies_keeps_script_initiated_text_responses_only() {
+        let mut api = event("https://api.example/items?all=1", "Fetch", 200, 1.0);
+        api.response_headers = std::sync::Arc::new(HashMap::from([(
+            "content-type".to_string(),
+            "application/json; charset=utf-8".to_string(),
+        )]));
+        let doc = event("https://shop.example/", "Document", 200, 2.0);
+        let mut failed = event("https://api.example/broken", "XHR", 0, 3.0);
+        failed.error = Some("net::ERR_FAILED".into());
+        let bodies = HashMap::from([(
+            api.request_id.clone(),
+            StoredResponseBody {
+                body: "{\"items\":[1,2,3]}".into(),
+                base64_encoded: false,
+            },
+        )]);
+
+        // Empty filter list = every script-initiated response; document rows,
+        // failed requests and unretained bodies are dropped.
+        let out = xhr_bodies(&[doc, api.clone(), failed], &[], 0, &|rid| bodies.get(rid).cloned());
+        assert_eq!(out.len(), 1, "only the retained XHR body: {out:?}");
+        assert_eq!(out[0]["url"], "https://api.example/items?all=1");
+        assert_eq!(out[0]["status"], 200);
+        assert_eq!(out[0]["mime"], "application/json; charset=utf-8");
+        assert_eq!(out[0]["body"], "{\"items\":[1,2,3]}");
+        assert_eq!(out[0]["body_truncated"], false);
+
+        // Substring filter narrows; char cap truncates and flags. ("miss"
+        // carries a longer body but is filtered out by URL.)
+        let miss = event("https://api.example/other", "XHR", 200, 4.0);
+        let long = StoredResponseBody {
+            body: "abcdefghij".into(),
+            base64_encoded: false,
+        };
+        let bodies2 = HashMap::from([
+            (api.request_id.clone(), bodies.get(&api.request_id).unwrap().clone()),
+            (miss.request_id.clone(), long),
+        ]);
+        let out = xhr_bodies(&[api, miss], &["/items".to_string()], 4, &|rid| bodies2.get(rid).cloned());
+        assert_eq!(out.len(), 1, "filter keeps only /items: {out:?}");
+        assert_eq!(out[0]["body"], "{\"it");
+        assert_eq!(out[0]["body_truncated"], true);
+
+        // Binary (base64-retained) bodies never join the agent-facing array.
+        let mut bin = event("https://cdn.example/pic.png", "XHR", 200, 5.0);
+        bin.request_id = "bin".into();
+        let out = xhr_bodies(&[bin], &[], 0, &|rid| {
+            (rid == "bin").then(|| StoredResponseBody {
+                body: "iVBORw0KGgo=".into(),
+                base64_encoded: true,
+            })
+        });
+        assert!(out.is_empty(), "base64 bodies are skipped: {out:?}");
     }
 
     #[test]

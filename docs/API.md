@@ -76,6 +76,7 @@ Fetch a page and return its content. Supports tiered rendering, automatic Cloudf
 | tls_fingerprint | string | | `null` | TLS fingerprint (stealth mode), see below |
 | js_extract | object | | `null` | JS data extraction (see below) |
 | sanitize | bool | | `true` | Strip prompt-injection carriers from the text/markdown output (see below) |
+| capture_xhr | string[] | | `null` | Return the page's script-initiated XHR/fetch response bodies as a first-class `xhr` field. Entries are URL substrings; `[]` = every XHR/fetch. Forces the browser tier |
 
 **`render_tier` options:**
 
@@ -128,6 +129,7 @@ Fetch a page and return its content. Supports tiered rendering, automatic Cloudf
 | redirected_from | string[]? | The redirect trail: `redirected_from[0]` is the URL you asked for, `url` is where the content actually came from (absent when no redirect happened) |
 | js_extract_result | any? | JS extraction result (only present when `js_extract` is set) |
 | sanitize_report | object? | What the injection stripper removed (only present when `sanitize` fired — see below) |
+| xhr | object[] | Script-initiated response bodies (only present when `capture_xhr` is set — see below) |
 | captcha_event | object? | CAPTCHA event (only present when a CAPTCHA is detected; covers Cloudflare/Google/Baidu challenge pages plus Taobao/Tmall risk-control signals — `punish` redirects, `x5sec`, and MTop `FAIL_SYS_USER_VALIDATE`/`RGV587` replies even when they arrive as HTTP 200) |
 
 **`sanitize` — injection stripping (default on):**
@@ -139,6 +141,19 @@ Page text is untrusted input, and a reading tool owes its caller content that do
 - **Instruction-shaped lines** — lines matching curated injection phrasings (EN/CN: "ignore previous instructions" class, chat markup like `<|im_start|>`) are dropped whole, because the payload continues past the matched phrase.
 
 Removal is observable, never silent: when anything fires, `sanitize_report` says what — `{"zero_width_removed": 1, "hidden_spans_removed": 1, "patterns_hit": {"ignore_previous_instructions": 1}}`. It's a heuristic, not a firewall; to study the payload itself, pass `"sanitize": false`. The `selector` parameter is the CSS-narrowing half of the story: restrict the extraction to the content region and the chrome's injected noise never enters the text at all.
+
+**`capture_xhr` — the page's own API face:**
+
+Usually the cleanest read of a JS-heavy page isn't the rendered DOM but the JSON APIs the page itself calls. `capture_xhr` returns those response bodies alongside the text:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8089/fetch \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://spa.example.com/list","capture_xhr":["/api/"],"wait_secs":2}'
+```
+
+Each row is `{"url", "method", "status", "mime", "body", "body_truncated"}`. Bodies are capped at `min(max_chars, 8000)` chars per entry (at most 20 entries) so a page's API traffic can't flood the context; binary (base64) bodies are skipped. `wait_secs` matters here: the page's fetches need a moment to land in the network log.
+
 
 **`captcha_event` format:**
 
@@ -905,6 +920,9 @@ The session's network request log for the current page — every document, subre
 | Field | Type | Default | Description |
 |------|------|------|------|
 | filter | string | — | `media` → only playback/stream requests (HLS `.m3u8`, DASH `.mpd`, `.mp4`, `.flv`, `.ts`, `.webm`, audio), classified by URL suffix or response Content-Type |
+| include_bodies | bool | `false` | Add an `xhr` array: the page's script-initiated (XHR/fetch) responses with their retained text bodies — the page's own API face. Binary (base64) bodies are skipped |
+| url_contains | string | — | With `include_bodies`: only body rows whose URL contains this substring |
+| body_max_chars | usize | `4000` | Per-body character cap for `include_bodies` (`0` = unlimited) |
 
 **Response (default):**
 
@@ -933,6 +951,8 @@ The session's network request log for the current page — every document, subre
   ]
 }
 ```
+
+**Response (`?include_bodies=true`)** — a sibling `xhr` array joins the default response, one row per script-initiated response with its retained body: `{"url":"https://api.example/items","method":"GET","status":200,"mime":"application/json","body":"{\"items\":[…]}","body_truncated":false}`. The same face `/fetch`'s `capture_xhr` returns statelessly, read live off the session.
 
 ### GET /session/{id}/har
 
@@ -1197,7 +1217,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 
 | Tool | Description |
 |------|------|
-| `fetch` | Fetch a web page (tiered rendering, stealth, js_extract supported); injection stripping on by default (`sanitize: false` opts out) |
+| `fetch` | Fetch a web page (tiered rendering, stealth, js_extract supported); injection stripping on by default (`sanitize: false` opts out) and `capture_xhr` returns the page's own API responses alongside the text |
 | `eval` | Execute JavaScript on the page (async/Promise supported) |
 | `click` | Click a page element (CSS selector) |
 | `search` | Multi-engine aggregated search (Baidu/Bing/Sogou/Sogou WeChat/Google) |
@@ -1228,7 +1248,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `session_viewport` | Set the session's viewport (device emulation): media queries re-evaluate, `mobile: true` flips `pointer: coarse` / `hover: none`; override survives navigation |
 | `session_screenshot` | Screenshot the session's current DOM state (mutations included) as a base64 PNG; optional `width`/`height`/`full_page`/`selector` |
 | `session_wait` | Wait until a CSS selector matches or a JS predicate turns truthy, with a timeout — the page's event loop keeps running while waiting, so this replaces blind sleeps for async content |
-| `session_network` | Read the session's network request log; `filter: "media"` extracts playback/stream URLs (m3u8, mp4, ...) actually requested by the page — the reliable way to get a real video link |
+| `session_network` | Read the session's network request log; `filter: "media"` extracts playback/stream URLs (m3u8, mp4, ...) actually requested by the page — the reliable way to get a real video link. `include_bodies: true` adds an `xhr` array with the page's script-initiated response bodies (its own API face), narrowed by `url_contains` |
 | `session_export` | Export the session's recorded actions as a runnable curl replay script (`format=jsonl` for the raw log) |
 | `session_close` | Close the session (for a persistent one this drops the on-disk login snapshot — idle expiry keeps it, an explicit close does not) |
 
@@ -1247,6 +1267,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | tls_fingerprint | string | | `null` | TLS fingerprint |
 | js_extract | object | | `null` | JS data extraction: `{expression, timeout_ms}` |
 | sanitize | bool | | `true` | Strip prompt-injection carriers (zero-width chars, hidden-span text, instruction-shaped lines) from text/markdown output; response carries a `sanitize_report` when anything fired |
+| capture_xhr | string[] | | `null` | Return the page's script-initiated XHR/fetch response bodies as a first-class `xhr` array. Entries are URL substrings; `[]` = every XHR/fetch |
 
 #### `render_markdown` Parameters
 
@@ -1276,7 +1297,7 @@ The output is deterministic — same input, same bytes — and the receipt carri
 
 #### Session Operation Parameters
 
-All session operations require the `session_id` parameter. `click`/`input` also need `index` (from `session_state`); `input` additionally needs `text`; `eval` needs `script`; `navigate` needs `url`; `clone` needs nothing but the source id. The acting/rendering tools take optional extras: `click_xy` needs `x`/`y` (optional `button`, `click_count`); `drag` needs `from`/`to` (optional `steps`, `delay_ms`); `viewport` accepts `width`/`height`/`mobile` (all optional — omit to keep current); `screenshot` accepts `width`/`height`/`full_page`/`selector`/`selector_all`; `wait` takes exactly one of `selector` / `predicate` plus `timeout_ms` (default 10000, max 120000); `export` accepts `format` (`bash` default / `jsonl`); `network` accepts `filter: "media"`; `dialog` accepts `action` (`list` default / `accept` / `dismiss`) plus optional `prompt_text`; `console` accepts `level`/`since_ts`/`url_contains`/`limit`; `storage`/`cookies` take only `session_id`.
+All session operations require the `session_id` parameter. `click`/`input` also need `index` (from `session_state`); `input` additionally needs `text`; `eval` needs `script`; `navigate` needs `url`; `clone` needs nothing but the source id. The acting/rendering tools take optional extras: `click_xy` needs `x`/`y` (optional `button`, `click_count`); `drag` needs `from`/`to` (optional `steps`, `delay_ms`); `viewport` accepts `width`/`height`/`mobile` (all optional — omit to keep current); `screenshot` accepts `width`/`height`/`full_page`/`selector`/`selector_all`; `wait` takes exactly one of `selector` / `predicate` plus `timeout_ms` (default 10000, max 120000); `export` accepts `format` (`bash` default / `jsonl`); `network` accepts `filter: "media"` or `include_bodies: true` (plus `url_contains`/`body_max_chars`); `dialog` accepts `action` (`list` default / `accept` / `dismiss`) plus optional `prompt_text`; `console` accepts `level`/`since_ts`/`url_contains`/`limit`; `storage`/`cookies` take only `session_id`.
 
 ### Client Configuration
 
