@@ -202,7 +202,7 @@ pub async fn handle(
             // hosted deploy may bind wider) could otherwise read any file the
             // process can read — the same threat as Page.navigate to file://,
             // so it honours the same opt-in and is off by default.
-            if !page.context.allow_file_access {
+            if !crate::diting_net::client::allow_file_access() {
                 return Err(
                     "DOM.setFileInputFiles is disabled. Restart with --allow-file-access to enable local file uploads."
                         .to_string(),

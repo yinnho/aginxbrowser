@@ -278,6 +278,8 @@ cargo build --release --features stealth,screenshot
 | `AGINXBROWSER_NAV_CHAIN_LIMIT` | `10` | JS 导航链上限：页面经 `location`/表单连跳多少个文档后导航中止。计数含最初文档（10 = 首文档 + 9 跳）。���法长链（跨提供商 SSO 跳转）可调高；HTTP 3xx 重定向单独算额度（20，按 Fetch spec/浏览器对齐） |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 进程内缓存 TTL，`0` 禁用 |
 | `AGINXBROWSER_HONOR_ROBOTS` | 未设 | `/fetch`、`/screenshot`、`/download` 和 MCP 工具默认不查 robots.txt；设 `1` 打开（运维自选） |
+| `AGINXBROWSER_ALLOW_FILE_ACCESS` | 未设 | 打开 `file://` 读取——导航、子资源、`/fetch`、CDP `setFileInputFiles`。等价于 `--allow-file-access` 命令行开关。默认关：服务默认绑 0.0.0.0，开了门等于把本地文件交给任何够得着端口的人。本地开发机再设，托管实例别设 |
+| `AGINXBROWSER_ALLOW_PRIVATE_NETWORK` | 未设 | 打开回环/RFC1918/链路本地地址的抓取（SSRF 门）。等价于 `--allow-private-network` 命令行开关——仅开发机 |
 | `AGINXBROWSER_ROBOTS_TTL_SECS` | `3600` | 每主机 robots.txt 策略缓存 TTL |
 | `AGINXBROWSER_DOMAIN_RATE_PER_MIN` | `20` | 单注册域每分钟页面数上限（子域名共额度���，超限返回 429；`0` 关闭。见「是浏览器，不是爬虫」 |
 | `AGINXBROWSER_SESSION_PAGE_LIMIT` | `200` | 单个交互 session 可走的页面总数上限（换页的点击也计），超限后续导航被拒，当前页仍可操作；`0` 关闭 |

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -227,9 +228,11 @@ pub(crate) fn custom_cert_store_requested(
     present(cert_file) || present(cert_dir)
 }
 
-pub fn env_allows_private_network() -> bool {
+/// Truthy set shared by the engine's opt-in env knobs: "1"/"true"/"yes"/"on"
+/// (case-insensitive, trimmed) all count.
+fn env_flag(name: &str) -> bool {
     matches!(
-        std::env::var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK")
+        std::env::var(name)
             .ok()
             .as_deref()
             .map(str::trim)
@@ -237,6 +240,67 @@ pub fn env_allows_private_network() -> bool {
             .as_deref(),
         Some("1") | Some("true") | Some("yes") | Some("on")
     )
+}
+
+/// The CLI-flag half of the private-network opt-in, OR'd with the env var.
+static PRIVATE_NETWORK_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// `--allow-private-network` (issue #33): five call-site comments promised
+/// this flag while only the env var was wired. Startup sets this instead of
+/// mutating the environment mid-process.
+pub fn set_allow_private_network(enabled: bool) {
+    PRIVATE_NETWORK_FLAG.store(enabled, Ordering::Relaxed);
+}
+
+pub fn env_allows_private_network() -> bool {
+    PRIVATE_NETWORK_FLAG.load(Ordering::Relaxed) || env_flag("AGINXBROWSER_ALLOW_PRIVATE_NETWORK")
+}
+
+/// The CLI-flag half of the file:// opt-in (requirements-aginxos P2).
+static FILE_ACCESS_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// True when the engine may read `file://` URLs — navigation documents,
+/// subresources, /fetch. Off by default: the server binds 0.0.0.0 out of
+/// the box, so an unguarded local-file read would hand the operator's
+/// filesystem to any client that can reach the port. Flipped by
+/// `--allow-file-access` or `AGINXBROWSER_ALLOW_FILE_ACCESS`. The gate
+/// itself lives in [`fetch_file_url`], the single choke point both
+/// transports (the reqwest funnel and the stealth client, redirect hops
+/// included) already delegate to; the CDP-layer gates read this too.
+pub fn allow_file_access() -> bool {
+    FILE_ACCESS_FLAG.load(Ordering::Relaxed) || env_flag("AGINXBROWSER_ALLOW_FILE_ACCESS")
+}
+
+/// Tests flip the gate through this instead of touching the environment.
+pub fn set_allow_file_access(enabled: bool) {
+    FILE_ACCESS_FLAG.store(enabled, Ordering::Relaxed);
+}
+
+/// Shared test fixture for the process-global file-access switch. The
+/// switch is one AtomicBool for the whole process, so ANY test that flips
+/// it — here or in another module reading it through `allow_file_access()`
+/// (screenshot.rs's subresource collector, ...) — must hold this lock while
+/// asserting, or the two run concurrently and race (1f7486c pattern). The
+/// drop-guard restores both halves (flag + env) even on panic so the
+/// off-by-default contract can't leak across tests.
+#[cfg(test)]
+pub(crate) mod file_access_test {
+    use std::sync::atomic::Ordering;
+    static FILE_ACCESS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    struct FileAccessGuard(std::sync::MutexGuard<'static, ()>, bool);
+    impl Drop for FileAccessGuard {
+        fn drop(&mut self) {
+            super::FILE_ACCESS_FLAG.store(self.1, Ordering::Relaxed);
+            std::env::remove_var("AGINXBROWSER_ALLOW_FILE_ACCESS");
+        }
+    }
+    pub(crate) fn file_access_guard(enabled: bool) -> impl Drop {
+        let guard = FILE_ACCESS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = super::FILE_ACCESS_FLAG.load(Ordering::Relaxed);
+        super::FILE_ACCESS_FLAG.store(enabled, Ordering::Relaxed);
+        std::env::remove_var("AGINXBROWSER_ALLOW_FILE_ACCESS");
+        FileAccessGuard(guard, prev)
+    }
 }
 
 /// True when `ip` must never be the target of an outbound request from the
@@ -456,6 +520,13 @@ pub(crate) fn validate_url(url: &Url, allow_private_network: bool) -> Result<(),
 }
 
 pub(crate) async fn fetch_file_url(url: &Url) -> Result<Response, NetError> {
+    if !allow_file_access() {
+        return Err(NetError::Network(
+            "file:// access is disabled. Restart with --allow-file-access or set \
+             AGINXBROWSER_ALLOW_FILE_ACCESS=1 to enable."
+                .to_string(),
+        ));
+    }
     let path = url
         .to_file_path()
         .map_err(|_| NetError::Network("Invalid file URL".to_string()))?;
@@ -1311,6 +1382,84 @@ mod tests {
         let ua = "Mozilla/5.0 (Macintosh) Gecko Firefox/120.0";
         let (ch_ua, _) = derive_client_hints(ua);
         assert!(ch_ua.contains(r#""Chromium";v="145""#));
+    }
+
+    // Env- and flag-sensitive (1f7486c pattern): the lock serializes tests
+    // that touch the file-access switch; the drop-guard restores both halves
+    // even on panic so the off-by-default contract can't leak across tests.
+    use super::file_access_test::file_access_guard;
+
+    fn temp_file(name: &str, body: &[u8]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("agx-file-url-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    fn file_url_for(path: &std::path::Path) -> Url {
+        Url::from_file_path(path).unwrap()
+    }
+
+    #[tokio::test]
+    async fn file_url_gate_is_off_by_default_and_names_the_switch() {
+        let _guard = file_access_guard(false);
+        let url = Url::parse("file:///definitely/not/here.html").unwrap();
+        let NetError::Network(msg) = fetch_file_url(&url).await.unwrap_err() else {
+            panic!("expected a Network error for a gated file:// read");
+        };
+        assert!(msg.contains("--allow-file-access"), "msg: {msg}");
+        assert!(msg.contains("AGINXBROWSER_ALLOW_FILE_ACCESS"), "msg: {msg}");
+    }
+
+    #[tokio::test]
+    async fn file_url_read_with_gate_open_sets_content_type() {
+        let _guard = file_access_guard(true);
+        let path = temp_file("page.html", b"<html><title>local</title></html>");
+        let resp = fetch_file_url(&file_url_for(&path)).await.unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.headers.get("content-type").unwrap(), "text/html");
+        assert_eq!(resp.body, b"<html><title>local</title></html>");
+
+        let blob = temp_file("blob.bin", b"\x00\x01");
+        let resp = fetch_file_url(&file_url_for(&blob)).await.unwrap();
+        assert_eq!(resp.headers.get("content-type").unwrap(), "application/octet-stream");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&blob);
+    }
+
+    #[tokio::test]
+    async fn file_url_missing_file_is_a_read_error() {
+        let _guard = file_access_guard(true);
+        let url = Url::parse("file:///definitely/not/here.html").unwrap();
+        let NetError::Network(msg) = fetch_file_url(&url).await.unwrap_err() else {
+            panic!("expected a Network error for a missing file");
+        };
+        assert!(msg.contains("Failed to read file"), "msg: {msg}");
+    }
+
+    #[tokio::test]
+    async fn file_url_percent_decoding_survives_spaces_and_cjk() {
+        let _guard = file_access_guard(true);
+        let path = temp_file("a b 世界.html", b"<h1>ok</h1>");
+        // Url::from_file_path percent-encodes; the loader must decode back.
+        let url = file_url_for(&path);
+        assert!(url.as_str().contains("%"), "expected encoding: {url}");
+        let resp = fetch_file_url(&url).await.unwrap();
+        assert_eq!(resp.body, b"<h1>ok</h1>");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn file_url_rejects_remote_hosts() {
+        let _guard = file_access_guard(true);
+        // A file URL with a non-local host must not fall through to a local
+        // path read; to_file_path refuses it and so do we.
+        let url = Url::parse("file://example.com/etc/passwd").unwrap();
+        let NetError::Network(msg) = fetch_file_url(&url).await.unwrap_err() else {
+            panic!("expected a Network error for a remote-host file URL");
+        };
+        assert!(msg.contains("Invalid file URL"), "msg: {msg}");
     }
 
     // Env-sensitive: AGINXBROWSER_ALLOW_PRIVATE_NETWORK overrides rejection, so this

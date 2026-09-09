@@ -46,13 +46,34 @@
   `Page.getLayoutMetrics` 反映真实值且可设）。
 - `Input.dispatchMouseEvent` 与抓帧/视口同一坐标系，devicePixelRatio 语义明确。
 
-## P2 — file:// 与本地内容导航
+## P2 — file:// 与本地内容导航 ✅ 已闭环（2026-09-09）
 
-**现状**：file:// 被硬禁，报错文案指引 `--allow-file-access`，但该开关无效（误导）。
+**当时的现状**：file:// 被硬禁，报错文案指引 `--allow-file-access`，但该开关无效（误导）。
 data: URL 可用，但大页面 base64 很笨重。
 
-**需求**：`--allow-file-access` 生效；或给 `Page.navigate` 一个正式的本地内容入口
-（setPageContent 之类）。
+**闭环方式**：`--allow-file-access` 真生效（需求的前半）。开关是进程级的，等价 env
+`AGINXBROWSER_ALLOW_FILE_ACCESS=1`（ musl 侧不传 CLI 参数时用 env 更顺手）。落地细节：
+
+- 网络层单一卡点：`fetch_file_url`（reqwest 主管线、stealth 文档请求、stealth 重定向
+  跳转三条路都汇到这里）进门先查开关。这同时修掉一个真洞：改之前**网络层对 file://
+  无门禁**——绕过三个 CDP gate 的入口（MCP session_create、/fetch、子资���）都能直接
+  读本地文件，而服务默认绑 0.0.0.0。现在默认全拒，错误文案点名真实开关。
+- 三个 CDP gate（`Page.navigate`/`Target.createTarget`/`DOM.setFileInputFiles`）改读
+  同一开关；`BrowserContext.allow_file_access` 死字段（从未有任何入口能置 true）删除。
+- 开关打开后：file:// 导航、相对路径子资源（css/js/img 同目录解析）、`/fetch` 本地
+  文件全可用；file 页面只能引 file 子资源（跨 scheme 钉死：http 页引 file:// 子资源
+  一律拒，`subresource_allowed` 矩阵原有测试钉着）。截图渲染链路同批补齐：预取收集器
+  原来只收 http/https，本地页的 css/img 根本进不了预取清单，抓出来的图是"黑标题+灰占位"
+  （live DOM 却是红的——探针只查 computed style 查不出这个）。现在 file 页的子资源按
+  同 scheme+开关开收进预取，截图与 http 页逐像素等价（红 h1 像素数 1262 两边一致）。
+  残留一个 http/file 共有的老洞：img 相对 src �� ImageCache 里不归一化成绝对 URL，
+  解码 miss 画占位框，与 file:// 无关，照旧挂账。
+- 边界（与 Chrome 对齐故意的）：页面 JS 的 `fetch()/XHR/import` 走 reqwest，reqwest
+  不做 file://，所以**页面脚本**读不了本地文件（Chrome 里 file:// fetch 也被 CORS
+  挡）；`file://` 带 remote host（`file://example.com/x`）拒。POST 到 file:// 按 GET
+  读。agent 想让页面带本地内容 → 导航 file:// 或 setContent（#299 已落）。
+- 顺手闭环同类洞：`--allow-private-network` 也是五处注释声称、实际从未接线的纸面开关
+  （只有 env 生效）。同批接线，`/doctor` 对两个开关都加了打开即警的检查行。
 
 ## P3 — 实测 OK、不用改（给团队的正面反馈）
 

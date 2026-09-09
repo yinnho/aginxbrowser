@@ -1206,7 +1206,26 @@ fn session_thread(
                 if let Some(url) = start_url {
                     match page.goto(&url).await {
                         Ok(()) => pages_loaded += 1,
-                        Err(e) => tracing::warn!("session: initial navigation failed: {}", e),
+                        Err(e) => {
+                            // session_create is fire-and-forget by design (the
+                            // id returns before the thread starts navigating),
+                            // so a failed initial navigation must not be
+                            // silent: the agent sees it in session_console as
+                            // an error entry — same observability contract as
+                            // page console output (feedback ⑦ family). The
+                            // session stays alive; navigating elsewhere works.
+                            tracing::warn!("session: initial navigation failed: {}", e);
+                            let ts_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as u64)
+                                .unwrap_or(0);
+                            console_ring.push_back(serde_json::json!({
+                                "ts_ms": ts_ms,
+                                "level": "error",
+                                "text": format!("initial navigation failed: {}", e),
+                                "url": url,
+                            }));
+                        }
                     }
                 }
 

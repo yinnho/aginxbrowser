@@ -304,7 +304,7 @@ async fn navigate_page(
 
     let (frame_id, page_id) = {
         let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
-        if url_is_file_scheme(url) && !page.context.allow_file_access {
+        if url_is_file_scheme(url) && !crate::diting_net::client::allow_file_access() {
             return Err(
                 "file:// navigation is disabled. Restart with `--allow-file-access` to enable."
                     .to_string(),

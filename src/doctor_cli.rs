@@ -124,6 +124,14 @@ fn env_checks() -> Vec<Check> {
             "AGINXBROWSER_ALLOW_PRIVATE_NETWORK is set: private/loopback URLs become fetchable — dev only",
         ));
     }
+    if crate::diting_net::client::allow_file_access() {
+        out.push(check(
+            Status::Warn,
+            "file-access",
+            "file:// reads are enabled (--allow-file-access / AGINXBROWSER_ALLOW_FILE_ACCESS): \
+             any client that reaches this port can read local files the process can",
+        ));
+    }
     out
 }
 

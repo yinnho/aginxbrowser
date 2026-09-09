@@ -72,12 +72,10 @@ pub async fn handle(
             // Same gate as Page.navigate. Without this, a CDP client can call
             // Target.createTarget {url:"file:///etc/passwd"} and then
             // Runtime.evaluate the body off the created target, bypassing the
-            // page-domain check entirely.
-            let allow_file_access = context_id
-                .and_then(|id| ctx.browser_context(id))
-                .unwrap_or(&ctx.default_context)
-                .allow_file_access;
-            if url_is_file_scheme(url) && !allow_file_access {
+            // page-domain check entirely. Process-global opt-in
+            // (--allow-file-access / AGINXBROWSER_ALLOW_FILE_ACCESS), same as
+            // the net-layer gate in fetch_file_url.
+            if url_is_file_scheme(url) && !crate::diting_net::client::allow_file_access() {
                 return Err(
                     "Target.createTarget to file:// is disabled. Restart with `--allow-file-access` to enable."
                         .to_string(),

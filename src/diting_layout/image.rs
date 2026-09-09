@@ -62,7 +62,7 @@ impl Default for ImageCache<'_> {
 }
 
 impl<'a> ImageCache<'a> {
-    /// A cache that also resolves http(s) sources against `bytes`
+    /// A cache that also resolves http(s)/file sources against `bytes`
     /// (absolute URL → response body).
     pub fn with_network(bytes: &'a HashMap<String, std::sync::Arc<Vec<u8>>>) -> Self {
         Self { network_bytes: Some(bytes), cache: RefCell::new(HashMap::new()) }
@@ -82,9 +82,12 @@ impl<'a> ImageCache<'a> {
         if let Some(rest) = src.strip_prefix("data:") {
             return decode_data_url_png(&format!("data:{rest}")).map(Arc::new);
         }
-        if (src.starts_with("http://") || src.starts_with("https://"))
+        if (src.starts_with("http://") || src.starts_with("https://") || src.starts_with("file://"))
             && self.network_bytes.is_some()
         {
+            // file:// bytes only reach the table when the net-layer gate
+            // admitted them (the collector refuses otherwise), so decoding
+            // them here grants nothing the gate didn't already grant.
             let bytes = self.network_bytes.unwrap().get(src)?;
             return decode_bytes(bytes).map(Arc::new);
         }

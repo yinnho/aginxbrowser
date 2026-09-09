@@ -17,16 +17,13 @@ pub struct BrowserContext {
     /// so plain builds see both as unread.
     #[cfg_attr(not(feature = "stealth"), allow(dead_code))]
     pub stealth: bool,
-    /// When true, CDP-driven navigation to file:// URLs is permitted.
-    /// Default is false: a remote CDP client cannot point the browser
-    /// at /etc/shadow even if the engine is running as a privileged user.
-    pub allow_file_access: bool,
     pub storage_dir: Option<PathBuf>,
     /// When true, the http client allows fetching localhost / RFC1918 /
     /// link-local addresses. Set via `--allow-private-network` (issue #33).
-    /// Independent of `allow_file_access` because they cover different threat
-    /// models: file:// is a local file-system read, while private-network is
-    /// the broader SSRF gate from issue #4.
+    /// file:// reads are NOT gated here: that switch is process-global
+    /// (`diting_net::client::allow_file_access`, threat model = the
+    /// operator's filesystem on a 0.0.0.0-bound server), while
+    /// private-network is the broader SSRF gate from issue #4.
     #[allow(dead_code)] // gate is enforced at HttpClient construction; field kept for introspection
     pub allow_private_network: bool,
     /// TLS fingerprint name override (stealth mode only): "chrome145",
@@ -145,7 +142,6 @@ impl BrowserContext {
             user_agent: resolved_ua,
             proxy_url,
             stealth,
-            allow_file_access: false,
             storage_dir,
             allow_private_network,
             tls_fingerprint,
@@ -202,7 +198,6 @@ impl BrowserContext {
             user_agent: self.user_agent.clone(),
             proxy_url: self.proxy_url.clone(),
             stealth: self.stealth,
-            allow_file_access: self.allow_file_access,
             storage_dir: persistent.then(|| self.storage_dir.clone()).flatten(),
             allow_private_network: self.allow_private_network,
             tls_fingerprint: self.tls_fingerprint.clone(),

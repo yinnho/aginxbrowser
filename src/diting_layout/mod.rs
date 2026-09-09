@@ -3018,7 +3018,7 @@ pub fn layout_dom_with_paint_order_and_images(
         .find(|id| tree.with_node(*id, |n| n.is_element()).unwrap_or(false));
 
     // Pre-pass (batches 5b + 6c): resolve every img src through the
-    // ImageCache — data: URLs decode inline, http(s) URLs consult the
+    // ImageCache — data: URLs decode inline, http(s)/file URLs consult the
     // fetched-byte table; results are cached so repeated srcs and layout
     // re-runs decode once. Unresolvable imgs keep the batch-5a placeholder.
     let empty: HashMap<String, std::sync::Arc<Vec<u8>>> = HashMap::new();

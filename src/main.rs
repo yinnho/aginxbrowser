@@ -605,6 +605,19 @@ async fn main() -> anyhow::Result<()> {
     // serialized inside the runtime).
     std::mem::drop(diting_js::runtime::JsRuntime::new());
 
+    // Opt-in relaxations, parsed before any mode branches so the HTTP server
+    // and MCP stdio both see them. Both were previously documented as CLI
+    // flags without wiring (only the env vars worked) — issue #33 and
+    // requirements-aginxos P2.
+    if args.contains(&"--allow-file-access".to_string()) {
+        diting_net::client::set_allow_file_access(true);
+        tracing::info!("file:// access enabled (--allow-file-access)");
+    }
+    if args.contains(&"--allow-private-network".to_string()) {
+        diting_net::client::set_allow_private_network(true);
+        tracing::info!("private-network fetch enabled (--allow-private-network)");
+    }
+
     // Check if running in MCP mode
     if args.contains(&"--mcp".to_string()) {
         tracing::info!("Starting in MCP mode");

@@ -109,7 +109,16 @@ fn collect_resource_urls(html: &str, base: &url::Url, viewport_width: f32) -> Ve
             return;
         }
         if let Ok(u) = base.join(raw) {
-            if matches!(u.scheme(), "http" | "https") && !out.contains(&u) {
+            // A file:// page's subresources (requirements-aginxos P2): same
+            // scheme only — the cross-scheme matrix pins file refs to file
+            // pages — and only while the net-layer gate is open, so a closed
+            // gate doesn't even queue reads that would be refused.
+            let scheme_ok = match u.scheme() {
+                "http" | "https" => true,
+                "file" => base.scheme() == "file" && crate::diting_net::client::allow_file_access(),
+                _ => false,
+            };
+            if scheme_ok && !out.contains(&u) {
                 out.push(u);
             }
         }
@@ -559,6 +568,45 @@ mod tests {
         assert!(set.contains("https://en.wikipedia.org/both.css"), "{set:?}");
         assert!(!set.contains("https://en.wikipedia.org/pre.css"), "{set:?}");
         assert!(!set.contains("https://en.wikipedia.org/favicon.ico"), "{set:?}");
+    }
+
+    /// requirements-aginxos P2 residual, found by eyeballing the ON-probe
+    /// screenshot: a file:// page rendered with default styles (black h1,
+    /// gray img placeholder) while the live DOM showed the sheet applied —
+    /// the collector had an http|https whitelist, so local subresources
+    /// never entered the prefetch list. File refs are admitted for file
+    /// pages with the gate open, never across schemes (the cross-scheme
+    /// matrix), and not queued at all while the gate is closed.
+    #[test]
+    fn collect_resource_urls_admits_file_subresources_for_file_pages() {
+        use crate::diting_net::client::file_access_test::file_access_guard;
+        let html = concat!(
+            r#"<html><head><link rel="stylesheet" href="style.css"></head>"#,
+            r#"<body><img src="dot.png" width="16" height="16"></body></html>"#,
+        );
+        let file_base = url::Url::parse("file:///tmp/agx-shot/page.html").unwrap();
+        let http_base = url::Url::parse("https://example.com/page.html").unwrap();
+
+        {
+            let _g = file_access_guard(true);
+            let urls = collect_resource_urls(html, &file_base, 1280.0);
+            assert!(urls.iter().any(|u| u.as_str().ends_with("/style.css")), "{urls:?}");
+            assert!(urls.iter().any(|u| u.as_str().ends_with("/dot.png")), "{urls:?}");
+            // Cross-scheme stays pinned: an http page never pulls file:// refs,
+            // open gate or not.
+            let urls = collect_resource_urls(
+                r#"<html><link rel="stylesheet" href="file:///etc/passwd"></html>"#,
+                &http_base,
+                1280.0,
+            );
+            assert!(urls.is_empty(), "{urls:?}");
+        }
+        {
+            // Gate closed: local refs are not even queued for fetching.
+            let _g = file_access_guard(false);
+            let urls = collect_resource_urls(html, &file_base, 1280.0);
+            assert!(urls.is_empty(), "{urls:?}");
+        }
     }
 
     /// End-to-end render on the diting stack (no Stylo/vello/parley): a

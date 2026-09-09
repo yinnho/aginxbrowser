@@ -278,6 +278,8 @@ If your network can't reach the rusty_v8 CDN (build hangs with zero progress aft
 | `AGINXBROWSER_NAV_CHAIN_LIMIT` | `10` | JS navigation-chain cap: documents a page may chain via `location`/form hops before navigation aborts. The count includes the requested document (10 = initial doc + 9 hops). Raise for legit long chains (SSO handover across providers); HTTP 3xx redirects are budgeted separately (20, per Fetch spec / browser parity) |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL, `0` disables |
 | `AGINXBROWSER_HONOR_ROBOTS` | unset | robots.txt is not consulted by default on `/fetch`, `/screenshot`, `/download` and MCP tools; set `1` to opt in (operator choice) |
+| `AGINXBROWSER_ALLOW_FILE_ACCESS` | unset | Opt in to `file://` reads — navigation, subresources, `/fetch`, and CDP `setFileInputFiles`. Same as the `--allow-file-access` CLI flag. Off by default: the server binds 0.0.0.0, so an open gate hands local files to anyone who can reach the port. Set it on a local dev instance, not a hosted one |
+| `AGINXBROWSER_ALLOW_PRIVATE_NETWORK` | unset | Opt in to loopback/RFC1918/link-local fetches (the SSRF gate). Same as the `--allow-private-network` CLI flag — dev machines only |
 | `AGINXBROWSER_ROBOTS_TTL_SECS` | `3600` | Per-host robots.txt policy cache TTL |
 | `AGINXBROWSER_DOMAIN_RATE_PER_MIN` | `20` | Per-registrable-domain page budget per minute (subdomains share one budget); over-budget requests get 429 with the stance message. `0` disables. See "A Browser, Not a Crawler" |
 | `AGINXBROWSER_SESSION_PAGE_LIMIT` | `200` | Total pages one interactive session may walk (navigation-causing clicks count); over-budget navigations are refused, the current page stays interactive. `0` disables |
