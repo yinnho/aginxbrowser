@@ -825,6 +825,101 @@ mod tests {
         );
     }
 
+    // obscura #920: a history-entry navigation re-runs the normal navigate
+    // pipeline, which pushes into history — the handler must restore the
+    // stack afterwards so a jump neither truncates the forward entries nor
+    // moves the cursor when the navigation fails.
+    #[tokio::test(flavor = "current_thread")]
+    async fn navigate_to_history_entry_preserves_forward_stack() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-1".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        for (id, body) in [(1u64, "a"), (2u64, "b")] {
+            let nav = CdpRequest {
+                id,
+                method: "Page.navigate".to_string(),
+                params: json!({ "url": format!("data:text/html,<p>{body}</p>") }),
+                session_id: Some(session_id.clone()),
+            };
+            assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+        }
+
+        let history = |id: u64| CdpRequest {
+            id,
+            method: "Page.getNavigationHistory".to_string(),
+            params: json!({}),
+            session_id: Some(session_id.clone()),
+        };
+        let before = dispatch(&history(3), &mut ctx).await.result.unwrap();
+        assert_eq!(before["currentIndex"], 1);
+        assert_eq!(before["entries"].as_array().unwrap().len(), 2);
+
+        let back = CdpRequest {
+            id: 4,
+            method: "Page.navigateToHistoryEntry".to_string(),
+            params: json!({ "entryId": 0 }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&back, &mut ctx).await.error.is_none());
+        let after = dispatch(&history(5), &mut ctx).await.result.unwrap();
+        assert_eq!(after["currentIndex"], 0, "cursor moves to the entry");
+        assert_eq!(
+            after["entries"].as_array().unwrap().len(),
+            2,
+            "forward stack survives a history jump: {after}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn navigate_to_history_entry_failure_leaves_cursor_alone() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-1".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id.clone());
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": "data:text/html,<p>a</p>" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        // Seed a second entry whose URL cannot load, with the cursor left on
+        // the first entry.
+        {
+            let page = ctx.get_page_mut(&page_id).unwrap();
+            page.push_history("http://".to_string());
+            page.set_history_index(0);
+        }
+
+        let doomed = CdpRequest {
+            id: 2,
+            method: "Page.navigateToHistoryEntry".to_string(),
+            params: json!({ "entryId": 1 }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(
+            dispatch(&doomed, &mut ctx).await.error.is_some(),
+            "navigating to an unparseable URL must fail"
+        );
+
+        let history = CdpRequest {
+            id: 3,
+            method: "Page.getNavigationHistory".to_string(),
+            params: json!({}),
+            session_id: Some(session_id.clone()),
+        };
+        let after = dispatch(&history, &mut ctx).await.result.unwrap();
+        assert_eq!(
+            after["currentIndex"], 0,
+            "a failed history navigation must not move the cursor: {after}"
+        );
+        assert_eq!(after["entries"].as_array().unwrap().len(), 2);
+    }
+
     // Playwright's setContent sync signal: its injection script runs
     // document.open(); console.debug("--playwright--set--content--…");
     // document.write(html); document.close(); and the client blocks until a

@@ -395,15 +395,28 @@ pub async fn handle(
         "resetNavigationHistory" => Ok(json!({})),
         "navigateToHistoryEntry" => {
             let entry_id = params.get("entryId").and_then(|v| v.as_i64()).unwrap_or(0) as usize;
-            let url = {
+            // Snapshot the stack first. The navigate below runs the normal
+            // pipeline, which pushes the loaded URL into history — but a
+            // history jump must neither grow nor truncate the back/forward
+            // list (Chrome only moves currentIndex), and a FAILED navigation
+            // must leave the index pointing at the page still shown instead
+            // of an entry that never loaded (obscura #920).
+            let (url, snapshot) = {
                 let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
                 let Some(url) = page.history.get(entry_id).cloned() else {
                     return Err(format!("History entry {entry_id} not found"));
                 };
-                page.set_history_index(entry_id);
-                url
+                (url, (page.history.clone(), page.history_index))
             };
-            navigate_page(ctx, session_id, &url).await
+            let result = navigate_page(ctx, session_id, &url).await;
+            if let Some(page) = ctx.get_session_page_mut(session_id) {
+                page.history = snapshot.0;
+                page.history_index = snapshot.1;
+                if result.is_ok() {
+                    page.set_history_index(entry_id);
+                }
+            }
+            result
         }
         "addScriptToEvaluateOnNewDocument" => {
             let source = params

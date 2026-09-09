@@ -854,6 +854,41 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn crypto_derive_output_lengths_are_capped() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // obscura #910 family: page-chosen crypto output lengths (HMAC
+        // generateKey key length, HKDF deriveBits output) must fail with a
+        // catchable error, not allocate the requested size first — the old
+        // shape was an instant OOM abort on `vec![0u8; 2**28]`.
+        let script = r#"async () => {
+            const results = [];
+            try {
+                await crypto.subtle.generateKey({ name: 'HMAC', hash: 'SHA-256', length: 2 ** 31 }, false, ['sign']);
+                results.push('hmac-generated');
+            } catch (e) { results.push(e.message); }
+            try {
+                const k = await crypto.subtle.importKey('raw', new Uint8Array(16), { name: 'HKDF' }, false, ['deriveBits']);
+                await crypto.subtle.deriveBits(
+                    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: new Uint8Array(0) },
+                    k, 2 ** 31);
+                results.push('hkdf-derived');
+            } catch (e) { results.push(e.message); }
+            return results;
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let values = result.value.unwrap();
+        let arr = values.as_array().unwrap();
+        assert!(
+            arr[0].as_str().unwrap().contains("65536"),
+            "oversized HMAC key must be rejected: {arr:?}"
+        );
+        assert!(
+            arr[1].as_str().unwrap().contains("65536"),
+            "oversized HKDF output must be rejected: {arr:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn test_subtle_digest_variants_and_rejection() {
         let mut rt = setup_runtime("<html><body></body></html>");
         // SHA-512/224 and SHA-512/256 were silently falling through to SHA-256,

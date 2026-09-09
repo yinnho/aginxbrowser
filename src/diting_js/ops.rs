@@ -3052,6 +3052,16 @@ fn op_subtle_hkdf(
     length: u32,
 ) -> Result<Vec<u8>, deno_error::JsErrorBox> {
     use hkdf::Hkdf;
+    // Cap before allocating (obscura #910 family): RFC 5869 bounds output at
+    // 255*HashLen anyway, but the old shape allocated `length` bytes BEFORE
+    // expand() rejected an oversized request — a page-controlled length was
+    // still a transient multi-hundred-MB spike even when it eventually
+    // errored. Same treatment PBKDF2 gets via PBKDF2_MAX_OUTPUT_BYTES.
+    if length > 65536 {
+        return Err(crypto_err(format!(
+            "HKDF output length {length} bytes exceeds the supported maximum of 65536"
+        )));
+    }
     let mut okm = vec![0u8; length as usize];
     macro_rules! run {
         ($d:ty) => {
@@ -3077,6 +3087,14 @@ fn op_subtle_hkdf(
 #[op2]
 #[buffer]
 fn op_random_bytes(len: u32) -> Result<Vec<u8>, deno_error::JsErrorBox> {
+    // Output-length cap (obscura #910 family): the HMAC generateKey path
+    // forwards a page-chosen key length here unclamped, and `vec![0u8; len]`
+    // with a multi-hundred-MB len is an instant OOM abort rather than a
+    // catchable error. 65536 matches the bound getRandomValues already
+    // enforces per spec; no real key or UUID comes near it.
+    if len > 65536 {
+        return Err(crypto_err("requested random length exceeds 65536 bytes"));
+    }
     let mut buf = vec![0u8; len as usize];
     getrandom::getrandom(&mut buf).map_err(|e| crypto_err(format!("getrandom failed: {e}")))?;
     Ok(buf)

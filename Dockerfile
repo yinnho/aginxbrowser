@@ -27,6 +27,14 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/aginxbrowser /usr/local/bin/aginxbrowser
 
+# Non-root runtime user (uid 65532, the distroless nonroot convention). The
+# server binds 8089 and needs no writes by default — cache, download dir and
+# persistent sessions are opt-in envs whose paths belong on a mounted volume
+# the operator chowns to this uid.
+RUN groupadd -g 65532 app && useradd -u 65532 -g 65532 -m app
+ENV HOME=/home/app
+USER 65532
+
 ENV AGINXBROWSER_BIND=0.0.0.0:8089
 EXPOSE 8089
 
