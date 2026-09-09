@@ -14,6 +14,8 @@ use std::sync::Arc;
 pub enum SearchError {
     /// Internal error → 500
     Other(String),
+    /// Caller error (unknown engine name, bad time_range) → 400
+    BadRequest(String),
 }
 
 /// Build a browser instance.
@@ -368,7 +370,19 @@ fn rendered_text(page: &mut crate::page::Page, selector: Option<&str>) -> String
             let escaped = sel.replace('\\', "\\\\").replace('`', "\\`").replace('$', "\\$");
             format!("(function(){{var el=document.querySelector(`{escaped}`);return el?el.innerText:'';}})()")
         }
-        None => "(function(){return document.body?document.body.innerText:'';})()".to_string(),
+        None => {
+            // WeChat articles ship the full body server-rendered inside
+            // #js_content but keep it visibility:hidden until their module JS
+            // reveals it — body.innerText is then just the title/byline shell
+            // (v0.3.1 report P1-3: 133 chars where the article is 981). Per
+            // spec a not-rendered element's own innerText is its textContent,
+            // so the container read still carries the article. Whichever
+            // extraction is richer wins: once the reveal does run, body
+            // reclaims the article (plus the byline lines) and matches anyway.
+            "(function(){var b=document.body?document.body.innerText:'';\
+             var c=document.querySelector('#js_content');var a=c?c.innerText:'';\
+             return (a.trim().length>b.trim().length)?a:b;})()".to_string()
+        }
     };
     let raw = page.evaluate(&js).as_str().unwrap_or("").to_string();
     // Collapse runs of whitespace (heavy SPA pages produce lots of blank
@@ -778,18 +792,81 @@ pub(crate) async fn search_engine_health() -> Vec<crate::search::EngineHealth> {
     SEARCH_REGISTRY.health_snapshot().await
 }
 
+/// Validate a SearchRequest's engine filter and time_range before dispatch.
+///
+/// v0.3.1 Windows report P1-1: `engines: ["baidu"]` (or a typo like
+/// "wechat") could silently yield zero results in 0.0s — an unknown name
+/// filtered the registry to nothing, or the named engine was benched by a
+/// CAPTCHA, and the response looked identical to "no results found". Two
+/// of those three failures are caller errors and get a 400 with the valid
+/// vocabulary; the suspension case is surfaced per-engine in the response
+/// (`engine_errors`) instead.
+pub(crate) fn validate_search_request(req: &crate::SearchRequest) -> Result<(), String> {
+    if let Some(tr) = req.time_range.as_deref() {
+        if crate::search::SearchTimeRange::parse(tr).is_none() {
+            return Err(format!(
+                "invalid time_range {tr:?}: expected one of day, week, month, year"
+            ));
+        }
+    }
+    if req.engines.is_empty() {
+        return Ok(());
+    }
+    let catalog = SEARCH_REGISTRY.engine_catalog();
+    let requested: Vec<String> = req
+        .categories
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
+    for name in &req.engines {
+        match catalog.iter().find(|(n, _)| n == name) {
+            None => {
+                let valid: Vec<&str> = catalog.iter().map(|(n, _)| n.as_str()).collect();
+                return Err(format!(
+                    "unknown engine {name:?}; valid engines: {} (also check GET /engines)",
+                    valid.join(", ")
+                ));
+            }
+            Some((_, cats)) => {
+                if !cats.iter().any(|c| requested.contains(c)) {
+                    return Err(format!(
+                        "engine {name:?} does not serve category {:?} (it serves: {})",
+                        req.categories,
+                        cats.join(", ")
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// /search: native search across Baidu/Bing/Sogou/Google, optionally grab body for top N results.
 pub async fn do_search(req: SearchRequest) -> Result<SearchResponse, SearchError> {
+    validate_search_request(&req).map_err(SearchError::BadRequest)?;
+
+    // Step 0: short-lived in-process cache (v0.3.1 Windows report P2-5: the
+    // same query re-fired back-to-back paid the full ~12s every time). Same
+    // TTL knob and eviction shape as the /fetch cache in main.rs.
+    let cache_key = search_cache_key(&req);
+    if let Some(cached) = search_cache_get(&cache_key) {
+        return Ok(cached);
+    }
+
     // Step 1: native search via built-in engines.
     let params = crate::search::SearchParams {
         language: req.language.clone(),
         pageno: 1,
         use_proxy: req.use_proxy,
         timeout_secs: 15,
-        engine_filter: req.engines,
+        engine_filter: req.engines.clone(),
+        time_range: req
+            .time_range
+            .as_deref()
+            .and_then(crate::search::SearchTimeRange::parse),
     };
 
-    let (mut items, number_of_results, captcha_events) =
+    let (mut items, _raw_total, captcha_events, engine_errors) =
         crate::search::native_search(&SEARCH_REGISTRY, &req.q, params, &req.categories, req.max_results).await;
 
     // Step 2: optionally grab body for the top fetch_top results (concurrent).
@@ -847,12 +924,85 @@ pub async fn do_search(req: SearchRequest) -> Result<SearchResponse, SearchError
         }
     }
 
-    Ok(SearchResponse {
+    let resp = SearchResponse {
         query: req.q,
-        number_of_results,
+        // Post-merge, post-truncate count: equals results.len(). The old
+        // pre-merge raw total drifted (19 vs 20 between identical queries)
+        // and read as "max_results is ignored" to callers comparing it with
+        // their cap (v0.3.1 Windows report P2-4).
+        number_of_results: items.len(),
         results: items,
         captcha_events,
-    })
+        engine_errors,
+    };
+    search_cache_put(&cache_key, &resp);
+    Ok(resp)
+}
+
+/// Cache key: the request fields that change the response. Mirrors the
+/// /fetch cache's shape.
+fn search_cache_key(req: &SearchRequest) -> String {
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}",
+        req.q, req.categories, req.language, req.max_results,
+        req.fetch_top, req.max_chars_per, req.wait_secs, req.use_proxy,
+        req.time_range.as_deref().unwrap_or(""),
+        req.engines,
+    )
+}
+
+type SearchCache = std::sync::Mutex<std::collections::HashMap<String, (u64, SearchResponse)>>;
+
+static SEARCH_CACHE: std::sync::LazyLock<SearchCache> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Max cached searches before eviction. Search responses (with fetch_top
+/// bodies) are large, so this stays well under the /fetch cache's 256.
+const SEARCH_CACHE_CAPACITY: usize = 64;
+
+fn search_cache_get(key: &str) -> Option<SearchResponse> {
+    let ttl = crate::cache_ttl_secs();
+    if ttl == 0 {
+        return None;
+    }
+    let now = crate::now_secs();
+    let Ok(mut cache) = SEARCH_CACHE.lock() else {
+        return None;
+    };
+    let (ts, resp) = cache.get(key)?;
+    if now.saturating_sub(*ts) < ttl {
+        Some(resp.clone())
+    } else {
+        cache.remove(key);
+        None
+    }
+}
+
+fn search_cache_put(key: &str, resp: &SearchResponse) {
+    let ttl = crate::cache_ttl_secs();
+    if ttl == 0 {
+        return;
+    }
+    if let Ok(mut cache) = SEARCH_CACHE.lock() {
+        if cache.len() >= SEARCH_CACHE_CAPACITY {
+            let now = crate::now_secs();
+            // First pass: drop expired entries.
+            cache.retain(|_, (ts, _)| now.saturating_sub(*ts) < ttl);
+            // Still over: evict the oldest entry.
+            while cache.len() >= SEARCH_CACHE_CAPACITY {
+                let oldest = cache
+                    .iter()
+                    .min_by_key(|(_, (ts, _))| *ts)
+                    .map(|(k, _)| k.clone());
+                if let Some(k) = oldest {
+                    cache.remove(&k);
+                } else {
+                    break;
+                }
+            }
+        }
+        cache.insert(key.to_string(), (crate::now_secs(), resp.clone()));
+    }
 }
 
 /// Shared test plumbing for handler-level tests that need a real local

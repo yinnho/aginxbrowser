@@ -299,7 +299,9 @@ fn parse_sogou_wechat_html(html: &str) -> Result<Vec<RawSearchResult>, SearchEng
             snippet,
             engine: "sogou_wechat".to_string(),
             score: total - i as f64,
-            cookies: vec![], // Filled in by search() from wreq session.
+            cookies: vec![], // Intentionally empty: the sogou /link fetch
+            // resolves inside search() with its own session; the result URL
+            // itself is a mp.weixin.qq.com link that wants no sogou cookies.
             js_extract_result: None,
             image: None,
         });

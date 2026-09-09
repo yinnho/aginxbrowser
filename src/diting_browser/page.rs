@@ -605,7 +605,7 @@ impl Page {
         // can interrupt a page that burns the budget across many synchronous
         // scripts (the real-world SPA / anti-bot busy-loop hang). This watchdog
         // terminates the isolate if cumulative synchronous script work overruns.
-        let exec_wd = self
+        let mut exec_wd = self
             .js
             .as_mut()
             .map(|js| js.arm_watchdog(std::time::Duration::from_millis(script_deadline_ms + 1000)));
@@ -909,7 +909,14 @@ impl Page {
         }
 
         for (i, script) in all_to_execute.iter().enumerate() {
-            if tokio::time::Instant::now() >= script_deadline {
+            // Both exit conditions matter: the wall-clock deadline stops the
+            // serial classic phase from eating the whole navigation budget,
+            // and a watchdog that already fired means the isolate carries a
+            // pending termination — every further guarded execution in this
+            // loop would instantly fail, so stop burning scripts on it.
+            if tokio::time::Instant::now() >= script_deadline
+                || exec_wd.as_ref().is_some_and(|t| t.fired())
+            {
                 tracing::warn!(
                     "execute_scripts: deadline reached, skipping {} remaining scripts",
                     all_to_execute.len() - i,
@@ -930,6 +937,11 @@ impl Page {
                 }
             } else if !script.inline.is_empty() {
                 if let Some(js) = &mut self.js {
+                    tracing::info!(
+                        "Executing inline script ({} bytes) [nid {}]",
+                        script.inline.len(),
+                        script.nid
+                    );
                     let _ = js.execute_script("<current-script>", &format!("globalThis.__currentScriptNid={};", script.nid));
                     if let Err(e) = js.execute_script_guarded("<inline>", &script.inline) {
                         tracing::warn!("Inline script error: {}", e);
@@ -939,9 +951,40 @@ impl Page {
             }
         }
 
+        // Retire the classic-phase watchdog at the phase boundary. When the
+        // phase overran (slow scripts, or a spinner the 5s guard killed),
+        // the watchdog has already called terminate_execution() and the
+        // isolate carries a pending termination: every subsequent
+        // execute_script fails instantly, the module phase silently no-ops,
+        // and the <load-events> script below never flips readyState or
+        // fires DOMContentLoaded — the page is then wedged in "loading"
+        // forever (weixin article pages; v0.3.1 Windows report P1-3).
+        // disarm_watchdog cancels the termination, healing the isolate for
+        // the phases that follow. Chrome semantics: a killed script ends
+        // the script, never the document's load lifecycle.
+        if let Some(token) = exec_wd.take() {
+            if let Some(js) = self.js.as_mut() {
+                if js.disarm_watchdog(token) {
+                    tracing::warn!(
+                        "execute_scripts: classic script phase overran the watchdog; \
+                         module + load phases continue on a recovered isolate"
+                    );
+                }
+            }
+        }
+
+        // Module phase runs on its own deadline: modules load async (their
+        // eval is separately bounded by AGINXBROWSER_MODULE_EVAL_TIMEOUT_MS)
+        // and must not inherit a budget already consumed by the classic
+        // phase — on pages whose inline scripts legitimately take most of
+        // the deadline, the app's entry module never got a chance to load.
+        let module_deadline = tokio::time::Instant::now()
+            + tokio::time::Duration::from_millis(script_deadline_ms);
         for module_script in &module_scripts {
-            if tokio::time::Instant::now() >= script_deadline {
-                tracing::warn!("execute_scripts: deadline reached, skipping remaining module scripts");
+            if tokio::time::Instant::now() >= module_deadline {
+                tracing::warn!(
+                    "execute_scripts: module-phase deadline reached, skipping remaining module scripts"
+                );
                 break;
             }
             if let Some(ref src) = module_script.src {
@@ -983,6 +1026,11 @@ impl Page {
         if let Some(js) = &mut self.js {
             // Spec order: readyState -> interactive, fire DOMContentLoaded on both
             // document and window, then readyState -> complete, fire load.
+            // A page's DOMContentLoaded listener can spin exactly like a
+            // script can — without a bound it would pin this synchronous
+            // execute_script (and the whole session thread) forever. 5s
+            // matches the per-script guard.
+            let load_wd = js.arm_watchdog(std::time::Duration::from_secs(5));
             let _ = js.execute_script("<load-events>",
                 "globalThis.__documentReadyState__ = 'interactive';\n\
                  try { document.dispatchEvent(new Event('DOMContentLoaded', {bubbles:false,cancelable:false})); } catch(e) {}\n\
@@ -1008,6 +1056,7 @@ impl Page {
                  } catch(e) {}\n\
                  globalThis.__documentReadyState__ = 'complete';\n\
                  try { window.dispatchEvent(new Event('load', {bubbles:false,cancelable:false})); } catch(e) {}");
+            js.disarm_watchdog(load_wd);
         }
 
         if let Some(js) = &mut self.js {
@@ -1070,11 +1119,6 @@ impl Page {
                 }
             }
             js.disarm_watchdog(settle_wd);
-        }
-        if let Some(token) = exec_wd {
-            if let Some(js) = self.js.as_mut() {
-                js.disarm_watchdog(token);
-            }
         }
     }
 
@@ -4101,5 +4145,172 @@ mod tests {
             p.evaluate("globalThis.__temporal_base_value"),
             serde_json::json!("before-first-module")
         );
+    }
+
+    // ---- script-phase overrun (weixin DCL hang; v0.3.1 report P1-3) -------
+
+    /// Env-knob guard discipline (obscura#853 family) for the script-deadline
+    /// knob: a leaked small deadline would truncate a concurrently running
+    /// navigation's script phase too.
+    #[allow(dead_code)] // the guard field is never read; holding it is the effect
+    struct ScriptDeadlineGuard(std::sync::MutexGuard<'static, ()>);
+    impl Drop for ScriptDeadlineGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("AGINXBROWSER_SCRIPT_DEADLINE_MS");
+        }
+    }
+    static SCRIPT_DEADLINE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn script_deadline_guard(ms: &str) -> ScriptDeadlineGuard {
+        let guard = SCRIPT_DEADLINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("AGINXBROWSER_SCRIPT_DEADLINE_MS", ms);
+        ScriptDeadlineGuard(guard)
+    }
+
+    /// Same discipline for the module-eval budget knob.
+    #[allow(dead_code)] // the guard field is never read; holding it is the effect
+    struct ModuleEvalGuard(std::sync::MutexGuard<'static, ()>);
+    impl Drop for ModuleEvalGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("AGINXBROWSER_MODULE_EVAL_TIMEOUT_MS");
+        }
+    }
+    static MODULE_EVAL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn module_eval_guard(ms: &str) -> ModuleEvalGuard {
+        let guard = MODULE_EVAL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("AGINXBROWSER_MODULE_EVAL_TIMEOUT_MS", ms);
+        ModuleEvalGuard(guard)
+    }
+
+    /// Regression (weixin article pages; v0.3.1 Windows report P1-3): when
+    /// the classic script phase overran its deadline, the exec watchdog's
+    /// terminate_execution stayed pending past its phase — the module phase
+    /// no-opped and the `<load-events>` script failed silently, so
+    /// readyState was wedged in "loading" forever and DOMContentLoaded
+    /// never fired. The phase boundary now disarms (and thereby heals) the
+    /// isolate before the load lifecycle runs. Chrome semantics: a killed
+    /// script ends the script, not the document's load lifecycle.
+    #[tokio::test(flavor = "current_thread")]
+    async fn script_phase_overrun_still_fires_load_lifecycle() {
+        let _net = net_test_guard();
+        let _deadline = script_deadline_guard("1500");
+        // Pad the spinner past the 10 KB threshold so the 5s per-script
+        // guard applies — the phase watchdog (deadline + 1s) terminates it
+        // well before that, which is exactly the overrun shape the bug had.
+        let pad = " ".repeat(10_100);
+        let spinner = format!("var pad = '{pad}'; while (true) {{}}");
+        let port = local_http_server_typed(vec![(
+            "/hang.html",
+            200,
+            "text/html",
+            format!(
+                r#"<html><head>
+                    <script>window.__dcl__ = false;
+                        document.addEventListener('DOMContentLoaded', function() {{ window.__dcl__ = true; }});</script>
+                    <script>{spinner}</script>
+                    <script>window.__after_spin__ = true;</script>
+                </head><body>body text</body></html>"#
+            ),
+        )]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/hang.html")).await.unwrap();
+        assert_eq!(
+            p.evaluate("document.readyState"),
+            serde_json::json!("complete"),
+            "an overrun classic phase must not wedge the load lifecycle"
+        );
+        assert_eq!(p.evaluate("window.__dcl__"), serde_json::json!(true));
+        // The script after the spinner is skipped by design — the deadline
+        // bounds the classic phase. What must survive is the lifecycle.
+        assert_eq!(p.evaluate("window.__after_spin__"), serde_json::Value::Null);
+    }
+
+    /// The per-script 5s guard's other half: a script killed by ITS OWN
+    /// watchdog (not the phase deadline's) used to leave V8's termination
+    /// flag pending, so every later script on the page died instantly —
+    /// guarded ones logged "killed after 5s" for spins they never ran,
+    /// unguarded ones errored, module evals came back "Uncaught null"
+    /// (weixin article pages: one genuine spinner, 30+ collateral kills).
+    /// The kill site now cancels the termination; the scripts after a killed
+    /// one keep running, exactly like Chrome.
+    #[tokio::test(flavor = "current_thread")]
+    async fn per_script_guard_kill_does_not_poison_later_scripts() {
+        let _net = net_test_guard();
+        // Generous phase deadline so the exec watchdog never fires here —
+        // the ONLY termination in play is the spinner's own 5s guard.
+        let _deadline = script_deadline_guard("20000");
+        let pad = " ".repeat(10_100);
+        let spinner = format!("var pad = '{pad}'; while (true) {{}}");
+        let port = local_http_server_typed(vec![
+            (
+                "/spin.html",
+                200,
+                "text/html",
+                format!(
+                    r#"<html><head>
+                        <script>window.__dcl__ = false;
+                            document.addEventListener('DOMContentLoaded', function() {{ window.__dcl__ = true; }});</script>
+                        <script>{spinner}</script>
+                        <script>window.__after_spin__ = 'ran';</script>
+                        <script src="/late.js"></script>
+                    </head><body>body text</body></html>"#
+                ),
+            ),
+            (
+                "/late.js",
+                200,
+                "application/javascript",
+                "window.__late_external__ = 'ran';".to_string(),
+            ),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/spin.html")).await.unwrap();
+        // The killed spinner ends the spinner — nothing else.
+        assert_eq!(
+            p.evaluate("window.__after_spin__"),
+            serde_json::json!("ran"),
+            "the inline script after a guard-killed one must still run"
+        );
+        assert_eq!(
+            p.evaluate("window.__late_external__"),
+            serde_json::json!("ran"),
+            "the external script after a guard-killed one must still run"
+        );
+        assert_eq!(p.evaluate("document.readyState"), serde_json::json!("complete"));
+        assert_eq!(p.evaluate("window.__dcl__"), serde_json::json!(true));
+    }
+
+    /// Regression (module half of the same weixin hang): a module whose
+    /// top-level spins forever pinned the session thread inside V8 —
+    /// `mod_evaluate` runs the top-level synchronously, the tokio budget
+    /// around it only wraps futures, so neither the module budget nor the
+    /// 30s navigation deadline could ever fire and the HTTP caller got no
+    /// answer at all (>2min, no response). The eval now runs under a V8
+    /// watchdog 250ms past the budget; the killed module ends the module,
+    /// never the page's load lifecycle.
+    #[tokio::test(flavor = "current_thread")]
+    async fn module_top_level_spin_cannot_wedge_navigation() {
+        let _net = net_test_guard();
+        let _budget = module_eval_guard("1000");
+        let port = local_http_server_typed(vec![(
+            "/mod.html",
+            200,
+            "text/html",
+            r#"<html><head>
+                <script>window.__dcl__ = false;
+                    document.addEventListener('DOMContentLoaded', function() { window.__dcl__ = true; });</script>
+                <script type="module">while (true) {}</script>
+            </head><body>body text</body></html>"#
+                .to_string(),
+        )]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/mod.html"))
+            .await
+            .unwrap();
+        assert_eq!(
+            p.evaluate("document.readyState"),
+            serde_json::json!("complete"),
+            "a spinning module top-level must not wedge the load lifecycle"
+        );
+        assert_eq!(p.evaluate("window.__dcl__"), serde_json::json!(true));
     }
 }

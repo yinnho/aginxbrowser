@@ -101,6 +101,16 @@ pub struct SearchParams {
     /// Max characters per result content
     #[serde(default = "default_max_chars_per")]
     pub max_chars_per: usize,
+    /// Restrict to these engine names (e.g. ["baidu"], ["sogou_wechat"]).
+    /// Empty = all engines serving `categories`. Invalid names return an
+    /// error listing the valid ones.
+    #[serde(default)]
+    pub engines: Vec<String>,
+    /// Freshness window: "day" | "week" | "month" | "year". Honored by
+    /// engines with dated results (e.g. bing_news filters by pubDate);
+    /// others ignore it.
+    #[serde(default)]
+    pub time_range: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -625,7 +635,7 @@ interaction on a shared page use session_click instead.",
     }
 
     #[tool(
-        description = "Search the web across Baidu/Bing/Sogou/WeChat/Google (aggregated + deduped) and optionally fetch the top results' full content. Use when the agent needs to FIND information online - replaces a search API. Supports image search returning direct image URLs.",
+        description = "Search the web across Baidu/Bing/Sogou/WeChat/Google (aggregated + deduped) and optionally fetch the top results' full content. Use when the agent needs to FIND information online - replaces a search API. Supports image search returning direct image URLs. Optional engines: [\"baidu\"]-style filter by engine name (invalid names error with the valid list; /doctor lists them with live health). Optional time_range day/week/month/year for news freshness (engines without dated results ignore it). Response carries engine_errors explaining any engine that contributed nothing (CAPTCHA suspension, transient failure).",
         annotations(title = "Web Search", read_only_hint = true)
     )]
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
@@ -639,7 +649,8 @@ interaction on a shared page use session_click instead.",
             max_chars_per: params.max_chars_per,
             wait_secs: 3,
             use_proxy: false,
-            engines: Vec::new(),
+            engines: params.engines,
+            time_range: params.time_range,
         };
 
         // do_search is already async and uses spawn_blocking internally for
@@ -650,7 +661,9 @@ interaction on a shared page use session_click instead.",
                 json!({
                     "query": resp.query,
                     "number_of_results": resp.number_of_results,
-                    "results": resp.results
+                    "results": resp.results,
+                    "captcha_events": resp.captcha_events,
+                    "engine_errors": resp.engine_errors
                 })
                 .to_string()
             }

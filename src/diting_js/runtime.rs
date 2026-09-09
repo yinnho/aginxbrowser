@@ -1307,6 +1307,19 @@ impl JsRuntime {
         }
 
         let budget = tokio::time::Duration::from_millis(budget_ms);
+        // Backstop for the whole drive, not just the async half. `mod_evaluate`
+        // runs the module's top-level code SYNCHRONOUSLY inside the call, and
+        // the event-loop poll below runs ready page callbacks — either can pin
+        // the thread inside V8, where the tokio budget cannot fire (and neither
+        // can the 30s navigation deadline: the current-thread runtime worker
+        // itself is blocked, so the HTTP caller gets no answer at all —
+        // weixin's appmsg.js did exactly this, hung >2min with no response).
+        // Same shape as the post-script settle loop: watchdog 250ms past the
+        // budget; disarm cancels/heals a fired termination so the phases after
+        // this module still run. Chrome semantics: a killed module ends the
+        // module, never the page's load lifecycle.
+        let eval_wd = self
+            .arm_watchdog(budget + tokio::time::Duration::from_millis(250));
         // deno_core 0.350 panics ("Module already evaluated") rather than
         // treating a second evaluation as the module-map no-op browsers
         // perform; that panic is a success, not a crash.
@@ -1316,6 +1329,7 @@ impl JsRuntime {
         let result = match evaluation {
             Ok(result) => result,
             Err(payload) => {
+                let _ = self.disarm_watchdog(eval_wd);
                 let message = panic_payload_message(payload);
                 let outcome = if message.contains("Module already evaluated") {
                     Ok(())
@@ -1342,11 +1356,24 @@ impl JsRuntime {
             }
         })
         .await;
+        let wd_fired = self.disarm_watchdog(eval_wd);
+        if wd_fired {
+            tracing::warn!(
+                "{} evaluation watchdog fired; isolate recovered for later scripts",
+                what
+            );
+        }
 
         // An eval error or timeout is returned to the page lifecycle. The
         // caller may keep rendering, but must not report the module as loaded.
         let outcome = match outcome {
             Ok(Ok(())) => Ok(()),
+            // A fired watchdog makes the eval unwind with "execution
+            // terminated" — report the timeout, not the termination symptom.
+            Ok(Err(_)) if wd_fired => Err(format!(
+                "{} evaluation timed out after {}ms",
+                what, budget_ms
+            )),
             Ok(Err(e)) => Err(format!("{} eval error: {}", what, e)),
             Err(_) => Err(format!(
                 "{} evaluation timed out after {}ms",
@@ -1467,6 +1494,19 @@ impl JsRuntime {
             Err(e) => {
                 let msg = e.to_string();
                 if msg.contains("Uncaught Error: execution terminated") {
+                    // Clear the termination NOW. The isolate was terminated by
+                    // a watchdog (usually this guard's own 5s one, possibly a
+                    // phase watchdog that fired mid-script) — and V8 keeps
+                    // the termination flag pending once the script unwinds.
+                    // Left set, every subsequent execution on the isolate
+                    // fails instantly: the next scripts "die in 5s" they never
+                    // ran, unguarded ones error out, module evals come back
+                    // "Uncaught null" (weixin article pages hit all three).
+                    // Chrome semantics: a killed script ends the script,
+                    // never the page — the page's remaining scripts keep
+                    // running. cancel_terminate_execution is the same
+                    // healing disarm_watchdog applies at its phase boundary.
+                    self.runtime.v8_isolate().cancel_terminate_execution();
                     tracing::warn!("Script killed after {}s timeout", timeout.as_secs());
                     self.runtime.execute_script("<reset>", "undefined".to_string()).ok();
                     Ok(())

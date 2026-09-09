@@ -296,11 +296,26 @@ fn extract_selector_html(html: &str, selector: &str) -> String {
     elem.html()
 }
 
+/// Hosts that serve a plausible-looking bot-stub to plain HTTP clients —
+/// a body that passes the content-sufficiency gate but isn't the real page
+/// (WeChat article URLs return an ~18KB shell with no `js_content` over
+/// HTTP; only the JS browser gets the article). Auto tiering skips Tier 1
+/// for these instead of trusting the gate (v0.3.1 Windows report P1-3).
+/// Explicit `render_tier:"http"` still goes direct — the caller asked for
+/// exactly what HTTP sees.
+fn tier1_host_blocklisted(url: &str) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h == "mp.weixin.qq.com"))
+        .unwrap_or(false)
+}
+
 /// Decide whether Tier 1 (HTTP) should be attempted at all for this request.
 fn tier1_eligible(req: &crate::FetchRequest) -> bool {
     match req.render_tier {
         RenderTier::Obscura => false,
-        RenderTier::Http | RenderTier::Auto => true,
+        RenderTier::Auto => !tier1_host_blocklisted(&req.url),
+        RenderTier::Http => true,
     }
 }
 
@@ -415,6 +430,38 @@ mod tests {
         assert!(is_antispider_url("https://example.com/antispider/check"));
         assert!(is_antispider_url("https://sorry.google.com/sorry"));
         assert!(is_antispider_url("https://x.com/cdn-cgi/challenge-platform/h/g/"));
+    }
+
+    // ---- tier1_eligible ----
+
+    fn tier_req(url: &str, tier: crate::RenderTier) -> crate::FetchRequest {
+        crate::FetchRequest {
+            url: url.into(),
+            format: crate::OutputFormat::Markdown,
+            selector: None,
+            wait_secs: None,
+            use_proxy: false,
+            cookies: vec![],
+            max_chars: 50_000,
+            auto_bypass_challenge: true,
+            render_tier: tier,
+            tls_fingerprint: None,
+            js_extract: None,
+        }
+    }
+
+    // v0.3.1 Windows report P1-3: WeChat signed article URLs fetched over
+    // HTTP return a bot-stub that passes the sufficiency gate — auto must
+    // skip Tier 1 there, while every other host and explicit tiers behave
+    // as before.
+    #[test]
+    fn weixin_urls_never_take_tier1_on_auto() {
+        use crate::RenderTier;
+        let wx = "https://mp.weixin.qq.com/s?src=11&timestamp=1&signature=x";
+        assert!(!tier1_eligible(&tier_req(wx, RenderTier::Auto)));
+        assert!(tier1_eligible(&tier_req(wx, RenderTier::Http)), "explicit http is the caller's call");
+        assert!(!tier1_eligible(&tier_req(wx, RenderTier::Obscura)));
+        assert!(tier1_eligible(&tier_req("https://example.com/a", RenderTier::Auto)));
     }
 
     #[test]

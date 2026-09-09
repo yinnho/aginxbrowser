@@ -76,13 +76,24 @@ impl SearchEngine for BingNewsEngine {
         }
         let body =
             super::get_direct_first_if(&url, BN_HEADERS, Self::proxied_client, is_rss).await?;
-        parse_bing_news_rss(&body)
+        // time_range: the RSS route has no server-side freshness param, but
+        // every item carries a pubDate — filter client-side (v0.3.1 Windows
+        // report P2-6: intraday agents need "today only").
+        let cutoff = params
+            .time_range
+            .map(|tr| tr.cutoff_epoch(std::time::SystemTime::now()));
+        parse_bing_news_rss(&body, cutoff)
     }
 }
 
 /// Minimal RSS reader: <item><title/link/description/pubDate>. Flat enough
-/// that string scanning beats an XML crate dependency.
-fn parse_bing_news_rss(body: &str) -> Result<Vec<RawSearchResult>, SearchEngineError> {
+/// that string scanning beats an XML crate dependency. Items dated before
+/// `cutoff` (when set) are dropped; undated items are kept — we don't hide
+/// what we can't date.
+fn parse_bing_news_rss(
+    body: &str,
+    cutoff: Option<u64>,
+) -> Result<Vec<RawSearchResult>, SearchEngineError> {
     if !body.contains("<rss") && !body.contains("<item>") {
         return Err(SearchEngineError::Transient(
             "bing news response is not RSS".into(),
@@ -99,6 +110,14 @@ fn parse_bing_news_rss(body: &str) -> Result<Vec<RawSearchResult>, SearchEngineE
         let link = tag_text(item_xml, "link");
         if title.is_empty() || link.is_empty() {
             continue;
+        }
+        let pub_date = tag_text(item_xml, "pubDate");
+        if let Some(cutoff) = cutoff {
+            if let Some(epoch) = rfc822_epoch(&pub_date) {
+                if epoch < cutoff {
+                    continue;
+                }
+            }
         }
         let description = unescape(tag_text(item_xml, "description"));
         // Strip residual HTML tags from the description snippet.
@@ -127,6 +146,65 @@ fn parse_bing_news_rss(body: &str) -> Result<Vec<RawSearchResult>, SearchEngineE
         r.score = total - i as f64;
     }
     Ok(results)
+}
+
+/// RFC 822 date ("Tue, 25 Aug 2026 08:00:00 GMT" | "+0800") → epoch seconds.
+/// Days-from-civil algorithm (Howard Hinnant's), enough for a freshness
+/// cutoff without pulling a date crate in.
+fn rfc822_epoch(s: &str) -> Option<u64> {
+    let s = s.trim();
+    // "Tue, 25 Aug 2026 08:00:00 GMT" — drop the weekday prefix if present.
+    let body = match s.find(',') {
+        Some(i) => s[i + 1..].trim(),
+        None => s,
+    };
+    let parts: Vec<&str> = body.split_whitespace().collect();
+    if parts.len() < 4 {
+        return None;
+    }
+    let day: i64 = parts[0].parse().ok()?;
+    let month = match parts[1] {
+        "Jan" => 1,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        _ => return None,
+    };
+    let year: i64 = parts[2].parse().ok()?;
+    let hms: Vec<u32> = parts[3].split(':').filter_map(|p| p.parse().ok()).collect();
+    if hms.len() != 3 {
+        return None;
+    }
+    let zone = parts.get(4).copied().unwrap_or("GMT");
+    let offset_secs: i64 = if zone == "GMT" || zone == "UTC" || zone == "Z" {
+        0
+    } else if let Some(stripped) = zone.strip_prefix(['+', '-']) {
+        let sign = if zone.starts_with('-') { -1 } else { 1 };
+        let hh: i64 = stripped.get(..2).and_then(|p| p.parse().ok()).unwrap_or(0);
+        let mm: i64 = stripped.get(2..).and_then(|p| p.parse().ok()).unwrap_or(0);
+        sign * (hh * 3600 + mm * 60)
+    } else {
+        0 // Unrecognized zone names (EST…): treat as UTC, the cutoff is coarse anyway.
+    };
+
+    // Days from civil.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + hms[0] as i64 * 3600 + hms[1] as i64 * 60 + hms[2] as i64;
+    Some((secs - offset_secs).max(0) as u64)
 }
 
 fn tag_text(xml: &str, tag: &str) -> String {
@@ -184,7 +262,7 @@ fn strip_tags(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_bing_news_rss, strip_tags};
+    use super::{parse_bing_news_rss, rfc822_epoch, strip_tags};
 
     const SAMPLE: &str = r#"<?xml version="1.0"?><rss version="2.0"><channel>
 <item>
@@ -201,7 +279,7 @@ mod tests {
 
     #[test]
     fn parses_rss_items_with_clean_snippets() {
-        let results = parse_bing_news_rss(SAMPLE).unwrap();
+        let results = parse_bing_news_rss(SAMPLE, None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].title, "Rust 2.0 roadmap published");
         assert_eq!(results[0].url, "https://example.com/rust-roadmap");
@@ -212,7 +290,39 @@ mod tests {
 
     #[test]
     fn non_rss_body_is_transient_error() {
-        assert!(parse_bing_news_rss("<html>portal</html>").is_err());
+        assert!(parse_bing_news_rss("<html>portal</html>", None).is_err());
+    }
+
+    #[test]
+    fn rfc822_epoch_matches_known_instants() {
+        // 1787644800 = 2026-08-25T08:00:00Z (verified with `date -u -r`).
+        assert_eq!(rfc822_epoch("Tue, 25 Aug 2026 08:00:00 GMT"), Some(1_787_644_800));
+        assert_eq!(rfc822_epoch("Thu, 01 Jan 1970 00:00:00 GMT"), Some(0));
+        // Zone offset shifts the instant the other way.
+        assert_eq!(
+            rfc822_epoch("Tue, 25 Aug 2026 16:00:00 +0800"),
+            Some(1_787_644_800)
+        );
+        // Junk is None, not a wrong date.
+        assert_eq!(rfc822_epoch("not a date"), None);
+    }
+
+    #[test]
+    fn time_range_cutoff_drops_old_keeps_undated() {
+        // 1787644800 = 2026-08-25T08:00:00Z, the SAMPLE item's date.
+        let results = parse_bing_news_rss(SAMPLE, Some(1_787_644_800)).unwrap();
+        assert_eq!(results.len(), 1, "item dated exactly at the cutoff is kept");
+
+        let results = parse_bing_news_rss(SAMPLE, Some(1_787_644_801)).unwrap();
+        assert!(results.is_empty(), "item one second past the cutoff is dropped");
+
+        // The no-link item carries no date — an undated item survives any cutoff
+        // once it has a link (we don't hide what we can't date).
+        let undated = r#"<?xml version="1.0"?><rss version="2.0"><channel>
+<item><title>undated</title><link>https://example.com/u</link><description>d</description></item>
+</channel></rss>"#;
+        let results = parse_bing_news_rss(undated, Some(9_999_999_999)).unwrap();
+        assert_eq!(results.len(), 1);
     }
 
     #[test]

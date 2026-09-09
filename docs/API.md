@@ -82,7 +82,11 @@ Fetch a page and return its content. Supports tiered rendering, automatic Cloudf
 |----|------|
 | `auto` | Direct HTTP fetch first; automatically fall back to the browser when content is insufficient (**recommended**, default) |
 | `http` | Pure HTTP, no browser. Fastest but cannot capture JS-rendered content |
-| `obscura` | Force obscura browser rendering. Slowest but most reliable |
+| `obscura` / `browser` | Force the full JS browser. Slowest but most reliable |
+
+> **JS-heavy SPA sites** (cls.cn, juejin-class feeds, WeChat articles) render their content client-side: with `auto` the HTTP pass returns a small skeleton and the sufficiency gate usually catches it, but a site that returns a *plausible-looking* stub defeats the heuristic. When you know the target is an SPA, pass `"render_tier":"browser"` explicitly — you skip a wasted HTTP round-trip and get the rendered page directly. The `tier` field in the response tells you which path served a given fetch.
+>
+> **WeChat article text** (`mp.weixin.qq.com`, no explicit `selector`): the article body is server-rendered inside `#js_content` but hidden until WeChat's own JS reveals it, so plain `body` text is just the title/byline shell. `format:"text"`/`"markdown"` reads the `#js_content` container and returns the fuller of the two extractions — the full article comes back even when the reveal script never finishes.
 
 **`tls_fingerprint` options (requires `--features stealth`):**
 
@@ -270,20 +274,33 @@ Native aggregated search with optional automatic content fetching. Agents go fro
 | max_chars_per | usize | | `4000` | Per-result content truncation in characters. `0` = unlimited |
 | wait_secs | u64 | | `3` | Seconds to wait for JS rendering per page while fetching content |
 | use_proxy | bool | | `false` | Whether to route content fetching through a proxy (overseas sites) |
+| engines | string[] | | `[]` | Restrict to these engine names (e.g. `["baidu"]`). Empty = all engines serving `categories`. Unknown names → 400 with the valid list |
+| time_range | string | | — | Freshness window: `day` / `week` / `month` / `year`. Honored by engines with dated results (bing_news filters by pubDate); others ignore it. Invalid values → 400 |
 
-**Built-in search engines:**
+> Unknown request fields are rejected with a 400 — a typo'd parameter name (`count`, `limit`, `num`) fails loudly instead of being silently ignored.
 
-| Engine | Categories | HTTP client | Description |
-|------|------|------------|------|
-| Baidu | general | wreq stealth | Baidu JSON API |
-| Bing | general | plain reqwest | Bing HTML parsing |
-| Sogou | general | plain reqwest | Sogou web search |
-| Sogou WeChat | general, news | plain reqwest | Sogou WeChat search |
-| Google | general | wreq stealth + proxy | Google HTML parsing; requires a proxy from mainland China |
-| Baidu Images | images | wreq stealth | Baidu Images `acjson` JSON |
-| Bing Images | images | plain reqwest | Bing Images `images/async` |
+**Built-in search engines** (`GET /engines` returns this list with live health):
 
-Engines are queried concurrently and results merged with deduplication: identical URLs (after normalization) merge into a single entry, `engines` lists the source engines, and `score` accumulates.
+| Engine | Categories | Description |
+|------|------|------|
+| baidu | general | Baidu JSON API (wreq stealth) |
+| bing | general | Bing HTML parsing |
+| sogou | general | Sogou web search |
+| sogou_wechat | general, news | Sogou WeChat article search |
+| duckduckgo | general | DuckDuckGo HTML (stealth fingerprint) |
+| bing_news | general, news | Bing News RSS; honors `time_range` by pubDate |
+| baidu_images | images | Baidu Images `acjson` JSON |
+| bing_images | images | Bing Images `images/async` |
+| arxiv | general, academic | arXiv API |
+| huggingface | general, ai | Hugging Face models search |
+| github | general, code | GitHub repository search |
+| stackexchange | general, code | StackExchange API |
+| npm | general, packages | npm registry |
+| pypi | general, packages | PyPI |
+
+`meilisearch` additionally registers when `AGINXBROWSER_MEILI_URL` + `AGINXBROWSER_MEILI_INDEX` are set (private index). Google search is not included — it requires a proxy and steady CAPTCHA clearance from mainland China; use `duckduckgo`/`bing` instead.
+
+Engines are queried concurrently and results merged with deduplication: identical URLs (after normalization) merge into a single entry, `engines` lists the source engines, and `score` accumulates. `GET /engines` returns every engine's name, categories, and live suspension state — call it to discover valid names for the `engines` filter.
 
 **CAPTCHA progressive backoff**: when an engine triggers a CAPTCHA it pauses automatically, with the pause duration escalating on consecutive hits (5 min → 10 min → 30 min → 1 h) and resetting after a successful search. Set the `CAPTCHA_SOLVER_API_KEY` environment variable to enable automatic CAPTCHA solving.
 
@@ -292,9 +309,10 @@ Engines are queried concurrently and results merged with deduplication: identica
 | Field | Type | Description |
 |------|------|------|
 | query | string | Search query |
-| number_of_results | usize | Total number of results |
+| number_of_results | usize | Number of results returned (equals `results.length`) |
 | results | array | Result list |
 | captcha_events | array | List of CAPTCHA events |
+| engine_errors | object | Per-engine reason an engine contributed nothing: CAPTCHA suspension (with resume countdown), transient fetch/parse failure, or a task panic. Absent when every eligible engine answered |
 
 **Each entry in `results`:**
 
@@ -321,6 +339,20 @@ Engines are queried concurrently and results merged with deduplication: identica
 curl -sS -X POST http://127.0.0.1:8089/search \
   -H "Content-Type: application/json" \
   -d '{"q":"macbook 价格","fetch_top":3,"max_chars_per":2000}'
+```
+
+**Example — restrict to WeChat articles, today's news only:**
+
+```bash
+curl -sS -X POST http://127.0.0.1:8089/search \
+  -H "Content-Type: application/json" \
+  -d '{"q":"A股 午评","engines":["sogou_wechat","bing_news"],"categories":"news","time_range":"day","fetch_top":2}'
+```
+
+If `engines` names an engine the server doesn't know, the response is a 400 carrying the valid list:
+
+```json
+{"error":"unknown engine \"wechat\"; valid engines: baidu, baidu_images, bing, bing_images, sogou, sogou_wechat, ... (also check GET /engines)"}
 ```
 
 **Example — image search (returns direct links, downloadable straight from curl):**
@@ -352,6 +384,28 @@ curl -sS -X POST http://127.0.0.1:8089/search \
 # Download the image
 curl -sL -o cabin_ref.jpg "<image_url>"
 ```
+
+---
+
+### GET /engines
+
+Discover the search-engine vocabulary plus live health. Returns every registered engine with the categories it serves and its current suspension state — call this before using /search's `engines` filter, or to see who is currently benched by a CAPTCHA.
+
+```bash
+curl -sS http://127.0.0.1:8089/engines
+```
+
+```json
+{
+  "engines": [
+    { "name": "baidu", "categories": ["general"], "suspended": false, "captcha_count": 0 },
+    { "name": "sogou_wechat", "categories": ["general", "news"], "suspended": true,
+      "suspend_remaining_secs": 184, "captcha_count": 1 }
+  ]
+}
+```
+
+`suspended: true` means the engine hit a CAPTCHA and is in progressive backoff — `/search` skips it (the response's `engine_errors` says so, with the resume countdown) until the suspension expires.
 
 ---
 

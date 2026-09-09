@@ -28,6 +28,45 @@ use crate::SearchResultItem;
 // Core types
 // ---------------------------------------------------------------------------
 
+/// Freshness window for news-style queries. Engines without a server-side
+/// filter (or a dated response body to filter on) ignore it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchTimeRange {
+    Day,
+    Week,
+    Month,
+    Year,
+}
+
+impl SearchTimeRange {
+    /// Parse the API vocabulary ("day"|"week"|"month"|"year").
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "day" => Some(Self::Day),
+            "week" => Some(Self::Week),
+            "month" => Some(Self::Month),
+            "year" => Some(Self::Year),
+            _ => None,
+        }
+    }
+
+    /// Cutoff as epoch seconds relative to `now`.
+    pub fn cutoff_epoch(&self, now: std::time::SystemTime) -> u64 {
+        const DAY: u64 = 86_400;
+        let back = match self {
+            Self::Day => DAY,
+            Self::Week => 7 * DAY,
+            Self::Month => 30 * DAY,
+            Self::Year => 365 * DAY,
+        };
+        let now_epoch = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        now_epoch.saturating_sub(back)
+    }
+}
+
 /// Parameters passed from the /search API request, adapted for engine use.
 pub struct SearchParams {
     pub language: String,
@@ -36,6 +75,8 @@ pub struct SearchParams {
     pub timeout_secs: u64,
     /// Restrict to these engine names; empty = all eligible engines for the category.
     pub engine_filter: Vec<String>,
+    /// Freshness window; None = no restriction.
+    pub time_range: Option<SearchTimeRange>,
 }
 
 /// Image-specific result fields. Populated only for `images`-category results.
@@ -239,6 +280,21 @@ impl SearchEngineRegistry {
         });
     }
 
+    /// Catalog for discovery/validation: every registered engine's name and
+    /// the categories it serves. Owned strings — the trait's borrowed
+    /// returns don't outlive the registry lock-free read.
+    pub fn engine_catalog(&self) -> Vec<(String, Vec<String>)> {
+        self.engines
+            .iter()
+            .map(|e| {
+                (
+                    e.name().to_string(),
+                    e.categories().iter().map(|c| c.to_string()).collect(),
+                )
+            })
+            .collect()
+    }
+
     /// Live per-engine suspension state for /doctor: who is currently
     /// benched, until when, and how many CAPTCHAs stacked up.
     pub async fn health_snapshot(&self) -> Vec<EngineHealth> {
@@ -258,6 +314,7 @@ impl SearchEngineRegistry {
                 };
                 EngineHealth {
                     name: name.to_string(),
+                    categories: e.categories().iter().map(|c| c.to_string()).collect(),
                     suspended,
                     suspend_remaining_secs: remaining,
                     captcha_count: count,
@@ -267,9 +324,10 @@ impl SearchEngineRegistry {
     }
 }
 
-/// One engine's health row for /doctor.
+/// One engine's health row for /doctor and /engines.
 pub struct EngineHealth {
     pub name: String,
+    pub categories: Vec<String>,
     pub suspended: bool,
     pub suspend_remaining_secs: u64,
     pub captcha_count: u32,
@@ -280,13 +338,22 @@ pub struct EngineHealth {
 // ---------------------------------------------------------------------------
 
 /// Execute native search across all eligible engines, merge and dedup results.
+/// Also returns per-engine error reasons (transient failures, CAPTCHA
+/// suspensions, task panics) so a zero-result response explains itself
+/// instead of silently reporting nothing (v0.3.1 Windows report P1-1: a
+/// filtered engine that fails looks identical to "no results found").
 pub async fn native_search(
     registry: &SearchEngineRegistry,
     query: &str,
     params: SearchParams,
     categories: &str,
     max_results: usize,
-) -> (Vec<SearchResultItem>, usize, Vec<crate::captcha::CaptchaEvent>) {
+) -> (
+    Vec<SearchResultItem>,
+    usize,
+    Vec<crate::captcha::CaptchaEvent>,
+    std::collections::BTreeMap<String, String>,
+) {
     registry.cleanup_suspensions().await;
 
     // Filter engines by category.
@@ -310,11 +377,12 @@ pub async fn native_search(
             use_proxy: params.use_proxy,
             timeout_secs: params.timeout_secs,
             engine_filter: Vec::new(),
+            time_range: params.time_range,
         };
 
         let state = registry.state.clone();
 
-        handles.push(tokio::spawn(async move {
+        handles.push((name.clone(), tokio::spawn(async move {
             // Check suspension inside the task.
             {
                 let s = state.read().await;
@@ -329,15 +397,17 @@ pub async fn native_search(
 
             let result = engine.search(&query, params).await;
             (name, result)
-        }));
+        })));
     }
 
     // Collect results.
     let mut all_results: Vec<RawSearchResult> = Vec::new();
     let mut total_count = 0usize;
     let mut captcha_events: Vec<crate::captcha::CaptchaEvent> = Vec::new();
+    let mut engine_errors: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
 
-    for handle in handles {
+    for (handle_name, handle) in handles {
         match handle.await {
             Ok((name, Ok(results))) => {
                 total_count += results.len();
@@ -353,28 +423,46 @@ pub async fn native_search(
                     .unwrap_or(Duration::from_secs(300));
                 registry.suspend_engine(&name, base_suspend).await;
                 captcha_events.push(crate::captcha::CaptchaEvent {
-                    engine: name,
+                    engine: name.clone(),
                     captcha_type: captcha_type.unwrap_or(crate::captcha::CaptchaType::Unknown),
                     url,
                     auto_solve_attempted: false,
                     auto_solve_succeeded: false,
                 });
+                engine_errors.insert(
+                    name,
+                    "CAPTCHA hit — engine suspended, other engines still serve results".into(),
+                );
             }
             Ok((name, Err(SearchEngineError::Transient(msg)))) => {
                 tracing::warn!("search: engine {} transient error: {}", name, msg);
+                engine_errors.insert(name, format!("transient: {msg}"));
             }
             Ok((name, Err(SearchEngineError::Suspended))) => {
+                let remaining = {
+                    let state = registry.state.read().await;
+                    state
+                        .get(&name)
+                        .and_then(|s| s.resume_at)
+                        .map(|t| t.saturating_duration_since(std::time::Instant::now()).as_secs())
+                        .unwrap_or(0)
+                };
                 tracing::debug!("search: engine {} skipped (suspended)", name);
+                engine_errors.insert(
+                    name,
+                    format!("skipped: CAPTCHA suspension, resumes in {remaining}s"),
+                );
             }
             Err(e) => {
                 tracing::error!("search: engine task panicked: {}", e);
+                engine_errors.insert(handle_name, format!("engine task panicked: {e}"));
             }
         }
     }
 
     // Merge and dedup.
     let merged = merge_results(all_results, max_results);
-    (merged, total_count, captcha_events)
+    (merged, total_count, captcha_events, engine_errors)
 }
 
 // ---------------------------------------------------------------------------

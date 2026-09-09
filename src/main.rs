@@ -129,6 +129,8 @@ pub enum RenderTier {
     /// Pure HTTP, no V8/JS. Fastest; misses JS-rendered content.
     Http,
     /// Always use the diting browser (current behaviour pre-tiering).
+    /// "browser" is accepted as an alias — agents guess it before "obscura".
+    #[serde(alias = "browser")]
     Obscura,
 }
 
@@ -318,6 +320,7 @@ pub struct ScreenshotResponse {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct SearchRequest {
     pub q: String,
     #[serde(default)]
@@ -335,8 +338,14 @@ pub struct SearchRequest {
     #[serde(default)]
     pub use_proxy: bool,
     /// Restrict search to these engine names (e.g. ["baidu"]). Empty = all eligible engines.
+    /// Unknown names are a 400 carrying the valid list — GET /engines discovers them.
     #[serde(default)]
     pub engines: Vec<String>,
+    /// Freshness window: "day" | "week" | "month" | "year". Currently honored
+    /// by bing_news (items are filtered by their pubDate); engines without a
+    /// server-side filter ignore it. Invalid values are a 400.
+    #[serde(default)]
+    pub time_range: Option<String>,
 }
 
 fn default_categories() -> String {
@@ -385,13 +394,20 @@ pub struct SearchResultItem {
     pub height: Option<u32>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct SearchResponse {
     pub query: String,
     pub number_of_results: usize,
     pub results: Vec<SearchResultItem>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub captcha_events: Vec<crate::captcha::CaptchaEvent>,
+    /// Why an engine contributed nothing: CAPTCHA suspension (with resume
+    /// countdown), transient fetch/parse failure, or a panicked task. Absent
+    /// when every eligible engine answered — a zero-result response with an
+    /// empty map is then genuinely "no hits", not a swallowed failure
+    /// (v0.3.1 Windows report P1-1).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub engine_errors: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -635,6 +651,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/click", post(click_handler))
         .route("/eval", post(eval_handler))
         .route("/search", post(search_handler))
+        .route("/engines", get(engines_handler))
         .route("/download", post(download_handler))
         .route("/v1/scrape", post(firecrawl_compat::scrape_handler))
         .route("/session/create", post(session_create_handler))
@@ -836,10 +853,12 @@ async fn status_handler() -> axum::response::Html<String> {
   <table>
     <tr><td>GET&nbsp;&nbsp;/health</td><td>liveness + capabilities (JSON)</td></tr>
     <tr><td>GET&nbsp;&nbsp;/doctor</td><td>deep self-report, <code>?probe=true</code> for a live fetch</td></tr>
+    <tr><td>GET&nbsp;&nbsp;/engines</td><td>search engines: names, categories, suspension state</td></tr>
     <tr><td>POST&nbsp;/fetch</td><td>fetch a URL, render JS, return markdown/HTML</td></tr>
     <tr><td>POST&nbsp;/search</td><td>multi-engine meta-search</td></tr>
     <tr><td>POST&nbsp;/screenshot</td><td>render a page to PNG (CPU)</td></tr>
     <tr><td>POST&nbsp;/download</td><td>streaming file download</td></tr>
+    <tr><td>POST&nbsp;/session/:id/&hellip;</td><td>stateful browser session (navigate/click/eval/&hellip;)</td></tr>
     <tr><td>GET&nbsp;&nbsp;/mcp</td><td>MCP endpoint (streamable HTTP)</td></tr>
   </table>
 
@@ -885,18 +904,7 @@ async fn doctor_handler(Query(params): Query<DoctorParams>) -> impl IntoResponse
 
     // Live engine health, not a static list: an agent deciding between
     // engines wants to know who is benched by a CAPTCHA right now.
-    let search_engines: Vec<serde_json::Value> = server::search_engine_health()
-        .await
-        .into_iter()
-        .map(|e| {
-            serde_json::json!({
-                "name": e.name,
-                "suspended": e.suspended,
-                "suspend_remaining_secs": if e.suspended { Some(e.suspend_remaining_secs) } else { None },
-                "captcha_count": e.captcha_count,
-            })
-        })
-        .collect();
+    let search_engines = search_engine_rows().await;
 
     let probe = if params.probe.unwrap_or(false) {
         let probe_url = std::env::var("AGINXBROWSER_DOCTOR_URL")
@@ -952,12 +960,38 @@ async fn doctor_handler(Query(params): Query<DoctorParams>) -> impl IntoResponse
         "capabilities": capabilities,
         "search_engines": search_engines,
         "endpoints": [
-            "/health", "/doctor", "/fetch", "/click", "/eval", "/search",
-            "/download", "/v1/scrape", "/session/create", "/session/list",
-            "/import/curl", "/mcp"
+            "/health", "/doctor", "/engines", "/fetch", "/click", "/eval",
+            "/search", "/download", "/v1/scrape", "/session/create",
+            "/session/list", "/import/curl", "/mcp"
         ],
         "probe": probe,
     }))
+}
+
+/// Engine health rows shared by /doctor and /engines: name, categories
+/// served, live suspension state and stacked CAPTCHA count.
+async fn search_engine_rows() -> Vec<serde_json::Value> {
+    server::search_engine_health()
+        .await
+        .into_iter()
+        .map(|e| {
+            serde_json::json!({
+                "name": e.name,
+                "categories": e.categories,
+                "suspended": e.suspended,
+                "suspend_remaining_secs": if e.suspended { Some(e.suspend_remaining_secs) } else { None },
+                "captcha_count": e.captcha_count,
+            })
+        })
+        .collect()
+}
+
+/// GET /engines: the search-engine vocabulary for /search's `engines` filter
+/// plus live health — so an agent discovers valid names AND who is currently
+/// benched by a CAPTCHA in one call (v0.3.1 Windows report P1-1: the
+/// alternative was guessing names and reading zero results as "no hits").
+async fn engines_handler() -> impl IntoResponse {
+    Json(serde_json::json!({ "engines": search_engine_rows().await }))
 }
 
 async fn mcp_handler(
@@ -1011,8 +1045,9 @@ static FETCH_CACHE: std::sync::LazyLock<FetchCache> = std::sync::LazyLock::new(|
 /// Max entries before triggering eviction.
 const CACHE_CAPACITY: usize = 256;
 
-/// Lazy-initialized TTL read from env (parsed once, then cached).
-fn cache_ttl_secs() -> u64 {
+/// Lazy-initialized TTL read from env (parsed once, then cached). Shared by
+/// the /fetch and /search caches.
+pub(crate) fn cache_ttl_secs() -> u64 {
     static TTL: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *TTL.get_or_init(|| {
         std::env::var("AGINXBROWSER_CACHE_TTL_SECS")
@@ -1083,7 +1118,7 @@ fn fetch_cache_put(key: &str, resp: &FetchResponse) {
     }
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -1119,6 +1154,7 @@ async fn search_handler(Json(req): Json<SearchRequest>) -> Result<impl IntoRespo
     let categories = req.categories.clone();
     let resp = do_search(req).await.map_err(|e| match e {
         SearchError::Other(msg) => AppError::Internal(msg),
+        SearchError::BadRequest(msg) => AppError::BadRequest(msg),
     })?;
     store::record_search(store::REST_OWNER, &resp.query, &categories, &resp);
     Ok((StatusCode::OK, Json(resp)))
@@ -1733,6 +1769,40 @@ mod tests {
         if let Ok(cache) = FETCH_CACHE.lock() {
             assert!(!cache.contains_key(&key));
         }
+    }
+
+    // v0.3.1 Windows report P2-4: guessed parameter names (count/limit/num)
+    // were silently ignored by serde, so the response read as "max_results
+    // is ignored" when the caller's cap never landed. Unknown fields now
+    // 400 at the door instead of being swallowed.
+    #[test]
+    fn search_request_rejects_guessed_param_names() {
+        for bad in [
+            r#"{"q":"x","count":5}"#,
+            r#"{"q":"x","limit":5}"#,
+            r#"{"q":"x","num":5}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<SearchRequest>(bad).is_err(),
+                "guessed param must be rejected loudly: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_request_accepts_engines_and_time_range() {
+        let r: SearchRequest =
+            serde_json::from_str(r#"{"q":"x","engines":["baidu"],"time_range":"day"}"#).unwrap();
+        assert_eq!(r.engines, vec!["baidu"]);
+        assert_eq!(r.time_range.as_deref(), Some("day"));
+    }
+
+    // "browser" is what agents guess before "obscura" — accept both.
+    #[test]
+    fn render_tier_accepts_browser_alias_for_obscura() {
+        let r: FetchRequest =
+            serde_json::from_str(r#"{"url":"https://e.com","render_tier":"browser"}"#).unwrap();
+        assert_eq!(r.render_tier, RenderTier::Obscura);
     }
 }
 
