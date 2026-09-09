@@ -956,6 +956,128 @@
         );
     }
 
+    /// A dynamically inserted `<link rel=stylesheet>` must fetch its sheet,
+    /// expose it through document.styleSheets, and fire the element's `load`
+    /// event. The event is the load-bearing part: webpack's mini-css chunk
+    /// runtime (d.f.miniCss) resolves chunk promises from it with no timeout
+    /// — without it, tmall pc-shop-webapp's lazy routes render a styled
+    /// blank page (router parked at navigation:"loading", Component never
+    /// attached).
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn dynamic_stylesheet_link_fires_load_and_registers_sheet() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let css = "#probe { color: rgb(4, 5, 6); }";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).unwrap();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/css\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                css.len(),
+                css
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut rt = setup_runtime("<html><body><p id=\"probe\">x</p></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const link = document.createElement('link');
+                    link.rel = 'stylesheet';
+                    link.href = '/sheet.css';
+                    let heardListener = 'no';
+                    link.addEventListener('load', () => { heardListener = 'yes'; }, { once: true });
+                    const loaded = new Promise(r => { link.onload = () => r('fired'); });
+                    document.head.appendChild(link);
+                    const how = await loaded;
+                    const sheet = Array.from(document.styleSheets).find(s => (s.href || '').endsWith('/sheet.css'));
+                    return {
+                        how,
+                        heardListener,
+                        sheet: String(sheet != null),
+                        rules: sheet ? String(sheet.cssRules.length) : 'none',
+                    };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        // The landed sheet must also reach the cascade (layout cache drop on
+        // ext_sheet_put). Cascade reads are screenshot-feature ops.
+        #[cfg(feature = "screenshot")]
+        let color = rt
+            .evaluate("getComputedStyle(document.getElementById('probe')).color")
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let v = result.value.unwrap();
+        assert_eq!(v["how"], serde_json::json!("fired"));
+        assert_eq!(v["heardListener"], serde_json::json!("yes"));
+        assert_eq!(v["sheet"], serde_json::json!("true"));
+        assert_eq!(v["rules"], serde_json::json!("1"));
+        #[cfg(feature = "screenshot")]
+        assert_eq!(color, serde_json::json!("rgb(4, 5, 6)"));
+    }
+
+    /// The failure side of the same contract: a stylesheet link whose fetch
+    /// fails fires `error` (both the on* property and listeners), never a
+    /// phantom `load`.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn dynamic_stylesheet_link_fires_error_on_failed_fetch() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        // Bind then drop: the port answers connection-refused.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let p = l.local_addr().unwrap().port();
+            drop(l);
+            p
+        };
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const link = document.createElement('link');
+                    link.rel = 'stylesheet';
+                    link.href = '/missing.css';
+                    let sawLoad = false;
+                    link.addEventListener('load', () => { sawLoad = true; }, { once: true });
+                    const failed = new Promise(r => { link.onerror = () => r('fired'); });
+                    document.head.appendChild(link);
+                    const how = await failed;
+                    return { how, sawLoad: String(sawLoad) };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let v = result.value.unwrap();
+        assert_eq!(v["how"], serde_json::json!("fired"));
+        assert_eq!(v["sawLoad"], serde_json::json!("false"));
+    }
+
     #[test]
     fn test_button_click_dispatches_listener() {
         let mut rt = setup_runtime(r#"<button id="go">Go</button>"#);

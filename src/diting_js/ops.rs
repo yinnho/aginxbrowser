@@ -1034,6 +1034,21 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             }
             serde_json::Value::Object(obj).to_string()
         }
+        // Stylesheet body for a link that entered the live document (or
+        // re-href'd inside it) after navigation — fetched by the bootstrap's
+        // dynamic-link loader and parked here so both layout_run_all's
+        // cascade join and document.styleSheets see it. The layout cache
+        // must drop: a new sheet can flip any rule match, which the tree
+        // epoch cannot express (same reasoning as the attribute-write
+        // commands at the top of this dispatcher).
+        "ext_sheet_put" => {
+            gs.ext_sheets.borrow_mut().insert(arg1, arg2);
+            #[cfg(feature = "screenshot")]
+            {
+                gs.drop_layout();
+            }
+            "null".to_string()
+        }
         // Parse CSS text into rule records for CSSOM: real selector +
         // declaration text from the same parser the cascade uses, so
         // sheet.cssRules agrees with what layout actually applies.

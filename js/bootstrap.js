@@ -61,6 +61,9 @@ const _DOM_MUTATION_COMMANDS = new Set([
   "append_child", "insert_before", "remove_child",
   "set_attribute", "remove_attribute",
   "set_text_content", "set_inner_html", "document_write_reset",
+  // Not a tree mutation, but it lands a new stylesheet in the cascade —
+  // the getComputedStyle snapshot epoch must see it like any style write.
+  "ext_sheet_put",
 ]);
 const _domRaw = (cmd, a1, a2) => {
   if (_DOM_MUTATION_COMMANDS.has(cmd)) _ditingMutationEpoch++;
@@ -1067,6 +1070,92 @@ function __prepareInsertedSubtree(root) {
     }
   }
   for (const script of scripts) __prepareInsertedScript(script);
+  __prepareInsertedStylesheetLinksIn(root);
+}
+
+// --- dynamic <link rel=stylesheet> -------------------------------------
+// Chrome fetches a stylesheet link when it becomes connected (or its href
+// changes while connected) and fires `load`/`error` on the element when the
+// fetch settles — with no timeout. Loader-side waits on that event are
+// load-bearing: webpack's mini-css chunk runtime (d.f.miniCss) resolves its
+// chunk promise from the link's load event, so a missing event leaves the
+// promise pending forever and freezes every lazy route behind it (tmall
+// pc-shop-webapp renders a styled blank page exactly this way).
+function __linkIsStylesheet(el) {
+  if (!el || el.nodeType !== 1 || (el.tagName || '').toUpperCase() !== 'LINK') return false;
+  return (el.getAttribute('rel') || '').toLowerCase().split(/\s+/).indexOf('stylesheet') >= 0;
+}
+function __fireLinkLoadEvent(link, type) {
+  const ev = new Event(type);
+  if (typeof link['on' + type] === 'function') { try { link['on' + type](ev); } catch (e) {} }
+  try { link.dispatchEvent(ev); } catch (e) {}
+}
+function __prepareInsertedStylesheetLinksIn(root) {
+  if (!root || !root.isConnected) return;
+  const links = [];
+  const seen = new Set();
+  if (root.nodeType === 1 && root.tagName === 'LINK') { links.push(root); seen.add(root._nid); }
+  const ids = _domParse("query_selector_all_scoped", root._nid, "link") || [];
+  for (const nid of ids) {
+    if (seen.has(+nid)) continue;
+    const link = _wrapEl(+nid);
+    if (link) { links.push(link); seen.add(+nid); }
+  }
+  // Re-insertion restarts a sheet's load in a browser (usually from cache),
+  // so the per-element URL guard resets on the insertion path.
+  for (const link of links) { delete link._sheetLoadUrl; __prepareInsertedStylesheetLink(link); }
+}
+function __prepareInsertedStylesheetLink(link) {
+  if (!__linkIsStylesheet(link)) return;
+  const raw = link.getAttribute('href');
+  if (!raw) return;
+  let abs;
+  try { abs = new URL(raw, globalThis.location?.href || 'http://localhost/').href; } catch (e) { return; }
+  // One fetch per (element, URL); a later href change re-enters with the new
+  // URL and starts a fresh load, like the browser.
+  if (link._sheetLoadUrl === abs) return;
+  link._sheetLoadUrl = abs;
+  const fireLoad = () => __fireLinkLoadEvent(link, 'load');
+  if (_extSheetBodies()[abs] != null) {
+    // Already fetched at navigation — shells often preload the same CSS the
+    // chunk runtime then re-requests under a differently-shaped URL string.
+    // The load still fires, as a task like the completed fetch it stands in
+    // for.
+    setTimeout(fireLoad, 0);
+    return;
+  }
+  const pageOrigin = (function() { try { return new URL(globalThis.location?.href || 'about:blank').origin; } catch (e) { return ''; } })();
+  (async () => {
+    try {
+      // Same settle-loop bracket as dynamic <script src>: this fetch rides
+      // the op-level client, invisible to the page client's
+      // active_requests() counter.
+      _OPS.op_dyn_script_fetch_begin();
+      let body;
+      try {
+        // Stylesheet requests are no-cors with same-origin credentials (no
+        // crossorigin attribute) — unlike classic scripts, whose JSONP-era
+        // include policy is deliberately looser.
+        const rawResp = await _OPS.op_fetch_url(abs, "GET", "{}", "", pageOrigin, "no-cors", "same-origin");
+        const parsed = JSON.parse(rawResp);
+        if (!(parsed.status >= 200 && parsed.status <= 299)) {
+          const why = parsed.error || parsed.corsError;
+          throw new Error('HTTP ' + (parsed.status || 0) + (why ? ': ' + why : ''));
+        }
+        body = parsed.body;
+      } finally {
+        _OPS.op_dyn_script_fetch_end();
+      }
+      if (body != null) {
+        _domRaw("ext_sheet_put", abs, body);
+        if (_extSheetsMap) _extSheetsMap[abs] = body;
+      }
+      fireLoad();
+    } catch (e) {
+      console.error('Dynamic stylesheet fetch error (' + abs + '):', e.message);
+      __fireLinkLoadEvent(link, 'error');
+    }
+  })();
 }
 
 class Node {
@@ -1764,7 +1853,13 @@ class Element extends Node {
       oldChildren = _domParse("child_nodes", this._nid) || [];
     }
     _dom("set_inner_html", this._nid, String(v ?? ""));
-    if (_nodeInDocument(this)) _registerIframesIn(this);
+    if (_nodeInDocument(this)) {
+      _registerIframesIn(this);
+      // Stylesheets arriving through innerHTML-connected markup load like
+      // any other (the replaced children are new nodes — scripts among them
+      // stay inert per the already-started flag, sheets do not).
+      __prepareInsertedStylesheetLinksIn(this);
+    }
     if (globalThis.__mutationObservers?.length) {
       newChildren = _domParse("child_nodes", this._nid) || [];
       globalThis.__notifyMutation('childList', this._nid, newChildren, oldChildren);
@@ -1858,6 +1953,25 @@ class Element extends Node {
     }
     return this._relList;
   }
+  // `rel` reflection — the plain-string twin of relList, same element set as
+  // Chrome. webpack's CSS chunk runtime (d.f.miniCss) builds its <link> with
+  // `link.rel = "stylesheet"` through this property: without reflection the
+  // attribute never lands, the sheet never loads, and the chunk promise the
+  // runtime parks on that link's load event never settles (tmall pc-shop
+  // lazy-route white screen).
+  get rel() {
+    const ns = this.namespaceURI, ln = this.localName;
+    const ok = (ns === "http://www.w3.org/2000/svg" && ln === "a") ||
+               (ns === "http://www.w3.org/1999/xhtml" && (ln === "a" || ln === "area" || ln === "link"));
+    if (!ok) return undefined;
+    return this.getAttribute("rel") || "";
+  }
+  set rel(v) {
+    const ns = this.namespaceURI, ln = this.localName;
+    const ok = (ns === "http://www.w3.org/2000/svg" && ln === "a") ||
+               (ns === "http://www.w3.org/1999/xhtml" && (ln === "a" || ln === "area" || ln === "link"));
+    if (ok) this.setAttribute("rel", v);
+  }
   get sandbox() {
     if (this.namespaceURI !== "http://www.w3.org/1999/xhtml" || this.localName !== "iframe") return undefined;
     if (!this._sandboxList) this._sandboxList = new DOMTokenList(this, "sandbox", SANDBOX_SUPPORTED);
@@ -1898,6 +2012,14 @@ class Element extends Node {
     const popoverPrev = (n === "popover") ? this.popover : undefined;
     _dom("set_attribute", this._nid, n + "\0" + String(v));
     if (popoverPrev !== undefined) this._popoverTypeMaybeChanged(popoverPrev);
+    // A stylesheet link's href/rel changing while connected restarts its
+    // fetch in a browser (HTML §the-link-element: "whenever an href is
+    // set, changed... run these steps"). Covers both setAttribute and the
+    // IDL `link.href = …` reflection, which funnels through here.
+    if ((n === "href" || n === "rel") &&
+        (this.tagName || '').toUpperCase() === 'LINK' && this.isConnected) {
+      __prepareInsertedStylesheetLink(this);
+    }
     if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('attributes', this._nid, [], [], n);
   }
   setAttributeNS(ns, n, v) { _dom("set_attribute", this._nid, String(n) + "\0" + String(v)); } // exact name, no HTML folding
