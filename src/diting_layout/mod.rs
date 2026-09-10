@@ -1778,8 +1778,10 @@ fn cell_valign_justify(styles: &HashMap<NodeId, ComputedStyle>, dom: &NodeId) ->
 /// `border-collapse: collapse` realizes as zero gaps between rows/cells;
 /// the separate initial gets Chrome's default 2px border-spacing.
 ///
-/// v1 known limits: no anonymous cell synthesis, no caption/colgroup, no
-/// fixed layout algorithm.
+/// v1 known limits: no anonymous cell synthesis; caption renders top-only
+/// (caption-side:bottom unstyled); colgroup/col contribute widths only;
+/// `table-layout: fixed` requires an authored table width (an auto-width
+/// fixed table falls back to the auto algorithm).
 #[allow(clippy::too_many_arguments)]
 fn build_table(
     tree: &DomTree,
@@ -1800,11 +1802,16 @@ fn build_table(
             .unwrap_or_default()
     };
     // Rows in document order, row groups flattened; CSS `display: table-row`
-    // children count as rows too (the CSS-authored minimum).
+    // children count as rows too (the CSS-authored minimum). The caption and
+    // the colgroup/col width sources ride the same scan.
     let mut row_ids: Vec<NodeId> = Vec::new();
+    let mut caption_id: Option<NodeId> = None;
+    let mut col_nodes: Vec<NodeId> = Vec::new();
     for child in tree.children(id) {
         match tag_of(child).as_str() {
             "tr" => row_ids.push(child),
+            "caption" => caption_id = caption_id.or(Some(child)),
+            "colgroup" | "col" => col_nodes.push(child),
             "thead" | "tbody" | "tfoot" => {
                 row_ids.extend(
                     tree.children(child)
@@ -1854,6 +1861,57 @@ fn build_table(
             .filter(|v| *v >= 1)
             .unwrap_or(1)
     };
+    // `table-layout: fixed` needs an authored table width (an auto-width
+    // fixed table falls back to the auto algorithm — the browser guidance
+    // posture for "fixed needs width"). Under fixed, column widths come
+    // from authored sources only: colgroup/col `width` attributes and
+    // first-row cells; later-row content never widens a column. The
+    // content-measurement passes still run (row heights under rowspan read
+    // them), but the pinning below ignores their column maxima.
+    let fixed = matches!(style.table_layout, Some(crate::diting_css::TableLayout::Fixed))
+        && style.width.is_some();
+    // Per-column authored widths for the fixed layout. None = auto column
+    // (its share of the leftover width comes from flex-grow at layout).
+    let mut col_authored: Vec<Option<f32>> = Vec::new();
+    if fixed && !col_nodes.is_empty() {
+        let px_attr = |nid: NodeId| -> Option<f32> {
+            tree.with_node(nid, |n| n.get_attribute("width").map(|v| v.trim().to_string()))
+                .flatten()
+                .and_then(|v| {
+                    // HTML bare number; tolerate a px suffix (pages write
+                    // width="100px" against the spec). Percentages stay
+                    // unparsed — no resolved table width to fold against.
+                    let t = v.trim();
+                    let t = t.strip_suffix("px").map(str::trim).unwrap_or(t);
+                    t.parse::<f32>().ok().filter(|w| *w > 0.0)
+                })
+        };
+        for cn in &col_nodes {
+            // A colgroup's own width covers its span when it carries no col
+            // children; each col child carries its own (span spreads one
+            // width over a run of columns).
+            let cols: Vec<NodeId> = tree
+                .children(*cn)
+                .into_iter()
+                .filter(|gc| tag_of(*gc) == "col")
+                .collect();
+            let sources: Vec<(NodeId, usize)> = if cols.is_empty() {
+                vec![(*cn, span_attr(*cn, "span"))]
+            } else {
+                cols.into_iter().map(|c| (c, span_attr(c, "span"))).collect()
+            };
+            for (c, span) in sources {
+                let authored = px_attr(c);
+                let start = col_authored.len();
+                col_authored.resize(start + span, None);
+                if let Some(w) = authored {
+                    for slot in &mut col_authored[start..start + span] {
+                        *slot = Some(w);
+                    }
+                }
+            }
+        }
+    }
     let mut span_cells: Vec<SpanCell> = Vec::new();
     // Placeholders owed to rows below by rowspan cells processed above: each
     // continuation row needs its own slot-holder leaf (a taffy node has one
@@ -1886,6 +1944,30 @@ fn build_table(
             ) else {
                 continue; // display:none builds no box and claims no slot
             };
+            // Fixed layout: a first-row single-column cell pins its column
+            // (the computed width already folds the td/th `width` attribute
+            // hint in below every author declaration). A `<col>` width
+            // outranks it — CSS2.2 §17.5.2.1: the col element sets the
+            // column, the first-row cell only fills a column the cols left
+            // auto.
+            if fixed && row_idx == 0 && col_span == 1 {
+                let w = styles
+                    .get(&cid)
+                    .and_then(|s| s.width)
+                    .and_then(|l| match l {
+                        crate::diting_css::Length::Px(px) => Some(px),
+                        _ => None,
+                    })
+                    .filter(|w| *w > 0.0);
+                if let Some(px) = w {
+                    if col_authored.len() < col + 1 {
+                        col_authored.resize(col + 1, None);
+                    }
+                    if col_authored[col].is_none() {
+                        col_authored[col] = Some(px);
+                    }
+                }
+            }
             // Claim the slots in this row and (for a rowspan) the rows below.
             for occ in &mut occupied[row_idx..row_idx + row_span] {
                 occ.resize(col + col_span, false);
@@ -1995,8 +2077,19 @@ fn build_table(
         }
     }
 
-    let table_children: Vec<taffy::tree::NodeId> =
-        row_wrappers.iter().map(|(_, r, _)| *r).collect();
+    // The caption box rides first: a block-flow first child of the table,
+    // spanning its width (caption-side top is the UA default; bottom is out
+    // of scope for v1). Previously the element was dropped entirely — no box
+    // built — so wikipedia infobox captions were invisible.
+    let mut table_children: Vec<taffy::tree::NodeId> = Vec::with_capacity(row_wrappers.len() + 1);
+    if let Some(cap) = caption_id {
+        if let Some(cap_node) = build_element(
+            tree, cap, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta,
+        ) {
+            table_children.push(cap_node);
+        }
+    }
+    table_children.extend(row_wrappers.iter().map(|(_, r, _)| *r));
     let table_node = if table_children.is_empty() {
         taffy_tree.new_leaf(to_taffy_style(style)).ok()?
     } else {
@@ -2105,13 +2198,43 @@ fn build_table(
         }
         w
     };
+    // Fixed-layout authored group: the summed spanned authored widths plus
+    // interior gaps; None when any spanned column is auto (that group then
+    // grows for its equal per-column share of the leftover instead).
+    let authored_group = |col: usize, span: usize| -> Option<f32> {
+        let end = (col + span).min(col_authored.len());
+        (col < end && (col..end).all(|i| col_authored[i].is_some())).then(|| {
+            col_authored[col..end].iter().map(|w| w.unwrap_or(0.0)).sum::<f32>()
+                + if span > 1 { gap * (span - 1) as f32 } else { 0.0 }
+        })
+    };
     for (_, _, cells) in &row_wrappers {
         for cell in cells {
-            let basis = group_width(cell.col, cell.col_span);
+            // Fixed: an authored group is exact and frozen (no grow, no
+            // shrink); an auto group takes zero basis and grows by its
+            // spanned-column count — every row then distributes the same
+            // leftover over the same per-column grow total, keeping columns
+            // aligned (authored-ness is a property of the column, so rows
+            // that cover all columns freeze the same total). Auto keeps the
+            // content-measured basis with proportional grow/shrink.
+            let (basis, grow, shrink) = if fixed {
+                match authored_group(cell.col, cell.col_span) {
+                    Some(w) => (w, 0.0, 0.0),
+                    None => (0.0, cell.col_span as f32, 0.0),
+                }
+            } else {
+                let basis = group_width(cell.col, cell.col_span);
+                (basis, if basis > 0.0 { basis } else { 1.0 }, 1.0)
+            };
             if let Ok(mut st) = taffy_tree.style(cell.taffy).cloned() {
                 st.flex_basis = Dimension::length(basis);
-                st.flex_grow = if basis > 0.0 { basis } else { 1.0 };
-                st.flex_shrink = 1.0;
+                st.flex_grow = grow;
+                st.flex_shrink = shrink;
+                if fixed {
+                    // Fixed columns don't clamp to their content: a long cell
+                    // wraps or overflows its column instead of widening it.
+                    st.min_size.width = LengthPercentageAuto::length(0.0);
+                }
                 // vertical-align (blitz#508): the declaration or the legacy
                 // valign attribute (same computed slot) moves cell CONTENT,
                 // not the box — the cell still fills the row via the
@@ -2144,7 +2267,16 @@ fn build_table(
             }
         }
         for cell in &span_cells {
-            let group_w = group_width(cell.col, cell.col_span);
+            // Under fixed the lifted cell's real width is its authored group;
+            // the content-measured group is the fallback for auto groups (the
+            // final auto width only exists post-layout — the estimate only
+            // shapes this row-height pre-pass).
+            let group_w = if fixed {
+                authored_group(cell.col, cell.col_span)
+                    .unwrap_or_else(|| group_width(cell.col, cell.col_span))
+            } else {
+                group_width(cell.col, cell.col_span)
+            };
             let (_, ch) = measure_cell(taffy_tree, cell.taffy, AvailableSpace::Definite(group_w));
             let spanned: Vec<usize> = (cell.row..(cell.row + cell.row_span).min(n_rows)).collect();
             if spanned.is_empty() {

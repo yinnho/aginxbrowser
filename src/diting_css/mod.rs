@@ -591,6 +591,11 @@ pub struct ComputedStyle {
     /// merge (we realize this as zero cell gaps), separate = the HTML
     /// default 2px `border-spacing`. `None` = not declared (separate).
     pub border_collapse: Option<BorderCollapse>,
+    /// `table-layout` (table layout): `fixed` = column widths come from
+    /// authored sources only (colgroup/col attributes, first-row cell
+    /// widths) and later-row content never widens a column; `auto` = the
+    /// initial content-measured layout. `None` = not declared (auto).
+    pub table_layout: Option<TableLayout>,
     /// `vertical-align` on table cells (blitz#508); None = not declared
     /// (the UA middle default applies at the cell alignment site). The
     /// valign attribute feeds the same slot as a presentational hint, so
@@ -647,6 +652,16 @@ pub enum BorderStyle {
 pub enum BorderCollapse {
     Collapse,
     Separate,
+}
+
+/// `table-layout` (table layout). Auto is the initial content-measured
+/// algorithm; Fixed pins columns from authored widths only — a column never
+/// grows past its authored width for content, and the remaining width
+/// splits equally over the auto columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableLayout {
+    Auto,
+    Fixed,
 }
 
 /// `vertical-align` on table cells (blitz#508): top/middle/bottom move the
@@ -1384,13 +1399,14 @@ pub fn ua_font_weight(tag: &str) -> Option<u16> {
     }
 }
 
-/// UA text-align: the header cell centering every browser UA sheet carries.
-/// The element's own UA declaration beats an inherited value (cascadeElement
-/// merges with `.or`), so a th stays centered inside a text-align:right
-/// ancestor, matching Chrome.
+/// UA text-align: th centers every browser UA sheet's header cells, caption
+/// carries CSS2.1's `caption { text-align: center }`. The element's own UA
+/// declaration beats an inherited value (cascadeElement merges with `.or`),
+/// so a th stays centered inside a text-align:right ancestor, matching
+/// Chrome.
 pub fn ua_text_align(tag: &str) -> Option<TextAlign> {
     match tag {
-        "th" => Some(TextAlign::Center),
+        "th" | "caption" => Some(TextAlign::Center),
         _ => None,
     }
 }
@@ -1686,6 +1702,14 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             style.border_collapse = match v {
                 "collapse" => Some(BorderCollapse::Collapse),
                 "separate" => Some(BorderCollapse::Separate),
+                _ => return false,
+            };
+            true
+        }
+        "table-layout" => {
+            style.table_layout = match v {
+                "auto" => Some(TableLayout::Auto),
+                "fixed" => Some(TableLayout::Fixed),
                 _ => return false,
             };
             true
@@ -2918,6 +2942,21 @@ pub fn cascade_element(
             .flatten();
         if let Some(h) = attr_h {
             style.height = Some(Length::Px(h));
+        }
+    }
+    // The `width` attribute, td/th arm of the same hint family: a px width
+    // (bare number) slotted below every author declaration. Fixed table
+    // layout and the auto column maxima both read it off the computed
+    // style, so a bare `<td width="80">` pins its column with no CSS.
+    if matches!(tag, "td" | "th") {
+        let attr_w = tree
+            .with_node(node_id, |n| {
+                n.get_attribute("width")
+                    .and_then(|v| v.trim().parse::<f32>().ok())
+            })
+            .flatten();
+        if let Some(w) = attr_w {
+            style.width = Some(Length::Px(w));
         }
     }
     // valign attribute (blitz#508), same hint slot: fills vertical_align

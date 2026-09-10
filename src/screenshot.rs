@@ -995,6 +995,120 @@ mod tests {
         );
     }
 
+    /// caption: a real box above the first row, spanning the table width.
+    /// The element used to be dropped entirely (no box built), so wikipedia
+    /// infobox `<caption>` titles were invisible.
+    #[test]
+    fn caption_renders_above_the_table() {
+        let html = r##"<html><head><style>
+            body { margin: 0; }
+            table { border-collapse: collapse; }
+            td { padding: 0; height: 20px; width: 100px; }
+        </style></head><body>
+            <table>
+                <caption id="cap">Quarterly figures</caption>
+                <tr><td id="c1">a</td><td id="c2">b</td></tr>
+            </table>
+        </body></html>"##;
+        let cap = element_rects_diting(html, "#cap", false, 800.0, 600.0, None).expect("caption box")[0];
+        let c1 = element_rects_diting(html, "#c1", false, 800.0, 600.0, None).expect("c1")[0];
+        let c2 = element_rects_diting(html, "#c2", false, 800.0, 600.0, None).expect("c2")[0];
+        assert!(cap.height >= 10.0, "caption carries its text: {cap:?}");
+        assert!(
+            c1.y >= cap.y + cap.height - 1.0,
+            "first row starts below the caption: {cap:?} {c1:?}"
+        );
+        assert!(
+            (cap.width - (c2.x + c2.width - c1.x)).abs() <= 2.0,
+            "caption spans the table width: {cap:?} {c1:?} {c2:?}"
+        );
+    }
+
+    /// table-layout: fixed — column widths come from the first row only;
+    /// long content in later rows never widens a column. Auto (the initial)
+    /// widens column 1 for the row-2 text; fixed holds the authored 100px
+    /// and gives the auto column the leftover.
+    #[test]
+    fn table_layout_fixed_pins_first_row_column_widths() {
+        let mk = |layout: &str| {
+            format!(
+                r##"<html><head><style>
+            body {{ margin: 0; }}
+            table {{ width: 300px; table-layout: {layout}; border-collapse: collapse; }}
+            td {{ padding: 0; height: 20px; }}
+        </style></head><body>
+            <table>
+                <tr><td id="a1" style="width:100px">a</td><td id="b1">b</td></tr>
+                <tr><td id="a2">much wider content in row two</td><td id="b2">y</td></tr>
+            </table>
+        </body></html>"##
+            )
+        };
+        let rect = |layout: &str, id: &str| {
+            let html = mk(layout);
+            element_rects_diting(&html, id, false, 800.0, 600.0, None).expect(id)[0]
+        };
+        let (a1, b1, a2) = (rect("fixed", "#a1"), rect("fixed", "#b1"), rect("fixed", "#a2"));
+        assert!((a1.width - 100.0).abs() <= 1.0, "fixed: authored 100px holds: {a1:?}");
+        assert!((a2.width - a1.width).abs() <= 1.0, "fixed: col 1 uniform across rows: {a1:?} {a2:?}");
+        assert!((b1.width - 200.0).abs() <= 2.0, "fixed: auto column takes the 200px leftover: {b1:?}");
+        let a1_auto = rect("auto", "#a1");
+        assert!(
+            a1_auto.width > 140.0,
+            "auto: row-2 content widens col 1 past 100px: {a1_auto:?}"
+        );
+    }
+
+    /// Fixed columns from <colgroup>/<col width>: the col element pins its
+    /// column, and CSS2.2 §17.5.2.1 makes it outrank a first-row cell width.
+    #[test]
+    fn fixed_layout_honors_colgroup_col_widths() {
+        let html = r##"<html><head><style>
+            body { margin: 0; }
+            table { width: 300px; table-layout: fixed; border-collapse: collapse; }
+            td { padding: 0; height: 20px; }
+        </style></head><body>
+            <table>
+                <colgroup><col width="60"><col></colgroup>
+                <tr><td id="a1" style="width:120px">a</td><td id="b1">b</td></tr>
+                <tr><td id="a2">long content that wants a wide column</td><td id="b2">y</td></tr>
+            </table>
+        </body></html>"##;
+        let a1 = element_rects_diting(html, "#a1", false, 800.0, 600.0, None).expect("a1")[0];
+        let a2 = element_rects_diting(html, "#a2", false, 800.0, 600.0, None).expect("a2")[0];
+        let b1 = element_rects_diting(html, "#b1", false, 800.0, 600.0, None).expect("b1")[0];
+        assert!((a1.width - 60.0).abs() <= 1.0, "col width outranks the first-row cell: {a1:?}");
+        assert!((a2.width - 60.0).abs() <= 1.0, "col 1 pinned despite row-2 content: {a2:?}");
+        assert!((b1.width - 240.0).abs() <= 2.0, "second col is auto: 240px leftover: {b1:?}");
+    }
+
+    /// The td `width` attribute — the height attribute's (blitz#507)
+    /// sibling: a px hint below every author declaration, so on its own it
+    /// pins a fixed-layout column, and a CSS width on the same element
+    /// outranks it.
+    #[test]
+    fn td_width_attribute_hints_the_column() {
+        let mk = |cell: &str| {
+            format!(
+                r##"<html><head><style>
+            body {{ margin: 0; }}
+            table {{ width: 300px; table-layout: fixed; border-collapse: collapse; }}
+            td {{ padding: 0; height: 20px; }}
+        </style></head><body>
+            <table><tr><td {cell} id="a">a</td><td id="b">b</td></tr></table>
+        </body></html>"##
+            )
+        };
+        let width = |cell: &str, id: &str| {
+            let html = mk(cell);
+            element_rects_diting(&html, id, false, 800.0, 600.0, None).expect(id)[0].width
+        };
+        let attr = width(r#"width="80""#, "#a");
+        assert!((attr - 80.0).abs() <= 1.0, "bare width attribute pins the column: {attr}");
+        let css = width(r#"width="80" style="width:120px""#, "#a");
+        assert!((css - 120.0).abs() <= 1.0, "CSS width outranks the attribute: {css}");
+    }
+
     /// collapsed borders between adjacent cells halve: two 4px borders meet at
     /// one shared 4px line, not 8px of doubled paint.
     #[test]

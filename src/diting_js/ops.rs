@@ -1569,6 +1569,7 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "clear",
     "overflow",
     "border-collapse",
+    "table-layout",
     "vertical-align",
     "font-size",
     "font-weight",
@@ -1667,6 +1668,13 @@ fn computed_style_value(
             match s.border_collapse {
                 Some(BorderCollapse::Collapse) => "collapse",
                 _ => "separate",
+            }
+            .into(),
+        ),
+        "table-layout" => Some(
+            match s.table_layout {
+                Some(TableLayout::Fixed) => "fixed",
+                _ => "auto",
             }
             .into(),
         ),
