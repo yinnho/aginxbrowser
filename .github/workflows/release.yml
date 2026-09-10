@@ -20,13 +20,15 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             features: stealth,screenshot
-          # Windows v1: no `stealth` — the wreq/BoringSSL toolchain (cmake +
-          # perl + Go-generated asm) is a separate bring-up; plain reqwest TLS
-          # still works, disclose in the release notes. The package/smoke
-          # steps below carry the .exe / PowerShell differences.
+          # Windows stealth bring-up: boring-sys2 ships pregenerated NASM for
+          # win-x86_64, so the build needs cmake + nasm + libclang (bindgen)
+          # — all preinstalled on windows-latest. FIPS/prefix features stay
+          # off. The Build step pins `shell: bash` for every OS: PowerShell
+          # parses `--features stealth,screenshot` as a comma ARRAY and joins
+          # it into two argv items, which cargo rejects.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            features: screenshot
+            features: stealth,screenshot
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -40,6 +42,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: Build
+        shell: bash
         run: cargo build --release --features ${{ matrix.features }} --target ${{ matrix.target }}
       - name: Package
         shell: bash
