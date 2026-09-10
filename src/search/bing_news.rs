@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use super::{SearchParams, RawSearchResult, SearchEngine, SearchEngineError};
+use super::{SearchParams, RawSearchResult, SearchEngine, SearchEngineError, strip_tags};
 
 /// Bing News via the RSS output format (`format=RSS`) — the same route
 /// SearXNG's bing_news engine effectively serves when HTML scraping breaks.
@@ -244,20 +244,6 @@ fn unescape(s: String) -> String {
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
         .replace("&amp;", "&")
-}
-
-fn strip_tags(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_tag = false;
-    for ch in s.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            c if !in_tag => out.push(c),
-            _ => {}
-        }
-    }
-    out.trim().to_string()
 }
 
 #[cfg(test)]

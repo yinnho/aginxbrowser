@@ -1172,7 +1172,13 @@ pub async fn do_search(req: SearchRequest) -> Result<SearchResponse, SearchError
         captcha_events,
         engine_errors,
     };
-    search_cache_put(&cache_key, &resp);
+    // Cache successes and clean zeros only. A walled answer (0 results +
+    // engine errors) is transient by nature — caching it for the full TTL
+    // would keep serving the wall after it lifts (v0.3.2 Windows report:
+    // the follow-up search hours later still paid for the morning's wall).
+    if !resp.results.is_empty() || resp.engine_errors.is_empty() {
+        search_cache_put(&cache_key, &resp);
+    }
     Ok(resp)
 }
 

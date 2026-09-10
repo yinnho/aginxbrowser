@@ -228,7 +228,9 @@ impl SearchEngineRegistry {
 
     /// Suspend an engine after CAPTCHA, using progressive backoff.
     /// Duration is max(backoff_ladder, engine's base_captcha_suspend).
-    async fn suspend_engine(&self, name: &str, base_suspend: Duration) {
+    /// Returns the engine's consecutive-CAPTCHA count after the increment
+    /// (the backoff-ladder step), which callers surface in CaptchaEvent.
+    async fn suspend_engine(&self, name: &str, base_suspend: Duration) -> u32 {
         let mut state = self.state.write().await;
         let s = state.entry(name.to_string()).or_insert(EngineSuspendState {
             resume_at: None,
@@ -243,6 +245,7 @@ impl SearchEngineRegistry {
             "search: engine {} suspended for {:?} (CAPTCHA #{})",
             name, duration, s.captcha_count
         );
+        s.captcha_count
     }
 
     /// Reset CAPTCHA count for an engine after a successful search.
@@ -421,11 +424,13 @@ pub async fn native_search(
                     .find(|e| e.name() == name)
                     .map(|e| e.base_captcha_suspend())
                     .unwrap_or(Duration::from_secs(300));
-                registry.suspend_engine(&name, base_suspend).await;
+                let hit_count = registry.suspend_engine(&name, base_suspend).await;
                 captcha_events.push(crate::captcha::CaptchaEvent {
                     engine: name.clone(),
                     captcha_type: captcha_type.unwrap_or(crate::captcha::CaptchaType::Unknown),
                     url,
+                    detected_at: crate::now_secs(),
+                    hit_count,
                     auto_solve_attempted: false,
                     auto_solve_succeeded: false,
                 });
@@ -629,6 +634,23 @@ pub fn html_unescape(s: &str) -> String {
 }
 
 /// Build a plain reqwest client suitable for search (no auto-redirect, 15s timeout).
+/// Strip inline markup (`<em>` highlights and friends) from a text run
+/// lifted out of SERP HTML or embedded JSON. Shared by the engines that
+/// read highlight-tagged snippets (bing_news, baidu).
+pub(crate) fn strip_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for ch in s.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            c if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.trim().to_string()
+}
+
 pub fn build_plain_client(timeout_secs: u64) -> reqwest::Client {
     crate::diting_net::client::reqwest_builder_no_env_proxy()
         .timeout(Duration::from_secs(timeout_secs))
@@ -745,12 +767,27 @@ pub async fn stealth_fetch(
 /// charset decoding for Chinese engines (GBK/GB2312). Follows non-CAPTCHA
 /// redirects up to `max_redirects` hops.
 pub async fn plain_fetch(client: &reqwest::Client, url: &str) -> Result<String, SearchEngineError> {
+    plain_fetch_with(client, url, &[]).await
+}
+
+/// `plain_fetch` with per-request headers. Engines served to a plain
+/// (non-stealth) client MUST send a browser UA — a headerless reqwest is
+/// fingerprinted as a bot on sight (v0.3.2 Windows report: baidu walled
+/// the engine while /engines showed it healthy).
+pub async fn plain_fetch_with(
+    client: &reqwest::Client,
+    url: &str,
+    headers: &[(&str, &str)],
+) -> Result<String, SearchEngineError> {
     let mut current_url = url.to_string();
     let max_redirects = 5;
 
     for _ in 0..max_redirects {
-        let resp = client
-            .get(&current_url)
+        let mut req = client.get(&current_url);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| SearchEngineError::Transient(format!("fetch error: {e}")))?;

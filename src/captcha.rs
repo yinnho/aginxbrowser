@@ -28,6 +28,14 @@ pub struct CaptchaEvent {
     pub captcha_type: CaptchaType,
     /// The URL that triggered the CAPTCHA.
     pub url: String,
+    /// Wall-clock time the CAPTCHA was detected (unix seconds) — so a
+    /// log of events can answer "when did the wall go up" without
+    /// guessing from request timestamps (v0.3.2 Windows report).
+    pub detected_at: u64,
+    /// Consecutive CAPTCHA hits for this engine — the backoff-ladder
+    /// step driving the suspension duration (1 → 5 min, 2 → 10 min, …).
+    /// Always 1 on the /fetch path (no per-engine ladder there).
+    pub hit_count: u32,
     /// Whether auto-solve was attempted.
     pub auto_solve_attempted: bool,
     /// Whether auto-solve succeeded.
@@ -129,6 +137,8 @@ pub async fn detect_and_maybe_solve(url: &str, body: &str) -> Option<CaptchaEven
         engine: String::new(),
         captcha_type: ct.clone(),
         url: url.to_string(),
+        detected_at: crate::now_secs(),
+        hit_count: 1,
         auto_solve_attempted: false,
         auto_solve_succeeded: false,
     };

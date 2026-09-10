@@ -162,6 +162,8 @@ Each row is `{"url", "method", "status", "mime", "body", "body_truncated"}`. Bod
 | engine | string | Name of the search engine that triggered the CAPTCHA (empty for `/fetch`) |
 | captcha_type | string | `cloudflare_turnstile` / `recaptcha_v2` / `hcaptcha` / `slider` / `unknown` |
 | url | string | URL that triggered the CAPTCHA |
+| detected_at | u64 | Wall-clock time of detection (unix seconds) |
+| hit_count | u32 | Consecutive CAPTCHA hits for this engine — the backoff-ladder step driving the suspension duration (`1` → 5 min, `2` → 10 min, `3` → 30 min, `4+` → 1 h). Always `1` on the `/fetch` path |
 | auto_solve_attempted | bool | Whether auto-solve was attempted |
 | auto_solve_succeeded | bool | Whether auto-solve succeeded |
 
@@ -310,7 +312,7 @@ Native aggregated search with optional automatic content fetching. Agents go fro
 
 | Engine | Categories | Description |
 |------|------|------|
-| baidu | general | Baidu JSON API (wreq stealth) |
+| baidu | general | Baidu HTML SERP (browser UA; the old `tn=json` API is wall-dead) |
 | bing | general | Bing HTML parsing |
 | sogou | general | Sogou web search |
 | sogou_wechat | general, news | Sogou WeChat article search |
@@ -338,7 +340,7 @@ Engines are queried concurrently and results merged with deduplication: identica
 | query | string | Search query |
 | number_of_results | usize | Number of results returned (equals `results.length`) |
 | results | array | Result list |
-| captcha_events | array | List of CAPTCHA events |
+| captcha_events | array | List of CAPTCHA events (see `captcha_event` format above — each carries `detected_at` + `hit_count`) |
 | engine_errors | object | Per-engine reason an engine contributed nothing: CAPTCHA suspension (with resume countdown), transient fetch/parse failure, or a task panic. Absent when every eligible engine answered |
 
 **Each entry in `results`:**

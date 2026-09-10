@@ -171,10 +171,10 @@ curl -sS -X POST http://127.0.0.1:8089/fetch \
   -H "Content-Type: application/json" \
   -d '{"url":"https://example.com"}'
 
-# 搜索
+# 搜索（默认只回摘要；fetch_top 给前 N 条抓正文）
 curl -sS -X POST http://127.0.0.1:8089/search \
   -H "Content-Type: application/json" \
-  -d '{"q":"macbook 价格","max_results":5}'
+  -d '{"q":"macbook 价格","max_results":5,"fetch_top":2,"max_chars_per":2000}'
 
 # 建交互式会话
 curl -sS -X POST http://127.0.0.1:8089/session/create \
@@ -185,6 +185,34 @@ curl -sS -X POST http://127.0.0.1:8089/session/create \
 # MCP 模式（给 AI Agent 用）
 ./target/release/aginxbrowser --mcp
 ```
+
+## REST 路由总表
+
+所有能力都是普通 HTTP，不需要 SDK。没有 /openapi.json（路由就下面这些，一屏放得下）；每个路由的完整请求/响应字段见 [docs/API.md](docs/API.md)。
+
+| 方法 | 路径 | 干什么 |
+|---|---|---|
+| GET | `/health` | 存活 + 构建 commit、UA、TLS、能力面 |
+| GET | `/doctor` | 深度自查：引擎活况、字体、出网 |
+| GET | `/engines` | 搜索引擎目录 + 实时挂起状态 |
+| POST | `/fetch` | 抓页面 → text/markdown/html。参数：`render_tier`（`auto`/`http`/`browser`）、`max_chars`、`capture_xhr` 等 |
+| POST | `/search` | 多引擎聚合搜索。参数：`engines`、`categories`、`max_results`、`time_range`（`day`/`week`/`month`/`year`）、`fetch_top`、`max_chars_per`、`wait_secs` |
+| POST | `/click` | 按选择器点页面 |
+| POST | `/eval` | 在页面上跑 JavaScript |
+| POST | `/download` | 流式下载到磁盘（sha256、断点续传） |
+| POST | `/screenshot` | 渲染页面 → PNG（`screenshot` feature） |
+| POST | `/video` | 动画时间线 → MP4（`screenshot` feature） |
+| POST | `/pdf` | 分页打包 → PDF/PNG/PPTX/DOCX（`screenshot` feature） |
+| POST | `/v1/scrape` | Firecrawl 兼容抓取（含 `actions`） |
+| POST | `/session/create` | 建交互式会话（cookies/UA 跨调用延续） |
+| POST | `/import/curl` | 用 DevTools「Copy as cURL」一键建登录会话 |
+| GET | `/session/list` | 活着的会话 |
+| POST | `/session/{id}/navigate` · `/state` · `/click` · `/click_xy` · `/drag` · `/input` · `/scroll` · `/eval` · `/wait` · `/dialog` · `/viewport` · `/screenshot` · `/clone` · `/close` | 会话动作 |
+| GET | `/session/{id}/cookies` · `/storage` · `/console` · `/network` · `/har` · `/export` | 会话观测 |
+| GET | `/json/version` · `/json/list` · `/devtools/…` | CDP 桥（Playwright/Puppeteer 连这里） |
+| POST | `/mcp` | MCP 端点（`--mcp` 模式走 stdio） |
+
+只有两个 MCP 工具没有 REST 路由：`cache`（查本地抓取/搜索缓存）和 `render_markdown`（markdown → 确定性 HTML 产物）。Agent 走 MCP 能做的每一件事，上面 REST 都能做。
 
 ## 目录结构
 
@@ -208,7 +236,7 @@ aginxbrowser/
     ├── main.rs              # HTTP 服务入口与路由
     ├── server.rs            # 业务层（fetch/click/eval/search）
     ├── session.rs           # 交互式浏览器会话
-    ├── mcp.rs               # MCP Server（30 个工具）
+    ├── mcp.rs               # MCP Server（31 个工具）
     ├── docgen/              # 文档层：markdown → 确定性 HTML + 内联 SVG 图
     ├── render.rs            # 分层渲染（HTTP 直取 → diting 浏览器引擎）
     ├── store.rs             # 本地 fetch/搜索缓存（SQLite FTS5、漂移哈希）

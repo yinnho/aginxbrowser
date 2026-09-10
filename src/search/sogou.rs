@@ -74,7 +74,7 @@ impl SearchEngine for SogouEngine {
         let html = crate::diting_net::encoding::decode_non_html(&bytes.to_vec(), None);
 
         // Check for CAPTCHA indicators in the HTML body.
-        if html.contains("/antispider") || html.contains("用户频率限制") {
+        if looks_walled(&html) {
             tracing::warn!("sogou: CAPTCHA detected in HTML body (len={})", html.len());
             return Err(SearchEngineError::Captcha {
                 url: url.to_string(),
@@ -84,6 +84,24 @@ impl SearchEngine for SogouEngine {
 
         parse_sogou_html(&html)
     }
+}
+
+/// Wall fingerprints for Sogou's risk-control surfaces, matched against a
+/// served body. Beyond the /antispider redirect these arrive as 200 pages:
+/// the frequency-limit page, the abnormal-traffic page, and inline
+/// seccode/captcha widgets. Any of them parses to zero `div.rb`/`vrwrap`
+/// results and used to read as "no hits" while `/engines` showed the
+/// engine healthy (v0.3.2 Windows report).
+fn looks_walled(html: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "/antispider",
+        "用户频率限制",
+        "异常流量",
+        "seccode",
+        "showCaptcha",
+        "请输入验证码",
+    ];
+    MARKERS.iter().any(|m| html.contains(m))
 }
 
 /// Parse Sogou's HTML search results.
@@ -110,6 +128,17 @@ fn parse_sogou_html(html: &str) -> Result<Vec<RawSearchResult>, SearchEngineErro
         if let Some(r) = parse_sogou_vrwrap_item(&item, &mut position) {
             results.push(r);
         }
+    }
+
+    // Zero results must explain themselves: a served SERP that found
+    // nothing says so explicitly; anything else that parses to zero
+    // containers is markup drift or an unrecognized wall variant, and a
+    // silent Ok(0) reads as "no hits" (v0.3.2 Windows report).
+    if results.is_empty() && !html.contains("未找到") && !html.contains("无相关结果") {
+        return Err(SearchEngineError::Transient(format!(
+            "unrecognized response: 0 result containers (len={})",
+            html.len()
+        )));
     }
 
     let total = results.len().max(1) as f64;
@@ -231,4 +260,30 @@ fn resolve_sogou_url(raw: &str, item_html: &str) -> String {
 
     // Fallback: prefix with sogou base.
     format!("https://www.sogou.com{}", raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wall_bodies_are_flagged() {
+        for marker in ["/antispider", "用户频率限制", "异常流量", "seccode", "showCaptcha"] {
+            assert!(looks_walled(&format!("<html>xx {marker} yy</html>")), "{marker}");
+        }
+        assert!(!looks_walled("<html><div class=rb>normal serp</div></html>"));
+    }
+
+    #[test]
+    fn empty_serp_is_ok_but_unrecognized_zero_is_transient() {
+        let legit = "<html><body>未找到与 xxx 相关的结果</body></html>";
+        assert!(parse_sogou_html(legit).unwrap().is_empty());
+
+        let drift = "<html><body>something else entirely</body></html>";
+        let err = parse_sogou_html(drift).unwrap_err();
+        match err {
+            SearchEngineError::Transient(msg) => assert!(msg.contains("0 result containers")),
+            other => panic!("expected transient, got {other:?}"),
+        }
+    }
 }

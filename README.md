@@ -171,10 +171,10 @@ curl -sS -X POST http://127.0.0.1:8089/fetch \
   -H "Content-Type: application/json" \
   -d '{"url":"https://example.com"}'
 
-# Search
+# Search (snippets only by default; fetch_top grabs page bodies for the top N)
 curl -sS -X POST http://127.0.0.1:8089/search \
   -H "Content-Type: application/json" \
-  -d '{"q":"macbook price","max_results":5}'
+  -d '{"q":"macbook price","max_results":5,"fetch_top":2,"max_chars_per":2000}'
 
 # Create an interactive session
 curl -sS -X POST http://127.0.0.1:8089/session/create \
@@ -185,6 +185,34 @@ curl -sS -X POST http://127.0.0.1:8089/session/create \
 # MCP mode (for AI agents)
 ./target/release/aginxbrowser --mcp
 ```
+
+## REST Routes
+
+Every capability is plain HTTP — no SDK required. There is no `/openapi.json` (the routes are few enough to list here); full request/response fields for each route are in [docs/API.md](docs/API.md).
+
+| Method | Path | What it does |
+|---|---|---|
+| GET | `/health` | Liveness + build commit, UA, TLS, capabilities |
+| GET | `/doctor` | Deep self-check: engines live, fonts, egress |
+| GET | `/engines` | Search engine catalog with live suspension state |
+| POST | `/fetch` | Fetch a page → text/markdown/html. Params: `render_tier` (`auto`/`http`/`browser`), `max_chars`, `capture_xhr`, … |
+| POST | `/search` | Multi-engine meta-search. Params: `engines`, `categories`, `max_results`, `time_range` (`day`/`week`/`month`/`year`), `fetch_top`, `max_chars_per`, `wait_secs` |
+| POST | `/click` | Click a CSS selector on a page |
+| POST | `/eval` | Evaluate JavaScript on a page |
+| POST | `/download` | Stream a file to disk (sha256, resume) |
+| POST | `/screenshot` | Render page → PNG (`screenshot` feature) |
+| POST | `/video` | Render animation timelines → MP4 (`screenshot` feature) |
+| POST | `/pdf` | Paginate page → PDF/PNG/PPTX/DOCX (`screenshot` feature) |
+| POST | `/v1/scrape` | Firecrawl-compatible scrape (+ `actions`) |
+| POST | `/session/create` | Start an interactive session (cookies/UA carried across calls) |
+| POST | `/import/curl` | Create a logged-in session from a DevTools "Copy as cURL" |
+| GET | `/session/list` | Live sessions |
+| POST | `/session/{id}/navigate` · `/state` · `/click` · `/click_xy` · `/drag` · `/input` · `/scroll` · `/eval` · `/wait` · `/dialog` · `/viewport` · `/screenshot` · `/clone` · `/close` | Session actions |
+| GET | `/session/{id}/cookies` · `/storage` · `/console` · `/network` · `/har` · `/export` | Session inspection |
+| GET | `/json/version` · `/json/list` · `/devtools/…` | CDP bridge (Playwright/Puppeteer connect here) |
+| POST | `/mcp` | MCP endpoint (`--mcp` mode serves stdio) |
+
+Two MCP tools have no REST route: `cache` (query the local fetch/search cache) and `render_markdown` (markdown → deterministic HTML artifact). Everything an agent does through MCP is callable over REST above.
 
 ## Project Layout
 
