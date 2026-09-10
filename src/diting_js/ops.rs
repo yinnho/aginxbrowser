@@ -1579,6 +1579,14 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "background-color",
     "background-image",
     "font-family",
+    "padding-top",
+    "padding-right",
+    "padding-bottom",
+    "padding-left",
+    "margin-top",
+    "margin-right",
+    "margin-bottom",
+    "margin-left",
     "border-radius",
     "flex-direction",
     "flex-wrap",
@@ -1742,6 +1750,20 @@ fn computed_style_value(
         "background-image" => s.background_image.clone(),
         // Same posture as background-image: the author's stack, verbatim.
         "font-family" => s.font_family.clone(),
+        // Padding/margin longhands: Chrome reports the used px. Percent and
+        // calc keep their declared spelling (resolving needs the containing
+        // block this layer has no geometry for), unset is 0 — all closer to
+        // truth than the JS mask's blanket "0px", which swallowed real
+        // padding from every stylesheet-declared element (the pptx-native
+        // walker read all-zero insets off this).
+        "padding-top" => Some(side_css(&s.padding.top)),
+        "padding-right" => Some(side_css(&s.padding.right)),
+        "padding-bottom" => Some(side_css(&s.padding.bottom)),
+        "padding-left" => Some(side_css(&s.padding.left)),
+        "margin-top" => Some(side_css(&s.margin.top)),
+        "margin-right" => Some(side_css(&s.margin.right)),
+        "margin-bottom" => Some(side_css(&s.margin.bottom)),
+        "margin-left" => Some(side_css(&s.margin.left)),
         // Chrome's computed border-radius collapses equal corners (up to the
         // shortest form that round-trips); elliptical corners serialize with
         // the slash form. Percent stays percent — resolving against the box
@@ -1868,6 +1890,27 @@ fn format_number(v: f32) -> String {
         format!("{}", v as i64)
     } else {
         format!("{}", v)
+    }
+}
+
+/// One side of a padding/margin shorthand in Chrome's computed spelling.
+/// Unset sides are `0px` (the CSS initial for both properties).
+#[cfg(feature = "screenshot")]
+fn side_css(l: &Option<crate::diting_css::Length>) -> String {
+    use crate::diting_css::Length;
+    match l {
+        None => "0px".to_string(),
+        Some(Length::Px(v)) => format!("{}px", format_number(*v)),
+        Some(Length::Percent(p)) => format!("{}%", format_number(*p)),
+        Some(Length::Calc { percent, px }) => {
+            format!("calc({}% + {}px)", format_number(*percent), format_number(*px))
+        }
+        // `auto` is margin-only (the centering idiom); padding rejects it
+        // at parse time so it can't reach this arm from there. min/max/
+        // fit-content are width keywords and likewise never reach a
+        // padding/margin side — the fallback just keeps the arm total.
+        Some(Length::Auto) => "auto".to_string(),
+        Some(Length::MinContent | Length::MaxContent | Length::FitContent) => "0px".to_string(),
     }
 }
 

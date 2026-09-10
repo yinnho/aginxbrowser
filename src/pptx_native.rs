@@ -15,6 +15,10 @@
 //! text/size/weight/color/fill are real; what a text box can't express
 //! (per-glyph inline styling, z-index reordering, transforms, borders)
 //! degrades by omission — the element still lands as an editable shape.
+//! Text alignment is mapped, not eyeballed: `<br>` lines become paragraphs
+//! (a joined re-wraps wherever the consumer's fonts land), padding becomes
+//! bodyPr insets, line heights become exact points, and the text anchors
+//! MIDDLE in the content box the way CSS half-leading centers glyphs.
 //! The CSS `background` shorthand doesn't expand into background-image in
 //! this engine yet, so gradient decks must use the `background-image`
 //! longhand.
@@ -56,9 +60,19 @@ const WALKER_JS: &str = r#"function(sel) {
         if (st.display === 'none') continue;
         const r = c.getBoundingClientRect();
         if (r.width < 0.5 || r.height < 0.5) continue;
-        let text = '';
-        for (const n of c.childNodes) if (n.nodeType === 3) text += ' ' + n.nodeValue;
-        text = text.replace(/\s+/g, ' ').trim();
+        // Direct text, split on <br>: each visual line rides as its own
+        // DrawingML paragraph later. A joined single run re-wraps wherever
+        // the consumer's own font metrics allow, which reads as the line
+        // breaking in a different place than the deck authored.
+        const lines = [[]];
+        for (const n of c.childNodes) {
+          if (n.nodeType === 3) lines[lines.length - 1].push(n.nodeValue);
+          else if (n.nodeType === 1 && n.tagName && n.tagName.toLowerCase() === 'br') lines.push([]);
+        }
+        const text = lines
+          .map(l => l.join(' ').replace(/\s+/g, ' ').trim())
+          .filter(l => l.length > 0)
+          .join('\n');
         slide.elements.push({
           tag: c.tagName,
           x: r.left - rr.left, y: r.top - rr.top, w: r.width, h: r.height,
@@ -66,6 +80,8 @@ const WALKER_JS: &str = r#"function(sel) {
           fontFamily: st.fontFamily, fontSize: st.fontSize, fontWeight: st.fontWeight,
           textAlign: st.textAlign, opacity: st.opacity,
           borderRadius: st.borderRadius, lineHeight: st.lineHeight,
+          padTop: st.paddingTop, padLeft: st.paddingLeft,
+          padRight: st.paddingRight, padBottom: st.paddingBottom,
           text: text || null,
           img: c.tagName === 'IMG' ? c.getAttribute('src') : null
         });
@@ -118,6 +134,14 @@ struct WalkedElement {
     border_radius: Option<String>,
     #[serde(default)]
     line_height: Option<String>,
+    #[serde(default)]
+    pad_top: Option<String>,
+    #[serde(default)]
+    pad_left: Option<String>,
+    #[serde(default)]
+    pad_right: Option<String>,
+    #[serde(default)]
+    pad_bottom: Option<String>,
     #[serde(default)]
     text: Option<String>,
     #[serde(default)]
@@ -395,17 +419,22 @@ fn plain_shape(
     )
 }
 
-/// A text-bearing shape: optional fill + a text body whose run carries the
+/// A text-bearing shape: optional fill + a text body whose runs carry the
 /// element's font size (hundredths of a point), weight, family, and color.
+/// Vertical alignment is the part CSS hands us for free and DrawingML
+/// doesn't: half-leading centers the glyphs in each line box, so the shape
+/// anchors its text MIDDLE in the content box, padding maps to insets, and
+/// line heights convert to exact points — the DrawingML defaults (top
+/// anchor, "single" spacing ≈ 1.2 em) sit visibly high and drift per line.
 fn text_shape(id: u64, e: &WalkedElement, fill: Option<&Fill>) -> String {
     let opacity: f32 = e.opacity.as_deref().and_then(|o| o.parse().ok()).unwrap_or(1.0);
 
-    let sz = e
+    let font_px = e
         .font_size
         .as_deref()
         .and_then(|s| s.trim_end_matches("px").trim().parse::<f32>().ok())
-        .unwrap_or(16.0)
-        * 75.0; // px → pt in hundredths
+        .unwrap_or(16.0);
+    let sz = font_px * 75.0; // px → pt in hundredths
     let bold = e
         .font_weight
         .as_deref()
@@ -420,26 +449,39 @@ fn text_shape(id: u64, e: &WalkedElement, fill: Option<&Fill>) -> String {
         _ => "l",
     };
 
-    // Line spacing: a unitless number is spcPct, a px length is spcPts;
+    // Line spacing: unitless and px lengths both become EXACT points
+    // (spcPts). Percentages (spcPct) are relative to the renderer's own
+    // single-line height (~1.2 em in Office) — CSS 1.35 mapped to 135%
+    // renders ~1.62 em and every line lands further down the box.
     // "normal" (and anything unparseable) inherits the shape default.
     let mut ln_spc = String::new();
     if let Some(lh) = e.line_height.as_deref() {
         let lh = lh.trim();
         if lh != "normal" {
             if let Ok(n) = lh.parse::<f32>() {
-                ln_spc =
-                    format!(r#"<a:lnSpc><a:spcPct val="{}"/></a:lnSpc>"#, (n * 100000.0).round() as u32);
+                ln_spc = format!(
+                    r#"<a:lnSpc><a:spcPts val="{}"/></a:lnSpc>"#,
+                    (n * font_px * 75.0).round() as u32
+                );
             } else if let Some(px) = lh.strip_suffix("px").and_then(|p| p.trim().parse::<f32>().ok()) {
                 ln_spc = format!(r#"<a:lnSpc><a:spcPts val="{}"/></a:lnSpc>"#, (px * 75.0).round() as u32);
             }
         }
     }
 
+    // Both scripts of a mixed zh/en deck carry the same family; see
+    // `portable_family`.
     let typeface = e
         .font_family
         .as_deref()
-        .and_then(first_family)
-        .map(|f| format!(r#"<a:latin typeface="{}"/>"#, xml_escape(&f)))
+        .and_then(portable_family)
+        .map(|f| {
+            format!(
+                r#"<a:latin typeface="{}"/><a:ea typeface="{}"/>"#,
+                xml_escape(&f),
+                xml_escape(&f)
+            )
+        })
         .unwrap_or_default();
 
     // Run color: the computed color, alpha-composited with opacity.
@@ -450,23 +492,84 @@ fn text_shape(id: u64, e: &WalkedElement, fill: Option<&Fill>) -> String {
         .map(|c| format!("<a:solidFill>{}</a:solidFill>", srgb_with_alpha(c, opacity)))
         .unwrap_or_default();
 
+    let pad = |v: Option<&str>| {
+        v.and_then(|s| s.trim_end_matches("px").trim().parse::<f32>().ok())
+            .unwrap_or(0.0)
+    };
+    let (pt, pl, pr, pb) = (
+        pad(e.pad_top.as_deref()),
+        pad(e.pad_left.as_deref()),
+        pad(e.pad_right.as_deref()),
+        pad(e.pad_bottom.as_deref()),
+    );
+
+    // <br>-split lines ride as one DrawingML paragraph each, so the deck's
+    // authored breaks survive instead of re-wrapping wherever the consumer's
+    // own font metrics land.
+    let paragraphs: Vec<&str> = e
+        .text
+        .as_deref()
+        .map(|t| t.split('\n').filter(|l| !l.trim().is_empty()).collect())
+        .unwrap_or_default();
+
+    // A box only one line tall turns wrapping off: its width is the
+    // fit-content width under diting's fonts, and a substituted face in
+    // the consumer is wider — wrapping would fold the line. Taller boxes
+    // keep wrapping (they hold more than one line by construction).
+    let single_line = paragraphs.len() <= 1 && (e.h as f32 - pt - pb) < 2.2 * font_px;
+    let wrap = if single_line { "none" } else { "square" };
+
+    let bold_attr = if bold { r#" b="1""# } else { "" };
+
+    let paras: String = paragraphs
+        .iter()
+        .map(|line| {
+            format!(
+                r#"<a:p><a:pPr algn="{algn}">{ln_spc}</a:pPr><a:r><a:rPr lang="en-US" sz="{sz}" dirty="0"{bold_attr}>{color_xml}{typeface}</a:rPr><a:t>{}</a:t></a:r></a:p>"#,
+                xml_escape(line),
+            )
+        })
+        .collect();
+
     let fill_xml_str = fill.map(|f| fill_xml(f, opacity)).unwrap_or_else(|| "<a:noFill/>".to_string());
 
     format!(
-        r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="{}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr>{}{}{}<a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr lIns="0" tIns="0" rIns="0" bIns="0" wrap="square"/><a:lstStyle/><a:p><a:pPr algn="{algn}">{ln_spc}</a:pPr><a:r><a:rPr lang="en-US" sz="{sz}" dirty="0"{}>{color_xml}{typeface}</a:rPr><a:t>{}</a:t></a:r></a:p></p:txBody></p:sp>"#,
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="{}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr>{}{}{}<a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr lIns="{}" tIns="{}" rIns="{}" bIns="{}" wrap="{wrap}" anchor="ctr"/><a:lstStyle/>{paras}</p:txBody></p:sp>"#,
         xml_escape(&e.tag),
         xfrm(e.x as f32, e.y as f32, e.w as f32, e.h as f32),
         geom_xml(e.border_radius.as_deref(), e.w as f32, e.h as f32),
         fill_xml_str,
-        if bold { r#" b="1""# } else { "" },
-        xml_escape(e.text.as_deref().unwrap_or("")),
+        emu(pl),
+        emu(pt),
+        emu(pr),
+        emu(pb),
     )
 }
 
-fn first_family(stack: &str) -> Option<String> {
-    let f = stack.split(',').next()?.trim();
-    let f = f.trim_matches(|c| c == '"' || c == '\'').trim();
-    (!f.is_empty()).then(|| f.to_string())
+/// The typeface to declare for both the latin and east-asian runs. Stacks
+/// open with vendor aliases ("-apple-system", "BlinkMacSystemFont",
+/// "system-ui") and CSS generics that resolve to nothing outside the
+/// authoring OS — the consumer substitutes its default and the metric
+/// drift re-wraps text that fit its box. Skip those, then prefer a
+/// CJK-capable family the author listed (Office and WPS both resolve
+/// "Microsoft YaHei" on Windows and macOS; one CJK face covers the mixed
+/// zh/en runs this exporter emits); otherwise the first real family.
+fn portable_family(stack: &str) -> Option<String> {
+    const SKIPPED: [&str; 7] = [
+        "-apple-system", "BlinkMacSystemFont", "system-ui", "sans-serif", "serif", "monospace", "cursive",
+    ];
+    let families: Vec<&str> = stack
+        .split(',')
+        .map(|f| f.trim().trim_matches(|c| c == '"' || c == '\'').trim())
+        .filter(|f| !f.is_empty() && !SKIPPED.iter().any(|s| s.eq_ignore_ascii_case(f)))
+        .collect();
+    const CJK: [&str; 6] = [
+        "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Source Han Sans SC", "SimHei",
+    ];
+    CJK.iter()
+        .find(|cjk| families.iter().any(|f| f.eq_ignore_ascii_case(cjk)))
+        .or_else(|| families.first())
+        .map(|f| f.to_string())
 }
 
 /// An image shape with its own relationship id (slide-local, images only).
@@ -592,7 +695,9 @@ mod tests {
             x, y, w, h,
             color: None, bg: None, bg_image: None, font_family: None,
             font_size: None, font_weight: None, text_align: None, opacity: None,
-            border_radius: None, line_height: None, text: None, img: None,
+            border_radius: None, line_height: None,
+            pad_top: None, pad_left: None, pad_right: None, pad_bottom: None,
+            text: None, img: None,
         }
     }
 
@@ -625,6 +730,78 @@ mod tests {
         assert!(slide_xml.contains("lIns=\"0\""), "zero insets so CSS geometry holds");
         // No media parts at all — nothing image-based in the package.
         assert!(entries.iter().all(|(n, _)| !n.contains("/media/")), "no image parts");
+    }
+
+    #[test]
+    fn text_alignment_contract_maps_css_to_drawingml() {
+        // The WPS misalignment family, one shape each: <br> lines →
+        // paragraphs, unitless line-height → exact points, vendor font
+        // aliases → a portable family, single-line box → no re-wrap.
+        let mut e = el("DIV", 0.0, 0.0, 900.0, 194.4);
+        e.text = Some("用国产模型跑\nClaude Code / Codex".to_string());
+        e.font_size = Some("72px".to_string());
+        e.line_height = Some("1.35".to_string());
+        e.font_family = Some(
+            "-apple-system, BlinkMacSystemFont, \"PingFang SC\", \"Microsoft YaHei\", sans-serif".to_string(),
+        );
+        let pptx = pack(&[slide(1280.0, 720.0, vec![e])], &Media { parts: vec![], index: HashMap::new() });
+        let slide_xml = entries_of(&pptx)
+            .iter()
+            .find(|(n, _)| n == "ppt/slides/slide1.xml")
+            .map(|(_, d)| String::from_utf8_lossy(d).to_string())
+            .expect("slide1");
+        // Two lines, two real paragraphs — not one run left to re-wrap.
+        assert_eq!(slide_xml.matches("<a:p>").count(), 2, "one paragraph per <br> line");
+        assert!(slide_xml.contains("<a:t>用国产模型跑</a:t>"));
+        assert!(slide_xml.contains("<a:t>Claude Code / Codex</a:t>"));
+        // 1.35 × 72px = 97.2px = 72.9pt → spcPts 7290, not spcPct 135000.
+        assert!(slide_xml.contains(r#"<a:spcPts val="7290"/>"#));
+        assert!(!slide_xml.contains("spcPct"), "percent line spacing drifts in Office");
+        // Vendor aliases skipped, the CJK family the author listed pins for
+        // both scripts.
+        assert!(slide_xml.contains(r#"<a:latin typeface="Microsoft YaHei"/>"#));
+        assert!(slide_xml.contains(r#"<a:ea typeface="Microsoft YaHei"/>"#));
+        assert!(!slide_xml.contains("-apple-system"), "vendor alias never exported");
+        // Two lines tall → keeps wrapping.
+        assert!(slide_xml.contains(r#"wrap="square""#), "multi-line box wraps");
+
+        // Same element one line tall: wrapping off — the box width is the
+        // fit-content width under diting's fonts and a substituted face in
+        // WPS is wider, which would fold the line.
+        let mut single = el("H1", 0.0, 0.0, 600.0, 97.2);
+        single.text = Some("Agent 的 AI 大脑".to_string());
+        single.font_size = Some("72px".to_string());
+        let pptx = pack(&[slide(1280.0, 720.0, vec![single])], &Media { parts: vec![], index: HashMap::new() });
+        let slide_xml = entries_of(&pptx)
+            .iter()
+            .find(|(n, _)| n == "ppt/slides/slide1.xml")
+            .map(|(_, d)| String::from_utf8_lossy(d).to_string())
+            .expect("slide1");
+        assert!(slide_xml.contains(r#"wrap="none""#), "single-line box does not re-wrap");
+        assert!(slide_xml.contains(r#"anchor="ctr""#), "text centers like CSS half-leading");
+    }
+
+    #[test]
+    fn padding_maps_to_bodypr_insets() {
+        // A chip: 10px 26px of padding around its text. CSS draws the
+        // glyphs inside the content box; insets carry that into DrawingML.
+        let mut e = el("SPAN", 0.0, 0.0, 152.0, 44.0);
+        e.text = Some("brain.aginx.net".to_string());
+        e.font_size = Some("24px".to_string());
+        e.pad_top = Some("10px".to_string());
+        e.pad_left = Some("26px".to_string());
+        e.pad_right = Some("26px".to_string());
+        e.pad_bottom = Some("10px".to_string());
+        let pptx = pack(&[slide(400.0, 300.0, vec![e])], &Media { parts: vec![], index: HashMap::new() });
+        let slide_xml = entries_of(&pptx)
+            .iter()
+            .find(|(n, _)| n == "ppt/slides/slide1.xml")
+            .map(|(_, d)| String::from_utf8_lossy(d).to_string())
+            .expect("slide1");
+        assert!(slide_xml.contains(r#"tIns="95250""#), "10px top padding");
+        assert!(slide_xml.contains(r#"lIns="247650""#), "26px left padding");
+        assert!(slide_xml.contains(r#"rIns="247650""#), "26px right padding");
+        assert!(slide_xml.contains(r#"bIns="95250""#), "10px bottom padding");
     }
 
     #[test]
@@ -712,10 +889,12 @@ html,body{margin:0;padding:0}
 .slide{width:400px;height:300px;background:#202030;margin:0 auto}
 .slide h1{font-family:Arial,sans-serif;font-size:32px;font-weight:700;color:#f0f0f0;text-align:center}
 .card{width:120px;height:80px;background-color:#27ae60;border-radius:12px}
+.chip{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;font-size:24px;line-height:1.35;padding:10px 26px;color:#ffffff;background-color:#574b90}
 </style></head><body>
 <div class="slide">
   <h1>Hello native</h1>
   <div class="card"></div>
+  <div class="chip">每年省下<br>几千块</div>
   <img src="IMG_PLACEHOLDER" width="60" height="60">
 </div>
 </body></html>"#;
@@ -788,6 +967,22 @@ html,body{margin:0;padding:0}
         assert!(slide_xml.contains("b=\"1\""), "weight 700 → bold");
         assert!(slide_xml.contains("algn=\"ctr\""), "center → algn ctr");
         assert!(slide_xml.contains(r#"typeface="Arial""#), "font-family from the engine surface");
+        assert!(slide_xml.contains(r#"anchor="ctr""#), "text centers like CSS half-leading");
+        // The chip: <br> → two paragraphs, portable family for both scripts,
+        // exact line spacing, padding → insets — the full alignment contract
+        // read off the live engine.
+        assert!(slide_xml.contains(r#"typeface="Microsoft YaHei""#));
+        assert!(slide_xml.contains(r#"<a:ea typeface="Microsoft YaHei"/>"#));
+        assert!(slide_xml.contains(r#"<a:spcPts val="2430"/>"#), "1.35 × 24px = 32.4px = 24.3pt");
+        assert!(slide_xml.contains(r#"tIns="95250""#), "10px top padding");
+        assert!(slide_xml.contains(r#"lIns="247650""#), "26px left padding");
+        assert!(slide_xml.contains("<a:t>每年省下</a:t>"));
+        assert!(slide_xml.contains("<a:t>几千块</a:t>"));
+        assert_eq!(
+            slide_xml.matches("<a:p>").count(),
+            3,
+            "h1 + two chip paragraphs"
+        );
         // The card: rounded green shape.
         assert!(slide_xml.contains(r#"prst="roundRect""#));
         assert!(slide_xml.contains(r#"val="27AE60""#));
