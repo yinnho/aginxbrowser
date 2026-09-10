@@ -591,6 +591,10 @@ Each frame seeks every registered timeline to `t = i/fps` and paints the viewpor
 | use_proxy | bool | | `false` | Route through the `AGINXBROWSER_PROXY` proxy |
 | cookies | string[] \| object[] | | `[]` | Cookies injected before navigation (same semantics as `/fetch`) |
 | tls_fingerprint | string | | `null` | TLS fingerprint (stealth mode) |
+| narration | object[] | | `[]` | Voiceover clips: `{url, start_secs, volume}` — each fetched, delayed to its start time, all mixed into one AAC track. Any TTS output works (mp3/wav/ogg/m4a, probed by content). Fetch failure is an error, never a silent video |
+| audio | object | | `null` | Background music: `{url, volume, fade_out_secs, loop_audio}` — looped to cover the video, volume-scaled, faded out at the tail |
+| subtitles_srt | string | | `null` | Inline SRT text muxed as a soft (toggleable) mov_text track — no libass needed for muxing. Cap 64 KiB |
+| subtitles_language | string | | `null` | ISO language tag for the subtitle track ("eng", "zh") |
 
 **Response fields:**
 
@@ -603,7 +607,11 @@ Each frame seeks every registered timeline to `t = i/fps` and paints the viewpor
 | duration_secs | f64 | Total video length = timeline + hold tail |
 | width / height | u32 | Encoded pixel size |
 | video_base64 | string | base64-encoded MP4 (H.264, yuv420p). Decode with `base64 -d`, or use directly as `data:video/mp4;base64,...` |
+| has_audio | bool | Whether an audio track (BGM and/or narration) was muxed in |
+| has_subtitles | bool | Whether a soft subtitle track was muxed in |
 | format | string | Always `"mp4"` |
+
+Audio details: audio URLs are fetched through the page's own HTTP client (http/https only, ≤16 MiB, 8 s timeout, same SSRF gate as subresources). One audio source rides a plain `-af volume/adelay/afade` chain; two or more (e.g. BGM + narration clips) are mixed with `amix=normalize=0` so narration isn't halved for having quiet music under it. With ≥2 audio inputs the subtitle stream is mapped explicitly. Burned-in captions need no engine support — register a second `__timelines` entry that writes caption text/opacity in `pause(t)`, and it seeks along with everything else.
 
 **Example:**
 

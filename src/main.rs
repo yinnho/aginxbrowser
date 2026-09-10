@@ -338,6 +338,42 @@ fn default_video_hold_tail_secs() -> f64 { 0.5 }
 fn default_video_max_duration_secs() -> f64 { 120.0 }
 #[cfg(feature = "screenshot")]
 fn default_video_wait_timelines_ms() -> u64 { 10_000 }
+#[cfg(feature = "screenshot")]
+fn default_audio_volume() -> f32 { 1.0 }
+#[cfg(feature = "screenshot")]
+fn default_audio_loop() -> bool { true }
+
+/// /video `audio`: background track fetched through the page's HTTP client
+/// and muxed in — looped by default, volume-scaled, optionally faded out
+/// over the final seconds.
+#[cfg(feature = "screenshot")]
+#[derive(Debug, Deserialize, Clone)]
+pub struct VideoAudioRequest {
+    pub url: String,
+    /// Linear multiplier 0..=2; 1 = as authored. Default 1.
+    #[serde(default = "default_audio_volume")]
+    pub volume: f32,
+    /// Fade out over the final N seconds. Default 0 (none).
+    #[serde(default)]
+    pub fade_out_secs: f32,
+    /// Loop to cover the whole video. Default true.
+    #[serde(default = "default_audio_loop")]
+    pub loop_audio: bool,
+}
+
+/// /video `narration[]`: one voiceover clip placed at a start time —
+/// generate with any TTS, hand us the URL; all clips mix into one AAC track.
+#[cfg(feature = "screenshot")]
+#[derive(Debug, Deserialize, Clone)]
+pub struct VideoNarrationClip {
+    pub url: String,
+    /// Seconds from video t=0 where this clip starts. Default 0.
+    #[serde(default)]
+    pub start_secs: f64,
+    /// Linear multiplier 0..=2. Default 1.
+    #[serde(default = "default_audio_volume")]
+    pub volume: f32,
+}
 
 #[cfg(feature = "screenshot")]
 fn default_pdf_width() -> u32 { 794 }
@@ -458,6 +494,18 @@ pub struct VideoRequest {
     /// TLS fingerprint override (stealth mode only).
     #[serde(default)]
     pub tls_fingerprint: Option<String>,
+    /// Background music track: looped by default, faded at the tail.
+    #[serde(default)]
+    pub audio: Option<VideoAudioRequest>,
+    /// Voiceover clips, each starting at its own time (mixed into one track).
+    #[serde(default)]
+    pub narration: Vec<VideoNarrationClip>,
+    /// Inline SRT subtitles muxed as a soft (toggleable) mov_text track.
+    #[serde(default)]
+    pub subtitles_srt: Option<String>,
+    /// ISO language tag for the subtitle track, e.g. "eng" / "zh".
+    #[serde(default)]
+    pub subtitles_language: Option<String>,
 }
 
 /// /video response: MP4 encoded as base64 (`base64 -d > out.mp4` or
@@ -478,6 +526,10 @@ pub struct VideoResponse {
     pub height: u32,
     /// Base64-encoded MP4 bytes (H.264, yuv420p).
     pub video_base64: String,
+    /// Whether an audio track (BGM and/or narration) was muxed in.
+    pub has_audio: bool,
+    /// Whether a soft subtitle track was muxed in.
+    pub has_subtitles: bool,
     /// Always "mp4" for now.
     pub format: String,
 }

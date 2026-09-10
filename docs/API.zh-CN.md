@@ -529,6 +529,10 @@ window.__timelines = { main: tl };
 | use_proxy | bool | | `false` | 走 `AGINXBROWSER_PROXY` 代理 |
 | cookies | string[] \| object[] | | `[]` | 导航前注入的 cookie（语义同 `/fetch`） |
 | tls_fingerprint | string | | `null` | TLS 指纹（stealth 模式） |
+| narration | object[] | | `[]` | 旁白片段：`{url, start_secs, volume}`——各自拉取、adelay 到各自的起点、混成一条 AAC 轨。任意 TTS 产物都行（mp3/wav/ogg/m4a，按内容探测）。拉不到就是报错，绝不静音出片 |
+| audio | object | | `null` | 背景音乐：`{url, volume, fade_out_secs, loop_audio}`——循环铺满全片、调音量、结尾淡出 |
+| subtitles_srt | string | | `null` | 内联 SRT 文本，混流成软字幕（可开关的 mov_text 轨）——mux 不需要 libass。上限 64 KiB |
+| subtitles_language | string | | `null` | 字幕轨的 ISO 语言标签（"eng"、"zh"） |
 
 **响应字段：**
 
@@ -541,6 +545,8 @@ window.__timelines = { main: tl };
 | duration_secs | f64 | 视频总长 = 时间线 + 定格 |
 | width / height | u32 | 编码出的像素尺寸 |
 | video_base64 | string | MP4 的 base64（H.264，yuv420p）。`base64 -d` 解码，或 `data:video/mp4;base64,...` 直接用 |
+| has_audio | bool | 是否混入了音轨（BGM 和/或旁白） |
+| has_subtitles | bool | 是否混入了软字幕轨 |
 | format | string | 固定 `"mp4"` |
 
 **示例：**

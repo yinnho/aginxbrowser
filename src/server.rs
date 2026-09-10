@@ -852,6 +852,23 @@ pub fn do_video(req: crate::VideoRequest) -> Result<crate::VideoResponse> {
                 hold_tail_secs: req.hold_tail_secs,
                 max_duration_secs: req.max_duration_secs,
                 wait_timelines: std::time::Duration::from_millis(req.wait_timelines_ms),
+                audio: req.audio.map(|a| crate::video::AudioTrack {
+                    url: a.url,
+                    volume: a.volume,
+                    fade_out_secs: a.fade_out_secs,
+                    loop_audio: a.loop_audio,
+                }),
+                narration: req
+                    .narration
+                    .into_iter()
+                    .map(|c| crate::video::NarrationClip {
+                        url: c.url,
+                        start_secs: c.start_secs,
+                        volume: c.volume,
+                    })
+                    .collect(),
+                subtitles_srt: req.subtitles_srt,
+                subtitles_language: req.subtitles_language,
             };
             let video = crate::video::render_timeline_video(&mut page.inner, &opts).await?;
             let final_url = page.url();
@@ -869,6 +886,8 @@ pub fn do_video(req: crate::VideoRequest) -> Result<crate::VideoResponse> {
                 width: video.width,
                 height: video.height,
                 video_base64: base64_png(&video.mp4),
+                has_audio: video.has_audio,
+                has_subtitles: video.has_subtitles,
                 format: "mp4".to_string(),
             })
         })

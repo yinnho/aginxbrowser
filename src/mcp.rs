@@ -523,6 +523,43 @@ fn default_video_max_duration_secs() -> f64 {
 fn default_video_wait_timelines_ms() -> u64 {
     10_000
 }
+fn default_audio_volume() -> f32 {
+    1.0
+}
+fn default_audio_loop() -> bool {
+    true
+}
+
+/// render_video `audio`: background music track — fetched, looped to cover
+/// the video, volume-scaled, optionally faded out at the end.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct RenderVideoAudio {
+    /// URL of the music file. mp3/wav/ogg/m4a — probed by content.
+    pub url: String,
+    /// Linear multiplier 0..=2; 1 = as authored. Default 1.
+    #[serde(default = "default_audio_volume")]
+    pub volume: f32,
+    /// Fade out over the final N seconds. Default 0 (none).
+    #[serde(default)]
+    pub fade_out_secs: f32,
+    /// Loop to cover the whole video. Default true.
+    #[serde(default = "default_audio_loop")]
+    pub loop_audio: bool,
+}
+
+/// render_video `narration[]`: one voiceover clip placed at a start time —
+/// generate with any TTS, hand us the URL; all clips mix into one AAC track.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct RenderNarrationClip {
+    /// URL of the voice clip (any TTS output; mp3/wav/ogg/m4a).
+    pub url: String,
+    /// Seconds from video t=0 where this line starts. Default 0.
+    #[serde(default)]
+    pub start_secs: f64,
+    /// Linear multiplier 0..=2. Default 1.
+    #[serde(default = "default_audio_volume")]
+    pub volume: f32,
+}
 
 /// render_video parameters — mirrors POST /video's request shape.
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -554,6 +591,20 @@ pub struct RenderVideoParams {
     /// TLS fingerprint override (stealth mode only)
     #[serde(default)]
     pub tls_fingerprint: Option<String>,
+    /// Background music: looped to cover the video, volume-scaled, faded
+    /// out at the tail.
+    #[serde(default)]
+    pub audio: Option<RenderVideoAudio>,
+    /// Voiceover clips, each starting at its own time (any TTS output;
+    /// mixed into one AAC track).
+    #[serde(default)]
+    pub narration: Vec<RenderNarrationClip>,
+    /// Inline SRT subtitles muxed as a soft (toggleable) mov_text track.
+    #[serde(default)]
+    pub subtitles_srt: Option<String>,
+    /// ISO language tag for the subtitle track, e.g. "eng" / "zh".
+    #[serde(default)]
+    pub subtitles_language: Option<String>,
 }
 
 fn default_pdf_width() -> u32 {
@@ -738,7 +789,10 @@ when the script needs prior page state or a login, use session_eval.",
 expose `window.__timelines` — objects with `duration()` and `pause(t)` (a paused \
 gsap.timeline registered there works as-is). Each frame seeks every timeline to \
 t=i/fps and paints the viewport, so the output is deterministic — no wall clock \
-in the pixel values. Requires ffmpeg on the server. Returns base64 MP4 \
+in the pixel values. Audio: `narration[]` places TTS/voice clips at start times \
+(mixed into one AAC track), `audio` adds looped background music, and \
+`subtitles_srt` muxes an SRT as a soft mov_text track. Requires ffmpeg on the \
+server. Returns base64 MP4 \
 (H.264, yuv420p) plus frame count and durations.",
         annotations(title = "Render Timeline Video")
     )]
@@ -759,6 +813,23 @@ in the pixel values. Requires ffmpeg on the server. Returns base64 MP4 \
                 use_proxy: params.use_proxy,
                 cookies: vec![],
                 tls_fingerprint: params.tls_fingerprint,
+                audio: params.audio.map(|a| crate::VideoAudioRequest {
+                    url: a.url,
+                    volume: a.volume,
+                    fade_out_secs: a.fade_out_secs,
+                    loop_audio: a.loop_audio,
+                }),
+                narration: params
+                    .narration
+                    .into_iter()
+                    .map(|c| crate::VideoNarrationClip {
+                        url: c.url,
+                        start_secs: c.start_secs,
+                        volume: c.volume,
+                    })
+                    .collect(),
+                subtitles_srt: params.subtitles_srt,
+                subtitles_language: params.subtitles_language,
             };
             return match tokio::task::spawn_blocking(move || crate::server::do_video(req)).await {
                 Ok(Ok(resp)) => json!({
@@ -770,6 +841,8 @@ in the pixel values. Requires ffmpeg on the server. Returns base64 MP4 \
                     "width": resp.width,
                     "height": resp.height,
                     "video_base64": resp.video_base64,
+                    "has_audio": resp.has_audio,
+                    "has_subtitles": resp.has_subtitles,
                     "format": resp.format,
                 })
                 .to_string(),
