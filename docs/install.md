@@ -147,7 +147,7 @@ tar xzf aginxbrowser.tar.gz && cd aginxbrowser-${VER}-${T}
 ./aginxbrowser   # serves the HTTP API on 0.0.0.0:8089 by default (.exe on Windows)
 ```
 
-Verify the download with the matching `.sha256` file in the same release. Windows releases up to v0.3.2 carry `screenshot` but not `stealth`; the CI matrix builds Windows with the full feature set (BoringSSL/NASM on msvc), so releases after v0.3.2 ship `stealth` everywhere — `doctor` reports the compiled-in feature set.
+Verify the download with the matching `.sha256` file in the same release. Windows releases up to v0.3.2 carry `screenshot` but not `stealth`; the CI matrix builds Windows with the full feature set (BoringSSL/NASM on msvc), so v0.4.0 and later ship `stealth` everywhere — `doctor` reports the compiled-in feature set.
 
 ### Option D: Build from source
 

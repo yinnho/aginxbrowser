@@ -146,7 +146,7 @@ docker run -p 8089:8089 yinnho/aginxbrowser:latest
 # （或 ghcr.io/yinnho/aginxbrowser:latest）
 
 # 或预编译二进制（平台识别 + sha256 校验 + 镜像回退 + doctor 自检）
-# macOS / Linux / Windows（git-bash；Windows 预编译从 v0.3.1 起，v0.3.2 之后的第一版起带全 stealth+screenshot）
+# macOS / Linux / Windows（git-bash；Windows 预编译从 v0.3.1 起，v0.4.0 起带全 stealth+screenshot）
 # 稳妥起见：下载 -> 看一眼 -> 再跑（不要盲跑网络脚本）
 curl -fsSL https://browser.aginx.net/install.sh -o install.sh
 less install.sh && bash install.sh
