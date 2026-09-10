@@ -879,9 +879,18 @@ impl DomTree {
             MatchingForInvalidation::No,
         );
         // Rule matching is document-rooted (the same scope posture as a
-        // document-rooted querySelectorAll): no :scope binding here.
+        // document-rooted querySelectorAll): no :scope binding here. Shadow
+        // descendants join the probe set so shadow `<style>` rules can match
+        // shadow elements — the cascade's global-rule-pool approximation
+        // (spec-scoped styles are a v3 concern). Combinators still stop at
+        // the shadow root: the matcher climbs ordinary parent links, and a
+        // shadow root has none.
+        let mut probe_ids: Vec<NodeId> = self.descendants(self.document());
+        for root in self.shadow_roots() {
+            probe_ids.extend(self.descendants(root));
+        }
         let mut candidates: Vec<usize> = Vec::new();
-        for desc_id in self.descendants(self.document()) {
+        for desc_id in probe_ids {
             let Some((local, id, class)) = self
                 .with_node(desc_id, |n| {
                     let name = n.as_element()?;

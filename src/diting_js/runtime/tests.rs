@@ -659,6 +659,92 @@
         );
     }
 
+    /// Shadow layout phase 2, composition: a shadow host's box contains its
+    /// shadow tree, not its light children — gBCR on shadow content reports
+    /// real composed-tree geometry, while unassigned light children report
+    /// nothing (no box, per spec).
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn shadow_content_renders_unassigned_light_children_do_not() {
+        let mut rt = setup_runtime(r#"<div id="host"><span id="orphan">hidden</span></div>"#);
+        let result = rt.evaluate(r#"
+            const host = document.getElementById('host');
+            const sr = host.attachShadow({ mode: 'open' });
+            sr.innerHTML = '<div id="in-shadow" style="width:60px;height:30px"></div>';
+            const inner = sr.getElementById('in-shadow');
+            const r = inner.getBoundingClientRect();
+            const orphan = document.getElementById('orphan').getBoundingClientRect();
+            const hostR = host.getBoundingClientRect();
+            return [r.width, r.height, orphan.width, orphan.height,
+                    hostR.width >= r.width - 0.5, hostR.height >= r.height - 0.5];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        assert_eq!(parts[0], serde_json::json!(60), "shadow box has real width");
+        assert_eq!(parts[1], serde_json::json!(30), "shadow box has real height");
+        assert_eq!(
+            parts[2],
+            serde_json::json!(0),
+            "unassigned light child renders nothing"
+        );
+        assert_eq!(parts[3], serde_json::json!(0), "no height either");
+        assert_eq!(parts[4], serde_json::json!(true), "host wraps the shadow box");
+        assert_eq!(parts[5], serde_json::json!(true), "host height tracks shadow content");
+    }
+
+    /// Slot composition: slotted light children render AT their slot's
+    /// position inside the shadow tree, and a slot with no assignment serves
+    /// its fallback children in place.
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn slotted_light_children_render_at_the_slot_position() {
+        let mut rt = setup_runtime(
+            r#"<my-el id="h"><b slot="t" id="slotted" style="display:block;width:44px;height:11px">S</b></my-el>"#,
+        );
+        let result = rt.evaluate(r#"
+            const host = document.getElementById('h');
+            const sr = host.attachShadow({ mode: 'open' });
+            sr.innerHTML = '<div style="height:10px" id="pad"></div><slot name="t" id="sl"></slot><slot name="none" id="fb"><i id="fi" style="display:block;width:22px;height:7px"></i></slot>';
+            const slotted = document.getElementById('slotted').getBoundingClientRect();
+            const pad = sr.getElementById('pad').getBoundingClientRect();
+            const fb = sr.getElementById('fi').getBoundingClientRect();
+            const slotBox = sr.getElementById('sl').getBoundingClientRect();
+            return [slotted.width, slotted.height,
+                    Math.abs(slotted.y - (pad.y + pad.height)) < 0.5,
+                    fb.width, slotBox.width];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        assert_eq!(parts[0], serde_json::json!(44), "slotted child keeps its own size");
+        assert_eq!(parts[1], serde_json::json!(11), "slotted child height");
+        assert_eq!(
+            parts[2],
+            serde_json::json!(true),
+            "slotted child sits at the slot's position (after the pad div)"
+        );
+        assert_eq!(parts[3], serde_json::json!(22), "fallback child renders in the empty slot");
+        assert_eq!(parts[4], serde_json::json!(0), "the slot element itself never boxes");
+    }
+
+    /// Shadow `<style>` joins the CSS pool and styles shadow content; rules
+    /// match by class across the tree scopes (global-pool approximation).
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn shadow_style_sheets_style_shadow_content() {
+        let mut rt = setup_runtime(r#"<div id="host"></div>"#);
+        let result = rt.evaluate(r#"
+            const host = document.getElementById('host');
+            const sr = host.attachShadow({ mode: 'open' });
+            sr.innerHTML = '<style>.card { width: 120px; height: 55px; }</style><div class="card" id="c"></div>';
+            const c = sr.getElementById('c');
+            const r = c.getBoundingClientRect();
+            const cs = getComputedStyle(c);
+            return [r.width, r.height, cs.width];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        assert_eq!(parts[0], serde_json::json!(120), "shadow style sizes the card");
+        assert_eq!(parts[1], serde_json::json!(55), "height from the shadow sheet");
+        assert_eq!(parts[2], serde_json::json!("120px"), "getComputedStyle sees the shadow rule");
+    }
+
     /// Regression for #105: `HTMLFormElement` must expose `.elements` so
     /// frameworks that probe form field collections work.
     #[test]

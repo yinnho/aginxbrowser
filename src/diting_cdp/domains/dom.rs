@@ -308,7 +308,14 @@ pub async fn handle(
 /// the node exists but has no rendered box — display:none subtrees, detached
 /// nodes, comments. Viewport roots (document node; html/body when no layout
 /// ran yet) answer the viewport rect like gBCR does, matching Chrome's
-/// document-root success.
+/// document-root success. A zero-area answer also collapses to null:
+/// `layout_rect` fabricates [0,0,0,0] for a node the layout run covered but
+/// gave no box (display:none, detached, unslotted shadow content — Chrome's
+/// boxless gBCR contract), and that is not a degenerate real box (an
+/// authored 0x0 element at the origin is the one ambiguous overlap,
+/// accepted divergence). Note the JS body is one backslash-continued
+/// Rust line, so `//` comments inside it swallow the rest of the script —
+/// keep commentary here, in Rust.
 fn node_box_probe_code(node_id: u64) -> String {
     format!(
         "(function() {{\
@@ -326,7 +333,7 @@ fn node_box_probe_code(node_id: u64) -> String {
             if (!r && el && ((el._isViewportRoot && el._isViewportRoot()) || el.nodeType === 9)) {{\
                 r = [0, 0, globalThis.innerWidth || 1280, globalThis.innerHeight || 720];\
             }}\
-            if (!r) return null;\
+            if (!r || (r[2] === 0 && r[3] === 0)) return null;\
             var x = r[0], y = r[1], w = r[2], h = r[3];\
             return [x, y, x + w, y, x + w, y + h, x, y + h, w, h];\
         }})()",

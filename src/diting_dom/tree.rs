@@ -379,6 +379,14 @@ impl DomTree {
         self.inner.borrow().shadow_roots_by_host.get(&host).copied()
     }
 
+    /// Every registered shadow-root node, in no particular order. The
+    /// rendering passes (styles, layout, image prefetch) walk these in
+    /// addition to the ordinary tree so shadow content paints; ordinary DOM
+    /// traversal must stay tree-scoped.
+    pub fn shadow_roots(&self) -> Vec<NodeId> {
+        self.inner.borrow().shadow_roots.keys().copied().collect()
+    }
+
     pub fn shadow_root_info(&self, root: NodeId) -> Option<ShadowRoot> {
         self.inner.borrow().shadow_roots.get(&root).copied()
     }

@@ -1082,7 +1082,24 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             });
             match rect {
                 Some([x, y, w, h]) => format!("[{},{},{},{}]", x, y, w, h),
-                None => "null".into(),
+                None => {
+                    // A valid layout run for this epoch says the element has
+                    // NO box (display:none, detached, or composed-tree-hidden:
+                    // an unslotted light child / a slot element) — Chrome
+                    // answers an all-zero DOMRect there. "null" stays reserved
+                    // for an invalid nid or a failed layout run, the cases
+                    // where bootstrap's synthetic grid is the fallback.
+                    if gs
+                        .layout_cache
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|(e, _)| *e == epoch)
+                    {
+                        "[0,0,0,0]".into()
+                    } else {
+                        "null".into()
+                    }
+                }
             }
         }
         // Elements in paint order (ascending), from the same layout run as
@@ -1291,6 +1308,14 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
                 _ => {}
             }
         }
+    }
+    // Shadow trees are invisible to the document-rooted query above, but
+    // their <style> blocks style shadow content (composed rendering, phase
+    // 2). They join the pool after the light sheets — same global-pool
+    // approximation the rule matcher uses.
+    for text in crate::diting_layout::shadow_style_texts(dom) {
+        css.push_str(&text);
+        css.push('\n');
     }
     let t_css = t0.elapsed();
     let rules = crate::diting_css::parse_stylesheet_for(
