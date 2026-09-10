@@ -1037,8 +1037,12 @@ pub(crate) async fn search_engine_health() -> Vec<crate::search::EngineHealth> {
 /// CAPTCHA, and the response looked identical to "no results found". Two
 /// of those three failures are caller errors and get a 400 with the valid
 /// vocabulary; the suspension case is surfaced per-engine in the response
-/// (`engine_errors`) instead.
-pub(crate) fn validate_search_request(req: &crate::SearchRequest) -> Result<(), String> {
+/// (`engine_errors`) instead. Catalog comes from the caller so tests drive
+/// it against mock registries.
+fn validate_search_request(
+    catalog: &[(String, Vec<String>)],
+    req: &crate::SearchRequest,
+) -> Result<(), String> {
     if let Some(tr) = req.time_range.as_deref() {
         if crate::search::SearchTimeRange::parse(tr).is_none() {
             return Err(format!(
@@ -1049,7 +1053,6 @@ pub(crate) fn validate_search_request(req: &crate::SearchRequest) -> Result<(), 
     if req.engines.is_empty() {
         return Ok(());
     }
-    let catalog = SEARCH_REGISTRY.engine_catalog();
     let requested: Vec<String> = req
         .categories
         .split(',')
@@ -1078,9 +1081,43 @@ pub(crate) fn validate_search_request(req: &crate::SearchRequest) -> Result<(), 
     Ok(())
 }
 
+/// Rescue candidates for the fallback round (v0.3.2 Windows report #9):
+/// the engines serving the requested categories that the caller did NOT
+/// name. Non-empty only when an explicit `engines` filter errored in its
+/// entirety — every named engine is in `engine_errors` — so a real
+/// zero-hits answer from any surviving engine stands as-is and the
+/// fallback never rewrites a deliberate engine choice that worked.
+fn fallback_candidates(
+    requested: &[String],
+    categories: &str,
+    engine_errors: &std::collections::BTreeMap<String, String>,
+    catalog: &[(String, Vec<String>)],
+) -> Vec<String> {
+    if requested.is_empty() || !requested.iter().all(|e| engine_errors.contains_key(e)) {
+        return Vec::new();
+    }
+    let cats: Vec<&str> = categories.split(',').map(|s| s.trim()).collect();
+    catalog
+        .iter()
+        .filter(|(n, cs)| {
+            !requested.iter().any(|r| r == n) && cs.iter().any(|c| cats.contains(&c.as_str()))
+        })
+        .map(|(n, _)| n.clone())
+        .collect()
+}
+
 /// /search: native search across Baidu/Bing/Sogou/Google, optionally grab body for top N results.
 pub async fn do_search(req: SearchRequest) -> Result<SearchResponse, SearchError> {
-    validate_search_request(&req).map_err(SearchError::BadRequest)?;
+    do_search_with_registry(&SEARCH_REGISTRY, req).await
+}
+
+/// [`do_search`] over a caller-supplied registry (tests drive mock engine
+/// sets through the full orchestration, fallback round included).
+async fn do_search_with_registry(
+    registry: &crate::search::SearchEngineRegistry,
+    req: SearchRequest,
+) -> Result<SearchResponse, SearchError> {
+    validate_search_request(&registry.engine_catalog(), &req).map_err(SearchError::BadRequest)?;
 
     // Step 0: short-lived in-process cache (v0.3.1 Windows report P2-5: the
     // same query re-fired back-to-back paid the full ~12s every time). Same
@@ -1103,8 +1140,55 @@ pub async fn do_search(req: SearchRequest) -> Result<SearchResponse, SearchError
             .and_then(crate::search::SearchTimeRange::parse),
     };
 
-    let (mut items, _raw_total, captcha_events, engine_errors) =
-        crate::search::native_search(&SEARCH_REGISTRY, &req.q, params, &req.categories, req.max_results).await;
+    let (mut items, _raw_total, mut captcha_events, mut engine_errors) =
+        crate::search::native_search(registry, &req.q, params, &req.categories, req.max_results).await;
+
+    // Step 1.5: fallback round. An explicit engines filter that failed in
+    // its entirety (every named engine errored, zero results) is usually a
+    // site-specific wall — the same query over the rest of the category's
+    // engines still answers. The substitution is disclosed via
+    // `fallback_engines`, never silent (v0.3.2 Windows report #9).
+    let mut fallback_engines = None;
+    if items.is_empty() {
+        let rescue = fallback_candidates(
+            &req.engines,
+            &req.categories,
+            &engine_errors,
+            &registry.engine_catalog(),
+        );
+        if !rescue.is_empty() {
+            tracing::info!(
+                "search: engines {:?} all failed, retrying over {:?}",
+                req.engines,
+                rescue
+            );
+            let fb_params = crate::search::SearchParams {
+                language: req.language.clone(),
+                pageno: 1,
+                use_proxy: req.use_proxy,
+                timeout_secs: 15,
+                engine_filter: rescue.clone(),
+                time_range: req
+                    .time_range
+                    .as_deref()
+                    .and_then(crate::search::SearchTimeRange::parse),
+            };
+            let (fb_items, _t, fb_events, fb_errors) = crate::search::native_search(
+                registry,
+                &req.q,
+                fb_params,
+                &req.categories,
+                req.max_results,
+            )
+            .await;
+            engine_errors.extend(fb_errors);
+            captcha_events.extend(fb_events);
+            if !fb_items.is_empty() {
+                items = fb_items;
+                fallback_engines = Some(rescue);
+            }
+        }
+    }
 
     // Step 2: optionally grab body for the top fetch_top results (concurrent).
     // Each fetch runs in its own blocking thread + current-thread runtime
@@ -1171,6 +1255,7 @@ pub async fn do_search(req: SearchRequest) -> Result<SearchResponse, SearchError
         results: items,
         captcha_events,
         engine_errors,
+        fallback_engines,
     };
     // Cache successes and clean zeros only. A walled answer (0 results +
     // engine errors) is transient by nature — caching it for the full TTL
@@ -1260,7 +1345,9 @@ pub(crate) mod test_util {
     /// diting_browser's NetGuard. The field is the point: holding the guard
     /// is what serializes against tests asserting on the unset state.
     #[allow(dead_code)] // the guard field is never read; holding it is the effect
-    pub(crate) struct NetEnvGuard(std::sync::MutexGuard<'static, ()>);    impl Drop for NetEnvGuard {
+    pub(crate) struct NetEnvGuard(std::sync::MutexGuard<'static, ()>);
+
+    impl Drop for NetEnvGuard {
         fn drop(&mut self) {
             std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
         }
@@ -1761,5 +1848,143 @@ mod cookie_injection_tests {
             req.cookies[0],
             "compat_test=not-a-credential; Domain=.tmall.com; Path=/; Secure"
         );
+    }
+}
+
+/// #355 / v0.3.2 Windows report #9: the fallback round's contract. An
+/// explicit `engines` filter that fails in its entirety gets one rescue
+/// pass over the category's remaining engines, the substitution is
+/// disclosed in `fallback_engines`, and — just as important — the two
+/// cases that must NOT trigger it: a partial survivor (any named engine
+/// answered, so the caller's choice worked) and a legit zero-hits answer
+/// (the engine served; there simply is nothing for this query).
+#[cfg(test)]
+mod search_fallback_tests {
+    use super::*;
+
+    enum MockBehavior {
+        /// CAPTCHA wall: the engine errors as walled and gets suspended.
+        Walled,
+        /// One clean hit carrying `url`.
+        Answer(&'static str),
+        /// Ok(vec![]) — the query genuinely has no results.
+        Empty,
+    }
+
+    struct MockEngine {
+        name: &'static str,
+        cats: &'static [&'static str],
+        behavior: MockBehavior,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::search::SearchEngine for MockEngine {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn categories(&self) -> &[&str] {
+            self.cats
+        }
+        async fn search(
+            &self,
+            _query: &str,
+            _params: crate::search::SearchParams,
+        ) -> Result<Vec<crate::search::RawSearchResult>, crate::search::SearchEngineError> {
+            match &self.behavior {
+                MockBehavior::Walled => Err(crate::search::SearchEngineError::Captcha {
+                    url: "https://walled.example.com/captcha".to_string(),
+                    captcha_type: None,
+                }),
+                MockBehavior::Empty => Ok(vec![]),
+                MockBehavior::Answer(url) => Ok(vec![crate::search::RawSearchResult {
+                    title: format!("hit from {}", self.name),
+                    url: url.to_string(),
+                    snippet: "s".to_string(),
+                    engine: self.name.to_string(),
+                    score: 1.0,
+                    cookies: vec![],
+                    js_extract_result: None,
+                    image: None,
+                }]),
+            }
+        }
+    }
+
+    /// wally (general) always walls; rescuer (general) answers; newsy (news)
+    /// answers but serves a different category.
+    fn mock_registry() -> crate::search::SearchEngineRegistry {
+        crate::search::SearchEngineRegistry::with_engines(vec![
+            Arc::new(MockEngine {
+                name: "wally",
+                cats: &["general"],
+                behavior: MockBehavior::Walled,
+            }),
+            Arc::new(MockEngine {
+                name: "rescuer",
+                cats: &["general"],
+                behavior: MockBehavior::Answer("https://rescuer.example.com/a"),
+            }),
+            Arc::new(MockEngine {
+                name: "newsy",
+                cats: &["news"],
+                behavior: MockBehavior::Answer("https://newsy.example.com/n"),
+            }),
+        ])
+    }
+
+    fn search_req(q: &str, engines: &[&str]) -> SearchRequest {
+        serde_json::from_str(
+            &serde_json::json!({ "q": q, "engines": engines, "categories": "general" }).to_string(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn all_named_engines_walled_falls_back_and_discloses() {
+        let resp = do_search_with_registry(&mock_registry(), search_req("fb wall probe q7x", &["wally"]))
+            .await
+            .unwrap();
+        assert!(!resp.results.is_empty(), "rescuer must have served: {resp:?}");
+        assert_eq!(resp.fallback_engines, Some(vec!["rescuer".to_string()]),
+            "only same-category engines substitute; newsy (news) must stay out: {:?}",
+            resp.fallback_engines);
+        assert!(resp.results.iter().all(|r| r.engines == vec!["rescuer"]));
+        assert!(resp.engine_errors.contains_key("wally"), "the wall stays visible: {:?}", resp.engine_errors);
+        assert!(
+            resp.captcha_events.iter().any(|e| e.engine == "wally" && e.hit_count == 1),
+            "captcha_events carries the wall with its backoff step: {:?}",
+            resp.captcha_events
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_survivor_never_triggers_fallback() {
+        let resp = do_search_with_registry(
+            &mock_registry(),
+            search_req("fb partial probe q8x", &["wally", "rescuer"]),
+        )
+        .await
+        .unwrap();
+        assert!(!resp.results.is_empty(), "rescuer answered directly: {resp:?}");
+        assert_eq!(resp.fallback_engines, None,
+            "a working named engine means the caller's choice is honored as-is");
+        assert!(resp.results.iter().all(|r| r.engines == vec!["rescuer"]));
+        assert!(resp.engine_errors.contains_key("wally"), "the dead engine is still reported: {:?}", resp.engine_errors);
+    }
+
+    #[tokio::test]
+    async fn legit_zero_hits_stands_without_fallback() {
+        let registry = crate::search::SearchEngineRegistry::with_engines(vec![Arc::new(MockEngine {
+            name: "honest",
+            cats: &["general"],
+            behavior: MockBehavior::Empty,
+        })]);
+        let resp = do_search_with_registry(&registry, search_req("fb zero probe q9x", &["honest"]))
+            .await
+            .unwrap();
+        assert!(resp.results.is_empty(), "the answer is genuinely empty");
+        assert_eq!(resp.fallback_engines, None,
+            "an engine that answered with zero hits is an answer, not a failure");
+        assert!(resp.engine_errors.is_empty(), "nothing errored: {:?}", resp.engine_errors);
     }
 }

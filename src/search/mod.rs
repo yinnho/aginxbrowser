@@ -212,6 +212,20 @@ impl SearchEngineRegistry {
         self.engines.push(Arc::new(engine));
     }
 
+    /// Registry from a caller-supplied engine list — the production set is
+    /// fixed in `new()`, but the fallback/orchestration layer above (and
+    /// its tests) needs to drive `native_search` against a controlled set
+    /// of engines (e.g. one that always walls, one that answers).
+    /// Test-only: the binary crate exports nothing, so an un-gated
+    /// constructor reads as dead code in non-test builds.
+    #[cfg(test)]
+    pub fn with_engines(engines: Vec<Arc<dyn SearchEngine>>) -> Self {
+        SearchEngineRegistry {
+            engines,
+            state: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
     /// Check if an engine is currently suspended.
     #[allow(dead_code)]
     async fn is_suspended(&self, name: &str) -> bool {

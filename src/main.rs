@@ -657,6 +657,14 @@ pub struct SearchResponse {
     /// (v0.3.1 Windows report P1-1).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub engine_errors: std::collections::BTreeMap<String, String>,
+    /// Engines that served in place of an explicitly requested set where
+    /// EVERY named engine errored (CAPTCHA wall / transient failure): the
+    /// same query re-ran over the rest of the category's engines so a
+    /// site-specific wall doesn't leave the agent empty-handed, and the
+    /// substitution is disclosed here — never silent (v0.3.2 Windows
+    /// report #9). Absent when no fallback ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_engines: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
