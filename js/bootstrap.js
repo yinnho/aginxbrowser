@@ -2659,6 +2659,14 @@ class Element extends Node {
     if (this.localName === 'iframe' && v && v !== 'about:blank') {
       this._loadIframeSrc(v);
     }
+    // MSE attach: setting a media element's src to a MediaSource blob URL
+    // flips the source 'open' and fires 'sourceopen' asynchronously (see
+    // the MediaSource stub near canPlayType).
+    if ((this.localName === 'video' || this.localName === 'audio')
+        && typeof v === 'string' && v.startsWith('blob:')
+        && globalThis.__mediaSources && globalThis.__mediaSources[v]) {
+      globalThis.__mediaSources[v]._attachToElement(this);
+    }
   }
   _loadIframeSrc(url) {
     let fullUrl = url;
@@ -2745,6 +2753,18 @@ class Element extends Node {
       set(v) { sel.selectedIndex = v; },
     });
     return opts;
+  }
+  // `options` only exists on HTMLSelectElement in Chrome, so assigning it on
+  // any other element is a plain own-property expando there. bilibili's
+  // player binds component state as `el.options = ...` during mount; with
+  // only the shared-prototype getter (see the labels note at _htmlInterface)
+  // that assignment threw and killed the whole player init. A select keeps
+  // the readonly accessor (silent no-op assignment, spec behavior).
+  set options(v) {
+    if (this.localName === 'select') return;
+    Object.defineProperty(this, 'options', {
+      value: v, writable: true, configurable: true, enumerable: true,
+    });
   }
   add(item, before = null) {
     if (this.localName !== 'select') {
@@ -3284,6 +3304,22 @@ class Document extends Node {
   // automation navigations. Computed by the navigation layer per
   // strict-origin-when-cross-origin (upstream edb1785).
   get referrer() { return _domParse("document_referrer") ?? ""; }
+  // document.domain: legacy same-origin surface. The getter returns the
+  // origin's host — bilibili's log-reporter scopes its b_lsid cookie with
+  // `document.domain.split(".")`, and an undefined domain took the whole
+  // script down there. The setter is the legacy relaxation: assigning the
+  // same host or a parent suffix sticks, anything else is a SecurityError.
+  get domain() {
+    if (this._domainOverride !== undefined) return this._domainOverride;
+    const loc = globalThis.location;
+    return (loc && loc.hostname) || "";
+  }
+  set domain(v) {
+    v = String(v);
+    const cur = this.domain;
+    if (v === cur || (v && cur.endsWith("." + v))) this._domainOverride = v;
+    else throw new DOMException("Illegal document.domain value \"" + v + "\"", "SecurityError");
+  }
   get location() { return globalThis.location; }
   set location(url) { _OPS.op_navigate(_resolveUrl(String(url)), 'GET', ''); }
   get defaultView() { return globalThis; }
@@ -8868,6 +8904,469 @@ Element.prototype.canPlayType = function(type) {
 };
 _markNative(Element.prototype.canPlayType);
 
+// ---- MSE (MediaSource) surface ----------------------------------------
+//
+// DASH/HLS players gate their whole mount on
+// `window.MediaSource && MediaSource.isTypeSupported(...)` — bilibili's
+// nano player leaves the player docker EMPTY without it (its /video/ pages
+// are dash-only, no durl fallback). This stub satisfies the capability
+// probes and runs the attach handshake (createObjectURL → video.src =
+// blob:… → async 'sourceopen'); SourceBuffers accept appended segments and
+// drop the bytes. Playback itself is not simulated — the goal is player
+// DOM/UI mounting for automation; pulling the real stream stays the
+// sniffer's job (session_network filter=media).
+function _mediaRanges(pairs) {
+  return {
+    length: pairs.length,
+    start(i) {
+      i = i >>> 0;
+      if (i >= pairs.length) throw new DOMException("Failed to execute 'start' on 'TimeRanges': The index provided (" + i + ") is greater than or equal to the maximum bound (" + pairs.length + ").", "IndexSizeError");
+      return pairs[i][0];
+    },
+    end(i) {
+      i = i >>> 0;
+      if (i >= pairs.length) throw new DOMException("Failed to execute 'end' on 'TimeRanges': The index provided (" + i + ") is greater than or equal to the maximum bound (" + pairs.length + ").", "IndexSizeError");
+      return pairs[i][1];
+    },
+  };
+}
+const _EMPTY_RANGES = _mediaRanges([]);
+
+// Minimal ISO-BMFF (fMP4) walker — enough to derive real buffered ranges
+// from the bytes a page appends, the way Chrome's demuxer does. Appends feed
+// us init segments (moov: per-track timescale + trex default durations) then
+// media segments (moof: tfdt base time + trun sample durations). WebM is not
+// parsed — its appends just leave buffered untouched.
+function _mp4BoxIter(u8, start, end, fn) {
+  let p = start;
+  while (p + 8 <= end) {
+    let size = (u8[p] << 24) | (u8[p + 1] << 16) | (u8[p + 2] << 8) | u8[p + 3];
+    const type = String.fromCharCode(u8[p + 4], u8[p + 5], u8[p + 6], u8[p + 7]);
+    let body = p + 8;
+    if (size === 1) {
+      if (p + 16 > end) break;
+      size = 0;
+      for (let k = 8; k < 16; k++) size = size * 256 + u8[p + k];
+      body = p + 16;
+    } else if (size === 0) {
+      size = end - p;
+    }
+    if (size < 8 || p + size > end) break;
+    if (fn(type, body, p + size) === false) return;
+    p += size;
+  }
+}
+function _mp4Scan(u8, knownTracks) {
+  const out = { initTracks: {}, segments: [] };
+  if (knownTracks) for (const id of Object.keys(knownTracks)) out.initTracks[id] = knownTracks[id];
+  // bilibili's moov puts mvex BEFORE trak, so a trex can arrive before its
+  // track exists — park the defaults and apply at trak registration.
+  const pendingTrex = {};
+  _mp4BoxIter(u8, 0, u8.length, (type, body, boxEnd) => {
+    if (type === 'moov') {
+      _mp4BoxIter(u8, body, boxEnd, (t2, b2, e2) => {
+        if (t2 === 'trak') {
+          let id = 0, timescale = 0;
+          _mp4BoxIter(u8, b2, e2, (t3, b3, e3) => {
+            if (t3 === 'tkhd' && b3 + 16 <= e3) {
+              const v = u8[b3];
+              id = (u8[b3 + (v ? 20 : 12)] << 24) | (u8[b3 + (v ? 21 : 13)] << 16) | (u8[b3 + (v ? 22 : 14)] << 8) | u8[b3 + (v ? 23 : 15)];
+            } else if (t3 === 'mdia') {
+              _mp4BoxIter(u8, b3, e3, (t4, b4, e4) => {
+                if (t4 === 'mdhd') {
+                  const v = u8[b4];
+                  // v0: timescale u32 @12; v1: u32 @20 (creation/mod are u64)
+                  if (b4 + (v ? 24 : 16) <= e4) {
+                    timescale = (u8[b4 + (v ? 20 : 12)] << 24) | (u8[b4 + (v ? 21 : 13)] << 16) | (u8[b4 + (v ? 22 : 14)] << 8) | u8[b4 + (v ? 23 : 15)];
+                  }
+                }
+              });
+            }
+          });
+          if (id && timescale) out.initTracks[id] = { timescale, defaultDur: pendingTrex[id] || 0 };
+        } else if (t2 === 'mvex') {
+          _mp4BoxIter(u8, b2, e2, (t3, b3, e3) => {
+            if (t3 === 'trex' && b3 + 16 <= e3) {
+              // ver/flags, track_ID @4, description_index @8, default_duration @12
+              const tid = (u8[b3 + 4] << 24) | (u8[b3 + 5] << 16) | (u8[b3 + 6] << 8) | u8[b3 + 7];
+              const dur = (u8[b3 + 12] << 24) | (u8[b3 + 13] << 16) | (u8[b3 + 14] << 8) | u8[b3 + 15];
+              if (out.initTracks[tid]) out.initTracks[tid].defaultDur = dur;
+              else pendingTrex[tid] = dur;
+            }
+          });
+        }
+      });
+    } else if (type === 'moof') {
+      _mp4BoxIter(u8, body, boxEnd, (t2, b2, e2) => {
+        if (t2 !== 'traf') return;
+        let trackId = 0, tfdt = null, tfhdDur = 0, trun = null;
+        _mp4BoxIter(u8, b2, e2, (t3, b3, e3) => {
+          if (t3 === 'tfhd' && b3 + 8 <= e3) {
+            let q = b3 + 4;
+            // FullBox flags are the 3 bytes AFTER the version byte.
+            const flags = (u8[b3 + 1] << 16) | (u8[b3 + 2] << 8) | u8[b3 + 3];
+            if (flags & 0x01) q += 8;
+            if (flags & 0x02) q += 4;
+            if (q + 4 <= e3) trackId = (u8[q] << 24) | (u8[q + 1] << 16) | (u8[q + 2] << 8) | u8[q + 3];
+            // 0x08 default_sample_duration sits right after track_ID
+            if ((flags & 0x08) && q + 8 <= e3) {
+              tfhdDur = (u8[q + 4] << 24) | (u8[q + 5] << 16) | (u8[q + 6] << 8) | u8[q + 7];
+            }
+          } else if (t3 === 'tfdt' && b3 + 8 <= e3) {
+            const v = u8[b3];
+            tfdt = 0;
+            const n = v ? 8 : 4;
+            for (let k = 4; k < 4 + n; k++) tfdt = tfdt * 256 + u8[b3 + k];
+          } else if (t3 === 'trun' && b3 + 8 <= e3) {
+            const v = u8[b3];
+            const flags = (u8[b3 + 1] << 16) | (u8[b3 + 2] << 8) | u8[b3 + 3];
+            const count = (u8[b3 + 4] << 24) | (u8[b3 + 5] << 16) | (u8[b3 + 6] << 8) | u8[b3 + 7];
+            let q = b3 + 8;
+            if (flags & 0x01) q += 4;
+            if (flags & 0x04) q += 4;
+            let total = 0;
+            const perSample = (flags & 0x100) !== 0;
+            for (let s = 0; s < count && q + 4 <= e3; s++) {
+              if (perSample) {
+                total += (u8[q] << 24) | (u8[q + 1] << 16) | (u8[q + 2] << 8) | u8[q + 3];
+                q += 4;
+              }
+              if (flags & 0x200) q += 4;
+              if (flags & 0x400) q += 4;
+              if (flags & 0x800) q += (v ? 8 : 4);
+            }
+            trun = { count, perSample, total };
+          }
+        });
+        const track = trackId ? (out.initTracks[trackId] || null) : null;
+        // Prefer remembered init config; a segment before its init is a no-op.
+        if (!track || tfdt == null) return;
+        const def = tfhdDur || track.defaultDur;
+        let durUnits = 0;
+        if (trun && trun.perSample) durUnits = trun.total;
+        else if (trun && def) durUnits = def * trun.count;
+        if (durUnits > 0) {
+          out.segments.push({ trackId, start: tfdt / track.timescale, end: (tfdt + durUnits) / track.timescale });
+        }
+      });
+    }
+  });
+  return out;
+}
+
+class _SourceBufferList extends Array {
+  item(i) { return this[i] || null; }
+}
+
+// MSE objects are EventTargets but NOT Nodes — Chrome says
+// `new MediaSource() instanceof Node` is false. The global EventTarget in
+// this realm is the DOM Node stand-in (see the binding block near
+// Document/Element), so extending it would both route dispatch through the
+// tree-flavored path (which silently no-ops on nid-less objects — the
+// 'sourceopen' handshake never fired) and make instanceof Node true. A
+// self-contained registry keeps the surface right; same shape
+// XMLHttpRequestEventTarget uses. The on<type> property dispatch is
+// load-bearing here: onsourceopen/onsourceended and SourceBuffer's
+// onupdate/onupdateend/onerror/onabort are standard IDL attributes.
+class _MseEventTarget {
+  addEventListener(type, handler) {
+    if (!this._listeners) this._listeners = {};
+    (this._listeners[type] || (this._listeners[type] = [])).push(handler);
+  }
+  removeEventListener(type, handler) {
+    if (this._listeners && this._listeners[type]) {
+      this._listeners[type] = this._listeners[type].filter(h => h !== handler);
+    }
+  }
+  dispatchEvent(event) {
+    if (!event || !event.type) return false;
+    const ev = (typeof event === 'object') ? event : { type: event };
+    ev.target = ev.target || this;
+    ev.currentTarget = ev.currentTarget || this;
+    const handlers = (this._listeners && this._listeners[ev.type]) || [];
+    for (const h of handlers) { try { h.call(this, ev); } catch (e) {} }
+    const prop = 'on' + ev.type;
+    if (typeof this[prop] === 'function') {
+      try { this[prop](ev); } catch (e) {}
+    }
+    return true;
+  }
+}
+_markNative(_MseEventTarget);
+_markNative(_MseEventTarget.prototype.addEventListener);
+_markNative(_MseEventTarget.prototype.removeEventListener);
+_markNative(_MseEventTarget.prototype.dispatchEvent);
+
+globalThis.SourceBuffer = class SourceBuffer extends _MseEventTarget {
+  constructor(ms, mime) {
+    super();
+    this._ms = ms;
+    this.mimeType = mime;
+    this.mode = 'segments';
+    this.updating = false;
+    this.timestampOffset = 0;
+    this.appendWindowStart = 0;
+    this.appendWindowEnd = Infinity;
+    this._ranges = [];
+    this._tracks = {};
+  }
+  get buffered() {
+    // Chrome hands out a fresh TimeRanges object per access.
+    return _mediaRanges(this._ranges.map(r => [r[0], r[1]]));
+  }
+  appendBuffer(data) {
+    if (this._ms.readyState !== 'open' || this.updating) {
+      throw new DOMException("Failed to execute 'appendBuffer' on 'SourceBuffer': this SourceBuffer cannot be appended to right now.", 'InvalidStateError');
+    }
+    if (data == null) {
+      throw new TypeError("Failed to execute 'appendBuffer' on 'SourceBuffer': 1 argument required, but only 0 present.");
+    }
+    const bytes = data.buffer ? new Uint8Array(data.buffer, data.byteOffset || 0, data.byteLength) : new Uint8Array(data);
+    this.updating = true;
+    // Chrome completes appends off-thread; a microtask keeps the
+    // update/updateend contract without starving the player's loop.
+    queueMicrotask(() => {
+      this.updating = false;
+      this._applyAppend(bytes);
+      this.dispatchEvent(new Event('update'));
+      this.dispatchEvent(new Event('updateend'));
+      this._ms._afterAppend();
+    });
+  }
+  // Derive real buffered ranges from the appended bytes (moov seeds track
+  // config; moof frames carry tfdt base + durations). Unparseable bytes are
+  // a silent no-op — same as Chrome ignoring a partial box.
+  _applyAppend(bytes) {
+    if (!bytes || bytes.length < 8) return;
+    let scan;
+    try { scan = _mp4Scan(bytes, this._tracks); } catch (_) { return; }
+    for (const id of Object.keys(scan.initTracks)) {
+      this._tracks[id] = scan.initTracks[id];
+    }
+    for (const seg of scan.segments) {
+      const merged = this._ranges.filter(r => !(r[1] < seg.start - 0.001 || r[0] > seg.end + 0.001));
+      const start = Math.min(seg.start, ...merged.map(r => r[0]), seg.start);
+      const end = Math.max(seg.end, ...merged.map(r => r[1]), seg.end);
+      this._ranges = this._ranges.filter(r => merged.indexOf(r) === -1);
+      this._ranges.push([start, end]);
+      this._ranges.sort((a, b) => a[0] - b[0]);
+    }
+  }
+  remove(start, end) {
+    if (this._ms.readyState !== 'open' || this.updating) {
+      throw new DOMException("Failed to execute 'remove' on 'SourceBuffer'.", 'InvalidStateError');
+    }
+    this.updating = true;
+    const s = Number(start) || 0, e = Number(end) || 0;
+    queueMicrotask(() => {
+      this.updating = false;
+      this._ranges = this._ranges.filter(r => r[1] <= s + 0.001 || r[0] >= e - 0.001);
+      this.dispatchEvent(new Event('update'));
+      this.dispatchEvent(new Event('updateend'));
+    });
+  }
+  changeType(mime) { this.mimeType = String(mime); }
+  abort() {
+    if (this.updating) {
+      this.updating = false;
+      this.dispatchEvent(new Event('abort'));
+      this.dispatchEvent(new Event('updateend'));
+    }
+  }
+};
+
+globalThis.MediaSource = class MediaSource extends _MseEventTarget {
+  constructor() {
+    super();
+    this._explicitDuration = undefined;
+    this._mediaElement = null;
+    this.sourceBuffers = new _SourceBufferList();
+    this.activeSourceBuffers = new _SourceBufferList();
+  }
+  get readyState() { return this._readyState || 'closed'; }
+  set readyState(v) { this._readyState = v; }
+  // Spec: with no explicit duration set, duration is the highest end
+  // timestamp across source buffers.
+  get duration() {
+    if (this._explicitDuration !== undefined) return this._explicitDuration;
+    let max = 0;
+    for (const sb of this.sourceBuffers) {
+      if (sb._ranges.length) max = Math.max(max, sb._ranges[sb._ranges.length - 1][1]);
+    }
+    return max > 0 ? max : NaN;
+  }
+  set duration(v) {
+    const d = Number(v);
+    if (this.readyState !== 'open') {
+      throw new DOMException("Failed to set the 'duration' property on 'MediaSource': The MediaSource's readyState is not 'open'.", 'InvalidStateError');
+    }
+    this._explicitDuration = d;
+  }
+  static isTypeSupported(type) {
+    if (arguments.length === 0) {
+      throw new TypeError("Failed to execute 'isTypeSupported' on 'MediaSource': 1 argument required, but only 0 present.");
+    }
+    // Generous by design: mount gates probe mp4/webm container strings
+    // (avc1/hevc/av01 codec variants all ride video/mp4).
+    return /^(?:audio|video)\/(?:mp4|webm)\b/i.test(String(type));
+  }
+  addSourceBuffer(mime) {
+    if (this.readyState !== 'open') {
+      throw new DOMException("Failed to execute 'addSourceBuffer' on 'MediaSource': The MediaSource object is not attached", 'InvalidStateError');
+    }
+    const sb = new globalThis.SourceBuffer(this, String(mime));
+    this.sourceBuffers.push(sb);
+    return sb;
+  }
+  removeSourceBuffer(sb) {
+    const i = this.sourceBuffers.indexOf(sb);
+    if (i === -1) {
+      throw new DOMException("Failed to execute 'removeSourceBuffer' on 'MediaSource': The SourceBuffer provided is not contained in this MediaSource's sourceBuffers attribute.", 'NotFoundError');
+    }
+    this.sourceBuffers.splice(i, 1);
+  }
+  endOfStream() {
+    if (this.readyState === 'closed') {
+      throw new DOMException("Failed to execute 'endOfStream' on 'MediaSource': The MediaSource object is not attached", 'InvalidStateError');
+    }
+    if (this.readyState === 'open') {
+      this.readyState = 'ended';
+      this.dispatchEvent(new Event('sourceended'));
+    }
+  }
+  setLiveSeekableRange() {}
+  clearLiveSeekableRange() {}
+  // Attach handshake: a media element picked up our blob: URL. Chrome
+  // flips readyState synchronously and runs the resource selection
+  // algorithm on a task — 'loadstart' on the element, then 'sourceopen'
+  // here; players build their SourceBuffers inside that handler.
+  _attachToElement(el) {
+    if (this.readyState !== 'closed') return;
+    this._mediaElement = el;
+    el._mediaSource = this;
+    el._mediaNetworkState = 2; // NETWORK_LOADING
+    this.readyState = 'open';
+    setTimeout(() => {
+      el.dispatchEvent(new Event('loadstart'));
+      this.dispatchEvent(new Event('sourceopen'));
+    }, 0);
+  }
+  // Union of every SourceBuffer's ranges — what the attached element can
+  // read. Coalesces touching/overlapping ranges (0.001s tolerance, same
+  // as append-time merging).
+  _unionBuffered() {
+    const all = [];
+    for (const sb of this.sourceBuffers) {
+      for (const r of sb._ranges) all.push(r);
+    }
+    if (!all.length) return [];
+    all.sort((a, b) => a[0] - b[0]);
+    const merged = [[all[0][0], all[0][1]]];
+    for (let i = 1; i < all.length; i++) {
+      const last = merged[merged.length - 1];
+      if (all[i][0] <= last[1] + 0.001) {
+        if (all[i][1] > last[1]) last[1] = all[i][1];
+      } else {
+        merged.push([all[i][0], all[i][1]]);
+      }
+    }
+    return merged;
+  }
+  // Readiness ladder: every completed append re-derives the element's
+  // readyState from the union of buffered data, firing the same ladder
+  // Chrome's demuxer does as fMP4 bytes land — loadedmetadata (HAVE_METADATA),
+  // loadeddata (2), canplay (3), canplaythrough (4) — plus 'progress' and
+  // 'durationchange' when the derived duration moves. This is the mount
+  // signal bilibili's nano player parks on: player.connect() resolves a
+  // deferred from onCanplay, and no video ever mounts without it.
+  _afterAppend() {
+    const el = this._mediaElement;
+    if (!el) return;
+    const merged = this._unionBuffered();
+    if (!merged.length) return;
+    const ct = el.currentTime || 0;
+    // How far playable data extends from the playhead, if the playhead
+    // sits inside buffered data at all.
+    let aheadEnd = null;
+    for (const r of merged) {
+      if (ct >= r[0] - 0.001 && ct < r[1]) { aheadEnd = r[1]; break; }
+      if (r[0] > ct) break;
+    }
+    let ready = 1; // HAVE_METADATA — some data parsed
+    if (aheadEnd !== null) {
+      ready = 2; // HAVE_CURRENT_DATA
+      if (aheadEnd > ct + 0.05) ready = 3; // HAVE_FUTURE_DATA
+      const enough = Number.isFinite(this.duration) ? Math.min(this.duration, ct + 30) : ct + 30;
+      if (aheadEnd >= enough - 0.001) ready = 4; // HAVE_ENOUGH_DATA
+    }
+    const prev = el._mediaReadyState || 0;
+    el._mediaReadyState = ready;
+    el._mediaNetworkState = ready >= 4 ? 1 : 2; // NETWORK_IDLE : NETWORK_LOADING
+    el.dispatchEvent(new Event('progress'));
+    const dur = el.duration;
+    if (!Number.isNaN(dur) && dur !== el._lastReportedDuration) {
+      el._lastReportedDuration = dur;
+      el.dispatchEvent(new Event('durationchange'));
+    }
+    if (prev < 1) el.dispatchEvent(new Event('loadedmetadata'));
+    if (prev < 2 && ready >= 2) el.dispatchEvent(new Event('loadeddata'));
+    if (prev < 3 && ready >= 3) el.dispatchEvent(new Event('canplay'));
+    if (prev < 4 && ready >= 4) el.dispatchEvent(new Event('canplaythrough'));
+  }
+};
+_markNative(globalThis.MediaSource);
+_markNative(globalThis.MediaSource.isTypeSupported);
+globalThis.WebKitMediaSource = globalThis.MediaSource;
+
+// Media element state — the mount path reads these off the <video> the
+// player just created; `video.play()` returning undefined (players do
+// `video.play().catch(...)`) crashed init on bilibili before these.
+Object.defineProperties(Element.prototype, {
+  paused: { configurable: true, get() { return this._playing !== true; } },
+  ended: { configurable: true, get() { return false; } },
+  seeking: { configurable: true, get() { return false; } },
+  duration: { configurable: true, get() { return this._mediaDuration ?? (this._mediaSource ? this._mediaSource.duration : NaN); }, set(v) { this._mediaDuration = Number(v); } },
+  currentTime: { configurable: true, get() { return this._currentTime || 0; }, set(v) { this._currentTime = Number(v) || 0; } },
+  playbackRate: { configurable: true, get() { return this._playbackRate || 1; }, set(v) { this._playbackRate = Number(v) || 1; } },
+  readyState: { configurable: true, get() { return this._mediaReadyState || 0; } },
+  networkState: { configurable: true, get() { return this._mediaNetworkState || 0; } },
+  buffered: { configurable: true, get() { return this._mediaSource ? _mediaRanges(this._mediaSource._unionBuffered()) : _EMPTY_RANGES; } },
+  played: { configurable: true, get() { return _EMPTY_RANGES; } },
+  seekable: { configurable: true, get() {
+    if (!this._mediaSource) return _EMPTY_RANGES;
+    const d = this._mediaSource.duration;
+    return Number.isFinite(d) && d > 0 ? _mediaRanges([[0, d]]) : _EMPTY_RANGES;
+  } },
+});
+// HTMLMediaElement readiness/network constants — Chrome exposes them on
+// instances (players write `video.readyState === video.HAVE_ENOUGH_DATA`);
+// keep them non-enumerable like native.
+Object.defineProperties(Element.prototype, {
+  HAVE_NOTHING: { value: 0 }, HAVE_METADATA: { value: 1 }, HAVE_CURRENT_DATA: { value: 2 }, HAVE_FUTURE_DATA: { value: 3 }, HAVE_ENOUGH_DATA: { value: 4 },
+  NETWORK_EMPTY: { value: 0 }, NETWORK_IDLE: { value: 1 }, NETWORK_LOADING: { value: 2 }, NETWORK_NO_SOURCE: { value: 3 },
+});
+Element.prototype.play = function() {
+  const wasPaused = this._playing !== true;
+  this._playing = true;
+  if (wasPaused) {
+    setTimeout(() => {
+      try { this.dispatchEvent(new Event('play')); this.dispatchEvent(new Event('playing')); } catch (_) {}
+    }, 0);
+  }
+  return Promise.resolve();
+};
+Element.prototype.pause = function() {
+  const wasPlaying = this._playing === true;
+  this._playing = false;
+  if (wasPlaying) {
+    setTimeout(() => { try { this.dispatchEvent(new Event('pause')); } catch (_) {} }, 0);
+  }
+};
+Element.prototype.load = function() {};
+_markNative(Element.prototype.play);
+_markNative(Element.prototype.pause);
+_markNative(Element.prototype.load);
+
 _markNative(Element.prototype.getContext);
 _markNative(Element.prototype.toDataURL);
 _markNative(Element.prototype.toBlob);
@@ -9660,20 +10159,12 @@ globalThis.__blobStore = globalThis.__blobStore || {};
 // Blob objects by URL, registered synchronously — Worker construction reads
 // these so the createObjectURL → new Worker race can't lose.
 globalThis.__blobObjs = globalThis.__blobObjs || {};
-URL.createObjectURL = function(blob) {
-  // Chrome throws on missing / non-Blob input rather than minting a URL;
-  // a silent fallback string was both a compat gap and a fingerprint.
-  if (arguments.length === 0) {
-    throw new TypeError("Failed to execute 'createObjectURL' on 'URL': 1 argument required, but only 0 present.");
-  }
-  if (!blob || typeof blob.text !== 'function') {
-    throw new TypeError("Failed to execute 'createObjectURL' on 'URL': parameter 1 is not of type 'Blob'.");
-  }
-  // Chrome shape: blob:https://<origin>/<uuid> (blob:null/ for opaque
-  // origins). The old blob:obscura/ prefix named the engine to any page
-  // that inspected the returned URL.
-  // Chrome mints v4 UUIDs (version nibble at 14, variant nibble at 19);
-  // a fully-random id fails strict UUID parsers.
+// Chrome shape: blob:https://<origin>/<uuid> (blob:null/ for opaque
+// origins). The old blob:obscura/ prefix named the engine to any page
+// that inspected the returned URL.
+// Chrome mints v4 UUIDs (version nibble at 14, variant nibble at 19);
+// a fully-random id fails strict UUID parsers.
+function _mintBlobUrl() {
   const origin = (globalThis.location && globalThis.location.origin) || 'null';
   let u = '';
   while (u.length < 36) {
@@ -9687,7 +10178,26 @@ URL.createObjectURL = function(blob) {
       u += '0123456789abcdef'[Math.floor(Math.random() * 16)];
     }
   }
-  const id = 'blob:' + origin + '/' + u;
+  return 'blob:' + origin + '/' + u;
+}
+URL.createObjectURL = function(blob) {
+  // Chrome throws on missing / non-Blob input rather than minting a URL;
+  // a silent fallback string was both a compat gap and a fingerprint.
+  if (arguments.length === 0) {
+    throw new TypeError("Failed to execute 'createObjectURL' on 'URL': 1 argument required, but only 0 present.");
+  }
+  // MediaSource rides the same registry (the MSE stub's attach handshake
+  // looks the URL up when a media element's src is set).
+  if (blob && typeof blob === 'object' && blob instanceof globalThis.MediaSource) {
+    const id = _mintBlobUrl();
+    globalThis.__mediaSources = globalThis.__mediaSources || {};
+    globalThis.__mediaSources[id] = blob;
+    return id;
+  }
+  if (!blob || typeof blob.text !== 'function') {
+    throw new TypeError("Failed to execute 'createObjectURL' on 'URL': parameter 1 is not of type 'Blob'.");
+  }
+  const id = _mintBlobUrl();
   globalThis.__blobObjs[id] = blob;
   // Mirror into the Rust-side registry: import() and <script type=module>
   // of blob: URLs resolve through the module loader, which runs outside
@@ -9705,6 +10215,7 @@ URL.createObjectURL = function(blob) {
 URL.revokeObjectURL = function(url) {
   delete globalThis.__blobStore[url];
   delete globalThis.__blobObjs[url];
+  if (globalThis.__mediaSources) delete globalThis.__mediaSources[url];
   try { _OPS.op_blob_revoke(url); } catch (_) {}
 };
 

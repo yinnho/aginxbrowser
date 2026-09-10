@@ -2930,6 +2930,153 @@ mod tests {
         assert_eq!(p.evaluate("window.__ref"), serde_json::json!(""));
     }
 
+    // document.domain: the getter mirrors the origin's host (bilibili's
+    // log-reporter derives its cookie scope from `document.domain.split(".")`
+    // and died on undefined), and the legacy relaxation setter accepts the
+    // same host but rejects foreign values.
+    #[tokio::test(flavor = "current_thread")]
+    async fn document_domain_getter_and_legacy_setter() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![(
+            "/a",
+            200,
+            "<html><script>window.__d = document.domain; document.domain = '127.0.0.1'; window.__relaxed = document.domain; try { document.domain = 'evil.com'; window.__bad = 'no-throw'; } catch (e) { window.__bad = e.name; }</script></html>".into(),
+        )]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/a")).await.unwrap();
+        assert_eq!(p.evaluate("window.__d"), serde_json::json!("127.0.0.1"));
+        assert_eq!(p.evaluate("window.__relaxed"), serde_json::json!("127.0.0.1"));
+        assert_eq!(p.evaluate("window.__bad"), serde_json::json!("SecurityError"));
+    }
+
+    // `el.options = x` on a non-select element is an expando in Chrome (the
+    // accessor only exists on HTMLSelectElement). The shared-prototype
+    // getter made it a TypeError instead — bilibili's player binds component
+    // state that way and its whole init died on it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn element_options_assignment_is_expando_off_select() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![(
+            "/a",
+            200,
+            "<html><body><div id=d></div><select id=s><option>x</option></select><script>const d = document.getElementById('d'); d.options = {a: 1}; window.__d = d.options.a; window.__len = document.getElementById('s').options.length; try { document.getElementById('s').options = {a: 2}; } catch (e) { window.__sel = 'threw'; }</script></body></html>".into(),
+        )]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/a")).await.unwrap();
+        assert_eq!(p.evaluate("window.__d").as_f64().unwrap(), 1.0);
+        // select.options stays the live collection, assignment is a silent no-op.
+        assert_eq!(p.evaluate("window.__len").as_f64().unwrap(), 1.0);
+        assert_eq!(p.evaluate("window.__sel === 'threw'"), serde_json::json!(false));
+        assert_eq!(p.evaluate("document.getElementById('s').options.length").as_f64().unwrap(), 1.0);
+    }
+
+    // MSE surface: capability gate → attach handshake (createObjectURL →
+    // video.src = blob:… → async sourceopen) → SourceBuffer append cycle.
+    // bilibili's dash-only player leaves the player container empty
+    // without `window.MediaSource && isTypeSupported(...)` succeeding.
+    #[tokio::test(flavor = "current_thread")]
+    async fn mse_stub_attach_handshake_and_append_cycle() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![(
+            "/a",
+            200,
+            "<html><body><script>window.__log = []; if (window.MediaSource && MediaSource.isTypeSupported('video/mp4; codecs=\"avc1.42E01E,mp4a.40.2\"')) { const ms = new MediaSource(); const url = URL.createObjectURL(ms); const v = document.createElement('video'); document.body.appendChild(v); v.src = url; ms.addEventListener('sourceopen', function() { const sb = ms.addSourceBuffer('video/mp4; codecs=\"avc1.42E01E\"'); window.__log.push('open:' + ms.readyState + ':' + ms.sourceBuffers.length); sb.addEventListener('updateend', function() { window.__log.push('appended:' + sb.updating); ms.endOfStream(); window.__log.push('eos:' + ms.readyState); }); sb.appendBuffer(new Uint8Array([1,2,3])); }); } else { window.__log.push('no-mse'); }</script></body></html>".into(),
+        )]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/a")).await.unwrap();
+        // The handshake is async (sourceopen on a macrotask) and this page
+        // has no pending network, so nothing will turn the isolate's event
+        // loop after scripts finish — pump it the way wait_for_network_idle
+        // does (50ms bounded slices).
+        for _ in 0..5 {
+            if let Some(js) = p.js.as_mut() {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(50),
+                    js.run_event_loop(),
+                )
+                .await;
+            }
+        }
+        let log = p.evaluate("window.__log.join('|')").as_str().unwrap().to_string();
+        assert_eq!(log, "open:open:1|appended:false|eos:ended");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mse_ladder_derives_buffered_and_fires_readiness_events() {
+        let _g = net_test_guard();
+        // Hand-built fMP4 mirroring bilibili's muxer: moov with mvex/trex
+        // BEFORE trak (default durations ride the trex — the trun carries
+        // sizes only), tkhd track 1, mdhd timescale 1000, trex default
+        // duration 100; then two moofs (tfdt 0 and 1000, trun count 10
+        // each) → ranges [0,1] then coalesced [0,2]. The ladder must fire
+        // the Chrome readiness events on the element — bilibili's nano
+        // player only mounts from onCanplay.
+        let js = "window.__log = []; window.__events = []; \
+function u32(n){return [n>>>24&255,n>>>16&255,n>>>8&255,n&255];} \
+function box(t){let b=[];for(let i=1;i<arguments.length;i++)b=b.concat(arguments[i]);return [0,0,0,b.length+8].concat(t.split('').map(function(c){return c.charCodeAt(0);}),b);} \
+function fb(){return [0,0,0,0];} \
+const moov = box('moov', box('mvex', box('trex', fb(), u32(1), u32(0), u32(100), u32(0), u32(0))), box('trak', box('tkhd', fb(), u32(0), u32(0), u32(1), u32(0), u32(0)), box('mdia', box('mdhd', fb(), u32(0), u32(0), u32(1000), u32(0))))); \
+const moof0 = box('moof', box('traf', box('tfhd', fb(), u32(1)), box('tfdt', fb(), u32(0)), box('trun', fb(), u32(10)))); \
+const moof1 = box('moof', box('traf', box('tfhd', fb(), u32(1)), box('tfdt', fb(), u32(1000)), box('trun', fb(), u32(10)))); \
+const ms = new MediaSource(); const url = URL.createObjectURL(ms); \
+const v = document.createElement('video'); document.body.appendChild(v); \
+['loadstart','durationchange','loadedmetadata','loadeddata','canplay','canplaythrough','progress'].forEach(function(t){v.addEventListener(t,function(){window.__events.push(t);});}); \
+v.src = url; \
+ms.addEventListener('sourceopen', function(){ \
+  const sb = ms.addSourceBuffer('video/mp4'); \
+  const segs = [moov, moof0, moof1]; let i = 0; \
+  sb.addEventListener('updateend', function(){ \
+    if (sb.buffered.length) window.__log.push('b' + i + ':' + sb.buffered.start(0).toFixed(3) + '-' + sb.buffered.end(0).toFixed(3)); \
+    i++; \
+    if (i < segs.length) { sb.appendBuffer(new Uint8Array(segs[i])); return; } \
+    queueMicrotask(function(){ \
+      ms.duration = 5; \
+      window.__state = 'rs=' + v.readyState + '|nbuf=' + sb.buffered.length + '|' + sb.buffered.start(0).toFixed(3) + '-' + sb.buffered.end(0).toFixed(3) + '|dur=' + v.duration + '|msdur=' + ms.duration + '|net=' + v.networkState + '|HAVE=' + v.HAVE_ENOUGH_DATA + '|seek=' + v.seekable.length + ':' + v.seekable.end(0); \
+      window.__ev = window.__events.join(','); \
+    }); \
+  }); \
+  sb.appendBuffer(new Uint8Array(segs[0])); \
+});";
+        let port = local_http_server(vec![(
+            "/a",
+            200,
+            format!("<html><body><script>{js}</script></body></html>"),
+        )]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/a")).await.unwrap();
+        for _ in 0..5 {
+            if let Some(js) = p.js.as_mut() {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(50),
+                    js.run_event_loop(),
+                )
+                .await;
+            }
+        }
+        let log = p.evaluate("window.__log.join('|')").as_str().unwrap().to_string();
+        assert_eq!(log, "b1:0.000-1.000|b2:0.000-2.000", "buffered ranges from bytes, coalesced");
+        let state = p
+            .evaluate("window.__state || 'unset'")
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            state,
+            "rs=4|nbuf=1|0.000-2.000|dur=5|msdur=5|net=1|HAVE=4|seek=1:5",
+            "readiness/network/duration/seekable all derived"
+        );
+        let ev = p
+            .evaluate("window.__ev || 'unset'")
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            ev,
+            "loadstart,progress,durationchange,loadedmetadata,loadeddata,canplay,canplaythrough,progress,durationchange",
+            "Chrome-shaped readiness ladder on the element"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn sop_blocks_js_navigation_into_file_scheme() {
         let _g = net_test_guard();
