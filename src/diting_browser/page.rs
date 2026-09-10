@@ -1819,6 +1819,15 @@ impl Page {
         js.with_state(|st| crate::diting_js::ops::band_frame(st, scroll_x, scroll_y, viewport))
     }
 
+    /// The document's text-ink extent (CSS px) from the same cached layout
+    /// run band paint rides — the true content height of a bare-text body,
+    /// whose only element boxes (html/body) stretch to the viewport.
+    #[cfg(feature = "screenshot")]
+    pub fn text_ink_extent(&self) -> Option<(f32, f32)> {
+        let js = self.js.as_ref()?;
+        js.with_state(crate::diting_js::ops::text_ink_extent)
+    }
+
     /// Store a fetched image body for band paint (FIFO-capped; drops the
     /// layout cache since intrinsic sizes can reflow placeholder boxes).
     #[cfg(feature = "screenshot")]

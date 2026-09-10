@@ -7083,6 +7083,44 @@
         );
     }
 
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn test_bare_text_body_scroll_height_serves_text_extent() {
+        // blitz#444's text-only residual: a body holding nothing but text
+        // nodes has no element box past html/body — and those stretch to the
+        // viewport — so the element walk sees no overflow and the page could
+        // never scroll past its first screenful. The Text paint items carry
+        // the true extent (wrap-model estimate, errs high); the root fold
+        // lifts scrollHeight past innerHeight. 1000 chars at width 20 ≈ 9600
+        // estimated px, safely above the largest persona viewport (2080).
+        let html = format!(
+            "<html><body style=\"width:20px;font-size:16px;line-height:20px\">{}</body></html>",
+            "x".repeat(1000)
+        );
+        let mut rt = setup_runtime(&html);
+        let result = rt.evaluate(r#"
+            return [document.documentElement.scrollHeight > innerHeight,
+                    document.body.scrollHeight > innerHeight,
+                    document.documentElement.scrollHeight >= document.body.scrollHeight];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        assert_eq!(
+            parts[0],
+            serde_json::json!(true),
+            "bare text taller than the viewport must make the root scrollable"
+        );
+        assert_eq!(
+            parts[1],
+            serde_json::json!(true),
+            "body scrollHeight must serve the text extent, not its stretched box"
+        );
+        assert_eq!(
+            parts[2],
+            serde_json::json!(true),
+            "html extent contains the body extent"
+        );
+    }
+
     /// Upstream obscura #704: postMessage's targetOrigin argument must gate
     /// delivery — '*' or a matching origin delivers, a mismatched origin
     /// drops silently (browsers never throw), '/' requires same-origin with

@@ -953,6 +953,35 @@ fn lerp_premultiplied(a: [u8; 4], b: [u8; 4], k: f32) -> [u8; 4] {
     [ch(a[0], b[0]), ch(a[1], b[1]), ch(a[2], b[2]), out_a.round().clamp(0.0, 255.0) as u8]
 }
 
+/// Rough advance width: CJK/fullwidth ≈ 1em, everything else ≈ 0.6em.
+pub(crate) fn est_width(text: &str, font_size: f32) -> f32 {
+    text.chars()
+        .map(|c| if c > '\u{2E80}' { 1.0 } else { 0.6 })
+        .sum::<f32>()
+        * font_size
+}
+
+/// The page-space extent of the `Text` items alone, from the same wrap model
+/// the band pre-filter and `rasterize_wrapped` use (height = y + lines ×
+/// line-height, width = one wrapped line). Bare text owns no element box —
+/// html/body stretch to the viewport — so this is the only place its true
+/// extent exists: the scroll-union in `band_frame` and the print pump's page
+/// count both read it. Errs high, never low.
+pub fn text_ink_extent(items: &[PaintItem]) -> (f32, f32) {
+    let mut w = 0.0f32;
+    let mut h = 0.0f32;
+    for item in items {
+        if let PaintItem::Text { text, font_size, line_height, x, y, wrap_at, .. } = item {
+            let wrap = wrap_at.max(1.0);
+            let est = est_width(text, *font_size);
+            let lines = (est / wrap).ceil().max(1.0);
+            w = w.max(x + est.min(wrap));
+            h = h.max(y + lines * line_height);
+        }
+    }
+    (w, h)
+}
+
 /// Replay the paint items onto `out`. `Bg` rects come from taffy's rounded
 /// layout so the fill lands on whole pixels; each `Text` re-rasterizes
 /// wrapped at the width its containing block offered at measure time, so
@@ -980,13 +1009,6 @@ fn alpha_color(c: [u8; 4], a: f32) -> [u8; 4] {
 /// get a cheap bounds estimate first — a skip can only ever drop ink that
 /// the estimate put outside the band, and the estimate errs high.
 pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx: f32, dy: f32) {
-    // Rough advance width: CJK/fullwidth ≈ 1em, everything else ≈ 0.6em.
-    fn est_width(text: &str, font_size: f32) -> f32 {
-        text.chars()
-            .map(|c| if c > '\u{2E80}' { 1.0 } else { 0.6 })
-            .sum::<f32>()
-            * font_size
-    }
     // Whether a text tile's ink can reach the band. Line count comes from
     // the same wrap model rasterize_wrapped uses; `top` can lift ink above
     // the line-box top by up to a line's leading, so the top edge gets a

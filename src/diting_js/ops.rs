@@ -1141,7 +1141,8 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             let epoch = dom.epoch();
             ensure_layout_run(&gs, dom, epoch);
             let guard = gs.layout_cache.borrow();
-            let Some((_, (rects, ..))) = guard.as_ref().filter(|(e, _)| *e == epoch) else {
+            let Some((_, (rects, _, _, items))) = guard.as_ref().filter(|(e, _)| *e == epoch)
+            else {
                 return "null".into();
             };
             let Some(&[ox, oy, ow, oh]) = rects.get(&nid) else { return "null".into() };
@@ -1170,6 +1171,15 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 let (vw, vh) = gs.viewport;
                 max_w = max_w.max(vw);
                 max_h = max_h.max(vh);
+                // The element walk can't see bare text — html/body stretch
+                // to the viewport, so a text-only body's ink never lifts the
+                // union past vh and the page can't scroll past its first
+                // screenful. Fold the Text items' wrap-model extent in (the
+                // same fold `band_frame` applies, so JS scrollHeight and the
+                // pump's clamp agree on the range).
+                let (ink_w, ink_h) = crate::diting_layout::paint::text_ink_extent(items);
+                max_w = max_w.max(ink_w);
+                max_h = max_h.max(ink_h);
             }
             format!("[{},{}]", max_w, max_h)
         }
@@ -1456,6 +1466,17 @@ pub(crate) fn band_frame(
             }
         }
     }
+    // The rect union is element-only and the html/body boxes stretch to the
+    // viewport, so a bare-text body (no element children) reports no extent
+    // past the viewport — its ink lives only in the Text paint items. Folding
+    // their wrap-model extent in fixes both readers of content_h: the scroll
+    // clamp (blitz#444 fixed overflowing elements but text-only bodies still
+    // couldn't scroll past the first screenful) and the print pump's page
+    // count (which saw viewport-clamped scrollHeight and cut blank tail
+    // pages).
+    let (ink_w, ink_h) = crate::diting_layout::paint::text_ink_extent(items);
+    content_w = content_w.max(ink_w);
+    content_h = content_h.max(ink_h);
     let dx = (if scroll_x.is_finite() { scroll_x.max(0.0) } else { 0.0 })
         .min((content_w - vw).max(0.0));
     let dy = (if scroll_y.is_finite() { scroll_y.max(0.0) } else { 0.0 })
@@ -1496,6 +1517,21 @@ pub(crate) fn band_frame(
         },
         missing,
     ))
+}
+
+/// The page's text-ink extent alone ((width, height) in CSS px), from the
+/// same memoized layout run every band paint shares. For bare-text bodies —
+/// no element boxes past the stretched html/body — this is the only true
+/// extent; the print pump reads it as its content-height fallback when
+/// scrollHeight sits at the viewport clamp.
+#[cfg(feature = "screenshot")]
+pub(crate) fn text_ink_extent(gs: &JsState) -> Option<(f32, f32)> {
+    let dom = gs.dom.as_ref()?;
+    let epoch = dom.epoch();
+    ensure_layout_run(gs, dom, epoch);
+    let guard = gs.layout_cache.borrow();
+    let (_, (_, _, _, items)) = guard.as_ref().filter(|(e, _)| *e == epoch)?;
+    Some(crate::diting_layout::paint::text_ink_extent(items))
 }
 
 /// Insert a fetched image body into [`JsState::image_bytes`] (FIFO eviction

@@ -185,11 +185,17 @@ fn print_bands(page: &mut Page, page_h: f32) -> Result<Vec<Band>, PageError> {
     // innerHeight) — right for scrolling, wrong for pagination, where a
     // document shorter than the viewport must not grow blank tail pages.
     // Overflowing scrollHeight IS the content extent; otherwise the deepest
-    // block bottom is.
+    // block bottom is. A bare-text body has no block bottoms at all, so the
+    // text-ink extent off the same layout the band paint rides takes over —
+    // never scrollHeight, which for it is just the viewport wearing a hat.
+    // (The test viewport is persona-random, so the old numbers were flaky
+    // by whole pages.)
     let content_h = if sh.is_finite() && sh > 0.0 && sh > ih {
         sh as f32
     } else {
-        bottoms.last().copied().unwrap_or(sh as f32)
+        let block_h = bottoms.last().copied().unwrap_or(0.0);
+        let ink_h = page.text_ink_extent().map(|(_, h)| h).unwrap_or(0.0);
+        block_h.max(ink_h)
     };
     if !(content_h.is_finite() && content_h > 0.0) {
         return Err(PageError::EmptyDocument);
@@ -427,6 +433,27 @@ html,body{margin:0;padding:0}
 <div class="slide" id="s3"></div>
 </body></html>"#;
 
+    /// Text nodes only — body has no element children, so the probe's child
+    /// bottoms list is empty and body's own box stretches to the viewport:
+    /// the extent must come from the Text paint items. ~24 wrapped lines at
+    /// line-height 20px ≈ 480px: paginates at page_h 300 but is far shorter
+    /// than the 1000px test viewport — the old fallback (viewport-clamped
+    /// scrollHeight) turned this into 4 mostly-blank pages.
+    fn bare_text_html() -> &'static str {
+        let text = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do \
+             eiusmod tempor incididunt ut labore et dolore magna aliqua ut enim ad \
+             minim veniam quis nostrud exercitation ullamco laboris nisi ut aliquip \
+             ex ea commodo consequat duis aute irure dolor in reprehenderit in \
+             voluptate velit esse cillum dolore eu fugiat nulla pariatur ";
+        let html = format!(
+            r#"<!doctype html><html><head><style>
+html,body{{margin:0;padding:0;width:400px;font-size:16px;line-height:20px;color:#000}}
+</style></head><body>{}</body></html>"#,
+            text.repeat(3)
+        );
+        Box::leak(html.into_boxed_str())
+    }
+
     fn spawn_html_server(html: &'static str) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -557,6 +584,28 @@ html,body{margin:0;padding:0}
         };
         let err = render_page_set(&mut page, &opts).await.unwrap_err();
         assert!(matches!(err, PageError::PageCapExceeded { asked: 4, cap: 2 }), "{err}");
+    }
+
+    /// Bare-text body: no element children → the extent must come from the
+    /// text paint items (html/body stretch to the viewport, so even body's
+    /// own box lies). The text's ink extent (est. 480px) paginates into
+    /// exactly 2 pages, every page carries ink. The old fallback was
+    /// viewport-clamped scrollHeight = innerHeight — and the test viewport is
+    /// persona-random (902..2452 observed), so the bug paginated into a
+    /// persona-dependent 3-8 mostly-blank pages.
+    #[tokio::test(flavor = "current_thread")]
+    async fn bare_text_body_paginates_without_blank_tail() {
+        let mut page = navigated(bare_text_html(), "bare.html").await;
+        let opts = PagePumpOptions {
+            mode: PageMode::Print,
+            page_size: (400.0, 300.0),
+            max_pages: 10,
+        };
+        let set = render_page_set(&mut page, &opts).await.expect("bare text renders");
+        assert_eq!(set.pages.len(), 2, "ink extent 480px at page_h 300 is 2 pages: {:?}", set.pages.iter().map(|p| (p.origin_y, p.height)).collect::<Vec<_>>());
+        for (i, p) in set.pages.iter().enumerate() {
+            assert!(has_ink(&p_rgba_frame(p)), "page {i} is blank — blank-tail bug");
+        }
     }
 
     /// The PDF writer's shape: header with binary marker, per-page objects,
