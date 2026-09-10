@@ -1662,14 +1662,31 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             style.font_family = Some(v.to_string());
             true
         }
-        "background" | "background-color" => {
-            // `background` shorthand: take a leading color token if present.
-            let candidate = if name == "background" {
-                v.split_whitespace().next().unwrap_or("")
-            } else {
-                v
-            };
-            parse_color(candidate).map(|c| style.background_color = Some(c)).is_some()
+        "background-color" => parse_color(v).map(|c| style.background_color = Some(c)).is_some(),
+        // `background` shorthand: paren-aware token split, then classify —
+        // a *-gradient(...) function feeds background_image (the paint
+        // layer parses it there), a color token feeds background_color;
+        // repeat/position/attachment tokens are accepted and ignored (v1
+        // models no other layer longhand). Like every CSS shorthand it
+        // RESETS the sub-longhands first, so `background: #fff` after a
+        // gradient declaration clears the image.
+        "background" => {
+            style.background_image = None;
+            let mut applied = false;
+            for tok in split_sides(v) {
+                let t = tok.trim();
+                if let Some(c) = parse_color(t) {
+                    style.background_color = Some(c);
+                    applied = true;
+                } else if t.to_ascii_lowercase().contains("gradient(") {
+                    style.background_image = Some(t.to_string());
+                    applied = true;
+                } else if t.eq_ignore_ascii_case("none") || t.starts_with("url(") {
+                    // Recognized layer values this slice doesn't model.
+                    applied = true;
+                }
+            }
+            applied
         }
         "margin" => {
             let sides = expand_sides(v, fonts);
@@ -3157,6 +3174,41 @@ mod tests {
         assert!(parse_linear_gradient("url(https://x/y.png)").is_none());
         assert!(parse_linear_gradient("radial-gradient(red, blue)").is_none());
         assert!(parse_linear_gradient("linear-gradient(90deg, red)").is_none());
+    }
+
+    /// The `background` shorthand is how real sheets declare gradients —
+    /// the longhand-only v1 left those declarations dropped on the floor.
+    #[test]
+    fn background_shorthand_expands_gradient_and_color() {
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "background: linear-gradient(135deg, red, blue)"));
+        assert_eq!(
+            s.background_image.as_deref(),
+            Some("linear-gradient(135deg, red, blue)"),
+            "the whole gradient function is one paren-aware token"
+        );
+        assert_eq!(s.background_color, None, "no color token in the shorthand");
+
+        // Full layer: color + gradient + repeat, order-free.
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "background: #fff linear-gradient(to right, red, blue) no-repeat"));
+        assert_eq!(s.background_color, Some(Color(255, 255, 255, 255)));
+        assert_eq!(s.background_image.as_deref(), Some("linear-gradient(to right, red, blue)"));
+
+        // Shorthand RESETS the image longhand (CSS semantics): a plain
+        // color later in the cascade clears an earlier gradient.
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "background-image: linear-gradient(red, blue)");
+        assert!(apply_declarations(&mut s, "background: #f0f0f0"));
+        assert_eq!(s.background_image, None);
+        assert_eq!(s.background_color, Some(Color(240, 240, 240, 255)));
+
+        // Function colors stay inside their token; rgb() shorthand still
+        // lands as a color (the pre-shorthand-rework behavior).
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "background: rgb(20, 60, 200)"));
+        assert_eq!(s.background_color, Some(Color(20, 60, 200, 255)));
+        assert_eq!(s.background_image, None);
     }
 
     #[test]
