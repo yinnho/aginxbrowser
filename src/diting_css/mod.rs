@@ -2538,6 +2538,132 @@ fn parse_hex_color(v: &str) -> Option<Color> {
     Some(Color(r, g, b, a))
 }
 
+/// One parsed CSS `linear-gradient(...)`: stops as (0..1 position, color),
+/// ascending by position, plus the CSS angle in degrees (0 = to top,
+/// clockwise; 180 = the `linear-gradient(a, b)` default, to bottom).
+/// Authored for the native PPTX exporter (`gradFill`), promoted to a
+/// shared parse when the diting paint layer grew its own background-image
+/// consumer — one grammar, two backends.
+pub struct LinearGradient {
+    pub stops: Vec<(f32, Color)>,
+    pub css_deg: f32,
+}
+
+/// Parse a `linear-gradient(<angle>, <color> [pos%], ...)` value. Angle
+/// forms: bare `135deg` or `to top/right/bottom/left` (corners rejected,
+/// v1). Missing stop positions distribute evenly (all missing) or
+/// interpolate between the nearest known neighbors (some missing), per the
+/// CSS rule. Anything else — `none`, `url(...)`, radial/repeating — is
+/// None so callers keep their fallback fill.
+pub fn parse_linear_gradient(raw: &str) -> Option<LinearGradient> {
+    let v = raw.trim().to_ascii_lowercase();
+    let rest = v.strip_prefix("linear-gradient(")?.strip_suffix(')')?;
+    // Top-level comma split (rgb()/rgba() carry commas of their own).
+    let mut parts: Vec<String> = Vec::new();
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    for ch in rest.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            ',' if depth == 0 => parts.push(std::mem::take(&mut cur)),
+            _ => cur.push(ch),
+        }
+    }
+    parts.push(cur);
+    // Two parts is the floor (`red, blue` with no angle spec); an angle
+    // that starves the stop list falls through to the colors.len() gate.
+    if parts.len() < 2 {
+        return None;
+    }
+
+    // First part: angle spec or the first stop.
+    let mut css_deg = 180.0; // CSS default: to bottom
+    let mut stop_parts: &[String] = &parts;
+    let first = parts[0].trim();
+    if let Some(deg) = first.strip_suffix("deg") {
+        css_deg = deg.trim().parse().ok()?;
+        stop_parts = &parts[1..];
+    } else if let Some(dir) = first.strip_prefix("to ") {
+        css_deg = match dir.trim() {
+            "top" => 0.0,
+            "right" => 90.0,
+            "bottom" => 180.0,
+            "left" => 270.0,
+            _ => return None, // corners: v1 doesn't map diagonal keywords
+        };
+        stop_parts = &parts[1..];
+    }
+
+    // Stops: "<color> [pos%]" — color first (may contain spaces inside
+    // parens), an optional trailing percent position.
+    let mut colors: Vec<Color> = Vec::new();
+    let mut positions: Vec<Option<f32>> = Vec::new();
+    for p in stop_parts {
+        let p = p.trim();
+        if p.is_empty() {
+            return None;
+        }
+        // Whole part is a bare color (no position).
+        if let Some(c) = parse_color(p) {
+            colors.push(c);
+            positions.push(None);
+            continue;
+        }
+        let (head, tail) = p.rsplit_once(' ')?;
+        let c = parse_color(head.trim())?;
+        let pos = tail.trim().strip_suffix('%')?.trim().parse::<f32>().ok()? / 100.0;
+        colors.push(c);
+        positions.push(Some(pos));
+    }
+    if colors.len() < 2 {
+        return None;
+    }
+
+    // Missing positions distribute evenly (all missing), or interpolate
+    // between the nearest known neighbors (some missing) — the CSS
+    // interpolation rule, to slide fidelity.
+    let n = colors.len();
+    let mut pos: Vec<f32> = vec![0.0; n];
+    if positions.iter().all(|p| p.is_none()) {
+        for (i, slot) in pos.iter_mut().enumerate() {
+            *slot = i as f32 / (n - 1) as f32;
+        }
+    } else {
+        positions[0] = positions[0].or(Some(0.0));
+        positions[n - 1] = positions[n - 1].or(Some(1.0));
+        for i in 0..n {
+            if positions[i].is_none() {
+                let (mut lo, mut hi) = (i, i);
+                while lo > 0 && positions[lo].is_none() {
+                    lo -= 1;
+                }
+                while hi + 1 < n && positions[hi].is_none() {
+                    hi += 1;
+                }
+                let a = positions[lo].unwrap_or(0.0);
+                let b = positions[hi].unwrap_or(1.0);
+                pos[i] = a + (b - a) * (i - lo) as f32 / (hi - lo).max(1) as f32;
+            } else {
+                pos[i] = positions[i].unwrap_or(0.0);
+            }
+        }
+    }
+
+    let mut stops: Vec<(f32, Color)> = pos.into_iter().zip(colors).collect();
+    // Out-of-order authored stops clamp up to their predecessor at raster
+    // time per CSS; a stable sort is the equivalent here (equal positions
+    // keep the hard-line transition).
+    stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+    Some(LinearGradient { stops, css_deg })
+}
+
 // ---------------------------------------------------------------------------
 // Cascade
 // ---------------------------------------------------------------------------
@@ -2982,6 +3108,55 @@ mod tests {
         assert_eq!(parse_color("rgba(198,40,40,0.5)"), Some(Color(198, 40, 40, 128)));
         assert_eq!(parse_color("RGB(50%, 0%, 0%)"), Some(Color(128, 0, 0, 255)), "percent + case-insensitive");
         assert_eq!(parse_color("rgb(1,2)"), None, "wrong arity");
+    }
+
+    #[test]
+    fn linear_gradient_135deg_two_stops() {
+        let g = parse_linear_gradient("linear-gradient(135deg, #2c3e50 0%, #fd79a8 100%)").expect("parses");
+        assert_eq!(g.css_deg, 135.0);
+        assert_eq!(g.stops, vec![(0.0, Color(0x2c, 0x3e, 0x50, 255)), (1.0, Color(0xfd, 0x79, 0xa8, 255))]);
+    }
+
+    #[test]
+    fn linear_gradient_direction_keywords_and_default() {
+        assert_eq!(parse_linear_gradient("linear-gradient(to right, red, blue)").unwrap().css_deg, 90.0);
+        assert_eq!(parse_linear_gradient("linear-gradient(to top, red, blue)").unwrap().css_deg, 0.0);
+        assert_eq!(parse_linear_gradient("linear-gradient(red, blue)").unwrap().css_deg, 180.0, "no spec = to bottom");
+        assert!(parse_linear_gradient("linear-gradient(to top left, red, blue)").is_none(),
+            "corner keywords stay unparsed (v1), callers keep their fallback");
+    }
+
+    #[test]
+    fn linear_gradient_missing_positions_distribute_evenly() {
+        let g = parse_linear_gradient("linear-gradient(red, lime, blue)").expect("parses");
+        assert_eq!(g.stops[0].0, 0.0);
+        assert_eq!(g.stops[1].0, 0.5);
+        assert_eq!(g.stops[2].0, 1.0);
+    }
+
+    #[test]
+    fn linear_gradient_rgb_function_stops() {
+        let g = parse_linear_gradient("linear-gradient(90deg, rgb(93, 58, 176) 0%, rgba(213, 0, 114, 0.5) 100%)")
+            .expect("parses");
+        assert_eq!(g.stops[0].1, Color(93, 58, 176, 255));
+        assert_eq!(g.stops[1].1, Color(213, 0, 114, 128));
+    }
+
+    #[test]
+    fn linear_gradient_out_of_order_stops_sort() {
+        let g = parse_linear_gradient("linear-gradient(90deg, red 100%, blue 0%)").expect("parses");
+        // Authored reversed; raster needs ascending, equal-position hard
+        // lines survive as-is.
+        assert!(g.stops[0].0 <= g.stops[1].0);
+        assert_eq!(g.stops[0].1, Color(0, 0, 255, 255));
+    }
+
+    #[test]
+    fn non_gradients_rejected() {
+        assert!(parse_linear_gradient("none").is_none());
+        assert!(parse_linear_gradient("url(https://x/y.png)").is_none());
+        assert!(parse_linear_gradient("radial-gradient(red, blue)").is_none());
+        assert!(parse_linear_gradient("linear-gradient(90deg, red)").is_none());
     }
 
     #[test]

@@ -2680,6 +2680,19 @@ pub enum PaintItem {
     /// Per-corner radii variant of `Bg` (batch 7c): CSS corner order
     /// (TL TR BR BL), each (rx, ry) already resolved to px.
     BgCorner { rect: Rect, color: [u8; 4], radii: [(f32, f32); 4] },
+    /// A `background-image: linear-gradient(...)` fill (gradient batch).
+    /// `stops` are (0..1 position, straight RGBA) ascending, the CSS angle
+    /// is in degrees (0 = to top, clockwise), and `radii` are the same
+    /// per-corner values a solid `Bg` would clip to — the fill follows the
+    /// rounded box. Paints AFTER the element's `Bg` (background-color is
+    /// the bottom layer in CSS); element-subtree opacity is already folded
+    /// into the stop alphas at emission.
+    BgGradient {
+        rect: Rect,
+        stops: Vec<(f32, [u8; 4])>,
+        css_deg: f32,
+        radii: [(f32, f32); 4],
+    },
     /// A decoded raster image blitted into the replaced box (batch 5b):
     /// sized per object-fit and offset per object-position (batch 5c) —
     /// see [`object_paint_rect`]. `rect` is the element box and doubles as
@@ -3800,48 +3813,57 @@ pub fn layout_dom_with_paint_order_and_images(
                     }
                 }
             }
-            if let Some(c) = bg {
-                if c.3 != 0 && alpha > 0.0 && rect.width > 0.0 && rect.height > 0.0 {
+            // Radii resolve per-axis against the LOCAL box (rx width, ry
+            // height — the elliptical form), then ride the affine. Hoisted
+            // above the fills so the color and gradient layers share them.
+            let res = |l: &crate::diting_css::Length, basis: f32| match l {
+                crate::diting_css::Length::Px(v) => *v,
+                crate::diting_css::Length::Percent(p) => p * basis / 100.0,
+                crate::diting_css::Length::Calc { percent, .. } => percent * basis / 100.0,
+                crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent => 0.0,
+            };
+            let radii: [(f32, f32); 4] = styles
+                .get(dom_id)
+                .and_then(|s| s.corner_radii.as_ref())
+                .map(|corners| {
+                    std::array::from_fn(|i| {
+                        (res(&corners[i].0, rect.width) * child_xf.sx, res(&corners[i].1, rect.height) * child_xf.sy)
+                    })
+                })
+                .unwrap_or([(0.0, 0.0); 4]);
+            if alpha > 0.0 && rect.width > 0.0 && rect.height > 0.0 {
+                // background-color: the bottom CSS layer.
+                if let Some(c) = bg.filter(|c| c.3 != 0) {
                     let color = with_alpha([c.0, c.1, c.2, c.3], alpha);
-                    // Radii resolve per-axis against the LOCAL box (rx width,
-                    // ry height — the elliptical form), then ride the affine.
-                    let res = |l: &crate::diting_css::Length, basis: f32| match l {
-                        crate::diting_css::Length::Px(v) => *v,
-                        crate::diting_css::Length::Percent(p) => p * basis / 100.0,
-                        crate::diting_css::Length::Calc { percent, .. } => percent * basis / 100.0,
-                        crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent => 0.0,
-                    };
-                    match &styles.get(dom_id).and_then(|s| s.corner_radii.clone()) {
-                        Some(corners) => {
-                            let radii = corners
-                                .iter()
-                                .map(|(rx, ry)| {
-                                    (res(rx, rect.width) * child_xf.sx, res(ry, rect.height) * child_xf.sy)
-                                })
-                                .collect::<Vec<_>>();
-                            let uniform = radii.iter().all(|r| *r == radii[0]);
-                            if uniform {
-                                items.push(PaintItem::Bg {
-                                    rect: mrect,
-                                    color,
-                                    radius: radii[0].0,
-                                });
-                            } else {
-                                items.push(PaintItem::BgCorner {
-                                    rect: mrect,
-                                    color,
-                                    radii: [
-                                        radii[0], radii[1], radii[2], radii[3],
-                                    ],
-                                });
-                            }
-                        }
-                        None => items.push(PaintItem::Bg {
+                    let uniform = radii.iter().all(|r| *r == radii[0]);
+                    if uniform {
+                        items.push(PaintItem::Bg {
                             rect: mrect,
                             color,
-                            radius: 0.0,
-                        }),
+                            radius: radii[0].0,
+                        });
+                    } else {
+                        items.push(PaintItem::BgCorner {
+                            rect: mrect,
+                            color,
+                            radii,
+                        });
                     }
+                }
+                // background-image above it: v1 takes a parseable
+                // linear-gradient for the whole box (url() images stay
+                // unpainted — they are the Image item's job, not a fill).
+                if let Some(g) = styles
+                    .get(dom_id)
+                    .and_then(|s| s.background_image.as_deref())
+                    .and_then(crate::diting_css::parse_linear_gradient)
+                {
+                    let stops = g
+                        .stops
+                        .iter()
+                        .map(|(p, c)| (*p, with_alpha([c.0, c.1, c.2, c.3], alpha)))
+                        .collect();
+                    items.push(PaintItem::BgGradient { rect: mrect, stops, css_deg: g.css_deg, radii });
                 }
             }
             // A border exists only with a line style; its color defaults to

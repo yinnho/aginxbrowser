@@ -324,6 +324,56 @@ impl Canvas {
         }
     }
 
+    /// Source-over fill of a `linear-gradient(...)` box (gradient batch):
+    /// each pixel's stop position is its projection onto the CSS gradient
+    /// line — direction `(sin θ, −cos θ)` in screen space (y grows down,
+    /// css_deg 0 = to top, clockwise), line length `|w·sinθ| + |h·cosθ|`,
+    /// position `dot(p − center, dir)/len + 0.5` clamped to [0,1]. Stop
+    /// colors interpolate in premultiplied space; the shape clips through
+    /// the same per-corner elliptical test a solid `BgCorner` uses (the
+    /// fill follows the rounded box).
+    pub fn fill_gradient(
+        &mut self,
+        x: i64,
+        y: i64,
+        w: i64,
+        h: i64,
+        stops: &[(f32, [u8; 4])],
+        css_deg: f32,
+        radii: [(f32, f32); 4],
+    ) {
+        if w <= 0 || h <= 0 || stops.len() < 2 {
+            return;
+        }
+        let (ax0, ay0, ax1, ay1) = self.allowed();
+        let rad = css_deg.to_radians() as f64;
+        let (dux, duy) = (rad.sin(), -rad.cos());
+        let len = (w as f64 * dux.abs() + h as f64 * duy.abs()).max(1.0);
+        let (ccx, ccy) = (x as f64 + w as f64 / 2.0, y as f64 + h as f64 / 2.0);
+        // Row-invariant part of the position: hoisted so the inner loop is
+        // one fused multiply-add per pixel.
+        let col_a = dux / len;
+        // Degenerate corners (either radius ≤ 0) don't round; only build the
+        // clip shape when at least one corner is live.
+        let rounded = radii.iter().any(|r| r.0 > 0.0 && r.1 > 0.0);
+        let shape = rounded.then_some(ClipShape::Rounded { x0: x, y0: y, x1: x + w, y1: y + h, radii });
+        for gy in y.max(0).max(ay0)..(y + h).min(self.height as i64).min(ay1) {
+            let row_base = (gy as f64 + 0.5 - ccy) * duy / len + 0.5;
+            for gx in x.max(0).max(ax0)..(x + w).min(self.width as i64).min(ax1) {
+                let (cx, cy) = (gx as f64 + 0.5, gy as f64 + 0.5);
+                if let Some(s) = &shape {
+                    if !s.accepts(cx, cy) {
+                        continue;
+                    }
+                }
+                let t = ((cx - ccx) * col_a + row_base).clamp(0.0, 1.0) as f32;
+                let color = gradient_stop_color(stops, t);
+                let i = (gy as usize * self.width + gx as usize) * 4;
+                over(&mut self.data[i..i + 4], color);
+            }
+        }
+    }
+
     /// Source-over fill of a rounded rectangle (batch 6b), clipped to the
     /// canvas and the clip stack. `radius` is the uniform circular corner
     /// radius in px (clamped to half the shorter side — the CSS scale-down
@@ -439,6 +489,49 @@ fn over(dst: &mut [u8], src: [u8; 4]) {
     dst[3] = 255.min(dst[3] as u32 + a * (255 - dst[3] as u32) / 255) as u8;
 }
 
+/// Gradient stop color at position `t` (0..1). Stops are ascending; `t`
+/// outside the list clamps to the end stops. The ramp scan uses a strict
+/// upper bound, so a shared position (hard line, `blue 50%, green 50%`)
+/// falls through to the next ramp and the LATER stop's color owns the
+/// line itself — Chrome's behavior at the discontinuity.
+fn gradient_stop_color(stops: &[(f32, [u8; 4])], t: f32) -> [u8; 4] {
+    if t <= stops[0].0 {
+        return stops[0].1;
+    }
+    let last = stops.len() - 1;
+    if t >= stops[last].0 {
+        return stops[last].1;
+    }
+    for w in stops.windows(2) {
+        let (p0, c0) = w[0];
+        let (p1, c1) = w[1];
+        if t < p1 {
+            // Windows tile [p0, last) and the outer clamps pin t >= p0,
+            // so the selected window always has span > 0.
+            let k = (t - p0) / (p1 - p0);
+            return lerp_premultiplied(c0, c1, k);
+        }
+    }
+    stops[last].1
+}
+
+/// Interpolate two straight-alpha colors at `k` in premultiplied space:
+/// premultiply both endpoints, lerp, un-premultiply by the lerped alpha.
+/// A straight lerp of rgba() midpoints drags transparent colors toward
+/// gray (rgba(255,0,0,0)→rgba(0,0,255,255) at 0.5 would come out purple).
+fn lerp_premultiplied(a: [u8; 4], b: [u8; 4], k: f32) -> [u8; 4] {
+    let out_a = a[3] as f32 + (b[3] as f32 - a[3] as f32) * k;
+    if out_a <= 0.0 {
+        return [0, 0, 0, 0];
+    }
+    let ch = |x: u8, y: u8| {
+        let px = x as f32 * a[3] as f32 / 255.0;
+        let py = y as f32 * b[3] as f32 / 255.0;
+        ((px + (py - px) * k) * 255.0 / out_a).round().clamp(0.0, 255.0) as u8
+    };
+    [ch(a[0], b[0]), ch(a[1], b[1]), ch(a[2], b[2]), out_a.round().clamp(0.0, 255.0) as u8]
+}
+
 /// Replay the paint items onto `out`. `Bg` rects come from taffy's rounded
 /// layout so the fill lands on whole pixels; each `Text` re-rasterizes
 /// wrapped at the width its containing block offered at measure time, so
@@ -526,6 +619,15 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                 rect.height.round() as i64,
                 *radius,
                 *color,
+            ),
+            PaintItem::BgGradient { rect, stops, css_deg, radii } => out.fill_gradient(
+                (rect.x - dx).round() as i64,
+                (rect.y - dy).round() as i64,
+                rect.width.round() as i64,
+                rect.height.round() as i64,
+                stops,
+                *css_deg,
+                *radii,
             ),
             PaintItem::Border { rect, widths, color, .. } => {
                 // Four bands, square corners: top/bottom span the full
@@ -636,6 +738,84 @@ mod tests {
         assert_eq!(px(&c, 9, 0), [200, 40, 40, 255], "clipped fill still paints");
         assert_eq!(px(&c, 7, 0), [255, 255, 255, 255], "outside the rect untouched");
         assert_eq!(px(&c, 0, 9), [255, 255, 255, 255], "below the rect untouched");
+    }
+
+    /// Axis-aligned gradients land on the right walls: 180° (the CSS
+    /// default, to bottom) paints red top / blue bottom, 0° flips, 90°
+    /// (to right) runs left→right. Plateau stops keep the sampled pixels
+    /// on the exact end colors.
+    #[test]
+    fn gradient_axis_directions() {
+        let stops = vec![
+            (0.0, [255, 0, 0, 255]),
+            (0.2, [255, 0, 0, 255]),
+            (0.8, [0, 0, 255, 255]),
+            (1.0, [0, 0, 255, 255]),
+        ];
+        let mut c = Canvas::new_filled(10, 10, [255, 255, 255, 255]);
+        c.fill_gradient(0, 0, 10, 10, &stops, 180.0, [(0.0, 0.0); 4]);
+        assert_eq!(px(&c, 5, 0), [255, 0, 0, 255], "180°: top row at t=0.05 is red");
+        assert_eq!(px(&c, 5, 9), [0, 0, 255, 255], "180°: bottom row at t=0.95 is blue");
+        assert_eq!(px(&c, 0, 0), px(&c, 9, 0), "180°: rows are column-invariant");
+
+        let mut c = Canvas::new_filled(10, 10, [255, 255, 255, 255]);
+        c.fill_gradient(0, 0, 10, 10, &stops, 0.0, [(0.0, 0.0); 4]);
+        assert_eq!(px(&c, 5, 0), [0, 0, 255, 255], "0° (to top): top is blue");
+        assert_eq!(px(&c, 5, 9), [255, 0, 0, 255], "0°: bottom is red");
+
+        let mut c = Canvas::new_filled(10, 10, [255, 255, 255, 255]);
+        c.fill_gradient(0, 0, 10, 10, &stops, 90.0, [(0.0, 0.0); 4]);
+        assert_eq!(px(&c, 0, 5), [255, 0, 0, 255], "90° (to right): left is red");
+        assert_eq!(px(&c, 9, 5), [0, 0, 255, 255], "90°: right is blue");
+    }
+
+    /// 135° runs corner to corner: TL at t≈0, BR at t≈1, and the two
+    /// off-diagonal corners project to the gradient-line center (t=0.5,
+    /// the mid lerp of the plateau ramp).
+    #[test]
+    fn gradient_135deg_diagonal() {
+        let stops = vec![
+            (0.0, [255, 0, 0, 255]),
+            (0.2, [255, 0, 0, 255]),
+            (0.8, [0, 0, 255, 255]),
+            (1.0, [0, 0, 255, 255]),
+        ];
+        let mut c = Canvas::new_filled(10, 10, [255, 255, 255, 255]);
+        c.fill_gradient(0, 0, 10, 10, &stops, 135.0, [(0.0, 0.0); 4]);
+        assert_eq!(px(&c, 0, 0), [255, 0, 0, 255], "TL projects to t=0.05");
+        assert_eq!(px(&c, 9, 9), [0, 0, 255, 255], "BR projects to t=0.95");
+        assert_eq!(px(&c, 9, 0), [128, 0, 128, 255], "TR projects to t=0.5");
+        assert_eq!(px(&c, 0, 9), [128, 0, 128, 255], "BL projects to t=0.5");
+    }
+
+    /// The gradient fill follows the rounded box: a full-circle radius
+    /// leaves the corner pixels untouched while the middle paints.
+    #[test]
+    fn gradient_rounded_clip_follows_box() {
+        let stops = vec![(0.0, [255, 0, 0, 255]), (1.0, [0, 0, 255, 255])];
+        let mut c = Canvas::new_filled(12, 12, [255, 255, 255, 255]);
+        c.fill_gradient(1, 1, 10, 10, &stops, 180.0, [(5.0, 5.0); 4]);
+        assert_eq!(px(&c, 1, 1), [255, 255, 255, 255], "corner pixel stays canvas bg");
+        assert_eq!(px(&c, 10, 1), [255, 255, 255, 255], "opposite corner too");
+        assert_ne!(px(&c, 6, 6), [255, 255, 255, 255], "middle paints");
+    }
+
+    /// Stop interpolation runs premultiplied: a transparent-red → opaque-blue
+    /// midpoint keeps blue at full saturation instead of the purple a
+    /// straight rgba lerp produces; positions clamp outside the stop list
+    /// and equal positions keep the later stop past the hard line.
+    #[test]
+    fn gradient_stop_interpolation_is_premultiplied() {
+        assert_eq!(lerp_premultiplied([255, 0, 0, 0], [0, 0, 255, 255], 0.5), [0, 0, 255, 128]);
+        assert_eq!(lerp_premultiplied([10, 20, 30, 255], [10, 20, 30, 255], 0.5), [10, 20, 30, 255]);
+        let stops = vec![(0.25, [255, 0, 0, 0]), (0.75, [0, 0, 255, 255])];
+        assert_eq!(gradient_stop_color(&stops, 0.0), [255, 0, 0, 0], "below clamps to first");
+        assert_eq!(gradient_stop_color(&stops, 1.0), [0, 0, 255, 255], "above clamps to last");
+        // t=0.5 sits mid-ramp: k=0.5, the premultiplied midpoint again.
+        assert_eq!(gradient_stop_color(&stops, 0.5), [0, 0, 255, 128]);
+        let hard = vec![(0.0, [1, 2, 3, 255]), (0.5, [4, 5, 6, 255]), (0.5, [7, 8, 9, 255]), (1.0, [1, 1, 1, 255])];
+        assert_eq!(gradient_stop_color(&hard, 0.5), [7, 8, 9, 255], "equal positions: later stop wins past the hard line");
+        assert_eq!(gradient_stop_color(&hard, 0.49), [4, 5, 6, 255], "just before the hard line is the earlier stop");
     }
 
     /// Text blits source-over: 50% black over white is mid-gray, and the

@@ -24,7 +24,7 @@ use std::collections::{BTreeSet, HashMap};
 use serde::Deserialize;
 
 use crate::diting_browser::Page;
-use crate::diting_css::{parse_color, Color};
+use crate::diting_css::{parse_color, parse_linear_gradient, Color};
 use crate::ooxml::{pptx_package, PPTX_SP_TREE_HEAD, A_NS, P_NS, R_NS, XML_DECL};
 use crate::pages::PageError;
 
@@ -280,121 +280,14 @@ enum Fill {
 
 /// Parse an element's background into a fill: gradient (longhand
 /// `background-image`) wins, then a non-transparent `background-color`.
+/// The gradient grammar itself is `diting_css::parse_linear_gradient`
+/// (shared with the paint layer since the gradient-paint batch).
 fn element_fill(bg: Option<&str>, bg_image: Option<&str>) -> Option<Fill> {
-    if let Some(g) = bg_image.and_then(parse_gradient) {
+    if let Some(g) = bg_image.and_then(parse_linear_gradient) {
         return Some(Fill::Grad { stops: g.stops, css_deg: g.css_deg });
     }
     let c = bg.and_then(parse_color)?;
     (c.3 > 0).then_some(Fill::Solid(c))
-}
-
-/// One parsed CSS linear-gradient: stops as (0..1 position, color) plus the
-/// CSS angle in degrees (0 = to top, clockwise).
-struct Gradient {
-    stops: Vec<(f32, Color)>,
-    css_deg: f32,
-}
-
-fn parse_gradient(raw: &str) -> Option<Gradient> {
-    let v = raw.trim().to_ascii_lowercase();
-    let rest = v.strip_prefix("linear-gradient(")?.strip_suffix(')')?;
-    // Top-level comma split (rgb()/rgba() carry commas of their own).
-    let mut parts: Vec<String> = Vec::new();
-    let mut depth = 0i32;
-    let mut cur = String::new();
-    for ch in rest.chars() {
-        match ch {
-            '(' => {
-                depth += 1;
-                cur.push(ch);
-            }
-            ')' => {
-                depth -= 1;
-                cur.push(ch);
-            }
-            ',' if depth == 0 => parts.push(std::mem::take(&mut cur)),
-            _ => cur.push(ch),
-        }
-    }
-    parts.push(cur);
-    if parts.len() < 3 {
-        return None; // angle spec + at least two stops
-    }
-
-    // First part: angle spec or the first stop.
-    let mut css_deg = 180.0; // CSS default: to bottom
-    let mut stop_parts: &[String] = &parts;
-    let first = parts[0].trim();
-    if let Some(deg) = first.strip_suffix("deg") {
-        css_deg = deg.trim().parse().ok()?;
-        stop_parts = &parts[1..];
-    } else if let Some(dir) = first.strip_prefix("to ") {
-        css_deg = match dir.trim() {
-            "top" => 0.0,
-            "right" => 90.0,
-            "bottom" => 180.0,
-            "left" => 270.0,
-            _ => return None, // corners: v1 doesn't map diagonal keywords
-        };
-        stop_parts = &parts[1..];
-    }
-
-    // Stops: "<color> [pos%]" — color first (may contain spaces inside
-    // parens), an optional trailing percent position.
-    let mut colors: Vec<Color> = Vec::new();
-    let mut positions: Vec<Option<f32>> = Vec::new();
-    for p in stop_parts {
-        let p = p.trim();
-        if p.is_empty() {
-            return None;
-        }
-        // Whole part is a bare color (no position).
-        if let Some(c) = parse_color(p) {
-            colors.push(c);
-            positions.push(None);
-            continue;
-        }
-        let (head, tail) = p.rsplit_once(' ')?;
-        let c = parse_color(head.trim())?;
-        let pos = tail.trim().strip_suffix('%')?.trim().parse::<f32>().ok()? / 100.0;
-        colors.push(c);
-        positions.push(Some(pos));
-    }
-    if colors.len() < 2 {
-        return None;
-    }
-
-    // Missing positions distribute evenly (all missing), or interpolate
-    // between the nearest known neighbors (some missing) — the CSS
-    // interpolation rule, to slide fidelity.
-    let n = colors.len();
-    let mut pos: Vec<f32> = vec![0.0; n];
-    if positions.iter().all(|p| p.is_none()) {
-        for (i, slot) in pos.iter_mut().enumerate() {
-            *slot = i as f32 / (n - 1) as f32;
-        }
-    } else {
-        positions[0] = positions[0].or(Some(0.0));
-        positions[n - 1] = positions[n - 1].or(Some(1.0));
-        for i in 0..n {
-            if positions[i].is_none() {
-                let (mut lo, mut hi) = (i, i);
-                while lo > 0 && positions[lo].is_none() {
-                    lo -= 1;
-                }
-                while hi + 1 < n && positions[hi].is_none() {
-                    hi += 1;
-                }
-                let a = positions[lo].unwrap_or(0.0);
-                let b = positions[hi].unwrap_or(1.0);
-                pos[i] = a + (b - a) * (i - lo) as f32 / (hi - lo).max(1) as f32;
-            } else {
-                pos[i] = positions[i].unwrap_or(0.0);
-            }
-        }
-    }
-
-    Some(Gradient { stops: pos.into_iter().zip(colors).collect(), css_deg })
 }
 
 /// CSS gradient angle → DrawingML `ang` (60000ths of a degree, clockwise
@@ -679,46 +572,16 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::Arc;
 
-    // --- gradient parsing -------------------------------------------------
+    // --- gradient angle export --------------------------------------------
+    // (The gradient grammar itself is tested in diting_css next to
+    // parse_linear_gradient; only the DrawingML conversion is ours.)
 
     #[test]
-    fn gradient_135deg_two_stops() {
-        let g = parse_gradient("linear-gradient(135deg, #2c3e50 0%, #fd79a8 100%)").expect("parses");
-        assert_eq!(g.css_deg, 135.0);
-        assert_eq!(g.stops.len(), 2);
-        assert_eq!(g.stops[0], (0.0, Color(0x2c, 0x3e, 0x50, 255)));
-        assert_eq!(g.stops[1], (1.0, Color(0xfd, 0x79, 0xa8, 255)));
+    fn drawingml_angle_converts_css_degrees() {
+        // CSS 0deg points up; DrawingML 0° points right (3 o'clock):
+        // (90 - css) mod 360, in 60000ths of a degree.
         assert_eq!(drawingml_angle(135.0), 18900000, "135deg CSS → 315° DrawingML");
-    }
-
-    #[test]
-    fn gradient_to_direction_keywords() {
-        assert_eq!(parse_gradient("linear-gradient(to right, red, blue)").unwrap().css_deg, 90.0);
-        assert_eq!(parse_gradient("linear-gradient(to top, red, blue)").unwrap().css_deg, 0.0);
         assert_eq!(drawingml_angle(90.0), 0, "to right → 0° (pointing right)");
-    }
-
-    #[test]
-    fn gradient_missing_positions_distribute_evenly() {
-        let g = parse_gradient("linear-gradient(red, lime, blue)").expect("parses");
-        assert_eq!(g.stops[0].0, 0.0);
-        assert_eq!(g.stops[1].0, 0.5);
-        assert_eq!(g.stops[2].0, 1.0);
-    }
-
-    #[test]
-    fn gradient_rgb_function_stops() {
-        let g = parse_gradient("linear-gradient(90deg, rgb(93, 58, 176) 0%, rgba(213, 0, 114, 0.5) 100%)")
-            .expect("parses");
-        assert_eq!(g.stops[0].1, Color(93, 58, 176, 255));
-        assert_eq!(g.stops[1].1, Color(213, 0, 114, 128));
-    }
-
-    #[test]
-    fn non_gradients_rejected() {
-        assert!(parse_gradient("none").is_none());
-        assert!(parse_gradient("url(https://x/y.png)").is_none());
-        assert!(parse_gradient("linear-gradient(90deg, red)").is_none());
     }
 
     // --- pure mapping ------------------------------------------------------
