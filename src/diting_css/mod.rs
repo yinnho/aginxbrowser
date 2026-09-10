@@ -582,6 +582,12 @@ pub struct ComputedStyle {
     /// form; this exists so the CSSOM reports author-set images instead of
     /// the `none` initial. The `background` shorthand does NOT fill it (v1).
     pub background_image: Option<String>,
+    /// `font-family`, raw author token stream (same posture as
+    /// `background_image`): this slice resolves fonts at raster time from
+    /// the default stack, so there is no parsed form — the field exists so
+    /// the CSSOM reports the author's stack (inherited, like the spec) and
+    /// downstream exporters can name real typefaces.
+    pub font_family: Option<String>,
     /// `border-collapse` (table layout): collapse = adjacent cell borders
     /// merge (we realize this as zero cell gaps), separate = the HTML
     /// default 2px `border-spacing`. `None` = not declared (separate).
@@ -1651,6 +1657,11 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             style.background_image = Some(v.to_string());
             true
         }
+        // Same posture as background-image: the author's stack, verbatim.
+        "font-family" => {
+            style.font_family = Some(v.to_string());
+            true
+        }
         "background" | "background-color" => {
             // `background` shorthand: take a leading color token if present.
             let candidate = if name == "background" {
@@ -2574,6 +2585,10 @@ pub fn cascade_element(
     if let Some(parent) = parent {
         style.color = parent.color;
         style.font_size = parent.font_size;
+        // font-family inherits like the spec: the closest ancestor that
+        // names a stack wins. `or` is enough because a child without its
+        // own declaration carries None here.
+        style.font_family = parent.font_family.clone();
         style.font_weight = style.font_weight.or(parent.font_weight);
         // `.or` (not overwrite): the element's own UA declaration beats an
         // inherited value — a th stays centered inside a text-align:right

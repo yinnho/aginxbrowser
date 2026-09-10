@@ -53,17 +53,17 @@ struct ZipEntry {
 /// A minimal ZIP writer emitting stored (uncompressed) entries. The page
 /// images are already-compressed JPEG payloads and the XML parts are tiny,
 /// so deflate would buy nothing for the dependency it costs.
-struct ZipWriter {
+pub(crate) struct ZipWriter {
     out: Vec<u8>,
     entries: Vec<ZipEntry>,
 }
 
 impl ZipWriter {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { out: Vec::new(), entries: Vec::new() }
     }
 
-    fn add(&mut self, name: &str, data: &[u8]) {
+    pub(crate) fn add(&mut self, name: &str, data: &[u8]) {
         let offset = self.out.len() as u32;
         let crc = crc32(data);
         let size = data.len() as u32;
@@ -83,7 +83,7 @@ impl ZipWriter {
         self.entries.push(ZipEntry { name: name.as_bytes().to_vec(), crc, size, offset });
     }
 
-    fn finish(mut self) -> Vec<u8> {
+    pub(crate) fn finish(mut self) -> Vec<u8> {
         let cd_offset = self.out.len() as u32;
         for e in &self.entries {
             self.out.extend_from_slice(&0x0201_4b50u32.to_le_bytes()); // central directory
@@ -124,45 +124,68 @@ impl ZipWriter {
 // ---------------------------------------------------------------------------
 
 /// CSS px → EMU (English Metric Units; 914400 per inch at 96 dpi).
-const PX_TO_EMU: u64 = 914_400 / 96;
+pub(crate) const PX_TO_EMU: u64 = 914_400 / 96;
 
 /// CSS px → twips (1440 per inch at 96 dpi) — the DOCX page unit.
 const PX_TO_TWIP: u64 = 1440 / 96;
 
-const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
-const P_NS: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
+pub(crate) const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+pub(crate) const P_NS: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
 const W_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
-const R_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+pub(crate) const R_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const PIC_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/picture";
 const WP_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
 
-const XML_DECL: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#;
+pub(crate) const XML_DECL: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#;
 
-const PPTX_THEME: &str = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="aginxbrowser"><a:themeElements><a:clrScheme name="aginxbrowser"><a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2><a:accent1><a:srgbClr val="4472C4"/></a:accent1><a:accent2><a:srgbClr val="ED7D31"/></a:accent2><a:accent3><a:srgbClr val="A5A5A5"/></a:accent3><a:accent4><a:srgbClr val="FFC000"/></a:accent4><a:accent5><a:srgbClr val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6><a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme><a:fontScheme name="aginxbrowser"><a:majorFont><a:latin typeface=""/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface=""/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme><a:fmtScheme name="aginxbrowser"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="12700"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="19050"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>"#;
+pub(crate) const PPTX_THEME: &str = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="aginxbrowser"><a:themeElements><a:clrScheme name="aginxbrowser"><a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2><a:accent1><a:srgbClr val="4472C4"/></a:accent1><a:accent2><a:srgbClr val="ED7D31"/></a:accent2><a:accent3><a:srgbClr val="A5A5A5"/></a:accent3><a:accent4><a:srgbClr val="FFC000"/></a:accent4><a:accent5><a:srgbClr val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6><a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme><a:fontScheme name="aginxbrowser"><a:majorFont><a:latin typeface=""/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface=""/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme><a:fmtScheme name="aginxbrowser"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="12700"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="19050"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>"#;
 
-const PPTX_MASTER: &str = r#"<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:bg><p:bgRef idx="1001"><a:schemeClr val="bg1"/></p:bgRef></p:bg><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr></p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/><p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rId1"/></p:sldLayoutIdLst></p:sldMaster>"#;
+pub(crate) const PPTX_MASTER: &str = r#"<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:bg><p:bgRef idx="1001"><a:schemeClr val="bg1"/></p:bgRef></p:bg><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr></p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/><p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rId1"/></p:sldLayoutIdLst></p:sldMaster>"#;
 
-const PPTX_LAYOUT: &str = r#"<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" type="blank" preserve="1"><p:cSld name="Blank"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>"#;
+pub(crate) const PPTX_LAYOUT: &str = r#"<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" type="blank" preserve="1"><p:cSld name="Blank"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>"#;
 
-/// Empty spTree skeleton shared by slides (the pic is appended inside).
-const PPTX_SP_TREE_HEAD: &str = r#"<p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>"#;
+/// Empty spTree skeleton shared by slides (shapes/pics are appended inside).
+pub(crate) const PPTX_SP_TREE_HEAD: &str = r#"<p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>"#;
 
-/// Pack per-page JPEGs as an image-based PPTX: one slide per page, the
-/// page image anchored at the slide's top-left at its own size. The deck
-/// carries a single slide size — max page width × max page height — because
-/// presentation.xml has exactly one `sldSz`.
-pub fn pptx_of_pages(pages: &[(u32, u32, &[u8])]) -> Vec<u8> {
-    let max_w = pages.iter().map(|&(w, _, _)| w).max().unwrap_or(794);
-    let max_h = pages.iter().map(|&(_, h, _)| h).max().unwrap_or(1123);
+/// The MIME map for media extensions a PPTX package may declare.
+fn media_content_type(ext: &str) -> &'static str {
+    match ext {
+        "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        _ => "application/octet-stream",
+    }
+}
 
+/// Shared PPTX package scaffolding: content types, package rels, docProps,
+/// presentation/master/layout/theme — the parts every PPTX carries regardless
+/// of how its slides were authored. Callers hand over finished slides (slide
+/// XML + its .rels XML, both already serialized), media parts (package path +
+/// bytes), the deck slide size in EMU, and the media extensions to declare.
+pub(crate) fn pptx_package(
+    slides: &[(String, String)],
+    media: &[(String, Vec<u8>)],
+    deck_w_emu: u64,
+    deck_h_emu: u64,
+    media_exts: &[&str],
+) -> Vec<u8> {
     let mut content_types = format!(
-        r#"{XML_DECL}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="jpeg" ContentType="image/jpeg"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/><Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>"#
+        r#"{XML_DECL}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>"#
+    );
+    for ext in media_exts {
+        content_types.push_str(&format!(
+            r#"<Default Extension="{ext}" ContentType="{}"/>"#,
+            media_content_type(ext)
+        ));
+    }
+    content_types.push_str(
+        r#"<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/><Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>"#,
     );
     let mut sld_ids = String::new();
     let mut pres_rels = format!(
         r#"{XML_DECL}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>"#
     );
-    for (i, &(_, _, _)) in pages.iter().enumerate() {
+    for (i, _) in slides.iter().enumerate() {
         let n = i + 1;
         let rid = n + 1; // rId1 is the master; slides start at rId2
         content_types.push_str(&format!(
@@ -178,13 +201,11 @@ pub fn pptx_of_pages(pages: &[(u32, u32, &[u8])]) -> Vec<u8> {
     );
     pres_rels.push_str(&format!(
         r#"<Relationship Id="rId{}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/></Relationships>"#,
-        pages.len() + 2
+        slides.len() + 2
     ));
 
     let presentation = format!(
-        r#"{XML_DECL}<p:presentation xmlns:a="{A_NS}" xmlns:r="{R_NS}" xmlns:p="{P_NS}"><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst><p:sldIdLst>{sld_ids}</p:sldIdLst><p:sldSz cx="{}" cy="{}"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>"#,
-        max_w as u64 * PX_TO_EMU,
-        max_h as u64 * PX_TO_EMU,
+        r#"{XML_DECL}<p:presentation xmlns:a="{A_NS}" xmlns:r="{R_NS}" xmlns:p="{P_NS}"><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst><p:sldIdLst>{sld_ids}</p:sldIdLst><p:sldSz cx="{deck_w_emu}" cy="{deck_h_emu}"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>"#,
     );
 
     let mut zip = ZipWriter::new();
@@ -229,6 +250,27 @@ pub fn pptx_of_pages(pages: &[(u32, u32, &[u8])]) -> Vec<u8> {
         )
         .as_bytes(),
     );
+    for (i, (slide, rels)) in slides.iter().enumerate() {
+        let n = i + 1;
+        zip.add(&format!("ppt/slides/slide{n}.xml"), slide.as_bytes());
+        zip.add(&format!("ppt/slides/_rels/slide{n}.xml.rels"), rels.as_bytes());
+    }
+    for (path, bytes) in media {
+        zip.add(path, bytes);
+    }
+    zip.finish()
+}
+
+/// Pack per-page JPEGs as an image-based PPTX: one slide per page, the
+/// page image anchored at the slide's top-left at its own size. The deck
+/// carries a single slide size — max page width × max page height — because
+/// presentation.xml has exactly one `sldSz`.
+pub fn pptx_of_pages(pages: &[(u32, u32, &[u8])]) -> Vec<u8> {
+    let max_w = pages.iter().map(|&(w, _, _)| w).max().unwrap_or(794);
+    let max_h = pages.iter().map(|&(_, h, _)| h).max().unwrap_or(1123);
+
+    let mut slides = Vec::with_capacity(pages.len());
+    let mut media = Vec::with_capacity(pages.len());
     for (i, &(w, h, jpeg)) in pages.iter().enumerate() {
         let n = i + 1;
         let slide = format!(
@@ -237,14 +279,19 @@ pub fn pptx_of_pages(pages: &[(u32, u32, &[u8])]) -> Vec<u8> {
             w as u64 * PX_TO_EMU,
             h as u64 * PX_TO_EMU,
         );
-        let slide_rels = format!(
+        let rels = format!(
             r#"{XML_DECL}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image{n}.jpeg"/></Relationships>"#
         );
-        zip.add(&format!("ppt/slides/slide{n}.xml"), slide.as_bytes());
-        zip.add(&format!("ppt/slides/_rels/slide{n}.xml.rels"), slide_rels.as_bytes());
-        zip.add(&format!("ppt/media/image{n}.jpeg"), jpeg);
+        slides.push((slide, rels));
+        media.push((format!("ppt/media/image{n}.jpeg"), jpeg.to_vec()));
     }
-    zip.finish()
+    pptx_package(
+        &slides,
+        &media,
+        max_w as u64 * PX_TO_EMU,
+        max_h as u64 * PX_TO_EMU,
+        &["jpeg"],
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -317,34 +364,37 @@ pub fn docx_of_pages(pages: &[(u32, u32, &[u8])]) -> Vec<u8> {
 }
 
 #[cfg(test)]
+/// Walk the central directory and return (name, local-data-slice) pairs —
+/// the shared fixture-inspection helper for both this module's package tests
+/// and `pptx_native`'s.
+pub(crate) fn entries_of(zip: &[u8]) -> Vec<(String, Vec<u8>)> {
+    let eocd = zip
+        .windows(4)
+        .rposition(|w| w == [0x50, 0x4b, 0x05, 0x06])
+        .expect("EOCD");
+    let rd16 = |p: usize| u16::from_le_bytes([zip[p], zip[p + 1]]) as usize;
+    let rd32 = |p: usize| u32::from_le_bytes([zip[p], zip[p + 1], zip[p + 2], zip[p + 3]]) as usize;
+    let count = rd16(eocd + 10);
+    let mut cd = rd32(eocd + 16);
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        assert_eq!(&zip[cd..cd + 4], &[0x50, 0x4b, 0x01, 0x02], "central dir sig");
+        let csize = rd32(cd + 20);
+        let name_len = rd16(cd + 28);
+        let local = rd32(cd + 42);
+        let name = String::from_utf8(zip[cd + 46..cd + 46 + name_len].to_vec()).expect("name");
+        // Local header: 30 fixed bytes + name; then the stored payload.
+        let l_name_len = rd16(local + 26);
+        let data_at = local + 30 + l_name_len;
+        out.push((name, zip[data_at..data_at + csize].to_vec()));
+        cd += 46 + name_len;
+    }
+    out
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Walk the central directory and return (name, local-data-slice) pairs.
-    fn entries_of(zip: &[u8]) -> Vec<(String, Vec<u8>)> {
-        let eocd = zip
-            .windows(4)
-            .rposition(|w| w == [0x50, 0x4b, 0x05, 0x06])
-            .expect("EOCD");
-        let rd16 = |p: usize| u16::from_le_bytes([zip[p], zip[p + 1]]) as usize;
-        let rd32 = |p: usize| u32::from_le_bytes([zip[p], zip[p + 1], zip[p + 2], zip[p + 3]]) as usize;
-        let count = rd16(eocd + 10);
-        let mut cd = rd32(eocd + 16);
-        let mut out = Vec::with_capacity(count);
-        for _ in 0..count {
-            assert_eq!(&zip[cd..cd + 4], &[0x50, 0x4b, 0x01, 0x02], "central dir sig");
-            let csize = rd32(cd + 20);
-            let name_len = rd16(cd + 28);
-            let local = rd32(cd + 42);
-            let name = String::from_utf8(zip[cd + 46..cd + 46 + name_len].to_vec()).expect("name");
-            // Local header: 30 fixed bytes + name; then the stored payload.
-            let l_name_len = rd16(local + 26);
-            let data_at = local + 30 + l_name_len;
-            out.push((name, zip[data_at..data_at + csize].to_vec()));
-            cd += 46 + name_len;
-        }
-        out
-    }
 
     #[test]
     fn crc32_known_check_value() {

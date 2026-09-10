@@ -895,11 +895,12 @@ pub fn do_video(req: crate::VideoRequest) -> Result<crate::VideoResponse> {
 }
 
 /// /pdf: cut the page into a set of pages and package as PDF (default),
-/// per-page PNGs, or image-based PPTX/DOCX — the logical page-slicing layer
-/// (print pagination at block boundaries, or one page per `selector` match
-/// in slides mode). Same live-page shape as /video: the geometry comes from
-/// the live tree's layout, so the whole run happens while the browser is
-/// up. See src/pages.rs and src/ooxml.rs.
+/// per-page PNGs, image-based PPTX/DOCX, or native (editable) PPTX — the
+/// logical page-slicing layer (print pagination at block boundaries, or one
+/// page per `selector` match in slides mode). Same live-page shape as
+/// /video: the geometry comes from the live tree's layout, so the whole run
+/// happens while the browser is up. See src/pages.rs, src/ooxml.rs, and
+/// src/pptx_native.rs.
 #[cfg(feature = "screenshot")]
 pub fn do_pdf(req: crate::PdfRequest) -> Result<crate::PdfResponse> {
     run_on_local_runtime(move |_rt| {
@@ -912,6 +913,37 @@ pub fn do_pdf(req: crate::PdfRequest) -> Result<crate::PdfResponse> {
             // on the requested page width.
             page.set_viewport_override(req.width as f32, req.height as f32, false, None);
             page.goto(&req.url).await?;
+
+            // Native PPTX branches BEFORE the page-set render: its walker
+            // collects element rects itself — painting page bands first
+            // would be wasted work. Slides semantics only (one slide per
+            // selector match), so a missing selector is an explicit error.
+            if req.format.eq_ignore_ascii_case("pptx-native") {
+                let selector = req.selector.clone().ok_or_else(|| {
+                    anyhow::anyhow!("format=pptx-native requires `selector` (one slide per match)")
+                })?;
+                let (bytes, slides) = crate::pptx_native::pptx_native_deck(
+                    &mut page.inner,
+                    &selector,
+                    req.max_pages,
+                )
+                .await?;
+                return Ok(crate::PdfResponse {
+                    url: page.url(),
+                    title: {
+                        let v = page.evaluate("document.title");
+                        v.as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+                    },
+                    pages: slides,
+                    width: req.width,
+                    height: req.height,
+                    pdf_base64: None,
+                    pages_base64: Vec::new(),
+                    pptx_base64: Some(base64_png(&bytes)),
+                    docx_base64: None,
+                    format: "pptx-native".to_string(),
+                });
+            }
 
             let mode = match req.selector.as_deref() {
                 Some(sel) => crate::pages::PageMode::Slides(sel.to_string()),

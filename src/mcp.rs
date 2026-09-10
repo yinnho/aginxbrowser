@@ -629,7 +629,9 @@ pub struct RenderPdfParams {
     /// Page URL to cut into pages.
     pub url: String,
     /// Output format: "pdf" (default), "png" (one base64 PNG per page),
-    /// "pptx" (one slide per page), or "docx" (one page-sized section per
+    /// "pptx" (one slide per page, image-based), "pptx-native" (editable:
+    /// element-level DrawingML — real text runs, gradient shapes, image
+    /// parts; requires `selector`), or "docx" (one page-sized section per
     /// page).
     #[serde(default = "default_pdf_format")]
     pub format: String,

@@ -1494,6 +1494,8 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "color",
     "background-color",
     "background-image",
+    "font-family",
+    "border-radius",
     "flex-direction",
     "flex-wrap",
     "justify-content",
@@ -1647,6 +1649,55 @@ fn computed_style_value(
         // Raw author token stream (var() already substituted by the cascade);
         // unset stays absent so the JS initial (`none`) serves it.
         "background-image" => s.background_image.clone(),
+        // Same posture as background-image: the author's stack, verbatim.
+        "font-family" => s.font_family.clone(),
+        // Chrome's computed border-radius collapses equal corners (up to the
+        // shortest form that round-trips); elliptical corners serialize with
+        // the slash form. Percent stays percent — resolving against the box
+        // is a used value this layer has no geometry for, and "12%" is closer
+        // to truth than the JS mask's "0px".
+        "border-radius" => Some({
+            let spell = |l: &Length| match l {
+                Length::Px(v) => format!("{}px", format_number(*v)),
+                Length::Percent(p) => format!("{}%", format_number(*p)),
+                // Keyword lengths never parse into a corner radius; the
+                // fallback just keeps the arm total.
+                _ => "0px".to_string(),
+            };
+            match &s.corner_radii {
+                Some([(tl_x, tl_y), (tr_x, tr_y), (br_x, br_y), (bl_x, bl_y)]) => {
+                    let x = format!(
+                        "{} {} {} {}",
+                        spell(tl_x),
+                        spell(tr_x),
+                        spell(br_x),
+                        spell(bl_x)
+                    );
+                    let y = format!(
+                        "{} {} {} {}",
+                        spell(tl_y),
+                        spell(tr_y),
+                        spell(br_y),
+                        spell(bl_y)
+                    );
+                    if x == y {
+                        // Circular corners: collapse like Chrome (a b / a b /
+                        // a b c d → a / a b / a b c d).
+                        let parts: Vec<&str> = x.split(' ').collect();
+                        let [a, b, c, d] = [parts[0], parts[1], parts[2], parts[3]];
+                        let s = if c == a && d == b {
+                            if a == b { a.to_string() } else { format!("{a} {b}") }
+                        } else {
+                            format!("{a} {b} {c} {d}")
+                        };
+                        s
+                    } else {
+                        format!("{x} / {y}")
+                    }
+                }
+                None => "0px".to_string(),
+            }
+        }),
         "flex-direction" => Some(
             match s.flex_direction {
                 Some(FlexDirection::RowReverse) => "row-reverse",

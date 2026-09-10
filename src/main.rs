@@ -46,6 +46,10 @@ mod pages;
 // set — stored-ZIP writer, zero new dependencies.
 #[cfg(feature = "screenshot")]
 mod ooxml;
+// Native (editable) PPTX (容器层): element-level DrawingML — text runs,
+// gradient shapes, image parts, with diting as the layout oracle.
+#[cfg(feature = "screenshot")]
+mod pptx_native;
 // The Blitz reference pipeline — cross-check oracle for diting, opt-in via
 // `blitz-reference`. Not compiled in production/device builds.
 #[cfg(feature = "blitz-reference")]
@@ -395,8 +399,9 @@ fn default_pdf_format() -> String { "pdf".to_string() }
 pub struct PdfRequest {
     pub url: String,
     /// Output format: `"pdf"` (default), `"png"` (one base64 PNG per page),
-    /// `"pptx"` (one slide per page), or `"docx"` (one page-sized section
-    /// per page).
+    /// `"pptx"` (one slide per page, image-based), `"pptx-native"` (editable:
+    /// element-level DrawingML, requires `selector`), or `"docx"` (one
+    /// page-sized section per page).
     #[serde(default = "default_pdf_format")]
     pub format: String,
     /// Page width in CSS pixels. Default 794 (A4 @96dpi).
@@ -447,14 +452,16 @@ pub struct PdfResponse {
     /// One base64 PNG per page (`format:"png"`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub pages_base64: Vec<String>,
-    /// Base64-encoded PPTX bytes (`format:"pptx"`) — one slide per page.
+    /// Base64-encoded PPTX bytes — `format:"pptx"` is image-based (one
+    /// slide per page); `format:"pptx-native"` is editable DrawingML.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pptx_base64: Option<String>,
     /// Base64-encoded DOCX bytes (`format:"docx"`) — one page-sized section
     /// per page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub docx_base64: Option<String>,
-    /// Echoes the requested output format ("pdf" / "png" / "pptx" / "docx").
+    /// Echoes the requested output format ("pdf" / "png" / "pptx" /
+    /// "pptx-native" / "docx").
     pub format: String,
 }
 

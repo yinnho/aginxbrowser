@@ -637,12 +637,14 @@ Two slicing modes, picked by whether `selector` is set:
 
 Each page is painted as a viewport band off the live tree's layout — same primitive the timeline pump rides, no Chromium. The PDF is image-based: per-page JPEG (`jpeg_quality`) embedded via DCTDecode, one page object per page with its own MediaBox in points (px→pt at 96dpi), so variable-height pages need no normalization. PPTX and DOCX are the same pages re-packaged: PPTX as one slide per page (deck-sized to the largest page, images anchored top-left), DOCX as one page-sized section per page with zero margins — Word sizes every section independently, so each page keeps its exact height. Both containers are written by hand (stored-ZIP, fixed timestamps — byte-deterministic), zero new dependencies.
 
+`format="pptx-native"` is the editable tier: instead of rasterizing pages, each `selector` match is walked element-by-element off the live tree (gBCR + computed style from the same layout cache the band paints ride) and mapped to native DrawingML — text becomes real text runs (`<a:t>` with font family/size/weight/color/alignment), background boxes become shapes (solid fill, `border-radius` → roundRect, CSS gradients → `gradFill` with the angle converted), `<img>` becomes a `p:pic` with the fetched bytes as a media part. Slides mode only: `selector` is required, one slide per match, and the deck is sized to the largest slide. What a text box can't express (per-glyph inline styling, z-index reordering, transforms, borders) degrades by omission — the element still lands as an editable shape. Note: the engine doesn't expand the CSS `background` shorthand into `background-image` yet, so gradient slides must use the `background-image` longhand.
+
 **Request fields:**
 
 | Field | Type | Required | Default | Description |
 |------|------|------|------|------|
 | url | string | ✅ | — | Target URL |
-| format | string | | `"pdf"` | `"pdf"` (base64 PDF), `"png"` (one base64 PNG per page), `"pptx"` (one slide per page), or `"docx"` (one page-sized section per page) |
+| format | string | | `"pdf"` | `"pdf"` (base64 PDF), `"png"` (one base64 PNG per page), `"pptx"` (one slide per page), `"pptx-native"` (editable: element-level DrawingML; requires `selector`), or `"docx"` (one page-sized section per page) |
 | width | u32 | | `794` | Page width (CSS px) |
 | height | u32 | | `1123` | Page height (CSS px) — print pagination only; slides size each page to its element |
 | selector | string | | `null` | CSS selector; set → slides mode, unset → print mode |
@@ -662,9 +664,9 @@ Each page is painted as a viewport band off the live tree's layout — same prim
 | width / height | u32 | Requested page size (slides pages vary in height — each PNG self-describes) |
 | pdf_base64 | string? | base64 PDF (set when `format="pdf"`). Decode with `base64 -d`, or use directly as `data:application/pdf;base64,...` |
 | pages_base64 | string[] | One base64 PNG per page (non-empty when `format="png"`) |
-| pptx_base64 | string? | base64 PPTX, one slide per page (set when `format="pptx"`) |
+| pptx_base64 | string? | base64 PPTX, one slide per page (set when `format="pptx"` or `"pptx-native"`) |
 | docx_base64 | string? | base64 DOCX, one page-sized section per page (set when `format="docx"`) |
-| format | string | `"pdf"` / `"png"` / `"pptx"` / `"docx"` |
+| format | string | `"pdf"` / `"png"` / `"pptx"` / `"pptx-native"` / `"docx"` |
 
 **Examples:**
 
@@ -685,6 +687,12 @@ curl -sS -X POST http://127.0.0.1:8089/pdf \
 curl -sS -X POST http://127.0.0.1:8089/pdf \
   -H "Content-Type: application/json" \
   -d '{"url":"https://example.com/deck.html","selector":".slide","format":"pptx"}' \
+  | jq -r .pptx_base64 | base64 -d > deck.pptx
+
+# Slides mode → editable PowerPoint (text runs, shapes, gradients, images)
+curl -sS -X POST http://127.0.0.1:8089/pdf \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com/deck.html","selector":".slide","format":"pptx-native"}' \
   | jq -r .pptx_base64 | base64 -d > deck.pptx
 ```
 
@@ -1354,7 +1362,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `cache` | Query the local cache of fetched pages and past searches (full-text incl. CJK, full-content `get`, stats, filtered clear) |
 | `render_markdown` | Render markdown into a deterministic, self-contained HTML document; fenced `archify` blocks (typed diagram JSON — sequence / workflow / architecture / dataflow / lifecycle) become inline-SVG diagrams; `theme`/`preset`/`quality` (showcase audit) and optional `session_id` viewport grading |
 | `render_video` | Render a page's animation timelines (`window.__timelines`, GSAP-style `duration()`+`pause(t)`) to a base64 MP4 — deterministic seek per frame (`t=i/fps`), in-process paint, ffmpeg encode; needs ffmpeg on PATH and the `screenshot` feature |
-| `render_pdf` | Cut a rendered page into pages and package as base64 PDF, per-page PNGs, PPTX (one slide per page) or DOCX (one page-sized section per page) — print mode paginates at top-level block boundaries (default A4 @96dpi), slides mode makes one page per CSS-selector match sized to the element; needs the `screenshot` feature |
+| `render_pdf` | Cut a rendered page into pages and package as base64 PDF, per-page PNGs, PPTX (one slide per page), editable PPTX (`format="pptx-native"`: element-level DrawingML — text runs/shapes/gradients/images; requires `selector`) or DOCX (one page-sized section per page) — print mode paginates at top-level block boundaries (default A4 @96dpi), slides mode makes one page per CSS-selector match sized to the element; needs the `screenshot` feature |
 
 #### Session Tools
 

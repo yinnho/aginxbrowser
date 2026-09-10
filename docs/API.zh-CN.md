@@ -573,12 +573,14 @@ curl -sS -X POST http://127.0.0.1:8089/video \
 
 每页都是从活树布局画的视口带——和视频帧泵同一个原语，没有 Chromium。PDF 是图基的：每页 JPEG（`jpeg_quality`）走 DCTDecode 内嵌，每页一个 page 对象、自己的 MediaBox（px→pt 按 96dpi），所以页高不一致也不用归一。PPTX 和 DOCX 是同一叠页换个壳：PPTX 每页一张幻灯片（整个 deck 取最大页当幻灯片尺寸，图片锚在左上角）；DOCX 每页一个按页定尺寸的 section、零边距——Word 的每个 section 可以各定页面大小，所以每页保住自己的精确高度。两个容器都是手写的（stored ZIP、时间戳写死——字节级确定性），零新依赖。
 
+`format="pptx-native"` 是可编辑档：不栅格化页面，而是对每个 `selector` 匹配在活树上逐元素走一遍（gBCR + 计算样式，和带画同源的布局缓存），映射成原生 DrawingML——文字变成真文本 run（`<a:t>`，带字体族/字号/字重/颜色/对齐），背景盒变成形状（纯色填充、`border-radius` 转 roundRect、CSS 渐变转带角度换算的 `gradFill`），`<img>` 变成 `p:pic`、抓到的字节进 media part。只有幻灯片模式：`selector` 必填，一个匹配一张幻灯片，deck 尺寸取最大那张。文本框表达不了的（逐字 inline 样式、z-index 重排、transform、边框）缺省降级——元素仍落成可编辑形状。注意：引擎暂时不把 CSS `background` 简写展开成 background-image，渐变页要用 `background-image` 长写法。
+
 **请求字段：**
 
 | 字段 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
 | url | string | ✅ | — | 目标 URL |
-| format | string | | `"pdf"` | `"pdf"`（base64 PDF）、`"png"`（每页一张 base64 PNG）、`"pptx"`（每页一张幻灯片）或 `"docx"`（每页一个按页定尺寸的 section） |
+| format | string | | `"pdf"` | `"pdf"`（base64 PDF）、`"png"`（每页一张 base64 PNG）、`"pptx"`（每页一张幻灯片）、`"pptx-native"`（可编辑：元素级 DrawingML；必须给 `selector`）或 `"docx"`（每页一个按页定尺寸的 section） |
 | width | u32 | | `794` | 页宽（CSS px） |
 | height | u32 | | `1123` | 页高（CSS px）——只管打印分页；幻灯片模式每页按元素自己的高度 |
 | selector | string | | `null` | CSS 选择器；给了走幻灯片模式，不给走打印模式 |
@@ -598,9 +600,9 @@ curl -sS -X POST http://127.0.0.1:8089/video \
 | width / height | u32 | 请求的页尺寸（幻灯片页高各不同——PNG 自己带尺寸头） |
 | pdf_base64 | string? | PDF 的 base64（`format="pdf"` 时有）。`base64 -d` 解码，或 `data:application/pdf;base64,...` 直接用 |
 | pages_base64 | string[] | 每页一张 base64 PNG（`format="png"` 时非空） |
-| pptx_base64 | string? | PPTX 的 base64，每页一张幻灯片（`format="pptx"` 时有） |
+| pptx_base64 | string? | PPTX 的 base64，每页一张幻灯片（`format="pptx"` 或 `"pptx-native"` 时有） |
 | docx_base64 | string? | DOCX 的 base64，每页一个按页定尺寸的 section（`format="docx"` 时有） |
-| format | string | `"pdf"` / `"png"` / `"pptx"` / `"docx"` |
+| format | string | `"pdf"` / `"png"` / `"pptx"` / `"pptx-native"` / `"docx"` |
 
 **示例：**
 
@@ -621,6 +623,12 @@ curl -sS -X POST http://127.0.0.1:8089/pdf \
 curl -sS -X POST http://127.0.0.1:8089/pdf \
   -H "Content-Type: application/json" \
   -d '{"url":"https://example.com/deck.html","selector":".slide","format":"pptx"}' \
+  | jq -r .pptx_base64 | base64 -d > deck.pptx
+
+# 幻灯片模式 → 可编辑 PowerPoint（真文本 run、形状、渐变、图片）
+curl -sS -X POST http://127.0.0.1:8089/pdf \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com/deck.html","selector":".slide","format":"pptx-native"}' \
   | jq -r .pptx_base64 | base64 -d > deck.pptx
 ```
 
@@ -989,7 +997,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 | `cache` | 查询本地抓取/搜索缓存（全文含 CJK、整页 `get`、统计、按条件清理） |
 | `render_markdown` | 把 markdown 渲成确定性自包含 HTML 文档；围栏 `archify` 块（带类型的图 JSON——sequence / workflow / architecture / dataflow / lifecycle）出内联 SVG 图；`theme`/`preset`/`quality`（showcase 审计）+ 可选 `session_id` 视口适配评级 |
 | `render_video` | 把页面的动画时间线（`window.__timelines`，GSAP 风格 `duration()`+`pause(t)`）渲成 base64 MP4——每帧确定性 seek（`t=i/fps`）、进程内绘制、ffmpeg 编码；要 PATH 上有 ffmpeg 和 `screenshot` feature |
-| `render_pdf` | 把渲好的页面切成一叠页，打包 base64 PDF、逐页 PNG、PPTX（每页一张幻灯片）或 DOCX（每页一个按页定尺寸的 section）——打印模式按顶层块边界分页（默认 96dpi A4），幻灯片模式每个选择器匹配自成一张页、按元素定高；要 `screenshot` feature |
+| `render_pdf` | 把渲好的页面切成一叠页，打包 base64 PDF、逐页 PNG、PPTX（每页一张幻灯片）、可编辑 PPTX（`format="pptx-native"`：元素级 DrawingML——文本 run/形状/渐变/图片，必须给 `selector`）或 DOCX（每页一个按页定尺寸的 section）——打印模式按顶层块边界分页（默认 96dpi A4），幻灯片模式每个选择器匹配自成一张页、按元素定高；要 `screenshot` feature |
 
 #### Session 工具
 
