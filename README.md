@@ -146,7 +146,7 @@ docker run -p 8089:8089 yinnho/aginxbrowser:latest
 # (or ghcr.io/yinnho/aginxbrowser:latest)
 
 # Or the prebuilt binary (platform detect + sha256 + mirror fallback + doctor self-check)
-# macOS / Linux / Windows (git-bash; prebuilt Windows ships from v0.3.1, without `stealth`)
+# macOS / Linux / Windows (git-bash; prebuilt Windows ships from v0.3.1, full `stealth`+`screenshot` feature set from the release after v0.3.2)
 # Cautious: download -> inspect -> run (never blind-run network scripts)
 curl -fsSL https://browser.aginx.net/install.sh -o install.sh
 less install.sh && bash install.sh
