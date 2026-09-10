@@ -351,6 +351,27 @@ impl StealthHttpClient {
     }
 
     pub async fn fetch(&self, url: &Url) -> Result<Response, NetError> {
+        self.fetch_inner(url, None).await
+    }
+
+    /// Subresource GET (band-paint image fetch, 反馈⑫ shape): like [`fetch`]
+    /// but carrying the initiating document as Referer, recomputed per redirect
+    /// hop by the same strict-origin-when-cross-origin trim the plain client's
+    /// subresource path applies. Referer-checking image CDNs reject a bare
+    /// request even with a perfect TLS fingerprint.
+    pub async fn fetch_subresource(
+        &self,
+        url: &Url,
+        referrer: Option<&str>,
+    ) -> Result<Response, NetError> {
+        self.fetch_inner(url, referrer).await
+    }
+
+    async fn fetch_inner(
+        &self,
+        url: &Url,
+        referrer: Option<&str>,
+    ) -> Result<Response, NetError> {
         // The stealth path must enforce the same SSRF rules as the reqwest
         // path — without this, StealthHttpClient could reach loopback/private
         // addresses that HttpClient rejects. The per-context opt-in rides the
@@ -398,6 +419,23 @@ impl StealthHttpClient {
             // in extra_headers to suppress it.
             if !extra.contains_key("Sec-Ch-Ua-Platform") {
                 req = req.header("Sec-Ch-Ua-Platform", &platform);
+            }
+
+            // Document-initiated subresource requests carry the initiator's
+            // Referer — recomputed per hop (a redirect can change the
+            // same/cross-origin answer); extra_headers overrides it.
+            if let Some(src) = referrer {
+                if !extra.contains_key("Referer") {
+                    if let Ok(source) = url::Url::parse(src) {
+                        let ref_value = crate::diting_net::client::HttpClient::navigation_referrer(
+                            &source,
+                            &current_url,
+                        );
+                        if !ref_value.is_empty() {
+                            req = req.header("Referer", &ref_value);
+                        }
+                    }
+                }
             }
 
             let cookie_header = self.cookie_jar.get_cookie_header(&current_url);
@@ -644,6 +682,65 @@ mod tests {
             .await
             .expect("context flag must open the stealth path to loopback");
         assert_eq!(resp.status, 200);
+    }
+
+    // fetch_subresource carries the document as Referer under the same
+    // strict-origin-when-cross-origin trim as the plain client's subresource
+    // path — same-origin sends the full URL, cross-origin (a port difference
+    // is an origin difference) only the origin — while a plain fetch stays
+    // bare. The pump image fetch rides this: Referer-checking image CDNs
+    // reject a bare request even with a perfect TLS fingerprint (反馈⑫).
+    #[allow(clippy::await_holding_lock)] // env-lock guard spans the fixture fetch, as above
+    #[tokio::test]
+    async fn stealth_subresource_carries_trimmed_referrer() {
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+        let (port, heads) = head_recording_fixture().await;
+        let mut client = StealthHttpClient::new(Arc::new(CookieJar::new()));
+        client.allow_private_network = true;
+        let same = Url::parse(&format!("http://127.0.0.1:{port}/same.png")).unwrap();
+        let cross = Url::parse(&format!("http://127.0.0.1:{port}/cross.png")).unwrap();
+        let bare = Url::parse(&format!("http://127.0.0.1:{port}/bare.png")).unwrap();
+        let results = vec![
+            client
+                .fetch_subresource(&same, Some(&format!("http://127.0.0.1:{port}/doc.html#frag")))
+                .await,
+            client
+                .fetch_subresource(&cross, Some("http://other.example:9/doc.html"))
+                .await,
+            client.fetch(&bare).await,
+        ];
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+        for r in results {
+            assert_eq!(r.expect("fixture fetch").status, 200);
+        }
+        let heads = heads.lock().unwrap();
+        let head_of = |path: &str| {
+            heads
+                .iter()
+                .find(|h| h.contains(&format!("GET {path} ")))
+                .unwrap_or_else(|| panic!("no request for {path}: {heads:?}"))
+                .clone()
+        };
+        let same_head = head_of("/same.png");
+        assert!(
+            same_head
+                .lines()
+                .any(|l| l.eq_ignore_ascii_case(&format!("referer: http://127.0.0.1:{port}/doc.html"))),
+            "same-origin subresource must carry the full document URL (fragment stripped): {same_head}"
+        );
+        let cross_head = head_of("/cross.png");
+        assert!(
+            cross_head
+                .lines()
+                .any(|l| l.eq_ignore_ascii_case("referer: http://other.example:9/")),
+            "cross-origin subresource must trim to the origin: {cross_head}"
+        );
+        let bare_head = head_of("/bare.png");
+        assert!(
+            !bare_head.to_ascii_lowercase().contains("referer:"),
+            "plain fetch must not invent a Referer: {bare_head}"
+        );
     }
 
     /// Serve 200s on an ephemeral port, recording each request's raw head

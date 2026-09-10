@@ -13,8 +13,6 @@
 //! short last viewport makes the clamp land exactly on the page's start
 //! offset instead of pulling it back into the previous page's content.
 
-use std::time::Duration;
-
 use crate::diting_browser::Page;
 
 /// How the page set is cut.
@@ -96,9 +94,6 @@ impl std::error::Error for PageError {}
 /// than emitting a near-blank tail page.
 const MIN_TAIL: f32 = 64.0;
 
-/// Per-body cap for band-image fetches (matches the pump paths).
-const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
-
 /// A page break's start offset and height.
 struct Band {
     y: f32,
@@ -119,7 +114,7 @@ pub async fn render_page_set(
     // band). Fetch those through the page's client so later geometry sees
     // intrinsic sizes instead of placeholders.
     let (probe, missing) = paint(page, 0.0, 0.0, (w, page_h)).ok_or(PageError::NoLiveDocument)?;
-    fetch_missing_images(page, missing).await;
+    page.fetch_band_images(missing).await;
     let content_size = probe.content_size;
 
     let bands = match &opts.mode {
@@ -137,7 +132,7 @@ pub async fn render_page_set(
         let (_, missing) = paint(page, 0.0, band.y, (w, band.vh))
             .ok_or(PageError::NoLiveDocument)?;
         if !missing.is_empty() {
-            fetch_missing_images(page, missing).await;
+            page.fetch_band_images(missing).await;
         }
         let (frame, _) = paint(page, 0.0, band.y, (w, band.vh)).ok_or(PageError::NoLiveDocument)?;
         pages.push(PageImage {
@@ -274,29 +269,6 @@ fn paint(
     viewport: (f32, f32),
 ) -> Option<(crate::diting_js::ops::BandFrame, Vec<String>)> {
     page.viewport_band_frame(scroll_x, scroll_y, viewport)
-}
-
-/// Fetch the img bodies band paint is missing, through the page's own HTTP
-/// client with the document as Referer. Same per-URL policy as the other
-/// pump paths: SSRF gate, 3 s timeout, 200-only, ≤2 MiB.
-async fn fetch_missing_images(page: &Page, urls: Vec<String>) {
-    let base = page.url_string();
-    for u in urls {
-        let Ok(parsed) = url::Url::parse(&u) else { continue };
-        if crate::diting_js::ops::validate_fetch_url(&parsed).is_err() {
-            continue;
-        }
-        let fetched = tokio::time::timeout(
-            Duration::from_secs(3),
-            page.context.http_client.fetch_subresource(&parsed, Some(base.as_str())),
-        )
-        .await;
-        if let Ok(Ok(resp)) = fetched {
-            if resp.status == 200 && !resp.body.is_empty() && resp.body.len() <= MAX_BODY_BYTES {
-                page.store_band_image(u, resp.body);
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

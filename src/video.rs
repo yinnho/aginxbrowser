@@ -157,8 +157,6 @@ impl Default for TimelineVideoOptions {
     }
 }
 
-/// Per-body cap for band-image fetches (matches the CDP band path).
-const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 /// Audio bodies get their own, larger cap — a three-minute 128 kbps MP3 is
 /// already ~2.8 MB, so the image cap would reject ordinary music files.
 const MAX_AUDIO_BYTES: usize = 16 * 1024 * 1024;
@@ -510,34 +508,11 @@ async fn seek_and_paint(
     if missing.is_empty() {
         return Ok((frame.width, frame.height, frame.rgba));
     }
-    fetch_missing_images(page, missing).await;
+    page.fetch_band_images(missing).await;
     let Some((frame, _)) = page.viewport_band_frame(0.0, 0.0, viewport) else {
         return Err(VideoError::NoLiveDocument);
     };
     Ok((frame.width, frame.height, frame.rgba))
-}
-
-/// Fetch the img bodies band paint is missing, through the page's own HTTP
-/// client with the document as Referer. Same per-URL policy as the CDP band
-/// path: SSRF gate, 3 s timeout, 200-only, ≤2 MiB.
-async fn fetch_missing_images(page: &Page, urls: Vec<String>) {
-    let base = page.url_string();
-    for u in urls {
-        let Ok(parsed) = url::Url::parse(&u) else { continue };
-        if crate::diting_js::ops::validate_fetch_url(&parsed).is_err() {
-            continue;
-        }
-        let fetched = tokio::time::timeout(
-            Duration::from_secs(3),
-            page.context.http_client.fetch_subresource(&parsed, Some(base.as_str())),
-        )
-        .await;
-        if let Ok(Ok(resp)) = fetched {
-            if resp.status == 200 && !resp.body.is_empty() && resp.body.len() <= MAX_BODY_BYTES {
-                page.store_band_image(u, resp.body);
-            }
-        }
-    }
 }
 
 #[cfg(all(test, feature = "screenshot"))]

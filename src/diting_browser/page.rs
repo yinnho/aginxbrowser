@@ -1828,6 +1828,64 @@ impl Page {
         }
     }
 
+    /// Fetch the img bodies band paint is missing, through the page's own
+    /// identity: the stealth stack when armed (its TLS/UA fingerprint and
+    /// cookie jar are what fingerprint-gated image CDNs — the bilibili-412
+    /// family — let through), else the plain subresource path. Both carry
+    /// the document as Referer (strict-origin-when-cross-origin, the plain
+    /// client's subresource policy — Referer-checking CDNs reject a bare
+    /// request). Shared by every band-paint pump (CDP capture, screencast,
+    /// video, print/PDF); same per-URL policy everywhere: SSRF gate, ≤2 MiB
+    /// per body, 3 s per request, 200-only. Failures just leave the
+    /// placeholder — a frame beats a stall.
+    #[cfg(feature = "screenshot")]
+    pub async fn fetch_band_images(&self, urls: Vec<String>) {
+        const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+        const PER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+        let base = self.url_string();
+        let client = self.http_client.clone();
+        #[cfg(feature = "stealth")]
+        let stealth = self.stealth_client.clone();
+        let futs = urls.into_iter().map(|u| {
+            let client = client.clone();
+            let base = base.clone();
+            #[cfg(feature = "stealth")]
+            let stealth = stealth.clone();
+            async move {
+                let Ok(parsed) = url::Url::parse(&u) else { return None };
+                if crate::diting_js::ops::validate_fetch_url(&parsed).is_err() {
+                    return None;
+                }
+                let resp = tokio::time::timeout(PER_REQUEST_TIMEOUT, async {
+                    #[cfg(feature = "stealth")]
+                    if let Some(ref s) = stealth {
+                        return s.fetch_subresource(&parsed, Some(base.as_str())).await.ok();
+                    }
+                    #[allow(unreachable_code)]
+                    client
+                        .fetch_subresource(&parsed, Some(base.as_str()))
+                        .await
+                        .ok()
+                })
+                .await
+                .ok()
+                .flatten()?;
+                if resp.status != 200 || resp.body.is_empty() || resp.body.len() > MAX_BODY_BYTES {
+                    return None;
+                }
+                Some((u, resp.body))
+            }
+        });
+        let got: Vec<(String, Vec<u8>)> = futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+        for (u, body) in got {
+            self.store_band_image(u, body);
+        }
+    }
+
     /// The root scroller's mirrored offset (screencast damage signatures and
     /// frame metadata).
     #[cfg(feature = "screenshot")]

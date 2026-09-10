@@ -659,11 +659,9 @@ pub async fn handle(
                     .viewport_band_frame(sx, sy, (vw, vh))
                     .ok_or_else(|| "band paint failed: no live document".to_string())?;
                 if !missing.is_empty() {
-                    // Fill the image table (page client, SSRF gate, 2 MiB /
-                    // 3 s caps — the render-path pre-fetch semantics), then
-                    // re-blit with real rasters.
-                    let url = page.url_string();
-                    fetch_band_images(page, &url, missing).await;
+                    // Fill the image table (page identity + Referer, SSRF
+                    // gate, 2 MiB / 3 s caps), then re-blit with real rasters.
+                    page.fetch_band_images(missing).await;
                     let (frame, _) = page
                         .viewport_band_frame(sx, sy, (vw, vh))
                         .ok_or_else(|| "band paint failed: no live document".to_string())?;
@@ -864,59 +862,6 @@ fn maybe_downscale(
     (nw, nh, thumb.into_raw())
 }
 
-/// Fetch the img bodies band paint is missing, through the page's own client
-/// (stealth when enabled, else the plain client with the document as
-/// Referer), and store them for the next band pass. Same per-URL policy as
-/// the render-path pre-fetch: SSRF gate, ≤2 MiB per body, 3 s per request,
-/// 200-only. Failures just leave the placeholder — a frame beats a stall.
-#[cfg(feature = "screenshot")]
-async fn fetch_band_images(page: &crate::diting_browser::Page, base_url: &str, urls: Vec<String>) {
-    const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
-    const PER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-    #[cfg(feature = "stealth")]
-    let stealth = page.stealth_client.clone();
-    let client = page.http_client.clone();
-    let doc_referrer = base_url.to_string();
-    let futs = urls.into_iter().map(|u| {
-        let client = client.clone();
-        let doc_referrer = doc_referrer.clone();
-        #[cfg(feature = "stealth")]
-        let stealth = stealth.clone();
-        async move {
-            let Ok(parsed) = url::Url::parse(&u) else { return None };
-            if crate::diting_js::ops::validate_fetch_url(&parsed).is_err() {
-                return None;
-            }
-            let resp = tokio::time::timeout(PER_REQUEST_TIMEOUT, async {
-                #[cfg(feature = "stealth")]
-                if let Some(ref s) = stealth {
-                    return s.fetch(&parsed).await.ok();
-                }
-                #[allow(unreachable_code)]
-                client
-                    .fetch_subresource(&parsed, Some(doc_referrer.as_str()))
-                    .await
-                    .ok()
-            })
-            .await
-            .ok()
-            .flatten()?;
-            if resp.status != 200 || resp.body.is_empty() || resp.body.len() > MAX_BODY_BYTES {
-                return None;
-            }
-            Some((u, resp.body))
-        }
-    });
-    let got: Vec<(String, Vec<u8>)> = futures::future::join_all(futs)
-        .await
-        .into_iter()
-        .flatten()
-        .collect();
-    for (u, body) in got {
-        page.store_band_image(u, body);
-    }
-}
-
 /// Produce one screencast frame per armed, unacked, damaged page. Called on
 /// the connection loop's 33 ms tick and once immediately from
 /// `startScreencast` (Chrome emits the first frame right away). Damage =
@@ -991,8 +936,7 @@ pub(crate) async fn pump_screencast_frames(ctx: &mut CdpContext) {
                 None => None,
                 Some((frame, missing)) => {
                     if !missing.is_empty() {
-                        let url = page.url_string();
-                        fetch_band_images(page, &url, missing).await;
+                        page.fetch_band_images(missing).await;
                         page.viewport_band_frame(ox, oy, (vw, vh)).map(|(f, _)| f)
                     } else {
                         Some(frame)
