@@ -893,6 +893,127 @@ mod tests {
         assert!((h.width - b.width).abs() <= 1.0, "single column, uniform width: {h:?} {b:?}");
     }
 
+    /// colspan: the spanning cell covers both columns exactly — same x as the
+    /// first column cell below it, width = sum of the two column widths.
+    #[test]
+    fn colspan_cell_spans_the_columns_it_covers() {
+        let html = r##"<html><head><style>
+            body { margin: 0; }
+            table { border-collapse: collapse; }
+            td { padding: 0; font-size: 0; line-height: 0; }
+            div { display: inline-block; }
+        </style></head><body>
+            <table>
+                <tr><td colspan="2" id="wide"><div style="width:150px;height:20px"></div></td></tr>
+                <tr><td id="c1"><div style="width:100px;height:20px"></div></td><td id="c2"><div style="width:50px;height:20px"></div></td></tr>
+            </table>
+        </body></html>"##;
+        let wide = element_rects_diting(html, "#wide", false, 800.0, 600.0, None).expect("wide")[0];
+        let c1 = element_rects_diting(html, "#c1", false, 800.0, 600.0, None).expect("c1")[0];
+        let c2 = element_rects_diting(html, "#c2", false, 800.0, 600.0, None).expect("c2")[0];
+        assert!((wide.x - c1.x).abs() <= 1.0, "spanning cell starts at col 1: {wide:?} {c1:?}");
+        assert!(
+            (wide.width - (c1.width + c2.width)).abs() <= 2.0,
+            "spanning cell width = col1 + col2: {wide:?} {c1:?} {c2:?}"
+        );
+        assert!(
+            (wide.x + wide.width - (c2.x + c2.width)).abs() <= 1.0,
+            "spanning cell ends with col 2: {wide:?} {c2:?}"
+        );
+    }
+
+    /// rowspan: the lifted cell spans both rows — top at row 1's top, bottom at
+    /// row 2's bottom — and the cells to its right skip the occupied slot.
+    #[test]
+    fn rowspan_cell_spans_the_rows_it_covers() {
+        let html = r##"<html><head><style>
+            body { margin: 0; }
+            table { border-collapse: collapse; }
+            td { padding: 0; font-size: 0; line-height: 0; }
+            div { display: inline-block; }
+        </style></head><body>
+            <table>
+                <tr><td rowspan="2" id="tall"><div style="width:40px;height:80px"></div></td><td id="r1"><div style="width:40px;height:30px"></div></td></tr>
+                <tr><td id="r2"><div style="width:40px;height:30px"></div></td></tr>
+            </table>
+        </body></html>"##;
+        let tall = element_rects_diting(html, "#tall", false, 800.0, 600.0, None).expect("tall")[0];
+        let r1 = element_rects_diting(html, "#r1", false, 800.0, 600.0, None).expect("r1")[0];
+        let r2 = element_rects_diting(html, "#r2", false, 800.0, 600.0, None).expect("r2")[0];
+        // both rows are 30px of content each; the 80px rowspan cell forces the
+        // band to 80px, split evenly → 40px per row.
+        assert!((tall.y - r1.y).abs() <= 1.0, "rowspan cell top = row 1 top: {tall:?} {r1:?}");
+        assert!(
+            (tall.height - (r1.height + r2.height)).abs() <= 2.0,
+            "rowspan cell height = row1 + row2: {tall:?} {r1:?} {r2:?}"
+        );
+        assert!(
+            (tall.y + tall.height - (r2.y + r2.height)).abs() <= 1.0,
+            "rowspan cell bottom = row 2 bottom: {tall:?} {r2:?}"
+        );
+        assert!(
+            (r1.x - r2.x).abs() <= 1.0 && r2.x >= tall.x + tall.width - 1.0,
+            "row 2 cell right of the occupied slot: {tall:?} {r1:?} {r2:?}"
+        );
+    }
+
+    /// rowspan + colspan together: a 2×2 spanning cell covers the full 2×2
+    /// grid of normal cells that define the columns and rows.
+    #[test]
+    fn rowspan_and_colspan_combined() {
+        let html = r##"<html><head><style>
+            body { margin: 0; }
+            table { border-collapse: collapse; }
+            td { padding: 0; font-size: 0; line-height: 0; }
+            div { display: inline-block; }
+        </style></head><body>
+            <table>
+                <tr><td rowspan="2" colspan="2" id="big"><div style="width:90px;height:90px"></div></td><td id="a"><div style="width:30px;height:30px"></div></td></tr>
+                <tr><td id="b"><div style="width:30px;height:30px"></div></td></tr>
+                <tr><td id="c"><div style="width:30px;height:30px"></div></td><td id="d"><div style="width:60px;height:30px"></div></td><td id="e"><div style="width:30px;height:30px"></div></td></tr>
+            </table>
+        </body></html>"##;
+        let big = element_rects_diting(html, "#big", false, 800.0, 600.0, None).expect("big")[0];
+        let a = element_rects_diting(html, "#a", false, 800.0, 600.0, None).expect("a")[0];
+        let c = element_rects_diting(html, "#c", false, 800.0, 600.0, None).expect("c")[0];
+        let d = element_rects_diting(html, "#d", false, 800.0, 600.0, None).expect("d")[0];
+        let e = element_rects_diting(html, "#e", false, 800.0, 600.0, None).expect("e")[0];
+        // columns: col1=30, col2=60, col3=30 (from the third row); big covers
+        // col1+col2 = 90.
+        assert!((big.x - c.x).abs() <= 1.0, "big starts at col 1: {big:?} {c:?}");
+        assert!(
+            (big.width - (c.width + d.width)).abs() <= 2.0,
+            "big width = col1 + col2: {big:?} {c:?} {d:?}"
+        );
+        assert!((a.x - e.x).abs() <= 1.0, "col 3 aligned across rows 1/3: {a:?} {e:?}");
+        // big holds a 90px div and spans rows 1+2 (30px content each) → the
+        // 30px deficit splits evenly, 45px per row, band = 90.
+        assert!((big.height - 90.0).abs() <= 2.0, "big spans the full 2-row band: {big:?}");
+        assert!(
+            (c.y - (big.y + big.height)).abs() <= 1.0,
+            "row 3 starts at big's bottom: {big:?} {c:?}"
+        );
+    }
+
+    /// collapsed borders between adjacent cells halve: two 4px borders meet at
+    /// one shared 4px line, not 8px of doubled paint.
+    #[test]
+    fn collapsed_borders_halve_where_adjacent_cells_meet() {
+        let html = r##"<html><head><style>
+            body { margin: 0; }
+            table { border-collapse: collapse; }
+            td { width: 100px; height: 40px; padding: 0; border: 4px solid black; }
+        </style></head><body>
+            <table><tr><td id="l">a</td><td id="r">b</td></tr></table>
+        </body></html>"##;
+        let l = element_rects_diting(html, "#l", false, 800.0, 600.0, None).expect("l")[0];
+        let r = element_rects_diting(html, "#r", false, 800.0, 600.0, None).expect("r")[0];
+        assert!(
+            (r.x - (l.x + l.width)).abs() <= 1.0,
+            "halved borders meet exactly — no gap, no overlap: {l:?} {r:?}"
+        );
+    }
+
     /// The `height` attribute on td is a px presentational hint (blitz#507):
     /// an empty `<td height="55">` is a 55px-tall box — the bare bones of
     /// HTML-email bar charts.
