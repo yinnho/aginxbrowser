@@ -1507,6 +1507,7 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
 /// table/list box types, so `td` lays out as a block — but getComputedStyle
 /// must still answer like a browser (obscura #771: a table's box type was
 /// unreadable over CDP). Only consulted while `display_from_ua` is set.
+#[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
 fn ua_display_cssom(tag: Option<&str>) -> Option<&'static str> {
     match tag? {
         "table" => Some("table"),

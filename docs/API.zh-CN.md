@@ -501,6 +501,61 @@ curl -sS -X POST http://127.0.0.1:8089/screenshot \
 
 ---
 
+### POST /video
+
+把页面的动画时间线渲成 MP4（base64 返回）。**需 `--features screenshot` 构建，且服务器 PATH 上要有 ffmpeg。**
+
+页面脚本要先把时间线挂到 `window.__timelines`——带 `duration()` 和 `pause(t)` 两个方法的对象就行，GSAP 的时间线（建的时候 `paused: true`）直接放进去就能用：
+
+```js
+const tl = gsap.timeline({ paused: true });
+tl.from("#box", { opacity: 0, x: -200, duration: 2, ease: "power2.out" });
+window.__timelines = { main: tl };
+```
+
+引擎每帧把所有注册的时间线 seek 到 `t = i/fps`，画视口，RGBA 直接 pipe 进 ffmpeg 出 H.264/yuv420p。帧值里没有墙钟，同一页面渲两遍字节一样——确定性是构造出来的，不是碰运气。
+
+**请求字段：**
+
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| url | string | ✅ | — | 目标 URL（页面要注册 `window.__timelines`） |
+| fps | f64 | | `24` | 帧率 |
+| width | u32 | | `1280` | 视口宽（CSS px；向下取偶——yuv420p 要求） |
+| height | u32 | | `720` | 视口高（CSS px） |
+| hold_tail_secs | f64 | | `0.5` | 时间线走完后定格的额外秒数 |
+| max_duration_secs | f64 | | `120` | 时间线 + 定格的安全上限，超了报错不硬编 |
+| wait_timelines_ms | u64 | | `10000` | 等 `window.__timelines` 出现的毫秒数 |
+| use_proxy | bool | | `false` | 走 `AGINXBROWSER_PROXY` 代理 |
+| cookies | string[] \| object[] | | `[]` | 导航前注入的 cookie（语义同 `/fetch`） |
+| tls_fingerprint | string | | `null` | TLS 指纹（stealth 模式） |
+
+**响应字段：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| url | string | 最终 URL |
+| title | string? | 页面标题 |
+| frames | u32 | 写进编码器的帧数 |
+| timeline_secs | f64 | 最长注册时间线的秒数 |
+| duration_secs | f64 | 视频总长 = 时间线 + 定格 |
+| width / height | u32 | 编码出的像素尺寸 |
+| video_base64 | string | MP4 的 base64（H.264，yuv420p）。`base64 -d` 解码，或 `data:video/mp4;base64,...` 直接用 |
+| format | string | 固定 `"mp4"` |
+
+**示例：**
+
+```bash
+curl -sS -X POST http://127.0.0.1:8089/video \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com/anim.html","fps":20,"width":800,"height":450}' \
+  | jq -r .video_base64 | base64 -d > anim.mp4
+```
+
+错误把原因原样带回来：`wait_timelines_ms` 内没等到 `__timelines`、时间线时长为零、超过时长上限、PATH 上没有 ffmpeg、ffmpeg 非零退出（带 stderr 尾巴）。
+
+---
+
 ### POST /v1/scrape（Firecrawl 兼容）
 
 [Firecrawl](https://github.com/mendableai/firecrawl) 兼容端点。现有 Firecrawl 客户端只需改 base URL 即可迁移。
@@ -848,7 +903,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 
 `--mcp` 模式走 stdio 协议，不启动 HTTP 服务器，通过 stdin/stdout 与 MCP 客户端通信。
 
-### 提供的工具（28 个）
+### 提供的工具（30 个）
 
 #### 基础工具
 
@@ -860,6 +915,8 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 | `search` | 多引擎聚合搜索（百度/Bing/搜狗/搜狗微信/Google） |
 | `download` | 流式下载文件到磁盘（SHA-256 校验、断点续传） |
 | `cache` | 查询本地抓取/搜索缓存（全文含 CJK、整页 `get`、统计、按条件清理） |
+| `render_markdown` | 把 markdown 渲成确定性自包含 HTML 文档；围栏 `archify` 块（带类型的图 JSON——sequence / workflow / architecture / dataflow / lifecycle）出内联 SVG 图；`theme`/`preset`/`quality`（showcase 审计）+ 可选 `session_id` 视口适配评级 |
+| `render_video` | 把页面的动画时间线（`window.__timelines`，GSAP 风格 `duration()`+`pause(t)`）渲成 base64 MP4——每帧确定性 seek（`t=i/fps`）、进程内绘制、ffmpeg 编码；要 PATH 上有 ffmpeg 和 `screenshot` feature |
 
 #### Session 工具
 

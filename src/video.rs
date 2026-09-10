@@ -34,6 +34,9 @@ pub struct TimelineVideo {
     pub timeline_secs: f64,
     /// Total video length = timeline + hold tail, seconds.
     pub duration_secs: f64,
+    /// Encoded pixel size (the request viewport floored to even — yuv420p).
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Debug)]
@@ -231,7 +234,14 @@ pub async fn render_timeline_video(
         let tail: String = err_reader.join().unwrap_or_default().chars().rev().take(400).collect();
         return Err(VideoError::FfmpegFailed(tail.chars().rev().collect()));
     }
-    Ok(TimelineVideo { mp4, frames: written, timeline_secs: timeline, duration_secs: total })
+    Ok(TimelineVideo {
+        mp4,
+        frames: written,
+        timeline_secs: timeline,
+        duration_secs: total,
+        width: w,
+        height: h,
+    })
 }
 
 /// Seek every registered timeline to `t`, then paint one viewport band. The

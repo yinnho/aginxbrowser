@@ -825,6 +825,56 @@ fn base64_png(bytes: &[u8]) -> String {
     STANDARD.encode(bytes)
 }
 
+/// /video: render the page's registered timelines (window.__timelines —
+/// GSAP-style objects with `duration()` + `pause(t)`) to an MP4.
+///
+/// Unlike /screenshot, which extracts outerHTML and renders offline, this
+/// needs the LIVE page: the timelines live in the page's own V8 isolate, so
+/// the seek loop (pause(t) → viewport band paint → ffmpeg stdin) runs while
+/// the browser is still up. Requires ffmpeg on PATH. See src/video.rs for
+/// the protocol.
+#[cfg(feature = "screenshot")]
+pub fn do_video(req: crate::VideoRequest) -> Result<crate::VideoResponse> {
+    run_on_local_runtime(move |_rt| {
+        Box::pin(async move {
+            crate::rate::check_domain(&req.url).map_err(anyhow::Error::msg)?;
+            let browser = build_browser(req.use_proxy, &req.url, req.tls_fingerprint.as_deref())?;
+            inject_cookies(&browser, &req.cookies, &req.url);
+            let mut page = browser.new_page().await?;
+            // Pin the viewport so JS-time layout (media queries) and the band
+            // paint below agree on the requested size.
+            page.set_viewport_override(req.width as f32, req.height as f32, false, None);
+            page.goto(&req.url).await?;
+
+            let opts = crate::video::TimelineVideoOptions {
+                fps: req.fps,
+                viewport: (req.width as f32, req.height as f32),
+                hold_tail_secs: req.hold_tail_secs,
+                max_duration_secs: req.max_duration_secs,
+                wait_timelines: std::time::Duration::from_millis(req.wait_timelines_ms),
+            };
+            let video = crate::video::render_timeline_video(&mut page.inner, &opts).await?;
+            let final_url = page.url();
+            let title: Option<String> = {
+                let v = page.evaluate("document.title");
+                v.as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+            };
+
+            Ok(crate::VideoResponse {
+                url: final_url,
+                title,
+                frames: video.frames,
+                timeline_secs: video.timeline_secs,
+                duration_secs: video.duration_secs,
+                width: video.width,
+                height: video.height,
+                video_base64: base64_png(&video.mp4),
+                format: "mp4".to_string(),
+            })
+        })
+    })
+}
+
 /// Shared search engine registry. LazyLock so engine clients (reqwest/wreq)
 /// are built once on first use.
 pub(crate) static SEARCH_REGISTRY: std::sync::LazyLock<crate::search::SearchEngineRegistry> =

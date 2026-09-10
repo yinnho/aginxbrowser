@@ -318,6 +318,79 @@ fn default_screenshot_scale() -> f32 { 1.0 }
 #[cfg(feature = "screenshot")]
 fn default_screenshot_full_page() -> bool { true }
 
+#[cfg(feature = "screenshot")]
+fn default_video_fps() -> f64 { 24.0 }
+#[cfg(feature = "screenshot")]
+fn default_video_width() -> u32 { 1280 }
+#[cfg(feature = "screenshot")]
+fn default_video_height() -> u32 { 720 }
+#[cfg(feature = "screenshot")]
+fn default_video_hold_tail_secs() -> f64 { 0.5 }
+#[cfg(feature = "screenshot")]
+fn default_video_max_duration_secs() -> f64 { 120.0 }
+#[cfg(feature = "screenshot")]
+fn default_video_wait_timelines_ms() -> u64 { 10_000 }
+
+/// /video request: render the page's registered timelines
+/// (`window.__timelines` — GSAP-style objects with `duration()` + `pause(t)`)
+/// to an MP4. The seek protocol is deterministic — frame t = i/fps, no wall
+/// clock in the pixel values. Requires ffmpeg on PATH.
+#[cfg(feature = "screenshot")]
+#[derive(Debug, Deserialize, Clone)]
+pub struct VideoRequest {
+    pub url: String,
+    /// Frames per second. Default 24.
+    #[serde(default = "default_video_fps")]
+    pub fps: f64,
+    /// Viewport width in CSS pixels (floored to even — yuv420p). Default 1280.
+    #[serde(default = "default_video_width")]
+    pub width: u32,
+    /// Viewport height in CSS pixels. Default 720.
+    #[serde(default = "default_video_height")]
+    pub height: u32,
+    /// Freeze the final timeline state for this many extra seconds. Default 0.5.
+    #[serde(default = "default_video_hold_tail_secs")]
+    pub hold_tail_secs: f64,
+    /// Safety cap on timeline + hold tail, seconds. Default 120.
+    #[serde(default = "default_video_max_duration_secs")]
+    pub max_duration_secs: f64,
+    /// How long to wait for `window.__timelines` to appear, ms. Default 10000.
+    #[serde(default = "default_video_wait_timelines_ms")]
+    pub wait_timelines_ms: u64,
+    /// Route through AGINXBROWSER_PROXY. Default false (direct).
+    #[serde(default)]
+    pub use_proxy: bool,
+    /// Cookies to inject before navigation (`"name=value"` strings or CDP-style
+    /// objects) — for pages whose timelines sit behind a login.
+    #[serde(default, deserialize_with = "crate::server::cookie_list_from_json")]
+    pub cookies: Vec<String>,
+    /// TLS fingerprint override (stealth mode only).
+    #[serde(default)]
+    pub tls_fingerprint: Option<String>,
+}
+
+/// /video response: MP4 encoded as base64 (`base64 -d > out.mp4` or
+/// `<video src="data:video/mp4;base64,...">`).
+#[cfg(feature = "screenshot")]
+#[derive(Debug, Serialize)]
+pub struct VideoResponse {
+    pub url: String,
+    pub title: Option<String>,
+    /// Frames written to the encoder.
+    pub frames: u32,
+    /// Longest registered timeline, seconds.
+    pub timeline_secs: f64,
+    /// Total video length = timeline + hold tail, seconds.
+    pub duration_secs: f64,
+    /// Encoded pixel size (request viewport floored to even).
+    pub width: u32,
+    pub height: u32,
+    /// Base64-encoded MP4 bytes (H.264, yuv420p).
+    pub video_base64: String,
+    /// Always "mp4" for now.
+    pub format: String,
+}
+
 /// /screenshot response: PNG encoded as base64 (so it rides in the existing
 /// JSON API; clients `base64 -d` or `<img src="data:image/png;base64,...">`).
 #[cfg(feature = "screenshot")]
@@ -714,7 +787,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/devtools/:kind/:id", get(diting_cdp::http::devtools_ws));
 
     #[cfg(feature = "screenshot")]
-    let app = app.route("/screenshot", post(screenshot_handler));
+    let app = app
+        .route("/screenshot", post(screenshot_handler))
+        .route("/video", post(video_handler));
 
     let bind_addr = std::env::var("AGINXBROWSER_BIND").unwrap_or_else(|_| "0.0.0.0:8089".to_string());
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
@@ -883,6 +958,7 @@ async fn status_handler() -> axum::response::Html<String> {
     <tr><td>POST&nbsp;/fetch</td><td>fetch a URL, render JS, return markdown/HTML</td></tr>
     <tr><td>POST&nbsp;/search</td><td>multi-engine meta-search</td></tr>
     <tr><td>POST&nbsp;/screenshot</td><td>render a page to PNG (CPU)</td></tr>
+    <tr><td>POST&nbsp;/video</td><td>page timelines &rarr; MP4 (needs ffmpeg)</td></tr>
     <tr><td>POST&nbsp;/download</td><td>streaming file download</td></tr>
     <tr><td>POST&nbsp;/session/:id/&hellip;</td><td>stateful browser session (navigate/click/eval/&hellip;)</td></tr>
     <tr><td>GET&nbsp;&nbsp;/mcp</td><td>MCP endpoint (streamable HTTP)</td></tr>
@@ -1174,6 +1250,16 @@ async fn screenshot_handler(Json(req): Json<ScreenshotRequest>) -> Result<impl I
     // V8 (deno_core) holds !Send state, so drive the whole capture on a
     // current-thread runtime on a blocking thread — same pattern as do_eval.
     let resp = spawn_blocking(move || server::do_screenshot(req)).await??;
+    Ok((StatusCode::OK, Json(resp)))
+}
+
+/// Timeline video: seek the page's registered timelines frame by frame and
+/// encode the viewport bands to MP4 (ffmpeg pipe). Same threading pattern as
+/// /screenshot — V8 is !Send.
+#[cfg(feature = "screenshot")]
+async fn video_handler(Json(req): Json<VideoRequest>) -> Result<impl IntoResponse, AppError> {
+    robots::assert_allowed(&req.url).await.map_err(AppError::Forbidden)?;
+    let resp = spawn_blocking(move || server::do_video(req)).await??;
     Ok((StatusCode::OK, Json(resp)))
 }
 
@@ -1848,6 +1934,22 @@ mod tests {
         let r: FetchRequest =
             serde_json::from_str(r#"{"url":"https://e.com","render_tier":"browser"}"#).unwrap();
         assert_eq!(r.render_tier, RenderTier::Obscura);
+    }
+
+    // /video defaults must all be materialized by serde (not left zeroed when
+    // the caller omits them) — a 0 fps or 0-height request would produce a
+    // broken encode, so the defaults ARE the contract.
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn video_request_defaults_are_materialized() {
+        let r: VideoRequest = serde_json::from_str(r#"{"url":"https://e.com/anim.html"}"#).unwrap();
+        assert_eq!(r.fps, 24.0);
+        assert_eq!((r.width, r.height), (1280, 720));
+        assert_eq!(r.hold_tail_secs, 0.5);
+        assert_eq!(r.max_duration_secs, 120.0);
+        assert_eq!(r.wait_timelines_ms, 10_000);
+        assert!(!r.use_proxy);
+        assert!(r.cookies.is_empty());
     }
 }
 

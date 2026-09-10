@@ -505,6 +505,56 @@ fn default_scroll_amount() -> u32 {
 fn default_format() -> String {
     "markdown".to_string()
 }
+fn default_video_fps() -> f64 {
+    24.0
+}
+fn default_video_width() -> u32 {
+    1280
+}
+fn default_video_height() -> u32 {
+    720
+}
+fn default_video_hold_tail_secs() -> f64 {
+    0.5
+}
+fn default_video_max_duration_secs() -> f64 {
+    120.0
+}
+fn default_video_wait_timelines_ms() -> u64 {
+    10_000
+}
+
+/// render_video parameters — mirrors POST /video's request shape.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct RenderVideoParams {
+    /// Page URL whose scripts register timelines in `window.__timelines`
+    /// (GSAP-style objects with `duration()` + `pause(t)`).
+    pub url: String,
+    /// Frames per second. Default 24.
+    #[serde(default = "default_video_fps")]
+    pub fps: f64,
+    /// Viewport width in CSS pixels (floored to even — yuv420p). Default 1280.
+    #[serde(default = "default_video_width")]
+    pub width: u32,
+    /// Viewport height in CSS pixels. Default 720.
+    #[serde(default = "default_video_height")]
+    pub height: u32,
+    /// Freeze the final timeline state for this many extra seconds. Default 0.5.
+    #[serde(default = "default_video_hold_tail_secs")]
+    pub hold_tail_secs: f64,
+    /// Safety cap on timeline + hold tail, seconds. Default 120.
+    #[serde(default = "default_video_max_duration_secs")]
+    pub max_duration_secs: f64,
+    /// How long to wait for `window.__timelines` to appear, ms. Default 10000.
+    #[serde(default = "default_video_wait_timelines_ms")]
+    pub wait_timelines_ms: u64,
+    /// Route through proxy (for blocked foreign sites)
+    #[serde(default)]
+    pub use_proxy: bool,
+    /// TLS fingerprint override (stealth mode only)
+    #[serde(default)]
+    pub tls_fingerprint: Option<String>,
+}
 fn default_max_chars() -> usize {
     50000
 }
@@ -630,6 +680,57 @@ when the script needs prior page state or a login, use session_eval.",
             .to_string(),
             Ok(Err(e)) => json!({ "error": format!("{}", e) }).to_string(),
             Err(e) => json!({ "error": format!("task panicked: {}", e) }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Render a page's animation timelines to an MP4 video. The page's scripts must \
+expose `window.__timelines` — objects with `duration()` and `pause(t)` (a paused \
+gsap.timeline registered there works as-is). Each frame seeks every timeline to \
+t=i/fps and paints the viewport, so the output is deterministic — no wall clock \
+in the pixel values. Requires ffmpeg on the server. Returns base64 MP4 \
+(H.264, yuv420p) plus frame count and durations.",
+        annotations(title = "Render Timeline Video")
+    )]
+    async fn render_video(&self, Parameters(params): Parameters<RenderVideoParams>) -> String {
+        if let Err(e) = crate::robots::assert_allowed(&params.url).await {
+            return json!({ "error": e }).to_string();
+        }
+        #[cfg(feature = "screenshot")]
+        {
+            let req = crate::VideoRequest {
+                url: params.url,
+                fps: params.fps,
+                width: params.width,
+                height: params.height,
+                hold_tail_secs: params.hold_tail_secs,
+                max_duration_secs: params.max_duration_secs,
+                wait_timelines_ms: params.wait_timelines_ms,
+                use_proxy: params.use_proxy,
+                cookies: vec![],
+                tls_fingerprint: params.tls_fingerprint,
+            };
+            return match tokio::task::spawn_blocking(move || crate::server::do_video(req)).await {
+                Ok(Ok(resp)) => json!({
+                    "url": resp.url,
+                    "title": resp.title,
+                    "frames": resp.frames,
+                    "timeline_secs": resp.timeline_secs,
+                    "duration_secs": resp.duration_secs,
+                    "width": resp.width,
+                    "height": resp.height,
+                    "video_base64": resp.video_base64,
+                    "format": resp.format,
+                })
+                .to_string(),
+                Ok(Err(e)) => json!({ "error": format!("{e:#}") }).to_string(),
+                Err(e) => json!({ "error": format!("task panicked: {e}") }).to_string(),
+            };
+        }
+        #[cfg(not(feature = "screenshot"))]
+        {
+            let _ = (params.url, params.use_proxy, params.tls_fingerprint);
+            json!({ "error": "render_video requires the `screenshot` feature" }).to_string()
         }
     }
 

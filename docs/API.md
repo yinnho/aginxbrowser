@@ -563,6 +563,61 @@ curl -sS -X POST http://127.0.0.1:8089/screenshot \
 
 ---
 
+### POST /video
+
+Render a page's animation timelines to an MP4 video (returned as base64). **Requires building with `--features screenshot` and ffmpeg on the server's PATH.**
+
+The page's scripts must expose their timelines in `window.__timelines` — objects with `duration()` and `pause(t)` (a paused GSAP timeline registered there works as-is):
+
+```js
+const tl = gsap.timeline({ paused: true });
+tl.from("#box", { opacity: 0, x: -200, duration: 2, ease: "power2.out" });
+window.__timelines = { main: tl };
+```
+
+Each frame seeks every registered timeline to `t = i/fps` and paints the viewport — the frame values carry no wall clock, so output is deterministic across runs. The full path runs in-process: seek → viewport band paint → raw RGBA piped into ffmpeg → H.264/yuv420p MP4.
+
+**Request fields:**
+
+| Field | Type | Required | Default | Description |
+|------|------|------|------|------|
+| url | string | ✅ | — | Target URL (must populate `window.__timelines`) |
+| fps | f64 | | `24` | Frames per second |
+| width | u32 | | `1280` | Viewport width (CSS px; floored to even — yuv420p) |
+| height | u32 | | `720` | Viewport height (CSS px) |
+| hold_tail_secs | f64 | | `0.5` | Freeze the final timeline state for this many extra seconds |
+| max_duration_secs | f64 | | `120` | Safety cap on timeline + hold tail (longer timelines error instead of encoding) |
+| wait_timelines_ms | u64 | | `10000` | How long to wait for `window.__timelines` to appear |
+| use_proxy | bool | | `false` | Route through the `AGINXBROWSER_PROXY` proxy |
+| cookies | string[] \| object[] | | `[]` | Cookies injected before navigation (same semantics as `/fetch`) |
+| tls_fingerprint | string | | `null` | TLS fingerprint (stealth mode) |
+
+**Response fields:**
+
+| Field | Type | Description |
+|------|------|------|
+| url | string | Final URL |
+| title | string? | Page title |
+| frames | u32 | Frames written to the encoder |
+| timeline_secs | f64 | Longest registered timeline, seconds |
+| duration_secs | f64 | Total video length = timeline + hold tail |
+| width / height | u32 | Encoded pixel size |
+| video_base64 | string | base64-encoded MP4 (H.264, yuv420p). Decode with `base64 -d`, or use directly as `data:video/mp4;base64,...` |
+| format | string | Always `"mp4"` |
+
+**Example:**
+
+```bash
+curl -sS -X POST http://127.0.0.1:8089/video \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com/anim.html","fps":20,"width":800,"height":450}' \
+  | jq -r .video_base64 | base64 -d > anim.mp4
+```
+
+Errors carry the failure reason verbatim: no `__timelines` before `wait_timelines_ms`, zero timeline duration, the duration cap, ffmpeg missing from PATH, or ffmpeg exiting non-zero (with its stderr tail).
+
+---
+
 ### POST /v1/scrape (Firecrawl-compatible)
 
 [Firecrawl](https://github.com/mendableai/firecrawl)-compatible endpoint. Existing Firecrawl clients can migrate by simply changing the base URL.
@@ -1211,7 +1266,7 @@ The streamable HTTP transport follows the protocol's dual session semantics — 
 
 Browser sessions (`session_create` & co.) are shared across MCP sessions by design: two MCP clients on the same server can list (`session_list`) and reuse the same browser session IDs, which is what makes "one instance per machine, every agent shares it" work. For a self-hosted instance reached over a LAN IP or a Docker hostname (not `localhost`/`127.0.0.1`), add the hostname to `AGINXBROWSER_MCP_ALLOWED_HOSTS` — the transport validates the `Host` header as DNS-rebinding protection and rejects unlisted hosts with `403`.
 
-### Provided Tools (29)
+### Provided Tools (30)
 
 #### Core Tools
 
@@ -1224,6 +1279,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `download` | Stream a file to disk with SHA-256 and resume support |
 | `cache` | Query the local cache of fetched pages and past searches (full-text incl. CJK, full-content `get`, stats, filtered clear) |
 | `render_markdown` | Render markdown into a deterministic, self-contained HTML document; fenced `archify` blocks (typed diagram JSON — sequence / workflow / architecture / dataflow / lifecycle) become inline-SVG diagrams; `theme`/`preset`/`quality` (showcase audit) and optional `session_id` viewport grading |
+| `render_video` | Render a page's animation timelines (`window.__timelines`, GSAP-style `duration()`+`pause(t)`) to a base64 MP4 — deterministic seek per frame (`t=i/fps`), in-process paint, ffmpeg encode; needs ffmpeg on PATH and the `screenshot` feature |
 
 #### Session Tools
 
