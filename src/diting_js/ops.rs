@@ -1498,6 +1498,8 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "flex-wrap",
     "justify-content",
     "align-items",
+    "opacity",
+    "transform",
 ];
 
 /// Chrome's UA-sheet display for the tags whose CSSOM value differs from the
@@ -1684,6 +1686,30 @@ fn computed_style_value(
             }
             .into(),
         ),
+        // Animation batch A: opacity is non-inherited with initial 1; Chrome
+        // spells the computed number bare ("1", "0.5781"). Undeclared still
+        // answers here — "1" IS the initial value, so no caller chain can
+        // know better.
+        "opacity" => Some(format_number(s.opacity.unwrap_or(1.0))),
+        // Animation batch B: the axis-aligned Transform2D serializes as its
+        // equivalent matrix. No transform (or `none`) computes to "none";
+        // a percentage translate resolves against the element's own border
+        // box — a used value this snapshot layer has no box for — so those
+        // stay absent and the JS inline chain answers instead of a wrong
+        // matrix (GSAP writes inline, so tween state always reflects).
+        "transform" => match &s.transform {
+            None => Some("none".into()),
+            Some(t) => match (t.tx, t.ty) {
+                (Length::Px(tx), Length::Px(ty)) => Some(format!(
+                    "matrix({}, 0, 0, {}, {}, {})",
+                    format_number(t.sx),
+                    format_number(t.sy),
+                    format_number(tx),
+                    format_number(ty)
+                )),
+                _ => None,
+            },
+        },
         _ => None,
     }
 }

@@ -525,7 +525,6 @@
         assert_eq!(is_slot, serde_json::json!(true));
     }
 
-    #[test]
     /// Native shadow trees: attachShadow registers a real arena root with
     /// its own child list, so the ordinary nid-based Node methods operate on
     /// the shadow tree — while the light tree, document queries, and shadow
@@ -5967,6 +5966,9 @@
     /// different origins, same 127.0.0.1 host so jar cookies domain-match.
     #[tokio::test(flavor = "current_thread")]
     async fn test_dynamic_cross_origin_script_sends_and_stores_cookies() {
+        // The tuple field is the RAII payload (holding the env lock); Drop
+        // is its reader — it removes the env var when the guard releases.
+        #[allow(dead_code)]
         struct PrivateNetGuard(std::sync::MutexGuard<'static, ()>);
         impl Drop for PrivateNetGuard {
             fn drop(&mut self) {

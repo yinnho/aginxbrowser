@@ -189,7 +189,8 @@ impl Canvas {
     /// the canvas and the clip stack. 1:1 sizes are exact texel copies;
     /// scaled output is nearest-neighbor (vello samples bilinearly upstream,
     /// so scaled-image cross-checks compare bbox + sampled interior, not
-    /// per-pixel).
+    /// per-pixel). `alpha` (animation batch A) scales the source alpha —
+    /// raster pixels can't fold a group opacity any other way.
     pub fn blit_image(
         &mut self,
         image: &super::image::DecodedImage,
@@ -197,6 +198,7 @@ impl Canvas {
         y: i64,
         w: i64,
         h: i64,
+        alpha: f32,
     ) {
         if w <= 0 || h <= 0 || image.width == 0 || image.height == 0 {
             return;
@@ -221,7 +223,12 @@ impl Canvas {
                 }
                 let sx = (((gx as f64 + 0.5) * sw as f64 / w as f64) as i64).min(sw - 1);
                 let i = ((sy * sw + sx) * 4) as usize;
-                let src_px = [src[i], src[i + 1], src[i + 2], src[i + 3]];
+                let a = if alpha >= 1.0 {
+                    src[i + 3]
+                } else {
+                    (src[i + 3] as f32 * alpha).round() as u8
+                };
+                let src_px = [src[i], src[i + 1], src[i + 2], a];
                 let d = (ty as usize * self.width + tx as usize) * 4;
                 over(&mut self.data[d..d + 4], src_px);
             }
@@ -440,6 +447,17 @@ pub fn execute(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas) {
     execute_band(items, fonts, out, 0.0, 0.0);
 }
 
+/// Scale a straight-alpha color's alpha channel (animation batch A): the
+/// pipeline composites straight-alpha source-over, so a group opacity folds
+/// into item colors directly.
+fn alpha_color(c: [u8; 4], a: f32) -> [u8; 4] {
+    if a >= 1.0 {
+        c
+    } else {
+        [c[0], c[1], c[2], (c[3] as f32 * a).round() as u8]
+    }
+}
+
 /// Replay the paint items shifted by `(-dx, -dy)` — the viewport-band paint:
 /// with `dy` at the band's page-space top, only the band's rows land on the
 /// canvas and everything else falls outside the bounds (every primitive's
@@ -525,7 +543,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                 out.fill_rect(x, y + t as i64, l as i64, h - t as i64 - b as i64, *color);
                 out.fill_rect(x + w - r as i64, y + t as i64, r as i64, h - t as i64 - b as i64, *color);
             }
-            PaintItem::Image { rect, paint_rect, image } => {
+            PaintItem::Image { rect, paint_rect, image, alpha } => {
                 // Replaced content is always clipped to the element box
                 // (upstream clips image elements regardless of overflow);
                 // object-fit cover/object-position can push paint_rect past
@@ -542,10 +560,11 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     (paint_rect.y - dy).round() as i64,
                     paint_rect.width.round() as i64,
                     paint_rect.height.round() as i64,
+                    *alpha,
                 );
                 out.pop_clip();
             }
-            PaintItem::Replaced { rect, alt, fill_placeholder } => {
+            PaintItem::Replaced { rect, alt, fill_placeholder, alpha } => {
                 if rect.y + rect.height <= dy || rect.y >= dy + out.height as f32 {
                     continue;
                 }
@@ -555,7 +574,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                 );
                 let (w, h) = (rect.width.round() as i64, rect.height.round() as i64);
                 if *fill_placeholder && w > 0 && h > 0 {
-                    out.fill_rect(x, y, w, h, [224, 224, 224, 255]);
+                    out.fill_rect(x, y, w, h, alpha_color([224, 224, 224, 255], *alpha));
                 }
                 if let Some((text, font_size, bold, line_height, color)) = alt {
                     if !text.trim().is_empty() {
@@ -570,7 +589,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                             text,
                             *font_size,
                             *bold,
-                            *color,
+                            alpha_color(*color, *alpha),
                             w.max(0) as f32,
                             *line_height,
                         );
@@ -579,14 +598,14 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     }
                 }
             }
-            PaintItem::Svg { rect, render } => {
+            PaintItem::Svg { rect, render, alpha } => {
                 // Same band prefilter as Replaced: the svg painter clips to
                 // the element box anyway, this just skips rasterizing an
                 // off-band subtree.
                 if rect.y + rect.height <= dy || rect.y >= dy + out.height as f32 {
                     continue;
                 }
-                super::svg::paint_svg(render, rect, fonts, out, dx, dy);
+                super::svg::paint_svg(render, rect, fonts, out, dx, dy, *alpha);
             }
             PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at } => {
                 if !text_reaches_band(*y, text, *font_size, *wrap_at, *line_height, dy, out.height as i64) {
@@ -680,11 +699,13 @@ mod tests {
                 rect: super::super::Rect { x: 10.0, y: 30.0, width: 8.0, height: 8.0 },
                 paint_rect: super::super::Rect { x: 10.0, y: 30.0, width: 8.0, height: 8.0 },
                 image: DecodedImage::new(2, 2, vec![1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255]),
+                alpha: 1.0,
             },
             PaintItem::Replaced {
                 rect: super::super::Rect { x: 25.0, y: 40.0, width: 10.0, height: 12.0 },
                 alt: Some(("alt".into(), 16.0, false, 20.0, [0, 0, 0, 255])),
                 fill_placeholder: true,
+                alpha: 1.0,
             },
             PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0 },
         ];

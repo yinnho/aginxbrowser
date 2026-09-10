@@ -376,14 +376,15 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "border-top-width", "border-right-width", "border-bottom-width", "border-left-width",
         "width", "height", "flex-direction", "gap", "overflow",
         "object-fit", "object-position", "z-index", "border-radius",
-        "float", "clear", "border-collapse", "vertical-align",
+        "float", "clear", "border-collapse", "vertical-align", "opacity", "transform",
     ];
     if !SUPPORTED.contains(&name.to_ascii_lowercase().as_str()) {
         return false;
     }
     // Unitless nonzero lengths are invalid everywhere (upstream 2c12b5a) —
-    // EXCEPT line-height, where a bare number is the canonical form.
-    if !name.eq_ignore_ascii_case("line-height") {
+    // EXCEPT line-height, where a bare number is the canonical form, and
+    // opacity, which IS a bare number.
+    if !name.eq_ignore_ascii_case("line-height") && !name.eq_ignore_ascii_case("opacity") {
         if let Ok(num) = value.parse::<f64>() {
             return num == 0.0;
         }
@@ -425,6 +426,11 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
             value,
             "top" | "middle" | "bottom" | "baseline" | "sub" | "super"
         ),
+        "opacity" => match value.parse::<f32>() {
+            Ok(n) => n.is_finite() && (0.0..=1.0).contains(&n),
+            Err(_) => false,
+        },
+        "transform" => parse_transform(value).is_some(),
         "border-radius" => {
             // 1-4 radii, optionally `/` plus 1-4 vertical radii.
             let (horiz, vert) = match value.split_once('/') {
@@ -541,12 +547,21 @@ pub struct ComputedStyle {
     /// `z-index` (batch 6a), non-inherited; None = auto. Only meaningful on
     /// positioned elements (flex/grid-item support is a later batch).
     pub z_index: Option<i32>,
-    /// `transform: translate(x[, y])` — the one transform form the pipeline
-    /// computes (obscura #740). Percentages resolve against the element's
-    /// own border-box size at collect time; the shift moves paint, gBCR and
-    /// hit testing but NOT the layout box (Chrome semantics: transforms
-    /// never affect layout). Other transform values stay None.
-    pub transform_translate: Option<(Length, Length)>,
+    /// `opacity` (animation batch A), non-inherited; None = 1 (the initial
+    /// value) so untouched subtrees skip alpha work entirely. The paint pass
+    /// multiplies it into everything the element's subtree emits — color
+    /// alphas for Bg/Border/Text, an explicit item alpha for Image/Svg/
+    /// Replaced — which matches Chrome's group compositing for fades.
+    pub opacity: Option<f32>,
+    /// `transform` function list (animation batch B; obscura #740 lineage):
+    /// the axis-aligned slice translate/translate3d/translateX/translateY
+    /// plus scale/scaleX/scaleY accumulated into one affine. Percentages
+    /// resolve against the element's own border-box size at collect time;
+    /// the map moves paint, gBCR and hit testing but NOT the layout box
+    /// (Chrome semantics: transforms never affect layout). rotate/skew/
+    /// matrix invalidate the whole declaration (spec: one unknown function
+    /// kills the list); true affine paint is a later batch.
+    pub transform: Option<Transform2D>,
     /// Uniform circular `border-radius` (batch 6b): ONE length/percentage
     /// applied to all four corners (the 1-value syntax — by far the most
     /// common form). Percentages resolve against the box width. Per-corner
@@ -819,15 +834,55 @@ pub enum Length {
     FitContent,
 }
 
-/// Parse the translate component of a `transform` declaration: the
-/// `translate(x[, y])` / `translateX(x)` / `translateY(y)` forms, each
-/// argument px or % (of the element's own border box, resolved later by
-/// layout). Anything else — `none`, scale/rotate/matrix, a list of several
-/// functions — is not a pure translation and yields None.
-fn parse_translate(v: &str) -> Option<(Length, Length)> {
+/// The axis-aligned `transform` this pipeline computes: a translate (px or
+/// % of the element's own border box, resolved at collect time) composed
+/// with an axis scale. Function lists accumulate in CSS order (the
+/// first-listed function is the outermost map).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Transform2D {
+    pub tx: Length,
+    pub ty: Length,
+    pub sx: f32,
+    pub sy: f32,
+}
+
+/// Length arithmetic for transform accumulation: same-unit adds fold, a
+/// zero px collapses into the other side; mixed units without a box to
+/// resolve against can't compose and invalidate the whole list.
+fn add_len(a: Length, b: Length) -> Option<Length> {
+    match (a, b) {
+        (Length::Px(x), Length::Px(y)) => Some(Length::Px(x + y)),
+        (Length::Percent(x), Length::Percent(y)) => Some(Length::Percent(x + y)),
+        (Length::Px(0.0), b) => Some(b),
+        (a, Length::Px(0.0)) => Some(a),
+        _ => None,
+    }
+}
+
+/// Scale a Length by a factor: px scales numerically, and a percent of the
+/// box times the factor is the same percent scaled (w·f·s == Percent(f·s)).
+fn mul_len(a: Length, s: f32) -> Length {
+    match a {
+        Length::Px(x) => Length::Px(x * s),
+        Length::Percent(f) => Length::Percent(f * s),
+        other => other,
+    }
+}
+
+/// Parse a `transform` declaration into one axis-aligned [`Transform2D`].
+/// translate/translate3d (z parses and drops — 3D flattens to 2D here) /
+/// translateX/translateY and scale/scaleX/scaleY accumulate exactly; the
+/// GSAP tween output this exists for writes e.g.
+/// `translate3d(-185.3719px, 0px, 0px)`, `translate(-200px, 0px)`,
+/// `translate(0, 0)` mid-flight. `none` and anything unrecognized
+/// (rotate/skew/matrix, unparsable args) yield None — spec: one unknown
+/// function invalidates the whole declaration, so the element renders
+/// untransformed.
+fn parse_transform(v: &str) -> Option<Transform2D> {
     let v = v.trim();
-    let (name, args) = v.split_once('(')?;
-    let args = args.strip_suffix(')')?.trim();
+    if v.is_empty() || v.eq_ignore_ascii_case("none") {
+        return None; // `none` is the initial value → no transform
+    }
     let one = |s: &str| -> Option<Length> {
         let s = s.trim();
         if let Some(num) = s.strip_suffix('%') {
@@ -839,18 +894,77 @@ fn parse_translate(v: &str) -> Option<(Length, Length)> {
             (s == "0").then_some(Length::Px(0.0))
         }
     };
-    match name.trim() {
-        "translate" => {
-            let (a, b) = match args.split_once(',') {
-                Some((a, b)) => (one(a)?, one(b)?),
-                None => (one(args)?, Length::Px(0.0)), // translate(x) == translate(x, 0)
-            };
-            Some((a, b))
+    let num = |s: &str| -> Option<f32> {
+        let n = s.trim().parse::<f32>().ok()?;
+        n.is_finite().then_some(n)
+    };
+    let mut t = Transform2D { tx: Length::Px(0.0), ty: Length::Px(0.0), sx: 1.0, sy: 1.0 };
+    let mut rest = v;
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            break;
         }
-        "translateX" => Some((one(args)?, Length::Px(0.0))),
-        "translateY" => Some((Length::Px(0.0), one(args)?)),
-        _ => None,
+        let (name, after) = rest.split_once('(')?;
+        let (args, tail) = after.split_once(')')?;
+        let name = name.trim();
+        let parts: Vec<&str> = args.split(',').collect();
+        // Walking left to right, each new function sits INNERMOST (CSS
+        // composes the list first-to-last as outermost-to-innermost): a
+        // translate composes scaled by the scales accumulated so far.
+        match name {
+            "translate" | "translate3d" => {
+                let (a, b) = match parts.as_slice() {
+                    [x] => (one(x)?, Length::Px(0.0)), // translate(x) == translate(x, 0)
+                    [x, y] => (one(x)?, one(y)?),
+                    [x, y, z] => {
+                        // 3-arg form is translate3d; z must parse as a
+                        // length (GSAP writes "0px") and is then dropped —
+                        // this engine has no z axis.
+                        one(z)?;
+                        (one(x)?, one(y)?)
+                    }
+                    _ => return None,
+                };
+                t.tx = add_len(mul_len(a, t.sx), t.tx)?;
+                t.ty = add_len(mul_len(b, t.sy), t.ty)?;
+            }
+            "translateX" => {
+                let [x] = parts.as_slice() else { return None };
+                let a = one(x)?;
+                t.tx = add_len(mul_len(a, t.sx), t.tx)?;
+            }
+            "translateY" => {
+                let [y] = parts.as_slice() else { return None };
+                let b = one(y)?;
+                t.ty = add_len(mul_len(b, t.sy), t.ty)?;
+            }
+            "scale" => {
+                let (fsx, fsy) = match parts.as_slice() {
+                    [x] => {
+                        let s = num(x)?;
+                        (s, s) // scale(s) == scale(s, s)
+                    }
+                    [x, y] => (num(x)?, num(y)?),
+                    _ => return None,
+                };
+                t.sx *= fsx;
+                t.sy *= fsy;
+            }
+            "scaleX" | "scaleY" => {
+                let [x] = parts.as_slice() else { return None };
+                let s = num(x)?;
+                if name == "scaleX" {
+                    t.sx *= s;
+                } else {
+                    t.sy *= s;
+                }
+            }
+            _ => return None,
+        }
+        rest = tail;
     }
+    Some(t)
 }
 
 /// Declaration-level length: em/rem can't resolve until the font context is
@@ -1785,12 +1899,25 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             true
         }
         "transform" => {
-            // Only translation moves a rect without changing its shape, so
-            // only translate/translateX/translateY are computed (obscura
-            // #740); scale/rotate/matrix and multi-function values stay
-            // None — the element paints where layout put it.
-            style.transform_translate = parse_translate(v);
-            style.transform_translate.is_some()
+            // Axis-aligned slice only (obscura #740 lineage, widened in the
+            // animation batch): the translate family plus scale family
+            // accumulate into one affine; rotate/skew/matrix invalidate the
+            // declaration (spec: one unknown function kills the list) and
+            // the element paints where layout put it.
+            style.transform = parse_transform(v);
+            style.transform.is_some()
+        }
+        "opacity" => {
+            // A number in [0, 1] (animation batch A). The initial value 1
+            // stores like any other — paint skips alpha work when the
+            // accumulated alpha is exactly 1.
+            match v.trim().parse::<f32>() {
+                Ok(n) if n.is_finite() => {
+                    style.opacity = Some(n.clamp(0.0, 1.0));
+                    true
+                }
+                _ => false,
+            }
         }
         "border-radius" => {
             // CSS syntax: 1-4 horizontal radii, optionally `/` plus 1-4
@@ -2406,11 +2533,9 @@ fn parse_hex_color(v: &str) -> Option<Color> {
 
 /// One candidate: a compiled rule plus how strongly it applies.
 struct CascadeCandidate<'a> {
-    rule_index: usize,
     declarations: &'a str,
     specificity: u32,
     source_order: usize,
-    inline: bool,
 }
 
 /// Compute the style for one element: UA defaults ← author rules (specificity,
@@ -2468,11 +2593,9 @@ pub fn cascade_element(
         .iter()
         .enumerate()
         .map(|(order, (rule, spec))| CascadeCandidate {
-            rule_index: order,
             declarations: &rule.declarations,
             specificity: *spec,
             source_order: order,
-            inline: false,
         })
         .collect();
     candidates.sort_by_key(|c| (c.specificity, c.source_order));
@@ -2657,6 +2780,91 @@ mod tests {
         assert_eq!(s.display, Some(Display::InlineBlock));
         // @supports already claimed inline-block; now the claim is truthful.
         assert!(supports_declaration("display", "inline-block"));
+    }
+
+    // ---- animation batch A/B: opacity + transform ----
+
+    /// The exact inline strings GSAP's tween engine writes on a diting-driven
+    /// page (spike-captured ground truth): from() initial, mid-tween, and the
+    /// completion write. All three must land in Transform2D or the frame
+    /// snaps to end-state mid-animation (the 300-identical-frames bug).
+    #[test]
+    fn parse_transform_gsap_ground_truth() {
+        let t = parse_transform("translate3d(-185.3719px, 0px, 0px)").unwrap();
+        assert_eq!(t, Transform2D { tx: Length::Px(-185.3719), ty: Length::Px(0.0), sx: 1.0, sy: 1.0 });
+        let t = parse_transform("translate(-200px, 0px)").unwrap();
+        assert_eq!(t.tx, Length::Px(-200.0));
+        // Completion write uses bare 0 lengths.
+        let t = parse_transform("translate(0, 0)").unwrap();
+        assert_eq!((t.tx, t.ty), (Length::Px(0.0), Length::Px(0.0)));
+        // translate3d's z must parse (finite) even though 3D flattens away.
+        assert!(parse_transform("translate3d(10px, 20px, 30px)").is_some());
+        assert!(parse_transform("translate3d(10px, 20px, bad)").is_none());
+    }
+
+    /// Scale family plus the composition-order contract: walking the list
+    /// left-to-right, each new function is innermost, so a translate added
+    /// AFTER a scale composes scaled — `scale(2) translate(100px)` maps
+    /// p → p·2 + 200, while `translate(100px) scale(2)` maps p → p·2 + 100.
+    #[test]
+    fn parse_transform_scales_and_composition_order() {
+        let t = parse_transform("scale(0.5)").unwrap();
+        assert_eq!((t.sx, t.sy), (0.5, 0.5));
+        let t = parse_transform("scale(2, 3)").unwrap();
+        assert_eq!((t.sx, t.sy), (2.0, 3.0));
+        let t = parse_transform("scaleX(2)").unwrap();
+        assert_eq!((t.sx, t.sy), (2.0, 1.0));
+        let t = parse_transform("scaleY(4)").unwrap();
+        assert_eq!((t.sx, t.sy), (1.0, 4.0));
+
+        let t = parse_transform("scale(2) translate(100px)").unwrap();
+        assert_eq!(t.tx, Length::Px(200.0));
+        assert_eq!(t.sx, 2.0);
+        let t = parse_transform("translate(100px) scale(2)").unwrap();
+        assert_eq!(t.tx, Length::Px(100.0));
+        assert_eq!(t.sx, 2.0);
+
+        // Scales multiply through a percent translate: w·0.5·2 == Percent(50·2).
+        let t = parse_transform("scale(2) translate(50%)").unwrap();
+        assert_eq!(t.tx, Length::Percent(100.0));
+
+        let t = parse_transform("translateX(12px) translateY(34px)").unwrap();
+        assert_eq!((t.tx, t.ty), (Length::Px(12.0), Length::Px(34.0)));
+    }
+
+    /// Spec rule: one unknown function invalidates the whole declaration —
+    /// rotate/matrix/skew yield None (the element renders untransformed),
+    /// as do `none` (the initial value) and garbage.
+    #[test]
+    fn parse_transform_rejects_unknown_functions() {
+        assert!(parse_transform("rotate(45deg)").is_none());
+        assert!(parse_transform("matrix(1, 0, 0, 1, 0, 0)").is_none());
+        assert!(parse_transform("skewX(10deg)").is_none());
+        assert!(parse_transform("translate(100px) rotate(10deg)").is_none());
+        assert!(parse_transform("none").is_none());
+        assert!(parse_transform("").is_none());
+        assert!(parse_transform("translate(50%, 10%)").is_some());
+    }
+
+    /// opacity parses through the same declaration pipeline the cascade uses,
+    /// clamps into [0,1], and rejects non-finite/out-of-range values.
+    #[test]
+    fn opacity_parses_clamps_and_validates() {
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "opacity: 0.5781"));
+        assert_eq!(s.opacity, Some(0.5781));
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "opacity: 0"));
+        assert_eq!(s.opacity, Some(0.0));
+        // Out-of-range clamps toward the nearest bound (Chrome clamps used
+        // values; parse keeps the clamp so paint never sees alpha > 1).
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "opacity: 2"));
+        assert_eq!(s.opacity, Some(1.0));
+        assert!(!supports_declaration("opacity", "1.5x"));
+        assert!(supports_declaration("opacity", "0.25"));
+        // Undeclared stays None — the caller's default chain answers "1".
+        assert_eq!(ComputedStyle::default().opacity, None);
     }
 
     #[test]

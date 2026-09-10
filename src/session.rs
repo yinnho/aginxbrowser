@@ -440,6 +440,7 @@ impl BrowserSession {
 /// Where persistent-session snapshots live. Production delegates to the
 /// local SQLite store (store.rs); tests inject a shared in-memory map — two
 /// managers holding one Arc simulate a process restart.
+#[cfg_attr(not(test), allow(dead_code))] // Memory is only constructed in tests
 enum SnapshotStore {
     Global,
     Memory(std::sync::Arc<std::sync::Mutex<HashMap<String, (String, i64)>>>),

@@ -949,7 +949,9 @@ fn flatten_bezier(
 // ---------------------------------------------------------------------------
 
 /// Paint a compiled svg into its element box on the canvas. `dx`/`dy` are
-/// the band shift shared with [`super::paint::execute_band`].
+/// the band shift shared with [`super::paint::execute_band`]; `alpha`
+/// (animation batch A) scales every op color's alpha — the compiled op list
+/// is shared/immutable, so a group opacity folds in at draw time.
 pub fn paint_svg(
     render: &SvgRender,
     rect: &Rect,
@@ -957,7 +959,17 @@ pub fn paint_svg(
     out: &mut Canvas,
     dx: f32,
     dy: f32,
+    alpha: f32,
 ) {
+    // Straight-alpha source-over throughout, so folding the group opacity
+    // into each op color composites the whole subtree at once.
+    let col = |c: [u8; 4]| -> [u8; 4] {
+        if alpha >= 1.0 {
+            c
+        } else {
+            [c[0], c[1], c[2], (c[3] as f32 * alpha).round() as u8]
+        }
+    };
     if rect.width <= 0.0 || rect.height <= 0.0 || render.ops.is_empty() {
         return;
     }
@@ -990,7 +1002,7 @@ pub fn paint_svg(
             SvgOp::Fill { polys, color } => {
                 let mapped: Vec<Vec<(f32, f32)>> =
                     polys.iter().map(|p| p.iter().map(|&q| map(q)).collect()).collect();
-                fill_even_odd(&mapped, *color, out);
+                fill_even_odd(&mapped, col(*color), out);
             }
             SvgOp::Stroke { poly, closed, width, dash, color } => {
                 let mapped: Vec<(f32, f32)> = poly.iter().map(|&q| map(q)).collect();
@@ -999,7 +1011,7 @@ pub fn paint_svg(
                     *closed,
                     width * s,
                     dash.as_ref().map(|d| d.iter().map(|n| n * s).collect::<Vec<_>>()).as_deref(),
-                    *color,
+                    col(*color),
                     out,
                 );
             }
@@ -1009,7 +1021,7 @@ pub fn paint_svg(
                     continue;
                 }
                 let (sx, sy) = map((*x, *y));
-                let r = fonts.rasterize(content, fs, *bold, *color, fs * 1.2);
+                let r = fonts.rasterize(content, fs, *bold, col(*color), fs * 1.2);
                 if r.width == 0 || r.height == 0 {
                     continue;
                 }
@@ -1383,7 +1395,7 @@ mod tests {
         };
         let rect = Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 };
         let mut canvas = Canvas::new_filled(20, 20, [255, 255, 255, 255]);
-        paint_svg(&render, &rect, &fonts, &mut canvas, 0.0, 0.0);
+        paint_svg(&render, &rect, &fonts, &mut canvas, 0.0, 0.0, 1.0);
         let px = |x: usize, y: usize| canvas.data[(y * 20 + x) * 4];
         assert_eq!(px(0, 0), 0, "corner filled (green R=0)");
         assert_eq!(px(19, 19), 0);
@@ -1405,7 +1417,7 @@ mod tests {
         };
         let rect = Rect { x: 10.0, y: 20.0, width: 100.0, height: 50.0 };
         let mut canvas = Canvas::new_filled(120, 90, [255, 255, 255, 255]);
-        paint_svg(&render, &rect, &fonts, &mut canvas, 0.0, 0.0);
+        paint_svg(&render, &rect, &fonts, &mut canvas, 0.0, 0.0, 1.0);
         let px = |x: usize, y: usize| canvas.data[(y * 120 + x) * 4];
         assert_eq!(px(60, 45), 0, "box center painted");
         assert_eq!(px(60, 15), 255, "above the box untouched (letterbox)");
@@ -1433,6 +1445,7 @@ mod tests {
             &mut canvas,
             0.0,
             0.0,
+            1.0,
         );
         let row_ink = |y: usize| (0..40).any(|x| canvas.data[(y * 40 + x) * 4] < 128);
         assert!(row_ink(4) && row_ink(5), "2px band covers rows 4-5");
@@ -1456,6 +1469,7 @@ mod tests {
             &mut canvas,
             0.0,
             0.0,
+            1.0,
         );
         let ink_at = |x: usize| canvas.data[(5 * 40 + x) * 4] < 128;
         assert!(ink_at(1), "first dash on");

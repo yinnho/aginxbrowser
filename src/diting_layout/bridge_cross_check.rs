@@ -2145,7 +2145,7 @@
         let (replaced_rect, alt, fill) = items
             .iter()
             .find_map(|i| match i {
-                PaintItem::Replaced { rect, alt, fill_placeholder } => {
+                PaintItem::Replaced { rect, alt, fill_placeholder, .. } => {
                     Some((*rect, alt.clone(), *fill_placeholder))
                 }
                 _ => None,

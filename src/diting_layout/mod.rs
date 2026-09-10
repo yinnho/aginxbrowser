@@ -2689,6 +2689,10 @@ pub enum PaintItem {
         rect: Rect,
         paint_rect: Rect,
         image: DecodedImage,
+        /// Element-subtree opacity (animation batch A) multiplied into the
+        /// source pixels at blit time — raster colors can't fold a group
+        /// alpha any other way.
+        alpha: f32,
     },
     /// A replaced element's placeholder (batch 5a): an optional gray box
     /// (skipped when the author styled a background — that already shows)
@@ -2705,6 +2709,9 @@ pub enum PaintItem {
         /// alt="").
         alt: Option<(String, f32, bool, f32, [u8; 4])>,
         fill_placeholder: bool,
+        /// Element-subtree opacity (animation batch A) applied to the
+        /// placeholder fill and the alt run's color at paint time.
+        alpha: f32,
     },
     /// A compiled svg subtree painted into its replaced box (svg v1): the
     /// op list is in viewBox user units with group transforms pre-flattened
@@ -2714,6 +2721,9 @@ pub enum PaintItem {
     Svg {
         rect: Rect,
         render: std::sync::Arc<svg::SvgRender>,
+        /// Element-subtree opacity (animation batch A) multiplied into every
+        /// op color at paint time — the compiled op list is shared/immutable.
+        alpha: f32,
     },
     /// Begin clipping descendants to `rect` (the padding box of an
     /// overflow-clipping element) until the matching [`PaintItem::PopClip`].
@@ -3596,6 +3606,47 @@ pub fn layout_dom_with_paint_order_and_images(
     // The same pre-order walk emits paint items: an element's Bg when its
     // box is recorded, a run's Text at its leaf — document order, parents
     // before children.
+    /// Resolved axis-aligned affine threaded down the collect walk
+    /// (animation batch B): x' = x·sx + dx. Identity unless some ancestor
+    /// declared a transform with a scale part — pure translates fold into
+    /// `offset` and never appear here, so untouched trees take the exact
+    /// pre-batch path.
+    #[derive(Clone, Copy)]
+    struct Xf {
+        sx: f32,
+        sy: f32,
+        dx: f32,
+        dy: f32,
+    }
+
+    impl Xf {
+        const IDENTITY: Xf = Xf { sx: 1.0, sy: 1.0, dx: 0.0, dy: 0.0 };
+
+        /// Map a rect through the affine; negative scales mirror, so the
+        /// result is normalized to a positive-extent box.
+        fn map_rect(&self, r: Rect) -> Rect {
+            let (x1, x2) = (r.x * self.sx + self.dx, (r.x + r.width) * self.sx + self.dx);
+            let (y1, y2) = (r.y * self.sy + self.dy, (r.y + r.height) * self.sy + self.dy);
+            Rect {
+                x: x1.min(x2),
+                y: y1.min(y2),
+                width: (x2 - x1).abs(),
+                height: (y2 - y1).abs(),
+            }
+        }
+    }
+
+    /// Multiply a straight-alpha color's alpha channel (animation batch A):
+    /// the paint pipeline is straight-alpha source-over throughout, so
+    /// folding element opacity into item colors composites the subtree.
+    fn with_alpha(c: [u8; 4], a: f32) -> [u8; 4] {
+        if a >= 1.0 {
+            c
+        } else {
+            [c[0], c[1], c[2], (c[3] as f32 * a).round() as u8]
+        }
+    }
+
     fn collect(
         tree: &DomTree,
         taffy_tree: &TaffyTree<TextLeaf>,
@@ -3612,6 +3663,8 @@ pub fn layout_dom_with_paint_order_and_images(
         node: taffy::tree::NodeId,
         offset: (f32, f32),
         viewport_width: f32,
+        xf: Xf,
+        alpha: f32,
     ) {
         let Ok(layout) = taffy_tree.layout(node) else { return };
         let item0 = items.len();
@@ -3625,16 +3678,16 @@ pub fn layout_dom_with_paint_order_and_images(
         if let Some(dom_id) = node_map.get(&node) {
             paint_order.push(*dom_id);
         }
-        // transform: translate shifts geometry — the element's own rect,
-        // its paint items and its whole subtree — but never layout itself
-        // (Chrome: transforms don't affect layout; taffy never sees this).
-        // Percentages resolve against the element's own border box
-        // (obscura #740). Folded into the offset so every consumer of
-        // `abs` below (rects, items, clips, the paint slots above) moves
-        // together.
+        // transform (obscura #740 lineage, widened in the animation batch):
+        // the translate part resolves against the element's own border box
+        // (percent included) and folds into the offset — the element's rect,
+        // paint items and whole subtree move together, layout never sees it
+        // (Chrome: transforms don't affect layout). The scale part waits for
+        // the box below: it pivots on the box center.
         let mut offset = offset;
+        let mut t_scale = (1.0f32, 1.0f32);
         if let Some(dom_id) = node_map.get(&node) {
-            if let Some((tx, ty)) = styles.get(dom_id).and_then(|s| s.transform_translate) {
+            if let Some(t) = styles.get(dom_id).and_then(|s| s.transform) {
                 let resolve = |l: crate::diting_css::Length, basis: f32| match l {
                     crate::diting_css::Length::Px(v) => v,
                     crate::diting_css::Length::Percent(p) => p / 100.0 * basis,
@@ -3642,10 +3695,20 @@ pub fn layout_dom_with_paint_order_and_images(
                     crate::diting_css::Length::Calc { percent, .. } => percent / 100.0 * basis,
                     crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent => 0.0,
                 };
-                offset.0 += resolve(tx, layout.size.width);
-                offset.1 += resolve(ty, layout.size.height);
+                offset.0 += resolve(t.tx, layout.size.width);
+                offset.1 += resolve(t.ty, layout.size.height);
+                t_scale = (t.sx, t.sy);
             }
         }
+        // opacity (animation batch A): non-inherited, multiplies down the
+        // subtree — a faded parent fades everything inside it, matching
+        // Chrome's group compositing for fades.
+        let alpha = alpha
+            * node_map
+                .get(&node)
+                .and_then(|d| styles.get(d))
+                .and_then(|s| s.opacity)
+                .unwrap_or(1.0);
         // Baseline alignment (blitz#750 family): run items drop onto their
         // line's baseline. Folded into the offset like the translate above,
         // so the item's rect, paint and whole subtree move together.
@@ -3653,16 +3716,20 @@ pub fn layout_dom_with_paint_order_and_images(
             offset.1 += dy;
         }
         let abs = (offset.0 + layout.location.x, offset.1 + layout.location.y);
+        // The map handed to descendants (animation batch B): upgraded below
+        // once this element's own box is final, since the scale part pivots
+        // on the box center.
+        let mut child_xf = xf;
         // Every visited node's absolute border box — the union pass after
         // the walk rebuilds rects for flattened inline wrappers from kids.
         abs_by_node.insert(
             node,
-            Rect {
+            xf.map_rect(Rect {
                 x: abs.0,
                 y: abs.1,
                 width: layout.size.width,
                 height: layout.size.height,
-            },
+            }),
         );
         let mut clips = false;
         if let Some(dom_id) = node_map.get(&node) {
@@ -3683,7 +3750,27 @@ pub fn layout_dom_with_paint_order_and_images(
                     rect.y = *sy;
                 }
             }
-            rects.insert(*dom_id, rect);
+            // The scale part of the transform pivots on the element's own
+            // (already translate-folded) box center — composing
+            // "scale about the translated center" after the translate fold
+            // equals CSS's translate-then-scale list order. Ancestors wrap
+            // outside. Own items below use the same map: the center is
+            // fixed by construction, so mapping the box through child_xf
+            // is exactly the transformed box.
+            if t_scale != (1.0, 1.0) {
+                let (cx, cy) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+                child_xf = Xf {
+                    sx: t_scale.0 * xf.sx,
+                    sy: t_scale.1 * xf.sy,
+                    dx: cx * (1.0 - t_scale.0) * xf.sx + xf.dx,
+                    dy: cy * (1.0 - t_scale.1) * xf.sy + xf.dy,
+                };
+            }
+            // gBCR/hit-testing rect: the TRANSFORMED box (Chrome reports the
+            // mapped bounds; translate is already in `rect` via the offset
+            // fold).
+            let mrect = child_xf.map_rect(rect);
+            rects.insert(*dom_id, mrect);
             // CSS2.1 paints cell > row > row-group backgrounds; row-group
             // elements (thead/tbody/tfoot) get no box of their own here, so a
             // background set on them is otherwise invisible. Climb one DOM
@@ -3714,10 +3801,10 @@ pub fn layout_dom_with_paint_order_and_images(
                 }
             }
             if let Some(c) = bg {
-                if c.3 != 0 && rect.width > 0.0 && rect.height > 0.0 {
-                    let color = [c.0, c.1, c.2, c.3];
-                    // Radii resolve per-axis: rx against the box width,
-                    // ry against its height (the elliptical form).
+                if c.3 != 0 && alpha > 0.0 && rect.width > 0.0 && rect.height > 0.0 {
+                    let color = with_alpha([c.0, c.1, c.2, c.3], alpha);
+                    // Radii resolve per-axis against the LOCAL box (rx width,
+                    // ry height — the elliptical form), then ride the affine.
                     let res = |l: &crate::diting_css::Length, basis: f32| match l {
                         crate::diting_css::Length::Px(v) => *v,
                         crate::diting_css::Length::Percent(p) => p * basis / 100.0,
@@ -3729,19 +3816,19 @@ pub fn layout_dom_with_paint_order_and_images(
                             let radii = corners
                                 .iter()
                                 .map(|(rx, ry)| {
-                                    (res(rx, rect.width), res(ry, rect.height))
+                                    (res(rx, rect.width) * child_xf.sx, res(ry, rect.height) * child_xf.sy)
                                 })
                                 .collect::<Vec<_>>();
                             let uniform = radii.iter().all(|r| *r == radii[0]);
                             if uniform {
                                 items.push(PaintItem::Bg {
-                                    rect,
+                                    rect: mrect,
                                     color,
                                     radius: radii[0].0,
                                 });
                             } else {
                                 items.push(PaintItem::BgCorner {
-                                    rect,
+                                    rect: mrect,
                                     color,
                                     radii: [
                                         radii[0], radii[1], radii[2], radii[3],
@@ -3750,7 +3837,7 @@ pub fn layout_dom_with_paint_order_and_images(
                             }
                         }
                         None => items.push(PaintItem::Bg {
-                            rect,
+                            rect: mrect,
                             color,
                             radius: 0.0,
                         }),
@@ -3761,19 +3848,22 @@ pub fn layout_dom_with_paint_order_and_images(
             // currentColor = the element's own computed (inherited) color.
             let st = styles.get(dom_id);
             if let Some(style) = st.filter(|s| s.border_style.is_some()) {
+                // Top/bottom are horizontal strips (vertical thickness rides
+                // sy), left/right vertical strips (sx) — the affine maps each
+                // edge's thickness with its own axis.
                 let widths = [
-                    side_px(style.border_width.top),
-                    side_px(style.border_width.right),
-                    side_px(style.border_width.bottom),
-                    side_px(style.border_width.left),
+                    side_px(style.border_width.top) * child_xf.sy,
+                    side_px(style.border_width.right) * child_xf.sx,
+                    side_px(style.border_width.bottom) * child_xf.sy,
+                    side_px(style.border_width.left) * child_xf.sx,
                 ];
                 if widths.iter().any(|w| *w > 0.0) {
                     let color = style
                         .border_color
                         .or(style.color)
-                        .map(|c| [c.0, c.1, c.2, c.3])
+                        .map(|c| with_alpha([c.0, c.1, c.2, c.3], alpha))
                         .unwrap_or([0, 0, 0, 255]);
-                    items.push(PaintItem::Border { rect, widths, color });
+                    items.push(PaintItem::Border { rect: mrect, widths, color });
                 }
             }
             // A replaced box paints either its decoded image (batch 5b,
@@ -3798,7 +3888,7 @@ pub fn layout_dom_with_paint_order_and_images(
                     .unwrap_or(false);
                 if is_svg {
                     let render = std::sync::Arc::new(svg::compile_svg(tree, styles, *dom_id));
-                    items.push(PaintItem::Svg { rect, render });
+                    items.push(PaintItem::Svg { rect: mrect, render, alpha });
                 } else if let Some(img) = images.get(dom_id) {
                     let st = styles.get(dom_id);
                     let fit = st.and_then(|s| s.object_fit).unwrap_or(ObjectFit::Fill);
@@ -3810,9 +3900,9 @@ pub fn layout_dom_with_paint_order_and_images(
                         ));
                     // The blit destination per object-fit/position (batch
                     // 5c); `rect` stays the element box for callers that
-                    // want it.
-                    let paint_rect = object_paint_rect(rect, img.width as f32, img.height as f32, fit, pos);
-                    items.push(PaintItem::Image { rect, paint_rect, image: img.clone() });
+                    // want it — mapped through the same affine as mrect.
+                    let paint_rect = child_xf.map_rect(object_paint_rect(rect, img.width as f32, img.height as f32, fit, pos));
+                    items.push(PaintItem::Image { rect: mrect, paint_rect, image: img.clone(), alpha });
                 } else {
                     // Alt text is an <img> concept only (batch 7a): video/
                     // iframe/canvas placeholders are the bare box.
@@ -3838,7 +3928,7 @@ pub fn layout_dom_with_paint_order_and_images(
                         .get(dom_id)
                         .and_then(|s| s.background_color)
                         .is_none_or(|c| c.3 == 0);
-                    items.push(PaintItem::Replaced { rect, alt, fill_placeholder });
+                    items.push(PaintItem::Replaced { rect: mrect, alt, fill_placeholder, alpha });
                 }
             }
             // A clipping element constrains its DESCENDANTS' paint (its own
@@ -3893,16 +3983,25 @@ pub fn layout_dom_with_paint_order_and_images(
                             };
                             [(v, v); 4]
                         })
+                    })
+                    .map(|rs| {
+                        // Descendants paint through child_xf, so the clip
+                        // (and its radii) must ride the same affine.
+                        rs.map(|(rx, ry)| (rx * child_xf.sx, ry * child_xf.sy))
                     });
+                // The clip lives in child space (it bounds descendants),
+                // mapped through child_xf — the element's own bg/border
+                // above are already painted and stay unclipped.
+                let pad_rect = child_xf.map_rect(Rect { x: rect.x + bl, y: rect.y + bt, width: pad_w, height: pad_h });
                 let clip_item = match radii {
                     Some(radii) if radii.iter().any(|r| r.0 > 0.0 && r.1 > 0.0) => {
                         PaintItem::ClipRounded {
-                            rect: Rect { x: rect.x + bl, y: rect.y + bt, width: pad_w, height: pad_h },
+                            rect: pad_rect,
                             radii,
                         }
                     }
                     _ => PaintItem::Clip {
-                        rect: Rect { x: rect.x + bl, y: rect.y + bt, width: pad_w, height: pad_h },
+                        rect: pad_rect,
                     },
                 };
                 items.push(clip_item);
@@ -3912,19 +4011,23 @@ pub fn layout_dom_with_paint_order_and_images(
             // The wrap width the containing block offered at measure time:
             // the direct taffy parent's content box (the run wrapper for
             // mixed runs, the block itself for pure runs — same width).
+            // Scaled geometry (animation batch B): position maps through
+            // the affine, font metrics ride sy, the wrap width sx — exact
+            // for uniform scales, the documented approximation otherwise.
             let wrap_at = taffy_tree
                 .parent(node)
                 .and_then(|p| taffy_tree.layout(p).ok())
                 .map(|l| l.content_box_width())
-                .unwrap_or(viewport_width);
+                .unwrap_or(viewport_width)
+                * xf.sx;
             items.push(PaintItem::Text {
                 text: text.clone(),
-                font_size: *font_size,
+                font_size: font_size * xf.sy,
                 bold: *bold,
-                color: *color,
-                line_height: *line_height,
-                x: abs.0,
-                y: abs.1,
+                color: with_alpha(*color, alpha),
+                line_height: line_height * xf.sy,
+                x: abs.0 * xf.sx + xf.dx,
+                y: abs.1 * xf.sy + xf.dy,
                 wrap_at,
             });
         }
@@ -3934,13 +4037,13 @@ pub fn layout_dom_with_paint_order_and_images(
             // text can never break, so wrap_at just equals the leaf width.
             items.push(PaintItem::Text {
                 text: text.clone(),
-                font_size: *font_size,
+                font_size: font_size * xf.sy,
                 bold: *bold,
-                color: *color,
-                line_height: *line_height,
-                x: abs.0,
-                y: abs.1,
-                wrap_at: layout.size.width,
+                color: with_alpha(*color, alpha),
+                line_height: line_height * xf.sy,
+                x: abs.0 * xf.sx + xf.dx,
+                y: abs.1 * xf.sy + xf.dy,
+                wrap_at: layout.size.width * xf.sx,
             });
         }
         // Inline background bands (blitz#340 family) splice at the first
@@ -3995,7 +4098,7 @@ pub fn layout_dom_with_paint_order_and_images(
         pos.sort_by_key(|(z, _)| *z);
         for list in [neg, mid, pos] {
             for (_, i) in list {
-                collect(tree, taffy_tree, node_map, styles, images, static_pos, baseline_shifts, rects, abs_by_node, node_first_item, items, paint_order, children[i], abs, viewport_width);
+                collect(tree, taffy_tree, node_map, styles, images, static_pos, baseline_shifts, rects, abs_by_node, node_first_item, items, paint_order, children[i], abs, viewport_width, child_xf, alpha);
             }
         }
         if clips {
@@ -4020,6 +4123,8 @@ pub fn layout_dom_with_paint_order_and_images(
         icb_node,
         (0.0, 0.0),
         viewport_width,
+        Xf::IDENTITY,
+        1.0,
     );
     // Flattened inline wrappers (span/label/a/… — obscura#722 lineage) own no
     // taffy box: the run hoisted their children. getBoundingClientRect still
