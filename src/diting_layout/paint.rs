@@ -344,10 +344,10 @@ impl Canvas {
     }
 
     /// Border through the current bracket: pixels inside the outer local
-    /// box and NOT inside the widths-inset inner box — the rotated twin of
-    /// the axis-aligned four-band paint, square corners on both rings (the
-    /// axis-aligned arm paints square corners too; rounded borders under
-    /// rotation are a later batch).
+    /// rounded box and NOT inside the widths-inset inner rounded box — the
+    /// rotated twin of the axis-aligned ring paint (affine residuals batch;
+    /// radii ride the bracket like every other rounded shape).
+    #[allow(clippy::too_many_arguments)]
     fn border_affine(
         &mut self,
         x: f64,
@@ -355,25 +355,18 @@ impl Canvas {
         w: f64,
         h: f64,
         widths: [f32; 4],
+        radii: [(f32, f32); 4],
         color: [u8; 4],
     ) {
         let Some(m) = self.xf() else { return };
         let Some(inv) = mat_inv(m) else { return };
-        let [t, r, b, l] = widths;
-        let (ix, iy) = (x + l as f64, y + t as f64);
-        let (iw, ih) = ((w - l as f64 - r as f64).max(0.0), (h - t as f64 - b as f64).max(0.0));
         let (bx0, by0, bx1, by1) = mapped_bounds(m, x, y, w, h);
         let (ax0, ay0, ax1, ay1) = self.allowed();
         for gy in by0.max(ay0).max(0)..by1.min(ay1).min(self.height as i64) {
             for gx in bx0.max(ax0).max(0)..bx1.min(ax1).min(self.width as i64) {
                 let (cx, cy) = (gx as f64 + 0.5, gy as f64 + 0.5);
                 let (lx, ly) = mat_apply(inv, cx, cy);
-                if !(lx >= x && lx < x + w && ly >= y && ly < y + h) {
-                    continue;
-                }
-                // Inner hole (square): present only while the inset ring
-                // still has positive extent on both axes.
-                if iw > 0.0 && ih > 0.0 && lx >= ix && lx < ix + iw && ly >= iy && ly < iy + ih {
+                if !border_ring_contains(x, y, w, h, widths, radii, lx, ly) {
                     continue;
                 }
                 if !self.clip_accepts(cx, cy) {
@@ -383,6 +376,47 @@ impl Canvas {
                 over(&mut self.data[i..i + 4], color);
             }
         }
+    }
+
+    /// Axis-aligned rounded border ring: the same outer-minus-inner test
+    /// [`border_affine`](Self::border_affine) inverse-maps for, evaluated
+    /// directly on canvas pixel centers. Only reached with nonzero radii —
+    /// square borders keep the four-band fast path (bit-for-bit the
+    /// historical paint).
+    #[allow(clippy::too_many_arguments)]
+    fn fill_border_ring(
+        &mut self,
+        x: i64,
+        y: i64,
+        w: i64,
+        h: i64,
+        widths: [f32; 4],
+        radii: [(f32, f32); 4],
+        color: [u8; 4],
+    ) {
+        let (ax0, ay0, ax1, ay1) = self.allowed();
+        for gy in y.max(ay0).max(0)..(y + h).min(ay1).min(self.height as i64) {
+            for gx in x.max(ax0).max(0)..(x + w).min(ax1).min(self.width as i64) {
+                let (cx, cy) = (gx as f64 + 0.5, gy as f64 + 0.5);
+                if !border_ring_contains(x as f64, y as f64, w as f64, h as f64, widths, radii, cx, cy) {
+                    continue;
+                }
+                if !self.clip_accepts(cx, cy) {
+                    continue;
+                }
+                let i = (gy as usize * self.width + gx as usize) * 4;
+                over(&mut self.data[i..i + 4], color);
+            }
+        }
+    }
+
+    /// Open a canvas-coordinate bracket ([`PaintItem::SetXfCanvas`]): the
+    /// map REPLACES the current top instead of composing onto it, so items
+    /// until the matching ClearXf paint in canvas space (the band shift in
+    /// a viewport-band paint, the identity in full-page execute), cancelling
+    /// any enclosing transform bracket.
+    pub(crate) fn push_xf_canvas(&mut self, m: [f64; 6]) {
+        self.xf_stack.push(m);
     }
 
     /// Nearest-neighbor image blit through the current bracket: the
@@ -910,6 +944,42 @@ fn rounded_contains(
     }
 }
 
+/// LOCAL-space border-ring containment (affine residuals batch): inside the
+/// outer rounded box AND outside the widths-inset inner rounded box — the
+/// CSS border shape. Inner radii shrink by the adjacent border widths per
+/// corner (TL: left/top, TR: right/top, …), floored at 0 — the corner-box
+/// approximation every raster browser uses. A degenerate inner box (the
+/// border thicker than the box on an axis) leaves a solid fill. Zero radii
+/// degenerate to the plain square ring.
+#[allow(clippy::too_many_arguments)]
+fn border_ring_contains(
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    widths: [f32; 4],
+    radii: [(f32, f32); 4],
+    lx: f64,
+    ly: f64,
+) -> bool {
+    let [t, r, b, l] = widths;
+    if !rounded_contains(x, y, w, h, radii, lx, ly) {
+        return false;
+    }
+    let (ix, iy) = (x + l as f64, y + t as f64);
+    let (iw, ih) = ((w - l as f64 - r as f64).max(0.0), (h - t as f64 - b as f64).max(0.0));
+    if iw <= 0.0 || ih <= 0.0 {
+        return true;
+    }
+    let inner_radii = [
+        ((radii[0].0 - l).max(0.0), (radii[0].1 - t).max(0.0)),
+        ((radii[1].0 - r).max(0.0), (radii[1].1 - t).max(0.0)),
+        ((radii[2].0 - r).max(0.0), (radii[2].1 - b).max(0.0)),
+        ((radii[3].0 - l).max(0.0), (radii[3].1 - b).max(0.0)),
+    ];
+    !rounded_contains(ix, iy, iw, ih, inner_radii, lx, ly)
+}
+
 /// Gradient stop color at position `t` (0..1). Stops are ascending; `t`
 /// outside the list clamps to the end stops. The ramp scan uses a strict
 /// upper bound, so a shared position (hard line, `blue 50%, green 50%`)
@@ -1044,6 +1114,12 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     xf[5] as f64 - dy as f64,
                 ]);
             }
+            PaintItem::SetXfCanvas => {
+                // Canvas-space emission (the inline-band splice): replace
+                // the open map with the band shift alone — identity in the
+                // full-page execute — so the bracket's transform cancels.
+                out.push_xf_canvas([1.0, 0.0, 0.0, 1.0, -dx as f64, -dy as f64]);
+            }
             PaintItem::ClearXf => {
                 out.pop_xf();
             }
@@ -1152,7 +1228,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     );
                 }
             }
-            PaintItem::Border { rect, widths, color, .. } => {
+            PaintItem::Border { rect, widths, color, radii } => {
                 if out.xf().is_some() {
                     out.border_affine(
                         rect.x as f64,
@@ -1160,13 +1236,15 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                         rect.width as f64,
                         rect.height as f64,
                         *widths,
+                        *radii,
                         *color,
                     );
-                } else {
+                } else if radii.iter().all(|r| r.0 <= 0.0 && r.1 <= 0.0) {
                     // Four bands, square corners: top/bottom span the full
                     // border-box width (they own the corners), left/right inset
                     // by the top/bottom widths — the classic rectangular-border
-                    // paint browsers produce with radius 0.
+                    // paint browsers produce with radius 0 (the historical
+                    // fast path, bit-for-bit).
                     let [t, r, b, l] = *widths;
                     let (x, y) = (
                         (rect.x - dx).round() as i64,
@@ -1177,6 +1255,19 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     out.fill_rect(x, y + h - b as i64, w, b as i64, *color);
                     out.fill_rect(x, y + t as i64, l as i64, h - t as i64 - b as i64, *color);
                     out.fill_rect(x + w - r as i64, y + t as i64, r as i64, h - t as i64 - b as i64, *color);
+                } else {
+                    // Rounded ring: outer rounded box minus the widths-inset
+                    // inner rounded box — Chrome's border shape when
+                    // border-radius meets a border.
+                    out.fill_border_ring(
+                        (rect.x - dx).round() as i64,
+                        (rect.y - dy).round() as i64,
+                        rect.width.round() as i64,
+                        rect.height.round() as i64,
+                        *widths,
+                        *radii,
+                        *color,
+                    );
                 }
             }
             PaintItem::Image { rect, paint_rect, image, alpha } => {
@@ -1512,7 +1603,7 @@ mod tests {
         use super::super::image::DecodedImage;
         let items = vec![
             PaintItem::Bg { rect: super::super::Rect { x: 0.0, y: 0.0, width: 40.0, height: 60.0 }, color: [30, 60, 90, 255], radius: 0.0 },
-            PaintItem::Border { rect: super::super::Rect { x: 5.0, y: 5.0, width: 30.0, height: 20.0 }, widths: [2.0, 3.0, 4.0, 1.0], color: [200, 40, 40, 255] },
+            PaintItem::Border { rect: super::super::Rect { x: 5.0, y: 5.0, width: 30.0, height: 20.0 }, widths: [2.0, 3.0, 4.0, 1.0], color: [200, 40, 40, 255], radii: [(0.0, 0.0); 4] },
             PaintItem::Clip { rect: super::super::Rect { x: 8.0, y: 8.0, width: 24.0, height: 14.0 } },
             PaintItem::Bg { rect: super::super::Rect { x: 0.0, y: 0.0, width: 40.0, height: 60.0 }, color: [240, 240, 0, 255], radius: 0.0 },
             PaintItem::PopClip,
@@ -1545,7 +1636,7 @@ mod tests {
         let items = vec![
             PaintItem::Bg { rect: super::super::Rect { x: 0.0, y: 0.0, width: 40.0, height: 300.0 }, color: [30, 60, 90, 255], radius: 0.0 },
             PaintItem::Bg { rect: super::super::Rect { x: 4.0, y: 120.0, width: 32.0, height: 40.0 }, color: [200, 40, 40, 255], radius: 0.0 },
-            PaintItem::Border { rect: super::super::Rect { x: 6.0, y: 240.0, width: 28.0, height: 30.0 }, widths: [3.0, 3.0, 3.0, 3.0], color: [0, 200, 0, 255] },
+            PaintItem::Border { rect: super::super::Rect { x: 6.0, y: 240.0, width: 28.0, height: 30.0 }, widths: [3.0, 3.0, 3.0, 3.0], color: [0, 200, 0, 255], radii: [(0.0, 0.0); 4] },
         ];
         let fonts = crate::diting_fonts::font_book();
         let mut full = Canvas::new_filled(40, 300, [255, 255, 255, 255]);
@@ -1731,5 +1822,139 @@ mod tests {
             ink_x.iter().all(|&x| x > 60),
             "ink must land in the mirrored half: {ink_x:?}"
         );
+    }
+
+    /// skewX(45°) — x' = x + y, y' = y — paints pixel-exactly: the sheared
+    /// parallelogram puts ink at columns the unskewed box can't reach and
+    /// cuts the ones only it occupied (affine residuals batch).
+    #[test]
+    fn skew_x_bracket_pixel_exact() {
+        let items = vec![
+            PaintItem::SetXf { xf: [1.0, 0.0, 1.0, 1.0, 0.0, 0.0] },
+            PaintItem::Bg {
+                rect: super::super::Rect { x: 10.0, y: 10.0, width: 40.0, height: 20.0 },
+                color: [200, 40, 40, 255],
+                radius: 0.0,
+            },
+            PaintItem::ClearXf,
+        ];
+        let fonts = crate::diting_fonts::font_book();
+        let mut c = Canvas::new_filled(120, 60, [255, 255, 255, 255]);
+        execute(&items, &fonts, &mut c);
+        // Inverse: lx = cx − cy, ly = cy. Local box [10,50)×[10,30).
+        assert_eq!(px(&c, 20, 10), [200, 40, 40, 255], "sheared TL edge");
+        assert_eq!(px(&c, 55, 20), [200, 40, 40, 255], "right of the unskewed box — only skew reaches");
+        assert_eq!(px(&c, 69, 29), [200, 40, 40, 255], "far bottom-right of the parallelogram");
+        assert_eq!(px(&c, 30, 29), [255, 255, 255, 255], "lower-left cut away by the shear");
+        assert_eq!(px(&c, 60, 10), [255, 255, 255, 255], "top right edge exclusive (lx = 50)");
+        assert_eq!(px(&c, 79, 29), [255, 255, 255, 255], "bottom right edge exclusive");
+    }
+
+    /// matrix(1, 0.5, 0, 1, 5, 0) — x' = x + 5, y' = 0.5x + y — the general
+    /// affine form, pixel-exact on integer-friendly entries.
+    #[test]
+    fn matrix_bracket_pixel_exact() {
+        let items = vec![
+            PaintItem::SetXf { xf: [1.0, 0.5, 0.0, 1.0, 5.0, 0.0] },
+            PaintItem::Bg {
+                rect: super::super::Rect { x: 10.0, y: 10.0, width: 40.0, height: 20.0 },
+                color: [200, 40, 40, 255],
+                radius: 0.0,
+            },
+            PaintItem::ClearXf,
+        ];
+        let fonts = crate::diting_fonts::font_book();
+        let mut c = Canvas::new_filled(60, 50, [255, 255, 255, 255]);
+        execute(&items, &fonts, &mut c);
+        // Inverse: lx = cx − 5, ly = cy − 0.5·lx. Local box [10,50)×[10,30).
+        assert_eq!(px(&c, 16, 16), [200, 40, 40, 255], "mapped TL region");
+        assert_eq!(px(&c, 30, 26), [200, 40, 40, 255], "mid box");
+        assert_eq!(px(&c, 30, 33), [200, 40, 40, 255], "sheared down — only the matrix reaches");
+        assert_eq!(px(&c, 30, 8), [255, 255, 255, 255], "above the sheared top");
+        assert_eq!(px(&c, 55, 40), [255, 255, 255, 255], "past the sheared right");
+    }
+
+    /// A rounded border through a bracket is the ROUNDED ring rotated, not
+    /// the square-cornered one: corners stay cut along the curve, the
+    /// widths-inset hole stays open (affine residuals batch ①).
+    #[test]
+    fn rotated_rounded_border_pixel_exact() {
+        // rotate(90°) about (20, 20): (x, y) → (40 − y, x).
+        let items = vec![
+            PaintItem::SetXf { xf: [0.0, 1.0, -1.0, 0.0, 40.0, 0.0] },
+            PaintItem::Border {
+                rect: super::super::Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 },
+                widths: [6.0, 6.0, 6.0, 6.0],
+                color: [200, 40, 40, 255],
+                radii: [(12.0, 12.0); 4],
+            },
+            PaintItem::ClearXf,
+        ];
+        let fonts = crate::diting_fonts::font_book();
+        let mut c = Canvas::new_filled(40, 40, [255, 255, 255, 255]);
+        execute(&items, &fonts, &mut c);
+        // Inverse: lx = 40 − cy, ly = cx.
+        assert_eq!(px(&c, 20, 20), [255, 255, 255, 255], "the inner hole stays open");
+        assert_eq!(px(&c, 20, 5), [200, 40, 40, 255], "straight edge band");
+        assert_eq!(px(&c, 33, 6), [200, 40, 40, 255], "corner arc band (outer in, inner out)");
+        assert_eq!(px(&c, 37, 2), [255, 255, 255, 255], "outside the rounded corner — square paint would hit");
+    }
+
+    /// The axis-aligned twin: nonzero radii switch the border to the rounded
+    /// ring — corners cut along the arc, hole open, edges solid. Zero radii
+    /// keep the historical four-band paint (covered by the older tests).
+    #[test]
+    fn rounded_border_ring_axis_aligned() {
+        let items = vec![PaintItem::Border {
+            rect: super::super::Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 },
+            widths: [4.0, 4.0, 4.0, 4.0],
+            color: [200, 40, 40, 255],
+            radii: [(10.0, 10.0); 4],
+        }];
+        let fonts = crate::diting_fonts::font_book();
+        let mut c = Canvas::new_filled(40, 40, [255, 255, 255, 255]);
+        execute(&items, &fonts, &mut c);
+        assert_eq!(px(&c, 0, 0), [255, 255, 255, 255], "corner cut by the 10px arc");
+        assert_eq!(px(&c, 5, 5), [200, 40, 40, 255], "arc band mid-corner");
+        assert_eq!(px(&c, 20, 0), [200, 40, 40, 255], "top band");
+        assert_eq!(px(&c, 0, 20), [200, 40, 40, 255], "left band");
+        assert_eq!(px(&c, 20, 20), [255, 255, 255, 255], "hole open");
+    }
+
+    /// SetXfCanvas cancels the enclosing bracket: the canvas-space Bg paints
+    /// UNROTATED (its rotated image would be off-canvas entirely), and the
+    /// matching ClearXf restores the bracket for subsequent local items
+    /// (affine residuals batch ②, the inline-band splice's engine).
+    #[test]
+    fn canvas_bracket_cancels_enclosing_map() {
+        // rotate(90°) about (60, 30): x' = 90 − y, y' = x − 30.
+        let items = vec![
+            PaintItem::SetXf { xf: [0.0, 1.0, -1.0, 0.0, 90.0, -30.0] },
+            PaintItem::SetXfCanvas,
+            PaintItem::Bg {
+                rect: super::super::Rect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 },
+                color: [200, 40, 40, 255],
+                radius: 0.0,
+            },
+            PaintItem::ClearXf,
+            PaintItem::Bg {
+                rect: super::super::Rect { x: 40.0, y: 40.0, width: 10.0, height: 10.0 },
+                color: [0, 0, 200, 255],
+                radius: 0.0,
+            },
+            PaintItem::ClearXf,
+        ];
+        let fonts = crate::diting_fonts::font_book();
+        let mut c = Canvas::new_filled(120, 120, [255, 255, 255, 255]);
+        execute(&items, &fonts, &mut c);
+        // Rotated, the red box maps to y' ∈ [−30,−20) — off-canvas; painting
+        // at (0,0) proves the bracket was cancelled for it.
+        assert_eq!(px(&c, 0, 0), [200, 40, 40, 255], "canvas-space bg paints unrotated");
+        assert_eq!(px(&c, 9, 9), [200, 40, 40, 255], "canvas-space bg far corner");
+        // After the ClearXf the rotation is back: local (40,40,10,10) maps
+        // to canvas x' = 90 − y ∈ (40,50], y' = x − 30 ∈ [10,20).
+        assert_eq!(px(&c, 41, 11), [0, 0, 200, 255], "bracket restored after ClearXf");
+        assert_eq!(px(&c, 45, 15), [0, 0, 200, 255], "restored map far corner");
+        assert_eq!(px(&c, 50, 15), [255, 255, 255, 255], "restored map edge exclusive");
     }
 }

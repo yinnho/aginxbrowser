@@ -1268,6 +1268,53 @@ mod opacity_pipeline_tests {
     /// multiplies it into glyph coverage. This locks the whole static-paint
     /// chain (a page whose hidden-by-opacity captions painted at full ink
     /// made every "hidden until animated" scene visible from frame 0).
+    /// Rotated inline background (affine residuals batch ②): a span with a
+    /// background inside a rotate(90°) div must paint its band — as a
+    /// VERTICAL stripe (the rotation applied to the band rect), not the
+    /// horizontal unrotated band, and not nothing (the pre-fix skip).
+    #[test]
+    fn rotated_inline_background_paints_its_band() {
+        let html = r#"<html><head><style>
+            body { margin: 0; }
+            #rot { transform: rotate(90deg); width: 200px; height: 40px; }
+            #hl { background: #ffcc00; font-size: 20px; color: #000; }
+        </style></head><body>
+            <div id="rot"><span id="hl">MMMMMMMMMM</span></div>
+        </body></html>"#;
+        let shot = render_html_to_png_diting(html, "http://probe.local/", 220, 180, 1.0, false, None, false, None)
+            .expect("render");
+        // rotate(90°) about the div center (100,20) is x' = 120 − y,
+        // y' = x − 80: the first line's horizontal band (x ∈ [0,165),
+        // y ∈ [0,24)) maps to a vertical stripe at columns ≈ [96, 121) and
+        // rows up to ≈ 85 — every other column holding yellow means the
+        // band painted unrotated; zero yellow means the old skip.
+        let is_yellow = |(r, g, b): (u8, u8, u8)| r > 230 && g > 180 && b < 80;
+        let decoder = png::Decoder::new(std::io::Cursor::new(&shot.png));
+        let mut reader = decoder.read_info().expect("png read_info");
+        let mut buf = vec![0; reader.output_buffer_size().expect("png buffer size")];
+        let info = reader.next_frame(&mut buf).expect("png decode");
+        let px = &buf[..info.buffer_size()];
+        let mut yellow_cols: Vec<u32> = Vec::new();
+        let mut max_row = 0u32;
+        for y in 0..info.height {
+            for x in 0..info.width {
+                let i = ((y * info.width + x) * 4) as usize;
+                if is_yellow((px[i], px[i + 1], px[i + 2])) {
+                    yellow_cols.push(x);
+                    max_row = max_row.max(y);
+                }
+            }
+        }
+        assert!(yellow_cols.len() > 500, "band paints: {} yellow px", yellow_cols.len());
+        assert!(
+            yellow_cols.iter().all(|&x| (90..122).contains(&x)),
+            "stripe is vertical (rotation applied to the band): cols {:?}..{:?}",
+            yellow_cols.iter().min(),
+            yellow_cols.iter().max()
+        );
+        assert!(max_row > 60, "band extends below the original line box: max row {max_row}");
+    }
+
     #[test]
     fn css_opacity_zero_hides_text_in_static_screenshot() {
         // Force the body box to the full canvas: diting paints body bg over

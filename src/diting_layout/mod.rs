@@ -3267,14 +3267,27 @@ pub enum PaintItem {
     SetXf { xf: [f32; 6] },
     /// End the nearest open [`PaintItem::SetXf`] bracket.
     ClearXf,
-    /// A uniform solid border: four bands on the border-box edges, painted
-    /// AFTER the element's Bg (background-clip: border-box draws the bg
-    /// beneath the border) and before the subtree. Widths in CSS order
-    /// (top right bottom left), px.
+    /// Paint in CANVAS coordinates until the matching [`PaintItem::ClearXf`]
+    /// (affine residuals batch): the pushed map REPLACES the open bracket's
+    /// total instead of composing onto it, cancelling the enclosing
+    /// transform. Emitted by the inline-band splice — its band rects come
+    /// from `abs_by_node`, which already maps through ancestor transforms,
+    /// so splicing them raw inside a bracket would double-map. The pair is
+    /// self-contained; paint after the ClearXf returns to the bracket.
+    SetXfCanvas,
+    /// A uniform solid border: four bands on the border-box edges (rounded
+    /// ring when `radii` are set), painted AFTER the element's Bg
+    /// (background-clip: border-box draws the bg beneath the border) and
+    /// before the subtree. Widths in CSS order (top right bottom left), px;
+    /// `radii` are the same per-corner values a `BgCorner` fill would use —
+    /// the ring is the outer rounded box minus the widths-inset inner box
+    /// (inner radii shrink by the adjacent border widths). All-zero radii
+    /// keep the historical four-band fast path.
     Border {
         rect: Rect,
         widths: [f32; 4],
         color: [u8; 4],
+        radii: [(f32, f32); 4],
     },
     Text {
         text: String,
@@ -3357,29 +3370,64 @@ pub fn layout_dom_with_paint_and_images(
     (rects, items)
 }
 
-/// Collect the absolute rects of everything a flattened inline hoisted:
+/// Map a rect through a CSS-order affine array [a,b,c,d,e,f]: the diagonal
+/// fast path keeps the historical two-corner normalize (negative scales
+/// mirror); anything else maps all four corners and unions them — Chrome's
+/// gBCR bounding-box behavior under rotation. Free-standing so
+/// [`expand_wrapped_leaves`] can map through a recorded array — the walk's
+/// `Xf` type is fn-local.
+fn map_rect_arr(m: [f32; 6], r: Rect) -> Rect {
+    if m[1] == 0.0 && m[2] == 0.0 {
+        let (x1, x2) = (r.x * m[0] + m[4], (r.x + r.width) * m[0] + m[4]);
+        let (y1, y2) = (r.y * m[3] + m[5], (r.y + r.height) * m[3] + m[5]);
+        Rect {
+            x: x1.min(x2),
+            y: y1.min(y2),
+            width: (x2 - x1).abs(),
+            height: (y2 - y1).abs(),
+        }
+    } else {
+        let pt = |x: f32, y: f32| (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]);
+        let (x0, y0) = pt(r.x, r.y);
+        let (x1, y1) = pt(r.x + r.width, r.y);
+        let (x2, y2) = pt(r.x, r.y + r.height);
+        let (x3, y3) = pt(r.x + r.width, r.y + r.height);
+        let xs = [x0, x1, x2, x3];
+        let ys = [y0, y1, y2, y3];
+        let min_x = xs.iter().cloned().fold(f32::MAX, f32::min);
+        let max_x = xs.iter().cloned().fold(f32::MIN, f32::max);
+        let min_y = ys.iter().cloned().fold(f32::MAX, f32::min);
+        let max_y = ys.iter().cloned().fold(f32::MIN, f32::max);
+        Rect { x: min_x, y: min_y, width: max_x - min_x, height: max_y - min_y }
+    }
+}
+
+/// Collect the canvas-space rects of everything a flattened inline hoisted:
 /// descend through run wrappers (nested flattening wraps wrapper into
-/// wrapper) and stop at leaves / boxed nodes, which carry both a rect in
-/// `abs_by_node` and a first-item index in `node_first_item`. A wrapped
-/// run leaf is one taffy box covering every line it broke into — split it
-/// with the same greedy-wrap truth the paint path uses so bands follow the
-/// ragged line ends instead of painting the full union box.
+/// wrapper) and stop at leaves / boxed nodes, which carry their LOCAL rect
+/// plus the accumulated map in `local_by_node` and a first-item index in
+/// `node_first_item`. A wrapped run leaf is one taffy box covering every
+/// line it broke into — split it with the same greedy-wrap truth the paint
+/// path uses (in LOCAL space, where the wrap width still means what the
+/// paint item's `wrap_at` means), then map each line band to canvas —
+/// under rotation a horizontal line band is a vertical stripe, and the
+/// mapped bbox of each band is the closest an axis-aligned Bg can get.
 fn expand_wrapped_leaves(
     node: taffy::tree::NodeId,
     taffy_tree: &TaffyTree<TextLeaf>,
     wrapper_set: &std::collections::HashSet<taffy::tree::NodeId>,
-    abs_by_node: &HashMap<taffy::tree::NodeId, Rect>,
+    local_by_node: &HashMap<taffy::tree::NodeId, (Rect, [f32; 6])>,
     fonts: &FontBook,
     pieces: &mut Vec<Rect>,
     owners: &mut Vec<taffy::tree::NodeId>,
 ) {
     if wrapper_set.contains(&node) {
         for c in taffy_tree.children(node).unwrap_or_default() {
-            expand_wrapped_leaves(c, taffy_tree, wrapper_set, abs_by_node, fonts, pieces, owners);
+            expand_wrapped_leaves(c, taffy_tree, wrapper_set, local_by_node, fonts, pieces, owners);
         }
         return;
     }
-    let Some(r) = abs_by_node.get(&node) else { return };
+    let Some((r, m)) = local_by_node.get(&node) else { return };
     if let Some(TextLeaf::Run { text, font_size, bold, line_height, .. }) =
         taffy_tree.get_node_context(node)
     {
@@ -3389,17 +3437,20 @@ fn expand_wrapped_leaves(
             if line.width <= 0.0 {
                 continue;
             }
-            pieces.push(Rect {
-                x: r.x,
-                y: r.y + i as f32 * line_height,
-                width: line.width,
-                height: *line_height,
-            });
+            pieces.push(map_rect_arr(
+                *m,
+                Rect {
+                    x: r.x,
+                    y: r.y + i as f32 * line_height,
+                    width: line.width,
+                    height: *line_height,
+                },
+            ));
             owners.push(node);
         }
         return;
     }
-    pieces.push(*r);
+    pieces.push(map_rect_arr(*m, *r));
     owners.push(node);
 }
 
@@ -4253,37 +4304,12 @@ pub fn layout_dom_with_paint_order_and_images(
             }
         }
 
-        fn map_point(&self, x: f32, y: f32) -> (f32, f32) {
-            (self.a * x + self.c * y + self.e, self.b * x + self.d * y + self.f)
-        }
-
         /// Map a rect: the diagonal fast path keeps the historical two-corner
         /// normalize (negative scales mirror); anything else maps all four
         /// corners and unions them — Chrome's gBCR bounding-box behavior
         /// under rotation.
         fn map_rect(&self, r: Rect) -> Rect {
-            if self.is_diagonal() {
-                let (x1, x2) = (r.x * self.a + self.e, (r.x + r.width) * self.a + self.e);
-                let (y1, y2) = (r.y * self.d + self.f, (r.y + r.height) * self.d + self.f);
-                Rect {
-                    x: x1.min(x2),
-                    y: y1.min(y2),
-                    width: (x2 - x1).abs(),
-                    height: (y2 - y1).abs(),
-                }
-            } else {
-                let (x0, y0) = self.map_point(r.x, r.y);
-                let (x1, y1) = self.map_point(r.x + r.width, r.y);
-                let (x2, y2) = self.map_point(r.x, r.y + r.height);
-                let (x3, y3) = self.map_point(r.x + r.width, r.y + r.height);
-                let xs = [x0, x1, x2, x3];
-                let ys = [y0, y1, y2, y3];
-                let min_x = xs.iter().cloned().fold(f32::MAX, f32::min);
-                let max_x = xs.iter().cloned().fold(f32::MIN, f32::max);
-                let min_y = ys.iter().cloned().fold(f32::MAX, f32::min);
-                let max_y = ys.iter().cloned().fold(f32::MIN, f32::max);
-                Rect { x: min_x, y: min_y, width: max_x - min_x, height: max_y - min_y }
-            }
+            map_rect_arr(self.to_array(), r)
         }
 
         fn to_array(self) -> [f32; 6] {
@@ -4314,6 +4340,7 @@ pub fn layout_dom_with_paint_order_and_images(
         collapsed_edges: &HashMap<NodeId, [bool; 4]>,
         rects: &mut HashMap<NodeId, Rect>,
         abs_by_node: &mut HashMap<taffy::tree::NodeId, Rect>,
+        local_by_node: &mut HashMap<taffy::tree::NodeId, (Rect, [f32; 6])>,
         node_first_item: &mut HashMap<taffy::tree::NodeId, usize>,
         items: &mut Vec<PaintItem>,
         paint_order: &mut Vec<NodeId>,
@@ -4379,6 +4406,22 @@ pub fn layout_dom_with_paint_order_and_images(
         let mut child_xf = xf;
         // Every visited node's absolute border box — the union pass after
         // the walk rebuilds rects for flattened inline wrappers from kids.
+        // The local-space twin (affine residuals batch ②) records the
+        // PRE-map box plus the incoming map: the inline-band pass splits
+        // text runs into line bands where the wrap width still means what
+        // the paint item's `wrap_at` means, then maps each band.
+        local_by_node.insert(
+            node,
+            (
+                Rect {
+                    x: abs.0,
+                    y: abs.1,
+                    width: layout.size.width,
+                    height: layout.size.height,
+                },
+                xf.to_array(),
+            ),
+        );
         abs_by_node.insert(
             node,
             xf.map_rect(Rect {
@@ -4580,7 +4623,7 @@ pub fn layout_dom_with_paint_order_and_images(
                         .or(style.color)
                         .map(|c| with_alpha([c.0, c.1, c.2, c.3], alpha))
                         .unwrap_or([0, 0, 0, 255]);
-                    items.push(PaintItem::Border { rect: bg_rect, widths, color });
+                    items.push(PaintItem::Border { rect: bg_rect, widths, color, radii });
                 }
             }
             // A replaced box paints either its decoded image (batch 5b,
@@ -4861,7 +4904,7 @@ pub fn layout_dom_with_paint_order_and_images(
         pos.sort_by_key(|(z, _)| *z);
         for list in [neg, mid, pos] {
             for (_, i) in list {
-                collect(tree, taffy_tree, node_map, styles, images, static_pos, baseline_shifts, collapsed_edges, rects, abs_by_node, node_first_item, items, paint_order, children[i], abs, viewport_width, child_xf, alpha);
+                collect(tree, taffy_tree, node_map, styles, images, static_pos, baseline_shifts, collapsed_edges, rects, abs_by_node, local_by_node, node_first_item, items, paint_order, children[i], abs, viewport_width, child_xf, alpha);
             }
         }
         if clips {
@@ -4872,6 +4915,7 @@ pub fn layout_dom_with_paint_order_and_images(
         }
     }
     let mut abs_by_node: HashMap<taffy::tree::NodeId, Rect> = HashMap::new();
+    let mut local_by_node: HashMap<taffy::tree::NodeId, (Rect, [f32; 6])> = HashMap::new();
     let mut node_first_item: HashMap<taffy::tree::NodeId, usize> = HashMap::new();
     collect(
         tree,
@@ -4884,6 +4928,7 @@ pub fn layout_dom_with_paint_order_and_images(
         &table_meta.collapsed_edges,
         &mut rects,
         &mut abs_by_node,
+        &mut local_by_node,
         &mut node_first_item,
         &mut items,
         &mut paint_order,
@@ -4952,10 +4997,13 @@ pub fn layout_dom_with_paint_order_and_images(
     // the outer's and overpaint it — outer bg under inner bg under ink, the
     // CSS inline paint order.
     if !flattened.is_empty() {
-        // A rotated ancestor's SetXf bracket maps everything inside it, so
-        // canvas-coordinate band rects spliced there would double-map —
-        // skip flattened inlines that fall inside a bracket (rotated inline
-        // backgrounds are a v1 non-goal).
+        // A rotated ancestor's SetXf bracket maps everything inside it, and
+        // the band rects below are CANVAS-space (each line band maps through
+        // the leaf's recorded map) — splicing them raw there would
+        // double-map. Bands falling inside a bracket get wrapped in a
+        // SetXfCanvas/ClearXf pair that cancels the enclosing map (see the
+        // enum doc), so the rotated inline background paints at its canvas
+        // rect, still under the leaf's own ink.
         let mut inside_xf = vec![false; items.len()];
         {
             let mut depth = 0usize;
@@ -4989,7 +5037,7 @@ pub fn layout_dom_with_paint_order_and_images(
                     *k,
                     &taffy_tree,
                     &wrapper_set,
-                    &abs_by_node,
+                    &local_by_node,
                     fonts,
                     &mut pieces,
                     &mut owners,
@@ -4998,9 +5046,7 @@ pub fn layout_dom_with_paint_order_and_images(
             let Some(&idx) = owners.iter().filter_map(|n| node_first_item.get(n)).min() else {
                 continue;
             };
-            if inside_xf.get(idx).copied().unwrap_or(false) {
-                continue;
-            }
+            let inside = inside_xf.get(idx).copied().unwrap_or(false);
             // Group pieces into line bands by vertical overlap: same-line
             // leaves share the line box even where baseline shifts split
             // their tops; different lines never overlap.
@@ -5020,14 +5066,15 @@ pub fn layout_dom_with_paint_order_and_images(
                 }
             }
             let color = [color.0, color.1, color.2, color.3];
-            inserts.push((
-                idx,
-                tree.ancestors(*dom).len(),
-                bands
-                    .into_iter()
-                    .map(|rect| PaintItem::Bg { rect, color, radius: 0.0 })
-                    .collect(),
-            ));
+            let mut band_items: Vec<PaintItem> = bands
+                .into_iter()
+                .map(|rect| PaintItem::Bg { rect, color, radius: 0.0 })
+                .collect();
+            if inside {
+                band_items.insert(0, PaintItem::SetXfCanvas);
+                band_items.push(PaintItem::ClearXf);
+            }
+            inserts.push((idx, tree.ancestors(*dom).len(), band_items));
         }
         // Later splice points first, deeper element first on ties, so each
         // batch lands under everything recorded after it.
