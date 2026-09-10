@@ -38,6 +38,10 @@ mod screenshot;
 // paint viewport bands, pipe raw RGBA into ffmpeg — MP4 bytes out.
 #[cfg(feature = "screenshot")]
 mod video;
+// Page pump (切片层): cut the live page into pages — print pagination at
+// block boundaries, or one page per selector match — and package as PDF/PNG.
+#[cfg(feature = "screenshot")]
+mod pages;
 // The Blitz reference pipeline — cross-check oracle for diting, opt-in via
 // `blitz-reference`. Not compiled in production/device builds.
 #[cfg(feature = "blitz-reference")]
@@ -330,6 +334,79 @@ fn default_video_hold_tail_secs() -> f64 { 0.5 }
 fn default_video_max_duration_secs() -> f64 { 120.0 }
 #[cfg(feature = "screenshot")]
 fn default_video_wait_timelines_ms() -> u64 { 10_000 }
+
+#[cfg(feature = "screenshot")]
+fn default_pdf_width() -> u32 { 794 }
+#[cfg(feature = "screenshot")]
+fn default_pdf_height() -> u32 { 1123 }
+#[cfg(feature = "screenshot")]
+fn default_pdf_max_pages() -> usize { 50 }
+#[cfg(feature = "screenshot")]
+fn default_pdf_jpeg_quality() -> u8 { 90 }
+#[cfg(feature = "screenshot")]
+fn default_pdf_format() -> String { "pdf".to_string() }
+
+/// /pdf request: cut the page into pages and package as PDF (default) or
+/// per-page PNGs. No `selector` → print mode (fixed-height pages, breaks at
+/// top-level block boundaries); `selector` → slides mode (one page per
+/// match, sized to the element). Requires the `screenshot` feature.
+#[cfg(feature = "screenshot")]
+#[derive(Debug, Deserialize, Clone)]
+pub struct PdfRequest {
+    pub url: String,
+    /// Output format: `"pdf"` (default) or `"png"` (one base64 PNG per page).
+    #[serde(default = "default_pdf_format")]
+    pub format: String,
+    /// Page width in CSS pixels. Default 794 (A4 @96dpi).
+    #[serde(default = "default_pdf_width")]
+    pub width: u32,
+    /// Page height in CSS pixels — print pagination only (slides size each
+    /// page to its element). Default 1123 (A4 @96dpi).
+    #[serde(default = "default_pdf_height")]
+    pub height: u32,
+    /// CSS selector; present → slides mode (one page per match).
+    #[serde(default)]
+    pub selector: Option<String>,
+    /// Safety cap on emitted pages. Default 50.
+    #[serde(default = "default_pdf_max_pages")]
+    pub max_pages: usize,
+    /// JPEG quality for PDF page embedding (1-100). Default 90.
+    #[serde(default = "default_pdf_jpeg_quality")]
+    pub jpeg_quality: u8,
+    /// Route through AGINXBROWSER_PROXY. Default false (direct).
+    #[serde(default)]
+    pub use_proxy: bool,
+    /// Cookies to inject before navigation (`"name=value"` strings or CDP-style
+    /// objects) — for pages behind a login.
+    #[serde(default, deserialize_with = "crate::server::cookie_list_from_json")]
+    pub cookies: Vec<String>,
+    /// TLS fingerprint override (stealth mode only).
+    #[serde(default)]
+    pub tls_fingerprint: Option<String>,
+}
+
+/// /pdf response: PDF or per-page PNGs, base64. Exactly one of `pdf_base64`
+/// / `pages_base64` is present (PDF and PNG modes respectively).
+#[cfg(feature = "screenshot")]
+#[derive(Debug, Serialize)]
+pub struct PdfResponse {
+    pub url: String,
+    pub title: Option<String>,
+    /// Number of pages emitted.
+    pub pages: usize,
+    /// Requested page width in CSS px (print mode; slides pages vary in
+    /// height per element).
+    pub width: u32,
+    pub height: u32,
+    /// Base64-encoded PDF bytes (`format:"pdf"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pdf_base64: Option<String>,
+    /// One base64 PNG per page (`format:"png"`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pages_base64: Vec<String>,
+    /// Echoes the requested output format ("pdf" / "png").
+    pub format: String,
+}
 
 /// /video request: render the page's registered timelines
 /// (`window.__timelines` — GSAP-style objects with `duration()` + `pause(t)`)
@@ -789,7 +866,8 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "screenshot")]
     let app = app
         .route("/screenshot", post(screenshot_handler))
-        .route("/video", post(video_handler));
+        .route("/video", post(video_handler))
+        .route("/pdf", post(pdf_handler));
 
     let bind_addr = std::env::var("AGINXBROWSER_BIND").unwrap_or_else(|_| "0.0.0.0:8089".to_string());
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
@@ -959,6 +1037,7 @@ async fn status_handler() -> axum::response::Html<String> {
     <tr><td>POST&nbsp;/search</td><td>multi-engine meta-search</td></tr>
     <tr><td>POST&nbsp;/screenshot</td><td>render a page to PNG (CPU)</td></tr>
     <tr><td>POST&nbsp;/video</td><td>page timelines &rarr; MP4 (needs ffmpeg)</td></tr>
+    <tr><td>POST&nbsp;/pdf</td><td>page &rarr; paginated PDF / PNGs</td></tr>
     <tr><td>POST&nbsp;/download</td><td>streaming file download</td></tr>
     <tr><td>POST&nbsp;/session/:id/&hellip;</td><td>stateful browser session (navigate/click/eval/&hellip;)</td></tr>
     <tr><td>GET&nbsp;&nbsp;/mcp</td><td>MCP endpoint (streamable HTTP)</td></tr>
@@ -1260,6 +1339,15 @@ async fn screenshot_handler(Json(req): Json<ScreenshotRequest>) -> Result<impl I
 async fn video_handler(Json(req): Json<VideoRequest>) -> Result<impl IntoResponse, AppError> {
     robots::assert_allowed(&req.url).await.map_err(AppError::Forbidden)?;
     let resp = spawn_blocking(move || server::do_video(req)).await??;
+    Ok((StatusCode::OK, Json(resp)))
+}
+
+/// Page set: cut the page into pages (print pagination or per-selector
+/// slides) and package as PDF / PNGs. Same threading pattern as /screenshot.
+#[cfg(feature = "screenshot")]
+async fn pdf_handler(Json(req): Json<PdfRequest>) -> Result<impl IntoResponse, AppError> {
+    robots::assert_allowed(&req.url).await.map_err(AppError::Forbidden)?;
+    let resp = spawn_blocking(move || server::do_pdf(req)).await??;
     Ok((StatusCode::OK, Json(resp)))
 }
 
@@ -1948,6 +2036,21 @@ mod tests {
         assert_eq!(r.hold_tail_secs, 0.5);
         assert_eq!(r.max_duration_secs, 120.0);
         assert_eq!(r.wait_timelines_ms, 10_000);
+        assert!(!r.use_proxy);
+        assert!(r.cookies.is_empty());
+    }
+
+    // /pdf defaults likewise: a 0×0 page size or 0-page cap would break the
+    // pagination math, so the serde defaults are the contract.
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn pdf_request_defaults_are_materialized() {
+        let r: PdfRequest = serde_json::from_str(r#"{"url":"https://e.com/doc.html"}"#).unwrap();
+        assert_eq!(r.format, "pdf");
+        assert_eq!((r.width, r.height), (794, 1123));
+        assert!(r.selector.is_none());
+        assert_eq!(r.max_pages, 50);
+        assert_eq!(r.jpeg_quality, 90);
         assert!(!r.use_proxy);
         assert!(r.cookies.is_empty());
     }

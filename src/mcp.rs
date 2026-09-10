@@ -555,6 +555,54 @@ pub struct RenderVideoParams {
     #[serde(default)]
     pub tls_fingerprint: Option<String>,
 }
+
+fn default_pdf_width() -> u32 {
+    794
+}
+fn default_pdf_height() -> u32 {
+    1123
+}
+fn default_pdf_max_pages() -> usize {
+    50
+}
+fn default_pdf_jpeg_quality() -> u8 {
+    90
+}
+fn default_pdf_format() -> String {
+    "pdf".to_string()
+}
+
+/// render_pdf parameters — mirrors POST /pdf's request shape.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct RenderPdfParams {
+    /// Page URL to cut into pages.
+    pub url: String,
+    /// Output format: "pdf" (default) or "png" (one base64 PNG per page).
+    #[serde(default = "default_pdf_format")]
+    pub format: String,
+    /// Page width in CSS pixels. Default 794 (A4 @96dpi).
+    #[serde(default = "default_pdf_width")]
+    pub width: u32,
+    /// Page height in CSS pixels — print pagination only. Default 1123.
+    #[serde(default = "default_pdf_height")]
+    pub height: u32,
+    /// CSS selector; present → slides mode (one page per match, sized to the
+    /// element). Absent → print mode (fixed-height pages at block boundaries).
+    #[serde(default)]
+    pub selector: Option<String>,
+    /// Safety cap on emitted pages. Default 50.
+    #[serde(default = "default_pdf_max_pages")]
+    pub max_pages: usize,
+    /// JPEG quality for PDF page embedding (1-100). Default 90.
+    #[serde(default = "default_pdf_jpeg_quality")]
+    pub jpeg_quality: u8,
+    /// Route through proxy (for blocked foreign sites)
+    #[serde(default)]
+    pub use_proxy: bool,
+    /// TLS fingerprint override (stealth mode only)
+    #[serde(default)]
+    pub tls_fingerprint: Option<String>,
+}
 fn default_max_chars() -> usize {
     50000
 }
@@ -731,6 +779,56 @@ in the pixel values. Requires ffmpeg on the server. Returns base64 MP4 \
         {
             let _ = (params.url, params.use_proxy, params.tls_fingerprint);
             json!({ "error": "render_video requires the `screenshot` feature" }).to_string()
+        }
+    }
+
+    #[tool(
+        description = "Cut a rendered page into pages and package as PDF or PNGs. Print mode (no selector) \
+paginates the document into fixed-height pages (default 794x1123, A4 @96dpi), breaking at top-level \
+block boundaries — no half-cut text where a break can land on a block edge. Slides mode (selector set) \
+makes one page per match, sized to that element — generate an HTML deck with one .slide per page and \
+each becomes a PDF page. format \"pdf\" (default) returns base64 image-based PDF; \"png\" returns one \
+base64 PNG per page in pages_base64. Returns page count and packaging.",
+        annotations(title = "Render Page Set (PDF)")
+    )]
+    async fn render_pdf(&self, Parameters(params): Parameters<RenderPdfParams>) -> String {
+        if let Err(e) = crate::robots::assert_allowed(&params.url).await {
+            return json!({ "error": e }).to_string();
+        }
+        #[cfg(feature = "screenshot")]
+        {
+            let req = crate::PdfRequest {
+                url: params.url,
+                format: params.format,
+                width: params.width,
+                height: params.height,
+                selector: params.selector,
+                max_pages: params.max_pages,
+                jpeg_quality: params.jpeg_quality,
+                use_proxy: params.use_proxy,
+                cookies: vec![],
+                tls_fingerprint: params.tls_fingerprint,
+            };
+            return match tokio::task::spawn_blocking(move || crate::server::do_pdf(req)).await {
+                Ok(Ok(resp)) => json!({
+                    "url": resp.url,
+                    "title": resp.title,
+                    "pages": resp.pages,
+                    "width": resp.width,
+                    "height": resp.height,
+                    "pdf_base64": resp.pdf_base64,
+                    "pages_base64": resp.pages_base64,
+                    "format": resp.format,
+                })
+                .to_string(),
+                Ok(Err(e)) => json!({ "error": format!("{e:#}") }).to_string(),
+                Err(e) => json!({ "error": format!("task panicked: {e}") }).to_string(),
+            };
+        }
+        #[cfg(not(feature = "screenshot"))]
+        {
+            let _ = (params.url, params.use_proxy, params.tls_fingerprint);
+            json!({ "error": "render_pdf requires the `screenshot` feature" }).to_string()
         }
     }
 

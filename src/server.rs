@@ -875,6 +875,82 @@ pub fn do_video(req: crate::VideoRequest) -> Result<crate::VideoResponse> {
     })
 }
 
+/// /pdf: cut the page into a set of pages and package as PDF (default) or
+/// per-page PNGs — the logical page-slicing layer (print pagination at block
+/// boundaries, or one page per `selector` match in slides mode). Same live-
+/// page shape as /video: the geometry comes from the live tree's layout, so
+/// the whole run happens while the browser is up. See src/pages.rs.
+#[cfg(feature = "screenshot")]
+pub fn do_pdf(req: crate::PdfRequest) -> Result<crate::PdfResponse> {
+    run_on_local_runtime(move |_rt| {
+        Box::pin(async move {
+            crate::rate::check_domain(&req.url).map_err(anyhow::Error::msg)?;
+            let browser = build_browser(req.use_proxy, &req.url, req.tls_fingerprint.as_deref())?;
+            inject_cookies(&browser, &req.cookies, &req.url);
+            let mut page = browser.new_page().await?;
+            // Pin the viewport so JS-time layout and the band paints agree
+            // on the requested page width.
+            page.set_viewport_override(req.width as f32, req.height as f32, false, None);
+            page.goto(&req.url).await?;
+
+            let mode = match req.selector.as_deref() {
+                Some(sel) => crate::pages::PageMode::Slides(sel.to_string()),
+                None => crate::pages::PageMode::Print,
+            };
+            let opts = crate::pages::PagePumpOptions {
+                mode,
+                page_size: (req.width as f32, req.height as f32),
+                max_pages: req.max_pages,
+            };
+            let set = crate::pages::render_page_set(&mut page.inner, &opts).await?;
+            tracing::debug!(
+                "page set: {} pages, content {}x{}, break origins {:?}",
+                set.pages.len(),
+                set.content_size.0 as u32,
+                set.content_size.1 as u32,
+                set.pages.iter().map(|p| p.origin_y as u32).collect::<Vec<_>>()
+            );
+            let final_url = page.url();
+            let title: Option<String> = {
+                let v = page.evaluate("document.title");
+                v.as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+            };
+
+            let format = if req.format.eq_ignore_ascii_case("png") { "png" } else { "pdf" };
+            let (pdf_base64, pages_base64) = if format == "png" {
+                let mut pngs = Vec::with_capacity(set.pages.len());
+                for p in &set.pages {
+                    let png =
+                        crate::pages::png_of(p.width, p.height, &p.rgba).map_err(anyhow::Error::msg)?;
+                    pngs.push(base64_png(&png));
+                }
+                (None, pngs)
+            } else {
+                let mut jpegs: Vec<(u32, u32, Vec<u8>)> = Vec::with_capacity(set.pages.len());
+                for p in &set.pages {
+                    let jpeg = crate::pages::jpeg_of(p.width, p.height, &p.rgba, req.jpeg_quality)
+                        .map_err(anyhow::Error::msg)?;
+                    jpegs.push((p.width, p.height, jpeg));
+                }
+                let refs: Vec<(u32, u32, &[u8])> =
+                    jpegs.iter().map(|(w, h, j)| (*w, *h, j.as_slice())).collect();
+                (Some(base64_png(&crate::pages::pdf_of_pages(&refs))), Vec::new())
+            };
+
+            Ok(crate::PdfResponse {
+                url: final_url,
+                title,
+                pages: set.pages.len(),
+                width: req.width,
+                height: req.height,
+                pdf_base64,
+                pages_base64,
+                format: format.to_string(),
+            })
+        })
+    })
+}
+
 /// Shared search engine registry. LazyLock so engine clients (reqwest/wreq)
 /// are built once on first use.
 pub(crate) static SEARCH_REGISTRY: std::sync::LazyLock<crate::search::SearchEngineRegistry> =

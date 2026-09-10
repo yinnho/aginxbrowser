@@ -13,10 +13,6 @@
 //! memoized layout for exactly the mutation commands — so the next
 //! `viewport_band_frame` re-cascades with the fresh inline styles.
 
-// Product wiring (MCP tool / HTTP endpoint) is the next batch; until then
-// every consumer is a test (the diting_css precedent for this status).
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};

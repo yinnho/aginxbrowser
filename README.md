@@ -50,7 +50,7 @@ Most new "agent browsers" are stateless, fingerprint-less one-shot renderers —
 
 - **🔐 Real TLS fingerprints** — stealth mode replicates the complete Chrome145 / Firefox133 / Safari / Edge TLS handshakes via BoringSSL (not just a UA string), switchable per request; Cloudflare Turnstile challenges wait automatically for `cf_clearance`. Fingerprint-less engines eat 403s — we get through.
 - **🤝 Stateful interactive sessions** — login state injectable and exportable (`session_create(cookies=...)` ↔ `session_cookies`), surviving pagination and multi-step flows; `persistent: true` even survives idle eviction and server restarts — the same session id comes back logged in. One-shot engines throw state away.
-- **🔌 MCP native** — 30 tools as first-class citizens (not a CDP shim). Claude Code / Cursor / Claude Desktop connect in one line. HTTP + MCP dual protocol — plus a CDP bridge, so the DevTools ecosystem works too.
+- **🔌 MCP native** — 31 tools as first-class citizens (not a CDP shim). Claude Code / Cursor / Claude Desktop connect in one line. HTTP + MCP dual protocol — plus a CDP bridge, so the DevTools ecosystem works too.
 
 > Reference point: Cloudflare's Kitesurf explicitly ships neither real TLS-fingerprint negotiation nor persistent auth sessions — anti-bot and login territory is exactly where AginxBrowser plays.
 
@@ -82,8 +82,9 @@ The [local cache](#capabilities) builds on the same idea: search hits come back 
 - **Document generation**: `render_markdown` turns markdown into a deterministic, self-contained HTML artifact — the document layer, so agents never write HTML by hand. Prose rides a plain offline shell (no fonts, no scripts); fenced `archify` blocks carry typed zero-coordinate diagram JSON (sequence / workflow / architecture / dataflow / lifecycle families) and render to inline SVG via the layout engine. Same input, same bytes — the receipt carries the sha256 so determinism is verifiable. `theme` (light/dark) and `preset` (classic / signal-flow / blueprint / editorial) bake colors at generation time; `quality: "showcase"` is the delivery gate, grading route crossings, label clearance and rhythm without touching the artifact bytes. Guided-view tabs plus `window.agxViewer` (`focus` / ego / `route` / `reach`) make the artifact interactive; with `session_id` it loads into a live session and the reply grades how it fits the viewport (fits/tall/wide/oversized). Mermaid sources are the agent's job to translate into archify JSON, not the engine's. Diagram vocabulary adapted from archify (MIT)
 - **Screenshot rendering**: `/screenshot` endpoint (opt-in `--features screenshot`) paints the JS-rendered DOM with the diting rendering engine — pure CPU, no Chromium — to PNG. Vision input for agents
 - **Timeline video**: `/video` endpoint + `render_video` MCP tool render a page's animation timelines to MP4 — the page's scripts register GSAP-style timelines in `window.__timelines` (`duration()` + `pause(t)`), each frame seeks to `t=i/fps` and paints the viewport, and the frames pipe into ffmpeg (H.264, yuv420p). Deterministic by construction: no wall clock in the pixel values, same render twice = same MP4. Needs ffmpeg on PATH
+- **Page set (PDF/PNG)**: `/pdf` endpoint + `render_pdf` MCP tool cut a rendered page into pages and package them — print mode paginates at top-level block boundaries (default A4 @96dpi, no half-cut text where a break can land on a block edge), slides mode makes one page per CSS-selector match sized to the element (an HTML deck with one `.slide` per page exports as a PDF deck). Image-based PDF: per-page JPEG via DCTDecode, hand-rolled PDF 1.4 writer, zero new dependencies
 - **TLS fingerprint spoofing**: stealth mode impersonates Chrome145/Firefox133/Safari/Edge, switchable per request
-- **MCP server**: `--mcp` mode exposes 30 tools (fetch/eval/search/download/cache + session + screenshot + video + docgen tools) — Claude Code / Claude Desktop / Cursor call them directly
+- **MCP server**: `--mcp` mode exposes 31 tools (fetch/eval/search/download/cache + session + screenshot + video/pdf + docgen tools) — Claude Code / Claude Desktop / Cursor call them directly
 - **Firecrawl compatible**: `/v1/scrape` endpoint — existing Firecrawl clients migrate by changing the base URL
 - **DNS rebinding protection**: built-in SSRF guard + post-resolution IP validation
 
@@ -207,7 +208,7 @@ aginxbrowser/
     ├── main.rs              # HTTP service entry & routing
     ├── server.rs            # Business layer (fetch/click/eval/search)
     ├── session.rs           # Interactive browser sessions
-    ├── mcp.rs               # MCP server (30 tools)
+    ├── mcp.rs               # MCP server (31 tools)
     ├── docgen/              # Document layer: markdown → deterministic HTML + inline-SVG diagrams
     ├── render.rs            # Tiered rendering (HTTP direct → diting browser engine)
     ├── store.rs             # Local fetch/search cache (SQLite FTS5, drift hashes)
@@ -216,6 +217,8 @@ aginxbrowser/
     ├── rate.rs              # Per-domain + per-session budgets
     ├── captcha.rs           # CAPTCHA detection & auto-solve
     ├── firecrawl_compat.rs  # Firecrawl-compatible /v1/scrape endpoint
+    ├── video.rs             # Timeline video pump (__timelines seek → ffmpeg → MP4)
+    ├── pages.rs             # Page pump (print/slides pagination → PDF/PNG)
     ├── diting_cdp/          # CDP bridge (DevTools HTTP + WebSocket)
     ├── doctor_cli.rs        # `aginxbrowser doctor` self-check
     ├── browser.rs           # Top-level API: Browser, BrowserBuilder
@@ -307,8 +310,8 @@ If your network can't reach the rusty_v8 CDN (build hangs with zero progress aft
 **Security audit notes** → [`docs/skills-sh-audit.md`](docs/skills-sh-audit.md) — why skills.sh shows "Critical Risk", and which real product feature each warning corresponds to
 
 Covers:
-- All 34 HTTP endpoints (`/fetch`, `/search`, `/screenshot`, `/video`, `/download`, `/v1/scrape`, `/doctor`, 18 session endpoints, CDP discovery, MCP transport)
-- All 30 MCP server tools and their parameters
+- All 35 HTTP endpoints (`/fetch`, `/search`, `/screenshot`, `/video`, `/pdf`, `/download`, `/v1/scrape`, `/doctor`, 18 session endpoints, CDP discovery, MCP transport)
+- All 31 MCP server tools and their parameters
 - Claude Code / Claude Desktop / Cursor client configuration
 - Environment variables, error codes, per-site scraping examples
 
