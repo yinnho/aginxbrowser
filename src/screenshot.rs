@@ -1012,3 +1012,45 @@ mod tests {
         assert_eq!(urls[0].as_str(), "https://x.test/style.css");
     }
 }
+
+#[cfg(test)]
+mod opacity_pipeline_tests {
+    use super::*;
+
+    fn count_color(png_bytes: &[u8], pred: impl Fn((u8, u8, u8)) -> bool) -> usize {
+        let decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
+        let mut reader = decoder.read_info().expect("png read_info");
+        let mut buf = vec![0; reader.output_buffer_size().expect("png output buffer size")];
+        let info = reader.next_frame(&mut buf).expect("png decode");
+        buf[..info.buffer_size()]
+            .chunks(4)
+            .filter(|px| pred((px[0], px[1], px[2])))
+            .count()
+    }
+
+    /// CSS `opacity` must hide TEXT, not just backgrounds: the layout walk
+    /// folds element opacity into the text color's alpha and `colorize`
+    /// multiplies it into glyph coverage. This locks the whole static-paint
+    /// chain (a page whose hidden-by-opacity captions painted at full ink
+    /// made every "hidden until animated" scene visible from frame 0).
+    #[test]
+    fn css_opacity_zero_hides_text_in_static_screenshot() {
+        // Force the body box to the full canvas: diting paints body bg over
+        // its own box only (no propagation to the root canvas), so a
+        // content-height body would leave white bands that read as "bright
+        // ink" and the probe would prove nothing (hit three times now).
+        let html = r#"<html><head><style>
+            html, body { margin: 0; width: 300px; height: 200px; background: #000000; }
+            .h { color: #FFFFFF; font-size: 28px; opacity: 0; }
+            .half { color: #FFFFFF; font-size: 28px; opacity: 0.5; }
+        </style></head><body><div class="h">HIDDEN</div><div class="half">HALF</div></body></html>"#;
+        let shot = render_html_to_png_diting(html, "http://probe.local/", 300, 200, 1.0, false, None, false, None)
+            .expect("render");
+        // Nothing fully bright: the opacity-0 line leaves zero ink and the
+        // half-opacity line is mid-gray at worst.
+        assert_eq!(count_color(&shot.png, |(r, g, b)| r as u32 + g as u32 + b as u32 > 600), 0, "opacity:0 text must not paint");
+        // The half-opacity line DOES land — blended, not full-white.
+        let gray = count_color(&shot.png, |(r, g, b)| r > 80 && g > 80 && b > 80 && r as u32 + g as u32 + b as u32 <= 600);
+        assert!(gray > 50, "opacity:0.5 text should paint blended gray, got {gray} px");
+    }
+}

@@ -256,11 +256,20 @@ impl FontBook {
 /// Colorize an A8 coverage buffer into straight-alpha RGBA8.
 fn colorize(alpha: &[u8], color: [u8; 4]) -> Vec<u8> {
     let mut data = vec![0u8; alpha.len() * 4];
+    // Element-subtree opacity rides color[3] (the layout walk's `with_alpha`
+    // folds it there like it does for Bg/Border/Image) — scale the glyph
+    // coverage by it so a faded element fades its text too. Dropping it made
+    // `opacity: 0` hide backgrounds but leave text fully inked.
+    let ca = color[3] as u16;
     for (i, a) in alpha.iter().enumerate() {
         if *a == 0 {
             continue;
         }
-        data[i * 4..i * 4 + 4].copy_from_slice(&[color[0], color[1], color[2], *a]);
+        let a = (*a as u16 * ca / 255) as u8;
+        if a == 0 {
+            continue;
+        }
+        data[i * 4..i * 4 + 4].copy_from_slice(&[color[0], color[1], color[2], a]);
     }
     data
 }
@@ -395,5 +404,30 @@ impl TextRaster {
             }
         }
         bbox
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Element opacity rides the text color's alpha channel (the layout
+    /// walk's `with_alpha`); `colorize` must multiply it into the glyph
+    /// coverage — not paste RGB at full coverage, which made `opacity: 0`
+    /// hide backgrounds while leaving text fully inked.
+    #[test]
+    fn colorize_folds_color_alpha_into_coverage() {
+        let tile = colorize(&[255, 128, 0], [10, 20, 30, 128]);
+        // 255 * 128/255 = 128, 128 * 128/255 = 64.
+        assert_eq!(&tile[0..4], &[10, 20, 30, 128]);
+        assert_eq!(&tile[4..8], &[10, 20, 30, 64]);
+        // Zero coverage stays empty; zero color alpha kills any coverage.
+        assert_eq!(&tile[8..12], &[0, 0, 0, 0]);
+        let gone = colorize(&[255, 200], [10, 20, 30, 0]);
+        assert_eq!(gone.iter().filter(|&&b| b != 0).count(), 0);
+        // Fully opaque color is the old behavior, byte for byte.
+        let solid = colorize(&[255, 128, 0], [10, 20, 30, 255]);
+        assert_eq!(&solid[0..4], &[10, 20, 30, 255]);
+        assert_eq!(&solid[4..8], &[10, 20, 30, 128]);
     }
 }
