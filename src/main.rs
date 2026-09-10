@@ -34,6 +34,10 @@ mod session;
 mod store;
 #[cfg(feature = "screenshot")]
 mod screenshot;
+// Timeline video pump (切片层): seek `window.__timelines` frame by frame,
+// paint viewport bands, pipe raw RGBA into ffmpeg — MP4 bytes out.
+#[cfg(feature = "screenshot")]
+mod video;
 // The Blitz reference pipeline — cross-check oracle for diting, opt-in via
 // `blitz-reference`. Not compiled in production/device builds.
 #[cfg(feature = "blitz-reference")]
