@@ -42,6 +42,10 @@ mod video;
 // block boundaries, or one page per selector match — and package as PDF/PNG.
 #[cfg(feature = "screenshot")]
 mod pages;
+// OOXML containers (容器层): image-based PPTX/DOCX packaging of the page
+// set — stored-ZIP writer, zero new dependencies.
+#[cfg(feature = "screenshot")]
+mod ooxml;
 // The Blitz reference pipeline — cross-check oracle for diting, opt-in via
 // `blitz-reference`. Not compiled in production/device builds.
 #[cfg(feature = "blitz-reference")]
@@ -354,7 +358,9 @@ fn default_pdf_format() -> String { "pdf".to_string() }
 #[derive(Debug, Deserialize, Clone)]
 pub struct PdfRequest {
     pub url: String,
-    /// Output format: `"pdf"` (default) or `"png"` (one base64 PNG per page).
+    /// Output format: `"pdf"` (default), `"png"` (one base64 PNG per page),
+    /// `"pptx"` (one slide per page), or `"docx"` (one page-sized section
+    /// per page).
     #[serde(default = "default_pdf_format")]
     pub format: String,
     /// Page width in CSS pixels. Default 794 (A4 @96dpi).
@@ -385,8 +391,9 @@ pub struct PdfRequest {
     pub tls_fingerprint: Option<String>,
 }
 
-/// /pdf response: PDF or per-page PNGs, base64. Exactly one of `pdf_base64`
-/// / `pages_base64` is present (PDF and PNG modes respectively).
+/// /pdf response: PDF, per-page PNGs, or PPTX/DOCX container, base64.
+/// Exactly one of `pdf_base64` / `pages_base64` / `pptx_base64` /
+/// `docx_base64` is present (per the requested format).
 #[cfg(feature = "screenshot")]
 #[derive(Debug, Serialize)]
 pub struct PdfResponse {
@@ -404,7 +411,14 @@ pub struct PdfResponse {
     /// One base64 PNG per page (`format:"png"`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub pages_base64: Vec<String>,
-    /// Echoes the requested output format ("pdf" / "png").
+    /// Base64-encoded PPTX bytes (`format:"pptx"`) — one slide per page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pptx_base64: Option<String>,
+    /// Base64-encoded DOCX bytes (`format:"docx"`) — one page-sized section
+    /// per page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub docx_base64: Option<String>,
+    /// Echoes the requested output format ("pdf" / "png" / "pptx" / "docx").
     pub format: String,
 }
 

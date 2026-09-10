@@ -875,11 +875,12 @@ pub fn do_video(req: crate::VideoRequest) -> Result<crate::VideoResponse> {
     })
 }
 
-/// /pdf: cut the page into a set of pages and package as PDF (default) or
-/// per-page PNGs — the logical page-slicing layer (print pagination at block
-/// boundaries, or one page per `selector` match in slides mode). Same live-
-/// page shape as /video: the geometry comes from the live tree's layout, so
-/// the whole run happens while the browser is up. See src/pages.rs.
+/// /pdf: cut the page into a set of pages and package as PDF (default),
+/// per-page PNGs, or image-based PPTX/DOCX — the logical page-slicing layer
+/// (print pagination at block boundaries, or one page per `selector` match
+/// in slides mode). Same live-page shape as /video: the geometry comes from
+/// the live tree's layout, so the whole run happens while the browser is
+/// up. See src/pages.rs and src/ooxml.rs.
 #[cfg(feature = "screenshot")]
 pub fn do_pdf(req: crate::PdfRequest) -> Result<crate::PdfResponse> {
     run_on_local_runtime(move |_rt| {
@@ -916,25 +917,39 @@ pub fn do_pdf(req: crate::PdfRequest) -> Result<crate::PdfResponse> {
                 v.as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
             };
 
-            let format = if req.format.eq_ignore_ascii_case("png") { "png" } else { "pdf" };
-            let (pdf_base64, pages_base64) = if format == "png" {
-                let mut pngs = Vec::with_capacity(set.pages.len());
+            let format = if req.format.eq_ignore_ascii_case("png") {
+                "png"
+            } else if req.format.eq_ignore_ascii_case("pptx") {
+                "pptx"
+            } else if req.format.eq_ignore_ascii_case("docx") {
+                "docx"
+            } else {
+                "pdf"
+            };
+            // PNG wants per-page PNGs; the other three formats all embed
+            // per-page JPEGs, so they share one encode pass.
+            let mut pngs: Vec<String> = Vec::new();
+            let mut jpegs: Vec<(u32, u32, Vec<u8>)> = Vec::new();
+            if format == "png" {
                 for p in &set.pages {
                     let png =
                         crate::pages::png_of(p.width, p.height, &p.rgba).map_err(anyhow::Error::msg)?;
                     pngs.push(base64_png(&png));
                 }
-                (None, pngs)
             } else {
-                let mut jpegs: Vec<(u32, u32, Vec<u8>)> = Vec::with_capacity(set.pages.len());
                 for p in &set.pages {
                     let jpeg = crate::pages::jpeg_of(p.width, p.height, &p.rgba, req.jpeg_quality)
                         .map_err(anyhow::Error::msg)?;
                     jpegs.push((p.width, p.height, jpeg));
                 }
-                let refs: Vec<(u32, u32, &[u8])> =
-                    jpegs.iter().map(|(w, h, j)| (*w, *h, j.as_slice())).collect();
-                (Some(base64_png(&crate::pages::pdf_of_pages(&refs))), Vec::new())
+            }
+            let refs: Vec<(u32, u32, &[u8])> =
+                jpegs.iter().map(|(w, h, j)| (*w, *h, j.as_slice())).collect();
+            let (pdf_base64, pptx_base64, docx_base64) = match format {
+                "pptx" => (None, Some(base64_png(&crate::ooxml::pptx_of_pages(&refs))), None),
+                "docx" => (None, None, Some(base64_png(&crate::ooxml::docx_of_pages(&refs)))),
+                "pdf" => (Some(base64_png(&crate::pages::pdf_of_pages(&refs))), None, None),
+                _ => (None, None, None),
             };
 
             Ok(crate::PdfResponse {
@@ -944,7 +959,9 @@ pub fn do_pdf(req: crate::PdfRequest) -> Result<crate::PdfResponse> {
                 width: req.width,
                 height: req.height,
                 pdf_base64,
-                pages_base64,
+                pages_base64: pngs,
+                pptx_base64,
+                docx_base64,
                 format: format.to_string(),
             })
         })

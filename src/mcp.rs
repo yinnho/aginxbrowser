@@ -577,7 +577,9 @@ fn default_pdf_format() -> String {
 pub struct RenderPdfParams {
     /// Page URL to cut into pages.
     pub url: String,
-    /// Output format: "pdf" (default) or "png" (one base64 PNG per page).
+    /// Output format: "pdf" (default), "png" (one base64 PNG per page),
+    /// "pptx" (one slide per page), or "docx" (one page-sized section per
+    /// page).
     #[serde(default = "default_pdf_format")]
     pub format: String,
     /// Page width in CSS pixels. Default 794 (A4 @96dpi).
@@ -783,13 +785,15 @@ in the pixel values. Requires ffmpeg on the server. Returns base64 MP4 \
     }
 
     #[tool(
-        description = "Cut a rendered page into pages and package as PDF or PNGs. Print mode (no selector) \
-paginates the document into fixed-height pages (default 794x1123, A4 @96dpi), breaking at top-level \
-block boundaries — no half-cut text where a break can land on a block edge. Slides mode (selector set) \
-makes one page per match, sized to that element — generate an HTML deck with one .slide per page and \
-each becomes a PDF page. format \"pdf\" (default) returns base64 image-based PDF; \"png\" returns one \
-base64 PNG per page in pages_base64. Returns page count and packaging.",
-        annotations(title = "Render Page Set (PDF)")
+        description = "Cut a rendered page into pages and package as PDF, PNGs, PPTX or DOCX. Print mode \
+(no selector) paginates the document into fixed-height pages (default 794x1123, A4 @96dpi), breaking \
+at top-level block boundaries — no half-cut text where a break can land on a block edge. Slides mode \
+(selector set) makes one page per match, sized to that element — generate an HTML deck with one .slide \
+per page and each becomes a deck page. format \"pdf\" (default) returns base64 image-based PDF; \"png\" \
+returns one base64 PNG per page in pages_base64; \"pptx\" returns a base64 PPTX (one slide per page, \
+deck-sized to the largest page); \"docx\" returns a base64 DOCX (one page-sized section per page, each \
+section keeps its own height). Returns page count and packaging.",
+        annotations(title = "Render Page Set (PDF/PPTX/DOCX)")
     )]
     async fn render_pdf(&self, Parameters(params): Parameters<RenderPdfParams>) -> String {
         if let Err(e) = crate::robots::assert_allowed(&params.url).await {
@@ -818,6 +822,8 @@ base64 PNG per page in pages_base64. Returns page count and packaging.",
                     "height": resp.height,
                     "pdf_base64": resp.pdf_base64,
                     "pages_base64": resp.pages_base64,
+                    "pptx_base64": resp.pptx_base64,
+                    "docx_base64": resp.docx_base64,
                     "format": resp.format,
                 })
                 .to_string(),

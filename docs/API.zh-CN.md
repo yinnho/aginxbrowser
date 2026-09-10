@@ -558,26 +558,26 @@ curl -sS -X POST http://127.0.0.1:8089/video \
 
 ### POST /pdf
 
-把渲好的页面切成一叠页，打包成 PDF（默认）或逐页 PNG。**需 `--features screenshot` 构建。**
+把渲好的页面切成一叠页，打包成 PDF（默认）、逐页 PNG，或者图基的 PPTX/DOCX。**需 `--features screenshot` 构建。**
 
 按 `selector` 有没有给，走两种切法：
 
 - **打印**（不给 `selector`）：整篇文档切成定高页（默认 794×1123，96dpi 的 A4），断点尽量落在顶层块边界——取装得下的最深块底，且有半页下限，页不会被压成纸片。末尾不足 64px 的余量并进上一页，不出近乎空白的尾页。
 - **幻灯片**（给 `selector`）：每个匹配的元素自成一张页，页高就是元素高。deck 就用普通 HTML 写，一页一个 `.slide` div，每个匹配各自成页。
 
-每页都是从活树布局画的视口带——和视频帧泵同一个原语，没有 Chromium。PDF 是图基的：每页 JPEG（`jpeg_quality`）走 DCTDecode 内嵌，每页一个 page 对象、自己的 MediaBox（px→pt 按 96dpi），所以页高不一致也不用归一。
+每页都是从活树布局画的视口带——和视频帧泵同一个原语，没有 Chromium。PDF 是图基的：每页 JPEG（`jpeg_quality`）走 DCTDecode 内嵌，每页一个 page 对象、自己的 MediaBox（px→pt 按 96dpi），所以页高不一致也不用归一。PPTX 和 DOCX 是同一叠页换个壳：PPTX 每页一张幻灯片（整个 deck 取最大页当幻灯片尺寸，图片锚在左上角）；DOCX 每页一个按页定尺寸的 section、零边距——Word 的每个 section 可以各定页面大小，所以每页保住自己的精确高度。两个容器都是手写的（stored ZIP、时间戳写死——字节级确定性），零新依赖。
 
 **请求字段：**
 
 | 字段 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
 | url | string | ✅ | — | 目标 URL |
-| format | string | | `"pdf"` | `"pdf"`（base64 PDF）或 `"png"`（每页一张 base64 PNG） |
+| format | string | | `"pdf"` | `"pdf"`（base64 PDF）、`"png"`（每页一张 base64 PNG）、`"pptx"`（每页一张幻灯片）或 `"docx"`（每页一个按页定尺寸的 section） |
 | width | u32 | | `794` | 页宽（CSS px） |
 | height | u32 | | `1123` | 页高（CSS px）——只管打印分页；幻灯片模式每页按元素自己的高度 |
 | selector | string | | `null` | CSS 选择器；给了走幻灯片模式，不给走打印模式 |
 | max_pages | usize | | `50` | 页数安全上限，超了报错不硬渲 |
-| jpeg_quality | u8 | | `90` | PDF 内嵌 JPEG 质量 1-100（png 格式忽略它） |
+| jpeg_quality | u8 | | `90` | PDF/PPTX/DOCX 内嵌 JPEG 质量 1-100（png 格式忽略它） |
 | use_proxy | bool | | `false` | 走 `AGINXBROWSER_PROXY` 代理 |
 | cookies | string[] \| object[] | | `[]` | 导航前注入的 cookie（语义同 `/fetch`） |
 | tls_fingerprint | string | | `null` | TLS 指纹（stealth 模式） |
@@ -592,7 +592,9 @@ curl -sS -X POST http://127.0.0.1:8089/video \
 | width / height | u32 | 请求的页尺寸（幻灯片页高各不同——PNG 自己带尺寸头） |
 | pdf_base64 | string? | PDF 的 base64（`format="pdf"` 时有）。`base64 -d` 解码，或 `data:application/pdf;base64,...` 直接用 |
 | pages_base64 | string[] | 每页一张 base64 PNG（`format="png"` 时非空） |
-| format | string | `"pdf"` 或 `"png"` |
+| pptx_base64 | string? | PPTX 的 base64，每页一张幻灯片（`format="pptx"` 时有） |
+| docx_base64 | string? | DOCX 的 base64，每页一个按页定尺寸的 section（`format="docx"` 时有） |
+| format | string | `"pdf"` / `"png"` / `"pptx"` / `"docx"` |
 
 **示例：**
 
@@ -608,6 +610,12 @@ curl -sS -X POST http://127.0.0.1:8089/pdf \
   -H "Content-Type: application/json" \
   -d '{"url":"https://example.com/deck.html","selector":".slide","format":"png"}' \
   | jq -r '.pages_base64[0]' | base64 -d > slide-0.png
+
+# 幻灯片模式 → PowerPoint（HTML 里的 .slide div 直接变幻灯片）
+curl -sS -X POST http://127.0.0.1:8089/pdf \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com/deck.html","selector":".slide","format":"pptx"}' \
+  | jq -r .pptx_base64 | base64 -d > deck.pptx
 ```
 
 错误把原因原样带回来：选择器一个没匹配上、页数超过 `max_pages`、文档没有内容高度。
@@ -975,7 +983,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 | `cache` | 查询本地抓取/搜索缓存（全文含 CJK、整页 `get`、统计、按条件清理） |
 | `render_markdown` | 把 markdown 渲成确定性自包含 HTML 文档；围栏 `archify` 块（带类型的图 JSON——sequence / workflow / architecture / dataflow / lifecycle）出内联 SVG 图；`theme`/`preset`/`quality`（showcase 审计）+ 可选 `session_id` 视口适配评级 |
 | `render_video` | 把页面的动画时间线（`window.__timelines`，GSAP 风格 `duration()`+`pause(t)`）渲成 base64 MP4——每帧确定性 seek（`t=i/fps`）、进程内绘制、ffmpeg 编码；要 PATH 上有 ffmpeg 和 `screenshot` feature |
-| `render_pdf` | 把渲好的页面切成一叠页，打包 base64 PDF 或逐页 PNG——打印模式按顶层块边界分页（默认 96dpi A4），幻灯片模式每个选择器匹配自成一张页、按元素定高；要 `screenshot` feature |
+| `render_pdf` | 把渲好的页面切成一叠页，打包 base64 PDF、逐页 PNG、PPTX（每页一张幻灯片）或 DOCX（每页一个按页定尺寸的 section）——打印模式按顶层块边界分页（默认 96dpi A4），幻灯片模式每个选择器匹配自成一张页、按元素定高；要 `screenshot` feature |
 
 #### Session 工具
 

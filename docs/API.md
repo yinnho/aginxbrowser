@@ -620,26 +620,26 @@ Errors carry the failure reason verbatim: no `__timelines` before `wait_timeline
 
 ### POST /pdf
 
-Cut a rendered page into a set of pages and package as PDF (default) or per-page PNGs. **Requires building with `--features screenshot`.**
+Cut a rendered page into a set of pages and package as PDF (default), per-page PNGs, or an image-based PPTX/DOCX. **Requires building with `--features screenshot`.**
 
 Two slicing modes, picked by whether `selector` is set:
 
 - **Print** (no `selector`): fixed-height pages over the whole document (default 794×1123, A4 @96dpi), breaking at top-level block boundaries where possible — the break lands on the deepest block bottom that fits, with a half-page floor so pages never collapse to slivers. A remainder shorter than 64px merges into the previous page instead of a near-blank tail.
 - **Slides** (`selector` set): one page per CSS-selector match, sized to that element. Build the deck as plain HTML with one `.slide` div per slide; each match becomes a page at its own height.
 
-Each page is painted as a viewport band off the live tree's layout — same primitive the timeline pump rides, no Chromium. The PDF is image-based: per-page JPEG (`jpeg_quality`) embedded via DCTDecode, one page object per page with its own MediaBox in points (px→pt at 96dpi), so variable-height pages need no normalization.
+Each page is painted as a viewport band off the live tree's layout — same primitive the timeline pump rides, no Chromium. The PDF is image-based: per-page JPEG (`jpeg_quality`) embedded via DCTDecode, one page object per page with its own MediaBox in points (px→pt at 96dpi), so variable-height pages need no normalization. PPTX and DOCX are the same pages re-packaged: PPTX as one slide per page (deck-sized to the largest page, images anchored top-left), DOCX as one page-sized section per page with zero margins — Word sizes every section independently, so each page keeps its exact height. Both containers are written by hand (stored-ZIP, fixed timestamps — byte-deterministic), zero new dependencies.
 
 **Request fields:**
 
 | Field | Type | Required | Default | Description |
 |------|------|------|------|------|
 | url | string | ✅ | — | Target URL |
-| format | string | | `"pdf"` | `"pdf"` (base64 PDF) or `"png"` (one base64 PNG per page) |
+| format | string | | `"pdf"` | `"pdf"` (base64 PDF), `"png"` (one base64 PNG per page), `"pptx"` (one slide per page), or `"docx"` (one page-sized section per page) |
 | width | u32 | | `794` | Page width (CSS px) |
 | height | u32 | | `1123` | Page height (CSS px) — print pagination only; slides size each page to its element |
 | selector | string | | `null` | CSS selector; set → slides mode, unset → print mode |
 | max_pages | usize | | `50` | Safety cap on emitted pages (more pages errors instead of rendering) |
-| jpeg_quality | u8 | | `90` | JPEG quality 1-100 for PDF page embedding (PNG format ignores it) |
+| jpeg_quality | u8 | | `90` | JPEG quality 1-100 for page embedding in PDF/PPTX/DOCX (PNG format ignores it) |
 | use_proxy | bool | | `false` | Route through the `AGINXBROWSER_PROXY` proxy |
 | cookies | string[] \| object[] | | `[]` | Cookies injected before navigation (same semantics as `/fetch`) |
 | tls_fingerprint | string | | `null` | TLS fingerprint (stealth mode) |
@@ -654,7 +654,9 @@ Each page is painted as a viewport band off the live tree's layout — same prim
 | width / height | u32 | Requested page size (slides pages vary in height — each PNG self-describes) |
 | pdf_base64 | string? | base64 PDF (set when `format="pdf"`). Decode with `base64 -d`, or use directly as `data:application/pdf;base64,...` |
 | pages_base64 | string[] | One base64 PNG per page (non-empty when `format="png"`) |
-| format | string | `"pdf"` or `"png"` |
+| pptx_base64 | string? | base64 PPTX, one slide per page (set when `format="pptx"`) |
+| docx_base64 | string? | base64 DOCX, one page-sized section per page (set when `format="docx"`) |
+| format | string | `"pdf"` / `"png"` / `"pptx"` / `"docx"` |
 
 **Examples:**
 
@@ -670,6 +672,12 @@ curl -sS -X POST http://127.0.0.1:8089/pdf \
   -H "Content-Type: application/json" \
   -d '{"url":"https://example.com/deck.html","selector":".slide","format":"png"}' \
   | jq -r '.pages_base64[0]' | base64 -d > slide-0.png
+
+# Slides mode → PowerPoint deck (HTML .slide divs become real slides)
+curl -sS -X POST http://127.0.0.1:8089/pdf \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com/deck.html","selector":".slide","format":"pptx"}' \
+  | jq -r .pptx_base64 | base64 -d > deck.pptx
 ```
 
 Errors carry the reason verbatim: a selector that matches nothing, more pages than `max_pages`, or a document with no content height.
@@ -1338,7 +1346,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `cache` | Query the local cache of fetched pages and past searches (full-text incl. CJK, full-content `get`, stats, filtered clear) |
 | `render_markdown` | Render markdown into a deterministic, self-contained HTML document; fenced `archify` blocks (typed diagram JSON — sequence / workflow / architecture / dataflow / lifecycle) become inline-SVG diagrams; `theme`/`preset`/`quality` (showcase audit) and optional `session_id` viewport grading |
 | `render_video` | Render a page's animation timelines (`window.__timelines`, GSAP-style `duration()`+`pause(t)`) to a base64 MP4 — deterministic seek per frame (`t=i/fps`), in-process paint, ffmpeg encode; needs ffmpeg on PATH and the `screenshot` feature |
-| `render_pdf` | Cut a rendered page into pages and package as base64 PDF or per-page PNGs — print mode paginates at top-level block boundaries (default A4 @96dpi), slides mode makes one page per CSS-selector match sized to the element; needs the `screenshot` feature |
+| `render_pdf` | Cut a rendered page into pages and package as base64 PDF, per-page PNGs, PPTX (one slide per page) or DOCX (one page-sized section per page) — print mode paginates at top-level block boundaries (default A4 @96dpi), slides mode makes one page per CSS-selector match sized to the element; needs the `screenshot` feature |
 
 #### Session Tools
 

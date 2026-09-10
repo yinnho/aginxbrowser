@@ -82,7 +82,7 @@ Agent 是照着浏览器说的话行事的，所以响应里要写清楚实际�
 - **文档生成**：`render_markdown` 把 markdown 渲成一份确定性的自包含 HTML——文档这层 agent 不用手写 HTML 了。正文走纯离线壳（无字体无脚本）；围栏代码块标成 `archify` 的话，里面放带类型的零坐标图 JSON（sequence / workflow / architecture / dataflow / lifecycle 五族），布局引擎直接出内联 SVG。同一份输入出同一份字节，回执带 sha256，确定性可以验。`theme` 明暗、`preset` 配色族（classic / signal-flow / blueprint / editorial）在生成时烤进产物；`quality:"showcase"` 是交付档，审计连线路交叉、标签净空、节奏都打分，但不动产物字节。图上还能挂 views 引导页签，点节点亮 ego 图、点页签亮子图，`window.agxViewer` 还能编程查 route（两点最短路径）和 reach（上下游闭包）。传 `session_id` 的话产物直接装进活会话，回执告诉你这页在视口里是 fits 还是 tall/wide。Mermaid 源码归 agent 翻译成 archify JSON，引擎只收 archify JSON。图词汇表改编自 archify（MIT）
 - **截图渲染**：`/screenshot` 端点（`--features screenshot`），JS 渲染后的 DOM 用自有的 diting 引擎出 PNG——纯 CPU，无 Chromium，agent 的视觉输入
 - **时间线视频**：`/video` 端点 + `render_video` MCP 工具，把页面的动画渲成 MP4。约定很简单：页面脚本把时间线注册进 `window.__timelines`（GSAP 风格，带 `duration()` 和 `pause(t)` 就行），引擎每帧 seek 到 `t=i/fps`、画视口、RGBA 直接 pipe 给 ffmpeg 编 H.264/yuv420p。确定性是构造出来的——像素值里没有墙钟，同一页面渲两遍出同一个 MP4。服务器上要有 ffmpeg
-- **页集（PDF/PNG）**：`/pdf` 端点 + `render_pdf` MCP 工具，把渲好的页面切页打包——打印模式按顶层块边界分页（默认 96dpi A4，断点尽量落在块边，文字不拦腰截断），幻灯片模式每个选择器匹配自成一张页、按元素定高（HTML 写个 deck、一页一个 `.slide`，导出就是 PDF 版 deck）。图基 PDF：每页 JPEG 走 DCTDecode，PDF 1.4 手写打包器，零新依赖
+- **页集（PDF/PNG/PPTX/DOCX）**：`/pdf` 端点 + `render_pdf` MCP 工具，把渲好的页面切页打包——打印模式按顶层块边界分页（默认 96dpi A4，断点尽量落在块边，文字不拦腰截断），幻灯片模式每个选择器匹配自成一张页、按元素定高（HTML 写个 deck、一页一个 `.slide`，导出就是真能用的 deck）。图基 PDF：每页 JPEG 走 DCTDecode，PDF 1.4 手写打包器，零新依赖。PPTX 把同一叠页每页打一张幻灯片；DOCX 每页一个按页定尺寸的 section——两个 OOXML 容器都是手写的（stored-ZIP 打包器、时间戳写死），字节级确定性，零新依赖
 - **TLS 指纹伪装**：stealth 模式模拟 Chrome145/Firefox133/Safari/Edge，可按请求切换
 - **MCP Server**：`--mcp` 模式暴露 31 个工具（fetch/eval/click/search/download/cache + session + 截图 + 视频/PDF + 文档生成工具），Claude Code / Claude Desktop / Cursor 直接调用
 - **Firecrawl 兼容**：`/v1/scrape` 端点，现有 Firecrawl 客户端改 base URL 即可迁移
@@ -219,6 +219,7 @@ aginxbrowser/
     ├── firecrawl_compat.rs  # Firecrawl 兼容 /v1/scrape 端点
     ├── video.rs             # 时间线视频泵（__timelines seek → ffmpeg → MP4）
     ├── pages.rs             # 页泵（打印/幻灯片分页 → PDF/PNG）
+    ├── ooxml.rs             # OOXML 容器（图基 PPTX/DOCX，stored-ZIP 手写打包器）
     ├── diting_cdp/          # CDP 桥（DevTools HTTP + WebSocket）
     ├── doctor_cli.rs        # `aginxbrowser doctor` 自检
     ├── browser.rs           # 顶层 API：Browser、BrowserBuilder
