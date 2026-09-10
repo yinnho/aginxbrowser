@@ -10,6 +10,7 @@ use selectors::matching::{
 use selectors::parser::{self, ParseRelative, SelectorParseErrorKind};
 use selectors::{Element, OpaqueElement, SelectorList};
 use selectors::visitor::SelectorVisitor;
+use std::collections::HashMap;
 
 use crate::diting_dom::tree::{DomTree, NodeData, NodeId};
 
@@ -796,6 +797,148 @@ impl DomTree {
             specificity: list.slice().first()?.specificity(),
         })
     }
+
+    /// Build [`RuleMatchSets`] for one stylesheet's rule selectors: the
+    /// per-rule document match sets `compute_styles` needs, without one
+    /// full-document querySelectorAll per rule.
+    ///
+    /// A rule selector can only match an element that carries the
+    /// rightmost compound's id/class/tag, so rules are bucketed by that
+    /// key and each element's keys probe only the plausible buckets; the
+    /// servo matcher then confirms candidates exactly as the
+    /// querySelector path would. A selector that fails to parse yields no
+    /// bucket and no hits, the "never matches" outcome the old per-rule
+    /// qSA error path produced.
+    pub fn rule_match_sets(&self, rule_selectors: &[&str]) -> RuleMatchSets {
+        let mut entries: Vec<Option<SelectorList<DitingSelector>>> =
+            Vec::with_capacity(rule_selectors.len());
+        let mut specificity: Vec<Option<u32>> = Vec::with_capacity(rule_selectors.len());
+        let mut by_id: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_class: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_tag: HashMap<String, Vec<usize>> = HashMap::new();
+        // Rules where no sub-selector has an id/class/tag key (universal,
+        // attr-only, pseudo-only compounds) stay candidates for every
+        // element.
+        let mut unkeyed: Vec<usize> = Vec::new();
+        // In quirks mode class/id matching is ASCII-case-insensitive, so a
+        // probe must reach rules keyed in the other case: bucket and probe
+        // both spellings there. Over-bucketing is always safe (the matcher
+        // has the final word); a bucket the probe cannot reach never is.
+        let quirks = self.selector_quirks_mode() == QuirksMode::Quirks;
+
+        for (ri, selector) in rule_selectors.iter().enumerate() {
+            let Ok(list) = parse_selector(selector) else {
+                entries.push(None);
+                specificity.push(None);
+                continue;
+            };
+            specificity.push(list.slice().first().map(|s| s.specificity()));
+            // A comma list matches if ANY sub-selector matches, so every
+            // sub-selector contributes its own bucket entry.
+            let mut bucketed = false;
+            for sel in list.slice() {
+                match rightmost_key(sel) {
+                    Some(RuleKey::Id(id)) => {
+                        by_id.entry(id.clone()).or_default().push(ri);
+                        if quirks {
+                            by_id.entry(id.to_ascii_lowercase()).or_default().push(ri);
+                        }
+                        bucketed = true;
+                    }
+                    Some(RuleKey::Class(class)) => {
+                        by_class.entry(class.clone()).or_default().push(ri);
+                        if quirks {
+                            by_class
+                                .entry(class.to_ascii_lowercase())
+                                .or_default()
+                                .push(ri);
+                        }
+                        bucketed = true;
+                    }
+                    Some(RuleKey::Tag(tag)) => {
+                        by_tag.entry(tag).or_default().push(ri);
+                        bucketed = true;
+                    }
+                    None => {}
+                }
+            }
+            if !bucketed {
+                unkeyed.push(ri);
+            }
+            entries.push(Some(list));
+        }
+
+        let mut hits: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut caches = selectors::context::SelectorCaches::default();
+        let mut context = MatchingContext::new(
+            MatchingMode::Normal,
+            None,
+            &mut caches,
+            self.selector_quirks_mode(),
+            NeedsSelectorFlags::No,
+            MatchingForInvalidation::No,
+        );
+        // Rule matching is document-rooted (the same scope posture as a
+        // document-rooted querySelectorAll): no :scope binding here.
+        let mut candidates: Vec<usize> = Vec::new();
+        for desc_id in self.descendants(self.document()) {
+            let Some((local, id, class)) = self
+                .with_node(desc_id, |n| {
+                    let name = n.as_element()?;
+                    Some((
+                        name.local.as_ref().to_string(),
+                        n.get_attribute("id").map(|s| s.to_string()),
+                        n.get_attribute("class").map(|s| s.to_string()),
+                    ))
+                })
+                .flatten()
+            else {
+                continue;
+            };
+            candidates.clear();
+            candidates.extend_from_slice(&unkeyed);
+            let mut probe = |bucket: &HashMap<String, Vec<usize>>, key: &str| {
+                if let Some(rules) = bucket.get(key) {
+                    candidates.extend_from_slice(rules);
+                }
+            };
+            // Tag selectors bucket under the parser's lower_name; probing
+            // the element's lowercased local name is the shared spelling.
+            // Foreign-element tags keep camelCase local names in the DOM
+            // (SVG clipPath and friends), and lowercasing the probe covers
+            // them too.
+            probe(&by_tag, &local.to_ascii_lowercase());
+            if let Some(id) = &id {
+                probe(&by_id, id);
+                if quirks {
+                    probe(&by_id, &id.to_ascii_lowercase());
+                }
+            }
+            if let Some(class) = &class {
+                for c in class.split_whitespace() {
+                    probe(&by_class, c);
+                    if quirks {
+                        probe(&by_class, &c.to_ascii_lowercase());
+                    }
+                }
+            }
+            candidates.sort_unstable();
+            candidates.dedup();
+            let element = DomElement::new(self, desc_id);
+            for ri in candidates.drain(..) {
+                let Some(list) = entries[ri].as_ref() else { continue };
+                if selectors::matching::matches_selector_list(list, &element, &mut context) {
+                    hits.entry(ri).or_default().push(desc_id.index());
+                }
+            }
+        }
+        // The walk is document order, not node-index order; the cascade
+        // binary-searches these, so each rule's hit set ends ascending.
+        for rule_hits in hits.values_mut() {
+            rule_hits.sort_unstable();
+        }
+        RuleMatchSets { hits, specificity }
+    }
 }
 
 /// A parsed rule selector reduced to its specificity — the only fact the
@@ -808,6 +951,76 @@ impl CompiledSelector {
     pub fn specificity(&self) -> u32 {
         self.specificity
     }
+}
+
+/// The rightmost-compound key a rule selector's subject element must
+/// carry, ranked by selectivity (id > class > tag). Extracted per
+/// sub-selector for [`DomTree::rule_match_sets`]'s buckets; a compound
+/// with none of the three keys nothing, so its rule is tested against
+/// every element.
+enum RuleKey {
+    Tag(String),
+    Class(String),
+    Id(String),
+}
+
+impl RuleKey {
+    fn rank(&self) -> u8 {
+        match self {
+            RuleKey::Tag(_) => 0,
+            RuleKey::Class(_) => 1,
+            RuleKey::Id(_) => 2,
+        }
+    }
+}
+
+/// Extract the key from one parsed selector's rightmost compound. Servo's
+/// `Selector::iter()` yields components right-to-left starting at the
+/// rightmost compound; the iterator stops at the compound boundary, which
+/// is exactly the span that constrains the subject element (anything left
+/// of a combinator describes ancestors, not the subject).
+fn rightmost_key(selector: &parser::Selector<DitingSelector>) -> Option<RuleKey> {
+    let mut best: Option<RuleKey> = None;
+    for component in selector.iter() {
+        let key = match component {
+            parser::Component::ID(id) => Some(RuleKey::Id(id.0.clone())),
+            parser::Component::Class(class) => Some(RuleKey::Class(class.0.clone())),
+            // The DOM-side probe reaches this bucket through the element's
+            // lowercased local name, so the parser's lower_name is the
+            // spelling both sides agree on.
+            parser::Component::LocalName(name) => Some(RuleKey::Tag(name.lower_name.0.to_string())),
+            _ => None,
+        };
+        if let Some(key) = key {
+            if best.as_ref().is_none_or(|b| key.rank() > b.rank()) {
+                best = Some(key);
+            }
+        }
+    }
+    best
+}
+
+/// Chrome-style rule-hash match sets for stylesheet application, built by
+/// [`DomTree::rule_match_sets`].
+///
+/// `compute_styles` used to precompute each rule's document match set
+/// with one full-document `querySelectorAll` per rule: O(rules x docsize)
+/// selector matches per layout run, re-paid on every epoch bump. On the
+/// WeChat article pages (6912 rules, 483 elements, 3 MB of CSS) that
+/// phase alone was ~3.7s of EVERY layout run, and page scripts'
+/// write-then-read layout thrashing re-triggered it several times per
+/// navigation, the engine-side root cause behind the appmsg.js
+/// synchronous "dead spin" that blew the nav deadline (a V8 terminate
+/// cannot land inside a long Rust phase).
+pub struct RuleMatchSets {
+    /// Rule index to matching element node indices, ascending: ready for
+    /// the cascade's per-element binary-search membership test (which the
+    /// old code documented but then did linearly).
+    pub hits: HashMap<usize, Vec<usize>>,
+    /// Rule index to the rule selector's specificity, parsed once here
+    /// instead of re-parsed per matched element (the old cascade called
+    /// `compile_rule_selector` per element x matched rule).
+    pub specificity: Vec<Option<u32>>,
 }
 
 #[cfg(test)]
@@ -1146,5 +1359,96 @@ mod tests {
         let d = detached.get_element_by_id("d").unwrap();
         assert!(detached.matches_selector(d, "em#d").unwrap());
         assert!(!detached.matches_selector(d, "div em").unwrap());
+    }
+
+    /// The rule-hash must be indistinguishable from the old per-rule
+    /// querySelectorAll on every selector shape compute_styles feeds it:
+    /// per-rule hit sets AND per-rule specificity, rule index by rule
+    /// index. parse_html fixtures without a doctype parse in quirks mode,
+    /// so the case-folded selectors in the list also pin the quirks
+    /// bucket/probe spellings against the matcher's ground truth.
+    #[test]
+    fn rule_match_sets_agree_with_per_rule_qsa() {
+        let tree = parse_html(
+            r#"<div id="wrap" class="container">
+                <h1 class="title main">T</h1>
+                <p data-kind="lead">L</p>
+                <p>plain</p>
+                <ul><li class="item">1</li><li>2</li></ul>
+                <svg><clipPath id="cp"><rect/></clipPath></svg>
+                <span>s</span>
+            </div>"#,
+        );
+        let selectors = [
+            "div",
+            ".container",
+            "#wrap",
+            "p",
+            ".title.main",
+            "div .item",
+            "ul li",
+            "h1, .item",
+            "li, rect, #cp",
+            "*",
+            "ul *",
+            "[data-kind]",
+            "p[data-kind='lead']",
+            "li:not(.item)",
+            "li:first-child",
+            "clipPath",
+            "#nope",
+            ".container, .missing",
+            "p[lang]",
+            // Quirks-mode case folds: whichever way the matcher answers,
+            // the hash must answer identically.
+            ".ITEM",
+            "#WRAP",
+            // Dangling combinator: fails to parse, so no bucket, no hits,
+            // no specificity — same as the old qSA error path skipping it.
+            "div >",
+        ];
+        let sets = tree.rule_match_sets(&selectors);
+        for (ri, sel) in selectors.iter().enumerate() {
+            let expected: Vec<usize> = tree
+                .query_selector_all_from(tree.document(), sel)
+                .map(|v| v.into_iter().map(|n| n.index()).collect())
+                .unwrap_or_default();
+            let got = sets.hits.get(&ri).cloned().unwrap_or_default();
+            assert_eq!(got, expected, "hit set diverged for rule {ri} `{sel}`");
+            // Ascending order is the cascade's binary-search contract.
+            assert!(
+                got.windows(2).all(|w| w[0] < w[1]),
+                "hits not ascending for rule {ri} `{sel}`: {got:?}"
+            );
+            assert_eq!(
+                sets.specificity[ri],
+                tree.compile_rule_selector(sel).map(|c| c.specificity()),
+                "specificity diverged for rule {ri} `{sel}`"
+            );
+        }
+    }
+
+    /// Rules whose rightmost compound has no id/class/tag key (universal,
+    /// attr-only, pseudo-only) fall into the always-tested bucket — the
+    /// one place the hash could silently drop matches if the fallback
+    /// regressed.
+    #[test]
+    fn rule_match_sets_unkeyed_rules_still_match() {
+        let tree = parse_html(r#"<div><p data-x="1">a</p><p>b</p><span>c</span></div>"#);
+        let selectors = ["[data-x]", "*:not(span)", "[hidden]", "*"];
+        let sets = tree.rule_match_sets(&selectors);
+        let expected: Vec<usize> = tree
+            .query_selector_all_from(tree.document(), "[data-x]")
+            .unwrap()
+            .into_iter()
+            .map(|n| n.index())
+            .collect();
+        let got = sets.hits.get(&0).cloned().unwrap_or_default();
+        assert_eq!(got, expected, "attr-only rule lost its match");
+        // `*` matches every element: html, head, body included.
+        let star = sets.hits.get(&3).cloned().unwrap_or_default();
+        assert!(star.len() >= 5, "universal rule matched only {star:?}");
+        // Never-matching unkeyed rule contributes nothing.
+        assert!(sets.hits.get(&2).is_none());
     }
 }

@@ -369,6 +369,23 @@ impl ModuleLoader for DitingModuleLoader {
             // matches what a browser would run.
             let code = String::from_utf8_lossy(&code_bytes).into_owned();
 
+            // Debug knob (AGINXBROWSER_MODULE_TRACE=1): bracket every fetched
+            // module with ENTER/EXIT console marks. A watchdog that terminates
+            // a synchronous spin inside module-graph evaluation leaves no JS
+            // stack behind (terminate_execution discards it), but the console
+            // log survives — the last MODULE_ENTER without a matching
+            // MODULE_EXIT names the exact chunk that owns the spin. Statements
+            // around the body are legal ESM (imports are hoisted); a module
+            // with top-level await just reports its EXIT late, which still
+            // localizes the spin. Strictly an engine-debugging aid.
+            let code = if std::env::var("AGINXBROWSER_MODULE_TRACE").is_ok() {
+                format!(
+                    "console.log(\"MODULE_ENTER:{url}\");\n{code}\nconsole.log(\"MODULE_EXIT:{url}\");"
+                )
+            } else {
+                code
+            };
+
             Ok(ModuleSource::new(
                 deno_core::ModuleType::JavaScript,
                 ModuleSourceCode::String(code.into()),

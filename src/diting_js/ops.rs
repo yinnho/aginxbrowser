@@ -1236,6 +1236,12 @@ type LayoutRun = (
 /// stale geometry.
 #[cfg(feature = "screenshot")]
 fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
+    // Debug knob (AGINXBROWSER_LAYOUT_TRACE=1): phase timings for a full
+    // layout run. The interrupt-sampler evidence on the WeChat article pages
+    // shows multi-second stretches with no V8 stack check — candidates are
+    // the Rust phases below, each re-done from scratch on every epoch bump.
+    let trace = std::env::var("AGINXBROWSER_LAYOUT_TRACE").is_ok();
+    let t0 = std::time::Instant::now();
     // Same viewport the persona publishes to window.innerWidth/innerHeight,
     // so geometry agrees with what scripts read off `window` (and the ICB
     // has a definite size for fixed-box inset resolution — obscura#675).
@@ -1286,12 +1292,15 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
             }
         }
     }
+    let t_css = t0.elapsed();
     let rules = crate::diting_css::parse_stylesheet_for(
         &css,
         (viewport_width, viewport_height),
         crate::diting_css::CssMediaType::Screen,
     );
+    let t_parse = t0.elapsed();
     let styles_map = crate::diting_layout::compute_styles(dom, &rules);
+    let t_styles = t0.elapsed();
     let fonts = crate::diting_fonts::font_book();
     // The byte table the run resolves http(s) img sources against. Empty →
     // None keeps the all-placeholder path byte-identical to before (and lets
@@ -1309,6 +1318,19 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
         Some(gs.url.as_str()),
     );
     drop(bytes_map);
+    if trace {
+        let t_layout = t0.elapsed();
+        eprintln!(
+            "[layout-trace] total={:?} css_collect={:?} css_parse={:?} compute_styles={:?} layout={:?} css_bytes={} rects={}",
+            t_layout,
+            t_css,
+            t_parse - t_css,
+            t_styles - t_parse,
+            t_layout - t_styles,
+            css.len(),
+            rects.len(),
+        );
+    }
     (
         rects.into_iter().map(|(id, r)| (id, [r.x, r.y, r.width, r.height])).collect(),
         paint_order,

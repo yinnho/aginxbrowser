@@ -4453,7 +4453,7 @@ pub fn compute_styles(
     fn visit(
         tree: &DomTree,
         rules: &[crate::diting_css::ParsedRule],
-        rule_matches: &HashMap<usize, Vec<usize>>,
+        sets: &crate::diting_dom::selector::RuleMatchSets,
         nid: NodeId,
         parent: Option<&crate::diting_css::ComputedStyle>,
         root_fs: f32,
@@ -4474,12 +4474,14 @@ pub fn compute_styles(
                 // O(elements x rules x docsize) — the baidu SERP hang: a page
                 // script's first geometry read re-resolved every rule against
                 // every element for minutes.
-                let hits = rule_matches.get(&ri)?;
-                if !hits.contains(&nid.index()) {
+                let hits = sets.hits.get(&ri)?;
+                if hits.binary_search(&nid.index()).is_err() {
                     return None;
                 }
-                let compiled = tree.compile_rule_selector(&rule.selector)?;
-                Some((rule, compiled.specificity()))
+                // Specificity was parsed once with the match sets above;
+                // the old per-element compile_rule_selector re-parse cost
+                // one selector parse per (element x matched rule).
+                Some((rule, sets.specificity.get(ri).copied().flatten()?))
             })
             .collect();
         let inline = tree
@@ -4500,28 +4502,44 @@ pub fn compute_styles(
             root_fs
         };
         for child in tree.children(nid) {
-            visit(tree, rules, rule_matches, child, Some(&cs), child_root_fs, out);
+            visit(
+                tree,
+                rules,
+                sets,
+                child,
+                Some(&cs),
+                child_root_fs,
+                out,
+            );
         }
         out.insert(nid, cs);
     }
     // One querySelectorAll per RULE over the whole document, sorted for the
     // binary search in visit. This replaces the per-element-per-rule full-doc
     // scan that made style resolution quadratic-cubic on real pages.
-    let rule_matches: HashMap<usize, Vec<usize>> = rules
-        .iter()
-        .enumerate()
-        .filter_map(|(ri, rule)| {
-            let hits = tree.query_selector_all_from(tree.document(), &rule.selector).ok()?;
-            Some((ri, hits.into_iter().map(|n| n.index()).collect()))
-        })
-        .collect();
+    // One bucketed tree walk replaces one full-document querySelectorAll
+    // per rule: the rightmost-compound rule hash (see RuleMatchSets for
+    // the WeChat numbers behind this) builds every rule's document match
+    // set AND each selector's specificity in a single pass, both sorted
+    // once for the binary searches in visit.
+    let rule_selectors: Vec<&str> = rules.iter().map(|r| r.selector.as_str()).collect();
+    let sets = tree.rule_match_sets(&rule_selectors);
 
     let mut out = HashMap::new();
+    if std::env::var("AGINXBROWSER_LAYOUT_TRACE").is_ok() {
+        let elements = out_capacity_hint(tree);
+        eprintln!(
+            "[styles-trace] rules={} elements={} rule_match_sets={}",
+            rules.len(),
+            elements,
+            sets.hits.len()
+        );
+    }
     for child in tree.children(tree.document()) {
         visit(
             tree,
             rules,
-            &rule_matches,
+            &sets,
             child,
             None,
             crate::diting_css::DEFAULT_ROOT_FONT_SIZE,
@@ -4529,6 +4547,22 @@ pub fn compute_styles(
         );
     }
     out
+}
+
+/// Trace-only element count (a full walk just for the debug knob; keep out of
+/// the hot path when the knob is off).
+fn out_capacity_hint(tree: &DomTree) -> usize {
+    fn count(tree: &DomTree, nid: NodeId, acc: &mut usize) {
+        if tree.with_node(nid, |n| n.as_element().is_some()) == Some(true) {
+            *acc += 1;
+        }
+        for child in tree.children(nid) {
+            count(tree, child, acc);
+        }
+    }
+    let mut acc = 0;
+    count(tree, tree.document(), &mut acc);
+    acc
 }
 
 #[cfg(test)]
