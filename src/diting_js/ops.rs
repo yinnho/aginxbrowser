@@ -1743,8 +1743,9 @@ fn computed_style_value(
         // answers here — "1" IS the initial value, so no caller chain can
         // know better.
         "opacity" => Some(format_number(s.opacity.unwrap_or(1.0))),
-        // Animation batch B: the axis-aligned Transform2D serializes as its
-        // equivalent matrix. No transform (or `none`) computes to "none";
+        // Animation batch B / affine batch: the Transform2D serializes as
+        // its full CSS matrix (a b c d tx ty) — rotate/skew/matrix join the
+        // same composition now. No transform (or `none`) computes to "none";
         // a percentage translate resolves against the element's own border
         // box — a used value this snapshot layer has no box for — so those
         // stay absent and the JS inline chain answers instead of a wrong
@@ -1753,9 +1754,11 @@ fn computed_style_value(
             None => Some("none".into()),
             Some(t) => match (t.tx, t.ty) {
                 (Length::Px(tx), Length::Px(ty)) => Some(format!(
-                    "matrix({}, 0, 0, {}, {}, {})",
-                    format_number(t.sx),
-                    format_number(t.sy),
+                    "matrix({}, {}, {}, {}, {}, {})",
+                    format_number(t.a),
+                    format_number(t.b),
+                    format_number(t.c),
+                    format_number(t.d),
                     format_number(tx),
                     format_number(ty)
                 )),

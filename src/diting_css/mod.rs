@@ -553,14 +553,13 @@ pub struct ComputedStyle {
     /// alphas for Bg/Border/Text, an explicit item alpha for Image/Svg/
     /// Replaced — which matches Chrome's group compositing for fades.
     pub opacity: Option<f32>,
-    /// `transform` function list (animation batch B; obscura #740 lineage):
-    /// the axis-aligned slice translate/translate3d/translateX/translateY
-    /// plus scale/scaleX/scaleY accumulated into one affine. Percentages
-    /// resolve against the element's own border-box size at collect time;
-    /// the map moves paint, gBCR and hit testing but NOT the layout box
-    /// (Chrome semantics: transforms never affect layout). rotate/skew/
-    /// matrix invalidate the whole declaration (spec: one unknown function
-    /// kills the list); true affine paint is a later batch.
+    /// `transform` function list (animation batch B; obscura #740 lineage,
+    /// widened in the affine batch): translate/translate3d/translateX/
+    /// translateY, scale/scaleX/scaleY, rotate/skewX/skewY and matrix
+    /// composed into one 2D affine. Percentages resolve against the
+    /// element's own border-box size at collect time; the map moves paint,
+    /// gBCR and hit testing but NOT the layout box (Chrome semantics:
+    /// transforms never affect layout).
     pub transform: Option<Transform2D>,
     /// Uniform circular `border-radius` (batch 6b): ONE length/percentage
     /// applied to all four corners (the 1-value syntax — by far the most
@@ -840,16 +839,29 @@ pub enum Length {
     FitContent,
 }
 
-/// The axis-aligned `transform` this pipeline computes: a translate (px or
-/// % of the element's own border box, resolved at collect time) composed
-/// with an axis scale. Function lists accumulate in CSS order (the
+/// The 2D affine `transform` this pipeline computes (CSS matrix
+/// convention): x' = a·x + c·y + tx, y' = b·x + d·y + ty. The translate
+/// stays a symbolic Length — percentages resolve against the element's own
+/// border box at collect time. Function lists accumulate in CSS order (the
 /// first-listed function is the outermost map).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Transform2D {
+    pub a: f32,
+    pub b: f32,
+    pub c: f32,
+    pub d: f32,
     pub tx: Length,
     pub ty: Length,
-    pub sx: f32,
-    pub sy: f32,
+}
+
+impl Transform2D {
+    /// Whether the linear part is diagonal (translate/scale only, no
+    /// rotate/skew): the layout collect walk keeps pre-baking geometry into
+    /// item fields on that path; anything else flips the element's paint
+    /// items into local coordinates bracketed by SetXf/ClearXf.
+    pub fn is_axis_aligned(&self) -> bool {
+        self.b == 0.0 && self.c == 0.0
+    }
 }
 
 /// Length arithmetic for transform accumulation: same-unit adds fold, a
@@ -875,15 +887,14 @@ fn mul_len(a: Length, s: f32) -> Length {
     }
 }
 
-/// Parse a `transform` declaration into one axis-aligned [`Transform2D`].
-/// translate/translate3d (z parses and drops — 3D flattens to 2D here) /
-/// translateX/translateY and scale/scaleX/scaleY accumulate exactly; the
-/// GSAP tween output this exists for writes e.g.
-/// `translate3d(-185.3719px, 0px, 0px)`, `translate(-200px, 0px)`,
-/// `translate(0, 0)` mid-flight. `none` and anything unrecognized
-/// (rotate/skew/matrix, unparsable args) yield None — spec: one unknown
-/// function invalidates the whole declaration, so the element renders
-/// untransformed.
+/// Parse a `transform` declaration into one 2D affine [`Transform2D`]
+/// (transform batch; obscura #740 lineage, widened twice). The translate
+/// family (translate/translate3d — z parses and drops, 3D flattens to 2D
+/// here — /translateX/translateY) and the scale family accumulate exactly;
+/// rotate/skewX/skewY/matrix join the same composition. The GSAP tween
+/// output this exists for writes deg/rad angles and full `matrix(…)` forms.
+/// `none` and anything unparsable yield None — spec: one unknown function
+/// invalidates the whole declaration, so the element renders untransformed.
 fn parse_transform(v: &str) -> Option<Transform2D> {
     let v = v.trim();
     if v.is_empty() || v.eq_ignore_ascii_case("none") {
@@ -900,11 +911,67 @@ fn parse_transform(v: &str) -> Option<Transform2D> {
             (s == "0").then_some(Length::Px(0.0))
         }
     };
+    // Percentage/calc translate slots can't ride a rotated linear part (the
+    // vector map mixes axes) — only a fully resolved px composes there.
+    let px_only = |l: Length| match l {
+        Length::Px(v) => Some(v),
+        _ => None,
+    };
     let num = |s: &str| -> Option<f32> {
         let n = s.trim().parse::<f32>().ok()?;
         n.is_finite().then_some(n)
     };
-    let mut t = Transform2D { tx: Length::Px(0.0), ty: Length::Px(0.0), sx: 1.0, sy: 1.0 };
+    // Angle in CSS units: deg (the default suffix real sheets write), rad,
+    // turn, grad. Bare nonzero numbers are invalid CSS (Chrome rejects).
+    let angle = |s: &str| -> Option<f32> {
+        let s = s.trim();
+        let (n, scale) = if let Some(n) = s.strip_suffix("deg") {
+            (n, 1.0f32)
+        } else if let Some(n) = s.strip_suffix("rad") {
+            (n, 180.0 / std::f32::consts::PI)
+        } else if let Some(n) = s.strip_suffix("turn") {
+            (n, 360.0)
+        } else if let Some(n) = s.strip_suffix("grad") {
+            (n, 0.9)
+        } else if s == "0" {
+            ("0", 1.0)
+        } else {
+            return None;
+        };
+        let deg = n.trim().parse::<f32>().ok()? * scale;
+        deg.is_finite().then_some(deg)
+    };
+    let mut t = Transform2D {
+        a: 1.0, b: 0.0, c: 0.0, d: 1.0,
+        tx: Length::Px(0.0),
+        ty: Length::Px(0.0),
+    };
+    // Walking left to right, each new function sits INNERMOST (CSS composes
+    // the list first-to-last as outermost-to-innermost): M_new = M_old ∘ F.
+    // Linear parts multiply; a translate maps through the linear part
+    // accumulated so far (exactly the translate-scaled-by-prior-scale rule
+    // the axis-aligned slice pinned).
+    let compose_linear = |t: &mut Transform2D, fa: f32, fb: f32, fc: f32, fd: f32| {
+        let (a, b, c, d) = (t.a, t.b, t.c, t.d);
+        t.a = a * fa + c * fb;
+        t.b = b * fa + d * fb;
+        t.c = a * fc + c * fd;
+        t.d = b * fc + d * fd;
+    };
+    let compose_translate = |t: &mut Transform2D, x: Length, y: Length| -> Option<()> {
+        if t.is_axis_aligned() {
+            // Diagonal keeps the slots independent (the historical
+            // mul_len/add_len semantics, percent included).
+            t.tx = add_len(mul_len(x, t.a), t.tx)?;
+            t.ty = add_len(mul_len(y, t.d), t.ty)?;
+        } else {
+            // Full vector map: both slots must be px.
+            let (px, py) = (px_only(x)?, px_only(y)?);
+            t.tx = add_len(Length::Px(t.a * px + t.c * py), t.tx)?;
+            t.ty = add_len(Length::Px(t.b * px + t.d * py), t.ty)?;
+        }
+        Some(())
+    };
     let mut rest = v;
     loop {
         rest = rest.trim_start();
@@ -915,9 +982,6 @@ fn parse_transform(v: &str) -> Option<Transform2D> {
         let (args, tail) = after.split_once(')')?;
         let name = name.trim();
         let parts: Vec<&str> = args.split(',').collect();
-        // Walking left to right, each new function sits INNERMOST (CSS
-        // composes the list first-to-last as outermost-to-innermost): a
-        // translate composes scaled by the scales accumulated so far.
         match name {
             "translate" | "translate3d" => {
                 let (a, b) = match parts.as_slice() {
@@ -932,18 +996,29 @@ fn parse_transform(v: &str) -> Option<Transform2D> {
                     }
                     _ => return None,
                 };
-                t.tx = add_len(mul_len(a, t.sx), t.tx)?;
-                t.ty = add_len(mul_len(b, t.sy), t.ty)?;
+                compose_translate(&mut t, a, b)?;
             }
             "translateX" => {
                 let [x] = parts.as_slice() else { return None };
                 let a = one(x)?;
-                t.tx = add_len(mul_len(a, t.sx), t.tx)?;
+                if t.is_axis_aligned() {
+                    compose_translate(&mut t, a, Length::Px(0.0))?;
+                } else {
+                    let v = px_only(a)?;
+                    t.tx = add_len(Length::Px(t.a * v), t.tx)?;
+                    t.ty = add_len(Length::Px(t.b * v), t.ty)?;
+                }
             }
             "translateY" => {
                 let [y] = parts.as_slice() else { return None };
                 let b = one(y)?;
-                t.ty = add_len(mul_len(b, t.sy), t.ty)?;
+                if t.is_axis_aligned() {
+                    compose_translate(&mut t, Length::Px(0.0), b)?;
+                } else {
+                    let v = px_only(b)?;
+                    t.tx = add_len(Length::Px(t.c * v), t.tx)?;
+                    t.ty = add_len(Length::Px(t.d * v), t.ty)?;
+                }
             }
             "scale" => {
                 let (fsx, fsy) = match parts.as_slice() {
@@ -954,17 +1029,41 @@ fn parse_transform(v: &str) -> Option<Transform2D> {
                     [x, y] => (num(x)?, num(y)?),
                     _ => return None,
                 };
-                t.sx *= fsx;
-                t.sy *= fsy;
+                compose_linear(&mut t, fsx, 0.0, 0.0, fsy);
             }
             "scaleX" | "scaleY" => {
                 let [x] = parts.as_slice() else { return None };
                 let s = num(x)?;
                 if name == "scaleX" {
-                    t.sx *= s;
+                    compose_linear(&mut t, s, 0.0, 0.0, 1.0);
                 } else {
-                    t.sy *= s;
+                    compose_linear(&mut t, 1.0, 0.0, 0.0, s);
                 }
+            }
+            "rotate" => {
+                let [arg] = parts.as_slice() else { return None };
+                let rad = angle(arg)?.to_radians();
+                let (s, c) = (rad.sin(), rad.cos());
+                compose_linear(&mut t, c, s, -s, c);
+            }
+            "skewX" => {
+                let [arg] = parts.as_slice() else { return None };
+                compose_linear(&mut t, 1.0, 0.0, angle(arg)?.to_radians().tan(), 1.0);
+            }
+            "skewY" => {
+                let [arg] = parts.as_slice() else { return None };
+                compose_linear(&mut t, 1.0, angle(arg)?.to_radians().tan(), 0.0, 1.0);
+            }
+            "matrix" => {
+                let [fa, fb, fc, fd, fe, ff] = parts.as_slice() else { return None };
+                let (fa, fb, fc, fd) = (num(fa)?, num(fb)?, num(fc)?, num(fd)?);
+                let (fe, ff) = (num(fe)?, num(ff)?);
+                // e/f are plain numbers (px in matrix units) that map through
+                // the OLD accumulated linear — F rides innermost, so
+                // (M∘F).t = L_M·t_F + t_M — which means the translate must
+                // compose BEFORE the linear update, while t still holds L_M.
+                compose_translate(&mut t, Length::Px(fe), Length::Px(ff));
+                compose_linear(&mut t, fa, fb, fc, fd);
             }
             _ => return None,
         }
@@ -1927,11 +2026,11 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             true
         }
         "transform" => {
-            // Axis-aligned slice only (obscura #740 lineage, widened in the
-            // animation batch): the translate family plus scale family
-            // accumulate into one affine; rotate/skew/matrix invalidate the
-            // declaration (spec: one unknown function kills the list) and
-            // the element paints where layout put it.
+            // Full 2D function list (obscura #740 lineage, widened twice):
+            // translate/scale/rotate/skew/matrix compose into one affine.
+            // One unknown function still invalidates the whole declaration
+            // (spec) — parse_transform returns None and the element paints
+            // where layout put it.
             style.transform = parse_transform(v);
             style.transform.is_some()
         }
@@ -2949,7 +3048,14 @@ mod tests {
     #[test]
     fn parse_transform_gsap_ground_truth() {
         let t = parse_transform("translate3d(-185.3719px, 0px, 0px)").unwrap();
-        assert_eq!(t, Transform2D { tx: Length::Px(-185.3719), ty: Length::Px(0.0), sx: 1.0, sy: 1.0 });
+        assert_eq!(
+            t,
+            Transform2D {
+                a: 1.0, b: 0.0, c: 0.0, d: 1.0,
+                tx: Length::Px(-185.3719),
+                ty: Length::Px(0.0),
+            }
+        );
         let t = parse_transform("translate(-200px, 0px)").unwrap();
         assert_eq!(t.tx, Length::Px(-200.0));
         // Completion write uses bare 0 lengths.
@@ -2967,20 +3073,20 @@ mod tests {
     #[test]
     fn parse_transform_scales_and_composition_order() {
         let t = parse_transform("scale(0.5)").unwrap();
-        assert_eq!((t.sx, t.sy), (0.5, 0.5));
+        assert_eq!((t.a, t.d), (0.5, 0.5));
         let t = parse_transform("scale(2, 3)").unwrap();
-        assert_eq!((t.sx, t.sy), (2.0, 3.0));
+        assert_eq!((t.a, t.d), (2.0, 3.0));
         let t = parse_transform("scaleX(2)").unwrap();
-        assert_eq!((t.sx, t.sy), (2.0, 1.0));
+        assert_eq!((t.a, t.d), (2.0, 1.0));
         let t = parse_transform("scaleY(4)").unwrap();
-        assert_eq!((t.sx, t.sy), (1.0, 4.0));
+        assert_eq!((t.a, t.d), (1.0, 4.0));
 
         let t = parse_transform("scale(2) translate(100px)").unwrap();
         assert_eq!(t.tx, Length::Px(200.0));
-        assert_eq!(t.sx, 2.0);
+        assert_eq!(t.a, 2.0);
         let t = parse_transform("translate(100px) scale(2)").unwrap();
         assert_eq!(t.tx, Length::Px(100.0));
-        assert_eq!(t.sx, 2.0);
+        assert_eq!(t.a, 2.0);
 
         // Scales multiply through a percent translate: w·0.5·2 == Percent(50·2).
         let t = parse_transform("scale(2) translate(50%)").unwrap();
@@ -2991,17 +3097,86 @@ mod tests {
     }
 
     /// Spec rule: one unknown function invalidates the whole declaration —
-    /// rotate/matrix/skew yield None (the element renders untransformed),
-    /// as do `none` (the initial value) and garbage.
+    /// functions this engine has no axis for (3D), bad arity, and unitless
+    /// nonzero angles yield None (the element renders untransformed), as do
+    /// `none` (the initial value) and garbage.
     #[test]
     fn parse_transform_rejects_unknown_functions() {
-        assert!(parse_transform("rotate(45deg)").is_none());
-        assert!(parse_transform("matrix(1, 0, 0, 1, 0, 0)").is_none());
-        assert!(parse_transform("skewX(10deg)").is_none());
-        assert!(parse_transform("translate(100px) rotate(10deg)").is_none());
+        assert!(parse_transform("translateZ(10px)").is_none());
+        assert!(parse_transform("rotate3d(1, 1, 1, 45deg)").is_none());
+        assert!(parse_transform("matrix(1, 2)").is_none());
+        assert!(parse_transform("rotate(45)").is_none(), "unitless nonzero angle is invalid CSS");
+        assert!(parse_transform("scale(banana)").is_none());
         assert!(parse_transform("none").is_none());
         assert!(parse_transform("").is_none());
         assert!(parse_transform("translate(50%, 10%)").is_some());
+        assert!(parse_transform("translate(100px) rotate(10deg)").is_some(), "rotate joins the composition now");
+    }
+
+    /// rotate/skew/matrix vectors, checked against the CSS matrix
+    /// convention x' = a·x + c·y + e, y' = b·x + d·y + f: rotate(θ) is
+    /// (cos, sin, −sin, cos), skewX bends y into x (c = tan), and a
+    /// translate AFTER a rotation composes rotated (the vector maps
+    /// through the accumulated linear part).
+    #[test]
+    fn parse_transform_rotate_skew_matrix_ground_truth() {
+        let close = |t: &Transform2D, want: (f32, f32, f32, f32)| {
+            let got = (t.a, t.b, t.c, t.d);
+            let ok = [got.0, got.1, got.2, got.3]
+                .into_iter()
+                .zip([want.0, want.1, want.2, want.3])
+                .all(|(g, w)| (g - w).abs() < 1e-5);
+            assert!(ok, "got {got:?} want {want:?}");
+        };
+
+        let t = parse_transform("rotate(90deg)").unwrap();
+        close(&t, (0.0, 1.0, -1.0, 0.0));
+        assert!(!t.is_axis_aligned());
+        let t = parse_transform("rotate(45deg)").unwrap();
+        close(&t, (0.70710678, 0.70710678, -0.70710678, 0.70710678));
+        // Angle units: 0.25 turn and ~π/2 rad are both 90°.
+        let t = parse_transform("rotate(0.25turn)").unwrap();
+        close(&t, (0.0, 1.0, -1.0, 0.0));
+        let t = parse_transform("rotate(1.5707963rad)").unwrap();
+        close(&t, (0.0, 1.0, -1.0, 0.0));
+
+        let t = parse_transform("skewX(45deg)").unwrap();
+        close(&t, (1.0, 0.0, 1.0, 1.0));
+        let t = parse_transform("skewY(45deg)").unwrap();
+        close(&t, (1.0, 1.0, 0.0, 1.0));
+
+        let t = parse_transform("matrix(1, 0, 0, 1, 10, 20)").unwrap();
+        close(&t, (1.0, 0.0, 0.0, 1.0));
+        assert_eq!((t.tx, t.ty), (Length::Px(10.0), Length::Px(20.0)));
+        // e/f are numbers that map through the OLD linear: matrix(2,0,0,2,10,0)
+        // keeps tx=10 (Chrome maps the origin to (10,0), not (20,0)).
+        let t = parse_transform("matrix(2, 0, 0, 2, 10, 0)").unwrap();
+        assert_eq!(t.tx, Length::Px(10.0));
+        close(&t, (2.0, 0.0, 0.0, 2.0));
+
+        // A translate AFTER a rotation composes rotated; BEFORE it, the
+        // slots ride untouched (rotate never touches the translate). The
+        // rotated tx carries cos(90°) f32 noise (≈ −4.4e-7), which is the
+        // same "0" every downstream rasterizer sees — snap it in the assert.
+        let t = parse_transform("rotate(90deg) translate(10px)").unwrap();
+        let (Length::Px(tx), Length::Px(ty)) = (t.tx, t.ty) else {
+            panic!("rotate+translate must stay px-resolved");
+        };
+        assert!((tx - 0.0).abs() < 1e-5, "cos(90°) noise collapses to 0: {tx}");
+        assert_eq!(ty, 10.0);
+        let t = parse_transform("translate(10px) rotate(90deg)").unwrap();
+        assert_eq!((t.tx, t.ty), (Length::Px(10.0), Length::Px(0.0)));
+
+        // Percent translate survives only while the accumulated linear is
+        // diagonal: an outermost percent is fine, a percent under rotation
+        // can't compose (the vector map mixes axes) and dies with the list.
+        let t = parse_transform("translate(50%) rotate(10deg)").unwrap();
+        assert_eq!(t.tx, Length::Percent(50.0));
+        assert!(parse_transform("rotate(10deg) translate(50%)").is_none());
+
+        // The diagonal cases keep the pre-baked geometry path.
+        assert!(parse_transform("translate(10px, 20px)").unwrap().is_axis_aligned());
+        assert!(parse_transform("scale(2)").unwrap().is_axis_aligned());
     }
 
     /// opacity parses through the same declaration pipeline the cascade uses,

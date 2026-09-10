@@ -28,6 +28,13 @@ pub struct Canvas {
     /// the curve like upstream's padding_box_path BezPath clip. An empty
     /// intersection is the degenerate (0,0,0,0): it clips everything.
     clip: Vec<ClipShape>,
+    /// Open transform-bracket stack (affine batch): entries are TOTAL
+    /// local→canvas maps in the same CSS matrix order PaintItem::SetXf
+    /// carries, composed at push time — an inner bracket multiplies onto
+    /// the current top, an empty stack is the identity. Diagonal transforms
+    /// never open a bracket (their geometry pre-bakes at collect time), so
+    /// untouched pages keep the exact pre-batch path.
+    xf_stack: Vec<[f64; 6]>,
 }
 
 /// One clip stack entry: an axis-aligned rect, optionally with per-corner
@@ -42,6 +49,25 @@ enum ClipShape {
         y1: i64,
         radii: [(f32, f32); 4],
     },
+    /// A clip whose LOCAL rect maps through an open transform bracket
+    /// (affine batch): `inv` is the inverse of the canvas-space total map,
+    /// `(x, y, w, h)` + `radii` the local rounded rect, and `(bx0..by1)`
+    /// the canvas-space bounds (mapped bbox ∩ prior clips) that
+    /// [`Canvas::allowed`] intersects on. A pixel passes when its inverse
+    /// image falls inside the local rounded rect — so a rotated
+    /// overflow:hidden window cuts child ink along the rotation.
+    Affine {
+        inv: [f64; 6],
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        radii: [(f32, f32); 4],
+        bx0: i64,
+        by0: i64,
+        bx1: i64,
+        by1: i64,
+    },
 }
 
 impl ClipShape {
@@ -49,6 +75,7 @@ impl ClipShape {
         match *self {
             ClipShape::Rect(x0, y0, x1, y1)
             | ClipShape::Rounded { x0, y0, x1, y1, .. } => (x0, y0, x1, y1),
+            ClipShape::Affine { bx0, by0, bx1, by1, .. } => (bx0, by0, bx1, by1),
         }
     }
 
@@ -57,6 +84,10 @@ impl ClipShape {
         match *self {
             ClipShape::Rect(x0, y0, x1, y1) => cx >= x0 as f64 && cx < x1 as f64
                 && cy >= y0 as f64 && cy < y1 as f64,
+            ClipShape::Affine { inv, x, y, w, h, radii, .. } => {
+                let (lx, ly) = mat_apply(inv, cx, cy);
+                rounded_contains(x, y, w, h, radii, lx, ly)
+            }
             ClipShape::Rounded { x0, y0, x1, y1, radii } => {
                 if !(cx >= x0 as f64 && cx < x1 as f64 && cy >= y0 as f64 && cy < y1 as f64) {
                     return false;
@@ -115,7 +146,15 @@ impl Canvas {
         for px in data.chunks_exact_mut(4) {
             px.copy_from_slice(&color);
         }
-        Self { width, height, data, clip: Vec::new() }
+        Self { width, height, data, clip: Vec::new(), xf_stack: Vec::new() }
+    }
+
+    /// A fully transparent canvas — the LOCAL scratch surface an affine
+    /// bracket rasterizes a subtree tile into before blitting it through
+    /// the transform (text/svg/replaced ink keeps its own rasterizer, which
+    /// only knows how to write axis-aligned integer pixels).
+    pub fn new_transparent(width: usize, height: usize) -> Self {
+        Self { width, height, data: vec![0u8; width * height * 4], clip: Vec::new(), xf_stack: Vec::new() }
     }
 
     /// Rows [y0, y1) × cols [x0, x1) the next primitive may touch: the
@@ -166,6 +205,267 @@ impl Canvas {
         } else {
             ClipShape::Rounded { x0: r.0, y0: r.1, x1: r.2, y1: r.3, radii }
         });
+    }
+
+    // --- affine bracket (rotate/skew/matrix paint) ---
+
+    /// The current total local→canvas map, or None while no bracket is
+    /// open (the identity — callers route to the axis-aligned primitives).
+    fn xf(&self) -> Option<[f64; 6]> {
+        self.xf_stack.last().copied()
+    }
+
+    /// Open a transform bracket: the incoming map composes ONTO the current
+    /// top (an empty stack is the identity), so nested brackets multiply —
+    /// exactly the collect walk's child_xf chain.
+    pub(crate) fn push_xf(&mut self, m: [f64; 6]) {
+        let top = match self.xf() {
+            Some(t) => mat_mul(t, m),
+            None => m,
+        };
+        self.xf_stack.push(top);
+    }
+
+    /// Close the innermost transform bracket.
+    pub(crate) fn pop_xf(&mut self) {
+        self.xf_stack.pop();
+    }
+
+    /// Canvas-space bbox of a LOCAL rect through the current bracket
+    /// (identity when none is open) — the affine items' band prefilter.
+    fn mapped_xf_bounds(&self, x: f64, y: f64, w: f64, h: f64) -> (i64, i64, i64, i64) {
+        match self.xf() {
+            Some(m) => mapped_bounds(m, x, y, w, h),
+            None => (x.floor() as i64, y.floor() as i64, (x + w).ceil() as i64, (y + h).ceil() as i64),
+        }
+    }
+
+    /// Push a clip whose LOCAL rect maps through the current bracket: the
+    /// stack entry stores the inverse map plus the local rounded rect, and
+    /// its bounds are the mapped bbox intersected with the prior clips. A
+    /// singular map (degenerate scale) clips everything.
+    fn push_clip_affine(&mut self, x: f64, y: f64, w: f64, h: f64, radii: [(f32, f32); 4]) {
+        let Some(m) = self.xf() else { return };
+        let (bx0, by0, bx1, by1) = mapped_bounds(m, x, y, w, h);
+        let (cx0, cy0, cx1, cy1) = self.allowed();
+        let r = (bx0.max(cx0), by0.max(cy0), bx1.min(cx1), by1.min(cy1));
+        match (r.2 > r.0 && r.3 > r.1, mat_inv(m)) {
+            (true, Some(inv)) => self.clip.push(ClipShape::Affine {
+                inv,
+                x,
+                y,
+                w,
+                h,
+                radii,
+                bx0: r.0,
+                by0: r.1,
+                bx1: r.2,
+                by1: r.3,
+            }),
+            _ => self.clip.push(ClipShape::Rect(0, 0, 0, 0)),
+        }
+    }
+
+    /// Source-over fill of a rounded LOCAL rect through the current
+    /// bracket: each canvas pixel in the mapped bbox inverse-maps into
+    /// local space and takes the same zone/ellipse corner test the
+    /// axis-aligned fills use — hard edges, the batch-6b/7c posture
+    /// (no antialiased arcs). Integer multiples of 90° are pixel-exact.
+    fn fill_shape_affine(
+        &mut self,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        radii: [(f32, f32); 4],
+        color: [u8; 4],
+    ) {
+        let Some(m) = self.xf() else { return };
+        let Some(inv) = mat_inv(m) else { return };
+        let (bx0, by0, bx1, by1) = mapped_bounds(m, x, y, w, h);
+        let (ax0, ay0, ax1, ay1) = self.allowed();
+        for gy in by0.max(ay0).max(0)..by1.min(ay1).min(self.height as i64) {
+            for gx in bx0.max(ax0).max(0)..bx1.min(ax1).min(self.width as i64) {
+                let (cx, cy) = (gx as f64 + 0.5, gy as f64 + 0.5);
+                let (lx, ly) = mat_apply(inv, cx, cy);
+                if !rounded_contains(x, y, w, h, radii, lx, ly) {
+                    continue;
+                }
+                if !self.clip_accepts(cx, cy) {
+                    continue;
+                }
+                let i = (gy as usize * self.width + gx as usize) * 4;
+                over(&mut self.data[i..i + 4], color);
+            }
+        }
+    }
+
+    /// Gradient fill through the current bracket: stop positions project in
+    /// LOCAL space (the gradient rides the element's box through the
+    /// rotation), colors sample per inverse-mapped pixel center, and the
+    /// shape clips by the same local rounded test a solid fill uses.
+    fn fill_gradient_affine(
+        &mut self,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        stops: &[(f32, [u8; 4])],
+        css_deg: f32,
+        radii: [(f32, f32); 4],
+    ) {
+        if w <= 0.0 || h <= 0.0 || stops.len() < 2 {
+            return;
+        }
+        let Some(m) = self.xf() else { return };
+        let Some(inv) = mat_inv(m) else { return };
+        let rad = css_deg.to_radians() as f64;
+        let (dux, duy) = (rad.sin(), -rad.cos());
+        let len = (w * dux.abs() + h * duy.abs()).max(1.0);
+        let (ccx, ccy) = (x + w / 2.0, y + h / 2.0);
+        let (bx0, by0, bx1, by1) = mapped_bounds(m, x, y, w, h);
+        let (ax0, ay0, ax1, ay1) = self.allowed();
+        for gy in by0.max(ay0).max(0)..by1.min(ay1).min(self.height as i64) {
+            for gx in bx0.max(ax0).max(0)..bx1.min(ax1).min(self.width as i64) {
+                let (cx, cy) = (gx as f64 + 0.5, gy as f64 + 0.5);
+                let (lx, ly) = mat_apply(inv, cx, cy);
+                if !rounded_contains(x, y, w, h, radii, lx, ly) {
+                    continue;
+                }
+                if !self.clip_accepts(cx, cy) {
+                    continue;
+                }
+                let t = (((lx - ccx) * dux + (ly - ccy) * duy) / len + 0.5).clamp(0.0, 1.0) as f32;
+                let color = gradient_stop_color(stops, t);
+                let i = (gy as usize * self.width + gx as usize) * 4;
+                over(&mut self.data[i..i + 4], color);
+            }
+        }
+    }
+
+    /// Border through the current bracket: pixels inside the outer local
+    /// box and NOT inside the widths-inset inner box — the rotated twin of
+    /// the axis-aligned four-band paint, square corners on both rings (the
+    /// axis-aligned arm paints square corners too; rounded borders under
+    /// rotation are a later batch).
+    fn border_affine(
+        &mut self,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        widths: [f32; 4],
+        color: [u8; 4],
+    ) {
+        let Some(m) = self.xf() else { return };
+        let Some(inv) = mat_inv(m) else { return };
+        let [t, r, b, l] = widths;
+        let (ix, iy) = (x + l as f64, y + t as f64);
+        let (iw, ih) = ((w - l as f64 - r as f64).max(0.0), (h - t as f64 - b as f64).max(0.0));
+        let (bx0, by0, bx1, by1) = mapped_bounds(m, x, y, w, h);
+        let (ax0, ay0, ax1, ay1) = self.allowed();
+        for gy in by0.max(ay0).max(0)..by1.min(ay1).min(self.height as i64) {
+            for gx in bx0.max(ax0).max(0)..bx1.min(ax1).min(self.width as i64) {
+                let (cx, cy) = (gx as f64 + 0.5, gy as f64 + 0.5);
+                let (lx, ly) = mat_apply(inv, cx, cy);
+                if !(lx >= x && lx < x + w && ly >= y && ly < y + h) {
+                    continue;
+                }
+                // Inner hole (square): present only while the inset ring
+                // still has positive extent on both axes.
+                if iw > 0.0 && ih > 0.0 && lx >= ix && lx < ix + iw && ly >= iy && ly < iy + ih {
+                    continue;
+                }
+                if !self.clip_accepts(cx, cy) {
+                    continue;
+                }
+                let i = (gy as usize * self.width + gx as usize) * 4;
+                over(&mut self.data[i..i + 4], color);
+            }
+        }
+    }
+
+    /// Nearest-neighbor image blit through the current bracket: the
+    /// element's LOCAL paint rect maps through the map; each canvas pixel
+    /// in the mapped bbox inverse-maps to a local point, which scales into
+    /// source texel space exactly like the axis-aligned `blit_image`
+    /// (destination-pixel-center sampling).
+    fn blit_image_affine(
+        &mut self,
+        image: &super::image::DecodedImage,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        alpha: f32,
+    ) {
+        if w <= 0.0 || h <= 0.0 || image.width == 0 || image.height == 0 {
+            return;
+        }
+        let Some(m) = self.xf() else { return };
+        let Some(inv) = mat_inv(m) else { return };
+        let src = &image.rgba;
+        let (sw, sh) = (image.width as f64, image.height as f64);
+        let (bx0, by0, bx1, by1) = mapped_bounds(m, x, y, w, h);
+        let (ax0, ay0, ax1, ay1) = self.allowed();
+        for gy in by0.max(ay0).max(0)..by1.min(ay1).min(self.height as i64) {
+            for gx in bx0.max(ax0).max(0)..bx1.min(ax1).min(self.width as i64) {
+                let (cx, cy) = (gx as f64 + 0.5, gy as f64 + 0.5);
+                let (lx, ly) = mat_apply(inv, cx, cy);
+                if !(lx >= x && lx < x + w && ly >= y && ly < y + h) {
+                    continue;
+                }
+                if !self.clip_accepts(cx, cy) {
+                    continue;
+                }
+                let sx = (((lx - x) * sw / w) as i64).clamp(0, image.width as i64 - 1);
+                let sy = (((ly - y) * sh / h) as i64).clamp(0, image.height as i64 - 1);
+                let i = ((sy as usize * image.width as usize) + sx as usize) * 4;
+                let a = if alpha >= 1.0 {
+                    src[i + 3]
+                } else {
+                    (src[i + 3] as f32 * alpha).round() as u8
+                };
+                let src_px = [src[i], src[i + 1], src[i + 2], a];
+                let d = (gy as usize * self.width + gx as usize) * 4;
+                over(&mut self.data[d..d + 4], src_px);
+            }
+        }
+    }
+
+    /// Blit a straight-alpha RGBA tile rasterized in LOCAL coordinates
+    /// through the current bracket: tile pixel (0, 0) lands at local point
+    /// `(ox, oy)`. Nearest sampling; transparent pixels skip — the affine
+    /// twin of `blit_text`.
+    fn blit_rgba_affine(&mut self, src: &[u8], sw: usize, sh: usize, ox: f64, oy: f64) {
+        if sw == 0 || sh == 0 {
+            return;
+        }
+        let Some(m) = self.xf() else { return };
+        let Some(inv) = mat_inv(m) else { return };
+        let (bx0, by0, bx1, by1) = mapped_bounds(m, ox, oy, sw as f64, sh as f64);
+        let (ax0, ay0, ax1, ay1) = self.allowed();
+        for gy in by0.max(ay0).max(0)..by1.min(ay1).min(self.height as i64) {
+            for gx in bx0.max(ax0).max(0)..bx1.min(ax1).min(self.width as i64) {
+                let (cx, cy) = (gx as f64 + 0.5, gy as f64 + 0.5);
+                let (lx, ly) = mat_apply(inv, cx, cy);
+                let (tx, ty) = ((lx - ox) as i64, (ly - oy) as i64);
+                if tx < 0 || ty < 0 || tx >= sw as i64 || ty >= sh as i64 {
+                    continue;
+                }
+                if !self.clip_accepts(cx, cy) {
+                    continue;
+                }
+                let i = (ty as usize * sw + tx as usize) * 4;
+                let a = src[i + 3];
+                if a == 0 {
+                    continue;
+                }
+                let src_px = [src[i], src[i + 1], src[i + 2], a];
+                let d = (gy as usize * self.width + gx as usize) * 4;
+                over(&mut self.data[d..d + 4], src_px);
+            }
+        }
     }
 
     /// Source-over fill of an axis-aligned integer rect, clipped to the
@@ -489,6 +789,127 @@ fn over(dst: &mut [u8], src: [u8; 4]) {
     dst[3] = 255.min(dst[3] as u32 + a * (255 - dst[3] as u32) / 255) as u8;
 }
 
+// --- 2D affine math (affine batch) — CSS matrix order throughout:
+// [a, b, c, d, e, f] maps x' = a·x + c·y + e, y' = b·x + d·y + f. ---
+
+/// Matrix product m∘n (apply n first, then m) in the CSS column convention —
+/// the same composition the collect walk's Xf::compose and the parse-time
+/// function-list accumulation use, in f64 for raster-side exactness.
+fn mat_mul(m: [f64; 6], n: [f64; 6]) -> [f64; 6] {
+    [
+        m[0] * n[0] + m[2] * n[1],
+        m[1] * n[0] + m[3] * n[1],
+        m[0] * n[2] + m[2] * n[3],
+        m[1] * n[2] + m[3] * n[3],
+        m[0] * n[4] + m[2] * n[5] + m[4],
+        m[1] * n[4] + m[3] * n[5] + m[5],
+    ]
+}
+
+/// Apply the map to a point.
+fn mat_apply(m: [f64; 6], x: f64, y: f64) -> (f64, f64) {
+    (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
+}
+
+/// Inverse of the map, or None when the linear part is singular (a
+/// degenerate scale collapses the plane to a line — nothing to rasterize).
+fn mat_inv(m: [f64; 6]) -> Option<[f64; 6]> {
+    let det = m[0] * m[3] - m[1] * m[2];
+    if det.abs() < 1e-9 {
+        return None;
+    }
+    let ia = m[3] / det;
+    let ib = -m[1] / det;
+    let ic = -m[2] / det;
+    let id = m[0] / det;
+    Some([
+        ia,
+        ib,
+        ic,
+        id,
+        -(ia * m[4] + ic * m[5]),
+        -(ib * m[4] + id * m[5]),
+    ])
+}
+
+/// Canvas-space integer bbox of a local rect mapped through `m`: the four
+/// mapped corners' union, floored/ceiled outward — a conservative superset
+/// of the true mapped area (fill loops re-test every pixel anyway).
+fn mapped_bounds(m: [f64; 6], x: f64, y: f64, w: f64, h: f64) -> (i64, i64, i64, i64) {
+    let (x0, y0) = mat_apply(m, x, y);
+    let (x1, y1) = mat_apply(m, x + w, y);
+    let (x2, y2) = mat_apply(m, x, y + h);
+    let (x3, y3) = mat_apply(m, x + w, y + h);
+    let xs = [x0, x1, x2, x3];
+    let ys = [y0, y1, y2, y3];
+    (
+        xs.iter().copied().fold(f64::MAX, f64::min).floor() as i64,
+        ys.iter().copied().fold(f64::MAX, f64::min).floor() as i64,
+        xs.iter().copied().fold(f64::MIN, f64::max).ceil() as i64,
+        ys.iter().copied().fold(f64::MIN, f64::max).ceil() as i64,
+    )
+}
+
+/// LOCAL-space rounded-rect containment (the affine twin of
+/// [`ClipShape::Rounded::accepts`]): a pixel's inverse image lands in local
+/// coordinates, where the same zone/ellipse corner test runs against the
+/// rect's own radii (clamped to half the box per the CSS scale-down rule).
+/// Zero radii degenerate to the plain rect test.
+fn rounded_contains(
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    radii: [(f32, f32); 4],
+    lx: f64,
+    ly: f64,
+) -> bool {
+    if !(lx >= x && lx < x + w && ly >= y && ly < y + h) {
+        return false;
+    }
+    let clamp = |r: (f32, f32)| {
+        (
+            r.0.clamp(0.0, w as f32 / 2.0) as f64,
+            r.1.clamp(0.0, h as f32 / 2.0) as f64,
+        )
+    };
+    let (rx0, ry0) = clamp(radii[0]);
+    let (rx1, ry1) = clamp(radii[1]);
+    let (rx2, ry2) = clamp(radii[2]);
+    let (rx3, ry3) = clamp(radii[3]);
+    let centers = [
+        (x + rx0, y + ry0),
+        (x + w - rx1, y + ry1),
+        (x + w - rx2, y + h - ry2),
+        (x + rx3, y + h - ry3),
+    ];
+    let zone = if lx < centers[0].0 && ly < centers[0].1 {
+        Some(0usize)
+    } else if lx > centers[1].0 && ly < centers[1].1 {
+        Some(1)
+    } else if lx > centers[2].0 && ly > centers[2].1 {
+        Some(2)
+    } else if lx < centers[3].0 && ly > centers[3].1 {
+        Some(3)
+    } else {
+        None
+    };
+    match zone {
+        None => true,
+        Some(i) => {
+            let rxs = [rx0, rx1, rx2, rx3];
+            let rys = [ry0, ry1, ry2, ry3];
+            if rxs[i] <= 0.0 || rys[i] <= 0.0 {
+                true
+            } else {
+                let dx = (lx - centers[i].0) / rxs[i];
+                let dy = (ly - centers[i].1) / rys[i];
+                dx * dx + dy * dy <= 1.0
+            }
+        }
+    }
+}
+
 /// Gradient stop color at position `t` (0..1). Stops are ascending; `t`
 /// outside the list clamps to the end stops. The ramp scan uses a strict
 /// upper bound, so a shared position (hard line, `blue 50%, green 50%`)
@@ -588,134 +1009,332 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
 
     for item in items {
         match item {
-            PaintItem::Clip { rect } => out.push_clip(
-                (rect.x - dx).round() as i64,
-                (rect.y - dy).round() as i64,
-                (rect.x + rect.width - dx).round() as i64,
-                (rect.y + rect.height - dy).round() as i64,
-            ),
-            PaintItem::ClipRounded { rect, radii } => out.push_rounded_clip(
-                (rect.x - dx).round() as i64,
-                (rect.y - dy).round() as i64,
-                (rect.x + rect.width - dx).round() as i64,
-                (rect.y + rect.height - dy).round() as i64,
-                *radii,
-            ),
+            PaintItem::SetXf { xf } => {
+                // The stored map is in page space; the band shift folds in
+                // here — the canvas-space total is T(−dx,−dy)∘M, whose e/f
+                // are exactly M.e − dx / M.f − dy.
+                out.push_xf([
+                    xf[0] as f64,
+                    xf[1] as f64,
+                    xf[2] as f64,
+                    xf[3] as f64,
+                    xf[4] as f64 - dx as f64,
+                    xf[5] as f64 - dy as f64,
+                ]);
+            }
+            PaintItem::ClearXf => {
+                out.pop_xf();
+            }
+            PaintItem::Clip { rect } => {
+                if out.xf().is_some() {
+                    out.push_clip_affine(
+                        rect.x as f64,
+                        rect.y as f64,
+                        rect.width as f64,
+                        rect.height as f64,
+                        [(0.0, 0.0); 4],
+                    );
+                } else {
+                    out.push_clip(
+                        (rect.x - dx).round() as i64,
+                        (rect.y - dy).round() as i64,
+                        (rect.x + rect.width - dx).round() as i64,
+                        (rect.y + rect.height - dy).round() as i64,
+                    );
+                }
+            }
+            PaintItem::ClipRounded { rect, radii } => {
+                if out.xf().is_some() {
+                    out.push_clip_affine(
+                        rect.x as f64,
+                        rect.y as f64,
+                        rect.width as f64,
+                        rect.height as f64,
+                        *radii,
+                    );
+                } else {
+                    out.push_rounded_clip(
+                        (rect.x - dx).round() as i64,
+                        (rect.y - dy).round() as i64,
+                        (rect.x + rect.width - dx).round() as i64,
+                        (rect.y + rect.height - dy).round() as i64,
+                        *radii,
+                    );
+                }
+            }
             PaintItem::PopClip => {
                 out.pop_clip();
             }
-            PaintItem::BgCorner { rect, color, radii, .. } => out.fill_corner_rect(
-                (rect.x - dx).round() as i64,
-                (rect.y - dy).round() as i64,
-                rect.width.round() as i64,
-                rect.height.round() as i64,
-                *radii,
-                *color,
-            ),
-            PaintItem::Bg { rect, color, radius, .. } => out.fill_rounded_rect(
-                (rect.x - dx).round() as i64,
-                (rect.y - dy).round() as i64,
-                rect.width.round() as i64,
-                rect.height.round() as i64,
-                *radius,
-                *color,
-            ),
-            PaintItem::BgGradient { rect, stops, css_deg, radii } => out.fill_gradient(
-                (rect.x - dx).round() as i64,
-                (rect.y - dy).round() as i64,
-                rect.width.round() as i64,
-                rect.height.round() as i64,
-                stops,
-                *css_deg,
-                *radii,
-            ),
+            PaintItem::BgCorner { rect, color, radii, .. } => {
+                if out.xf().is_some() {
+                    out.fill_shape_affine(
+                        rect.x as f64,
+                        rect.y as f64,
+                        rect.width as f64,
+                        rect.height as f64,
+                        *radii,
+                        *color,
+                    );
+                } else {
+                    out.fill_corner_rect(
+                        (rect.x - dx).round() as i64,
+                        (rect.y - dy).round() as i64,
+                        rect.width.round() as i64,
+                        rect.height.round() as i64,
+                        *radii,
+                        *color,
+                    );
+                }
+            }
+            PaintItem::Bg { rect, color, radius, .. } => {
+                if out.xf().is_some() {
+                    out.fill_shape_affine(
+                        rect.x as f64,
+                        rect.y as f64,
+                        rect.width as f64,
+                        rect.height as f64,
+                        [(*radius, *radius); 4],
+                        *color,
+                    );
+                } else {
+                    out.fill_rounded_rect(
+                        (rect.x - dx).round() as i64,
+                        (rect.y - dy).round() as i64,
+                        rect.width.round() as i64,
+                        rect.height.round() as i64,
+                        *radius,
+                        *color,
+                    );
+                }
+            }
+            PaintItem::BgGradient { rect, stops, css_deg, radii } => {
+                if out.xf().is_some() {
+                    out.fill_gradient_affine(
+                        rect.x as f64,
+                        rect.y as f64,
+                        rect.width as f64,
+                        rect.height as f64,
+                        stops,
+                        *css_deg,
+                        *radii,
+                    );
+                } else {
+                    out.fill_gradient(
+                        (rect.x - dx).round() as i64,
+                        (rect.y - dy).round() as i64,
+                        rect.width.round() as i64,
+                        rect.height.round() as i64,
+                        stops,
+                        *css_deg,
+                        *radii,
+                    );
+                }
+            }
             PaintItem::Border { rect, widths, color, .. } => {
-                // Four bands, square corners: top/bottom span the full
-                // border-box width (they own the corners), left/right inset
-                // by the top/bottom widths — the classic rectangular-border
-                // paint browsers produce with radius 0.
-                let [t, r, b, l] = *widths;
-                let (x, y) = (
-                    (rect.x - dx).round() as i64,
-                    (rect.y - dy).round() as i64,
-                );
-                let (w, h) = (rect.width.round() as i64, rect.height.round() as i64);
-                out.fill_rect(x, y, w, t as i64, *color);
-                out.fill_rect(x, y + h - b as i64, w, b as i64, *color);
-                out.fill_rect(x, y + t as i64, l as i64, h - t as i64 - b as i64, *color);
-                out.fill_rect(x + w - r as i64, y + t as i64, r as i64, h - t as i64 - b as i64, *color);
+                if out.xf().is_some() {
+                    out.border_affine(
+                        rect.x as f64,
+                        rect.y as f64,
+                        rect.width as f64,
+                        rect.height as f64,
+                        *widths,
+                        *color,
+                    );
+                } else {
+                    // Four bands, square corners: top/bottom span the full
+                    // border-box width (they own the corners), left/right inset
+                    // by the top/bottom widths — the classic rectangular-border
+                    // paint browsers produce with radius 0.
+                    let [t, r, b, l] = *widths;
+                    let (x, y) = (
+                        (rect.x - dx).round() as i64,
+                        (rect.y - dy).round() as i64,
+                    );
+                    let (w, h) = (rect.width.round() as i64, rect.height.round() as i64);
+                    out.fill_rect(x, y, w, t as i64, *color);
+                    out.fill_rect(x, y + h - b as i64, w, b as i64, *color);
+                    out.fill_rect(x, y + t as i64, l as i64, h - t as i64 - b as i64, *color);
+                    out.fill_rect(x + w - r as i64, y + t as i64, r as i64, h - t as i64 - b as i64, *color);
+                }
             }
             PaintItem::Image { rect, paint_rect, image, alpha } => {
-                // Replaced content is always clipped to the element box
-                // (upstream clips image elements regardless of overflow);
-                // object-fit cover/object-position can push paint_rect past
-                // `rect`, so clip the blit to the box.
-                out.push_clip(
-                    (rect.x - dx).round() as i64,
-                    (rect.y - dy).round() as i64,
-                    (rect.x + rect.width - dx).round() as i64,
-                    (rect.y + rect.height - dy).round() as i64,
-                );
-                out.blit_image(
-                    image,
-                    (paint_rect.x - dx).round() as i64,
-                    (paint_rect.y - dy).round() as i64,
-                    paint_rect.width.round() as i64,
-                    paint_rect.height.round() as i64,
-                    *alpha,
-                );
-                out.pop_clip();
+                if out.xf().is_some() {
+                    // Replaced content still clips to the element box — the
+                    // clip rides the same bracket.
+                    out.push_clip_affine(
+                        rect.x as f64,
+                        rect.y as f64,
+                        rect.width as f64,
+                        rect.height as f64,
+                        [(0.0, 0.0); 4],
+                    );
+                    out.blit_image_affine(
+                        image,
+                        paint_rect.x as f64,
+                        paint_rect.y as f64,
+                        paint_rect.width as f64,
+                        paint_rect.height as f64,
+                        *alpha,
+                    );
+                    out.pop_clip();
+                } else {
+                    // Replaced content is always clipped to the element box
+                    // (upstream clips image elements regardless of overflow);
+                    // object-fit cover/object-position can push paint_rect past
+                    // `rect`, so clip the blit to the box.
+                    out.push_clip(
+                        (rect.x - dx).round() as i64,
+                        (rect.y - dy).round() as i64,
+                        (rect.x + rect.width - dx).round() as i64,
+                        (rect.y + rect.height - dy).round() as i64,
+                    );
+                    out.blit_image(
+                        image,
+                        (paint_rect.x - dx).round() as i64,
+                        (paint_rect.y - dy).round() as i64,
+                        paint_rect.width.round() as i64,
+                        paint_rect.height.round() as i64,
+                        *alpha,
+                    );
+                    out.pop_clip();
+                }
             }
             PaintItem::Replaced { rect, alt, fill_placeholder, alpha } => {
-                if rect.y + rect.height <= dy || rect.y >= dy + out.height as f32 {
-                    continue;
-                }
-                let (x, y) = (
-                    (rect.x - dx).round() as i64,
-                    (rect.y - dy).round() as i64,
-                );
-                let (w, h) = (rect.width.round() as i64, rect.height.round() as i64);
-                if *fill_placeholder && w > 0 && h > 0 {
-                    out.fill_rect(x, y, w, h, alpha_color([224, 224, 224, 255], *alpha));
-                }
-                if let Some((text, font_size, bold, line_height, color)) = alt {
-                    if !text.trim().is_empty() {
-                        // The alt run wraps at the box width; the tile's
-                        // `top` offsets ink above the box top exactly like
-                        // any other text tile (cramped-CJK leading). The
-                        // ink clips to the box (batch 6e): a broken-image
-                        // alt that wraps past the bottom is cut there,
-                        // like every browser.
-                        out.push_clip(x, y, x + w, y + h);
-                        let r = fonts.rasterize_wrapped(
-                            text,
-                            *font_size,
-                            *bold,
-                            alpha_color(*color, *alpha),
-                            w.max(0) as f32,
-                            *line_height,
-                        );
-                        out.blit_text(&r, x, (y as f32 + r.top).round() as i64);
-                        out.pop_clip();
+                if out.xf().is_some() {
+                    // Rasterize the placeholder + alt into a transparent
+                    // LOCAL scratch at raw metrics (the bracket maps the
+                    // tile; alt text must not bake the scale in), then blit
+                    // it through the map.
+                    let (w, h) = (rect.width.round() as i64, rect.height.round() as i64);
+                    if w <= 0 || h <= 0 {
+                        continue;
+                    }
+                    let (bx0, by0, bx1, by1) = out.mapped_xf_bounds(
+                        rect.x as f64,
+                        rect.y as f64,
+                        rect.width as f64,
+                        rect.height as f64,
+                    );
+                    if bx1 <= 0 || by1 <= 0 || bx0 >= out.width as i64 || by0 >= out.height as i64 {
+                        continue;
+                    }
+                    let (w, h) = (w as usize, h as usize);
+                    let mut scratch = Canvas::new_transparent(w, h);
+                    if *fill_placeholder {
+                        scratch.fill_rect(0, 0, w as i64, h as i64, alpha_color([224, 224, 224, 255], *alpha));
+                    }
+                    if let Some((text, font_size, bold, line_height, color)) = alt {
+                        if !text.trim().is_empty() {
+                            // Ink clips to the box (batch 6e), now in the
+                            // scratch's own coordinates.
+                            scratch.push_clip(0, 0, w as i64, h as i64);
+                            let r = fonts.rasterize_wrapped(
+                                text,
+                                *font_size,
+                                *bold,
+                                alpha_color(*color, *alpha),
+                                w as f32,
+                                *line_height,
+                            );
+                            scratch.blit_text(&r, 0, r.top.round() as i64);
+                            scratch.pop_clip();
+                        }
+                    }
+                    out.blit_rgba_affine(&scratch.data, w, h, rect.x as f64, rect.y as f64);
+                } else {
+                    if rect.y + rect.height <= dy || rect.y >= dy + out.height as f32 {
+                        continue;
+                    }
+                    let (x, y) = (
+                        (rect.x - dx).round() as i64,
+                        (rect.y - dy).round() as i64,
+                    );
+                    let (w, h) = (rect.width.round() as i64, rect.height.round() as i64);
+                    if *fill_placeholder && w > 0 && h > 0 {
+                        out.fill_rect(x, y, w, h, alpha_color([224, 224, 224, 255], *alpha));
+                    }
+                    if let Some((text, font_size, bold, line_height, color)) = alt {
+                        if !text.trim().is_empty() {
+                            // The alt run wraps at the box width; the tile's
+                            // `top` offsets ink above the box top exactly like
+                            // any other text tile (cramped-CJK leading). The
+                            // ink clips to the box (batch 6e): a broken-image
+                            // alt that wraps past the bottom is cut there,
+                            // like every browser.
+                            out.push_clip(x, y, x + w, y + h);
+                            let r = fonts.rasterize_wrapped(
+                                text,
+                                *font_size,
+                                *bold,
+                                alpha_color(*color, *alpha),
+                                w.max(0) as f32,
+                                *line_height,
+                            );
+                            out.blit_text(&r, x, (y as f32 + r.top).round() as i64);
+                            out.pop_clip();
+                        }
                     }
                 }
             }
             PaintItem::Svg { rect, render, alpha } => {
-                // Same band prefilter as Replaced: the svg painter clips to
-                // the element box anyway, this just skips rasterizing an
-                // off-band subtree.
-                if rect.y + rect.height <= dy || rect.y >= dy + out.height as f32 {
-                    continue;
+                if out.xf().is_some() {
+                    let (w, h) = (rect.width.round() as i64, rect.height.round() as i64);
+                    if w <= 0 || h <= 0 {
+                        continue;
+                    }
+                    let (bx0, by0, bx1, by1) = out.mapped_xf_bounds(
+                        rect.x as f64,
+                        rect.y as f64,
+                        rect.width as f64,
+                        rect.height as f64,
+                    );
+                    if bx1 <= 0 || by1 <= 0 || bx0 >= out.width as i64 || by0 >= out.height as i64 {
+                        continue;
+                    }
+                    // Rasterize the subtree into a transparent LOCAL scratch
+                    // (dx/dy = the local origin lands it at (0, 0)), then
+                    // blit through the bracket.
+                    let (w, h) = (w as usize, h as usize);
+                    let mut scratch = Canvas::new_transparent(w, h);
+                    super::svg::paint_svg(render, rect, fonts, &mut scratch, rect.x, rect.y, *alpha);
+                    out.blit_rgba_affine(&scratch.data, w, h, rect.x as f64, rect.y as f64);
+                } else {
+                    // Same band prefilter as Replaced: the svg painter clips to
+                    // the element box anyway, this just skips rasterizing an
+                    // off-band subtree.
+                    if rect.y + rect.height <= dy || rect.y >= dy + out.height as f32 {
+                        continue;
+                    }
+                    super::svg::paint_svg(render, rect, fonts, out, dx, dy, *alpha);
                 }
-                super::svg::paint_svg(render, rect, fonts, out, dx, dy, *alpha);
             }
             PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at } => {
-                if !text_reaches_band(*y, text, *font_size, *wrap_at, *line_height, dy, out.height as i64) {
-                    continue;
+                if out.xf().is_some() {
+                    // Rasterize at RAW local metrics — the bracket maps the
+                    // tile, so no scale folds into font metrics — prefiltered
+                    // by the mapped bbox of the same estimated tile box the
+                    // band check below uses.
+                    let est_w = est_width(text, *font_size).max(*wrap_at);
+                    let lines = (est_width(text, *font_size) / wrap_at.max(1.0)).ceil().max(1.0);
+                    let (bx0, by0, bx1, by1) = out.mapped_xf_bounds(
+                        *x as f64,
+                        (*y - *line_height) as f64,
+                        est_w as f64,
+                        ((lines + 1.0) * *line_height) as f64,
+                    );
+                    if bx1 <= 0 || by1 <= 0 || bx0 >= out.width as i64 || by0 >= out.height as i64 {
+                        continue;
+                    }
+                    let r = fonts.rasterize_wrapped(text, *font_size, *bold, *color, *wrap_at, *line_height);
+                    out.blit_rgba_affine(&r.data, r.width, r.height, *x as f64, (*y + r.top) as f64);
+                } else {
+                    if !text_reaches_band(*y, text, *font_size, *wrap_at, *line_height, dy, out.height as i64) {
+                        continue;
+                    }
+                    let r = fonts.rasterize_wrapped(text, *font_size, *bold, *color, *wrap_at, *line_height);
+                    // Tile row 0 sits `top` px above the leaf's line-box top.
+                    out.blit_text(&r, (x - dx).round() as i64, (y - dy + r.top).round() as i64);
                 }
-                let r = fonts.rasterize_wrapped(text, *font_size, *bold, *color, *wrap_at, *line_height);
-                // Tile row 0 sits `top` px above the leaf's line-box top.
-                out.blit_text(&r, (x - dx).round() as i64, (y - dy + r.top).round() as i64);
             }
         }
     }
@@ -963,5 +1582,132 @@ mod tests {
             .filter(|&y| (0..40).any(|x| band.data[(y * 40 + x) * 4] < 128))
             .collect();
         assert!(dark_rows.iter().all(|&y| y < 25), "no ink from the far-below text: {dark_rows:?}");
+    }
+
+    // ---- affine brackets (rotate/skew/matrix paint) ----
+
+    /// rotate(90°) about the 120×60 box's center paints pixel-exactly: the
+    /// map x' = 90 − y, y' = x − 30 (pivot (60, 30)) turns the box into a
+    /// 60×120 canvas region — integer multiples of 90° must have zero
+    /// rasterization slop, exactly like the axis-aligned path.
+    #[test]
+    fn rotate_90_bracket_pixel_exact() {
+        let items = vec![
+            PaintItem::SetXf { xf: [0.0, 1.0, -1.0, 0.0, 90.0, -30.0] },
+            PaintItem::Bg {
+                rect: super::super::Rect { x: 0.0, y: 0.0, width: 120.0, height: 60.0 },
+                color: [200, 40, 40, 255],
+                radius: 0.0,
+            },
+            PaintItem::ClearXf,
+        ];
+        let fonts = crate::diting_fonts::font_book();
+        let mut c = Canvas::new_filled(120, 120, [255, 255, 255, 255]);
+        execute(&items, &fonts, &mut c);
+        // Mapped box: x' ∈ [30, 90), y' ∈ [−30, 90) → on-canvas [30,90)×[0,90).
+        assert_eq!(px(&c, 30, 0), [200, 40, 40, 255], "mapped TL corner");
+        assert_eq!(px(&c, 89, 89), [200, 40, 40, 255], "mapped BR corner");
+        assert_eq!(px(&c, 90, 10), [255, 255, 255, 255], "right of the mapped box");
+        assert_eq!(px(&c, 29, 10), [255, 255, 255, 255], "left of the mapped box");
+        assert_eq!(px(&c, 60, 90), [255, 255, 255, 255], "below the mapped box");
+        // The stack drained: a post-ClearXf fill paints unrotated.
+        c.fill_rect(0, 0, 5, 5, [0, 0, 255, 255]);
+        assert_eq!(px(&c, 0, 0), [0, 0, 255, 255]);
+    }
+
+    /// Nested brackets compose multiplicatively: an inner translate rides
+    /// the outer rotation (the canvas total is outer∘inner), and both
+    /// clears return to the identity.
+    #[test]
+    fn nested_brackets_compose() {
+        // Outer: rotate(90°) about (60, 30) — x' = 90 − y, y' = x − 30.
+        // Inner: translate(10, 0). Total: x' = 90 − y, y' = x − 20.
+        let items = vec![
+            PaintItem::SetXf { xf: [0.0, 1.0, -1.0, 0.0, 90.0, -30.0] },
+            PaintItem::SetXf { xf: [1.0, 0.0, 0.0, 1.0, 10.0, 0.0] },
+            PaintItem::Bg {
+                rect: super::super::Rect { x: 30.0, y: 60.0, width: 10.0, height: 10.0 },
+                color: [0, 200, 0, 255],
+                radius: 0.0,
+            },
+            PaintItem::ClearXf,
+            PaintItem::ClearXf,
+        ];
+        let fonts = crate::diting_fonts::font_book();
+        let mut c = Canvas::new_filled(120, 120, [255, 255, 255, 255]);
+        execute(&items, &fonts, &mut c);
+        // Total maps (x, y) → (90 − y, x − 20): the local (30,60,10,10) box
+        // lands at x' ∈ [20,30), y' ∈ [10,20).
+        assert_eq!(px(&c, 20, 10), [0, 200, 0, 255], "nested compose TL");
+        assert_eq!(px(&c, 29, 19), [0, 200, 0, 255], "nested compose BR");
+        assert_eq!(px(&c, 30, 10), [255, 255, 255, 255], "right edge exclusive");
+        assert_eq!(px(&c, 20, 20), [255, 255, 255, 255], "bottom edge exclusive");
+    }
+
+    /// An affine clip cuts child ink along the rotation: a clip at local
+    /// y < 30 under the 90° bracket trims the child background to its
+    /// inverse image — and the clip pops cleanly afterwards.
+    #[test]
+    fn affine_clip_cuts_child_ink() {
+        let items = vec![
+            PaintItem::SetXf { xf: [0.0, 1.0, -1.0, 0.0, 90.0, -30.0] },
+            PaintItem::Clip {
+                rect: super::super::Rect { x: 0.0, y: 0.0, width: 120.0, height: 30.0 },
+            },
+            PaintItem::Bg {
+                rect: super::super::Rect { x: 0.0, y: 0.0, width: 120.0, height: 60.0 },
+                color: [200, 40, 40, 255],
+                radius: 0.0,
+            },
+            PaintItem::PopClip,
+            PaintItem::ClearXf,
+        ];
+        let fonts = crate::diting_fonts::font_book();
+        let mut c = Canvas::new_filled(120, 120, [255, 255, 255, 255]);
+        execute(&items, &fonts, &mut c);
+        // Clip local y ∈ [0,30) ⇔ canvas x' = 90 − y ∈ (60, 90]: pixel
+        // centers pass at columns 60..=89; the bg box caps at x' < 90.
+        assert_eq!(px(&c, 60, 40), [200, 40, 40, 255], "inside the rotated window");
+        assert_eq!(px(&c, 59, 40), [255, 255, 255, 255], "outside the rotated window");
+        assert_eq!(px(&c, 89, 40), [200, 40, 40, 255], "window's far edge");
+        assert_eq!(px(&c, 90, 40), [255, 255, 255, 255], "past the bg box");
+        // The affine clip drained: a later fill covers the whole canvas.
+        c.fill_rect(0, 0, 120, 120, [0, 0, 255, 255]);
+        assert_eq!(px(&c, 0, 0), [0, 0, 255, 255]);
+    }
+
+    /// Text under a bracket rasterizes at raw local metrics and blits
+    /// through the map: a 180° flip moves the ink to the mirror half of
+    /// the canvas and none survives at the un-mapped position.
+    #[test]
+    fn affine_text_paints_through_bracket() {
+        // rotate(180°) about (60, 25): x' = 120 − x, y' = 50 − y.
+        let items = vec![
+            PaintItem::SetXf { xf: [-1.0, 0.0, 0.0, -1.0, 120.0, 50.0] },
+            PaintItem::Text {
+                text: "flip".into(),
+                font_size: 16.0,
+                bold: false,
+                color: [0, 0, 0, 255],
+                line_height: 20.0,
+                x: 10.0,
+                y: 10.0,
+                wrap_at: 200.0,
+            },
+            PaintItem::ClearXf,
+        ];
+        let fonts = crate::diting_fonts::font_book();
+        let mut c = Canvas::new_filled(120, 50, [255, 255, 255, 255]);
+        execute(&items, &fonts, &mut c);
+        // Un-mapped ink would sit at x < 30 (the leaf is at x=10, ~30px wide);
+        // the 180° flip about x=60 mirrors it to the right half (x > 60).
+        let ink_x: Vec<usize> = (0..c.width)
+            .filter(|&x| (0..c.height).any(|y| c.data[(y * c.width + x) * 4] < 128))
+            .collect();
+        assert!(!ink_x.is_empty(), "text must paint through the bracket");
+        assert!(
+            ink_x.iter().all(|&x| x > 60),
+            "ink must land in the mirrored half: {ink_x:?}"
+        );
     }
 }
