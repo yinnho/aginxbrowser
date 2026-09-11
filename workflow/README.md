@@ -26,6 +26,15 @@ rejected before it touches the filesystem.
 | `xcom-profile` | x.com | runs green logged-out | needs foreign egress (`use_proxy: true` baked in) |
 | `juejin-post` | juejin.cn | runs green | post pages are SSR; list pages stall (see flow.md) |
 | `zhihu-answer` | zhihu.com | 403 wall logged-out | compose with a logged-in session — see flow.md |
+| `x-reply` | x.com | runs green logged-in | post/reply with full write-header set + auto verify step |
+| `x-read` | x.com | runs green logged-in | user mode (profile+follow state) / tweet mode (thread+did-my-reply-land) |
+| `x-search` | x.com | runs green logged-in | SearchTimeline, results sorted by views — campaign target discovery |
+| `x-follow` | x.com | runs green logged-in | friendships create/destroy; response `following` echoes pre-action state |
+
+The `x-*` family shares one self-healing prefix (p256 / bearer / ctx+bind)
+and composes: `x-search` finds a target → `x-read` resolves ids and follow
+state → `x-reply` posts and self-verifies → `x-follow` if warranted. All of
+them need a logged-in x.com session passed as `session_id`.
 
 The honest rule the samples demonstrate: a flow either replays green or
 fails with a receipt (failing step, reason, URL, screenshot, saved-so-far,

@@ -1,0 +1,21 @@
+{
+ "vars": {
+  "args_json": "{\"q\": \"\", \"count\": 20, \"top\": 20}"
+ },
+ "steps": [
+  {
+   "op": "eval",
+   "args": {
+    "script": "\n(async () => {\n  const at = Number(localStorage.getItem('abx_bearer_at') || 0);\n  const cur = localStorage.getItem('abx_bearer') || '';\n  const fresh = cur && at && (Date.now() - at) < 12 * 3600e3;\n  if (fresh) return JSON.stringify({ok: true, src: 'cached', len: cur.length});\n  const src = [...document.querySelectorAll(\"script[src*='main']\")].map(s => s.src)[0];\n  if (!src) return JSON.stringify({ok: !!cur, src: 'kept-no-main', len: cur.length});\n  const t = await (await fetch(src, {credentials: 'omit'})).text();\n  const m = t.match(/Bearer ([A-Za-z0-9%/+=]{80,})/);\n  if (!m) return JSON.stringify({ok: !!cur, src: 'kept-no-match', len: cur.length});\n  localStorage.setItem('abx_bearer', m[1]);\n  localStorage.setItem('abx_bearer_at', String(Date.now()));\n  return JSON.stringify({ok: true, src: 'refreshed', len: m[1].length});\n})()\n"
+   },
+   "save": "bearer"
+  },
+  {
+   "op": "eval",
+   "args": {
+    "script": "// x-search step: SearchTimeline (POST-only) — tweets with views, sorted desc\n(async () => {\n  const ARGS = {{args_json}};\n  try {\n    if (!ARGS.q) return JSON.stringify({ok: false, err: 'args_json needs q'});\n    const bearer = localStorage.getItem('abx_bearer');\n    const ct0 = (document.cookie.match(/(?:^|;\\s*)ct0=([^;]+)/) || [])[1];\n    const features = JSON.parse(localStorage.getItem('abx_ct_features'));\n    if (!bearer || !ct0 || !features) return JSON.stringify({ok: false, err: 'missing bearer/ct0/features - session not set up'});\n    const r = await fetch('/i/api/graphql/KPSo2_UWdOMpPJwjhfT1Qg/SearchTimeline', {\n      method: 'POST', credentials: 'include',\n      headers: {\n        'content-type': 'application/json',\n        'authorization': 'Bearer ' + bearer,\n        'x-twitter-auth-type': 'OAuth2Session',\n        'x-csrf-token': ct0,\n        'x-twitter-client-language': 'en',\n        'x-twitter-active-user': 'yes'\n      },\n      body: JSON.stringify({\n        variables: {rawQuery: ARGS.q, count: ARGS.count || 20, querySource: 'typed_query', product: ARGS.product || 'Top'},\n        features, fieldToggles: {withPayments: false}\n      })\n    });\n    const t = await r.text();\n    let j = null; try { j = JSON.parse(t); } catch {}\n    if (!r.ok) return JSON.stringify({ok: false, status: r.status, err_head: t.slice(0, 160)});\n    const tweets = [];\n    const pick = (ic) => {\n      const res = ic && ic.tweet_results && ic.tweet_results.result;\n      const core = res && res.__typename === 'TweetWithVisibilityResults' ? res.tweet : res;\n      if (!core || !core.legacy) return;\n      const u = core.core && core.core.user_results && core.core.user_results.result;\n      tweets.push({\n        id: core.legacy.id_str,\n        sn: u ? ((u.core && u.core.screen_name) || (u.legacy && u.legacy.screen_name)) : null,\n        views: core.views ? Number(core.views.count) : null,\n        fav: core.legacy.favorite_count,\n        text: core.legacy.full_text\n      });\n    };\n    const walk = (entries) => {\n      for (const e of (entries || [])) {\n        const c = e && e.content;\n        if (!c) continue;\n        if (c.itemContent) pick(c.itemContent);\n        if (c.items) for (const it of c.items) pick(it.item && it.item.itemContent);\n      }\n    };\n    for (const ins of ((j.data && j.data.search_by_raw_query && j.data.search_by_raw_query.search_timeline && j.data.search_by_raw_query.search_timeline.timeline && j.data.search_by_raw_query.search_timeline.timeline.instructions) || [])) walk(ins.entries);\n    const seen = new Set();\n    const uniq = tweets.filter(x => x.id && !seen.has(x.id) && seen.add(x.id));\n    uniq.sort((a, b) => (b.views || 0) - (a.views || 0));\n    const top = uniq.slice(0, ARGS.top || 20).map(x => ({...x, text: x.text.slice(0, 200)}));\n    return JSON.stringify({ok: true, q: ARGS.q, count: uniq.length, tweets: top});\n  } catch (e) {\n    return JSON.stringify({ok: false, err: e.name + ': ' + e.message});\n  }\n})()\n"
+   },
+   "save": "search"
+  }
+ ]
+}

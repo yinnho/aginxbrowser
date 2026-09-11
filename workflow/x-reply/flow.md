@@ -2,7 +2,7 @@
 
 Post a tweet or a reply on X with the full write-op anti-automation header set
 (`x-client-transaction-id` + `x-twitter-session-signature` trio), generated
-in-page. Four steps, all `eval`:
+in-page. Five steps, all `eval`:
 
 1. `p256` — install the pure-JS P-256 library (engine `crypto.subtle` has no
    ECDSA) + sign/verify self-test.
@@ -15,6 +15,13 @@ in-page. Four steps, all `eval`:
 4. `post` — CreateTweet with txid + signature trio. Root tweet when
    `reply_to` is empty; reply otherwise. Result saved as `post`:
    `{ok, status, tweet_id, err_code, err_msg}`.
+5. `verify` — after a reply (skipped for root tweets): sleeps 1.5s, pulls
+   `TweetDetail` on the parent, and reports whether our reply is actually in
+   the thread: `{ok, verified, mine_in_thread}`. This is the only reliable
+   post-check — `UserTweetsAndReplies` lags and doesn't show replies to
+   strangers. A `verified:false` after `post.ok:true` means visibility lag,
+   not necessarily a lost reply; re-run the flow's verify step (or
+   `x-read {tweet_id}`) before concluding.
 
 ## Prerequisites
 
