@@ -1633,3 +1633,59 @@ fn relative_img_src_hits_absolute_keyed_byte_table() {
         "base-joined src must reach the fetched bytes"
     );
 }
+
+/// Emoji end-to-end (emoji batch): a text node carrying an emoji runs the
+/// whole stack — layout measure (advance through the fallback face) and
+/// paint (embedded color bitmap strike) — and lands COLORED ink on the
+/// canvas instead of a hollow .notdef. Gated on the host shipping an emoji
+/// font: font-less CI containers keep the graceful pre-emoji posture.
+#[test]
+fn emoji_text_paints_colored_ink_e2e() {
+    if crate::diting_fonts::platform_emoji_font().is_none() {
+        eprintln!("skipping: no platform emoji font on this host");
+        return;
+    }
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    let html = r#"<html><body style="margin:0"><p id="t" style="font-size:40px">🚀汉字</p></body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for("", (400.0, 200.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let (rects, items) = crate::diting_layout::layout_dom_with_paint(
+        &tree,
+        &styles,
+        &crate::diting_fonts::font_book(),
+        400.0,
+        200.0,
+    );
+
+    // Measure side: the mixed run must advance wider than the CJK alone —
+    // the emoji contributes its own shaped advance through the fallback.
+    let p = *rects.get(&tree.query_selector_all("#t").unwrap()[0]).unwrap();
+    let cjk_only = crate::diting_fonts::font_book().advance_width("汉字", 40.0, false);
+    assert!(
+        p.width > cjk_only + 20.0,
+        "the emoji must widen the run: {p:?} vs CJK-only {cjk_only}"
+    );
+
+    // Paint side: colored ink from the bitmap strike + dark CJK ink, both
+    // on the same canvas — measure and paint segmented identically.
+    let mut c = crate::diting_layout::paint::Canvas::new_filled(400, 120, [255, 255, 255, 255]);
+    crate::diting_layout::paint::execute(&items, &crate::diting_fonts::font_book(), &mut c);
+    let colored = c
+        .data
+        .chunks_exact(4)
+        .filter(|px| {
+            px[3] > 128
+                && (px[0] as i32 - px[1] as i32).abs().max((px[1] as i32 - px[2] as i32).abs()) > 32
+        })
+        .count();
+    let dark = c
+        .data
+        .chunks_exact(4)
+        .filter(|px| px[3] > 200 && px[0] < 100 && px[1] < 100 && px[2] < 100)
+        .count();
+    assert!(colored > 50, "the emoji must land colored ink (got {colored} px)");
+    assert!(dark > 20, "the CJK half must land dark ink (got {dark} px)");
+}

@@ -80,10 +80,49 @@ fn build_ctx(system_fonts: bool) -> parley::FontContext {
     ctx
 }
 
-/// The same bundle as a [`FontBook`] for the diting layout/paint stack.
+/// The same bundle as a [`FontBook`] for the diting layout/paint stack,
+/// with the platform's color-emoji face (when present) appended as a
+/// single-weight fallback — the same posture browsers take: the emoji font
+/// has no bold variant, and chars the primary pair lacks resolve through it.
 pub fn font_book() -> FontBook {
-    FontBook::from_pairs(REGULAR.to_vec(), BOLD.to_vec())
-        .expect("bundled CJK fonts parse (regenerate via scripts/make_font_bundle.py)")
+    let book = FontBook::from_pairs(REGULAR.to_vec(), BOLD.to_vec())
+        .expect("bundled CJK fonts parse (regenerate via scripts/make_font_bundle.py)");
+    match platform_emoji_font() {
+        Some(bytes) => book.with_fallbacks(vec![bytes]),
+        None => book,
+    }
+}
+
+/// Best-effort read of the host's color-emoji font (emoji batch): the
+/// bundled pair carries no emoji glyphs, and shipping Apple/Noto emoji
+/// bytes in-binary is both a size and a licensing question we don't need
+/// to answer — every platform a screenshot server runs on already ships
+/// one. `None` (file absent / unreadable) is the graceful pre-emoji
+/// behavior: runs stay .notdef exactly as before, no feature regression.
+///
+/// `pub(crate)` for the gated raster tests, which skip when it returns
+/// `None` (a font-less CI container must stay green).
+pub(crate) fn platform_emoji_font() -> Option<Vec<u8>> {
+    #[cfg(target_os = "macos")]
+    const CANDIDATES: &[&str] = &["/System/Library/Fonts/Apple Color Emoji.ttc"];
+    #[cfg(all(unix, not(target_os = "macos")))]
+    const CANDIDATES: &[&str] = &[
+        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+        "/usr/share/fonts/noto-color-emoji/NotoColorEmoji.ttf",
+        "/usr/share/fonts/truetype/google-noto-color-emoji/NotoColorEmoji.ttf",
+        "/usr/share/fonts/google-noto-color-emoji/NotoColorEmoji.ttf",
+    ];
+    #[cfg(target_os = "windows")]
+    const CANDIDATES: &[&str] = &[
+        r"C:\Windows\Fonts\seguiemj.ttf",
+    ];
+
+    for path in CANDIDATES {
+        if let Ok(bytes) = std::fs::read(path) {
+            return Some(bytes);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -125,6 +164,56 @@ mod tests {
                 ch as u32
             );
         }
+    }
+
+    /// Emoji fallback (emoji batch): with a platform emoji font present, a
+    /// char the primary pair lacks must resolve through the fallback face —
+    /// colored RGBA ink from the embedded bitmap strike, not a mono .notdef
+    /// box — and measure/paint must agree on the mixed run's advance (the
+    /// segmentation is shared by construction). Skipped when the host ships
+    /// no emoji font: a font-less CI container keeps the graceful posture.
+    #[test]
+    fn emoji_fallback_paints_color_ink() {
+        if platform_emoji_font().is_none() {
+            eprintln!("skipping: no platform emoji font on this host");
+            return;
+        }
+        let book = font_book();
+        assert!(book.has_fallbacks(), "the emoji face must load as a fallback");
+
+        let adv_cjk = book.advance_width("字字", 24.0, false);
+        let adv_mixed = book.advance_width("字🚀字", 24.0, false);
+        assert!(
+            adv_mixed > adv_cjk + 4.0,
+            "the emoji must contribute its own advance: {adv_mixed} vs {adv_cjk}"
+        );
+
+        let raster = book.rasterize("🚀", 24.0, false, [0, 0, 0, 255], 24.0 * 1.2);
+        assert!(raster.ink_bbox().is_some(), "the emoji must have ink");
+        let colored = raster
+            .data
+            .chunks_exact(4)
+            .filter(|p| {
+                p[3] > 128
+                    && (p[0] as i32 - p[1] as i32).abs().max((p[1] as i32 - p[2] as i32).abs()) > 32
+            })
+            .count();
+        assert!(
+            colored > 20,
+            "emoji ink must come from the colored bitmap strike, not a mono glyph ({colored} px)"
+        );
+
+        // The wrapped painter shares the segmentation: a mixed line wraps and
+        // both the CJK and the emoji halves paint.
+        let wrapped = book.rasterize_wrapped(
+            "文字🚀文字",
+            24.0,
+            false,
+            [0, 0, 0, 255],
+            60.0,
+            24.0 * 1.2,
+        );
+        assert!(wrapped.ink_bbox().is_some(), "wrapped mixed run must have ink");
     }
 
     /// The product claim: CJK text renders with the bundled collection and

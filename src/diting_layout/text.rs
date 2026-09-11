@@ -29,18 +29,30 @@
 use std::cell::RefCell;
 
 use swash::proxy::MetricsProxy;
-use swash::scale::{Render, ScaleContext, Source};
+use swash::scale::image::Content;
+use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::shape::ShapeContext;
 use swash::{FontRef, GlyphId};
+
+/// Which face a text segment shapes in: the primary bundle pair (weight
+/// selected by `bold`) or one of the fallback faces — single-weight tails
+/// like the emoji font, where bold emoji is the same face (as in browsers).
+#[derive(Clone, Copy, PartialEq)]
+enum FaceSel {
+    Primary,
+    Fallback(usize),
+}
 
 /// A regular/bold face pair loaded from raw TTF/OTF bytes.
 ///
 /// Deliberately minimal: one family, two weights, index-0 face. Weight
 /// matching beyond the pair (500, 800, …) snaps to the nearer face, which is
-/// also all the cross-check fixtures exercise.
+/// also all the cross-check fixtures exercise. Fallback faces (emoji batch)
+/// carry codepoints the pair lacks — see [`FaceSel`].
 pub struct FontBook {
     regular: Vec<u8>,
     bold: Vec<u8>,
+    fallbacks: Vec<Vec<u8>>,
 }
 
 thread_local! {
@@ -58,27 +70,115 @@ impl FontBook {
         if FontRef::from_index(&regular, 0).is_none() || FontRef::from_index(&bold, 0).is_none() {
             return None;
         }
-        Some(Self { regular, bold })
+        Some(Self { regular, bold, fallbacks: Vec::new() })
+    }
+
+    /// Append single-weight fallback faces (emoji batch): unparseable bytes
+    /// drop silently, parseable ones join the tail in order. A char the
+    /// primary pair doesn't map resolves through the first fallback that
+    /// covers it; measure and paint segment identically, so a mixed
+    /// "text 🚀 text" run advances the same bytes it rasterizes.
+    pub fn with_fallbacks(mut self, faces: Vec<Vec<u8>>) -> Self {
+        self.fallbacks
+            .extend(faces.into_iter().filter(|b| FontRef::from_index(b, 0).is_some()));
+        self
+    }
+
+    /// Whether any fallback face is loaded (the rasterizers' color-layer
+    /// allocation gate — empty books keep the pre-emoji allocation profile).
+    pub fn has_fallbacks(&self) -> bool {
+        !self.fallbacks.is_empty()
+    }
+
+    /// Allocate the RGBA color layer for a run (emoji batch): only when a
+    /// fallback face is loaded AND the run actually visits one — books
+    /// without fallbacks, and runs the primary pair fully covers, keep the
+    /// exact pre-emoji allocation profile.
+    fn color_layer_for(&self, text: &str, bold: bool, width: usize, height: usize) -> Option<Vec<u8>> {
+        if !self.has_fallbacks() || width == 0 || height == 0 {
+            return None;
+        }
+        let uses_fallback = self
+            .segments(text, bold)
+            .iter()
+            .any(|(sel, _)| matches!(sel, FaceSel::Fallback(_)));
+        uses_fallback.then(|| vec![0u8; width * height * 4])
     }
 
     fn face(&self, bold: bool) -> &Vec<u8> {
         if bold { &self.bold } else { &self.regular }
     }
 
+    fn face_bytes(&self, sel: FaceSel, bold: bool) -> &Vec<u8> {
+        match sel {
+            FaceSel::Primary => self.face(bold),
+            FaceSel::Fallback(i) => &self.fallbacks[i],
+        }
+    }
+
+    /// Split `text` into consecutive same-face segments (emoji batch): a
+    /// char maps to the primary pair when its cmap covers it, else to the
+    /// first fallback that does, else back to primary (.notdef — exactly
+    /// the pre-fallback behavior for still-uncovered chars). Boundary
+    /// kerning between segments is lost, but a fallback boundary only ever
+    /// separates scripts — never a kerned pair.
+    fn segments<'a>(&self, text: &'a str, bold: bool) -> Vec<(FaceSel, &'a str)> {
+        // Parse each candidate face once per call — the cmap probes below run
+        // per char, and re-parsing a face (table-directory walk) per char
+        // would dominate measurement on long pages.
+        let primary = FontRef::from_index(self.face(bold), 0);
+        let fallbacks: Vec<Option<FontRef>> =
+            self.fallbacks.iter().map(|b| FontRef::from_index(b, 0)).collect();
+        let covers = |f: Option<FontRef>, ch: char| -> bool {
+            // GlyphId is a plain u16 alias; 0 is .notdef.
+            f.map(|f| f.charmap().map(ch) != 0).unwrap_or(false)
+        };
+        let pick = |ch: char| -> FaceSel {
+            if covers(primary, ch) {
+                return FaceSel::Primary;
+            }
+            for (i, f) in fallbacks.iter().enumerate() {
+                if covers(*f, ch) {
+                    return FaceSel::Fallback(i);
+                }
+            }
+            FaceSel::Primary
+        };
+        let mut out: Vec<(FaceSel, &str)> = Vec::new();
+        let mut start = 0usize;
+        let mut cur: Option<FaceSel> = None;
+        for (i, ch) in text.char_indices() {
+            let sel = pick(ch);
+            match cur {
+                Some(prev) if prev == sel => continue,
+                Some(prev) => {
+                    out.push((prev, &text[start..i]));
+                    start = i;
+                    cur = Some(sel);
+                }
+                None => cur = Some(sel),
+            }
+        }
+        if let Some(prev) = cur {
+            out.push((prev, &text[start..]));
+        }
+        out
+    }
+
     /// Shaped advance of `text` at `font_size`, in px. Kerning (GPOS) and
     /// ligatures apply; CJK comes out at one full-width advance per glyph.
     pub fn advance_width(&self, text: &str, font_size: f32, bold: bool) -> f32 {
-        let bytes = self.face(bold);
-        let Some(font) = FontRef::from_index(bytes, 0) else {
-            return 0.0;
-        };
-        SHAPE_CTX.with_borrow_mut(|ctx| {
-            let mut shaper = ctx.builder(font).size(font_size).build();
-            shaper.add_str(text);
-            let mut width = 0.0f32;
-            shaper.shape_with(|cluster| width += cluster.advance());
-            width
-        })
+        let mut total = 0.0f32;
+        for (sel, seg) in self.segments(text, bold) {
+            let bytes = self.face_bytes(sel, bold);
+            let Some(font) = FontRef::from_index(bytes, 0) else { continue };
+            SHAPE_CTX.with_borrow_mut(|ctx| {
+                let mut shaper = ctx.builder(font).size(font_size).build();
+                shaper.add_str(seg);
+                shaper.shape_with(|cluster| total += cluster.advance());
+            });
+        }
+        total
     }
 
     /// Vertical metrics of the face, normalized to px at `font_size` — for
@@ -127,8 +227,19 @@ impl FontBook {
         let width = self.advance_width(text, font_size, bold).ceil() as usize + 2;
 
         let mut alpha = vec![0u8; width * height];
-        self.blit_line(&mut alpha, width, height, text, font_size, bold, 0.0, baseline - top);
-        let data = colorize(&alpha, color);
+        let mut layer = self.color_layer_for(text, bold, width, height);
+        self.blit_line(
+            &mut alpha,
+            layer.as_deref_mut(),
+            width,
+            height,
+            text,
+            font_size,
+            bold,
+            0.0,
+            baseline - top,
+        );
+        let data = colorize_layered(&alpha, layer.as_deref(), color);
         TextRaster { width, height, baseline: baseline - top, top, data }
     }
 
@@ -178,25 +289,34 @@ impl FontBook {
         let width = lines.iter().map(|l| l.width).fold(0.0, f32::max).ceil() as usize + 2;
 
         let mut alpha = vec![0u8; width * height];
+        // One color layer for the whole tile: every line's fallback glyphs
+        // max-blend into the same RGBA surface, then colorize merges it over
+        // the mono coverage once.
+        let mut layer = self.color_layer_for(&tokens.iter().map(|t| t.text.as_str()).collect::<String>(), bold, width, height);
         for (line, baseline) in lines.iter().zip(&baselines) {
             if line.token_idx.is_empty() {
                 continue;
             }
             let s: String =
                 line.token_idx.iter().map(|&i| tokens[i].text.as_str()).collect();
-            self.blit_line(&mut alpha, width, height, &s, font_size, bold, 0.0, baseline - top);
+            self.blit_line(&mut alpha, layer.as_deref_mut(), width, height, &s, font_size, bold, 0.0, baseline - top);
         }
-        let data = colorize(&alpha, color);
+        let data = colorize_layered(&alpha, layer.as_deref(), color);
         TextRaster { width, height, baseline: baselines[0] - top, top, data }
     }
 
     /// Shape `text` and blit its glyphs into an A8 `alpha` buffer (max
     /// blend) at pen origin `x0` with the baseline `baseline` rows from the
     /// tile top — the shared raster core behind [`Self::rasterize`] and
-    /// [`Self::rasterize_wrapped`].
+    /// [`Self::rasterize_wrapped`]. Emoji batch: the run segments by face;
+    /// primary segments keep the outline/Alpha path bit-for-bit, fallback
+    /// segments additionally try embedded color bitmaps (Apple sbix / CBDT
+    /// strikes, best fit) and land their RGBA pixels in `color_layer` —
+    /// same tile geometry, own colors, max-alpha blend like the mono path.
     fn blit_line(
         &self,
         alpha: &mut [u8],
+        mut color_layer: Option<&mut [u8]>,
         width: usize,
         height: usize,
         text: &str,
@@ -205,51 +325,85 @@ impl FontBook {
         x0: f32,
         baseline: f32,
     ) {
-        let bytes = self.face(bold);
-        let Some(font) = FontRef::from_index(bytes, 0) else { return };
+        let mono_sources = [Source::Outline];
+        let fallback_sources = [
+            Source::ColorBitmap(StrikeWith::BestFit),
+            Source::Bitmap(StrikeWith::BestFit),
+            Source::Outline,
+        ];
+        for (sel, seg) in self.segments(text, bold) {
+            let bytes = self.face_bytes(sel, bold);
+            let Some(font) = FontRef::from_index(bytes, 0) else { continue };
 
-        // Shape once: absolute x per glyph + y offset from the baseline.
-        let mut glyphs: Vec<(f32, f32, GlyphId)> = Vec::new();
-        SHAPE_CTX.with_borrow_mut(|ctx| {
-            let mut shaper = ctx.builder(font).size(font_size).build();
-            shaper.add_str(text);
-            let mut pen = 0.0f32;
-            shaper.shape_with(|cluster| {
-                for g in cluster.glyphs {
-                    glyphs.push((x0 + pen + g.x, g.y, g.id));
-                    pen += g.advance;
-                }
-            });
-        });
-
-        SCALE_CTX.with_borrow_mut(|sctx| {
-            let mut scaler = sctx.builder(font).size(font_size).build();
-            let render = Render::new(&[Source::Outline]);
-            for (pen_x, dy, gid) in glyphs {
-                // swash rasterizes outlines with zeno Origin::BottomLeft, so
-                // `placement.top` is the image's top edge ABOVE the pen:
-                // blit y = pen_y - top (data rows are ordinary top-down).
-                let Some(img) = render.render(&mut scaler, gid) else { continue };
-                let ox = pen_x.round() as i64 + img.placement.left as i64;
-                let oy = (baseline + dy).round() as i64 - img.placement.top as i64;
-                for gy in 0..img.placement.height as i64 {
-                    let Some(ty) = (oy + gy).checked_sub(0).and_then(|v| usize::try_from(v).ok())
-                    else { continue };
-                    if ty >= height {
-                        continue;
+            // Shape once: absolute x per glyph + y offset from the baseline.
+            let mut glyphs: Vec<(f32, f32, GlyphId)> = Vec::new();
+            SHAPE_CTX.with_borrow_mut(|ctx| {
+                let mut shaper = ctx.builder(font).size(font_size).build();
+                shaper.add_str(seg);
+                let mut pen = 0.0f32;
+                shaper.shape_with(|cluster| {
+                    for g in cluster.glyphs {
+                        glyphs.push((x0 + pen + g.x, g.y, g.id));
+                        pen += g.advance;
                     }
-                    for gx in 0..img.placement.width as i64 {
-                        let Some(tx) = usize::try_from(ox + gx).ok() else { continue };
-                        if tx >= width {
+                });
+            });
+
+            SCALE_CTX.with_borrow_mut(|sctx| {
+                let mut scaler = sctx.builder(font).size(font_size).build();
+                let sources = match sel {
+                    FaceSel::Primary => &mono_sources[..],
+                    FaceSel::Fallback(_) => &fallback_sources[..],
+                };
+                let render = Render::new(sources);
+                for (pen_x, dy, gid) in glyphs {
+                    // swash rasterizes outlines with zeno Origin::BottomLeft,
+                    // so `placement.top` is the image's top edge ABOVE the
+                    // pen: blit y = pen_y - top (data rows are ordinary
+                    // top-down). Bitmap strikes carry the same contract.
+                    let Some(img) = render.render(&mut scaler, gid) else { continue };
+                    let ox = pen_x.round() as i64 + img.placement.left as i64;
+                    let oy = (baseline + dy).round() as i64 - img.placement.top as i64;
+                    let color_px = matches!(img.content, Content::Color)
+                        && color_layer.as_ref().is_some_and(|l| !l.is_empty());
+                    for gy in 0..img.placement.height as i64 {
+                        let Some(ty) = (oy + gy).checked_sub(0).and_then(|v| usize::try_from(v).ok())
+                        else { continue };
+                        if ty >= height {
                             continue;
                         }
-                        let cov = img.data[(gy * img.placement.width as i64 + gx) as usize];
-                        let slot = &mut alpha[ty * width + tx];
-                        *slot = (*slot).max(cov);
+                        for gx in 0..img.placement.width as i64 {
+                            let Some(tx) = usize::try_from(ox + gx).ok() else { continue };
+                            if tx >= width {
+                                continue;
+                            }
+                            if color_px {
+                                let si = ((gy * img.placement.width as i64 + gx) * 4) as usize;
+                                let a = img.data[si + 3];
+                                if a == 0 {
+                                    continue;
+                                }
+                                let di = (ty * width + tx) * 4;
+                                let layer = color_layer.as_mut().unwrap();
+                                if a >= layer[di + 3] {
+                                    layer[di..di + 4].copy_from_slice(&[
+                                        img.data[si],
+                                        img.data[si + 1],
+                                        img.data[si + 2],
+                                        a,
+                                    ]);
+                                }
+                            } else {
+                                let cov =
+                                    img.data[(gy * img.placement.width as i64 + gx) as usize];
+                                let slot = &mut alpha[ty * width + tx];
+                                *slot = (*slot).max(cov);
+                            }
+                        }
                     }
                 }
-            }
-        });
+            });
+        }
     }
 }
 
@@ -270,6 +424,30 @@ fn colorize(alpha: &[u8], color: [u8; 4]) -> Vec<u8> {
             continue;
         }
         data[i * 4..i * 4 + 4].copy_from_slice(&[color[0], color[1], color[2], a]);
+    }
+    data
+}
+
+/// [`colorize`] with the emoji batch's color layer merged over the mono
+/// fill: a layer pixel with alpha ≥ the mono coverage wins outright (color
+/// glyphs bring their own RGB — the fill color must not tint them), with
+/// the same color[3] opacity fold `colorize` applies, so a faded element
+/// fades its emoji too. Where no layer ink exists the mono path is
+/// byte-for-byte `colorize`.
+fn colorize_layered(alpha: &[u8], layer: Option<&[u8]>, color: [u8; 4]) -> Vec<u8> {
+    let mut data = colorize(alpha, color);
+    let Some(layer) = layer else { return data };
+    let ca = color[3] as u16;
+    for (i, px) in layer.chunks_exact(4).enumerate() {
+        let a = px[3];
+        if a == 0 || i * 4 + 4 > data.len() {
+            continue;
+        }
+        let a = (a as u16 * ca / 255) as u8;
+        if a == 0 || a < data[i * 4 + 3] {
+            continue;
+        }
+        data[i * 4..i * 4 + 4].copy_from_slice(&[px[0], px[1], px[2], a]);
     }
     data
 }
