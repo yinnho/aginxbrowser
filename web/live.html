@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aginxbrowser — live session view</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --fg: #e6edf3; --dim: #8b949e; --accent: #3fb950; --link: #58a6ff;
+    --danger: #f85149; --warn: #d29922;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+    background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap;
+  }
+  header .logo { font-weight: 700; letter-spacing: .3px; white-space: nowrap; }
+  header .logo span { color: var(--accent); }
+  #urlbar {
+    flex: 1 1 320px; min-width: 200px; padding: 6px 10px;
+    background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px;
+    font: 13px ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  button {
+    padding: 6px 10px; background: #21262d; color: var(--fg);
+    border: 1px solid var(--border); border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  button:hover { background: #30363d; }
+  button.primary { background: #1f4d2a; border-color: #2ea043; }
+  button.primary:hover { background: #276e37; }
+  select, input[type=text], input[type=number] {
+    padding: 6px 8px; background: var(--bg); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 6px; font-size: 13px;
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); flex: none; }
+  .dot.live { background: var(--accent); }
+  .dot.err { background: var(--danger); }
+  #stats { color: var(--dim); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  #banner {
+    display: none; padding: 6px 12px; background: #3d1d20; color: #ffb3ad;
+    border-bottom: 1px solid var(--border); font-size: 13px;
+  }
+  main { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+  /* --- session picker --- */
+  #picker { padding: 24px; max-width: 760px; margin: 0 auto; overflow-y: auto; height: 100%; }
+  #picker h1 { font-size: 18px; margin: 0 0 4px; }
+  #picker .sub { color: var(--dim); margin: 0 0 18px; }
+  #newform { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 22px; }
+  .sess-card {
+    display: flex; align-items: center; gap: 10px; padding: 10px 12px; margin-bottom: 8px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px; cursor: pointer;
+  }
+  .sess-card:hover { border-color: var(--link); }
+  .sess-card .id { font-family: ui-monospace, Menlo, monospace; color: var(--link); }
+  .sess-card .meta { color: var(--dim); font-size: 12px; margin-left: auto; white-space: nowrap; }
+  .badge {
+    font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); color: var(--dim);
+  }
+  .badge.keep { color: var(--accent); border-color: #2ea043; }
+  .badge.persist { color: var(--warn); border-color: var(--warn); }
+  /* --- live view --- */
+  #stagewrap {
+    height: 100%; overflow: auto; display: none;
+    background: repeating-conic-gradient(#111 0% 25%, #0d1117 0% 50%) 50% / 24px 24px;
+  }
+  #shot {
+    display: block; margin: 0 auto; image-rendering: auto;
+    cursor: crosshair; touch-action: none;
+  }
+  #inputbar {
+    display: none; gap: 8px; padding: 8px 12px; align-items: center;
+    background: var(--panel); border-top: 1px solid var(--border);
+  }
+  #target { color: var(--dim); font-size: 12px; white-space: nowrap; font-family: ui-monospace, Menlo, monospace; }
+  #typebox { flex: 1; }
+  .ripple {
+    position: absolute; width: 22px; height: 22px; margin: -11px 0 0 -11px;
+    border: 2px solid var(--accent); border-radius: 50%; pointer-events: none;
+    animation: rip .5s ease-out forwards;
+  }
+  @keyframes rip { from { transform: scale(.3); opacity: 1; } to { transform: scale(1.6); opacity: 0; } }
+  footer { padding: 4px 12px; color: var(--dim); font-size: 11px; }
+  footer a { color: var(--link); text-decoration: none; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">agin<span>xbrowser</span> live</div>
+  <span class="dot" id="dot"></span>
+  <input id="urlbar" type="text" placeholder="https:// — navigate the session here" spellcheck="false">
+  <button class="primary" id="go">Go</button>
+  <select id="ms" title="Frame poll interval">
+    <option value="2000">0.5 fps</option>
+    <option value="1000" selected>1 fps</option>
+    <option value="400">2.5 fps</option>
+    <option value="250">4 fps</option>
+  </select>
+  <button id="pause">Pause</button>
+  <button id="openPng" title="Open the current frame full-size in a new tab">Frame ↗</button>
+  <button id="back">Sessions</button>
+  <span id="stats">—</span>
+</header>
+<div id="banner"></div>
+
+<main>
+  <div id="picker">
+    <h1>Live sessions</h1>
+    <p class="sub">Watch an agent-driven browser session and take over with your mouse. Same engine, same session — every click lands on the real page.</p>
+    <form id="newform">
+      <input type="text" id="newurl" placeholder="https://example.com" spellcheck="false" style="flex:1 1 260px">
+      <input type="number" id="neww" placeholder="width" min="200" max="3840" style="width:90px">
+      <input type="number" id="newh" placeholder="height" min="200" max="4320" style="width:90px">
+      <button class="primary" type="submit">New session</button>
+    </form>
+    <div id="sesslist"></div>
+  </div>
+  <div id="stagewrap"><img id="shot" alt="session frame"></div>
+</main>
+
+<div id="inputbar">
+  <span id="target">click a field on the frame first</span>
+  <input type="text" id="typebox" placeholder="type text, Enter to send (input/change events)" spellcheck="false">
+  <button class="primary" id="typesend">Send</button>
+</div>
+<footer>aginxbrowser — single-binary agent browser · <a href="https://github.com/yinnho/aginxbrowser">GitHub</a></footer>
+
+<script>
+"use strict";
+// ---------------------------------------------------------------------------
+// Config: ?session=<id> opens a live view directly; ?api=<base> overrides the
+// API origin (default: same origin — the hosted deployment serves this page
+// next to the REST API); ?ms=<n> sets the initial poll interval.
+// API surface used (all same-origin):
+//   GET  /session/list                      → {count, sessions:[{session_id, idle_secs, expires_in_secs, keepalive, persistent}]}
+//   POST /session/create {url,width,height} → {session_id, ...}
+//   POST /session/:id/navigate   {url}
+//   POST /session/:id/state      {}         → text: url=/title=/viewport=WxH + indexed elements
+//   POST /session/:id/screenshot {}         → {url,width,height,image_base64,format}
+//   POST /session/:id/click_xy   {x,y,button?,click_count?}
+//   POST /session/:id/scroll     {direction,amount}
+//   POST /session/:id/input      {index,text,events}
+// ---------------------------------------------------------------------------
+const qs = new URLSearchParams(location.search);
+const API = (qs.get("api") || "").replace(/\/+$/, "");
+const $ = (id) => document.getElementById(id);
+
+const state = {
+  session: qs.get("session") || "",
+  ms: Number(qs.get("ms")) || Number($("ms").value) || 1000,
+  paused: false,
+  img: $("shot"),
+  lastFrameAt: 0, frameMs: null, frames: 0, errStreak: 0,
+  natW: 0, natH: 0,
+  elements: [],          // [{index,tag,rect:[x,y,w,h]}] viewport-relative
+  targetIndex: null,
+  pollTimer: 0, stateTimer: 0,
+};
+
+function api(path, opts) {
+  return fetch(API + path, Object.assign({ headers: { "Content-Type": "application/json" } }, opts))
+    .then(async (r) => {
+      if (!r.ok) throw new Error((await r.text().catch(() => "")) || r.status + " " + r.statusText);
+      return r;
+    });
+}
+const j = (path, body) => api(path, { method: "POST", body: JSON.stringify(body || {}) });
+const banner = (msg, isErr) => {
+  const b = $("banner");
+  if (!msg) { b.style.display = "none"; return; }
+  b.textContent = msg; b.style.display = "block";
+  b.style.background = isErr ? "#3d1d20" : "#2a2313";
+  b.style.color = isErr ? "#ffb3ad" : "#e3b341";
+};
+
+// --- view switching --------------------------------------------------------
+function showLive(id) {
+  state.session = id;
+  history.replaceState(null, "", "?session=" + encodeURIComponent(id) +
+    (API ? "&api=" + encodeURIComponent(API) : ""));
+  $("picker").style.display = "none";
+  $("stagewrap").style.display = "block";
+  $("inputbar").style.display = "flex";
+  banner("");
+  startLoops();
+}
+function showPicker() {
+  stopLoops();
+  state.session = "";
+  history.replaceState(null, "", location.pathname + (API ? "?api=" + encodeURIComponent(API) : ""));
+  $("picker").style.display = "block";
+  $("stagewrap").style.display = "none";
+  $("inputbar").style.display = "none";
+  $("dot").className = "dot";
+  refreshList();
+}
+
+// --- session picker --------------------------------------------------------
+async function refreshList() {
+  const box = $("sesslist");
+  try {
+    const r = await (await api("/session/list")).json();
+    if (!r.sessions.length) {
+      box.innerHTML = '<p class="sub">No live sessions. Create one above, or point your agent at the <code>/session/create</code> API / MCP <code>session_create</code> tool and reload this page.</p>';
+      return;
+    }
+    box.innerHTML = "";
+    for (const s of r.sessions) {
+      const card = document.createElement("div");
+      card.className = "sess-card";
+      const ttl = s.expires_in_secs == null ? "" : `expires in ${s.expires_in_secs}s`;
+      card.innerHTML =
+        `<span class="id">${s.session_id.slice(0, 10)}…</span>` +
+        (s.keepalive ? '<span class="badge keep">keepalive</span>' : "") +
+        (s.persistent ? '<span class="badge persist">persistent</span>' : "") +
+        `<span class="meta">idle ${s.idle_secs}s · ${ttl}</span>`;
+      card.onclick = () => showLive(s.session_id);
+      box.appendChild(card);
+    }
+  } catch (e) {
+    box.innerHTML = `<p class="sub" style="color:var(--danger)">API unreachable (${e.message}). The live view needs the REST API on the same origin — self-host with <code>aginxbrowser serve</code> behind a reverse proxy, or use <code>?api=</code> when the engine sends CORS headers.</p>`;
+  }
+}
+$("newform").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const url = $("newurl").value.trim();
+  const body = { url };
+  if ($("neww").value) body.width = Number($("neww").value);
+  if ($("newh").value) body.height = Number($("newh").value);
+  try {
+    const r = await (await j("/session/create", body)).json();
+    showLive(r.session_id);
+  } catch (e) { banner("create failed: " + e.message, true); }
+};
+
+// --- live loops ------------------------------------------------------------
+function startLoops() {
+  stopLoops();
+  const tick = async () => {
+    if (!state.paused && state.session) await grabFrame();
+    state.pollTimer = setTimeout(tick, state.ms);
+  };
+  const stick = async () => {
+    if (state.session && !state.paused) await grabState();
+    state.stateTimer = setTimeout(stick, 3000);
+  };
+  tick(); stick();
+}
+function stopLoops() {
+  clearTimeout(state.pollTimer); clearTimeout(state.stateTimer);
+}
+
+async function grabFrame() {
+  const t0 = performance.now();
+  try {
+    const r = await (await j(`/session/${encodeURIComponent(state.session)}/screenshot`, {})).json();
+    state.img.src = "data:image/" + (r.format || "png") + ";base64," + r.image_base64;
+    state.natW = r.width; state.natH = r.height;
+    state.frameMs = Math.round(performance.now() - t0);
+    state.frames++; state.errStreak = 0;
+    state.lastFrameAt = Date.now();
+    $("dot").className = "dot live";
+    if (r.url) { const ub = $("urlbar"); if (document.activeElement !== ub) ub.value = r.url; }
+    updateStats();
+  } catch (e) {
+    state.errStreak++;
+    $("dot").className = "dot err";
+    updateStats();
+    if (state.errStreak >= 3) banner("frame fetch failed: " + e.message, true);
+  }
+}
+
+async function grabState() {
+  try {
+    const text = await (await j(`/session/${encodeURIComponent(state.session)}/state`, {})).text();
+    const els = [];
+    // Lines: `[12] <a href="…" rect=[x,y,WxH]>text</a>` — rect is mid-line;
+    // coordinates are viewport-relative, the same space click_xy dispatches into.
+    const re = /^\[(\d+)\]\s+(\S+).*?rect=\[(-?\d+),(-?\d+),(\d+)x(\d+)\]/;
+    for (const line of text.split("\n")) {
+      const m = re.exec(line.trim());
+      if (m) els.push({
+        index: Number(m[1]), tag: m[2],
+        rect: [Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6])],
+      });
+    }
+    state.elements = els;
+  } catch { /* state is a nicety; frames carry the view */ }
+}
+
+function updateStats() {
+  const fps = state.frameMs ? (1000 / state.ms).toFixed(1) : "—";
+  $("stats").textContent =
+    `${state.frameMs != null ? state.frameMs + "ms/frame" : "…"} · poll ${fps}/s · ${state.frames}f` +
+    (state.errStreak ? ` · ${state.errStreak} err` : "");
+}
+
+// --- interactions: click / double / right / wheel → real session events ----
+// Map a point in the displayed <img> to the frame's natural CSS-pixel space.
+function toNatural(ev) {
+  const r = state.img.getBoundingClientRect();
+  const x = (ev.clientX - r.left) * (state.natW || r.width) / r.width;
+  const y = (ev.clientY - r.top) * (state.natH || r.height) / r.height;
+  return { x: Math.max(0, Math.min(x, state.natW)), y: Math.max(0, Math.min(y, state.natH)) };
+}
+function ripple(ev) {
+  const wrap = $("stagewrap");
+  const d = document.createElement("div");
+  d.className = "ripple";
+  const pr = wrap.getBoundingClientRect();
+  d.style.left = (ev.clientX - pr.left + wrap.scrollLeft) + "px";
+  d.style.top = (ev.clientY - pr.top + wrap.scrollTop) + "px";
+  wrap.appendChild(d);
+  setTimeout(() => d.remove(), 500);
+}
+function elementAt(x, y) {
+  // Smallest indexed rect containing the point — the most specific hit.
+  let best = null, bestArea = Infinity;
+  for (const el of state.elements) {
+    const [rx, ry, rw, rh] = el.rect;
+    if (x >= rx && x <= rx + rw && y >= ry && y <= ry + rh && rw * rh < bestArea) {
+      best = el; bestArea = rw * rh;
+    }
+  }
+  return best;
+}
+async function act(path, body) {
+  try { await j(`/session/${encodeURIComponent(state.session)}/${path}`, body); }
+  catch (e) { banner(`${path} failed: ` + e.message, true); return false; }
+  return true;
+}
+
+state.img.addEventListener("click", async (ev) => {
+  const p = toNatural(ev); ripple(ev);
+  const hit = elementAt(p.x, p.y);
+  if (hit) { state.targetIndex = hit.index; $("target").textContent = `[${hit.index}] ${hit.tag}`; }
+  else { state.targetIndex = null; $("target").textContent = "no indexed element at click"; }
+  if (await act("click_xy", { x: Math.round(p.x), y: Math.round(p.y) })) grabFrame();
+});
+state.img.addEventListener("dblclick", async (ev) => {
+  const p = toNatural(ev);
+  if (await act("click_xy", { x: Math.round(p.x), y: Math.round(p.y), click_count: 2 })) grabFrame();
+});
+state.img.addEventListener("contextmenu", async (ev) => {
+  ev.preventDefault();
+  const p = toNatural(ev); ripple(ev);
+  if (await act("click_xy", { x: Math.round(p.x), y: Math.round(p.y), button: "right" })) grabFrame();
+});
+$("stagewrap").addEventListener("wheel", async (ev) => {
+  if (ev.target !== state.img) return;
+  ev.preventDefault();
+  const dir = ev.deltaY > 0 ? "down" : "up";
+  if (await act("scroll", { direction: dir, amount: 1 })) grabFrame();
+}, { passive: false });
+
+// Touch: single tap = click at the tap point (coordinates only; the engine
+// dispatches the full pointer/mouse event sequence itself).
+state.img.addEventListener("pointerdown", (ev) => {
+  if (ev.pointerType !== "touch") return;
+  const p = toNatural(ev); ripple(ev);
+  const hit = elementAt(p.x, p.y);
+  if (hit) { state.targetIndex = hit.index; $("target").textContent = `[${hit.index}] ${hit.tag}`; }
+  act("click_xy", { x: Math.round(p.x), y: Math.round(p.y) }).then((ok) => { if (ok) grabFrame(); });
+});
+
+// --- header controls -------------------------------------------------------
+$("go").onclick = async () => {
+  let url = $("urlbar").value.trim();
+  if (!url) return;
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) url = "https://" + url;
+  if (await act("navigate", { url })) { grabFrame(); grabState(); }
+};
+$("urlbar").addEventListener("keydown", (ev) => { if (ev.key === "Enter") $("go").click(); });
+$("ms").onchange = () => { state.ms = Number($("ms").value); updateStats(); };
+$("pause").onclick = () => {
+  state.paused = !state.paused;
+  $("pause").textContent = state.paused ? "Resume" : "Pause";
+  $("dot").className = state.paused ? "dot" : "dot live";
+};
+$("openPng").onclick = () => { if (state.img.src) window.open(state.img.src, "_blank"); };
+$("back").onclick = showPicker;
+
+// --- typing takeover -------------------------------------------------------
+async function sendType() {
+  const text = $("typebox").value;
+  if (!text || state.targetIndex == null) return;
+  if (await act("input", { index: state.targetIndex, text, events: "full" })) {
+    $("typebox").value = ""; grabFrame();
+  }
+}
+$("typesend").onclick = sendType;
+$("typebox").addEventListener("keydown", (ev) => { if (ev.key === "Enter") sendType(); });
+
+// --- boot ------------------------------------------------------------------
+$("ms").value = String(state.ms);
+if (state.session) showLive(state.session); else showPicker();
+</script>
+</body>
+</html>
