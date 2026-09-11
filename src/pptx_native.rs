@@ -231,6 +231,13 @@ async fn fetch_image(page: &Page, url: &str) -> Option<Vec<u8>> {
             if crate::diting_js::ops::validate_fetch_url(&parsed).is_err() {
                 return None;
             }
+            // `Network.setBlockedURLs` holds for render-path fetches too
+            // (same hard block as the static loaders): a match keeps the
+            // placeholder instead of reaching the wire.
+            if page.url_blocked(url) {
+                tracing::info!("Blocked pptx image by Network.setBlockedURLs: {}", url);
+                return None;
+            }
             let base = page.url_string();
             let fetched = tokio::time::timeout(
                 std::time::Duration::from_secs(3),

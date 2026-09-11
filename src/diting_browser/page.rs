@@ -390,7 +390,9 @@ impl Page {
 
     /// Hard block from `Network.setBlockedURLs`: matched resources fail
     /// outright (Chrome semantics — no pause, no client round trip).
-    fn url_blocked(&self, url: &str) -> bool {
+    /// `pub(crate)`: render-path fetchers outside this module (screenshot
+    /// prefetch, pptx_native image export) share the same hard block.
+    pub(crate) fn url_blocked(&self, url: &str) -> bool {
         if self.blocked_urls.is_empty() {
             return false;
         }
@@ -1851,6 +1853,20 @@ impl Page {
     pub async fn fetch_band_images(&self, urls: Vec<String>) {
         const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
         const PER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+        // Same hard block the static script/stylesheet loaders enforce: a
+        // `Network.setBlockedURLs` match must not reach the wire from the
+        // render path either (the frame keeps its placeholder).
+        let urls: Vec<String> = urls
+            .into_iter()
+            .filter(|u| {
+                if self.url_blocked(u) {
+                    tracing::info!("Blocked band image by Network.setBlockedURLs: {}", u);
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
         let base = self.url_string();
         let client = self.http_client.clone();
         #[cfg(feature = "stealth")]
@@ -4526,5 +4542,64 @@ ms.addEventListener('sourceopen', function(){ \
             "a spinning module top-level must not wedge the load lifecycle"
         );
         assert_eq!(p.evaluate("window.__dcl__"), serde_json::json!(true));
+    }
+
+    // Network.setBlockedURLs must reach render-path fetches too (the
+    // obscura 97ff86d / #890 same-hole): the band-image pump shares the
+    // hard-block list the static script/stylesheet loaders already enforce,
+    // so a matched URL never opens a connection. The unblocked sibling in
+    // the same batch is the negative control — it must still arrive.
+    #[cfg(feature = "screenshot")]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocked_urls_stop_band_image_fetches() {
+        let _net = net_test_guard();
+        // A server that records every request path it serves.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let recorder = seen.clone();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>"#;
+            for _ in 0..8 {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let path = String::from_utf8_lossy(&buf[..n])
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_string();
+                recorder.lock().unwrap().push(path);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: image/svg+xml\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    svg.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(svg);
+                let _ = stream.flush();
+            }
+        });
+
+        let mut p = test_page();
+        p.set_blocked_urls(vec!["*blocked.svg*".to_string()]);
+        p.fetch_band_images(vec![
+            format!("http://127.0.0.1:{port}/blocked.svg"),
+            format!("http://127.0.0.1:{port}/allowed.svg"),
+        ])
+        .await;
+
+        let served = seen.lock().unwrap().clone();
+        assert!(
+            served.iter().all(|path| path == "/allowed.svg"),
+            "a setBlockedURLs match must not open a render-path connection, served: {served:?}"
+        );
+        assert_eq!(
+            served.len(),
+            1,
+            "the unblocked sibling in the batch must still load (negative control)"
+        );
     }
 }

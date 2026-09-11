@@ -217,6 +217,12 @@ pub async fn prefetch_render_resources(
         u: &url::Url,
         doc: Option<&str>,
     ) -> Option<crate::diting_net::Response> {
+        // `Network.setBlockedURLs` holds for render-path fetches too (same
+        // hard block as the static loaders): a match is never prefetched.
+        if page.inner.url_blocked(u.as_str()) {
+            tracing::info!("Blocked prefetch by Network.setBlockedURLs: {}", u);
+            return None;
+        }
         #[cfg(feature = "stealth")]
         if let Some(ref stealth) = page.inner.stealth_client {
             return stealth.fetch(u).await.ok();
