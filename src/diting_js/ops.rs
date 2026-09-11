@@ -2747,9 +2747,9 @@ async fn op_fetch_url(
             req = req.header("User-Agent", &effective_ua);
         }
         for (name, value) in [
-            ("sec-ch-ua", sec_ch_ua),
+            ("sec-ch-ua", sec_ch_ua.clone()),
             ("sec-ch-ua-mobile", "?0".to_string()),
-            ("sec-ch-ua-platform", sec_ch_ua_platform),
+            ("sec-ch-ua-platform", sec_ch_ua_platform.clone()),
             ("accept", "*/*".to_string()),
         ] {
             if !custom_headers.keys().any(|k| k.eq_ignore_ascii_case(name)) {
@@ -2809,14 +2809,16 @@ async fn op_fetch_url(
                 // plain rustls dies on the handshake, the stealth stack's
                 // BoringSSL connects). A GET/HEAD transport failure gets the
                 // same one-shot legacy-TLS escape hatch the script and
-                // stylesheet loaders use; per-hop JS headers (Origin,
-                // Referer, sec-fetch-*) do not ride the retry — the accepted
-                // cost of an escape hatch, mirrored in client.rs. Any other
-                // method rides only when the failure is connect-stage
-                // (DNS/TCP/TLS — the request provably never left the
-                // machine), so a POST form submit cannot double-submit
-                // (taobao seller-backend shape: CBC-only endpoints killed
-                // every publish POST at the handshake).
+                // stylesheet loaders use; any other method rides only when
+                // the failure is connect-stage (DNS/TCP/TLS — the request
+                // provably never left the machine), so a POST form submit
+                // cannot double-submit (taobao seller-backend shape:
+                // CBC-only endpoints killed every publish POST at the
+                // handshake). The retry also rebuilds the hop's scripted
+                // header set (Origin, Referer, Fetch-Metadata, client hints)
+                // and the credentials policy, so the legacy transport sends
+                // the same request, not a bare one — Referer-checking WAFs
+                // 403 the bare shape even after the handshake succeeds.
                 let fallback_ctype = custom_headers
                     .iter()
                     .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
@@ -2828,17 +2830,77 @@ async fn op_fetch_url(
                             || e.is_connect() =>
                     {
                         match url::Url::parse(&current_url) {
-                            Ok(u) => Some(
-                                hc.scripted_fetch_fallback(
-                                    &current_method,
-                                    &u,
-                                    &e.to_string(),
-                                    (!current_body.is_empty()).then_some(current_body.as_slice()),
-                                    fallback_ctype.as_deref(),
-                                    e.is_connect(),
+                            Ok(u) => {
+                                let mut fallback_headers = custom_headers.clone();
+                                fn header_set(
+                                    headers: &HashMap<String, String>,
+                                    name: &str,
+                                ) -> bool {
+                                    headers.keys().any(|k| k.eq_ignore_ascii_case(name))
+                                }
+                                if (method_needs_origin || current_is_cross_origin)
+                                    && !header_set(&fallback_headers, "origin")
+                                {
+                                    fallback_headers
+                                        .insert("Origin".into(), page_origin.clone());
+                                }
+                                if !header_set(&fallback_headers, "user-agent") {
+                                    fallback_headers
+                                        .insert("User-Agent".into(), effective_ua.clone());
+                                }
+                                for (name, value) in [
+                                    ("sec-ch-ua", sec_ch_ua.clone()),
+                                    ("sec-ch-ua-mobile", "?0".to_string()),
+                                    ("sec-ch-ua-platform", sec_ch_ua_platform.clone()),
+                                    ("accept", "*/*".to_string()),
+                                    (
+                                        "sec-fetch-site",
+                                        if current_is_cross_origin {
+                                            "cross-site"
+                                        } else {
+                                            "same-origin"
+                                        }
+                                        .to_string(),
+                                    ),
+                                    (
+                                        "sec-fetch-mode",
+                                        if mode.is_empty() {
+                                            "cors"
+                                        } else {
+                                            mode.as_str()
+                                        }
+                                        .to_string(),
+                                    ),
+                                    ("sec-fetch-dest", "empty".to_string()),
+                                ] {
+                                    if !header_set(&fallback_headers, name) {
+                                        fallback_headers.insert(name.to_string(), value);
+                                    }
+                                }
+                                if !document_url.is_empty()
+                                    && !header_set(&fallback_headers, "referer")
+                                {
+                                    if let Ok(doc) = Url::parse(&document_url) {
+                                        let referrer = crate::diting_net::client::HttpClient::navigation_referrer(&doc, &u);
+                                        if !referrer.is_empty() {
+                                            fallback_headers.insert("Referer".into(), referrer);
+                                        }
+                                    }
+                                }
+                                Some(
+                                    hc.scripted_fetch_fallback(
+                                        &current_method,
+                                        &u,
+                                        &e.to_string(),
+                                        (!current_body.is_empty()).then_some(current_body.as_slice()),
+                                        fallback_ctype.as_deref(),
+                                        e.is_connect(),
+                                        Some(&fallback_headers),
+                                        credentials_allowed,
+                                    )
+                                    .await,
                                 )
-                                .await,
-                            ),
+                            }
                             Err(_) => None,
                         }
                     }

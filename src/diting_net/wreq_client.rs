@@ -351,7 +351,7 @@ impl StealthHttpClient {
     }
 
     pub async fn fetch(&self, url: &Url) -> Result<Response, NetError> {
-        self.fetch_inner(url, None, wreq::Method::GET, None, None).await
+        self.fetch_inner(url, None, wreq::Method::GET, None, None, None, true).await
     }
 
     /// Subresource GET (band-paint image fetch, 反馈⑫ shape): like [`fetch`]
@@ -364,7 +364,7 @@ impl StealthHttpClient {
         url: &Url,
         referrer: Option<&str>,
     ) -> Result<Response, NetError> {
-        self.fetch_inner(url, referrer, wreq::Method::GET, None, None)
+        self.fetch_inner(url, referrer, wreq::Method::GET, None, None, None, true)
             .await
     }
 
@@ -373,7 +373,11 @@ impl StealthHttpClient {
     /// CBC-only servers — now a connect-stage POST failure rides here with its
     /// body and Content-Type. The method name is parsed rather than passed as
     /// a type so the plain client's reqwest Method never has to unify with
-    /// wreq's.
+    /// wreq's. `request_headers` mirrors what the scripted attempt was
+    /// sending (Origin, Referer, Fetch-Metadata, client hints) — Referer-
+    /// checking WAFs 403 the bare shape even after the handshake succeeds —
+    /// and `include_cookies` carries the fetch credentials policy.
+    #[allow(clippy::too_many_arguments)]
     pub async fn fetch_with_body(
         &self,
         url: &Url,
@@ -381,13 +385,16 @@ impl StealthHttpClient {
         method: &str,
         body: Option<&[u8]>,
         content_type: Option<&str>,
+        request_headers: Option<&HashMap<String, String>>,
+        include_cookies: bool,
     ) -> Result<Response, NetError> {
         let method = wreq::Method::from_bytes(method.as_bytes())
             .map_err(|e| NetError::Network(format!("invalid method {method:?}: {e}")))?;
-        self.fetch_inner(url, referrer, method, body, content_type)
+        self.fetch_inner(url, referrer, method, body, content_type, request_headers, include_cookies)
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn fetch_inner(
         &self,
         url: &Url,
@@ -395,6 +402,8 @@ impl StealthHttpClient {
         method: wreq::Method,
         body: Option<&[u8]>,
         content_type: Option<&str>,
+        request_headers: Option<&HashMap<String, String>>,
+        include_cookies: bool,
     ) -> Result<Response, NetError> {
         // The stealth path must enforce the same SSRF rules as the reqwest
         // path — without this, StealthHttpClient could reach loopback/private
@@ -438,16 +447,30 @@ impl StealthHttpClient {
             let ua = self.user_agent.read().await.clone();
             let lang = self.accept_language.read().await.clone();
             let (_, platform) = crate::diting_net::client::derive_client_hints(&ua);
+            // Request-local scripted headers (the fetch()/XHR escape hatch)
+            // mirror what the primary reqwest attempt was sending and win
+            // over both the transport defaults and extra_headers, so the
+            // retry is the same request on another stack.
+            let request_local = |name: &str| {
+                request_headers
+                    .iter()
+                    .flat_map(|h| h.keys())
+                    .any(|k| k.eq_ignore_ascii_case(name))
+            };
             let extra = self.extra_headers.read().await;
-            req = req.header("User-Agent", &ua);
+            if !request_local("user-agent") {
+                req = req.header("User-Agent", &ua);
+            }
             // Only set Accept-Language automatically if not overridden in extra_headers.
-            if !extra.contains_key("Accept-Language") {
+            if !request_local("accept-language") && !extra.contains_key("Accept-Language") {
                 req = req.header("Accept-Language", &lang);
             }
             // Only set Sec-Ch-Ua-Platform automatically if not overridden.
             // Some engines (e.g. Google with GSA UA) explicitly set this to ""
             // in extra_headers to suppress it.
-            if !extra.contains_key("Sec-Ch-Ua-Platform") {
+            if !request_local("sec-ch-ua-platform")
+                && !extra.contains_key("Sec-Ch-Ua-Platform")
+            {
                 req = req.header("Sec-Ch-Ua-Platform", &platform);
             }
 
@@ -455,7 +478,7 @@ impl StealthHttpClient {
             // Referer — recomputed per hop (a redirect can change the
             // same/cross-origin answer); extra_headers overrides it.
             if let Some(src) = referrer {
-                if !extra.contains_key("Referer") {
+                if !request_local("referer") && !extra.contains_key("Referer") {
                     if let Ok(source) = url::Url::parse(src) {
                         let ref_value = crate::diting_net::client::HttpClient::navigation_referrer(
                             &source,
@@ -469,12 +492,23 @@ impl StealthHttpClient {
             }
 
             let cookie_header = self.cookie_jar.get_cookie_header(&current_url);
-            if !cookie_header.is_empty() {
+            if include_cookies && !cookie_header.is_empty() {
                 req = req.header("Cookie", &cookie_header);
             }
 
             for (k, v) in self.extra_headers.read().await.iter() {
-                req = req.header(k.as_str(), v.as_str());
+                if !request_local(k) {
+                    req = req.header(k.as_str(), v.as_str());
+                }
+            }
+            // Request-local headers ride the first hop only: they were
+            // computed for the hop that failed (Origin, Referer,
+            // sec-fetch-site keyed to that origin), and redirect hops are
+            // new requests back on the transport's own defaults.
+            if let Some(headers) = request_headers.filter(|_| redirects.is_empty()) {
+                for (k, v) in headers {
+                    req = req.header(k.as_str(), v.as_str());
+                }
             }
 
             // The legacy-TLS fallback rides here with a method and payload;
@@ -484,7 +518,9 @@ impl StealthHttpClient {
             // downgrade sets `body = None` below.
             if method != wreq::Method::GET && method != wreq::Method::HEAD {
                 if let Some(ct) = content_type {
-                    req = req.header("Content-Type", ct);
+                    if !request_local("content-type") {
+                        req = req.header("Content-Type", ct);
+                    }
                 }
             }
             if let Some(b) = body {
@@ -913,6 +949,8 @@ mod tests {
                 "POST",
                 Some(b"title=%E6%B5%8B%E8%AF%95".as_slice()),
                 Some("application/x-www-form-urlencoded"),
+                None,
+                true,
             )
             .await;
         std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
@@ -947,10 +985,10 @@ mod tests {
 
         let mk = |path: &str| Url::parse(&format!("http://127.0.0.1:{port}/{path}")).unwrap();
         let r1 = client
-            .fetch_with_body(&mk("r301"), None, "POST", Some(b"a=1".as_slice()), Some("application/x-www-form-urlencoded"))
+            .fetch_with_body(&mk("r301"), None, "POST", Some(b"a=1".as_slice()), Some("application/x-www-form-urlencoded"), None, true)
             .await;
         let r2 = client
-            .fetch_with_body(&mk("r307"), None, "POST", Some(b"a=1".as_slice()), Some("application/x-www-form-urlencoded"))
+            .fetch_with_body(&mk("r307"), None, "POST", Some(b"a=1".as_slice()), Some("application/x-www-form-urlencoded"), None, true)
             .await;
         std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
         assert_eq!(r1.expect("301 walk").status, 200);
@@ -981,6 +1019,85 @@ mod tests {
         assert!(
             preserved.ends_with("a=1"),
             "the 307 POST must keep its body: {preserved}"
+        );
+    }
+
+    /// The scripted escape hatch must send the same request, not a bare one:
+    /// the rebuilt per-hop headers (Origin, Referer, Fetch-Metadata) reach
+    /// the wire and win over the transport's defaults, while the credentials
+    /// policy gates the cookie jar — a `credentials: 'omit'` POST rides the
+    /// legacy transport without leaking the session cookie (the taobao
+    /// seller-backend receipts proved the headered variant end to end).
+    #[allow(clippy::await_holding_lock)] // env-lock guard spans the fixture fetch, as above
+    #[tokio::test]
+    async fn scripted_request_headers_ride_and_credentials_gate_cookies() {
+        use std::collections::HashMap;
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+        let (port, log) = method_recording_fixture().await;
+        let jar = Arc::new(CookieJar::new());
+        let mut client = StealthHttpClient::new(jar.clone());
+        client.allow_private_network = true;
+        let mk = |path: &str| Url::parse(&format!("http://127.0.0.1:{port}/{path}")).unwrap();
+        jar.set_cookie("sid=legacy", &mk("post"));
+
+        let headers = HashMap::from([
+            ("Origin".to_string(), "https://shop.example.com".to_string()),
+            (
+                "Referer".to_string(),
+                "https://shop.example.com/sell/post.htm".to_string(),
+            ),
+            ("sec-fetch-site".to_string(), "same-origin".to_string()),
+        ]);
+        let include = client
+            .fetch_with_body(
+                &mk("post"),
+                None,
+                "POST",
+                Some(b"a=1".as_slice()),
+                Some("application/x-www-form-urlencoded"),
+                Some(&headers),
+                true,
+            )
+            .await;
+        let omit = client
+            .fetch_with_body(
+                &mk("omit"),
+                None,
+                "POST",
+                Some(b"a=1".as_slice()),
+                None,
+                Some(&headers),
+                false,
+            )
+            .await;
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+        assert_eq!(include.expect("headered POST").status, 200);
+        assert_eq!(omit.expect("omitted-credentials POST").status, 200);
+
+        let log = log.lock().unwrap();
+        let wire = |path: &str| {
+            log.iter()
+                .find(|r| r.starts_with(&format!("POST /{path} ")))
+                .unwrap_or_else(|| panic!("no POST /{path} recorded: {log:?}"))
+                .to_ascii_lowercase()
+        };
+        let included = wire("post");
+        for want in [
+            "origin: https://shop.example.com",
+            "referer: https://shop.example.com/sell/post.htm",
+            "sec-fetch-site: same-origin",
+            "cookie: sid=legacy",
+        ] {
+            assert!(
+                included.contains(want),
+                "the retry must mirror the scripted request, missing {want:?}: {included}"
+            );
+        }
+        let omitted = wire("omit");
+        assert!(
+            !omitted.contains("cookie:"),
+            "credentials:'omit' must not leak the jar cookie: {omitted}"
         );
     }
 

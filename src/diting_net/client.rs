@@ -889,6 +889,8 @@ impl HttpClient {
                     fallback_body,
                     fallback_ctype,
                     connect_failed,
+                    None,
+                    true,
                 )
                 .await
             }
@@ -915,9 +917,15 @@ impl HttpClient {
     ///   SOCKS proxy) pass the original error through unchanged.
     ///
     /// The legacy client shares the cookie jar and re-syncs identity at
-    /// attempt time, but not per-hop navigation headers (sec-fetch-*,
-    /// Referer) — the accepted cost of an escape hatch.
+    /// attempt time. `request_headers` (the scripted fetch()/XHR path)
+    /// additionally mirrors the hop's browser-default headers — Origin,
+    /// Referer, Fetch-Metadata, client hints — so the retry is the same
+    /// request on another stack, not a bare one; the navigation path passes
+    /// None and rides transport defaults. `include_cookies` carries the
+    /// fetch credentials policy (navigation requests are always
+    /// credentialed).
     #[cfg(feature = "stealth")]
+    #[allow(clippy::too_many_arguments)]
     async fn retry_via_legacy_tls(
         &self,
         method: Method,
@@ -926,6 +934,8 @@ impl HttpClient {
         body: Option<&[u8]>,
         content_type: Option<&str>,
         connect_stage: bool,
+        request_headers: Option<&HashMap<String, String>>,
+        include_cookies: bool,
     ) -> Result<Response, NetError> {
         if matches!(err, NetError::TooManyRedirects(_)) {
             return Err(err);
@@ -948,7 +958,15 @@ impl HttpClient {
         legacy.set_extra_headers(self.extra_headers.read().await.clone()).await;
         tracing::warn!("rustls transport failed for {url}; retrying once via legacy TLS transport");
         match legacy
-            .fetch_with_body(url, None, method.as_str(), body, content_type)
+            .fetch_with_body(
+                url,
+                None,
+                method.as_str(),
+                body,
+                content_type,
+                request_headers,
+                include_cookies,
+            )
             .await
         {
             Ok(resp) => Ok(resp),
@@ -959,6 +977,7 @@ impl HttpClient {
     }
 
     #[cfg(not(feature = "stealth"))]
+    #[allow(clippy::too_many_arguments)]
     async fn retry_via_legacy_tls(
         &self,
         _method: Method,
@@ -967,6 +986,8 @@ impl HttpClient {
         _body: Option<&[u8]>,
         _content_type: Option<&str>,
         _connect_stage: bool,
+        _request_headers: Option<&HashMap<String, String>>,
+        _include_cookies: bool,
     ) -> Result<Response, NetError> {
         Err(err)
     }
@@ -979,10 +1000,16 @@ impl HttpClient {
     /// same guards (GET/HEAD always; other methods only when
     /// `connect_stage` says the request never left the machine,
     /// `validate_url` re-check, per-hop re-validation inside the stealth
-    /// redirect walk), same shared cookie jar and identity sync. `Err`
-    /// carries the original transport error, or the combined message when
-    /// the legacy attempt fired and failed too (the `legacy TLS transport`
-    /// marker is how tests prove the fallback actually ran).
+    /// redirect walk), same shared cookie jar and identity sync.
+    /// `request_headers` is the hop's rebuilt scripted header set (Origin,
+    /// Referer, Fetch-Metadata, client hints) — Referer-checking WAFs
+    /// 403 the bare shape even after the handshake succeeds (the taobao
+    /// seller-backend receipts proved the headered variant end to end).
+    /// `include_cookies` carries the fetch credentials policy.
+    /// `Err` carries the original transport error, or the combined message
+    /// when the legacy attempt fired and failed too (the `legacy TLS
+    /// transport` marker is how tests prove the fallback actually ran).
+    #[allow(clippy::too_many_arguments)]
     pub async fn scripted_fetch_fallback(
         &self,
         method: &Method,
@@ -991,6 +1018,8 @@ impl HttpClient {
         body: Option<&[u8]>,
         content_type: Option<&str>,
         connect_stage: bool,
+        request_headers: Option<&HashMap<String, String>>,
+        include_cookies: bool,
     ) -> Result<Response, NetError> {
         self.retry_via_legacy_tls(
             method.clone(),
@@ -999,6 +1028,8 @@ impl HttpClient {
             body,
             content_type,
             connect_stage,
+            request_headers,
+            include_cookies,
         )
         .await
     }
@@ -2062,7 +2093,7 @@ mod tests {
         let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
         let url = Url::parse("http://127.0.0.1:1/dead").unwrap();
         let err = client
-            .scripted_fetch_fallback(&Method::GET, &url, "error sending request", None, None, false)
+            .scripted_fetch_fallback(&Method::GET, &url, "error sending request", None, None, false, None, true)
             .await
             .expect_err("closed port must fail");
         let msg = err.to_string();
@@ -2086,6 +2117,8 @@ mod tests {
                 "error sending request",
                 Some(b"a=1".as_slice()),
                 Some("application/x-www-form-urlencoded"),
+                true,
+                None,
                 true,
             )
             .await
@@ -2112,6 +2145,8 @@ mod tests {
                 Some(b"a=1".as_slice()),
                 Some("application/x-www-form-urlencoded"),
                 false,
+                None,
+                true,
             )
             .await
             .expect_err("must fail");
