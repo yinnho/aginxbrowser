@@ -225,15 +225,20 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
         left: LengthPercentage::length(bl),
     };
     // CSS's initial box-sizing is content-box while taffy sizes are
-    // border-box; the subset has no authored box-sizing yet, so map authored
-    // sizes over by the padding + border widths.
-    // Percent sizes pass through as percent — "percent + padding px" has no
-    // taffy Dimension shape, so a % size keeps its padding inside (border-box
-    // behavior); authored box-sizing is a later batch anyway.
+    // border-box; authored `box-sizing: border-box` (the universal `*` reset
+    // idiom) measures width/min/max to the border edge instead, so only the
+    // content-box case maps authored px over by the padding + border widths.
+    // Percent sizes pass through as percent in both modes — "percent +
+    // padding px" has no taffy Dimension shape, so a % size keeps its padding
+    // inside (border-box behavior) even under authored content-box.
+    let border_box = matches!(
+        style.box_sizing,
+        Some(crate::diting_css::BoxSizing::BorderBox)
+    );
     s.size = Size {
         width: match style.width {
             Some(crate::diting_css::Length::Px(w)) => Dimension::length(
-                w + side_px(style.padding.left) + side_px(style.padding.right) + bl + br,
+                if border_box { w } else { w + side_px(style.padding.left) + side_px(style.padding.right) + bl + br },
             ),
             Some(crate::diting_css::Length::Percent(p)) => Dimension::percent(p / 100.0),
             // Mixed calc rides in as a percent-only placeholder; the px part
@@ -250,7 +255,7 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
         },
         height: match style.height {
             Some(crate::diting_css::Length::Px(h)) => Dimension::length(
-                h + side_px(style.padding.top) + side_px(style.padding.bottom) + bt + bb,
+                if border_box { h } else { h + side_px(style.padding.top) + side_px(style.padding.bottom) + bt + bb },
             ),
             Some(crate::diting_css::Length::Percent(p)) => Dimension::percent(p / 100.0),
             Some(crate::diting_css::Length::Calc { percent, .. }) => {
@@ -365,12 +370,13 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
             left: lpa_auto(style.left),
         };
     }
-    // Clamps are content-box in CSS's initial box-sizing — same padding +
-    // border carry-over as the main sizes above (px only; % passes through).
+    // Clamps follow the same box-sizing edge as the main sizes: border-box
+    // min/max measure to the border edge (no carry-over), content-box adds
+    // padding + border (px only; % passes through in both modes).
     s.min_size = Size {
         width: match style.min_width {
             Some(crate::diting_css::Length::Px(w)) => LengthPercentageAuto::length(
-                w + side_px(style.padding.left) + side_px(style.padding.right) + bl + br,
+                if border_box { w } else { w + side_px(style.padding.left) + side_px(style.padding.right) + bl + br },
             ),
             Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
             // Percent-only placeholder; repaired post-layout like width.
@@ -383,7 +389,7 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
         },
         height: match style.min_height {
             Some(crate::diting_css::Length::Px(h)) => LengthPercentageAuto::length(
-                h + side_px(style.padding.top) + side_px(style.padding.bottom) + bt + bb,
+                if border_box { h } else { h + side_px(style.padding.top) + side_px(style.padding.bottom) + bt + bb },
             ),
             Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
             Some(crate::diting_css::Length::Calc { percent, .. }) => {
@@ -395,7 +401,7 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
     s.max_size = Size {
         width: match style.max_width {
             Some(crate::diting_css::Length::Px(w)) => LengthPercentageAuto::length(
-                w + side_px(style.padding.left) + side_px(style.padding.right) + bl + br,
+                if border_box { w } else { w + side_px(style.padding.left) + side_px(style.padding.right) + bl + br },
             ),
             Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
             Some(crate::diting_css::Length::Calc { percent, .. }) => {
@@ -405,7 +411,7 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
         },
         height: match style.max_height {
             Some(crate::diting_css::Length::Px(h)) => LengthPercentageAuto::length(
-                h + side_px(style.padding.top) + side_px(style.padding.bottom) + bt + bb,
+                if border_box { h } else { h + side_px(style.padding.top) + side_px(style.padding.bottom) + bt + bb },
             ),
             Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
             Some(crate::diting_css::Length::Calc { percent, .. }) => {
@@ -1238,11 +1244,17 @@ fn build_replaced_leaf(
     // CSS width/height win per axis; missing axis derives from the ratio.
     // Percent CSS sizes pass through (the CB resolves them; the natural
     // ratio only backfills auto axes). Px sizes are content-box per the
-    // attribute semantics, so border widths ride on top.
+    // attribute semantics, so border widths ride on top — except under
+    // authored `box-sizing: border-box`, where the px already measures to
+    // the border edge.
+    let border_box = matches!(
+        style.box_sizing,
+        Some(crate::diting_css::BoxSizing::BorderBox)
+    );
     s.size = Size {
         width: match style.width {
             Some(crate::diting_css::Length::Px(w)) => {
-                Dimension::length(w + if bline { bl + br } else { 0.0 })
+                Dimension::length(if border_box { w } else { w + if bline { bl + br } else { 0.0 } })
             }
             Some(crate::diting_css::Length::Percent(p)) => Dimension::percent(p / 100.0),
             // Percent-only placeholder (same convention as to_taffy_style).
@@ -1255,7 +1267,7 @@ fn build_replaced_leaf(
         },
         height: match style.height {
             Some(crate::diting_css::Length::Px(h)) => {
-                Dimension::length(h + if bline { bt + bb } else { 0.0 })
+                Dimension::length(if border_box { h } else { h + if bline { bt + bb } else { 0.0 } })
             }
             Some(crate::diting_css::Length::Percent(p)) => Dimension::percent(p / 100.0),
             Some(crate::diting_css::Length::Calc { percent, .. }) => {
@@ -3302,7 +3314,34 @@ pub enum PaintItem {
         y: f32,
         /// The wrap width the containing block offered at measure time.
         wrap_at: f32,
+        /// `background-clip: text` fill (gradient-text batch): when the
+        /// nearest boxed ancestor established one, glyph coverage samples
+        /// this gradient across `area` instead of filling with `color` —
+        /// the run's color is ignored entirely (CSS paints the background
+        /// through the glyphs; `-webkit-text-fill-color: transparent` hides
+        /// the normal fill, which we get by construction).
+        gradient: Option<TextGradient>,
     },
+}
+
+/// A `background-clip: text` fill (gradient-text batch): the gradient a
+/// clip:text element suppressed from its own box, re-aimed at the glyphs of
+/// its subtree. Coverage samples the gradient at each pixel's own position
+/// in the text item's coordinate space, so the fill tracks the gradient's
+/// angle across the whole element, not per glyph.
+#[derive(Debug, Clone)]
+pub struct TextGradient {
+    /// The clip element's background box (exactly what a `BgGradient` would
+    /// have filled) in the text item's coordinate space — page space on the
+    /// prebaked diagonal path, local inside a transform bracket, where the
+    /// affine then carries the gradient through the rotation.
+    pub area: Rect,
+    /// Raw stops — the text item folds its own inherited alpha at attach
+    /// time, so opacity between the clip element and the text composes.
+    pub stops: Vec<(f32, [u8; 4])>,
+    /// linear-gradient angle in CSS degrees (0 = to top, clockwise), same
+    /// convention `BgGradient` carries.
+    pub css_deg: f32,
 }
 
 /// Lay a DOM tree out at a fixed viewport size and return each element's
@@ -4141,19 +4180,26 @@ pub fn layout_dom_with_paint_order_and_images(
                     continue;
                 };
                 // content-box → taffy border-box carry-over, same as
-                // to_taffy_style's px arms.
-                let infl = side_px(st.padding.left)
+                // to_taffy_style's px arms — skipped under authored
+                // `box-sizing: border-box`, where the calc result already
+                // measures to the border edge.
+                let pb = side_px(st.padding.left)
                     + side_px(st.padding.right)
                     + if st.border_style.is_some() {
                         side_px(st.border_width.left) + side_px(st.border_width.right)
                     } else {
                         0.0
                     };
+                let border_box = matches!(st.box_sizing, Some(crate::diting_css::BoxSizing::BorderBox));
+                let infl = if border_box { 0.0 } else { pb };
                 let Some(mut ts) = taffy_tree.style(tnid).ok().cloned() else { continue };
                 if let Some(crate::diting_css::Length::Calc { percent, px }) = st.width {
                     let content = (cbw * percent / 100.0 + px).max(0.0);
                     ts.size.width = Dimension::length(content + infl);
-                    repaired.insert(tnid, content);
+                    // Children resolve percents against this element's CONTENT
+                    // box — under border-box the calc result is the border
+                    // box, so strip padding+border for the child basis.
+                    repaired.insert(tnid, if border_box { (content - pb).max(0.0) } else { content });
                 }
                 if let Some(crate::diting_css::Length::Calc { percent, px }) = st.min_width {
                     let content = (cbw * percent / 100.0 + px).max(0.0);
@@ -4349,9 +4395,15 @@ pub fn layout_dom_with_paint_order_and_images(
         viewport_width: f32,
         xf: Xf,
         alpha: f32,
+        text_gradient: Option<&(TextGradient, [f32; 6])>,
     ) {
         let Ok(layout) = taffy_tree.layout(node) else { return };
         let item0 = items.len();
+        // background-clip: text (gradient-text batch): inherited from the
+        // nearest boxed clip:text ancestor, shadowed locally so a nested
+        // clip:text element replaces it for its own subtree only — siblings
+        // never see each other's gradient.
+        let mut text_gradient = text_gradient.cloned();
         // Hit testing (obscura #738): record this element's slot in the flat
         // paint sequence as the walk reaches it. Because `collect` pushes a
         // node's own items before recursing and sorts children into the
@@ -4581,12 +4633,33 @@ pub fn layout_dom_with_paint_order_and_images(
                     .and_then(|s| s.background_image.as_deref())
                     .and_then(crate::diting_css::parse_linear_gradient)
                 {
-                    let stops = g
-                        .stops
-                        .iter()
-                        .map(|(p, c)| (*p, with_alpha([c.0, c.1, c.2, c.3], alpha)))
-                        .collect();
-                    items.push(PaintItem::BgGradient { rect: bg_rect, stops, css_deg: g.css_deg, radii });
+                    if styles.get(dom_id).is_some_and(|s| s.background_clip_text) {
+                        // background-clip: text: the gradient never fills
+                        // the box (that was the opaque-block-covering-the-
+                        // text bug) — it becomes the glyph fill for this
+                        // subtree, threaded down like alpha. Stops stay raw;
+                        // each text folds its own inherited alpha at attach.
+                        // The captured map guards the space: a text leaf
+                        // only attaches while its accumulated xf still
+                        // equals this one, so an intervening transform
+                        // degrades those glyphs to solid color instead of
+                        // sampling a mismatched space.
+                        text_gradient = Some((
+                            TextGradient {
+                                area: bg_rect,
+                                stops: g.stops.iter().map(|(p, c)| (*p, [c.0, c.1, c.2, c.3])).collect(),
+                                css_deg: g.css_deg,
+                            },
+                            child_xf.to_array(),
+                        ));
+                    } else {
+                        let stops = g
+                            .stops
+                            .iter()
+                            .map(|(p, c)| (*p, with_alpha([c.0, c.1, c.2, c.3], alpha)))
+                            .collect();
+                        items.push(PaintItem::BgGradient { rect: bg_rect, stops, css_deg: g.css_deg, radii });
+                    }
                 }
             }
             // A border exists only with a line style; its color defaults to
@@ -4775,6 +4848,19 @@ pub fn layout_dom_with_paint_order_and_images(
                 items.push(clip_item);
             }
         }
+        // background-clip: text attach: the inherited fill lands only while
+        // this leaf still paints in the space the gradient was captured in
+        // (an intervening transform opened a different one — degrade to the
+        // solid run color), with this leaf's inherited opacity folded into
+        // the stops.
+        let text_gradient_fill = text_gradient
+            .as_ref()
+            .filter(|(_, at)| *at == xf.to_array())
+            .map(|(g, _)| TextGradient {
+                area: g.area,
+                stops: g.stops.iter().map(|(p, c)| (*p, with_alpha(*c, alpha))).collect(),
+                css_deg: g.css_deg,
+            });
         if let Some(TextLeaf::Run { text, font_size, bold, color, line_height }) = taffy_tree.get_node_context(node) {
             // The wrap width the containing block offered at measure time:
             // the direct taffy parent's content box (the run wrapper for
@@ -4801,6 +4887,7 @@ pub fn layout_dom_with_paint_order_and_images(
                     x: abs.0 * xf.a + xf.e,
                     y: abs.1 * xf.d + xf.f,
                     wrap_at,
+                    gradient: text_gradient_fill.clone(),
                 });
             } else {
                 let wrap_at = taffy_tree
@@ -4817,6 +4904,7 @@ pub fn layout_dom_with_paint_order_and_images(
                     x: abs.0,
                     y: abs.1,
                     wrap_at,
+                    gradient: text_gradient_fill.clone(),
                 });
             }
         }
@@ -4835,6 +4923,7 @@ pub fn layout_dom_with_paint_order_and_images(
                     x: abs.0 * xf.a + xf.e,
                     y: abs.1 * xf.d + xf.f,
                     wrap_at: layout.size.width * xf.a,
+                    gradient: text_gradient_fill.clone(),
                 });
             } else {
                 items.push(PaintItem::Text {
@@ -4846,6 +4935,7 @@ pub fn layout_dom_with_paint_order_and_images(
                     x: abs.0,
                     y: abs.1,
                     wrap_at: layout.size.width,
+                    gradient: text_gradient_fill.clone(),
                 });
             }
         }
@@ -4904,7 +4994,7 @@ pub fn layout_dom_with_paint_order_and_images(
         pos.sort_by_key(|(z, _)| *z);
         for list in [neg, mid, pos] {
             for (_, i) in list {
-                collect(tree, taffy_tree, node_map, styles, images, static_pos, baseline_shifts, collapsed_edges, rects, abs_by_node, local_by_node, node_first_item, items, paint_order, children[i], abs, viewport_width, child_xf, alpha);
+                collect(tree, taffy_tree, node_map, styles, images, static_pos, baseline_shifts, collapsed_edges, rects, abs_by_node, local_by_node, node_first_item, items, paint_order, children[i], abs, viewport_width, child_xf, alpha, text_gradient.as_ref());
             }
         }
         if clips {
@@ -4937,6 +5027,7 @@ pub fn layout_dom_with_paint_order_and_images(
         viewport_width,
         Xf::IDENTITY,
         1.0,
+        None,
     );
     // Flattened inline wrappers (span/label/a/… — obscura#722 lineage) own no
     // taffy box: the run hoisted their children. getBoundingClientRect still

@@ -1567,6 +1567,8 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "display",
     "float",
     "clear",
+    "box-sizing",
+    "background-clip",
     "overflow",
     "border-collapse",
     "table-layout",
@@ -1716,6 +1718,18 @@ fn computed_style_value(
             }
             .into(),
         ),
+        // Chrome's computed value is the declared keyword itself (not a used
+        // value), so the CSS initial surfaces as content-box.
+        "box-sizing" => Some(
+            match s.box_sizing {
+                Some(BoxSizing::BorderBox) => "border-box",
+                _ => "content-box",
+            }
+            .into(),
+        ),
+        // Same declared-keyword convention: `text` or the CSS initial's
+        // border-box. The -webkit- alias reads through here too.
+        "background-clip" => Some(if s.background_clip_text { "text" } else { "border-box" }.into()),
         "overflow" => Some(
             match s.overflow {
                 Some(Overflow::Hidden) => "hidden",

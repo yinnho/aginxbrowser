@@ -13,7 +13,7 @@
 //! gradients, z-index/stacking contexts.
 
 use super::text::TextRaster;
-use super::{FontBook, PaintItem};
+use super::{FontBook, PaintItem, TextGradient};
 
 /// A straight-alpha RGBA8 image, row-major — our paint target.
 #[derive(Debug)]
@@ -1023,6 +1023,45 @@ fn lerp_premultiplied(a: [u8; 4], b: [u8; 4], k: f32) -> [u8; 4] {
     [ch(a[0], b[0]), ch(a[1], b[1]), ch(a[2], b[2]), out_a.round().clamp(0.0, 255.0) as u8]
 }
 
+/// background-clip: text fill (gradient-text batch): rewrite an
+/// opaque-white text raster in place into the gradient — each covered
+/// pixel samples at its own position `(x + gx, y + top + gy)` in the item's
+/// coordinate space, final alpha = glyph coverage × stop alpha. The
+/// projection math mirrors [`Canvas::fill_gradient`] (same CSS gradient
+/// line convention), minus the shape test: coverage IS the shape.
+fn recolor_gradient_text(r: &mut TextRaster, x: f32, y: f32, g: &TextGradient) {
+    if r.width == 0 || r.height == 0 || g.stops.len() < 2 {
+        return;
+    }
+    let rad = g.css_deg.to_radians() as f64;
+    let (dux, duy) = (rad.sin(), -rad.cos());
+    let len = (g.area.width as f64 * dux.abs() + g.area.height as f64 * duy.abs()).max(1.0);
+    let (ccx, ccy) = (
+        g.area.x as f64 + g.area.width as f64 / 2.0,
+        g.area.y as f64 + g.area.height as f64 / 2.0,
+    );
+    let col_a = dux / len;
+    // Pixel row 0's y in the item space (the compositor blits at
+    // (x, y + top)) — row_base per row, fused multiply-add per pixel.
+    let tile_top = y as f64 + r.top as f64;
+    for gy in 0..r.height {
+        let row_base = (tile_top + gy as f64 - ccy) * duy / len + 0.5;
+        for gx in 0..r.width {
+            let i = (gy * r.width + gx) * 4;
+            let coverage = r.data[i + 3];
+            if coverage == 0 {
+                continue;
+            }
+            let t = (((x as f64 + gx as f64) - ccx) * col_a + row_base).clamp(0.0, 1.0) as f32;
+            let c = gradient_stop_color(&g.stops, t);
+            r.data[i] = c[0];
+            r.data[i + 1] = c[1];
+            r.data[i + 2] = c[2];
+            r.data[i + 3] = ((c[3] as u32 * coverage as u32 + 127) / 255) as u8;
+        }
+    }
+}
+
 /// Rough advance width: CJK/fullwidth ≈ 1em, everything else ≈ 0.6em.
 pub(crate) fn est_width(text: &str, font_size: f32) -> f32 {
     text.chars()
@@ -1421,7 +1460,17 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     super::svg::paint_svg(render, rect, fonts, out, dx, dy, *alpha);
                 }
             }
-            PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at } => {
+            PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at, gradient } => {
+                // background-clip: text: the fill color is ignored entirely
+                // (CSS paints the background through the glyphs; the
+                // transparent-text-fill half of the idiom is free by
+                // construction) — rasterize an opaque-white mask and rewrite
+                // each covered pixel with the gradient sampled at its own
+                // position. Both blit paths stay untouched: the band path's
+                // page coords and the bracket's local coords are exactly the
+                // space `area` was captured in, so the gradient rides the
+                // affine through rotations too.
+                let fill = if gradient.is_some() { [255, 255, 255, 255] } else { *color };
                 if out.xf().is_some() {
                     // Rasterize at RAW local metrics — the bracket maps the
                     // tile, so no scale folds into font metrics — prefiltered
@@ -1438,13 +1487,19 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     if bx1 <= 0 || by1 <= 0 || bx0 >= out.width as i64 || by0 >= out.height as i64 {
                         continue;
                     }
-                    let r = fonts.rasterize_wrapped(text, *font_size, *bold, *color, *wrap_at, *line_height);
+                    let mut r = fonts.rasterize_wrapped(text, *font_size, *bold, fill, *wrap_at, *line_height);
+                    if let Some(g) = gradient {
+                        recolor_gradient_text(&mut r, *x, *y, g);
+                    }
                     out.blit_rgba_affine(&r.data, r.width, r.height, *x as f64, (*y + r.top) as f64);
                 } else {
                     if !text_reaches_band(*y, text, *font_size, *wrap_at, *line_height, dy, out.height as i64) {
                         continue;
                     }
-                    let r = fonts.rasterize_wrapped(text, *font_size, *bold, *color, *wrap_at, *line_height);
+                    let mut r = fonts.rasterize_wrapped(text, *font_size, *bold, fill, *wrap_at, *line_height);
+                    if let Some(g) = gradient {
+                        recolor_gradient_text(&mut r, *x, *y, g);
+                    }
                     // Tile row 0 sits `top` px above the leaf's line-box top.
                     out.blit_text(&r, (x - dx).round() as i64, (y - dy + r.top).round() as i64);
                 }
@@ -1470,6 +1525,63 @@ mod tests {
         assert_eq!(px(&c, 9, 0), [200, 40, 40, 255], "clipped fill still paints");
         assert_eq!(px(&c, 7, 0), [255, 255, 255, 255], "outside the rect untouched");
         assert_eq!(px(&c, 0, 9), [255, 255, 255, 255], "below the rect untouched");
+    }
+
+    /// background-clip: text (gradient-text batch): a Text item carrying a
+    /// TextGradient samples the gradient at each glyph pixel's own position —
+    /// a to-right gradient over the glyph band runs red on the left half of
+    /// the INK and blue on the right — and ignores its fill color entirely.
+    #[test]
+    fn gradient_text_samples_gradient_at_glyph_positions() {
+        let items = vec![PaintItem::Text {
+            text: "mmmmm".into(),
+            font_size: 20.0,
+            bold: true,
+            // Would be black ink without the gradient: proves the fill color
+            // steps aside when the gradient rides the item.
+            color: [0, 0, 0, 255],
+            line_height: 24.0,
+            x: 10.0,
+            y: 4.0,
+            wrap_at: 400.0,
+            gradient: Some(TextGradient {
+                // 90deg = to right across [10, 110): t < 0.5 red, t > 0.5
+                // blue, hard switchover at the box center x = 60.
+                area: crate::diting_layout::Rect { x: 10.0, y: 0.0, width: 100.0, height: 32.0 },
+                stops: vec![(0.0, [255, 0, 0, 255]), (1.0, [0, 0, 255, 255])],
+                css_deg: 90.0,
+            }),
+        }];
+        let fonts = crate::diting_fonts::font_book();
+        let mut c = Canvas::new_filled(120, 40, [255, 255, 255, 255]);
+        execute(&items, &fonts, &mut c);
+
+        let mut reds: Vec<usize> = Vec::new();
+        let mut blues: Vec<usize> = Vec::new();
+        for y in 0..c.height {
+            for x in 0..c.width {
+                let [r, g, b, a] = px(&c, x, y);
+                if a < 64 {
+                    continue;
+                }
+                if r > 120 && b < 120 && g < 120 {
+                    reds.push(x);
+                } else if b > 120 && r < 120 && g < 120 {
+                    blues.push(x);
+                }
+            }
+        }
+        assert!(!reds.is_empty() && !blues.is_empty(), "both gradient halves must paint through the glyphs");
+        assert!(
+            *reds.iter().max().unwrap() < 60,
+            "strong red must stay left of the gradient's midpoint; max red x = {}",
+            reds.iter().max().unwrap()
+        );
+        assert!(
+            *blues.iter().min().unwrap() >= 60,
+            "strong blue must start right of the midpoint; min blue x = {}",
+            blues.iter().min().unwrap()
+        );
     }
 
     /// Axis-aligned gradients land on the right walls: 180° (the CSS
@@ -1619,7 +1731,7 @@ mod tests {
                 fill_placeholder: true,
                 alpha: 1.0,
             },
-            PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0 },
+            PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0, gradient: None },
         ];
         let fonts = crate::diting_fonts::font_book();
         let mut full = Canvas::new_filled(40, 60, [255, 255, 255, 255]);
@@ -1683,8 +1795,8 @@ mod tests {
         let fonts = crate::diting_fonts::font_book();
         // A tall low-content page: only two text leaves, one near the band.
         let items = vec![
-            PaintItem::Text { text: "edge".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 96.0, wrap_at: 36.0 },
-            PaintItem::Text { text: "far".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 500.0, wrap_at: 36.0 },
+            PaintItem::Text { text: "edge".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 96.0, wrap_at: 36.0, gradient: None },
+            PaintItem::Text { text: "far".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 500.0, wrap_at: 36.0, gradient: None },
         ];
         let mut band = Canvas::new_filled(40, 80, [255, 255, 255, 255]);
         execute_band(&items, &fonts, &mut band, 0.0, 100.0);
@@ -1806,6 +1918,7 @@ mod tests {
                 x: 10.0,
                 y: 10.0,
                 wrap_at: 200.0,
+                gradient: None,
             },
             PaintItem::ClearXf,
         ];

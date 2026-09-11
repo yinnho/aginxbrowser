@@ -603,6 +603,156 @@ fn unstyled_form_controls_get_default_boxes() {
     assert_eq!(styled.height, 40.0, "CSS height wins over the default; got {styled:?}");
 }
 
+/// `box-sizing` picks the edge an authored width/height/min/max measures to
+/// (the universal `* { box-sizing: border-box }` reset idiom). taffy sizes
+/// are border-box native, so the engine maps authored px over by padding +
+/// border only in the content-box case. Rects below are taffy layout sizes =
+/// border boxes, which is exactly what gBCR/offsetWidth report.
+#[test]
+fn box_sizing_picks_the_measured_edge() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    let html = r#"<html><body>
+        <div id="cb" style="width:100px; height:40px; padding:0 10px; border:2px solid red"></div>
+        <div id="bb" style="box-sizing:border-box; width:100px; height:40px; padding:0 10px; border:2px solid red"></div>
+        <div id="clamped-cb" style="max-width:60px; padding:0 10px; border:2px solid red; height:10px">xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx</div>
+        <div id="clamped-bb" style="box-sizing:border-box; max-width:60px; padding:0 10px; border:2px solid red; height:10px">xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx</div>
+        </body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let rects = crate::diting_layout::layout_dom(
+        &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0,
+    );
+    let rect = |sel: &str| {
+        let id = tree.query_selector_all(sel).unwrap()[0];
+        *rects.get(&id).unwrap_or_else(|| panic!("{sel} must own a box"))
+    };
+
+    // content-box (the CSS initial): 100px content + 2×10px padding +
+    // 2×2px border = 124 border box; the 4-sided border also grows height.
+    let cb = rect("#cb");
+    assert_eq!(cb.width, 124.0, "content-box width grows by padding + border; got {cb:?}");
+    assert_eq!(cb.height, 44.0, "content-box height grows by the top/bottom border; got {cb:?}");
+
+    // border-box: the authored 100px IS the border box; padding + border
+    // eat into the content area instead.
+    let bb = rect("#bb");
+    assert_eq!(bb.width, 100.0, "border-box width is the authored edge; got {bb:?}");
+    assert_eq!(bb.height, 40.0, "border-box height likewise; got {bb:?}");
+
+    // Clamps follow the same edge: max-width:60px clamps the border box at
+    // 60 + 24 (content-box) vs exactly 60 (border-box).
+    let clamped_cb = rect("#clamped-cb");
+    assert_eq!(clamped_cb.width, 84.0, "content-box max-width measures the content; got {clamped_cb:?}");
+    let clamped_bb = rect("#clamped-bb");
+    assert_eq!(clamped_bb.width, 60.0, "border-box max-width measures the border box; got {clamped_bb:?}");
+}
+
+/// `background-clip: text` (the gradient-text idiom, as real pages ship it
+/// with the -webkit- alias): the clip:text element suppresses its box
+/// gradient — the pre-fix page showed an opaque gradient block COVERING the
+/// text — and re-aims the gradient at the glyphs, where each pixel samples
+/// it at its own position. Without clip:text the box gradient still paints
+/// and the text keeps its solid color.
+#[test]
+fn background_clip_text_moves_gradient_into_glyphs() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::PaintItem;
+
+    let html = r#"<html><body style="margin:0">
+        <h1 id="grad" style="margin:0;width:200px;font-size:40px;background-image:linear-gradient(90deg,red,blue);-webkit-background-clip:text">MMMMM</h1>
+        <h1 id="plain" style="margin:0;width:200px;font-size:40px;background-image:linear-gradient(90deg,red,blue)">MMMMM</h1>
+        </body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let (rects, items) = crate::diting_layout::layout_dom_with_paint(
+        &tree,
+        &styles,
+        &crate::diting_fonts::font_book(),
+        1280.0,
+        800.0,
+    );
+
+    // Exactly one box gradient survives: the plain h1's. The clip:text one
+    // is gone from the box layer.
+    let box_gradients = items
+        .iter()
+        .filter(|it| matches!(it, PaintItem::BgGradient { .. }))
+        .count();
+    assert_eq!(box_gradients, 1, "clip:text must suppress the box gradient; got {box_gradients}");
+
+    // The clipped text carries the fill; the plain text keeps solid ink.
+    // Anchored to each element's rect — no pixel-position guessing.
+    let in_band = |it: &PaintItem, r: &crate::diting_layout::Rect| {
+        matches!(it, PaintItem::Text { y, .. } if *y >= r.y - 5.0 && *y < r.y + r.height)
+    };
+    let grad_rect = *rects.get(&tree.query_selector_all("#grad").unwrap()[0]).unwrap();
+    let plain_rect = *rects.get(&tree.query_selector_all("#plain").unwrap()[0]).unwrap();
+    let clipped = items
+        .iter()
+        .find_map(|it| match it {
+            PaintItem::Text { gradient: Some(g), .. } if in_band(it, &grad_rect) => Some(g.clone()),
+            _ => None,
+        })
+        .expect("clipped h1's text carries the gradient fill");
+    let plain_solid = items
+        .iter()
+        .any(|it| matches!(it, PaintItem::Text { gradient: None, .. }) && in_band(it, &plain_rect));
+    assert!(plain_solid, "unclipped h1 text keeps its solid fill");
+
+    // The fill's area is the clip element's background box and the angle
+    // survives the threading — the gradient the glyphs sample is the one
+    // the box would have painted.
+    let h1 = grad_rect;
+    assert!((clipped.area.x - h1.x).abs() < 1.0, "area x tracks the h1 box: {:?} vs {h1:?}", clipped.area);
+    assert!((clipped.area.width - h1.width).abs() < 1.0, "area width tracks the h1 box");
+    assert!((clipped.css_deg - 90.0).abs() < 0.01, "angle threads through unchanged");
+
+    // Pixel level: the 40px caps span past the h1's horizontal midpoint —
+    // the left half of the ink must sample red, the right half blue.
+    let mut c = crate::diting_layout::paint::Canvas::new_filled(300, 160, [255, 255, 255, 255]);
+    crate::diting_layout::paint::execute(&items, &crate::diting_fonts::font_book(), &mut c);
+    let (mid_x, mid_y) = (h1.x + h1.width / 2.0, h1.y + h1.height / 2.0);
+    let p = |x: usize, y: usize| {
+        let i = (y * c.width + x) * 4;
+        c.data[i..i + 4].try_into().unwrap()
+    };
+    // Scan the first line band for strongly-red and strongly-blue ink.
+    let mut reds = 0usize;
+    let mut blues = 0usize;
+    let mut red_max_x = 0usize;
+    let mut blue_min_x = usize::MAX;
+    for y in 0..(h1.y + h1.height) as usize {
+        for x in 0..300 {
+            let [r, g, b, a] = p(x, y);
+            if a < 64 {
+                continue;
+            }
+            if r > 120 && b < 120 && g < 120 {
+                reds += 1;
+                red_max_x = red_max_x.max(x);
+            } else if b > 120 && r < 120 && g < 120 {
+                blues += 1;
+                blue_min_x = blue_min_x.min(x);
+            }
+        }
+    }
+    assert!(reds > 5 && blues > 5, "both halves must paint through the 40px glyphs (reds={reds} blues={blues})");
+    assert!(
+        red_max_x as f32 <= mid_x + 2.0,
+        "red ink stays left of the gradient midpoint {mid_x}; max red x = {red_max_x}"
+    );
+    assert!(
+        blue_min_x as f32 >= mid_x - 2.0,
+        "blue ink starts right of the midpoint {mid_x}; min blue x = {blue_min_x}"
+    );
+    let _ = mid_y; // midpoint y folded into the band scan above
+}
+
 /// Absolute y of a span's text baseline, through the same metrics model the
 /// layout shift and the paint path both use (fixture font metrics, quantized
 /// parley-style offset).

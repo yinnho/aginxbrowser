@@ -491,8 +491,19 @@ pub struct ComputedStyle {
     pub border_color: Option<Color>,
     pub border_style: Option<BorderStyle>,
     /// Authored box size (non-inherited): px (em/rem resolved) or %.
+    /// Interpretation (content-box vs border-box edges) is `box_sizing`'s
+    /// call — the layout layer does the edge mapping at taffy hand-off.
     pub width: Option<Length>,
     pub height: Option<Length>,
+    /// `box-sizing` (non-inherited; the `*` reset idiom sets it per element).
+    /// `None` = the CSS initial `content-box`.
+    pub box_sizing: Option<BoxSizing>,
+    /// `background-clip: text` (non-inherited; real pages almost always ship
+    /// the `-webkit-background-clip` alias, both land here). The background
+    /// paints only inside the foreground glyphs — with a gradient this is the
+    /// gradient-text idiom. `false` (the initial box fill) covers every box
+    /// keyword; our background layers paint the border box regardless.
+    pub background_clip_text: bool,
     /// Font size in px (absolute keywords/units resolved by the caller's sheet
     /// context; here we accept px/em/% where em resolves against parent).
     pub font_size: Option<f32>,
@@ -613,6 +624,15 @@ pub enum PositionMode {
     Relative,
     Absolute,
     Fixed,
+}
+
+/// `box-sizing`: which box edge an authored width/height/min/max measures to.
+/// CSS's initial is ContentBox; the near-universal `*, *::before, *::after
+/// { box-sizing: border-box }` reset is why real pages declare BorderBox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoxSizing {
+    ContentBox,
+    BorderBox,
 }
 
 /// `float` keyword (batch 8a). `None` (the initial value) stays None on
@@ -736,7 +756,7 @@ fn border_style_kw(v: &str) -> BorderStyleKw {
 }
 
 /// One grid track sizing. `1fr` / `100px` / `auto` / `minmax(a, b)` —
-/// repeat() is a later batch.
+/// repeat() expands away at parse time, so it never reaches this enum.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GridTrack {
     Fr(f32),
@@ -2332,6 +2352,22 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             style.aspect_ratio = parse_aspect_ratio(v);
             style.aspect_ratio.is_some()
         }
+        "box-sizing" => {
+            style.box_sizing = match v {
+                "content-box" => Some(BoxSizing::ContentBox),
+                "border-box" => Some(BoxSizing::BorderBox),
+                _ => return false,
+            };
+            true
+        }
+        "background-clip" | "-webkit-background-clip" => {
+            style.background_clip_text = match v {
+                "text" => true,
+                "border-box" | "padding-box" | "content-box" => false,
+                _ => return false,
+            };
+            true
+        }
         _ => false,
     }
 }
@@ -2365,7 +2401,24 @@ fn parse_grid_tracks(v: &str) -> Option<Vec<GridTrack>> {
     let mut rest = v.trim();
     while !rest.is_empty() {
         let (token, tail) = next_track_token(rest)?;
-        tracks.push(parse_grid_track_token(token)?);
+        // repeat(N, <track-list>) expands inline to N copies of the list.
+        // auto-fill/auto-fit counts need the container's size, which the
+        // cascade doesn't have — those reject like any unknown token.
+        if let Some(inner) = token.strip_prefix("repeat(").and_then(|t| t.strip_suffix(')')) {
+            let (count, list) = inner.split_once(',')?;
+            let count: usize = count.trim().parse().ok()?;
+            // Chrome caps explicit tracks at 1000; repeat expansion must not
+            // let a stylesheet allocate unboundedly.
+            if count == 0 || count > 1000 {
+                return None;
+            }
+            let expanded = parse_grid_tracks(list.trim())?;
+            for _ in 0..count {
+                tracks.extend_from_slice(&expanded);
+            }
+        } else {
+            tracks.push(parse_grid_track_token(token)?);
+        }
         rest = tail.trim_start();
     }
     if tracks.is_empty() {
@@ -2375,23 +2428,33 @@ fn parse_grid_tracks(v: &str) -> Option<Vec<GridTrack>> {
     }
 }
 
-/// Split off one track token: `minmax(a, b)` contains spaces, so it can't
-/// go through plain whitespace splitting (nesting never occurs in valid CSS).
+/// Split off one track token: `minmax(a, b)` and `repeat(n, …)` contain
+/// spaces, so they can't go through plain whitespace splitting — a token
+/// whose first `(` precedes any whitespace runs to its balanced close
+/// (repeat lists can nest a minmax, so the scan counts depth).
 fn next_track_token(v: &str) -> Option<(&str, &str)> {
-    if let Some(open) = v.find("minmax(") {
-        if open > 0 {
-            // Non-minmax token ahead of it: cut at the first whitespace.
-            let end = v.find(char::is_whitespace).unwrap_or(v.len());
-            return Some(v.split_at(end));
+    let ws = v.find(char::is_whitespace).unwrap_or(v.len());
+    let paren = v.find('(').unwrap_or(v.len());
+    if paren < ws {
+        let mut depth = 0usize;
+        for (i, c) in v.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return Some(v.split_at(i + 1));
+                    }
+                }
+                _ => {}
+            }
         }
-        let close = v.find(')')? + 1;
-        return Some(v.split_at(close));
+        return None;
     }
-    let end = v.find(char::is_whitespace).unwrap_or(v.len());
-    if end == 0 {
+    if ws == 0 {
         None
     } else {
-        Some(v.split_at(end))
+        Some(v.split_at(ws))
     }
 }
 
@@ -3063,6 +3126,40 @@ mod tests {
         let mut s = ComputedStyle::default();
         apply_declarations(&mut s, "grid-area: 2 / 1 / 3 / 2");
         assert_eq!(s.grid_area, None);
+    }
+
+    #[test]
+    fn grid_repeat_expands_inline() {
+        // The landing-page idiom: repeat(4, 1fr). Before this batch the
+        // token failed to parse, the whole declaration dropped, and the
+        // grid collapsed to a single auto column.
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "grid-template-columns: repeat(4, 1fr)");
+        assert_eq!(
+            s.grid_template_columns,
+            Some(vec![GridTrack::Fr(1.0); 4]),
+        );
+
+        // Multi-track lists and minmax nested inside repeat.
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "grid-template-columns: 100px repeat(2, minmax(0, 1fr) 2fr) auto");
+        assert_eq!(
+            s.grid_template_columns,
+            Some(vec![
+                GridTrack::Px(100.0),
+                GridTrack::MinMax { min: TrackSize::Px(0.0), max: TrackSize::Fr(1.0) },
+                GridTrack::Fr(2.0),
+                GridTrack::MinMax { min: TrackSize::Px(0.0), max: TrackSize::Fr(1.0) },
+                GridTrack::Fr(2.0),
+                GridTrack::Auto,
+            ]),
+        );
+
+        // auto-fill needs container geometry the cascade doesn't have:
+        // reject the declaration rather than half-parse.
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "grid-template-columns: repeat(auto-fill, 100px)");
+        assert_eq!(s.grid_template_columns, None);
     }
 
 
@@ -4138,5 +4235,38 @@ mod tests {
         let mut s = ComputedStyle::default();
         assert!(!apply_declarations(&mut s, "gap: calc(50% + 4px) 8px"));
         assert_eq!(s.column_gap, None);
+    }
+
+    #[test]
+    fn box_sizing_parses_both_keywords() {
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "box-sizing: border-box"));
+        assert_eq!(s.box_sizing, Some(BoxSizing::BorderBox));
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "box-sizing: content-box"));
+        assert_eq!(s.box_sizing, Some(BoxSizing::ContentBox));
+        // Undeclared stays None (the CSS initial content-box applies downstream).
+        assert_eq!(ComputedStyle::default().box_sizing, None);
+        // Unknown keywords drop the declaration like any invalid value.
+        let mut s = ComputedStyle::default();
+        assert!(!apply_declarations(&mut s, "box-sizing: padding-box"));
+        assert_eq!(s.box_sizing, None);
+    }
+
+    #[test]
+    fn background_clip_parses_text_and_box_keywords() {
+        // The -webkit- alias is what real pages ship; it must land in the
+        // same field.
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "-webkit-background-clip: text"));
+        assert!(s.background_clip_text);
+        // Box keywords are accepted and modeled as the initial box fill.
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "background-clip: border-box"));
+        assert!(!s.background_clip_text);
+        assert_eq!(ComputedStyle::default().background_clip_text, false);
+        let mut s = ComputedStyle::default();
+        assert!(!apply_declarations(&mut s, "background-clip: no-box"));
+        assert!(!s.background_clip_text);
     }
 }
