@@ -3351,6 +3351,161 @@
         );
     }
 
+    /// Preflight permission enforcement (obscura "enforce CORS preflight
+    /// permissions", 04f0475 same-hole): a preflight that allows the origin
+    /// but never lists Access-Control-Allow-Methods does not consent to a
+    /// cross-origin PUT — the actual request must not go out. Before the fix
+    /// the origin-only check passed and the PUT reached the server anyway.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn preflight_without_allow_methods_blocks_the_actual_request() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            // Only the OPTIONS preflight should ever land here; a second
+            // connection means the actual PUT leaked through and the test's
+            // assertion below fires (recording it either way aids the
+            // failure message).
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                let req = String::from_utf8_lossy(&buf).to_string();
+                seen.lock().unwrap().push(req.lines().next().unwrap_or("").to_string());
+                let response = "HTTP/1.1 200 OK\r\naccess-control-allow-origin: *\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url("https://example.com/page");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    try {
+                        const r = await fetch("http://127.0.0.1:PORT/api", {
+                            method: "PUT",
+                            headers: { "content-type": "application/json" },
+                            body: "{}",
+                        });
+                        return "not-blocked:" + r.status;
+                    } catch (e) {
+                        return "rejected:" + (e && e.message);
+                    }
+                }"#
+                .replace("PORT", &port.to_string())
+                .as_str(),
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let msg = result.value.unwrap().as_str().unwrap_or_default().to_string();
+        assert!(
+            msg.starts_with("rejected:CORS preflight did not allow method 'PUT'"),
+            "server listed no Allow-Methods; the PUT must be refused, got: {msg}"
+        );
+
+        // The actual request never reached the wire: only the OPTIONS hop.
+        let served = requests.lock().unwrap().clone();
+        assert!(
+            served.iter().all(|line| line.starts_with("OPTIONS")),
+            "only the preflight may go out, served: {served:?}"
+        );
+
+        let events = rt.take_js_network_events();
+        let refused = events
+            .iter()
+            .find(|e| e.url.contains(&format!(":{port}/api")))
+            .expect("preflight-refused fetch must leave a network event");
+        assert_eq!(refused.status, 0);
+        let error = refused.error.as_deref().unwrap_or("");
+        assert!(
+            error.contains("did not allow method 'PUT'"),
+            "event must carry the preflight reason, got: {error}"
+        );
+    }
+
+    /// The positive companion: when the preflight DOES list the method and
+    /// headers, the actual request proceeds and resolves. Guards against the
+    /// enforcement over-blocking (the safelist value check must not reject
+    /// what the preflight explicitly allows).
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn preflight_that_allows_the_method_lets_the_request_through() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            // Hop 1: the OPTIONS preflight with a full consent set.
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            let preflight = concat!(
+                "HTTP/1.1 204 No Content\r\n",
+                "access-control-allow-origin: *\r\n",
+                "access-control-allow-methods: PUT, POST\r\n",
+                "access-control-allow-headers: content-type\r\n",
+                "access-control-max-age: 600\r\n",
+                "content-length: 0\r\nconnection: close\r\n\r\n",
+            );
+            stream.write_all(preflight.as_bytes()).unwrap();
+            stream.flush().unwrap();
+            // Hop 2: the actual PUT.
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            let body = b"ok";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\naccess-control-allow-origin: *\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url("https://example.com/page");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    try {
+                        const r = await fetch("http://127.0.0.1:PORT/api", {
+                            method: "PUT",
+                            headers: { "content-type": "application/json" },
+                            body: "{}",
+                        });
+                        return "ok:" + r.status + ":" + (await r.text());
+                    } catch (e) {
+                        return "rejected:" + (e && e.message);
+                    }
+                }"#
+                .replace("PORT", &port.to_string())
+                .as_str(),
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let msg = result.value.unwrap().as_str().unwrap_or_default().to_string();
+        assert_eq!(msg, "ok:200:ok", "consented preflight must let the PUT through, got: {msg}");
+    }
+
     /// op_fetch_url walks redirects on a raw reqwest client — the one
     /// subresource path that had no Tier2 legacy-TLS fallback (the
     /// g.alicdn.com shape: plain rustls dies on the handshake, the stealth
