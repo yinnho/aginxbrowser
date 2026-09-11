@@ -64,6 +64,12 @@ pub enum NodeData {
         attrs: Vec<Attribute>,
         template_contents: Option<NodeId>,
         mathml_annotation_xml_integration_point: bool,
+        /// A form control's dirty value (`el.value = x`) mirrored from the
+        /// bootstrap's prototype setter. Deliberately NOT an attribute: it
+        /// must stay invisible to `getAttribute`/`outerHTML`/CSS selectors
+        /// (Chrome keeps the dirty value out of the DOM the same way), while
+        /// the paint walk reads it to draw the text an input/textarea shows.
+        live_value: Option<String>,
     },
     Text {
         contents: String,
@@ -137,6 +143,19 @@ impl Node {
                     value,
                 });
             }
+        }
+    }
+
+    pub fn live_value(&self) -> Option<&str> {
+        match &self.data {
+            NodeData::Element { live_value, .. } => live_value.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn set_live_value(&mut self, value: String) {
+        if let NodeData::Element { live_value, .. } = &mut self.data {
+            *live_value = Some(value);
         }
     }
 
@@ -1468,6 +1487,7 @@ mod tests {
             attrs: vec![],
             template_contents: None,
             mathml_annotation_xml_integration_point: false,
+            live_value: None,
         })
     }
 
@@ -1480,6 +1500,7 @@ mod tests {
             }],
             template_contents: None,
             mathml_annotation_xml_integration_point: false,
+            live_value: None,
         })
     }
 
@@ -1559,6 +1580,7 @@ mod tests {
             attrs: vec![],
             template_contents: None,
             mathml_annotation_xml_integration_point: false,
+            live_value: None,
         });
         tree.append_child(doc, div);
 
@@ -1582,6 +1604,7 @@ mod tests {
             }],
             template_contents: None,
             mathml_annotation_xml_integration_point: false,
+            live_value: None,
         });
         tree.append_child(doc, div);
 
@@ -1603,6 +1626,7 @@ mod tests {
                 attrs: vec![],
                 template_contents: None,
                 mathml_annotation_xml_integration_point: false,
+                live_value: None,
             })
         };
         let html = mk("html");
@@ -1645,6 +1669,7 @@ mod tests {
                 attrs: vec![],
                 template_contents: None,
                 mathml_annotation_xml_integration_point: false,
+                live_value: None,
             })
         };
         let parent = mk("div");
@@ -1681,6 +1706,7 @@ mod tests {
             attrs: vec![],
             template_contents: None,
             mathml_annotation_xml_integration_point: false,
+            live_value: None,
         });
         tree.append_child(doc, div);
         let text = tree.new_node(NodeData::Text { contents: "hi".into() });
@@ -1772,6 +1798,7 @@ mod tests {
             attrs: vec![],
             template_contents: None,
             mathml_annotation_xml_integration_point: false,
+            live_value: None,
         });
         tree.append_child(doc, el);
 
@@ -1810,6 +1837,7 @@ mod tests {
             attrs: vec![],
             template_contents: None,
             mathml_annotation_xml_integration_point: false,
+            live_value: None,
         });
         dest.append_child(dest.document(), host);
 

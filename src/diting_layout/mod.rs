@@ -625,6 +625,65 @@ fn color_context(
     [0, 0, 0, 255]
 }
 
+/// The text run a form control paints inside its replaced box: the dirty
+/// value (live_value, mirrored from `el.value = x` by the bootstrap) wins,
+/// then the parsed default — value attribute for input, textContent for
+/// textarea (the same precedence the JS value getter uses, so what paints
+/// is what `el.value` reads). An empty text-like control paints its
+/// placeholder in Chrome's gray; button-ish inputs label from their value
+/// like their sizing does. Checkable inputs draw no run (widget state is
+/// future work). None for everything else.
+fn form_control_run(
+    tree: &DomTree,
+    id: NodeId,
+    styles: &HashMap<NodeId, ComputedStyle>,
+) -> Option<(String, f32, bool, f32, [u8; 4])> {
+    let tag = tree
+        .with_node(id, |n| n.as_element().map(|e| e.local.to_string()))
+        .flatten()
+        .unwrap_or_default();
+    if tag != "input" && tag != "textarea" {
+        return None;
+    }
+    let (font_size, bold, lh) = font_context(tree, id, styles);
+    let ink = color_context(tree, id, styles);
+    let attr = |name: &str| {
+        tree.with_node(id, |n| n.get_attribute(name).map(|v| v.to_string()))
+            .flatten()
+    };
+    let live = tree
+        .with_node(id, |n| n.live_value().map(|v| v.to_string()))
+        .flatten();
+    let run = |text: String, color: [u8; 4]| Some((text, font_size, bold, lh, color));
+    if tag == "textarea" {
+        let text = live.unwrap_or_else(|| tree.text_content(id));
+        return if text.is_empty() {
+            attr("placeholder").and_then(|p| run(p, [117, 117, 117, 255]))
+        } else {
+            run(text, ink)
+        };
+    }
+    let ty = attr("type").unwrap_or_default().to_ascii_lowercase();
+    match ty.as_str() {
+        "checkbox" | "radio" => None,
+        "button" | "submit" | "reset" => {
+            let label = live
+                .or_else(|| attr("value"))
+                .filter(|v| !v.is_empty())
+                .or_else(|| (ty == "submit").then(|| "Submit".to_string()));
+            label.and_then(|t| run(t, ink))
+        }
+        _ => {
+            let text = live.or_else(|| attr("value")).unwrap_or_default();
+            if text.is_empty() {
+                attr("placeholder").and_then(|p| run(p, [117, 117, 117, 255]))
+            } else {
+                run(text, ink)
+            }
+        }
+    }
+}
+
 /// Split text into layout tokens. Whitespace runs collapse to a single space
 /// token (CSS text processing) that keeps its width but contributes no
 /// height; CJK chars break per-glyph — UAX#14 allows a break after every
@@ -1124,8 +1183,14 @@ fn build_replaced_leaf(
             match ty.as_str() {
                 "checkbox" | "radio" => (13.0, 13.0, false),
                 "button" | "submit" | "reset" => {
+                    // Same precedence as the paint run: dirty value, then the
+                    // parsed value attribute, then Chrome's default "Submit".
                     let label = tree
-                        .with_node(id, |n| n.get_attribute("value").map(|v| v.to_string()))
+                        .with_node(id, |n| {
+                            n.live_value().map(|v| v.to_string()).or_else(|| {
+                                n.get_attribute("value").map(|v| v.to_string())
+                            })
+                        })
                         .flatten()
                         .unwrap_or_default();
                     let label: String = if label.is_empty() && ty == "submit" {
@@ -4740,7 +4805,9 @@ pub fn layout_dom_with_paint_order_and_images(
                     items.push(PaintItem::Image { rect: bg_rect, paint_rect, image: img.clone(), alpha });
                 } else {
                     // Alt text is an <img> concept only (batch 7a): video/
-                    // iframe/canvas placeholders are the bare box.
+                    // iframe/canvas placeholders are the bare box. Form
+                    // controls (input/textarea) paint the text they show —
+                    // the dirty value, parsed default, or gray placeholder.
                     let is_img = tree
                         .with_node(*dom_id, |n| {
                             n.as_element().map(|e| e.local.to_string() == "img")
@@ -4755,7 +4822,7 @@ pub fn layout_dom_with_paint_order_and_images(
                                 (text, font_size, bold, lh, color_context(tree, *dom_id, styles))
                             })
                     } else {
-                        None
+                        form_control_run(tree, *dom_id, styles)
                     };
                     // The gray box only when the author gave no visible
                     // background — an authored bg already reads as "box here".

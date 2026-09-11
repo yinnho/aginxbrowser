@@ -64,6 +64,10 @@ const _DOM_MUTATION_COMMANDS = new Set([
   // Not a tree mutation, but it lands a new stylesheet in the cascade —
   // the getComputedStyle snapshot epoch must see it like any style write.
   "ext_sheet_put",
+  // The form-control dirty value mirror: paint reads it (Rust side drops
+  // the layout cache on the same command), so the snapshot epoch must
+  // count it too.
+  "set_live_value",
 ]);
 const _domRaw = (cmd, a1, a2) => {
   if (_DOM_MUTATION_COMMANDS.has(cmd)) _ditingMutationEpoch++;
@@ -2474,9 +2478,16 @@ class Element extends Node {
       return;
     }
     _formValues[this._nid] = String(v);
-    if (tag === 'textarea') {
-      this.textContent = String(v);
-    }
+    // Mirror the dirty value into the Rust tree (NodeData::Element::
+    // live_value) so paint can draw what the control shows. Kept out of the
+    // value ATTRIBUTE on purpose — Chrome's el.value=x never touches
+    // getAttribute('value')/outerHTML, and this preserves that.
+    _domRaw("set_live_value", String(this._nid), String(v));
+    // NOTE: no textarea textContent write here. Chrome's el.value=x never
+    // touches the child text (defaultValue = child text; the dirty value
+    // stays out of outerHTML/cloneNode), and paint now reads live_value.
+    // Writing textContent also poisoned form.reset(): the "default" it
+    // restored had become the dirty value itself.
   }
   get min() { return this.getAttribute('min') || ''; }
   set min(v) { this.setAttribute('min', v); }
@@ -2569,6 +2580,11 @@ class Element extends Node {
     // option.selected = true moves select.value). glama.ai's admin form sets
     // selected on a freshly appended <option>; without sibling clearing the
     // old default-selected option kept winning every value/selectedIndex read.
+    // Chrome's property setter never touches the `selected` ATTRIBUTE: the
+    // attribute stays the parsed default (outerHTML keeps it, and reset()
+    // restores from it); dirtiness lives only in _selected, which the getter
+    // prefers. Stripping the attribute made reset() irreversible — the parsed
+    // default was destroyed by the first assignment.
     v = !!v;
     if (v) {
       let p = this.parentNode;
@@ -2576,10 +2592,7 @@ class Element extends Node {
       if (p) {
         const siblings = p.querySelectorAll('option');
         for (let i = 0; i < siblings.length; i++) {
-          if (siblings[i] !== this) {
-            siblings[i]._selected = false;
-            siblings[i].removeAttribute("selected");
-          }
+          if (siblings[i] !== this) siblings[i]._selected = false;
         }
       }
     }
@@ -2786,7 +2799,12 @@ class Element extends Node {
   get selectedIndex() {
     const opts = this.options;
     for (let i = 0; i < opts.length; i++) {
-      if (opts[i].selected || opts[i].hasAttribute('selected')) return i;
+      // `.selected` already falls back to the parsed attribute when the option
+      // was never dirtied; an explicit `_selected = false` must WIN over the
+      // attribute (Chrome: dirtiness beats the parsed default), so no `||`
+      // hasAttribute resurrection here — that arm undid deselection and kept
+      // the old default winning selectedIndex after select.value moved it.
+      if (opts[i].selected) return i;
     }
     // Only a single select implicitly selects its first option; a multiple
     // select with nothing chosen idles at -1 like a real browser.
@@ -3928,7 +3946,7 @@ function _wrap(nid) {
   if (_cache.has(nid)) return _cache.get(nid);
   const t = +_dom("node_type", nid);
   let n;
-  if (t === 1) { const C = _elementClassFor(nid); n = new C(nid); }
+  if (t === 1) { const C = _elementClassFor(nid); n = new C(nid); if (C === globalThis.HTMLFormElement) n = new Proxy(n, _formNamedProxy); }
   else if (t === 3) n = new Text(nid);
   else if (t === 8) n = new Comment(nid);
   else if (t === 9) n = new Document(nid);
@@ -3940,7 +3958,10 @@ function _wrapEl(nid) {
   if (nid < 0 || nid === null || nid === undefined || isNaN(nid)) return null;
   if (_cache.has(nid)) return _cache.get(nid);
   const C = _elementClassFor(nid);
-  const n = new C(nid);
+  const el = new C(nid);
+  // The cache holds the form's Proxy (not the raw wrapper) so identity is
+  // stable across every lookup path.
+  const n = C === globalThis.HTMLFormElement ? new Proxy(el, _formNamedProxy) : el;
   _cache.set(nid, n);
   return n;
 }
@@ -7852,7 +7873,51 @@ globalThis.HTMLFormElement = class HTMLFormElement extends Element {
   get length() { return this.elements.length; }
   // Inherit submit() from Element.prototype: it dispatches the cancelable
   // 'submit' event and (if not prevented) builds form data and navigates.
-  reset() { for (const f of this.elements) { if ('value' in f) f.value = ''; } }
+  // Chrome reset(): the cancelable 'reset' event fires first (a listener
+  // can veto), then every listed control restores its PARSED default — the
+  // value attribute for inputs/buttons, the child text for textareas, the
+  // selected attribute for a select's options, the checked attribute for
+  // checkables. The old `f.value = ''` did neither: it skipped the event
+  // and wiped defaults Chrome never wipes.
+  reset() {
+    const cancelled = !this.dispatchEvent(new Event('reset', { bubbles: true, cancelable: true }));
+    if (cancelled) return;
+    for (const f of this.elements) {
+      const tag = f.localName;
+      if (tag === 'select') {
+        for (const o of f.options) o._selected = o.hasAttribute('selected');
+        continue;
+      }
+      if (tag === 'input') {
+        const type = (f.getAttribute('type') || '').toLowerCase();
+        if (type === 'checkbox' || type === 'radio') { f.checked = f.hasAttribute('checked'); continue; }
+      }
+      if ('value' in f) {
+        f.value = tag === 'textarea'
+          ? (f.textContent || '')
+          : (f.getAttribute('value') !== null ? f.getAttribute('value') : '');
+      }
+    }
+  }
+};
+// HTMLFormElement named property access (`form.q` → the control named q, by
+// id or name — the spec's past-names map, minus the map's historical bits).
+// Real props/methods always win (Reflect.get resolves first), so a control
+// named "submit" can't shadow form.submit — same precedence as Chrome.
+// Surfaced by the hosted live-view page: an inline onclick reading
+// document.forms[0].q.value threw, because the forms *collection* shipped
+// without the form element's own named access. Applied per-form at wrap time
+// (forms are rare, so the per-instance Proxy costs nothing at scale).
+const _formNamedProxy = {
+  get(t, k, r) {
+    const v = Reflect.get(t, k, r);
+    if (v !== undefined || typeof k !== "string") return v;
+    return t.elements ? (t.elements.namedItem(k) || undefined) : undefined;
+  },
+  has(t, k) {
+    if (Reflect.has(t, k)) return true;
+    return typeof k === "string" && !!(t.elements && t.elements.namedItem(k));
+  },
 };
 globalThis.HTMLSelectElement = _htmlInterface('HTMLSelectElement', ['select']);
 globalThis.HTMLTextAreaElement = _htmlInterface('HTMLTextAreaElement', ['textarea']);

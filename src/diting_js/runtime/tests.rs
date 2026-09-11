@@ -2057,6 +2057,100 @@
     }
 
     #[test]
+    fn test_form_named_control_access() {
+        // `form.fieldName` — HTMLFormElement's own named access to its listed
+        // controls. Surfaced by the hosted live-view page: an inline onclick
+        // reading document.forms[0].q.value threw, because the forms
+        // *collection* shipped without the form element's named access. Real
+        // props must still win, so a control named "submit" cannot shadow
+        // form.submit (same precedence as Chrome).
+        let mut rt = setup_runtime(r#"<form id=f>
+            <input name=q value=hello><input id=alt name=second value=world><button name=go>Go</button>
+            </form>
+            <input name=q value=outside>"#);
+        let result = rt.evaluate(r#"
+            const f = document.forms[0];
+            return [
+                f.q.value,                                  // by name
+                f.alt.value,                                // by id
+                f.second === f.alt,                         // both names hit one control
+                f.go.tagName,                               // buttons are listed elements too
+                ('q' in f), ('nope' in f),
+                f.q === document.forms.namedItem('f').q,    // stable identity through the cache
+                typeof f.submit === 'function',             // real methods win over named props
+                f.q === document.querySelector('input[name=q]'), // the wrapper itself
+                document.createElement('form').constructor === HTMLFormElement, // createElement path too
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                "hello",
+                "world",
+                true,
+                "BUTTON",
+                true, false,
+                true,
+                true,
+                true,
+                true,
+            ])
+        );
+    }
+
+    #[test]
+    fn test_form_value_paint_mirror() {
+        // el.value = x is DIRTY state: the prototype setter mirrors it into
+        // NodeData::Element::live_value for the paint walk, and it must never
+        // leak into any serialized DOM surface (Chrome's dirty value lives in
+        // the same nowhere-land). form.reset() then restores the PARSED
+        // defaults (value attr / child text / selected attr / checked attr)
+        // after a cancelable 'reset' event — the old reset wiped everything
+        // to '' without firing anything.
+        let mut rt = setup_runtime(r#"<form id=f>
+            <input id=t value=stale><textarea id=ta>ta0</textarea>
+            <input id=c type=checkbox checked>
+            <select id=s><option value=a>A</option><option value=b selected>B</option></select>
+            </form>"#);
+        let result = rt.evaluate(r#"
+            const f = document.getElementById('f');
+            const t = document.getElementById('t');
+            const ta = document.getElementById('ta');
+            const c = document.getElementById('c');
+            const s = document.getElementById('s');
+            t.value = 'typed';
+            ta.value = 'typed ta';
+            c.checked = false;
+            s.value = 'a';
+            const before = [
+                t.value, ta.value,
+                t.getAttribute('value'),
+                t.outerHTML.includes('typed'),
+                ta.outerHTML.includes('typed ta'),
+                document.forms[0].t.value,
+                c.checked, s.value,
+            ];
+            let sawReset = 0, cancelled = false;
+            f.addEventListener('reset', (e) => { sawReset++; cancelled = e.cancelable; });
+            f.reset();
+            const after = [sawReset, cancelled, t.value, ta.value, c.checked, s.value];
+            // A vetoed reset leaves every control untouched.
+            f.addEventListener('reset', (e) => e.preventDefault());
+            t.value = 'typed2';
+            f.reset();
+            return [before, after, t.value, t.getAttribute('value'), t.outerHTML.includes('typed2')];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                ["typed", "typed ta", "stale", false, false, "typed", false, "a"],
+                [1, true, "stale", "ta0", true, "b"],
+                "typed2", "stale", false,
+            ])
+        );
+    }
+
+    #[test]
     fn test_option_legacy_factory() {
         // glama.ai admin form chunk populates selects via `new Option(label,
         // value)`; without the global its hydration died on "Option is not

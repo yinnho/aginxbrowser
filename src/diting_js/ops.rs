@@ -542,6 +542,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             | "remove_attribute"
             | "set_text_content"
             | "set_inner_html"
+            | "set_live_value"
             | "document_write_reset"
     ) {
         let gs = state.borrow::<SharedState>().clone();
@@ -796,6 +797,15 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             }
             "true".into()
         }
+        // The form-control dirty value mirrored from the bootstrap's value
+        // setter (see NodeData::Element::live_value). Not an attribute on
+        // purpose: getAttribute/outerHTML must keep showing the ORIGINAL
+        // value attribute like Chrome, while paint reads this instead.
+        "set_live_value" => {
+            let node_id = match parse_nid(&arg1) { Some(id) => id, None => return "false".into() };
+            dom.with_node_mut(node_id, |n| n.set_live_value(arg2.to_string()));
+            "true".into()
+        }
         "inner_html" => {
             let nid = arg1.parse::<u32>().unwrap_or(0);
             serde_json::to_string(&dom.inner_html(NodeId::new(nid))).unwrap_or("\"\"".into())
@@ -933,6 +943,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             dom.new_node(NodeData::Element {
                 name: html5ever::QualName::new(None, html5ever::ns!(html), html5ever::LocalName::from(arg1.as_str())),
                 attrs: vec![], template_contents: None, mathml_annotation_xml_integration_point: false,
+                live_value: None,
             }).index().to_string()
         }
         "create_text_node" => {

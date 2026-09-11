@@ -1659,7 +1659,6 @@ fn session_thread(
                         SessionCommand::Screenshot { width, height, full_page, selector, selector_all, reply } => {
                             #[cfg(feature = "screenshot")]
                             {
-                                let html = page.content();
                                 let url = page.url();
                                 // Default to the live viewport so a
                                 // session_viewport override is what the
@@ -1678,33 +1677,95 @@ fn session_thread(
                                 let h = height
                                     .unwrap_or_else(|| vh.as_f64().unwrap_or(800.0) as u32)
                                     .max(1);
-                                let resources = crate::screenshot::prefetch_render_resources(
-                                    &page, &url, &html, w as f32,
-                                )
-                                .await;
-                                let result = crate::screenshot::render_html_to_png_diting(
-                                    &html,
-                                    &url,
-                                    w,
-                                    h,
-                                    1.0,
-                                    full_page,
-                                    selector.as_deref(),
-                                    selector_all,
-                                    Some(&resources),
-                                )
-                                .map_err(|e| format!("screenshot failed: {e}"))
-                                .map(|rendered| {
+
+                                // The no-argument default is the hosted live
+                                // page's frame poll, and it paints the LIVE
+                                // tree's viewport band. The serialized
+                                // re-parse below drops everything Chrome's
+                                // outerHTML drops — dirty form values first
+                                // of all: the live page exists to watch the
+                                // agent type, and typed text lives in
+                                // NodeData::Element::live_value, which a
+                                // re-parse of page.content() cannot see. Any
+                                // explicit size/full_page/selector request
+                                // keeps the re-parse path unchanged.
+                                let mut band_png: Option<(u32, u32, Vec<u8>)> = None;
+                                if !full_page && selector.is_none() && width.is_none() && height.is_none() {
+                                    let mut num = |expr: &str| {
+                                        page.evaluate_with_timeout(
+                                            expr,
+                                            crate::page::INTERACTION_EVAL_TIMEOUT,
+                                        )
+                                        .as_f64()
+                                        .unwrap_or(0.0) as f32
+                                    };
+                                    let (sx, sy) = (num("scrollX"), num("scrollY"));
+                                    let vp = (w as f32, h as f32);
+                                    if let Some((frame, missing)) =
+                                        page.inner.viewport_band_frame(sx, sy, vp)
+                                    {
+                                        // Lazily fetch the images the band
+                                        // found missing and repaint once — a
+                                        // frame with placeholders beats a
+                                        // stall (same deal as the video pump).
+                                        let frame = if missing.is_empty() {
+                                            frame
+                                        } else {
+                                            page.inner.fetch_band_images(missing).await;
+                                            page.inner.viewport_band_frame(sx, sy, vp)
+                                                .map(|(f, _)| f)
+                                                .unwrap_or(frame)
+                                        };
+                                        band_png = crate::pages::png_of(
+                                            frame.width,
+                                            frame.height,
+                                            &frame.rgba,
+                                        )
+                                        .ok()
+                                        .map(|png| (frame.width, frame.height, png));
+                                    }
+                                }
+
+                                let result = if let Some((pw, ph, png)) = band_png {
                                     use base64::{engine::general_purpose::STANDARD, Engine as _};
-                                    serde_json::json!({
+                                    Ok(serde_json::json!({
                                         "url": url,
-                                        "width": rendered.pixel_width,
-                                        "height": rendered.pixel_height,
-                                        "image_base64": STANDARD.encode(&rendered.png),
+                                        "width": pw,
+                                        "height": ph,
+                                        "image_base64": STANDARD.encode(&png),
                                         "format": "png",
                                     })
-                                    .to_string()
-                                });
+                                    .to_string())
+                                } else {
+                                    let html = page.content();
+                                    let resources = crate::screenshot::prefetch_render_resources(
+                                        &page, &url, &html, w as f32,
+                                    )
+                                    .await;
+                                    crate::screenshot::render_html_to_png_diting(
+                                        &html,
+                                        &url,
+                                        w,
+                                        h,
+                                        1.0,
+                                        full_page,
+                                        selector.as_deref(),
+                                        selector_all,
+                                        Some(&resources),
+                                    )
+                                    .map_err(|e| format!("screenshot failed: {e}"))
+                                    .map(|rendered| {
+                                        use base64::{engine::general_purpose::STANDARD, Engine as _};
+                                        serde_json::json!({
+                                            "url": url,
+                                            "width": rendered.pixel_width,
+                                            "height": rendered.pixel_height,
+                                            "image_base64": STANDARD.encode(&rendered.png),
+                                            "format": "png",
+                                        })
+                                        .to_string()
+                                    })
+                                };
                                 let _ = reply.send(result);
                             }
                             #[cfg(not(feature = "screenshot"))]
@@ -2687,6 +2748,81 @@ mod tests {
         assert_eq!(&png[0..4], b"\x89PNG", "PNG magic bytes");
         assert!(png.len() > 1000, "non-trivial image, got {} bytes", png.len());
 
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
+    /// The hosted live page's frame poll is the no-argument screenshot, and
+    /// it must paint the LIVE tree. Dirty form values live in
+    /// NodeData::Element::live_value (mirrored from the JS value setter),
+    /// which a re-parse of serialized HTML cannot see — Chrome's outerHTML
+    /// drops them too. Pinned differentially: count dark text-ink pixels
+    /// inside the input's rect before and after typing. The re-parse path
+    /// renders the value ATTRIBUTE (empty) and leaves the count unchanged.
+    #[cfg(feature = "screenshot")]
+    #[tokio::test]
+    async fn screenshot_default_frame_paints_typed_input_value() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /live",
+            "<html><body style=\"margin:0\">\
+             <input id=q style=\"position:absolute;left:8px;top:8px;width:240px;height:32px\">\
+             </body></html>",
+        )]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/live")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+        );
+
+        async fn ink_in_input(mgr: &mut SessionManager, sid: &str) -> usize {
+            let shot = mgr
+                .send(sid, |reply| SessionCommand::Screenshot {
+                    width: None,
+                    height: None,
+                    full_page: false,
+                    selector: None,
+                    selector_all: false,
+                    reply,
+                })
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&shot).expect("screenshot JSON");
+            use base64::{engine::general_purpose::STANDARD, Engine as _};
+            let png = STANDARD
+                .decode(v["image_base64"].as_str().expect("base64 body"))
+                .expect("png bytes");
+            let img = image::load_from_memory(&png).expect("decode png").to_rgb8();
+            // Dark ink inside the input rect (8,8,240x32) — the box fill and
+            // any border are constant across both shots, so only the typed
+            // text moves the count.
+            img.enumerate_pixels()
+                .filter(|(x, y, p)| {
+                    *x >= 10 && *x < 246 && *y >= 10 && *y < 38
+                        && p.0[0] < 100 && p.0[1] < 100 && p.0[2] < 100
+                })
+                .count()
+        }
+
+        let before = ink_in_input(&mut mgr, &sid).await;
+        mgr.send(&sid, |reply| SessionCommand::Eval {
+            script: "document.getElementById('q').value = 'typed hello world'".to_string(),
+            reply,
+        })
+        .await
+        .unwrap();
+        let after = ink_in_input(&mut mgr, &sid).await;
+
+        assert!(
+            after > before + 40,
+            "typed value must paint inside the input box (ink {before} → {after})"
+        );
         assert!(mgr.close_and_wait(&sid).await);
     }
 

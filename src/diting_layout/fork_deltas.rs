@@ -603,6 +603,76 @@ fn unstyled_form_controls_get_default_boxes() {
     assert_eq!(styled.height, 40.0, "CSS height wins over the default; got {styled:?}");
 }
 
+/// A form control paints the text it shows inside its replaced box (the
+/// live-view dogfood batch): the dirty value (`el.value = x`, mirrored from
+/// the bootstrap's prototype setter into NodeData::Element::live_value) wins
+/// over the parsed default, and an empty text-like control paints its
+/// placeholder in Chrome's gray [117,117,117]. The mirror is deliberately NOT
+/// an attribute — Chrome's `el.value = x` never touches
+/// getAttribute('value')/outerHTML — so this test pins both halves: the paint
+/// run AND the invisibility (a mirror-into-attr implementation would fail the
+/// serialization asserts at the bottom).
+#[test]
+fn form_controls_paint_their_value_run() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::PaintItem;
+
+    let html = r#"<html><body>
+        <input id="dirty" value="default text">
+        <input id="attr" value="attr text">
+        <input id="empty" placeholder="Type here">
+        <input id="go" type="submit" value="Go">
+        <input id="submitdefault" type="submit">
+        <textarea id="ta">ta text</textarea>
+        </body></html>"#;
+    let tree = parse_html(html);
+    // The dirty-value mirror — the bootstrap's value setter does this via the
+    // set_live_value op; the test drives the Rust side directly.
+    let dirty = tree.query_selector_all("#dirty").unwrap()[0];
+    tree.with_node_mut(dirty, |n| n.set_live_value("typed text".into()));
+    let ta = tree.query_selector_all("#ta").unwrap()[0];
+    tree.with_node_mut(ta, |n| n.set_live_value("typed ta".into()));
+
+    let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let (_, items, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+        &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
+    );
+    let run = |want: &str| {
+        items.iter().find_map(|it| match it {
+            PaintItem::Replaced { alt: Some((text, .., color)), .. } if text == want => {
+                Some(*color)
+            }
+            _ => None,
+        })
+    };
+
+    assert!(run("typed text").is_some(), "dirty live_value paints, not the attr default");
+    assert!(run("attr text").is_some(), "parsed value attr paints absent a dirty value");
+    assert!(run("typed ta").is_some(), "textarea dirty value paints over its textContent");
+    assert!(
+        run("default text").is_none(),
+        "the stale value attr must not paint once the dirty value exists"
+    );
+    assert_eq!(
+        run("Type here").expect("placeholder paints on an empty control"),
+        [117, 117, 117, 255],
+        "placeholder paints in Chrome's gray"
+    );
+    assert!(run("Go").is_some(), "submit input labels from its value attr");
+    assert!(run("Submit").is_some(), "value-less submit paints Chrome's default label");
+
+    // The mirror stays out of every DOM surface, like Chrome's dirty value.
+    assert_eq!(
+        tree.with_node(dirty, |n| n.get_attribute("value").map(str::to_string)).flatten(),
+        Some("default text".into()),
+        "getAttribute keeps the ORIGINAL value attribute"
+    );
+    assert!(!tree.outer_html(dirty).contains("typed text"));
+    assert_eq!(tree.text_content(ta), "ta text", "textContent is not the dirty value");
+}
+
 /// `box-sizing` picks the edge an authored width/height/min/max measures to
 /// (the universal `* { box-sizing: border-box }` reset idiom). taffy sizes
 /// are border-box native, so the engine maps authored px over by padding +
