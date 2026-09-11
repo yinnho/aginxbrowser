@@ -107,6 +107,10 @@ Login composes: `import_curl` first, then `flow_run{session_id}` — the flow
 skips its own create block and runs inside the authenticated session.
 Installed workflows live server-side (`workflow/<name>/flow.json`);
 `flow_run{name:"bogus"}` errors back with the list of what's installed.
+`x-reply` posts/replies on X with the full write-op header set
+(txid + session-signature) — needs a logged-in x.com session, single-shot
+per target, never blind-retry on timeout (eval timeout cuts the result, not
+the request; a follow-up 187 means the first one landed).
 
 ## Quick commands
 
