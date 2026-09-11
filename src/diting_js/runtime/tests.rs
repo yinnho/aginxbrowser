@@ -3605,7 +3605,7 @@
     /// g.alicdn.com shape: plain rustls dies on the handshake, the stealth
     /// stack's BoringSSL connects). A closed port fails both transports
     /// fast; the JS-visible rejection must carry the legacy marker for GET
-    /// (fallback fired) and must NOT for POST (double-submit guard).
+    /// (fallback fired).
     #[cfg(feature = "stealth")]
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_transport_failure_falls_back_to_legacy_tls() {
@@ -3643,9 +3643,14 @@
         );
     }
 
+    /// Same closed-port probe with a POST: connection refused is
+    /// connect-stage — the request never left the machine — so the fallback
+    /// fires for the body-carrying method too and the marker must appear.
+    /// The post-send arm (no retry, double-submit guard) is pinned at the
+    /// client layer; this e2e pins the op's `is_connect` gate feeding it.
     #[cfg(feature = "stealth")]
     #[tokio::test(flavor = "current_thread")]
-    async fn fetch_transport_failure_post_keeps_original_error() {
+    async fn fetch_transport_failure_post_rides_connect_stage_fallback() {
         let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
         std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
 
@@ -3675,8 +3680,8 @@
             .unwrap();
         let msg = result.value.unwrap().as_str().unwrap_or_default().to_string();
         assert!(
-            msg.starts_with("rejected:") && !msg.contains("legacy TLS transport"),
-            "POST must fail with its original transport error, got: {msg}"
+            msg.starts_with("rejected:") && msg.contains("legacy TLS transport"),
+            "connect-stage POST must surface the legacy fallback attempt, got: {msg}"
         );
     }
 

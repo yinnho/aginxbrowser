@@ -2811,17 +2811,33 @@ async fn op_fetch_url(
                 // same one-shot legacy-TLS escape hatch the script and
                 // stylesheet loaders use; per-hop JS headers (Origin,
                 // Referer, sec-fetch-*) do not ride the retry — the accepted
-                // cost of an escape hatch, mirrored in client.rs. POST keeps
-                // failing with its original error (double-submit risk).
+                // cost of an escape hatch, mirrored in client.rs. Any other
+                // method rides only when the failure is connect-stage
+                // (DNS/TCP/TLS — the request provably never left the
+                // machine), so a POST form submit cannot double-submit
+                // (taobao seller-backend shape: CBC-only endpoints killed
+                // every publish POST at the handshake).
+                let fallback_ctype = custom_headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                    .map(|(_, v)| v.clone());
                 let fallback = match http_client.as_ref() {
                     Some(hc)
                         if current_method == reqwest::Method::GET
-                            || current_method == reqwest::Method::HEAD =>
+                            || current_method == reqwest::Method::HEAD
+                            || e.is_connect() =>
                     {
                         match url::Url::parse(&current_url) {
                             Ok(u) => Some(
-                                hc.scripted_fetch_fallback(&current_method, &u, &e.to_string())
-                                    .await,
+                                hc.scripted_fetch_fallback(
+                                    &current_method,
+                                    &u,
+                                    &e.to_string(),
+                                    (!current_body.is_empty()).then_some(current_body.as_slice()),
+                                    fallback_ctype.as_deref(),
+                                    e.is_connect(),
+                                )
+                                .await,
                             ),
                             Err(_) => None,
                         }

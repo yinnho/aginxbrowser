@@ -351,7 +351,7 @@ impl StealthHttpClient {
     }
 
     pub async fn fetch(&self, url: &Url) -> Result<Response, NetError> {
-        self.fetch_inner(url, None).await
+        self.fetch_inner(url, None, wreq::Method::GET, None, None).await
     }
 
     /// Subresource GET (band-paint image fetch, 反馈⑫ shape): like [`fetch`]
@@ -364,13 +364,37 @@ impl StealthHttpClient {
         url: &Url,
         referrer: Option<&str>,
     ) -> Result<Response, NetError> {
-        self.fetch_inner(url, referrer).await
+        self.fetch_inner(url, referrer, wreq::Method::GET, None, None)
+            .await
+    }
+
+    /// Non-GET transport for the legacy-TLS fallback (`retry_via_legacy_tls`):
+    /// the escape hatch used to be GET-only, which stranded scripted POSTs on
+    /// CBC-only servers — now a connect-stage POST failure rides here with its
+    /// body and Content-Type. The method name is parsed rather than passed as
+    /// a type so the plain client's reqwest Method never has to unify with
+    /// wreq's.
+    pub async fn fetch_with_body(
+        &self,
+        url: &Url,
+        referrer: Option<&str>,
+        method: &str,
+        body: Option<&[u8]>,
+        content_type: Option<&str>,
+    ) -> Result<Response, NetError> {
+        let method = wreq::Method::from_bytes(method.as_bytes())
+            .map_err(|e| NetError::Network(format!("invalid method {method:?}: {e}")))?;
+        self.fetch_inner(url, referrer, method, body, content_type)
+            .await
     }
 
     async fn fetch_inner(
         &self,
         url: &Url,
         referrer: Option<&str>,
+        method: wreq::Method,
+        body: Option<&[u8]>,
+        content_type: Option<&str>,
     ) -> Result<Response, NetError> {
         // The stealth path must enforce the same SSRF rules as the reqwest
         // path — without this, StealthHttpClient could reach loopback/private
@@ -398,9 +422,15 @@ impl StealthHttpClient {
         }
 
         let mut redirects = Vec::new();
+        let mut method = method;
+        let mut body = body;
+        let mut content_type = content_type;
 
         for _ in 0..20 {
-            let mut req = self.select_client(&current_url).await.get(current_url.as_str());
+            let mut req = self
+                .select_client(&current_url)
+                .await
+                .request(method.clone(), current_url.as_str());
 
             // Override the emulation's hardcoded Linux UA + en-US locale so the
             // advertised identity is internally consistent (UA platform must
@@ -447,7 +477,29 @@ impl StealthHttpClient {
                 req = req.header(k.as_str(), v.as_str());
             }
 
-            let resp = match send_get_with_connection_reset_retry(req, &current_url).await {
+            // The legacy-TLS fallback rides here with a method and payload;
+            // the plain GET paths pass None for both. Content-Type only on
+            // methods that can carry one — a GET advertising a content-type
+            // is a WAF tell, and the body drops naturally when a 3xx
+            // downgrade sets `body = None` below.
+            if method != wreq::Method::GET && method != wreq::Method::HEAD {
+                if let Some(ct) = content_type {
+                    req = req.header("Content-Type", ct);
+                }
+            }
+            if let Some(b) = body {
+                req = req.body(b.to_vec());
+            }
+
+            // GET/HEAD are idempotent, so the connection-reset retry applies;
+            // any other method sends exactly once (a reset after the request
+            // went out may already have applied server-side).
+            let resp = if matches!(method, wreq::Method::GET | wreq::Method::HEAD) {
+                send_get_with_connection_reset_retry(req, &current_url).await
+            } else {
+                req.send().await
+            };
+            let resp = match resp {
                 Ok(resp) => resp,
                 Err(e) => {
                     // Mirror the reqwest path: name an unreachable configured
@@ -499,6 +551,17 @@ impl StealthHttpClient {
                     redirects.push(current_url.clone());
                     tracing::info!("stealth redirect {} -> {}", current_url, next_url);
                     current_url = next_url;
+                    // Mirror the plain client (and Chrome): 301/302/303
+                    // rewrite the method to GET and drop body + content-type;
+                    // 307/308 preserve both.
+                    if status == wreq::StatusCode::MOVED_PERMANENTLY
+                        || status == wreq::StatusCode::FOUND
+                        || status == wreq::StatusCode::SEE_OTHER
+                    {
+                        method = wreq::Method::GET;
+                        body = None;
+                        content_type = None;
+                    }
                     continue;
                 }
             }
@@ -770,6 +833,155 @@ mod tests {
             }
         });
         (port, heads)
+    }
+
+    /// Read one full HTTP request (head until the blank line, then the
+    /// declared Content-Length of body) off the stream, as "head\nbody".
+    async fn read_request(
+        stream: &mut tokio::net::TcpStream,
+    ) -> Option<String> {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        for _ in 0..16 {
+            let n = stream.read(&mut chunk).await.ok()?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&buf[..pos]).to_string();
+                let clen = head
+                    .lines()
+                    .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                    .and_then(|l| l.split(':').nth(1))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if buf.len() >= pos + 4 + clen {
+                    return Some(format!(
+                        "{head}\n{}",
+                        String::from_utf8_lossy(&buf[pos + 4..])
+                    ));
+                }
+            }
+        }
+        Some(String::from_utf8_lossy(&buf).to_string())
+    }
+
+    /// Recording server for method-semantics tests: every request (head +
+    /// body) lands in the shared vec; `/r301` and `/r307` answer a redirect
+    /// to `/land`, everything else a plain 200.
+    async fn method_recording_fixture() -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let log: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let log2 = log.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let l = log2.clone();
+                tokio::spawn(async move {
+                    let Some(req) = read_request(&mut stream).await else { return };
+                    l.lock().unwrap().push(req.clone());
+                    let path = req.split(' ').nth(1).unwrap_or("").to_string();
+                    let resp = match path.as_str() {
+                        "/r301" => "HTTP/1.1 301 Moved Permanently\r\nlocation: /land\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string(),
+                        "/r307" => "HTTP/1.1 307 Temporary Redirect\r\nlocation: /land\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string(),
+                        _ => "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok".to_string(),
+                    };
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        (port, log)
+    }
+
+    /// The legacy-TLS fallback's POST transport: method, body and declared
+    /// Content-Type must all reach the wire (`fetch_with_body` used to be
+    /// GET-only — the taobao seller-backend shape this exists for).
+    #[allow(clippy::await_holding_lock)] // env-lock guard spans the fixture fetch, as above
+    #[tokio::test]
+    async fn stealth_post_rides_method_body_and_content_type() {
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+        let (port, log) = method_recording_fixture().await;
+        let mut client = StealthHttpClient::new(Arc::new(CookieJar::new()));
+        client.allow_private_network = true;
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/echo")).unwrap();
+        let result = client
+            .fetch_with_body(
+                &url,
+                None,
+                "POST",
+                Some(b"title=%E6%B5%8B%E8%AF%95".as_slice()),
+                Some("application/x-www-form-urlencoded"),
+            )
+            .await;
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+        assert_eq!(result.expect("fixture POST").status, 200);
+        let log = log.lock().unwrap();
+        let req = log
+            .iter()
+            .find(|r| r.starts_with("POST /echo "))
+            .unwrap_or_else(|| panic!("no POST /echo recorded: {log:?}"));
+        assert!(
+            req.lines()
+                .any(|l| l.eq_ignore_ascii_case("content-type: application/x-www-form-urlencoded")),
+            "declared content-type must ride the POST: {req}"
+        );
+        assert!(
+            req.ends_with("title=%E6%B5%8B%E8%AF%95"),
+            "body must ride the POST verbatim: {req}"
+        );
+    }
+
+    /// Redirect method semantics on the stealth transport must mirror the
+    /// plain client (and Chrome): 301 rewrites the POST to a bodyless GET,
+    /// 307 preserves method + body.
+    #[allow(clippy::await_holding_lock)] // env-lock guard spans the fixture fetch, as above
+    #[tokio::test]
+    async fn stealth_post_redirect_downgrades_301_preserves_307() {
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+        let (port, log) = method_recording_fixture().await;
+        let mut client = StealthHttpClient::new(Arc::new(CookieJar::new()));
+        client.allow_private_network = true;
+
+        let mk = |path: &str| Url::parse(&format!("http://127.0.0.1:{port}/{path}")).unwrap();
+        let r1 = client
+            .fetch_with_body(&mk("r301"), None, "POST", Some(b"a=1".as_slice()), Some("application/x-www-form-urlencoded"))
+            .await;
+        let r2 = client
+            .fetch_with_body(&mk("r307"), None, "POST", Some(b"a=1".as_slice()), Some("application/x-www-form-urlencoded"))
+            .await;
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+        assert_eq!(r1.expect("301 walk").status, 200);
+        assert_eq!(r2.expect("307 walk").status, 200);
+
+        let log = log.lock().unwrap();
+        let landed = log
+            .iter()
+            .filter(|r| r.contains(" /land "))
+            .collect::<Vec<_>>();
+        assert_eq!(landed.len(), 2, "both walks must land: {log:?}");
+        let downgraded = landed
+            .iter()
+            .find(|r| r.starts_with("GET /land "))
+            .unwrap_or_else(|| panic!("301 must land as GET: {log:?}"));
+        assert!(
+            !downgraded.to_ascii_lowercase().contains("content-type:"),
+            "the 301 GET must not carry the POST's content-type: {downgraded}"
+        );
+        assert!(
+            !downgraded.ends_with("a=1"),
+            "the 301 GET must drop the body: {downgraded}"
+        );
+        let preserved = landed
+            .iter()
+            .find(|r| r.starts_with("POST /land "))
+            .unwrap_or_else(|| panic!("307 must land as POST: {log:?}"));
+        assert!(
+            preserved.ends_with("a=1"),
+            "the 307 POST must keep its body: {preserved}"
+        );
     }
 
     // set_extra_headers must reach the wire per-request, and an extras

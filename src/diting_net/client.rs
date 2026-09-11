@@ -855,11 +855,17 @@ impl HttpClient {
         resource_type: ResourceType,
         referrer: Option<&str>,
     ) -> Result<Response, NetError> {
+        // The primary attempt borrows the body; ownership stays here so a
+        // retry can re-send it. `connect_failed` is the send-stage
+        // classification (DNS/TCP/TLS — the request never left the machine),
+        // the only regime where a non-idempotent retry cannot double-submit.
+        let mut connect_failed = false;
         match self
             .fetch_with_method_traced_inner(
                 initial_method.clone(),
                 url,
-                initial_body,
+                initial_body.as_deref(),
+                &mut connect_failed,
                 callbacks,
                 resource_type,
                 referrer,
@@ -867,23 +873,47 @@ impl HttpClient {
             .await
         {
             Ok(resp) => Ok(resp),
-            Err(e) => self.retry_via_legacy_tls(initial_method, url, e).await,
+            Err(e) => {
+                // Mirror what the primary attempt would have sent: the plain
+                // client hardcodes form-urlencoded on a POST with a body.
+                let fallback_body = initial_body.as_deref();
+                let fallback_ctype = if fallback_body.is_some() && initial_method == Method::POST {
+                    Some("application/x-www-form-urlencoded")
+                } else {
+                    None
+                };
+                self.retry_via_legacy_tls(
+                    initial_method,
+                    url,
+                    e,
+                    fallback_body,
+                    fallback_ctype,
+                    connect_failed,
+                )
+                .await
+            }
         }
     }
 
     /// One legacy-TLS retry for transport failures (obscura#769 navigation
     /// layer): rustls carries no TLS 1.2 CBC cipher suites, so a CBC-only
     /// server dies in the ClientHello while every browser connects; the
-    /// stealth transport's BoringSSL stack still speaks CBC. GET/HEAD that
-    /// failed on the primary transport get exactly one attempt through it.
-    /// Guards, in order:
-    /// - GET/HEAD only — a POST retry risks double form submission;
+    /// stealth transport's BoringSSL stack still speaks CBC. Guards, in
+    /// order:
+    /// - GET/HEAD always retry (idempotent). Any other method retries only
+    ///   when `connect_stage` says the failure was connect-phase (DNS/TCP/
+    ///   TLS) — the request provably never left the machine, so a second
+    ///   attempt cannot double-submit. A failure after the bytes went out
+    ///   (body read, response-wait reset) keeps the original error. This is
+    ///   what lets a scripted form POST ride the escape hatch without
+    ///   re-submitting anything (taobao seller-backend shape);
     /// - the URL must pass `validate_url` again. Gate rejections travel as
     ///   `NetError::Network` just like transport failures, so the error
     ///   type cannot fence them — the re-check can, and the legacy
     ///   transport re-validates every hop it walks on top of that;
     /// - redirect loops and an unavailable transport (non-stealth build,
     ///   SOCKS proxy) pass the original error through unchanged.
+    ///
     /// The legacy client shares the cookie jar and re-syncs identity at
     /// attempt time, but not per-hop navigation headers (sec-fetch-*,
     /// Referer) — the accepted cost of an escape hatch.
@@ -893,9 +923,14 @@ impl HttpClient {
         method: Method,
         url: &Url,
         err: NetError,
+        body: Option<&[u8]>,
+        content_type: Option<&str>,
+        connect_stage: bool,
     ) -> Result<Response, NetError> {
-        if !matches!(method, Method::GET | Method::HEAD) || matches!(err, NetError::TooManyRedirects(_))
-        {
+        if matches!(err, NetError::TooManyRedirects(_)) {
+            return Err(err);
+        }
+        if !matches!(method, Method::GET | Method::HEAD) && !connect_stage {
             return Err(err);
         }
         if validate_url(url, self.allow_private_network).is_err() {
@@ -912,7 +947,10 @@ impl HttpClient {
             .await;
         legacy.set_extra_headers(self.extra_headers.read().await.clone()).await;
         tracing::warn!("rustls transport failed for {url}; retrying once via legacy TLS transport");
-        match legacy.fetch(url).await {
+        match legacy
+            .fetch_with_body(url, None, method.as_str(), body, content_type)
+            .await
+        {
             Ok(resp) => Ok(resp),
             Err(legacy_err) => Err(NetError::Network(format!(
                 "{err}; legacy TLS transport also failed: {legacy_err}"
@@ -926,6 +964,9 @@ impl HttpClient {
         _method: Method,
         _url: &Url,
         err: NetError,
+        _body: Option<&[u8]>,
+        _content_type: Option<&str>,
+        _connect_stage: bool,
     ) -> Result<Response, NetError> {
         Err(err)
     }
@@ -935,20 +976,31 @@ impl HttpClient {
     /// `request_client()` and has no retry of its own, so a transport
     /// failure there hands the error string here and gets the same
     /// one-attempt BoringSSL escape hatch the subresource loaders use —
-    /// same guards (GET/HEAD only, `validate_url` re-check, per-hop
-    /// re-validation inside the stealth redirect walk), same shared cookie
-    /// jar and identity sync. `Err` carries the original transport error,
-    /// or the combined message when the legacy attempt fired and failed
-    /// too (the `legacy TLS transport` marker is how tests prove the
-    /// fallback actually ran).
+    /// same guards (GET/HEAD always; other methods only when
+    /// `connect_stage` says the request never left the machine,
+    /// `validate_url` re-check, per-hop re-validation inside the stealth
+    /// redirect walk), same shared cookie jar and identity sync. `Err`
+    /// carries the original transport error, or the combined message when
+    /// the legacy attempt fired and failed too (the `legacy TLS transport`
+    /// marker is how tests prove the fallback actually ran).
     pub async fn scripted_fetch_fallback(
         &self,
         method: &Method,
         url: &Url,
         transport_err: &str,
+        body: Option<&[u8]>,
+        content_type: Option<&str>,
+        connect_stage: bool,
     ) -> Result<Response, NetError> {
-        self.retry_via_legacy_tls(method.clone(), url, NetError::Network(transport_err.to_string()))
-            .await
+        self.retry_via_legacy_tls(
+            method.clone(),
+            url,
+            NetError::Network(transport_err.to_string()),
+            body,
+            content_type,
+            connect_stage,
+        )
+        .await
     }
 
     /// Build the legacy transport on first fallback need, mirroring this
@@ -979,11 +1031,13 @@ impl HttpClient {
             .as_ref()
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn fetch_with_method_traced_inner(
         &self,
         initial_method: Method,
         url: &Url,
-        initial_body: Option<Vec<u8>>,
+        initial_body: Option<&[u8]>,
+        connect_failed: &mut bool,
         callbacks: Option<&CallbackRegistry>,
         resource_type: ResourceType,
         referrer: Option<&str>,
@@ -1150,14 +1204,14 @@ impl HttpClient {
             let mut req_builder = self.get_client_for(&current_url).await.request(method.clone(), current_url.as_str())
                 .headers(headers);
 
-            if let Some(ref b) = body {
+            if let Some(b) = body {
                 if method == Method::POST {
                     req_builder = req_builder.header(
                         reqwest::header::CONTENT_TYPE,
                         "application/x-www-form-urlencoded",
                     );
                 }
-                req_builder = req_builder.body(b.clone());
+                req_builder = req_builder.body(b.to_vec());
             }
 
             if let Some((cbs, sent_headers)) = sent_headers.as_ref() {
@@ -1175,6 +1229,11 @@ impl HttpClient {
                 Ok(resp) => resp,
                 Err(e) => {
                     self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    // Connect-phase (DNS/TCP/TLS) is the only failure regime
+                    // where a non-idempotent retry is safe — the request
+                    // never left the machine. Classify before the error is
+                    // stringified; the legacy-TLS fallback reads the flag.
+                    *connect_failed = e.is_connect();
                     // Name the culprit when the configured upstream proxy is
                     // the part that cannot be reached: the target URL alone
                     // reads as "site down" and sends the operator debugging
@@ -1928,19 +1987,69 @@ mod tests {
         );
     }
 
+    /// 127.0.0.1:1 is a closed port: connection refused is connect-stage by
+    /// definition, so a POST (with its body) rides the legacy retry just
+    /// like a GET — the request provably never left the machine.
     #[cfg(feature = "stealth")]
     #[tokio::test]
-    async fn legacy_tls_skips_non_get_methods() {
+    async fn legacy_tls_retries_connect_stage_post() {
         let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
         let url = Url::parse("http://127.0.0.1:1/submit").unwrap();
         let err = client
-            .fetch_with_method(Method::POST, &url, None)
+            .fetch_with_method(Method::POST, &url, Some(b"a=1".to_vec()))
             .await
             .expect_err("closed port must fail");
         let msg = err.to_string();
         assert!(
+            msg.contains("legacy TLS transport"),
+            "connect-stage POST must reach the legacy retry, got: {msg}"
+        );
+    }
+
+    /// A POST that failed AFTER the bytes went out must keep its original
+    /// error — that is the double-submit guard. The fixture accepts the
+    /// request, then closes mid-body (Content-Length promises more than it
+    /// delivers), which reqwest classifies as a body-read failure, not a
+    /// connect failure.
+    #[cfg(feature = "stealth")]
+    #[tokio::test]
+    async fn legacy_tls_keeps_post_error_after_the_request_left() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _env = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = stream.read(&mut buf).await;
+                    // Promise 100 bytes, deliver 3, close.
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\nconnection: close\r\n\r\nabc",
+                        )
+                        .await;
+                });
+            }
+        });
+
+        let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/submit")).unwrap();
+        let err = client
+            .fetch_with_method(Method::POST, &url, Some(b"a=1".to_vec()))
+            .await
+            .expect_err("truncated body must fail");
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+        let msg = err.to_string();
+        assert!(
             !msg.contains("legacy TLS transport"),
-            "POST must not be retried (double-submit), got: {msg}"
+            "post-send POST failure must not be retried (double-submit), got: {msg}"
+        );
+        assert!(
+            msg.contains("Failed to read body"),
+            "the original transport error must surface, got: {msg}"
         );
     }
 
@@ -1953,7 +2062,7 @@ mod tests {
         let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
         let url = Url::parse("http://127.0.0.1:1/dead").unwrap();
         let err = client
-            .scripted_fetch_fallback(&Method::GET, &url, "error sending request")
+            .scripted_fetch_fallback(&Method::GET, &url, "error sending request", None, None, false)
             .await
             .expect_err("closed port must fail");
         let msg = err.to_string();
@@ -1963,22 +2072,56 @@ mod tests {
         );
     }
 
+    /// A scripted POST flagged connect-stage rides the fallback with its
+    /// body — the caller's classification is trusted only for this hop.
     #[cfg(feature = "stealth")]
     #[tokio::test]
-    async fn scripted_fetch_fallback_skips_post() {
+    async fn scripted_fetch_fallback_retries_connect_stage_post() {
         let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
         let url = Url::parse("http://127.0.0.1:1/submit").unwrap();
         let err = client
-            .scripted_fetch_fallback(&Method::POST, &url, "error sending request")
+            .scripted_fetch_fallback(
+                &Method::POST,
+                &url,
+                "error sending request",
+                Some(b"a=1".as_slice()),
+                Some("application/x-www-form-urlencoded"),
+                true,
+            )
             .await
             .expect_err("closed port must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("legacy TLS transport"),
+            "connect-stage POST must reach the legacy retry, got: {msg}"
+        );
+    }
+
+    /// A scripted POST that already left the machine (post-send failure)
+    /// keeps its original error — the double-submit guard.
+    #[cfg(feature = "stealth")]
+    #[tokio::test]
+    async fn scripted_fetch_fallback_keeps_post_error_after_send() {
+        let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+        let url = Url::parse("http://127.0.0.1:1/submit").unwrap();
+        let err = client
+            .scripted_fetch_fallback(
+                &Method::POST,
+                &url,
+                "error reading a body from connection",
+                Some(b"a=1".as_slice()),
+                Some("application/x-www-form-urlencoded"),
+                false,
+            )
+            .await
+            .expect_err("must fail");
         let msg = err.to_string();
         assert!(
             !msg.contains("legacy TLS transport"),
             "scripted POST must not be retried, got: {msg}"
         );
         assert!(
-            msg.contains("error sending request"),
+            msg.contains("error reading a body from connection"),
             "guard skip must surface the original transport error, got: {msg}"
         );
     }
