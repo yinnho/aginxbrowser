@@ -1,0 +1,21 @@
+{
+ "vars": {
+  "args_json": "{\"tab\": \"all\", \"count\": 40, \"top\": 20}"
+ },
+ "steps": [
+  {
+   "op": "eval",
+   "args": {
+    "script": "\n(async () => {\n  const at = Number(localStorage.getItem('abx_bearer_at') || 0);\n  const cur = localStorage.getItem('abx_bearer') || '';\n  const fresh = cur && at && (Date.now() - at) < 12 * 3600e3;\n  if (fresh) return JSON.stringify({ok: true, src: 'cached', len: cur.length});\n  const src = [...document.querySelectorAll(\"script[src*='main']\")].map(s => s.src)[0];\n  if (!src) return JSON.stringify({ok: !!cur, src: 'kept-no-main', len: cur.length});\n  const t = await (await fetch(src, {credentials: 'omit'})).text();\n  const m = t.match(/Bearer ([A-Za-z0-9%/+=]{80,})/);\n  if (!m) return JSON.stringify({ok: !!cur, src: 'kept-no-match', len: cur.length});\n  localStorage.setItem('abx_bearer', m[1]);\n  localStorage.setItem('abx_bearer_at', String(Date.now()));\n  return JSON.stringify({ok: true, src: 'refreshed', len: m[1].length});\n})()\n"
+   },
+   "save": "bearer"
+  },
+  {
+   "op": "eval",
+   "args": {
+    "script": "// x-notifs step: fetch v2 URT notifications (all/mentions tabs) and triage\n(async () => {\n  const ARGS = {{args_json}};\n  try {\n    const bearer = localStorage.getItem('abx_bearer');\n    const ct0 = (document.cookie.match(/(?:^|;\\s*)ct0=([^;]+)/) || [])[1];\n    if (!bearer || !ct0) return JSON.stringify({ok: false, err: 'missing bearer/ct0 - session not logged in'});\n    const KIND = {person_icon: 'follow', heart_icon: 'like', retweet_icon: 'retweet', reply_icon: 'reply',\n                  mention_icon: 'mention', favorite_icon: 'like', list_icon: 'list', rocket_icon: 'followed_tweet'};\n    const tab = ARGS.tab || 'all';\n    const q = '/i/api/2/notifications/' + tab + '.json?count=' + (ARGS.count || 40) +\n      '&requestContext=launch&pc=1&spelling_corrections=0&include_ext_is_blue_verified=1&include_ext_verified_type=1' +\n      '&include_reply_count=1&include_ext_views=true&tweet_mode=extended&include_entities=true&include_user_entities=true';\n    const r = await fetch(q, {credentials: 'include', headers: {\n      'authorization': 'Bearer ' + bearer,\n      'x-twitter-auth-type': 'OAuth2Session',\n      'x-csrf-token': ct0,\n      'x-twitter-client-language': 'en',\n      'x-twitter-active-user': 'yes'}});\n    const t = await r.text();\n    let j = null; try { j = JSON.parse(t); } catch {}\n    if (!r.ok) return JSON.stringify({ok: false, status: r.status, err_head: t.slice(0, 120)});\n    const go = j.globalObjects || {};\n    const users = go.users || {};\n    const u = (id) => { const x = users[id] || {}; return {sn: x.screen_name, name: x.name, fol: x.followers_count, blue: !!x.ext_is_blue_verified}; };\n    const rows = Object.values(go.notifications || {}).map(m => {\n      const tpl = m.template || {};\n      const agg = tpl.aggregateUserActionsV1 || {};\n      const fromIds = (agg.fromUsers || []).map(x => x.user && x.user.id).filter(Boolean);\n      const tweetRef = (m.message && m.message.entities || []).map(e => e.ref && e.ref.tweet && e.ref.tweet.id).filter(Boolean)[0] || null;\n      return {\n        kind: KIND[(m.icon || {}).id] || ((m.icon || {}).id || 'unknown'),\n        text: (m.message && m.message.text || '').slice(0, 140),\n        from: fromIds.length === 1 ? u(fromIds[0]) : fromIds.map(u),\n        from_n: fromIds.length,\n        tweet_id: tweetRef,\n        ts: Number(m.timestampMs || 0)\n      };\n    }).sort((a, b) => b.ts - a.ts);\n    const counts = {};\n    for (const x of rows) counts[x.kind] = (counts[x.kind] || 0) + 1;\n    // actionable = mentions/replies (someone talking to us); social = like/retweet/follow\n    const actionable = rows.filter(x => x.kind === 'mention' || x.kind === 'reply');\n    return JSON.stringify({ok: true, status: r.status, tab, n: rows.length, counts,\n      actionable_n: actionable.length, items: rows.slice(0, ARGS.top || 20)});\n  } catch (e) {\n    return JSON.stringify({ok: false, err: e.name + ': ' + e.message});\n  }\n})()\n"
+   },
+   "save": "notifs"
+  }
+ ]
+}

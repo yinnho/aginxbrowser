@@ -30,6 +30,7 @@ rejected before it touches the filesystem.
 | `x-read` | x.com | runs green logged-in | user mode (profile+follow state) / tweet mode (thread+did-my-reply-land) |
 | `x-search` | x.com | runs green logged-in | SearchTimeline, results sorted by views — campaign target discovery |
 | `x-follow` | x.com | runs green logged-in | friendships create/destroy; response `following` echoes pre-action state |
+| `x-notifs` | x.com | runs green logged-in | v2 URT notifications feed, read-only triage — the inbox half of the loop |
 
 The `x-*` family shares one self-healing prefix (p256 / bearer / ctx+bind)
 and composes: `x-search` finds a target → `x-read` resolves ids and follow
