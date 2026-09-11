@@ -331,6 +331,13 @@ impl FontBook {
             Source::Bitmap(StrikeWith::BestFit),
             Source::Outline,
         ];
+        // The pen carries ACROSS segments (emoji batch follow-up): a run
+        // like "汉字🚀" segments into [primary CJK, fallback emoji], and the
+        // fallback segment must continue at the primary's final advance —
+        // a per-segment pen restart stacked the emoji on the run's first
+        // glyphs (advance_width accumulated correctly, so measure agreed
+        // while paint overlapped).
+        let mut pen = x0;
         for (sel, seg) in self.segments(text, bold) {
             let bytes = self.face_bytes(sel, bold);
             let Some(font) = FontRef::from_index(bytes, 0) else { continue };
@@ -340,10 +347,9 @@ impl FontBook {
             SHAPE_CTX.with_borrow_mut(|ctx| {
                 let mut shaper = ctx.builder(font).size(font_size).build();
                 shaper.add_str(seg);
-                let mut pen = 0.0f32;
                 shaper.shape_with(|cluster| {
                     for g in cluster.glyphs {
-                        glyphs.push((x0 + pen + g.x, g.y, g.id));
+                        glyphs.push((pen + g.x, g.y, g.id));
                         pen += g.advance;
                     }
                 });

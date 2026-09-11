@@ -1689,3 +1689,80 @@ fn emoji_text_paints_colored_ink_e2e() {
     assert!(colored > 50, "the emoji must land colored ink (got {colored} px)");
     assert!(dark > 20, "the CJK half must land dark ink (got {dark} px)");
 }
+
+/// Fallback segments must PEN ACROSS the run (emoji batch follow-up): a
+/// run like "汉字🚀" segments into [primary CJK, fallback emoji], and
+/// `blit_line` used to restart its pen per segment — every segment after
+/// the first painted stacked at the run origin, covering the first glyphs
+/// (measure accumulated correctly, so widths agreed while ink overlapped).
+/// Ink-extent ordering in BOTH directions is the contract: emoji-first
+/// puts the CJK after the emoji, emoji-last puts it before.
+#[test]
+fn fallback_segments_pen_across_the_run_not_stacked_at_origin() {
+    if crate::diting_fonts::platform_emoji_font().is_none() {
+        eprintln!("skipping: no platform emoji font on this host");
+        return;
+    }
+    let fonts = crate::diting_fonts::font_book();
+
+    // Ink classification is only good enough to find the COLORED (fallback
+    // bitmap) bbox — Apple's emoji carry their own dark-gray parts, so
+    // "dark ink" bboxes of a mixed run include emoji pixels. Anchor the
+    // assertions on single-script reference runs instead: the CJK-only run
+    // gives the mono ink end, the emoji-only run gives the emoji ink span.
+    let colored_bbox = |text: &str| -> (usize, usize, usize, usize) {
+        let tile = fonts.rasterize(text, 40.0, false, [0, 0, 0, 255], 48.0);
+        let mut bb: Option<(usize, usize, usize, usize)> = None;
+        for y in 0..tile.height {
+            for x in 0..tile.width {
+                let i = (y * tile.width + x) * 4;
+                let (r, g, b, a) = (tile.data[i], tile.data[i + 1], tile.data[i + 2], tile.data[i + 3]);
+                if a < 128 {
+                    continue;
+                }
+                let spread = (r as i32 - g as i32)
+                    .abs()
+                    .max((g as i32 - b as i32).abs())
+                    .max((r as i32 - b as i32).abs());
+                if spread <= 32 {
+                    continue;
+                }
+                bb = Some(match bb {
+                    Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                    None => (x, y, x, y),
+                });
+            }
+        }
+        bb.unwrap_or_else(|| panic!("no colored ink in {text:?}"))
+    };
+    let mono_end = |text: &str| -> usize {
+        let tile = fonts.rasterize(text, 40.0, false, [0, 0, 0, 255], 48.0);
+        (0..tile.width)
+            .rev()
+            .find(|&x| (0..tile.height).any(|y| tile.data[(y * tile.width + x) * 4 + 3] > 200))
+            .unwrap_or_else(|| panic!("no mono ink in {text:?}"))
+    };
+
+    // Reference geometry from the single-script runs.
+    let cjk_ink_end = mono_end("汉字") as i64;
+    let emoji = colored_bbox("🚀");
+    let emoji_ink_width = (emoji.2 - emoji.0) as i64;
+
+    // Emoji LAST: the rocket's colored ink must start at/after where the
+    // CJK-only run's ink ended (pre-fix it stacked at the run origin).
+    let combined = colored_bbox("汉字🚀");
+    assert!(
+        combined.0 as i64 >= cjk_ink_end - 1,
+        "emoji-last: emoji ink starts at {} but CJK ink ends at {cjk_ink_end} (stacked at origin?)",
+        combined.0
+    );
+
+    // Emoji FIRST: the mono ink (CJK glyph ink + the emoji's own dark parts)
+    // must extend a full emoji-width past the CJK-only ink end — pre-fix the
+    // CJK stacked over the emoji and the run's total ink never grew.
+    let combined_end = mono_end("🚀汉字") as i64;
+    assert!(
+        combined_end >= cjk_ink_end + emoji_ink_width - 8,
+        "emoji-first: combined ink ends at {combined_end}, expected ≥ CJK end {cjk_ink_end} + emoji width {emoji_ink_width}"
+    );
+}
