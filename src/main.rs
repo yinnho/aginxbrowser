@@ -21,6 +21,7 @@ mod docgen;
 mod download;
 mod error;
 mod firecrawl_compat;
+mod flow;
 mod har;
 mod mcp;
 mod page;
@@ -912,6 +913,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/download", post(download_handler))
         .route("/v1/scrape", post(firecrawl_compat::scrape_handler))
         .route("/session/create", post(session_create_handler))
+        .route("/flow/run", post(flow_run_handler))
         .route("/session/:id/clone", post(session_clone_handler))
         .route("/import/curl", post(import_curl_handler))
         .route("/session/list", get(session_list_handler))
@@ -1636,13 +1638,16 @@ async fn session_dialog_handler(
 #[derive(Deserialize)]
 struct SessionExportQuery {
     /// `bash` (default) emits a runnable curl replay script;
-    /// `jsonl` emits the raw action log.
+    /// `jsonl` emits the raw action log;
+    /// `json` emits a flow.json document (recorded steps as editable,
+    /// replayable ops — cookies/storage stripped; replay via /flow/run).
     #[serde(default)]
     format: Option<String>,
 }
 
 /// Export the session's recorded actions: as a bash+curl replay script
-/// (default — replay with zero model tokens) or as raw JSONL.
+/// (default — replay with zero model tokens), as raw JSONL, or as a
+/// flow.json document for POST /flow/run.
 async fn session_export_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     axum::extract::Query(q): axum::extract::Query<SessionExportQuery>,
@@ -1650,12 +1655,51 @@ async fn session_export_handler(
     let mut mgr = session::SESSIONS.lock().await;
     let jsonl = mgr.send(&id, |reply| session::SessionCommand::Export { reply }).await
         .map_err(session_err)?;
-    if q.format.as_deref() == Some("jsonl") {
-        Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "application/x-ndjson")], jsonl))
-    } else {
-        let script = session::replay_bash(&jsonl, "http://127.0.0.1:8089");
-        Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")], script))
+    match q.format.as_deref() {
+        Some("jsonl") => Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "application/x-ndjson")], jsonl)),
+        Some("json") => {
+            let doc = flow::recorded_to_flow(&jsonl);
+            Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "application/json")], doc.to_string()))
+        }
+        _ => {
+            let script = session::replay_bash(&jsonl, "http://127.0.0.1:8089");
+            Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")], script))
+        }
     }
+}
+
+#[derive(Deserialize)]
+struct FlowRunBody {
+    /// Inline flow document ({create?, vars?, steps:[{op, args, expect?, save?}]}).
+    #[serde(default)]
+    flow: Option<serde_json::Value>,
+    /// Or run a server-side workflow/<name>/flow.json asset (unknown name →
+    /// error lists what's installed).
+    #[serde(default)]
+    name: Option<String>,
+    /// Values for {{placeholders}}; wins over the flow's own vars defaults.
+    #[serde(default)]
+    vars: Option<serde_json::Value>,
+    /// Reuse a live session (e.g. from /import/curl) instead of creating a
+    /// fresh one — how login state and flows compose.
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+/// Run a flow — a recorded/edited JSON session script — to completion with
+/// zero model tokens. Returns the receipt: `status:ok` + `saved` outputs, or
+/// `status:failed` + the failing step, reason, and a diagnostic screenshot
+/// (the session stays alive for manual takeover).
+async fn flow_run_handler(Json(body): Json<FlowRunBody>) -> Result<impl IntoResponse, AppError> {
+    let doc = flow::resolve_flow_doc(body.flow, body.name.as_deref())
+        .map_err(AppError::BadRequest)?;
+    let vars = body
+        .vars
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut mgr = session::SESSIONS.lock().await;
+    let receipt = flow::run_flow(&mut mgr, &doc, &vars, body.session_id).await;
+    Ok((StatusCode::OK, Json(receipt)))
 }
 
 #[derive(Deserialize)]

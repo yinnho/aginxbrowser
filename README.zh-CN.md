@@ -51,7 +51,7 @@ Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操
 
 - **🔐 真实 TLS 指纹** — stealth 模式用 BoringSSL 复刻 Chrome145 / Firefox133 / Safari / Edge 的完整 TLS 握手（不是只改 UA），可按请求切换；Cloudflare Turnstile 挑战页自动等 `cf_clearance`。无指纹引擎碰反爬就是 403，我们穿过去。
 - **🤝 有状态交互 Session** — 登录态可注入可导出（`session_create(cookies=...)` ↔ `session_cookies`），跨翻页、跨多步流程不断；`persistent: true` 连闲置过期和服务重启都能扛过去，同一个 session_id 复活时还带着登录态。一次性引擎抓完即弃，做不了「登录 → 操作 → 再操作」。
-- **🔌 MCP 原生** — 31 个工具是一等公民（不是 CDP 套壳），Claude Code / Cursor / Claude Desktop 一行接入。HTTP + MCP 双协议之外还有 CDP 桥，DevTools 生态照样能用。
+- **🔌 MCP 原生** — 32 个工具是一等公民（不是 CDP 套壳），Claude Code / Cursor / Claude Desktop 一行接入。HTTP + MCP 双协议之外还有 CDP 桥，DevTools 生态照样能用。
 
 > 参照：Cloudflare 的 Kitesurf 明确不做真实 TLS 指纹协商、不做持久认证会话——反爬与登录正是 AginxBrowser 的地盘。
 
@@ -73,7 +73,7 @@ Agent 是照着浏览器说的话行事的，所以响应里要写清楚实际�
 - **分层渲染**：静态页面纯 HTTP 直取（~100ms），需要 JS 渲染才启动 V8（~1-2s）——[bench](bench/README.md) 页面集里 90% 根本不用拉起 V8；每次响应带 `tier` 字段说明走的哪层
 - **多引擎聚合搜索**：通用网页（百度/Bing/搜狗/搜狗微信/Google/DuckDuckGo）、新闻（Bing News）、代码（Stack Overflow/GitHub）、包（npm/PyPI）、学术（arXiv）、AI 模型（Hugging Face）——15 引擎 7 分类，并发查询、合并去重；运维还可把私有 Meilisearch 索引接入同一 `/search`。Agent 一步完成"搜→读"
 - **图片搜索**：`categories=images` 接百度图片/必应图片，返回 `image_url` 二进制直链（可直接下成 jpg/png）+ `source_url` 溯源
-- **交互式 Session**：持久化浏览器会话，索引化交互（state/click/input/scroll/eval），Agent 像人一样浏览；`session_export` 把 Agent 摸索出来的操作导出成能直接跑的 curl 回放脚本，重放零模型 token。操作面也补齐了：`session_viewport` 模拟设备视口（media query 会响应）、`session_wait` 按 selector/谓词带超时等待、`session_screenshot` 截会话当前状态、`session_console` 回放页面 console 环形日志、`session_storage` 导出/恢复 cookie + localStorage 方便交接登录态
+- **交互式 Session**：持久化浏览器会话，索引化交互（state/click/input/scroll/eval），Agent 像人一样浏览；`session_export` 把 Agent 摸索出来的操作导出成能直接跑的 curl 回放脚本，重放零模型 token；`format=json` 则导出成 flow 文档（`flow_run` 服务端复跑：`{{var}}` 替换、`wait`/`expect` 设门、`save` 收产出；装好的 flow 放在 `workflow/<name>/flow.json`，丢目录进去即部署，不用重编）。操作面也补齐了：`session_viewport` 模拟设备视口（media query 会响应）、`session_wait` 按 selector/谓词带超时等待、`session_screenshot` 截会话当前状态、`session_console` 回放页面 console 环形日志、`session_storage` 导出/恢复 cookie + localStorage 方便交接登录态
 - **播放链接嗅探**：`session_network(filter=media)` 从页面播放器运行时真正发出的请求里挖 m3u8/mp4/dash 链接——写在 HTML 里的播放地址多半是诱饵，请求日志才是真相。`GET /session/{id}/har` 把同一份流量导出成 HAR 1.2（含已保留的响应体）
 - **CDP 桥**：`/json/version` + `/devtools/{kind}/{id}` WebSocket——Playwright / Puppeteer / browser-use 的 `chromium.connectOverCDP()` 一行接入（[集成指南](docs/integrations.md)）。兼容 DevTools 生态，但自己不做 CDP 套壳
 - **文件下载**：流式落盘（不吃内存）、SHA-256 校验、断点续传——二进制、压缩包、数据集用这个
@@ -85,7 +85,7 @@ Agent 是照着浏览器说的话行事的，所以响应里要写清楚实际�
 - **时间线视频**：`/video` 端点 + `render_video` MCP 工具，把页面的动画渲成 MP4。约定很简单：页面脚本把时间线注册进 `window.__timelines`（GSAP 风格，带 `duration()` 和 `pause(t)` 就行），引擎每帧 seek 到 `t=i/fps`、画视口、RGBA 直接 pipe 给 ffmpeg 编 H.264/yuv420p。确定性是构造出来的——像素值里没有墙钟，同一页面渲两遍出同一个 MP4。服务器上要有 ffmpeg
 - **页集（PDF/PNG/PPTX/DOCX）**：`/pdf` 端点 + `render_pdf` MCP 工具，把渲好的页面切页打包——打印模式按顶层块边界分页（默认 96dpi A4，断点尽量落在块边，文字不拦腰截断），幻灯片模式每个选择器匹配自成一张页、按元素定高（HTML 写个 deck、一页一个 `.slide`，导出就是真能用的 deck）。图基 PDF：每页 JPEG 走 DCTDecode，PDF 1.4 手写打包器，零新依赖。PPTX 把同一叠页每页打一张幻灯片；DOCX 每页一个按页定尺寸的 section——两个 OOXML 容器都是手写的（stored-ZIP 打包器、时间戳写死），字节级确定性，零新依赖
 - **TLS 指纹伪装**：stealth 模式模拟 Chrome145/Firefox133/Safari/Edge，可按请求切换
-- **MCP Server**：`--mcp` 模式暴露 31 个工具（fetch/eval/click/search/download/cache + session + 截图 + 视频/PDF + 文档生成工具），Claude Code / Claude Desktop / Cursor 直接调用
+- **MCP Server**：`--mcp` 模式暴露 32 个工具（fetch/eval/click/search/download/cache + session + flow + 截图 + 视频/PDF + 文档生成工具），Claude Code / Claude Desktop / Cursor 直接调用
 - **Firecrawl 兼容**：`/v1/scrape` 端点，现有 Firecrawl 客户端改 base URL 即可迁移
 - **DNS 重绑定防护**：内置 SSRF 防护 + 解析后 IP 校验
 
@@ -205,6 +205,7 @@ curl -sS -X POST http://127.0.0.1:8089/session/create \
 | POST | `/video` | 动画时间线 → MP4（`screenshot` feature） |
 | POST | `/pdf` | 分页打包 → PDF/PNG/PPTX/DOCX（`screenshot` feature） |
 | POST | `/v1/scrape` | Firecrawl 兼容抓取（含 `actions`） |
+| POST | `/flow/run` | 跑一个录制/整理过的 flow JSON 到跑完——零模型 token（`name` 跑已装的 `workflow/<name>/flow.json`，`flow` 内联，`vars` 替换 `{{占位符}}`，`session_id` 和导入的登录态组合） |
 | POST | `/session/create` | 建交互式会话（cookies/UA 跨调用延续） |
 | POST | `/import/curl` | 用 DevTools「Copy as cURL」一键建登录会话 |
 | GET | `/session/list` | 活着的会话 |
@@ -223,6 +224,7 @@ aginxbrowser/
 ├── build.rs              # V8 snapshot 生成
 ├── js/
 │   └── bootstrap.js      # V8 启动脚本
+├── workflow/            # Flow 资产：<name>/flow.json 由 flow_run 复跑（丢目录进去即部署）
 ├── README.md
 ├── docs/
 │   ├── API.md            # 完整 API 参考（HTTP + MCP）
@@ -237,7 +239,7 @@ aginxbrowser/
     ├── main.rs              # HTTP 服务入口与路由
     ├── server.rs            # 业务层（fetch/click/eval/search）
     ├── session.rs           # 交互式浏览器会话
-    ├── mcp.rs               # MCP Server（31 个工具）
+    ├── mcp.rs               # MCP Server（32 个工具）
     ├── docgen/              # 文档层：markdown → 确定性 HTML + 内联 SVG 图
     ├── render.rs            # 分层渲染（HTTP 直取 → diting 浏览器引擎）
     ├── store.rs             # 本地 fetch/搜索缓存（SQLite FTS5、漂移哈希）
@@ -340,8 +342,8 @@ cargo build --release --features stealth,screenshot
 **安全审计说明** → [`docs/skills-sh-audit.md`](docs/skills-sh-audit.md) — 为什么 skills.sh 上显示 Critical Risk，每条告警对应的真实产品功能
 
 包含：
-- 全部 35 个 HTTP 端点（`/fetch`、`/search`、`/screenshot`、`/video`、`/pdf`、`/download`、`/v1/scrape`、`/doctor`、18 个 session 端点、CDP 发现、MCP 传输）
-- MCP Server 的 31 个工具及参数
+- 全部 36 个 HTTP 端点（`/fetch`、`/search`、`/screenshot`、`/video`、`/pdf`、`/download`、`/v1/scrape`、`/flow/run`、`/doctor`、18 个 session 端点、CDP 发现、MCP 传输）
+- MCP Server 的 32 个工具及参数
 - Claude Code / Claude Desktop / Cursor 客户端配置
 - 环境变量、错误码、站点抓取示例
 

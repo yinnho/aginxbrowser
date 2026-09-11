@@ -934,6 +934,52 @@ curl -sS -X POST http://127.0.0.1:8089/session/$SID/close
 
 ---
 
+## Flow 执行（录制 → 回放，零 token）
+
+`session_export` 的 `format=json` 把会话录制导出成 flow 文档（`{create?, vars?, steps:[{op, args, expect?, save?}]}`，cookie/storage 全剥——flow 是可分享资产）；人工整理一轮（删探针 eval、把 URL 参数化成 `{{var}}`、补 `wait` 步——录制器只记动作不记等待、加 `expect` 断言、提取 eval 标 `save`）之后，`POST /flow/run` 一次跑完。引擎全程无 LLM：变量替换、等待谓词、断言全是纯数据。
+
+**流程闭环：**
+
+```
+手动开会话跑通 → export format=json → 整理成 workflow/<name>/flow.json → flow_run 零 token 复跑
+```
+
+### POST /flow/run
+
+**请求体：**
+
+| 字段 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| flow | object | — | 内联 flow 文档（见下） |
+| name | string | — | 或跑服务端 workflow 资产：`workflow/<name>/flow.json`（目录用 `AGINXBROWSER_WORKFLOW_DIR` 覆盖）；名字不认识就报错并列出已装 flow——那个报错就是发现入口 |
+| vars | object | `{}` | `{{占位符}}` 的值，压过 flow 自带 `vars` 默认值 |
+| session_id | string | — | 复用活会话（比如 `POST /import/curl` 建的）而不新建——登录态和 flow 就这么组合 |
+
+`flow` / `name` 二选一。
+
+**flow 文档示例：**
+
+```json
+{
+  "vars": { "handle": "aginxbrowser" },
+  "create": { "url": "https://x.com/{{handle}}", "use_proxy": true },
+  "steps": [
+    { "op": "wait", "args": { "predicate": "document.querySelectorAll('article').length >= 1", "timeout_ms": 20000 } },
+    { "op": "eval", "args": { "script": "JSON.stringify({...})" },
+      "expect": { "selector": "article" }, "save": "profile" }
+  ]
+}
+```
+
+- `steps[].op` 就是会话动词：`navigate` / `set_content` / `click` / `click_xy` / `drag` / `input` / `scroll` / `viewport` / `wait` / `eval`。
+- `expect`（可选）给步骤设门：`url_contains` / `selector` / `text_contains` / `eval_truthy`，全过才算过。
+- 失败即中止，回执带 `status:"failed"`、`failed_step`、`reason`、页面 `url`、视口 `screenshot`（base64）、已 `save` 的产出——**会话保持存活**（回执里有 `session_id`），可手动接管排查。
+- `vars` 里没声明的占位符替换直接快速失败（会话都还没建）。
+
+仓里 `workflow/` 自带三个样例（`xcom-profile` / `juejin-post` / `zhihu-answer`），各配 `flow.md` 说明自身——包括故意装着失败的知乎样例（403 墙 + 组合配方）。名字只许小写字母/数字/连字符单个路径段，别的进不了文件系统。丢一个目录进去就是部署，不用重编。
+
+---
+
 ## CAPTCHA 自动解决
 
 当搜索引擎或目标网站触发验证码时，AginxBrowser 会：
@@ -983,7 +1029,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 
 `--mcp` 模式走 stdio 协议，不启动 HTTP 服务器，通过 stdin/stdout 与 MCP 客户端通信。
 
-### 提供的工具（30 个）
+### 提供的工具（32 个）
 
 #### 基础工具
 
@@ -1023,7 +1069,8 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 | `session_screenshot` | 截会话**当前** DOM 状态（含 click/eval 后的突变）为 base64 PNG；可选 `width`/`height`/`full_page`/`selector` |
 | `session_wait` | 等 CSS 选择器命中或 JS 谓词为真，带超时——等待期间页面事件循环照常跑，替代瞎 sleep |
 | `session_network` | 读会话网络请求日志；`filter: "media"` 从页面真实发出的请求里提播放/直播链接（m3u8、mp4…）——拿真视频直链靠它。`include_bodies: true` 加一个 `xhr` 数组带页面脚本发起的响应体（它自己的 API 面），`url_contains` 收窄 |
-| `session_export` | 导出会话录制的动作（默认出可回放的 curl 脚本；`format=jsonl` 出原始日志） |
+| `session_export` | 导出会话录制的动作：可回放的 curl 脚本（默认）、原始日志（`format=jsonl`）、或 flow 文档（`format=json`——剥 cookie、可编辑的步骤）供 `flow_run` 服务端复跑 |
+| `flow_run` | 一次跑完一个 flow，零模型 token：内联 flow 文档或服务端 `workflow/<name>/flow.json` 资产，`{{var}}` 替换、`wait`/`expect` 设门、`save` 收产出；失败回执带失败步骤/原因/URL/截图，会话保活；传 `session_id` 让 flow 和导入的登录态组合 |
 | `session_close` | 关闭会话（persistent 会话顺带删落盘登录快照——空闲过期保留，显式关闭不留） |
 
 #### fetch 工具参数
@@ -1059,7 +1106,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 
 #### session 操作参数
 
-所有 session 操作都需要 `session_id` 参数。`click`/`input` 需要 `index`（从 `session_state` 获取），`input` 还需要 `text`，`eval` 需要 `script`，`navigate` 需要 `url`，`clone` 只要源会话 id。带可选参数的工具：`click_xy` 要 `x`/`y`（可选 `button`、`click_count`）；`drag` 要 `from`/`to`（可选 `steps`、`delay_ms`）；`viewport` 收 `width`/`height`/`mobile`（都可选，缺省保持当前值）；`screenshot` 收 `width`/`height`/`full_page`/`selector`/`selector_all`；`wait` 的 `selector`/`predicate` 二选一，加 `timeout_ms`（默认 10000，上限 120000）；`export` 收 `format`（默认 `bash` / `jsonl`）；`network` 收 `filter: "media"` 或 `include_bodies: true`（加 `url_contains`/`body_max_chars`）；`dialog` 收 `action`（`list`/`accept`/`dismiss`）加可选 `prompt_text`；`console` 收 `level`/`since_ts`/`url_contains`/`limit`；`storage`/`cookies` 只要 `session_id`。
+所有 session 操作都需要 `session_id` 参数。`click`/`input` 需要 `index`（从 `session_state` 获取），`input` 还需要 `text`，`eval` 需要 `script`，`navigate` 需要 `url`，`clone` 只要源会话 id。带可选参数的工具：`click_xy` 要 `x`/`y`（可选 `button`、`click_count`）；`drag` 要 `from`/`to`（可选 `steps`、`delay_ms`）；`viewport` 收 `width`/`height`/`mobile`（都可选，缺省保持当前值）；`screenshot` 收 `width`/`height`/`full_page`/`selector`/`selector_all`；`wait` 的 `selector`/`predicate` 二选一，加 `timeout_ms`（默认 10000，上限 120000）；`export` 收 `format`（`bash` 默认 / `jsonl` / `json` 出 flow 文档）；`flow_run` 的 `flow`/`name` 二选一，可加 `vars` 和 `session_id`；`network` 收 `filter: "media"` 或 `include_bodies: true`（加 `url_contains`/`body_max_chars`）；`dialog` 收 `action`（`list`/`accept`/`dismiss`）加可选 `prompt_text`；`console` 收 `level`/`since_ts`/`url_contains`/`limit`；`storage`/`cookies` 只要 `session_id`。
 
 ### 客户端配置
 
@@ -1171,6 +1218,7 @@ claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 缓存 TTL（秒），`0` 禁用 |
 | `AGINXBROWSER_DOWNLOAD_DIR` | `.` | `/download` 落盘目录 |
+| `AGINXBROWSER_WORKFLOW_DIR` | `./workflow` | `flow_run(name=…)` 找 `<name>/flow.json` 资产的目录（按服务端工作目录解析）；丢一个目录进去即部署，不用重编 |
 | `AGINXBROWSER_PROXY` | 无 | 代理地址（`use_proxy:true` 时使用；browser/session/CDP 页面导航遇到已知被墙域名时也会自动走它） |
 | `CAPTCHA_SOLVER_API_KEY` | 无 | 2captcha API Key，设置后自动解决验证码 |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | 验证码解决服务 |

@@ -51,7 +51,7 @@ Most new "agent browsers" are stateless, fingerprint-less one-shot renderers —
 
 - **🔐 Real TLS fingerprints** — stealth mode replicates the complete Chrome145 / Firefox133 / Safari / Edge TLS handshakes via BoringSSL (not just a UA string), switchable per request; Cloudflare Turnstile challenges wait automatically for `cf_clearance`. Fingerprint-less engines eat 403s — we get through.
 - **🤝 Stateful interactive sessions** — login state injectable and exportable (`session_create(cookies=...)` ↔ `session_cookies`), surviving pagination and multi-step flows; `persistent: true` even survives idle eviction and server restarts — the same session id comes back logged in. One-shot engines throw state away.
-- **🔌 MCP native** — 31 tools as first-class citizens (not a CDP shim). Claude Code / Cursor / Claude Desktop connect in one line. HTTP + MCP dual protocol — plus a CDP bridge, so the DevTools ecosystem works too.
+- **🔌 MCP native** — 32 tools as first-class citizens (not a CDP shim). Claude Code / Cursor / Claude Desktop connect in one line. HTTP + MCP dual protocol — plus a CDP bridge, so the DevTools ecosystem works too.
 
 > Reference point: Cloudflare's Kitesurf explicitly ships neither real TLS-fingerprint negotiation nor persistent auth sessions — anti-bot and login territory is exactly where AginxBrowser plays.
 
@@ -73,7 +73,7 @@ The [local cache](#capabilities) builds on the same idea: search hits come back 
 - **Tiered rendering**: static pages over plain HTTP (~100ms); V8 spins up only when JS rendering is needed (~1-2s) — 90% of the [bench](bench/README.md) page set served without spinning up V8 at all; every response reports which tier served it (`tier` field)
 - **Multi-engine meta-search**: general web (Baidu / Bing / Sogou / WeChat / Google / DuckDuckGo), news (Bing News), code (Stack Overflow, GitHub), packages (npm, PyPI), academic (arXiv), AI models (Hugging Face) — 15 engines across 7 categories, queried concurrently, merged and deduplicated. Operators can plug a private Meilisearch index into the same `/search`. Search → read in one step
 - **Image search**: `categories=images` hits Baidu/Bing image indexes and returns direct binary `image_url` links (downloadable straight to jpg/png) plus `source_url` provenance
-- **Interactive sessions**: persistent browser sessions with indexed interaction (`state/click/input/scroll/eval`) — agents browse like humans do, and `session_export` turns what an agent figured out into a runnable curl replay script (zero model tokens on re-run). Session tools also cover the acting part: `session_viewport` simulates device viewports (media queries respond), `session_wait` blocks on a selector or predicate with a timeout, `session_screenshot` renders the live state, `session_console` replays the page's console ring, and `session_storage` exports/restores cookies plus localStorage for login hand-off
+- **Interactive sessions**: persistent browser sessions with indexed interaction (`state/click/input/scroll/eval`) — agents browse like humans do, and `session_export` turns what an agent figured out into a runnable curl replay script (zero model tokens on re-run) — or, with `format=json`, into a flow document (`flow_run` replays it server-side with `{{var}}` substitution, `wait`/`expect` gates and saved outputs; installed flows live in `workflow/<name>/flow.json`, dropped in without a rebuild). Session tools also cover the acting part: `session_viewport` simulates device viewports (media queries respond), `session_wait` blocks on a selector or predicate with a timeout, `session_screenshot` renders the live state, `session_console` replays the page's console ring, and `session_storage` exports/restores cookies plus localStorage for login hand-off
 - **Playback-link sniffer**: `session_network(filter=media)` extracts the m3u8/mp4/dash URLs a page's player *actually requested* at runtime — links found only in page HTML are often decoys, so the request log is the source of truth. `GET /session/{id}/har` exports the same traffic as HAR 1.2 (retained bodies included)
 - **CDP bridge**: `/json/version` + `/devtools/{kind}/{id}` WebSocket — `chromium.connectOverCDP()` from Playwright, Puppeteer, or browser-use attaches with one line ([integration guide](docs/integrations.md)). DevTools ecosystem compatibility without becoming a CDP shim
 - **File download**: streaming to disk (no memory buffering), SHA-256 integrity, resume of interrupted transfers — for binaries, archives, datasets
@@ -85,7 +85,7 @@ The [local cache](#capabilities) builds on the same idea: search hits come back 
 - **Timeline video**: `/video` endpoint + `render_video` MCP tool render a page's animation timelines to MP4 — the page's scripts register GSAP-style timelines in `window.__timelines` (`duration()` + `pause(t)`), each frame seeks to `t=i/fps` and paints the viewport, and the frames pipe into ffmpeg (H.264, yuv420p). Deterministic by construction: no wall clock in the pixel values, same render twice = same MP4. Needs ffmpeg on PATH
 - **Page set (PDF/PNG/PPTX/DOCX)**: `/pdf` endpoint + `render_pdf` MCP tool cut a rendered page into pages and package them — print mode paginates at top-level block boundaries (default A4 @96dpi, no half-cut text where a break can land on a block edge), slides mode makes one page per CSS-selector match sized to the element (an HTML deck with one `.slide` per page exports as a real deck). Image-based PDF: per-page JPEG via DCTDecode, hand-rolled PDF 1.4 writer, zero new dependencies. PPTX packages the same pages as one slide per page; DOCX as one page-sized section per page — both hand-rolled OOXML (stored-ZIP writer, fixed timestamps), byte-deterministic, zero new dependencies
 - **TLS fingerprint spoofing**: stealth mode impersonates Chrome145/Firefox133/Safari/Edge, switchable per request
-- **MCP server**: `--mcp` mode exposes 31 tools (fetch/eval/search/download/cache + session + screenshot + video/pdf + docgen tools) — Claude Code / Claude Desktop / Cursor call them directly
+- **MCP server**: `--mcp` mode exposes 32 tools (fetch/eval/search/download/cache + session + flow + screenshot + video/pdf + docgen tools) — Claude Code / Claude Desktop / Cursor call them directly
 - **Firecrawl compatible**: `/v1/scrape` endpoint — existing Firecrawl clients migrate by changing the base URL
 - **DNS rebinding protection**: built-in SSRF guard + post-resolution IP validation
 
@@ -205,6 +205,7 @@ Every capability is plain HTTP — no SDK required. There is no `/openapi.json` 
 | POST | `/video` | Render animation timelines → MP4 (`screenshot` feature) |
 | POST | `/pdf` | Paginate page → PDF/PNG/PPTX/DOCX (`screenshot` feature) |
 | POST | `/v1/scrape` | Firecrawl-compatible scrape (+ `actions`) |
+| POST | `/flow/run` | Run a recorded/edited flow JSON to completion — zero model tokens (`name` runs an installed `workflow/<name>/flow.json`, `flow` is inline, `vars` substitute `{{placeholders}}`, `session_id` composes with imported login state) |
 | POST | `/session/create` | Start an interactive session (cookies/UA carried across calls) |
 | POST | `/import/curl` | Create a logged-in session from a DevTools "Copy as cURL" |
 | GET | `/session/list` | Live sessions |
@@ -223,6 +224,7 @@ aginxbrowser/
 ├── build.rs              # V8 snapshot generation
 ├── js/
 │   └── bootstrap.js      # V8 bootstrap script
+├── workflow/            # Flow assets: <name>/flow.json replayed by flow_run (drop-in, no rebuild)
 ├── README.md
 ├── docs/
 │   ├── API.md            # Full API reference (HTTP + MCP)
@@ -237,7 +239,7 @@ aginxbrowser/
     ├── main.rs              # HTTP service entry & routing
     ├── server.rs            # Business layer (fetch/click/eval/search)
     ├── session.rs           # Interactive browser sessions
-    ├── mcp.rs               # MCP server (31 tools)
+    ├── mcp.rs               # MCP server (32 tools)
     ├── docgen/              # Document layer: markdown → deterministic HTML + inline-SVG diagrams
     ├── render.rs            # Tiered rendering (HTTP direct → diting browser engine)
     ├── store.rs             # Local fetch/search cache (SQLite FTS5, drift hashes)
@@ -340,8 +342,8 @@ If your network can't reach the rusty_v8 CDN (build hangs with zero progress aft
 **Security audit notes** → [`docs/skills-sh-audit.md`](docs/skills-sh-audit.md) — why skills.sh shows "Critical Risk", and which real product feature each warning corresponds to
 
 Covers:
-- All 35 HTTP endpoints (`/fetch`, `/search`, `/screenshot`, `/video`, `/pdf`, `/download`, `/v1/scrape`, `/doctor`, 18 session endpoints, CDP discovery, MCP transport)
-- All 31 MCP server tools and their parameters
+- All 36 HTTP endpoints (`/fetch`, `/search`, `/screenshot`, `/video`, `/pdf`, `/download`, `/v1/scrape`, `/flow/run`, `/doctor`, 18 session endpoints, CDP discovery, MCP transport)
+- All 32 MCP server tools and their parameters
 - Claude Code / Claude Desktop / Cursor client configuration
 - Environment variables, error codes, per-site scraping examples
 

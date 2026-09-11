@@ -1014,7 +1014,7 @@ Export the session's recorded action log. Every page-changing command since crea
 
 | Field | Type | Default | Description |
 |------|------|------|------|
-| format | string | `bash` | `bash` → a runnable curl script replaying every recorded action against a fresh session; `jsonl` → the raw action log, one JSON object per line |
+| format | string | `bash` | `bash` → a runnable curl script replaying every recorded action against a fresh session; `jsonl` → the raw action log, one JSON object per line; `json` → a flow.json document — the same recording as editable ops (`{op, args}`) with cookies/storage stripped, for replay via [`POST /flow/run`](#post-flowrun) |
 
 **Response (`format=jsonl`):**
 
@@ -1046,9 +1046,85 @@ echo
 
 Run it anywhere with `curl` (override the target with `AGINXBROWSER_URL`), from cron, in CI, on another machine. What an agent figured out interactively becomes a deterministic, auditable script — re-running it costs **zero model tokens**.
 
+**Response (`format=json`)** — the recording as a flow document:
+
+```json
+{
+  "create": { "url": "https://example.com/login" },
+  "steps": [
+    { "op": "input", "args": { "index": 1, "text": "user@example.com" } },
+    { "op": "click", "args": { "index": 3 } }
+  ]
+}
+```
+
+This is the authoring entry point for flows: drive a session by hand, export as json, then curate (prune probe evals, promote URLs to `{{vars}}`, add `wait` steps and `expect` assertions, mark extraction evals with `save`) and replay via `POST /flow/run`. Cookies and storage are stripped — a flow is a shareable asset. `ok:false` probe actions are dropped. `wait` steps are not part of the recording (the recorder logs actions, not your waiting), so waits are hand-added during curation.
+
 > ⚠️ Treat an exported script like credentials — it embeds any cookies the session was created with.
 >
 > **Index caveat**: `click`/`input` replay the *index* from the original run's `/state` output. If the page's element order changed, an index may land elsewhere. The script is a readable, editable starting point, not a guaranteed selector — fix the index (or swap in a selector of your own) and re-run.
+
+### POST /flow/run
+
+Run a flow — a recorded/edited JSON session script — to completion server-side, zero model tokens in the loop. The engine stays LLM-free: a flow is pure data (`{{var}}` substitution, `wait` predicates, `expect` checks — no LLM calls anywhere).
+
+**Request body:**
+
+| Field | Type | Default | Description |
+|------|------|------|------|
+| flow | object | — | Inline flow document (see below) |
+| name | string | — | Or run a server-side workflow asset: `workflow/<name>/flow.json` (override the directory with `AGINXBROWSER_WORKFLOW_DIR`). An unknown name errors back with the list of installed workflows — that error is the discovery call |
+| vars | object | `{}` | Values for `{{placeholders}}`; wins over the flow's own `vars` defaults |
+| session_id | string | — | Reuse a live session (e.g. from `POST /import/curl`) instead of creating a fresh one — that's how login state and flows compose |
+
+One of `flow` / `name` is required.
+
+**Flow document:**
+
+```json
+{
+  "vars": { "handle": "aginxbrowser" },
+  "create": { "url": "https://x.com/{{handle}}", "use_proxy": true },
+  "steps": [
+    { "op": "wait", "args": { "predicate": "document.querySelectorAll('article').length >= 1", "timeout_ms": 20000 } },
+    { "op": "eval", "args": { "script": "JSON.stringify({...})" },
+      "expect": { "selector": "article" }, "save": "profile" }
+  ]
+}
+```
+
+- `vars` — default values for `{{placeholders}}` in `create` and step args; request `vars` override them. Substituting an undeclared var fails fast with a receipt (no session created).
+- `create` — passed to `POST /session/create` semantics (url / cookies / use_proxy / viewport / …); skipped entirely when `session_id` is given.
+- `steps[]` — `op` is one of the session verbs: `navigate`, `set_content`, `click`, `click_xy`, `drag`, `input`, `scroll`, `viewport`, `wait`, `eval`. `expect` (optional) gates the step: `url_contains`, `selector`, `text_contains`, `eval_truthy` — all must hold. `save` (optional) stores the step's result under that key in the receipt.
+- On failure the flow aborts at the failing step and the receipt carries `status:"failed"`, `failed_step`, `reason`, the page `url`, a viewport `screenshot` (base64), everything `saved` so far — and the session **stays alive** for manual takeover (`session_id` in the receipt).
+
+**Response (ok):**
+
+```json
+{
+  "status": "ok",
+  "session_id": "s_7",
+  "steps_done": 2,
+  "saved": { "profile": "{\"url\":\"https://x.com/aginxbrowser\",...}" }
+}
+```
+
+**Response (failed):**
+
+```json
+{
+  "status": "failed",
+  "session_id": "s_8",
+  "failed_step": 0,
+  "reason": "wait timeout: predicate never became truthy within 15000ms",
+  "url": "https://www.zhihu.com/question/603518666",
+  "screenshot": "<base64 png>",
+  "steps_done": 0,
+  "saved": {}
+}
+```
+
+The repo ships three sample flows under `workflow/` (`xcom-profile`, `juejin-post`, `zhihu-answer`) — one runs green logged-out, one green, one fails on a 403 wall on purpose, each with a `flow.md` explaining itself. A workflow `name` is one path segment of lowercase/digits/dashes; anything else is rejected before it touches the filesystem. Drop a directory in to deploy — no rebuild.
 
 ### GET /session/{id}/network
 
@@ -1350,7 +1426,7 @@ The streamable HTTP transport follows the protocol's dual session semantics — 
 
 Browser sessions (`session_create` & co.) are shared across MCP sessions by design: two MCP clients on the same server can list (`session_list`) and reuse the same browser session IDs, which is what makes "one instance per machine, every agent shares it" work. For a self-hosted instance reached over a LAN IP or a Docker hostname (not `localhost`/`127.0.0.1`), add the hostname to `AGINXBROWSER_MCP_ALLOWED_HOSTS` — the transport validates the `Host` header as DNS-rebinding protection and rejects unlisted hosts with `403`.
 
-### Provided Tools (30)
+### Provided Tools (32)
 
 #### Core Tools
 
@@ -1390,7 +1466,8 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `session_screenshot` | Screenshot the session's current DOM state (mutations included) as a base64 PNG; optional `width`/`height`/`full_page`/`selector` |
 | `session_wait` | Wait until a CSS selector matches or a JS predicate turns truthy, with a timeout — the page's event loop keeps running while waiting, so this replaces blind sleeps for async content |
 | `session_network` | Read the session's network request log; `filter: "media"` extracts playback/stream URLs (m3u8, mp4, ...) actually requested by the page — the reliable way to get a real video link. `include_bodies: true` adds an `xhr` array with the page's script-initiated response bodies (its own API face), narrowed by `url_contains` |
-| `session_export` | Export the session's recorded actions as a runnable curl replay script (`format=jsonl` for the raw log) |
+| `session_export` | Export the session's recorded actions: a runnable curl replay script (default), the raw action log (`format=jsonl`), or a flow.json document (`format=json` — cookies stripped, editable ops) that `flow_run` replays server-side |
+| `flow_run` | Run a flow to completion — zero model tokens: an inline flow document or a server-side `workflow/<name>/flow.json` asset, `{{var}}` substitution, `wait`/`expect` gates, `save` outputs; fails with a receipt (failing step, reason, URL, screenshot) and the session stays alive; `session_id` composes flows with imported login state |
 | `session_close` | Close the session (for a persistent one this drops the on-disk login snapshot — idle expiry keeps it, an explicit close does not) |
 
 #### `fetch` Tool Parameters
@@ -1438,7 +1515,7 @@ The output is deterministic — same input, same bytes — and the receipt carri
 
 #### Session Operation Parameters
 
-All session operations require the `session_id` parameter. `click`/`input` also need `index` (from `session_state`); `input` additionally needs `text`; `eval` needs `script`; `navigate` needs `url`; `clone` needs nothing but the source id. The acting/rendering tools take optional extras: `click_xy` needs `x`/`y` (optional `button`, `click_count`); `drag` needs `from`/`to` (optional `steps`, `delay_ms`); `viewport` accepts `width`/`height`/`mobile` (all optional — omit to keep current); `screenshot` accepts `width`/`height`/`full_page`/`selector`/`selector_all`; `wait` takes exactly one of `selector` / `predicate` plus `timeout_ms` (default 10000, max 120000); `export` accepts `format` (`bash` default / `jsonl`); `network` accepts `filter: "media"` or `include_bodies: true` (plus `url_contains`/`body_max_chars`); `dialog` accepts `action` (`list` default / `accept` / `dismiss`) plus optional `prompt_text`; `console` accepts `level`/`since_ts`/`url_contains`/`limit`; `storage`/`cookies` take only `session_id`.
+All session operations require the `session_id` parameter. `click`/`input` also need `index` (from `session_state`); `input` additionally needs `text`; `eval` needs `script`; `navigate` needs `url`; `clone` needs nothing but the source id. The acting/rendering tools take optional extras: `click_xy` needs `x`/`y` (optional `button`, `click_count`); `drag` needs `from`/`to` (optional `steps`, `delay_ms`); `viewport` accepts `width`/`height`/`mobile` (all optional — omit to keep current); `screenshot` accepts `width`/`height`/`full_page`/`selector`/`selector_all`; `wait` takes exactly one of `selector` / `predicate` plus `timeout_ms` (default 10000, max 120000); `export` accepts `format` (`bash` default / `jsonl` / `json` for a flow document); `flow_run` takes exactly one of `flow` / `name`, plus optional `vars` and `session_id`; `network` accepts `filter: "media"` or `include_bodies: true` (plus `url_contains`/`body_max_chars`); `dialog` accepts `action` (`list` default / `accept` / `dismiss`) plus optional `prompt_text`; `console` accepts `level`/`since_ts`/`url_contains`/`limit`; `storage`/`cookies` take only `session_id`.
 
 ### Client Configuration
 
@@ -1551,6 +1628,7 @@ If AginxBrowser is deployed on a remote server, connect through an SSH tunnel:
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL (seconds); `0` disables |
 | `AGINXBROWSER_MCP_ALLOWED_HOSTS` | unset | Extra `Host` values accepted by `/mcp` (comma-separated) — the DNS-rebinding guard defaults to loopback; add your LAN IP / Docker hostname when other machines call the instance |
 | `AGINXBROWSER_DOWNLOAD_DIR` | `.` | Directory where `/download` saves files |
+| `AGINXBROWSER_WORKFLOW_DIR` | `./workflow` | Where `flow_run(name=…)` looks for `<name>/flow.json` assets (resolved from the server's working directory); drop a directory in to deploy, no rebuild |
 | `AGINXBROWSER_PROXY` | None | Proxy address (used when `use_proxy:true`, and applied automatically for browser/session/CDP navigations to known-blocked domains) |
 | `CAPTCHA_SOLVER_API_KEY` | None | 2captcha API key; enables automatic CAPTCHA solving when set |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | CAPTCHA solving service |

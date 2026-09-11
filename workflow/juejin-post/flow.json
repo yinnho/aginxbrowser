@@ -1,0 +1,27 @@
+{
+  "vars": {
+    "post_id": "7263464719901458492"
+  },
+  "create": {
+    "url": "https://juejin.cn/post/{{post_id}}"
+  },
+  "steps": [
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "document.querySelectorAll('.article-viewer, .markdown-body').length >= 1",
+        "timeout_ms": 15000
+      }
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "JSON.stringify({url:location.href,title:(document.querySelector('.article-title')||{}).textContent||document.title,author:(document.querySelector('.username')||{}).textContent||'',contentLen:(document.querySelector('.article-viewer')||{innerText:''}).innerText.length})"
+      },
+      "expect": {
+        "url_contains": "/post/"
+      },
+      "save": "post"
+    }
+  ]
+}

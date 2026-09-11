@@ -421,9 +421,31 @@ pub struct SessionExportParams {
     pub session_id: String,
     /// Output format: "bash" (default) renders a runnable curl script that
     /// replays every recorded action against a fresh session; "jsonl" returns
-    /// the raw action log, one JSON object per line
+    /// the raw action log, one JSON object per line; "json" returns a
+    /// flow.json document (editable ops, cookies/storage stripped) for
+    /// replay via flow_run
     #[serde(default)]
     pub format: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct FlowRunParams {
+    /// Inline flow document: {create?, vars?, steps:[{op, args, expect?, save?}]}
+    #[serde(default)]
+    pub flow: Option<serde_json::Value>,
+    /// Or run a server-side workflow/<name>/flow.json asset. An unknown name
+    /// errors back with the list of installed workflows — that error is the
+    /// discovery call.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Values for {{placeholders}} in step args; wins over the flow's own
+    /// vars defaults.
+    #[serde(default)]
+    pub vars: Option<serde_json::Value>,
+    /// Reuse a live session (e.g. from import_curl) instead of creating a
+    /// fresh one — that's how login state and flows compose.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -1444,7 +1466,7 @@ bash, PowerShell and cmd copy flavors.",
     }
 
     #[tool(
-        description = "Export a browser session's recorded action log. Format \"bash\" (default) returns a runnable curl script that replays every recorded action (navigate/click/input/scroll/eval) against a fresh session on this server — hand it to a shell or cron, zero model tokens. Format \"jsonl\" returns the raw action log, one JSON object per line.",
+        description = "Export a browser session's recorded action log. Format \"bash\" (default) returns a runnable curl script that replays every recorded action (navigate/click/input/scroll/eval) against a fresh session on this server — hand it to a shell or cron, zero model tokens. Format \"jsonl\" returns the raw action log, one JSON object per line. Format \"json\" returns a flow.json document — the same recording as editable ops ({op, args}) with cookies/storage stripped — that flow_run replays server-side.",
         annotations(title = "Export Session Replay Script", read_only_hint = true)
     )]
     async fn session_export(&self, Parameters(params): Parameters<SessionExportParams>) -> String {
@@ -1455,11 +1477,32 @@ bash, PowerShell and cmd copy flavors.",
         };
         match params.format.as_deref() {
             Some("jsonl") => stamped_json(json!({ "format": "jsonl", "actions": jsonl }), &mgr, &params.session_id),
+            Some("json") => {
+                let doc = crate::flow::recorded_to_flow(&jsonl);
+                stamped_json(json!({ "format": "json", "flow": doc }), &mgr, &params.session_id)
+            }
             _ => {
                 let script = session::replay_bash(&jsonl, "http://127.0.0.1:8089");
                 stamped_json(json!({ "format": "bash", "script": script }), &mgr, &params.session_id)
             }
         }
+    }
+
+    #[tool(
+        description = "Run a flow — a recorded, editable JSON browser-session script — deterministically, with zero model tokens. Steps are {op, args, expect?, save?}: ops cover navigate/click/click_xy/input/scroll/eval/wait/screenshot/state/cookies; {{var}} placeholders in args are filled from vars; expect asserts (url_contains | selector | text_contains | eval_truthy) abort with evidence on failure; save collects a step's output into the receipt. Source the flow inline via \"flow\", or by \"name\" from the server's workflow/<name>/flow.json (unknown name → error lists installed workflows). Pass session_id to reuse a live session (e.g. from import_curl) so login state and flows compose. The receipt carries status ok/failed, saved outputs, the session_id (kept alive), and on failure the failing step, reason and a diagnostic screenshot — fix the flow or take the session over from there.",
+        annotations(title = "Run Flow")
+    )]
+    async fn flow_run(&self, Parameters(params): Parameters<FlowRunParams>) -> String {
+        let doc = match crate::flow::resolve_flow_doc(params.flow, params.name.as_deref()) {
+            Ok(d) => d,
+            Err(e) => return json!({ "error": e }).to_string(),
+        };
+        let vars = params
+            .vars
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+        let mut mgr = session::SESSIONS.lock().await;
+        crate::flow::run_flow(&mut mgr, &doc, &vars, params.session_id).await.to_string()
     }
 
     #[tool(

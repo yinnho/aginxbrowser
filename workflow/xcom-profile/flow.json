@@ -1,0 +1,28 @@
+{
+  "vars": {
+    "handle": "aginxbrowser"
+  },
+  "create": {
+    "url": "https://x.com/{{handle}}",
+    "use_proxy": true
+  },
+  "steps": [
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "document.querySelectorAll('article').length >= 1",
+        "timeout_ms": 20000
+      }
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "JSON.stringify({url:location.href,stats:[...document.querySelectorAll('a[href*=\"/following\"],a[href*=\"/followers\"]')].map(a=>a.textContent.trim()),posts:[...document.querySelectorAll('article')].map(a=>a.innerText.replace(/\\n+/g,' | ').slice(0,300))})"
+      },
+      "expect": {
+        "selector": "article"
+      },
+      "save": "profile"
+    }
+  ]
+}

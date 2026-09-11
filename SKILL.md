@@ -5,7 +5,7 @@ description: >
   pages as clean markdown, run 5-engine aggregated web search (Baidu, Bing,
   Sogou, WeChat, Google), take screenshots as visual input, extract
   structured data from SPAs, and drive multi-step interactions (click, type,
-  fill forms, login, paginate) through indexed sessions. 14 MCP tools over a
+  fill forms, login, paginate) through indexed sessions. 32 MCP tools over a
   single Rust binary — no Chromium. Use when the agent needs to read a web
   page, scrape or extract content from a URL, search the web, screenshot a
   page, log in or fill a form, or click through interactive content. Triggers
@@ -22,14 +22,15 @@ description: >
 
 # AginxBrowser — a browser engine for agents
 
-14 tools cover everything an agent needs on the web: read, search,
-screenshot, download files, and interact. When a task involves
+The tools cover everything an agent needs on the web: read, search,
+screenshot, download files, interact, generate documents/video, and replay
+recorded interactions with zero tokens. When a task involves
 reading/searching/screenshotting a web page or driving a multi-step
 interaction, prefer this skill's tools over hand-rolled `curl` + HTML parsing.
 
 ## Setup: register the MCP server (one-time)
 
-The 14 tools run over an MCP server (`browser.aginx.net`). If not yet
+The tools run over an MCP server (`browser.aginx.net`). If not yet
 registered, run once (or ask the user to):
 
 ```bash
@@ -84,7 +85,28 @@ bash skill.sh
 | Screenshot as visual input | `screenshot` | `url`, `full_page`, `wait_secs`, `selector`(crop / element rects) |
 | Multi-step interaction (login/form/paginate) | `session_create` -> `session_state` -> `session_click`/`session_input` -> ... -> `session_close` | index `[N]` from `session_state` |
 | Reuse a logged-in session | `session_create{cookies:[...]}` + `session_cookies` export | `cookies` array round-trips |
+| Human logs in, agent takes over | `import_curl{curl}` -> session_id carries the login | paste DevTools "Copy as cURL" |
+| Run a recorded interaction again (zero tokens) | `flow_run` | `name` (installed workflow) or `flow` (inline doc), `vars`, `session_id` |
+| A task you'll repeat: turn it into a flow | `session_export{format:"json"}` -> curate -> `flow_run` | prune probes, `{{var}}` the URLs, hand-add `wait`s |
 | Firecrawl-compatible clients | `/v1/scrape`(HTTP) | `actions` runs a single-page session flow |
+
+## Flows (record once, replay free)
+
+A flow is a JSON session script — `{create?, vars?, steps:[{op, args,
+expect?, save?}]}` — executed server-side with **zero model tokens**. The
+authoring loop: drive a session interactively until the task works,
+`session_export{format:"json"}` to get the recording as a flow document
+(cookies stripped), curate it (delete probe evals, promote URLs to
+`{{vars}}`, add `wait` steps — waits are never recorded — add `expect`
+assertions, mark extraction evals `save`), then `flow_run` replays it.
+Re-running costs nothing and fails loudly: a failed run returns the failing
+step, reason, URL, and a screenshot, with the session left alive for
+takeover.
+
+Login composes: `import_curl` first, then `flow_run{session_id}` — the flow
+skips its own create block and runs inside the authenticated session.
+Installed workflows live server-side (`workflow/<name>/flow.json`);
+`flow_run{name:"bogus"}` errors back with the list of what's installed.
 
 ## Quick commands
 
@@ -122,7 +144,7 @@ curl -sS -X POST https://browser.aginx.net/search \
   web is first-class, not an afterthought
 - Stateful sessions (8-min idle keep-alive) with cookie inject/export for
   logged-in workflows
-- 14 MCP tools over HTTP + MCP dual protocol — Claude Code, Cursor, Claude
+- 32 MCP tools over HTTP + MCP dual protocol — Claude Code, Cursor, Claude
   Desktop, and any MCP client
 - Screenshots and element coordinates from a pure-CPU Rust renderer, no GPU
 

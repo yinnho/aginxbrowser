@@ -1,0 +1,27 @@
+{
+  "vars": {
+    "question_id": "603518666"
+  },
+  "create": {
+    "url": "https://www.zhihu.com/question/{{question_id}}"
+  },
+  "steps": [
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "document.querySelectorAll('.List-item, .AnswerItem').length >= 1",
+        "timeout_ms": 15000
+      }
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "JSON.stringify({url:location.href,question:(document.querySelector('.QuestionHeader-title')||{}).textContent||document.title,answers:[...document.querySelectorAll('.List-item, .AnswerItem')].slice(0,3).map(a=>({author:(a.querySelector('.AuthorInfo-name')||{}).textContent||'',excerpt:a.innerText.replace(/\\n+/g,' ').slice(0,200)}))})"
+      },
+      "expect": {
+        "url_contains": "/question/"
+      },
+      "save": "qa"
+    }
+  ]
+}
