@@ -3201,7 +3201,12 @@ pub(crate) fn reset_local_storage_for_tests() {
 fn op_navigate(state: &OpState, #[string] url: &str, #[string] method: &str, #[string] body: &str) {
     let gs = state.borrow::<SharedState>().clone();
     let mut gs = gs.borrow_mut();
-    gs.url = url.to_string();
+    // Only queue the navigation — do NOT move the realm URL here. The URL is
+    // written on commit (init_js → set_url from the page's committed URL).
+    // Moving it early let synchronous JS between the assignment and the
+    // actual navigation read and write another origin's cookies through
+    // document.cookie, whose ops derive the domain from this URL
+    // (SOP bypass, obscura #940).
     gs.pending_navigation = Some((url.to_string(), method.to_string(), body.to_string()));
 }
 

@@ -2715,6 +2715,42 @@
     }
 
     #[test]
+    fn queued_navigation_does_not_move_the_cookie_context() {
+        // obscura #940 shape: op_navigate must only queue the navigation —
+        // the realm URL moves on commit, not at assignment time. The early
+        // move let synchronous JS between `location.href = target` and the
+        // actual navigation read and write the TARGET origin's cookies
+        // through document.cookie, whose ops derive the domain from that
+        // URL (SOP bypass). The navigation tuple itself must still be queued.
+        let (mut rt, jar) = setup_runtime_with_cookies("<html><body></body></html>");
+        let victim = url::Url::parse("https://victim.example/").unwrap();
+        jar.set_cookie("secret=victimtoken; Path=/", &victim);
+
+        rt.evaluate("location.href = 'https://victim.example/'").unwrap();
+        let cookie_str = rt.evaluate("document.cookie").unwrap().as_str().unwrap().to_string();
+        assert!(
+            !cookie_str.contains("victimtoken"),
+            "document.cookie must not expose another origin's cookies while the navigation is only queued, got: {}",
+            cookie_str
+        );
+
+        // The write side of the same hole: a JS cookie set while the
+        // navigation is queued must land on the CURRENT origin, not the
+        // navigation target.
+        rt.evaluate("document.cookie = 'poison=1; Path=/'").unwrap();
+        assert!(
+            !jar.get_cookie_header(&victim).contains("poison=1"),
+            "a JS cookie written before navigation commit must not land on the target origin"
+        );
+
+        // The navigation itself is unaffected: still queued, GET, empty body.
+        assert_eq!(
+            rt.take_pending_navigation(),
+            Some(("https://victim.example/".to_string(), "GET".to_string(), "".to_string()))
+        );
+    }
+
+    #[test]
     fn evaluate_accepts_statement_scripts_with_completion_value() {
         // CDP Runtime.evaluate semantics: the input is a script — statements
         // are legal and the completion value of the last statement comes
