@@ -282,7 +282,7 @@ fn first_pass_corpus_is_clean() {
 #[test]
 fn corpus_passes_the_showcase_audit() {
     for (name, md) in CORPUS {
-        let outcome = render_with_quality(md, &theme::LIGHT, Quality::Showcase);
+        let outcome = render_with_quality(md, &theme::LIGHT, Quality::Showcase, false);
         for d in outcome.receipt["diagrams"].as_array().unwrap() {
             let c = &d["composition"];
             assert_eq!(
@@ -317,7 +317,7 @@ fn corpus_passes_the_showcase_audit() {
 fn quality_profiles_do_not_change_the_artifact() {
     for (name, md) in CORPUS {
         let standard = render(md);
-        let showcase = render_with_quality(md, &theme::LIGHT, Quality::Showcase);
+        let showcase = render_with_quality(md, &theme::LIGHT, Quality::Showcase, false);
         assert_eq!(
             standard.html, showcase.html,
             "{name}: showcase must not touch the bytes"

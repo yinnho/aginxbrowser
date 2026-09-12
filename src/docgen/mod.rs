@@ -17,6 +17,7 @@ pub mod graph;
 #[cfg(test)]
 mod gate;
 pub mod lifecycle;
+pub mod motion;
 pub mod sequence;
 pub mod shell;
 pub mod sigil;
@@ -43,29 +44,35 @@ pub struct RenderOutcome {
     pub receipt: Value,
 }
 
-/// Render with the default (light) theme — the historical palette.
+/// Render with the default (light) theme, static posture — the historical
+/// shorthand; production rides [`render_with_quality`].
+#[cfg(test)]
 pub fn render(markdown: &str) -> RenderOutcome {
     render_with_theme(markdown, &theme::LIGHT)
 }
 
-/// Render with an explicit theme. The theme is part of the render input:
-/// same markdown + same theme = same bytes, and the receipt names it so a
-/// cached artifact is never mistaken for another theme's.
+/// Render with an explicit theme, static posture — the historical
+/// shorthand; production rides [`render_with_quality`].
+#[cfg(test)]
 pub fn render_with_theme(markdown: &str, theme: &'static theme::Theme) -> RenderOutcome {
-    render_with_quality(markdown, theme, checks::Quality::Standard)
+    render_with_quality(markdown, theme, checks::Quality::Standard, false)
 }
 
 /// Render with an explicit theme and quality profile. The profile grades
 /// the receipt, never the artifact: the composition audit runs in process
 /// over the placed geometry and `quality` only sets how its findings are
 /// severity-rated (border runs fail every profile; showcase fails on any
-/// finding). The emitted bytes are identical across profiles.
+/// finding). The emitted bytes are identical across profiles. `motion`
+/// (motion preset batch) bakes the declarative entrance choreography in —
+/// CSS keyframes and delay ladders, zero scripts; off, the bytes are the
+/// historical static document.
 pub fn render_with_quality(
     markdown: &str,
     theme: &'static theme::Theme,
     quality: checks::Quality,
+    motion: bool,
 ) -> RenderOutcome {
-    let doc = shell::render(markdown, theme);
+    let doc = shell::render(markdown, theme, motion);
 
     let rendered: Vec<&shell::FenceOutcome> = doc.fences.iter().filter(|f| f.ok).collect();
     let failed: Vec<&shell::FenceOutcome> = doc.fences.iter().filter(|f| !f.ok).collect();
@@ -80,6 +87,12 @@ pub fn render_with_quality(
     }
     if doc.fences.is_empty() {
         checks.push("no archify fences found — prose-only document".to_string());
+    }
+    if motion {
+        checks.push(
+            "entrance motion baked in — CSS keyframes with nth-child delay ladders, zero scripts"
+                .to_string(),
+        );
     }
     if failed.is_empty() && !doc.fences.is_empty() {
         checks.push("all fences parsed and validated clean".to_string());
@@ -167,6 +180,7 @@ pub fn render_with_quality(
         "preset": theme.preset,
         "theme": theme.name,
         "quality": quality.name(),
+        "motion": motion,
         "diagrams": diagrams,
         "checks": checks,
         "diagnostics": diagnostics,
@@ -336,6 +350,30 @@ mod tests {
         // Without views the receipt key stays absent.
         let plain = render("# T\n\n```archify\n{\"sequence\":{\"title\":\"Ping\",\"participants\":[{\"id\":\"a\",\"type\":\"frontend\",\"label\":\"A\"},{\"id\":\"b\",\"type\":\"backend\",\"label\":\"B\"}],\"messages\":[{\"from\":\"a\",\"to\":\"b\",\"label\":\"ping\"}]}}\n```\n");
         assert!(plain.receipt["diagrams"][0].get("views").is_none());
+    }
+
+    #[test]
+    fn motion_round_trips_the_receipt_and_changes_the_bytes() {
+        let statik = render(DOC);
+        let moved = render_with_quality(DOC, &theme::LIGHT, checks::Quality::Standard, true);
+        // The receipt names the axis so a cached artifact is never mistaken
+        // for the other posture.
+        assert_eq!(statik.receipt["motion"], false);
+        assert_eq!(moved.receipt["motion"], true);
+        assert_ne!(statik.html, moved.html);
+        assert_eq!(
+            moved.html,
+            render_with_quality(DOC, &theme::LIGHT, checks::Quality::Standard, true).html
+        );
+        assert!(moved.html.contains("<div class=\"agx-motion\">"));
+        assert!(moved.html.contains("@keyframes agx-rise"));
+        assert!(moved
+            .receipt["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c.as_str().unwrap_or("").contains("entrance motion baked in")));
+        assert!(!statik.html.contains("agx-motion"));
     }
 
     #[test]

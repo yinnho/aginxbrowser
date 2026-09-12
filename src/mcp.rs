@@ -364,6 +364,15 @@ pub struct RenderMarkdownParams {
     /// receipt (diagrams[].composition); it never changes the artifact
     /// bytes, only how findings are severity-rated
     pub quality: Option<String>,
+    /// Bake the entrance choreography into the artifact (default false):
+    /// pure-declarative CSS animation — headings split into per-glyph/per-
+    /// word spans that rise in with expo easing, prose blocks stagger up a
+    /// nth-child delay ladder, and diagram figures grow in with a back
+    /// ease (GSAP's easing math as public cubic-bezier equivalents). Zero
+    /// scripts: the file itself animates in any browser, subtitles and all;
+    /// the receipt records motion so a cached artifact is never mistaken
+    /// for the static one. prefers-reduced-motion disables it all
+    pub motion: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -1526,11 +1535,10 @@ bash, PowerShell and cmd copy flavors.",
     }
 
     #[tool(
-        description = "Render a markdown document into a deterministic, self-contained HTML artifact - the document layer, so the agent never writes HTML by hand. Prose rides a plain offline shell (no fonts, no scripts); archify fenced code blocks carry typed zero-coordinate diagram JSON (sequence, workflow, architecture, dataflow, lifecycle families) and render to inline SVG via the layout engine. Same input, same bytes: the receipt carries the sha256 so determinism is verifiable. theme picks light (default) or dark; preset picks the palette family — classic (default), signal-flow, blueprint, editorial — orthogonal to theme; colors bake at generation time (presentation attributes, not CSS variables), and the receipt records both preset and theme. quality picks the composition audit profile — standard (default) or showcase, the delivery gate: the receipt's diagrams[].composition grades route crossings, ambiguous corridors, label clearance (2px standard / 4px showcase), route rhythm, and node text projected to the 930px reader width; the audit never changes the artifact bytes. Mermaid sources are the agent's job to translate, not the engine's: flowchart/graph → workflow (lanes + columns), sequenceDiagram → sequence, stateDiagram-v2 → lifecycle (bands), erDiagram/class → architecture (grid + boundaries) — read the topology and emit the matching zero-coordinate archify JSON; the engine accepts only archify JSON. A broken diagram degrades to a visible code block and lands in receipt.diagnostics; an authored route preset that cannot be honored is self-repaired to a verified semantic substitute and disclosed in receipt diagrams[].repairs - the document still renders. A fence may also carry views: [{id,label,nodes,note?}] (node ids of the active family), emitted as guided-view tabs above the diagram plus an inlined viewer script - clicking a tab lights the member nodes and the routes between them (subgraph), clicking a node lights it with its direct neighbors (ego graph), everything else dims; a view's optional note shows as a caption while it is active (the story layer). window.agxViewer in a session drives and reads the same state programmatically: {focus,view,state} as before, plus route(i,from,to) which returns and lights the shortest authored directed path between two nodes (null when unreachable, state untouched), and reach(i,id,down|up) which returns and lights the authored downstream/upstream closure ({nodes,links}); both dim the rest of the diagram. diagrams[].views in the receipt lists the tabs. With session_id the artifact is also loaded into that session (local, free) and the reply carries viewport acceptance: scroll extents measured in the live session and graded fits/tall/wide/oversized, telling the agent how to read the page back. Diagram vocabulary adapted from archify (MIT).",
+        description = "Render a markdown document into a deterministic, self-contained HTML artifact - the document layer, so the agent never writes HTML by hand. Prose rides a plain offline shell (no fonts, no scripts); archify fenced code blocks carry typed zero-coordinate diagram JSON (sequence, workflow, architecture, dataflow, lifecycle families) and render to inline SVG via the layout engine. Same input, same bytes: the receipt carries the sha256 so determinism is verifiable. theme picks light (default) or dark; preset picks the palette family — classic (default), signal-flow, blueprint, editorial — orthogonal to theme; colors bake at generation time (presentation attributes, not CSS variables), and the receipt records both preset and theme. quality picks the composition audit profile — standard (default) or showcase, the delivery gate: the receipt's diagrams[].composition grades route crossings, ambiguous corridors, label clearance (2px standard / 4px showcase), route rhythm, and node text projected to the 930px reader width; the audit never changes the artifact bytes. Mermaid sources are the agent's job to translate, not the engine's: flowchart/graph → workflow (lanes + columns), sequenceDiagram → sequence, stateDiagram-v2 → lifecycle (bands), erDiagram/class → architecture (grid + boundaries) — read the topology and emit the matching zero-coordinate archify JSON; the engine accepts only archify JSON. A broken diagram degrades to a visible code block and lands in receipt.diagnostics; an authored route preset that cannot be honored is self-repaired to a verified semantic substitute and disclosed in receipt diagrams[].repairs - the document still renders. A fence may also carry views: [{id,label,nodes,note?}] (node ids of the active family), emitted as guided-view tabs above the diagram plus an inlined viewer script - clicking a tab lights the member nodes and the routes between them (subgraph), clicking a node lights it with its direct neighbors (ego graph), everything else dims; a view's optional note shows as a caption while it is active (the story layer). window.agxViewer in a session drives and reads the same state programmatically: {focus,view,state} as before, plus route(i,from,to) which returns and lights the shortest authored directed path between two nodes (null when unreachable, state untouched), and reach(i,id,down|up) which returns and lights the authored downstream/upstream closure ({nodes,links}); both dim the rest of the diagram. diagrams[].views in the receipt lists the tabs. motion: true bakes an entrance choreography into the artifact: pure-declarative CSS animation with zero scripts - headings split into per-glyph (CJK) / per-word (latin) spans that rise in with expo easing, prose blocks stagger up an nth-child delay ladder, diagram figures grow in with a back ease (GSAP's easing math as public cubic-bezier equivalents, nothing embedded); the file itself animates in any browser and prefers-reduced-motion disables it all; the receipt records motion. With session_id the artifact is also loaded into that session (local, free) and the reply carries viewport acceptance: scroll extents measured in the live session and graded fits/tall/wide/oversized, telling the agent how to read the page back. Diagram vocabulary adapted from archify (MIT).",
         annotations(title = "Render Markdown")
     )]
     async fn render_markdown(&self, Parameters(params): Parameters<RenderMarkdownParams>) -> String {
-        use crate::docgen::checks::Quality;
         use crate::docgen::theme::Theme;
         // (preset, mode) → theme. One-sided requests fill in the classic/
         // light defaults; the all-default request keeps riding render(),
@@ -1567,18 +1575,18 @@ bash, PowerShell and cmd copy flavors.",
         );
         let rendered = match (resolved, quality) {
             (Err(e), _) | (_, Err(e)) => return json!({ "error": e }).to_string(),
-            (Ok(theme), Ok(Quality::Standard)) if theme.is_none() => {
-                crate::docgen::render(&params.markdown)
-            }
-            (Ok(None), Ok(quality)) => {
-                crate::docgen::render_with_quality(&params.markdown, &crate::docgen::theme::LIGHT, quality)
-            }
-            (Ok(Some(theme)), Ok(Quality::Standard)) => {
-                crate::docgen::render_with_theme(&params.markdown, theme)
-            }
-            (Ok(Some(theme)), Ok(quality)) => {
-                crate::docgen::render_with_quality(&params.markdown, theme, quality)
-            }
+            (Ok(None), Ok(quality)) => crate::docgen::render_with_quality(
+                &params.markdown,
+                &crate::docgen::theme::LIGHT,
+                quality,
+                params.motion.unwrap_or(false),
+            ),
+            (Ok(Some(theme)), Ok(quality)) => crate::docgen::render_with_quality(
+                &params.markdown,
+                theme,
+                quality,
+                params.motion.unwrap_or(false),
+            ),
         };
         let crate::docgen::RenderOutcome { html, receipt } = rendered;
         match params.session_id {

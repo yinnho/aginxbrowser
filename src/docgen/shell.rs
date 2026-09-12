@@ -235,14 +235,21 @@ pub struct RenderedDoc {
 }
 
 /// Escapes text for HTML content/attribute contexts.
-fn html_escape(s: &str) -> String {
+pub(crate) fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
 }
 
-pub fn render(markdown: &str, theme: &'static Theme) -> RenderedDoc {
+/// Render the shell. `motion` (the motion preset batch) bakes a declarative
+/// entrance choreography into the artifact: the body wraps in one
+/// `.agx-motion` div, pure-text h1-h3 split into per-unit animated spans,
+/// and the motion stylesheet (keyframes + nth-child delay ladders) appends
+/// to the shell CSS — zero scripts, so the artifact still plays in any
+/// browser from the file alone. Off (the default), the bytes are the
+/// historical static document.
+pub fn render(markdown: &str, theme: &'static Theme, motion: bool) -> RenderedDoc {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
@@ -372,17 +379,54 @@ pub fn render(markdown: &str, theme: &'static Theme) -> RenderedDoc {
                 }
                 plain.push(events[i].clone());
             }
-            Event::Start(Tag::Heading { level, .. }) if *level == HeadingLevel::H1 && doc_title.is_none() => {
+            Event::Start(Tag::Heading { level, .. })
+                if matches!(level, HeadingLevel::H1 | HeadingLevel::H2 | HeadingLevel::H3) =>
+            {
+                // The first H1 wins the doc-title race (a fence earlier in
+                // the document already claimed it). Non-motion documents
+                // keep the historical event order: the inner events reach
+                // `plain` through this arm now instead of the default one,
+                // but it is the same events in the same order.
+                let first_h1 = *level == HeadingLevel::H1 && doc_title.is_none();
                 let mut title = String::new();
+                let mut text = String::new();
+                let mut inner: Vec<Event> = Vec::new();
+                let mut complex = false;
                 let mut j = i + 1;
                 while j < events.len() && !matches!(events[j], Event::End(TagEnd::Heading(_))) {
-                    if let Event::Text(t) = &events[j] {
-                        title.push_str(t);
+                    match &events[j] {
+                        Event::Text(t) => {
+                            text.push_str(t);
+                            if first_h1 {
+                                title.push_str(t);
+                            }
+                        }
+                        _ => complex = true,
                     }
+                    inner.push(events[j].clone());
                     j += 1;
                 }
-                doc_title = Some(title.trim().to_string());
-                plain.push(events[i].clone());
+                if first_h1 {
+                    doc_title = Some(title.trim().to_string());
+                }
+                // Motion splits pure-text headings into per-unit spans (the
+                // SplitText move, done at generation time); a heading with
+                // inline markup (code, strong, breaks) passes through
+                // un-split — the span sequence can't reproduce nested tags.
+                if motion && !complex && !text.trim().is_empty() {
+                    plain.push(events[i].clone());
+                    let spans: pulldown_cmark::CowStr =
+                        super::motion::split_heading_html(&text, 0.10).into();
+                    plain.push(Event::Html(spans));
+                } else {
+                    plain.push(events[i].clone());
+                    plain.extend(inner);
+                }
+                if j < events.len() {
+                    plain.push(events[j].clone());
+                }
+                i = j + 1;
+                continue;
             }
             _ => plain.push(events[i].clone()),
         }
@@ -396,12 +440,22 @@ pub fn render(markdown: &str, theme: &'static Theme) -> RenderedDoc {
     }
 
     let title = doc_title.unwrap_or_else(|| "Document".to_string());
+    let css = if motion {
+        format!("{}{}", shell_css(theme), super::motion::motion_css())
+    } else {
+        shell_css(theme)
+    };
+    let body = if motion {
+        format!("<div class=\"agx-motion\">{}</div>", body)
+    } else {
+        body
+    };
     let html = format!(
         "<!DOCTYPE html>\n<html data-theme=\"{}\" data-preset=\"{}\">\n<head>\n<meta charset=\"utf-8\">\n<title>{}</title>\n<style>{}</style>\n</head>\n<body>\n{}</body>\n</html>\n",
         theme.name,
         theme.preset,
         html_escape(&title),
-        shell_css(theme),
+        css,
         body
     );
     RenderedDoc { html, fences }
@@ -757,7 +811,11 @@ mod tests {
     // Every shell test rides the default (light) theme; theme behavior has
     // its own coverage in mod/theme tests.
     fn render(markdown: &str) -> RenderedDoc {
-        super::render(markdown, &LIGHT)
+        super::render(markdown, &LIGHT, false)
+    }
+
+    fn render_motion(markdown: &str) -> RenderedDoc {
+        super::render(markdown, &LIGHT, true)
     }
 
     const SEQ: &str = r#"{"sequence":{"title":"Ping","participants":[
@@ -947,5 +1005,77 @@ mod tests {
         assert!(!doc.html.contains("<div class=\"agx-views\""));
         assert!(!doc.html.contains("agx-views-data"));
         assert!(!doc.html.contains("agxViewer"));
+    }
+
+    // ---- motion preset batch ----
+
+    #[test]
+    fn motion_wraps_bodys_appends_css_and_splits_headings() {
+        let doc = render_motion(&format!(
+            "# Notes\n\nSome prose with `code`.\n\n```archify\n{SEQ}\n```\n\nMore prose.\n"
+        ));
+        // One wrapper right inside the body, motion stylesheet appended to
+        // the shell CSS.
+        assert!(doc.html.contains("<body>\n<div class=\"agx-motion\">"));
+        assert!(doc.html.contains("</div></body>"));
+        assert!(doc.html.contains("@keyframes agx-rise"));
+        assert!(doc.html.contains(".agx-motion>*:nth-child(1){animation-delay:0.12s}"));
+        // The H1 split into per-unit spans (one latin word = one unit) with
+        // escalating delays; the title element still harvests the plain text.
+        assert!(doc.html.contains("<h1><span class=\"agx-ch\" style=\"animation-delay:0.10s\">Notes</span></h1>"));
+        assert!(doc.html.contains("<title>Notes</title>"));
+        // Motion is scripts-free: the artifact carries no script unless a
+        // fence has views (this one doesn't).
+        assert!(!doc.html.contains("<script"));
+    }
+
+    #[test]
+    fn motion_off_leaves_no_motion_surface() {
+        let doc = render("# Notes\n\nSome prose.\n");
+        assert!(!doc.html.contains("agx-motion"));
+        assert!(!doc.html.contains("agx-ch"));
+        assert!(!doc.html.contains("@keyframes"));
+        assert!(!doc.html.contains("animation-delay"));
+    }
+
+    #[test]
+    fn motion_complex_headings_pass_through_unsplit() {
+        let doc = render_motion("## **bold** and `code`\n\n# Plain\n");
+        // Inline markup can't ride the span sequence: the heading passes
+        // through with its strong/code intact, no spans inside.
+        let h2_at = doc.html.find("<h2>").unwrap();
+        let h2_end = doc.html.find("</h2>").unwrap();
+        let h2 = &doc.html[h2_at..h2_end];
+        assert!(h2.contains("<strong>bold</strong>"));
+        assert!(h2.contains("<code>code</code>"));
+        assert!(!h2.contains("agx-ch"));
+        // The plain H1 after it still splits.
+        assert!(doc.html.contains("style=\"animation-delay:0.10s\">Plain</span>"));
+    }
+
+    #[test]
+    fn motion_keeps_the_fence_title_priority() {
+        // A fence BEFORE the first H1 claims the title even under motion —
+        // the split arm harvests the H1 only when the race is still open.
+        let doc = render_motion(&format!(
+            "```archify\n{SEQ}\n```\n\n# After the diagram\n"
+        ));
+        assert!(doc.html.contains("<title>Ping</title>"));
+        assert!(doc.html.contains("style=\"animation-delay:0.10s\">After"));
+    }
+
+    #[test]
+    fn motion_bytes_are_deterministic() {
+        let md = format!("# T\n\n```archify\n{SEQ}\n```\n\nparagraph with words.\n");
+        assert_eq!(render_motion(&md).html, render_motion(&md).html);
+    }
+
+    #[test]
+    fn motion_with_views_keeps_the_script_count() {
+        // Motion adds no scripts of its own; a views document still carries
+        // exactly the island + viewer pair.
+        let doc = render_motion(&format!("```archify\n{}\n```\n", seq_with_views()));
+        assert!(doc.html.contains("@keyframes agx-grow"));
+        assert_eq!(doc.html.matches("<script").count(), 2);
     }
 }
