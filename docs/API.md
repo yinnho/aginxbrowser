@@ -1008,6 +1008,27 @@ Type text into an input field by index. After writing the value, `input` + `chan
 {"filled": true}
 ```
 
+### POST /session/{id}/files
+
+Select files on a file input programmatically (Playwright `setInputFiles` semantics). Each file is built from its base64 content and assigned through `input.files`, then `input` + `change` dispatch so framework `onChange` handlers fire. The page's own `FormData(form)`/submit serialization then uploads them as real multipart parts. Selector-addressed because file inputs are routinely hidden — the `/state` index may not include them. The body limit is the same as `/eval` (`AGINXBROWSER_MAX_BODY_BYTES`, default 64 MiB).
+
+**Request fields:**
+
+| Field | Type | Required | Description |
+|------|------|------|------|
+| selector | string | ✅ | CSS selector for the file input, e.g. `input[type=file]` |
+| files | array | ✅ | `{name, content_base64, mime_type?, last_modified?}` — one entry per file (multi-select) |
+
+**Response:**
+
+```json
+{"set": true, "selector": "input[type=file]", "count": 2,
+ "value": "C:\\fakepath\\a.png",
+ "files": [{"name": "a.png", "size": 2, "type": "image/png"}, ...]}
+```
+
+`set: false` with an `error` field (no element / not a file input / invalid base64) instead of a throw.
+
 ### POST /session/{id}/scroll
 
 Scroll the page.
@@ -1557,6 +1578,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `session_click_xy` | Click at viewport coordinates via the real mouse chain (`pointerdown`→`click`, hit-tested) — for canvas/map/custom widgets; `click_count: 2` adds `dblclick` |
 | `session_drag` | Press at `from`, glide through interpolated `mousemove` events, release at `to` — drags map markers/canvas selections the way a real pointer would |
 | `session_input` | Type text by index (`input`+`change` dispatched; `events:"full"` for per-character keyboard cycles) |
+| `session_set_files` | Select files on a file input programmatically (Playwright `setInputFiles` semantics): files arrive as `{name, content_base64, mime_type?, last_modified?}`, get assigned to `input.files`, then `input`+`change` dispatch. Selector-addressed (`input[type=file]`) because file inputs are often hidden — the `session_state` index may not include them |
 | `session_scroll` | Scroll the page |
 | `session_eval` | Execute JavaScript in the session |
 | `session_dialog` | Inspect/steer dialog policy (`alert`/`confirm`/`prompt` never block: auto-answered, logged, `list`/`accept`/`dismiss`) |

@@ -843,6 +843,27 @@ pub struct SessionInputRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SessionSetFilesRequest {
+    /// CSS selector for the file input — file inputs are often hidden, so the
+    /// interactive index from GET /session/:id/state may not include them.
+    pub selector: String,
+    #[serde(default)]
+    pub files: Vec<SessionFileSpec>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SessionFileSpec {
+    pub name: String,
+    /// File content, standard base64 (padding allowed).
+    pub content_base64: String,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    /// ECMAScript time, defaults to now.
+    #[serde(default)]
+    pub last_modified: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct SessionScrollRequest {
     #[serde(default = "default_scroll_direction")]
     pub direction: session::ScrollDirection,
@@ -1009,6 +1030,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/session/:id/click_xy", post(session_click_xy_handler))
         .route("/session/:id/drag", post(session_drag_handler))
         .route("/session/:id/input", post(session_input_handler))
+        // File content rides in the JSON body as base64 — the axum default
+        // 2 MiB cap would reject real product images outright.
+        .route(
+            "/session/:id/files",
+            post(session_set_files_handler).layer(axum::extract::DefaultBodyLimit::max(max_body_bytes())),
+        )
         .route("/session/:id/scroll", post(session_scroll_handler))
         .route("/session/:id/viewport", post(session_viewport_handler))
         .route("/session/:id/screenshot", post(session_screenshot_handler))
@@ -2122,6 +2149,42 @@ async fn session_input_handler(
         .await
         .map_err(session_err)?;
     Ok((StatusCode::OK, Json(filled)))
+}
+
+/// Programmatic file selection: build File objects from base64 content and
+/// assign them through the page's `input.files` (Playwright setInputFiles
+/// semantics), then dispatch input+change so framework onChange handlers fire.
+async fn session_set_files_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<SessionSetFilesRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    if req.files.is_empty() {
+        return Err(AppError::BadRequest(
+            "files must not be empty — to clear a selection, send one 0-byte file or clear via eval".to_string(),
+        ));
+    }
+    let specs: Vec<serde_json::Value> = req
+        .files
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "name": f.name,
+                "content_base64": f.content_base64,
+                "mime_type": f.mime_type,
+                "last_modified": f.last_modified,
+            })
+        })
+        .collect();
+    let mut mgr = session::SESSIONS.lock().await;
+    let result = mgr
+        .send(&id, |reply| session::SessionCommand::SetFiles {
+            selector: req.selector,
+            files: specs,
+            reply,
+        })
+        .await
+        .map_err(session_err)?;
+    Ok((StatusCode::OK, Json(result)))
 }
 
 async fn session_scroll_handler(

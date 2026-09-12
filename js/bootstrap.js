@@ -292,10 +292,12 @@ globalThis._eventRegistry = globalThis._eventRegistry || {};
 globalThis._formValues = globalThis._formValues || {};
 globalThis._formChecked = globalThis._formChecked || {};
 globalThis._formIndeterminate = globalThis._formIndeterminate || {};
+globalThis._fileInputs = globalThis._fileInputs || {};
 const _eventRegistry = globalThis._eventRegistry;
 const _formValues = globalThis._formValues;
 const _formChecked = globalThis._formChecked;
 const _formIndeterminate = globalThis._formIndeterminate;
+const _fileInputs = globalThis._fileInputs;
 const _domParse = (cmd, a1, a2) => { try { return JSON.parse(_dom(cmd, a1, a2)); } catch { return null; } };
 
 // HTML "ASCII whitespace": U+0009 TAB, U+000A LF, U+000C FF, U+000D CR, U+0020 SPACE.
@@ -2459,6 +2461,12 @@ class Element extends Node {
       if (opts.length) return opts[0].getAttribute('value') !== null ? opts[0].getAttribute('value') : opts[0].textContent;
       return '';
     }
+    // File inputs never read the dirty-value store: their DOM value is the
+    // fakepath string Chrome synthesizes from the selected list.
+    if (tag === 'input' && (this.getAttribute('type') || '').toLowerCase() === 'file') {
+      const fs = _fileInputs[this._nid];
+      return fs && fs.length ? 'C:\\fakepath\\' + fs[0].name : '';
+    }
     if (_formValues[this._nid] !== undefined) return _formValues[this._nid];
     if (tag === 'textarea') return this.textContent;
     if (tag === 'option') {
@@ -2478,6 +2486,14 @@ class Element extends Node {
   }
   set value(v) {
     const tag = this.localName;
+    // Spec: a file input's value may only be cleared — setting a non-empty
+    // string throws InvalidStateError in Chrome. The fakepath string is a
+    // read-side synthesis, never stored.
+    if (tag === 'input' && (this.getAttribute('type') || '').toLowerCase() === 'file') {
+      if (String(v) === '') delete _fileInputs[this._nid];
+      else throw new DOMException("Failed to set the 'value' property on 'HTMLInputElement': This input element accepts a filename, which may only be programmatically set to the empty string.", "InvalidStateError");
+      return;
+    }
     if (tag === 'option') {
       this.setAttribute('value', String(v));
       return;
@@ -2513,6 +2529,32 @@ class Element extends Node {
     // stays out of outerHTML/cloneNode), and paint now reads live_value.
     // Writing textContent also poisoned form.reset(): the "default" it
     // restored had become the dirty value itself.
+  }
+  // File upload state lives in _fileInputs keyed by the stable node id — the
+  // same outlives-the-wrapper pattern as _formValues. `files` is null on
+  // non-file inputs and a FileList-like (length/item/indexed/iterator) on
+  // file inputs.
+  get files() {
+    if (this.localName !== 'input' || this._inputType() !== 'file') return null;
+    const fs = _fileInputs[this._nid] || [];
+    const list = { length: fs.length, item: (i) => (i >= 0 && i < fs.length ? fs[i] : null) };
+    for (let i = 0; i < fs.length; i++) list[i] = fs[i];
+    list[Symbol.iterator] = function* () { for (let i = 0; i < this.length; i++) yield this[i]; };
+    Object.defineProperty(list, Symbol.toStringTag, { value: 'FileList' });
+    return list;
+  }
+  set files(v) {
+    if (this.localName !== 'input' || this._inputType() !== 'file') return;
+    // Chrome-shaped tolerance: the setter only accepts sequences of File and
+    // silently ignores anything else (polyfills that reassign a DataTransfer
+    // fileList must not explode). null/undefined clears the selection.
+    if (v == null) { delete _fileInputs[this._nid]; return; }
+    if (typeof v !== 'object' || typeof v.length !== 'number') return;
+    const out = [];
+    for (let i = 0; i < v.length; i++) {
+      if (typeof File === 'function' && v[i] instanceof File) out.push(v[i]);
+    }
+    _fileInputs[this._nid] = out;
   }
   get min() { return this.getAttribute('min') || ''; }
   set min(v) { this.setAttribute('min', v); }
@@ -6829,6 +6871,19 @@ if (typeof FormData === "undefined") globalThis.FormData = class FormData {
       const t = String(el.type || "").toLowerCase();
       if (t === "submit" || t === "button" || t === "reset" || t === "image") continue;
       if ((t === "checkbox" || t === "radio") && !el.checked) continue;
+      if (t === "file") {
+        // Spec "constructing the form data set": each selected file becomes
+        // its own (name, blob) entry; an empty selection still contributes an
+        // empty octet-stream part — upload endpoints key on the part's
+        // presence, so skipping it entirely changes what the server sees.
+        const fl = el.files;
+        if (fl && fl.length) {
+          for (const f of fl) this._d.push([el.name, f]);
+        } else if (typeof File === "function") {
+          this._d.push([el.name, new File([], "", { type: "application/octet-stream" })]);
+        }
+        continue;
+      }
       if (tag === "SELECT" && el.selectedOptions) {
         let any = false;
         for (const opt of el.selectedOptions) { any = true; this._d.push([el.name, String(opt.value ?? "")]); }
@@ -7795,8 +7850,36 @@ const _mkStore = (persistent) => {
 globalThis.localStorage = _mkStore(true);
 globalThis.sessionStorage = _mkStore(false);
 
-globalThis.btoa = globalThis.btoa || ((s) => { const b = new TextEncoder().encode(s); const c="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"; let r=""; for(let i=0;i<b.length;i+=3){const a=b[i],bb=b[i+1]??0,cc=b[i+2]??0; r+=c[a>>2]+c[((a&3)<<4)|(bb>>4)]+(i+1<b.length?c[((bb&15)<<2)|(cc>>6)]:"=")+(i+2<b.length?c[cc&63]:"=");} return r; });
-globalThis.atob = globalThis.atob || ((s) => { const c="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"; let r=[]; for(let i=0;i<s.length;i+=4){const a=c.indexOf(s[i]),b=c.indexOf(s[i+1]),cc=c.indexOf(s[i+2]),d=c.indexOf(s[i+3]); r.push((a<<2)|(b>>4)); if(cc>=0)r.push(((b&15)<<4)|(cc>>2)); if(d>=0)r.push(((cc&3)<<6)|d);} return String.fromCharCode(...r); });
+// Latin1 binary strings per the HTML spec, not UTF-8: Chrome's btoa("é") is
+// "6Q==" (the single byte 0xE9), and anything above 0xFF throws
+// InvalidCharacterError — the old TextEncoder version diverged on both
+// counts (two-byte UTF-8 output, silent acceptance of astral chars), which
+// breaks signature-style round-trips against servers that expect the spec.
+globalThis.btoa = globalThis.btoa || ((s) => {
+  for (let i = 0; i < s.length; i++)
+    if (s.charCodeAt(i) > 0xFF)
+      throw new DOMException("Failed to execute 'btoa' on 'Window': The string to be encoded contains characters outside of the Latin1 range.", "InvalidCharacterError");
+  const c="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"; let r="";
+  for(let i=0;i<s.length;i+=3){const a=s.charCodeAt(i),b=s.charCodeAt(i+1)||0,cc=s.charCodeAt(i+2)||0; r+=c[a>>2]+c[((a&3)<<4)|(b>>4)]+(i+1<s.length?c[((b&15)<<2)|(cc>>6)]:"=")+(i+2<s.length?c[cc&63]:"=");} return r; });
+// Decoding must fail loud on non-alphabet input: a stray char used to decode
+// to garbage bytes through indexOf's -1 instead of throwing, so corrupt
+// payloads sailed through parsers. ASCII whitespace is ignored, '=' is
+// padding (at most two, tail only), and a lone trailing char (%4 === 1) is
+// not a decodable quantum.
+globalThis.atob = globalThis.atob || ((s) => {
+  const bad = () => new DOMException("Failed to execute 'atob' on 'Window': The string to be decoded is not correctly encoded.", "InvalidCharacterError");
+  const c="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let body = String(s).replace(/[ \t\n\f\r]/g, "");
+  if (body.endsWith("=")) body = body.slice(0, -1);
+  if (body.endsWith("=")) body = body.slice(0, -1);
+  if (body.includes("=") || body.length % 4 === 1) throw bad();
+  const v=[];
+  for (let i = 0; i < body.length; i++) {
+    const x = c.indexOf(body[i]);
+    if (x < 0) throw bad();
+    v.push(x);
+  }
+  let r=[]; for(let i=0;i<v.length;i+=4){const a=v[i],b=v[i+1],cc=v[i+2],d=v[i+3]; r.push((a<<2)|(b>>4)); if(cc!==undefined)r.push(((b&15)<<4)|(cc>>2)); if(d!==undefined)r.push(((cc&3)<<6)|d);} let out=""; for (let k=0;k<r.length;k++) out += String.fromCharCode(r[k]); return out; });
 
 // Functional History API. The earlier stub returned constant state and was a
 // no-op on push/replace, so any SPA that tried to update its URL (Next.js

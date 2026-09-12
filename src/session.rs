@@ -207,6 +207,14 @@ pub enum SessionCommand {
         full_events: bool,
         reply: oneshot::Sender<Result<Value, String>>,
     },
+    /// Programmatic file selection (Playwright setInputFiles semantics).
+    /// Selector-addressed because file inputs are routinely hidden — the
+    /// interactive index from State may not include them at all.
+    SetFiles {
+        selector: String,
+        files: Vec<Value>,
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
     Scroll {
         direction: ScrollDirection,
         amount: u32,
@@ -459,6 +467,14 @@ pub enum RecordedAction {
     Input {
         index: usize,
         text: String,
+        ok: bool,
+    },
+    SetFiles {
+        selector: String,
+        /// File names only — content base64 never enters the action log:
+        /// recordings and exported flows would balloon, and blob content has
+        /// no business sitting in a replay script.
+        names: Vec<String>,
         ok: bool,
     },
     Scroll {
@@ -1611,6 +1627,22 @@ fn session_thread(
                             let _ = reply.send(result);
                         }
 
+                        SessionCommand::SetFiles { selector, files, reply } => {
+                            let result = set_files_by_selector(&mut page, &selector, &files);
+                            recorder.push(RecordedAction::SetFiles {
+                                selector,
+                                names: files
+                                    .iter()
+                                    .filter_map(|f| f.get("name").and_then(Value::as_str).map(str::to_owned))
+                                    .collect(),
+                                ok: result
+                                    .as_ref()
+                                    .map(|v| v.get("set").and_then(Value::as_bool).unwrap_or(false))
+                                    .unwrap_or(false),
+                            });
+                            let _ = reply.send(result);
+                        }
+
                         SessionCommand::ClickXY { x, y, button, click_count, reply } => {
                             // A coordinate click can navigate exactly like an
                             // indexed one, so it spends the same page budget.
@@ -2563,6 +2595,62 @@ fn input_by_index(
     Ok(parsed)
 }
 
+/// Programmatic file selection (Playwright setInputFiles semantics): locate a
+/// file input by CSS selector, build File objects from base64 content
+/// specs, assign through `el.files`, then dispatch input+change so framework
+/// onChange handlers fire. Selector-addressed on purpose — file inputs are
+/// routinely hidden, so the interactive index the other commands use may not
+/// include them at all.
+fn set_files_by_selector(page: &mut Page, selector: &str, files: &[Value]) -> Result<Value, String> {
+    if selector.trim().is_empty() {
+        return Err("selector must not be empty".to_string());
+    }
+    // JSON-encode both interpolations so selector quotes and spec strings
+    // can't break out of the script literal.
+    let selector_json = serde_json::to_string(selector).map_err(|e| e.to_string())?;
+    let specs = serde_json::to_string(files).map_err(|e| e.to_string())?;
+    let js = format!(
+        r#"(function() {{
+    var el = document.querySelector({selector_json});
+    if (!el) return JSON.stringify({{set: false, error: "selector matched no element"}});
+    if (el.tagName !== 'INPUT' || (el.getAttribute('type') || '').toLowerCase() !== 'file')
+        return JSON.stringify({{set: false, error: "not a file input"}});
+    var specs = {specs};
+    var out = [];
+    for (var i = 0; i < specs.length; i++) {{
+        var s = specs[i] || {{}};
+        var bin;
+        try {{ bin = atob(s.content_base64 || ''); }} catch (e) {{
+            return JSON.stringify({{set: false, error: "invalid base64 for " + (s.name || ("file " + i))}});
+        }}
+        var bytes = new Uint8Array(bin.length);
+        for (var j = 0; j < bin.length; j++) bytes[j] = bin.charCodeAt(j);
+        var opts = {{ type: s.mime_type || 'application/octet-stream' }};
+        if (s.last_modified != null) opts.lastModified = Number(s.last_modified);
+        out.push(new File([bytes], String(s.name || 'blob'), opts));
+    }}
+    el.files = out;
+    el.dispatchEvent(new Event('input', {{bubbles: true}}));
+    el.dispatchEvent(new Event('change', {{bubbles: true}}));
+    return JSON.stringify({{
+        set: true,
+        selector: {selector_json},
+        count: out.length,
+        value: el.value,
+        files: out.map(function(f) {{ return {{name: f.name, size: f.size, type: f.type}}; }})
+    }});
+}})()"#,
+        selector_json = selector_json,
+        specs = specs,
+    );
+    let result = page.evaluate_with_timeout(&js, crate::page::INTERACTION_EVAL_TIMEOUT);
+    let parsed = result
+        .as_str()
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .ok_or_else(|| "files assignment did not return a JSON string".to_string())?;
+    Ok(parsed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2639,6 +2727,117 @@ mod tests {
             ticks >= 3,
             "interval must keep firing while idle, got {ticks} ticks"
         );
+    }
+
+    /// File-upload leg (the taobao product-publishing chain's missing piece):
+    /// SetFiles assigns File objects through input.files, value reads back
+    /// Chrome's fakepath string, FormData(form) carries the selection as real
+    /// File entries, and a wrong selector / non-file target reports set:false
+    /// instead of throwing.
+    #[tokio::test]
+    async fn set_files_assigns_selection_and_formdata_reads_it() {
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+
+        let armed = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: r#"document.body.innerHTML = '<form id="f"><input type="file" name="up"><input type="text" name="t"></form>'; 'ok'"#.to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(armed.as_str().unwrap_or(""), "ok");
+
+        let specs = vec![
+            serde_json::json!({"name": "a.png", "content_base64": "aGk=", "mime_type": "image/png"}),
+            serde_json::json!({"name": "b.jpg", "content_base64": "Qg=="}),
+        ];
+        let result = mgr
+            .send(&sid, |reply| SessionCommand::SetFiles {
+                selector: "input[type=file]".to_string(),
+                files: specs,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            result.get("set").and_then(Value::as_bool),
+            Some(true),
+            "assignment must succeed: {result}"
+        );
+        assert_eq!(result.get("count").and_then(Value::as_i64), Some(2));
+        assert_eq!(
+            result.get("value").and_then(Value::as_str),
+            Some("C:\\fakepath\\a.png")
+        );
+
+        // The selection is live page state: FormData(form) sees real File
+        // entries and the bytes round-trip through the File objects.
+        let check = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: r#"(function() {
+                    var el = document.querySelector('input[type=file]');
+                    var entries = [];
+                    for (var e of new FormData(document.getElementById('f')).entries())
+                        entries.push(e[0] + ':' + (typeof File === 'function' && e[1] instanceof File ? e[1].name + '/' + e[1].size : e[1]));
+                    return entries.join('|') + '#' + el.files.item(1).name + '#' + atob('aGk=');
+                })()"#
+                    .to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(check.as_str().unwrap_or(""), "up:a.png/2|up:b.jpg/1|t:#b.jpg#hi");
+
+        // Wrong selector and non-file target report set:false, never throw.
+        let miss = mgr
+            .send(&sid, |reply| SessionCommand::SetFiles {
+                selector: "input#nope".to_string(),
+                files: vec![serde_json::json!({"name": "x", "content_base64": ""})],
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(miss.get("set").and_then(Value::as_bool), Some(false));
+        assert!(
+            miss.get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("no element"),
+            "miss should name the failure: {miss}"
+        );
+
+        let not_file = mgr
+            .send(&sid, |reply| SessionCommand::SetFiles {
+                selector: "input[type=text]".to_string(),
+                files: vec![serde_json::json!({"name": "x", "content_base64": ""})],
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(not_file.get("set").and_then(Value::as_bool), Some(false));
+        assert!(
+            not_file
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("not a file input"),
+            "non-file target should be named: {not_file}"
+        );
+
+        assert!(mgr.close_and_wait(&sid).await, "session thread must ack close");
     }
 
     /// Session errors must be machine-readable: an agent has to tell "the

@@ -327,6 +327,32 @@ pub struct SessionInputParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionFileSpecParams {
+    /// File name the page sees (and what multipart uploads as filename)
+    pub name: String,
+    /// File content, standard base64 (padding allowed)
+    pub content_base64: String,
+    /// MIME type (default "application/octet-stream")
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    /// Last-modified time in ms since epoch (default: now)
+    #[serde(default)]
+    pub last_modified: Option<f64>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionSetFilesParams {
+    /// Session ID
+    pub session_id: String,
+    /// CSS selector for the file input, e.g. "input[type=file]". File inputs
+    /// are often hidden, so this is selector-addressed rather than using the
+    /// /state index.
+    pub selector: String,
+    /// Files to select
+    pub files: Vec<SessionFileSpecParams>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SessionScrollParams {
     /// Session ID
     pub session_id: String,
@@ -1449,6 +1475,47 @@ drag targets and canvas selections that only track while the pointer travels.",
             .await
         {
             Ok(filled) => stamped(filled.to_string(), &mgr, &params.session_id),
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Select files on a file input programmatically (Playwright setInputFiles \
+semantics): builds File objects from base64 content, assigns them to input.files, then dispatches \
+input+change so framework onChange handlers fire. Selector-addressed because file inputs are \
+often hidden and absent from the session_state index.",
+        annotations(title = "Session Set Files")
+    )]
+    async fn session_set_files(
+        &self,
+        Parameters(params): Parameters<SessionSetFilesParams>,
+    ) -> String {
+        if params.files.is_empty() {
+            return json!({ "error": "files must not be empty" }).to_string();
+        }
+        let specs: Vec<serde_json::Value> = params
+            .files
+            .iter()
+            .map(|f| {
+                json!({
+                    "name": f.name,
+                    "content_base64": f.content_base64,
+                    "mime_type": f.mime_type,
+                    "last_modified": f.last_modified,
+                })
+            })
+            .collect();
+        let mut mgr = session::SESSIONS.lock().await;
+        let session_id = params.session_id.clone();
+        match mgr
+            .send(&session_id, |reply| SessionCommand::SetFiles {
+                selector: params.selector.clone(),
+                files: specs,
+                reply,
+            })
+            .await
+        {
+            Ok(result) => stamped_json(result, &mgr, &session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
     }

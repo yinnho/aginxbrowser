@@ -1373,6 +1373,138 @@
         );
     }
 
+    #[test]
+    fn btoa_atob_latin1_contract() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // Latin1 per the HTML spec: btoa("é") is the single byte 0xE9 →
+        // "6Q==", not the two-byte UTF-8 sequence ("w6k="), and anything
+        // above 0xFF throws InvalidCharacterError. atob must reject
+        // non-alphabet input (it used to decode garbage through indexOf's
+        // -1) while ignoring ASCII whitespace like Chrome.
+        assert_eq!(
+            rt.evaluate("btoa('hello')").unwrap(),
+            serde_json::json!("aGVsbG8=")
+        );
+        assert_eq!(
+            rt.evaluate("btoa('\\u00e9')").unwrap(),
+            serde_json::json!("6Q==")
+        );
+        assert_eq!(
+            rt.evaluate("try { btoa('\\u4e2d') } catch (e) { e.name }").unwrap(),
+            serde_json::json!("InvalidCharacterError")
+        );
+        assert_eq!(
+            rt.evaluate("atob('6Q==')").unwrap(),
+            serde_json::json!("\u{e9}")
+        );
+        assert_eq!(
+            rt.evaluate("try { atob('aGVs!!o') } catch (e) { e.name }").unwrap(),
+            serde_json::json!("InvalidCharacterError")
+        );
+        // A lone trailing char is not a decodable quantum.
+        assert_eq!(
+            rt.evaluate("try { atob('Q') } catch (e) { e.name }").unwrap(),
+            serde_json::json!("InvalidCharacterError")
+        );
+        // ASCII whitespace is ignored; the four chars here decode "hel".
+        assert_eq!(
+            rt.evaluate("atob('aG Vs\\n')").unwrap(),
+            serde_json::json!("hel")
+        );
+        assert_eq!(
+            rt.evaluate("atob(btoa('AB'))").unwrap(),
+            serde_json::json!("AB")
+        );
+        // Large payloads must survive: the decoder used to finish with
+        // String.fromCharCode(...bytes), whose spread blew the call stack on
+        // real upload sizes (file content arrives through this path).
+        assert_eq!(
+            rt.evaluate(
+                "(function () { const s = 'A'.repeat(262144); \
+                 return atob(btoa(s)).length === s.length ? 'ok' : 'len:' + atob(btoa(s)).length; })()"
+            )
+            .unwrap(),
+            serde_json::json!("ok")
+        );
+    }
+
+    /// input.files is the file-upload leg: assignment stores File objects per
+    /// node (stable-nid store, same pattern as _formValues), value synthesizes
+    /// Chrome's fakepath string, and FormData(form) turns the selection into
+    /// real multipart File entries — an unset file input still contributes an
+    /// empty octet-stream part like the spec's "constructing the form data set".
+    #[test]
+    fn file_input_files_value_and_formdata() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate(
+                r#"(function () {
+            document.body.innerHTML =
+                '<form id="f"><input type="file" name="up" id="file1">' +
+                '<input type="text" name="t" id="txt" value="x">' +
+                '<input type="file" name="empty" id="file2"></form>';
+            const out = [];
+            const f1 = document.getElementById('file1');
+            out.push('len0:' + f1.files.length);
+            out.push('val0:' + f1.value);
+            out.push('textfiles:' + (document.getElementById('txt').files === null));
+            const fileA = new File([new Uint8Array([104, 105])], 'a.png', { type: 'image/png' });
+            const fileB = new File([new Uint8Array([66])], 'b.jpg');
+            f1.files = [fileA, fileB];
+            const fl = f1.files;
+            out.push('len:' + fl.length);
+            out.push('item:' + fl.item(0).name + ',' + fl.item(1).name + ',oob:' + fl.item(5));
+            out.push('idx:' + fl[0].name + '/' + fl[1].name);
+            const names = []; for (const f of fl) names.push(f.name);
+            out.push('iter:' + names.join('+'));
+            out.push('tag:' + Object.prototype.toString.call(fl));
+            out.push('value:' + f1.value);
+            out.push('size:' + fileA.size + ',type:' + fileA.type);
+            // Junk tolerance: non-array-like and non-File entries are dropped
+            // silently, the way Chrome tolerates polyfill reassignments. An
+            // ignored assignment keeps the previous selection intact.
+            f1.files = 'nope';
+            out.push('junkstr:' + f1.files.length);
+            f1.files = [fileA, 'string', null];
+            out.push('junkmix:' + f1.files.length + ':' + f1.files.item(0).name);
+            // Value assignment: non-empty throws InvalidStateError (Chrome
+            // message contract), empty clears the selection.
+            let threw = ''; try { f1.value = 'C:\\x'; } catch (e) { threw = e.name; }
+            out.push('setthrow:' + threw);
+            f1.value = '';
+            out.push('cleared:' + f1.files.length + ':' + f1.value);
+            // FormData(form): the selection rides as File entries, an unset
+            // file input still yields an empty octet-stream part.
+            f1.files = [fileA];
+            const entries = [];
+            for (const [k, v] of new FormData(document.getElementById('f')).entries())
+                entries.push(k + '=' + (typeof File === 'function' && v instanceof File ? 'File(' + v.name + ',' + v.type + ',' + v.size + ')' : v));
+            out.push('fd:' + entries.join('|'));
+            return out.join('\n');
+        })()"#,
+            )
+            .unwrap();
+        let text = result.as_str().unwrap();
+        let expected = [
+            "len0:0",
+            "val0:",
+            "textfiles:true",
+            "len:2",
+            "item:a.png,b.jpg,oob:null",
+            "idx:a.png/b.jpg",
+            "iter:a.png+b.jpg",
+            "tag:[object FileList]",
+            "value:C:\\fakepath\\a.png",
+            "size:2,type:image/png",
+            "junkstr:2",
+            "junkmix:1:a.png",
+            "setthrow:InvalidStateError",
+            "cleared:0:",
+            "fd:up=File(a.png,image/png,2)|t=x|empty=File(,application/octet-stream,0)",
+        ].join("\n");
+        assert_eq!(text, expected);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn test_subtle_digest_variants_and_rejection() {
         let mut rt = setup_runtime("<html><body></body></html>");
