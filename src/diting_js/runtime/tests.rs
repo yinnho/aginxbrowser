@@ -2327,6 +2327,50 @@
     }
 
     #[test]
+    fn test_selection_mirror_records_js_writes() {
+        // The typing-cursor batch's JS halves, read from the Rust tree: focus,
+        // setSelectionRange, value writes, selectionStart writes, and blur all
+        // keep the (node, start, end) selection mirror true to Chrome's
+        // semantics — focus with no record parks the caret at the value end,
+        // a value write resets it to the new end, blur keeps the record while
+        // the focus moves on.
+        let mut rt = setup_runtime(r#"<input id="q" value="abcd">"#);
+        let sel_of = |rt: &JsRuntime| {
+            rt.with_dom(|dom| {
+                let q = dom.query_selector_all("#q").unwrap()[0];
+                (
+                    dom.focused_node() == Some(q),
+                    dom.selection().filter(|(nid, _, _)| *nid == q),
+                )
+            })
+            .expect("dom handle")
+        };
+
+        rt.evaluate("document.getElementById('q').focus()").unwrap();
+        let (focused, sel) = sel_of(&rt);
+        assert!(focused, "focus() records focused_node");
+        let (_q, x, y) = sel.expect("focus() writes a selection record");
+        assert_eq!((x, y), (4, 4), "focus() with no record parks at the value end");
+
+        rt.evaluate("document.getElementById('q').setSelectionRange(1, 3)").unwrap();
+        let (_, sel) = sel_of(&rt);
+        assert_eq!(sel.map(|(_, s, e)| (s, e)), Some((1, 3)), "setSelectionRange mirrors");
+
+        rt.evaluate("document.getElementById('q').value = 'ab'").unwrap();
+        let (_, sel) = sel_of(&rt);
+        assert_eq!(sel.map(|(_, s, e)| (s, e)), Some((2, 2)), "value write resets the mirror to the new end");
+
+        rt.evaluate("document.getElementById('q').selectionStart = 1").unwrap();
+        let (_, sel) = sel_of(&rt);
+        assert_eq!(sel.map(|(_, s, e)| (s, e)), Some((1, 2)), "selectionStart write mirrors");
+
+        rt.evaluate("document.getElementById('q').blur()").unwrap();
+        let (focused, sel) = sel_of(&rt);
+        assert!(!focused, "blur clears focused_node");
+        assert_eq!(sel.map(|(_, s, e)| (s, e)), Some((1, 2)), "blur keeps the selection record for the refocus");
+    }
+
+    #[test]
     fn test_option_legacy_factory() {
         // glama.ai admin form chunk populates selects via `new Option(label,
         // value)`; without the global its hydration died on "Option is not

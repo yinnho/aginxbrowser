@@ -3430,6 +3430,15 @@ pub enum PaintItem {
         /// and insets/centers the text run per kind. Mutually exclusive with
         /// `widget` in practice: checkables resolve None here.
         form: Option<FormRun>,
+        /// Caret (typing-cursor batch): (char offset, ink) in the focused
+        /// text-entry control, resolved at collect time — the offset is the
+        /// recorded selection's anchor (min(start, end)) clamped to the
+        /// value's char count, the ink the control's color context (never
+        /// the placeholder gray). Some only while this node holds focus AND
+        /// a selection was recorded for it; paint keeps no tree access, so
+        /// the whole condition is evaluated here. Deterministic always-on
+        /// (no blink) — a screenshot must show it.
+        caret: Option<(usize, [u8; 4])>,
     },
     /// A compiled svg subtree painted into its replaced box (svg v1): the
     /// op list is in viewBox user units with group transforms pre-flattened
@@ -5120,7 +5129,69 @@ pub fn layout_collect(
                     } else {
                         None
                     };
-                    items.push(PaintItem::Replaced { rect: bg_rect, alt, fill_placeholder, alpha, widget, form });
+                    // Caret: the focused text-entry control's typing
+                    // cursor, at the recorded selection's anchor. Resolved
+                    // here — collect time — because paint keeps no tree
+                    // access; same posture as checkedness and the run kind
+                    // above. min(start,end): a non-collapsed range paints
+                    // the anchor side (Chrome paints the focus node; the
+                    // direction mirror is not recorded, so the anchor is
+                    // the deterministic stand-in).
+                    let caret = if matches!(form, Some(FormRun::Input) | Some(FormRun::Textarea))
+                        && tree.focused_node() == Some(*dom_id)
+                        && tree.selection().is_some_and(|(nid, _, _)| nid == *dom_id)
+                    {
+                        tree.selection().map(|(_, start, end)| {
+                            let live = tree
+                                .with_node(*dom_id, |n| n.live_value().map(|v| v.to_string()))
+                                .flatten();
+                            // The value the JS getter would report: dirty
+                            // mirror first, then the parsed default
+                            // (attribute for input, child text for
+                            // textarea).
+                            let value = if matches!(form, Some(FormRun::Textarea)) {
+                                live.unwrap_or_else(|| tree.text_content(*dom_id))
+                            } else {
+                                live.or_else(|| {
+                                    tree.with_node(*dom_id, |n| {
+                                        n.get_attribute("value").map(|v| v.to_string())
+                                    })
+                                    .flatten()
+                                })
+                                .unwrap_or_default()
+                            };
+                            let ink = color_context(tree, *dom_id, styles);
+                            (start.min(end).min(value.chars().count()), ink)
+                        })
+                    } else {
+                        None
+                    };
+                    // An empty value with no placeholder leaves the run
+                    // None — but a caret still needs the control's font
+                    // metrics to stand in a line box, so synthesize an
+                    // empty run for it (the rasterizer blits nothing for
+                    // empty text; only the caret consumes the metrics).
+                    let alt = if alt.is_none() && caret.is_some() {
+                        let (font_size, bold, lh) = font_context(tree, *dom_id, styles);
+                        Some((
+                            String::new(),
+                            font_size,
+                            bold,
+                            lh,
+                            caret.map(|(_, ink)| ink).unwrap_or_default(),
+                        ))
+                    } else {
+                        alt
+                    };
+                    items.push(PaintItem::Replaced {
+                        rect: bg_rect,
+                        alt,
+                        fill_placeholder,
+                        alpha,
+                        widget,
+                        form,
+                        caret,
+                    });
                 }
             }
             // A clipping element constrains its DESCENDANTS' paint (its own

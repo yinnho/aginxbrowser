@@ -2327,6 +2327,14 @@ class Element extends Node {
     globalThis.__diting_focused = this;
     globalThis.__diting_click_target = this;
     _domRaw("set_focused", String(this._nid), "1");
+    // Chrome: script focus() puts the caret at the end of the value unless
+    // the control already has a recorded selection (refocus restores it).
+    if (_ns_isTextEntry(this) && _ns_selectionStart.get(this) == null) {
+      const len = String(this.value ?? '').length;
+      _ns_selectionStart.set(this, len);
+      _ns_selectionEnd.set(this, len);
+      _ns_mirrorSelection(this);
+    }
     this.dispatchEvent(new FocusEvent("focus"));
     this.dispatchEvent(new FocusEvent("focusin", {bubbles: true}));
   }
@@ -2561,6 +2569,16 @@ class Element extends Node {
     // value ATTRIBUTE on purpose — Chrome's el.value=x never touches
     // getAttribute('value')/outerHTML, and this preserves that.
     _domRaw("set_live_value", String(this._nid), String(v));
+    // Chrome: assigning value moves the selection to the end (any prior
+    // range is dropped). insertText/Backspace write through here first and
+    // then setSelectionRange their own caret, so the reset ordering works
+    // out naturally.
+    if (_ns_isTextEntry(this)) {
+      const len = String(v).length;
+      _ns_selectionStart.set(this, len);
+      _ns_selectionEnd.set(this, len);
+      _ns_mirrorSelection(this);
+    }
     // NOTE: no textarea textContent write here. Chrome's el.value=x never
     // touches the child text (defaultValue = child text; the dirty value
     // stays out of outerHTML/cloneNode), and paint now reads live_value.
@@ -12056,6 +12074,28 @@ const _ns_selectionStart = new WeakMap();
 const _ns_selectionEnd = new WeakMap();
 const _ns_selectionDir = new WeakMap();
 
+// Selection mirror (typing-cursor batch): the WeakMaps stay the JS-side
+// truth for reads; every write also lands in the Rust tree so paint can
+// resolve the caret at collect time. Offsets are the JS numbers verbatim
+// (UTF-16 units — the Rust side clamps to the value's char count).
+const _ns_mirrorSelection = (el) => {
+  try {
+    if (!el || el._nid === undefined) return;
+    const s = _ns_selectionStart.get(el);
+    const e = _ns_selectionEnd.get(el);
+    _domRaw("set_selection", el._nid, (s ?? 0) + "," + (e ?? 0));
+  } catch (_e) {}
+};
+// A control whose value is text the user can edit — the same type list the
+// CDP insertText guard uses (input.rs).
+const _ns_isTextEntry = (el) => {
+  if (!el) return false;
+  if (el.localName === 'textarea') return true;
+  if (el.localName !== 'input') return false;
+  const ty = String(el.getAttribute('type') || 'text').toLowerCase();
+  return ['button','submit','reset','image','checkbox','radio','file','hidden','range','color'].indexOf(ty) < 0;
+};
+
 // Element.prototype.selectionStart - get/set selection start position
 if (!Element.prototype.selectionStart) {
   Object.defineProperty(Element.prototype, 'selectionStart', {
@@ -12064,6 +12104,7 @@ if (!Element.prototype.selectionStart) {
     },
     set: function(v) {
       _ns_selectionStart.set(this, v == null ? null : Math.max(0, parseInt(v, 10) || 0));
+      _ns_mirrorSelection(this);
     },
     enumerable: true,
     configurable: true
@@ -12078,6 +12119,7 @@ if (!Element.prototype.selectionEnd) {
     },
     set: function(v) {
       _ns_selectionEnd.set(this, v == null ? null : Math.max(0, parseInt(v, 10) || 0));
+      _ns_mirrorSelection(this);
     },
     enumerable: true,
     configurable: true
@@ -12107,6 +12149,7 @@ if (!Element.prototype.setSelectionRange) {
     _ns_selectionStart.set(this, start);
     _ns_selectionEnd.set(this, end);
     _ns_selectionDir.set(this, direction);
+    _ns_mirrorSelection(this);
   };
   _markNative(Element.prototype.setSelectionRange);
 }
@@ -12137,6 +12180,7 @@ if (!Element.prototype.setRangeText) {
       _ns_selectionEnd.set(this, start + replLen);
       _ns_selectionDir.set(this, 'none');
     }
+    _ns_mirrorSelection(this);
   };
   _markNative(Element.prototype.setRangeText);
 }
@@ -12150,6 +12194,7 @@ if (!Element.prototype.select) {
     _ns_selectionStart.set(this, 0);
     _ns_selectionEnd.set(this, len);
     _ns_selectionDir.set(this, 'none');
+    _ns_mirrorSelection(this);
   };
   _markNative(Element.prototype.select);
 }

@@ -280,6 +280,9 @@ pub(crate) struct DomTreeInner {
     pub(crate) quirks: bool,
     /// The document's focused element — see [`DomTree::focused_node`].
     focused_node: Option<NodeId>,
+    /// Text selection in a text-entry control as (node, start, end) — see
+    /// [`DomTree::selection`].
+    selection: Option<(NodeId, usize, usize)>,
 }
 
 impl DomTree {
@@ -302,6 +305,7 @@ impl DomTree {
                 shadow_roots_by_host: HashMap::new(),
                 quirks: false,
                 focused_node: None,
+                selection: None,
             }),
         }
     }
@@ -316,6 +320,22 @@ impl DomTree {
 
     pub fn set_focused_node(&self, id: Option<NodeId>) {
         self.inner.borrow_mut().focused_node = id;
+    }
+
+    /// The recorded text-entry selection as (node, start, end), if a
+    /// script wrote one (setSelectionRange, selectionStart/End setters,
+    /// value writes, focus). Offsets are the JS numbers passed through
+    /// as-is — UTF-16 units; paint clamps to the value's char count, so
+    /// astral characters diverge (accepted). Tree-level like focus: the
+    /// record dies with the document on navigation. The caret paints only
+    /// while this node ALSO holds focus — blur keeps the record, matching
+    /// Chrome's hidden caret on an unfocused control.
+    pub fn selection(&self) -> Option<(NodeId, usize, usize)> {
+        self.inner.borrow().selection
+    }
+
+    pub fn set_selection(&self, sel: Option<(NodeId, usize, usize)>) {
+        self.inner.borrow_mut().selection = sel;
     }
 
     pub fn document(&self) -> NodeId {

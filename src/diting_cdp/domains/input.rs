@@ -55,6 +55,30 @@ globalThis.__diting_setInputFiles = function(el, specs) {
   try { el.dispatchEvent(new Event("input", { bubbles: true })); } catch (_e) {}
   try { el.dispatchEvent(new Event("change", { bubbles: true })); } catch (_e) {}
 };
+// Chrome's mousedown default action for text-entry controls: focus and
+// place the caret. A real click hit-tests the text and puts the caret at
+// the click point; the engine has no glyph hit-testing, so the caret
+// lands at the end of the value — exactly where a click past the last
+// glyph would put it, and where typing then appends. Scoped to
+// text-entry controls on purpose: the engine historically focused
+// nothing on mousedown, and widening this to buttons/links would light
+// :focus styles on every navigation click with no focus-ring heuristic
+// to gate them.
+globalThis.__diting_focusTextEntry = globalThis.__diting_focusTextEntry || function(t) {
+  try {
+    if (!t || !t.localName) return;
+    if (t.localName !== "input" && t.localName !== "textarea") return;
+    if (t.localName === "input") {
+      const ty = String(t.getAttribute("type") || "text").toLowerCase();
+      if (["button","submit","reset","image","checkbox","radio","file","hidden","range","color"].indexOf(ty) >= 0) return;
+    }
+    if (typeof t.focus === "function") t.focus();
+    const v = t.value;
+    if (typeof v === "string" && typeof t.setSelectionRange === "function") {
+      t.setSelectionRange(v.length, v.length);
+    }
+  } catch (_e) {}
+};
 })();
 "#;
 
@@ -166,7 +190,7 @@ pub(crate) fn mouse_down_js(
             var pd = globalThis.__diting_markTrusted(new PointerEvent('pointerdown', {{bubbles:true,cancelable:true,composed:true,view:globalThis,clientX:{x},clientY:{y},button:{button_code},buttons:{buttons},pointerId:1,pointerType:'mouse',isPrimary:true,pressure:{buttons}!==0?0.5:0,width:1,height:1}}));\
             if (target.dispatchEvent(pd)) {{\
                 var evt = globalThis.__diting_markTrusted(new MouseEvent('mousedown', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:{button_code},buttons:{buttons},detail:{click_count},altKey:{alt_key},ctrlKey:{ctrl_key},metaKey:{meta_key},shiftKey:{shift_key}}}));\
-                target.dispatchEvent(evt);\
+                if (target.dispatchEvent(evt)) globalThis.__diting_focusTextEntry(target);\
             }}\
         }})()",
         x = x, y = y, button_code = button_code, buttons = buttons,

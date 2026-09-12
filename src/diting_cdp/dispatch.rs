@@ -1464,6 +1464,77 @@ mod tests {
         );
     }
 
+    // Chrome's mousedown default action focuses text-entry controls and parks
+    // the caret at the value end (the typing-cursor batch) — the click→type→
+    // screenshot agent flow depends on it, and Input.insertText reads
+    // document.activeElement so it needs the focus to land too.
+    #[tokio::test(flavor = "current_thread")]
+    async fn mousedown_focuses_text_entry_input() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-caret".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({
+                "url": "data:text/html,<input id=\"q\" value=\"abcd\">"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        // Layout-less data: page — pre-point the click target the same way
+        // the click tests do.
+        let set_target = CdpRequest {
+            id: 2,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "globalThis.__diting_click_target = document.getElementById('q')"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&set_target, &mut ctx).await.error.is_none());
+
+        for (i, ty) in ["mousePressed", "mouseReleased"].iter().enumerate() {
+            let req = CdpRequest {
+                id: 3 + i as u64,
+                method: "Input.dispatchMouseEvent".to_string(),
+                params: json!({
+                    "type": ty,
+                    "x": -1,
+                    "y": -1,
+                    "button": "left",
+                    "clickCount": 1,
+                }),
+                session_id: Some(session_id.clone()),
+            };
+            assert!(
+                dispatch(&req, &mut ctx).await.error.is_none(),
+                "dispatchMouseEvent {ty} failed"
+            );
+        }
+
+        let probe = CdpRequest {
+            id: 5,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "[document.activeElement && document.activeElement.id, document.activeElement && document.activeElement.selectionStart, document.activeElement && document.activeElement.selectionEnd]",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&probe, &mut ctx).await;
+        assert!(resp.error.is_none(), "probe evaluate failed: {:?}", resp.error);
+        let result = resp.result.expect("result");
+        assert_eq!(
+            result["result"]["value"],
+            json!(["q", 4, 4]),
+            "mousedown focuses the text entry and parks the caret at the value end"
+        );
+    }
+
     // A CDP mouse click on a <label for=...> must activate its labeled
     // control (checkbox flips, input+change fire) — the same activation the
     // HTMLElement.click() path implements. Without forwarding, Puppeteer's

@@ -582,6 +582,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             | "set_live_value"
             | "set_live_checked"
             | "set_focused"
+            | "set_selection"
             | "document_write_reset"
     ) {
         let gs = state.borrow::<SharedState>().clone();
@@ -916,6 +917,27 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             } else if dom.focused_node() == Some(node_id) {
                 dom.set_focused_node(None);
             }
+            "true".into()
+        }
+        // Selection mirror (caret batch): the bootstrap's selection APIs
+        // keep (start, end) in WeakMaps for JS reads; this op mirrors the
+        // same record into the tree so paint can resolve the caret at
+        // collect time. arg2 is "start,end" — the JS numbers verbatim;
+        // paint clamps to the value's char count (UTF-16 vs chars diverge
+        // on astral text, accepted).
+        "set_selection" => {
+            let node_id = match parse_nid(&arg1) {
+                Some(id) => id,
+                None => return "false".into(),
+            };
+            let Some((start, end)) = arg2.split_once(',') else {
+                return "false".into();
+            };
+            let (Ok(start), Ok(end)) = (start.trim().parse::<usize>(), end.trim().parse::<usize>())
+            else {
+                return "false".into();
+            };
+            dom.set_selection(Some((node_id, start, end)));
             "true".into()
         }
         "inner_html" => {

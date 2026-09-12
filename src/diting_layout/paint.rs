@@ -12,7 +12,7 @@
 //! per-side border colors/styles, network-loaded images (data: PNG only),
 //! gradients, z-index/stacking contexts.
 
-use super::text::TextRaster;
+use super::text::{greedy_wrap, tokens_of, TextRaster};
 use super::{FontBook, PaintItem, TextGradient};
 
 /// A straight-alpha RGBA8 image, row-major — our paint target.
@@ -1186,6 +1186,7 @@ fn paint_form_control(
     fill: bool,
     fonts: &FontBook,
     alpha: f32,
+    caret: Option<(usize, [u8; 4])>,
 ) {
     if w <= 0 || h <= 0 {
         return;
@@ -1205,12 +1206,14 @@ fn paint_form_control(
     if form == super::FormRun::Select {
         paint_select_arrow(out, x, y, w, h, alpha);
     }
-    let Some((text, font_size, bold, line_height, color)) = run else {
-        return;
+    // Metrics come from the run; the fallback pair only carries a caret
+    // whose collect site failed to synthesize a run (the collect path
+    // guarantees one whenever a caret is present, so the empty text below
+    // keeps the fallback from ever painting).
+    let (text, font_size, bold, line_height, color) = match run {
+        Some((t, fs, b, lh, c)) => (t.as_str(), *fs, *b, *lh, *c),
+        None => ("", 16.0, false, 19.0, [0, 0, 0, 255]),
     };
-    if text.trim().is_empty() {
-        return;
-    }
     // Ink stays inside the field: wrap at the box minus the padding, and
     // the select additionally reserves its arrow zone.
     let wrap_at = match form {
@@ -1218,14 +1221,6 @@ fn paint_form_control(
         super::FormRun::Button => w,
         _ => (w - 4).max(0),
     };
-    let r = fonts.rasterize_wrapped(
-        text,
-        *font_size,
-        *bold,
-        alpha_color(*color, alpha),
-        wrap_at.max(1) as f32,
-        *line_height,
-    );
     // The line-box top the tile hangs from: centered for the single-line
     // controls ((h − lh)/2, symmetric overflow when the box runs shorter
     // than the line), 2px below the top edge for textarea. Button labels
@@ -1233,15 +1228,89 @@ fn paint_form_control(
     // uses — close enough to the ink the rasterizer will lay down.
     let (tx, ty) = match form {
         super::FormRun::Button => {
-            let est = est_width(text, *font_size).min(w as f32);
+            let est = est_width(text, font_size).min(w as f32);
             (x as f32 + ((w as f32 - est) / 2.0).max(2.0), y as f32 + (h as f32 - line_height) / 2.0)
         }
         super::FormRun::Textarea => (x as f32 + 2.0, y as f32 + 2.0),
         _ => (x as f32 + 2.0, y as f32 + (h as f32 - line_height) / 2.0),
     };
-    out.push_clip(x + 1, y + 1, x + w - 1, y + h - 1);
-    out.blit_text(&r, tx.round() as i64, (ty + r.top).round() as i64);
-    out.pop_clip();
+    if !text.trim().is_empty() {
+        let r = fonts.rasterize_wrapped(
+            text,
+            font_size,
+            bold,
+            alpha_color(color, alpha),
+            wrap_at.max(1) as f32,
+            line_height,
+        );
+        out.push_clip(x + 1, y + 1, x + w - 1, y + h - 1);
+        out.blit_text(&r, tx.round() as i64, (ty + r.top).round() as i64);
+        out.pop_clip();
+    }
+    // Caret (typing-cursor batch): a 1px bar the line height tall, riding
+    // the same token/wrap walk the rasterizer lays the run down with, so
+    // it stands exactly between the glyphs the offset names — including
+    // on an empty value, where the run above paints nothing. Always on
+    // (no blink): a screenshot is one instant, and Chrome's 50%-duty
+    // blink would make the caret randomly vanish from captures. Chrome
+    // colors it caret-color (default: the used color); collect passes
+    // the ink so the placeholder gray can never leak into the bar.
+    if let Some((off, ink)) = caret {
+        if matches!(form, super::FormRun::Input | super::FormRun::Textarea) {
+            let tokens = tokens_of(text, font_size, bold, fonts);
+            let lines = greedy_wrap(&tokens, Some(wrap_at.max(1) as f32));
+            // tokens_of tokenizes the TRIMMED text: map the offset into
+            // trimmed coordinates. A caret inside the leading whitespace
+            // pins to the line start — accepted v1 imprecision.
+            let leading = text.chars().count() - text.trim_start().chars().count();
+            let off = off.saturating_sub(leading);
+            // Which wrapped line holds the offset, and the ink width
+            // before it on that line: consume whole tokens while their
+            // cumulative chars stay at/below the offset; a mid-token
+            // landing takes the proportional slice of that token's
+            // advance. Walking painted tokens only (greedy_wrap drops
+            // whitespace before breaks) keeps the caret glued to the
+            // glyphs actually on screen.
+            let mut line = 0usize;
+            let mut x_before = 0.0f32;
+            let mut cum = 0usize;
+            'lines: for (li, l) in lines.iter().enumerate() {
+                line = li;
+                x_before = 0.0;
+                for &ti in &l.token_idx {
+                    let tok = &tokens[ti];
+                    let n = tok.text.chars().count();
+                    if cum + n <= off {
+                        x_before += tok.width;
+                        cum += n;
+                    } else {
+                        if off > cum {
+                            x_before += tok.width * (off - cum) as f32 / n as f32;
+                        }
+                        break 'lines;
+                    }
+                }
+            }
+            // Input never wraps in Chrome (the text scrolls); the engine
+            // has no text scroll, so a caret that wrapped past the first
+            // line clamps to the right padding — the deterministic
+            // stand-in. Every bar clamps into the field regardless.
+            let bar_x = if form == super::FormRun::Input && line > 0 {
+                x as f32 + w as f32 - 3.0
+            } else {
+                tx + x_before
+            }
+            .round();
+            let lo = x as f32 + 2.0;
+            let hi = (x as f32 + w as f32 - 3.0).max(lo);
+            let bar_x = bar_x.max(lo).min(hi) as i64;
+            let bar_y = (ty + line as f32 * line_height).round() as i64;
+            let bar_h = line_height.ceil().max(1.0) as i64;
+            out.push_clip(x + 1, y + 1, x + w - 1, y + h - 1);
+            out.fill_rect(bar_x, bar_y, 1, bar_h, alpha_color(ink, alpha));
+            out.pop_clip();
+        }
+    }
 }
 
 /// Replay the paint items onto `out`. `Bg` rects come from taffy's rounded
@@ -1504,7 +1573,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     out.pop_clip();
                 }
             }
-            PaintItem::Replaced { rect, alt, fill_placeholder, widget, form, alpha } => {
+            PaintItem::Replaced { rect, alt, fill_placeholder, widget, form, alpha, caret } => {
                 if out.xf().is_some() {
                     // Rasterize the placeholder + alt into a transparent
                     // LOCAL scratch at raw metrics (the bracket maps the
@@ -1532,7 +1601,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     } else if let Some(form) = form {
                         paint_form_control(
                             &mut scratch, 0, 0, w as i64, h as i64, alt.as_ref(), *form,
-                            *fill_placeholder, fonts, *alpha,
+                            *fill_placeholder, fonts, *alpha, *caret,
                         );
                     } else {
                         if *fill_placeholder {
@@ -1573,6 +1642,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     } else if let Some(form) = form {
                         paint_form_control(
                             out, x, y, w, h, alt.as_ref(), *form, *fill_placeholder, fonts, *alpha,
+                            *caret,
                         );
                     } else {
                         if *fill_placeholder && w > 0 && h > 0 {
@@ -1918,6 +1988,7 @@ mod tests {
                 alpha: 1.0,
                 widget: None,
                 form: None,
+                caret: None,
             },
             PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0, gradient: None },
         ];
@@ -1944,6 +2015,7 @@ mod tests {
             widget,
             alpha: 1.0,
             form: None,
+            caret: None,
         };
         // Interior pixel classes: field is white, border gray, ink near-black.
         let field = [255, 255, 255, 255];
@@ -2008,6 +2080,7 @@ mod tests {
             widget: None,
             alpha: 1.0,
             form,
+            caret: None,
         };
         // Ink bbox over the whole canvas, three channels dark (the green bg
         // and the gray ring/arrow both sit at or above 80).
@@ -2069,6 +2142,7 @@ mod tests {
             widget: None,
             alpha: 1.0,
             form: Some(super::super::FormRun::Textarea),
+            caret: None,
         };
         execute(&[tall], &fonts, &mut c);
         let (_x0, y0, _x1, y1) = ink_bbox(&c).expect("textarea run ink");
@@ -2097,6 +2171,97 @@ mod tests {
         execute(&items, &fonts, &mut c);
         assert_eq!(px(&c, 132 - 115, 34 - 15), [118, 118, 118, 255], "arrow rides the bracket");
         assert_eq!(px(&c, 132 - 10, 34 - 10), [255, 255, 255, 255], "field rides the bracket");
+    }
+
+    /// Caret paint (typing-cursor batch): a 1px bar the line height tall at
+    /// the offset's token-walk position — offset 0 stands before the first
+    /// glyph, an offset past the text clears the glyphs, an empty field with
+    /// a caret still paints the bar (collect synthesizes the run), no caret
+    /// means no bar, and a textarea offset that wrapped lands on the wrapped
+    /// line. The run is painted white so its glyphs vanish into the white
+    /// field — every dark pixel below is the bar itself.
+    #[test]
+    fn caret_paints_bar_at_offset() {
+        let fonts = crate::diting_fonts::font_book();
+        let white_run =
+            |text: &str| Some((text.to_string(), 16.0, false, 19.0, [255u8, 255, 255, 255]));
+        let input = |alt, caret| PaintItem::Replaced {
+            rect: super::super::Rect { x: 4.0, y: 4.0, width: 120.0, height: 24.0 },
+            alt,
+            fill_placeholder: true,
+            widget: None,
+            alpha: 1.0,
+            form: Some(super::super::FormRun::Input),
+            caret,
+        };
+        let ink = [0u8, 0, 0, 255];
+        // The single dark column and its y extent: the white run keeps the
+        // glyphs invisible, the gray ring sits at 118, and the green canvas
+        // bg fails the all-channels probe — so only the bar qualifies.
+        let bar = |c: &Canvas| -> Option<(usize, usize, usize)> {
+            let mut found = None;
+            for x in 0..c.width {
+                let ys: Vec<usize> = (0..c.height)
+                    .filter(|&y| {
+                        let [r, g, b, _] = px(c, x, y);
+                        r < 80 && g < 80 && b < 80
+                    })
+                    .collect();
+                if !ys.is_empty() {
+                    assert!(found.is_none(), "caret bar must be one 1px column (second at x={x})");
+                    found = Some((x, *ys.first().unwrap(), *ys.last().unwrap()));
+                }
+            }
+            found
+        };
+
+        // Offset 0: the bar stands at the run start, one line tall and
+        // vertically centered with the box.
+        let mut c = Canvas::new_filled(132, 34, [0, 255, 0, 255]);
+        execute(&[input(white_run("abcd"), Some((0, ink)))], &fonts, &mut c);
+        let (bx, y0, y1) = bar(&c).expect("caret bar at offset 0");
+        assert_eq!(bx, 6, "offset 0 stands at the 2px-padded run start");
+        assert_eq!(y1 - y0 + 1, 19, "bar is the line height tall");
+        let cy = (y0 + y1) as f32 / 2.0;
+        assert!((13.0..=19.0).contains(&cy), "bar centered on the box center 16 (cy={cy})");
+
+        // Offset 4 (end of "abcd"): single column well past the glyphs.
+        let mut c = Canvas::new_filled(132, 34, [0, 255, 0, 255]);
+        execute(&[input(white_run("abcd"), Some((4, ink)))], &fonts, &mut c);
+        let (bx, _y0, _y1) = bar(&c).expect("caret bar at offset 4");
+        assert!(bx > 6 + 16, "offset 4 clears the glyphs (bx={bx})");
+
+        // Empty value with a caret: the bar still paints (collect handed the
+        // synthesized run) at the field start.
+        let mut c = Canvas::new_filled(132, 34, [0, 255, 0, 255]);
+        execute(&[input(None, Some((0, ink)))], &fonts, &mut c);
+        let (bx, y0, y1) = bar(&c).expect("caret bar on the empty field");
+        assert_eq!(bx, 6, "empty field caret at the run start");
+        assert_eq!(y1 - y0 + 1, 19, "empty field bar keeps the line height");
+
+        // No caret, white run: nothing dark anywhere.
+        let mut c = Canvas::new_filled(132, 34, [0, 255, 0, 255]);
+        execute(&[input(white_run("abcd"), None)], &fonts, &mut c);
+        assert!(bar(&c).is_none(), "no caret, no bar");
+
+        // Textarea whose value wraps: offset 5 (end of "bb") lands on the
+        // second line — the bar's top sits a full line height below the
+        // first line's.
+        let tall = PaintItem::Replaced {
+            rect: super::super::Rect { x: 4.0, y: 4.0, width: 40.0, height: 52.0 },
+            alt: white_run("aa bb"),
+            fill_placeholder: true,
+            widget: None,
+            alpha: 1.0,
+            form: Some(super::super::FormRun::Textarea),
+            caret: Some((5, ink)),
+        };
+        let mut c = Canvas::new_filled(60, 62, [0, 255, 0, 255]);
+        execute(&[tall], &fonts, &mut c);
+        let (bx, y0, y1) = bar(&c).expect("wrapped caret bar");
+        assert_eq!(y1 - y0 + 1, 19, "wrapped bar keeps the line height");
+        assert!(y0 >= 24, "offset 5 lands on the wrapped second line (y0={y0})");
+        assert!(bx > 6, "the bar sits after the wrapped token (bx={bx})");
     }
 
     /// A band at dy=100 reproduces exactly rows [100, 180) of the full
