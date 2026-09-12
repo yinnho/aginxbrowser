@@ -114,7 +114,7 @@ pub fn motion_css() -> String {
 .agx-motion li{animation:agx-rise .45s cubic-bezier(.33,1,.68,1) both}\
 .agx-motion figure svg [data-node-id],.agx-motion figure svg [data-participant-id]{transform-box:fill-box;transform-origin:center}\
 .agx-caps{position:relative;min-height:2.5em;margin:.55rem 0 0}\
-.agx-cap{position:absolute;left:0;right:0;top:0;text-align:center;font-size:15px;line-height:1.5;opacity:0;animation-name:agx-cap;animation-fill-mode:both;animation-timing-function:ease-out}\
+.agx-cap{position:absolute;left:0;right:0;top:0;text-align:center;font-size:24px;font-weight:600;line-height:1.5;opacity:0;animation-name:agx-cap;animation-fill-mode:both;animation-timing-function:ease-out}\
 @media(prefers-reduced-motion:reduce){.agx-motion>*,.agx-ch,.agx-motion li,.agx-motion figure [data-node-id],.agx-motion figure [data-participant-id],.agx-motion figure [data-message-index],.agx-motion figure path[data-from],.agx-motion figure path[data-from]+path,.agx-motion figure g[data-from]{animation:none!important}.agx-motion .agx-cap{animation:none!important;opacity:1;position:static;display:block}}",
     );
     // Body-child ladder: `> *` (0-1-0) sets the animation, the nth-child
