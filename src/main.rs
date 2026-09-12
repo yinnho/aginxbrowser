@@ -514,6 +514,11 @@ pub struct VideoRequest {
     /// ISO language tag for the subtitle track, e.g. "eng" / "zh".
     #[serde(default)]
     pub subtitles_language: Option<String>,
+    /// Burn the cues into the frame pixels too (hardsub) — on by default
+    /// when `subtitles_srt` is present; QuickTime, WeChat and most social
+    /// embeds ignore the soft track. `false` keeps the soft track only.
+    #[serde(default)]
+    pub burn_subtitles: Option<bool>,
 }
 
 /// /video response: MP4 encoded as base64 (`base64 -d > out.mp4` or
@@ -538,6 +543,8 @@ pub struct VideoResponse {
     pub has_audio: bool,
     /// Whether a soft subtitle track was muxed in.
     pub has_subtitles: bool,
+    /// Whether the cues were also burned into the frame pixels.
+    pub burned_subtitles: bool,
     /// Always "mp4" for now.
     pub format: String,
 }

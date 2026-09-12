@@ -627,6 +627,12 @@ pub struct RenderVideoParams {
     /// ISO language tag for the subtitle track, e.g. "eng" / "zh".
     #[serde(default)]
     pub subtitles_language: Option<String>,
+    /// Burn the cues into the frame pixels too (hardsub) — on by default
+    /// when `subtitles_srt` is present; QuickTime, WeChat and most social
+    /// embeds ignore the soft mov_text track. `false` keeps the soft track
+    /// only.
+    #[serde(default)]
+    pub burn_subtitles: Option<bool>,
 }
 
 fn default_pdf_width() -> u32 {
@@ -815,7 +821,9 @@ gsap.timeline registered there works as-is). Each frame seeks every timeline to 
 t=i/fps and paints the viewport, so the output is deterministic — no wall clock \
 in the pixel values. Audio: `narration[]` places TTS/voice clips at start times \
 (mixed into one AAC track), `audio` adds looped background music, and \
-`subtitles_srt` muxes an SRT as a soft mov_text track. Requires ffmpeg on the \
+`subtitles_srt` muxes an SRT as a soft mov_text track and (by default, \
+`burn_subtitles: false` to opt out) burns the same cues into the frame pixels — \
+QuickTime, WeChat and most social embeds ignore the soft track. Requires ffmpeg on the \
 server. Returns base64 MP4 \
 (H.264, yuv420p) plus frame count and durations.",
         annotations(title = "Render Timeline Video")
@@ -854,6 +862,7 @@ server. Returns base64 MP4 \
                     .collect(),
                 subtitles_srt: params.subtitles_srt,
                 subtitles_language: params.subtitles_language,
+                burn_subtitles: params.burn_subtitles,
             };
             return match tokio::task::spawn_blocking(move || crate::server::do_video(req)).await {
                 Ok(Ok(resp)) => json!({
@@ -867,6 +876,7 @@ server. Returns base64 MP4 \
                     "video_base64": resp.video_base64,
                     "has_audio": resp.has_audio,
                     "has_subtitles": resp.has_subtitles,
+                    "burned_subtitles": resp.burned_subtitles,
                     "format": resp.format,
                 })
                 .to_string(),

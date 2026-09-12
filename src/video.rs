@@ -18,6 +18,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::diting_browser::Page;
+use crate::diting_layout::text::FontBook;
 
 /// One rendered timeline video.
 #[derive(Debug)]
@@ -37,6 +38,8 @@ pub struct TimelineVideo {
     pub has_audio: bool,
     /// Whether a soft subtitle track was muxed in.
     pub has_subtitles: bool,
+    /// Whether the cues were also burned into the frame pixels.
+    pub burned_subtitles: bool,
 }
 
 #[derive(Debug)]
@@ -139,6 +142,11 @@ pub struct TimelineVideoOptions {
     /// ISO language tag for the subtitle track ("eng", "zh"), shown by
     /// players when labeling the track.
     pub subtitles_language: Option<String>,
+    /// Burn the cues into the frame pixels too (hardsub). `None` = burn
+    /// whenever `subtitles_srt` is present — QuickTime, WeChat and most
+    /// social embeds ignore the soft mov_text track, pixels never do.
+    /// `Some(false)` keeps the soft track only.
+    pub burn_subtitles: Option<bool>,
 }
 
 impl Default for TimelineVideoOptions {
@@ -153,6 +161,7 @@ impl Default for TimelineVideoOptions {
             narration: Vec::new(),
             subtitles_srt: None,
             subtitles_language: None,
+            burn_subtitles: None,
         }
     }
 }
@@ -164,6 +173,214 @@ const AUDIO_FETCH_TIMEOUT: Duration = Duration::from_secs(8);
 /// Inline SRT cap: subtitle text is kilobytes; anything past this is a
 /// caller bug, not a track.
 const MAX_SUBTITLE_BYTES: usize = 64 * 1024;
+
+/// Per-phase pump timings for the AGINXBROWSER_VIDEO_TRACE knob: where the
+/// frame budget goes — JS seek, band paint (any relayout inside
+/// ensure_layout_run included; AGINXBROWSER_LAYOUT_TRACE splits that phase
+/// further), image refetch, and the ffmpeg stdin write.
+#[derive(Default)]
+struct PumpPhases {
+    frames: u32,
+    eval: std::time::Duration,
+    band: std::time::Duration,
+    images: std::time::Duration,
+    write: std::time::Duration,
+}
+
+impl PumpPhases {
+    fn record(&mut self, eval: std::time::Duration, band: std::time::Duration, images: std::time::Duration) {
+        self.frames += 1;
+        self.eval += eval;
+        self.band += band;
+        self.images += images;
+    }
+}
+
+/// One parsed subtitle cue: active for `[start, end)` seconds.
+struct SubCue {
+    start: f64,
+    end: f64,
+    text: String,
+}
+
+/// A cue rasterized once: white glyphs over an 8-direction black outline
+/// (the hardsub look every player shows — QuickTime, WeChat and most social
+/// embeds ignore the mov_text soft track, pixels never do). Straight-alpha
+/// RGBA, composited bottom-center onto every frame the cue covers. A cue
+/// spans many frames and text raster is the one expensive step here, so
+/// tiles cache per cue.
+struct CueTile {
+    width: usize,
+    height: usize,
+    data: Vec<u8>,
+}
+
+/// Burned-in subtitles: the same inline SRT the soft mov_text track muxes
+/// from, parsed, rasterized on first use per cue, and painted onto the pump
+/// frames before they reach ffmpeg. Both tracks ride together — soft for
+/// players that honor it, burn for everything else.
+struct Hardsub {
+    cues: Vec<SubCue>,
+    tiles: Vec<Option<CueTile>>,
+}
+
+impl Hardsub {
+    fn none() -> Self {
+        Self { cues: Vec::new(), tiles: Vec::new() }
+    }
+
+    /// Parse the inline SRT. Malformed blocks are skipped, never fatal —
+    /// burning must not reject a video the soft-track path accepted.
+    fn parse(srt: &str) -> Self {
+        let mut cues = Vec::new();
+        for block in srt.replace("\r\n", "\n").split("\n\n") {
+            let lines: Vec<&str> = block.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+            let Some(t_i) = lines.iter().position(|l| l.contains("-->")) else { continue };
+            let Some((start, end)) = lines[t_i].split_once("-->") else { continue };
+            let (Some(start), Some(end)) =
+                (parse_srt_timestamp(start), parse_srt_timestamp(end))
+            else {
+                continue;
+            };
+            if end <= start {
+                continue;
+            }
+            let text = lines[t_i + 1..].join("\n");
+            if !text.is_empty() {
+                cues.push(SubCue { start, end, text });
+            }
+        }
+        let tiles: Vec<Option<CueTile>> = (0..cues.len()).map(|_| None).collect();
+        Self { cues, tiles }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.cues.is_empty()
+    }
+
+    /// Composite the cue active at `t` onto the frame, rasterizing its tile
+    /// on first use. Later cues win on overlap (SRT convention).
+    fn burn(&mut self, frame: &mut [u8], w: u32, h: u32, t: f64, fonts: &FontBook) {
+        let Some(i) = self.cues.iter().rposition(|c| c.start <= t && t < c.end) else {
+            return;
+        };
+        let tile = self.tiles[i].get_or_insert_with(|| {
+            rasterize_cue_tile(&self.cues[i].text, w, h, fonts)
+        });
+        let x0 = (w as i64 - tile.width as i64) / 2;
+        let y0 = h as i64 - tile.height as i64 - (h / 12) as i64;
+        composite_tile(frame, w as usize, h as usize, TileRef::from(&*tile), x0, y0);
+    }
+}
+
+/// `"HH:MM:SS,mmm"` (or `.mmm`) → seconds. SRT mandates the comma; players
+/// in the wild also accept the dot, so both parse.
+fn parse_srt_timestamp(s: &str) -> Option<f64> {
+    // Cue settings can trail the timestamp ("... --> ... x1:0 x2:100").
+    let s = s.split_whitespace().next()?;
+    let (hms, ms) = match (s.rfind(','), s.rfind('.')) {
+        (Some(c), None) => s.split_at(c),
+        (None, Some(d)) => s.split_at(d),
+        // Both present: whichever sits later is the ms separator.
+        (Some(c), Some(d)) => s.split_at(c.max(d)),
+        (None, None) => return None,
+    };
+    let mut parts = hms.split(':');
+    let (h, m, sec) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    let ms: f64 = ms[1..].parse().ok()?;
+    let h: f64 = h.parse().ok()?;
+    let m: f64 = m.parse().ok()?;
+    let sec: f64 = sec.parse().ok()?;
+    Some(h * 3600.0 + m * 60.0 + sec + ms / 1000.0)
+}
+
+/// Rasterize one cue into a self-contained tile. Metrics scale with the
+/// frame so the same SRT reads the same at 720p and 4K: font ≈ height/20,
+/// stroke ≈ font/12, wrap at 90% width. The black outline is the same raster
+/// offset in 8 directions — a real stroke pass would need a new rasterizer,
+/// offset compositing gets within a pixel of libass's look at hardsub sizes.
+fn rasterize_cue_tile(text: &str, w: u32, h: u32, fonts: &FontBook) -> CueTile {
+    let font_size = h as f32 / 20.0;
+    let line_height = font_size * 1.4;
+    let wrap_at = w as f32 * 0.9;
+    let stroke = ((font_size / 12.0).round() as i32).max(1);
+    let pad = stroke as usize;
+    let white = fonts.rasterize_wrapped(text, font_size, true, [255, 255, 255, 255], wrap_at, line_height);
+    let black = fonts.rasterize_wrapped(text, font_size, true, [12, 12, 12, 255], wrap_at, line_height);
+    let width = white.width + pad * 2;
+    let height = white.height + pad * 2;
+    let mut data = vec![0u8; width * height * 4];
+    let stroke_i64 = stroke as i64;
+    for (dx, dy) in [
+        (-stroke, 0), (stroke, 0), (0, -stroke), (0, stroke),
+        (-stroke, -stroke), (-stroke, stroke), (stroke, -stroke), (stroke, stroke),
+    ] {
+        composite_tile(
+            &mut data, width, height, TileRef::from(&black),
+            stroke_i64 + dx as i64, stroke_i64 + dy as i64,
+        );
+    }
+    composite_tile(&mut data, width, height, TileRef::from(&white), stroke_i64, stroke_i64);
+    CueTile { width, height, data }
+}
+
+/// A borrowed RGBA tile — the burn compositor's blit unit, wrapping both
+/// the cached cue tiles and the raw rasters the font stack returns.
+struct TileRef<'a> {
+    width: usize,
+    height: usize,
+    data: &'a [u8],
+}
+
+impl<'a> From<&'a CueTile> for TileRef<'a> {
+    fn from(t: &'a CueTile) -> Self {
+        Self { width: t.width, height: t.height, data: &t.data }
+    }
+}
+
+impl<'a> From<&'a crate::diting_layout::text::TextRaster> for TileRef<'a> {
+    fn from(r: &'a crate::diting_layout::text::TextRaster) -> Self {
+        Self { width: r.width, height: r.height, data: &r.data }
+    }
+}
+
+/// Source-over blit of an RGBA tile into an RGBA buffer, clipped at the
+/// destination bounds. Same straight-alpha model as paint.rs `over`, but
+/// maintaining the destination alpha — cue tiles start transparent.
+fn composite_tile(dst: &mut [u8], dw: usize, dh: usize, src: TileRef, x0: i64, y0: i64) {
+    let TileRef { width: sw, height: sh, data: src } = src;
+    if sw == 0 || sh == 0 {
+        return;
+    }
+    let (gx0, gx1) = (x0.max(0), (x0 + sw as i64).min(dw as i64));
+    let (gy0, gy1) = (y0.max(0), (y0 + sh as i64).min(dh as i64));
+    if gx0 >= gx1 || gy0 >= gy1 {
+        return;
+    }
+    for gy in gy0..gy1 {
+        let srow = ((gy - y0) as usize * sw + (gx0 - x0) as usize) * 4;
+        let drow = (gy as usize * dw + gx0 as usize) * 4;
+        for gx in gx0..gx1 {
+            let s = srow + (gx - gx0) as usize * 4;
+            let d = drow + (gx - gx0) as usize * 4;
+            let sa = src[s + 3] as u32;
+            if sa == 0 {
+                continue;
+            }
+            let da = dst[d + 3] as u32;
+            let out_a = sa + da * (255 - sa) / 255;
+            for c in 0..3 {
+                let sc = src[s + c] as u32 * sa * 255;
+                let dc = dst[d + c] as u32 * da * (255 - sa);
+                dst[d + c] = ((sc + dc) / (255 * out_a)) as u8;
+            }
+            dst[d + 3] = out_a as u8;
+        }
+    }
+}
 
 /// Render the page's registered timelines to an MP4. See the module docs for
 /// the seek protocol. The page must already be navigated; this waits for the
@@ -219,7 +436,8 @@ pub async fn render_timeline_video(
 
     // Frame 0 first: it fixes the pixel size ffmpeg gets spawned with and
     // absorbs the one-time band-image fetch pass before encoding starts.
-    let (w, h, first) = seek_and_paint(page, viewport, 0.0).await?;
+    let mut phases = PumpPhases::default();
+    let (w, h, mut first) = seek_and_paint(page, viewport, 0.0, &mut phases).await?;
     let expect = w as usize * h as usize * 4;
 
     // MP4 muxing needs a seekable output, so the file goes to a temp path
@@ -266,14 +484,29 @@ pub async fn render_timeline_video(
         })
         .collect::<Result<_, _>>()?;
 
-    // Subtitles: inline SRT text staged as the last input, muxed as a soft
-    // mov_text track — a text codec ffmpeg carries natively, so no libass
-    // (burning would need it; muxing does not).
-    let subtitles_path: Option<std::path::PathBuf> = opts
+    // Subtitles, two layers from the same SRT: staged as the last input and
+    // muxed as a soft mov_text track (a text codec ffmpeg carries natively —
+    // no libass needed for muxing), and burned into the frame pixels by the
+    // pump's own font stack. Burning is on whenever subtitles ride because
+    // QuickTime, WeChat and most social embeds ignore mov_text; opt out with
+    // burn_subtitles: Some(false) for the soft track only.
+    let srt_text = opts
         .subtitles_srt
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty());
+    let mut hardsub = match (opts.burn_subtitles.unwrap_or(true), srt_text) {
+        (true, Some(srt)) => Hardsub::parse(srt),
+        _ => Hardsub::none(),
+    };
+    // font_book() re-parses its faces per call, so the burn path takes it
+    // once per render and hands the book around — cues rasterize lazily
+    // against it.
+    let hardsub_fonts = (!hardsub.is_empty()).then(crate::diting_fonts::font_book);
+    if let Some(fonts) = &hardsub_fonts {
+        hardsub.burn(&mut first, w, h, 0.0, fonts);
+    }
+    let subtitles_path: Option<std::path::PathBuf> = srt_text
         .map(|srt| {
             if srt.len() > MAX_SUBTITLE_BYTES {
                 return Err(VideoError::SubtitleStaging(format!(
@@ -417,12 +650,20 @@ pub async fn render_timeline_video(
             .and_then(|_| stdin.flush())
             .map_err(|e| VideoError::FfmpegFailed(format!("stdin write: {e}")))
     };
+    let t_send = Instant::now();
     send(first, 0)?;
+    phases.write += t_send.elapsed();
     written += 1;
+    let pump_wall = Instant::now();
     for i in 1..frames {
         let t = i as f64 / opts.fps;
-        let (_, _, rgba) = seek_and_paint(page, viewport, t).await?;
+        let (_, _, mut rgba) = seek_and_paint(page, viewport, t, &mut phases).await?;
+        if let Some(fonts) = &hardsub_fonts {
+            hardsub.burn(&mut rgba, w, h, t, fonts);
+        }
+        let t_send = Instant::now();
         send(rgba, i)?;
+        phases.write += t_send.elapsed();
         written += 1;
     }
     // Closing stdin is ffmpeg's end-of-stream signal; the MP4 trailer lands
@@ -441,6 +682,20 @@ pub async fn render_timeline_video(
         let tail: String = err_reader.join().unwrap_or_default().chars().rev().take(400).collect();
         return Err(VideoError::FfmpegFailed(tail.chars().rev().collect()));
     }
+    // Debug knob (AGINXBROWSER_VIDEO_TRACE=1): pump phase summary, the video
+    // counterpart of AGINXBROWSER_LAYOUT_TRACE. `band` includes any relayout
+    // ensure_layout_run triggered (LAYOUT_TRACE splits that phase further).
+    if std::env::var("AGINXBROWSER_VIDEO_TRACE").is_ok() {
+        eprintln!(
+            "[video-trace] frames={} wall={:?} eval={:?} band={:?} images={:?} write={:?}",
+            phases.frames,
+            pump_wall.elapsed(),
+            phases.eval,
+            phases.band,
+            phases.images,
+            phases.write
+        );
+    }
     Ok(TimelineVideo {
         mp4,
         frames: written,
@@ -450,6 +705,7 @@ pub async fn render_timeline_video(
         height: h,
         has_audio: !audio_inputs.is_empty(),
         has_subtitles: subtitles_path.is_some(),
+        burned_subtitles: hardsub_fonts.is_some(),
     })
 }
 
@@ -491,33 +747,44 @@ async fn fetch_audio(page: &Page, url: &str) -> Result<Vec<u8>, VideoError> {
 /// Seek every registered timeline to `t`, then paint one viewport band. The
 /// first pass may report missing image URLs — those fetch through the page's
 /// own client and the band repaints before returning (placeholders only if a
-/// fetch fails; a frame beats a stall).
+/// fetch fails; a frame beats a stall). Phase timings accumulate into
+/// `phases` (the AGINXBROWSER_VIDEO_TRACE knob).
 async fn seek_and_paint(
     page: &mut Page,
     viewport: (f32, f32),
     t: f64,
+    phases: &mut PumpPhases,
 ) -> Result<(u32, u32, Vec<u8>), VideoError> {
     let seek = format!(
         "(() => {{ for (const k in window.__timelines) {{ \
          try {{ window.__timelines[k].pause({t:.4}); }} catch (e) {{}} }} }})()"
     );
+    let t_eval = Instant::now();
     let _ = page.evaluate(&seek);
+    let eval_dt = t_eval.elapsed();
     // The camera's window.scrollTo lands in the JS root-scroller state (the
     // bootstrap mirrors it to set_scroll_offset) — read it back so the band
     // paints the section the page is actually showing. Painting (0, 0)
     // unconditionally froze every scrolling timeline at the document top;
     // the intro video never noticed because its camera never moved.
     let (sx, sy) = page.scroll_offset();
+    let t_band = Instant::now();
     let Some((frame, missing)) = page.viewport_band_frame(sx, sy, viewport) else {
         return Err(VideoError::NoLiveDocument);
     };
+    let band_dt = t_band.elapsed();
     if missing.is_empty() {
+        phases.record(eval_dt, band_dt, std::time::Duration::ZERO);
         return Ok((frame.width, frame.height, frame.rgba));
     }
+    let t_img = Instant::now();
     page.fetch_band_images(missing).await;
+    let img_dt = t_img.elapsed();
+    let t_band = Instant::now();
     let Some((frame, _)) = page.viewport_band_frame(sx, sy, viewport) else {
         return Err(VideoError::NoLiveDocument);
     };
+    phases.record(eval_dt, band_dt + t_band.elapsed(), img_dt);
     Ok((frame.width, frame.height, frame.rgba))
 }
 
@@ -660,8 +927,12 @@ window.__timelines = { main: {
         .expect("navigate scroll fixture");
         page.settle_until_idle(5000).await;
         let vp = (800.0, 450.0);
-        let (_, _, top) = seek_and_paint(&mut page, vp, 0.0).await.expect("frame at top");
-        let (_, _, bot) = seek_and_paint(&mut page, vp, 2.0).await.expect("frame at bottom");
+        let (_, _, top) = seek_and_paint(&mut page, vp, 0.0, &mut PumpPhases::default())
+            .await
+            .expect("frame at top");
+        let (_, _, bot) = seek_and_paint(&mut page, vp, 2.0, &mut PumpPhases::default())
+            .await
+            .expect("frame at bottom");
         let px = |f: &[u8]| {
             let i = (225 * 800 + 400) * 4;
             (f[i], f[i + 1], f[i + 2])
@@ -819,6 +1090,73 @@ window.__timelines = { main: {
             .to_string()
     }
 
+    /// Timestamp forms the burn parser accepts: the SRT-mandated comma, the
+    /// dot variant players in the wild emit, and trailing cue settings.
+    #[test]
+    fn srt_timestamp_parses_comma_dot_and_settings() {
+        assert_eq!(parse_srt_timestamp("00:00:01,500"), Some(1.5));
+        assert_eq!(parse_srt_timestamp("01:02:03.250"), Some(3723.25));
+        assert_eq!(parse_srt_timestamp("00:00:10,000 x1:0 x2:100"), Some(10.0));
+        assert_eq!(parse_srt_timestamp("garbage"), None);
+        assert_eq!(parse_srt_timestamp("00:00"), None);
+    }
+
+    /// Malformed blocks and inverted windows are skipped, never fatal — the
+    /// burn pass must not reject a video the soft-track path accepted.
+    #[test]
+    fn srt_parse_skips_malformed_blocks() {
+        let hs = Hardsub::parse(
+            "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n\
+             not a cue at all\n\n\
+             2\n00:00:02,000 --> 00:00:03,000\nsecond\n",
+        );
+        assert_eq!(hs.cues.len(), 2);
+        assert_eq!(hs.cues[0].text, "hello");
+        assert_eq!(hs.cues[1].start, 2.0);
+        assert!(Hardsub::parse("1\n00:00:05,000 --> 00:00:05,000\nx\n").is_empty());
+    }
+
+    /// The burn pass itself, pixel-level: on a flat dark frame the cue draws
+    /// white glyph ink with black outline ink in the bottom band, and leaves
+    /// the rest of the frame byte-identical.
+    #[test]
+    fn hardsub_paints_white_text_bottom_center() {
+        let fonts = crate::diting_fonts::font_book();
+        let (w, h) = (400u32, 240u32);
+        let mut frame = vec![40u8; (w * h * 4) as usize];
+        for px in frame.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+        let mut hs = Hardsub::parse("1\n00:00:00,000 --> 00:00:02,000\n测试字幕\n");
+        let pristine = frame.clone();
+        hs.burn(&mut frame, w, h, 1.0, &fonts);
+        // Outside the cue window nothing draws (same buffer, pristine copy).
+        let mut outside = pristine.clone();
+        hs.burn(&mut outside, w, h, 3.0, &fonts);
+        assert_eq!(outside, pristine, "t past the cue burns nothing");
+
+        let px = |f: &[u8], x: usize, y: usize| {
+            let i = (y * w as usize + x) * 4;
+            (f[i], f[i + 1], f[i + 2])
+        };
+        assert_eq!(px(&frame, 10, 10), (40, 40, 40), "top of frame untouched");
+        let mut white = 0;
+        let mut black = 0;
+        for y in (h as usize * 3 / 4)..h as usize {
+            for x in (w as usize / 4)..(w as usize * 3 / 4) {
+                let p = px(&frame, x, y);
+                if p.0 > 220 && p.1 > 220 && p.2 > 220 {
+                    white += 1;
+                }
+                if p.0 < 60 && p.1 < 60 && p.2 < 60 {
+                    black += 1;
+                }
+            }
+        }
+        assert!(white > 20, "white glyph ink in the subtitle band ({white} px)");
+        assert!(black > 20, "black outline ink around it ({black} px)");
+    }
+
     /// Probe the mp4's stream codecs with ffprobe; skips when ffprobe is
     /// absent (it ships with ffmpeg installs but the test must not require
     /// a second binary to prove the mux).
@@ -865,7 +1203,7 @@ window.__timelines = { main: {
         let bgm_port = serve_bytes("audio/wav", sine_wav(1.0));
         let line_port = serve_bytes("audio/wav", sine_wav(0.6));
         let mut page = navigated_stub_page().await;
-        let opts = TimelineVideoOptions {
+        let mut opts = TimelineVideoOptions {
             fps: 10.0,
             viewport: (800.0, 450.0),
             hold_tail_secs: 0.0,
@@ -884,6 +1222,7 @@ window.__timelines = { main: {
             }],
             subtitles_srt: Some(sample_srt()),
             subtitles_language: Some("eng".to_string()),
+            ..Default::default()
         };
         let video = render_timeline_video(&mut page, &opts)
             .await
@@ -892,12 +1231,20 @@ window.__timelines = { main: {
         assert_eq!(video.duration_secs, 2.0, "-t pins the length");
         assert!(video.has_audio);
         assert!(video.has_subtitles);
+        assert!(video.burned_subtitles, "cues burn into the pixels by default");
         assert!(video.mp4.windows(4).any(|w| w == b"mp4a"), "AAC track");
         assert!(video.mp4.windows(4).any(|w| w == b"avc1"), "h264 track");
         if let Some(codecs) = ffprobe_codecs(&video.mp4) {
             assert!(codecs.iter().any(|c| c == "mov_text"), "soft subtitle stream: {codecs:?}");
             assert!(codecs.iter().any(|c| c == "aac"), "aac stream: {codecs:?}");
         }
+        // Opt-out keeps the soft track without touching the pixels.
+        opts.burn_subtitles = Some(false);
+        let soft_only = render_timeline_video(&mut page, &opts)
+            .await
+            .expect("soft-only render");
+        assert!(soft_only.has_subtitles);
+        assert!(!soft_only.burned_subtitles);
     }
 
     /// A single narration clip rides the plain -af path (adelay places it) —

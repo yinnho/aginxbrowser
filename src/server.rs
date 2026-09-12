@@ -869,6 +869,7 @@ pub fn do_video(req: crate::VideoRequest) -> Result<crate::VideoResponse> {
                     .collect(),
                 subtitles_srt: req.subtitles_srt,
                 subtitles_language: req.subtitles_language,
+                burn_subtitles: req.burn_subtitles,
             };
             let video = crate::video::render_timeline_video(&mut page.inner, &opts).await?;
             let final_url = page.url();
@@ -888,6 +889,7 @@ pub fn do_video(req: crate::VideoRequest) -> Result<crate::VideoResponse> {
                 video_base64: base64_png(&video.mp4),
                 has_audio: video.has_audio,
                 has_subtitles: video.has_subtitles,
+                burned_subtitles: video.burned_subtitles,
                 format: "mp4".to_string(),
             })
         })
