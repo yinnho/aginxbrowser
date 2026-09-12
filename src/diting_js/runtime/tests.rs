@@ -2151,6 +2151,50 @@
     }
 
     #[test]
+    fn test_form_paint_mirrors_from_js() {
+        // The form paint batch's JS halves, read from the Rust tree: every
+        // select mutation entry point (value / selectedIndex / option
+        // .selected / form.reset) recomputes the displayed label into
+        // live_value, and a checked write lands as live_checked — the layout
+        // tests drive the Rust setters directly, so this is the only place
+        // proving the bootstrap actually fires the mirrors.
+        let mut rt = setup_runtime(r#"<form id=f>
+            <select id=s><option value=a>A</option><option value=b selected>B</option></select>
+            <input id=c type=checkbox>
+            </form>"#);
+        let label_of = |rt: &JsRuntime| {
+            rt.with_dom(|dom| {
+                let s = dom.query_selector_all("#s").unwrap()[0];
+                dom.with_node(s, |n| n.live_value().map(str::to_string)).flatten()
+            })
+            .flatten()
+        };
+        let checked_of = |rt: &JsRuntime| {
+            rt.with_dom(|dom| {
+                let c = dom.query_selector_all("#c").unwrap()[0];
+                dom.with_node(c, |n| n.live_checked()).flatten()
+            })
+            .flatten()
+        };
+
+        rt.evaluate("document.getElementById('s').value = 'a'").unwrap();
+        assert_eq!(label_of(&rt).as_deref(), Some("A"), "value setter mirrors the label");
+
+        rt.evaluate("document.getElementById('s').selectedIndex = 1").unwrap();
+        assert_eq!(label_of(&rt).as_deref(), Some("B"), "selectedIndex mirrors despite bypassing the property setter");
+
+        rt.evaluate("document.getElementById('s').options[0].selected = true").unwrap();
+        assert_eq!(label_of(&rt).as_deref(), Some("A"), "option.selected mirrors through its owning select");
+
+        rt.evaluate("document.getElementById('c').checked = true").unwrap();
+        assert_eq!(checked_of(&rt), Some(true), "checked setter mirrors live_checked");
+
+        rt.evaluate("document.getElementById('f').reset()").unwrap();
+        assert_eq!(label_of(&rt).as_deref(), Some("B"), "reset mirrors the parsed selected attr");
+        assert_eq!(checked_of(&rt), Some(false), "reset mirrors the parsed (absent) checked attr");
+    }
+
+    #[test]
     fn test_option_legacy_factory() {
         // glama.ai admin form chunk populates selects via `new Option(label,
         // value)`; without the global its hydration died on "Option is not

@@ -66,8 +66,10 @@ const _DOM_MUTATION_COMMANDS = new Set([
   "ext_sheet_put",
   // The form-control dirty value mirror: paint reads it (Rust side drops
   // the layout cache on the same command), so the snapshot epoch must
-  // count it too.
+  // count it too. set_live_checked is the same posture for the
+  // checkbox/radio dirty checkedness the widget paint reads.
   "set_live_value",
+  "set_live_checked",
 ]);
 const _domRaw = (cmd, a1, a2) => {
   if (_DOM_MUTATION_COMMANDS.has(cmd)) _ditingMutationEpoch++;
@@ -78,6 +80,25 @@ const _domRaw = (cmd, a1, a2) => {
 // synthetic 12-col grid fallback would fabricate a box for every boxless
 // node, and Chrome errors "Could not compute box model." for those.
 globalThis.__diting_domRaw = _domRaw;
+
+// Recompute the label a select displays and land it as the select's
+// live_value mirror (form paint batch): paint reads exactly this, and the
+// JS walk supersedes Rust's parsed-attribute fallback because it also sees
+// JS-side dirtiness (option._selected). The precedence matches the value
+// getter the label must agree with: first selected option, else the first
+// option, else ''. An option's text is its `label` attribute when present,
+// else its content — trimmed either way. An empty label writes through,
+// which paint treats as "no mirror" and falls back to the attributes.
+function _mirrorSelectLabel(selectEl) {
+  const opts = selectEl.querySelectorAll('option');
+  let o = null;
+  for (let i = 0; i < opts.length; i++) { if (opts[i].selected) { o = opts[i]; break; } }
+  if (!o && opts.length) o = opts[0];
+  const label = o
+    ? ((o.getAttribute('label') !== null ? o.getAttribute('label') : o.textContent) || '').trim()
+    : '';
+  _domRaw("set_live_value", String(selectEl._nid), label);
+}
 const _domStrA1 = new Set([
   "create_element", "create_text_node", "create_comment_node",
   "create_processing_instruction", "create_doctype",
@@ -2475,6 +2496,10 @@ class Element extends Node {
         const optVal = attrV !== null ? attrV : opts[i].textContent;
         opts[i].selected = optVal === wanted;
       }
+      // Each opts[i].selected write mirrors through the property setter;
+      // this final walk pins the select's own state once (and covers an
+      // empty option list, where no per-option write happens at all).
+      _mirrorSelectLabel(this);
       return;
     }
     _formValues[this._nid] = String(v);
@@ -2565,7 +2590,14 @@ class Element extends Node {
     if (_formChecked[this._nid] !== undefined) return _formChecked[this._nid];
     return this.hasAttribute("checked");
   }
-  set checked(v) { _formChecked[this._nid] = !!v; }
+  set checked(v) {
+    _formChecked[this._nid] = !!v;
+    // Mirror the dirty checkedness into the Rust tree (NodeData::Element::
+    // live_checked) so the widget paint draws the state. Same posture as
+    // set_live_value: getAttribute/outerHTML keep showing only the parsed
+    // `checked` attribute, like Chrome.
+    _domRaw("set_live_checked", String(this._nid), v ? "1" : "0");
+  }
   // Real IDL property (not an expando): `in` checks, Object.keys enumeration,
   // and prototype introspection must all see it, and the click activation
   // steps clear/restore it as real state.
@@ -2586,17 +2618,18 @@ class Element extends Node {
     // prefers. Stripping the attribute made reset() irreversible — the parsed
     // default was destroyed by the first assignment.
     v = !!v;
-    if (v) {
-      let p = this.parentNode;
-      while (p && p.localName !== 'select') p = p.parentNode;
-      if (p) {
-        const siblings = p.querySelectorAll('option');
-        for (let i = 0; i < siblings.length; i++) {
-          if (siblings[i] !== this) siblings[i]._selected = false;
-        }
+    let p = this.parentNode;
+    while (p && p.localName !== 'select') p = p.parentNode;
+    if (v && p) {
+      const siblings = p.querySelectorAll('option');
+      for (let i = 0; i < siblings.length; i++) {
+        if (siblings[i] !== this) siblings[i]._selected = false;
       }
     }
     this._selected = v;
+    // The displayed label may have moved — recompute the owning select's
+    // mirror once, covering both this write and the sibling clears above.
+    if (p) _mirrorSelectLabel(p);
   }
   get disabled() { return this.hasAttribute("disabled"); }
   set disabled(v) { if (v) this.setAttribute("disabled", ""); else this.removeAttribute("disabled"); }
@@ -2813,8 +2846,13 @@ class Element extends Node {
   set selectedIndex(v) {
     const opts = this.options;
     for (let i = 0; i < opts.length; i++) {
+      // Direct _selected writes (not the property setter): the setter's
+      // sibling-clearing walk is O(n) per option, and this loop IS the
+      // batch form of that walk. The explicit mirror below covers the
+      // whole assignment.
       opts[i]._selected = (i === v);
     }
+    _mirrorSelectLabel(this);
   }
   // Per the HTML spec, the submit() METHOD submits the form WITHOUT firing a
   // cancelable `submit` event — a page's submit listener cannot veto it. Only
@@ -7885,7 +7923,12 @@ globalThis.HTMLFormElement = class HTMLFormElement extends Element {
     for (const f of this.elements) {
       const tag = f.localName;
       if (tag === 'select') {
+        // Direct _selected writes like selectedIndex's: restore every
+        // option to its parsed default, then mirror the label once. (The
+        // checkable arm below goes through the checked SETTER, whose own
+        // mirror rides along.)
         for (const o of f.options) o._selected = o.hasAttribute('selected');
+        _mirrorSelectLabel(f);
         continue;
       }
       if (tag === 'input') {

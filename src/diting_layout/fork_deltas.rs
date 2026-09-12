@@ -673,6 +673,168 @@ fn form_controls_paint_their_value_run() {
     assert_eq!(tree.text_content(ta), "ta text", "textContent is not the dirty value");
 }
 
+/// A select is a replaced box painting ONE label, not its options as page
+/// text (the form paint batch's select half): the selected option's label
+/// (`label` attr else content, trimmed) wins, else the first option's — the
+/// same precedence the bootstrap's value getter resolves with — and the JS
+/// dirty-value mirror (`_mirrorSelectLabel` → set_live_value) beats both.
+/// An optgroup's options count in document order.
+#[test]
+fn select_paints_one_option_label_not_the_option_list() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::PaintItem;
+
+    let html = r#"<html><body>
+        <select id="plain">
+            <option value="a">Alpha</option>
+            <option value="b" selected>Beta</option>
+        </select>
+        <select id="firstwins">
+            <option>First</option>
+            <option>Second</option>
+        </select>
+        <select id="labeled">
+            <option label="Shown Label">ignored content</option>
+        </select>
+        <select id="grouped">
+            <optgroup><option selected>GroupedSel</option></optgroup>
+            <option>After</option>
+        </select>
+        </body></html>"#;
+    let tree = parse_html(html);
+    let sel = |id: &str| tree.query_selector_all(id).unwrap()[0];
+
+    let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let (_, items, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+        &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
+    );
+    let run = |want: &str| {
+        items.iter().any(|it| matches!(
+            it,
+            PaintItem::Replaced { alt: Some((text, ..)), .. } if text == want
+        ))
+    };
+
+    assert!(run("Beta"), "the selected option's label paints");
+    assert!(!run("Alpha"), "the unselected option must not paint");
+    assert!(run("First"), "no selected attr: the first option is the display");
+    assert!(!run("Second"), "the second option stays hidden without selectedness");
+    assert!(run("Shown Label"), "an option's label attr beats its content");
+    assert!(!run("ignored content"), "the option's own content yields to its label attr");
+    assert!(run("GroupedSel"), "an optgroup's selected option paints");
+    assert!(!run("After"), "the option after the optgroup stays hidden");
+    // Select is now replaced: its options' text must NOT leak as page Text
+    // items (the pre-batch behavior laid every option out as stacked text).
+    assert!(
+        !items.iter().any(|it| matches!(it, PaintItem::Text { text, .. } if text.contains("Alpha"))),
+        "option content must not lay out as page text"
+    );
+
+    // The JS mirror (select.value = x recomputes the label into live_value)
+    // beats the attributes — the test drives the Rust side directly, same
+    // as the value-run test above.
+    tree.with_node_mut(sel("#plain"), |n| n.set_live_value("Typed".into()));
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let (_, items, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+        &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
+    );
+    let run = |want: &str| {
+        items.iter().any(|it| matches!(
+            it,
+            PaintItem::Replaced { alt: Some((text, ..)), .. } if text == want
+        ))
+    };
+    assert!(run("Typed"), "the dirty label mirror paints over the attributes");
+    assert!(!run("Beta"), "the attribute-selected label must not paint once dirtied");
+    assert_eq!(
+        tree.with_node(sel("#plain"), |n| n.get_attribute("value").map(str::to_string)).flatten(),
+        None,
+        "the select itself never gains a value attribute"
+    );
+}
+
+/// Checkable inputs paint as native widgets, not text runs (the form paint
+/// batch's widget half): the replaced item carries a Checkbox/Radio
+/// FormWidget whose checked state is the live_checked mirror (what
+/// `el.checked = x` writes) else the parsed `checked` attribute — the exact
+/// precedence the JS getter resolves with.
+#[test]
+fn checkable_inputs_paint_native_widgets() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::{FormWidget, PaintItem};
+
+    let html = r#"<html><body>
+        <input id="cb-default" type="checkbox">
+        <input id="cb-attr" type="checkbox" checked>
+        <input id="cb-dirty" type="checkbox">
+        <input id="rd-attr" type="radio" name="g" checked>
+        <input id="rd-off" type="radio" name="g">
+        <input id="text" type="text" value="plain">
+        </body></html>"#;
+    let tree = parse_html(html);
+    let sel = |id: &str| tree.query_selector_all(id).unwrap()[0];
+    tree.with_node_mut(sel("#cb-dirty"), |n| n.set_live_checked(true));
+
+    // The walk keys widgets by node, so scan all Replaced items and count
+    // widget states: 4 checkables total — 3 checked (attr ×2 + dirty ×1),
+    // 1 unchecked — and the text input must carry NO widget.
+    let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let (_, items, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+        &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
+    );
+    let mut checkboxes = [0usize; 2]; // [unchecked, checked]
+    let mut radios = [0usize; 2];
+    let mut text_runs = 0usize;
+    for it in &items {
+        match it {
+            PaintItem::Replaced { widget: Some(FormWidget::Checkbox { checked }), .. } => {
+                checkboxes[*checked as usize] += 1;
+            }
+            PaintItem::Replaced { widget: Some(FormWidget::Radio { checked }), .. } => {
+                radios[*checked as usize] += 1;
+            }
+            PaintItem::Replaced { alt: Some((text, ..)), .. } if text == "plain" => {
+                text_runs += 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(checkboxes, [1, 2], "checkboxes: default unchecked, attr+dirty checked");
+    assert_eq!(radios, [1, 1], "radios: one checked via attr, one unchecked");
+    assert_eq!(text_runs, 1, "the text input keeps its plain alt run");
+    // The checkables paint NO alt text — the widget IS the content.
+    assert!(
+        !items.iter().any(|it| matches!(
+            it,
+            PaintItem::Replaced { alt: Some((text, ..)), .. } if text == "on"
+        )),
+        "checkable inputs must not paint a value run"
+    );
+
+    // Flip the dirty checkbox off: the mirror must win over the attribute
+    // precedence in the same re-layout (el.checked = false).
+    tree.with_node_mut(sel("#cb-dirty"), |n| n.set_live_checked(false));
+    tree.with_node_mut(sel("#cb-attr"), |n| n.set_live_checked(false));
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let (_, items, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+        &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
+    );
+    let checked = items.iter().filter(|it| matches!(
+        it,
+        PaintItem::Replaced { widget: Some(FormWidget::Checkbox { checked: true }), .. }
+    )).count();
+    assert_eq!(checked, 0, "live_checked=false beats the parsed checked attribute on both");
+    // And the mirror never surfaces through the DOM, like Chrome.
+    assert!(
+        tree.with_node(sel("#cb-attr"), |n| n.get_attribute("checked").is_some()).unwrap_or(false),
+        "getAttribute keeps the parsed checked attribute"
+    );
+}
+
 /// `box-sizing` picks the edge an authored width/height/min/max measures to
 /// (the universal `* { box-sizing: border-box }` reset idiom). taffy sizes
 /// are border-box native, so the engine maps authored px over by padding +

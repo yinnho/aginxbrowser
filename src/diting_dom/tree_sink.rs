@@ -81,6 +81,7 @@ impl TreeSink for DomTree {
             template_contents: None,
             mathml_annotation_xml_integration_point: flags.mathml_annotation_xml_integration_point,
             live_value: None,
+            live_checked: None,
         });
 
         if flags.template {

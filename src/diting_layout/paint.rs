@@ -1091,6 +1091,69 @@ pub fn text_ink_extent(items: &[PaintItem]) -> (f32, f32) {
     (w, h)
 }
 
+/// Draw a checkable input's native widget (form paint batch): a bordered
+/// box — square with a ✓ for checkboxes, circular ring for radios — with
+/// the checked state carried in ink. The look is Chrome's neutral light
+/// default (white field, gray border, dark mark) rather than any platform
+/// accent, so it reads on both light and dark pages. Works in whatever
+/// coordinate space `out` is in: the direct path passes page-band coords,
+/// the affine path a local scratch at (0, 0).
+#[allow(clippy::too_many_arguments)]
+fn paint_form_widget(
+    out: &mut Canvas,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+    widget: super::FormWidget,
+    fonts: &FontBook,
+    alpha: f32,
+) {
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let (radio, checked) = match widget {
+        super::FormWidget::Checkbox { checked } => (false, checked),
+        super::FormWidget::Radio { checked } => (true, checked),
+    };
+    let border = alpha_color([118, 118, 118, 255], alpha);
+    let fill = alpha_color([255, 255, 255, 255], alpha);
+    let ink = alpha_color([26, 26, 26, 255], alpha);
+    // fill_rounded_rect clamps the radius to half the shorter side, so a
+    // radio's w/2 is the full circle; the inset re-fill keeps a 1px ring.
+    let radius = if radio { w.min(h) as f32 / 2.0 } else { 2.0 };
+    out.fill_rounded_rect(x, y, w, h, radius, border);
+    out.fill_rounded_rect(x + 1, y + 1, w - 2, h - 2, (radius - 1.0).max(0.0), fill);
+    if !checked {
+        return;
+    }
+    if radio {
+        let d = (w.min(h) - 6).max(2);
+        out.fill_rounded_rect(
+            x + (w - d) / 2,
+            y + (h - d) / 2,
+            d,
+            d,
+            d as f32 / 2.0,
+            ink,
+        );
+    } else {
+        // The bundled symbol set carries ✓ (the font-fallback batch's
+        // coverage tail), and the raster cache (#399) makes the repeat free.
+        // Centering goes by the tile's ink bbox, not its full line box —
+        // the cramped CJK metrics leave the glyph off-center inside the box.
+        let fs = (h as f32 * 0.82).max(6.0);
+        let r = fonts.rasterize("✓", fs, false, ink, fs * 1.45);
+        if let Some((bx0, by0, bx1, by1)) = r.ink_bbox() {
+            let iw = (bx1 - bx0 + 1) as i64;
+            let ih = (by1 - by0 + 1) as i64;
+            let tx = x + (w - iw) / 2 - bx0 as i64;
+            let ty = y + (h - ih) / 2 - by0 as i64;
+            out.blit_text(&r, tx, ty);
+        }
+    }
+}
+
 /// Replay the paint items onto `out`. `Bg` rects come from taffy's rounded
 /// layout so the fill lands on whole pixels; each `Text` re-rasterizes
 /// wrapped at the width its containing block offered at measure time, so
@@ -1351,7 +1414,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     out.pop_clip();
                 }
             }
-            PaintItem::Replaced { rect, alt, fill_placeholder, alpha } => {
+            PaintItem::Replaced { rect, alt, fill_placeholder, widget, alpha } => {
                 if out.xf().is_some() {
                     // Rasterize the placeholder + alt into a transparent
                     // LOCAL scratch at raw metrics (the bracket maps the
@@ -1372,24 +1435,30 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     }
                     let (w, h) = (w as usize, h as usize);
                     let mut scratch = Canvas::new_transparent(w, h);
-                    if *fill_placeholder {
-                        scratch.fill_rect(0, 0, w as i64, h as i64, alpha_color([224, 224, 224, 255], *alpha));
-                    }
-                    if let Some((text, font_size, bold, line_height, color)) = alt {
-                        if !text.trim().is_empty() {
-                            // Ink clips to the box (batch 6e), now in the
-                            // scratch's own coordinates.
-                            scratch.push_clip(0, 0, w as i64, h as i64);
-                            let r = fonts.rasterize_wrapped(
-                                text,
-                                *font_size,
-                                *bold,
-                                alpha_color(*color, *alpha),
-                                w as f32,
-                                *line_height,
-                            );
-                            scratch.blit_text(&r, 0, r.top.round() as i64);
-                            scratch.pop_clip();
+                    if let Some(widget) = widget {
+                        paint_form_widget(
+                            &mut scratch, 0, 0, w as i64, h as i64, *widget, fonts, *alpha,
+                        );
+                    } else {
+                        if *fill_placeholder {
+                            scratch.fill_rect(0, 0, w as i64, h as i64, alpha_color([224, 224, 224, 255], *alpha));
+                        }
+                        if let Some((text, font_size, bold, line_height, color)) = alt {
+                            if !text.trim().is_empty() {
+                                // Ink clips to the box (batch 6e), now in the
+                                // scratch's own coordinates.
+                                scratch.push_clip(0, 0, w as i64, h as i64);
+                                let r = fonts.rasterize_wrapped(
+                                    text,
+                                    *font_size,
+                                    *bold,
+                                    alpha_color(*color, *alpha),
+                                    w as f32,
+                                    *line_height,
+                                );
+                                scratch.blit_text(&r, 0, r.top.round() as i64);
+                                scratch.pop_clip();
+                            }
                         }
                     }
                     out.blit_rgba_affine(&scratch.data, w, h, rect.x as f64, rect.y as f64);
@@ -1402,28 +1471,34 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                         (rect.y - dy).round() as i64,
                     );
                     let (w, h) = (rect.width.round() as i64, rect.height.round() as i64);
-                    if *fill_placeholder && w > 0 && h > 0 {
-                        out.fill_rect(x, y, w, h, alpha_color([224, 224, 224, 255], *alpha));
-                    }
-                    if let Some((text, font_size, bold, line_height, color)) = alt {
-                        if !text.trim().is_empty() {
-                            // The alt run wraps at the box width; the tile's
-                            // `top` offsets ink above the box top exactly like
-                            // any other text tile (cramped-CJK leading). The
-                            // ink clips to the box (batch 6e): a broken-image
-                            // alt that wraps past the bottom is cut there,
-                            // like every browser.
-                            out.push_clip(x, y, x + w, y + h);
-                            let r = fonts.rasterize_wrapped(
-                                text,
-                                *font_size,
-                                *bold,
-                                alpha_color(*color, *alpha),
-                                w.max(0) as f32,
-                                *line_height,
-                            );
-                            out.blit_text(&r, x, (y as f32 + r.top).round() as i64);
-                            out.pop_clip();
+                    if let Some(widget) = widget {
+                        if w > 0 && h > 0 {
+                            paint_form_widget(out, x, y, w, h, *widget, fonts, *alpha);
+                        }
+                    } else {
+                        if *fill_placeholder && w > 0 && h > 0 {
+                            out.fill_rect(x, y, w, h, alpha_color([224, 224, 224, 255], *alpha));
+                        }
+                        if let Some((text, font_size, bold, line_height, color)) = alt {
+                            if !text.trim().is_empty() {
+                                // The alt run wraps at the box width; the tile's
+                                // `top` offsets ink above the box top exactly like
+                                // any other text tile (cramped-CJK leading). The
+                                // ink clips to the box (batch 6e): a broken-image
+                                // alt that wraps past the bottom is cut there,
+                                // like every browser.
+                                out.push_clip(x, y, x + w, y + h);
+                                let r = fonts.rasterize_wrapped(
+                                    text,
+                                    *font_size,
+                                    *bold,
+                                    alpha_color(*color, *alpha),
+                                    w.max(0) as f32,
+                                    *line_height,
+                                );
+                                out.blit_text(&r, x, (y as f32 + r.top).round() as i64);
+                                out.pop_clip();
+                            }
                         }
                     }
                 }
@@ -1742,6 +1817,7 @@ mod tests {
                 alt: Some(("alt".into(), 16.0, false, 20.0, [0, 0, 0, 255])),
                 fill_placeholder: true,
                 alpha: 1.0,
+                widget: None,
             },
             PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0, gradient: None },
         ];
@@ -1751,6 +1827,66 @@ mod tests {
         let mut band = Canvas::new_filled(40, 60, [255, 255, 255, 255]);
         execute_band(&items, &fonts, &mut band, 0.0, 0.0);
         assert_eq!(full.data, band.data, "dy=0 band paint equals execute");
+    }
+
+    /// Native form widgets (form paint batch): a checked checkbox draws the
+    /// ✓ ink inside a white field ringed by the gray border; unchecked
+    /// leaves the interior empty; a checked radio carries the center dot.
+    /// The direct band path and the transform-bracket scratch path paint
+    /// the same widget (the bracket just maps the same local tile).
+    #[test]
+    fn form_widgets_paint_checked_state() {
+        let fonts = crate::diting_fonts::font_book();
+        let box_at = |widget| PaintItem::Replaced {
+            rect: super::super::Rect { x: 4.0, y: 4.0, width: 16.0, height: 16.0 },
+            alt: None,
+            fill_placeholder: false,
+            widget,
+            alpha: 1.0,
+        };
+        // Interior pixel classes: field is white, border gray, ink near-black.
+        let field = [255, 255, 255, 255];
+        let border = [118, 118, 118, 255];
+
+        // Checked checkbox: ink in the middle, white field around it.
+        let mut c = Canvas::new_filled(24, 24, [0, 255, 0, 255]);
+        execute(&[box_at(Some(super::super::FormWidget::Checkbox { checked: true }))], &fonts, &mut c);
+        assert_eq!(px(&c, 12, 4), border, "top border band");
+        assert_eq!(px(&c, 6, 6), field, "field interior inside the border ring");
+        // Ink = all channels dark (the green canvas bg would sneak past a
+        // red-channel-only probe; the gray border sits above 80).
+        let ink = c.data.chunks_exact(4).filter(|p| p[0] < 80 && p[1] < 80 && p[2] < 80 && p[3] > 200).count();
+        assert!(ink > 4, "the ✓ must leave dark ink; got {ink} px");
+
+        // Unchecked: same box, no ink anywhere.
+        let mut c = Canvas::new_filled(24, 24, [0, 255, 0, 255]);
+        execute(&[box_at(Some(super::super::FormWidget::Checkbox { checked: false }))], &fonts, &mut c);
+        assert_eq!(px(&c, 6, 6), field, "field still paints");
+        let ink = c.data.chunks_exact(4).filter(|p| p[0] < 80 && p[1] < 80 && p[2] < 80 && p[3] > 200).count();
+        assert_eq!(ink, 0, "unchecked must carry no ink");
+
+        // Checked radio: center dot, white ring field between dot and border.
+        let mut c = Canvas::new_filled(24, 24, [0, 255, 0, 255]);
+        execute(&[box_at(Some(super::super::FormWidget::Radio { checked: true }))], &fonts, &mut c);
+        assert_eq!(px(&c, 12, 4), border, "circle's top border pixel");
+        assert_eq!(px(&c, 12, 12), [26, 26, 26, 255], "center dot");
+        // Between the dot and the ring: the white field (dot r=5, white
+        // circle r=7, border r=8 — all centered (12,12) — so (6,12), at
+        // distance 5.5, is the 2px field band).
+        assert_eq!(px(&c, 6, 12), field, "field band between dot and ring");
+
+        // Through a transform bracket: the widget rasterizes into the local
+        // scratch and blits through the map — a 180° flip keeps every pixel
+        // class, just mirrored, so the same probes hold after flipping x/y.
+        let items = vec![
+            PaintItem::SetXf { xf: [-1.0, 0.0, 0.0, -1.0, 24.0, 24.0] },
+            box_at(Some(super::super::FormWidget::Radio { checked: true })),
+            PaintItem::ClearXf,
+        ];
+        let mut c = Canvas::new_filled(24, 24, [0, 255, 0, 255]);
+        execute(&items, &fonts, &mut c);
+        assert_eq!(px(&c, 12, 12), [26, 26, 26, 255], "center dot survives the bracket (invariant point)");
+        assert_eq!(px(&c, 6, 12), field, "field band rides the bracket");
     }
 
     /// A band at dy=100 reproduces exactly rows [100, 180) of the full

@@ -70,6 +70,11 @@ pub enum NodeData {
         /// (Chrome keeps the dirty value out of the DOM the same way), while
         /// the paint walk reads it to draw the text an input/textarea shows.
         live_value: Option<String>,
+        /// A checkbox/radio's dirty checkedness (`el.checked = x`), same
+        /// mirror posture as [`NodeData::Element::live_value`]: `None` means
+        /// "never dirtied" and readers fall back to the parsed `checked`
+        /// attribute — the exact precedence the JS getter resolves with.
+        live_checked: Option<bool>,
     },
     Text {
         contents: String,
@@ -156,6 +161,19 @@ impl Node {
     pub fn set_live_value(&mut self, value: String) {
         if let NodeData::Element { live_value, .. } = &mut self.data {
             *live_value = Some(value);
+        }
+    }
+
+    pub fn live_checked(&self) -> Option<bool> {
+        match &self.data {
+            NodeData::Element { live_checked, .. } => *live_checked,
+            _ => None,
+        }
+    }
+
+    pub fn set_live_checked(&mut self, checked: bool) {
+        if let NodeData::Element { live_checked, .. } = &mut self.data {
+            *live_checked = Some(checked);
         }
     }
 
@@ -1488,6 +1506,7 @@ mod tests {
             template_contents: None,
             mathml_annotation_xml_integration_point: false,
             live_value: None,
+            live_checked: None,
         })
     }
 
@@ -1501,6 +1520,7 @@ mod tests {
             template_contents: None,
             mathml_annotation_xml_integration_point: false,
             live_value: None,
+            live_checked: None,
         })
     }
 
@@ -1581,6 +1601,7 @@ mod tests {
             template_contents: None,
             mathml_annotation_xml_integration_point: false,
             live_value: None,
+            live_checked: None,
         });
         tree.append_child(doc, div);
 
@@ -1605,6 +1626,7 @@ mod tests {
             template_contents: None,
             mathml_annotation_xml_integration_point: false,
             live_value: None,
+            live_checked: None,
         });
         tree.append_child(doc, div);
 
@@ -1627,6 +1649,7 @@ mod tests {
                 template_contents: None,
                 mathml_annotation_xml_integration_point: false,
                 live_value: None,
+                live_checked: None,
             })
         };
         let html = mk("html");
@@ -1670,6 +1693,7 @@ mod tests {
                 template_contents: None,
                 mathml_annotation_xml_integration_point: false,
                 live_value: None,
+                live_checked: None,
             })
         };
         let parent = mk("div");
@@ -1707,6 +1731,7 @@ mod tests {
             template_contents: None,
             mathml_annotation_xml_integration_point: false,
             live_value: None,
+            live_checked: None,
         });
         tree.append_child(doc, div);
         let text = tree.new_node(NodeData::Text { contents: "hi".into() });
@@ -1799,6 +1824,7 @@ mod tests {
             template_contents: None,
             mathml_annotation_xml_integration_point: false,
             live_value: None,
+            live_checked: None,
         });
         tree.append_child(doc, el);
 
@@ -1838,6 +1864,7 @@ mod tests {
             template_contents: None,
             mathml_annotation_xml_integration_point: false,
             live_value: None,
+            live_checked: None,
         });
         dest.append_child(dest.document(), host);
 

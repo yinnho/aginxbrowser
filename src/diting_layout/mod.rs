@@ -625,14 +625,72 @@ fn color_context(
     [0, 0, 0, 255]
 }
 
+/// The label a select displays: the first option whose selectedness is on
+/// — the parsed `selected` attribute, since JS-side dirtiness rides the
+/// live_value mirror instead — else the first option, the same precedence
+/// the bootstrap's select.value getter resolves with (`opts[i].selected`
+/// falls back to the attribute there). An option's display text is its
+/// `label` attribute when present, else its content, trimmed.
+fn selected_option_label(tree: &DomTree, root: NodeId) -> Option<String> {
+    // Document order over the subtree: options are children of the select
+    // or of optgroups, so an explicit LIFO stack of reversed child lists
+    // walks exactly the order querySelectorAll('option') would match.
+    let children_rev = |id: NodeId| -> Vec<NodeId> {
+        let mut out = Vec::new();
+        let mut cur = tree.with_node(id, |n| n.first_child).flatten();
+        while let Some(c) = cur {
+            out.push(c);
+            cur = tree.with_node(c, |n| n.next_sibling).flatten();
+        }
+        out.reverse();
+        out
+    };
+    let label_of = |id: NodeId| -> String {
+        tree.with_node(id, |n| n.get_attribute("label").map(|v| v.to_string()))
+            .flatten()
+            .unwrap_or_else(|| tree.text_content(id))
+            .trim()
+            .to_string()
+    };
+    let mut first: Option<String> = None;
+    let mut stack = children_rev(root);
+    while let Some(nid) = stack.pop() {
+        let is_option = tree
+            .with_node(nid, |n| n.as_element().map(|e| e.local.as_ref() == "option"))
+            .flatten()
+            .unwrap_or(false);
+        if is_option {
+            let selected = tree
+                .with_node(nid, |n| n.get_attribute("selected").is_some())
+                .unwrap_or(false);
+            if selected {
+                return Some(label_of(nid));
+            }
+            // The first option stays the fallback even when its label is
+            // empty (Chrome shows an empty box then, not option #2).
+            if first.is_none() {
+                first = Some(label_of(nid));
+            }
+        } else {
+            // Only optgroup (and, in weird markup, anything else) can wrap
+            // options; text nodes carry no options.
+            stack.extend(children_rev(nid));
+        }
+    }
+    first.filter(|s| !s.is_empty())
+}
+
 /// The text run a form control paints inside its replaced box: the dirty
 /// value (live_value, mirrored from `el.value = x` by the bootstrap) wins,
 /// then the parsed default — value attribute for input, textContent for
 /// textarea (the same precedence the JS value getter uses, so what paints
-/// is what `el.value` reads). An empty text-like control paints its
-/// placeholder in Chrome's gray; button-ish inputs label from their value
-/// like their sizing does. Checkable inputs draw no run (widget state is
-/// future work). None for everything else.
+/// is what `el.value` reads). A select paints the label of the option its
+/// value getter would report (the bootstrap's value/selectedIndex writes
+/// land that label as live_value on the select). An empty text-like
+/// control paints its placeholder in Chrome's gray; button-ish inputs
+/// label from their value like their sizing does. Checkable inputs draw
+/// no run — the widget itself carries the state (see [`FormWidget`]).
+/// None for everything else.
 fn form_control_run(
     tree: &DomTree,
     id: NodeId,
@@ -642,7 +700,7 @@ fn form_control_run(
         .with_node(id, |n| n.as_element().map(|e| e.local.to_string()))
         .flatten()
         .unwrap_or_default();
-    if tag != "input" && tag != "textarea" {
+    if tag != "input" && tag != "textarea" && tag != "select" {
         return None;
     }
     let (font_size, bold, lh) = font_context(tree, id, styles);
@@ -655,6 +713,12 @@ fn form_control_run(
         .with_node(id, |n| n.live_value().map(|v| v.to_string()))
         .flatten();
     let run = |text: String, color: [u8; 4]| Some((text, font_size, bold, lh, color));
+    if tag == "select" {
+        let label = live
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| selected_option_label(tree, id))?;
+        return run(label.trim().to_string(), ink);
+    }
     if tag == "textarea" {
         let text = live.unwrap_or_else(|| tree.text_content(id));
         return if text.is_empty() {
@@ -944,6 +1008,7 @@ fn is_replaced_tag(tag: &str) -> bool {
     matches!(
         tag,
         "img" | "video" | "iframe" | "canvas" | "object" | "embed" | "input" | "textarea"
+            | "select"
             | "svg"
     )
 }
@@ -1204,6 +1269,20 @@ fn build_replaced_leaf(
             }
         }
         "textarea" => (177.0, 38.0, false),
+        // An atomic replaced box like the others: options never lay out as
+        // page text (a closed select paints one label). Width tracks the
+        // label it will paint — the same precedence form_control_run
+        // resolves — with control padding and dropdown-arrow room added,
+        // matching how the button arm sizes from its label.
+        "select" => {
+            let label = tree
+                .with_node(id, |n| n.live_value().map(|v| v.to_string()))
+                .flatten()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| selected_option_label(tree, id))
+                .unwrap_or_default();
+            (label.chars().count() as f32 * 8.8 + 36.0, 22.0, false)
+        }
         "canvas" => (
             aw.unwrap_or(300.0),
             ah.unwrap_or(150.0),
@@ -3252,6 +3331,17 @@ fn build_element(
     Some(node)
 }
 
+/// A checkable input's native widget (form paint batch): the replaced box
+/// draws the control itself — a bordered square with a ✓ for checkboxes, a
+/// ring with an inner dot for radios. `checked` is resolved at collect time
+/// (the live_checked mirror, else the parsed `checked` attribute) so paint
+/// stays tree-free, the same posture as the alt run.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FormWidget {
+    Checkbox { checked: bool },
+    Radio { checked: bool },
+}
+
 /// One paint primitive in document order (batch 4a) — the minimal output
 /// contract between layout and paint. `Bg` is an element's solid
 /// background-color over its border-box (rounded per border-radius, batch
@@ -3310,6 +3400,11 @@ pub enum PaintItem {
         /// Element-subtree opacity (animation batch A) applied to the
         /// placeholder fill and the alt run's color at paint time.
         alpha: f32,
+        /// A checkable input's native widget (form paint batch): when set,
+        /// paint draws the control itself instead of text — the checkedness
+        /// resolved here at collect time (live_checked mirror, else the
+        /// parsed attribute), exactly the JS getter's precedence.
+        widget: Option<FormWidget>,
     },
     /// A compiled svg subtree painted into its replaced box (svg v1): the
     /// op list is in viewBox user units with group transforms pre-flattened
@@ -4944,7 +5039,31 @@ pub fn layout_collect(
                         .get(dom_id)
                         .and_then(|s| s.background_color)
                         .is_none_or(|c| c.3 == 0);
-                    items.push(PaintItem::Replaced { rect: bg_rect, alt, fill_placeholder, alpha });
+                    // Checkable inputs resolve their widget here (dirty
+                    // mirror beats the parsed attribute — the JS getter's
+                    // precedence) so the paint executor stays tree-free.
+                    let widget = tree
+                        .with_node(*dom_id, |n| {
+                            let is_input =
+                                n.as_element().map(|e| e.local.as_ref() == "input").unwrap_or(false);
+                            if !is_input {
+                                return None;
+                            }
+                            let ty = n
+                                .get_attribute("type")
+                                .map(|v| v.to_ascii_lowercase())
+                                .unwrap_or_default();
+                            let checked = n
+                                .live_checked()
+                                .unwrap_or_else(|| n.get_attribute("checked").is_some());
+                            match ty.as_str() {
+                                "checkbox" => Some(FormWidget::Checkbox { checked }),
+                                "radio" => Some(FormWidget::Radio { checked }),
+                                _ => None,
+                            }
+                        })
+                        .flatten();
+                    items.push(PaintItem::Replaced { rect: bg_rect, alt, fill_placeholder, alpha, widget });
                 }
             }
             // A clipping element constrains its DESCENDANTS' paint (its own
