@@ -835,6 +835,64 @@ fn checkable_inputs_paint_native_widgets() {
     );
 }
 
+/// The text-carrying controls resolve their run-layout kind at collect time
+/// (form paint polish batch): text-like input → Input, button-like → Button,
+/// textarea → Textarea, select → Select — while checkables keep the widget
+/// path (no form), non-controls (img/video) carry nothing, and an authored
+/// background drops only the default shell (fill_placeholder false), not the
+/// run layout.
+#[test]
+fn form_runs_resolve_layout_kind() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::{FormRun, PaintItem};
+
+    let html = r#"<html><body>
+        <input id="text" type="text" value="x">
+        <input id="pass" type="password" value="y">
+        <input id="btn" type="button" value="Go">
+        <input id="styled" type="text" style="background:#eef" value="z">
+        <textarea id="ta">ta</textarea>
+        <select id="s"><option>A</option></select>
+        <input id="cb" type="checkbox">
+        <img id="pic" src="/x.png" alt="alt run">
+        </body></html>"#;
+    let tree = parse_html(html);
+
+    let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let (_, items, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+        &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
+    );
+    // (run text, form kind, fill) per Replaced item carrying an alt run,
+    // plus the checkbox widget entry, in document order.
+    let mut seen: Vec<(String, Option<FormRun>, bool)> = Vec::new();
+    for it in &items {
+        match it {
+            PaintItem::Replaced { alt: Some((text, ..)), form, fill_placeholder, .. } => {
+                seen.push((text.clone(), *form, *fill_placeholder));
+            }
+            PaintItem::Replaced { widget: Some(_), form, .. } => {
+                assert!(form.is_none(), "a widget control never carries a run layout kind");
+            }
+            _ => {}
+        }
+    }
+    let kind_of = |want: &str| seen.iter().find(|(t, ..)| t == want).and_then(|(_, f, _)| *f);
+    assert_eq!(kind_of("x"), Some(FormRun::Input), "text input");
+    assert_eq!(kind_of("y"), Some(FormRun::Input), "password is a text-like single-line control");
+    assert_eq!(kind_of("Go"), Some(FormRun::Button), "button input");
+    assert_eq!(kind_of("ta"), Some(FormRun::Textarea), "textarea");
+    assert_eq!(kind_of("A"), Some(FormRun::Select), "select paints its one label");
+    assert_eq!(kind_of("z"), Some(FormRun::Input), "an authored background keeps the run layout");
+    assert_eq!(kind_of("alt run"), None, "an img alt run carries no form layout");
+
+    // The default shell only paints while the author styled no background.
+    let fill_of = |want: &str| seen.iter().find(|(t, ..)| t == want).map(|(_, _, f)| *f);
+    assert_eq!(fill_of("x"), Some(true), "unstyled input paints the default shell");
+    assert_eq!(fill_of("z"), Some(false), "authored background drops the default shell");
+}
+
 /// `box-sizing` picks the edge an authored width/height/min/max measures to
 /// (the universal `* { box-sizing: border-box }` reset idiom). taffy sizes
 /// are border-box native, so the engine maps authored px over by padding +

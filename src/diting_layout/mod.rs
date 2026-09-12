@@ -3331,6 +3331,25 @@ fn build_element(
     Some(node)
 }
 
+/// How a form control lays its text run out inside the replaced box (form
+/// paint polish batch): Chrome's control padding plus vertical centering
+/// for the single-line controls, top-anchored for textarea, and the
+/// select's reserved dropdown-arrow zone. Resolved at collect time so
+/// paint stays tree-free, the same posture as [`FormWidget`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FormRun {
+    /// Text-like input: 2px side padding, vertically centered run.
+    Input,
+    /// Button-like input: light button-face field, label centered both axes.
+    Button,
+    /// Textarea: 2px padding, top-anchored — a multiline run centered
+    /// vertically would jump as it grows.
+    Textarea,
+    /// Select: like Input plus a 16px arrow zone reserved at the right,
+    /// where the executor paints the closed control's ▼ mark.
+    Select,
+}
+
 /// A checkable input's native widget (form paint batch): the replaced box
 /// draws the control itself — a bordered square with a ✓ for checkboxes, a
 /// ring with an inner dot for radios. `checked` is resolved at collect time
@@ -3405,6 +3424,12 @@ pub enum PaintItem {
         /// resolved here at collect time (live_checked mirror, else the
         /// parsed attribute), exactly the JS getter's precedence.
         widget: Option<FormWidget>,
+        /// The control's run layout (form paint polish batch): when set,
+        /// paint draws Chrome's default control shell (1px gray ring, white
+        /// field — only while the author styled no background of their own)
+        /// and insets/centers the text run per kind. Mutually exclusive with
+        /// `widget` in practice: checkables resolve None here.
+        form: Option<FormRun>,
     },
     /// A compiled svg subtree painted into its replaced box (svg v1): the
     /// op list is in viewBox user units with group transforms pre-flattened
@@ -5063,7 +5088,39 @@ pub fn layout_collect(
                             }
                         })
                         .flatten();
-                    items.push(PaintItem::Replaced { rect: bg_rect, alt, fill_placeholder, alpha, widget });
+                    // The control's run layout kind: same tag/type split the
+                    // widget arm uses, but for the text-carrying controls —
+                    // checkables take the widget path instead.
+                    let form = if widget.is_none() {
+                        tree.with_node(*dom_id, |n| {
+                            let local = n
+                                .as_element()
+                                .map(|e| e.local.to_string())
+                                .unwrap_or_default();
+                            match local.as_str() {
+                                "textarea" => Some(FormRun::Textarea),
+                                "select" => Some(FormRun::Select),
+                                "input" => {
+                                    let ty = n
+                                        .get_attribute("type")
+                                        .map(|v| v.to_ascii_lowercase())
+                                        .unwrap_or_default();
+                                    match ty.as_str() {
+                                        "button" | "submit" | "reset" => Some(FormRun::Button),
+                                        // checkbox/radio never reach here
+                                        // (widget took them); every other type
+                                        // is a text-like single-line control.
+                                        _ => Some(FormRun::Input),
+                                    }
+                                }
+                                _ => None,
+                            }
+                        })
+                        .flatten()
+                    } else {
+                        None
+                    };
+                    items.push(PaintItem::Replaced { rect: bg_rect, alt, fill_placeholder, alpha, widget, form });
                 }
             }
             // A clipping element constrains its DESCENDANTS' paint (its own

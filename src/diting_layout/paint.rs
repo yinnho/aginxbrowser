@@ -1154,6 +1154,96 @@ fn paint_form_widget(
     }
 }
 
+/// The closed select's dropdown mark (form paint polish batch): a 7×4
+/// solid ▼ centered in the 16px zone at the box's right, in the border
+/// gray — hard-edged rows like every other primitive here.
+fn paint_select_arrow(out: &mut Canvas, x: i64, y: i64, w: i64, h: i64, alpha: f32) {
+    let cx = x + w - 9;
+    let cy = y + h / 2;
+    let color = alpha_color([118, 118, 118, 255], alpha);
+    for (row, width) in [7i64, 5, 3, 1].into_iter().enumerate() {
+        out.fill_rect(cx - width / 2, cy - 2 + row as i64, width, 1, color);
+    }
+}
+
+/// A text-carrying form control's default shell + run layout (form paint
+/// polish batch): Chrome's 1px gray ring with a white field (the light
+/// button face for buttons), the run inset by the control's 2px padding —
+/// vertically centered for single-line controls, top-anchored for textarea
+/// — and a select's arrow in its reserved right zone. The shell only
+/// paints while `fill` is set (the author styled no background of their
+/// own — their bg/border already read as the box). Works in whatever
+/// coordinate space `out` is in, like [`paint_form_widget`].
+#[allow(clippy::too_many_arguments)]
+fn paint_form_control(
+    out: &mut Canvas,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+    run: Option<&(String, f32, bool, f32, [u8; 4])>,
+    form: super::FormRun,
+    fill: bool,
+    fonts: &FontBook,
+    alpha: f32,
+) {
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    if fill {
+        let border = alpha_color([118, 118, 118, 255], alpha);
+        let field = alpha_color(
+            match form {
+                super::FormRun::Button => [239, 239, 239, 255],
+                _ => [255, 255, 255, 255],
+            },
+            alpha,
+        );
+        out.fill_rounded_rect(x, y, w, h, 2.0, border);
+        out.fill_rounded_rect(x + 1, y + 1, w - 2, h - 2, 1.0, field);
+    }
+    if form == super::FormRun::Select {
+        paint_select_arrow(out, x, y, w, h, alpha);
+    }
+    let Some((text, font_size, bold, line_height, color)) = run else {
+        return;
+    };
+    if text.trim().is_empty() {
+        return;
+    }
+    // Ink stays inside the field: wrap at the box minus the padding, and
+    // the select additionally reserves its arrow zone.
+    let wrap_at = match form {
+        super::FormRun::Select => (w - 20).max(0),
+        super::FormRun::Button => w,
+        _ => (w - 4).max(0),
+    };
+    let r = fonts.rasterize_wrapped(
+        text,
+        *font_size,
+        *bold,
+        alpha_color(*color, alpha),
+        wrap_at.max(1) as f32,
+        *line_height,
+    );
+    // The line-box top the tile hangs from: centered for the single-line
+    // controls ((h − lh)/2, symmetric overflow when the box runs shorter
+    // than the line), 2px below the top edge for textarea. Button labels
+    // also center horizontally, at the estimator width the band prefilter
+    // uses — close enough to the ink the rasterizer will lay down.
+    let (tx, ty) = match form {
+        super::FormRun::Button => {
+            let est = est_width(text, *font_size).min(w as f32);
+            (x as f32 + ((w as f32 - est) / 2.0).max(2.0), y as f32 + (h as f32 - line_height) / 2.0)
+        }
+        super::FormRun::Textarea => (x as f32 + 2.0, y as f32 + 2.0),
+        _ => (x as f32 + 2.0, y as f32 + (h as f32 - line_height) / 2.0),
+    };
+    out.push_clip(x + 1, y + 1, x + w - 1, y + h - 1);
+    out.blit_text(&r, tx.round() as i64, (ty + r.top).round() as i64);
+    out.pop_clip();
+}
+
 /// Replay the paint items onto `out`. `Bg` rects come from taffy's rounded
 /// layout so the fill lands on whole pixels; each `Text` re-rasterizes
 /// wrapped at the width its containing block offered at measure time, so
@@ -1414,7 +1504,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     out.pop_clip();
                 }
             }
-            PaintItem::Replaced { rect, alt, fill_placeholder, widget, alpha } => {
+            PaintItem::Replaced { rect, alt, fill_placeholder, widget, form, alpha } => {
                 if out.xf().is_some() {
                     // Rasterize the placeholder + alt into a transparent
                     // LOCAL scratch at raw metrics (the bracket maps the
@@ -1438,6 +1528,11 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     if let Some(widget) = widget {
                         paint_form_widget(
                             &mut scratch, 0, 0, w as i64, h as i64, *widget, fonts, *alpha,
+                        );
+                    } else if let Some(form) = form {
+                        paint_form_control(
+                            &mut scratch, 0, 0, w as i64, h as i64, alt.as_ref(), *form,
+                            *fill_placeholder, fonts, *alpha,
                         );
                     } else {
                         if *fill_placeholder {
@@ -1475,6 +1570,10 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                         if w > 0 && h > 0 {
                             paint_form_widget(out, x, y, w, h, *widget, fonts, *alpha);
                         }
+                    } else if let Some(form) = form {
+                        paint_form_control(
+                            out, x, y, w, h, alt.as_ref(), *form, *fill_placeholder, fonts, *alpha,
+                        );
                     } else {
                         if *fill_placeholder && w > 0 && h > 0 {
                             out.fill_rect(x, y, w, h, alpha_color([224, 224, 224, 255], *alpha));
@@ -1818,6 +1917,7 @@ mod tests {
                 fill_placeholder: true,
                 alpha: 1.0,
                 widget: None,
+                form: None,
             },
             PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0, gradient: None },
         ];
@@ -1843,6 +1943,7 @@ mod tests {
             fill_placeholder: false,
             widget,
             alpha: 1.0,
+            form: None,
         };
         // Interior pixel classes: field is white, border gray, ink near-black.
         let field = [255, 255, 255, 255];
@@ -1887,6 +1988,115 @@ mod tests {
         execute(&items, &fonts, &mut c);
         assert_eq!(px(&c, 12, 12), [26, 26, 26, 255], "center dot survives the bracket (invariant point)");
         assert_eq!(px(&c, 6, 12), field, "field band rides the bracket");
+    }
+
+    /// Text-run layout for the text-carrying form controls (form paint
+    /// polish batch): the default shell is a 1px gray ring with a white
+    /// field (the light button face on buttons), the run insets 2px and
+    /// centers vertically for single-line controls, textarea stays
+    /// top-anchored, and a select reserves+pains its dropdown arrow at the
+    /// right. An authored background (fill=false) drops the shell but keeps
+    /// the run layout, and an empty control paints the bare shell.
+    #[test]
+    fn form_controls_pad_center_and_arrow() {
+        let fonts = crate::diting_fonts::font_book();
+        let run = |text: &str| Some((text.to_string(), 16.0, false, 19.0, [0u8, 0, 0, 255]));
+        let ctrl = |form, alt, fill| PaintItem::Replaced {
+            rect: super::super::Rect { x: 4.0, y: 4.0, width: 120.0, height: 24.0 },
+            alt,
+            fill_placeholder: fill,
+            widget: None,
+            alpha: 1.0,
+            form,
+        };
+        // Ink bbox over the whole canvas, three channels dark (the green bg
+        // and the gray ring/arrow both sit at or above 80).
+        let ink_bbox = |c: &Canvas| {
+            let mut b: Option<(usize, usize, usize, usize)> = None;
+            for y in 0..c.height {
+                for x in 0..c.width {
+                    let [r, g, bl, _] = px(c, x, y);
+                    if r < 80 && g < 80 && bl < 80 {
+                        b = Some(match b {
+                            None => (x, y, x, y),
+                            Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                        });
+                    }
+                }
+            }
+            b
+        };
+
+        // Text input: ring + white field, run padded in and centered.
+        let mut c = Canvas::new_filled(132, 34, [0, 255, 0, 255]);
+        execute(&[ctrl(Some(super::super::FormRun::Input), run("abcd"), true)], &fonts, &mut c);
+        assert_eq!(px(&c, 4, 15), [118, 118, 118, 255], "left ring band");
+        assert_eq!(px(&c, 10, 10), [255, 255, 255, 255], "white field inside the ring");
+        let (x0, y0, _x1, y1) = ink_bbox(&c).expect("input run ink");
+        assert!(x0 >= 6, "run starts at least 2px inside the box (x0={x0})");
+        assert!(y0 > 5 && y1 < 27, "run clear of the ring bands (y={y0}..{y1})");
+        let cy = (y0 + y1) as f32 / 2.0;
+        assert!((13.0..=19.0).contains(&cy), "run vertically centered on 16 (cy={cy})");
+
+        // Authored background: no shell (the canvas shows through), run keeps
+        // its layout.
+        let mut c = Canvas::new_filled(132, 34, [0, 255, 0, 255]);
+        execute(&[ctrl(Some(super::super::FormRun::Input), run("abcd"), false)], &fonts, &mut c);
+        assert_eq!(px(&c, 10, 10), [0, 255, 0, 255], "no shell without the default look");
+        assert!(ink_bbox(&c).is_some(), "the run still paints");
+
+        // Empty control: bare shell, no ink.
+        let mut c = Canvas::new_filled(132, 34, [0, 255, 0, 255]);
+        execute(&[ctrl(Some(super::super::FormRun::Input), None, true)], &fonts, &mut c);
+        assert_eq!(px(&c, 10, 10), [255, 255, 255, 255], "empty input keeps its field");
+        assert!(ink_bbox(&c).is_none(), "no run, no ink");
+
+        // Button: light button-face field, label centered horizontally.
+        let mut c = Canvas::new_filled(132, 34, [0, 255, 0, 255]);
+        execute(&[ctrl(Some(super::super::FormRun::Button), run("Go"), true)], &fonts, &mut c);
+        assert_eq!(px(&c, 10, 10), [239, 239, 239, 255], "button face");
+        let (x0, _y0, x1, _y1) = ink_bbox(&c).expect("button label ink");
+        let cx = (x0 + x1) as f32 / 2.0;
+        assert!((60.0..=68.0).contains(&cx), "label centered on the box center 64 (cx={cx})");
+
+        // Textarea: top-anchored — the whole run sits in the top half of a
+        // 40px box (a taller box than the others for the claim to bite).
+        let mut c = Canvas::new_filled(132, 50, [0, 255, 0, 255]);
+        let tall = PaintItem::Replaced {
+            rect: super::super::Rect { x: 4.0, y: 4.0, width: 120.0, height: 40.0 },
+            alt: run("line"),
+            fill_placeholder: true,
+            widget: None,
+            alpha: 1.0,
+            form: Some(super::super::FormRun::Textarea),
+        };
+        execute(&[tall], &fonts, &mut c);
+        let (_x0, y0, _x1, y1) = ink_bbox(&c).expect("textarea run ink");
+        assert!(y1 < 24, "top-anchored run stays in the top half (y={y0}..{y1})");
+
+        // Select: the dropdown arrow in the right zone, the label clear of it.
+        let mut c = Canvas::new_filled(132, 34, [0, 255, 0, 255]);
+        execute(&[ctrl(Some(super::super::FormRun::Select), run("Alpha"), true)], &fonts, &mut c);
+        // cx = 4+120−9 = 115, rows 14..17 (widths 7/5/3/1) — (115,15) is the
+        // second row's center pixel.
+        assert_eq!(px(&c, 115, 15), [118, 118, 118, 255], "dropdown arrow ink");
+        assert_eq!(px(&c, 10, 10), [255, 255, 255, 255], "select field");
+        let (x0, _y0, x1, _y1) = ink_bbox(&c).expect("select label ink");
+        assert!(x0 >= 6, "label padded 2px in (x0={x0})");
+        assert!(x1 < 110, "label stays clear of the arrow zone (x1={x1})");
+
+        // Through a transform bracket: the same shell rasterizes into the
+        // local scratch and blits through the map — 180° flip about the
+        // canvas center mirrors every probe.
+        let items = vec![
+            PaintItem::SetXf { xf: [-1.0, 0.0, 0.0, -1.0, 132.0, 34.0] },
+            ctrl(Some(super::super::FormRun::Select), run("Alpha"), true),
+            PaintItem::ClearXf,
+        ];
+        let mut c = Canvas::new_filled(132, 34, [0, 255, 0, 255]);
+        execute(&items, &fonts, &mut c);
+        assert_eq!(px(&c, 132 - 115, 34 - 15), [118, 118, 118, 255], "arrow rides the bracket");
+        assert_eq!(px(&c, 132 - 10, 34 - 10), [255, 255, 255, 255], "field rides the bracket");
     }
 
     /// A band at dy=100 reproduces exactly rows [100, 180) of the full
