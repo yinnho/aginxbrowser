@@ -18,6 +18,8 @@
 //! the fixture approach (bytes pinned both sides) and real-world pages.
 //! Regenerate with `scripts/make_font_bundle.py`.
 
+use std::sync::Arc;
+
 use crate::diting_layout::text::FontBook;
 
 /// Real family name, on purpose: pages that style `font-family: "Noto Sans
@@ -84,13 +86,22 @@ fn build_ctx(system_fonts: bool) -> parley::FontContext {
 /// with the platform's color-emoji face (when present) appended as a
 /// single-weight fallback — the same posture browsers take: the emoji font
 /// has no bold variant, and chars the primary pair lacks resolve through it.
-pub fn font_book() -> FontBook {
-    let book = FontBook::from_pairs(REGULAR.to_vec(), BOLD.to_vec())
-        .expect("bundled CJK fonts parse (regenerate via scripts/make_font_bundle.py)");
-    match platform_emoji_font() {
-        Some(bytes) => book.with_fallbacks(vec![bytes]),
-        None => book,
-    }
+///
+/// Cached in a `OnceLock`: the book used to be re-parsed per call (the
+/// video pump carried its own copy for exactly that reason), and since the
+/// raster cache (#399) keys on the book's face fingerprint, constructing
+/// the book once per process also computes that hash once.
+pub fn font_book() -> Arc<FontBook> {
+    static BOOK: std::sync::OnceLock<Arc<FontBook>> = std::sync::OnceLock::new();
+    BOOK.get_or_init(|| {
+        let book = FontBook::from_pairs(REGULAR.to_vec(), BOLD.to_vec())
+            .expect("bundled CJK fonts parse (regenerate via scripts/make_font_bundle.py)");
+        match platform_emoji_font() {
+            Some(bytes) => Arc::new(book.with_fallbacks(vec![bytes])),
+            None => Arc::new(book),
+        }
+    })
+    .clone()
 }
 
 /// Best-effort read of the host's color-emoji font (emoji batch): the
@@ -123,6 +134,14 @@ pub(crate) fn platform_emoji_font() -> Option<Vec<u8>> {
         }
     }
     None
+}
+
+/// The bundled pair as owned bytes — the raster-cache tests in
+/// `diting_layout::text` build sibling `FontBook`s from them (fingerprint
+/// isolation: same bytes = another instance, swapped = a different set).
+#[cfg(test)]
+pub(crate) fn bundled_pair_for_tests() -> (Vec<u8>, Vec<u8>) {
+    (REGULAR.to_vec(), BOLD.to_vec())
 }
 
 #[cfg(test)]

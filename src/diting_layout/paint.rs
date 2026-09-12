@@ -1487,21 +1487,33 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     if bx1 <= 0 || by1 <= 0 || bx0 >= out.width as i64 || by0 >= out.height as i64 {
                         continue;
                     }
-                    let mut r = fonts.rasterize_wrapped(text, *font_size, *bold, fill, *wrap_at, *line_height);
-                    if let Some(g) = gradient {
-                        recolor_gradient_text(&mut r, *x, *y, g);
-                    }
+                    let r = fonts.rasterize_wrapped(text, *font_size, *bold, fill, *wrap_at, *line_height);
+                    // Gradient recolor rewrites pixels in place — the cache
+                    // hands out Arcs, so that path clones first (#399).
+                    let mut owned;
+                    let r = if let Some(g) = gradient {
+                        owned = (*r).clone();
+                        recolor_gradient_text(&mut owned, *x, *y, g);
+                        &owned
+                    } else {
+                        &r
+                    };
                     out.blit_rgba_affine(&r.data, r.width, r.height, *x as f64, (*y + r.top) as f64);
                 } else {
                     if !text_reaches_band(*y, text, *font_size, *wrap_at, *line_height, dy, out.height as i64) {
                         continue;
                     }
-                    let mut r = fonts.rasterize_wrapped(text, *font_size, *bold, fill, *wrap_at, *line_height);
-                    if let Some(g) = gradient {
-                        recolor_gradient_text(&mut r, *x, *y, g);
-                    }
+                    let r = fonts.rasterize_wrapped(text, *font_size, *bold, fill, *wrap_at, *line_height);
+                    let mut owned;
+                    let r = if let Some(g) = gradient {
+                        owned = (*r).clone();
+                        recolor_gradient_text(&mut owned, *x, *y, g);
+                        &owned
+                    } else {
+                        &r
+                    };
                     // Tile row 0 sits `top` px above the leaf's line-box top.
-                    out.blit_text(&r, (x - dx).round() as i64, (y - dy + r.top).round() as i64);
+                    out.blit_text(r, (x - dx).round() as i64, (y - dy + r.top).round() as i64);
                 }
             }
         }

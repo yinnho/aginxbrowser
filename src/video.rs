@@ -357,6 +357,14 @@ impl<'a> From<&'a crate::diting_layout::text::TextRaster> for TileRef<'a> {
     }
 }
 
+/// The raster cache hands out `Arc<TextRaster>` (#399); burning borrows
+/// through the Arc without claiming a clone.
+impl<'a> From<&'a std::sync::Arc<crate::diting_layout::text::TextRaster>> for TileRef<'a> {
+    fn from(r: &'a std::sync::Arc<crate::diting_layout::text::TextRaster>) -> Self {
+        Self { width: r.width, height: r.height, data: &r.data }
+    }
+}
+
 /// Source-over blit of an RGBA tile into an RGBA buffer, clipped at the
 /// destination bounds. Same straight-alpha model as paint.rs `over`, but
 /// maintaining the destination alpha — cue tiles start transparent.

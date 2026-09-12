@@ -27,6 +27,9 @@
 //! function reported — measure and paint share one wrap truth.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use swash::proxy::MetricsProxy;
 use swash::scale::image::Content;
@@ -53,6 +56,26 @@ pub struct FontBook {
     regular: Vec<u8>,
     bold: Vec<u8>,
     fallbacks: Vec<Vec<u8>>,
+    /// Content hash of all face bytes — the raster cache's book identity.
+    /// Rasters are pure functions of (faces, text, size, bold, color, wrap,
+    /// line height), so two books with identical bytes may share cache
+    /// entries and books with different bytes must not; the hash is computed
+    /// once at construction, which is once per process for the production
+    /// book ([`crate::diting_fonts::font_book`] caches its instance).
+    fingerprint: u64,
+}
+
+/// Hash a book's whole face set into the cache identity (see
+/// [`FontBook::fingerprint`]).
+fn face_fingerprint(regular: &[u8], bold: &[u8], fallbacks: &[Vec<u8>]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    regular.hash(&mut h);
+    bold.hash(&mut h);
+    for f in fallbacks {
+        f.hash(&mut h);
+    }
+    h.finish()
 }
 
 thread_local! {
@@ -70,7 +93,8 @@ impl FontBook {
         if FontRef::from_index(&regular, 0).is_none() || FontRef::from_index(&bold, 0).is_none() {
             return None;
         }
-        Some(Self { regular, bold, fallbacks: Vec::new() })
+        let fingerprint = face_fingerprint(&regular, &bold, &[]);
+        Some(Self { regular, bold, fallbacks: Vec::new(), fingerprint })
     }
 
     /// Append single-weight fallback faces (emoji batch): unparseable bytes
@@ -81,6 +105,7 @@ impl FontBook {
     pub fn with_fallbacks(mut self, faces: Vec<Vec<u8>>) -> Self {
         self.fallbacks
             .extend(faces.into_iter().filter(|b| FontRef::from_index(b, 0).is_some()));
+        self.fingerprint = face_fingerprint(&self.regular, &self.bold, &self.fallbacks);
         self
     }
 
@@ -210,7 +235,20 @@ impl FontBook {
     /// rounded to whole pixels (no subpixel placement — ink-extent
     /// cross-checks against blitz stay within tolerance because both
     /// rasterizers cover the same outlines to within ~a pixel).
-    pub fn rasterize(&self, text: &str, font_size: f32, bold: bool, color: [u8; 4], line_height: f32) -> TextRaster {
+    pub fn rasterize(&self, text: &str, font_size: f32, bold: bool, color: [u8; 4], line_height: f32) -> Arc<TextRaster> {
+        let key = RasterKey {
+            fingerprint: self.fingerprint,
+            kind: RasterKind::Line,
+            text: text.into(),
+            font_size_bits: font_size.to_bits(),
+            bold,
+            color,
+            line_height_bits: line_height.to_bits(),
+        };
+        RasterCache::get_or_insert(key, || self.rasterize_line_uncached(text, font_size, bold, color, line_height))
+    }
+
+    fn rasterize_line_uncached(&self, text: &str, font_size: f32, bold: bool, color: [u8; 4], line_height: f32) -> TextRaster {
         let m = self.metrics(font_size, bold).unwrap_or(ScaledMetrics {
             ascent: font_size,
             descent: font_size * 0.2,
@@ -250,6 +288,29 @@ impl FontBook {
     /// function reported, so a compositor places this tile at the leaf's
     /// layout origin and the geometry lines up with the layout tree.
     pub fn rasterize_wrapped(
+        &self,
+        text: &str,
+        font_size: f32,
+        bold: bool,
+        color: [u8; 4],
+        wrap_at: f32,
+        line_height: f32,
+    ) -> Arc<TextRaster> {
+        let key = RasterKey {
+            fingerprint: self.fingerprint,
+            kind: RasterKind::Wrapped { wrap_at_bits: wrap_at.to_bits() },
+            text: text.into(),
+            font_size_bits: font_size.to_bits(),
+            bold,
+            color,
+            line_height_bits: line_height.to_bits(),
+        };
+        RasterCache::get_or_insert(key, || {
+            self.rasterize_wrapped_uncached(text, font_size, bold, color, wrap_at, line_height)
+        })
+    }
+
+    fn rasterize_wrapped_uncached(
         &self,
         text: &str,
         font_size: f32,
@@ -557,7 +618,228 @@ pub fn baseline_offset(ascent: f32, descent: f32, line_height: f32) -> f32 {
 /// `round(i × lh) + baseline_offset`. `top` is tile row 0's y in LINE-BOX
 /// coordinates (≤ 0 when ink overflows the cramped CJK box top): a
 /// compositor blits at `(box_x, box_y + top)`.
-#[derive(Debug)]
+/// The pixel-level raster cache (#399): rasterizing a run is the paint
+/// floor (~44ms/frame on text-heavy pages — every text leaf re-shapes and
+/// re-rasters every frame even when its pixels can't have changed), yet a
+/// raster is a pure function of (book faces, text, size, bold, color,
+/// wrap, line height). The diting stack has no dynamic webfont loading at
+/// all — `@font-face` at-rules drop in the CSS parser and the JS `FontFace`
+/// class is an inert stub — so the face set is constant per process and
+/// keying on the book's content fingerprint is sound with no
+/// fonts-settling gate (the swap-fallback-glyphs-pinned-by-cache hazard
+/// html-video hit cannot arise here; if webfont loading ever lands, the
+/// gate becomes a prerequisite of this cache, not of this module).
+///
+/// Budget: fixed 48 MB, clear-all on overflow. A page's working set is a
+/// few MB of tiles; the clear is a full re-raster of the next pass, rare
+/// enough in practice that LRU bookkeeping isn't worth its complexity.
+struct RasterCache;
+static RASTER_CACHE: std::sync::LazyLock<Mutex<HashMap<RasterKey, Arc<TextRaster>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static RASTER_CACHE_BYTES: AtomicUsize = AtomicUsize::new(0);
+static RASTER_CACHE_MAX: AtomicUsize = AtomicUsize::new(48 * 1024 * 1024);
+static RASTER_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static RASTER_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
+
+/// Which rasterizer a key belongs to — the single-line [`FontBook::rasterize`]
+/// and the wrapping [`FontBook::rasterize_wrapped`] produce different tiles
+/// from the same text, so the kind rides in the key.
+#[derive(PartialEq, Eq, Hash)]
+enum RasterKind {
+    Line,
+    Wrapped { wrap_at_bits: u32 },
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct RasterKey {
+    fingerprint: u64,
+    kind: RasterKind,
+    text: Box<str>,
+    font_size_bits: u32,
+    bold: bool,
+    color: [u8; 4],
+    line_height_bits: u32,
+}
+
+impl RasterCache {
+    fn get_or_insert(key: RasterKey, make: impl FnOnce() -> TextRaster) -> Arc<TextRaster> {
+        if let Some(hit) = RASTER_CACHE.lock().unwrap().get(&key) {
+            RASTER_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+            return Arc::clone(hit);
+        }
+        RASTER_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+        let raster = Arc::new(make());
+        // Rough entry weight: tile bytes plus the key's text. Tiles dominate;
+        // exactness would buy nothing the clear-all policy can spend.
+        let bytes = raster.data.len() + key.text.len() + 64;
+        let max = RASTER_CACHE_MAX.load(Ordering::Relaxed);
+        let mut map = RASTER_CACHE.lock().unwrap();
+        if bytes >= max || RASTER_CACHE_BYTES.load(Ordering::Relaxed) + bytes > max {
+            map.clear();
+            RASTER_CACHE_BYTES.store(0, Ordering::Relaxed);
+        }
+        RASTER_CACHE_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        map.insert(key, Arc::clone(&raster));
+        raster
+    }
+
+    /// Test isolation: every cache test starts from a clean slate (parallel
+    /// tests share the process-wide map).
+    #[cfg(test)]
+    fn reset() {
+        RASTER_CACHE.lock().unwrap().clear();
+        RASTER_CACHE_BYTES.store(0, Ordering::Relaxed);
+        RASTER_CACHE_HITS.store(0, Ordering::Relaxed);
+        RASTER_CACHE_MISSES.store(0, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod raster_cache_tests {
+    use super::*;
+
+    /// Serialize budget-touching tests and restore the budget on scope exit —
+    /// the env-knob guard precedent (1f7486c): the cache is process-global,
+    /// a leaked tiny budget would silently neuter every later test. The guard
+    /// OWNS the lock: releasing it at shrink() return would leave the tiny
+    /// budget exposed to a concurrent test's inserts.
+    pub(crate) struct BudgetGuard {
+        _held: std::sync::MutexGuard<'static, ()>,
+        prev: usize,
+    }
+
+    impl Drop for BudgetGuard {
+        fn drop(&mut self) {
+            RASTER_CACHE_MAX.store(self.prev, Ordering::Relaxed);
+        }
+    }
+
+    static BUDGET_LOCK: Mutex<()> = Mutex::new(());
+
+    /// A clean slate under the serialization lock — the starting posture of
+    /// every cache test (parallel tests in other modules only ever INSERT;
+    /// only these tests reset or shrink).
+    pub(crate) fn isolated() -> std::sync::MutexGuard<'static, ()> {
+        let held = BUDGET_LOCK.lock().unwrap();
+        RasterCache::reset();
+        held
+    }
+
+    pub(crate) fn shrink_budget_for_test(bytes: usize) -> BudgetGuard {
+        let _held = BUDGET_LOCK.lock().unwrap();
+        RasterCache::reset();
+        let prev = RASTER_CACHE_MAX.swap(bytes, Ordering::Relaxed);
+        BudgetGuard { _held, prev }
+    }
+
+    /// The production face bytes, for building sibling `FontBook`s in the
+    /// fingerprint test (same bytes = another instance; swapped = a different
+    /// face set).
+    fn production_pair() -> (Vec<u8>, Vec<u8>) {
+        crate::diting_fonts::bundled_pair_for_tests()
+    }
+
+    /// The cache contract's happy path: a repeated rasterize returns the SAME
+    /// tile (`Arc::ptr_eq` — no re-shaping, no re-raster), while a different
+    /// color bakes different pixels into a different tile.
+    #[test]
+    fn repeated_rasterize_shares_the_cached_tile() {
+        let (reg, bold) = production_pair();
+        let book = FontBook::from_pairs(reg, bold).unwrap();
+        let _held = isolated();
+        let black = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0);
+        let again = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0);
+        assert!(Arc::ptr_eq(&black, &again), "repeat must hand back the cached Arc");
+        assert!(black.ink_bbox().is_some(), "the tile has real ink");
+
+        let red = book.rasterize_wrapped("缓存命中", 16.0, false, [255, 0, 0, 255], 20.0, 24.0);
+        assert!(!Arc::ptr_eq(&black, &red), "color rides the key — a new tile");
+        let ink = |r: &TextRaster| {
+            r.data
+                .chunks_exact(4)
+                .filter(|p| p[3] > 200)
+                .map(|p| (p[0], p[1], p[2]))
+                .max()
+        };
+        assert_eq!(ink(&black), Some((0, 0, 0)), "black tile's opaque ink is black");
+        assert_eq!(ink(&red), Some((255, 0, 0)), "red tile's opaque ink is red");
+    }
+
+    /// `rasterize` (single line) and `rasterize_wrapped` are different
+    /// rasterizers with different tiles — the kind rides the key, so the two
+    /// must not collide even at identical text/params.
+    #[test]
+    fn line_and_wrapped_rasters_cache_separately() {
+        let (reg, bold) = production_pair();
+        let book = FontBook::from_pairs(reg, bold).unwrap();
+        let _held = isolated();
+        let text = "一行两行三行四行";
+        let line = book.rasterize(text, 16.0, false, [0, 0, 0, 255], 24.0);
+        // Narrow wrap: the same text breaks across 4+ lines, so the wrapped
+        // tile is much taller than the single-line one.
+        let wrapped = book.rasterize_wrapped(text, 16.0, false, [0, 0, 0, 255], 40.0, 24.0);
+        assert!(!Arc::ptr_eq(&line, &wrapped), "kinds must not collide");
+        assert!(
+            wrapped.height > line.height * 2,
+            "wrapped tile stacks lines ({} vs {})",
+            wrapped.height,
+            line.height
+        );
+    }
+
+    /// Budget overflow clears everything: with the budget at exactly one
+    /// entry's weight, the second insert wipes the map — the first entry's
+    /// next rasterize comes back as a fresh tile.
+    #[test]
+    fn budget_overflow_clears_all() {
+        let (reg, bold) = production_pair();
+        let book = FontBook::from_pairs(reg, bold).unwrap();
+        // Measure entry A's weight under a normal-budget lock, then shrink —
+        // two lock windows (std Mutex is not reentrant), which is safe: other
+        // budget tests serialize the same way and insert-only tests can't
+        // shrink anything.
+        let a_weight = {
+            let _held = isolated();
+            let probe = book.rasterize("ii", 8.0, false, [0, 0, 0, 255], 10.0);
+            probe.data.len() + 2 + 64
+        };
+        let _budget = shrink_budget_for_test(a_weight + 1);
+        let a1 = book.rasterize("ii", 8.0, false, [0, 0, 0, 255], 10.0);
+        let same = book.rasterize("ii", 8.0, false, [0, 0, 0, 255], 10.0);
+        assert!(Arc::ptr_eq(&a1, &same), "A alone fits the budget exactly");
+        // A longer text is a strictly heavier entry (wider tile, longer key):
+        // inserting it overflows and clears — A's tile is gone.
+        let b = book.rasterize("iiiiiiiiiiii", 8.0, false, [0, 0, 0, 255], 10.0);
+        assert!(!Arc::ptr_eq(&a1, &b));
+        let a2 = book.rasterize("ii", 8.0, false, [0, 0, 0, 255], 10.0);
+        assert!(!Arc::ptr_eq(&a1, &a2), "clear-all must evict the earlier entry");
+    }
+
+    /// The book's face fingerprint is the cache's book identity: two books
+    /// built from the same bytes share entries (either instance's tile serves
+    /// both), while a book with different face bytes gets its own.
+    #[test]
+    fn face_fingerprint_isolates_books() {
+        let (reg, bold) = production_pair();
+        let a = FontBook::from_pairs(reg.clone(), bold.clone()).unwrap();
+        let b = FontBook::from_pairs(reg.clone(), bold.clone()).unwrap();
+        // Swapped faces: a genuinely different byte set (regular slot carries
+        // the bold face and vice versa), so a different fingerprint.
+        let swapped = FontBook::from_pairs(bold, reg).unwrap();
+        let _held = isolated();
+        let r1 = a.rasterize("指纹隔离", 12.0, false, [0, 0, 0, 255], 15.0);
+        let r2 = b.rasterize("指纹隔离", 12.0, false, [0, 0, 0, 255], 15.0);
+        assert!(Arc::ptr_eq(&r1, &r2), "same face bytes share entries across instances");
+        let r3 = swapped.rasterize("指纹隔离", 12.0, false, [0, 0, 0, 255], 15.0);
+        assert!(!Arc::ptr_eq(&r1, &r3), "different face bytes must not share entries");
+    }
+}
+
+/// One rasterized text tile: what the rasterizers below return and what the
+/// paint stack blits. `Clone` exists for the mutating consumers (gradient
+/// recolor rewrites pixels in place) — the cache hands out `Arc`s, those
+/// callers clone before they mutate.
+#[derive(Debug, Clone)]
 pub struct TextRaster {
     pub width: usize,
     pub height: usize,
