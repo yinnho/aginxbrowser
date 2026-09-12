@@ -69,6 +69,19 @@ pub fn recorded_to_flow(jsonl: &str) -> Value {
                 "input",
                 json!({ "index": v["index"], "text": v["text"] }),
             )),
+            // Names-only skeleton: the recorded log never carries file bytes,
+            // so the export marks where an upload belongs and the author fills
+            // in content (or a {{var}}) during curation — replay fails loudly
+            // on a spec without content_base64 rather than uploading 0 bytes.
+            "set_files" => steps.push(step(
+                "set_files",
+                json!({
+                    "selector": v["selector"],
+                    "files": v["names"].as_array().map(|ns| {
+                        ns.iter().map(|n| json!({ "name": n })).collect::<Vec<_>>()
+                    }).unwrap_or_default(),
+                }),
+            )),
             "scroll" => steps.push(step(
                 "scroll",
                 json!({ "direction": v["direction"], "amount": v["amount"] }),
@@ -326,6 +339,40 @@ async fn exec_step(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "set_files" => {
+            let selector = str_arg(a, "selector", op)?;
+            let files = a
+                .get("files")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| "set_files: pass files as a non-empty array".to_string())?;
+            if files.is_empty() {
+                return Err("set_files: pass files as a non-empty array".into());
+            }
+            for (i, f) in files.iter().enumerate() {
+                let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                // Key present (a string) is the requirement — an empty
+                // content_base64 is a legitimate deliberate 0-byte clear, the
+                // same carve-out session_set_files documents. Key absent is
+                // the names-only skeleton a recorded export emits; replaying
+                // it would silently upload 0-byte files, so fail loudly and
+                // point at {{var}} as the fix.
+                match f.get("content_base64") {
+                    Some(Value::String(_)) => {}
+                    _ => {
+                        return Err(format!(
+                            "set_files: file {i} ({name:?}) has no content_base64 — supply it, e.g. via a {{{{var}}}} (the recorded export carries names only)"
+                        ))
+                    }
+                }
+            }
+            mgr.send(sid, |reply| C::SetFiles {
+                selector: selector.clone(),
+                files: files.clone(),
+                reply,
+            })
+            .await
+            .map_err(|e| e.to_string())
+        }
         "scroll" => {
             let direction = match a.get("direction").and_then(|v| v.as_str()) {
                 Some("up") => ScrollDirection::Up,
@@ -404,7 +451,7 @@ async fn exec_step(
             Ok(json!({ "closed": true }))
         }
         other => Err(format!(
-            "unknown op {other:?} (navigate set_content click click_xy drag input scroll eval wait viewport screenshot state cookies close)"
+            "unknown op {other:?} (navigate set_content click click_xy drag input set_files scroll eval wait viewport screenshot state cookies close)"
         )),
     }
 }
@@ -680,6 +727,18 @@ mod tests {
     }
 
     #[test]
+    fn recorded_to_flow_emits_set_files_names_only_skeleton() {
+        let jsonl = r#"{"action":"set_files","selector":"input[type=file]","names":["a.png","b.png"],"ok":true}"#;
+        let doc = recorded_to_flow(jsonl);
+        let step = &doc["steps"][0];
+        assert_eq!(step["op"], "set_files");
+        assert_eq!(step["args"]["selector"], "input[type=file]");
+        // Names carried through; no content_base64 key anywhere — the skeleton
+        // the author fills in during curation.
+        assert_eq!(step["args"]["files"], json!([{ "name": "a.png" }, { "name": "b.png" }]));
+    }
+
+    #[test]
     fn substitute_handles_whole_embedded_nested_and_errors() {
         let mut vars = Map::new();
         vars.insert("q".into(), json!("rust engine"));
@@ -768,6 +827,58 @@ mod tests {
             .await
             .unwrap();
         assert!(state.contains("hi flow"));
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
+    /// set_files in a flow: the upload lands on the page's file input and the
+    /// File metadata is readable back from JS — the same machinery
+    /// session_set_files drives.
+    #[tokio::test]
+    async fn run_flow_set_files_uploads() {
+        let mut mgr = SessionManager::new();
+        let flow = json!({
+            "steps": [
+                { "op": "set_content", "args": { "html": "<html><body><input id='f' type='file'></body></html>" } },
+                { "op": "set_files", "args": {
+                    "selector": "#f",
+                    "files": [
+                        { "name": "a.txt", "content_base64": "aGVsbG8=" },
+                        { "name": "empty.bin", "content_base64": "" }
+                    ]
+                } },
+                { "op": "eval", "args": {
+                    "script": "(() => { const fs = document.getElementById('f').files; return [fs.length, fs[0].name, fs[0].size, fs[1].name, fs[1].size].join('|'); })()"
+                }, "save": "files" },
+            ]
+        });
+        let receipt = run_flow(&mut mgr, &flow, &Map::new(), None).await;
+        assert_eq!(receipt["status"], "ok", "receipt: {receipt}");
+        assert_eq!(receipt["steps_done"], 3);
+        // "hello" is 5 bytes; the deliberate 0-byte clear file is 0.
+        assert_eq!(receipt["saved"]["files"], "2|a.txt|5|empty.bin|0");
+
+        let sid = receipt["session_id"].as_str().unwrap().to_string();
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
+    /// The names-only skeleton a recorded export emits must fail loudly at
+    /// the set_files step — not silently upload 0-byte files.
+    #[tokio::test]
+    async fn run_flow_set_files_names_only_skeleton_fails_loudly() {
+        let mut mgr = SessionManager::new();
+        let flow = json!({
+            "steps": [
+                { "op": "set_content", "args": { "html": "<html><body><input id='f' type='file'></body></html>" } },
+                { "op": "set_files", "args": { "selector": "#f", "files": [{ "name": "a.txt" }] } },
+            ]
+        });
+        let receipt = run_flow(&mut mgr, &flow, &Map::new(), None).await;
+        assert_eq!(receipt["status"], "failed");
+        assert_eq!(receipt["failed_step"], 1);
+        let reason = receipt["reason"].as_str().unwrap();
+        assert!(reason.contains("content_base64"), "reason: {reason}");
+        assert!(reason.contains("{{var}}"), "reason: {reason}");
+        let sid = receipt["session_id"].as_str().unwrap().to_string();
         assert!(mgr.close_and_wait(&sid).await);
     }
 
