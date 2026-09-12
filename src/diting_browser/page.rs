@@ -2154,10 +2154,11 @@ impl Page {
         expression: &str,
         return_by_value: bool,
         await_promise: bool,
+        await_budget_ms: u64,
     ) -> crate::diting_js::runtime::EvalOutcome {
         if let Some(js) = &mut self.js {
             match js
-                .evaluate_for_cdp_outcome(expression, return_by_value, await_promise)
+                .evaluate_for_cdp_outcome(expression, return_by_value, await_promise, await_budget_ms)
                 .await
             {
                 Ok(outcome) => outcome,

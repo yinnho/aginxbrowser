@@ -14,6 +14,12 @@ use crate::diting_js::ops::{build_extension, JsState};
 
 static SNAPSHOT: &[u8] = include_bytes!(env!("AGINXBROWSER_SNAPSHOT_PATH"));
 
+/// Budget for awaiting a script's promise before declaring an eval timeout.
+/// The session eval face exposes this per-call (`timeout_ms`); callers that
+/// do slow page-side work (uploads through the page's own fetch) pass a
+/// larger budget instead of hitting a silent-null (0.4.1 taobao report).
+pub const DEFAULT_AWAIT_BUDGET_MS: u64 = 5000;
+
 /// CDP `Runtime.RemoteObject` shape returned by evaluate paths. Our HTTP
 /// surface only reads `value`; the rest is the CDP serialization contract
 /// (kept so a CDP consumer can adopt it without reshaping).
@@ -795,7 +801,12 @@ impl JsRuntime {
         await_promise: bool,
     ) -> Result<RemoteObjectInfo, String> {
         match self
-            .evaluate_for_cdp_outcome(expression, return_by_value, await_promise)
+            .evaluate_for_cdp_outcome(
+                expression,
+                return_by_value,
+                await_promise,
+                DEFAULT_AWAIT_BUDGET_MS,
+            )
             .await?
         {
             EvalOutcome {
@@ -835,6 +846,7 @@ impl JsRuntime {
         expression: &str,
         return_by_value: bool,
         await_promise: bool,
+        await_budget_ms: u64,
     ) -> Result<EvalOutcome, String> {
         self.object_counter += 1;
         let oid = self.make_oid(self.object_counter);
@@ -932,14 +944,32 @@ impl JsRuntime {
         if await_promise {
             let __t0 = std::time::Instant::now();
             let sentinel = format!("globalThis.__diting_done_{done_counter} === true");
-            self.resolve_promises_until(
+            let settled = self.resolve_promises_until(
                 |rt| rt.runtime.execute_script("<done?>", sentinel.clone())
                     .ok()
                     .and_then(|v| rt.v8_to_json(v).ok())
                     .and_then(|j| j.as_bool())
                     .unwrap_or(false),
-                5000,
+                await_budget_ms,
             ).await;
+            // An unset sentinel means the budget expired with the promise
+            // still pending: the result slot was never assigned, so falling
+            // through would read `undefined` and surface as a silent
+            // `null` — indistinguishable from a genuine null return (the
+            // 0.4.1 taobao report's intermittent `result: null` mid
+            // batch-upload). Tell the truth instead: the script may still
+            // be running, callers must verify side effects before retry.
+            if !settled {
+                let preview: String = expression.chars().take(80).collect();
+                tracing::warn!(
+                    "eval await exceeded {}ms budget (still pending): '{}'",
+                    await_budget_ms, preview
+                );
+                return Err(format!(
+                    "EVAL_TIMEOUT: expression did not settle within {}ms — the script may still be running; verify side effects before retrying",
+                    await_budget_ms
+                ));
+            }
             let __dt = __t0.elapsed();
             if __dt > std::time::Duration::from_secs(1) {
                 let preview: String = expression
@@ -1153,14 +1183,22 @@ impl JsRuntime {
                 .map_err(|e| format!("JS error: {}", e))?;
 
             let sentinel = format!("globalThis.__diting_done_{done_counter} === true");
-            self.resolve_promises_until(
+            let settled = self.resolve_promises_until(
                 |rt| rt.runtime.execute_script("<done?>", sentinel.clone())
                     .ok()
                     .and_then(|v| rt.v8_to_json(v).ok())
                     .and_then(|j| j.as_bool())
                     .unwrap_or(false),
-                5000,
+                DEFAULT_AWAIT_BUDGET_MS,
             ).await;
+            // Same contract as evaluate_for_cdp_outcome: an unsettled budget
+            // must not fall through to an empty result slot (silent null).
+            if !settled {
+                return Err(format!(
+                    "EVAL_TIMEOUT: callFunctionOn did not settle within {}ms — the function may still be running; verify side effects before retrying",
+                    DEFAULT_AWAIT_BUDGET_MS
+                ));
+            }
 
             let rejected = self
                 .runtime
@@ -1799,7 +1837,7 @@ impl JsRuntime {
     /// added ~7s per click because Puppeteer's `isIntersectingViewport`
     /// disconnects its observer in the callback, but our scheduled
     /// re-fires keep the event loop "busy" until they all fire.
-    pub async fn resolve_promises_until<F>(&mut self, mut done_check: F, max_total_ms: u64)
+    pub async fn resolve_promises_until<F>(&mut self, mut done_check: F, max_total_ms: u64) -> bool
     where
         F: FnMut(&mut Self) -> bool,
     {
@@ -1811,8 +1849,13 @@ impl JsRuntime {
         // whole wait with the V8 watchdog: on fire, exit early (disarm cancels
         // the termination so the isolate stays usable).
         let wd = self.arm_watchdog(std::time::Duration::from_millis(max_total_ms + 500));
+        // False on deadline/watchdog: the caller must not read a result slot
+        // the script never assigned (that's how a timeout used to become a
+        // silent `null`).
+        let mut settled = false;
         loop {
             if done_check(self) {
+                settled = true;
                 break;
             }
             if tokio::time::Instant::now() >= deadline {
@@ -1834,6 +1877,7 @@ impl JsRuntime {
         if self.disarm_watchdog(wd) {
             tracing::warn!("promise wait terminated by watchdog (sync spin in event loop)");
         }
+        settled
     }
     #[cfg_attr(not(test), allow(dead_code))] // used by suspend_js/resume_js lifecycle tests
     pub fn take_dom(&self) -> Option<DomTree> {

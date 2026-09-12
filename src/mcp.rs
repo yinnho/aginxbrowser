@@ -337,6 +337,13 @@ pub struct SessionEvalParams {
     pub session_id: String,
     /// JavaScript code to execute
     pub script: String,
+    /// Await budget for the script's promise in ms (default 5000, clamped
+    /// 100..120000). Pass a larger budget for slow page-side work such as
+    /// uploads through the page's own fetch; on expiry the tool errors with
+    /// EVAL_TIMEOUT (the script may still be running) instead of returning
+    /// a null result.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -1376,6 +1383,7 @@ navigation moves the session's URL. JS exceptions are reported with name, line/c
         let mut mgr = session::SESSIONS.lock().await;
         match mgr.send(&params.session_id, |reply| SessionCommand::Eval {
             script: params.script.clone(),
+            timeout_ms: params.timeout_ms,
             reply,
         }).await {
             Ok(result) => stamped_json(json!({ "result": result }), &mgr, &params.session_id),
@@ -1614,6 +1622,7 @@ bash, PowerShell and cmd copy flavors.",
                         let measured = mgr
                             .send(&sid, |reply| SessionCommand::Eval {
                                 script: VIEWPORT_PROBE.to_string(),
+                                timeout_ms: None,
                                 reply,
                             })
                             .await

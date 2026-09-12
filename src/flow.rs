@@ -330,7 +330,10 @@ async fn exec_step(
         }
         "eval" => {
             let script = str_arg(a, "script", op)?;
-            mgr.send(sid, |reply| C::Eval { script: script.clone(), reply })
+            // Flow eval steps ride the default await budget; a flow needing a
+            // longer one passes `timeout_ms` (same clamp as the HTTP face).
+            let timeout_ms = a.get("timeout_ms").and_then(|v| v.as_u64());
+            mgr.send(sid, |reply| C::Eval { script: script.clone(), timeout_ms, reply })
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -426,7 +429,7 @@ async fn run_expect(
         }
     };
     let v = mgr
-        .send(sid, |reply| SessionCommand::Eval { script, reply })
+        .send(sid, |reply| SessionCommand::Eval { script, timeout_ms: None, reply })
         .await
         .map_err(|e| e.to_string())?;
     if js_truthy(&v) {
@@ -452,6 +455,7 @@ async fn fail_receipt(
     let url = if last_url.is_null() {
         mgr.send(sid, |reply| SessionCommand::Eval {
             script: "location.href".into(),
+            timeout_ms: None,
             reply,
         })
         .await

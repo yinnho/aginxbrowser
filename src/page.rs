@@ -74,8 +74,23 @@ impl Page {
     /// back as `Err("TypeError: boom (line 1, col 14)\n    at <anonymous>:1:14")`
     /// instead of collapsing to Null — agents can't debug what they can't
     /// see. The position is the user-script frame from the error's stack.
-    pub async fn evaluate_async_checked(&mut self, expression: &str) -> Result<Value, String> {
-        let outcome = self.inner.evaluate_for_cdp_outcome(expression, true, true).await;
+    /// `timeout_ms` widens the await budget for scripts whose page-side work
+    /// (uploads via the page's own fetch) legitimately outlives the default
+    /// 5s; on expiry the call errors with EVAL_TIMEOUT instead of a silent
+    /// null — the script may still be running, so verify side effects
+    /// before retrying. Clamped to 100ms..120s.
+    pub async fn evaluate_async_checked(
+        &mut self,
+        expression: &str,
+        timeout_ms: Option<u64>,
+    ) -> Result<Value, String> {
+        let budget = timeout_ms
+            .unwrap_or(crate::diting_js::runtime::DEFAULT_AWAIT_BUDGET_MS)
+            .clamp(100, 120_000);
+        let outcome = self
+            .inner
+            .evaluate_for_cdp_outcome(expression, true, true, budget)
+            .await;
         if let Some(exc) = outcome.exception {
             let mut msg = exc.description;
             if let (Some(line), Some(col)) = (exc.line, exc.col) {

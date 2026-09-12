@@ -5012,7 +5012,13 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
   }
 
   open(method, url, async_) {
-    this._method = method;
+    // Fetch-spec "normalize a method": a token that byte-uppercases to a
+    // standard method is sent uppercased; custom tokens ride as authored.
+    // Pages hand us lowercase ('get'/'put' from the Ali SDK) and the network
+    // layer compares methods case-sensitively, so passthrough broke CORS
+    // safelist matching and Allow-Methods checks (taobao report ⑤).
+    const up = String(method).toUpperCase();
+    this._method = /^(CONNECT|DELETE|GET|HEAD|OPTIONS|POST|PUT|TRACE)$/.test(up) ? up : String(method);
     this._url = url;
     this._headers = {};
     this._responseHeaders = {};

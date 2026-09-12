@@ -840,6 +840,24 @@ List live sessions — the discovery twin of `/session/create` (reuse an idle se
 
 Sessions are process-global and shared across callers (HTTP and MCP alike) — that's what makes "one instance per machine, every agent shares it" work.
 
+### GET /sessions
+
+The full listing — every live session with its current page URL, so an agent resuming work can find "the session that was on the publish page" without guessing ids. Each entry asks its session thread for the URL with a 250ms budget, so a session pinned mid-eval reports `"url": null` instead of stalling the listing.
+
+**Response:**
+
+```json
+{
+  "count": 2,
+  "sessions": [
+    {"session_id": "s_1", "url": "https://example.com/publish", "idle_secs": 12, "expires_in_secs": 468, "keepalive": false, "persistent": true},
+    {"session_id": "s_2", "url": null, "idle_secs": 3, "expires_in_secs": 477, "keepalive": false, "persistent": false}
+  ]
+}
+```
+
+`expires_in_secs` is absent for `keepalive` sessions (they never auto-evict); `persistent` marks sessions whose login state is snapshotted and revivable. Close entries with `POST /session/{id}/close`. `/session/list` remains the lightweight sibling (id + idle age only, no per-session round-trips).
+
 ### POST /session/{id}/navigate
 
 Navigate to a new URL.
@@ -961,15 +979,20 @@ Execute JavaScript within the session.
 
 **Request fields:**
 
-| Field | Type | Required | Description |
-|------|------|------|------|
-| script | string | ✅ | JS code (async supported) |
+| Field | Type | Required | Default | Description |
+|------|------|------|------|------|
+| script | string | ✅ | — | JS code (async supported) |
+| timeout_ms | u64 | | `5000` | Await budget for the script's promise, clamped 100..120000. Slow page-side work (an upload driven through the page's own fetch) legitimately outlives the default — raise it per call instead of retrying blind |
 
 **Response:**
 
 ```json
 {"result": "..."}
 ```
+
+**Error semantics:** a script whose promise never settles does **not** come back as `{result: null}` — it's an HTTP 504 with `{"error": "EVAL_TIMEOUT: expression did not settle within 5000ms — the script may still be running; verify side effects before retrying"}`. The message is a warning on purpose: the script may have completed its side effects after the budget expired (a submit that landed, a write that went through), so verify before retrying rather than firing it again. Genuine JS `null` still returns `200 {"result": null}`; a throwing/rejecting script returns `EVAL_ERROR` with name, message, throw position and first stack frame.
+
+**Body limit:** request bodies up to 64 MiB by default (raise with `AGINXBROWSER_MAX_BODY_BYTES`); oversized bodies get a structured `413 {"error": "EVAL_BODY_TOO_LARGE: request body exceeded the 67108864-byte limit ..."}` instead of a bare-text rejection. The same limit covers `/screenshot`, `/video` and `/pdf`.
 
 ### POST /session/{id}/close
 
@@ -1095,7 +1118,7 @@ One of `flow` / `name` is required.
 
 - `vars` — default values for `{{placeholders}}` in `create` and step args; request `vars` override them. Substituting an undeclared var fails fast with a receipt (no session created).
 - `create` — passed to `POST /session/create` semantics (url / cookies / use_proxy / viewport / …); skipped entirely when `session_id` is given.
-- `steps[]` — `op` is one of the session verbs: `navigate`, `set_content`, `click`, `click_xy`, `drag`, `input`, `scroll`, `viewport`, `wait`, `eval`. `expect` (optional) gates the step: `url_contains`, `selector`, `text_contains`, `eval_truthy` — all must hold. `save` (optional) stores the step's result under that key in the receipt.
+- `steps[]` — `op` is one of the session verbs: `navigate`, `set_content`, `click`, `click_xy`, `drag`, `input`, `scroll`, `viewport`, `wait`, `eval` (`eval` steps accept an optional `timeout_ms`, same clamp as the eval endpoint). `expect` (optional) gates the step: `url_contains`, `selector`, `text_contains`, `eval_truthy` — all must hold. `save` (optional) stores the step's result under that key in the receipt.
 - On failure the flow aborts at the failing step and the receipt carries `status:"failed"`, `failed_step`, `reason`, the page `url`, a viewport `screenshot` (base64), everything `saved` so far — and the session **stays alive** for manual takeover (`session_id` in the receipt).
 
 **Response (ok):**
@@ -1515,7 +1538,7 @@ The output is deterministic — same input, same bytes — and the receipt carri
 
 #### Session Operation Parameters
 
-All session operations require the `session_id` parameter. `click`/`input` also need `index` (from `session_state`); `input` additionally needs `text`; `eval` needs `script`; `navigate` needs `url`; `clone` needs nothing but the source id. The acting/rendering tools take optional extras: `click_xy` needs `x`/`y` (optional `button`, `click_count`); `drag` needs `from`/`to` (optional `steps`, `delay_ms`); `viewport` accepts `width`/`height`/`mobile` (all optional — omit to keep current); `screenshot` accepts `width`/`height`/`full_page`/`selector`/`selector_all`; `wait` takes exactly one of `selector` / `predicate` plus `timeout_ms` (default 10000, max 120000); `export` accepts `format` (`bash` default / `jsonl` / `json` for a flow document); `flow_run` takes exactly one of `flow` / `name`, plus optional `vars` and `session_id`; `network` accepts `filter: "media"` or `include_bodies: true` (plus `url_contains`/`body_max_chars`); `dialog` accepts `action` (`list` default / `accept` / `dismiss`) plus optional `prompt_text`; `console` accepts `level`/`since_ts`/`url_contains`/`limit`; `storage`/`cookies` take only `session_id`.
+All session operations require the `session_id` parameter. `click`/`input` also need `index` (from `session_state`); `input` additionally needs `text`; `eval` needs `script` (optional `timeout_ms`, default 5000, clamped 100..120000 — a script that outlives the budget returns `EVAL_TIMEOUT` instead of a silent null); `navigate` needs `url`; `clone` needs nothing but the source id. The acting/rendering tools take optional extras: `click_xy` needs `x`/`y` (optional `button`, `click_count`); `drag` needs `from`/`to` (optional `steps`, `delay_ms`); `viewport` accepts `width`/`height`/`mobile` (all optional — omit to keep current); `screenshot` accepts `width`/`height`/`full_page`/`selector`/`selector_all`; `wait` takes exactly one of `selector` / `predicate` plus `timeout_ms` (default 10000, max 120000); `export` accepts `format` (`bash` default / `jsonl` / `json` for a flow document); `flow_run` takes exactly one of `flow` / `name`, plus optional `vars` and `session_id`; `network` accepts `filter: "media"` or `include_bodies: true` (plus `url_contains`/`body_max_chars`); `dialog` accepts `action` (`list` default / `accept` / `dismiss`) plus optional `prompt_text`; `console` accepts `level`/`since_ts`/`url_contains`/`limit`; `storage`/`cookies` take only `session_id`.
 
 ### Client Configuration
 
@@ -1628,6 +1651,7 @@ If AginxBrowser is deployed on a remote server, connect through an SSH tunnel:
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL (seconds); `0` disables |
 | `AGINXBROWSER_MCP_ALLOWED_HOSTS` | unset | Extra `Host` values accepted by `/mcp` (comma-separated) — the DNS-rebinding guard defaults to loopback; add your LAN IP / Docker hostname when other machines call the instance |
 | `AGINXBROWSER_DOWNLOAD_DIR` | `.` | Directory where `/download` saves files |
+| `AGINXBROWSER_MAX_BODY_BYTES` | `67108864` (64 MiB) | Max request body for `/eval`-family POST endpoints (`/session/{id}/eval`, `/screenshot`, `/video`, `/pdf`). Oversized bodies get a structured `413 EVAL_BODY_TOO_LARGE` naming the limit |
 | `AGINXBROWSER_WORKFLOW_DIR` | `./workflow` | Where `flow_run(name=…)` looks for `<name>/flow.json` assets (resolved from the server's working directory); drop a directory in to deploy, no rebuild |
 | `AGINXBROWSER_PROXY` | None | Proxy address (used when `use_proxy:true`, and applied automatically for browser/session/CDP navigations to known-blocked domains) |
 | `CAPTCHA_SOLVER_API_KEY` | None | 2captcha API key; enables automatic CAPTCHA solving when set |

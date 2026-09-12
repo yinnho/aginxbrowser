@@ -684,6 +684,7 @@ pub enum AppError {
     BadRequest(String),
     Forbidden(String),
     NotFound(String),
+    PayloadTooLarge(String),
     TooManyRequests(String),
     BadGateway(String),
     GatewayTimeout(String),
@@ -697,6 +698,7 @@ impl IntoResponse for AppError {
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            AppError::PayloadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg),
             AppError::TooManyRequests(msg) => (StatusCode::TOO_MANY_REQUESTS, msg),
             AppError::BadGateway(msg) => (StatusCode::BAD_GATEWAY, msg),
             AppError::GatewayTimeout(msg) => (StatusCode::GATEWAY_TIMEOUT, msg),
@@ -802,6 +804,19 @@ pub struct SessionScrollRequest {
     pub amount: u32,
 }
 
+/// Request-body ceiling for the JSON-heavy routes (session eval, /screenshot,
+/// /video, /pdf). Default 64 MiB, raised via AGINXBROWSER_MAX_BODY_BYTES —
+/// the axum default of 2 MiB rejected base64 image payloads before the
+/// script even ran (0.4.1 taobao report, problem 1). Read once at router
+/// construction; eval's 413 classification re-reads it so the message always
+/// names the limit actually in force.
+fn max_body_bytes() -> usize {
+    std::env::var("AGINXBROWSER_MAX_BODY_BYTES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(64 * 1024 * 1024)
+}
+
 fn default_scroll_direction() -> session::ScrollDirection {
     session::ScrollDirection::Down
 }
@@ -813,6 +828,14 @@ fn default_scroll_amount() -> u32 {
 #[derive(Debug, Deserialize)]
 pub struct SessionEvalRequest {
     pub script: String,
+    /// Await budget for the script's promise in ms (default 5000, clamped
+    /// 100..120000). Slow page-side work — uploads through the page's own
+    /// fetch — legitimately outlives the default; on expiry the call
+    /// returns HTTP 504 with an EVAL_TIMEOUT error (the script may still
+    /// be running) instead of a silent `result: null` (0.4.1 taobao
+    /// report).
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -941,7 +964,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/session/:id/viewport", post(session_viewport_handler))
         .route("/session/:id/screenshot", post(session_screenshot_handler))
         .route("/session/:id/wait", post(session_wait_handler))
-        .route("/session/:id/eval", post(session_eval_handler))
+        .route("/session/:id/eval", post(session_eval_handler)
+            .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes())))
+        .route("/sessions", get(sessions_handler))
         .route("/session/:id/close", post(session_close_handler))
         .route("/mcp", get(mcp_handler).post(mcp_handler))
         // CDP bridge — Playwright connectOverCDP / Puppeteer connect surface.
@@ -955,9 +980,12 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(feature = "screenshot")]
     let app = app
-        .route("/screenshot", post(screenshot_handler))
-        .route("/video", post(video_handler))
-        .route("/pdf", post(pdf_handler));
+        .route("/screenshot", post(screenshot_handler)
+            .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes())))
+        .route("/video", post(video_handler)
+            .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes())))
+        .route("/pdf", post(pdf_handler)
+            .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes())));
 
     let bind_addr = std::env::var("AGINXBROWSER_BIND").unwrap_or_else(|_| "0.0.0.0:8089".to_string());
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
@@ -1543,6 +1571,14 @@ fn session_err(e: session::SessionError) -> AppError {
         session::SessionError::NotFound(msg) | session::SessionError::Expired(msg) => {
             AppError::NotFound(msg)
         }
+        // An await-budget expiry is a timeout, not a bad script — 504 lets
+        // callers branch on "retry slower / raise timeout_ms" separately
+        // from "my script threw" (0.4.1 taobao report, problem 2).
+        session::SessionError::Eval(msg)
+            if msg.contains("timed out") || msg.contains("EVAL_TIMEOUT") =>
+        {
+            AppError::GatewayTimeout(msg)
+        }
         session::SessionError::Eval(msg) => AppError::BadRequest(msg),
         session::SessionError::ThreadDied(msg) => AppError::ServiceUnavailable(msg),
         session::SessionError::Command(msg) => AppError::Internal(msg),
@@ -1557,18 +1593,6 @@ async fn session_state_handler(
         .map_err(session_err)?;
     // Return as plain text for token efficiency.
     Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], compact_text))
-}
-
-async fn session_cookies_handler(
-    axum::extract::Path(id): axum::extract::Path<String>,
-) -> Result<impl IntoResponse, AppError> {    let mut mgr = session::SESSIONS.lock().await;
-    let text = mgr.send(&id, |reply| session::SessionCommand::Cookies { reply }).await
-        .map_err(session_err)?;
-    // `text` is a JSON string {"url":...,"cookies":[...]} from the session
-    // thread; parse it back so we emit a real JSON response.
-    let val: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| AppError::Internal(format!("cookies parse error: {}", e)))?;
-    Ok((StatusCode::OK, Json(val)))
 }
 
 /// Snapshot the session's localStorage/sessionStorage (round-trips with
@@ -1906,16 +1930,85 @@ async fn session_screenshot_handler(
     Ok((StatusCode::OK, Json(body)))
 }
 
+/// Classify an eval-body rejection into a structured AppError. The default
+/// axum rejection for an over-limit body is a bare-text 413 ("Failed to
+/// buffer the request body: length limit exceeded") — callers pushing
+/// base64 payloads through eval need the code and the limit in a shape
+/// they can branch on (0.4.1 taobao report, problem 1).
+fn eval_body_rejection(body_text: String, limit_bytes: usize) -> AppError {
+    if body_text.contains("length limit") {
+        AppError::PayloadTooLarge(format!(
+            "EVAL_BODY_TOO_LARGE: request body exceeded the {}-byte limit \
+             (raise AGINXBROWSER_MAX_BODY_BYTES or move binary payloads off eval): {}",
+            limit_bytes, body_text
+        ))
+    } else {
+        AppError::BadRequest(format!("invalid JSON body: {}", body_text))
+    }
+}
+
 async fn session_eval_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
-    Json(req): Json<SessionEvalRequest>,
+    payload: Result<Json<SessionEvalRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<impl IntoResponse, AppError> {
+    let Json(req) = payload.map_err(|rej| eval_body_rejection(rej.body_text(), max_body_bytes()))?;
     let mut mgr = session::SESSIONS.lock().await;
     let result = mgr.send(&id, |reply| session::SessionCommand::Eval {
         script: req.script,
+        timeout_ms: req.timeout_ms,
         reply,
     }).await.map_err(session_err)?;
     Ok((StatusCode::OK, Json(serde_json::json!({ "result": result }))))
+}
+
+/// Live sessions with their identity — the P2 ask from the 0.4.1 taobao
+/// report: the homepage shows a count, agents need "which session is on
+/// which page". The URL rides a cheap per-session Url command with a short
+/// timeout so a session pinned inside a long eval can't wedge the listing
+/// (it reports `url: null` instead).
+async fn sessions_handler() -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    mgr.evict_expired();
+    let entries = mgr.list();
+    let mut out = Vec::with_capacity(entries.len());
+    for e in &entries {
+        let url = match tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            mgr.send(&e.session_id, |reply| session::SessionCommand::Url { reply }),
+        ).await {
+            Ok(Ok(u)) => Some(u),
+            // Busy (mid-eval), expired, or gone — identity probe is best
+            // effort; the listing must never block on one session.
+            _ => None,
+        };
+        out.push(serde_json::json!({
+            "session_id": e.session_id,
+            "url": url,
+            "idle_secs": e.idle_secs,
+            "expires_in_secs": e.expires_in_secs,
+            "keepalive": e.keepalive,
+            "persistent": e.persistent,
+        }));
+    }
+    Ok((StatusCode::OK, Json(serde_json::json!({
+        "count": out.len(),
+        "sessions": out,
+    }))))
+}
+
+/// Cookie read-back for one session — the HTTP-face mirror of the MCP
+/// `session_cookies` tool (the Cookies command already existed; only the
+/// route was missing). Values are the full Set-Cookie form so the output
+/// round-trips with `POST /session/create`'s `cookies` field.
+async fn session_cookies_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    let text = mgr.send(&id, |reply| session::SessionCommand::Cookies { reply }).await
+        .map_err(session_err)?;
+    let val: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| AppError::Internal(format!("cookies parse error: {}", e)))?;
+    Ok((StatusCode::OK, Json(val)))
 }
 
 /// Wait for a selector/predicate with the page's event loop driven between
@@ -2174,6 +2267,30 @@ mod tests {
 
     // /pdf defaults likewise: a 0×0 page size or 0-page cap would break the
     // pagination math, so the serde defaults are the contract.
+    // 0.4.1 taobao report problem 1: an over-limit body must classify as a
+    // structured 413 carrying the code and the limit in force, not axum's
+    // bare-text page. The length-limit text below is axum 0.7's verbatim
+    // rejection body — pinned so an upstream wording change fails loudly here
+    // instead of silently downgrading 413s to 400s.
+    #[test]
+    fn eval_body_rejection_classifies_length_limit_as_payload_too_large() {
+        match eval_body_rejection(
+            "Failed to buffer the request body: length limit exceeded".into(),
+            67_108_864,
+        ) {
+            AppError::PayloadTooLarge(msg) => {
+                assert!(msg.contains("EVAL_BODY_TOO_LARGE"), "got: {msg}");
+                assert!(msg.contains("67108864"), "message names the limit: {msg}");
+            }
+            _ => panic!("expected PayloadTooLarge"),
+        }
+        // Any other rejection stays a malformed-JSON 400.
+        match eval_body_rejection("expected value at line 1 column 1".into(), 67_108_864) {
+            AppError::BadRequest(msg) => assert!(msg.contains("invalid JSON body"), "got: {msg}"),
+            _ => panic!("expected BadRequest"),
+        }
+    }
+
     #[cfg(feature = "screenshot")]
     #[test]
     fn pdf_request_defaults_are_materialized() {

@@ -2489,7 +2489,7 @@
     async fn test_evaluate_outcome_reports_sync_throw() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let outcome = rt
-            .evaluate_for_cdp_outcome("(() => { throw new Error('sync-boom') })()", false, false)
+            .evaluate_for_cdp_outcome("(() => { throw new Error('sync-boom') })()", false, false, DEFAULT_AWAIT_BUDGET_MS)
             .await
             .unwrap();
         let exc = outcome.exception.expect("expected exception");
@@ -2504,7 +2504,7 @@
     async fn test_evaluate_outcome_reports_sync_throw_by_value() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let outcome = rt
-            .evaluate_for_cdp_outcome("(() => { throw new Error('bv-boom') })()", true, false)
+            .evaluate_for_cdp_outcome("(() => { throw new Error('bv-boom') })()", true, false, DEFAULT_AWAIT_BUDGET_MS)
             .await
             .unwrap();
         let exc = outcome.exception.expect("expected exception");
@@ -2516,13 +2516,48 @@
     async fn test_evaluate_outcome_reports_await_rejection() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let outcome = rt
-            .evaluate_for_cdp_outcome("Promise.reject(new Error('boom'))", true, true)
+            .evaluate_for_cdp_outcome("Promise.reject(new Error('boom'))", true, true, DEFAULT_AWAIT_BUDGET_MS)
             .await
             .unwrap();
         let exc = outcome.exception.expect("expected exception");
         assert_eq!(exc.text, "Uncaught (in promise)");
         assert_eq!(exc.description, "Error: boom");
         assert_eq!(exc.class_name, "Error");
+    }
+
+    // 0.4.1 taobao report problem 2: a script whose promise outlives the await
+    // budget used to fall through to the never-assigned result slot and answer
+    // HTTP 200 {result: null}. The settle deadline must now be an error — and
+    // the message must tell the caller the script may still be running, so a
+    // blind retry (double upload!) is the obviously wrong move.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_evaluate_outcome_times_out_on_never_settling_promise() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let err = rt
+            .evaluate_for_cdp_outcome("new Promise(() => {})", true, true, 150)
+            .await
+            .unwrap_err();
+        assert!(err.contains("EVAL_TIMEOUT"), "got: {err}");
+        assert!(err.contains("verify side effects"), "got: {err}");
+        assert!(err.contains("150"), "message names the budget: {err}");
+    }
+
+    // The widened-budget half of the same fix: the identical late promise
+    // succeeds when the caller passes a budget that actually covers it —
+    // timeout_ms exists so slow page-side work is a parameter, not a failure.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_evaluate_outcome_late_promise_lands_within_widened_budget() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let outcome = rt
+            .evaluate_for_cdp_outcome(
+                "new Promise(r => setTimeout(() => r('late-ok'), 150))",
+                true,
+                true,
+                DEFAULT_AWAIT_BUDGET_MS,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.info.value.unwrap().as_str().unwrap(), "late-ok");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3851,6 +3886,74 @@
                 "blobBytes": png_magic,
             })
         );
+    }
+
+    /// 0.4.1 taobao report problem 5: the Ali SDK opens XHRs with lowercase
+    /// methods (`xhr.open('get', …)`), and the network layer compares methods
+    /// case-sensitively — so the request went out literally `get`, breaking
+    /// CORS safelist matching. open() now uppercases a token that
+    /// byte-uppercases to a standard method (Fetch-spec "normalize a
+    /// method"); custom tokens ride as authored, as in Chrome.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn xhr_open_normalizes_method_case() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (line_tx, line_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap();
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let line = request.lines().next().unwrap_or("").to_string();
+                let body = b"ok";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.write_all(body).unwrap();
+                stream.flush().unwrap();
+                line_tx.send(line).unwrap();
+            }
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/test", port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const send = (m) => new Promise((resolve, reject) => {
+                        const xhr = new XMLHttpRequest();
+                        xhr.open(m, "/probe");
+                        xhr.onload = () => resolve(xhr.status);
+                        xhr.onerror = () => reject(new Error("xhr error"));
+                        xhr.send();
+                    });
+                    return [await send("get"), await send("put"), await send("x-custom")];
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        assert_eq!(result.value.unwrap(), serde_json::json!([200, 200, 200]));
+        // What the wire actually saw: standard tokens uppercased, custom as-is.
+        let lines: Vec<String> = (0..3)
+            .map(|_| line_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap())
+            .collect();
+        assert!(lines[0].starts_with("GET /probe "), "got: {}", lines[0]);
+        assert!(lines[1].starts_with("PUT /probe "), "got: {}", lines[1]);
+        assert!(lines[2].starts_with("x-custom /probe "), "got: {}", lines[2]);
     }
 
     /// obscura#664 class: the fetch/XHR redirect budget is the Fetch spec's

@@ -214,7 +214,19 @@ pub enum SessionCommand {
     },
     Eval {
         script: String,
+        /// Await budget for the script's promise, ms (default 5000, clamped
+        /// 100..120000). Slow page-side work — uploads through the page's
+        /// own fetch — legitimately outlives the default; without this the
+        /// caller hit a silent `result: null` at the 5s mark (0.4.1 taobao
+        /// report) instead of a truthable EVAL_TIMEOUT error.
+        timeout_ms: Option<u64>,
         reply: oneshot::Sender<Result<Value, SessionError>>,
+    },
+    /// The session's current page URL — the cheap identity probe behind
+    /// GET /sessions (State is a full indexed page walk, too heavy to
+    /// fan out per listing entry).
+    Url {
+        reply: oneshot::Sender<Result<String, String>>,
     },
     /// Pin the viewport (width/height/mobile). None width/height keeps the
     /// current dimension (Chrome's setDeviceMetricsOverride semantics),
@@ -1465,8 +1477,8 @@ fn session_thread(
                             let _ = reply.send(Ok(val));
                         }
 
-                        SessionCommand::Eval { script, reply } => {
-                            let outcome = page.evaluate_async_checked(&script).await;
+                        SessionCommand::Eval { script, timeout_ms, reply } => {
+                            let outcome = page.evaluate_async_checked(&script, timeout_ms).await;
                             recorder.push(RecordedAction::Eval { script });
                             // Drain any JS-initiated navigation the script
                             // started (location.href / form submit) so the
@@ -1474,6 +1486,10 @@ fn session_thread(
                             // policy as click_by_index below.
                             let _ = page.process_pending_navigation().await;
                             let _ = reply.send(outcome.map_err(SessionError::Eval));
+                        }
+
+                        SessionCommand::Url { reply } => {
+                            let _ = reply.send(Ok(page.url()));
                         }
 
                         SessionCommand::Storage { reply } => {
@@ -2308,6 +2324,7 @@ mod tests {
                     return 'armed';
                 })()"#
                     .to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -2320,6 +2337,7 @@ mod tests {
         let state = mgr
             .send(&sid, |reply| SessionCommand::Eval {
                 script: "JSON.stringify(window.__marks)".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -2384,6 +2402,22 @@ mod tests {
         assert_eq!(err.code(), "SESSION_NOT_FOUND");
     }
 
+    /// GET /sessions identity probe (0.4.1 taobao report problem 7): the Url
+    /// command must answer cheaply with the session's current URL — it is
+    /// fanned out per listing entry, so anything heavier than a read would
+    /// make the listing itself expensive.
+    #[tokio::test]
+    async fn url_command_round_trips_the_current_page() {
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(Some("about:blank"), false, vec![], None, None, None, false, false);
+        let url = mgr
+            .send(&sid, |reply| SessionCommand::Url { reply })
+            .await
+            .unwrap();
+        assert_eq!(url, "about:blank");
+        assert!(mgr.close_and_wait(&sid).await, "session thread must ack close");
+    }
+
     /// Regression (obscura #618 class): an eval whose script clicks a submit
     /// button must leave the session on the form's action URL — the click
     /// stores a pending JS navigation that the Eval command drains (same
@@ -2416,6 +2450,7 @@ mod tests {
         let clicked = mgr
             .send(&sid, |reply| SessionCommand::Eval {
                 script: "document.querySelector('#go').click(); 'clicked'".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -2425,6 +2460,7 @@ mod tests {
         let href = mgr
             .send(&sid, |reply| SessionCommand::Eval {
                 script: "location.href".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -2484,6 +2520,7 @@ mod tests {
         let matches = mgr
             .send(&sid, |reply| SessionCommand::Eval {
                 script: "matchMedia('(max-width:600px)').matches && matchMedia('(pointer:coarse)').matches".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -2505,6 +2542,7 @@ mod tests {
         let pointer = mgr
             .send(&sid, |reply| SessionCommand::Eval {
                 script: "matchMedia('(pointer:coarse)').matches".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -2521,6 +2559,7 @@ mod tests {
         let w = mgr
             .send(&sid, |reply| SessionCommand::Eval {
                 script: "innerWidth".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -2563,6 +2602,7 @@ mod tests {
         let ran = mgr
             .send(&sid, |reply| SessionCommand::Eval {
                 script: "window.__ran".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -2585,6 +2625,7 @@ mod tests {
         let title = mgr
             .send(&sid, |reply| SessionCommand::Eval {
                 script: "document.title".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -2665,6 +2706,7 @@ mod tests {
         let user = mgr
             .send(&dup, |reply| SessionCommand::Eval {
                 script: "localStorage.getItem('user')".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -2674,6 +2716,7 @@ mod tests {
         let w = mgr
             .send(&dup, |reply| SessionCommand::Eval {
                 script: "innerWidth".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -2695,6 +2738,7 @@ mod tests {
         let still = mgr
             .send(&src, |reply| SessionCommand::Eval {
                 script: "localStorage.getItem('user')".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -2722,6 +2766,7 @@ mod tests {
         // so the pixels must reflect the mutation, not the HTTP response.
         mgr.send(&sid, |reply| SessionCommand::Eval {
             script: "document.querySelector('h1').textContent = 'after'".to_string(),
+            timeout_ms: None,
             reply,
         })
         .await
@@ -2813,6 +2858,7 @@ mod tests {
         let before = ink_in_input(&mut mgr, &sid).await;
         mgr.send(&sid, |reply| SessionCommand::Eval {
             script: "document.getElementById('q').value = 'typed hello world'".to_string(),
+            timeout_ms: None,
             reply,
         })
         .await
@@ -2929,6 +2975,7 @@ mod tests {
                      localStorage.setItem('user','小张'); \
                      sessionStorage.setItem('cart','2 items'); 'ok'"
                 .to_string(),
+            timeout_ms: None,
             reply,
         })
         .await
@@ -2951,6 +2998,7 @@ mod tests {
                 script: "localStorage.getItem('token') + '|' + localStorage.getItem('user') \
                          + '|' + sessionStorage.getItem('cart')"
                     .to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -3045,6 +3093,7 @@ mod tests {
             .send(&sid, |reply| SessionCommand::Eval {
                 script: "innerWidth + 'x' + innerHeight + '|' + matchMedia('(pointer:coarse)').matches"
                     .to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -3061,6 +3110,7 @@ mod tests {
         let after = mgr
             .send(&sid, |reply| SessionCommand::Eval {
                 script: "innerWidth".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -3113,6 +3163,7 @@ mod tests {
         let v = mgr
             .send(&sid, |reply| SessionCommand::Eval {
                 script: "1 + 1".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -3164,6 +3215,7 @@ mod tests {
         // sets this key, so only injection can restore it.
         mgr.send(&sid, |reply| SessionCommand::Eval {
             script: "localStorage.setItem('user','miccim'); 'ok'".to_string(),
+            timeout_ms: None,
             reply,
         })
         .await
@@ -3178,6 +3230,7 @@ mod tests {
         let user = mgr2
             .send(&sid, |reply| SessionCommand::Eval {
                 script: "localStorage.getItem('user')".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -3201,6 +3254,7 @@ mod tests {
         let w = mgr2
             .send(&sid, |reply| SessionCommand::Eval {
                 script: "innerWidth".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -3233,6 +3287,7 @@ mod tests {
         let p = mgr.create(Some("about:blank"), false, vec![], None, None, None, false, true);
         mgr.send(&p, |reply| SessionCommand::Eval {
             script: "1".to_string(),
+            timeout_ms: None,
             reply,
         })
         .await
@@ -3244,6 +3299,7 @@ mod tests {
         let v = mgr
             .send(&p, |reply| SessionCommand::Eval {
                 script: "2 + 1".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -3255,6 +3311,7 @@ mod tests {
         let plain = mgr.create(Some("about:blank"), false, vec![], None, None, None, false, false);
         mgr.send(&plain, |reply| SessionCommand::Eval {
             script: "1".to_string(),
+            timeout_ms: None,
             reply,
         })
         .await
@@ -3266,6 +3323,7 @@ mod tests {
         let err = mgr
             .send(&plain, |reply| SessionCommand::Eval {
                 script: "1".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -3287,6 +3345,7 @@ mod tests {
         let a = mgr.create(Some("about:blank"), false, vec![], None, None, None, false, true);
         mgr.send(&a, |reply| SessionCommand::Eval {
             script: "1".to_string(),
+            timeout_ms: None,
             reply,
         })
         .await
@@ -3301,6 +3360,7 @@ mod tests {
         let b = mgr.create(Some("about:blank"), false, vec![], None, None, None, false, true);
         mgr.send(&b, |reply| SessionCommand::Eval {
             script: "1".to_string(),
+            timeout_ms: None,
             reply,
         })
         .await
@@ -3317,6 +3377,7 @@ mod tests {
         let v = mgr
             .send(&b, |reply| SessionCommand::Eval {
                 script: "40 + 2".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -3367,6 +3428,7 @@ mod tests {
         let err = mgr
             .send(&sid, |reply| SessionCommand::Eval {
                 script: "1 + 1; throw new TypeError('boom at runtime')".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -3384,6 +3446,7 @@ mod tests {
         let ok = mgr
             .send(&sid, |reply| SessionCommand::Eval {
                 script: "2 + 2".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -3393,6 +3456,7 @@ mod tests {
         let err = mgr
             .send(&sid, |reply| SessionCommand::Eval {
                 script: "Promise.reject(new Error('async boom'))".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -3447,6 +3511,7 @@ mod tests {
             let out = mgr
                 .send(sid, |reply| SessionCommand::Eval {
                     script: "JSON.stringify(window.__log)".to_string(),
+                    timeout_ms: None,
                     reply,
                 })
                 .await
@@ -3574,6 +3639,7 @@ mod tests {
         // Output produced by an agent-driven eval joins the same ring.
         mgr.send(&sid, |reply| SessionCommand::Eval {
             script: "console.error('eval-time boom'); 'done'".to_string(),
+            timeout_ms: None,
             reply,
         })
         .await
@@ -3715,6 +3781,7 @@ mod tests {
             .send(&sid, |reply| SessionCommand::Eval {
                 script: "[String(confirm('delete it?')), String(prompt('your name'))].join('|')"
                     .to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -3763,6 +3830,7 @@ mod tests {
             .send(&sid, |reply| SessionCommand::Eval {
                 script: "[String(confirm('sure?')), String(prompt('your name')), String(prompt('fallback'))].join('|')"
                     .to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -3797,6 +3865,7 @@ mod tests {
         let out = mgr
             .send(&sid, |reply| SessionCommand::Eval {
                 script: "String(confirm('again?'))".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -3911,6 +3980,7 @@ mod tests {
         let _ = mgr
             .send(&sid, |reply| SessionCommand::Eval {
                 script: "1 + 1".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await
@@ -3973,6 +4043,7 @@ mod tests {
         let _ = mgr
             .send(&sid, |reply| SessionCommand::Eval {
                 script: "1".to_string(),
+                timeout_ms: None,
                 reply,
             })
             .await

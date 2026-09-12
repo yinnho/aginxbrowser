@@ -147,7 +147,12 @@ pub async fn handle(
                 let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
                 match tokio::time::timeout(
                     std::time::Duration::from_millis(timeout_ms),
-                    page.evaluate_for_cdp_outcome(expression, return_by_value, await_promise),
+                    page.evaluate_for_cdp_outcome(
+                        expression,
+                        return_by_value,
+                        await_promise,
+                        crate::diting_js::runtime::DEFAULT_AWAIT_BUDGET_MS,
+                    ),
                 )
                 .await
                 {
