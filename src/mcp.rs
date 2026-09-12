@@ -504,6 +504,12 @@ pub struct SessionCloseParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionChallengesParams {
+    /// Session ID
+    pub session_id: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ImportCurlParams {
     /// A "Copy as cURL" command pasted from Chrome DevTools (Network panel →
     /// right-click any authenticated request). bash, PowerShell and cmd
@@ -1584,6 +1590,34 @@ naming the selector/predicate on expiry. Exactly one of selector/predicate.",
                 include_bodies: params.include_bodies.unwrap_or(false),
                 url_contains: params.url_contains,
                 body_max_chars: params.body_max_chars.unwrap_or(4000),
+                reply,
+            })
+            .await
+        {
+            Ok(text) => text,
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "One-call risk-control report: did this session hit an anti-bot wall? \
+Taobao/tmall's x5 risk control answers 200 like a normal response — either a redirect onto \
+a punish page (_____tmd_____/punish, punish.taobao.com) or an MTop API body carrying \
+FAIL_SYS_USER_VALIDATE / RGV587 / x5secdata. Returns {total, events:[{url,method,status,kind,via}]} \
+where via says whether the wall was navigated into (\"url\") or swallowed by an API response \
+(\"body\"). When there are hits, the response also carries the account name (which identity got \
+walled) and a `handoff` instruction: the engine detects and surfaces but does not auto-bypass — \
+a human opens the live view (web/live.html), solves the challenge in this session, and the \
+retry rides the cookie that solving sets. Detection only; no automated solving or bypass.",
+        annotations(title = "Session Challenges", read_only_hint = true)
+    )]
+    async fn session_challenges(
+        &self,
+        Parameters(params): Parameters<SessionChallengesParams>,
+    ) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        match mgr
+            .send(&params.session_id, |reply| SessionCommand::Challenges {
                 reply,
             })
             .await

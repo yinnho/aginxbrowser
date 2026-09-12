@@ -924,6 +924,8 @@ Navigate to a new URL.
 {"url": "https://example.com/page2", "title": "Page 2"}
 ```
 
+When the navigation lands on an anti-bot wall (punish page / `_____tmd_____/punish`), a `challenge` field joins the response — risk-control pages answer like ordinary pages, the flag is the machine-readable verdict: `{"url": "https://punish.taobao.com/...", "title": "...", "challenge": "punish"}`.
+
 ### POST /session/{id}/state
 
 Get the current page state as an indexed list of interactive elements.
@@ -1240,7 +1242,27 @@ The session's network request log for the current page — every document, subre
 }
 ```
 
-**Response (`?include_bodies=true`)** — a sibling `xhr` array joins the default response, one row per script-initiated response with its retained body: `{"url":"https://api.example/items","method":"GET","status":200,"mime":"application/json","body":"{\"items\":[…]}","body_truncated":false}`. The same face `/fetch`'s `capture_xhr` returns statelessly, read live off the session.
+**Response (`?include_bodies=true`)** — a sibling `xhr` array joins the default response, one row per script-initiated response with its retained body: `{"url":"https://api.example/items","method":"GET","status":200,"mime":"application/json","body":"{\"items\":[…]}","body_truncated":false}`. The same face `/fetch`'s `capture_xhr` returns statelessly, read live off the session. Rows whose body carries risk-control markers (`FAIL_SYS_USER_VALIDATE`, `RGV587`, `x5secdata`) are tagged `"challenge": "punish"` — those bodies answer 200 like any other API, the tag is what separates them from success.
+
+### GET /session/{id}/challenges
+
+One-call risk-control report: did this session hit an anti-bot wall? Taobao/tmall's x5 risk control answers **200** like a normal response — either a redirect onto a punish page (`_____tmd_____/punish`, `punish.taobao.com`) or an MTop API body carrying `FAIL_SYS_USER_VALIDATE` / `RGV587` / `x5secdata`. Detection only — the engine surfaces walls, it does not auto-bypass them.
+
+**Response:**
+
+```json
+{
+  "url": "https://shop.example/item",
+  "total": 1,
+  "events": [
+    {"url":"https://h5api.m.taobao.com/h5/mtop.taobao.shop.simple.item.fetch/1.0/","method":"GET","status":200,"kind":"punish","via":"body"}
+  ],
+  "account": "taobao-scraper",
+  "handoff": "anti-bot wall detected — hand this session to a human: open the live view (web/live.html), solve the challenge there, then retry the same request in this session"
+}
+```
+
+`via` says how the wall was detected: `"url"` = the navigation/request landed on the punish page, `"body"` = a 200-status API response swallowed the challenge. `account` (which identity got walled — matters when scraper and publisher run as different accounts) and `handoff` are present only when there are hits; a clean session returns `{"url", "total": 0, "events": []}`. The human handoff works because the session keeps its cookies and persona: solving in the live view sets the x5sec cookie, and the retry rides it.
 
 ### GET /session/{id}/har
 
@@ -1542,6 +1564,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `session_screenshot` | Screenshot the session's current DOM state (mutations included) as a base64 PNG; optional `width`/`height`/`full_page`/`selector` |
 | `session_wait` | Wait until a CSS selector matches or a JS predicate turns truthy, with a timeout — the page's event loop keeps running while waiting, so this replaces blind sleeps for async content |
 | `session_network` | Read the session's network request log; `filter: "media"` extracts playback/stream URLs (m3u8, mp4, ...) actually requested by the page — the reliable way to get a real video link. `include_bodies: true` adds an `xhr` array with the page's script-initiated response bodies (its own API face), narrowed by `url_contains` |
+| `session_challenges` | One-call risk-control report: did this session hit an anti-bot wall? Taobao/tmall x5 answers 200 — a punish-page redirect or an MTop body with `FAIL_SYS_USER_VALIDATE`/`RGV587`/`x5secdata`. Returns `{total, events:[{url,method,status,kind,via}]}`, plus `account` and a human-`handoff` instruction when there are hits (detection only — the engine never auto-bypasses) |
 | `session_export` | Export the session's recorded actions: a runnable curl replay script (default), the raw action log (`format=jsonl`), or a flow.json document (`format=json` — cookies stripped, editable ops) that `flow_run` replays server-side |
 | `flow_run` | Run a flow to completion — zero model tokens: an inline flow document or a server-side `workflow/<name>/flow.json` asset, `{{var}}` substitution, `wait`/`expect` gates, `save` outputs; fails with a receipt (failing step, reason, URL, screenshot) and the session stays alive; `session_id` composes flows with imported login state |
 | `session_close` | Close the session (for a persistent one this drops the on-disk login snapshot — idle expiry keeps it, an explicit close does not) |

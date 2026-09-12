@@ -352,6 +352,15 @@ pub enum SessionCommand {
         timeout_ms: u64,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// One-call risk-control report: every anti-bot challenge the session's
+    /// traffic hit, as structured rows (URL-shaped walls plus the
+    /// 200-status MTop JSON bodies taobao's x5 answers with). Read-only, so
+    /// not recorded in the action log. Reply is
+    /// `{"url", "total", "events":[{url,method,status,kind,via}], "handoff"}`;
+    /// `handoff` is present only when there is something to hand off.
+    Challenges {
+        reply: oneshot::Sender<Result<String, String>>,
+    },
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -369,6 +378,11 @@ pub enum ScrollDirection {
 pub struct SessionNavResponse {
     pub url: String,
     pub title: Option<String>,
+    /// Short challenge tag ("punish") when the navigation itself landed on
+    /// an anti-bot wall — risk-control pages answer like ordinary pages, so
+    /// the flag is the machine-readable verdict. Absent when it didn't.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub challenge: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1509,9 +1523,11 @@ fn session_thread(
                                             .as_str()
                                             .filter(|s| !s.is_empty())
                                             .map(|s| s.to_string());
+                                        let challenge =
+                                            crate::har::challenge_kind(&final_url).map(|s| s.to_string());
                                         element_map.clear();
                                         pages_loaded += 1;
-                                        Ok(SessionNavResponse { url: final_url, title })
+                                        Ok(SessionNavResponse { url: final_url, title, challenge })
                                     }
                                     Err(e) => Err(format!("navigation failed: {}", e)),
                                 },
@@ -1837,6 +1853,7 @@ fn session_thread(
                                 })
                             } else {
                                 let events = &page.inner.network_events;
+                                let body_of = |rid: &str| page.inner.get_response_body(rid);
                                 let mut payload = serde_json::json!({
                                     "url": page.url(),
                                     "total": events.len(),
@@ -1846,16 +1863,16 @@ fn session_thread(
                                 // hide among successful rows — surface the
                                 // count at the top level so an agent that
                                 // just asks "did we get punished" doesn't
-                                // have to scan every URL.
-                                let challenges = events
-                                    .iter()
-                                    .filter(|e| crate::har::challenge_kind(&e.url).is_some())
-                                    .count();
+                                // have to scan every URL. Same detection as
+                                // the Challenges command (URL shape + the
+                                // MTop risk-control bodies), so the numbers
+                                // agree.
+                                let challenges =
+                                    crate::har::challenge_rows(events, &body_of).len();
                                 if challenges > 0 {
                                     payload["challenges"] = json!(challenges);
                                 }
                                 if include_bodies {
-                                    let body_of = |rid: &str| page.inner.get_response_body(rid);
                                     let filters = url_contains
                                         .as_deref()
                                         .map(|s| vec![s.to_string()])
@@ -2090,6 +2107,40 @@ fn session_thread(
                                 }
                             };
                             let _ = reply.send(result);
+                        }
+
+                        SessionCommand::Challenges { reply } => {
+                            page.inner.sync_js_network_events();
+                            let events = &page.inner.network_events;
+                            let body_of = |rid: &str| page.inner.get_response_body(rid);
+                            let rows = crate::har::challenge_rows(events, &body_of);
+                            let mut payload = serde_json::json!({
+                                "url": page.url(),
+                                "total": rows.len(),
+                                "events": rows,
+                            });
+                            if !rows.is_empty() {
+                                // Which identity got walled matters as much as
+                                // the wall itself — a multi-account run wants
+                                // to know whether the scraper or the publisher
+                                // hit risk control.
+                                if let Some((_, name)) = &account {
+                                    payload["account"] = json!(name);
+                                }
+                                // Human handoff (taobao 0.4.1 report P1-6):
+                                // the engine detects and surfaces, it does not
+                                // auto-bypass. A person opens the live view,
+                                // solves the slider in this session, and the
+                                // retry below rides the x5sec cookie that
+                                // solving sets — same cookies, same persona,
+                                // session continues.
+                                payload["handoff"] = json!(
+                                    "anti-bot wall detected — hand this session to a human: \
+                                     open the live view (web/live.html), solve the challenge there, \
+                                     then retry the same request in this session"
+                                );
+                            }
+                            let _ = reply.send(Ok(payload.to_string()));
                         }
 
                         SessionCommand::Close { reply } => {

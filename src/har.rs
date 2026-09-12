@@ -103,10 +103,83 @@ pub fn challenge_kind(url: &str) -> Option<&'static str> {
     // Path-shaped — query/fragment stripped first, same convention as
     // media_kind — so a mere query param naming the marker never trips it.
     let bare = url.split(['?', '#']).next().unwrap_or(url);
-    if bare.to_ascii_lowercase().contains("_____tmd_____/punish") {
+    let lower = bare.to_ascii_lowercase();
+    if lower.contains("_____tmd_____/punish") {
+        return Some("punish");
+    }
+    // The dedicated punish hosts (where the x5sec slider lives) are host-shaped
+    // and unambiguous — a redirect that lands there IS the wall, no path
+    // convention needed.
+    if lower.contains("punish.taobao.com") || lower.contains("punish.tmall.com") {
         return Some("punish");
     }
     None
+}
+
+/// Risk control that answers 200 with an ordinary-looking JSON body. The
+/// taobao x5 wall fronts MTop requests this way: the URL stays the plain
+/// API endpoint, only the `ret` array (`FAIL_SYS_USER_VALIDATE`,
+/// `RGV587_ERROR::SM`) or an `x5secdata` field says the response is a
+/// challenge. URL-shape detection can never see this — the body is the
+/// only signal.
+pub fn body_challenge(body: &str) -> Option<&'static str> {
+    if body.contains("FAIL_SYS_USER_VALIDATE")
+        || body.contains("RGV587")
+        || body.contains("x5secdata")
+        || body.contains("_____tmd_____/punish")
+    {
+        Some("punish")
+    } else {
+        None
+    }
+}
+
+/// Every anti-bot challenge the session's traffic hit, as structured rows —
+/// the one-call answer to "did we get punished". URL-shaped walls come via
+/// [`challenge_kind`]; body-shaped ones (200-status MTop JSON) via
+/// [`body_challenge`] on retained XHR/fetch bodies. Rows carry `via` so an
+/// agent can tell a wall it navigated into from one an API call swallowed.
+pub fn challenge_rows(
+    events: &[NetworkEvent],
+    body_of: &dyn Fn(&str) -> Option<StoredResponseBody>,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    for e in events {
+        if let Some(kind) = challenge_kind(&e.url) {
+            out.push(json!({
+                "url": e.url,
+                "method": e.method,
+                "status": e.status,
+                "kind": kind,
+                "via": "url",
+            }));
+            continue;
+        }
+        // Body-shaped: only script-initiated responses that actually landed
+        // can carry the MTop risk-control JSON.
+        if e.resource_type != "XHR" && e.resource_type != "Fetch" {
+            continue;
+        }
+        if e.status == 0 || e.error.is_some() {
+            continue;
+        }
+        let Some(body) = body_of(&e.request_id) else {
+            continue;
+        };
+        if body.base64_encoded {
+            continue;
+        }
+        if let Some(kind) = body_challenge(&body.body) {
+            out.push(json!({
+                "url": e.url,
+                "method": e.method,
+                "status": e.status,
+                "kind": kind,
+                "via": "body",
+            }));
+        }
+    }
+    out
 }
 
 /// Compact one-line-per-request view for agents: method/url/status/type/size.
@@ -186,14 +259,20 @@ pub fn xhr_bodies(
             } else {
                 (body.body.clone(), false)
             };
-        out.push(json!({
+        let mut row = json!({
             "url": e.url,
             "method": e.method,
             "status": e.status,
             "mime": mime,
             "body": body_text,
             "body_truncated": body_truncated,
-        }));
+        });
+        // Risk-control JSON answers 200 like any other API row — the tag is
+        // the only thing separating it from a successful response.
+        if let Some(kind) = body_challenge(&body.body) {
+            row["challenge"] = json!(kind);
+        }
+        out.push(row);
     }
     out
 }
@@ -514,6 +593,97 @@ mod tests {
         assert_eq!(
             challenge_kind("https://shop.example/search?q=_____tmd_____/punish"),
             None
+        );
+        // The dedicated punish hosts are the x5 slider's home — a redirect
+        // landing there is the wall regardless of path.
+        assert_eq!(
+            challenge_kind("https://punish.taobao.com/auth?x5sec=abc"),
+            Some("punish")
+        );
+        assert_eq!(
+            challenge_kind("https://PUNISH.TMALL.com/captcha/index.html"),
+            Some("punish")
+        );
+    }
+
+    #[test]
+    fn body_challenge_reads_mtop_risk_control_json() {
+        // The taobao 0.4.1 report shape: the MTop endpoint answers 200, the
+        // URL stays the plain API path, only the body says "validate".
+        let mtop = r#"{"api":"mtop.taobao.shop.simple.item.fetch","ret":["FAIL_SYS_USER_VALIDATE","RGV587_ERROR::SM::Validate failed"],"data":{"url":"https://h5api.m.taobao.com/h5/mtop.taobao.shop.simple.item.fetch/1.0/?_____tmd_____/punish%3Faction%3Dcaptcha"}}"#;
+        assert_eq!(body_challenge(mtop), Some("punish"));
+        assert_eq!(
+            body_challenge(r#"{"data":{"x5secdata":"zzz"}}"#),
+            Some("punish")
+        );
+        // Ordinary success JSON never trips.
+        assert_eq!(
+            body_challenge(r#"{"api":"mtop.taobao.item.get","data":{}}"#),
+            None
+        );
+        assert_eq!(body_challenge(""), None);
+    }
+
+    #[test]
+    fn challenge_rows_see_url_and_body_walls() {
+        // URL-shaped: the redirect that landed on the punish path.
+        let landed = event(
+            "https://h5api.m.taobao.com/h5/mtop.taobao.shop.simple.item.fetch/1.0/_____tmd_____/punish",
+            "Fetch",
+            200,
+            1.0,
+        );
+        // Body-shaped: plain API URL, 200, risk-control JSON retained.
+        let swallowed = event(
+            "https://h5api.m.taobao.com/h5/mtop.taobao.shop.simple.item.fetch/1.0/",
+            "Fetch",
+            200,
+            2.0,
+        );
+        let clean = event(
+            "https://h5api.m.taobao.com/h5/mtop.taobao.recommend.feed/1.0/",
+            "XHR",
+            200,
+            3.0,
+        );
+        let mut failed = event("https://h5api.m.taobao.com/h5/x/", "Fetch", 0, 4.0);
+        failed.error = Some("net::ERR_FAILED".into());
+        let bodies = HashMap::from([
+            (
+                swallowed.request_id.clone(),
+                StoredResponseBody {
+                    body: r#"{"ret":["FAIL_SYS_USER_VALIDATE"]}"#.into(),
+                    base64_encoded: false,
+                },
+            ),
+            (
+                clean.request_id.clone(),
+                StoredResponseBody {
+                    body: r#"{"data":{"items":[]}}"#.into(),
+                    base64_encoded: false,
+                },
+            ),
+        ]);
+
+        let rows = challenge_rows(
+            &[landed, swallowed.clone(), clean.clone(), failed],
+            &|rid| bodies.get(rid).cloned(),
+        );
+        assert_eq!(rows.len(), 2, "punished URL + swallowed body: {rows:?}");
+        assert_eq!(rows[0]["via"], "url");
+        assert_eq!(rows[0]["kind"], "punish");
+        assert_eq!(rows[1]["via"], "body");
+        assert_eq!(
+            rows[1]["url"],
+            "https://h5api.m.taobao.com/h5/mtop.taobao.shop.simple.item.fetch/1.0/"
+        );
+
+        // The same body-level tag rides the xhr_bodies rows.
+        let xhr = xhr_bodies(&[swallowed, clean], &[], 0, &|rid| bodies.get(rid).cloned());
+        assert_eq!(xhr[0].get("challenge"), Some(&json!("punish")));
+        assert!(
+            xhr[1].get("challenge").is_none(),
+            "clean API row stays lean"
         );
     }
 

@@ -426,7 +426,7 @@ mod tests {
         assert!(!from_b.contains("SCRAPER"), "got: {from_b}");
 
         // And the shared jar stays clean of both.
-        let shared = crate::server::SHARED_COOKIE_JAR_FOR_TESTS();
+        let shared = crate::server::shared_cookie_jar_for_tests();
         let shared_header = shared.get_cookie_header(&url);
         assert!(
             !shared_header.contains("SCRAPER") && !shared_header.contains("PUBLISHER"),
@@ -492,10 +492,13 @@ mod tests {
         // The human's real UA wins verbatim — even out-of-family: the site
         // already saw it alongside these cookies.
         assert_eq!(draw_persona(Some(real)).user_agent, real);
-        // Empty hints fall through to the pool.
-        assert_eq!(
-            draw_persona(Some("  ")).user_agent,
-            draw_persona(None).user_agent
+        // Empty hints fall through to the pool — membership, not two random
+        // draws agreeing (the pool holds two UAs, so that's a coin flip).
+        let blank = draw_persona(Some("  "));
+        assert!(
+            persona_ua_pool().contains(&blank.user_agent.as_str()),
+            "blank hint should draw from the pool, got {}",
+            blank.user_agent
         );
         for _ in 0..20 {
             let p = draw_persona(None);

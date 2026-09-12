@@ -134,7 +134,7 @@ pub fn build_browser_for_account(
 /// tests assert account jars never leak into it.
 #[cfg(test)]
 #[allow(dead_code)]
-pub(crate) fn SHARED_COOKIE_JAR_FOR_TESTS() -> std::sync::Arc<CookieJar> {
+pub(crate) fn shared_cookie_jar_for_tests() -> std::sync::Arc<CookieJar> {
     SHARED_COOKIE_JAR.clone()
 }
 

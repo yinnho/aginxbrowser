@@ -1003,6 +1003,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/session/:id/dialog", post(session_dialog_handler))
         .route("/session/:id/export", get(session_export_handler))
         .route("/session/:id/network", get(session_network_handler))
+        .route("/session/:id/challenges", get(session_challenges_handler))
         .route("/session/:id/har", get(session_har_handler))
         .route("/session/:id/click", post(session_click_handler))
         .route("/session/:id/click_xy", post(session_click_xy_handler))
@@ -1997,6 +1998,25 @@ async fn session_har_handler(
         .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| AppError::Internal(format!("har parse error: {}", e)))?;
+    Ok((StatusCode::OK, Json(val)))
+}
+
+/// One-call risk-control report: every anti-bot challenge the session's
+/// traffic hit — walls navigated into (punish URLs) and walls swallowed by
+/// 200-status MTop JSON bodies (`FAIL_SYS_USER_VALIDATE` / `RGV587` /
+/// `x5secdata`). With hits, carries the account name (which identity got
+/// walled) and the human-handoff instruction; the engine detects and
+/// surfaces, it does not auto-bypass.
+async fn session_challenges_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    let text = mgr
+        .send(&id, |reply| session::SessionCommand::Challenges { reply })
+        .await
+        .map_err(session_err)?;
+    let val: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| AppError::Internal(format!("challenges parse error: {}", e)))?;
     Ok((StatusCode::OK, Json(val)))
 }
 
