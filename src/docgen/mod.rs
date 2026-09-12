@@ -22,6 +22,7 @@ pub mod sequence;
 pub mod shell;
 pub mod sigil;
 pub mod spec;
+pub mod story;
 pub mod theme;
 pub mod workflow;
 
@@ -93,6 +94,13 @@ pub fn render_with_quality(
             "entrance motion baked in — CSS keyframes with nth-child delay ladders, zero scripts"
                 .to_string(),
         );
+        if doc.fences.iter().any(|f| f.ok && f.story.is_some()) {
+            checks.push(
+                "flow story baked in — diagram beats, edge draws, and timed captions share one \
+                 clock (diagrams[].story)"
+                    .to_string(),
+            );
+        }
     }
     if failed.is_empty() && !doc.fences.is_empty() {
         checks.push("all fences parsed and validated clean".to_string());
@@ -163,6 +171,25 @@ pub fn render_with_quality(
                 // The viewer tabs this artifact carries, so a caller can
                 // verify what is focusable without loading the document.
                 v["views"] = serde_json::to_value(&f.views).unwrap_or(Value::Null);
+            }
+            // The story clock (motion posture only): beat times are the
+            // hook for later voice muxing — the one sanctioned ffmpeg step.
+            // Times ride the 0.05s grid but live as f32, whose f64 promotion
+            // carries tail bits (0.9 → 0.89999997…); round through f64 so
+            // the receipt reads the two decimals it was built from.
+            if motion {
+                if let Some(st) = &f.story {
+                    let j2 = |x: f32| (x as f64 * 100.0).round() / 100.0;
+                    v["story"] = json!({
+                        "duration": j2(st.duration),
+                        "beats": st.beats.iter().map(|b| json!({
+                            "id": b.id,
+                            "caption": b.caption,
+                            "at": j2(b.at),
+                            "dur": j2(b.dur),
+                        })).collect::<Vec<_>>(),
+                    });
+                }
             }
             if let Some(c) = &f.composition {
                 v["composition"] = c.report(quality);
@@ -374,6 +401,30 @@ mod tests {
             .iter()
             .any(|c| c.as_str().unwrap_or("").contains("entrance motion baked in")));
         assert!(!statik.html.contains("agx-motion"));
+    }
+
+    #[test]
+    fn the_story_clock_rides_only_the_motion_receipt() {
+        let statik = render(DOC);
+        let moved = render_with_quality(DOC, &theme::LIGHT, checks::Quality::Standard, true);
+        assert!(statik.receipt["diagrams"][0].get("story").is_none());
+        let story = &moved.receipt["diagrams"][0]["story"];
+        let beats = story["beats"].as_array().unwrap();
+        // The demo DOC is a 3-participant sequence: messages are the beats.
+        assert_eq!(beats.len(), 3);
+        assert_eq!(beats[0]["at"], 0.9);
+        for w in beats.windows(2) {
+            assert!(w[1]["at"].as_f64().unwrap() > w[0]["at"].as_f64().unwrap());
+        }
+        assert!(story["duration"].as_f64().unwrap() > 0.0);
+        assert!(beats[0]["caption"].as_str().unwrap().contains("GET /x"));
+        // The check line names the shared clock.
+        assert!(moved
+            .receipt["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c.as_str().unwrap_or("").contains("flow story baked in")));
     }
 
     #[test]

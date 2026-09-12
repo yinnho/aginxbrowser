@@ -88,17 +88,34 @@ pub fn split_heading_html(text: &str, base_secs: f32) -> String {
 /// direct children (40 rungs, 70ms apart, clamped tail) and list items
 /// within each list (20 rungs, 50ms apart) — pure CSS, so the DOM carries
 /// no per-element hooks and the bytes stay deterministic.
+///
+/// The prefers-reduced-motion resets carry `!important` because the story
+/// layer's per-element rules are generated at render time with specificity
+/// the static stylesheet cannot know in advance (the edge rules alone sit
+/// at three attribute selectors plus a sibling combinator) and they append
+/// after this block — a plain reset would lose the cascade tie or the
+/// specificity race outright. An accessibility override that must beat
+/// generated rules regardless of their shape is the canonical !important.
+/// The caption strip additionally flips to `display:block` so the static
+/// transcript reads one beat per line instead of a run-on inline smear.
 pub fn motion_css() -> String {
     let mut css = String::from(
         "@keyframes agx-rise{from{opacity:0;transform:translateY(10px)}}\
 @keyframes agx-char{from{opacity:0;transform:translateY(.45em)}}\
 @keyframes agx-grow{from{opacity:0;transform:scale(.965)}}\
+@keyframes agx-node{from{opacity:0;transform:scale(.9)}}\
+@keyframes agx-in{from{opacity:0}}\
+@keyframes agx-draw{from{opacity:0;stroke-dashoffset:4000}}\
+@keyframes agx-cap{0%{opacity:0;transform:translateY(6px)}12%,84%{opacity:1;transform:none}100%{opacity:0}}\
 .agx-motion>*{animation:agx-rise .55s cubic-bezier(.33,1,.68,1) both}\
 .agx-motion>h1,.agx-motion>h2,.agx-motion>h3{animation:none}\
 .agx-motion>figure{animation:agx-grow .65s cubic-bezier(.34,1.56,.64,1) both}\
 .agx-ch{display:inline;animation:agx-char .5s cubic-bezier(.16,1,.3,1) both}\
 .agx-motion li{animation:agx-rise .45s cubic-bezier(.33,1,.68,1) both}\
-@media(prefers-reduced-motion:reduce){.agx-motion>*,.agx-ch,.agx-motion li{animation:none}}",
+.agx-motion figure svg [data-node-id],.agx-motion figure svg [data-participant-id]{transform-box:fill-box;transform-origin:center}\
+.agx-caps{position:relative;min-height:2.5em;margin:.55rem 0 0}\
+.agx-cap{position:absolute;left:0;right:0;top:0;text-align:center;font-size:15px;line-height:1.5;opacity:0;animation-name:agx-cap;animation-fill-mode:both;animation-timing-function:ease-out}\
+@media(prefers-reduced-motion:reduce){.agx-motion>*,.agx-ch,.agx-motion li,.agx-motion figure [data-node-id],.agx-motion figure [data-participant-id],.agx-motion figure [data-message-index],.agx-motion figure path[data-from],.agx-motion figure path[data-from]+path,.agx-motion figure g[data-from]{animation:none!important}.agx-motion .agx-cap{animation:none!important;opacity:1;position:static;display:block}}",
     );
     // Body-child ladder: `> *` (0-1-0) sets the animation, the nth-child
     // rules (0-2-0) win on the delay property they override.
@@ -155,6 +172,12 @@ mod tests {
             ".agx-motion li:nth-child(3){animation-delay:0.15s}",
             ".agx-motion li:nth-child(n+21)",
             "prefers-reduced-motion",
+            // The reduced-motion contract: resets must beat the generated
+            // story rules (hence !important), cover the arrowhead sibling,
+            // and stack the caption transcript one beat per line.
+            "animation:none!important",
+            "path[data-from]+path",
+            "position:static;display:block",
         ] {
             assert!(css.contains(needle), "missing {needle}");
         }

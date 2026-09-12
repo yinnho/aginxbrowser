@@ -45,6 +45,10 @@ pub struct FenceOutcome {
     /// Guided views carried by the fence (empty when none): named node
     /// subsets the viewer offers as tabs.
     pub views: Vec<View>,
+    /// The flow story (motion batch 2): caption beats and edge timings
+    /// derived from the spec. Serialized into the receipt and baked into
+    /// CSS/captions only under motion; Some for every rendered fence.
+    pub story: Option<super::story::Story>,
 }
 
 /// A rendered fence, in family-agnostic terms for the figure splice.
@@ -56,6 +60,7 @@ struct FenceDiagram {
     repairs: Vec<RouteRepair>,
     composition: super::checks::Composition,
     views: Vec<View>,
+    story: super::story::Story,
 }
 
 /// Parse one fence body. The family is the declared `diagram_type`, or the
@@ -109,6 +114,7 @@ fn parse_fence(body: &str, theme: &'static Theme) -> Result<FenceDiagram, Vec<St
                 repairs: Vec::new(),
                 composition: r.composition,
                 views,
+                story: super::story::sequence(spec),
             })
         }
         ("workflow", _, Some(spec), ..) => {
@@ -132,6 +138,7 @@ fn parse_fence(body: &str, theme: &'static Theme) -> Result<FenceDiagram, Vec<St
                 repairs: r.repairs,
                 composition: r.composition,
                 views,
+                story: super::story::workflow(spec),
             })
         }
         ("dataflow", _, _, Some(spec), ..) => {
@@ -155,6 +162,7 @@ fn parse_fence(body: &str, theme: &'static Theme) -> Result<FenceDiagram, Vec<St
                 repairs: r.repairs,
                 composition: r.composition,
                 views,
+                story: super::story::dataflow(spec),
             })
         }
         ("lifecycle", _, _, _, Some(spec), _) => {
@@ -178,6 +186,7 @@ fn parse_fence(body: &str, theme: &'static Theme) -> Result<FenceDiagram, Vec<St
                 repairs: r.repairs,
                 composition: r.composition,
                 views,
+                story: super::story::lifecycle(spec),
             })
         }
         ("architecture", .., Some(spec)) => {
@@ -201,6 +210,7 @@ fn parse_fence(body: &str, theme: &'static Theme) -> Result<FenceDiagram, Vec<St
                 repairs: r.repairs,
                 composition: r.composition,
                 views,
+                story: super::story::architecture(spec),
             })
         }
         ("sequence", None, ..) => Err(vec![
@@ -272,6 +282,9 @@ pub fn render(markdown: &str, theme: &'static Theme, motion: bool) -> RenderedDo
     };
 
     let mut i = 0;
+    // Per-fence story rules accumulate here and join the motion stylesheet
+    // under `motion` (the static posture never builds them).
+    let mut story_css_buf = String::new();
     while i < events.len() {
         match &events[i] {
             Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) => {
@@ -333,12 +346,23 @@ pub fn render(markdown: &str, theme: &'static Theme, motion: bool) -> RenderedDo
                                 t.push_str("</script>");
                                 t
                             };
+                            // The flow story rides only the motion posture:
+                            // timed captions under the svg, per-element rules
+                            // in the stylesheet.
+                            let caps = if motion {
+                                story_css_buf
+                                    .push_str(&super::story::story_css(index, &d.story));
+                                super::story::captions_html(&d.story)
+                            } else {
+                                String::new()
+                            };
                             body.push_str(&format!(
-                                "<figure class=\"agx-diagram\" data-diagram-type=\"{}\" data-diagram-index=\"{index}\" data-diagram-title=\"{}\">{}{}</figure>",
+                                "<figure class=\"agx-diagram\" data-diagram-type=\"{}\" data-diagram-index=\"{index}\" data-diagram-title=\"{}\">{}{}{}</figure>",
                                 d.kind,
                                 html_escape(&d.title),
                                 tabs,
-                                d.svg
+                                d.svg,
+                                caps
                             ));
                             fences.push(FenceOutcome {
                                 index,
@@ -349,6 +373,7 @@ pub fn render(markdown: &str, theme: &'static Theme, motion: bool) -> RenderedDo
                                 repairs: d.repairs,
                                 composition: Some(d.composition),
                                 views: d.views,
+                                story: Some(d.story),
                             });
                             if doc_title.is_none() {
                                 doc_title = Some(d.title);
@@ -371,6 +396,7 @@ pub fn render(markdown: &str, theme: &'static Theme, motion: bool) -> RenderedDo
                                 repairs: Vec::new(),
                                 composition: None,
                                 views: Vec::new(),
+                                story: None,
                             });
                         }
                     }
@@ -441,7 +467,12 @@ pub fn render(markdown: &str, theme: &'static Theme, motion: bool) -> RenderedDo
 
     let title = doc_title.unwrap_or_else(|| "Document".to_string());
     let css = if motion {
-        format!("{}{}", shell_css(theme), super::motion::motion_css())
+        format!(
+            "{}{}{}",
+            shell_css(theme),
+            super::motion::motion_css(),
+            story_css_buf
+        )
     } else {
         shell_css(theme)
     };
@@ -1077,5 +1108,73 @@ mod tests {
         let doc = render_motion(&format!("```archify\n{}\n```\n", seq_with_views()));
         assert!(doc.html.contains("@keyframes agx-grow"));
         assert_eq!(doc.html.matches("<script").count(), 2);
+    }
+
+    // ---- flow story batch (motion batch 2) ----
+
+    const WF: &str = r#"{"workflow":{"title":"Loop","lanes":[{"id":"s","label":"Svc"}],
+        "nodes":[
+          {"id":"a","lane":"s","col":0,"label":"Fetch","sublabel":"上游拉取","type":"backend"},
+          {"id":"b","lane":"s","col":1,"label":"Store","type":"database"}],
+        "edges":[
+          {"from":"a","to":"b","label":"rows"},
+          {"from":"b","to":"a","label":"ack","variant":"return"}]}}"#;
+
+    #[test]
+    fn motion_bakes_story_rules_and_a_caption_strip() {
+        let doc = render_motion(&format!("# T\n\n```archify\n{WF}\n```\n"));
+        // Per-element rules scoped to the figure, riding the shared
+        // keyframes from the motion stylesheet.
+        assert!(doc
+            .html
+            .contains("figure[data-diagram-index=\"0\"] [data-node-id=\"a\"]{animation:agx-node"));
+        assert!(doc.html.contains("@keyframes agx-node{from{opacity:0;transform:scale(.9)}}"));
+        // The solid edge draws; the return edge fades (its authored dash
+        // survives) and the arrowhead/label rule trails both.
+        assert!(doc.html.contains(
+            "path[data-from=\"a\"][data-to=\"b\"]{stroke-dasharray:4000;animation:agx-draw"
+        ));
+        assert!(doc
+            .html
+            .contains("path[data-from=\"b\"][data-to=\"a\"]{animation:agx-in .5s both"));
+        assert!(doc.html.contains("path[data-from=\"a\"][data-to=\"b\"]+path,"));
+        // The caption strip rides inside the figure, after the svg.
+        let fig_at = doc.html.find("<figure").unwrap();
+        let fig_end = doc.html[fig_at..].find("</figure>").unwrap() + fig_at;
+        let figure = &doc.html[fig_at..fig_end];
+        assert!(figure.contains("</svg><div class=\"agx-caps\">"));
+        assert!(figure
+            .contains("style=\"animation-duration:2.45s;animation-delay:0.90s\">Fetch，上游拉取</span>"));
+        // The strip styles ship with the motion stylesheet, transcript under
+        // reduced motion (block stack, and !important so the reset beats the
+        // generated per-element rules — see motion.rs).
+        assert!(doc.html.contains(".agx-cap{position:absolute"));
+        assert!(doc.html.contains(
+            ".agx-motion .agx-cap{animation:none!important;opacity:1;position:static;display:block}"
+        ));
+    }
+
+    #[test]
+    fn static_posture_ships_no_story_surface() {
+        let doc = render(&format!("# T\n\n```archify\n{WF}\n```\n"));
+        assert!(!doc.html.contains("agx-caps"));
+        assert!(!doc.html.contains("agx-node"));
+        assert!(!doc.html.contains("agx-draw"));
+        assert!(!doc.html.contains("@keyframes"));
+        assert!(doc.fences[0].story.is_some(), "story is parsed either way");
+    }
+
+    #[test]
+    fn two_diagrams_scope_their_stories_independently() {
+        let doc =
+            render_motion(&format!("```archify\n{WF}\n```\n\n```archify\n{SEQ}\n```\n"));
+        assert!(doc.html.contains("figure[data-diagram-index=\"0\"] [data-node-id=\"a\"]"));
+        // The sequence figure indexes its story by message, not node.
+        assert!(
+            doc.html
+                .contains("figure[data-diagram-index=\"1\"] g[data-message-index=\"0\"]")
+        );
+        // Both caption strips ship, one per figure.
+        assert_eq!(doc.html.matches("<div class=\"agx-caps\">").count(), 2);
     }
 }
