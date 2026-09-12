@@ -1943,6 +1943,17 @@ impl Page {
             .unwrap_or(0)
     }
 
+    /// How many band paints this page has produced. Test probe for the
+    /// video pump's static-frame reuse (#398): held frames must skip the
+    /// paint entirely, so this counter sits below the pumped frame count.
+    #[cfg(all(test, feature = "screenshot"))]
+    pub fn band_paint_count(&self) -> u64 {
+        self.js
+            .as_ref()
+            .map(|js| js.with_state(|st| st.band_paints.get()))
+            .unwrap_or(0)
+    }
+
     /// Layout invalidation revision — the other half of the screencast damage
     /// signature. The tree epoch above is a shape stamp: attribute-level
     /// writes (style/class/attr) drop the layout cache without allocating

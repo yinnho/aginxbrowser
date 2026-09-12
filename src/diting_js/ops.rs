@@ -160,6 +160,11 @@ pub struct JsState {
     #[cfg(feature = "screenshot")]
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) solves: std::cell::Cell<u64>,
+    /// Band paints this state has produced — a test probe, so the video
+    /// pump's static-frame reuse can assert held frames skip the paint.
+    #[cfg(feature = "screenshot")]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) band_paints: std::cell::Cell<u64>,
     /// External stylesheet bodies fetched at navigation (absolute URL →
     /// decoded CSS text). Joined into the cascade by [`layout_run_all`]
     /// and served to the JS side as `document.styleSheets` rule content.
@@ -327,6 +332,7 @@ impl JsState {
             geometry_cache: std::cell::RefCell::new(None),
             #[cfg(feature = "screenshot")]
             solves: std::cell::Cell::new(0),
+            band_paints: std::cell::Cell::new(0),
             #[cfg(feature = "screenshot")]
             viewport: (1920.0, 1000.0),
             #[cfg(feature = "screenshot")]
@@ -587,27 +593,42 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         // attribute is still on the node for the diff. Anything else —
         // unknown properties added, no prior style to diff against — falls
         // back to the full drop.
-        let paint_only = cmd.as_str() == "set_attribute"
+        //
+        // Value-identity short-circuit (#398): a style write whose full
+        // serialized string is byte-identical to what's already on the node
+        // cannot change any computed style, so no cache drops and layout_rev
+        // holds — that flat revision is what the video pump's static-frame
+        // reuse keys on. The DOM write below still happens (observers see
+        // it, exactly as Chrome fires mutation records for a redundant
+        // setAttribute); only the invalidation is skipped, the same way
+        // Chrome's style system dedupes equal declarations.
+        let mut paint_only = false;
+        let mut identity = false;
+        if cmd.as_str() == "set_attribute"
             && arg2
                 .split_once('\0')
                 .is_some_and(|(name, _)| name.eq_ignore_ascii_case("style"))
-            && {
-                let old = arg1
-                    .parse::<u32>()
-                    .ok()
-                    .map(NodeId::new)
-                    .and_then(|id| {
-                        gs.borrow()
-                            .dom
-                            .as_ref()
-                            .and_then(|d| d.get_node(id).and_then(|n| n.get_attribute("style").map(|s| s.to_string())))
-                    });
-                style_write_is_paint_only(old.as_deref(), arg2.split_once('\0').map(|(_, v)| v))
-            };
-        if paint_only {
-            gs.borrow().drop_paint_only();
-        } else {
-            gs.borrow().drop_layout();
+        {
+            let old = arg1
+                .parse::<u32>()
+                .ok()
+                .map(NodeId::new)
+                .and_then(|id| {
+                    gs.borrow()
+                        .dom
+                        .as_ref()
+                        .and_then(|d| d.get_node(id).and_then(|n| n.get_attribute("style").map(|s| s.to_string())))
+                });
+            let new = arg2.split_once('\0').map(|(_, v)| v);
+            identity = old.as_deref() == new;
+            paint_only = !identity && style_write_is_paint_only(old.as_deref(), new);
+        }
+        if !identity {
+            if paint_only {
+                gs.borrow().drop_paint_only();
+            } else {
+                gs.borrow().drop_layout();
+            }
         }
     }
     // Persona viewport: needs a mutable borrow, so it runs before the main
@@ -1565,6 +1586,7 @@ pub(crate) fn band_frame(
     scroll_y: f32,
     viewport: (f32, f32),
 ) -> Option<(BandFrame, Vec<String>)> {
+    gs.band_paints.set(gs.band_paints.get() + 1);
     let dom = gs.dom.as_ref()?;
     // Same page-height cap the full-page render uses — a malicious client
     // requesting a 1e9-viewport must not allocate for it.

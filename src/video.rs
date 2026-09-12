@@ -15,7 +15,11 @@
 //! geometry/collection cache split (#395), transform/opacity writes only
 //! drop the collection half: the taffy solve is cached and `layout_collect`
 //! re-runs against the fresh styles — what real browsers hand to the
-//! compositor. Geometry writes (width, …) still drop both.
+//! compositor. Geometry writes (width, …) still drop both. And the inverse
+//! is the reuse arm (#398): a seek whose style writes are byte-identical to
+//! what's already on the nodes invalidates nothing, so a flat layout
+//! revision at an unchanged scroll means the last frame's pixels still hold
+//! — the pump clones them instead of repainting.
 
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -181,10 +185,12 @@ const MAX_SUBTITLE_BYTES: usize = 64 * 1024;
 /// Per-phase pump timings for the AGINXBROWSER_VIDEO_TRACE knob: where the
 /// frame budget goes — JS seek, band paint (any relayout inside
 /// ensure_layout_run included; AGINXBROWSER_LAYOUT_TRACE splits that phase
-/// further), image refetch, and the ffmpeg stdin write.
+/// further), image refetch, and the ffmpeg stdin write. `reused` counts
+/// frames shipped as clones of the previous paint (static-frame reuse).
 #[derive(Default)]
 struct PumpPhases {
     frames: u32,
+    reused: u32,
     eval: std::time::Duration,
     band: std::time::Duration,
     images: std::time::Duration,
@@ -441,7 +447,8 @@ pub async fn render_timeline_video(
     // Frame 0 first: it fixes the pixel size ffmpeg gets spawned with and
     // absorbs the one-time band-image fetch pass before encoding starts.
     let mut phases = PumpPhases::default();
-    let (w, h, mut first) = seek_and_paint(page, viewport, 0.0, &mut phases).await?;
+    let mut reuse = FrameReuse::default();
+    let (w, h, mut first) = seek_and_paint(page, viewport, 0.0, &mut phases, &mut reuse).await?;
     let expect = w as usize * h as usize * 4;
 
     // MP4 muxing needs a seekable output, so the file goes to a temp path
@@ -661,7 +668,7 @@ pub async fn render_timeline_video(
     let pump_wall = Instant::now();
     for i in 1..frames {
         let t = i as f64 / opts.fps;
-        let (_, _, mut rgba) = seek_and_paint(page, viewport, t, &mut phases).await?;
+        let (_, _, mut rgba) = seek_and_paint(page, viewport, t, &mut phases, &mut reuse).await?;
         if let Some(fonts) = &hardsub_fonts {
             hardsub.burn(&mut rgba, w, h, t, fonts);
         }
@@ -691,8 +698,9 @@ pub async fn render_timeline_video(
     // ensure_layout_run triggered (LAYOUT_TRACE splits that phase further).
     if std::env::var("AGINXBROWSER_VIDEO_TRACE").is_ok() {
         eprintln!(
-            "[video-trace] frames={} wall={:?} eval={:?} band={:?} images={:?} write={:?}",
+            "[video-trace] frames={} reused={} wall={:?} eval={:?} band={:?} images={:?} write={:?}",
             phases.frames,
+            phases.reused,
             pump_wall.elapsed(),
             phases.eval,
             phases.band,
@@ -748,21 +756,38 @@ async fn fetch_audio(page: &Page, url: &str) -> Result<Vec<u8>, VideoError> {
     }
 }
 
-/// Seek every registered timeline to `t`, then paint one viewport band. The
-/// first pass may report missing image URLs — those fetch through the page's
-/// own client and the band repaints before returning (placeholders only if a
-/// fetch fails; a frame beats a stall). Phase timings accumulate into
-/// `phases` (the AGINXBROWSER_VIDEO_TRACE knob).
+/// Static-frame reuse bookkeeping (#398): the last painted frame's CLEAN
+/// (pre-hardsub) bytes plus the camera position it was painted at. A seek
+/// that lands no cache invalidation (flat `layout_rev`) while the scroll
+/// offset sits where that frame was painted cannot have changed a pixel —
+/// the pump clones the stored bytes instead of repainting, which is what
+/// turns hold sections and end freezes into ~a memcpy. Clean bytes because
+/// the hardsub pass composites in place and source-over is not idempotent
+/// on anti-aliased glyph edges: every output frame burns a fresh copy.
+#[derive(Default)]
+struct FrameReuse {
+    scroll: Option<(f32, f32)>,
+    frame: Option<(u32, u32, Vec<u8>)>,
+}
+
+/// Seek every registered timeline to `t`, then paint one viewport band —
+/// or, when the seek provably changed nothing, clone the last frame. The
+/// first pass may report missing image URLs — those fetch through the
+/// page's own client and the band repaints before returning (placeholders
+/// only if a fetch fails; a frame beats a stall). Phase timings accumulate
+/// into `phases` (the AGINXBROWSER_VIDEO_TRACE knob).
 async fn seek_and_paint(
     page: &mut Page,
     viewport: (f32, f32),
     t: f64,
     phases: &mut PumpPhases,
+    reuse: &mut FrameReuse,
 ) -> Result<(u32, u32, Vec<u8>), VideoError> {
     let seek = format!(
         "(() => {{ for (const k in window.__timelines) {{ \
          try {{ window.__timelines[k].pause({t:.4}); }} catch (e) {{}} }} }})()"
     );
+    let gen_before = page.layout_rev();
     let t_eval = Instant::now();
     let _ = page.evaluate(&seek);
     let eval_dt = t_eval.elapsed();
@@ -772,6 +797,35 @@ async fn seek_and_paint(
     // unconditionally froze every scrolling timeline at the document top;
     // the intro video never noticed because its camera never moved.
     let (sx, sy) = page.scroll_offset();
+    // Static-frame reuse: the seek landed nothing that invalidates (the
+    // layout revision is flat — the style-identity short-circuit in
+    // op_dom_inner is what holds it there for well-behaved seeks) and the
+    // camera sits where the stored frame was painted, so the pixels are
+    // byte-for-byte the ones already encoded once.
+    if page.layout_rev() == gen_before && reuse.scroll == Some((sx, sy)) {
+        if let Some((w, h, bytes)) = reuse.frame.as_ref() {
+            phases.reused += 1;
+            phases.record(eval_dt, std::time::Duration::ZERO, std::time::Duration::ZERO);
+            return Ok((*w, *h, bytes.clone()));
+        }
+    }
+    let paint = paint_band(page, viewport, sx, sy, phases, eval_dt).await?;
+    reuse.scroll = Some((sx, sy));
+    reuse.frame = Some((paint.0, paint.1, paint.2.clone()));
+    Ok(paint)
+}
+
+/// The band half of a pump cycle: paint from the cached layout, fetch any
+/// img bodies the pass reports missing, repaint image-complete. Owned by
+/// [`seek_and_paint`]; split out so the reuse path reads as its own arm.
+async fn paint_band(
+    page: &mut Page,
+    viewport: (f32, f32),
+    sx: f32,
+    sy: f32,
+    phases: &mut PumpPhases,
+    eval_dt: std::time::Duration,
+) -> Result<(u32, u32, Vec<u8>), VideoError> {
     let t_band = Instant::now();
     let Some((frame, missing)) = page.viewport_band_frame(sx, sy, viewport) else {
         return Err(VideoError::NoLiveDocument);
@@ -938,6 +992,92 @@ document.getElementById("box").style.opacity = "0";
         );
     }
 
+    /// Guarded timeline stub: same slide+fade, but pause() only writes when
+    /// the serialized value actually changed — how a well-behaved seek
+    /// spends its dead time (GSAP caches rendered values the same way). The
+    /// clamped tail [1, 2] writes nothing, which is what static-frame reuse
+    /// feeds on.
+    const GUARD_HTML: &str = r#"<!doctype html><html><head><style>
+html,body{margin:0;padding:0;width:800px;height:450px;overflow:hidden;background:#101418}
+#box{position:absolute;left:40px;top:40px;width:200px;height:92px;background:rgb(255,92,0)}
+</style></head><body>
+<div id="box"></div>
+<script>
+var lastTf = null, lastOp = null;
+window.__timelines = { main: {
+  duration: function () { return 2; },
+  pause: function (t) {
+    var u = Math.min(Math.max(t, 0), 1);
+    var e = 1 - Math.pow(1 - u, 3);
+    var box = document.getElementById("box");
+    var tf = "translate3d(" + (-200 * (1 - e)).toFixed(4) + "px, 0px, 0px)";
+    if (tf !== lastTf) { lastTf = tf; box.style.transform = tf; }
+    var op = e.toFixed(4);
+    if (op !== lastOp) { lastOp = op; box.style.opacity = op; }
+  }
+}};
+window.__timelines.main.pause(0);
+</script></body></html>"#;
+
+    /// The #398 contract: a timeline that stops writing (the clamped hold
+    /// tail behind the value guard) must not repaint — frames still ship to
+    /// ffmpeg as clones of the last paint, and the animated half still
+    /// paints every frame.
+    #[tokio::test(flavor = "current_thread")]
+    async fn held_timeline_reuses_the_last_frame_instead_of_repainting() {
+        if Command::new("ffmpeg").arg("-version").output().is_err() {
+            eprintln!("skipping: ffmpeg not on PATH");
+            return;
+        }
+        let port = spawn_html_server(GUARD_HTML);
+        let mut page = test_page();
+        page.navigate_with_wait(
+            &format!("http://127.0.0.1:{port}/guard.html"),
+            WaitUntil::Load,
+        )
+        .await
+        .expect("navigate guard fixture");
+        page.settle_until_idle(5000).await;
+        assert_eq!(page.band_paint_count(), 0, "nothing paints before the pump");
+        let opts = TimelineVideoOptions {
+            fps: 10.0,
+            viewport: (800.0, 450.0),
+            hold_tail_secs: 0.0,
+            max_duration_secs: 30.0,
+            wait_timelines: Duration::from_secs(5),
+            ..Default::default()
+        };
+        let video = render_timeline_video(&mut page, &opts)
+            .await
+            .expect("pump renders held timeline");
+        assert_eq!(video.frames, 20, "2s @ 10fps");
+        let paints = page.band_paint_count();
+        // Animated half [0, 1]: ten frames, each a fresh value → a paint.
+        assert!(paints >= 10, "animated frames still paint ({paints})");
+        // Hold tail [1, 2]: ten frames the guard leaves unwritten → clones.
+        assert!(paints < 20, "held frames must reuse, not repaint ({paints})");
+        assert_eq!(&video.mp4[4..8], b"ftyp", "mp4 magic");
+    }
+
+    /// The value-identity short-circuit (#398): rewriting the exact same
+    /// serialized style string must not move the layout revision (that flat
+    /// rev is what reuse keys on); a changed value must.
+    #[tokio::test(flavor = "current_thread")]
+    async fn identical_style_rewrite_does_not_invalidate() {
+        let mut page = navigated_stub_page().await;
+        fn write(page: &mut EnginePage, v: &str) {
+            page.evaluate(&format!(
+                "document.getElementById('box').style.transform = 'translate3d({v}px, 0px, 0px)'; undefined"
+            ));
+        }
+        write(&mut page, "-77");
+        let g1 = page.layout_rev();
+        write(&mut page, "-77");
+        assert_eq!(page.layout_rev(), g1, "identical rewrite must not invalidate");
+        write(&mut page, "-78");
+        assert!(page.layout_rev() > g1, "changed rewrite invalidates");
+    }
+
     /// Scrolling-camera fixture: pause(t) drives window.scrollTo down a
     /// two-screen document, the way the comparison video's camera does.
     const SCROLL_HTML: &str = r#"<!doctype html><html><head><style>
@@ -971,10 +1111,10 @@ window.__timelines = { main: {
         .expect("navigate scroll fixture");
         page.settle_until_idle(5000).await;
         let vp = (800.0, 450.0);
-        let (_, _, top) = seek_and_paint(&mut page, vp, 0.0, &mut PumpPhases::default())
+        let (_, _, top) = seek_and_paint(&mut page, vp, 0.0, &mut PumpPhases::default(), &mut FrameReuse::default())
             .await
             .expect("frame at top");
-        let (_, _, bot) = seek_and_paint(&mut page, vp, 2.0, &mut PumpPhases::default())
+        let (_, _, bot) = seek_and_paint(&mut page, vp, 2.0, &mut PumpPhases::default(), &mut FrameReuse::default())
             .await
             .expect("frame at bottom");
         let px = |f: &[u8]| {
@@ -1012,6 +1152,13 @@ window.__timelines = { main: {
         assert!(!video.has_audio);
         assert!(!video.mp4.windows(4).any(|w| w == b"mp4a"), "no audio track when none requested");
         assert!(video.mp4.len() > 4_000, "a real encoded stream, not a bare header: {} bytes", video.mp4.len());
+        // The stub's pause() writes unconditionally, so every seek bumps
+        // the layout revision — reuse must never fire here.
+        assert_eq!(
+            page.band_paint_count(),
+            20,
+            "unguarded seeks must repaint every frame"
+        );
     }
 
     /// A minimal mono 16-bit PCM WAV of `secs` of 440 Hz — hand-rolled so the
