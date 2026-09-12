@@ -581,6 +581,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             | "set_inner_html"
             | "set_live_value"
             | "set_live_checked"
+            | "set_focused"
             | "document_write_reset"
     ) {
         let gs = state.borrow::<SharedState>().clone();
@@ -897,6 +898,24 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         "set_live_checked" => {
             let node_id = match parse_nid(&arg1) { Some(id) => id, None => return "false".into() };
             dom.with_node_mut(node_id, |n| n.set_live_checked(arg2 == "1"));
+            "true".into()
+        }
+        // Focus mirror (blitz#839): the bootstrap's focus()/blur() keep the
+        // JS-side __diting_focused global for activeElement, and this op
+        // mirrors the same fact into the tree so :focus/:focus-within/
+        // :focus-visible selectors match on the next style run. arg2 "0"
+        // clears (the JS side passes the node it is blurring; a blur when
+        // some OTHER node holds focus must not steal it away).
+        "set_focused" => {
+            let node_id = match parse_nid(&arg1) {
+                Some(id) => id,
+                None => return "false".into(),
+            };
+            if arg2 == "1" {
+                dom.set_focused_node(Some(node_id));
+            } else if dom.focused_node() == Some(node_id) {
+                dom.set_focused_node(None);
+            }
             "true".into()
         }
         "inner_html" => {
@@ -1246,7 +1265,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             let epoch = dom.epoch();
             ensure_layout_run(&gs, dom, epoch);
             let guard = gs.layout_cache.borrow();
-            let Some((_, (rects, _, _, items))) = guard.as_ref().filter(|(e, _)| *e == epoch)
+            let Some((_, (rects, _, styles, items))) = guard.as_ref().filter(|(e, _)| *e == epoch)
             else {
                 return "null".into();
             };
@@ -1266,6 +1285,14 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             let mut max_h = oh;
             let mut stack = dom.children(nid);
             while let Some(cur) = stack.pop() {
+                // blitz#841: a viewport-fixed box never contributes to any
+                // scroller's overflow — its containing block is the viewport,
+                // so its (possibly transformed) rect must stay out of the
+                // union. The whole subtree skips: everything under it is
+                // pinned with it.
+                if is_viewport_fixed(dom, styles, cur, nid) {
+                    continue;
+                }
                 stack.extend(dom.children(cur));
                 if let Some(&[x, y, w, h]) = rects.get(&cur) {
                     max_w = max_w.max((x + w - ox).max(0.0));
@@ -1562,6 +1589,39 @@ fn ensure_layout_run(gs: &JsState, dom: &DomTree, epoch: u64) {
     }
 }
 
+/// Whether `node` is a position:fixed box whose containing block is the
+/// VIEWPORT — no ancestor between it and `root` carries a transform. CSS
+/// transforms establish a new containing block for fixed descendants, so a
+/// fixed box under a transformed ancestor re-anchors into that subtree and
+/// DOES contribute to its scrollable overflow; only the viewport-anchored
+/// kind is exempt (blitz#841: upstream's viewport became scrollable because
+/// a translated fixed element entered the overflow walk).
+#[cfg(feature = "screenshot")]
+fn is_viewport_fixed(
+    dom: &DomTree,
+    styles: &HashMap<NodeId, crate::diting_css::ComputedStyle>,
+    node: NodeId,
+    root: NodeId,
+) -> bool {
+    if !styles
+        .get(&node)
+        .is_some_and(|st| st.position == Some(crate::diting_css::PositionMode::Fixed))
+    {
+        return false;
+    }
+    let mut cur = dom.get_node(node).and_then(|n| n.parent);
+    while let Some(id) = cur {
+        if id == root {
+            return true;
+        }
+        if styles.get(&id).is_some_and(|st| st.transform.is_some()) {
+            return false;
+        }
+        cur = dom.get_node(id).and_then(|n| n.parent);
+    }
+    true
+}
+
 /// One viewport-band frame: RGBA pixels plus the scroll offset actually
 /// painted and the document's scrollable extent.
 #[cfg(feature = "screenshot")]
@@ -1608,7 +1668,7 @@ pub(crate) fn band_frame(
     let epoch = dom.epoch();
     ensure_layout_run(gs, dom, epoch);
     let guard = gs.layout_cache.borrow();
-    let (_, (rects, _, _, items)) = guard.as_ref().filter(|(e, _)| *e == epoch)?;
+    let (_, (rects, _, styles, items)) = guard.as_ref().filter(|(e, _)| *e == epoch)?;
 
     // Scrollable content extent: the root scroller's box unioned with every
     // laid-out descendant, clamped up to the viewport — the same union the
@@ -1627,6 +1687,12 @@ pub(crate) fn band_frame(
             content_h = content_h.max(oh);
             let mut stack = dom.children(root);
             while let Some(cur) = stack.pop() {
+                // Same viewport-fixed skip as the scroll_extent op (blitz#841)
+                // — the two walks must agree or JS scrollHeight and the
+                // pump's clamp disagree on the scroll range.
+                if is_viewport_fixed(dom, styles, cur, root) {
+                    continue;
+                }
                 stack.extend(dom.children(cur));
                 if let Some(&[x, y, w, h]) = rects.get(&cur) {
                     content_w = content_w.max((x + w - ox).max(0.0));

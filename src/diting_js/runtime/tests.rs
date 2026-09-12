@@ -7690,6 +7690,121 @@
         );
     }
 
+    /// blitz#841 shape: a `position: fixed` element never contributes to the
+    /// root scrollable overflow — not even when a transform pushes its paint
+    /// far past the viewport edge. Upstream's viewport became scrollable
+    /// because the fixed element's (transformed) box entered the overflow
+    /// walk; Chrome keeps scrollWidth pinned to the viewport for fixed boxes.
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn test_fixed_transformed_element_does_not_expand_scroll_extent() {
+        let mut rt = setup_runtime(
+            "<html><body><p>body text</p>\
+             <div id=\"fx\" style=\"position:fixed;left:0;top:0;width:50px;height:50px;\
+             transform:translateX(2500px)\"></div></body></html>",
+        );
+        let result = rt.evaluate(r#"
+            return [document.documentElement.scrollWidth <= innerWidth + 50,
+                    document.body.scrollWidth <= innerWidth + 50];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        assert_eq!(
+            parts[0],
+            serde_json::json!(true),
+            "a fixed box translated past the viewport must not widen the root scroll area"
+        );
+        assert_eq!(
+            parts[1],
+            serde_json::json!(true),
+            "nor the body's scroll area — fixed is out of every scroller's flow"
+        );
+    }
+
+    /// blitz#840 shape (narrowed to what applies without transitions): an
+    /// out-of-flow element inside an INLINE-LEVEL container must still carry
+    /// its transform — in gBCR here, and the paint side reads the same
+    /// resolved matrix. Upstream lost the transform entirely when the subtree
+    /// was pruned at an inline ancestor; the probe pins the abspos-in-span
+    /// arrangement plus a trailing sibling, their exact three conditions.
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn test_abspos_child_in_inline_container_keeps_transform() {
+        let mut rt = setup_runtime(
+            "<html><body style=\"margin:0\">\
+             <span class=\"box\" style=\"position:relative;width:42px;height:22px\">\
+             <span id=\"dot\" style=\"position:absolute;top:0;left:2px;width:18px;height:18px;\
+             transform:translateX(20px)\"></span></span>\
+             <div></div></body></html>",
+        );
+        let result = rt.evaluate(r#"
+            const dot = document.getElementById("dot");
+            const r = dot.getBoundingClientRect();
+            return [Math.round(r.x), Math.round(r.width)];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        assert_eq!(
+            parts[0],
+            serde_json::json!(22),
+            "abspos dot at left:2 + translateX(20) reports x=22 through the inline container"
+        );
+        assert_eq!(parts[1], serde_json::json!(18), "transform does not resize the box");
+    }
+
+    /// blitz#839's complaint through the whole stack: focus() must reach the
+    /// Rust tree (selector matching), so :focus/:focus-within/:focus-visible
+    /// rules actually re-style, and blur() clears them again. The old focus()
+    /// flipped a JS global only — every focus-dependent rule stayed inert.
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn test_focus_pseudo_styles_react_to_focus_and_blur() {
+        let mut rt = setup_runtime(
+            "<html><head><style>\
+             #q:focus { background-color: rgb(10, 20, 30); }\
+             form:focus-within { margin-top: 7px; }\
+             #q:focus-visible { color: rgb(1, 2, 3); }\
+             </style></head><body><form><input id=\"q\"></form></body></html>",
+        );
+        let result = rt.evaluate(r#"
+            const q = document.getElementById("q");
+            const form = document.querySelector("form");
+            const before = getComputedStyle(q).backgroundColor;
+            const formBefore = getComputedStyle(form).marginTop;
+            q.focus();
+            const focusedBg = getComputedStyle(q).backgroundColor;
+            const visibleColor = getComputedStyle(q).color;
+            const formWithin = getComputedStyle(form).marginTop;
+            q.blur();
+            return [before, focusedBg, visibleColor, formBefore, formWithin,
+                    getComputedStyle(q).backgroundColor];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        let before = parts[0].as_str().expect("before is a string");
+        let focused = parts[1].as_str().expect("focused is a string");
+        assert_ne!(
+            before, focused,
+            ":focus rule must re-style the focused input"
+        );
+        assert_eq!(
+            focused, "rgb(10, 20, 30)",
+            "the :focus background lands in computed style"
+        );
+        assert_eq!(
+            parts[2].as_str().expect("color string"),
+            "rgb(1, 2, 3)",
+            ":focus-visible matches — a text input shows the ring on programmatic focus"
+        );
+        assert_ne!(
+            parts[3].as_str().expect("form before"),
+            parts[4].as_str().expect("form within"),
+            ":focus-within re-styles the containing form while the input holds focus"
+        );
+        assert_eq!(
+            parts[5].as_str().expect("after blur"),
+            before,
+            "blur() returns the input to its unfocused style"
+        );
+    }
+
     /// Upstream obscura #704: postMessage's targetOrigin argument must gate
     /// delivery — '*' or a matching origin delivers, a mismatched origin
     /// drops silently (browsers never throw), '/' requires same-origin with

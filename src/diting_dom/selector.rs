@@ -262,6 +262,43 @@ impl<'a> DomElement<'a> {
             .with_node(self.node_id, |n| n.get_attribute(name).is_some())
             .unwrap_or(false)
     }
+
+    /// Chrome's :focus-visible text-entry family: textarea, select, a text
+    /// flavor of input (absent/unknown type defaults to text), or anything
+    /// contenteditable. Buttons, links, checkboxes stay mouse-ish.
+    fn is_text_entry_control(&self) -> bool {
+        self.tree
+            .with_node(self.node_id, |n| {
+                let e = n.as_element()?;
+                let local = e.local.to_ascii_lowercase();
+                if matches!(local.as_ref(), "textarea" | "select") {
+                    return Some(true);
+                }
+                if local.as_ref() == "input" {
+                    let t = n
+                        .get_attribute("type")
+                        .map(|s| s.to_ascii_lowercase())
+                        .unwrap_or_else(|| "text".into());
+                    return Some(!matches!(
+                        t.as_str(),
+                        "button"
+                            | "submit"
+                            | "reset"
+                            | "image"
+                            | "checkbox"
+                            | "radio"
+                            | "file"
+                            | "hidden"
+                    ));
+                }
+                if n.get_attribute("contenteditable").is_some() {
+                    return Some(true);
+                }
+                Some(false)
+            })
+            .flatten()
+            .unwrap_or(false)
+    }
 }
 
 impl<'a> std::fmt::Debug for DomElement<'a> {
@@ -466,13 +503,35 @@ impl<'a> Element for DomElement<'a> {
             PseudoClass::Checked => {
                 self.has_boolean_attr("checked") || self.has_boolean_attr("selected")
             }
-            // Dynamic user-interaction pseudo-classes have no meaning against
-            // a static DOM snapshot with no live user input.
-            PseudoClass::Hover
-            | PseudoClass::Active
-            | PseudoClass::Focus
-            | PseudoClass::FocusVisible
-            | PseudoClass::FocusWithin => false,
+            // Focus tracks the tree's live focused node (blitz#839): agents
+            // focus() a control and then read :focus styles, and the old
+            // unconditional false froze every focus-dependent rule inert.
+            PseudoClass::Focus => self.tree.focused_node() == Some(self.node_id),
+            PseudoClass::FocusWithin => {
+                // :focus-within = the subject itself is focused OR contains
+                // the focused node — so climb from the focused element and
+                // see whether the subject is on that ancestor chain.
+                let mut cur = self.tree.focused_node();
+                while let Some(id) = cur {
+                    if id == self.node_id {
+                        return true;
+                    }
+                    cur = self.tree.get_node(id).and_then(|n| n.parent);
+                }
+                false
+            }
+            // Chrome's :focus-visible heuristic narrowed to what a
+            // script-driven engine knows: text-entry controls show the ring
+            // on programmatic focus, mouse-ish targets (button/link) don't.
+            // Keyboard Tab would light those too, but Tab traversal isn't
+            // implemented — this matches Chrome for every focus() probe an
+            // agent actually runs.
+            PseudoClass::FocusVisible => {
+                self.tree.focused_node() == Some(self.node_id) && self.is_text_entry_control()
+            }
+            // Hover/active stay snapshot-false: nothing in the engine holds
+            // a live hover/active target.
+            PseudoClass::Hover | PseudoClass::Active => false,
         }
     }
 
@@ -1339,13 +1398,51 @@ mod tests {
     #[test]
     fn focus_state_pseudo_classes_parse_and_match_static_snapshot() {
         // Bootstrap's .visually-hidden-focusable pattern: :not(:focus):not(:focus-within)
-        // must MATCH on a snapshot with no live input (both pseudos are false).
+        // must MATCH when nothing holds focus (both pseudos are false).
         let tree = parse_html(r#"<div class="visually-hidden-focusable">Skip</div>"#);
         let hidden = tree
             .query_selector_all(".visually-hidden-focusable:not(:focus):not(:focus-within)")
             .unwrap();
         assert_eq!(hidden.len(), 1);
         assert_eq!(tree.query_selector_all(":focus-visible").unwrap().len(), 0);
+    }
+
+    /// The live side of the focus pseudos (blitz#839): the tree's focused
+    /// node drives :focus, :focus-within climbs ancestors, and
+    /// :focus-visible narrows to text-entry controls (input type=text
+    /// yes, type=checkbox no).
+    #[test]
+    fn focus_pseudo_classes_match_live_focused_node() {
+        let tree = parse_html(
+            r#"<form><input id="q" type="text"><input id="c" type="checkbox"><button id="b">Go</button></form>"#,
+        );
+        let q = tree.get_element_by_id("q").unwrap();
+        tree.set_focused_node(Some(q));
+        assert_eq!(tree.query_selector_all(":focus").unwrap().len(), 1);
+        assert_eq!(
+            tree.query_selector_all("#q:focus-visible").unwrap().len(),
+            1
+        );
+        // :focus-within reaches the form even though the form itself isn't focused.
+        assert_eq!(
+            tree.query_selector_all("form:focus-within").unwrap().len(),
+            1
+        );
+
+        // A checkbox holds focus → :focus matches, but :focus-visible doesn't
+        // (mouse-ish control per the heuristic).
+        let c = tree.get_element_by_id("c").unwrap();
+        tree.set_focused_node(Some(c));
+        assert_eq!(tree.query_selector_all("#c:focus").unwrap().len(), 1);
+        assert_eq!(tree.query_selector_all(":focus-visible").unwrap().len(), 0);
+
+        // Blur → every focus pseudo is false again.
+        tree.set_focused_node(None);
+        assert_eq!(tree.query_selector_all(":focus").unwrap().len(), 0);
+        assert_eq!(
+            tree.query_selector_all("form:focus-within").unwrap().len(),
+            0
+        );
     }
 
     #[test]

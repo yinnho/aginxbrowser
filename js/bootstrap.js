@@ -70,6 +70,9 @@ const _DOM_MUTATION_COMMANDS = new Set([
   // checkbox/radio dirty checkedness the widget paint reads.
   "set_live_value",
   "set_live_checked",
+  // Focus changes what :focus/:focus-within/:focus-visible rules resolve
+  // to — the getComputedStyle snapshot epoch must go stale on it (blitz#839).
+  "set_focused",
 ]);
 const _domRaw = (cmd, a1, a2) => {
   if (_DOM_MUTATION_COMMANDS.has(cmd)) _ditingMutationEpoch++;
@@ -942,6 +945,18 @@ function _isFormControlDisabled(el) {
   if (t !== 'INPUT' && t !== 'BUTTON' && t !== 'SELECT' && t !== 'TEXTAREA') return false;
   if ((el.hasAttribute && el.hasAttribute('disabled')) || el.disabled) return true;
   return _fieldsetDisabled(el);
+}
+
+// Clear focus and fire the leaving half of the focus event family
+// (blur non-bubbling, focusout bubbling). Shared by el.blur() and the
+// switch-away leg of el.focus() — Chrome runs blur+focusout on the old
+// holder before focus+focusin on the new one.
+function _fireBlurFamily(el) {
+  globalThis.__diting_focused = null;
+  if (el && el._nid !== undefined) _domRaw("set_focused", String(el._nid), "0");
+  if (!el) return;
+  el.dispatchEvent(new FocusEvent("blur"));
+  el.dispatchEvent(new FocusEvent("focusout", {bubbles: true}));
 }
 
 function __prepareInsertedScript(script) {
@@ -2296,8 +2311,30 @@ class Element extends Node {
       this._ditingClickInProgress = false;
     }
   }
-  focus() { globalThis.__diting_focused = this; globalThis.__diting_click_target = this; }
-  blur() { if (globalThis.__diting_focused === this) globalThis.__diting_focused = null; }
+  // Focus/blur are real now (blitz#839): the tree-level focused node drives
+  // :focus/:focus-within/:focus-visible matching and repaint, and the focus
+  // event family fires. Chrome order for a switch old→new is blur+focusout
+  // on the old target, then focus (non-bubbling) + focusin (bubbling) on the
+  // new one; listeners observe activeElement already moved. A disabled form
+  // control is a full no-op (no events, focus unchanged). Chrome also gates
+  // focus() on "focusable area" (tabindex/controls/links); we keep the old
+  // engine permissiveness — anything can hold focus — because typing and
+  // click targeting flow through activeElement and page scripts rely on it.
+  focus() {
+    if (_isFormControlDisabled(this)) return;
+    if (globalThis.__diting_focused === this) return;
+    if (globalThis.__diting_focused) _fireBlurFamily(globalThis.__diting_focused);
+    globalThis.__diting_focused = this;
+    globalThis.__diting_click_target = this;
+    _domRaw("set_focused", String(this._nid), "1");
+    this.dispatchEvent(new FocusEvent("focus"));
+    this.dispatchEvent(new FocusEvent("focusin", {bubbles: true}));
+  }
+  blur() {
+    if (globalThis.__diting_focused !== this) return;
+    _fireBlurFamily(this);
+  }
+
 
   // --- Popover API (HTML "popover") ---------------------------------------
   // Read the popover content attribute case-insensitively. The HTML parser

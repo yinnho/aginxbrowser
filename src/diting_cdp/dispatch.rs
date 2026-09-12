@@ -1826,6 +1826,127 @@ mod tests {
         );
     }
 
+    // Enter/Space activation (blitz#839): a focused button has activation
+    // behavior, so Enter synthesizes its click — a type=button must NOT
+    // trigger implicit form submission the way a text input does. Space
+    // fires the click on keyUp for the button/checkbox family, and its
+    // text must not splice into a checkbox's .value (text insertion only
+    // targets text-entry controls).
+    #[tokio::test(flavor = "current_thread")]
+    async fn input_enter_and_space_activate_focused_controls() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-enter-space".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({
+                "url": "data:text/html,<form id=f><button type=button id=b>Go</button><input type=checkbox id=c></form>"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        let park = CdpRequest {
+            id: 2,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "(function(){window.__clicks=0;window.__submits=0;\
+                    document.getElementById('b').addEventListener('click',function(){window.__clicks++;});\
+                    document.getElementById('f').addEventListener('submit',function(e){e.preventDefault();window.__submits++;});\
+                    document.getElementById('b').focus();})()"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&park, &mut ctx).await.error.is_none());
+
+        let enter = CdpRequest {
+            id: 3,
+            method: "Input.dispatchKeyEvent".to_string(),
+            params: json!({
+                "type": "keyDown",
+                "key": "Enter",
+                "code": "Enter",
+                "text": "\r"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&enter, &mut ctx).await.error.is_none());
+
+        let check = CdpRequest {
+            id: 4,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "[window.__clicks, window.__submits]",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&check, &mut ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        let result = resp.result.expect("result");
+        assert_eq!(
+            result["result"]["value"][0], 1,
+            "Enter on the focused button fires its click"
+        );
+        assert_eq!(
+            result["result"]["value"][1], 0,
+            "a type=button must not submit the form"
+        );
+
+        // Space on the checkbox: keyDown carries the printable text (which
+        // must NOT splice into a checkbox), keyUp carries the activation.
+        let re_focus = CdpRequest {
+            id: 5,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "document.getElementById('c').focus()"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&re_focus, &mut ctx).await.error.is_none());
+        for (id, ty) in [(6u64, "keyDown"), (7, "keyUp")] {
+            let req = CdpRequest {
+                id,
+                method: "Input.dispatchKeyEvent".to_string(),
+                params: json!({
+                    "type": ty,
+                    "key": " ",
+                    "code": "Space",
+                    "text": " "
+                }),
+                session_id: Some(session_id.clone()),
+            };
+            assert!(dispatch(&req, &mut ctx).await.error.is_none());
+        }
+        let check = CdpRequest {
+            id: 8,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "[document.getElementById('c').checked, document.getElementById('c').value, window.__submits]",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&check, &mut ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        let result = resp.result.expect("result");
+        assert_eq!(
+            result["result"]["value"][0], true,
+            "Space on keyUp toggles the focused checkbox"
+        );
+        assert_eq!(
+            result["result"]["value"][1], "on",
+            "the Space text never splices into a checkbox's value"
+        );
+        assert_eq!(
+            result["result"]["value"][2], 0,
+            "a checkbox toggle is not a submission"
+        );
+    }
+
     // Target discovery surfaces must agree (obscura#570 class): /json/list,
     // Target.getTargets, and the setDiscoverTargets event stream all read the
     // same per-connection context. A fresh connection has no pages, so all

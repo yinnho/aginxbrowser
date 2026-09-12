@@ -67,6 +67,10 @@ fn insert_text_js(text: &str) -> String {
         "(function() {{\
             var t = document.activeElement;\
             if (!t || (t.localName !== 'input' && t.localName !== 'textarea')) return;\
+            if (t.localName === 'input') {{\
+                var ty = String(t.type || 'text').toLowerCase();\
+                if (['button','submit','reset','image','checkbox','radio','file','hidden','range','color'].indexOf(ty) >= 0) return;\
+            }}\
             var ins = {text};\
             var v = t.value || '';\
             var s = t.selectionStart, e = t.selectionEnd;\
@@ -388,9 +392,21 @@ pub async fn handle(
                                     globalThis.__diting_setFieldValue(target, 'value', v.slice(0, lo) + '\\n' + v.slice(hi));\
                                     target.setSelectionRange(lo + 1, lo + 1);\
                                     target.dispatchEvent(globalThis.__diting_markTrusted(new Event('input', {bubbles:true})));\
-                                } else {\
-                                    var form = target.form || (target.closest && target.closest('form'));\
-                                    if (form) {{ try {{ if (typeof form.requestSubmit === 'function') {{ form.requestSubmit(); }} else {{ form.submit(); }} }} catch(e) {{}} }}\
+                                } else {
+                                    // Enter on an activation-behavior element synthesizes
+                                    // a click on it (blitz#839): Chrome runs the focused
+                                    // button/link/checkbox activation, NOT implicit form
+                                    // submission — a focused type=button must not submit.
+                                    var ln = target.localName;\
+                                    var ty = (ln === 'input') ? String(target.type || 'text').toLowerCase() : '';\
+                                    var activatable = ln === 'button' || ln === 'a' || ln === 'area'\
+                                        || (ln === 'input' && ['button','submit','reset','image','checkbox','radio','file'].indexOf(ty) >= 0);\
+                                    if (activatable) {\
+                                        try { target.click(); } catch (e) {}\
+                                    } else {\
+                                        var form = target.form || (target.closest && target.closest('form'));\
+                                        if (form) { try { if (typeof form.requestSubmit === 'function') { form.requestSubmit(); } else { form.submit(); } } catch(e) {} }\
+                                    }\
                                 }\
                             })()";
                             page.evaluate(js);
@@ -411,6 +427,24 @@ pub async fn handle(
                             code = code.replace('\\', "\\\\").replace('\'', "\\'"),
                         );
                         page.evaluate(&js);
+
+                        // Space activates on keyUP in Chrome (blitz#839): the
+                        // focused button/checkbox/radio family fires its click
+                        // when the key releases. Links are not Space-
+                        // activatable and stay out of the list.
+                        if key == " " {
+                            let js = "(function() {\
+                                var target = document.activeElement;\
+                                if (!target) return;\
+                                var ln = target.localName;\
+                                var ty = (ln === 'input') ? String(target.type || '').toLowerCase() : '';\
+                                if (ln === 'button'\
+                                    || (ln === 'input' && ['button','submit','reset','image','checkbox','radio'].indexOf(ty) >= 0)) {\
+                                    try { target.click(); } catch (e) {}\
+                                }\
+                            })()";
+                            page.evaluate(js);
+                        }
                     }
                     "char" => {
                         if !text.is_empty() {

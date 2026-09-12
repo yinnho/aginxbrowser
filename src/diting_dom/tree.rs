@@ -278,6 +278,8 @@ pub(crate) struct DomTreeInner {
     // Whether the document was parsed in (full) quirks mode; quirks makes CSS
     // class/id selectors ASCII-case-insensitive.
     pub(crate) quirks: bool,
+    /// The document's focused element — see [`DomTree::focused_node`].
+    focused_node: Option<NodeId>,
 }
 
 impl DomTree {
@@ -299,8 +301,21 @@ impl DomTree {
                 shadow_roots: HashMap::new(),
                 shadow_roots_by_host: HashMap::new(),
                 quirks: false,
+                focused_node: None,
             }),
         }
+    }
+
+    /// The currently focused element, if any (blitz#839: :focus and friends
+    /// must match live focus, not a static snapshot). Tree-level on purpose:
+    /// focus dies with the document — navigation builds a new tree, and
+    /// Chrome resets activeElement to body on navigation the same way.
+    pub fn focused_node(&self) -> Option<NodeId> {
+        self.inner.borrow().focused_node
+    }
+
+    pub fn set_focused_node(&self, id: Option<NodeId>) {
+        self.inner.borrow_mut().focused_node = id;
     }
 
     pub fn document(&self) -> NodeId {
