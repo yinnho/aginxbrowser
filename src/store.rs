@@ -99,7 +99,11 @@ pub fn session_owner() -> String {
     }
 }
 
-fn norm_owner(owner: &str) -> String {
+/// Canonical owner under the active scope. Pub for the account layer: its
+/// live-jar registry keys must agree with the store rows, so every face
+/// (REST owner "rest", MCP session owner) converges on one account under the
+/// default global scope.
+pub fn norm_owner(owner: &str) -> String {
     if scope_global() {
         "global".to_string()
     } else {
@@ -121,8 +125,8 @@ fn normalize_url(raw: &str) -> String {
     let mut out = format!("{}://", parsed.scheme());
     match (parsed.host_str(), parsed.port()) {
         (Some(h), Some(p)) => {
-            let default = (parsed.scheme() == "https" && p == 443)
-                || (parsed.scheme() == "http" && p == 80);
+            let default =
+                (parsed.scheme() == "https" && p == 443) || (parsed.scheme() == "http" && p == 80);
             if default {
                 out.push_str(&h.to_lowercase());
             } else {
@@ -338,6 +342,13 @@ impl Store {
                  id TEXT PRIMARY KEY,
                  snapshot TEXT NOT NULL,
                  updated_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS accounts (
+                 owner TEXT NOT NULL,
+                 name TEXT NOT NULL,
+                 record TEXT NOT NULL,
+                 updated_at INTEGER NOT NULL,
+                 PRIMARY KEY (owner, name)
              );",
         )
         .map_err(|e| e.to_string())?;
@@ -381,7 +392,15 @@ impl Store {
         Ok(Store { conn })
     }
 
-    fn record_fetch(&self, owner: &str, url: &str, title: &str, content: &str, tier: &str, truncated: bool) {
+    fn record_fetch(
+        &self,
+        owner: &str,
+        url: &str,
+        title: &str,
+        content: &str,
+        tier: &str,
+        truncated: bool,
+    ) {
         if content.is_empty() {
             return;
         }
@@ -411,8 +430,20 @@ impl Store {
                  prev_hash=excluded.prev_hash, prev_fetched_at=excluded.prev_fetched_at,
                  fetched_at=excluded.fetched_at, expires_at=excluded.expires_at
              RETURNING id",
-            params![owner, url, norm, title, content, tier, truncated as i64, hash,
-                    prev.0, prev.1, ts, expires],
+            params![
+                owner,
+                url,
+                norm,
+                title,
+                content,
+                tier,
+                truncated as i64,
+                hash,
+                prev.0,
+                prev.1,
+                ts,
+                expires
+            ],
             |r| r.get::<_, i64>(0),
         );
         match res {
@@ -429,7 +460,14 @@ impl Store {
         }
     }
 
-    fn record_search(&self, owner: &str, query: &str, categories: &str, results_json: &str, n_results: usize) {
+    fn record_search(
+        &self,
+        owner: &str,
+        query: &str,
+        categories: &str,
+        results_json: &str,
+        n_results: usize,
+    ) {
         let ts = now();
         let expires = ts + search_ttl_hours() * 3600;
         if let Err(e) = self.conn.execute(
@@ -439,7 +477,15 @@ impl Store {
              ON CONFLICT(owner, query, categories) DO UPDATE SET
                  n_results=excluded.n_results, results_json=excluded.results_json,
                  searched_at=excluded.searched_at, expires_at=excluded.expires_at",
-            params![owner, query, categories, n_results as i64, results_json, ts, expires],
+            params![
+                owner,
+                query,
+                categories,
+                n_results as i64,
+                results_json,
+                ts,
+                expires
+            ],
         ) {
             tracing::debug!("store: search upsert failed: {e}");
         }
@@ -630,7 +676,15 @@ impl Store {
         for row in rows {
             let (url, title, content, tier, truncated, fetched_at, content_hash) =
                 row.map_err(|e| e.to_string())?;
-            cands.push((url, title, content, tier, truncated != 0, fetched_at, content_hash));
+            cands.push((
+                url,
+                title,
+                content,
+                tier,
+                truncated != 0,
+                fetched_at,
+                content_hash,
+            ));
         }
         let n = cands.len();
         let mut by_recency: Vec<usize> = (0..n).collect();
@@ -643,7 +697,12 @@ impl Store {
         let mut scored: Vec<(f64, usize)> = cands
             .iter()
             .enumerate()
-            .map(|(i, _)| (1.0 / (k + i as f64 + 1.0) + 1.0 / (k + recency_rank[i] as f64), i))
+            .map(|(i, _)| {
+                (
+                    1.0 / (k + i as f64 + 1.0) + 1.0 / (k + recency_rank[i] as f64),
+                    i,
+                )
+            })
             .collect();
         scored.sort_by(|a, b| {
             b.0.partial_cmp(&a.0)
@@ -773,18 +832,24 @@ impl Store {
             })
     }
 
-    fn clear(&self, owner: &str, url: Option<&str>, since_hours: Option<u64>, all: bool) -> Result<(usize, usize), String> {
+    fn clear(
+        &self,
+        owner: &str,
+        url: Option<&str>,
+        since_hours: Option<u64>,
+        all: bool,
+    ) -> Result<(usize, usize), String> {
         if !all && url.is_none() && since_hours.is_none() {
-            return Err("refusing to clear without a filter: pass url, since_hours, or all=true".into());
+            return Err(
+                "refusing to clear without a filter: pass url, since_hours, or all=true".into(),
+            );
         }
         let mut where_pages = String::from("owner=?1");
         let mut where_searches = String::from("owner=?1");
         let mut args: Vec<rusqlite::types::Value> = vec![owner.to_string().into()];
         if let Some(u) = url {
             let ph = format!("?{}", args.len() + 1);
-            where_pages.push_str(&format!(
-                " AND norm_url LIKE '%'||{ph}||'%' ESCAPE '\\'"
-            ));
+            where_pages.push_str(&format!(" AND norm_url LIKE '%'||{ph}||'%' ESCAPE '\\'"));
             where_searches.push_str(&format!(
                 " AND results_json LIKE '%'||{ph}||'%' ESCAPE '\\'"
             ));
@@ -806,7 +871,10 @@ impl Store {
             .map_err(|e| e.to_string())?;
         let np = self
             .conn
-            .execute(&format!("DELETE FROM pages WHERE {where_pages}"), params_from_iter(args.iter()))
+            .execute(
+                &format!("DELETE FROM pages WHERE {where_pages}"),
+                params_from_iter(args.iter()),
+            )
             .map_err(|e| e.to_string())?;
         let ns = self
             .conn
@@ -864,6 +932,105 @@ impl Store {
             .map_err(|e| e.to_string())
     }
 
+    // Named login identities (account.rs). Keyed (owner, name) from day one —
+    // hosted multi-caller deployments keep callers' accounts separate the
+    // same way the cache rows are scoped. Records hold login cookies and live
+    // under the same 0600 db as the session snapshots.
+
+    fn save_account(&self, owner: &str, name: &str, record: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO accounts (owner, name, record, updated_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(owner, name) DO UPDATE SET record=excluded.record, updated_at=excluded.updated_at",
+                params![owner, name, record, now()],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    fn load_account(&self, owner: &str, name: &str) -> Result<Option<(String, i64)>, String> {
+        self.conn
+            .query_row(
+                "SELECT record, updated_at FROM accounts WHERE owner=?1 AND name=?2",
+                params![owner, name],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(e.to_string()),
+            })
+    }
+
+    fn delete_account(&self, owner: &str, name: &str) -> Result<bool, String> {
+        self.conn
+            .execute(
+                "DELETE FROM accounts WHERE owner=?1 AND name=?2",
+                params![owner, name],
+            )
+            .map(|n| n > 0)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Metadata-only rows for the account listing — cookie values are
+    /// credentials and never leave the store; name, domains and counts are
+    /// enough to tell identities apart.
+    fn list_accounts(&self, owner: &str) -> Result<Vec<crate::account::AccountSummary>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, record, updated_at FROM accounts WHERE owner=?1 ORDER BY name")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![owner], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (name, record, updated_at) = row.map_err(|e| e.to_string())?;
+            let v: serde_json::Value =
+                serde_json::from_str(&record).unwrap_or(serde_json::Value::Null);
+            let cookies: Vec<String> = v["cookies"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|c| c.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            // Distinct registrable-looking domains from the Domain= attributes.
+            let mut domains: Vec<String> = cookies
+                .iter()
+                .filter_map(|c| {
+                    c.split(';')
+                        .skip(1)
+                        .filter_map(|a| a.trim().split_once('='))
+                        .find(|(k, _)| k.trim().eq_ignore_ascii_case("domain"))
+                })
+                .map(|(_, d)| d.trim().trim_start_matches('.').to_string())
+                .collect();
+            domains.sort();
+            domains.dedup();
+            out.push(crate::account::AccountSummary {
+                name,
+                domains,
+                cookie_count: cookies.len(),
+                updated_at,
+                verify_url: v["verify"]["url"].as_str().map(str::to_string),
+                verify_predicate: v["verify"]["predicate"].as_str().map(str::to_string),
+                verify_last: v["verify"]["last_result"]
+                    .as_object()
+                    .cloned()
+                    .map(serde_json::Value::Object),
+            });
+        }
+        Ok(out)
+    }
+
     fn stats(&self, owner: &str) -> Result<Stats, String> {
         let (pages, searches, oldest) = self
             .conn
@@ -901,22 +1068,20 @@ fn hex(d: &[u8]) -> String {
 
 fn with_store<T>(f: impl FnOnce(&Store) -> Result<T, String>) -> Result<T, String> {
     let cell = STORE.get_or_init(|| {
-        Mutex::new(
-            if enabled() {
-                match Store::open(&db_path()) {
-                    Ok(s) => {
-                        tracing::info!("local store open at {}", db_path().display());
-                        Some(s)
-                    }
-                    Err(e) => {
-                        tracing::warn!("local store disabled, open failed: {e}");
-                        None
-                    }
+        Mutex::new(if enabled() {
+            match Store::open(&db_path()) {
+                Ok(s) => {
+                    tracing::info!("local store open at {}", db_path().display());
+                    Some(s)
                 }
-            } else {
-                None
-            },
-        )
+                Err(e) => {
+                    tracing::warn!("local store disabled, open failed: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        })
     });
     let guard = cell.lock().map_err(|_| "store mutex poisoned")?;
     match guard.as_ref() {
@@ -1071,6 +1236,28 @@ pub fn purge_session_snapshots(max_age_secs: i64) {
 }
 
 // ---------------------------------------------------------------------------
+// Accounts (named login identities — see account.rs)
+// ---------------------------------------------------------------------------
+
+pub fn save_account(owner: &str, name: &str, record: &str) -> Result<(), String> {
+    with_store(|st| st.save_account(&norm_owner(owner), name, record))
+}
+
+pub fn load_account(owner: &str, name: &str) -> Option<(String, i64)> {
+    with_store(|st| st.load_account(&norm_owner(owner), name))
+        .ok()
+        .flatten()
+}
+
+pub fn delete_account(owner: &str, name: &str) -> bool {
+    with_store(|st| st.delete_account(&norm_owner(owner), name)).unwrap_or(false)
+}
+
+pub fn list_accounts(owner: &str) -> Vec<crate::account::AccountSummary> {
+    with_store(|st| st.list_accounts(&norm_owner(owner))).unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1090,9 +1277,21 @@ mod tests {
     #[test]
     fn fetch_roundtrip_and_fts_match() {
         let s = test_store();
-        page(&s, "a", "https://docs.rs/rusqlite/latest", "rusqlite docs", "Rust bindings for SQLite. Use prepare and query_map.");
+        page(
+            &s,
+            "a",
+            "https://docs.rs/rusqlite/latest",
+            "rusqlite docs",
+            "Rust bindings for SQLite. Use prepare and query_map.",
+        );
         let hits = s
-            .query_pages("a", &CacheQuery { query: Some("rust".into()), ..Default::default() })
+            .query_pages(
+                "a",
+                &CacheQuery {
+                    query: Some("rust".into()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].url, "https://docs.rs/rusqlite/latest");
@@ -1103,9 +1302,20 @@ mod tests {
     fn page_hits_carry_content_hash() {
         let s = test_store();
         let body = "Rust bindings for SQLite. Use prepare and query_map.";
-        page(&s, "a", "https://docs.rs/rusqlite/latest", "rusqlite docs", body);
+        page(
+            &s,
+            "a",
+            "https://docs.rs/rusqlite/latest",
+            "rusqlite docs",
+            body,
+        );
         let hits = s
-            .query_pages("a", &CacheQuery { ..Default::default() })
+            .query_pages(
+                "a",
+                &CacheQuery {
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].content_hash, hex(&Sha256::digest(body.as_bytes())));
@@ -1136,8 +1346,20 @@ mod tests {
     fn fts_order_fuses_relevance_with_recency() {
         let s = test_store();
         page(&s, "a", "https://example.cn/old", "", "rust rust rust docs");
-        page(&s, "a", "https://example.cn/mid", "", "rust middle tokio docs");
-        page(&s, "a", "https://example.cn/new", "", "rust newer far longer filler content docs");
+        page(
+            &s,
+            "a",
+            "https://example.cn/mid",
+            "",
+            "rust middle tokio docs",
+        );
+        page(
+            &s,
+            "a",
+            "https://example.cn/new",
+            "",
+            "rust newer far longer filler content docs",
+        );
         // bm25 order: old (3 hits) > mid > new (longest doc). Overwrite fetch
         // times so recency runs the other way: new > mid > old.
         let ts = now();
@@ -1147,19 +1369,33 @@ mod tests {
             ("https://example.cn/new", ts),
         ] {
             s.conn
-                .execute("UPDATE pages SET fetched_at=?1 WHERE url=?2", params![at, url])
+                .execute(
+                    "UPDATE pages SET fetched_at=?1 WHERE url=?2",
+                    params![at, url],
+                )
                 .unwrap();
         }
         let hits = s
             .query_pages(
                 "a",
-                &CacheQuery { query: Some("rust".into()), limit: 10, ..Default::default() },
+                &CacheQuery {
+                    query: Some("rust".into()),
+                    limit: 10,
+                    ..Default::default()
+                },
             )
             .unwrap();
         let urls: Vec<&str> = hits.iter().map(|h| h.url.as_str()).collect();
         // Leader+trailer tie exactly; the tiebreak hands it to the newer one,
         // and the consistent-middle doc falls last.
-        assert_eq!(urls, vec!["https://example.cn/new", "https://example.cn/old", "https://example.cn/mid"]);
+        assert_eq!(
+            urls,
+            vec![
+                "https://example.cn/new",
+                "https://example.cn/old",
+                "https://example.cn/mid"
+            ]
+        );
     }
 
     #[test]
@@ -1169,15 +1405,29 @@ mod tests {
         let body = format!("## Deploy runbook\n\n{filler}now use rsync to publish the site\n");
         page(&s, "a", "https://example.cn/guide", "guide", &body);
         // Hit before any heading and heading-free content stay unprefixed.
-        page(&s, "a", "https://example.cn/plain", "plain", "plain text without markdown headings mentions rsync once\n");
+        page(
+            &s,
+            "a",
+            "https://example.cn/plain",
+            "plain",
+            "plain text without markdown headings mentions rsync once\n",
+        );
         let hits = s
             .query_pages(
                 "a",
-                &CacheQuery { query: Some("rsync".into()), limit: 10, ..Default::default() },
+                &CacheQuery {
+                    query: Some("rsync".into()),
+                    limit: 10,
+                    ..Default::default()
+                },
             )
             .unwrap();
         let guide = hits.iter().find(|h| h.url.contains("guide")).unwrap();
-        assert!(guide.snippet.starts_with("[§ Deploy runbook] "), "got: {}", guide.snippet);
+        assert!(
+            guide.snippet.starts_with("[§ Deploy runbook] "),
+            "got: {}",
+            guide.snippet
+        );
         let plain = hits.iter().find(|h| h.url.contains("plain")).unwrap();
         assert!(!plain.snippet.starts_with("[§ "), "got: {}", plain.snippet);
     }
@@ -1191,8 +1441,10 @@ mod tests {
             // Roll the schema back to the pre-drift shape so the reopen below
             // exercises the ALTER TABLE migration branch for real.
             s.conn
-                .execute_batch("ALTER TABLE pages DROP COLUMN prev_hash;
-                                ALTER TABLE pages DROP COLUMN prev_fetched_at;")
+                .execute_batch(
+                    "ALTER TABLE pages DROP COLUMN prev_hash;
+                                ALTER TABLE pages DROP COLUMN prev_fetched_at;",
+                )
                 .unwrap();
         }
         let s = Store::open(&path).unwrap();
@@ -1207,10 +1459,22 @@ mod tests {
     #[test]
     fn cjk_substring_matches_via_split_phrase() {
         let s = test_store();
-        page(&s, "a", "https://example.cn/a", "浏览器内核分析", "这个浏览器引擎渲染很快。");
+        page(
+            &s,
+            "a",
+            "https://example.cn/a",
+            "浏览器内核分析",
+            "这个浏览器引擎渲染很快。",
+        );
         // Two-char substring: would fail under plain unicode61 indexing.
         let hits = s
-            .query_pages("a", &CacheQuery { query: Some("浏览器".into()), ..Default::default() })
+            .query_pages(
+                "a",
+                &CacheQuery {
+                    query: Some("浏览器".into()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].snippet.contains("浏览器"));
@@ -1222,7 +1486,13 @@ mod tests {
         page(&s, "alice", "https://x.test/1", "t", "secret project notes");
         page(&s, "bob", "https://x.test/2", "t", "other notes");
         let hits = s
-            .query_pages("alice", &CacheQuery { query: Some("notes".into()), ..Default::default() })
+            .query_pages(
+                "alice",
+                &CacheQuery {
+                    query: Some("notes".into()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].url.ends_with("/1"));
@@ -1253,7 +1523,10 @@ mod tests {
                 params![ts - 100, ts - 50],
             )
             .unwrap();
-        let id: i64 = s.conn.query_row("SELECT id FROM pages", [], |r| r.get(0)).unwrap();
+        let id: i64 = s
+            .conn
+            .query_row("SELECT id FROM pages", [], |r| r.get(0))
+            .unwrap();
         s.conn
             .execute(
                 "INSERT INTO pages_fts (rowid, title, content, url) VALUES (?1,'t','body','u')",
@@ -1262,11 +1535,18 @@ mod tests {
             .unwrap();
         LAST_PURGE.store(0, Ordering::Relaxed);
         s.purge_expired();
-        let n: i64 = s.conn.query_row("SELECT COUNT(*) FROM pages", [], |r| r.get(0)).unwrap();
+        let n: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM pages", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 0);
         let f: i64 = s
             .conn
-            .query_row("SELECT COUNT(*) FROM pages_fts WHERE pages_fts MATCH 'body'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM pages_fts WHERE pages_fts MATCH 'body'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(f, 0);
     }
@@ -1281,7 +1561,13 @@ mod tests {
         .to_string();
         s.record_search("a", "rust async runtime", "general", &results, 2);
         let hits = s
-            .query_searches("a", &CacheQuery { query: Some("async".into()), ..Default::default() })
+            .query_searches(
+                "a",
+                &CacheQuery {
+                    query: Some("async".into()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].n_results, 2);
@@ -1307,7 +1593,13 @@ mod tests {
     #[test]
     fn get_page_full_content() {
         let s = test_store();
-        page(&s, "a", "https://x.test/full", "The Title", "full body text");
+        page(
+            &s,
+            "a",
+            "https://x.test/full",
+            "The Title",
+            "full body text",
+        );
         let full = s.get_page("a", "https://x.test/full").unwrap().unwrap();
         assert_eq!(full.content, "full body text");
         assert_eq!(full.tier, "http");
@@ -1320,7 +1612,13 @@ mod tests {
         page(&s, "a", "https://x.test/1", "t", "harmless body");
         for q in ["\"(weird)*", "a OR b AND NOT (", "NEAR(", "--", "'"] {
             let hits = s
-                .query_pages("a", &CacheQuery { query: Some(q.into()), ..Default::default() })
+                .query_pages(
+                    "a",
+                    &CacheQuery {
+                        query: Some(q.into()),
+                        ..Default::default()
+                    },
+                )
                 .unwrap();
             let _ = hits; // must not Err
         }
@@ -1330,13 +1628,16 @@ mod tests {
     fn session_snapshots_roundtrip_and_purge() {
         let s = test_store();
         assert!(s.load_session_snapshot("s_1").unwrap().is_none());
-        s.save_session_snapshot("s_1", "{\"url\":\"https://x.test\"}").unwrap();
+        s.save_session_snapshot("s_1", "{\"url\":\"https://x.test\"}")
+            .unwrap();
         let (snap, at) = s.load_session_snapshot("s_1").unwrap().unwrap();
         assert_eq!(snap, "{\"url\":\"https://x.test\"}");
         assert!(at > 0);
         // Upsert overwrites; ids are independent.
-        s.save_session_snapshot("s_1", "{\"url\":\"https://y.test\"}").unwrap();
-        s.save_session_snapshot("s_2", "{\"url\":\"https://z.test\"}").unwrap();
+        s.save_session_snapshot("s_1", "{\"url\":\"https://y.test\"}")
+            .unwrap();
+        s.save_session_snapshot("s_2", "{\"url\":\"https://z.test\"}")
+            .unwrap();
         assert_eq!(
             s.load_session_snapshot("s_1").unwrap().unwrap().0,
             "{\"url\":\"https://y.test\"}"
@@ -1365,6 +1666,42 @@ mod tests {
             normalize_url("http://example.com:8080/a"),
             "http://example.com:8080/a"
         );
+    }
+
+    #[test]
+    fn accounts_roundtrip_owner_isolation_and_listing() {
+        let s = test_store();
+        let record = r#"{"version":1,"cookies":["cookie2=t; Domain=.taobao.com; Path=/","sg=1; Domain=.taobao.com; Path=/"],"url":"https://www.taobao.com/"}"#;
+        s.save_account("owner-a", "scraper", record).unwrap();
+        // Upsert overwrites in place, keeping one row per (owner, name).
+        let v2 = r#"{"version":1,"cookies":["cookie2=v2; Domain=.taobao.com; Path=/"],"url":"https://www.taobao.com/"}"#;
+        s.save_account("owner-a", "scraper", v2).unwrap();
+        let rows: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+
+        let (loaded, _) = s.load_account("owner-a", "scraper").unwrap().unwrap();
+        assert!(loaded.contains("cookie2=v2"));
+
+        // Same name under another owner is a different account.
+        assert!(s.load_account("owner-b", "scraper").unwrap().is_none());
+        s.save_account("owner-b", "scraper", record).unwrap();
+        assert!(s.load_account("owner-b", "scraper").unwrap().is_some());
+
+        // Listing: metadata only — names/domains/counts, never cookie values.
+        let rows = s.list_accounts("owner-a").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "scraper");
+        assert_eq!(rows[0].cookie_count, 1);
+        assert_eq!(rows[0].domains, vec!["taobao.com".to_string()]);
+        assert!(rows[0].verify_url.is_none());
+
+        assert!(s.delete_account("owner-a", "scraper").unwrap());
+        assert!(!s.delete_account("owner-a", "scraper").unwrap()); // already gone
+        assert!(s.load_account("owner-a", "scraper").unwrap().is_none());
+        assert!(s.load_account("owner-b", "scraper").unwrap().is_some());
     }
 
     #[test]

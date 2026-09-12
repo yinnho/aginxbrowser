@@ -51,7 +51,7 @@ Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操
 
 - **🔐 真实 TLS 指纹** — stealth 模式用 BoringSSL 复刻 Chrome145 / Firefox133 / Safari / Edge 的完整 TLS 握手（不是只改 UA），可按请求切换；Cloudflare Turnstile 挑战页自动等 `cf_clearance`。无指纹引擎碰反爬就是 403，我们穿过去。
 - **🤝 有状态交互 Session** — 登录态可注入可导出（`session_create(cookies=...)` ↔ `session_cookies`），跨翻页、跨多步流程不断；`persistent: true` 连闲置过期和服务重启都能扛过去，同一个 session_id 复活时还带着登录态。一次性引擎抓完即弃，做不了「登录 → 操作 → 再操作」。
-- **🔌 MCP 原生** — 32 个工具是一等公民（不是 CDP 套壳），Claude Code / Cursor / Claude Desktop 一行接入。HTTP + MCP 双协议之外还有 CDP 桥，DevTools 生态照样能用。
+- **🔌 MCP 原生** — 35 个工具是一等公民（不是 CDP 套壳），Claude Code / Cursor / Claude Desktop 一行接入。HTTP + MCP 双协议之外还有 CDP 桥，DevTools 生态照样能用。
 
 > 参照：Cloudflare 的 Kitesurf 明确不做真实 TLS 指纹协商、不做持久认证会话——反爬与登录正是 AginxBrowser 的地盘。
 
@@ -85,7 +85,7 @@ Agent 是照着浏览器说的话行事的，所以响应里要写清楚实际�
 - **时间线视频**：`/video` 端点 + `render_video` MCP 工具，把页面的动画渲成 MP4。约定很简单：页面脚本把时间线注册进 `window.__timelines`（GSAP 风格，带 `duration()` 和 `pause(t)` 就行），引擎每帧 seek 到 `t=i/fps`、画视口、RGBA 直接 pipe 给 ffmpeg 编 H.264/yuv420p。确定性是构造出来的——像素值里没有墙钟，同一页面渲两遍出同一个 MP4。服务器上要有 ffmpeg
 - **页集（PDF/PNG/PPTX/DOCX）**：`/pdf` 端点 + `render_pdf` MCP 工具，把渲好的页面切页打包——打印模式按顶层块边界分页（默认 96dpi A4，断点尽量落在块边，文字不拦腰截断），幻灯片模式每个选择器匹配自成一张页、按元素定高（HTML 写个 deck、一页一个 `.slide`，导出就是真能用的 deck）。图基 PDF：每页 JPEG 走 DCTDecode，PDF 1.4 手写打包器，零新依赖。PPTX 把同一叠页每页打一张幻灯片；DOCX 每页一个按页定尺寸的 section——两个 OOXML 容器都是手写的（stored-ZIP 打包器、时间戳写死），字节级确定性，零新依赖
 - **TLS 指纹伪装**：stealth 模式模拟 Chrome145/Firefox133/Safari/Edge，可按请求切换
-- **MCP Server**：`--mcp` 模式暴露 32 个工具（fetch/eval/click/search/download/cache + session + flow + 截图 + 视频/PDF + 文档生成工具），Claude Code / Claude Desktop / Cursor 直接调用
+- **MCP Server**：`--mcp` 模式暴露 35 个工具（fetch/eval/click/search/download/cache + session + flow + 截图 + 视频/PDF + 文档生成工具），Claude Code / Claude Desktop / Cursor 直接调用
 - **Firecrawl 兼容**：`/v1/scrape` 端点，现有 Firecrawl 客户端改 base URL 即可迁移
 - **DNS 重绑定防护**：内置 SSRF 防护 + 解析后 IP 校验
 
@@ -239,7 +239,7 @@ aginxbrowser/
     ├── main.rs              # HTTP 服务入口与路由
     ├── server.rs            # 业务层（fetch/click/eval/search）
     ├── session.rs           # 交互式浏览器会话
-    ├── mcp.rs               # MCP Server（32 个工具）
+    ├── mcp.rs               # MCP Server（35 个工具）
     ├── docgen/              # 文档层：markdown → 确定性 HTML + 内联 SVG 图
     ├── render.rs            # 分层渲染（HTTP 直取 → diting 浏览器引擎）
     ├── store.rs             # 本地 fetch/搜索缓存（SQLite FTS5、漂移哈希）
@@ -343,7 +343,7 @@ cargo build --release --features stealth,screenshot
 
 包含：
 - 全部 36 个 HTTP 端点（`/fetch`、`/search`、`/screenshot`、`/video`、`/pdf`、`/download`、`/v1/scrape`、`/flow/run`、`/doctor`、18 个 session 端点、CDP 发现、MCP 传输）
-- MCP Server 的 32 个工具及参数
+- MCP Server 的 35 个工具及参数
 - Claude Code / Claude Desktop / Cursor 客户端配置
 - 环境变量、错误码、站点抓取示例
 

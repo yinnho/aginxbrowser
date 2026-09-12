@@ -239,9 +239,7 @@ pub enum SessionCommand {
     },
     /// Read back the pinned viewport (session_clone's source side); None
     /// when the session never called Viewport.
-    GetViewport {
-        reply: ViewportOverrideReply,
-    },
+    GetViewport { reply: ViewportOverrideReply },
     /// Export the session's cookies as a JSON string
     /// `{"url":...,"cookies":["name=value; Domain=...; Path=...; ...", ...]}`.
     /// Full Set-Cookie form so a clone opened on a sibling domain keeps its
@@ -303,9 +301,7 @@ pub enum SessionCommand {
     /// waits on this to learn the thread actually stopped - without it, close
     /// replies ok while the thread is still pinned inside V8 (a runaway eval)
     /// and keeps burning CPU.
-    Close {
-        reply: oneshot::Sender<()>,
-    },
+    Close { reply: oneshot::Sender<()> },
     /// Export the session's recorded action log as JSONL (one
     /// RecordedAction per line) — the raw material for replay scripts.
     Export {
@@ -397,6 +393,10 @@ pub struct SessionListEntry {
     pub expires_in_secs: Option<u64>,
     /// True when the session is exempt from the idle reaper.
     pub keepalive: bool,
+    /// Account name when this session runs as a named login identity
+    /// (see account.rs); absent for anonymous sessions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     /// True when the login state is snapshotted and the session revives by
     /// the same id after eviction or restart.
     pub persistent: bool,
@@ -408,17 +408,57 @@ pub struct SessionListEntry {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RecordedAction {
-    Create { url: Option<String>, use_proxy: bool, cookies: Vec<String>, #[serde(skip_serializing_if = "Option::is_none")] storage: Option<Value> },
-    Navigate { url: String, ok: bool },
-    SetContent { html: String, ok: bool },
-    Click { index: usize, ok: bool },
+    Create {
+        url: Option<String>,
+        use_proxy: bool,
+        cookies: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        storage: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+    },
+    Navigate {
+        url: String,
+        ok: bool,
+    },
+    SetContent {
+        html: String,
+        ok: bool,
+    },
+    Click {
+        index: usize,
+        ok: bool,
+    },
     #[serde(rename = "click_xy")]
-    ClickXY { x: f64, y: f64, ok: bool },
-    Drag { from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32 },
-    Input { index: usize, text: String, ok: bool },
-    Scroll { direction: String, amount: u32 },
-    Eval { script: String },
-    Viewport { width: Option<u32>, height: Option<u32>, mobile: bool },
+    ClickXY {
+        x: f64,
+        y: f64,
+        ok: bool,
+    },
+    Drag {
+        from_x: f64,
+        from_y: f64,
+        to_x: f64,
+        to_y: f64,
+        steps: u32,
+    },
+    Input {
+        index: usize,
+        text: String,
+        ok: bool,
+    },
+    Scroll {
+        direction: String,
+        amount: u32,
+    },
+    Eval {
+        script: String,
+    },
+    Viewport {
+        width: Option<u32>,
+        height: Option<u32>,
+        mobile: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -441,6 +481,13 @@ struct BrowserSession {
     /// revives under the same id from that snapshot after an idle eviction
     /// or a process restart (feedback ③). `session_close` drops the snapshot.
     persistent: bool,
+    /// Named login identity this session runs as (account.rs): `(owner,
+    /// name)`. An account session builds its browser on the account's
+    /// private jar and writes its state back to the account store after
+    /// every command — the per-session snapshot/revive path is for
+    /// anonymous sessions; for account sessions the account IS the
+    /// persistence (a new session_create {account} picks up the warm jar).
+    account: Option<(String, String)>,
 }
 
 impl BrowserSession {
@@ -471,7 +518,9 @@ impl SnapshotStore {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64;
-                m.lock().expect("snapshot map poisoned").insert(id.to_string(), (snapshot.to_string(), now));
+                m.lock()
+                    .expect("snapshot map poisoned")
+                    .insert(id.to_string(), (snapshot.to_string(), now));
             }
         }
     }
@@ -539,6 +588,9 @@ impl SessionManager {
     /// live value for any unspecified axis. With `persistent`, the login
     /// state is snapshotted to the local store after every command and the
     /// session revives under the same id after idle eviction or restart.
+    /// With `account` (owner, name), the session runs as that named login
+    /// identity: private cookie jar, state written back to the account
+    /// store instead of a per-session snapshot (account.rs).
     #[allow(clippy::too_many_arguments)]
     pub fn create(
         &mut self,
@@ -550,6 +602,7 @@ impl SessionManager {
         pin_viewport: Option<(Option<u32>, Option<u32>, bool)>,
         keepalive: bool,
         persistent: bool,
+        account: Option<(String, String)>,
     ) -> String {
         // A snapshot with the same id may survive from a previous process —
         // a fresh session must never squat on a revivable id.
@@ -569,6 +622,7 @@ impl SessionManager {
             pin_viewport,
             keepalive,
             persistent,
+            account,
         );
         session_id
     }
@@ -587,13 +641,19 @@ impl SessionManager {
         pin_viewport: Option<(Option<u32>, Option<u32>, bool)>,
         keepalive: bool,
         persistent: bool,
+        account: Option<(String, String)>,
     ) {
-        let timeout = Duration::from_secs(ttl_secs.unwrap_or(SESSION_TIMEOUT.as_secs()).clamp(60, 3600));
+        let timeout = Duration::from_secs(
+            ttl_secs
+                .unwrap_or(SESSION_TIMEOUT.as_secs())
+                .clamp(60, 3600),
+        );
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
         let thread_id = session_id.to_string();
         let thread_url = start_url.map(|s| s.to_string());
+        let thread_account = account.clone();
         std::thread::Builder::new()
             .name(format!("session-{}", &thread_id[..8.min(thread_id.len())]))
             // Deep stack for the V8 isolate — see server::v8_stack_size.
@@ -601,7 +661,15 @@ impl SessionManager {
             // (juejin.cn class) before the page renders.
             .stack_size(crate::server::v8_stack_size())
             .spawn(move || {
-                session_thread(thread_id, thread_url, use_proxy, cookies, storage, cmd_rx);
+                session_thread(
+                    thread_id,
+                    thread_url,
+                    use_proxy,
+                    cookies,
+                    storage,
+                    thread_account,
+                    cmd_rx,
+                );
             })
             .expect("failed to spawn session thread");
 
@@ -614,6 +682,7 @@ impl SessionManager {
                 keepalive,
                 use_proxy,
                 persistent,
+                account,
             },
         );
         // Fire-and-forget viewport pin: it queues ahead of anything the
@@ -649,8 +718,12 @@ impl SessionManager {
     /// replaces the manual cookies→create round-trip where a hand-edited
     /// cookie string could clobber a working login (real-device feedback ⑩).
     pub async fn clone_session(&mut self, session_id: &str) -> Result<Value, SessionError> {
-        let cookies_text = self.send(session_id, |reply| SessionCommand::Cookies { reply }).await?;
-        let storage_text = self.send(session_id, |reply| SessionCommand::Storage { reply }).await?;
+        let cookies_text = self
+            .send(session_id, |reply| SessionCommand::Cookies { reply })
+            .await?;
+        let storage_text = self
+            .send(session_id, |reply| SessionCommand::Storage { reply })
+            .await?;
         let dialog_text = self
             .send(session_id, |reply| SessionCommand::Dialog {
                 action: "list".to_string(),
@@ -670,18 +743,27 @@ impl SessionManager {
         let storage = parse(storage_text, "storage")?;
         let dialog = parse(dialog_text, "dialog")?;
 
-        let (use_proxy, keepalive, persistent, timeout) = {
-            let s = self
-                .sessions
-                .get(session_id)
-                .ok_or_else(|| SessionError::NotFound(format!("session not found: {}", session_id)))?;
-            (s.use_proxy, s.keepalive, s.persistent, s.timeout)
+        let (use_proxy, keepalive, persistent, timeout, account) = {
+            let s = self.sessions.get(session_id).ok_or_else(|| {
+                SessionError::NotFound(format!("session not found: {}", session_id))
+            })?;
+            (
+                s.use_proxy,
+                s.keepalive,
+                s.persistent,
+                s.timeout,
+                s.account.clone(),
+            )
         };
 
         let url = cookies["url"].as_str().unwrap_or("about:blank").to_string();
         let cookie_list: Vec<String> = cookies["cookies"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default();
         let ls = storage["local_storage"].clone();
         let ss = storage["session_storage"].clone();
@@ -703,6 +785,10 @@ impl SessionManager {
             pin,
             keepalive,
             persistent,
+            // The clone runs as the same identity: same account, same live
+            // jar (two tabs, one profile). An anonymous source stays None.
+            // Cloned: the name is echoed into the response below.
+            account.clone(),
         );
 
         // Copy a non-default dialog policy over (fire-and-forget, same
@@ -728,6 +814,9 @@ impl SessionManager {
                 .map(|(w, h, mobile)| serde_json::json!({"width": w as u32, "height": h as u32, "mobile": mobile}))
                 .unwrap_or(Value::Null),
         });
+        if let Some((_, name)) = &account {
+            resp["account"] = serde_json::json!(name);
+        }
         if let Some(s) = self.expires_in_secs(resp["session_id"].as_str().unwrap_or("")) {
             resp["expires_in_secs"] = serde_json::json!(s);
         }
@@ -758,13 +847,19 @@ impl SessionManager {
             let revive = session.persistent;
             self.close_inner(session_id, false);
             if !revive {
-                return Err(SessionError::Expired(format!("session expired: {}", session_id)));
+                return Err(SessionError::Expired(format!(
+                    "session expired: {}",
+                    session_id
+                )));
             }
         }
         if self.revive_session(session_id) {
             return self.dispatch(session_id, make_cmd).await;
         }
-        Err(SessionError::NotFound(format!("session not found: {}", session_id)))
+        Err(SessionError::NotFound(format!(
+            "session not found: {}",
+            session_id
+        )))
     }
 
     /// Channel round-trip against a live session — no expiry check, no
@@ -781,9 +876,11 @@ impl SessionManager {
         reply_rx.await.ok()
     }
 
-    /// Dispatch one command to a live session and, for persistent sessions,
-    /// refresh the on-disk snapshot after every successful command so the
-    /// snapshot never trails the live login state by more than one action.
+    /// Dispatch one command to a live session and refresh the persisted
+    /// login state after every successful command: persistent anonymous
+    /// sessions snapshot to their session-id slot; account sessions write
+    /// back to the account store (the account IS the persistence — no
+    /// per-session snapshot, so nothing to revive from, by design).
     async fn dispatch<T: Send + 'static, E: Into<SessionError> + Send + 'static>(
         &mut self,
         session_id: &str,
@@ -803,8 +900,20 @@ impl SessionManager {
             .await
             .map_err(|_| SessionError::ThreadDied("session thread died".to_string()))?
             .map_err(Into::into);
-        if result.is_ok() && self.sessions.get(session_id).is_some_and(|s| s.persistent) {
-            self.capture_snapshot(session_id).await;
+        if result.is_ok() {
+            match self
+                .sessions
+                .get(session_id)
+                .map(|s| (s.account.clone(), s.persistent))
+            {
+                Some((Some((owner, name)), _)) => {
+                    self.capture_account(&owner, &name, session_id).await;
+                }
+                Some((None, true)) => {
+                    self.capture_snapshot(session_id).await;
+                }
+                _ => {}
+            }
         }
         result
     }
@@ -813,50 +922,72 @@ impl SessionManager {
     /// the snapshot store. Best-effort: any read failure just skips the
     /// save (the next successful command retries).
     async fn capture_snapshot(&mut self, session_id: &str) {
+        let Some(state) = self.read_login_state(session_id).await else {
+            return;
+        };
+        self.snapshots.save(session_id, &state.to_string());
+    }
+
+    /// Same read, but into the account store — the write-back target for
+    /// account sessions. The learned verify spec from the previous record
+    /// survives the refresh (a state write-back must not erase what
+    /// account_verify taught).
+    async fn capture_account(&mut self, owner: &str, name: &str, session_id: &str) {
+        let Some(mut record) = self.read_login_state(session_id).await else {
+            return;
+        };
+        if let Some((text, _)) = crate::account::load(owner, name) {
+            if let Ok(prev) = serde_json::from_str::<Value>(&text) {
+                if prev.get("verify").is_some_and(|v| v.is_object()) {
+                    record["verify"] = prev["verify"].clone();
+                }
+            }
+        }
+        if let Err(e) = crate::account::save(owner, name, &record.to_string()) {
+            tracing::debug!("account save failed for {name}: {e}");
+        }
+    }
+
+    /// The login-state read shared by both persistence paths: cookies,
+    /// web storage, dialog policy and viewport pin, plus the session's
+    /// proxy/keepalive/ttl flags. None when any read failed.
+    async fn read_login_state(&self, session_id: &str) -> Option<Value> {
         let (use_proxy, keepalive, ttl) = match self.sessions.get(session_id) {
             Some(s) => (s.use_proxy, s.keepalive, s.timeout.as_secs()),
-            None => return,
+            None => return None,
         };
-        let Some(cookies) = self
+        let cookies = self
             .raw_send(session_id, |reply| SessionCommand::Cookies { reply })
             .await
-            .and_then(Result::ok)
-        else {
-            return;
-        };
-        let Some(storage) = self
+            .and_then(Result::ok)?;
+        let storage = self
             .raw_send(session_id, |reply| SessionCommand::Storage { reply })
             .await
-            .and_then(Result::ok)
-        else {
-            return;
-        };
-        let Some(dialog) = self
+            .and_then(Result::ok)?;
+        let dialog = self
             .raw_send(session_id, |reply| SessionCommand::Dialog {
                 action: "list".to_string(),
                 prompt_text: None,
                 reply,
             })
             .await
-            .and_then(Result::ok)
-        else {
-            return;
-        };
+            .and_then(Result::ok)?;
         let viewport: Option<Option<(f32, f32, bool)>> = self
             .raw_send(session_id, |reply| SessionCommand::GetViewport { reply })
             .await
             .and_then(Result::ok);
 
         let parse = |text: String| serde_json::from_str::<Value>(&text).ok();
-        let (Some(cookies), Some(storage), Some(dialog)) = (parse(cookies), parse(storage), parse(dialog))
-        else {
-            return;
-        };
+        let (cookies, storage, dialog) = (parse(cookies)?, parse(storage)?, parse(dialog)?);
         let cookie_list: Vec<String> = cookies["cookies"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default();
-        let snapshot = serde_json::json!({
+        Some(serde_json::json!({
             "version": 1,
             "url": cookies["url"].as_str().unwrap_or("about:blank"),
             "cookies": cookie_list,
@@ -872,8 +1003,7 @@ impl SessionManager {
             "use_proxy": use_proxy,
             "keepalive": keepalive,
             "ttl_secs": ttl,
-        });
-        self.snapshots.save(session_id, &snapshot.to_string());
+        }))
     }
 
     /// Bring a snapshotted session back under the same id: false when there
@@ -901,7 +1031,11 @@ impl SessionManager {
         }
         let cookies: Vec<String> = snap["cookies"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default();
         let ls = snap["local_storage"].clone();
         let ss = snap["session_storage"].clone();
@@ -920,10 +1054,7 @@ impl SessionManager {
             )
         });
         let dialog = snap["dialog"].as_object();
-        let accept = dialog
-            .and_then(|d| d.get("policy"))
-            .and_then(Value::as_str)
-            == Some("accept");
+        let accept = dialog.and_then(|d| d.get("policy")).and_then(Value::as_str) == Some("accept");
         let prompt_text = dialog
             .and_then(|d| d.get("prompt_text"))
             .and_then(Value::as_str)
@@ -939,6 +1070,9 @@ impl SessionManager {
             pin,
             snap["keepalive"].as_bool().unwrap_or(false),
             true,
+            // Snapshots are never from account sessions (they write to the
+            // account store instead), so a revived session is anonymous.
+            None,
         );
 
         // Non-default dialog policy rides along (enqueue-ahead, same as the
@@ -953,7 +1087,10 @@ impl SessionManager {
                 });
             }
         }
-        tracing::info!(session = session_id, "persistent session revived from snapshot");
+        tracing::info!(
+            session = session_id,
+            "persistent session revived from snapshot"
+        );
         true
     }
 
@@ -983,7 +1120,11 @@ impl SessionManager {
         if let Some(session) = self.sessions.remove(session_id) {
             self.snapshots.delete(session_id);
             let (tx, rx) = oneshot::channel();
-            if session.cmd_tx.send(SessionCommand::Close { reply: tx }).is_err() {
+            if session
+                .cmd_tx
+                .send(SessionCommand::Close { reply: tx })
+                .is_err()
+            {
                 return true; // thread already gone
             }
             match tokio::time::timeout(std::time::Duration::from_secs(20), rx).await {
@@ -1030,6 +1171,7 @@ impl SessionManager {
                     Some(s.timeout.saturating_sub(s.last_active.elapsed()).as_secs())
                 },
                 keepalive: s.keepalive,
+                account: s.account.as_ref().map(|(_, name)| name.clone()),
                 persistent: s.persistent,
             })
             .collect();
@@ -1069,7 +1211,10 @@ fn shell_quote(s: &str) -> String {
 /// for a storage object with nothing in it.
 fn inject_storage_js(storage: &Value) -> Option<String> {
     let ls = storage.get("local_storage").filter(|v| v.is_object())?;
-    let ss = storage.get("session_storage").cloned().unwrap_or(serde_json::json!({}));
+    let ss = storage
+        .get("session_storage")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
     let ls_lit = serde_json::to_string(&serde_json::to_string(ls).ok()?).ok()?;
     let ss_lit = serde_json::to_string(&serde_json::to_string(&ss).ok()?).ok()?;
     Some(format!(
@@ -1094,7 +1239,9 @@ pub fn replay_bash(jsonl: &str, default_base: &str) -> String {
 
     let mut sid_bound = false;
     for line in jsonl.lines().filter(|l| !l.trim().is_empty()) {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         // Payload = JSON body, shell-single-quoted for the POST helper's -d "$2".
         let payload = |body: Value| shell_quote(&body.to_string());
         match v["action"].as_str().unwrap_or_default() {
@@ -1107,16 +1254,26 @@ pub fn replay_bash(jsonl: &str, default_base: &str) -> String {
                 if v.get("storage").map(|s| s.is_object()).unwrap_or(false) {
                     body["storage"] = v["storage"].clone();
                 }
+                if v.get("account")
+                    .and_then(|a| a.as_str())
+                    .is_some_and(|a| !a.is_empty())
+                {
+                    body["account"] = v["account"].clone();
+                }
                 let body = payload(body);
                 out.push_str(&format!(
                     "SID=$(POST session/create {body} | sed -n 's/.*\"session_id\":\"\\([^\"]*\\)\".*/\\1/p')\n"
                 ));
-                out.push_str("[ -n \"$SID\" ] || { echo \"session create failed\" >&2; exit 1; }\n");
+                out.push_str(
+                    "[ -n \"$SID\" ] || { echo \"session create failed\" >&2; exit 1; }\n",
+                );
                 sid_bound = true;
             }
             "navigate" if sid_bound => {
                 let body = payload(serde_json::json!({"url": v["url"].clone()}));
-                out.push_str(&format!("POST \"session/$SID/navigate\" {body} > /dev/null\n"));
+                out.push_str(&format!(
+                    "POST \"session/$SID/navigate\" {body} > /dev/null\n"
+                ));
             }
             "click" if sid_bound => {
                 let body = payload(serde_json::json!({"index": v["index"].clone()}));
@@ -1124,7 +1281,9 @@ pub fn replay_bash(jsonl: &str, default_base: &str) -> String {
             }
             "click_xy" if sid_bound => {
                 let body = payload(serde_json::json!({"x": v["x"].clone(), "y": v["y"].clone()}));
-                out.push_str(&format!("POST \"session/$SID/click_xy\" {body} > /dev/null\n"));
+                out.push_str(&format!(
+                    "POST \"session/$SID/click_xy\" {body} > /dev/null\n"
+                ));
             }
             "drag" if sid_bound => {
                 let body = payload(serde_json::json!({
@@ -1135,7 +1294,9 @@ pub fn replay_bash(jsonl: &str, default_base: &str) -> String {
                 out.push_str(&format!("POST \"session/$SID/drag\" {body} > /dev/null\n"));
             }
             "input" if sid_bound => {
-                let body = payload(serde_json::json!({"index": v["index"].clone(), "text": v["text"].clone()}));
+                let body = payload(
+                    serde_json::json!({"index": v["index"].clone(), "text": v["text"].clone()}),
+                );
                 out.push_str(&format!("POST \"session/$SID/input\" {body} > /dev/null\n"));
             }
             "scroll" if sid_bound => {
@@ -1143,7 +1304,9 @@ pub fn replay_bash(jsonl: &str, default_base: &str) -> String {
                     "direction": v["direction"].clone(),
                     "amount": v["amount"].clone(),
                 }));
-                out.push_str(&format!("POST \"session/$SID/scroll\" {body} > /dev/null\n"));
+                out.push_str(&format!(
+                    "POST \"session/$SID/scroll\" {body} > /dev/null\n"
+                ));
             }
             "viewport" if sid_bound => {
                 let body = payload(serde_json::json!({
@@ -1151,7 +1314,9 @@ pub fn replay_bash(jsonl: &str, default_base: &str) -> String {
                     "height": v["height"].clone(),
                     "mobile": v["mobile"].as_bool().unwrap_or(false),
                 }));
-                out.push_str(&format!("POST \"session/$SID/viewport\" {body} > /dev/null\n"));
+                out.push_str(&format!(
+                    "POST \"session/$SID/viewport\" {body} > /dev/null\n"
+                ));
             }
             "eval" if sid_bound => {
                 let body = payload(serde_json::json!({"script": v["script"].clone()}));
@@ -1178,6 +1343,7 @@ fn session_thread(
     use_proxy: bool,
     cookies: Vec<String>,
     storage: Option<Value>,
+    account: Option<(String, String)>,
     mut cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
 ) {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -1190,11 +1356,27 @@ fn session_thread(
 
         local
             .run_until(async {
-                let browser = crate::server::build_browser(use_proxy, "", None)
-                    .expect("failed to build session browser");
+                // Account sessions build on the account's private jar
+                // (account.rs): same-account sessions share it (two tabs,
+                // one profile), other accounts and the anonymous shared jar
+                // never see this session's cookies. The jar is seeded from
+                // the stored record, so a post-restart session_create
+                // {account} starts where the last one left off.
+                let browser = match &account {
+                    Some((owner, name)) => crate::server::build_browser_for_account(
+                        use_proxy,
+                        "",
+                        None,
+                        crate::account::jar_for(owner, name),
+                    ),
+                    None => crate::server::build_browser(use_proxy, "", None),
+                }
+                .expect("failed to build session browser");
                 // Inject cookies before navigation so a session can start
                 // already logged-in (cookies gathered from a prior session via
-                // the Cookies command, or hand-exported). Mirrors /fetch.
+                // the Cookies command, or hand-exported). Mirrors /fetch. For
+                // account sessions the browser's cookie store IS the account
+                // jar, so first-time login imports land in the account too.
                 if !cookies.is_empty() {
                     let target = start_url.as_deref().unwrap_or("");
                     crate::server::inject_cookies(&browser, &cookies, target);
@@ -1210,6 +1392,7 @@ fn session_thread(
                     use_proxy,
                     cookies: cookies.clone(),
                     storage: storage.clone(),
+                    account: account.as_ref().map(|(_, name)| name.clone()),
                 }];
 
                 // Ring buffer of recent page console output, fed by
@@ -1941,12 +2124,7 @@ fn merge_dom_candidates(media: &mut Vec<Value>, dom_json: &str) {
         Ok(v) => v,
         Err(_) => return,
     };
-    let bare = |u: &str| {
-        u.split(['?', '#'])
-            .next()
-            .unwrap_or(u)
-            .to_ascii_lowercase()
-    };
+    let bare = |u: &str| u.split(['?', '#']).next().unwrap_or(u).to_ascii_lowercase();
     let confirmed: std::collections::HashSet<String> = media
         .iter()
         .filter_map(|m| m["url"].as_str())
@@ -2079,8 +2257,8 @@ fn extract_indexed_state(
     };
 
     // Parse the JSON to extract element_map, then format as compact text.
-    let parsed: Value = serde_json::from_str(&json_str)
-        .map_err(|e| format!("state parse error: {}", e))?;
+    let parsed: Value =
+        serde_json::from_str(&json_str).map_err(|e| format!("state parse error: {}", e))?;
 
     // Build element_map from the JS-side indexMap.
     let map_val = page.evaluate("JSON.stringify(window.__session_element_map)");
@@ -2158,7 +2336,10 @@ fn extract_indexed_state(
                 } else {
                     text.to_string()
                 };
-                out.push_str(&format!("[{}] <{}{}{}>{}</{}>\n", idx, tag, attr_str, rect, display_text, tag));
+                out.push_str(&format!(
+                    "[{}] <{}{}{}>{}</{}>\n",
+                    idx, tag, attr_str, rect, display_text, tag
+                ));
             }
         }
     }
@@ -2171,8 +2352,7 @@ fn extract_indexed_state(
 // ---------------------------------------------------------------------------
 
 use crate::diting_cdp::domains::input::{
-    mouse_down_js, mouse_move_js, mouse_up_js, mouse_button_code, mouse_button_mask,
-    INPUT_HELPERS,
+    mouse_button_code, mouse_button_mask, mouse_down_js, mouse_move_js, mouse_up_js, INPUT_HELPERS,
 };
 
 fn eval_interaction(page: &mut Page, js: &str) {
@@ -2225,7 +2405,9 @@ async fn click_by_index(
     element_map: &HashMap<usize, u64>,
     index: usize,
 ) -> Result<SessionClickResponse, String> {
-    let nid = *element_map.get(&index).ok_or_else(|| format!("invalid index: {}", index))?;
+    let nid = *element_map
+        .get(&index)
+        .ok_or_else(|| format!("invalid index: {}", index))?;
     let js = format!(
         "(function() {{ var el = globalThis._wrap && globalThis._wrap({}); if (el) {{ el.scrollIntoView({{block:'center'}}); el.click(); return true; }} return false; }})()",
         nid
@@ -2248,7 +2430,11 @@ async fn click_by_index(
         .evaluate("document.body.innerText")
         .as_str()
         .map(|s| s.chars().take(2000).collect::<String>());
-    Ok(SessionClickResponse { url, clicked, text_after })
+    Ok(SessionClickResponse {
+        url,
+        clicked,
+        text_after,
+    })
 }
 
 fn input_by_index(
@@ -2258,7 +2444,9 @@ fn input_by_index(
     text: &str,
     full_events: bool,
 ) -> Result<Value, String> {
-    let nid = *element_map.get(&index).ok_or_else(|| format!("invalid index: {}", index))?;
+    let nid = *element_map
+        .get(&index)
+        .ok_or_else(|| format!("invalid index: {}", index))?;
     // Escape single quotes in text.
     let escaped = text.replace('\\', "\\\\").replace('\'', "\\'");
     // React/Vue controlled inputs: assigning `el.value` directly goes through
@@ -2312,7 +2500,17 @@ mod tests {
     #[tokio::test]
     async fn idle_session_keeps_timers_and_microtasks_firing() {
         let mut mgr = SessionManager::new();
-        let sid = mgr.create(Some("about:blank"), false, vec![], None, None, None, false, false);
+        let sid = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
 
         let armed = mgr
             .send(&sid, |reply| SessionCommand::Eval {
@@ -2342,17 +2540,27 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(mgr.close_and_wait(&sid).await, "session thread must ack close");
+        assert!(
+            mgr.close_and_wait(&sid).await,
+            "session thread must ack close"
+        );
 
-        let json: Value = serde_json::from_str(state.as_str().unwrap_or("null")).unwrap_or(Value::Null);
-        let timeout = json.get("timeout").and_then(|v| v.as_bool()).unwrap_or(false);
+        let json: Value =
+            serde_json::from_str(state.as_str().unwrap_or("null")).unwrap_or(Value::Null);
+        let timeout = json
+            .get("timeout")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let micro = json.get("micro").and_then(|v| v.as_bool()).unwrap_or(false);
         let ticks = json.get("ticks").and_then(|v| v.as_i64()).unwrap_or(0);
         // 1.5s idle at a 200ms interval ≈ 7 ticks; 3 is a safe floor that
         // still proves sustained pumping (one post-command drain gives 0-1).
         assert!(timeout, "setTimeout must fire during the idle gap");
         assert!(micro, "promise chain must settle during the idle gap");
-        assert!(ticks >= 3, "interval must keep firing while idle, got {ticks} ticks");
+        assert!(
+            ticks >= 3,
+            "interval must keep firing while idle, got {ticks} ticks"
+        );
     }
 
     /// Session errors must be machine-readable: an agent has to tell "the
@@ -2367,7 +2575,9 @@ mod tests {
 
         // Unknown id: SESSION_NOT_FOUND with the recreate hint.
         let err = mgr
-            .send(&"s_missing".to_string(), |reply| SessionCommand::State { reply })
+            .send(&"s_missing".to_string(), |reply| SessionCommand::State {
+                reply,
+            })
             .await
             .unwrap_err();
         assert_eq!(err.code(), "SESSION_NOT_FOUND");
@@ -2375,26 +2585,56 @@ mod tests {
 
         // Command failure inside a LIVE session: COMMAND_FAILED, no recreate
         // hint, and the session survives (a retry is safe).
-        let sid = mgr.create(Some("about:blank"), false, vec![], None, None, None, false, false);
+        let sid = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
         let err = mgr
-            .send(&sid, |reply| SessionCommand::Click { index: 99_999, reply })
+            .send(&sid, |reply| SessionCommand::Click {
+                index: 99_999,
+                reply,
+            })
             .await
             .unwrap_err();
         assert_eq!(err.code(), "COMMAND_FAILED");
         assert!(err.to_value().get("hint").is_none());
-        assert!(mgr.close_and_wait(&sid).await, "session thread must ack close");
+        assert!(
+            mgr.close_and_wait(&sid).await,
+            "session thread must ack close"
+        );
 
         // Expired: SESSION_EXPIRED + destructive close, then the same id
         // answers SESSION_NOT_FOUND — the two conclusions agree.
-        let sid = mgr.create(Some("about:blank"), false, vec![], None, None, None, false, false);
-        mgr.sessions.get_mut(&sid).unwrap().last_active = Instant::now() - Duration::from_secs(3600);
+        let sid = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+        mgr.sessions.get_mut(&sid).unwrap().last_active =
+            Instant::now() - Duration::from_secs(3600);
         let err = mgr
             .send(&sid, |reply| SessionCommand::State { reply })
             .await
             .unwrap_err();
         assert_eq!(err.code(), "SESSION_EXPIRED");
         assert_eq!(err.to_value()["hint"], "call session_create to recreate");
-        assert!(!mgr.sessions.contains_key(&sid), "expiry must close the session");
+        assert!(
+            !mgr.sessions.contains_key(&sid),
+            "expiry must close the session"
+        );
         let err = mgr
             .send(&sid, |reply| SessionCommand::State { reply })
             .await
@@ -2409,13 +2649,26 @@ mod tests {
     #[tokio::test]
     async fn url_command_round_trips_the_current_page() {
         let mut mgr = SessionManager::new();
-        let sid = mgr.create(Some("about:blank"), false, vec![], None, None, None, false, false);
+        let sid = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
         let url = mgr
             .send(&sid, |reply| SessionCommand::Url { reply })
             .await
             .unwrap();
         assert_eq!(url, "about:blank");
-        assert!(mgr.close_and_wait(&sid).await, "session thread must ack close");
+        assert!(
+            mgr.close_and_wait(&sid).await,
+            "session thread must ack close"
+        );
     }
 
     /// Regression (obscura #618 class): an eval whose script clicks a submit
@@ -2445,6 +2698,7 @@ mod tests {
             None,
             false,
             false,
+            None,
         );
 
         let clicked = mgr
@@ -2502,6 +2756,7 @@ mod tests {
             None,
             false,
             false,
+            None,
         );
 
         let vp = mgr
@@ -2583,7 +2838,17 @@ mod tests {
     async fn set_content_loads_local_html_as_a_real_page() {
         let _net = crate::server::test_util::net_env_guard();
         let mut mgr = SessionManager::new();
-        let sid = mgr.create(Some("about:blank"), false, vec![], None, None, None, false, false);
+        let sid = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
 
         let html = "<html><head><title>Doc</title></head>\
              <body><button id=\"b\">hello</button><script>window.__ran=1</script></body></html>"
@@ -2612,7 +2877,10 @@ mod tests {
             .send(&sid, |reply| SessionCommand::State { reply })
             .await
             .unwrap();
-        assert!(state.contains("hello"), "state must see the DOM, got: {state}");
+        assert!(
+            state.contains("hello"),
+            "state must see the DOM, got: {state}"
+        );
 
         // A later SetContent replaces the page (old DOM gone).
         mgr.send(&sid, |reply| SessionCommand::SetContent {
@@ -2664,6 +2932,7 @@ mod tests {
             None,
             false,
             false,
+            None,
         );
         mgr.send(&src, |reply| SessionCommand::Viewport {
             width: Some(375),
@@ -2760,7 +3029,17 @@ mod tests {
         )]);
 
         let mut mgr = SessionManager::new();
-        let sid = mgr.create(Some(&format!("http://127.0.0.1:{port}/shot")), false, vec![], None, None, None, false, false);
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/shot")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
 
         // Mutate the DOM after load — the capture renders page.content(),
         // so the pixels must reflect the mutation, not the HTTP response.
@@ -2791,7 +3070,11 @@ mod tests {
             .decode(v["image_base64"].as_str().expect("base64 body"))
             .expect("decodable base64");
         assert_eq!(&png[0..4], b"\x89PNG", "PNG magic bytes");
-        assert!(png.len() > 1000, "non-trivial image, got {} bytes", png.len());
+        assert!(
+            png.len() > 1000,
+            "non-trivial image, got {} bytes",
+            png.len()
+        );
 
         assert!(mgr.close_and_wait(&sid).await);
     }
@@ -2824,6 +3107,7 @@ mod tests {
             None,
             false,
             false,
+            None,
         );
 
         async fn ink_in_input(mgr: &mut SessionManager, sid: &str) -> usize {
@@ -2849,8 +3133,13 @@ mod tests {
             // text moves the count.
             img.enumerate_pixels()
                 .filter(|(x, y, p)| {
-                    *x >= 10 && *x < 246 && *y >= 10 && *y < 38
-                        && p.0[0] < 100 && p.0[1] < 100 && p.0[2] < 100
+                    *x >= 10
+                        && *x < 246
+                        && *y >= 10
+                        && *y < 38
+                        && p.0[0] < 100
+                        && p.0[1] < 100
+                        && p.0[2] < 100
                 })
                 .count()
         }
@@ -2891,7 +3180,17 @@ mod tests {
         )]);
 
         let mut mgr = SessionManager::new();
-        let sid = mgr.create(Some(&format!("http://127.0.0.1:{port}/wait")), false, vec![], None, None, None, false, false);
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/wait")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
 
         // Elapsed must cover the 600ms timer — proof the loop was driven,
         // not just polled.
@@ -2908,7 +3207,10 @@ mod tests {
         assert_eq!(v["matched"], serde_json::json!(true));
         assert_eq!(v["detail"]["tag"], serde_json::json!("DIV"));
         assert!(
-            v["detail"]["text"].as_str().unwrap_or("").contains("Plan A"),
+            v["detail"]["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Plan A"),
             "detail carries the matched element's text"
         );
 
@@ -2968,7 +3270,17 @@ mod tests {
         let url = format!("http://127.0.0.1:{port}/store");
 
         let mut mgr = SessionManager::new();
-        let a = mgr.create(Some(&url), false, vec![], None, None, None, false, false);
+        let a = mgr.create(
+            Some(&url),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
 
         mgr.send(&a, |reply| SessionCommand::Eval {
             script: "localStorage.setItem('token','abc\"123'); \
@@ -2992,7 +3304,17 @@ mod tests {
         assert!(mgr.close_and_wait(&a).await);
 
         // Fresh session on the same origin, restored from A's snapshot.
-        let b = mgr.create(Some(&url), false, vec![], Some(v), None, None, false, false);
+        let b = mgr.create(
+            Some(&url),
+            false,
+            vec![],
+            Some(v),
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
         let token = mgr
             .send(&b, |reply| SessionCommand::Eval {
                 script: "localStorage.getItem('token') + '|' + localStorage.getItem('user') \
@@ -3016,9 +3338,39 @@ mod tests {
     #[tokio::test]
     async fn ttl_secs_overrides_the_idle_budget() {
         let mut mgr = SessionManager::new();
-        let long = mgr.create(Some("about:blank"), false, vec![], None, Some(3600), None, false, false);
-        let short = mgr.create(Some("about:blank"), false, vec![], None, Some(60), None, false, false);
-        let def = mgr.create(Some("about:blank"), false, vec![], None, None, None, false, false);
+        let long = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            Some(3600),
+            None,
+            false,
+            false,
+            None,
+        );
+        let short = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            Some(60),
+            None,
+            false,
+            false,
+            None,
+        );
+        let def = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
 
         let entries = mgr.list();
         let by_id = |list: &[SessionListEntry], id: &str| {
@@ -3028,8 +3380,16 @@ mod tests {
                 .expires_in_secs
                 .expect("non-keepalive session carries a countdown")
         };
-        assert!(by_id(&entries, &long) > 3500, "hour-long TTL, got {}", by_id(&entries, &long));
-        assert!(by_id(&entries, &short) <= 60, "60s TTL, got {}", by_id(&entries, &short));
+        assert!(
+            by_id(&entries, &long) > 3500,
+            "hour-long TTL, got {}",
+            by_id(&entries, &long)
+        );
+        assert!(
+            by_id(&entries, &short) <= 60,
+            "60s TTL, got {}",
+            by_id(&entries, &short)
+        );
         assert!(
             by_id(&entries, &def) <= 480,
             "default stays at 8 minutes, got {}",
@@ -3037,7 +3397,17 @@ mod tests {
         );
 
         // Clamp: out-of-range asks land on the rails.
-        let clamped = mgr.create(Some("about:blank"), false, vec![], None, Some(999_999), None, false, false);
+        let clamped = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            Some(999_999),
+            None,
+            false,
+            false,
+            None,
+        );
         let entries = mgr.list();
         assert!(by_id(&entries, &clamped) <= 3600, "clamp at one hour");
 
@@ -3072,6 +3442,7 @@ mod tests {
             Some((Some(375), Some(667), true)),
             false,
             false,
+            None,
         );
 
         // First command the caller sends is a probe — the queued pin must
@@ -3086,13 +3457,18 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(vp["width"].as_f64(), Some(375.0), "pin applied before first command");
+        assert_eq!(
+            vp["width"].as_f64(),
+            Some(375.0),
+            "pin applied before first command"
+        );
         assert_eq!(vp["mobile"].as_bool(), Some(true));
 
         let matches = mgr
             .send(&sid, |reply| SessionCommand::Eval {
-                script: "innerWidth + 'x' + innerHeight + '|' + matchMedia('(pointer:coarse)').matches"
-                    .to_string(),
+                script:
+                    "innerWidth + 'x' + innerHeight + '|' + matchMedia('(pointer:coarse)').matches"
+                        .to_string(),
                 timeout_ms: None,
                 reply,
             })
@@ -3141,6 +3517,7 @@ mod tests {
             None,
             true,
             false,
+            None,
         );
 
         {
@@ -3148,7 +3525,10 @@ mod tests {
             s.last_active = std::time::Instant::now() - std::time::Duration::from_secs(99_999);
         }
 
-        assert!(mgr.expires_in_secs(&sid).is_none(), "keepalive has no countdown");
+        assert!(
+            mgr.expires_in_secs(&sid).is_none(),
+            "keepalive has no countdown"
+        );
         let entry = mgr
             .list()
             .into_iter()
@@ -3210,6 +3590,7 @@ mod tests {
             Some((Some(375), Some(667), false)),
             false,
             true,
+            None,
         );
         // The mutation is what the snapshot must capture — the page never
         // sets this key, so only injection can restore it.
@@ -3284,7 +3665,17 @@ mod tests {
         let shared: SharedSnapshots = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
         let mut mgr = manager_on(shared);
 
-        let p = mgr.create(Some("about:blank"), false, vec![], None, None, None, false, true);
+        let p = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            true,
+            None,
+        );
         mgr.send(&p, |reply| SessionCommand::Eval {
             script: "1".to_string(),
             timeout_ms: None,
@@ -3304,11 +3695,28 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(v, serde_json::json!(3), "expired persistent session revives");
-        assert!(mgr.sessions.contains_key(&p), "revived session is live again");
+        assert_eq!(
+            v,
+            serde_json::json!(3),
+            "expired persistent session revives"
+        );
+        assert!(
+            mgr.sessions.contains_key(&p),
+            "revived session is live again"
+        );
 
         // Control: a plain session expires with the structured error.
-        let plain = mgr.create(Some("about:blank"), false, vec![], None, None, None, false, false);
+        let plain = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
         mgr.send(&plain, |reply| SessionCommand::Eval {
             script: "1".to_string(),
             timeout_ms: None,
@@ -3342,7 +3750,17 @@ mod tests {
         let shared: SharedSnapshots = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
         let mut mgr = manager_on(shared.clone());
 
-        let a = mgr.create(Some("about:blank"), false, vec![], None, None, None, false, true);
+        let a = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            true,
+            None,
+        );
         mgr.send(&a, |reply| SessionCommand::Eval {
             script: "1".to_string(),
             timeout_ms: None,
@@ -3357,7 +3775,17 @@ mod tests {
             "explicit close drops the snapshot"
         );
 
-        let b = mgr.create(Some("about:blank"), false, vec![], None, None, None, false, true);
+        let b = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            true,
+            None,
+        );
         mgr.send(&b, |reply| SessionCommand::Eval {
             script: "1".to_string(),
             timeout_ms: None,
@@ -3382,7 +3810,11 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(v, serde_json::json!(42), "evicted persistent session revives");
+        assert_eq!(
+            v,
+            serde_json::json!(42),
+            "evicted persistent session revives"
+        );
         mgr.close_inner(&b, true);
     }
 
@@ -3397,7 +3829,17 @@ mod tests {
             .unwrap()
             .insert(next.clone(), (r#"{"version":1}"#.to_string(), 0));
         let mut mgr = manager_on(shared);
-        let id = mgr.create(Some("about:blank"), false, vec![], None, None, None, false, false);
+        let id = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
         assert_ne!(id, next, "create must skip ids owned by a snapshot");
         mgr.close_inner(&id, true);
     }
@@ -3423,6 +3865,7 @@ mod tests {
             None,
             false,
             false,
+            None,
         );
 
         let err = mgr
@@ -3436,7 +3879,10 @@ mod tests {
         assert_eq!(err.code(), "EVAL_ERROR");
         let text = err.to_string();
         assert!(text.contains("TypeError: boom at runtime"), "got: {text}");
-        assert!(text.contains("(line 1, col"), "throw position in message, got: {text}");
+        assert!(
+            text.contains("(line 1, col"),
+            "throw position in message, got: {text}"
+        );
         assert!(
             text.contains("<anonymous>:1:14"),
             "first stack frame carries the throw site, got: {text}"
@@ -3505,6 +3951,7 @@ mod tests {
             None,
             false,
             false,
+            None,
         );
 
         async fn read_log(mgr: &mut SessionManager, sid: &str) -> Vec<String> {
@@ -3586,7 +4033,11 @@ mod tests {
         let downs = log.iter().filter(|e| e.starts_with("down@60,60")).count();
         assert_eq!(downs, 1, "one press, got {log:?}");
         let moves: Vec<&String> = log.iter().filter(|e| e.starts_with("move@")).collect();
-        assert_eq!(moves.len(), 10, "every interpolated move delivered, got {log:?}");
+        assert_eq!(
+            moves.len(),
+            10,
+            "every interpolated move delivered, got {log:?}"
+        );
         assert_eq!(moves[0].as_str(), "move@69,63", "first step interpolated");
         assert_eq!(
             moves.last().map(|m| m.as_str()),
@@ -3634,6 +4085,7 @@ mod tests {
             None,
             false,
             false,
+            None,
         );
 
         // Output produced by an agent-driven eval joins the same ring.
@@ -3654,11 +4106,11 @@ mod tests {
             .unwrap();
         let v: Value = serde_json::from_str(&out).expect("console JSON");
         let msgs = v["messages"].as_array().expect("messages array");
-        let texts: Vec<&str> = msgs
-            .iter()
-            .filter_map(|m| m["text"].as_str())
-            .collect();
-        assert!(texts.contains(&"boot ok"), "log from page script, got {texts:?}");
+        let texts: Vec<&str> = msgs.iter().filter_map(|m| m["text"].as_str()).collect();
+        assert!(
+            texts.contains(&"boot ok"),
+            "log from page script, got {texts:?}"
+        );
         assert!(texts.contains(&"legacy api"), "warn level, got {texts:?}");
         assert!(
             texts.contains(&"load failed: x") && texts.contains(&"eval-time boom"),
@@ -3774,6 +4226,7 @@ mod tests {
             None,
             false,
             false,
+            None,
         );
 
         // Default policy: auto-dismiss. confirm → false, prompt → null.
@@ -3807,7 +4260,10 @@ mod tests {
             .iter()
             .map(|m| serde_json::from_str(m["text"].as_str().unwrap_or("")).unwrap())
             .collect();
-        assert_eq!(payloads[0]["dialog"], "confirm", "kind tagged: {payloads:?}");
+        assert_eq!(
+            payloads[0]["dialog"], "confirm",
+            "kind tagged: {payloads:?}"
+        );
         assert_eq!(payloads[0]["message"], "delete it?");
         assert_eq!(payloads[0]["answer"], false, "dismissed");
         assert_eq!(payloads[1]["dialog"], "prompt");
@@ -3848,7 +4304,11 @@ mod tests {
             .unwrap();
         let v: Value = serde_json::from_str(&out).expect("list JSON");
         assert_eq!(v["policy"], "accept");
-        assert_eq!(v["dialogs"].as_array().map(Vec::len), Some(5), "2 + 3 logged");
+        assert_eq!(
+            v["dialogs"].as_array().map(Vec::len),
+            Some(5),
+            "2 + 3 logged"
+        );
 
         // Back to dismiss: prompts answer null again.
         let out = mgr
@@ -3891,15 +4351,38 @@ mod tests {
     #[tokio::test]
     async fn list_reports_live_sessions_and_goes_empty_after_close() {
         let mut mgr = SessionManager::new();
-        let a = mgr.create(Some("about:blank"), false, vec![], None, None, None, false, false);
+        let a = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let b = mgr.create(Some("about:blank"), false, vec![], None, None, None, false, false);
+        let b = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
 
         let entries = mgr.list();
         assert_eq!(entries.len(), 2);
         let ids: Vec<&str> = entries.iter().map(|e| e.session_id.as_str()).collect();
         assert!(ids.contains(&a.as_str()) && ids.contains(&b.as_str()));
-        assert!(entries[0].idle_secs <= entries[1].idle_secs, "most recent first");
+        assert!(
+            entries[0].idle_secs <= entries[1].idle_secs,
+            "most recent first"
+        );
         for e in &entries {
             assert!(
                 e.expires_in_secs.expect("countdown") <= 480,
@@ -3936,7 +4419,10 @@ mod tests {
         assert!(script.contains(r#"POST "session/$SID/input""#));
         assert!(script.contains(r#"POST "session/$SID/scroll""#));
         assert!(script.contains(r#"POST "session/$SID/eval""#));
-        assert!(script.contains(r#"POST "session/$SID/state" '{}'"#), "ends by printing final state");
+        assert!(
+            script.contains(r#"POST "session/$SID/state" '{}'"#),
+            "ends by printing final state"
+        );
         // Single-quote escaping: it's → 'it'\''s — an unescaped quote would
         // terminate the argument and execute the rest as shell.
         assert!(script.contains(r#""sid=it'\''s"]"#));
@@ -3954,7 +4440,10 @@ mod tests {
     fn replay_bash_without_create_skips_sid_actions() {
         let jsonl = r#"{"action":"navigate","url":"https://example.com/","ok":true}"#;
         let script = replay_bash(jsonl, "http://127.0.0.1:8089");
-        assert!(!script.contains("$SID"), "no SID may be referenced without a create");
+        assert!(
+            !script.contains("$SID"),
+            "no SID may be referenced without a create"
+        );
     }
 
     /// A live session records what it did: create params + one entry per
@@ -3963,7 +4452,17 @@ mod tests {
     #[tokio::test]
     async fn session_records_actions_and_exports_jsonl() {
         let mut mgr = SessionManager::new();
-        let sid = mgr.create(Some("about:blank"), false, vec!["k=v".to_string()], None, None, None, false, false);
+        let sid = mgr.create(
+            Some("about:blank"),
+            false,
+            vec!["k=v".to_string()],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
 
         let _ = mgr
             .send(&sid, |reply| SessionCommand::State { reply })
@@ -3989,9 +4488,15 @@ mod tests {
             .send(&sid, |reply| SessionCommand::Export { reply })
             .await
             .unwrap();
-        assert!(mgr.close_and_wait(&sid).await, "session thread must ack close");
+        assert!(
+            mgr.close_and_wait(&sid).await,
+            "session thread must ack close"
+        );
 
-        let actions: Vec<Value> = jsonl.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let actions: Vec<Value> = jsonl
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
         assert_eq!(actions.len(), 3, "create + scroll + eval, state excluded");
 
         assert_eq!(actions[0]["action"], "create");
@@ -4037,7 +4542,17 @@ mod tests {
         ]);
 
         let mut mgr = SessionManager::new();
-        let sid = mgr.create(Some(&format!("http://127.0.0.1:{port}/watch")), false, vec![], None, None, None, false, false);
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/watch")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
 
         // One pump cycle so the page's fetch() settles into the event queue.
         let _ = mgr
@@ -4050,7 +4565,13 @@ mod tests {
             .unwrap();
 
         let media = mgr
-            .send(&sid, |reply| SessionCommand::Network { media_only: true, include_bodies: false, url_contains: None, body_max_chars: 0, reply })
+            .send(&sid, |reply| SessionCommand::Network {
+                media_only: true,
+                include_bodies: false,
+                url_contains: None,
+                body_max_chars: 0,
+                reply,
+            })
             .await
             .unwrap();
         let media: Value = serde_json::from_str(&media).unwrap();
@@ -4063,7 +4584,10 @@ mod tests {
         assert_eq!(items[0]["kind"], "hls");
         assert_eq!(items[0]["via"], "network");
         assert!(
-            items[0]["url"].as_str().unwrap().ends_with("/v/master.m3u8?token=1"),
+            items[0]["url"]
+                .as_str()
+                .unwrap()
+                .ends_with("/v/master.m3u8?token=1"),
             "playback link carries its query: {media}"
         );
         // Native video src the engine never fetched: a dom candidate.
@@ -4084,7 +4608,13 @@ mod tests {
         );
 
         let all = mgr
-            .send(&sid, |reply| SessionCommand::Network { media_only: false, include_bodies: false, url_contains: None, body_max_chars: 0, reply })
+            .send(&sid, |reply| SessionCommand::Network {
+                media_only: false,
+                include_bodies: false,
+                url_contains: None,
+                body_max_chars: 0,
+                reply,
+            })
             .await
             .unwrap();
         let all: Value = serde_json::from_str(&all).unwrap();
@@ -4113,7 +4643,10 @@ mod tests {
         let arr = xhrs["xhr"].as_array().expect("xhr array");
         assert_eq!(arr.len(), 1, "the script-initiated fetch only: {xhrs}");
         assert!(
-            arr[0]["url"].as_str().unwrap().ends_with("/v/master.m3u8?token=1"),
+            arr[0]["url"]
+                .as_str()
+                .unwrap()
+                .ends_with("/v/master.m3u8?token=1"),
             "entry carries the request URL: {xhrs}"
         );
         assert_eq!(arr[0]["status"], 200);
@@ -4134,10 +4667,16 @@ mod tests {
             .unwrap();
         assert_eq!(doc["response"]["status"], 200);
         assert!(
-            doc["response"]["content"]["text"].as_str().unwrap().contains("master.m3u8"),
+            doc["response"]["content"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("master.m3u8"),
             "document body retained as text"
         );
 
-        assert!(mgr.close_and_wait(&sid).await, "session thread must ack close");
+        assert!(
+            mgr.close_and_wait(&sid).await,
+            "session thread must ack close"
+        );
     }
 }

@@ -38,7 +38,9 @@ pub fn recorded_to_flow(jsonl: &str) -> Value {
     let mut create = Map::new();
     let mut steps = Vec::new();
     for line in jsonl.lines().filter(|l| !l.trim().is_empty()) {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         if v.get("ok") == Some(&Value::Bool(false)) {
             continue;
         }
@@ -63,7 +65,10 @@ pub fn recorded_to_flow(jsonl: &str) -> Value {
                     "steps": v["steps"],
                 }),
             )),
-            "input" => steps.push(step("input", json!({ "index": v["index"], "text": v["text"] }))),
+            "input" => steps.push(step(
+                "input",
+                json!({ "index": v["index"], "text": v["text"] }),
+            )),
             "scroll" => steps.push(step(
                 "scroll",
                 json!({ "direction": v["direction"], "amount": v["amount"] }),
@@ -155,7 +160,10 @@ pub fn workflow_dir() -> PathBuf {
 /// anything else (dots, slashes, ..) is rejected before it ever reaches the
 /// filesystem.
 fn is_workflow_name(name: &str) -> bool {
-    !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// Names of flows installed under the workflow dir (discovery-by-error: an
@@ -189,7 +197,9 @@ pub fn resolve_flow_doc(flow: Option<Value>, name: Option<&str>) -> Result<Value
         );
     };
     if !is_workflow_name(name) {
-        return Err(format!("invalid workflow name {name:?} (lowercase/digits/dashes only)"));
+        return Err(format!(
+            "invalid workflow name {name:?} (lowercase/digits/dashes only)"
+        ));
     }
     let path = workflow_dir().join(name).join("flow.json");
     let text = std::fs::read_to_string(&path).map_err(|_| {
@@ -429,7 +439,11 @@ async fn run_expect(
         }
     };
     let v = mgr
-        .send(sid, |reply| SessionCommand::Eval { script, timeout_ms: None, reply })
+        .send(sid, |reply| SessionCommand::Eval {
+            script,
+            timeout_ms: None,
+            reply,
+        })
         .await
         .map_err(|e| e.to_string())?;
     if js_truthy(&v) {
@@ -536,7 +550,11 @@ pub async fn run_flow(
             let cookies = c
                 .get("cookies")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             let pin = match (opt_u32(&c, "width"), opt_u32(&c, "height")) {
                 (Some(w), Some(h)) => Some((
@@ -548,13 +566,16 @@ pub async fn run_flow(
             };
             mgr.create(
                 c.get("url").and_then(|v| v.as_str()),
-                c.get("use_proxy").and_then(|v| v.as_bool()).unwrap_or(false),
+                c.get("use_proxy")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 cookies,
                 c.get("storage").filter(|v| v.is_object()).cloned(),
                 None,
                 pin,
                 false,
                 false,
+                None,
             )
         }
     };
@@ -563,7 +584,11 @@ pub async fn run_flow(
     let mut last_url = Value::Null;
 
     for (i, raw) in steps.iter().enumerate() {
-        let op = raw.get("op").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let op = raw
+            .get("op")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
         let args = match substitute(raw.get("args").unwrap_or(&json!({})), &vars) {
             Ok(a) => a,
             Err(e) => {
@@ -671,7 +696,11 @@ mod tests {
         );
         // Nested objects and arrays are walked.
         assert_eq!(
-            substitute(&json!({ "url": "https://s/?q={{q}}", "meta": ["{{n}}"] }), &vars).unwrap(),
+            substitute(
+                &json!({ "url": "https://s/?q={{q}}", "meta": ["{{n}}"] }),
+                &vars
+            )
+            .unwrap(),
             json!({ "url": "https://s/?q=rust engine", "meta": ["3"] })
         );
         // Missing var and unterminated placeholder fail loudly.
@@ -769,7 +798,17 @@ mod tests {
     #[tokio::test]
     async fn run_flow_reuses_session_id() {
         let mut mgr = SessionManager::new();
-        let sid = mgr.create(Some("about:blank"), false, vec![], None, None, None, false, false);
+        let sid = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
         let flow = json!({
             "create": { "url": "https://example.com/" },
             "steps": [ { "op": "set_content", "args": { "html": "<html><body>x</body></html>" } } ]
@@ -809,7 +848,10 @@ mod tests {
         let r2 = run_flow(&mut mgr, &bad, &Map::new(), None).await;
         assert_eq!(r2["status"], "failed");
         let reason = r2["reason"].as_str().unwrap();
-        assert!(reason.contains("create block") && reason.contains("missing"), "reason: {reason}");
+        assert!(
+            reason.contains("create block") && reason.contains("missing"),
+            "reason: {reason}"
+        );
         assert!(r2["session_id"].is_null());
         assert_eq!(mgr.list().len(), before);
     }

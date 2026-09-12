@@ -1,12 +1,11 @@
 use std::sync::Arc;
 
-use rmcp::{
-    ServerHandler, ServiceExt,
-    handler::server::wrapper::Parameters,
-    tool, tool_handler, tool_router,
-};
 use rmcp::transport::streamable_http_server::{
-    session::local::LocalSessionManager, StreamableHttpService, StreamableHttpServerConfig,
+    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+};
+use rmcp::{
+    handler::server::wrapper::Parameters, tool, tool_handler, tool_router, ServerHandler,
+    ServiceExt,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -194,6 +193,14 @@ pub struct SessionCreateParams {
     /// drops the snapshot.
     #[serde(default)]
     pub persistent: bool,
+    /// Run as a named login identity (the multi-account layer): a private
+    /// cookie jar seeded from the account record, write-back to the account
+    /// store after every action. Concurrent logins (`taobao-scraper` vs
+    /// `taobao-publisher`) never clobber each other. The account record
+    /// survives the session — a later create with the same name picks up
+    /// the warm jar. 1-64 chars of [a-zA-Z0-9_-].
+    #[serde(default)]
+    pub account: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -506,6 +513,32 @@ pub struct ImportCurlParams {
     /// Route the session's traffic through the engine proxy.
     #[serde(default)]
     pub use_proxy: bool,
+    /// Attach the session to a named account: the imported login lands in
+    /// the account's private jar and is written back under its name after
+    /// every action — one import per identity, no clobbering.
+    #[serde(default)]
+    pub account: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct AccountVerifyParams {
+    /// The account to check.
+    pub name: String,
+    /// Teach-once: the page that shows login state (its login wall if the
+    /// account is logged out). Remembered after the first call.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Teach-once: a JS expression that is truthy when logged in, e.g.
+    /// `!!document.querySelector('.user-nick')`. Remembered after the first
+    /// call — later calls can pass neither and rerun the spec.
+    #[serde(default)]
+    pub predicate: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct AccountDeleteParams {
+    /// The account to delete: stored record AND live jar.
+    pub name: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -1075,8 +1108,12 @@ interaction on a shared page use session_click instead.",
     )]
     async fn cache(&self, Parameters(params): Parameters<CacheParams>) -> String {
         if params.clear {
-            return match crate::store::clear(&self.owner, params.url.as_deref(), params.since_hours, params.all)
-            {
+            return match crate::store::clear(
+                &self.owner,
+                params.url.as_deref(),
+                params.since_hours,
+                params.all,
+            ) {
                 Ok((pages, searches)) => json!({
                     "cleared_pages": pages,
                     "cleared_searches": searches
@@ -1120,6 +1157,13 @@ interaction on a shared page use session_click instead.",
         annotations(title = "Create Browser Session")
     )]
     async fn session_create(&self, Parameters(params): Parameters<SessionCreateParams>) -> String {
+        let account = match params.account.as_deref() {
+            None => None,
+            Some(name) => match crate::account::validate_name(name) {
+                Ok(()) => Some((self.owner.clone(), name.to_string())),
+                Err(e) => return json!({ "error": e }).to_string(),
+            },
+        };
         let mut mgr = session::SESSIONS.lock().await;
         mgr.evict_expired();
         let url = params.url.clone();
@@ -1137,6 +1181,7 @@ interaction on a shared page use session_click instead.",
             pin,
             params.keepalive,
             params.persistent,
+            account,
         );
         let mut resp = json!({ "session_id": id, "url": url });
         if let Some(s) = mgr.expires_in_secs(&id) {
@@ -1144,6 +1189,9 @@ interaction on a shared page use session_click instead.",
         }
         if params.persistent {
             resp["persistent"] = json!(true);
+        }
+        if let Some(name) = &params.account {
+            resp["account"] = json!(name);
         }
         resp.to_string()
     }
@@ -1167,13 +1215,23 @@ the same login in parallel tabs. Returns {session_id (new), cloned_from, url, vi
         description = "Navigate a browser session to a new URL.",
         annotations(title = "Session Navigate")
     )]
-    async fn session_navigate(&self, Parameters(params): Parameters<SessionNavigateParams>) -> String {
+    async fn session_navigate(
+        &self,
+        Parameters(params): Parameters<SessionNavigateParams>,
+    ) -> String {
         let mut mgr = session::SESSIONS.lock().await;
-        match mgr.send(&params.session_id, |reply| SessionCommand::Navigate {
-            url: params.url.clone(),
-            reply,
-        }).await {
-            Ok(resp) => stamped_json(json!({ "url": resp.url, "title": resp.title }), &mgr, &params.session_id),
+        match mgr
+            .send(&params.session_id, |reply| SessionCommand::Navigate {
+                url: params.url.clone(),
+                reply,
+            })
+            .await
+        {
+            Ok(resp) => stamped_json(
+                json!({ "url": resp.url, "title": resp.title }),
+                &mgr,
+                &params.session_id,
+            ),
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -1184,7 +1242,10 @@ the same login in parallel tabs. Returns {session_id (new), cloned_from, url, vi
     )]
     async fn session_state(&self, Parameters(params): Parameters<SessionStateParams>) -> String {
         let mut mgr = session::SESSIONS.lock().await;
-        match mgr.send(&params.session_id, |reply| SessionCommand::State { reply }).await {
+        match mgr
+            .send(&params.session_id, |reply| SessionCommand::State { reply })
+            .await
+        {
             Ok(text) => text,
             Err(e) => json!({ "error": e }).to_string(),
         }
@@ -1194,9 +1255,17 @@ the same login in parallel tabs. Returns {session_id (new), cloned_from, url, vi
         description = "Export the session's current cookies as [\"name=value\", ...] for the page's URL. Use to persist a logged-in session and replay it later via session_create with cookies. Round-trips with session_create's cookies field.",
         annotations(title = "Session Cookies", read_only_hint = true)
     )]
-    async fn session_cookies(&self, Parameters(params): Parameters<SessionCookiesParams>) -> String {
+    async fn session_cookies(
+        &self,
+        Parameters(params): Parameters<SessionCookiesParams>,
+    ) -> String {
         let mut mgr = session::SESSIONS.lock().await;
-        match mgr.send(&params.session_id, |reply| SessionCommand::Cookies { reply }).await {
+        match mgr
+            .send(&params.session_id, |reply| SessionCommand::Cookies {
+                reply,
+            })
+            .await
+        {
             Ok(text) => stamped(text, &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
@@ -1209,9 +1278,17 @@ a logged-in state in a new session — the half of login state that cookies can'
 keep the session token in localStorage). Call before the session idles out.",
         annotations(title = "Session Storage", read_only_hint = true)
     )]
-    async fn session_storage(&self, Parameters(params): Parameters<SessionCookiesParams>) -> String {
+    async fn session_storage(
+        &self,
+        Parameters(params): Parameters<SessionCookiesParams>,
+    ) -> String {
         let mut mgr = session::SESSIONS.lock().await;
-        match mgr.send(&params.session_id, |reply| SessionCommand::Storage { reply }).await {
+        match mgr
+            .send(&params.session_id, |reply| SessionCommand::Storage {
+                reply,
+            })
+            .await
+        {
             Ok(text) => stamped(text, &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
@@ -1226,7 +1303,10 @@ level (exact, e.g. \"error\"), since_ts (epoch ms), url_contains (page URL subst
 this, read the error.",
         annotations(title = "Session Console", read_only_hint = true)
     )]
-    async fn session_console(&self, Parameters(params): Parameters<SessionConsoleParams>) -> String {
+    async fn session_console(
+        &self,
+        Parameters(params): Parameters<SessionConsoleParams>,
+    ) -> String {
         let filter = session::ConsoleFilter {
             level: params.level,
             since_ts: params.since_ts,
@@ -1235,7 +1315,10 @@ this, read the error.",
         };
         let mut mgr = session::SESSIONS.lock().await;
         match mgr
-            .send(&params.session_id, |reply| SessionCommand::Console { filter, reply })
+            .send(&params.session_id, |reply| SessionCommand::Console {
+                filter,
+                reply,
+            })
             .await
         {
             Ok(text) => stamped(text, &mgr, &params.session_id),
@@ -1276,11 +1359,18 @@ Indexes come from the most recent session_state; re-list after navigation.",
     )]
     async fn session_click(&self, Parameters(params): Parameters<SessionClickParams>) -> String {
         let mut mgr = session::SESSIONS.lock().await;
-        match mgr.send(&params.session_id, |reply| SessionCommand::Click {
-            index: params.index,
-            reply,
-        }).await {
-            Ok(resp) => stamped_json(json!({ "url": resp.url, "clicked": resp.clicked, "text_after": resp.text_after }), &mgr, &params.session_id),
+        match mgr
+            .send(&params.session_id, |reply| SessionCommand::Click {
+                index: params.index,
+                reply,
+            })
+            .await
+        {
+            Ok(resp) => stamped_json(
+                json!({ "url": resp.url, "clicked": resp.clicked, "text_after": resp.text_after }),
+                &mgr,
+                &params.session_id,
+            ),
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -1296,14 +1386,15 @@ For canvas/map surfaces with no DOM element to index. click_count 2 adds dblclic
         Parameters(params): Parameters<SessionClickXyParams>,
     ) -> String {
         let mut mgr = session::SESSIONS.lock().await;
-        match mgr.send(&params.session_id, |reply| SessionCommand::ClickXY {
-            x: params.x,
-            y: params.y,
-            button: params.button.unwrap_or_else(|| "left".to_string()),
-            click_count: params.click_count.unwrap_or(1),
-            reply,
-        })
-        .await
+        match mgr
+            .send(&params.session_id, |reply| SessionCommand::ClickXY {
+                x: params.x,
+                y: params.y,
+                button: params.button.unwrap_or_else(|| "left".to_string()),
+                click_count: params.click_count.unwrap_or(1),
+                reply,
+            })
+            .await
         {
             Ok(text) => stamped(text, &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
@@ -1318,16 +1409,17 @@ drag targets and canvas selections that only track while the pointer travels.",
     )]
     async fn session_drag(&self, Parameters(params): Parameters<SessionDragParams>) -> String {
         let mut mgr = session::SESSIONS.lock().await;
-        match mgr.send(&params.session_id, |reply| SessionCommand::Drag {
-            from_x: params.from.x,
-            from_y: params.from.y,
-            to_x: params.to.x,
-            to_y: params.to.y,
-            steps: params.steps.unwrap_or(10),
-            delay_ms: params.delay_ms.unwrap_or(30),
-            reply,
-        })
-        .await
+        match mgr
+            .send(&params.session_id, |reply| SessionCommand::Drag {
+                from_x: params.from.x,
+                from_y: params.from.y,
+                to_x: params.to.x,
+                to_y: params.to.y,
+                steps: params.steps.unwrap_or(10),
+                delay_ms: params.delay_ms.unwrap_or(30),
+                reply,
+            })
+            .await
         {
             Ok(text) => stamped(text, &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
@@ -1341,12 +1433,15 @@ drag targets and canvas selections that only track while the pointer travels.",
     async fn session_input(&self, Parameters(params): Parameters<SessionInputParams>) -> String {
         let mut mgr = session::SESSIONS.lock().await;
         let full = params.events.as_deref() == Some("full");
-        match mgr.send(&params.session_id, |reply| SessionCommand::Input {
-            index: params.index,
-            text: params.text.clone(),
-            full_events: full,
-            reply,
-        }).await {
+        match mgr
+            .send(&params.session_id, |reply| SessionCommand::Input {
+                index: params.index,
+                text: params.text.clone(),
+                full_events: full,
+                reply,
+            })
+            .await
+        {
             Ok(filled) => stamped(filled.to_string(), &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
@@ -1362,11 +1457,14 @@ drag targets and canvas selections that only track while the pointer travels.",
             _ => session::ScrollDirection::Down,
         };
         let mut mgr = session::SESSIONS.lock().await;
-        match mgr.send(&params.session_id, |reply| SessionCommand::Scroll {
-            direction,
-            amount: params.amount,
-            reply,
-        }).await {
+        match mgr
+            .send(&params.session_id, |reply| SessionCommand::Scroll {
+                direction,
+                amount: params.amount,
+                reply,
+            })
+            .await
+        {
             Ok(scrolled) => stamped_json(json!({ "scrolled": scrolled }), &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
@@ -1381,11 +1479,14 @@ navigation moves the session's URL. JS exceptions are reported with name, line/c
     )]
     async fn session_eval(&self, Parameters(params): Parameters<SessionEvalParams>) -> String {
         let mut mgr = session::SESSIONS.lock().await;
-        match mgr.send(&params.session_id, |reply| SessionCommand::Eval {
-            script: params.script.clone(),
-            timeout_ms: params.timeout_ms,
-            reply,
-        }).await {
+        match mgr
+            .send(&params.session_id, |reply| SessionCommand::Eval {
+                script: params.script.clone(),
+                timeout_ms: params.timeout_ms,
+                reply,
+            })
+            .await
+        {
             Ok(result) => stamped_json(json!({ "result": result }), &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
@@ -1397,14 +1498,20 @@ move, media queries like (max-width: 600px) re-evaluate, element rects re-anchor
 flips pointer/hover matchMedia answers to coarse/none. Omitted width/height keeps the current value.",
         annotations(title = "Session Viewport")
     )]
-    async fn session_viewport(&self, Parameters(params): Parameters<SessionViewportParams>) -> String {
+    async fn session_viewport(
+        &self,
+        Parameters(params): Parameters<SessionViewportParams>,
+    ) -> String {
         let mut mgr = session::SESSIONS.lock().await;
-        match mgr.send(&params.session_id, |reply| SessionCommand::Viewport {
-            width: params.width,
-            height: params.height,
-            mobile: params.mobile,
-            reply,
-        }).await {
+        match mgr
+            .send(&params.session_id, |reply| SessionCommand::Viewport {
+                width: params.width,
+                height: params.height,
+                mobile: params.mobile,
+                reply,
+            })
+            .await
+        {
             Ok(viewport) => stamped_json(json!({ "viewport": viewport }), &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
@@ -1417,16 +1524,22 @@ session_viewport + session_screenshot shows the responsive layout. Returns \
 {url, width, height, image_base64, format}.",
         annotations(title = "Session Screenshot")
     )]
-    async fn session_screenshot(&self, Parameters(params): Parameters<SessionScreenshotParams>) -> String {
+    async fn session_screenshot(
+        &self,
+        Parameters(params): Parameters<SessionScreenshotParams>,
+    ) -> String {
         let mut mgr = session::SESSIONS.lock().await;
-        match mgr.send(&params.session_id, |reply| SessionCommand::Screenshot {
-            width: params.width,
-            height: params.height,
-            full_page: params.full_page,
-            selector: params.selector.clone(),
-            selector_all: params.selector_all,
-            reply,
-        }).await {
+        match mgr
+            .send(&params.session_id, |reply| SessionCommand::Screenshot {
+                width: params.width,
+                height: params.height,
+                full_page: params.full_page,
+                selector: params.selector.clone(),
+                selector_all: params.selector_all,
+                reply,
+            })
+            .await
+        {
             Ok(s) => stamped(s, &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
@@ -1442,12 +1555,15 @@ naming the selector/predicate on expiry. Exactly one of selector/predicate.",
     )]
     async fn session_wait(&self, Parameters(params): Parameters<SessionWaitParams>) -> String {
         let mut mgr = session::SESSIONS.lock().await;
-        match mgr.send(&params.session_id, |reply| SessionCommand::Wait {
-            selector: params.selector.clone(),
-            predicate: params.predicate.clone(),
-            timeout_ms: params.timeout_ms,
-            reply,
-        }).await {
+        match mgr
+            .send(&params.session_id, |reply| SessionCommand::Wait {
+                selector: params.selector.clone(),
+                predicate: params.predicate.clone(),
+                timeout_ms: params.timeout_ms,
+                reply,
+            })
+            .await
+        {
             Ok(s) => stamped(s, &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
@@ -1457,15 +1573,21 @@ naming the selector/predicate on expiry. Exactly one of selector/predicate.",
         description = "Read the session's network request log. filter=\"media\" extracts playback/stream URLs (m3u8/HLS, mp4, dash, flv...) actually requested by the page's player at runtime - the reliable way to get a real video link, since links embedded in page HTML are often decoys. Media elements and player iframes the engine never fetches (video/audio/source/iframe src) are merged in as candidates: via=\"network\" entries are confirmed requests, via=\"dom\" entries are candidates carrying their tag (iframes = kind \"iframe\", navigate into them to sniff). Default returns every request as compact rows (method/url/status/type/size). Navigate to the video page first, let it load, then call this.",
         annotations(title = "Session Network Sniffer", read_only_hint = true)
     )]
-    async fn session_network(&self, Parameters(params): Parameters<SessionNetworkParams>) -> String {
+    async fn session_network(
+        &self,
+        Parameters(params): Parameters<SessionNetworkParams>,
+    ) -> String {
         let mut mgr = session::SESSIONS.lock().await;
-        match mgr.send(&params.session_id, |reply| SessionCommand::Network {
-            media_only: params.filter.as_deref() == Some("media"),
-            include_bodies: params.include_bodies.unwrap_or(false),
-            url_contains: params.url_contains,
-            body_max_chars: params.body_max_chars.unwrap_or(4000),
-            reply,
-        }).await {
+        match mgr
+            .send(&params.session_id, |reply| SessionCommand::Network {
+                media_only: params.filter.as_deref() == Some("media"),
+                include_bodies: params.include_bodies.unwrap_or(false),
+                url_contains: params.url_contains,
+                body_max_chars: params.body_max_chars.unwrap_or(4000),
+                reply,
+            })
+            .await
+        {
             Ok(text) => text,
             Err(e) => json!({ "error": e }).to_string(),
         }
@@ -1481,9 +1603,66 @@ bash, PowerShell and cmd copy flavors.",
         annotations(title = "Import Login From cURL")
     )]
     async fn import_curl(&self, Parameters(params): Parameters<ImportCurlParams>) -> String {
-        match crate::curl_import::create_session_from_curl(&params.curl, params.use_proxy).await {
+        let account = match params.account.as_deref() {
+            None => None,
+            Some(name) => match crate::account::validate_name(name) {
+                Ok(()) => Some((self.owner.clone(), name.to_string())),
+                Err(e) => return json!({ "error": e }).to_string(),
+            },
+        };
+        match crate::curl_import::create_session_from_curl(&params.curl, params.use_proxy, account)
+            .await
+        {
             Ok(v) => v.to_string(),
             Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "List named login identities (the multi-account layer) with metadata only: \
+name, cookie domains, cookie count, updated_at, and the last account_verify verdict. Cookie values \
+are credentials and never leave the server. Use to see which identities exist before \
+session_create {account} picks one.",
+        annotations(title = "List Accounts", read_only_hint = true)
+    )]
+    async fn account_list(&self) -> String {
+        json!(crate::account::list(&self.owner)).to_string()
+    }
+
+    #[tool(
+        description = "Check whether a named account is still logged in. Teach-once: the first call \
+passes url + predicate (a JS expression truthy on a logged-in page, e.g. \
+!!document.querySelector('.user-nick')); the spec is remembered and later calls can be bare. Runs \
+in a scratch session AS the account (private jar), so the probe doubles as a cookie refresh. \
+Returns {name, logged_in, url, checked_at}.",
+        annotations(title = "Verify Account Login")
+    )]
+    async fn account_verify(&self, Parameters(params): Parameters<AccountVerifyParams>) -> String {
+        match crate::account::verify(
+            &self.owner,
+            &params.name,
+            params.url.as_deref(),
+            params.predicate.as_deref(),
+        )
+        .await
+        {
+            Ok(v) => v.to_string(),
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Delete a named login identity: stored record AND live jar. Cookie values are \
+credentials — delete means gone. Sessions currently running as the account keep their in-process \
+jar handle, but nothing writes back. Returns {deleted: name}, or an error naming the account if \
+it does not exist.",
+        annotations(title = "Delete Account")
+    )]
+    async fn account_delete(&self, Parameters(params): Parameters<AccountDeleteParams>) -> String {
+        if crate::account::delete(&self.owner, &params.name) {
+            json!({ "deleted": params.name }).to_string()
+        } else {
+            json!({ "error": format!("no account named {:?}", params.name) }).to_string()
         }
     }
 
@@ -1504,19 +1683,34 @@ bash, PowerShell and cmd copy flavors.",
     )]
     async fn session_export(&self, Parameters(params): Parameters<SessionExportParams>) -> String {
         let mut mgr = session::SESSIONS.lock().await;
-        let jsonl = match mgr.send(&params.session_id, |reply| SessionCommand::Export { reply }).await {
+        let jsonl = match mgr
+            .send(&params.session_id, |reply| SessionCommand::Export { reply })
+            .await
+        {
             Ok(j) => j,
             Err(e) => return json!({ "error": e }).to_string(),
         };
         match params.format.as_deref() {
-            Some("jsonl") => stamped_json(json!({ "format": "jsonl", "actions": jsonl }), &mgr, &params.session_id),
+            Some("jsonl") => stamped_json(
+                json!({ "format": "jsonl", "actions": jsonl }),
+                &mgr,
+                &params.session_id,
+            ),
             Some("json") => {
                 let doc = crate::flow::recorded_to_flow(&jsonl);
-                stamped_json(json!({ "format": "json", "flow": doc }), &mgr, &params.session_id)
+                stamped_json(
+                    json!({ "format": "json", "flow": doc }),
+                    &mgr,
+                    &params.session_id,
+                )
             }
             _ => {
                 let script = session::replay_bash(&jsonl, "http://127.0.0.1:8089");
-                stamped_json(json!({ "format": "bash", "script": script }), &mgr, &params.session_id)
+                stamped_json(
+                    json!({ "format": "bash", "script": script }),
+                    &mgr,
+                    &params.session_id,
+                )
             }
         }
     }
@@ -1535,7 +1729,9 @@ bash, PowerShell and cmd copy flavors.",
             .and_then(|v| v.as_object().cloned())
             .unwrap_or_default();
         let mut mgr = session::SESSIONS.lock().await;
-        crate::flow::run_flow(&mut mgr, &doc, &vars, params.session_id).await.to_string()
+        crate::flow::run_flow(&mut mgr, &doc, &vars, params.session_id)
+            .await
+            .to_string()
     }
 
     #[tool(
@@ -1552,7 +1748,10 @@ bash, PowerShell and cmd copy flavors.",
         description = "Render a markdown document into a deterministic, self-contained HTML artifact - the document layer, so the agent never writes HTML by hand. Prose rides a plain offline shell (no fonts, no scripts); archify fenced code blocks carry typed zero-coordinate diagram JSON (sequence, workflow, architecture, dataflow, lifecycle families) and render to inline SVG via the layout engine. Same input, same bytes: the receipt carries the sha256 so determinism is verifiable. theme picks light (default) or dark; preset picks the palette family — classic (default), signal-flow, blueprint, editorial — orthogonal to theme; colors bake at generation time (presentation attributes, not CSS variables), and the receipt records both preset and theme. quality picks the composition audit profile — standard (default) or showcase, the delivery gate: the receipt's diagrams[].composition grades route crossings, ambiguous corridors, label clearance (2px standard / 4px showcase), route rhythm, and node text projected to the 930px reader width; the audit never changes the artifact bytes. Mermaid sources are the agent's job to translate, not the engine's: flowchart/graph → workflow (lanes + columns), sequenceDiagram → sequence, stateDiagram-v2 → lifecycle (bands), erDiagram/class → architecture (grid + boundaries) — read the topology and emit the matching zero-coordinate archify JSON; the engine accepts only archify JSON. A broken diagram degrades to a visible code block and lands in receipt.diagnostics; an authored route preset that cannot be honored is self-repaired to a verified semantic substitute and disclosed in receipt diagrams[].repairs - the document still renders. A fence may also carry views: [{id,label,nodes,note?}] (node ids of the active family), emitted as guided-view tabs above the diagram plus an inlined viewer script - clicking a tab lights the member nodes and the routes between them (subgraph), clicking a node lights it with its direct neighbors (ego graph), everything else dims; a view's optional note shows as a caption while it is active (the story layer). window.agxViewer in a session drives and reads the same state programmatically: {focus,view,state} as before, plus route(i,from,to) which returns and lights the shortest authored directed path between two nodes (null when unreachable, state untouched), and reach(i,id,down|up) which returns and lights the authored downstream/upstream closure ({nodes,links}); both dim the rest of the diagram. diagrams[].views in the receipt lists the tabs. motion: true bakes an entrance choreography into the artifact: pure-declarative CSS animation with zero scripts - headings split into per-glyph (CJK) / per-word (latin) spans that rise in with expo easing, prose blocks stagger up an nth-child delay ladder, diagram figures grow in with a back ease (GSAP's easing math as public cubic-bezier equivalents, nothing embedded); the diagrams themselves play a flow story on the same clock - nodes land beat by beat, solid edges draw in (dash-offset), dashed returns fade, sequence messages arrive as sent - with a timed caption strip under each figure as the subtitles, which becomes a static transcript under prefers-reduced-motion; the file itself animates in any browser and the receipt records motion plus diagrams[].story (beat times and captions - the hook for muxing voice later). With session_id the artifact is also loaded into that session (local, free) and the reply carries viewport acceptance: scroll extents measured in the live session and graded fits/tall/wide/oversized, telling the agent how to read the page back. Diagram vocabulary adapted from archify (MIT).",
         annotations(title = "Render Markdown")
     )]
-    async fn render_markdown(&self, Parameters(params): Parameters<RenderMarkdownParams>) -> String {
+    async fn render_markdown(
+        &self,
+        Parameters(params): Parameters<RenderMarkdownParams>,
+    ) -> String {
         use crate::docgen::theme::Theme;
         // (preset, mode) → theme. One-sided requests fill in the classic/
         // light defaults; the all-default request keeps riding render(),
@@ -1566,18 +1765,16 @@ bash, PowerShell and cmd copy flavors.",
                     Theme::names().join(", ")
                 )
             }),
-            (Some(preset), mode) => {
-                Theme::resolve(preset, mode.as_deref().unwrap_or("light"))
-                    .map(Some)
-                    .ok_or_else(|| {
-                        format!(
-                            "unknown preset \"{preset}\" or theme \"{}\" — presets: {}; themes: {}",
-                            mode.as_deref().unwrap_or("light"),
-                            Theme::presets().join(", "),
-                            Theme::names().join(", ")
-                        )
-                    })
-            }
+            (Some(preset), mode) => Theme::resolve(preset, mode.as_deref().unwrap_or("light"))
+                .map(Some)
+                .ok_or_else(|| {
+                    format!(
+                        "unknown preset \"{preset}\" or theme \"{}\" — presets: {}; themes: {}",
+                        mode.as_deref().unwrap_or("light"),
+                        Theme::presets().join(", "),
+                        Theme::names().join(", ")
+                    )
+                }),
         };
         let quality = params.quality.as_deref().map_or(
             Ok(crate::docgen::checks::Quality::Standard),
@@ -1630,15 +1827,16 @@ bash, PowerShell and cmd copy flavors.",
                         let mut receipt = receipt;
                         let viewport = measured.map(|v| {
                             let graded = grade_viewport(&v);
-                            if let Some(checks) = receipt
-                                .get_mut("checks")
-                                .and_then(Value::as_array_mut)
+                            if let Some(checks) =
+                                receipt.get_mut("checks").and_then(Value::as_array_mut)
                             {
                                 checks.push(json!(format!(
                                     "viewport acceptance: {} (scroll {}x{} vs viewport {}x{})",
                                     graded["tier"].as_str().unwrap_or("?"),
-                                    graded["scrollWidth"], graded["scrollHeight"],
-                                    graded["innerWidth"], graded["innerHeight"],
+                                    graded["scrollWidth"],
+                                    graded["scrollHeight"],
+                                    graded["innerWidth"],
+                                    graded["innerHeight"],
                                 )));
                             }
                             graded
@@ -1714,11 +1912,7 @@ fn grade_viewport(v: &Value) -> Value {
 /// fires instead of discovering an expired session mid-workflow. keepalive
 /// sessions have no expiry and stay unstamped. Free-form text (session_state's
 /// compact listing, the network rows) passes through untouched.
-fn stamped_json(
-    mut v: serde_json::Value,
-    mgr: &session::SessionManager,
-    sid: &str,
-) -> String {
+fn stamped_json(mut v: serde_json::Value, mgr: &session::SessionManager, sid: &str) -> String {
     if let Some(s) = mgr.expires_in_secs(sid) {
         v["expires_in_secs"] = json!(s);
     }
@@ -1749,9 +1943,9 @@ pub async fn run_mcp_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sy
         owner: crate::store::session_owner(),
     }
     .serve(rmcp::transport::io::stdio())
-        .await?
-        .waiting()
-        .await?;
+    .await?
+    .waiting()
+    .await?;
     Ok(())
 }
 
@@ -1781,9 +1975,11 @@ pub fn mcp_http_service() -> StreamableHttpService<AginxBrowserMcp, LocalSession
     }
     let config = StreamableHttpServerConfig::default().with_allowed_hosts(hosts);
     StreamableHttpService::new(
-        || Ok(AginxBrowserMcp {
-            owner: crate::store::session_owner(),
-        }),
+        || {
+            Ok(AginxBrowserMcp {
+                owner: crate::store::session_owner(),
+            })
+        },
         Arc::new(LocalSessionManager::default()),
         config,
     )

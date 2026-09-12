@@ -777,6 +777,7 @@ Create an interactive browser session.
 | use_proxy | bool | | `false` | Route through a proxy |
 | cookies | string[] \| object[] | | `[]` | Cookies injected before navigation (`"name=value",...` or CDP-style objects) so the session starts already logged in |
 | persistent | bool | | `false` | Persist login state to the server-side store: if the session idles out or the server restarts, the same `session_id` revives logged-in on the next call (`session/{id}/close` drops the snapshot; idle expiry keeps it) |
+| account | string | | `null` | Run as a named login identity (see [Named Accounts](#named-accounts-multi-login)): a private cookie jar seeded from the account record, written back after every action — concurrent logins on different accounts never clobber each other, and none touch the anonymous shared jar |
 
 **Response:**
 
@@ -794,6 +795,7 @@ Turn a DevTools **"Copy as cURL"** command into a logged-in browser session — 
 |------|------|------|------|------|
 | curl | string | ✅ | — | The copied cURL command |
 | use_proxy | bool | | `false` | Route the session's traffic through the `AGINXBROWSER_PROXY` proxy |
+| account | string | | `null` | Attach the session to a named account: the imported login lands in the account's private jar and is written back under its name — one import per identity, no clobbering |
 
 **Response:**
 
@@ -857,6 +859,52 @@ The full listing — every live session with its current page URL, so an agent r
 ```
 
 `expires_in_secs` is absent for `keepalive` sessions (they never auto-evict); `persistent` marks sessions whose login state is snapshotted and revivable. Close entries with `POST /session/{id}/close`. `/session/list` remains the lightweight sibling (id + idle age only, no per-session round-trips).
+
+### Named Accounts (multi-login)
+
+Anonymous traffic shares one process-global cookie jar — deliberate (repeat-visitor cookies cut CAPTCHA rates) but it makes multi-account work impossible: two logins on one site clobber each other's session cookies, last writer wins. A **named account** is the fix — Chrome-profile semantics: one jar per identity, not a site×account matrix. `taobao-scraper` and `taobao-publisher` are two accounts; each keeps its own cookies and login state, written back to the store after every action, surviving idle eviction and server restarts. Sessions on the *same* account share one live jar (two tabs, one profile); different accounts never touch each other — and none touch the anonymous shared jar, since shared cookie history is itself a risk-control linkage signal.
+
+Attach a session with `account` on `POST /session/create` or `POST /import/curl` (1-64 chars of `[a-zA-Z0-9_-]`). The account is the persistence — account sessions don't need `persistent: true`.
+
+**List accounts:**
+
+```bash
+curl -sS http://127.0.0.1:8089/accounts
+```
+
+```json
+{
+  "count": 2,
+  "accounts": [
+    {"name": "taobao-publisher", "domains": ["taobao.com", "tmall.com"], "cookie_count": 34, "updated_at": 1762934400, "verify_url": "https://www.taobao.com/", "verify_predicate": "!!document.querySelector('.user-nick')", "verify_last": {"logged_in": true, "url": "https://www.taobao.com/", "checked_at": 1762934401}},
+    {"name": "taobao-scraper", "domains": ["taobao.com"], "cookie_count": 29, "updated_at": 1762933900}
+  ]
+}
+```
+
+Metadata only — cookie values are credentials and never leave the server.
+
+**Check login (teach-once):**
+
+```bash
+curl -sS -X POST http://127.0.0.1:8089/account/verify \
+  -H 'content-type: application/json' \
+  -d '{"name": "taobao-scraper", "url": "https://www.taobao.com/", "predicate": "!!document.querySelector(\".user-nick\")"}'
+```
+
+```json
+{"name": "taobao-scraper", "logged_in": true, "url": "https://www.taobao.com/", "checked_at": 1762934455, "verify_url": "https://www.taobao.com/"}
+```
+
+The first call teaches the spec — `url` (a page that shows login state) and `predicate` (a JS expression truthy when logged in). It's remembered on the account; later calls can be bare (`{"name": "taobao-scraper"}`) and rerun the spec. The probe runs in a scratch session *as the account* — private jar, same egress — so a verify doubles as a cookie refresh. A probe failure (network, predicate throw) returns an error and is not a logout verdict; the last successful verdict rides in `verify_last`.
+
+**Delete an account:**
+
+```bash
+curl -sS -X DELETE http://127.0.0.1:8089/accounts/taobao-scraper
+```
+
+`{"deleted": "taobao-scraper"}` — stored record AND live jar. Cookie values are credentials; delete means gone. Unknown names get HTTP 404.
 
 ### POST /session/{id}/navigate
 
@@ -1449,7 +1497,7 @@ The streamable HTTP transport follows the protocol's dual session semantics — 
 
 Browser sessions (`session_create` & co.) are shared across MCP sessions by design: two MCP clients on the same server can list (`session_list`) and reuse the same browser session IDs, which is what makes "one instance per machine, every agent shares it" work. For a self-hosted instance reached over a LAN IP or a Docker hostname (not `localhost`/`127.0.0.1`), add the hostname to `AGINXBROWSER_MCP_ALLOWED_HOSTS` — the transport validates the `Host` header as DNS-rebinding protection and rejects unlisted hosts with `403`.
 
-### Provided Tools (32)
+### Provided Tools (35)
 
 #### Core Tools
 
@@ -1470,7 +1518,10 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | Tool | Description |
 |------|------|
 | `session_create` | Create an interactive browser session; with `persistent: true` the login state survives idle eviction and server restarts — the same `session_id` revives logged-in |
-| `import_curl` | Paste a DevTools "Copy as cURL" command → a live session already carrying that site's cookies, anchored at the copied request's URL — the human logs in (CAPTCHA/SMS once) in their own Chrome, the agent continues from there; bash/PowerShell/cmd flavors all parse |
+| `import_curl` | Paste a DevTools "Copy as cURL" command → a live session already carrying that site's cookies, anchored at the copied request's URL — the human logs in (CAPTCHA/SMS once) in their own Chrome, the agent continues from there; bash/PowerShell/cmd flavors all parse; `account` attaches the login to a named identity |
+| `account_list` | List named login identities (the multi-account layer) — metadata only: name, cookie domains, cookie count, updated_at, last verify verdict. See which identities exist before `session_create {account}` picks one |
+| `account_verify` | Check whether a named account is still logged in. Teach-once: first call passes `url` + `predicate` (a JS expression truthy on a logged-in page); the spec is remembered, later calls can be bare. Runs in a scratch session as the account — the probe doubles as a cookie refresh |
+| `account_delete` | Delete a named login identity: stored record AND live jar (delete means gone) |
 | `session_clone` | Derive a new session carrying the full login state (cookies + storage + viewport + dialog policy); the source stays untouched — snapshot before risky actions, or run one login in parallel |
 | `session_list` | List live sessions with idle age and time left before auto-eviction (discover one to reuse) |
 | `session_navigate` | Navigate to a new URL within a session |

@@ -1,11 +1,11 @@
+use crate::browser::Browser;
+use crate::diting_net::CookieJar;
 use crate::{
     ClickRequest, ClickResponse, EvalRequest, EvalResponse, FetchRequest, FetchResponse,
     OutputFormat, SearchRequest, SearchResponse,
 };
 #[cfg(feature = "screenshot")]
 use crate::{ScreenshotRequest, ScreenshotResponse};
-use crate::browser::Browser;
-use crate::diting_net::CookieJar;
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
@@ -34,20 +34,19 @@ pub fn build_browser(use_proxy: bool, url: &str, tls_fingerprint: Option<&str>) 
 /// systems score "first-ever visitor" traffic hardest, so reusing cookies
 /// from prior visits (baidu/wappass tokens, cf_clearance-style grants)
 /// measurably cuts challenge rates on repeat URLs.
-static SHARED_COOKIE_JAR: std::sync::LazyLock<Arc<CookieJar>> =
-    std::sync::LazyLock::new(|| {
-        let jar = Arc::new(CookieJar::new());
-        if crate::config::ephemeral() {
-            return jar;
+static SHARED_COOKIE_JAR: std::sync::LazyLock<Arc<CookieJar>> = std::sync::LazyLock::new(|| {
+    let jar = Arc::new(CookieJar::new());
+    if crate::config::ephemeral() {
+        return jar;
+    }
+    let path = cookie_store_path();
+    if let Ok(n) = jar.load_from_file(&path) {
+        if n > 0 {
+            tracing::info!("restored {} cookies from {}", n, path.display());
         }
-        let path = cookie_store_path();
-        if let Ok(n) = jar.load_from_file(&path) {
-            if n > 0 {
-                tracing::info!("restored {} cookies from {}", n, path.display());
-            }
-        }
-        jar
-    });
+    }
+    jar
+});
 
 fn cookie_store_path() -> std::path::PathBuf {
     let dir = std::env::var("AGINXBROWSER_COOKIE_STORE_DIR")
@@ -78,7 +77,10 @@ pub fn build_browser_with_jar(
 ) -> Result<Browser> {
     // Stealth defaults on; disable via AGINXBROWSER_STEALTH=0 (diagnostic / when
     // the wreq stealth client misbehaves on a given site).
-    let stealth = !matches!(std::env::var("AGINXBROWSER_STEALTH").ok().as_deref(), Some("0"));
+    let stealth = !matches!(
+        std::env::var("AGINXBROWSER_STEALTH").ok().as_deref(),
+        Some("0")
+    );
     let mut builder = Browser::builder().stealth(stealth);
     if share_cookies {
         builder = builder.shared_cookie_jar(SHARED_COOKIE_JAR.clone());
@@ -92,6 +94,41 @@ pub fn build_browser_with_jar(
         }
     }
     Ok(builder.build()?)
+}
+
+/// [`build_browser`] variant bound to an account's private jar (account.rs).
+/// Same shape as the shared-jar wiring, but the jar belongs to one named
+/// login identity: concurrent same-account sessions share it (two tabs, one
+/// profile), and nothing an account does ever lands in the anonymous
+/// shared jar or another account's.
+pub fn build_browser_for_account(
+    use_proxy: bool,
+    url: &str,
+    tls_fingerprint: Option<&str>,
+    jar: std::sync::Arc<CookieJar>,
+) -> Result<Browser> {
+    let stealth = !matches!(
+        std::env::var("AGINXBROWSER_STEALTH").ok().as_deref(),
+        Some("0")
+    );
+    let mut builder = Browser::builder().stealth(stealth).shared_cookie_jar(jar);
+    if let Some(fp) = tls_fingerprint {
+        builder = builder.tls_fingerprint(fp);
+    }
+    if crate::config::should_auto_proxy(url) || use_proxy {
+        if let Some(proxy) = crate::config::proxy_from_env() {
+            builder = builder.proxy(&proxy);
+        }
+    }
+    Ok(builder.build()?)
+}
+
+/// Test-only handle on the process-global jar — the multi-account isolation
+/// tests assert account jars never leak into it.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn SHARED_COOKIE_JAR_FOR_TESTS() -> std::sync::Arc<CookieJar> {
+    SHARED_COOKIE_JAR.clone()
 }
 
 /// Native stack size for threads that host a V8 isolate. V8 counts its JS
@@ -115,7 +152,10 @@ pub(crate) fn v8_stack_size() -> usize {
 /// threads whose default 2 MB stack is too shallow for V8-heavy pages.
 pub(crate) fn run_on_local_runtime<F, T>(f: F) -> Result<T>
 where
-    F: for<'a> FnOnce(&'a tokio::runtime::Runtime) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + 'a>>
+    F: for<'a> FnOnce(
+            &'a tokio::runtime::Runtime,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + 'a>>
         + Send
         + 'static,
     T: Send + 'static,
@@ -125,14 +165,17 @@ where
         .name("v8-page".to_string())
         .spawn(move || run_on_local_runtime_on_thread(f))
         .context("failed to spawn V8 runtime thread")?;
-    handle.join().unwrap_or_else(|panic| {
-        Err(anyhow::anyhow!("V8 runtime thread panicked: {panic:?}"))
-    })
+    handle
+        .join()
+        .unwrap_or_else(|panic| Err(anyhow::anyhow!("V8 runtime thread panicked: {panic:?}")))
 }
 
 fn run_on_local_runtime_on_thread<F, T>(f: F) -> Result<T>
 where
-    F: for<'a> FnOnce(&'a tokio::runtime::Runtime) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + 'a>>
+    F: for<'a> FnOnce(
+            &'a tokio::runtime::Runtime,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + 'a>>
         + Send
         + 'static,
     T: Send + 'static,
@@ -158,7 +201,11 @@ pub(crate) fn inject_cookies(browser: &Browser, cookies: &[String], target_url: 
     if cookies.is_empty() {
         return;
     }
-    tracing::debug!("inject_cookies: {} cookies for {}", cookies.len(), target_url);
+    tracing::debug!(
+        "inject_cookies: {} cookies for {}",
+        cookies.len(),
+        target_url
+    );
     let store = browser.cookies();
     for c in cookies {
         let (full, anchor) = normalize_cookie_entry(c, target_url);
@@ -185,7 +232,10 @@ pub(crate) fn normalize_cookie_entry(entry: &str, target_url: &str) -> (String, 
             .ok()
             .and_then(|u| u.host_str().map(str::to_string))
             .unwrap_or_default();
-        (format!("{}; Domain={}; Path=/", entry, host), target_url.to_string())
+        (
+            format!("{}; Domain={}; Path=/", entry, host),
+            target_url.to_string(),
+        )
     }
 }
 
@@ -217,7 +267,10 @@ where
             let full = match v {
                 serde_json::Value::String(s) => s,
                 serde_json::Value::Object(m) => {
-                    let name = m.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+                    let name = m
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty());
                     let value = m.get("value").and_then(|v| v.as_str());
                     let (Some(name), Some(value)) = (name, value) else {
                         return Err(serde::de::Error::custom(format!(
@@ -226,8 +279,16 @@ where
                         )));
                     };
                     let mut full = format!("{name}={value}");
-                    for (key, attr) in [("domain", "Domain"), ("path", "Path"), ("sameSite", "SameSite")] {
-                        if let Some(val) = m.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                    for (key, attr) in [
+                        ("domain", "Domain"),
+                        ("path", "Path"),
+                        ("sameSite", "SameSite"),
+                    ] {
+                        if let Some(val) = m
+                            .get(key)
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                        {
                             full.push_str(&format!("; {attr}={val}"));
                         }
                     }
@@ -256,9 +317,8 @@ fn is_cloudflare_challenge(page: &mut crate::page::Page) -> bool {
     if title.contains("Just a moment") || title.contains("Attention Required") {
         return true;
     }
-    let has_turnstile_val = page.evaluate(
-        r#"!!document.querySelector('iframe[src*="challenges.cloudflare.com"]')"#,
-    );
+    let has_turnstile_val =
+        page.evaluate(r#"!!document.querySelector('iframe[src*="challenges.cloudflare.com"]')"#);
     has_turnstile_val.as_bool().unwrap_or(false)
 }
 
@@ -270,7 +330,10 @@ pub(crate) async fn maybe_bypass_challenge(page: &mut crate::page::Page) -> Resu
         return Ok(());
     }
     let url = page.url();
-    tracing::info!("Cloudflare challenge detected at {}, auto-bypassing...", url);
+    tracing::info!(
+        "Cloudflare challenge detected at {}, auto-bypassing...",
+        url
+    );
 
     // Give Turnstile JS time to execute (managed challenge auto-completes).
     page.settle(5000).await;
@@ -328,7 +391,10 @@ pub(crate) async fn maybe_bypass_byte_waf(page: &mut crate::page::Page) -> Resul
         return Ok(());
     }
     let url = page.url();
-    tracing::info!("byte-WAF challenge detected at {}, waiting for PoW + reload", url);
+    tracing::info!(
+        "byte-WAF challenge detected at {}, waiting for PoW + reload",
+        url
+    );
 
     // Pump so readygo's 1ms interval ticks (the PoW is trivially small —
     // observed answers are single/low double digits) and the reload lands
@@ -367,7 +433,10 @@ fn rendered_text(page: &mut crate::page::Page, selector: Option<&str>) -> String
     // destructively rewriting textContent before reading.
     let js = match selector {
         Some(sel) => {
-            let escaped = sel.replace('\\', "\\\\").replace('`', "\\`").replace('$', "\\$");
+            let escaped = sel
+                .replace('\\', "\\\\")
+                .replace('`', "\\`")
+                .replace('$', "\\$");
             format!("(function(){{var el=document.querySelector(`{escaped}`);return el?el.innerText:'';}})()")
         }
         None => {
@@ -381,7 +450,8 @@ fn rendered_text(page: &mut crate::page::Page, selector: Option<&str>) -> String
             // reclaims the article (plus the byline lines) and matches anyway.
             "(function(){var b=document.body?document.body.innerText:'';\
              var c=document.querySelector('#js_content');var a=c?c.innerText:'';\
-             return (a.trim().length>b.trim().length)?a:b;})()".to_string()
+             return (a.trim().length>b.trim().length)?a:b;})()"
+                .to_string()
         }
     };
     let raw = page.evaluate(&js).as_str().unwrap_or("").to_string();
@@ -450,7 +520,10 @@ fn fetch_url_text_with_cookies(
             // If we landed on an antispider/CAPTCHA page, treat it as an error
             // rather than returning the CAPTCHA page content as search result body.
             if is_antispider {
-                return Err(anyhow::anyhow!("CAPTCHA/antispider page detected at {}", final_url));
+                return Err(anyhow::anyhow!(
+                    "CAPTCHA/antispider page detected at {}",
+                    final_url
+                ));
             }
 
             let (content, truncated) = if max_chars > 0 && content.chars().count() > max_chars {
@@ -558,7 +631,11 @@ pub fn do_fetch(req: FetchRequest) -> Result<FetchResponse> {
                             &page.evaluate(crate::sanitize::HIDDEN_SPAN_PROBE),
                         );
                         let (clean, report) = crate::sanitize::sanitize_text(&raw, &hidden);
-                        let report = if report.is_clean() { None } else { Some(report) };
+                        let report = if report.is_clean() {
+                            None
+                        } else {
+                            Some(report)
+                        };
                         (clean, report)
                     }
                 }
@@ -566,12 +643,13 @@ pub fn do_fetch(req: FetchRequest) -> Result<FetchResponse> {
 
             // Truncate to max_chars (0 = unlimited). Keeps huge pages from
             // blowing up a downstream LLM context window.
-            let (content, truncated) = if req.max_chars > 0 && content.chars().count() > req.max_chars {
-                let cut: String = content.chars().take(req.max_chars).collect();
-                (cut, true)
-            } else {
-                (content, false)
-            };
+            let (content, truncated) =
+                if req.max_chars > 0 && content.chars().count() > req.max_chars {
+                    let cut: String = content.chars().take(req.max_chars).collect();
+                    (cut, true)
+                } else {
+                    (content, false)
+                };
 
             // JS extraction: evaluate the user-specified expression after page
             // has settled and content is extracted.
@@ -595,12 +673,9 @@ pub fn do_fetch(req: FetchRequest) -> Result<FetchResponse> {
             let xhr = if let Some(filters) = req.capture_xhr.as_ref() {
                 page.inner.sync_js_network_events();
                 let body_cap = req.max_chars.min(8_000);
-                crate::har::xhr_bodies(
-                    &page.inner.network_events,
-                    filters,
-                    body_cap,
-                    &|rid| page.inner.get_response_body(rid),
-                )
+                crate::har::xhr_bodies(&page.inner.network_events, filters, body_cap, &|rid| {
+                    page.inner.get_response_body(rid)
+                })
             } else {
                 Vec::new()
             };
@@ -724,13 +799,21 @@ pub fn do_screenshot(req: ScreenshotRequest) -> Result<ScreenshotResponse> {
             let final_url = page.url();
             let title: Option<String> = {
                 let v = page.evaluate("document.title");
-                v.as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+                v.as_str()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
             };
 
             // JS-rendered DOM — the same source /fetch uses for OutputFormat::Html.
             let html = page.content();
             // Pre-fetch while the page (its cookie'd HTTP client) is still alive.
-            let resources = crate::screenshot::prefetch_render_resources(&page, &final_url, &html, req.width as f32).await;
+            let resources = crate::screenshot::prefetch_render_resources(
+                &page,
+                &final_url,
+                &html,
+                req.width as f32,
+            )
+            .await;
             drop(page);
             drop(browser);
 
@@ -804,13 +887,20 @@ pub fn do_screenshot(req: ScreenshotRequest) -> Result<ScreenshotResponse> {
                             // External <link> sheet bodies the prefetch pass already
                             // fetched — feed them to diting so its cascade sees what
                             // Blitz saw. Inline <style> blocks come from the HTML.
-                            Some(&resources
-                                .iter()
-                                .filter(|(k, v)| !v.is_empty() && (css_urls.contains(k.as_str()) || k.ends_with(".css")))
-                                .map(|(_, v)| String::from_utf8_lossy(v.as_ref()).into_owned())
-                                .collect::<Vec<_>>()
-                                .join("\n")),
-                        ).ok()
+                            Some(
+                                &resources
+                                    .iter()
+                                    .filter(|(k, v)| {
+                                        !v.is_empty()
+                                            && (css_urls.contains(k.as_str())
+                                                || k.ends_with(".css"))
+                                    })
+                                    .map(|(_, v)| String::from_utf8_lossy(v.as_ref()).into_owned())
+                                    .collect::<Vec<_>>()
+                                    .join("\n"),
+                            ),
+                        )
+                        .ok()
                     }
                     None => None,
                 },
@@ -875,7 +965,9 @@ pub fn do_video(req: crate::VideoRequest) -> Result<crate::VideoResponse> {
             let final_url = page.url();
             let title: Option<String> = {
                 let v = page.evaluate("document.title");
-                v.as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+                v.as_str()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
             };
 
             Ok(crate::VideoResponse {
@@ -924,17 +1016,16 @@ pub fn do_pdf(req: crate::PdfRequest) -> Result<crate::PdfResponse> {
                 let selector = req.selector.clone().ok_or_else(|| {
                     anyhow::anyhow!("format=pptx-native requires `selector` (one slide per match)")
                 })?;
-                let (bytes, slides) = crate::pptx_native::pptx_native_deck(
-                    &mut page.inner,
-                    &selector,
-                    req.max_pages,
-                )
-                .await?;
+                let (bytes, slides) =
+                    crate::pptx_native::pptx_native_deck(&mut page.inner, &selector, req.max_pages)
+                        .await?;
                 return Ok(crate::PdfResponse {
                     url: page.url(),
                     title: {
                         let v = page.evaluate("document.title");
-                        v.as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+                        v.as_str()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
                     },
                     pages: slides,
                     width: req.width,
@@ -962,12 +1053,17 @@ pub fn do_pdf(req: crate::PdfRequest) -> Result<crate::PdfResponse> {
                 set.pages.len(),
                 set.content_size.0 as u32,
                 set.content_size.1 as u32,
-                set.pages.iter().map(|p| p.origin_y as u32).collect::<Vec<_>>()
+                set.pages
+                    .iter()
+                    .map(|p| p.origin_y as u32)
+                    .collect::<Vec<_>>()
             );
             let final_url = page.url();
             let title: Option<String> = {
                 let v = page.evaluate("document.title");
-                v.as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+                v.as_str()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
             };
 
             let format = if req.format.eq_ignore_ascii_case("png") {
@@ -985,8 +1081,8 @@ pub fn do_pdf(req: crate::PdfRequest) -> Result<crate::PdfResponse> {
             let mut jpegs: Vec<(u32, u32, Vec<u8>)> = Vec::new();
             if format == "png" {
                 for p in &set.pages {
-                    let png =
-                        crate::pages::png_of(p.width, p.height, &p.rgba).map_err(anyhow::Error::msg)?;
+                    let png = crate::pages::png_of(p.width, p.height, &p.rgba)
+                        .map_err(anyhow::Error::msg)?;
                     pngs.push(base64_png(&png));
                 }
             } else {
@@ -996,12 +1092,26 @@ pub fn do_pdf(req: crate::PdfRequest) -> Result<crate::PdfResponse> {
                     jpegs.push((p.width, p.height, jpeg));
                 }
             }
-            let refs: Vec<(u32, u32, &[u8])> =
-                jpegs.iter().map(|(w, h, j)| (*w, *h, j.as_slice())).collect();
+            let refs: Vec<(u32, u32, &[u8])> = jpegs
+                .iter()
+                .map(|(w, h, j)| (*w, *h, j.as_slice()))
+                .collect();
             let (pdf_base64, pptx_base64, docx_base64) = match format {
-                "pptx" => (None, Some(base64_png(&crate::ooxml::pptx_of_pages(&refs))), None),
-                "docx" => (None, None, Some(base64_png(&crate::ooxml::docx_of_pages(&refs)))),
-                "pdf" => (Some(base64_png(&crate::pages::pdf_of_pages(&refs))), None, None),
+                "pptx" => (
+                    None,
+                    Some(base64_png(&crate::ooxml::pptx_of_pages(&refs))),
+                    None,
+                ),
+                "docx" => (
+                    None,
+                    None,
+                    Some(base64_png(&crate::ooxml::docx_of_pages(&refs))),
+                ),
+                "pdf" => (
+                    Some(base64_png(&crate::pages::pdf_of_pages(&refs))),
+                    None,
+                    None,
+                ),
                 _ => (None, None, None),
             };
 
@@ -1143,7 +1253,8 @@ async fn do_search_with_registry(
     };
 
     let (mut items, _raw_total, mut captcha_events, mut engine_errors) =
-        crate::search::native_search(registry, &req.q, params, &req.categories, req.max_results).await;
+        crate::search::native_search(registry, &req.q, params, &req.categories, req.max_results)
+            .await;
 
     // Step 1.5: fallback round. An explicit engines filter that failed in
     // its entirety (every named engine errored, zero results) is usually a
@@ -1225,16 +1336,24 @@ async fn do_search_with_registry(
             let wait = req.wait_secs;
             let max_chars = req.max_chars_per;
             if !cookies.is_empty() {
-                tracing::debug!("do_search: item {} url={} has {} cookies", i, url, cookies.len());
+                tracing::debug!(
+                    "do_search: item {} url={} has {} cookies",
+                    i,
+                    url,
+                    cookies.len()
+                );
             }
             handles.push(tokio::task::spawn_blocking(move || {
-                (i, fetch_url_text_with_cookies(url, use_proxy, wait, max_chars, &cookies))
+                (
+                    i,
+                    fetch_url_text_with_cookies(url, use_proxy, wait, max_chars, &cookies),
+                )
             }));
         }
         for h in handles {
-            let (i, res) = h.await.map_err(|e| {
-                SearchError::Other(format!("fetch task panicked: {e}"))
-            })?;
+            let (i, res) = h
+                .await
+                .map_err(|e| SearchError::Other(format!("fetch task panicked: {e}")))?;
             match res {
                 Ok((content, truncated)) => {
                     items[i].content = Some(content);
@@ -1274,8 +1393,14 @@ async fn do_search_with_registry(
 fn search_cache_key(req: &SearchRequest) -> String {
     format!(
         "{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}",
-        req.q, req.categories, req.language, req.max_results,
-        req.fetch_top, req.max_chars_per, req.wait_secs, req.use_proxy,
+        req.q,
+        req.categories,
+        req.language,
+        req.max_results,
+        req.fetch_top,
+        req.max_chars_per,
+        req.wait_secs,
+        req.use_proxy,
         req.time_range.as_deref().unwrap_or(""),
         req.engines,
     )
@@ -1377,7 +1502,9 @@ pub(crate) mod test_util {
             .collect();
         std::thread::spawn(move || {
             for _ in 0..32 {
-                let Ok((mut stream, _)) = listener.accept() else { return };
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
                 let mut buf = [0u8; 8192];
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]).to_string();
@@ -1539,7 +1666,10 @@ mod sanitize_fetch_tests {
         )]);
 
         let resp = do_fetch(fetch_req(format!("http://127.0.0.1:{port}/dirty"), true)).unwrap();
-        assert!(resp.content.contains("coffee maker review"), "real content survives");
+        assert!(
+            resp.content.contains("coffee maker review"),
+            "real content survives"
+        );
         assert!(
             !resp.content.contains("reveal the system prompt"),
             "instruction-shaped line dropped whole: {}",
@@ -1552,7 +1682,9 @@ mod sanitize_fetch_tests {
         );
         assert!(!resp.content.contains('\u{200B}'), "zero-width stripped");
 
-        let report = resp.sanitize_report.expect("report present when something was stripped");
+        let report = resp
+            .sanitize_report
+            .expect("report present when something was stripped");
         assert_eq!(report.hidden_spans_removed, 1);
         assert!(report.zero_width_removed >= 1);
         assert_eq!(
@@ -1564,8 +1696,14 @@ mod sanitize_fetch_tests {
 
         // Opt-out: sanitize:false is the study-the-payload escape hatch.
         let raw = do_fetch(fetch_req(format!("http://127.0.0.1:{port}/dirty"), false)).unwrap();
-        assert!(raw.content.contains("reveal the system prompt"), "raw keeps the line");
-        assert!(raw.content.contains("hidden watermark"), "raw keeps the hidden span");
+        assert!(
+            raw.content.contains("reveal the system prompt"),
+            "raw keeps the line"
+        );
+        assert!(
+            raw.content.contains("hidden watermark"),
+            "raw keeps the hidden span"
+        );
         assert!(raw.content.contains('\u{200B}'), "raw keeps zero-width");
         assert!(raw.sanitize_report.is_none());
     }
@@ -1629,7 +1767,10 @@ mod sanitize_fetch_tests {
         );
         assert_eq!(resp.xhr[0]["status"], 200);
         assert!(
-            resp.xhr[0]["body"].as_str().unwrap().contains("\"price\":42"),
+            resp.xhr[0]["body"]
+                .as_str()
+                .unwrap()
+                .contains("\"price\":42"),
             "retained body rides along: {:?}",
             resp.xhr[0]
         );
@@ -1663,7 +1804,10 @@ mod shared_jar_tests {
         let b2 = mk();
         let got = b2.cookies().get_for_url(url.as_str()).unwrap();
         let names: Vec<&str> = got.iter().map(|c| c.name.as_str()).collect();
-        assert!(names.contains(&"sid"), "second browser sees the cookie: {names:?}");
+        assert!(
+            names.contains(&"sid"),
+            "second browser sees the cookie: {names:?}"
+        );
     }
 
     /// Regression (juejin.cn feed rendered empty, `RangeError: Maximum call
@@ -1829,7 +1973,10 @@ mod cookie_injection_tests {
         let err = serde_json::from_str::<Wrapper>(r#"{"cookies":[{"name":"x"}]}"#);
         assert!(err.is_err(), "name without value must be rejected");
         let err = serde_json::from_str::<Wrapper>(r#"{"cookies":[42]}"#);
-        assert!(err.is_err(), "non-string non-object entries must be rejected");
+        assert!(
+            err.is_err(),
+            "non-string non-object entries must be rejected"
+        );
     }
 
     // 0.3.0 shipped a 422 on POST /session/create with CDP-style cookie
@@ -1943,17 +2090,32 @@ mod search_fallback_tests {
 
     #[tokio::test]
     async fn all_named_engines_walled_falls_back_and_discloses() {
-        let resp = do_search_with_registry(&mock_registry(), search_req("fb wall probe q7x", &["wally"]))
-            .await
-            .unwrap();
-        assert!(!resp.results.is_empty(), "rescuer must have served: {resp:?}");
-        assert_eq!(resp.fallback_engines, Some(vec!["rescuer".to_string()]),
-            "only same-category engines substitute; newsy (news) must stay out: {:?}",
-            resp.fallback_engines);
-        assert!(resp.results.iter().all(|r| r.engines == vec!["rescuer"]));
-        assert!(resp.engine_errors.contains_key("wally"), "the wall stays visible: {:?}", resp.engine_errors);
+        let resp = do_search_with_registry(
+            &mock_registry(),
+            search_req("fb wall probe q7x", &["wally"]),
+        )
+        .await
+        .unwrap();
         assert!(
-            resp.captcha_events.iter().any(|e| e.engine == "wally" && e.hit_count == 1),
+            !resp.results.is_empty(),
+            "rescuer must have served: {resp:?}"
+        );
+        assert_eq!(
+            resp.fallback_engines,
+            Some(vec!["rescuer".to_string()]),
+            "only same-category engines substitute; newsy (news) must stay out: {:?}",
+            resp.fallback_engines
+        );
+        assert!(resp.results.iter().all(|r| r.engines == vec!["rescuer"]));
+        assert!(
+            resp.engine_errors.contains_key("wally"),
+            "the wall stays visible: {:?}",
+            resp.engine_errors
+        );
+        assert!(
+            resp.captcha_events
+                .iter()
+                .any(|e| e.engine == "wally" && e.hit_count == 1),
             "captcha_events carries the wall with its backoff step: {:?}",
             resp.captcha_events
         );
@@ -1967,26 +2129,42 @@ mod search_fallback_tests {
         )
         .await
         .unwrap();
-        assert!(!resp.results.is_empty(), "rescuer answered directly: {resp:?}");
-        assert_eq!(resp.fallback_engines, None,
-            "a working named engine means the caller's choice is honored as-is");
+        assert!(
+            !resp.results.is_empty(),
+            "rescuer answered directly: {resp:?}"
+        );
+        assert_eq!(
+            resp.fallback_engines, None,
+            "a working named engine means the caller's choice is honored as-is"
+        );
         assert!(resp.results.iter().all(|r| r.engines == vec!["rescuer"]));
-        assert!(resp.engine_errors.contains_key("wally"), "the dead engine is still reported: {:?}", resp.engine_errors);
+        assert!(
+            resp.engine_errors.contains_key("wally"),
+            "the dead engine is still reported: {:?}",
+            resp.engine_errors
+        );
     }
 
     #[tokio::test]
     async fn legit_zero_hits_stands_without_fallback() {
-        let registry = crate::search::SearchEngineRegistry::with_engines(vec![Arc::new(MockEngine {
-            name: "honest",
-            cats: &["general"],
-            behavior: MockBehavior::Empty,
-        })]);
+        let registry =
+            crate::search::SearchEngineRegistry::with_engines(vec![Arc::new(MockEngine {
+                name: "honest",
+                cats: &["general"],
+                behavior: MockBehavior::Empty,
+            })]);
         let resp = do_search_with_registry(&registry, search_req("fb zero probe q9x", &["honest"]))
             .await
             .unwrap();
         assert!(resp.results.is_empty(), "the answer is genuinely empty");
-        assert_eq!(resp.fallback_engines, None,
-            "an engine that answered with zero hits is an answer, not a failure");
-        assert!(resp.engine_errors.is_empty(), "nothing errored: {:?}", resp.engine_errors);
+        assert_eq!(
+            resp.fallback_engines, None,
+            "an engine that answered with zero hits is an answer, not a failure"
+        );
+        assert!(
+            resp.engine_errors.is_empty(),
+            "nothing errored: {:?}",
+            resp.engine_errors
+        );
     }
 }

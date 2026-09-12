@@ -147,7 +147,10 @@ pub fn parse_curl(cmd: &str) -> Result<ParsedCurl, String> {
     // Skip the binary name (curl, curl.exe, or a path ending in curl).
     if let Some(first) = iter.peek() {
         let bare = first.rsplit('/').next().unwrap_or(first);
-        if bare.eq_ignore_ascii_case("curl") || bare.eq_ignore_ascii_case("curl.exe") || bare == "wget" {
+        if bare.eq_ignore_ascii_case("curl")
+            || bare.eq_ignore_ascii_case("curl.exe")
+            || bare == "wget"
+        {
             iter.next();
         }
     }
@@ -159,7 +162,8 @@ pub fn parse_curl(cmd: &str) -> Result<ParsedCurl, String> {
         // Long flags use `--name` or `--name=value`; short flags are a
         // single char with the value attached directly (`-H'cookie: x'`,
         // `-XPOST`, `-b=v`) or as the next token (`-H 'cookie: x'`).
-        let (flag, attached): (String, Option<String>) = if let Some(rest) = tok.strip_prefix("--") {
+        let (flag, attached): (String, Option<String>) = if let Some(rest) = tok.strip_prefix("--")
+        {
             match rest.split_once('=') {
                 Some((f, v)) => (f.to_string(), Some(v.to_string())),
                 None => (rest.to_string(), None),
@@ -233,11 +237,38 @@ pub fn parse_curl(cmd: &str) -> Result<ParsedCurl, String> {
             // Valueless flags and flags we deliberately ignore.
             _ => {
                 let value_taking = [
-                    "o", "output", "x", "proxy", "U", "proxy-user", "m", "max-time",
-                    "connect-timeout", "c", "cookie-jar", "C", "continue-at",
-                    "D", "dump-header", "F", "form", "form-string", "T", "upload-file",
-                    "w", "write-out", "y", "speed-time", "Y", "speed-limit",
-                    "z", "time-cond", "retry", "interface", "local-port", "resolve",
+                    "o",
+                    "output",
+                    "x",
+                    "proxy",
+                    "U",
+                    "proxy-user",
+                    "m",
+                    "max-time",
+                    "connect-timeout",
+                    "c",
+                    "cookie-jar",
+                    "C",
+                    "continue-at",
+                    "D",
+                    "dump-header",
+                    "F",
+                    "form",
+                    "form-string",
+                    "T",
+                    "upload-file",
+                    "w",
+                    "write-out",
+                    "y",
+                    "speed-time",
+                    "Y",
+                    "speed-limit",
+                    "z",
+                    "time-cond",
+                    "retry",
+                    "interface",
+                    "local-port",
+                    "resolve",
                 ];
                 if value_taking.contains(&flag) {
                     let _ = value(&mut iter);
@@ -307,8 +338,17 @@ fn widen_cookie_scope(cookies: Vec<String>, url: &str) -> Vec<String> {
 
 /// Parse a copied cURL command and turn its login state into a live session
 /// navigating to the copied URL. Shared by the HTTP `/import/curl` endpoint
-/// and the MCP `import_curl` tool so the two can't drift.
-pub async fn create_session_from_curl(cmd: &str, use_proxy: bool) -> Result<serde_json::Value, String> {
+/// and the MCP `import_curl` tool so the two can't drift. With `account`,
+/// the session runs as that named identity: the imported cookies land in the
+/// account's private jar and are written back under its name.
+pub async fn create_session_from_curl(
+    cmd: &str,
+    use_proxy: bool,
+    account: Option<(String, String)>,
+) -> Result<serde_json::Value, String> {
+    if let Some((_, name)) = &account {
+        crate::account::validate_name(name)?;
+    }
     let parsed = parse_curl(cmd)?;
     if parsed.cookies.is_empty() {
         return Err("no Cookie header or -b jar found — copy the command from a request made while logged in (an XHR on the logged-in page usually carries the most complete cookie set)".into());
@@ -342,6 +382,7 @@ pub async fn create_session_from_curl(cmd: &str, use_proxy: bool) -> Result<serd
         None,
         false,
         false,
+        account.clone(),
     );
     let expires_in_secs = mgr.expires_in_secs(&id);
     Ok(serde_json::json!({
@@ -354,6 +395,7 @@ pub async fn create_session_from_curl(cmd: &str, use_proxy: bool) -> Result<serd
         "user_agent": ua,
         "authorization_prefix": authorization,
         "expires_in_secs": expires_in_secs,
+        "account": account.as_ref().map(|(_, name)| name.clone()),
         // Cookie pairs are scoped to the registrable domain (taobao.com),
         // since the real browser held them domain-wide and the site's data
         // APIs usually live on a sibling subdomain of the copied URL.
@@ -379,7 +421,10 @@ mod tests {
         assert!(p.cookies.contains(&"sid=S1".to_string()));
         assert!(p.cookies.contains(&"token=T%3D2".to_string()));
         assert_eq!(
-            p.headers.iter().find(|(n, _)| n == "user-agent").map(|(_, v)| v.as_str()),
+            p.headers
+                .iter()
+                .find(|(n, _)| n == "user-agent")
+                .map(|(_, v)| v.as_str()),
             Some("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/145.0.0.0")
         );
         assert!(p.headers.iter().any(|(n, _)| n == "accept"));
@@ -405,7 +450,8 @@ mod tests {
 
     #[test]
     fn powershell_flavor() {
-        let cmd = "curl.exe 'https://ps.example.com/hello' `\n  -H 'cookie: s=42' `\n  --compressed";
+        let cmd =
+            "curl.exe 'https://ps.example.com/hello' `\n  -H 'cookie: s=42' `\n  --compressed";
         let p = parse_curl(cmd).unwrap();
         assert_eq!(p.url, "https://ps.example.com/hello");
         assert_eq!(p.cookies, vec!["s=42".to_string()]);
@@ -456,7 +502,12 @@ mod tests {
         // zero cookies and MTop answered FAIL_SYS_ILLEGAL_ACCESS).
         let p = parse_curl(BASH).unwrap();
         let widened = widen_cookie_scope(p.cookies.clone(), &p.url);
-        assert!(widened.iter().all(|c| c.ends_with("; Domain=example.com; Path=/")), "{widened:?}");
+        assert!(
+            widened
+                .iter()
+                .all(|c| c.ends_with("; Domain=example.com; Path=/")),
+            "{widened:?}"
+        );
         // Interop: the session layer anchors a Domain= entry at its own
         // domain, which is what makes the cookie reach sibling subdomains.
         let (full, anchor) = crate::server::normalize_cookie_entry(&widened[0], &p.url);
@@ -468,20 +519,32 @@ mod tests {
         )
         .unwrap();
         let widened = widen_cookie_scope(shop.cookies, &shop.url);
-        assert!(widened.iter().all(|c| c.ends_with("; Domain=taobao.com; Path=/")), "{widened:?}");
+        assert!(
+            widened
+                .iter()
+                .all(|c| c.ends_with("; Domain=taobao.com; Path=/")),
+            "{widened:?}"
+        );
     }
 
     #[test]
     fn widening_honors_multi_part_suffixes() {
-        let p = parse_curl(r#"curl 'https://www.example.co.uk/account' -H 'cookie: sid=S1'"#).unwrap();
+        let p =
+            parse_curl(r#"curl 'https://www.example.co.uk/account' -H 'cookie: sid=S1'"#).unwrap();
         let widened = widen_cookie_scope(p.cookies, &p.url);
-        assert_eq!(widened, vec!["sid=S1; Domain=example.co.uk; Path=/".to_string()]);
+        assert_eq!(
+            widened,
+            vec!["sid=S1; Domain=example.co.uk; Path=/".to_string()]
+        );
     }
 
     #[test]
     fn two_label_hosts_anchor_directly() {
         let p = parse_curl(r#"curl 'https://example.com/' -H 'cookie: sid=S1'"#).unwrap();
         let widened = widen_cookie_scope(p.cookies, &p.url);
-        assert_eq!(widened, vec!["sid=S1; Domain=example.com; Path=/".to_string()]);
+        assert_eq!(
+            widened,
+            vec!["sid=S1; Domain=example.com; Path=/".to_string()]
+        );
     }
 }

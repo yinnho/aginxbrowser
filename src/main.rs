@@ -2,7 +2,7 @@ use axum::{
     extract::{Json, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use rmcp::transport::streamable_http_server::{
@@ -11,13 +11,14 @@ use rmcp::transport::streamable_http_server::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+mod account;
 mod browser;
 mod captcha;
 mod config;
 mod cookie;
 mod curl_import;
-mod doctor_cli;
 mod docgen;
+mod doctor_cli;
 mod download;
 mod error;
 mod firecrawl_compat;
@@ -29,12 +30,12 @@ mod rate;
 mod render;
 mod robots;
 mod sanitize;
+#[cfg(feature = "screenshot")]
+mod screenshot;
 mod search;
 mod server;
 mod session;
 mod store;
-#[cfg(feature = "screenshot")]
-mod screenshot;
 // Timeline video pump (切片层): seek `window.__timelines` frame by frame,
 // paint viewport bands, pipe raw RGBA into ffmpeg — MP4 bytes out.
 #[cfg(feature = "screenshot")]
@@ -57,11 +58,11 @@ mod pptx_native;
 mod screenshot_reference;
 
 // Inlined Diting engine (formerly external crates).
-mod diting_dom;
-mod diting_net;
-mod diting_js;
 mod diting_browser;
 mod diting_cdp;
+mod diting_dom;
+mod diting_js;
+mod diting_net;
 // Cascade layer absorbed from upstream obscura-render (read-only slice,
 // not yet wired to the product pipeline — see docs/engine/render.md).
 mod diting_css;
@@ -74,8 +75,8 @@ mod diting_layout;
 #[cfg(feature = "screenshot")]
 mod diting_fonts;
 
-use server::{do_click, do_eval, do_fetch, do_search, SearchError};
 use render::smart_fetch;
+use server::{do_click, do_eval, do_fetch, do_search, SearchError};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct FetchRequest {
@@ -323,30 +324,54 @@ pub struct ScreenshotRequest {
 }
 
 #[cfg(feature = "screenshot")]
-fn default_screenshot_width() -> u32 { 1280 }
+fn default_screenshot_width() -> u32 {
+    1280
+}
 #[cfg(feature = "screenshot")]
-fn default_screenshot_height() -> u32 { 800 }
+fn default_screenshot_height() -> u32 {
+    800
+}
 #[cfg(feature = "screenshot")]
-fn default_screenshot_scale() -> f32 { 1.0 }
+fn default_screenshot_scale() -> f32 {
+    1.0
+}
 #[cfg(feature = "screenshot")]
-fn default_screenshot_full_page() -> bool { true }
+fn default_screenshot_full_page() -> bool {
+    true
+}
 
 #[cfg(feature = "screenshot")]
-fn default_video_fps() -> f64 { 24.0 }
+fn default_video_fps() -> f64 {
+    24.0
+}
 #[cfg(feature = "screenshot")]
-fn default_video_width() -> u32 { 1280 }
+fn default_video_width() -> u32 {
+    1280
+}
 #[cfg(feature = "screenshot")]
-fn default_video_height() -> u32 { 720 }
+fn default_video_height() -> u32 {
+    720
+}
 #[cfg(feature = "screenshot")]
-fn default_video_hold_tail_secs() -> f64 { 0.5 }
+fn default_video_hold_tail_secs() -> f64 {
+    0.5
+}
 #[cfg(feature = "screenshot")]
-fn default_video_max_duration_secs() -> f64 { 120.0 }
+fn default_video_max_duration_secs() -> f64 {
+    120.0
+}
 #[cfg(feature = "screenshot")]
-fn default_video_wait_timelines_ms() -> u64 { 10_000 }
+fn default_video_wait_timelines_ms() -> u64 {
+    10_000
+}
 #[cfg(feature = "screenshot")]
-fn default_audio_volume() -> f32 { 1.0 }
+fn default_audio_volume() -> f32 {
+    1.0
+}
 #[cfg(feature = "screenshot")]
-fn default_audio_loop() -> bool { true }
+fn default_audio_loop() -> bool {
+    true
+}
 
 /// /video `audio`: background track fetched through the page's HTTP client
 /// and muxed in — looped by default, volume-scaled, optionally faded out
@@ -381,15 +406,25 @@ pub struct VideoNarrationClip {
 }
 
 #[cfg(feature = "screenshot")]
-fn default_pdf_width() -> u32 { 794 }
+fn default_pdf_width() -> u32 {
+    794
+}
 #[cfg(feature = "screenshot")]
-fn default_pdf_height() -> u32 { 1123 }
+fn default_pdf_height() -> u32 {
+    1123
+}
 #[cfg(feature = "screenshot")]
-fn default_pdf_max_pages() -> usize { 50 }
+fn default_pdf_max_pages() -> usize {
+    50
+}
 #[cfg(feature = "screenshot")]
-fn default_pdf_jpeg_quality() -> u8 { 90 }
+fn default_pdf_jpeg_quality() -> u8 {
+    90
+}
 #[cfg(feature = "screenshot")]
-fn default_pdf_format() -> String { "pdf".to_string() }
+fn default_pdf_format() -> String {
+    "pdf".to_string()
+}
 
 /// /pdf request: cut the page into pages and package as PDF (default) or
 /// per-page PNGs. No `selector` → print mode (fixed-height pages, breaks at
@@ -768,6 +803,14 @@ pub struct SessionCreateRequest {
     /// restart. An explicit DELETE /session/:id drops the snapshot.
     #[serde(default)]
     pub persistent: bool,
+    /// Run as a named login identity (the multi-account layer): a private
+    /// cookie jar seeded from the account record, write-back to the account
+    /// store after every action. `taobao-scraper` vs `taobao-publisher` —
+    /// concurrent logins that never clobber each other. The account record
+    /// survives the session; a later create with the same name picks up the
+    /// warm jar. 1-64 chars of [a-zA-Z0-9_-].
+    #[serde(default)]
+    pub account: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -780,6 +823,9 @@ pub struct SessionCreateResponse {
     /// Echoed only for persistent sessions (the snapshot is live).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub persistent: bool,
+    /// Echoed only for account sessions (named identity, private jar).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -926,7 +972,9 @@ async fn main() -> anyhow::Result<()> {
     // Check if running in MCP mode
     if args.contains(&"--mcp".to_string()) {
         tracing::info!("Starting in MCP mode");
-        mcp::run_mcp_stdio().await.map_err(|e| anyhow::anyhow!("MCP server error: {}", e))?;
+        mcp::run_mcp_stdio()
+            .await
+            .map_err(|e| anyhow::anyhow!("MCP server error: {}", e))?;
         return Ok(());
     }
 
@@ -964,10 +1012,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/session/:id/viewport", post(session_viewport_handler))
         .route("/session/:id/screenshot", post(session_screenshot_handler))
         .route("/session/:id/wait", post(session_wait_handler))
-        .route("/session/:id/eval", post(session_eval_handler)
-            .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes())))
+        .route(
+            "/session/:id/eval",
+            post(session_eval_handler)
+                .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes())),
+        )
         .route("/sessions", get(sessions_handler))
         .route("/session/:id/close", post(session_close_handler))
+        .route("/accounts", get(accounts_handler))
+        .route("/accounts/:name", delete(account_delete_handler))
+        .route("/account/verify", post(account_verify_handler))
         .route("/mcp", get(mcp_handler).post(mcp_handler))
         // CDP bridge — Playwright connectOverCDP / Puppeteer connect surface.
         .route("/json/version", get(diting_cdp::http::json_version))
@@ -980,14 +1034,21 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(feature = "screenshot")]
     let app = app
-        .route("/screenshot", post(screenshot_handler)
-            .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes())))
-        .route("/video", post(video_handler)
-            .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes())))
-        .route("/pdf", post(pdf_handler)
-            .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes())));
+        .route(
+            "/screenshot",
+            post(screenshot_handler).layer(axum::extract::DefaultBodyLimit::max(max_body_bytes())),
+        )
+        .route(
+            "/video",
+            post(video_handler).layer(axum::extract::DefaultBodyLimit::max(max_body_bytes())),
+        )
+        .route(
+            "/pdf",
+            post(pdf_handler).layer(axum::extract::DefaultBodyLimit::max(max_body_bytes())),
+        );
 
-    let bind_addr = std::env::var("AGINXBROWSER_BIND").unwrap_or_else(|_| "0.0.0.0:8089".to_string());
+    let bind_addr =
+        std::env::var("AGINXBROWSER_BIND").unwrap_or_else(|_| "0.0.0.0:8089".to_string());
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     tracing::info!("aginxbrowser listening on {}", listener.local_addr()?);
 
@@ -1310,7 +1371,9 @@ async fn fetch_handler(Json(req): Json<FetchRequest>) -> Result<impl IntoRespons
     // robots.txt gate before the cache — a policy flip applies to cached
     // content too, and the robots policy itself is host-cached so this is
     // cheap on the hot path.
-    robots::assert_allowed(&req.url).await.map_err(AppError::Forbidden)?;
+    robots::assert_allowed(&req.url)
+        .await
+        .map_err(AppError::Forbidden)?;
     // Short-lived in-process cache. Each /fetch spins up a fresh V8 browser
     // (expensive), so repeated grabs of the same URL in one session benefit a
     // lot. Keyed by everything that affects the result (url/format/selector/
@@ -1330,17 +1393,25 @@ async fn fetch_handler(Json(req): Json<FetchRequest>) -> Result<impl IntoRespons
 fn fetch_cache_key(req: &FetchRequest) -> String {
     format!(
         "{}|{:?}|{:?}|{}|{:?}|{}|{}|{}|{:?}|{:?}|{}|{:?}",
-        req.url, req.format, req.selector, req.use_proxy, req.cookies, req.max_chars,
-        req.wait_secs.unwrap_or(0), req.auto_bypass_challenge, req.render_tier,
-        req.tls_fingerprint, req.sanitize, req.capture_xhr,
+        req.url,
+        req.format,
+        req.selector,
+        req.use_proxy,
+        req.cookies,
+        req.max_chars,
+        req.wait_secs.unwrap_or(0),
+        req.auto_bypass_challenge,
+        req.render_tier,
+        req.tls_fingerprint,
+        req.sanitize,
+        req.capture_xhr,
     )
 }
 
 type FetchCache = std::sync::Mutex<HashMap<String, (u64, FetchResponse)>>;
 
-static FETCH_CACHE: std::sync::LazyLock<FetchCache> = std::sync::LazyLock::new(|| {
-    std::sync::Mutex::new(HashMap::new())
-});
+static FETCH_CACHE: std::sync::LazyLock<FetchCache> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 /// Max entries before triggering eviction.
 const CACHE_CAPACITY: usize = 256;
@@ -1428,7 +1499,9 @@ pub(crate) fn now_secs() -> u64 {
 async fn click_handler(Json(req): Json<ClickRequest>) -> Result<impl IntoResponse, AppError> {
     // /click fetches the URL autonomously before acting on it — same robots
     // gate as /fetch (see robots.rs for the contract).
-    robots::assert_allowed(&req.url).await.map_err(AppError::Forbidden)?;
+    robots::assert_allowed(&req.url)
+        .await
+        .map_err(AppError::Forbidden)?;
     let resp = spawn_blocking(move || do_click(req)).await?;
     Ok((StatusCode::OK, Json(resp?)))
 }
@@ -1436,14 +1509,20 @@ async fn click_handler(Json(req): Json<ClickRequest>) -> Result<impl IntoRespons
 async fn eval_handler(Json(req): Json<EvalRequest>) -> Result<impl IntoResponse, AppError> {
     // /eval fetches the URL autonomously to run the script on it — same
     // robots gate as /fetch (see robots.rs for the contract).
-    robots::assert_allowed(&req.url).await.map_err(AppError::Forbidden)?;
+    robots::assert_allowed(&req.url)
+        .await
+        .map_err(AppError::Forbidden)?;
     let resp = spawn_blocking(move || do_eval(req)).await?;
     Ok((StatusCode::OK, Json(resp?)))
 }
 
 #[cfg(feature = "screenshot")]
-async fn screenshot_handler(Json(req): Json<ScreenshotRequest>) -> Result<impl IntoResponse, AppError> {
-    robots::assert_allowed(&req.url).await.map_err(AppError::Forbidden)?;
+async fn screenshot_handler(
+    Json(req): Json<ScreenshotRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    robots::assert_allowed(&req.url)
+        .await
+        .map_err(AppError::Forbidden)?;
     // V8 (deno_core) holds !Send state, so drive the whole capture on a
     // current-thread runtime on a blocking thread — same pattern as do_eval.
     let resp = spawn_blocking(move || server::do_screenshot(req)).await??;
@@ -1455,7 +1534,9 @@ async fn screenshot_handler(Json(req): Json<ScreenshotRequest>) -> Result<impl I
 /// /screenshot — V8 is !Send.
 #[cfg(feature = "screenshot")]
 async fn video_handler(Json(req): Json<VideoRequest>) -> Result<impl IntoResponse, AppError> {
-    robots::assert_allowed(&req.url).await.map_err(AppError::Forbidden)?;
+    robots::assert_allowed(&req.url)
+        .await
+        .map_err(AppError::Forbidden)?;
     let resp = spawn_blocking(move || server::do_video(req)).await??;
     Ok((StatusCode::OK, Json(resp)))
 }
@@ -1464,7 +1545,9 @@ async fn video_handler(Json(req): Json<VideoRequest>) -> Result<impl IntoRespons
 /// slides) and package as PDF / PNGs. Same threading pattern as /screenshot.
 #[cfg(feature = "screenshot")]
 async fn pdf_handler(Json(req): Json<PdfRequest>) -> Result<impl IntoResponse, AppError> {
-    robots::assert_allowed(&req.url).await.map_err(AppError::Forbidden)?;
+    robots::assert_allowed(&req.url)
+        .await
+        .map_err(AppError::Forbidden)?;
     let resp = spawn_blocking(move || server::do_pdf(req)).await??;
     Ok((StatusCode::OK, Json(resp)))
 }
@@ -1479,8 +1562,12 @@ async fn search_handler(Json(req): Json<SearchRequest>) -> Result<impl IntoRespo
     Ok((StatusCode::OK, Json(resp)))
 }
 
-async fn download_handler(Json(req): Json<download::DownloadRequest>) -> Result<impl IntoResponse, AppError> {
-    robots::assert_allowed(&req.url).await.map_err(AppError::Forbidden)?;
+async fn download_handler(
+    Json(req): Json<download::DownloadRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    robots::assert_allowed(&req.url)
+        .await
+        .map_err(AppError::Forbidden)?;
     let resp = download::do_download(req).await?;
     server::persist_shared_cookies();
     Ok((StatusCode::OK, Json(resp)))
@@ -1490,21 +1577,44 @@ async fn download_handler(Json(req): Json<download::DownloadRequest>) -> Result<
 // Session handlers
 // ---------------------------------------------------------------------------
 
-async fn session_create_handler(Json(req): Json<SessionCreateRequest>) -> Result<impl IntoResponse, AppError> {
+async fn session_create_handler(
+    Json(req): Json<SessionCreateRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let account = match req.account.as_deref() {
+        None => None,
+        Some(name) => {
+            account::validate_name(name).map_err(AppError::BadRequest)?;
+            Some((crate::store::REST_OWNER.to_string(), name.to_string()))
+        }
+    };
     let mut mgr = session::SESSIONS.lock().await;
     mgr.evict_expired();
     let pin = match (req.width, req.height) {
         (None, None) => None,
         (w, h) => Some((w, h, req.mobile)),
     };
-    let id = mgr.create(req.url.as_deref(), req.use_proxy, req.cookies, req.storage, req.ttl_secs, pin, req.keepalive, req.persistent);
+    let id = mgr.create(
+        req.url.as_deref(),
+        req.use_proxy,
+        req.cookies,
+        req.storage,
+        req.ttl_secs,
+        pin,
+        req.keepalive,
+        req.persistent,
+        account,
+    );
     let expires_in_secs = mgr.expires_in_secs(&id);
-    Ok((StatusCode::OK, Json(SessionCreateResponse {
-        expires_in_secs,
-        session_id: id,
-        url: req.url,
-        persistent: req.persistent,
-    })))
+    Ok((
+        StatusCode::OK,
+        Json(SessionCreateResponse {
+            expires_in_secs,
+            session_id: id,
+            url: req.url,
+            persistent: req.persistent,
+            account: req.account,
+        }),
+    ))
 }
 
 /// Credential transfer from a real browser: paste a DevTools "Copy as cURL"
@@ -1518,12 +1628,79 @@ pub struct ImportCurlRequest {
     /// Route the session's traffic through the engine proxy.
     #[serde(default)]
     pub use_proxy: bool,
+    /// Attach the session to a named account: the imported login lands in
+    /// the account's private jar and is written back under its name after
+    /// every action — one import per identity, no clobbering.
+    #[serde(default)]
+    pub account: Option<String>,
 }
 
-async fn import_curl_handler(Json(req): Json<ImportCurlRequest>) -> Result<impl IntoResponse, AppError> {
-    let v = curl_import::create_session_from_curl(&req.curl, req.use_proxy)
+async fn import_curl_handler(
+    Json(req): Json<ImportCurlRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let account = match req.account.as_deref() {
+        None => None,
+        Some(name) => {
+            account::validate_name(name).map_err(AppError::BadRequest)?;
+            Some((crate::store::REST_OWNER.to_string(), name.to_string()))
+        }
+    };
+    let v = curl_import::create_session_from_curl(&req.curl, req.use_proxy, account)
         .await
         .map_err(AppError::BadRequest)?;
+    Ok((StatusCode::OK, Json(v)))
+}
+
+// ---------------------------------------------------------------------------
+// Accounts (named login identities — the multi-account layer)
+// ---------------------------------------------------------------------------
+
+/// List the caller's accounts: metadata only (name, domains, cookie count,
+/// last verify verdict) — cookie values are credentials and never leave.
+async fn accounts_handler() -> impl IntoResponse {
+    let accounts = account::list(crate::store::REST_OWNER);
+    axum::Json(serde_json::json!({ "count": accounts.len(), "accounts": accounts }))
+}
+
+/// Delete an account: stored record AND live jar. Sessions currently running
+/// as the account keep their in-process jar handle, but with the record gone
+/// their write-backs recreate nothing.
+async fn account_delete_handler(
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    if !account::delete(crate::store::REST_OWNER, &name) {
+        return Err(AppError::NotFound(format!("no account named {name:?}")));
+    }
+    Ok((StatusCode::OK, Json(serde_json::json!({ "deleted": name }))))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AccountVerifyRequest {
+    /// The account to check.
+    pub name: String,
+    /// Teach-once verify spec: the page that shows login state, and a JS
+    /// expression truthy when logged in (e.g.
+    /// `!!document.querySelector('.user-nick')`). Remembered after the first
+    /// call; later calls can pass neither and rerun the remembered spec.
+    pub url: Option<String>,
+    pub predicate: Option<String>,
+}
+
+/// Check whether an account is still logged in. Runs in a scratch session AS
+/// the account (private jar, same egress), so the probe doubles as a cookie
+/// refresh. Errors are actionable: a missing spec tells the caller to teach
+/// one; a probe failure is not a logout verdict.
+async fn account_verify_handler(
+    Json(req): Json<AccountVerifyRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let v = account::verify(
+        crate::store::REST_OWNER,
+        &req.name,
+        req.url.as_deref(),
+        req.predicate.as_deref(),
+    )
+    .await
+    .map_err(AppError::BadRequest)?;
     Ok((StatusCode::OK, Json(v)))
 }
 
@@ -1552,10 +1729,13 @@ async fn session_navigate_handler(
     Json(req): Json<SessionNavigateRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let mut mgr = session::SESSIONS.lock().await;
-    let resp = mgr.send(&id, |reply| session::SessionCommand::Navigate {
-        url: req.url.clone(),
-        reply,
-    }).await.map_err(session_err)?;
+    let resp = mgr
+        .send(&id, |reply| session::SessionCommand::Navigate {
+            url: req.url.clone(),
+            reply,
+        })
+        .await
+        .map_err(session_err)?;
     Ok((StatusCode::OK, Json(resp)))
 }
 
@@ -1589,10 +1769,19 @@ async fn session_state_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let mut mgr = session::SESSIONS.lock().await;
-    let compact_text = mgr.send(&id, |reply| session::SessionCommand::State { reply }).await
+    let compact_text = mgr
+        .send(&id, |reply| session::SessionCommand::State { reply })
+        .await
         .map_err(session_err)?;
     // Return as plain text for token efficiency.
-    Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], compact_text))
+    Ok((
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        compact_text,
+    ))
 }
 
 /// Snapshot the session's localStorage/sessionStorage (round-trips with
@@ -1601,7 +1790,9 @@ async fn session_storage_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let mut mgr = session::SESSIONS.lock().await;
-    let text = mgr.send(&id, |reply| session::SessionCommand::Storage { reply }).await
+    let text = mgr
+        .send(&id, |reply| session::SessionCommand::Storage { reply })
+        .await
         .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| AppError::Internal(format!("storage parse error: {}", e)))?;
@@ -1630,7 +1821,10 @@ async fn session_console_handler(
     };
     let mut mgr = session::SESSIONS.lock().await;
     let text = mgr
-        .send(&id, |reply| session::SessionCommand::Console { filter, reply })
+        .send(&id, |reply| session::SessionCommand::Console {
+            filter,
+            reply,
+        })
         .await
         .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
@@ -1684,17 +1878,34 @@ async fn session_export_handler(
     axum::extract::Query(q): axum::extract::Query<SessionExportQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     let mut mgr = session::SESSIONS.lock().await;
-    let jsonl = mgr.send(&id, |reply| session::SessionCommand::Export { reply }).await
+    let jsonl = mgr
+        .send(&id, |reply| session::SessionCommand::Export { reply })
+        .await
         .map_err(session_err)?;
     match q.format.as_deref() {
-        Some("jsonl") => Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "application/x-ndjson")], jsonl)),
+        Some("jsonl") => Ok((
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/x-ndjson")],
+            jsonl,
+        )),
         Some("json") => {
             let doc = flow::recorded_to_flow(&jsonl);
-            Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "application/json")], doc.to_string()))
+            Ok((
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                doc.to_string(),
+            ))
         }
         _ => {
             let script = session::replay_bash(&jsonl, "http://127.0.0.1:8089");
-            Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")], script))
+            Ok((
+                StatusCode::OK,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/x-shellscript; charset=utf-8",
+                )],
+                script,
+            ))
         }
     }
 }
@@ -1722,8 +1933,8 @@ struct FlowRunBody {
 /// `status:failed` + the failing step, reason, and a diagnostic screenshot
 /// (the session stays alive for manual takeover).
 async fn flow_run_handler(Json(body): Json<FlowRunBody>) -> Result<impl IntoResponse, AppError> {
-    let doc = flow::resolve_flow_doc(body.flow, body.name.as_deref())
-        .map_err(AppError::BadRequest)?;
+    let doc =
+        flow::resolve_flow_doc(body.flow, body.name.as_deref()).map_err(AppError::BadRequest)?;
     let vars = body
         .vars
         .and_then(|v| v.as_object().cloned())
@@ -1794,10 +2005,13 @@ async fn session_click_handler(
     Json(req): Json<SessionClickRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let mut mgr = session::SESSIONS.lock().await;
-    let resp = mgr.send(&id, |reply| session::SessionCommand::Click {
-        index: req.index,
-        reply,
-    }).await.map_err(session_err)?;
+    let resp = mgr
+        .send(&id, |reply| session::SessionCommand::Click {
+            index: req.index,
+            reply,
+        })
+        .await
+        .map_err(session_err)?;
     Ok((StatusCode::OK, Json(resp)))
 }
 
@@ -1818,13 +2032,16 @@ async fn session_click_xy_handler(
     Json(req): Json<SessionClickXyRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let mut mgr = session::SESSIONS.lock().await;
-    let text = mgr.send(&id, |reply| session::SessionCommand::ClickXY {
-        x: req.x,
-        y: req.y,
-        button: req.button.unwrap_or_else(|| "left".to_string()),
-        click_count: req.click_count.unwrap_or(1),
-        reply,
-    }).await.map_err(session_err)?;
+    let text = mgr
+        .send(&id, |reply| session::SessionCommand::ClickXY {
+            x: req.x,
+            y: req.y,
+            button: req.button.unwrap_or_else(|| "left".to_string()),
+            click_count: req.click_count.unwrap_or(1),
+            reply,
+        })
+        .await
+        .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| AppError::Internal(format!("click_xy parse error: {}", e)))?;
     Ok((StatusCode::OK, Json(val)))
@@ -1853,15 +2070,18 @@ async fn session_drag_handler(
     Json(req): Json<SessionDragRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let mut mgr = session::SESSIONS.lock().await;
-    let text = mgr.send(&id, |reply| session::SessionCommand::Drag {
-        from_x: req.from.x,
-        from_y: req.from.y,
-        to_x: req.to.x,
-        to_y: req.to.y,
-        steps: req.steps.unwrap_or(10),
-        delay_ms: req.delay_ms.unwrap_or(30),
-        reply,
-    }).await.map_err(session_err)?;
+    let text = mgr
+        .send(&id, |reply| session::SessionCommand::Drag {
+            from_x: req.from.x,
+            from_y: req.from.y,
+            to_x: req.to.x,
+            to_y: req.to.y,
+            steps: req.steps.unwrap_or(10),
+            delay_ms: req.delay_ms.unwrap_or(30),
+            reply,
+        })
+        .await
+        .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| AppError::Internal(format!("drag parse error: {}", e)))?;
     Ok((StatusCode::OK, Json(val)))
@@ -1872,12 +2092,15 @@ async fn session_input_handler(
     Json(req): Json<SessionInputRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let mut mgr = session::SESSIONS.lock().await;
-    let filled = mgr.send(&id, |reply| session::SessionCommand::Input {
-        index: req.index,
-        text: req.text,
-        full_events: req.events.as_deref() == Some("full"),
-        reply,
-    }).await.map_err(session_err)?;
+    let filled = mgr
+        .send(&id, |reply| session::SessionCommand::Input {
+            index: req.index,
+            text: req.text,
+            full_events: req.events.as_deref() == Some("full"),
+            reply,
+        })
+        .await
+        .map_err(session_err)?;
     Ok((StatusCode::OK, Json(filled)))
 }
 
@@ -1886,12 +2109,18 @@ async fn session_scroll_handler(
     Json(req): Json<SessionScrollRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let mut mgr = session::SESSIONS.lock().await;
-    let scrolled = mgr.send(&id, |reply| session::SessionCommand::Scroll {
-        direction: req.direction,
-        amount: req.amount,
-        reply,
-    }).await.map_err(session_err)?;
-    Ok((StatusCode::OK, Json(serde_json::json!({ "scrolled": scrolled }))))
+    let scrolled = mgr
+        .send(&id, |reply| session::SessionCommand::Scroll {
+            direction: req.direction,
+            amount: req.amount,
+            reply,
+        })
+        .await
+        .map_err(session_err)?;
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({ "scrolled": scrolled })),
+    ))
 }
 
 async fn session_viewport_handler(
@@ -1899,13 +2128,19 @@ async fn session_viewport_handler(
     Json(req): Json<SessionViewportRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let mut mgr = session::SESSIONS.lock().await;
-    let viewport = mgr.send(&id, |reply| session::SessionCommand::Viewport {
-        width: req.width,
-        height: req.height,
-        mobile: req.mobile,
-        reply,
-    }).await.map_err(session_err)?;
-    Ok((StatusCode::OK, Json(serde_json::json!({ "viewport": viewport }))))
+    let viewport = mgr
+        .send(&id, |reply| session::SessionCommand::Viewport {
+            width: req.width,
+            height: req.height,
+            mobile: req.mobile,
+            reply,
+        })
+        .await
+        .map_err(session_err)?;
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({ "viewport": viewport })),
+    ))
 }
 
 /// Screenshot the session's current DOM state. The reply mirrors
@@ -1917,16 +2152,19 @@ async fn session_screenshot_handler(
 ) -> Result<impl IntoResponse, AppError> {
     let req = req.map(|Json(r)| r).unwrap_or_default();
     let mut mgr = session::SESSIONS.lock().await;
-    let shot = mgr.send(&id, |reply| session::SessionCommand::Screenshot {
-        width: req.width,
-        height: req.height,
-        full_page: req.full_page,
-        selector: req.selector.clone(),
-        selector_all: req.selector_all,
-        reply,
-    }).await.map_err(session_err)?;
-    let body: serde_json::Value = serde_json::from_str(&shot)
-        .map_err(|_| AppError::Internal(shot.clone()))?;
+    let shot = mgr
+        .send(&id, |reply| session::SessionCommand::Screenshot {
+            width: req.width,
+            height: req.height,
+            full_page: req.full_page,
+            selector: req.selector.clone(),
+            selector_all: req.selector_all,
+            reply,
+        })
+        .await
+        .map_err(session_err)?;
+    let body: serde_json::Value =
+        serde_json::from_str(&shot).map_err(|_| AppError::Internal(shot.clone()))?;
     Ok((StatusCode::OK, Json(body)))
 }
 
@@ -1951,14 +2189,21 @@ async fn session_eval_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     payload: Result<Json<SessionEvalRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<impl IntoResponse, AppError> {
-    let Json(req) = payload.map_err(|rej| eval_body_rejection(rej.body_text(), max_body_bytes()))?;
+    let Json(req) =
+        payload.map_err(|rej| eval_body_rejection(rej.body_text(), max_body_bytes()))?;
     let mut mgr = session::SESSIONS.lock().await;
-    let result = mgr.send(&id, |reply| session::SessionCommand::Eval {
-        script: req.script,
-        timeout_ms: req.timeout_ms,
-        reply,
-    }).await.map_err(session_err)?;
-    Ok((StatusCode::OK, Json(serde_json::json!({ "result": result }))))
+    let result = mgr
+        .send(&id, |reply| session::SessionCommand::Eval {
+            script: req.script,
+            timeout_ms: req.timeout_ms,
+            reply,
+        })
+        .await
+        .map_err(session_err)?;
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({ "result": result })),
+    ))
 }
 
 /// Live sessions with their identity — the P2 ask from the 0.4.1 taobao
@@ -1974,8 +2219,12 @@ async fn sessions_handler() -> Result<impl IntoResponse, AppError> {
     for e in &entries {
         let url = match tokio::time::timeout(
             std::time::Duration::from_millis(250),
-            mgr.send(&e.session_id, |reply| session::SessionCommand::Url { reply }),
-        ).await {
+            mgr.send(&e.session_id, |reply| session::SessionCommand::Url {
+                reply,
+            }),
+        )
+        .await
+        {
             Ok(Ok(u)) => Some(u),
             // Busy (mid-eval), expired, or gone — identity probe is best
             // effort; the listing must never block on one session.
@@ -1990,10 +2239,13 @@ async fn sessions_handler() -> Result<impl IntoResponse, AppError> {
             "persistent": e.persistent,
         }));
     }
-    Ok((StatusCode::OK, Json(serde_json::json!({
-        "count": out.len(),
-        "sessions": out,
-    }))))
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "count": out.len(),
+            "sessions": out,
+        })),
+    ))
 }
 
 /// Cookie read-back for one session — the HTTP-face mirror of the MCP
@@ -2004,7 +2256,9 @@ async fn session_cookies_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let mut mgr = session::SESSIONS.lock().await;
-    let text = mgr.send(&id, |reply| session::SessionCommand::Cookies { reply }).await
+    let text = mgr
+        .send(&id, |reply| session::SessionCommand::Cookies { reply })
+        .await
         .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| AppError::Internal(format!("cookies parse error: {}", e)))?;
@@ -2019,12 +2273,15 @@ async fn session_wait_handler(
     Json(req): Json<SessionWaitRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let mut mgr = session::SESSIONS.lock().await;
-    let out = mgr.send(&id, |reply| session::SessionCommand::Wait {
-        selector: req.selector.clone(),
-        predicate: req.predicate.clone(),
-        timeout_ms: req.timeout_ms,
-        reply,
-    }).await.map_err(session_err)?;
+    let out = mgr
+        .send(&id, |reply| session::SessionCommand::Wait {
+            selector: req.selector.clone(),
+            predicate: req.predicate.clone(),
+            timeout_ms: req.timeout_ms,
+            reply,
+        })
+        .await
+        .map_err(session_err)?;
     let body: serde_json::Value =
         serde_json::from_str(&out).map_err(|_| AppError::Internal(out.clone()))?;
     Ok((StatusCode::OK, Json(body)))
@@ -2037,10 +2294,7 @@ async fn session_close_handler(
     // Wait for the session thread's ack so `ok` is truthful - a runaway eval
     // can pin the thread inside V8 for up to its watchdog budget.
     let closed = mgr.close_and_wait(&id).await;
-    Ok((
-        StatusCode::OK,
-        Json(serde_json::json!({ "ok": closed })),
-    ))
+    Ok((StatusCode::OK, Json(serde_json::json!({ "ok": closed }))))
 }
 
 fn spawn_blocking<F, R>(f: F) -> tokio::task::JoinHandle<R>
@@ -2064,7 +2318,10 @@ mod tests {
         assert_eq!(body["status"], "ok");
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
         let commit = body["commit"].as_str().expect("commit present");
-        assert!(!commit.is_empty(), "commit is the git short hash or 'unknown'");
+        assert!(
+            !commit.is_empty(),
+            "commit is the git short hash or 'unknown'"
+        );
         let ua = body["ua"].as_str().expect("ua present");
         assert!(ua.contains("Chrome/"), "persona UA expected, got: {ua}");
         #[cfg(feature = "stealth")]
@@ -2125,8 +2382,9 @@ mod tests {
 
     #[test]
     fn fetch_request_rejects_cookie_objects_without_value() {
-        let err =
-            serde_json::from_str::<FetchRequest>(r#"{"url":"https://e.com/","cookies":[{"name":"x"}]}"#);
+        let err = serde_json::from_str::<FetchRequest>(
+            r#"{"url":"https://e.com/","cookies":[{"name":"x"}]}"#,
+        );
         assert!(err.is_err());
     }
 
@@ -2304,4 +2562,3 @@ mod tests {
         assert!(r.cookies.is_empty());
     }
 }
-
