@@ -1,0 +1,16 @@
+{
+  "$schema": "https://dsh.community/schemas/dsh-plugin-0.15.json",
+  "id": "dsh-aginxbrowser",
+  "name": "aginxbrowser",
+  "version": "0.1.0",
+  "manifestVersion": "0.15",
+  "description": "Fetch JS-rendered / protected pages as markdown, aggregated web search, and interactive browser sessions with a live view URL — no local Chrome.",
+  "license": "Apache-2.0",
+  "source": "https://github.com/yinnho/aginxbrowser/tree/main/dsh-aginxbrowser",
+  "facets": {
+    "host": {
+      "entry": "lib/index.js",
+      "apiVersion": "v1alpha1"
+    }
+  }
+}
