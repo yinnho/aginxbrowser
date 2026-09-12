@@ -3742,6 +3742,78 @@ pub fn layout_dom_with_paint_order_and_images(
     network_bytes: Option<&HashMap<String, std::sync::Arc<Vec<u8>>>>,
     base_url: Option<&str>,
 ) -> (HashMap<NodeId, Rect>, Vec<PaintItem>, Vec<NodeId>) {
+    let solved = layout_solve(
+        tree,
+        styles,
+        fonts,
+        viewport_width,
+        viewport_height,
+        network_bytes,
+        base_url,
+    );
+    layout_collect(tree, styles, fonts, &solved, viewport_width)
+}
+
+/// The solved half of a layout run, split out for #395: the taffy tree after
+/// every pass (build, static-position harvest, reparent, main solve, float
+/// continuation, calc repair, table span placement) plus the auxiliary maps
+/// the collect walk consumes. Paint-only property writes — transform and
+/// opacity, everything a GSAP-style timeline seek lands — are invisible to
+/// all of it: `to_taffy_style` maps only geometry families, the solve passes
+/// consume only those, and baseline shifts read pure layout. A fresh
+/// [`layout_collect`] over a cached [`SolvedGeometry`] is therefore
+/// bit-identical to re-running the whole pipeline — which is what lets the
+/// video pump repaint per-seek frames without the full-page relayout it used
+/// to pay (43 solves × 114ms on the probe page).
+pub struct SolvedGeometry {
+    taffy_tree: TaffyTree<TextLeaf>,
+    node_map: HashMap<taffy::tree::NodeId, NodeId>,
+    images: HashMap<NodeId, DecodedImage>,
+    static_pos: HashMap<NodeId, (f32, f32)>,
+    baseline_shifts: HashMap<taffy::tree::NodeId, f32>,
+    run_wrappers: Vec<taffy::tree::NodeId>,
+    collapsed_edges: HashMap<NodeId, [bool; 4]>,
+    flattened: HashMap<NodeId, Vec<taffy::tree::NodeId>>,
+    /// The synthetic ICB the walk roots at; `None` marks an aborted solve
+    /// (no element root, or a taffy error) — collect returns the same empty
+    /// outputs the undivided pipeline returned on those paths.
+    icb_node: Option<taffy::tree::NodeId>,
+}
+
+impl SolvedGeometry {
+    /// The empty solve the early-return paths hand back: nothing walked,
+    /// nothing collected.
+    fn aborted() -> Self {
+        SolvedGeometry {
+            taffy_tree: TaffyTree::new(),
+            node_map: HashMap::new(),
+            images: HashMap::new(),
+            static_pos: HashMap::new(),
+            baseline_shifts: HashMap::new(),
+            run_wrappers: Vec::new(),
+            collapsed_edges: HashMap::new(),
+            flattened: HashMap::new(),
+            icb_node: None,
+        }
+    }
+}
+
+/// Solve the taffy tree for the live DOM (the first half of what
+/// [`layout_dom_with_paint_order_and_images`] used to do in one body): build
+/// the node tree, harvest static positions, reparent out-of-flow boxes onto
+/// their containing blocks, run the block/flex/grid solve, then the
+/// float-continuation, calc-repair and table-span fixups that re-solve when
+/// they adjust geometry. See [`SolvedGeometry`] for why the result is worth
+/// caching separately from the collected items.
+pub fn layout_solve(
+    tree: &DomTree,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    fonts: &FontBook,
+    viewport_width: f32,
+    viewport_height: f32,
+    network_bytes: Option<&HashMap<String, std::sync::Arc<Vec<u8>>>>,
+    base_url: Option<&str>,
+) -> SolvedGeometry {
     let mut taffy_tree = TaffyTree::new();
     let mut node_map: HashMap<taffy::tree::NodeId, NodeId> = HashMap::new();
 
@@ -3785,12 +3857,6 @@ pub fn layout_dom_with_paint_order_and_images(
         scan_images(tree, *root_id, &cache, &mut images, viewport_width, base_url);
     }
 
-    let mut rects = HashMap::new();
-    let mut items: Vec<PaintItem> = Vec::new();
-    // Paint sequence of the boxed elements (obscura #738): filled by the
-    // `collect` walk, sibling bands already z-sorted. See the doc on
-    // [`layout_dom_with_paint_order_and_images`].
-    let mut paint_order: Vec<NodeId> = Vec::new();
     // Flattened inline wrappers (see build_element) recorded as
     // dom id → hoisted taffy children, for the union pass after the walk.
     let mut flattened: HashMap<NodeId, Vec<taffy::tree::NodeId>> = HashMap::new();
@@ -3803,7 +3869,7 @@ pub fn layout_dom_with_paint_order_and_images(
     // table here; the post-layout fixup reads the placeholder geometry and
     // places the lifted absolute cells over their spanned band.
     let mut table_meta = TableBuildMeta::default();
-    let Some(root_id) = root else { return (rects, items, paint_order) };
+    let Some(root_id) = root else { return SolvedGeometry::aborted() };
     let Some(root_node) = build_element(
         tree,
         root_id,
@@ -3816,7 +3882,7 @@ pub fn layout_dom_with_paint_order_and_images(
         &mut run_wrappers,
         &mut table_meta,
     ) else {
-        return (rects, items, paint_order);
+        return SolvedGeometry::aborted();
     };
 
     // The initial containing block (obscura#675 lineage fix): CSS anchors a
@@ -4007,7 +4073,7 @@ pub fn layout_dom_with_paint_order_and_images(
         }
     });
     if measured.is_err() {
-        return (rects, items, paint_order);
+        return SolvedGeometry::aborted();
     }
 
     // --- float continuation (batch 8g) -----------------------------------
@@ -4177,7 +4243,7 @@ pub fn layout_dom_with_paint_order_and_images(
                     },
                 );
                 if re.is_err() {
-                    return (rects, items, paint_order);
+                    return SolvedGeometry::aborted();
                 }
             }
         }
@@ -4287,7 +4353,7 @@ pub fn layout_dom_with_paint_order_and_images(
                 },
             );
             if re.is_err() {
-                return (rects, items, paint_order);
+                return SolvedGeometry::aborted();
             }
         }
     }
@@ -4357,7 +4423,7 @@ pub fn layout_dom_with_paint_order_and_images(
                     },
                 );
                 if re.is_err() {
-                    return (rects, items, paint_order);
+                    return SolvedGeometry::aborted();
                 }
             }
         }
@@ -4369,6 +4435,54 @@ pub fn layout_dom_with_paint_order_and_images(
     // Baseline alignment of inline runs (blitz#750 family): per-line shifts
     // computed against the FINAL layout, applied during the collect walk.
     let baseline_shifts = compute_baseline_shifts(&taffy_tree, &run_wrappers, fonts);
+
+    SolvedGeometry {
+        taffy_tree,
+        node_map,
+        images,
+        static_pos,
+        baseline_shifts,
+        run_wrappers,
+        collapsed_edges: table_meta.collapsed_edges,
+        flattened,
+        icb_node: Some(icb_node),
+    }
+}
+
+/// Collect the paint-facing half from a solve (the second half of what
+/// [`layout_dom_with_paint_order_and_images`] used to do in one body): walk
+/// the solved taffy tree accumulating border-box rects and emitting paint
+/// items in document order, then the flattened-inline union pass and the
+/// inline-background splice. This is the half that reads transform and
+/// opacity — so this is the half a paint-only style write must re-run,
+/// against the cached solve, instead of paying for a fresh taffy pass.
+pub fn layout_collect(
+    tree: &DomTree,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    fonts: &FontBook,
+    solved: &SolvedGeometry,
+    viewport_width: f32,
+) -> (HashMap<NodeId, Rect>, Vec<PaintItem>, Vec<NodeId>) {
+    let mut rects = HashMap::new();
+    let mut items: Vec<PaintItem> = Vec::new();
+    // Paint sequence of the boxed elements (obscura #738): filled by the
+    // `collect` walk, sibling bands already z-sorted. See the doc on
+    // [`layout_dom_with_paint_order_and_images`].
+    let mut paint_order: Vec<NodeId> = Vec::new();
+    let Some(icb_node) = solved.icb_node else {
+        return (rects, items, paint_order);
+    };
+    let SolvedGeometry {
+        taffy_tree,
+        node_map,
+        images,
+        static_pos,
+        baseline_shifts,
+        run_wrappers,
+        flattened,
+        collapsed_edges,
+        ..
+    } = solved;
 
     // Accumulate locations down the taffy tree: child location already
     // includes the parent's border+padding offset, so a plain sum is the
@@ -5076,13 +5190,13 @@ pub fn layout_dom_with_paint_order_and_images(
     let mut node_first_item: HashMap<taffy::tree::NodeId, usize> = HashMap::new();
     collect(
         tree,
-        &taffy_tree,
-        &node_map,
+        taffy_tree,
+        node_map,
         styles,
-        &images,
-        &static_pos,
-        &baseline_shifts,
-        &table_meta.collapsed_edges,
+        images,
+        static_pos,
+        baseline_shifts,
+        collapsed_edges,
         &mut rects,
         &mut abs_by_node,
         &mut local_by_node,
@@ -5101,7 +5215,7 @@ pub fn layout_dom_with_paint_order_and_images(
     // owes them a rect, so union the hoisted kids' absolute boxes into one
     // bounding box. CSS unions the element's own fragments; kids approximate
     // that closely for text content (exact for the common cases).
-    for (dom, kids) in &flattened {
+    for (dom, kids) in flattened {
         if rects.contains_key(dom) {
             continue;
         }
@@ -5176,7 +5290,7 @@ pub fn layout_dom_with_paint_order_and_images(
         }
         let wrapper_set: std::collections::HashSet<_> = run_wrappers.iter().copied().collect();
         let mut inserts: Vec<(usize, usize, Vec<PaintItem>)> = Vec::new();
-        for (dom, kids) in &flattened {
+        for (dom, kids) in flattened {
             let Some(color) = styles
                 .get(dom)
                 .and_then(|s| s.background_color)
@@ -5193,7 +5307,7 @@ pub fn layout_dom_with_paint_order_and_images(
             for k in kids {
                 expand_wrapped_leaves(
                     *k,
-                    &taffy_tree,
+                    taffy_tree,
                     &wrapper_set,
                     &local_by_node,
                     fonts,

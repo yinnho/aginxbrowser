@@ -11,7 +11,11 @@
 //! `tl.pause(t)` writes `el.style.transform/opacity`, the bootstrap's
 //! `_push()` lands that as a `set_attribute` op, and op_dom_inner drops the
 //! memoized layout for exactly the mutation commands — so the next
-//! `viewport_band_frame` re-cascades with the fresh inline styles.
+//! `viewport_band_frame` re-cascades with the fresh inline styles. Since the
+//! geometry/collection cache split (#395), transform/opacity writes only
+//! drop the collection half: the taffy solve is cached and `layout_collect`
+//! re-runs against the fresh styles — what real browsers hand to the
+//! compositor. Geometry writes (width, …) still drop both.
 
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -873,8 +877,9 @@ document.getElementById("box").style.opacity = "0";
 
     /// The invalidation chain the pump rides on: a style-attribute seek
     /// (no tree change, so the DomTree epoch is identical across seeks) must
-    /// still repaint differently — drop_layout on set_attribute is what makes
-    /// band_frame see fresh styles.
+    /// still repaint differently — the attr-level cache drop on set_attribute
+    /// is what makes band_frame see fresh styles (the collection cache for
+    /// transform/opacity, both caches for anything else).
     #[tokio::test(flavor = "current_thread")]
     async fn seek_to_band_frame_yields_distinct_frames() {
         let mut page = navigated_stub_page().await;
@@ -892,6 +897,45 @@ document.getElementById("box").style.opacity = "0";
         assert_ne!(f0.rgba, f1.rgba, "mid-seek must repaint (epoch is equal — this is the attr invalidation)");
         assert_ne!(f1.rgba, f2.rgba, "end-seek must differ from mid");
         assert_ne!(f0.rgba, f2.rgba);
+    }
+
+    /// The #395 contract: a timeline seek writes only transform/opacity,
+    /// so the frames repaint while the taffy solve count stays flat — the
+    /// cached geometry is re-collected, never re-solved. A geometry write
+    /// (width) must pay for a fresh solve again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn paint_only_seek_reuses_the_geometry_solve() {
+        let mut page = navigated_stub_page().await;
+        let vp = (800.0, 450.0);
+        let seek = |page: &mut EnginePage, t: f64| {
+            page.evaluate(&format!(
+                "window.__timelines.main.pause({t}); undefined"
+            ));
+            page.viewport_band_frame(0.0, 0.0, vp).expect("band frame")
+        };
+        // First paint solves (the elements' initial style writes were also
+        // first-writes: no prior attribute to diff → full invalidation).
+        let (f0, _) = seek(&mut page, 0.0);
+        let after_first = page.layout_solve_count();
+        assert!(after_first >= 1, "the first frame must have solved at least once");
+        // Seeks differ in pixels…
+        let (f1, _) = seek(&mut page, 1.0);
+        let (f2, _) = seek(&mut page, 2.0);
+        assert_ne!(f0.rgba, f1.rgba, "mid-seek repaints");
+        assert_ne!(f1.rgba, f2.rgba, "end-seek repaints");
+        // …but every one of them rode the cached solve.
+        assert_eq!(
+            page.layout_solve_count(),
+            after_first,
+            "paint-only seeks must not re-run the taffy solve"
+        );
+        // A geometry property write breaks the whitelist — full re-solve.
+        page.evaluate("document.getElementById('box').style.width = '300px'; undefined");
+        let (_, _) = seek(&mut page, 2.0);
+        assert!(
+            page.layout_solve_count() > after_first,
+            "a width write must invalidate the geometry cache"
+        );
     }
 
     /// Scrolling-camera fixture: pause(t) drives window.scrollTo down a

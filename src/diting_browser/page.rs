@@ -1932,6 +1932,17 @@ impl Page {
             .unwrap_or(0)
     }
 
+    /// How many full taffy solves this page has run. Test probe for the
+    /// #395 paint-only path: transform/opacity style writes must repaint
+    /// without moving this counter.
+    #[cfg(all(test, feature = "screenshot"))]
+    pub fn layout_solve_count(&self) -> u64 {
+        self.js
+            .as_ref()
+            .map(|js| js.with_state(|st| st.solves.get()))
+            .unwrap_or(0)
+    }
+
     /// Layout invalidation revision — the other half of the screencast damage
     /// signature. The tree epoch above is a shape stamp: attribute-level
     /// writes (style/class/attr) drop the layout cache without allocating

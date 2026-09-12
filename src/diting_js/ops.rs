@@ -146,6 +146,20 @@ pub struct JsState {
     /// getComputedStyle.
     #[cfg(feature = "screenshot")] // the layout ops run only in the screenshot-gated pipeline
     layout_cache: std::cell::RefCell<Option<(u64, LayoutRun)>>,
+    /// Memoized taffy solve for the live DOM tree, keyed by the same epoch
+    /// — the geometry half of a layout run (see `SolvedGeometry`). A
+    /// paint-only style write (transform/opacity, everything a timeline
+    /// seek lands) drops `layout_cache` but keeps this one: the solve
+    /// provably ignores those properties, so the next run re-collects
+    /// against the cached tree instead of re-solving the full page.
+    #[cfg(feature = "screenshot")]
+    geometry_cache:
+        std::cell::RefCell<Option<(u64, crate::diting_layout::SolvedGeometry)>>,
+    /// Full taffy solves this state has run — a test probe, so the
+    /// paint-only path can assert it stays flat across seeks.
+    #[cfg(feature = "screenshot")]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) solves: std::cell::Cell<u64>,
     /// External stylesheet bodies fetched at navigation (absolute URL →
     /// decoded CSS text). Joined into the cascade by [`layout_run_all`]
     /// and served to the JS side as `document.styleSheets` rule content.
@@ -260,6 +274,19 @@ impl JsState {
     #[cfg(feature = "screenshot")]
     pub(crate) fn drop_layout(&self) {
         *self.layout_cache.borrow_mut() = None;
+        *self.geometry_cache.borrow_mut() = None;
+        self.layout_rev.set(self.layout_rev.get().wrapping_add(1));
+    }
+
+    /// The paint-only invalidation (#395): a transform/opacity style write
+    /// changes pixels but not geometry — the taffy solve provably ignores
+    /// both (`to_taffy_style` maps only geometry families), so the solve
+    /// cache survives and only the collected half re-runs. `layout_rev`
+    /// still moves: the pixels DID change, and damage-signature consumers
+    /// key on it.
+    #[cfg(feature = "screenshot")]
+    pub(crate) fn drop_paint_only(&self) {
+        *self.layout_cache.borrow_mut() = None;
         self.layout_rev.set(self.layout_rev.get().wrapping_add(1));
     }
 
@@ -296,6 +323,10 @@ impl JsState {
             // `layout_rect` op after each mutation; backs getBoundingClientRect.
             #[cfg(feature = "screenshot")]
             layout_cache: std::cell::RefCell::new(None),
+            #[cfg(feature = "screenshot")]
+            geometry_cache: std::cell::RefCell::new(None),
+            #[cfg(feature = "screenshot")]
+            solves: std::cell::Cell::new(0),
             #[cfg(feature = "screenshot")]
             viewport: (1920.0, 1000.0),
             #[cfg(feature = "screenshot")]
@@ -546,7 +577,38 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             | "document_write_reset"
     ) {
         let gs = state.borrow::<SharedState>().clone();
-        gs.borrow().drop_layout();
+        // Paint-only style write (#395): a timeline seek lands as
+        // set_attribute("style", …) whose property-NAME diff sits entirely
+        // inside {transform, opacity} — exactly the compositor-only set a
+        // real browser never re-layouts for. The taffy solve ignores both,
+        // so it survives and the next layout run re-collects against the
+        // cached tree (measured 109ms/frame full-pipeline seeks on the
+        // probe page → the paint floor). This runs pre-write, so the OLD
+        // attribute is still on the node for the diff. Anything else —
+        // unknown properties added, no prior style to diff against — falls
+        // back to the full drop.
+        let paint_only = cmd.as_str() == "set_attribute"
+            && arg2
+                .split_once('\0')
+                .is_some_and(|(name, _)| name.eq_ignore_ascii_case("style"))
+            && {
+                let old = arg1
+                    .parse::<u32>()
+                    .ok()
+                    .map(NodeId::new)
+                    .and_then(|id| {
+                        gs.borrow()
+                            .dom
+                            .as_ref()
+                            .and_then(|d| d.get_node(id).and_then(|n| n.get_attribute("style").map(|s| s.to_string())))
+                    });
+                style_write_is_paint_only(old.as_deref(), arg2.split_once('\0').map(|(_, v)| v))
+            };
+        if paint_only {
+            gs.borrow().drop_paint_only();
+        } else {
+            gs.borrow().drop_layout();
+        }
     }
     // Persona viewport: needs a mutable borrow, so it runs before the main
     // read-only `gs` alias below (same pattern as set_document_title).
@@ -1253,6 +1315,36 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
     }
 }
 
+/// Property names declared in an inline style string, lowercased. A
+/// fragment without a colon (malformed declaration, comment) counts as its
+/// raw text so garbage can never whitelist by accident — it simply never
+/// matches {transform, opacity}.
+#[cfg(feature = "screenshot")]
+fn style_property_names(style: &str) -> std::collections::HashSet<String> {
+    style
+        .split(';')
+        .map(|decl| decl.split_once(':').map(|(name, _)| name).unwrap_or(decl).trim())
+        .filter(|name| !name.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+/// Is a style-attribute write paint-only — every property name it ADDS or
+/// REMOVES sits inside {transform, opacity}? Values may differ freely: the
+/// taffy solve reads neither property, and the collect walk re-reads both
+/// from fresh computed styles, so only the name diff matters for geometry.
+/// A missing side (no prior attribute to diff against) answers false — an
+/// unmeasurable before-state gets the full invalidation, never a guessed
+/// cache reuse.
+#[cfg(feature = "screenshot")]
+fn style_write_is_paint_only(old: Option<&str>, new: Option<&str>) -> bool {
+    let (Some(old), Some(new)) = (old, new) else { return false };
+    let old = style_property_names(old);
+    let new = style_property_names(new);
+    old.symmetric_difference(&new)
+        .all(|name| name == "transform" || name == "opacity")
+}
+
 /// One style+layout run over the live tree (see [`JsState::layout_cache`]):
 /// every element's border-box rect, the paint order, the cascaded
 /// ComputedStyle per element, and the flat paint-item list in paint order
@@ -1348,27 +1440,60 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
     let styles_map = crate::diting_layout::compute_styles(dom, &rules);
     let t_styles = t0.elapsed();
     let fonts = crate::diting_fonts::font_book();
-    // The byte table the run resolves http(s) img sources against. Empty →
-    // None keeps the all-placeholder path byte-identical to before (and lets
-    // the caller decide when rasters are worth fetching).
-    let bytes_map = gs.image_bytes.borrow();
-    let network_bytes: Option<&HashMap<String, std::sync::Arc<Vec<u8>>>> =
-        if bytes_map.is_empty() { None } else { Some(&bytes_map) };
-    let (rects, items, paint_order) = crate::diting_layout::layout_dom_with_paint_order_and_images(
-        dom,
-        &styles_map,
-        &fonts,
-        viewport_width,
-        viewport_height,
-        network_bytes,
-        Some(gs.url.as_str()),
-    );
-    drop(bytes_map);
+    // Solve-vs-collect split (#395): the taffy solve is cached keyed by the
+    // tree epoch. A paint-only style write (transform/opacity — the choke
+    // point in op_dom_inner) dropped the collected cache but kept this one,
+    // so the run below re-collects against the cached tree. Anything
+    // structural (tree mutation, class change, image bytes landing,
+    // viewport move) drops both caches and re-solves.
+    let epoch = dom.epoch();
+    let reuse = gs
+        .geometry_cache
+        .borrow()
+        .as_ref()
+        .is_some_and(|(e, _)| *e == epoch);
+    let solve_src = if reuse { "cached" } else { "full" };
+    let (rects, items, paint_order) = if reuse {
+        // Borrow held only across layout_collect, which never touches
+        // JsState — nothing else can interleave on this single thread.
+        let guard = gs.geometry_cache.borrow();
+        let (_, solved) = guard.as_ref().expect("freshness checked above");
+        crate::diting_layout::layout_collect(dom, &styles_map, &fonts, solved, viewport_width)
+    } else {
+        // The byte table the run resolves http(s) img sources against.
+        // Empty → None keeps the all-placeholder path byte-identical to
+        // before (and lets the caller decide when rasters are worth
+        // fetching).
+        let bytes_map = gs.image_bytes.borrow();
+        let network_bytes: Option<&HashMap<String, std::sync::Arc<Vec<u8>>>> =
+            if bytes_map.is_empty() { None } else { Some(&bytes_map) };
+        let solved = crate::diting_layout::layout_solve(
+            dom,
+            &styles_map,
+            &fonts,
+            viewport_width,
+            viewport_height,
+            network_bytes,
+            Some(gs.url.as_str()),
+        );
+        drop(bytes_map);
+        gs.solves.set(gs.solves.get() + 1);
+        let run = crate::diting_layout::layout_collect(
+            dom,
+            &styles_map,
+            &fonts,
+            &solved,
+            viewport_width,
+        );
+        *gs.geometry_cache.borrow_mut() = Some((epoch, solved));
+        run
+    };
     if trace {
         let t_layout = t0.elapsed();
         eprintln!(
-            "[layout-trace] total={:?} css_collect={:?} css_parse={:?} compute_styles={:?} layout={:?} css_bytes={} rects={}",
+            "[layout-trace] total={:?} solve={} css_collect={:?} css_parse={:?} compute_styles={:?} layout={:?} css_bytes={} rects={}",
             t_layout,
+            solve_src,
             t_css,
             t_parse - t_css,
             t_styles - t_parse,
@@ -4122,6 +4247,56 @@ mod tests {
         preflight_allows_method, validate_fetch_url, FetchCredentials,
     };
     use super::{pbkdf2_derive, PBKDF2_MAX_ITERATIONS, PBKDF2_MAX_OUTPUT_BYTES};
+
+    /// The #395 paint-only predicate: only a name diff inside
+    /// {transform, opacity} may keep the solve cache. Value changes,
+    /// whitelist additions/removals, prefixed properties and missing
+    /// before-states must all fall back to the full invalidation.
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn style_write_paint_only_diff_matrix() {
+        use super::{style_property_names, style_write_is_paint_only};
+        // Values differ freely while the names stay — the seek case.
+        assert!(style_write_is_paint_only(
+            Some("transform: translate3d(-200px, 0px, 0px); opacity: 0"),
+            Some("transform: translate3d(-32.4821px, 0px, 0px); opacity: 0.8376"),
+        ));
+        // Adding a whitelisted property to an existing whitelisted set.
+        assert!(style_write_is_paint_only(
+            Some("transform: translate3d(-200px, 0px, 0px)"),
+            Some("transform: translate3d(-12px, 0px, 0px); opacity: 0.5"),
+        ));
+        // Clearing the animation off a style that only ever held it.
+        assert!(style_write_is_paint_only(
+            Some("opacity: 0.42; transform: scale(2)"),
+            Some(""),
+        ));
+        // A geometry property appears — full invalidation.
+        assert!(!style_write_is_paint_only(
+            Some("transform: translate3d(-200px, 0px, 0px); opacity: 0"),
+            Some("transform: translate3d(-200px, 0px, 0px); opacity: 0; width: 300px"),
+        ));
+        // Prefixed transform is a different name — never whitelisted on a
+        // guess.
+        assert!(!style_write_is_paint_only(
+            Some("transform: scale(2)"),
+            Some("transform: scale(2); -webkit-transform: scale(2)"),
+        ));
+        // A geometry property disappears.
+        assert!(!style_write_is_paint_only(
+            Some("width: 300px; opacity: 0.5"),
+            Some("opacity: 0.5"),
+        ));
+        // No before-state to diff — conservative full drop (first write on
+        // a bare element).
+        assert!(!style_write_is_paint_only(None, Some("opacity: 0")));
+        assert!(!style_write_is_paint_only(Some("opacity: 0"), None));
+        // Name extraction: casing, whitespace and empty fragments.
+        assert_eq!(
+            style_property_names("TRANSFORM: scale(2) ; ; opacity:0"),
+            ["transform", "opacity"].into_iter().map(str::to_string).collect::<std::collections::HashSet<_>>()
+        );
+    }
 
     // Ephemeral deployments must not persist login tokens: storage_file is
     // the single choke point every localStorage flush goes through.
