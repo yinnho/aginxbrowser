@@ -1620,9 +1620,10 @@ bash, PowerShell and cmd copy flavors.",
 
     #[tool(
         description = "List named login identities (the multi-account layer) with metadata only: \
-name, cookie domains, cookie count, updated_at, and the last account_verify verdict. Cookie values \
-are credentials and never leave the server. Use to see which identities exist before \
-session_create {account} picks one.",
+name, cookie domains, cookie count, updated_at, the last account_verify verdict, and the identity's \
+persona User-Agent (each account is one stable device: its own UA and hardware fingerprint, drawn \
+once and reused). Cookie values are credentials and never leave the server. Use to see which \
+identities exist before session_create {account} picks one.",
         annotations(title = "List Accounts", read_only_hint = true)
     )]
     async fn account_list(&self) -> String {

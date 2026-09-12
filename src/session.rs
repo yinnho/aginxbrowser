@@ -929,9 +929,9 @@ impl SessionManager {
     }
 
     /// Same read, but into the account store — the write-back target for
-    /// account sessions. The learned verify spec from the previous record
-    /// survives the refresh (a state write-back must not erase what
-    /// account_verify taught).
+    /// account sessions. The learned verify spec and drawn persona from the
+    /// previous record survive the refresh (a state write-back must not
+    /// erase what account_verify taught or re-draw the identity's device).
     async fn capture_account(&mut self, owner: &str, name: &str, session_id: &str) {
         let Some(mut record) = self.read_login_state(session_id).await else {
             return;
@@ -940,6 +940,9 @@ impl SessionManager {
             if let Ok(prev) = serde_json::from_str::<Value>(&text) {
                 if prev.get("verify").is_some_and(|v| v.is_object()) {
                     record["verify"] = prev["verify"].clone();
+                }
+                if prev.get("persona").is_some_and(|v| v.is_object()) {
+                    record["persona"] = prev["persona"].clone();
                 }
             }
         }
@@ -1361,17 +1364,32 @@ fn session_thread(
                 // one profile), other accounts and the anonymous shared jar
                 // never see this session's cookies. The jar is seeded from
                 // the stored record, so a post-restart session_create
-                // {account} starts where the last one left off.
-                let browser = match &account {
-                    Some((owner, name)) => crate::server::build_browser_for_account(
-                        use_proxy,
-                        "",
+                // {account} starts where the last one left off. The
+                // account's device persona rides along too (teach-once in
+                // the record): its UA goes to the browser, its fp_seed pins
+                // the page's JS hardware identity below — one stable device
+                // per identity, not one shared fingerprint with two logins.
+                let (browser, persona) = match &account {
+                    Some((owner, name)) => {
+                        let persona = crate::account::persona_for(owner, name, None);
+                        (
+                            crate::server::build_browser_for_account(
+                                use_proxy,
+                                "",
+                                None,
+                                crate::account::jar_for(owner, name),
+                                Some(persona.user_agent.as_str()),
+                            )
+                            .expect("failed to build session browser"),
+                            Some(persona),
+                        )
+                    }
+                    None => (
+                        crate::server::build_browser(use_proxy, "", None)
+                            .expect("failed to build session browser"),
                         None,
-                        crate::account::jar_for(owner, name),
                     ),
-                    None => crate::server::build_browser(use_proxy, "", None),
-                }
-                .expect("failed to build session browser");
+                };
                 // Inject cookies before navigation so a session can start
                 // already logged-in (cookies gathered from a prior session via
                 // the Cookies command, or hand-exported). Mirrors /fetch. For
@@ -1382,6 +1400,15 @@ fn session_thread(
                     crate::server::inject_cookies(&browser, &cookies, target);
                 }
                 let mut page = browser.new_page().await.expect("failed to create session page");
+
+                // Pin the persona's hardware seed before the first
+                // navigation: init_js re-bakes the seed into the JS runtime
+                // on every navigation (#269), so a pre-goto pin holds for
+                // the session's whole life — screen/dpr/GPU/canvas draw from
+                // the account's identity, not a fresh random one per page.
+                if let Some(persona) = &persona {
+                    page.inner.set_fingerprint_seed(persona.fp_seed);
+                }
 
                 // Replay log: every page-changing action this session took,
                 // in order. In-memory only, dies with the session; exported

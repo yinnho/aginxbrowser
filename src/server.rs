@@ -100,18 +100,25 @@ pub fn build_browser_with_jar(
 /// Same shape as the shared-jar wiring, but the jar belongs to one named
 /// login identity: concurrent same-account sessions share it (two tabs, one
 /// profile), and nothing an account does ever lands in the anonymous
-/// shared jar or another account's.
+/// shared jar or another account's. `user_agent` is the identity's persona
+/// UA — it reaches the HTTP transport and `navigator.userAgent` alike, and
+/// the TLS emulation OS follows it, so the whole device shape stays
+/// coherent.
 pub fn build_browser_for_account(
     use_proxy: bool,
     url: &str,
     tls_fingerprint: Option<&str>,
     jar: std::sync::Arc<CookieJar>,
+    user_agent: Option<&str>,
 ) -> Result<Browser> {
     let stealth = !matches!(
         std::env::var("AGINXBROWSER_STEALTH").ok().as_deref(),
         Some("0")
     );
     let mut builder = Browser::builder().stealth(stealth).shared_cookie_jar(jar);
+    if let Some(ua) = user_agent {
+        builder = builder.user_agent(ua);
+    }
     if let Some(fp) = tls_fingerprint {
         builder = builder.tls_fingerprint(fp);
     }

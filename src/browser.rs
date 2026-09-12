@@ -83,14 +83,13 @@ impl BrowserBuilder {
         self
     }
     // Per-instance UA override (env AGINXBROWSER_UA covers the process-wide
-    // case) and the storage_dir cookie-persistence knob. No caller sets
-    // either today; parked with the persistence feature (see
-    // BrowserContext::save_cookies).
-    #[allow(dead_code)]
+    // case): the account layer passes each identity's persona UA here.
     pub fn user_agent(mut self, ua: impl Into<String>) -> Self {
         self.config.user_agent = Some(ua.into());
         self
     }
+    // Cookie-persistence knob. No caller sets it today; parked with the
+    // persistence feature (see BrowserContext::save_cookies).
     #[allow(dead_code)]
     pub fn storage_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.config.storage_dir = Some(dir.into());

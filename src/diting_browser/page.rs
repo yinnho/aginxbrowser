@@ -388,6 +388,15 @@ impl Page {
         }
     }
 
+    /// Pin the hardware persona seed (screen/dpr/GPU/canvas all draw from
+    /// it). Must run before the first navigation — init_js bakes the seed
+    /// into the JS runtime on every navigation, so a pre-goto pin holds for
+    /// the page's whole life. The account layer uses this to give each
+    /// named identity one stable device.
+    pub fn set_fingerprint_seed(&mut self, seed: u64) {
+        self.fp_seed = seed;
+    }
+
     /// Hard block from `Network.setBlockedURLs`: matched resources fail
     /// outright (Chrome semantics — no pause, no client round trip).
     /// `pub(crate)`: render-path fetchers outside this module (screenshot

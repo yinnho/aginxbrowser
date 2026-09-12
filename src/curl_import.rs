@@ -371,6 +371,14 @@ pub async fn create_session_from_curl(
     let has_body = parsed.data.is_some();
     let cookie_count = parsed.cookies.len();
 
+    // With account: the copied command's User-Agent is the human's real
+    // device — teach it as the identity's persona UA on first import
+    // (teach-once: an account that already drew a persona keeps it). Runs
+    // before mgr.create so the session thread reads the persona back.
+    if let Some((owner, name)) = &account {
+        crate::account::persona_for(owner, name, ua.as_deref());
+    }
+
     let mut mgr = crate::session::SESSIONS.lock().await;
     mgr.evict_expired();
     let id = mgr.create(

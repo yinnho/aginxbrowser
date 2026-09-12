@@ -1026,6 +1026,7 @@ impl Store {
                     .as_object()
                     .cloned()
                     .map(serde_json::Value::Object),
+                persona_ua: v["persona"]["user_agent"].as_str().map(str::to_string),
             });
         }
         Ok(out)
@@ -1697,6 +1698,18 @@ mod tests {
         assert_eq!(rows[0].cookie_count, 1);
         assert_eq!(rows[0].domains, vec!["taobao.com".to_string()]);
         assert!(rows[0].verify_url.is_none());
+        assert!(rows[0].persona_ua.is_none());
+
+        // The persona rides the listing as its UA; the fp_seed stays
+        // server-side (callers can't act on it, and the summary is
+        // metadata-only by contract).
+        let with_persona =
+            r#"{"version":1,"persona":{"fp_seed":42,"user_agent":"UA-X"},"cookies":[]}"#;
+        s.save_account("owner-a", "publisher", with_persona)
+            .unwrap();
+        let rows = s.list_accounts("owner-a").unwrap();
+        let publisher = rows.iter().find(|r| r.name == "publisher").unwrap();
+        assert_eq!(publisher.persona_ua.as_deref(), Some("UA-X"));
 
         assert!(s.delete_account("owner-a", "scraper").unwrap());
         assert!(!s.delete_account("owner-a", "scraper").unwrap()); // already gone

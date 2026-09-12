@@ -127,6 +127,89 @@ pub fn delete(owner: &str, name: &str) -> bool {
     crate::store::delete_account(owner, name)
 }
 
+/// A named account's device identity: the User-Agent every request carries,
+/// and the hardware seed the JS persona (screen/dpr/GPU/canvas) draws from.
+/// One stable device per identity — jar isolation alone doesn't stop
+/// risk-control linkage: two logins sharing one fingerprint read as "one
+/// device with two accounts", which is exactly the correlation the layer
+/// exists to prevent.
+pub struct Persona {
+    pub fp_seed: u64,
+    pub user_agent: String,
+}
+
+/// UA pool for a fresh persona: Windows and macOS Chrome 145 only. Both
+/// entries match the default chrome145 TLS handshake on family and major
+/// (zero `warn_on_ua_tls_mismatch` tells), and the TLS emulation OS follows
+/// the UA, so Win↔Mac is the free axis — hardware differentiation rides the
+/// fp_seed. Drawn from the profiles pool (not hardcoded) so a pool refresh
+/// follows along.
+fn persona_ua_pool() -> Vec<&'static str> {
+    crate::diting_browser::profiles::PROFILES
+        .iter()
+        .filter(|p| p.user_agent.contains("Chrome/145.0.0.0"))
+        .map(|p| p.user_agent)
+        .collect()
+}
+
+/// Draw a fresh persona: random fp_seed (same uuid cut `Page::new` uses) and
+/// a UA — `ua_hint` verbatim when given (an imported cURL's User-Agent is
+/// the human's real device, already shown to the site alongside these
+/// cookies; replaying a different UA on the same login is the bigger tell),
+/// else a pick from the Chrome-145 pool keyed off the seed.
+fn draw_persona(ua_hint: Option<&str>) -> Persona {
+    let fp_seed = u64::from_be_bytes(uuid::Uuid::new_v4().into_bytes()[..8].try_into().unwrap());
+    let pool = persona_ua_pool();
+    let user_agent = ua_hint
+        .filter(|u| !u.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| pool[(fp_seed as usize) % pool.len()].to_string());
+    Persona {
+        fp_seed,
+        user_agent,
+    }
+}
+
+/// Read the persona off a stored record. Partial or empty entries read as
+/// "no persona yet" so the next session draws a complete one.
+fn read_persona(record: &serde_json::Value) -> Option<Persona> {
+    let fp_seed = record["persona"]["fp_seed"].as_u64()?;
+    let user_agent = record["persona"]["user_agent"]
+        .as_str()
+        .filter(|u| !u.is_empty())?;
+    Some(Persona {
+        fp_seed,
+        user_agent: user_agent.to_string(),
+    })
+}
+
+/// Get-or-draw the account's device persona, teach-once like verify: the
+/// first call draws (fp_seed random, UA = `ua_hint` when the caller has the
+/// human's real one — the import_curl path) and writes it into the stored
+/// record; every later call returns the remembered pair, so an account is
+/// one stable device across sessions and restarts. When the store is
+/// disabled the draw is best-effort per call (same semantics as jar seeding).
+pub fn persona_for(owner: &str, name: &str, ua_hint: Option<&str>) -> Persona {
+    validate_name(name).expect("account name validated at the API boundary");
+    let mut record = match load(owner, name) {
+        Some((text, _)) => serde_json::from_str::<serde_json::Value>(&text)
+            .unwrap_or(serde_json::json!({"version": 1})),
+        None => serde_json::json!({"version": 1}),
+    };
+    if let Some(persona) = read_persona(&record) {
+        return persona;
+    }
+    let persona = draw_persona(ua_hint);
+    record["persona"] = serde_json::json!({
+        "fp_seed": persona.fp_seed,
+        "user_agent": persona.user_agent,
+    });
+    if let Err(e) = save(owner, name, &record.to_string()) {
+        tracing::debug!("persona save failed for {name}: {e}");
+    }
+    persona
+}
+
 /// One row per account for `GET /accounts` / the MCP list tool. Metadata
 /// only — cookie values never appear (they're credentials; the count and
 /// domains are enough to tell identities apart).
@@ -142,6 +225,10 @@ pub struct AccountSummary {
     pub verify_predicate: Option<String>,
     /// Last verdict, if any: `{logged_in, checked_at, url}`.
     pub verify_last: Option<serde_json::Value>,
+    /// The persona's User-Agent, if this identity has drawn its device
+    /// identity. The fp_seed stays server-side — callers can't do anything
+    /// with it, and not echoing it keeps the summary metadata-only.
+    pub persona_ua: Option<String>,
 }
 
 pub fn list(owner: &str) -> Vec<AccountSummary> {
@@ -379,5 +466,63 @@ mod tests {
         );
         let other = url::Url::parse("https://example.com/").unwrap();
         assert!(!jar.get_cookie_header(&other).contains("cookie2"));
+    }
+
+    // The pool is the persona's TLS-coherence contract: Chrome 145 only
+    // (zero mismatch with the default chrome145 handshake), both desktop OSes
+    // present so Win/Mac is the differentiation axis.
+    #[test]
+    fn persona_pool_is_chrome145_win_and_mac() {
+        let pool = persona_ua_pool();
+        assert!(pool.len() >= 2, "pool: {pool:?}");
+        for ua in &pool {
+            assert!(ua.contains("Chrome/145.0.0.0"), "out of family: {ua}");
+        }
+        assert!(pool.iter().any(|u| u.contains("Windows NT")));
+        assert!(pool.iter().any(|u| u.contains("Macintosh")));
+    }
+
+    // persona_for's teach-once splits into these pure halves because the
+    // global store behind load/save is a OnceLock pinned at first use — env
+    // knobs can't re-point it per test. Persistence is covered by the store
+    // roundtrip tests.
+    #[test]
+    fn draw_persona_honors_hint_then_pool() {
+        let real = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
+        // The human's real UA wins verbatim — even out-of-family: the site
+        // already saw it alongside these cookies.
+        assert_eq!(draw_persona(Some(real)).user_agent, real);
+        // Empty hints fall through to the pool.
+        assert_eq!(
+            draw_persona(Some("  ")).user_agent,
+            draw_persona(None).user_agent
+        );
+        for _ in 0..20 {
+            let p = draw_persona(None);
+            assert!(
+                persona_ua_pool().contains(&p.user_agent.as_str()),
+                "drawn UA outside pool: {}",
+                p.user_agent
+            );
+        }
+        // Distinct identities get distinct hardware (collision odds 2^-64).
+        assert_ne!(draw_persona(None).fp_seed, draw_persona(None).fp_seed);
+    }
+
+    #[test]
+    fn read_persona_roundtrip_and_rejects_partial() {
+        let p = draw_persona(None);
+        let record =
+            serde_json::json!({"persona": {"fp_seed": p.fp_seed, "user_agent": p.user_agent}});
+        let back = read_persona(&record).expect("complete persona reads back");
+        assert_eq!(back.fp_seed, p.fp_seed);
+        assert_eq!(back.user_agent, p.user_agent);
+        // Partial or empty entries mean "draw fresh", never a half persona.
+        assert!(read_persona(&serde_json::json!({})).is_none());
+        assert!(read_persona(&serde_json::json!({"persona": {"fp_seed": 7}})).is_none());
+        assert!(
+            read_persona(&serde_json::json!({"persona": {"fp_seed": 7, "user_agent": ""}}))
+                .is_none()
+        );
     }
 }

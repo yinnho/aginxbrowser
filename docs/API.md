@@ -777,7 +777,7 @@ Create an interactive browser session.
 | use_proxy | bool | | `false` | Route through a proxy |
 | cookies | string[] \| object[] | | `[]` | Cookies injected before navigation (`"name=value",...` or CDP-style objects) so the session starts already logged in |
 | persistent | bool | | `false` | Persist login state to the server-side store: if the session idles out or the server restarts, the same `session_id` revives logged-in on the next call (`session/{id}/close` drops the snapshot; idle expiry keeps it) |
-| account | string | | `null` | Run as a named login identity (see [Named Accounts](#named-accounts-multi-login)): a private cookie jar seeded from the account record, written back after every action — concurrent logins on different accounts never clobber each other, and none touch the anonymous shared jar |
+| account | string | | `null` | Run as a named login identity (see [Named Accounts](#named-accounts-multi-login)): a private cookie jar seeded from the account record, written back after every action — concurrent logins on different accounts never clobber each other, and none touch the anonymous shared jar. The identity's device persona (own UA + hardware fingerprint) rides every session |
 
 **Response:**
 
@@ -795,7 +795,7 @@ Turn a DevTools **"Copy as cURL"** command into a logged-in browser session — 
 |------|------|------|------|------|
 | curl | string | ✅ | — | The copied cURL command |
 | use_proxy | bool | | `false` | Route the session's traffic through the `AGINXBROWSER_PROXY` proxy |
-| account | string | | `null` | Attach the session to a named account: the imported login lands in the account's private jar and is written back under its name — one import per identity, no clobbering |
+| account | string | | `null` | Attach the session to a named account: the imported login lands in the account's private jar and is written back under its name — one import per identity, no clobbering. On first import the copied command's User-Agent becomes the identity's persona (its device UA, reused by every later session) |
 
 **Response:**
 
@@ -866,6 +866,8 @@ Anonymous traffic shares one process-global cookie jar — deliberate (repeat-vi
 
 Attach a session with `account` on `POST /session/create` or `POST /import/curl` (1-64 chars of `[a-zA-Z0-9_-]`). The account is the persistence — account sessions don't need `persistent: true`.
 
+**Per-account device persona** — an identity is one stable *device*, not just one cookie jar. On first use an account draws a persona — a User-Agent from the Windows/macOS Chrome-145 pool plus a hardware seed that drives its `screen`/devicePixelRatio/GPU/canvas fingerprint — remembers both in its record, and reuses them for every later session, restarts included. Jar isolation alone can't stop risk-control linkage: two logins sharing one fingerprint read as "one device with two accounts". `import_curl` seeds the persona from the copied command's real User-Agent (the device the site already saw alongside those cookies). The pool is pinned to Chrome 145 so UA and the default TLS handshake never disagree; the hardware seed itself stays server-side — `GET /accounts` reports only the persona UA (`persona_ua`).
+
 **List accounts:**
 
 ```bash
@@ -876,8 +878,8 @@ curl -sS http://127.0.0.1:8089/accounts
 {
   "count": 2,
   "accounts": [
-    {"name": "taobao-publisher", "domains": ["taobao.com", "tmall.com"], "cookie_count": 34, "updated_at": 1762934400, "verify_url": "https://www.taobao.com/", "verify_predicate": "!!document.querySelector('.user-nick')", "verify_last": {"logged_in": true, "url": "https://www.taobao.com/", "checked_at": 1762934401}},
-    {"name": "taobao-scraper", "domains": ["taobao.com"], "cookie_count": 29, "updated_at": 1762933900}
+    {"name": "taobao-publisher", "domains": ["taobao.com", "tmall.com"], "cookie_count": 34, "updated_at": 1762934400, "persona_ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36", "verify_url": "https://www.taobao.com/", "verify_predicate": "!!document.querySelector('.user-nick')", "verify_last": {"logged_in": true, "url": "https://www.taobao.com/", "checked_at": 1762934401}},
+    {"name": "taobao-scraper", "domains": ["taobao.com"], "cookie_count": 29, "updated_at": 1762933900, "persona_ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"}
   ]
 }
 ```
@@ -1519,7 +1521,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 |------|------|
 | `session_create` | Create an interactive browser session; with `persistent: true` the login state survives idle eviction and server restarts — the same `session_id` revives logged-in |
 | `import_curl` | Paste a DevTools "Copy as cURL" command → a live session already carrying that site's cookies, anchored at the copied request's URL — the human logs in (CAPTCHA/SMS once) in their own Chrome, the agent continues from there; bash/PowerShell/cmd flavors all parse; `account` attaches the login to a named identity |
-| `account_list` | List named login identities (the multi-account layer) — metadata only: name, cookie domains, cookie count, updated_at, last verify verdict. See which identities exist before `session_create {account}` picks one |
+| `account_list` | List named login identities (the multi-account layer) — metadata only: name, cookie domains, cookie count, updated_at, last verify verdict, persona UA. Each account is one stable device (own UA + hardware fingerprint). See which identities exist before `session_create {account}` picks one |
 | `account_verify` | Check whether a named account is still logged in. Teach-once: first call passes `url` + `predicate` (a JS expression truthy on a logged-in page); the spec is remembered, later calls can be bare. Runs in a scratch session as the account — the probe doubles as a cookie refresh |
 | `account_delete` | Delete a named login identity: stored record AND live jar (delete means gone) |
 | `session_clone` | Derive a new session carrying the full login state (cookies + storage + viewport + dialog policy); the source stays untouched — snapshot before risky actions, or run one login in parallel |
