@@ -332,6 +332,7 @@ impl JsState {
             geometry_cache: std::cell::RefCell::new(None),
             #[cfg(feature = "screenshot")]
             solves: std::cell::Cell::new(0),
+            #[cfg(feature = "screenshot")]
             band_paints: std::cell::Cell::new(0),
             #[cfg(feature = "screenshot")]
             viewport: (1920.0, 1000.0),
