@@ -502,14 +502,20 @@ async fn seek_and_paint(
          try {{ window.__timelines[k].pause({t:.4}); }} catch (e) {{}} }} }})()"
     );
     let _ = page.evaluate(&seek);
-    let Some((frame, missing)) = page.viewport_band_frame(0.0, 0.0, viewport) else {
+    // The camera's window.scrollTo lands in the JS root-scroller state (the
+    // bootstrap mirrors it to set_scroll_offset) — read it back so the band
+    // paints the section the page is actually showing. Painting (0, 0)
+    // unconditionally froze every scrolling timeline at the document top;
+    // the intro video never noticed because its camera never moved.
+    let (sx, sy) = page.scroll_offset();
+    let Some((frame, missing)) = page.viewport_band_frame(sx, sy, viewport) else {
         return Err(VideoError::NoLiveDocument);
     };
     if missing.is_empty() {
         return Ok((frame.width, frame.height, frame.rgba));
     }
     page.fetch_band_images(missing).await;
-    let Some((frame, _)) = page.viewport_band_frame(0.0, 0.0, viewport) else {
+    let Some((frame, _)) = page.viewport_band_frame(sx, sy, viewport) else {
         return Err(VideoError::NoLiveDocument);
     };
     Ok((frame.width, frame.height, frame.rgba))
@@ -619,6 +625,49 @@ document.getElementById("box").style.opacity = "0";
         assert_ne!(f0.rgba, f1.rgba, "mid-seek must repaint (epoch is equal — this is the attr invalidation)");
         assert_ne!(f1.rgba, f2.rgba, "end-seek must differ from mid");
         assert_ne!(f0.rgba, f2.rgba);
+    }
+
+    /// Scrolling-camera fixture: pause(t) drives window.scrollTo down a
+    /// two-screen document, the way the comparison video's camera does.
+    const SCROLL_HTML: &str = r#"<!doctype html><html><head><style>
+html,body{margin:0;padding:0;width:800px}
+#top{width:800px;height:450px;background:rgb(16,20,24)}
+#bot{width:800px;height:450px;background:rgb(80,200,60)}
+</style></head><body>
+<div id="top"></div><div id="bot"></div>
+<script>
+window.__timelines = { main: {
+  duration: function () { return 2; },
+  pause: function (t) {
+    window.scrollTo(0, Math.round(450 * Math.min(Math.max(t / 2, 0), 1)));
+  }
+}};
+</script></body></html>"#;
+
+    /// A scrolling camera must paint the band the page scrolled to.
+    /// seek_and_paint once passed (0, 0) to viewport_band_frame
+    /// unconditionally, freezing every scrolling timeline at the document
+    /// top — the intro video never caught it because its camera never moved.
+    #[tokio::test(flavor = "current_thread")]
+    async fn scrolling_camera_paints_the_band_the_page_scrolled_to() {
+        let port = spawn_html_server(SCROLL_HTML);
+        let mut page = test_page();
+        page.navigate_with_wait(
+            &format!("http://127.0.0.1:{port}/scroll.html"),
+            WaitUntil::Load,
+        )
+        .await
+        .expect("navigate scroll fixture");
+        page.settle_until_idle(5000).await;
+        let vp = (800.0, 450.0);
+        let (_, _, top) = seek_and_paint(&mut page, vp, 0.0).await.expect("frame at top");
+        let (_, _, bot) = seek_and_paint(&mut page, vp, 2.0).await.expect("frame at bottom");
+        let px = |f: &[u8]| {
+            let i = (225 * 800 + 400) * 4;
+            (f[i], f[i + 1], f[i + 2])
+        };
+        assert_eq!(px(&top), (16, 20, 24), "camera at the top paints the dark screen");
+        assert_eq!(px(&bot), (80, 200, 60), "camera scrolled down paints the lower screen");
     }
 
     /// End-to-end pump: stub timeline → in-process frames → ffmpeg pipe →
