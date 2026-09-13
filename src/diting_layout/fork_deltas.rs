@@ -2235,3 +2235,78 @@ fn oversized_border_radius_clamps_to_half_box() {
     let top_row_ink = (0..400).filter(|&x| ink_at(x, pill.y as usize)).count();
     assert!(top_row_ink > 100, "capsule top edge is a wide flat segment, got {top_row_ink} px");
 }
+
+/// `word-spacing` (obscura#934 family) moves the words after a separator:
+/// in the mixed-run path the collapsed " " is its own leaf whose advance
+/// carries the extra spacing, so taffy positions the next word's leaf
+/// further right — by exactly the declared px per separator.
+#[test]
+fn word_spacing_widens_word_gaps_in_mixed_runs() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::PaintItem;
+
+    let html = r#"<html><body>
+        <p style="word-spacing:0px"><b>ab</b> cd</p>
+        <p style="word-spacing:50px"><b>ab</b> cd</p>
+        </body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let (_, items, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+        &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
+    );
+    let words_of = |needle: &str| -> Vec<(f32, f32)> {
+        items.iter().filter_map(|it| match it {
+            PaintItem::Text { text, x, y, .. } if text == needle => Some((*x, *y)),
+            _ => None,
+        }).collect()
+    };
+    let abs = words_of("ab");
+    let cds = words_of("cd");
+    assert_eq!(abs.len(), 2, "both paragraphs paint their 'ab' word leaf");
+    assert_eq!(cds.len(), 2, "both paragraphs paint their 'cd' word leaf");
+    // Paragraph order is document order; pair each 'cd' with the 'ab' on
+    // its line (same y) and diff the gap the space leaf absorbed.
+    let mut gaps = Vec::new();
+    for &(cx, cy) in &cds {
+        if let Some(&(ax, _)) = abs.iter().find(|&&(_, ay)| (ay - cy).abs() < 2.0) {
+            gaps.push(cx - ax);
+        }
+    }
+    assert_eq!(gaps.len(), 2);
+    gaps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let d = gaps[1] - gaps[0];
+    assert!(
+        (d - 50.0).abs() < 1.0,
+        "one separator → the gap grows by exactly the word-spacing, got {d}"
+    );
+}
+
+/// The phrasing-content rest (obscura#936): mark/ins/del/big/s/u/strike/tt/
+/// samp/kbd/dfn/var/cite/bdi/bdo are inline in every UA sheet — they must
+/// join the text run on ONE line, not stack as full-width blocks.
+#[test]
+fn phrasing_content_uas_share_one_text_line() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::PaintItem;
+
+    let html = r#"<html><body><p>a<mark>m</mark><ins>i</ins><del>d</del><big>g</big><u>u</u><s>s</s><strike>k</strike><tt>tt</tt><samp>sa</samp><kbd>kb</kbd><dfn>df</dfn><var>v</var><cite>ci</cite><bdi>b1</bdi><bdo>b2</bdo></p></body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let (_, items, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+        &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
+    );
+    let ys: Vec<f32> = items.iter().filter_map(|it| match it {
+        PaintItem::Text { text, y, .. } if !text.trim().is_empty() && text.len() <= 2 => Some(*y),
+        _ => None,
+    }).collect();
+    assert!(ys.len() >= 14, "every phrasing tag's token paints, found {}", ys.len());
+    let spread = ys.iter().cloned().fold(f32::MIN, f32::max) - ys.iter().cloned().fold(f32::MAX, f32::min);
+    assert!(
+        spread < 12.0,
+        "all phrasing tokens share one line (baseline tops differ by font size only), y-spread = {spread}"
+    );
+}

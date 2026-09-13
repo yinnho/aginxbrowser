@@ -299,6 +299,7 @@ impl FontBook {
             mono,
             color,
             line_height_bits: line_height.to_bits(),
+            word_spacing_bits: 0.0f32.to_bits(), // single-line path applies no word-spacing
         };
         RasterCache::get_or_insert(key, || {
             self.rasterize_line_uncached(text, font_size, bold, color, line_height, mono)
@@ -353,6 +354,7 @@ impl FontBook {
     /// and the box height is `lines × lh` — the exact box the measure
     /// function reported, so a compositor places this tile at the leaf's
     /// layout origin and the geometry lines up with the layout tree.
+    #[allow(clippy::too_many_arguments)]
     pub fn rasterize_wrapped(
         &self,
         text: &str,
@@ -362,6 +364,7 @@ impl FontBook {
         wrap_at: f32,
         line_height: f32,
         mono: bool,
+        word_spacing: f32,
     ) -> Arc<TextRaster> {
         let key = RasterKey {
             fingerprint: self.fingerprint,
@@ -372,12 +375,16 @@ impl FontBook {
             mono,
             color,
             line_height_bits: line_height.to_bits(),
+            word_spacing_bits: word_spacing.to_bits(),
         };
         RasterCache::get_or_insert(key, || {
-            self.rasterize_wrapped_uncached(text, font_size, bold, color, wrap_at, line_height, mono)
+            self.rasterize_wrapped_uncached(
+                text, font_size, bold, color, wrap_at, line_height, mono, word_spacing,
+            )
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn rasterize_wrapped_uncached(
         &self,
         text: &str,
@@ -387,6 +394,7 @@ impl FontBook {
         wrap_at: f32,
         line_height: f32,
         mono: bool,
+        word_spacing: f32,
     ) -> TextRaster {
         let empty = || TextRaster {
             width: 0,
@@ -398,7 +406,7 @@ impl FontBook {
         if text.trim().is_empty() {
             return empty();
         }
-        let tokens = tokens_of(text, font_size, bold, self, mono);
+        let tokens = tokens_of(text, font_size, bold, self, mono, word_spacing);
         let lines = greedy_wrap(&tokens, Some(wrap_at.max(0.0)));
         if lines.iter().all(|l| l.width <= 0.0) {
             return empty();
@@ -423,13 +431,30 @@ impl FontBook {
         // max-blend into the same RGBA surface, then colorize merges it over
         // the mono coverage once.
         let mut layer = self.color_layer_for(&tokens.iter().map(|t| t.text.as_str()).collect::<String>(), bold, mono, width, height);
-        for (line, baseline) in lines.iter().zip(&baselines) {
-            if line.token_idx.is_empty() {
-                continue;
+        if word_spacing == 0.0 {
+            for (line, baseline) in lines.iter().zip(&baselines) {
+                if line.token_idx.is_empty() {
+                    continue;
+                }
+                let s: String =
+                    line.token_idx.iter().map(|&i| tokens[i].text.as_str()).collect();
+                self.blit_line(&mut alpha, layer.as_deref_mut(), width, height, &s, font_size, bold, mono, 0.0, baseline - top);
             }
-            let s: String =
-                line.token_idx.iter().map(|&i| tokens[i].text.as_str()).collect();
-            self.blit_line(&mut alpha, layer.as_deref_mut(), width, height, &s, font_size, bold, mono, 0.0, baseline - top);
+        } else {
+            // Word-spacing run: blit token by token at the cumulative pen so
+            // the widened space advances actually separate the words (the
+            // whole-line shape above would draw them at natural spacing).
+            // Same token model measurement uses — one shape per token.
+            for (line, baseline) in lines.iter().zip(&baselines) {
+                let mut pen = 0.0f32;
+                for &i in &line.token_idx {
+                    let t = &tokens[i];
+                    if !t.is_space {
+                        self.blit_line(&mut alpha, layer.as_deref_mut(), width, height, &t.text, font_size, bold, mono, pen, baseline - top);
+                    }
+                    pen += t.width;
+                }
+            }
         }
         let data = colorize_layered(&alpha, layer.as_deref(), color);
         TextRaster { width, height, baseline: baselines[0] - top, top, data }
@@ -599,14 +624,27 @@ pub(crate) struct Token {
 }
 
 /// Tokenize a run's trimmed text and shape every token (shared by
-/// `measure_text_leaf` and `rasterize_wrapped`).
-pub(crate) fn tokens_of(text: &str, font_size: f32, bold: bool, fonts: &FontBook, mono: bool) -> Vec<Token> {
+/// `measure_text_leaf` and `rasterize_wrapped`). `word_spacing` (px) adds to
+/// each rendered space token's advance (CSS Text §7.1) so measure, paint and
+/// the shared wrap breaker all see the same widened widths.
+pub(crate) fn tokens_of(
+    text: &str,
+    font_size: f32,
+    bold: bool,
+    fonts: &FontBook,
+    mono: bool,
+    word_spacing: f32,
+) -> Vec<Token> {
     super::tokenize(text.trim())
         .into_iter()
-        .map(|t| Token {
-            is_space: t.trim().is_empty(),
-            width: fonts.advance_width(&t, font_size, bold, mono),
-            text: t,
+        .map(|t| {
+            let is_space = t.trim().is_empty();
+            Token {
+                is_space,
+                width: fonts.advance_width(&t, font_size, bold, mono)
+                    + if is_space { word_spacing } else { 0.0 },
+                text: t,
+            }
         })
         .collect()
 }
@@ -730,6 +768,7 @@ struct RasterKey {
     mono: bool,
     color: [u8; 4],
     line_height_bits: u32,
+    word_spacing_bits: u32,
 }
 
 impl RasterCache {
@@ -818,12 +857,12 @@ mod raster_cache_tests {
         let (reg, bold) = production_pair();
         let book = FontBook::from_pairs(reg, bold).unwrap();
         let _held = isolated();
-        let black = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false);
-        let again = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false);
+        let black = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false, 0.0);
+        let again = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false, 0.0);
         assert!(Arc::ptr_eq(&black, &again), "repeat must hand back the cached Arc");
         assert!(black.ink_bbox().is_some(), "the tile has real ink");
 
-        let red = book.rasterize_wrapped("缓存命中", 16.0, false, [255, 0, 0, 255], 20.0, 24.0, false);
+        let red = book.rasterize_wrapped("缓存命中", 16.0, false, [255, 0, 0, 255], 20.0, 24.0, false, 0.0);
         assert!(!Arc::ptr_eq(&black, &red), "color rides the key — a new tile");
         let ink = |r: &TextRaster| {
             r.data
@@ -848,7 +887,7 @@ mod raster_cache_tests {
         let line = book.rasterize(text, 16.0, false, [0, 0, 0, 255], 24.0, false);
         // Narrow wrap: the same text breaks across 4+ lines, so the wrapped
         // tile is much taller than the single-line one.
-        let wrapped = book.rasterize_wrapped(text, 16.0, false, [0, 0, 0, 255], 40.0, 24.0, false);
+        let wrapped = book.rasterize_wrapped(text, 16.0, false, [0, 0, 0, 255], 40.0, 24.0, false, 0.0);
         assert!(!Arc::ptr_eq(&line, &wrapped), "kinds must not collide");
         assert!(
             wrapped.height > line.height * 2,
@@ -944,6 +983,55 @@ mod raster_cache_tests {
         let plain = book.segments("code 汉 x", false, false);
         assert_eq!(flagged, plain, "no mono face: the flag is invisible");
         assert!(flagged.iter().all(|(sel, _)| *sel == FaceSel::Primary));
+    }
+
+    /// `word-spacing` rides the token model (CSS Text §7.1): exactly the
+    /// rendered word-separator tokens — the collapsed " " tokens — grow by
+    /// the extra advance; word tokens keep their natural width so wrap,
+    /// measure and paint all see the same shifted columns.
+    #[test]
+    fn tokens_of_applies_word_spacing_to_space_tokens_only() {
+        let (reg, bold) = production_pair();
+        let book = FontBook::from_pairs(reg, bold).unwrap();
+        let plain = tokens_of("ab cd ef", 16.0, false, &book, false, 0.0);
+        let spaced = tokens_of("ab cd ef", 16.0, false, &book, false, 9.0);
+        assert_eq!(plain.len(), spaced.len(), "spacing never changes the token count");
+        for (p, s) in plain.iter().zip(&spaced) {
+            assert_eq!(p.text, s.text);
+            if p.is_space {
+                assert!((s.width - (p.width + 9.0)).abs() < 0.01,
+                    "space token grows by exactly the extra advance ({} → {})", p.width, s.width);
+            } else {
+                assert_eq!(p.width, s.width, "word token width is spacing-invariant");
+            }
+        }
+        // `normal` is modeled as 0.0 — identical tokens.
+        let normal = tokens_of("ab cd", 16.0, false, &book, false, 0.0);
+        assert_eq!(normal[1].is_space, true);
+    }
+
+    /// The wrapped rasterizer must actually MOVE the second word, not just
+    /// grow the tile: with ws≠0 the glyphs blit per token at the cumulative
+    /// pen, so the ink's right edge widens by the extra advance too (the
+    /// whole-line shape would have left the ink put). ws=0 keeps the exact
+    /// existing path — byte-identical tile against a re-rasterize.
+    #[test]
+    fn rasterize_wrapped_word_spacing_shifts_ink() {
+        let (reg, bold) = production_pair();
+        let book = FontBook::from_pairs(reg, bold).unwrap();
+        let _held = isolated();
+        let tight = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0);
+        let loose = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 12.0);
+        assert_eq!(tight.height, loose.height, "one line either way");
+        let ink_right = |r: &TextRaster| r.ink_bbox().map(|b| b.2).unwrap_or(0);
+        assert!(
+            (ink_right(&loose) - ink_right(&tight)) as f32 >= 11.0,
+            "second word's ink shifts right by the extra advance (tight={}, loose={})",
+            ink_right(&tight), ink_right(&loose)
+        );
+        // Negative spacing tightens toward overlap — still deterministic.
+        let tight2 = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, -8.0);
+        assert!(ink_right(&tight2) < ink_right(&tight), "negative ws pulls the second word left");
     }
 }
 

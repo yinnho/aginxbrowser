@@ -1880,6 +1880,7 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "font-weight",
     "text-align",
     "line-height",
+    "word-spacing",
     "color",
     "background-color",
     "background-image",
@@ -2077,6 +2078,12 @@ fn computed_style_value(
                 Some(LineHeightSpec::Number(n)) => format_number(n),
                 Some(LineHeightSpec::Px(v)) => format!("{}px", format_number(v)),
                 _ => "normal".into(),
+            },
+        ),
+        "word-spacing" => Some(
+            match s.word_spacing {
+                Some(v) => format!("{}px", format_number(v)),
+                None => "normal".into(),
             },
         ),
         "color" => s.color.as_ref().map(&color),

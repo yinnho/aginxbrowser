@@ -632,6 +632,10 @@ pub struct ComputedStyle {
     pub font_weight: Option<u16>,
     /// Inherited: nearest ancestor's declared value, `None` = `normal`.
     pub line_height: Option<LineHeightSpec>,
+    /// Inherited: extra space added to each rendered word-separator (the
+    /// collapsed " " token's advance, CSS Text §7.1). `None` = `normal`
+    /// (no extra); negative values tighten.
+    pub word_spacing: Option<f32>,
     pub text_align: Option<TextAlign>,
     /// Overflow clipping (batch 4c), uniform for both axes. Any non-visible
     /// value clips descendants' paint to the padding box; per-axis
@@ -1782,7 +1786,14 @@ pub enum TextAlign {
 pub fn ua_display(tag: &str) -> Display {
     match tag {
         "span" | "a" | "b" | "i" | "strong" | "em" | "code" | "small" | "sub" | "sup"
-        | "label" | "time" | "abbr" | "q" => Display::Inline,
+        | "label" | "time" | "abbr" | "q"
+        // The phrasing-content rest (obscura#936): mark/ins/del/big/s/u/
+        // strike/tt/samp/kbd/dfn/var/cite/bdi/bdo are inline in every
+        // browser UA sheet — falling to Block made a <mark> paint a
+        // full-width yellow band and put each <ins>/<del>/<big> on its own
+        // line. (pre/xmp/listing/plaintext stay Block.)
+        | "mark" | "ins" | "del" | "big" | "s" | "u" | "strike" | "tt" | "samp" | "kbd"
+        | "dfn" | "var" | "cite" | "bdi" | "bdo" => Display::Inline,
         // Form controls are inline-level per every browser UA sheet, and the
         // inline-flavor matters twice: computed-style fidelity (CSSOM) and
         // the run dispatch — inline-block replaced elements join the text
@@ -2696,6 +2707,23 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 _ => return false,
             };
             true
+        }
+        "word-spacing" => {
+            // `normal` is the explicit initial; px lengths (negative allowed)
+            // apply as-is, em/rem fold against the font context. Percent is
+            // relative to the containing block's inline advance (needs
+            // geometry this layer lacks) — rejected like other %-lengths.
+            if v.eq_ignore_ascii_case("normal") {
+                style.word_spacing = None;
+                return true;
+            }
+            match len(v) {
+                Some(Length::Px(px)) => {
+                    style.word_spacing = Some(px);
+                    true
+                }
+                _ => false,
+            }
         }
         "overflow" => {
             style.overflow = match v {
@@ -3732,6 +3760,9 @@ pub fn cascade_element(
         // Number keeps its multiplier for descendants (spec computed value);
         // Px inherits as absolute px — both copy straight through.
         style.line_height = parent.line_height;
+        // Same inherited posture as text_align above: the element's own UA
+        // declaration beats an inherited value, author rules below re-declare.
+        style.word_spacing = style.word_spacing.or(parent.word_spacing);
         // Custom properties inherit computed (already-substituted-where-
         // possible) values; author rules below may re-declare per element.
         style.custom = parent.custom.clone();
