@@ -2438,10 +2438,13 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
         // layer parses it there), a color token feeds background_color;
         // repeat/position/attachment tokens are accepted and ignored (v1
         // models no other layer longhand). Like every CSS shorthand it
-        // RESETS the sub-longhands first, so `background: #fff` after a
-        // gradient declaration clears the image.
+        // RESETS the sub-longhands first — both modeled ones — so
+        // `background: #fff` after a gradient clears the image and
+        // `background: none` after `background-color: red` clears the
+        // color (css-backgrounds-3 §3).
         "background" => {
             style.background_image = None;
+            style.background_color = None;
             let mut applied = false;
             for tok in split_sides(v) {
                 let t = tok.trim();
@@ -4316,6 +4319,20 @@ mod tests {
         assert!(apply_declarations(&mut s, "background: #f0f0f0"));
         assert_eq!(s.background_image, None);
         assert_eq!(s.background_color, Some(Color(240, 240, 240, 255)));
+
+        // ... and the color longhand: `background: none` after
+        // `background-color: red` must land transparent (the classic
+        // button/link reset pattern), while a later longhand still wins.
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "background-color: red");
+        assert!(apply_declarations(&mut s, "background: none"));
+        assert_eq!(s.background_color, None, "shorthand resets color too");
+        assert_eq!(s.background_image, None);
+
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "background: none"));
+        apply_declarations(&mut s, "background-color: red");
+        assert_eq!(s.background_color, Some(Color(255, 0, 0, 255)));
 
         // Function colors stay inside their token; rgb() shorthand still
         // lands as a color (the pre-shorthand-rework behavior).
