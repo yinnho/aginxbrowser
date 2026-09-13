@@ -32,7 +32,7 @@ use taffy::prelude::*;
 use crate::diting_css::{
     AlignMode, ComputedStyle, Display as CssDisplay, FlexDirection as CssFlexDirection,
     FlexWrapMode, GridTrack, JustifyMode, ObjectFit, ObjectPositionPart, Overflow, PositionMode,
-    TextAlign,
+    TextAlign, TextDecorations,
 };
 use crate::diting_dom::tree::{DomTree, NodeId};
 
@@ -73,12 +73,12 @@ fn is_cjk(c: char) -> bool {
 /// flex-row-of-word-leaves fallback from batch 2b.
 #[derive(Clone)]
 enum TextLeaf {
-    Run { text: String, font_size: f32, bold: bool, color: [u8; 4], line_height: f32 },
+    Run { text: String, font_size: f32, bold: bool, color: [u8; 4], line_height: f32, decorations: TextDecorations },
     /// One word/glyph of a MIXED run (text around inline elements): the
     /// batch-2b word-leaf fallback, now carrying paint context (batch 4d).
     /// Layout is still style-driven — the measure closure passes Word
     /// leaves straight through to taffy's own style sizing.
-    Word { text: String, font_size: f32, bold: bool, color: [u8; 4], line_height: f32 },
+    Word { text: String, font_size: f32, bold: bool, color: [u8; 4], line_height: f32, decorations: TextDecorations },
 }
 
 /// Approximate used line height for text leaves. Matches blitz exactly:
@@ -625,6 +625,39 @@ fn color_context(
     [0, 0, 0, 255]
 }
 
+/// text-decoration resolution for a text node: the property PROPAGATES
+/// (CSS 2.1 §16.3.1) rather than inheriting, so every ancestor's declared
+/// set unions in — `<u><s>` paints both lines. Propagation stops at an
+/// atomic inline (inline-block) or out-of-flow (absolute/fixed/float)
+/// boundary: the boundary element's own text still carries its own
+/// declaration, but nothing crosses such an element inward OR outward.
+fn decoration_context(
+    tree: &DomTree,
+    id: NodeId,
+    styles: &HashMap<NodeId, ComputedStyle>,
+) -> TextDecorations {
+    let mut out = TextDecorations::default();
+    let mut current = Some(id);
+    while let Some(nid) = current {
+        let boundary = if let Some(s) = styles.get(&nid) {
+            if let Some(d) = s.text_decoration_line {
+                out = out.union(d);
+            }
+            nid != id
+                && (s.display == Some(CssDisplay::InlineBlock)
+                    || matches!(s.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
+                    || s.float_side.is_some())
+        } else {
+            false
+        };
+        if boundary {
+            break;
+        }
+        current = tree.with_node(nid, |n| n.parent).flatten();
+    }
+    out
+}
+
 /// The label a select displays: the first option whose selectedness is on
 /// — the parsed `selected` attribute, since JS-side dirtiness rides the
 /// live_value mirror instead — else the first option, the same precedence
@@ -864,12 +897,14 @@ fn collapse_adjacent_sibling_margins(
 /// from real shaped advances (batch 3a); wrapping happens in the enclosing
 /// flex-wrap run container. Since batch 4d the leaf carries paint context —
 /// mixed runs paint their words.
+#[allow(clippy::too_many_arguments)]
 fn build_word_leaves(
     text: &str,
     font_size: f32,
     bold: bool,
     color: [u8; 4],
     line_height: f32,
+    decorations: TextDecorations,
     fonts: &FontBook,
     taffy_tree: &mut TaffyTree<TextLeaf>,
 ) -> Vec<taffy::tree::NodeId> {
@@ -893,6 +928,7 @@ fn build_word_leaves(
                 bold,
                 color,
                 line_height,
+                decorations,
             };
             taffy_tree.new_leaf_with_context(style, leaf).ok()
         })
@@ -1521,7 +1557,8 @@ fn build_normal_sibling(
             let fs = if styles.get(&child).is_some() { fs } else { font_size };
             let lh = if styles.get(&child).is_some() { lh } else { line_height };
             let col = color_context(tree, child, styles);
-            leaves.extend(build_word_leaves(&text, fs, b, col, lh, fonts, taffy_tree));
+            let deco = decoration_context(tree, child, styles);
+            leaves.extend(build_word_leaves(&text, fs, b, col, lh, deco, fonts, taffy_tree));
         } else {
             let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta);
             if let Some(sub) = sub {
@@ -1711,7 +1748,7 @@ fn build_flow_column(
     lh_elem: f32,
 ) -> Vec<taffy::tree::NodeId> {
     enum RunSeg {
-        Text(String, f32, bool, [u8; 4], f32),
+        Text(String, f32, bool, [u8; 4], f32, TextDecorations),
         Nodes(Vec<taffy::tree::NodeId>),
     }
     let mut flow_children: Vec<taffy::tree::NodeId> = Vec::new();
@@ -1727,10 +1764,10 @@ fn build_flow_column(
                 .map(|s| match s { RunSeg::Text(t, ..) => t.as_str(), _ => "" })
                 .collect::<String>();
             if !text.trim().is_empty() {
-                let RunSeg::Text(_, fs, bold, color, lh) = &segs[0] else { unreachable!() };
+                let RunSeg::Text(_, fs, bold, color, lh, deco) = &segs[0] else { unreachable!() };
                 if let Ok(leaf) = taffy_tree.new_leaf_with_context(
                     Style::default(),
-                    TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh },
+                    TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco },
                 ) {
                     flow_children.push(leaf);
                 }
@@ -1740,8 +1777,8 @@ fn build_flow_column(
         let mut leaves: Vec<taffy::tree::NodeId> = Vec::new();
         for seg in segs {
             match seg {
-                RunSeg::Text(text, fs, bold, color, lh) => {
-                    leaves.extend(build_word_leaves(&text, fs, bold, color, lh, fonts, taffy_tree))
+                RunSeg::Text(text, fs, bold, color, lh, deco) => {
+                    leaves.extend(build_word_leaves(&text, fs, bold, color, lh, deco, fonts, taffy_tree))
                 }
                 RunSeg::Nodes(nodes) => leaves.extend(nodes),
             }
@@ -1791,7 +1828,8 @@ fn build_flow_column(
             let fs = if styles.get(&child).is_some() { fs } else { font_size };
             let lh = if styles.get(&child).is_some() { lh } else { lh_elem };
             let col = color_context(tree, child, styles);
-            run.push(RunSeg::Text(text, fs, b, col, lh));
+            let deco = decoration_context(tree, child, styles);
+            run.push(RunSeg::Text(text, fs, b, col, lh, deco));
         } else if child_display == Some(CssDisplay::InlineBlock) && !out_of_flow {
             // Atomic inline-level box (obscura#750 family): keeps its own
             // subtree box, joins the run as one shrink-to-fit unit.
@@ -2644,7 +2682,7 @@ fn build_element(
     // greedy wrap, ceiled width) we reproduce in measure_text_leaf. Mixed
     // runs fall back to the batch-2b wrapping flex row of word leaves.
     enum RunSeg {
-        Text(String, f32, bool, [u8; 4], f32),
+        Text(String, f32, bool, [u8; 4], f32, TextDecorations),
         Nodes(Vec<taffy::tree::NodeId>),
     }
     let mut direct: Vec<taffy::tree::NodeId> = Vec::new();
@@ -2667,10 +2705,10 @@ fn build_element(
             if text.trim().is_empty() {
                 return;
             }
-            let RunSeg::Text(_, fs, bold, color, lh) = &segs[0] else { unreachable!() };
+            let RunSeg::Text(_, fs, bold, color, lh, deco) = &segs[0] else { unreachable!() };
             if let Ok(leaf) = taffy_tree.new_leaf_with_context(
                 Style::default(),
-                TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh },
+                TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco },
             ) {
                 direct.push(leaf);
                 return;
@@ -2679,8 +2717,8 @@ fn build_element(
         let mut leaves: Vec<taffy::tree::NodeId> = Vec::new();
         for seg in segs {
             match seg {
-                RunSeg::Text(text, fs, bold, color, lh) => {
-                    leaves.extend(build_word_leaves(&text, fs, bold, color, lh, fonts, taffy_tree))
+                RunSeg::Text(text, fs, bold, color, lh, deco) => {
+                    leaves.extend(build_word_leaves(&text, fs, bold, color, lh, deco, fonts, taffy_tree))
                 }
                 RunSeg::Nodes(nodes) => leaves.extend(nodes),
             }
@@ -3279,7 +3317,8 @@ fn build_element(
             // First segment's node donates the whole run's color — the same
             // first-segment approximation fs/bold already use.
             let col = color_context(tree, child, styles);
-            run.push(RunSeg::Text(text, fs, b, col, lh));
+            let deco = decoration_context(tree, child, styles);
+            run.push(RunSeg::Text(text, fs, b, col, lh, deco));
         } else if child_display == Some(CssDisplay::InlineBlock) && !atomic_container && !out_of_flow {
             // An inline-level block is ATOMIC (Chrome line-box model): it keeps
             // its own subtree box and joins the run as one unit, like a replaced
@@ -3515,6 +3554,10 @@ pub enum PaintItem {
         /// through the glyphs; `-webkit-text-fill-color: transparent` hides
         /// the normal fill, which we get by construction).
         gradient: Option<TextGradient>,
+        /// Propagated `text-decoration-line` set (CSS 2.1 §16.3.1 — the
+        /// decoration an ancestor declared paints across this inline's text
+        /// in the TEXT's own color, so it rides the leaf, not the ancestor).
+        decorations: TextDecorations,
     },
 }
 
@@ -5289,7 +5332,7 @@ pub fn layout_collect(
                 stops: g.stops.iter().map(|(p, c)| (*p, with_alpha(*c, alpha))).collect(),
                 css_deg: g.css_deg,
             });
-        if let Some(TextLeaf::Run { text, font_size, bold, color, line_height }) = taffy_tree.get_node_context(node) {
+        if let Some(TextLeaf::Run { text, font_size, bold, color, line_height, decorations }) = taffy_tree.get_node_context(node) {
             // The wrap width the containing block offered at measure time:
             // the direct taffy parent's content box (the run wrapper for
             // mixed runs, the block itself for pure runs — same width).
@@ -5316,6 +5359,7 @@ pub fn layout_collect(
                     y: abs.1 * xf.d + xf.f,
                     wrap_at,
                     gradient: text_gradient_fill.clone(),
+                    decorations: *decorations,
                 });
             } else {
                 let wrap_at = taffy_tree
@@ -5333,10 +5377,11 @@ pub fn layout_collect(
                     y: abs.1,
                     wrap_at,
                     gradient: text_gradient_fill.clone(),
+                    decorations: *decorations,
                 });
             }
         }
-        if let Some(TextLeaf::Word { text, font_size, bold, color, line_height }) = taffy_tree.get_node_context(node) {
+        if let Some(TextLeaf::Word { text, font_size, bold, color, line_height, decorations }) = taffy_tree.get_node_context(node) {
             // A word leaf paints at its own box — the enclosing flex row
             // already did the line breaking (leaf-level wrap). Single-token
             // text can never break, so wrap_at just equals the leaf width.
@@ -5352,6 +5397,7 @@ pub fn layout_collect(
                     y: abs.1 * xf.d + xf.f,
                     wrap_at: layout.size.width * xf.a,
                     gradient: text_gradient_fill.clone(),
+                    decorations: *decorations,
                 });
             } else {
                 items.push(PaintItem::Text {
@@ -5364,6 +5410,7 @@ pub fn layout_collect(
                     y: abs.1,
                     wrap_at: layout.size.width,
                     gradient: text_gradient_fill.clone(),
+                    decorations: *decorations,
                 });
             }
         }

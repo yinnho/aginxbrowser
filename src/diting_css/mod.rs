@@ -739,6 +739,11 @@ pub struct ComputedStyle {
     /// valign attribute feeds the same slot as a presentational hint, so
     /// an author declaration outranks the attribute by construction.
     pub vertical_align: Option<VerticalAlign>,
+    /// `text-decoration-line` declared on THIS element (never inherited —
+    /// propagation to inline descendants happens at paint-collect time).
+    /// `Some(empty set)` is meaningful: `text-decoration: none` on a u/s/a
+    /// clears the UA decoration.
+    pub text_decoration_line: Option<TextDecorations>,
     /// Custom properties (`--*`), which DO inherit: the var() substitution
     /// source. Values are stored raw (author tokens) — !important stripped at
     /// insertion; resolution to colors/lengths happens at use sites.
@@ -820,6 +825,74 @@ pub enum VerticalAlign {
     Top,
     Middle,
     Bottom,
+}
+
+/// `text-decoration-line` keyword set (CSS Text Decoration 3): which lines
+/// paint. The property PROPAGATES to inline descendants rather than
+/// inheriting (CSS 2.1 §16.3.1) — the layout side resolves each text leaf's
+/// used value by walking its ancestor chain and unioning these sets, so the
+/// cascade here only records what the element itself declared. Color/style/
+/// thickness legs of the shorthand parse-and-drop: lines always paint solid
+/// in the text's own color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TextDecorations {
+    pub underline: bool,
+    pub overline: bool,
+    pub line_through: bool,
+}
+
+impl TextDecorations {
+    pub fn is_empty(&self) -> bool {
+        !self.underline && !self.overline && !self.line_through
+    }
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            underline: self.underline || other.underline,
+            overline: self.overline || other.overline,
+            line_through: self.line_through || other.line_through,
+        }
+    }
+}
+
+/// Shared grammar for `text-decoration-line` (shorthand=false) and the
+/// `text-decoration` shorthand (true: style keywords, colors and thickness
+/// tokens are accepted and dropped). `none` clears the set; an unknown token
+/// invalidates the whole declaration (None) like any CSS parse error, so a
+/// bogus value never strips a UA decoration by accident.
+fn parse_text_decoration(v: &str, shorthand: bool) -> Option<TextDecorations> {
+    let mut out = TextDecorations::default();
+    let mut saw_line = false;
+    for tok in v.split_whitespace() {
+        let t = tok.to_ascii_lowercase();
+        match t.as_str() {
+            "underline" => {
+                out.underline = true;
+                saw_line = true;
+            }
+            "overline" => {
+                out.overline = true;
+                saw_line = true;
+            }
+            "line-through" => {
+                out.line_through = true;
+                saw_line = true;
+            }
+            "none" => {
+                if !saw_line {
+                    out = TextDecorations::default();
+                    saw_line = true;
+                }
+            }
+            "solid" | "double" | "dotted" | "dashed" | "wavy" if shorthand => {}
+            _ if shorthand
+                && (parse_color(&t).is_some()
+                    || parse_css_length(&t).is_some()
+                    || t == "auto"
+                    || t == "from-font") => {}
+            _ => return None,
+        }
+    }
+    if saw_line { Some(out) } else { None }
 }
 
 /// What a border-style token means: not a style keyword at all, an explicit
@@ -1751,6 +1824,18 @@ pub fn ua_text_align(tag: &str) -> Option<TextAlign> {
     }
 }
 
+/// UA text decorations (every browser UA sheet's block): u/ins underline,
+/// s/del/strike line-through, and links underline — the `a` entry stands for
+/// `a:-webkit-any-link`, so the cascade site gates it on an href attribute.
+/// Author declarations override (they apply later in cascade_element).
+pub fn ua_text_decoration(tag: &str) -> Option<TextDecorations> {
+    match tag {
+        "u" | "ins" | "a" => Some(TextDecorations { underline: true, ..Default::default() }),
+        "s" | "del" | "strike" => Some(TextDecorations { line_through: true, ..Default::default() }),
+        _ => None,
+    }
+}
+
 /// UA heading font-sizes (blitz default.css / HTML rendering spec). Expressed
 /// as em so the cascade's font-size pre-pass folds them against the PARENT
 /// font-size, where author declarations override. small/big/sub/sup mirror
@@ -2241,6 +2326,20 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             }
             true
         }
+        "text-decoration-line" => match parse_text_decoration(v, false) {
+            Some(d) => {
+                style.text_decoration_line = Some(d);
+                true
+            }
+            None => false,
+        },
+        "text-decoration" => match parse_text_decoration(v, true) {
+            Some(d) => {
+                style.text_decoration_line = Some(d);
+                true
+            }
+            None => false,
+        },
         "color" => parse_color(v).map(|c| style.color = Some(c)).is_some(),
         // SVG presentation properties (svg v1): they cascade like any other
         // property — archify-class diagrams color shapes through classes +
@@ -3609,6 +3708,17 @@ pub fn cascade_element(
     if let Some(family) = ua_font_family(tag) {
         style.font_family = Some(family.to_string());
     }
+    // UA decorations ride the same slot. The link rule is `a:-webkit-any-link`
+    // upstream — an <a> without href is a named anchor and stays plain.
+    if let Some(d) = ua_text_decoration(tag) {
+        let hrefless_anchor = tag == "a"
+            && !tree
+                .with_node(node_id, |n| n.get_attribute("href").is_some())
+                .unwrap_or(false);
+        if !hrefless_anchor {
+            style.text_decoration_line = Some(d);
+        }
+    }
 
     // Author rules: sort by (specificity, source order) ascending, apply in
     // order so later/higher-specificity wins per property.
@@ -4691,6 +4801,71 @@ mod tests {
         assert_eq!(s.font_weight, Some(700));
         assert_eq!(s.line_height, Some(LineHeightSpec::Normal));
         assert!(!apply_one(&mut s, "font", "caption", &f));
+    }
+
+    #[test]
+    fn text_decoration_grammar() {
+        let f = FontCtx::default();
+        let mut s = ComputedStyle::default();
+        assert!(apply_one(&mut s, "text-decoration", "underline", &f));
+        assert_eq!(
+            s.text_decoration_line,
+            Some(TextDecorations { underline: true, overline: false, line_through: false })
+        );
+        // Multi-line longhand unions.
+        assert!(apply_one(&mut s, "text-decoration-line", "underline line-through", &f));
+        assert_eq!(
+            s.text_decoration_line,
+            Some(TextDecorations { underline: true, overline: false, line_through: true })
+        );
+        // Shorthand style/color/thickness legs parse-and-drop.
+        assert!(apply_one(&mut s, "text-decoration", "underline wavy red 2px", &f));
+        assert_eq!(
+            s.text_decoration_line,
+            Some(TextDecorations { underline: true, overline: false, line_through: false })
+        );
+        // `none` is a real declaration (kills UA decorations); overline alone
+        // is legal; garbage invalidates the whole declaration.
+        assert!(apply_one(&mut s, "text-decoration", "none", &f));
+        assert_eq!(s.text_decoration_line, Some(TextDecorations::default()));
+        assert!(apply_one(&mut s, "text-decoration-line", "overline", &f));
+        assert_eq!(
+            s.text_decoration_line,
+            Some(TextDecorations { underline: false, overline: true, line_through: false })
+        );
+        assert!(!apply_one(&mut s, "text-decoration", "sideways", &f));
+        assert!(!apply_one(&mut s, "text-decoration-line", "wavy", &f));
+        assert!(!apply_one(&mut s, "text-decoration", "solid", &f));
+    }
+
+    #[test]
+    fn ua_text_decoration_tags() {
+        let u = Some(TextDecorations { underline: true, ..Default::default() });
+        let lt = Some(TextDecorations { line_through: true, ..Default::default() });
+        let deco_of = |html: &str, sel: &str, tag: &str| {
+            let tree = diting_dom::tree_sink::parse_html(html);
+            let id = tree.query_selector(sel).unwrap().unwrap();
+            cascade_element(tag, &tree, id, &[], None, None, DEFAULT_ROOT_FONT_SIZE)
+                .text_decoration_line
+        };
+        assert_eq!(deco_of("<body><u>x</u></body>", "u", "u"), u);
+        assert_eq!(deco_of("<body><ins>x</ins></body>", "ins", "ins"), u);
+        assert_eq!(deco_of("<body><s>x</s></body>", "s", "s"), lt);
+        assert_eq!(deco_of("<body><del>x</del></body>", "del", "del"), lt);
+        assert_eq!(deco_of("<body><strike>x</strike></body>", "strike", "strike"), lt);
+        // The link gate: href → underline (any-link); bare <a> stays plain.
+        assert_eq!(deco_of(r#"<body><a href="https://x">l</a></body>"#, "a", "a"), u);
+        assert_eq!(deco_of("<body><a>n</a></body>", "a", "a"), None);
+        // Author `none` on a u kills the UA underline.
+        let tree = diting_dom::tree_sink::parse_html(r#"<body><u style="text-decoration:none">x</u></body>"#);
+        let id = tree.query_selector("u").unwrap().unwrap();
+        let inline: Option<String> =
+            tree.with_node(id, |n| n.get_attribute("style").map(str::to_string)).flatten();
+        assert_eq!(
+            cascade_element("u", &tree, id, &[], None, inline.as_deref(), DEFAULT_ROOT_FONT_SIZE)
+                .text_decoration_line,
+            Some(TextDecorations::default())
+        );
     }
 
     #[test]

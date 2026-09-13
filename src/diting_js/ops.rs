@@ -1874,6 +1874,8 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "border-collapse",
     "table-layout",
     "vertical-align",
+    "text-decoration",
+    "text-decoration-line",
     "font-size",
     "font-weight",
     "text-align",
@@ -2000,6 +2002,20 @@ fn computed_style_value(
                 VerticalAlign::Bottom => "bottom",
             })
             .map(str::to_string),
+        // Not inherited (the paint-time propagation to inline descendants is
+        // a layout concern): an element reports its OWN declared/UA set.
+        "text-decoration-line" | "text-decoration" => Some(match s.text_decoration_line {
+            Some(d) if !d.is_empty() => [
+                if d.underline { "underline" } else { "" },
+                if d.overline { "overline" } else { "" },
+                if d.line_through { "line-through" } else { "" },
+            ]
+            .into_iter()
+            .filter(|k| !k.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
+            _ => "none".to_string(),
+        }),
         "float" => Some(
             match s.float_side {
                 Some(FloatSide::Left) => "left",

@@ -12,8 +12,9 @@
 //! per-side border colors/styles, network-loaded images (data: PNG only),
 //! gradients, z-index/stacking contexts.
 
-use super::text::{greedy_wrap, tokens_of, TextRaster};
+use super::text::{baseline_offset, greedy_wrap, tokens_of, ScaledMetrics, TextRaster};
 use super::{FontBook, PaintItem, TextGradient};
+use crate::diting_css::TextDecorations;
 
 /// A straight-alpha RGBA8 image, row-major — our paint target.
 #[derive(Debug)]
@@ -1070,6 +1071,83 @@ pub(crate) fn est_width(text: &str, font_size: f32) -> f32 {
         * font_size
 }
 
+/// Paint a text item's `text-decoration-line` set — one rect per wrapped
+/// line, in the text's own color. Line breaks and baselines replay the
+/// exact `rasterize_wrapped` math (same tokens, same `baseline_offset`), so
+/// the strokes sit where the glyphs are regardless of wrap width. Geometry
+/// is font-metric derived (CSS Text Decoration 4's `auto` position/thickness
+/// family): underline rides half the descent under the baseline,
+/// line-through sits at ~x-height, overline caps the ascent; thickness
+/// scales with font size at 1px per 16px.
+#[allow(clippy::too_many_arguments)]
+fn paint_text_decorations(
+    out: &mut Canvas,
+    fonts: &FontBook,
+    text: &str,
+    font_size: f32,
+    bold: bool,
+    color: [u8; 4],
+    line_height: f32,
+    x: f32,
+    y: f32,
+    wrap_at: f32,
+    decorations: TextDecorations,
+    dx: f32,
+    dy: f32,
+) {
+    if decorations.is_empty() || text.trim().is_empty() {
+        return;
+    }
+    let tokens = tokens_of(text, font_size, bold, fonts);
+    let lines = greedy_wrap(&tokens, Some(wrap_at.max(0.0)));
+    let m = fonts.metrics(font_size, bold).unwrap_or(ScaledMetrics {
+        ascent: font_size,
+        descent: font_size * 0.2,
+        line_gap: 0.0,
+    });
+    let b0 = baseline_offset(m.ascent, m.descent, line_height);
+    let thickness = (font_size / 16.0).round().max(1.0);
+    let mut stroke = |lx: f32, ly: f32, w: f32| {
+        if w <= 0.0 {
+            return;
+        }
+        if out.xf().is_some() {
+            // fill_rect paints raw canvas coords — under a transform bracket
+            // the stroke needs the affine too, so blit a solid tile instead.
+            let tw = w.ceil().max(1.0) as usize;
+            let th = thickness as usize;
+            let mut tile = vec![0u8; tw * th * 4];
+            for px in tile.chunks_exact_mut(4) {
+                px.copy_from_slice(&color);
+            }
+            out.blit_rgba_affine(&tile, tw, th, lx as f64, ly as f64);
+        } else {
+            out.fill_rect(
+                (lx - dx).round() as i64,
+                (ly - dy).round() as i64,
+                w.round().max(1.0) as i64,
+                thickness as i64,
+                color,
+            );
+        }
+    };
+    for (i, line) in lines.iter().enumerate() {
+        if line.width <= 0.0 {
+            continue;
+        }
+        let baseline = y + (i as f32 * line_height).round() + b0;
+        if decorations.underline {
+            stroke(x, baseline + (m.descent * 0.5).max(1.0), line.width);
+        }
+        if decorations.overline {
+            stroke(x, baseline - m.ascent, line.width);
+        }
+        if decorations.line_through {
+            stroke(x, baseline - font_size * 0.28, line.width);
+        }
+    }
+}
+
 /// The page-space extent of the `Text` items alone, from the same wrap model
 /// the band pre-filter and `rasterize_wrapped` use (height = y + lines ×
 /// line-height, width = one wrapped line). Bare text owns no element box —
@@ -1704,7 +1782,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     super::svg::paint_svg(render, rect, fonts, out, dx, dy, *alpha);
                 }
             }
-            PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at, gradient } => {
+            PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at, gradient, decorations } => {
                 // background-clip: text: the fill color is ignored entirely
                 // (CSS paints the background through the glyphs; the
                 // transparent-text-fill half of the idiom is free by
@@ -1743,6 +1821,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                         &r
                     };
                     out.blit_rgba_affine(&r.data, r.width, r.height, *x as f64, (*y + r.top) as f64);
+                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, 0.0, 0.0);
                 } else {
                     if !text_reaches_band(*y, text, *font_size, *wrap_at, *line_height, dy, out.height as i64) {
                         continue;
@@ -1758,6 +1837,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     };
                     // Tile row 0 sits `top` px above the leaf's line-box top.
                     out.blit_text(r, (x - dx).round() as i64, (y - dy + r.top).round() as i64);
+                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, dx, dy);
                 }
             }
         }
@@ -1807,6 +1887,7 @@ mod tests {
                 stops: vec![(0.0, [255, 0, 0, 255]), (1.0, [0, 0, 255, 255])],
                 css_deg: 90.0,
             }),
+            decorations: TextDecorations::default(),
         }];
         let fonts = crate::diting_fonts::font_book();
         let mut c = Canvas::new_filled(120, 40, [255, 255, 255, 255]);
@@ -1990,7 +2071,7 @@ mod tests {
                 form: None,
                 caret: None,
             },
-            PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0, gradient: None },
+            PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default() },
         ];
         let fonts = crate::diting_fonts::font_book();
         let mut full = Canvas::new_filled(40, 60, [255, 255, 255, 255]);
@@ -1998,6 +2079,74 @@ mod tests {
         let mut band = Canvas::new_filled(40, 60, [255, 255, 255, 255]);
         execute_band(&items, &fonts, &mut band, 0.0, 0.0);
         assert_eq!(full.data, band.data, "dy=0 band paint equals execute");
+    }
+
+    /// text-decoration paint (#419): an underlined run adds a stroke strictly
+    /// below the glyph ink, line-through/overline add their own bands, and an
+    /// empty decoration set paints nothing extra.
+    #[test]
+    fn text_decorations_paint_line_bands() {
+        let fonts = crate::diting_fonts::font_book();
+        let paint = |decorations| {
+            let items = vec![PaintItem::Text {
+                text: "mmmm".into(),
+                font_size: 16.0,
+                bold: false,
+                color: [0, 0, 0, 255],
+                line_height: 20.0,
+                x: 2.0,
+                y: 4.0,
+                wrap_at: 400.0,
+                gradient: None,
+                decorations,
+            }];
+            let mut c = Canvas::new_filled(80, 32, [255, 255, 255, 255]);
+            execute(&items, &fonts, &mut c);
+            c
+        };
+        let ink_rows = |c: &Canvas| -> Vec<usize> {
+            (0..c.height)
+                .map(|y| (0..c.width).filter(|&x| px(c, x, y)[3] > 0 && px(c, x, y)[0] < 128).count())
+                .collect()
+        };
+        let base = ink_rows(&paint(TextDecorations::default()));
+        let base_total: usize = base.iter().sum();
+        let base_bottom = (0..32).rev().find(|&y| base[y] > 0).unwrap();
+        let under = ink_rows(&paint(TextDecorations { underline: true, ..Default::default() }));
+        assert!(under.iter().sum::<usize>() > base_total, "underline adds ink");
+        // "mmmm" has no descenders: the underline sits strictly below the
+        // glyph ink's bottom row.
+        let under_bottom = (0..32).rev().find(|&y| under[y] > base[y]).unwrap();
+        assert!(under_bottom > base_bottom, "underline ink below glyph bottom {base_bottom}, got {under_bottom}");
+        for d in [
+            TextDecorations { line_through: true, ..Default::default() },
+            TextDecorations { overline: true, ..Default::default() },
+            TextDecorations { underline: true, line_through: true, ..Default::default() },
+        ] {
+            let rows = ink_rows(&paint(d));
+            assert!(rows.iter().sum::<usize>() > base_total, "decoration {d:?} adds ink");
+        }
+        // The xf-bracket path paints the same strokes through the affine.
+        let items = vec![
+            PaintItem::SetXf { xf: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0] },
+            PaintItem::Text {
+                text: "mmmm".into(),
+                font_size: 16.0,
+                bold: false,
+                color: [0, 0, 0, 255],
+                line_height: 20.0,
+                x: 2.0,
+                y: 4.0,
+                wrap_at: 400.0,
+                gradient: None,
+                decorations: TextDecorations { underline: true, ..Default::default() },
+            },
+            PaintItem::ClearXf,
+        ];
+        let mut c = Canvas::new_filled(80, 32, [255, 255, 255, 255]);
+        execute(&items, &fonts, &mut c);
+        let rows = ink_rows(&c);
+        assert!(rows.iter().sum::<usize>() > base_total, "underline paints under identity xf");
     }
 
     /// Native form widgets (form paint batch): a checked checkbox draws the
@@ -2318,8 +2467,8 @@ mod tests {
         let fonts = crate::diting_fonts::font_book();
         // A tall low-content page: only two text leaves, one near the band.
         let items = vec![
-            PaintItem::Text { text: "edge".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 96.0, wrap_at: 36.0, gradient: None },
-            PaintItem::Text { text: "far".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 500.0, wrap_at: 36.0, gradient: None },
+            PaintItem::Text { text: "edge".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 96.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default() },
+            PaintItem::Text { text: "far".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 500.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default() },
         ];
         let mut band = Canvas::new_filled(40, 80, [255, 255, 255, 255]);
         execute_band(&items, &fonts, &mut band, 0.0, 100.0);
@@ -2442,6 +2591,7 @@ mod tests {
                 y: 10.0,
                 wrap_at: 200.0,
                 gradient: None,
+                decorations: TextDecorations::default(),
             },
             PaintItem::ClearXf,
         ];
