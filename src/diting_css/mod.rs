@@ -816,15 +816,19 @@ pub enum TableLayout {
     Fixed,
 }
 
-/// `vertical-align` on table cells (blitz#508): top/middle/bottom move the
-/// cell's content within a taller cell; baseline behaves like top for the
-/// flex-column cell model. On inline content (sub/super/lengths) the
-/// declaration is accepted but has no layout effect — same as before.
+/// `vertical-align` modeled subset. On table cells (blitz#508)
+/// top/middle/bottom move the cell's content within a taller cell; baseline
+/// behaves like top for the flex-column cell model. On inline content
+/// sub/super are baseline shifts the layout side resolves per text leaf
+/// (lengths/percentages stay accepted-but-unmodeled).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerticalAlign {
     Top,
     Middle,
     Bottom,
+    Baseline,
+    Sub,
+    Super,
 }
 
 /// `text-decoration-line` keyword set (CSS Text Decoration 3): which lines
@@ -2316,12 +2320,14 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
         }
         "vertical-align" => {
             match v {
-                "top" | "baseline" => style.vertical_align = Some(VerticalAlign::Top),
+                "top" => style.vertical_align = Some(VerticalAlign::Top),
+                "baseline" => style.vertical_align = Some(VerticalAlign::Baseline),
                 "middle" => style.vertical_align = Some(VerticalAlign::Middle),
                 "bottom" => style.vertical_align = Some(VerticalAlign::Bottom),
-                // sub/super/lengths/percentages are inline-baseline shifts;
-                // valid declarations with no modeled layout effect (and no
-                // effect on the cell alignment path either).
+                "sub" => style.vertical_align = Some(VerticalAlign::Sub),
+                "super" => style.vertical_align = Some(VerticalAlign::Super),
+                // lengths/percentages are inline-baseline shifts too —
+                // valid declarations, not yet modeled.
                 _ => {}
             }
             true
@@ -3719,6 +3725,14 @@ pub fn cascade_element(
             style.text_decoration_line = Some(d);
         }
     }
+    // UA baseline shifts (Chromium html.css: `sub { vertical-align: sub }`,
+    // `sup { vertical-align: super }`); font-size: smaller already rides the
+    // ua_font_size table. Author declarations below override.
+    match tag {
+        "sub" => style.vertical_align = Some(VerticalAlign::Sub),
+        "sup" => style.vertical_align = Some(VerticalAlign::Super),
+        _ => {}
+    }
 
     // Author rules: sort by (specificity, source order) ascending, apply in
     // order so later/higher-specificity wins per property.
@@ -4866,6 +4880,51 @@ mod tests {
                 .text_decoration_line,
             Some(TextDecorations::default())
         );
+    }
+
+    #[test]
+    fn ua_sub_sup_baseline_shift_declares() {
+        let va_of = |html: &str, sel: &str, tag: &str| {
+            let tree = diting_dom::tree_sink::parse_html(html);
+            let id = tree.query_selector(sel).unwrap().unwrap();
+            cascade_element(tag, &tree, id, &[], None, None, DEFAULT_ROOT_FONT_SIZE)
+                .vertical_align
+        };
+        assert_eq!(va_of("<body><sup>x</sup></body>", "sup", "sup"), Some(VerticalAlign::Super));
+        assert_eq!(va_of("<body><sub>x</sub></body>", "sub", "sub"), Some(VerticalAlign::Sub));
+        // Plain inline and font-size:smaller cousin stay baseline-aligned.
+        assert_eq!(va_of("<body><span>x</span></body>", "span", "span"), None);
+        assert_eq!(va_of("<body><big>x</big></body>", "big", "big"), None);
+
+        // Author declarations override the UA shift.
+        let tree = diting_dom::tree_sink::parse_html(r#"<body><sup style="vertical-align:baseline">x</sup></body>"#);
+        let id = tree.query_selector("sup").unwrap().unwrap();
+        let inline: Option<String> =
+            tree.with_node(id, |n| n.get_attribute("style").map(str::to_string)).flatten();
+        assert_eq!(
+            cascade_element("sup", &tree, id, &[], None, inline.as_deref(), DEFAULT_ROOT_FONT_SIZE)
+                .vertical_align,
+            Some(VerticalAlign::Baseline)
+        );
+
+        // Keyword surface: all six spell through the same slot.
+        let mut s = ComputedStyle::default();
+        for (kw, want) in [
+            ("baseline", VerticalAlign::Baseline),
+            ("sub", VerticalAlign::Sub),
+            ("super", VerticalAlign::Super),
+            ("top", VerticalAlign::Top),
+            ("middle", VerticalAlign::Middle),
+            ("bottom", VerticalAlign::Bottom),
+        ] {
+            apply_declarations(&mut s, &format!("vertical-align: {kw}"));
+            assert_eq!(s.vertical_align, Some(want), "keyword {kw}");
+        }
+        // Length/percentage shifts are valid declarations (apply_declarations
+        // returns true) but are not modeled — the slot is left untouched.
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "vertical-align: 3px"));
+        assert_eq!(s.vertical_align, None, "length shifts parse as valid but are not modeled");
     }
 
     #[test]

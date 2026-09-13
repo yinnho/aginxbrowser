@@ -1,4 +1,4 @@
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::rc::Rc;
@@ -193,7 +193,7 @@ pub struct JsState {
     /// recomputed each layout run. The video pump uses it as the timeline
     /// extent for CSS-animated pages (no `__timelines` needed).
     #[cfg(feature = "screenshot")]
-    pub(crate) css_extent: Cell<f64>,
+    pub(crate) css_extent: std::cell::Cell<f64>,
     /// Layout invalidation revision: bumped wherever `layout_cache` is
     /// dropped. The DomTree epoch is a tree-shape stamp — attribute-level
     /// writes (style/class/attr) clear the cache without allocating nodes,
@@ -354,7 +354,7 @@ impl JsState {
             #[cfg(feature = "screenshot")]
             css_time: None,
             #[cfg(feature = "screenshot")]
-            css_extent: Cell::new(0.0),
+            css_extent: std::cell::Cell::new(0.0),
             #[cfg(feature = "screenshot")]
             layout_rev: std::cell::Cell::new(0),
             #[cfg(feature = "screenshot")]
@@ -1993,13 +1993,16 @@ fn computed_style_value(
         ),
         // Declared values only: undeclared cells keep the JS caller's own
         // default chain (the UA middle behavior at the alignment site isn't
-        // a declaration, and baseline folds into Top for the layout model).
+        // a declaration).
         "vertical-align" => s
             .vertical_align
             .map(|va| match va {
                 VerticalAlign::Top => "top",
                 VerticalAlign::Middle => "middle",
                 VerticalAlign::Bottom => "bottom",
+                VerticalAlign::Baseline => "baseline",
+                VerticalAlign::Sub => "sub",
+                VerticalAlign::Super => "super",
             })
             .map(str::to_string),
         // Not inherited (the paint-time propagation to inline descendants is

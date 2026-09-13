@@ -73,12 +73,19 @@ fn is_cjk(c: char) -> bool {
 /// flex-row-of-word-leaves fallback from batch 2b.
 #[derive(Clone)]
 enum TextLeaf {
-    Run { text: String, font_size: f32, bold: bool, color: [u8; 4], line_height: f32, decorations: TextDecorations },
+    Run { text: String, font_size: f32, bold: bool, color: [u8; 4], line_height: f32, decorations: TextDecorations, baseline_shift: f32 },
     /// One word/glyph of a MIXED run (text around inline elements): the
     /// batch-2b word-leaf fallback, now carrying paint context (batch 4d).
     /// Layout is still style-driven — the measure closure passes Word
     /// leaves straight through to taffy's own style sizing.
-    Word { text: String, font_size: f32, bold: bool, color: [u8; 4], line_height: f32, decorations: TextDecorations },
+    Word { text: String, font_size: f32, bold: bool, color: [u8; 4], line_height: f32, decorations: TextDecorations, baseline_shift: f32 },
+    /// An inline-level replaced atom rides the strut (CSS: the strut is a
+    /// zero-width glyph of the container's font, so the LINE box spans its
+    /// full ascent+descent): the leaf grows by the surrounding font's
+    /// descent, and collect shrinks the recorded rect back to the element
+    /// box — gBCR/offsetHeight stay element-sized while the container line
+    /// gains the descent below the atom.
+    Replaced { strut_descent: f32 },
 }
 
 /// Approximate used line height for text leaves. Matches blitz exactly:
@@ -452,10 +459,11 @@ fn resolve_sizing_keywords(
         let space = taffy::geometry::Size { width: w, height: AvailableSpace::MaxContent };
         let _ = taffy_tree.compute_layout_with_measure(node, space, |inputs, _id, ctx, style| {
             match ctx {
-                Some(TextLeaf::Run { text, font_size, bold, line_height, .. }) => {
-                    measure_text_leaf(text, *font_size, *bold, *line_height, fonts, &inputs)
+                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, .. }) => {
+                    let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
+                    measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs)
                 }
-                Some(TextLeaf::Word { .. }) | None => {
+                Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | None => {
                     taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO)
                 }
             }
@@ -656,6 +664,77 @@ fn decoration_context(
         current = tree.with_node(nid, |n| n.parent).flatten();
     }
     out
+}
+
+/// `vertical-align: sub|super` as a baseline shift on inline text (CSS 2.1
+/// §10.8.1 keyword model, Chromium constants): sub drops 20% of the PARENT's
+/// font-size below the baseline, super lifts 40% above it — reproduces the
+/// Chrome probes (a 20px-parent `<sup>` and an explicit 20px `super` both
+/// grow the line by exactly 8px). Shifts compose up the ancestor chain
+/// (nested sup compounds). The walk stops at an atomic-inline (inline-block)
+/// or out-of-flow boundary WITHOUT applying the boundary's own declaration:
+/// vertical-align on an inline-block moves the BOX, not the text inside.
+/// Down-positive: sub → +0.2×parent_fs, super → −0.4×parent_fs; baseline/
+/// lengths/percentages are 0 (the line-baseline machinery already handles
+/// baseline, and lengths stay accepted-but-unmodeled in the parse).
+fn valign_shift(tree: &DomTree, id: NodeId, styles: &HashMap<NodeId, ComputedStyle>) -> f32 {
+    let mut shift = 0.0f32;
+    let mut current = Some(id);
+    while let Some(nid) = current {
+        let boundary = if let Some(s) = styles.get(&nid) {
+            if s.display == Some(CssDisplay::Inline) {
+                match s.vertical_align {
+                    Some(crate::diting_css::VerticalAlign::Sub)
+                    | Some(crate::diting_css::VerticalAlign::Super) => {
+                        let parent = tree.with_node(nid, |n| n.parent).flatten();
+                        let parent_fs = parent
+                            .map(|p| font_context(tree, p, styles).0)
+                            .unwrap_or(16.0);
+                        shift += if s.vertical_align == Some(crate::diting_css::VerticalAlign::Sub) {
+                            0.2 * parent_fs
+                        } else {
+                            -0.4 * parent_fs
+                        };
+                    }
+                    _ => {}
+                }
+            }
+            nid != id
+                && (s.display == Some(CssDisplay::InlineBlock)
+                    || matches!(s.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
+                    || s.float_side.is_some())
+        } else {
+            false
+        };
+        if boundary {
+            break;
+        }
+        current = tree.with_node(nid, |n| n.parent).flatten();
+    }
+    shift
+}
+
+/// Font descent at a size/weight, FontBook fallback fs×0.2 — the same
+/// fallback text_baseline rides.
+fn leaf_descent(fonts: &FontBook, fs: f32, bold: bool) -> f32 {
+    fonts.metrics(fs, bold).map(|m| m.descent).unwrap_or(fs * 0.2)
+}
+
+/// Extra leaf height a baseline shift needs so the line box contains the
+/// shifted glyph: a lift (super) pads by the lift itself; a drop (sub) pads
+/// by the drop plus the glyph's descent, which would otherwise poke out the
+/// line's bottom. Whole-pixel: taffy's round_layout pass sizes nodes on the
+/// cumulative pixel grid, so a fractional pad would be unrecoverable from
+/// the rounded height and the error would land on the element's own box.
+fn shift_pad(shift: f32, descent: f32) -> f32 {
+    let raw = if shift < 0.0 {
+        -shift
+    } else if shift > 0.0 {
+        shift + descent
+    } else {
+        0.0
+    };
+    raw.ceil()
 }
 
 /// The label a select displays: the first option whose selectedness is on
@@ -905,6 +984,7 @@ fn build_word_leaves(
     color: [u8; 4],
     line_height: f32,
     decorations: TextDecorations,
+    shift: f32,
     fonts: &FontBook,
     taffy_tree: &mut TaffyTree<TextLeaf>,
 ) -> Vec<taffy::tree::NodeId> {
@@ -914,7 +994,11 @@ fn build_word_leaves(
             let width = fonts.advance_width(&token, font_size, bold);
             // Pure-whitespace tokens contribute no height (they sit between
             // block siblings without adding a spurious blank row).
-            let height = if token.trim().is_empty() { 0.0 } else { line_height };
+            let height = if token.trim().is_empty() {
+                0.0
+            } else {
+                line_height + shift_pad(shift, leaf_descent(fonts, font_size, bold))
+            };
             let style = Style {
                 size: Size {
                     width: Dimension::length(width.max(0.0)),
@@ -929,6 +1013,7 @@ fn build_word_leaves(
                 color,
                 line_height,
                 decorations,
+                baseline_shift: shift,
             };
             taffy_tree.new_leaf_with_context(style, leaf).ok()
         })
@@ -973,12 +1058,15 @@ fn trim_run_edge_whitespace(
 ///   run's size UP so nothing overflows the box, which taffy's own
 ///   round-to-nearest would not reproduce (probe: "hello" 37.36 → 38);
 /// - height = line count × used line-height (blitz pins `normal` at
-///   1.2×fs; declared values arrive with the leaf).
+///   1.2×fs; declared values arrive with the leaf) plus the baseline-shift
+///   pad, so a shifted (sub/sup) run grows its line box by exactly the
+///   shift's extent.
 fn measure_text_leaf(
     text: &str,
     font_size: f32,
     bold: bool,
     line_height: f32,
+    pad: f32,
     fonts: &FontBook,
     inputs: &taffy::tree::LayoutInput,
 ) -> taffy::tree::LayoutOutput {
@@ -1003,7 +1091,7 @@ fn measure_text_leaf(
     let max_line = if min_content { widest_token } else { lines.iter().map(|l| l.width).fold(0.0, f32::max) };
     let size = taffy::geometry::Size {
         width: known.width.unwrap_or(max_line.ceil()),
-        height: known.height.unwrap_or(lines.len() as f32 * lh),
+        height: known.height.unwrap_or(lines.len() as f32 * lh + pad),
     };
     // taffy >= 1b918ba replaced the `content_size: Size` second argument
     // with a scrollable-overflow `Rect`; a text leaf's content is exactly
@@ -1254,6 +1342,7 @@ fn build_replaced_leaf(
     images: &HashMap<NodeId, DecodedImage>,
     taffy_tree: &mut TaffyTree<TextLeaf>,
     node_map: &mut HashMap<taffy::tree::NodeId, NodeId>,
+    strut_descent: f32,
 ) -> Option<taffy::tree::NodeId> {
     let style = styles.get(&id).cloned().unwrap_or_default();
     let tag = tree
@@ -1431,6 +1520,11 @@ fn build_replaced_leaf(
         style.box_sizing,
         Some(crate::diting_css::BoxSizing::BorderBox)
     );
+    // The strut descent (inline atoms only — block-level callers pass 0)
+    // extends the LEAF below the element box so the line box spans the
+    // strut's full extent; collect subtracts it back from the recorded
+    // rect, so percent/calc arms (CB-resolved approximations) skip the pad
+    // rather than grow an axis the rect shrink could not undo exactly.
     s.size = Size {
         width: match style.width {
             Some(crate::diting_css::Length::Px(w)) => {
@@ -1447,23 +1541,40 @@ fn build_replaced_leaf(
         },
         height: match style.height {
             Some(crate::diting_css::Length::Px(h)) => {
-                Dimension::length(if border_box { h } else { h + if bline { bt + bb } else { 0.0 } })
+                Dimension::length((if border_box { h } else { h + if bline { bt + bb } else { 0.0 } }) + strut_descent)
             }
             Some(crate::diting_css::Length::Percent(p)) => Dimension::percent(p / 100.0),
             Some(crate::diting_css::Length::Calc { percent, .. }) => {
                 Dimension::percent(percent / 100.0)
             }
-            Some(crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent) | None => Dimension::length(derived_h.unwrap_or(nat_h) + if bline { bt + bb } else { 0.0 }),
+            Some(crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent) | None => Dimension::length(derived_h.unwrap_or(nat_h) + if bline { bt + bb } else { 0.0 } + strut_descent),
         },
     };
 
-    let node = taffy_tree.new_leaf(s).ok()?;
+    let node = taffy_tree
+        .new_leaf_with_context(s, TextLeaf::Replaced { strut_descent })
+        .ok()?;
     node_map.insert(node, id);
     Some(node)
 }
 
 /// Build the taffy subtree for one element. Returns None for display:none
 /// (subtree skipped) and for the document node's non-element parts.
+/// Strut descent for an inline-level replaced atom: the descent of the
+/// element's inherited font context (the strut IS a zero-width glyph of the
+/// line's font). Block-level replaced boxes pass 0.
+fn strut_descent_for(
+    tree: &DomTree,
+    id: NodeId,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    fonts: &FontBook,
+) -> f32 {
+    let (fs, bold, _) = font_context(tree, id, styles);
+    // Whole-pixel pad so the padded leaf height survives taffy's integer
+    // rounding exactly and collect's subtract-back lands on the true box.
+    leaf_descent(fonts, fs, bold).ceil()
+}
+
 /// Build one child into its parent's normal-flow child list — the same
 /// replaced/text/inline-run/block dispatch as build_element's main loop,
 /// factored out so the float-zone branches (8b/8c) can append zone-external
@@ -1507,7 +1618,8 @@ fn build_normal_sibling(
         let inline_atom =
             inline_level || child_display == Some(CssDisplay::InlineBlock);
         if inline_atom && !atomic_container && !out_of_flow {
-            if let Some(leaf) = build_replaced_leaf(tree, child, styles, images, taffy_tree, node_map) {
+            let sd = strut_descent_for(tree, child, styles, fonts);
+            if let Some(leaf) = build_replaced_leaf(tree, child, styles, images, taffy_tree, node_map, sd) {
                 // A lone inline atom still gets the wrapping-run stand-in so
                 // it lays out on the text baseline path like the main loop.
                 if let Ok(wrapper) =
@@ -1517,7 +1629,7 @@ fn build_normal_sibling(
                     direct.push(wrapper);
                 }
             }
-        } else if let Some(leaf) = build_replaced_leaf(tree, child, styles, images, taffy_tree, node_map) {
+        } else if let Some(leaf) = build_replaced_leaf(tree, child, styles, images, taffy_tree, node_map, 0.0) {
             direct.push(leaf);
         }
         return;
@@ -1558,7 +1670,8 @@ fn build_normal_sibling(
             let lh = if styles.get(&child).is_some() { lh } else { line_height };
             let col = color_context(tree, child, styles);
             let deco = decoration_context(tree, child, styles);
-            leaves.extend(build_word_leaves(&text, fs, b, col, lh, deco, fonts, taffy_tree));
+            let vs = valign_shift(tree, child, styles);
+            leaves.extend(build_word_leaves(&text, fs, b, col, lh, deco, vs, fonts, taffy_tree));
         } else {
             let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta);
             if let Some(sub) = sub {
@@ -1748,7 +1861,7 @@ fn build_flow_column(
     lh_elem: f32,
 ) -> Vec<taffy::tree::NodeId> {
     enum RunSeg {
-        Text(String, f32, bool, [u8; 4], f32, TextDecorations),
+        Text(String, f32, bool, [u8; 4], f32, TextDecorations, f32),
         Nodes(Vec<taffy::tree::NodeId>),
     }
     let mut flow_children: Vec<taffy::tree::NodeId> = Vec::new();
@@ -1764,10 +1877,10 @@ fn build_flow_column(
                 .map(|s| match s { RunSeg::Text(t, ..) => t.as_str(), _ => "" })
                 .collect::<String>();
             if !text.trim().is_empty() {
-                let RunSeg::Text(_, fs, bold, color, lh, deco) = &segs[0] else { unreachable!() };
+                let RunSeg::Text(_, fs, bold, color, lh, deco, vs) = &segs[0] else { unreachable!() };
                 if let Ok(leaf) = taffy_tree.new_leaf_with_context(
                     Style::default(),
-                    TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco },
+                    TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs },
                 ) {
                     flow_children.push(leaf);
                 }
@@ -1777,8 +1890,8 @@ fn build_flow_column(
         let mut leaves: Vec<taffy::tree::NodeId> = Vec::new();
         for seg in segs {
             match seg {
-                RunSeg::Text(text, fs, bold, color, lh, deco) => {
-                    leaves.extend(build_word_leaves(&text, fs, bold, color, lh, deco, fonts, taffy_tree))
+                RunSeg::Text(text, fs, bold, color, lh, deco, vs) => {
+                    leaves.extend(build_word_leaves(&text, fs, bold, color, lh, deco, vs, fonts, taffy_tree))
                 }
                 RunSeg::Nodes(nodes) => leaves.extend(nodes),
             }
@@ -1806,13 +1919,18 @@ fn build_flow_column(
             matches!(s.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
         });
         if !is_text && is_replaced_tag(&child_tag) {
-            let leaf = build_replaced_leaf(tree, child, styles, images, taffy_tree, node_map);
+            // Inline-flavored replaced elements (UA inline-block form
+            // controls included) join the text run; the rest stay block
+            // siblings (current shipped behavior for img/video).
+            let inline_atom =
+                inline_level || child_display == Some(CssDisplay::InlineBlock);
+            let sd = if inline_atom && !out_of_flow {
+                strut_descent_for(tree, child, styles, fonts)
+            } else {
+                0.0
+            };
+            let leaf = build_replaced_leaf(tree, child, styles, images, taffy_tree, node_map, sd);
             if let Some(leaf) = leaf {
-                // Inline-flavored replaced elements (UA inline-block form
-                // controls included) join the text run; the rest stay block
-                // siblings (current shipped behavior for img/video).
-                let inline_atom =
-                    inline_level || child_display == Some(CssDisplay::InlineBlock);
                 if inline_atom && !out_of_flow {
                     run.push(RunSeg::Nodes(vec![leaf]));
                 } else {
@@ -1829,7 +1947,8 @@ fn build_flow_column(
             let lh = if styles.get(&child).is_some() { lh } else { lh_elem };
             let col = color_context(tree, child, styles);
             let deco = decoration_context(tree, child, styles);
-            run.push(RunSeg::Text(text, fs, b, col, lh, deco));
+            let vs = valign_shift(tree, child, styles);
+            run.push(RunSeg::Text(text, fs, b, col, lh, deco, vs));
         } else if child_display == Some(CssDisplay::InlineBlock) && !out_of_flow {
             // Atomic inline-level box (obscura#750 family): keeps its own
             // subtree box, joins the run as one shrink-to-fit unit.
@@ -1945,7 +2064,8 @@ pub(crate) struct TableBuildMeta {
 /// already merged in the cascade) as the cell-content justify rule.
 fn cell_valign_justify(styles: &HashMap<NodeId, ComputedStyle>, dom: &NodeId) -> JustifyContent {
     match styles.get(dom).and_then(|s| s.vertical_align) {
-        Some(crate::diting_css::VerticalAlign::Top) => JustifyContent::FLEX_START,
+        Some(crate::diting_css::VerticalAlign::Top)
+        | Some(crate::diting_css::VerticalAlign::Baseline) => JustifyContent::FLEX_START,
         Some(crate::diting_css::VerticalAlign::Bottom) => JustifyContent::FLEX_END,
         // Absent/unknown = Chrome's UA middle default.
         _ => JustifyContent::CENTER,
@@ -2307,10 +2427,11 @@ fn build_table(
         };
         let _ = taffy_tree.compute_layout_with_measure(node, space, |inputs, _id, ctx, style| {
             match ctx {
-                Some(TextLeaf::Run { text, font_size, bold, line_height, .. }) => {
-                    measure_text_leaf(text, *font_size, *bold, *line_height, fonts, &inputs)
+                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, .. }) => {
+                    let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
+                    measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs)
                 }
-                Some(TextLeaf::Word { .. }) | None => {
+                Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | None => {
                     taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO)
                 }
             }
@@ -2323,10 +2444,11 @@ fn build_table(
         let space = taffy::geometry::Size { width, height: AvailableSpace::MaxContent };
         let _ = taffy_tree.compute_layout_with_measure(node, space, |inputs, _id, ctx, style| {
             match ctx {
-                Some(TextLeaf::Run { text, font_size, bold, line_height, .. }) => {
-                    measure_text_leaf(text, *font_size, *bold, *line_height, fonts, &inputs)
+                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, .. }) => {
+                    let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
+                    measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs)
                 }
-                Some(TextLeaf::Word { .. }) | None => {
+                Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | None => {
                     taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO)
                 }
             }
@@ -2654,7 +2776,7 @@ fn build_element(
     // Reached directly (root, or a replaced element someone recursed into):
     // replaced boxes own no layout children.
     if is_replaced_tag(&tag) {
-        return build_replaced_leaf(tree, id, styles, images, taffy_tree, node_map);
+        return build_replaced_leaf(tree, id, styles, images, taffy_tree, node_map, 0.0);
     }
 
     // --- table layout (display:table family) ------------------------------
@@ -2682,7 +2804,7 @@ fn build_element(
     // greedy wrap, ceiled width) we reproduce in measure_text_leaf. Mixed
     // runs fall back to the batch-2b wrapping flex row of word leaves.
     enum RunSeg {
-        Text(String, f32, bool, [u8; 4], f32, TextDecorations),
+        Text(String, f32, bool, [u8; 4], f32, TextDecorations, f32),
         Nodes(Vec<taffy::tree::NodeId>),
     }
     let mut direct: Vec<taffy::tree::NodeId> = Vec::new();
@@ -2705,10 +2827,10 @@ fn build_element(
             if text.trim().is_empty() {
                 return;
             }
-            let RunSeg::Text(_, fs, bold, color, lh, deco) = &segs[0] else { unreachable!() };
+            let RunSeg::Text(_, fs, bold, color, lh, deco, vs) = &segs[0] else { unreachable!() };
             if let Ok(leaf) = taffy_tree.new_leaf_with_context(
                 Style::default(),
-                TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco },
+                TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs },
             ) {
                 direct.push(leaf);
                 return;
@@ -2717,8 +2839,8 @@ fn build_element(
         let mut leaves: Vec<taffy::tree::NodeId> = Vec::new();
         for seg in segs {
             match seg {
-                RunSeg::Text(text, fs, bold, color, lh, deco) => {
-                    leaves.extend(build_word_leaves(&text, fs, bold, color, lh, deco, fonts, taffy_tree))
+                RunSeg::Text(text, fs, bold, color, lh, deco, vs) => {
+                    leaves.extend(build_word_leaves(&text, fs, bold, color, lh, deco, vs, fonts, taffy_tree))
                 }
                 RunSeg::Nodes(nodes) => leaves.extend(nodes),
             }
@@ -3296,10 +3418,15 @@ fn build_element(
             // Replaced elements are atomic: an inline-level box inside a run
             // (like a fat word), a direct item inside flex/grid or when the
             // UA/author made it block-level (our ua_display keeps img block).
-            let leaf = build_replaced_leaf(tree, child, styles, images, taffy_tree, node_map);
+            let inline_atom =
+                inline_level || child_display == Some(CssDisplay::InlineBlock);
+            let sd = if inline_atom && !atomic_container && !out_of_flow {
+                strut_descent_for(tree, child, styles, fonts)
+            } else {
+                0.0
+            };
+            let leaf = build_replaced_leaf(tree, child, styles, images, taffy_tree, node_map, sd);
             if let Some(leaf) = leaf {
-                let inline_atom =
-                    inline_level || child_display == Some(CssDisplay::InlineBlock);
                 if inline_atom && !atomic_container && !out_of_flow {
                     run.push(RunSeg::Nodes(vec![leaf]));
                 } else {
@@ -3318,7 +3445,8 @@ fn build_element(
             // first-segment approximation fs/bold already use.
             let col = color_context(tree, child, styles);
             let deco = decoration_context(tree, child, styles);
-            run.push(RunSeg::Text(text, fs, b, col, lh, deco));
+            let vs = valign_shift(tree, child, styles);
+            run.push(RunSeg::Text(text, fs, b, col, lh, deco, vs));
         } else if child_display == Some(CssDisplay::InlineBlock) && !atomic_container && !out_of_flow {
             // An inline-level block is ATOMIC (Chrome line-box model): it keeps
             // its own subtree box and joins the run as one unit, like a replaced
@@ -3759,17 +3887,27 @@ fn subtree_last_baseline(
     let Ok(layout) = taffy_tree.layout(node) else { return };
     let rel_y = rel_y + shifts.get(&node).copied().unwrap_or(0.0);
     match taffy_tree.get_node_context(node) {
-        Some(TextLeaf::Word { font_size, bold, line_height, .. }) => {
+        Some(TextLeaf::Word { font_size, bold, line_height, baseline_shift, .. }) => {
             if layout.size.height > 0.0 {
-                let b = rel_y + text_baseline(fonts, *font_size, *bold, *line_height);
+                let b = rel_y + text_baseline(fonts, *font_size, *bold, *line_height) - baseline_shift;
                 *best = Some(best.map_or(b, |x: f32| x.max(b)));
             }
             return;
         }
-        Some(TextLeaf::Run { font_size, bold, line_height, .. }) => {
-            // A wrapped run's last line sits one line box above its bottom.
-            let b = rel_y + layout.size.height - line_height
-                + text_baseline(fonts, *font_size, *bold, *line_height);
+        Some(TextLeaf::Run { font_size, bold, line_height, baseline_shift, .. }) => {
+            // A wrapped run's last line sits one line box above its bottom;
+            // the shift pad is empty reservation, not a text line.
+            let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
+            let b = rel_y + layout.size.height - pad - line_height
+                + text_baseline(fonts, *font_size, *bold, *line_height)
+                - baseline_shift;
+            *best = Some(best.map_or(b, |x: f32| x.max(b)));
+            return;
+        }
+        Some(TextLeaf::Replaced { strut_descent }) => {
+            // Baseline = the element box's bottom edge (the pad below it is
+            // strut reservation, not element box).
+            let b = rel_y + layout.size.height - strut_descent;
             *best = Some(best.map_or(b, |x: f32| x.max(b)));
             return;
         }
@@ -3871,12 +4009,15 @@ fn item_baseline(
     height: f32,
 ) -> f32 {
     match taffy_tree.get_node_context(child) {
-        Some(TextLeaf::Word { font_size, bold, line_height, .. }) => {
-            text_baseline(fonts, *font_size, *bold, *line_height)
+        Some(TextLeaf::Word { font_size, bold, line_height, baseline_shift, .. }) => {
+            text_baseline(fonts, *font_size, *bold, *line_height) - baseline_shift
         }
-        Some(TextLeaf::Run { font_size, bold, line_height, .. }) => {
-            height - line_height + text_baseline(fonts, *font_size, *bold, *line_height)
+        Some(TextLeaf::Run { font_size, bold, line_height, baseline_shift, .. }) => {
+            let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
+            height - pad - line_height + text_baseline(fonts, *font_size, *bold, *line_height)
+                - baseline_shift
         }
+        Some(TextLeaf::Replaced { strut_descent }) => height - strut_descent,
         None => {
             if let Some(b) = first_baselines.get(&child) {
                 return *b;
@@ -3889,9 +4030,8 @@ fn item_baseline(
                     return b;
                 }
             }
-            // Replaced leaf or textless box: bottom edge (CSS bottom
-            // margin-edge fallback — run items carry no vertical margins in
-            // this model).
+            // Textless box: bottom edge (CSS bottom margin-edge fallback —
+            // run items carry no vertical margins in this model).
             height
         }
     }
@@ -4118,8 +4258,9 @@ pub fn layout_solve(
             let laid_out = taffy_tree
                 .compute_layout_with_measure(icb_node, available, |inputs, _id, ctx, style| {
                     match ctx {
-                        Some(TextLeaf::Run { text, font_size, bold, line_height, .. }) => {
-                            measure_text_leaf(text, *font_size, *bold, *line_height, fonts, &inputs)
+                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, .. }) => {
+                            let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
+                            measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs)
                         }
                         _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
                     }
@@ -4234,12 +4375,13 @@ pub fn layout_solve(
     // (that's exactly what stock compute_layout does below via the same fn).
     let measured = taffy_tree.compute_layout_with_measure(icb_node, available, |inputs, _id, ctx, style| {
         match ctx {
-            Some(TextLeaf::Run { text, font_size, bold, line_height, .. }) => {
-                measure_text_leaf(text, *font_size, *bold, *line_height, fonts, &inputs)
+            Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, .. }) => {
+                let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
+                measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs)
             }
             // Word leaves keep their style-driven sizing (batch 4d only
             // added paint context — zero layout change).
-            Some(TextLeaf::Word { .. }) | None => {
+            Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | None => {
                 taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO)
             }
         }
@@ -4408,8 +4550,9 @@ pub fn layout_solve(
                     icb_node,
                     available,
                     |inputs, _id, ctx, style| match ctx {
-                        Some(TextLeaf::Run { text, font_size, bold, line_height, .. }) => {
-                            measure_text_leaf(text, *font_size, *bold, *line_height, fonts, &inputs)
+                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, .. }) => {
+                            let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
+                            measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs)
                         }
                         _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
                     },
@@ -4518,8 +4661,9 @@ pub fn layout_solve(
                 icb_node,
                 available,
                 |inputs, _id, ctx, style| match ctx {
-                    Some(TextLeaf::Run { text, font_size, bold, line_height, .. }) => {
-                        measure_text_leaf(text, *font_size, *bold, *line_height, fonts, &inputs)
+                    Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, .. }) => {
+                        let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
+                        measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs)
                     }
                     _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
                 },
@@ -4588,8 +4732,9 @@ pub fn layout_solve(
                     icb_node,
                     available,
                     |inputs, _id, ctx, style| match ctx {
-                        Some(TextLeaf::Run { text, font_size, bold, line_height, .. }) => {
-                            measure_text_leaf(text, *font_size, *bold, *line_height, fonts, &inputs)
+                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, .. }) => {
+                            let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
+                            measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs)
                         }
                         _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
                     },
@@ -4802,6 +4947,14 @@ pub fn layout_collect(
         if let Some(dy) = baseline_shifts.get(&node) {
             offset.1 += dy;
         }
+        // Strut descent (replaced inline atoms): the taffy leaf is taller
+        // than the element box by the strut's descent so the line box spans
+        // it; every recorded box (rect/local/abs — gBCR, paint, hit test)
+        // reports the element box.
+        let strut_pad = match taffy_tree.get_node_context(node) {
+            Some(TextLeaf::Replaced { strut_descent }) => *strut_descent,
+            _ => 0.0,
+        };
         let abs = (offset.0 + layout.location.x, offset.1 + layout.location.y);
         // The map handed to descendants (animation batch B): upgraded below
         // once this element's own box is final, since the scale part pivots
@@ -4820,7 +4973,7 @@ pub fn layout_collect(
                     x: abs.0,
                     y: abs.1,
                     width: layout.size.width,
-                    height: layout.size.height,
+                    height: layout.size.height - strut_pad,
                 },
                 xf.to_array(),
             ),
@@ -4831,13 +4984,13 @@ pub fn layout_collect(
                 x: abs.0,
                 y: abs.1,
                 width: layout.size.width,
-                height: layout.size.height,
+                height: layout.size.height - strut_pad,
             }),
         );
         let mut clips = false;
         let mut xf_bracket = false;
         if let Some(dom_id) = node_map.get(&node) {
-            let mut rect = Rect { x: abs.0, y: abs.1, width: layout.size.width, height: layout.size.height };
+            let mut rect = Rect { x: abs.0, y: abs.1, width: layout.size.width, height: layout.size.height - strut_pad };
             // Static-position override (the harvest pass above): a
             // both-auto axis of an out-of-flow box takes its ORIGINAL flow
             // coordinate, not the post-reparent CB flow tail taffy fell
@@ -5332,7 +5485,7 @@ pub fn layout_collect(
                 stops: g.stops.iter().map(|(p, c)| (*p, with_alpha(*c, alpha))).collect(),
                 css_deg: g.css_deg,
             });
-        if let Some(TextLeaf::Run { text, font_size, bold, color, line_height, decorations }) = taffy_tree.get_node_context(node) {
+        if let Some(TextLeaf::Run { text, font_size, bold, color, line_height, decorations, .. }) = taffy_tree.get_node_context(node) {
             // The wrap width the containing block offered at measure time:
             // the direct taffy parent's content box (the run wrapper for
             // mixed runs, the block itself for pure runs — same width).
@@ -5381,7 +5534,7 @@ pub fn layout_collect(
                 });
             }
         }
-        if let Some(TextLeaf::Word { text, font_size, bold, color, line_height, decorations }) = taffy_tree.get_node_context(node) {
+        if let Some(TextLeaf::Word { text, font_size, bold, color, line_height, decorations, .. }) = taffy_tree.get_node_context(node) {
             // A word leaf paints at its own box — the enclosing flex row
             // already did the line breaking (leaf-level wrap). Single-token
             // text can never break, so wrap_at just equals the leaf width.

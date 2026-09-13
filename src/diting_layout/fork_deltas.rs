@@ -469,6 +469,87 @@ fn flattened_inline_union_carries_strut_height() {
     );
 }
 
+/// UA sub/super baseline shifts grow the line box, and an inline replaced
+/// atom carries the strut descent so the line can take its descender room
+/// (Chrome oracles from the #420 probe: x<sup>y</sup> at 20px parent → 28,
+/// explicit vertical-align:super → 32, div>img content height 44 while the
+/// img box itself stays 40; a block img takes no strut).
+#[test]
+fn sub_super_grows_line_box_and_strut_keeps_img_honest() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    let html = r#"<html><body>
+        <div id="plain" style="font-size:20px">xy</div>
+        <div id="sup" style="font-size:20px">x<sup>y</sup></div>
+        <div id="sub" style="font-size:20px">x<sub>y</sub></div>
+        <div id="explicit" style="font-size:20px"><span style="vertical-align:super">s</span></div>
+        <div id="imgwrap"><img width="40" height="40"></div>
+        <div id="imgblock"><img style="display:block" width="40" height="40"></div>
+    </body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let fonts = crate::diting_fonts::font_book();
+    let rects = crate::diting_layout::layout_dom(
+        &tree, &styles, &fonts, 1280.0, 800.0,
+    );
+
+    let h = |sel: &str| -> f32 {
+        let id = tree.query_selector_all(sel).unwrap()[0];
+        rects.get(&id).unwrap_or_else(|| panic!("{sel} must own a rect")).height
+    };
+
+    let plain_h = h("#plain");
+    let plain_id = tree.query_selector_all("#plain").unwrap()[0];
+    let (_, _, lh) = super::font_context(&tree, plain_id, &styles);
+    assert!(
+        (plain_h - lh).abs() <= 1.0,
+        "plain line sits at the strut {lh}; got {plain_h}"
+    );
+
+    let sup_h = h("#sup");
+    assert!(
+        (sup_h - 28.0).abs() <= 1.5,
+        "UA sup (fs smaller, valign super) lifts by 0.4×parent fs: 20+8 (Chrome 28); got {sup_h}"
+    );
+
+    let sub_h = h("#sub");
+    let sup_fs = 20.0 * 0.8333;
+    let want_sub = sup_fs * 1.2 + (0.2 * 20.0 + super::leaf_descent(&fonts, sup_fs, false)).ceil();
+    assert!(
+        (sub_h - want_sub).abs() <= 1.0,
+        "sub drops by 0.2×parent fs plus its own (whole-px) descent; got {sub_h} want {want_sub}"
+    );
+
+    let ex_h = h("#explicit");
+    assert!(
+        (ex_h - 32.0).abs() <= 1.5,
+        "explicit vertical-align:super at 20px: 24+8 (Chrome 32); got {ex_h}"
+    );
+
+    let wrap_h = h("#imgwrap");
+    let want_wrap = 40.0 + super::leaf_descent(&fonts, 16.0, false).ceil();
+    assert!(
+        (wrap_h - want_wrap).abs() <= 0.01,
+        "inline img rides the baseline: the line grows by the whole-px strut descent (Chrome 44); got {wrap_h} want {want_wrap}"
+    );
+    let img_h = {
+        let id = tree.query_selector_all("#imgwrap img").unwrap()[0];
+        rects.get(&id).unwrap_or_else(|| panic!("img must own a rect")).height
+    };
+    assert!(
+        (img_h - 40.0).abs() < 0.01,
+        "the img box itself stays 40 — the strut is line bookkeeping, not img geometry; got {img_h}"
+    );
+
+    let block_h = h("#imgblock");
+    assert!(
+        (block_h - 40.0).abs() <= 0.5,
+        "a block img takes no strut; got {block_h}"
+    );
+}
+
 /// Inline-block is an atomic inline-level box (obscura#750 family). Our CSS
 /// layer used to drop `display: inline-block` entirely (no enum variant, the
 /// declaration fell to `_ => return false`), so every inline list/stack
