@@ -30,6 +30,10 @@ pub struct DitingModuleLoader {
     /// unreachable from here, so createObjectURL mirrors each entry in via
     /// `op_blob_register` and `import("blob:…")` resolves through this map.
     pub blob_store: Rc<RefCell<HashMap<String, (Vec<u8>, String)>>>,
+    /// The page's context HTTP client, set post-construction via
+    /// `JsRuntime::set_http_client`. Owns the legacy-TLS transport the fetch
+    /// falls back to when the plain-reqwest primary dies at handshake.
+    pub http_client: RefCell<Option<std::sync::Arc<crate::diting_net::HttpClient>>>,
 }
 
 impl DitingModuleLoader {
@@ -55,7 +59,14 @@ impl DitingModuleLoader {
             proxy_url,
             import_map,
             blob_store,
+            http_client: RefCell::new(None),
         }
+    }
+
+    /// Wire the page's context HTTP client into the loader (called from
+    /// `JsRuntime::set_http_client`, which fires before any script runs).
+    pub fn set_http_client(&self, client: std::sync::Arc<crate::diting_net::HttpClient>) {
+        *self.http_client.borrow_mut() = Some(client);
     }
 }
 
@@ -283,6 +294,7 @@ impl ModuleLoader for DitingModuleLoader {
         // Capture the loader's proxy here so the async closure below owns a
         // plain Option<String> rather than borrowing &self across an `await`.
         let proxy_url = self.proxy_url.clone();
+        let http_client = self.http_client.borrow().clone();
 
         ModuleLoadResponse::Async(Pin::from(Box::new(async move {
             // Same page-reachable policy as fetch()/XHR (obscura #849):
@@ -315,12 +327,70 @@ impl ModuleLoader for DitingModuleLoader {
                 proxy_url.as_deref().unwrap_or("direct")
             );
 
-            let mut resp = client
+            let mut resp = match client
                 .get(&url)
                 .header("Accept", "application/javascript, text/javascript, */*")
                 .send()
                 .await
-                .map_err(|e| io_err(format!("Failed to fetch module {}: {}", url, e)))?;
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    // The module path rides the process-wide plain-reqwest
+                    // cache with no transport of its own; on a CBC-only CDN
+                    // (the g.alicdn.com shape) the GET died in the ClientHello
+                    // and every dynamic import() on the page failed even
+                    // though fetch()/XHR and classic scripts escaped via the
+                    // legacy-TLS hatch. Same one-shot retry: GET is
+                    // idempotent, modules carry no scripted headers beyond
+                    // Accept (the legacy client rides transport defaults), and
+                    // no cookies — the primary client shares no jar either,
+                    // so the retry keeps that posture. A non-connect failure
+                    // keeps the original error, same as every other caller.
+                    let fallback = match http_client.as_ref() {
+                        Some(hc) => match url::Url::parse(&url) {
+                            Ok(u) => Some(
+                                hc.scripted_fetch_fallback(
+                                    &reqwest::Method::GET,
+                                    &u,
+                                    &e.to_string(),
+                                    None,
+                                    None,
+                                    e.is_connect(),
+                                    None,
+                                    false,
+                                )
+                                .await,
+                            ),
+                            Err(_) => None,
+                        },
+                        None => None,
+                    };
+                    match fallback {
+                        Some(Ok(fr)) => {
+                            if !(200..300).contains(&fr.status) {
+                                return Err(io_err(format!(
+                                    "Module {} returned HTTP {}",
+                                    url, fr.status
+                                )));
+                            }
+                            let body_limit = crate::diting_js::ops::fetch_body_byte_limit();
+                            if fr.body.len() > body_limit {
+                                return Err(io_err(format!(
+                                    "Module {} response body exceeded limit of {} bytes",
+                                    url, body_limit
+                                )));
+                            }
+                            return decoded_module_source(&specifier, &url, fr.body);
+                        }
+                        Some(Err(fe)) => {
+                            return Err(io_err(format!("Failed to fetch module {}: {}", url, fe)))
+                        }
+                        None => {
+                            return Err(io_err(format!("Failed to fetch module {}: {}", url, e)))
+                        }
+                    }
+                }
+            };
 
             if !resp.status().is_success() {
                 return Err(io_err(format!(
@@ -367,31 +437,41 @@ impl ModuleLoader for DitingModuleLoader {
             // Module scripts decode as UTF-8 per spec (unlike classic scripts,
             // which honour charset attributes), so lossy conversion here
             // matches what a browser would run.
-            let code = String::from_utf8_lossy(&code_bytes).into_owned();
-
-            // Debug knob (AGINXBROWSER_MODULE_TRACE=1): bracket every fetched
-            // module with ENTER/EXIT console marks. A watchdog that terminates
-            // a synchronous spin inside module-graph evaluation leaves no JS
-            // stack behind (terminate_execution discards it), but the console
-            // log survives — the last MODULE_ENTER without a matching
-            // MODULE_EXIT names the exact chunk that owns the spin. Statements
-            // around the body are legal ESM (imports are hoisted); a module
-            // with top-level await just reports its EXIT late, which still
-            // localizes the spin. Strictly an engine-debugging aid.
-            let code = if std::env::var("AGINXBROWSER_MODULE_TRACE").is_ok() {
-                format!(
-                    "console.log(\"MODULE_ENTER:{url}\");\n{code}\nconsole.log(\"MODULE_EXIT:{url}\");"
-                )
-            } else {
-                code
-            };
-
-            Ok(ModuleSource::new(
-                deno_core::ModuleType::JavaScript,
-                ModuleSourceCode::String(code.into()),
-                &specifier,
-                None,
-            ))
+            decoded_module_source(&specifier, &url, code_bytes)
         })))
     }
+}
+
+/// UTF-8 decode + MODULE_TRACE bracketing + ModuleSource build — the tail
+/// both the streaming path and the legacy-TLS fallback converge on.
+fn decoded_module_source(
+    specifier: &ModuleSpecifier,
+    url: &str,
+    code_bytes: Vec<u8>,
+) -> Result<ModuleSource, ModuleLoaderError> {
+    let code = String::from_utf8_lossy(&code_bytes).into_owned();
+
+    // Debug knob (AGINXBROWSER_MODULE_TRACE=1): bracket every fetched
+    // module with ENTER/EXIT console marks. A watchdog that terminates
+    // a synchronous spin inside module-graph evaluation leaves no JS
+    // stack behind (terminate_execution discards it), but the console
+    // log survives — the last MODULE_ENTER without a matching
+    // MODULE_EXIT names the exact chunk that owns the spin. Statements
+    // around the body are legal ESM (imports are hoisted); a module
+    // with top-level await just reports its EXIT late, which still
+    // localizes the spin. Strictly an engine-debugging aid.
+    let code = if std::env::var("AGINXBROWSER_MODULE_TRACE").is_ok() {
+        format!(
+            "console.log(\"MODULE_ENTER:{url}\");\n{code}\nconsole.log(\"MODULE_EXIT:{url}\");"
+        )
+    } else {
+        code
+    };
+
+    Ok(ModuleSource::new(
+        deno_core::ModuleType::JavaScript,
+        ModuleSourceCode::String(code.into()),
+        specifier,
+        None,
+    ))
 }

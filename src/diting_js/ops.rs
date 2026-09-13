@@ -2905,25 +2905,88 @@ async fn op_fetch_url(
                 unsafe_header_names.join(","),
             );
         }
-        let preflight = match preflight_request.send().await {
-            Ok(p) => p,
-            Err(e) => {
-                let error = format!("CORS preflight failed: {}", e);
-                record_failed_fetch(&state, &url, &method, error.clone());
-                return Err(deno_error::JsErrorBox::generic(error));
-            }
-        };
-
-        let allowed_origin = preflight
-            .headers()
-            .get("access-control-allow-origin")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let allow_credentials = preflight
-            .headers()
-            .get("access-control-allow-credentials")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+        // The preflight rides the same plain-reqwest primary transport as the
+        // main request, but for a while it was the one hop without the
+        // legacy-TLS escape hatch: on a CBC-only endpoint the OPTIONS died in
+        // the ClientHello and fetch failed before the main request — which
+        // does retry on connect-stage failure — ever ran. The retry replays
+        // the exact three preflight headers (no cookies: a CORS preflight is
+        // never credentialed) and, like every other caller of the escape
+        // hatch, a non-connect failure keeps the original error.
+        let (pf_headers, allowed_origin, allow_credentials, preflight_status) =
+            match preflight_request.send().await {
+                Ok(p) => (
+                    p.headers().clone(),
+                    p.headers()
+                        .get("access-control-allow-origin")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string(),
+                    p.headers()
+                        .get("access-control-allow-credentials")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string(),
+                    p.status().as_u16(),
+                ),
+                Err(e) => {
+                    let mut preflight_headers: HashMap<String, String> = HashMap::new();
+                    preflight_headers.insert("Origin".to_string(), page_origin.clone());
+                    preflight_headers.insert(
+                        "Access-Control-Request-Method".to_string(),
+                        method.clone(),
+                    );
+                    if !unsafe_header_names.is_empty() {
+                        preflight_headers.insert(
+                            "Access-Control-Request-Headers".to_string(),
+                            unsafe_header_names.join(","),
+                        );
+                    }
+                    let fallback = match http_client.as_ref() {
+                        Some(hc) => match url::Url::parse(&url) {
+                            Ok(u) => Some(
+                                hc.scripted_fetch_fallback(
+                                    &reqwest::Method::OPTIONS,
+                                    &u,
+                                    &e.to_string(),
+                                    None,
+                                    None,
+                                    e.is_connect(),
+                                    Some(&preflight_headers),
+                                    false,
+                                )
+                                .await,
+                            ),
+                            Err(_) => None,
+                        },
+                        None => None,
+                    };
+                    match fallback {
+                        Some(Ok(fr)) => {
+                            let mut headers = reqwest::header::HeaderMap::new();
+                            for (name, value) in &fr.headers {
+                                if let (Ok(n), Ok(v)) = (
+                                    reqwest::header::HeaderName::try_from(name.as_str()),
+                                    reqwest::header::HeaderValue::try_from(value.as_str()),
+                                ) {
+                                    headers.insert(n, v);
+                                }
+                            }
+                            (
+                                headers,
+                                fr.header("access-control-allow-origin").unwrap_or("").to_string(),
+                                fr.header("access-control-allow-credentials").unwrap_or("").to_string(),
+                                fr.status,
+                            )
+                        }
+                        _ => {
+                            let error = format!("CORS preflight failed: {}", e);
+                            record_failed_fetch(&state, &url, &method, error.clone());
+                            return Err(deno_error::JsErrorBox::generic(error));
+                        }
+                    }
+                }
+            };
 
         // Every preflight rejection below is an early exit the JS side sees as
         // a rejected promise — each must leave a status-0 network event with
@@ -2934,16 +2997,16 @@ async fn op_fetch_url(
             deno_error::JsErrorBox::generic(message)
         };
 
-        if !cors_response_allows(credentials, &page_origin, allowed_origin, allow_credentials) {
+        if !cors_response_allows(credentials, &page_origin, &allowed_origin, &allow_credentials) {
             return Err(reject_preflight(format!(
                 "CORS preflight: Origin '{}' not allowed by Access-Control-Allow-Origin '{}'",
                 page_origin, allowed_origin
             )));
         }
-        if !preflight.status().is_success() {
+        if !(200..300).contains(&preflight_status) {
             return Err(reject_preflight(format!(
                 "CORS preflight returned HTTP {}",
-                preflight.status()
+                preflight_status
             )));
         }
 
@@ -2952,7 +3015,7 @@ async fn op_fetch_url(
         // method/headers does not consent to this request (obscura "enforce
         // CORS preflight permissions" fix, 04f0475).
         let allowed_methods = parse_cors_header_list(
-            preflight.headers(),
+            &pf_headers,
             "access-control-allow-methods",
         )
         .ok_or_else(|| {
@@ -2961,7 +3024,7 @@ async fn op_fetch_url(
             )
         })?;
         let allowed_headers = parse_cors_header_list(
-            preflight.headers(),
+            &pf_headers,
             "access-control-allow-headers",
         )
         .ok_or_else(|| {

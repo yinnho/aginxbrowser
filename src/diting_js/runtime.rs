@@ -125,6 +125,10 @@ pub struct JsRuntime {
     /// module URL twice (duplicate <script type=module src>, or a root already
     /// evaluated earlier as another graph's dependency) panics without this.
     module_evaluations: HashMap<deno_core::ModuleId, Result<(), String>>,
+    /// Handle to the ES-module loader this runtime was built with. Kept so
+    /// `set_http_client` can reach the loader after construction (the Rc also
+    /// lives inside deno_core's RuntimeOptions, which gives nothing back).
+    module_loader: Rc<DitingModuleLoader>,
 }
 
 /// Handle to an armed V8 execution watchdog (see [`JsRuntime::arm_watchdog`]).
@@ -455,7 +459,7 @@ impl JsRuntime {
             });
             deno_core::JsRuntime::new(RuntimeOptions {
                 extensions: vec![build_extension()],
-                module_loader: Some(module_loader),
+                module_loader: Some(module_loader.clone()),
                 startup_snapshot: Some(SNAPSHOT),
                 ..Default::default()
             })
@@ -483,6 +487,7 @@ impl JsRuntime {
             heap_limit_state,
             watchdog_fired_total: std::cell::Cell::new(0),
             module_evaluations: HashMap::new(),
+            module_loader: module_loader.clone(),
         }
     }
 
@@ -506,7 +511,8 @@ impl JsRuntime {
     }
 
     pub fn set_http_client(&self, client: std::sync::Arc<crate::diting_net::HttpClient>) {
-        self.state.borrow_mut().http_client = Some(client);
+        self.state.borrow_mut().http_client = Some(client.clone());
+        self.module_loader.set_http_client(client);
     }
 
     pub fn set_dom(&self, dom: DomTree) {

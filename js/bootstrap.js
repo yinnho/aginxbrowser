@@ -4894,7 +4894,12 @@ globalThis.fetch = async (input, init = {}) => {
       url = new URL(url, base).href;
     } catch(e) { /* keep as-is if URL resolution fails */ }
   }
-  const method = init.method || (input instanceof Request ? input.method : "GET");
+  // Fetch-spec "normalize a method" (obscura #969 family) — same rule as the
+  // XHR open() path below: standard tokens get uppercased for the
+  // case-sensitive CORS tables, custom tokens ride as authored.
+  const rawMethod = init.method || (input instanceof Request ? input.method : "GET");
+  const upMethod = String(rawMethod).toUpperCase();
+  const method = /^(CONNECT|DELETE|GET|HEAD|OPTIONS|POST|PUT|TRACE)$/.test(upMethod) ? upMethod : String(rawMethod);
   // data:/blob: never reach the HTTP client — it cannot fetch either scheme
   // (obscura #907 family). data: carries its MIME inline; blob: reads the
   // synchronous registry the real createObjectURL (in the Worker section
