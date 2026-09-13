@@ -8313,3 +8313,34 @@
         assert_eq!(d["csPct"].as_str().unwrap(), "50%");
         assert_eq!(d["csDown"].as_str().unwrap(), "-8px");
     }
+
+    /// Mono batch: a UA-monospace element (<code>) shapes its ASCII on the
+    /// bundled Noto Sans Mono — fixed 0.6em advance, Chrome's parity — while
+    /// a plain span stays proportional, an explicit `font-family: monospace`
+    /// on any element routes the same way, and CJK inside the run keeps the
+    /// CJK face's full-em advance (per-char fallback).
+    #[test]
+    fn test_monospace_face_routes_ascii_runs() {
+        let mut rt = setup_runtime(
+            r#"<html><body style="margin:0;font-size:20px">
+              <code id="c">0000000000</code>
+              <span id="p">0000000000</span>
+              <span id="m" style="font-family:monospace">0000000000</span>
+              <code id="cjk">汉字</code>
+            </body></html>"#,
+        );
+        let v = rt
+            .evaluate(
+                r#"JSON.stringify((() => {
+                    const w = (id) => document.getElementById(id).getBoundingClientRect().width;
+                    return { code: w('c'), plain: w('p'), explicit: w('m'), cjk: w('cjk') };
+                })())"#,
+            )
+            .unwrap();
+        let d: serde_json::Value = serde_json::from_str(v.as_str().unwrap()).unwrap();
+        let w = |key: &str| d[key].as_f64().unwrap();
+        assert!((w("code") - 120.0).abs() < 1.5, "10 chars × 0.6em @20px = 120 (diag={d})");
+        assert!((w("explicit") - 120.0).abs() < 1.5, "font-family:monospace routes the same (diag={d})");
+        assert!((w("plain") - w("code")).abs() > 1.0, "proportional digits differ from mono (diag={d})");
+        assert!((w("cjk") - 40.0).abs() < 1.5, "CJK in a mono run keeps full-em (diag={d})");
+    }

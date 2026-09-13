@@ -78,7 +78,7 @@ fn robots_check() -> Check {
 #[cfg(feature = "screenshot")]
 fn fonts_check() -> Check {
     let book = crate::diting_fonts::font_book();
-    let raster = book.rasterize("汉字Abc", 24.0, false, [0, 0, 0, 255], 24.0 * 1.2);
+    let raster = book.rasterize("汉字Abc", 24.0, false, [0, 0, 0, 255], 24.0 * 1.2, false);
     if raster.ink_bbox().is_some() {
         check(Status::Ok, "fonts", "bundled CJK bundle inks 汉字 (GB2312 + symbols)")
     } else {

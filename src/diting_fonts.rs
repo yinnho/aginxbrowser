@@ -14,9 +14,13 @@
 //!   tail for chars outside GB2312 (and other scripts);
 //! - the diting layout/paint stack via [`font_book`].
 //!
-//! Deterministic where covered, graceful where not — the compromise between
-//! the fixture approach (bytes pinned both sides) and real-world pages.
-//! Regenerate with `scripts/make_font_bundle.py`.
+//! The mono batch adds a third bundled face: Noto Sans Mono (OFL), instanced
+//! at wght 400 and subset to ASCII/Latin-1/punctuation/arrows/box-drawing —
+//! the face behind `font-family: monospace` runs (UA: code/kbd/samp/tt/pre).
+//! Its every advance is a fixed 600/1000 = 0.6em, exactly Chrome's default
+//! monospace, where the proportional CJK pair measured ~0.5em. Regenerate
+//! with `scripts/make_font_bundle.py` (CJK pair) and `scripts/make_mono_bundle.py`
+//! (mono face).
 
 use std::sync::Arc;
 
@@ -30,6 +34,11 @@ pub const FAMILY: &str = "Noto Sans SC";
 
 const REGULAR: &[u8] = include_bytes!("diting_fonts/diting-cjk-regular.ttf");
 const BOLD: &[u8] = include_bytes!("diting_fonts/diting-cjk-bold.ttf");
+
+/// The monospace face (mono batch) — see the module docs. Single-weight:
+/// bold mono runs shape the same face, and CJK in a mono run falls through
+/// to the pair above per-character.
+const MONO: &[u8] = include_bytes!("diting_fonts/diting-mono-regular.ttf");
 
 /// Build the parley FontContext for a blitz render: bundled faces registered,
 /// then hoisted to the head of the Han fallback chain ahead of whatever the
@@ -83,9 +92,10 @@ fn build_ctx(system_fonts: bool) -> parley::FontContext {
 }
 
 /// The same bundle as a [`FontBook`] for the diting layout/paint stack,
-/// with the platform's color-emoji face (when present) appended as a
-/// single-weight fallback — the same posture browsers take: the emoji font
-/// has no bold variant, and chars the primary pair lacks resolve through it.
+/// with the monospace face installed (mono batch) and the platform's
+/// color-emoji face (when present) appended as a single-weight fallback —
+/// the same posture browsers take: the emoji font has no bold variant, and
+/// chars the primary pair lacks resolve through it.
 ///
 /// Cached in a `OnceLock`: the book used to be re-parsed per call (the
 /// video pump carried its own copy for exactly that reason), and since the
@@ -95,7 +105,8 @@ pub fn font_book() -> Arc<FontBook> {
     static BOOK: std::sync::OnceLock<Arc<FontBook>> = std::sync::OnceLock::new();
     BOOK.get_or_init(|| {
         let book = FontBook::from_pairs(REGULAR.to_vec(), BOLD.to_vec())
-            .expect("bundled CJK fonts parse (regenerate via scripts/make_font_bundle.py)");
+            .expect("bundled CJK fonts parse (regenerate via scripts/make_font_bundle.py)")
+            .with_mono(MONO.to_vec());
         match platform_emoji_font() {
             Some(bytes) => Arc::new(book.with_fallbacks(vec![bytes])),
             None => Arc::new(book),
@@ -144,6 +155,14 @@ pub(crate) fn bundled_pair_for_tests() -> (Vec<u8>, Vec<u8>) {
     (REGULAR.to_vec(), BOLD.to_vec())
 }
 
+/// The bundled mono face as owned bytes — the raster-cache tests in
+/// `diting_layout::text` build a mono-carrying sibling `FontBook` from it
+/// (key separation + the fixed-advance contract).
+#[cfg(test)]
+pub(crate) fn bundled_mono_for_tests() -> Vec<u8> {
+    MONO.to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,10 +178,10 @@ mod tests {
         let book = font_book();
         let sample = "国庆节快乐浏览器引擎字体渲染简体汉字上海北京深圳杭州";
         for ch in sample.chars() {
-            let w = book.advance_width(&ch.to_string(), 20.0, false);
+            let w = book.advance_width(&ch.to_string(), 20.0, false, false);
             assert!((w - 20.0).abs() < 0.05, "{ch}: advance {w} (want one em)");
         }
-        let raster = book.rasterize("汉字渲染", 24.0, false, [0, 0, 0, 255], 24.0 * 1.2);
+        let raster = book.rasterize("汉字渲染", 24.0, false, [0, 0, 0, 255], 24.0 * 1.2, false);
         assert!(raster.ink_bbox().is_some(), "bundle raster must have ink");
     }
 
@@ -176,7 +195,7 @@ mod tests {
         let book = font_book();
         let sample = "·—–…✓→←↑↓●○◆◇■□▲△▼▽★☆";
         for ch in sample.chars() {
-            let raster = book.rasterize(&ch.to_string(), 24.0, false, [0, 0, 0, 255], 24.0 * 1.2);
+            let raster = book.rasterize(&ch.to_string(), 24.0, false, [0, 0, 0, 255], 24.0 * 1.2, false);
             assert!(
                 raster.ink_bbox().is_some(),
                 "{ch} (U+{:04X}) must have ink",
@@ -200,14 +219,14 @@ mod tests {
         let book = font_book();
         assert!(book.has_fallbacks(), "the emoji face must load as a fallback");
 
-        let adv_cjk = book.advance_width("字字", 24.0, false);
-        let adv_mixed = book.advance_width("字🚀字", 24.0, false);
+        let adv_cjk = book.advance_width("字字", 24.0, false, false);
+        let adv_mixed = book.advance_width("字🚀字", 24.0, false, false);
         assert!(
             adv_mixed > adv_cjk + 4.0,
             "the emoji must contribute its own advance: {adv_mixed} vs {adv_cjk}"
         );
 
-        let raster = book.rasterize("🚀", 24.0, false, [0, 0, 0, 255], 24.0 * 1.2);
+        let raster = book.rasterize("🚀", 24.0, false, [0, 0, 0, 255], 24.0 * 1.2, false);
         assert!(raster.ink_bbox().is_some(), "the emoji must have ink");
         let colored = raster
             .data
@@ -231,8 +250,28 @@ mod tests {
             [0, 0, 0, 255],
             60.0,
             24.0 * 1.2,
+            false,
         );
         assert!(wrapped.ink_bbox().is_some(), "wrapped mixed run must have ink");
+    }
+
+    /// The production wiring (mono batch): the real book carries the mono
+    /// face, so ASCII in a mono run shapes at Noto Sans Mono's fixed 0.6em
+    /// advance — Chrome's Courier parity, the gap the vertical-align batch
+    /// measured at ~0.5em on the proportional pair — while the same run with
+    /// mono=false keeps the proportional pair.
+    #[test]
+    fn bundled_mono_face_routes_ascii() {
+        let book = font_book();
+        let mono = book.advance_width("0000000000", 20.0, false, true);
+        assert!((mono - 120.0).abs() < 0.01, "10 × 0.6em = 120px, got {mono}");
+        let sans = book.advance_width("0000000000", 20.0, false, false);
+        assert!(
+            (sans - mono).abs() > 1.0,
+            "proportional digits differ from mono ({sans} vs {mono})"
+        );
+        let mono_raster = book.rasterize("code()", 20.0, false, [0, 0, 0, 255], 24.0, true);
+        assert!(mono_raster.ink_bbox().is_some(), "a mono run must paint");
     }
 
     /// The product claim: CJK text renders with the bundled collection and

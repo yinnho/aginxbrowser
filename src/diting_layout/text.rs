@@ -38,11 +38,13 @@ use swash::shape::ShapeContext;
 use swash::{FontRef, GlyphId};
 
 /// Which face a text segment shapes in: the primary bundle pair (weight
-/// selected by `bold`) or one of the fallback faces — single-weight tails
-/// like the emoji font, where bold emoji is the same face (as in browsers).
-#[derive(Clone, Copy, PartialEq)]
+/// selected by `bold`), the bundled monospace face (single-weight, like the
+/// emoji fallback), or one of the fallback tails — single-weight faces
+/// where bold is the same face (as in browsers).
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum FaceSel {
     Primary,
+    Mono,
     Fallback(usize),
 }
 
@@ -50,11 +52,14 @@ enum FaceSel {
 ///
 /// Deliberately minimal: one family, two weights, index-0 face. Weight
 /// matching beyond the pair (500, 800, …) snaps to the nearer face, which is
-/// also all the cross-check fixtures exercise. Fallback faces (emoji batch)
-/// carry codepoints the pair lacks — see [`FaceSel`].
+/// also all the cross-check fixtures exercise. The optional monospace face
+/// serves `font-family: monospace` runs (see [`FontBook::with_mono`]);
+/// fallback faces (emoji batch) carry codepoints the pair lacks — see
+/// [`FaceSel`].
 pub struct FontBook {
     regular: Vec<u8>,
     bold: Vec<u8>,
+    mono: Option<Vec<u8>>,
     fallbacks: Vec<Vec<u8>>,
     /// Content hash of all face bytes — the raster cache's book identity.
     /// Rasters are pure functions of (faces, text, size, bold, color, wrap,
@@ -67,11 +72,12 @@ pub struct FontBook {
 
 /// Hash a book's whole face set into the cache identity (see
 /// [`FontBook::fingerprint`]).
-fn face_fingerprint(regular: &[u8], bold: &[u8], fallbacks: &[Vec<u8>]) -> u64 {
+fn face_fingerprint(regular: &[u8], bold: &[u8], mono: Option<&[u8]>, fallbacks: &[Vec<u8>]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     regular.hash(&mut h);
     bold.hash(&mut h);
+    mono.hash(&mut h);
     for f in fallbacks {
         f.hash(&mut h);
     }
@@ -93,8 +99,8 @@ impl FontBook {
         if FontRef::from_index(&regular, 0).is_none() || FontRef::from_index(&bold, 0).is_none() {
             return None;
         }
-        let fingerprint = face_fingerprint(&regular, &bold, &[]);
-        Some(Self { regular, bold, fallbacks: Vec::new(), fingerprint })
+        let fingerprint = face_fingerprint(&regular, &bold, None, &[]);
+        Some(Self { regular, bold, mono: None, fallbacks: Vec::new(), fingerprint })
     }
 
     /// Append single-weight fallback faces (emoji batch): unparseable bytes
@@ -105,7 +111,23 @@ impl FontBook {
     pub fn with_fallbacks(mut self, faces: Vec<Vec<u8>>) -> Self {
         self.fallbacks
             .extend(faces.into_iter().filter(|b| FontRef::from_index(b, 0).is_some()));
-        self.fingerprint = face_fingerprint(&self.regular, &self.bold, &self.fallbacks);
+        self.fingerprint =
+            face_fingerprint(&self.regular, &self.bold, self.mono.as_deref(), &self.fallbacks);
+        self
+    }
+
+    /// Install the bundled monospace face (mono batch): single-weight, like
+    /// the fallbacks — a `bold: true` mono run shapes the same face. Books
+    /// without a usable mono face (cross-check fixture books; unparseable
+    /// bytes drop silently, the `with_fallbacks` posture) render `monospace`
+    /// runs with the primary pair: the exact pre-batch behavior, so the
+    /// routing is invisible wherever no mono face is loaded.
+    pub fn with_mono(mut self, bytes: Vec<u8>) -> Self {
+        if FontRef::from_index(&bytes, 0).is_some() {
+            self.mono = Some(bytes);
+        }
+        self.fingerprint =
+            face_fingerprint(&self.regular, &self.bold, self.mono.as_deref(), &self.fallbacks);
         self
     }
 
@@ -119,12 +141,19 @@ impl FontBook {
     /// fallback face is loaded AND the run actually visits one — books
     /// without fallbacks, and runs the primary pair fully covers, keep the
     /// exact pre-emoji allocation profile.
-    fn color_layer_for(&self, text: &str, bold: bool, width: usize, height: usize) -> Option<Vec<u8>> {
+    fn color_layer_for(
+        &self,
+        text: &str,
+        bold: bool,
+        mono: bool,
+        width: usize,
+        height: usize,
+    ) -> Option<Vec<u8>> {
         if !self.has_fallbacks() || width == 0 || height == 0 {
             return None;
         }
         let uses_fallback = self
-            .segments(text, bold)
+            .segments(text, bold, mono)
             .iter()
             .any(|(sel, _)| matches!(sel, FaceSel::Fallback(_)));
         uses_fallback.then(|| vec![0u8; width * height * 4])
@@ -137,21 +166,30 @@ impl FontBook {
     fn face_bytes(&self, sel: FaceSel, bold: bool) -> &Vec<u8> {
         match sel {
             FaceSel::Primary => self.face(bold),
+            // Minted only when the mono face parsed (see `segments`); bold
+            // resolves to the same single-weight face.
+            FaceSel::Mono => self.mono.as_ref().expect("mono sel without a mono face"),
             FaceSel::Fallback(i) => &self.fallbacks[i],
         }
     }
 
     /// Split `text` into consecutive same-face segments (emoji batch): a
-    /// char maps to the primary pair when its cmap covers it, else to the
-    /// first fallback that does, else back to primary (.notdef — exactly
+    /// char maps to the mono face first when the run is mono and it's
+    /// covered, then to the primary pair when its cmap covers it, else to
+    /// the first fallback that does, else back to primary (.notdef — exactly
     /// the pre-fallback behavior for still-uncovered chars). Boundary
     /// kerning between segments is lost, but a fallback boundary only ever
     /// separates scripts — never a kerned pair.
-    fn segments<'a>(&self, text: &'a str, bold: bool) -> Vec<(FaceSel, &'a str)> {
+    fn segments<'a>(&self, text: &'a str, bold: bool, mono: bool) -> Vec<(FaceSel, &'a str)> {
         // Parse each candidate face once per call — the cmap probes below run
         // per char, and re-parsing a face (table-directory walk) per char
         // would dominate measurement on long pages.
         let primary = FontRef::from_index(self.face(bold), 0);
+        let mono_face = if mono {
+            self.mono.as_deref().and_then(|b| FontRef::from_index(b, 0))
+        } else {
+            None
+        };
         let fallbacks: Vec<Option<FontRef>> =
             self.fallbacks.iter().map(|b| FontRef::from_index(b, 0)).collect();
         let covers = |f: Option<FontRef>, ch: char| -> bool {
@@ -159,6 +197,14 @@ impl FontBook {
             f.map(|f| f.charmap().map(ch) != 0).unwrap_or(false)
         };
         let pick = |ch: char| -> FaceSel {
+            // A mono run sends every char the mono face covers to it (ASCII —
+            // the point of the face); the rest falls through to the primary
+            // pair, then the fallback tails — the browser per-char cascade
+            // (code blocks with Chinese comments render CJK in the CJK face).
+            // No mono face (or mono=false): this arm never fires.
+            if covers(mono_face, ch) {
+                return FaceSel::Mono;
+            }
             if covers(primary, ch) {
                 return FaceSel::Primary;
             }
@@ -192,9 +238,9 @@ impl FontBook {
 
     /// Shaped advance of `text` at `font_size`, in px. Kerning (GPOS) and
     /// ligatures apply; CJK comes out at one full-width advance per glyph.
-    pub fn advance_width(&self, text: &str, font_size: f32, bold: bool) -> f32 {
+    pub fn advance_width(&self, text: &str, font_size: f32, bold: bool, mono: bool) -> f32 {
         let mut total = 0.0f32;
-        for (sel, seg) in self.segments(text, bold) {
+        for (sel, seg) in self.segments(text, bold, mono) {
             let bytes = self.face_bytes(sel, bold);
             let Some(font) = FontRef::from_index(bytes, 0) else { continue };
             SHAPE_CTX.with_borrow_mut(|ctx| {
@@ -235,20 +281,39 @@ impl FontBook {
     /// rounded to whole pixels (no subpixel placement — ink-extent
     /// cross-checks against blitz stay within tolerance because both
     /// rasterizers cover the same outlines to within ~a pixel).
-    pub fn rasterize(&self, text: &str, font_size: f32, bold: bool, color: [u8; 4], line_height: f32) -> Arc<TextRaster> {
+    pub fn rasterize(
+        &self,
+        text: &str,
+        font_size: f32,
+        bold: bool,
+        color: [u8; 4],
+        line_height: f32,
+        mono: bool,
+    ) -> Arc<TextRaster> {
         let key = RasterKey {
             fingerprint: self.fingerprint,
             kind: RasterKind::Line,
             text: text.into(),
             font_size_bits: font_size.to_bits(),
             bold,
+            mono,
             color,
             line_height_bits: line_height.to_bits(),
         };
-        RasterCache::get_or_insert(key, || self.rasterize_line_uncached(text, font_size, bold, color, line_height))
+        RasterCache::get_or_insert(key, || {
+            self.rasterize_line_uncached(text, font_size, bold, color, line_height, mono)
+        })
     }
 
-    fn rasterize_line_uncached(&self, text: &str, font_size: f32, bold: bool, color: [u8; 4], line_height: f32) -> TextRaster {
+    fn rasterize_line_uncached(
+        &self,
+        text: &str,
+        font_size: f32,
+        bold: bool,
+        color: [u8; 4],
+        line_height: f32,
+        mono: bool,
+    ) -> TextRaster {
         let m = self.metrics(font_size, bold).unwrap_or(ScaledMetrics {
             ascent: font_size,
             descent: font_size * 0.2,
@@ -262,10 +327,10 @@ impl FontBook {
         let top = (baseline - m.ascent).floor() - 1.0;
         let bottom = (baseline + m.descent).ceil() + 1.0;
         let height = (bottom - top).max(1.0) as usize;
-        let width = self.advance_width(text, font_size, bold).ceil() as usize + 2;
+        let width = self.advance_width(text, font_size, bold, mono).ceil() as usize + 2;
 
         let mut alpha = vec![0u8; width * height];
-        let mut layer = self.color_layer_for(text, bold, width, height);
+        let mut layer = self.color_layer_for(text, bold, mono, width, height);
         self.blit_line(
             &mut alpha,
             layer.as_deref_mut(),
@@ -274,6 +339,7 @@ impl FontBook {
             text,
             font_size,
             bold,
+            mono,
             0.0,
             baseline - top,
         );
@@ -295,6 +361,7 @@ impl FontBook {
         color: [u8; 4],
         wrap_at: f32,
         line_height: f32,
+        mono: bool,
     ) -> Arc<TextRaster> {
         let key = RasterKey {
             fingerprint: self.fingerprint,
@@ -302,11 +369,12 @@ impl FontBook {
             text: text.into(),
             font_size_bits: font_size.to_bits(),
             bold,
+            mono,
             color,
             line_height_bits: line_height.to_bits(),
         };
         RasterCache::get_or_insert(key, || {
-            self.rasterize_wrapped_uncached(text, font_size, bold, color, wrap_at, line_height)
+            self.rasterize_wrapped_uncached(text, font_size, bold, color, wrap_at, line_height, mono)
         })
     }
 
@@ -318,6 +386,7 @@ impl FontBook {
         color: [u8; 4],
         wrap_at: f32,
         line_height: f32,
+        mono: bool,
     ) -> TextRaster {
         let empty = || TextRaster {
             width: 0,
@@ -329,7 +398,7 @@ impl FontBook {
         if text.trim().is_empty() {
             return empty();
         }
-        let tokens = tokens_of(text, font_size, bold, self);
+        let tokens = tokens_of(text, font_size, bold, self, mono);
         let lines = greedy_wrap(&tokens, Some(wrap_at.max(0.0)));
         if lines.iter().all(|l| l.width <= 0.0) {
             return empty();
@@ -353,14 +422,14 @@ impl FontBook {
         // One color layer for the whole tile: every line's fallback glyphs
         // max-blend into the same RGBA surface, then colorize merges it over
         // the mono coverage once.
-        let mut layer = self.color_layer_for(&tokens.iter().map(|t| t.text.as_str()).collect::<String>(), bold, width, height);
+        let mut layer = self.color_layer_for(&tokens.iter().map(|t| t.text.as_str()).collect::<String>(), bold, mono, width, height);
         for (line, baseline) in lines.iter().zip(&baselines) {
             if line.token_idx.is_empty() {
                 continue;
             }
             let s: String =
                 line.token_idx.iter().map(|&i| tokens[i].text.as_str()).collect();
-            self.blit_line(&mut alpha, layer.as_deref_mut(), width, height, &s, font_size, bold, 0.0, baseline - top);
+            self.blit_line(&mut alpha, layer.as_deref_mut(), width, height, &s, font_size, bold, mono, 0.0, baseline - top);
         }
         let data = colorize_layered(&alpha, layer.as_deref(), color);
         TextRaster { width, height, baseline: baselines[0] - top, top, data }
@@ -383,6 +452,7 @@ impl FontBook {
         text: &str,
         font_size: f32,
         bold: bool,
+        mono: bool,
         x0: f32,
         baseline: f32,
     ) {
@@ -399,7 +469,7 @@ impl FontBook {
         // glyphs (advance_width accumulated correctly, so measure agreed
         // while paint overlapped).
         let mut pen = x0;
-        for (sel, seg) in self.segments(text, bold) {
+        for (sel, seg) in self.segments(text, bold, mono) {
             let bytes = self.face_bytes(sel, bold);
             let Some(font) = FontRef::from_index(bytes, 0) else { continue };
 
@@ -419,7 +489,7 @@ impl FontBook {
             SCALE_CTX.with_borrow_mut(|sctx| {
                 let mut scaler = sctx.builder(font).size(font_size).build();
                 let sources = match sel {
-                    FaceSel::Primary => &mono_sources[..],
+                    FaceSel::Primary | FaceSel::Mono => &mono_sources[..],
                     FaceSel::Fallback(_) => &fallback_sources[..],
                 };
                 let render = Render::new(sources);
@@ -530,12 +600,12 @@ pub(crate) struct Token {
 
 /// Tokenize a run's trimmed text and shape every token (shared by
 /// `measure_text_leaf` and `rasterize_wrapped`).
-pub(crate) fn tokens_of(text: &str, font_size: f32, bold: bool, fonts: &FontBook) -> Vec<Token> {
+pub(crate) fn tokens_of(text: &str, font_size: f32, bold: bool, fonts: &FontBook, mono: bool) -> Vec<Token> {
     super::tokenize(text.trim())
         .into_iter()
         .map(|t| Token {
             is_space: t.trim().is_empty(),
-            width: fonts.advance_width(&t, font_size, bold),
+            width: fonts.advance_width(&t, font_size, bold, mono),
             text: t,
         })
         .collect()
@@ -621,8 +691,8 @@ pub fn baseline_offset(ascent: f32, descent: f32, line_height: f32) -> f32 {
 /// The pixel-level raster cache (#399): rasterizing a run is the paint
 /// floor (~44ms/frame on text-heavy pages — every text leaf re-shapes and
 /// re-rasters every frame even when its pixels can't have changed), yet a
-/// raster is a pure function of (book faces, text, size, bold, color,
-/// wrap, line height). The diting stack has no dynamic webfont loading at
+/// raster is a pure function of (book faces, text, size, bold, mono,
+/// color, wrap, line height). The diting stack has no dynamic webfont loading at
 /// all — `@font-face` at-rules drop in the CSS parser and the JS `FontFace`
 /// class is an inert stub — so the face set is constant per process and
 /// keying on the book's content fingerprint is sound with no
@@ -657,6 +727,7 @@ struct RasterKey {
     text: Box<str>,
     font_size_bits: u32,
     bold: bool,
+    mono: bool,
     color: [u8; 4],
     line_height_bits: u32,
 }
@@ -747,12 +818,12 @@ mod raster_cache_tests {
         let (reg, bold) = production_pair();
         let book = FontBook::from_pairs(reg, bold).unwrap();
         let _held = isolated();
-        let black = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0);
-        let again = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0);
+        let black = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false);
+        let again = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false);
         assert!(Arc::ptr_eq(&black, &again), "repeat must hand back the cached Arc");
         assert!(black.ink_bbox().is_some(), "the tile has real ink");
 
-        let red = book.rasterize_wrapped("缓存命中", 16.0, false, [255, 0, 0, 255], 20.0, 24.0);
+        let red = book.rasterize_wrapped("缓存命中", 16.0, false, [255, 0, 0, 255], 20.0, 24.0, false);
         assert!(!Arc::ptr_eq(&black, &red), "color rides the key — a new tile");
         let ink = |r: &TextRaster| {
             r.data
@@ -774,10 +845,10 @@ mod raster_cache_tests {
         let book = FontBook::from_pairs(reg, bold).unwrap();
         let _held = isolated();
         let text = "一行两行三行四行";
-        let line = book.rasterize(text, 16.0, false, [0, 0, 0, 255], 24.0);
+        let line = book.rasterize(text, 16.0, false, [0, 0, 0, 255], 24.0, false);
         // Narrow wrap: the same text breaks across 4+ lines, so the wrapped
         // tile is much taller than the single-line one.
-        let wrapped = book.rasterize_wrapped(text, 16.0, false, [0, 0, 0, 255], 40.0, 24.0);
+        let wrapped = book.rasterize_wrapped(text, 16.0, false, [0, 0, 0, 255], 40.0, 24.0, false);
         assert!(!Arc::ptr_eq(&line, &wrapped), "kinds must not collide");
         assert!(
             wrapped.height > line.height * 2,
@@ -800,18 +871,18 @@ mod raster_cache_tests {
         // shrink anything.
         let a_weight = {
             let _held = isolated();
-            let probe = book.rasterize("ii", 8.0, false, [0, 0, 0, 255], 10.0);
+            let probe = book.rasterize("ii", 8.0, false, [0, 0, 0, 255], 10.0, false);
             probe.data.len() + 2 + 64
         };
         let _budget = shrink_budget_for_test(a_weight + 1);
-        let a1 = book.rasterize("ii", 8.0, false, [0, 0, 0, 255], 10.0);
-        let same = book.rasterize("ii", 8.0, false, [0, 0, 0, 255], 10.0);
+        let a1 = book.rasterize("ii", 8.0, false, [0, 0, 0, 255], 10.0, false);
+        let same = book.rasterize("ii", 8.0, false, [0, 0, 0, 255], 10.0, false);
         assert!(Arc::ptr_eq(&a1, &same), "A alone fits the budget exactly");
         // A longer text is a strictly heavier entry (wider tile, longer key):
         // inserting it overflows and clears — A's tile is gone.
-        let b = book.rasterize("iiiiiiiiiiii", 8.0, false, [0, 0, 0, 255], 10.0);
+        let b = book.rasterize("iiiiiiiiiiii", 8.0, false, [0, 0, 0, 255], 10.0, false);
         assert!(!Arc::ptr_eq(&a1, &b));
-        let a2 = book.rasterize("ii", 8.0, false, [0, 0, 0, 255], 10.0);
+        let a2 = book.rasterize("ii", 8.0, false, [0, 0, 0, 255], 10.0, false);
         assert!(!Arc::ptr_eq(&a1, &a2), "clear-all must evict the earlier entry");
     }
 
@@ -827,11 +898,52 @@ mod raster_cache_tests {
         // the bold face and vice versa), so a different fingerprint.
         let swapped = FontBook::from_pairs(bold, reg).unwrap();
         let _held = isolated();
-        let r1 = a.rasterize("指纹隔离", 12.0, false, [0, 0, 0, 255], 15.0);
-        let r2 = b.rasterize("指纹隔离", 12.0, false, [0, 0, 0, 255], 15.0);
+        let r1 = a.rasterize("指纹隔离", 12.0, false, [0, 0, 0, 255], 15.0, false);
+        let r2 = b.rasterize("指纹隔离", 12.0, false, [0, 0, 0, 255], 15.0, false);
         assert!(Arc::ptr_eq(&r1, &r2), "same face bytes share entries across instances");
-        let r3 = swapped.rasterize("指纹隔离", 12.0, false, [0, 0, 0, 255], 15.0);
+        let r3 = swapped.rasterize("指纹隔离", 12.0, false, [0, 0, 0, 255], 15.0, false);
         assert!(!Arc::ptr_eq(&r1, &r3), "different face bytes must not share entries");
+    }
+
+    /// The mono flag rides the key: a `mono: true` rasterize must not collide
+    /// with the `mono: false` twin even on a mono-less book (identical
+    /// pixels, distinct entry), and a book WITH the bundled mono face gets
+    /// its own tiles. Plus the advance contract that motivated the face: ten
+    /// ASCII digits at 20px shape to exactly 120px (0.6em each — Chrome's
+    /// Courier advance), while CJK in the same mono run keeps the CJK face.
+    #[test]
+    fn mono_rides_the_key_and_shapes_fixed_advance() {
+        let (reg, bold) = production_pair();
+        let sans = FontBook::from_pairs(reg.clone(), bold.clone()).unwrap();
+        let mono_book =
+            FontBook::from_pairs(reg, bold).unwrap().with_mono(crate::diting_fonts::bundled_mono_for_tests());
+        let _held = isolated();
+        let plain = sans.rasterize("mono key", 14.0, false, [0, 0, 0, 255], 18.0, false);
+        let flagged = sans.rasterize("mono key", 14.0, false, [0, 0, 0, 255], 18.0, true);
+        assert!(!Arc::ptr_eq(&plain, &flagged), "mono flag rides the key");
+        let faced = mono_book.rasterize("mono key", 14.0, false, [0, 0, 0, 255], 18.0, true);
+        assert!(!Arc::ptr_eq(&plain, &faced), "a mono face is different pixels");
+        let adv = mono_book.advance_width("0000000000", 20.0, false, true);
+        assert!((adv - 120.0).abs() < 0.01, "10 × 0.6em = 120px at 20px, got {adv}");
+        let cjk_mono = mono_book.advance_width("汉", 20.0, false, true);
+        let cjk_sans = sans.advance_width("汉", 20.0, false, false);
+        assert!(
+            (cjk_mono - cjk_sans).abs() < 0.01,
+            "CJK keeps the CJK face in a mono run ({cjk_mono} vs {cjk_sans})"
+        );
+    }
+
+    /// A book without a mono face degrades: `mono: true` segments exactly as
+    /// `mono: false` — every char on the primary pair. The blitz cross-check
+    /// fixture books never see the routing.
+    #[test]
+    fn mono_without_face_degrades_to_primary() {
+        let (reg, bold) = production_pair();
+        let book = FontBook::from_pairs(reg, bold).unwrap();
+        let flagged = book.segments("code 汉 x", false, true);
+        let plain = book.segments("code 汉 x", false, false);
+        assert_eq!(flagged, plain, "no mono face: the flag is invisible");
+        assert!(flagged.iter().all(|(sel, _)| *sel == FaceSel::Primary));
     }
 }
 

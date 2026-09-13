@@ -2034,7 +2034,7 @@ fn emoji_text_paints_colored_ink_e2e() {
     // Measure side: the mixed run must advance wider than the CJK alone —
     // the emoji contributes its own shaped advance through the fallback.
     let p = *rects.get(&tree.query_selector_all("#t").unwrap()[0]).unwrap();
-    let cjk_only = crate::diting_fonts::font_book().advance_width("汉字", 40.0, false);
+    let cjk_only = crate::diting_fonts::font_book().advance_width("汉字", 40.0, false, false);
     assert!(
         p.width > cjk_only + 20.0,
         "the emoji must widen the run: {p:?} vs CJK-only {cjk_only}"
@@ -2082,7 +2082,7 @@ fn fallback_segments_pen_across_the_run_not_stacked_at_origin() {
     // assertions on single-script reference runs instead: the CJK-only run
     // gives the mono ink end, the emoji-only run gives the emoji ink span.
     let colored_bbox = |text: &str| -> (usize, usize, usize, usize) {
-        let tile = fonts.rasterize(text, 40.0, false, [0, 0, 0, 255], 48.0);
+        let tile = fonts.rasterize(text, 40.0, false, [0, 0, 0, 255], 48.0, false);
         let mut bb: Option<(usize, usize, usize, usize)> = None;
         for y in 0..tile.height {
             for x in 0..tile.width {
@@ -2107,7 +2107,7 @@ fn fallback_segments_pen_across_the_run_not_stacked_at_origin() {
         bb.unwrap_or_else(|| panic!("no colored ink in {text:?}"))
     };
     let mono_end = |text: &str| -> usize {
-        let tile = fonts.rasterize(text, 40.0, false, [0, 0, 0, 255], 48.0);
+        let tile = fonts.rasterize(text, 40.0, false, [0, 0, 0, 255], 48.0, false);
         (0..tile.width)
             .rev()
             .find(|&x| (0..tile.height).any(|y| tile.data[(y * tile.width + x) * 4 + 3] > 200))

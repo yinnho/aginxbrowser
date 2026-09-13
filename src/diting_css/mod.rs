@@ -1865,14 +1865,34 @@ pub fn ua_font_size(tag: &str) -> Option<CssLength> {
     }
 }
 
-/// UA monospace families: code/kbd/samp/tt are monospace in every browser
-/// UA sheet. Beats the inherited family (`.or` at the merge site), author
-/// declarations override it.
+/// UA monospace families: code/kbd/samp/tt and the preformatted group are
+/// monospace in every browser UA sheet. Beats the inherited family (`.or`
+/// at the merge site), author declarations override it.
 pub fn ua_font_family(tag: &str) -> Option<&'static str> {
     match tag {
-        "code" | "kbd" | "samp" | "tt" => Some("monospace"),
+        "code" | "kbd" | "samp" | "tt" | "pre" | "xmp" | "listing" | "plaintext" => {
+            Some("monospace")
+        }
         _ => None,
     }
+}
+
+/// Whether a computed font-family list selects a monospace face for the
+/// run: any top-level list member named `monospace`/`ui-monospace` (case-
+/// insensitive, unquoted — quoted names are literal families). The layout
+/// stack renders that run's ASCII through the bundled mono face; chars it
+/// lacks (CJK) fall through to the CJK pair per-character, like a browser
+/// per-char cascade.
+pub fn wants_monospace(family: &str) -> bool {
+    family.split(',').any(|f| {
+        let f = f.trim();
+        let unquoted = f
+            .strip_prefix('"')
+            .and_then(|f| f.strip_suffix('"'))
+            .or_else(|| f.strip_prefix('\'').and_then(|f| f.strip_suffix('\'')))
+            .unwrap_or(f);
+        unquoted.eq_ignore_ascii_case("monospace") || unquoted.eq_ignore_ascii_case("ui-monospace")
+    })
 }
 
 /// UA margins in CSS order (top right bottom left), from the same blitz

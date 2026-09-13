@@ -1076,7 +1076,7 @@ pub fn paint_svg(
                     continue;
                 }
                 let (sx, sy) = map((*x, *y));
-                let r = fonts.rasterize(content, fs, *bold, col(*color), fs * 1.2);
+                let r = fonts.rasterize(content, fs, *bold, col(*color), fs * 1.2, false);
                 if r.width == 0 || r.height == 0 {
                     continue;
                 }

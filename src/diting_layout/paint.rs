@@ -1092,13 +1092,14 @@ fn paint_text_decorations(
     y: f32,
     wrap_at: f32,
     decorations: TextDecorations,
+    mono: bool,
     dx: f32,
     dy: f32,
 ) {
     if decorations.is_empty() || text.trim().is_empty() {
         return;
     }
-    let tokens = tokens_of(text, font_size, bold, fonts);
+    let tokens = tokens_of(text, font_size, bold, fonts, mono);
     let lines = greedy_wrap(&tokens, Some(wrap_at.max(0.0)));
     let m = fonts.metrics(font_size, bold).unwrap_or(ScaledMetrics {
         ascent: font_size,
@@ -1221,7 +1222,7 @@ fn paint_form_widget(
         // Centering goes by the tile's ink bbox, not its full line box —
         // the cramped CJK metrics leave the glyph off-center inside the box.
         let fs = (h as f32 * 0.82).max(6.0);
-        let r = fonts.rasterize("✓", fs, false, ink, fs * 1.45);
+        let r = fonts.rasterize("✓", fs, false, ink, fs * 1.45, false);
         if let Some((bx0, by0, bx1, by1)) = r.ink_bbox() {
             let iw = (bx1 - bx0 + 1) as i64;
             let ih = (by1 - by0 + 1) as i64;
@@ -1320,6 +1321,7 @@ fn paint_form_control(
             alpha_color(color, alpha),
             wrap_at.max(1) as f32,
             line_height,
+            false,
         );
         out.push_clip(x + 1, y + 1, x + w - 1, y + h - 1);
         out.blit_text(&r, tx.round() as i64, (ty + r.top).round() as i64);
@@ -1335,7 +1337,7 @@ fn paint_form_control(
     // the ink so the placeholder gray can never leak into the bar.
     if let Some((off, ink)) = caret {
         if matches!(form, super::FormRun::Input | super::FormRun::Textarea) {
-            let tokens = tokens_of(text, font_size, bold, fonts);
+            let tokens = tokens_of(text, font_size, bold, fonts, false);
             let lines = greedy_wrap(&tokens, Some(wrap_at.max(1) as f32));
             // tokens_of tokenizes the TRIMMED text: map the offset into
             // trimmed coordinates. A caret inside the leading whitespace
@@ -1697,6 +1699,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                                     alpha_color(*color, *alpha),
                                     w as f32,
                                     *line_height,
+                                    false,
                                 );
                                 scratch.blit_text(&r, 0, r.top.round() as i64);
                                 scratch.pop_clip();
@@ -1742,6 +1745,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                                     alpha_color(*color, *alpha),
                                     w.max(0) as f32,
                                     *line_height,
+                                    false,
                                 );
                                 out.blit_text(&r, x, (y as f32 + r.top).round() as i64);
                                 out.pop_clip();
@@ -1782,7 +1786,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     super::svg::paint_svg(render, rect, fonts, out, dx, dy, *alpha);
                 }
             }
-            PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at, gradient, decorations } => {
+            PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at, gradient, decorations, mono } => {
                 // background-clip: text: the fill color is ignored entirely
                 // (CSS paints the background through the glyphs; the
                 // transparent-text-fill half of the idiom is free by
@@ -1809,7 +1813,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     if bx1 <= 0 || by1 <= 0 || bx0 >= out.width as i64 || by0 >= out.height as i64 {
                         continue;
                     }
-                    let r = fonts.rasterize_wrapped(text, *font_size, *bold, fill, *wrap_at, *line_height);
+                    let r = fonts.rasterize_wrapped(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono);
                     // Gradient recolor rewrites pixels in place — the cache
                     // hands out Arcs, so that path clones first (#399).
                     let mut owned;
@@ -1821,12 +1825,12 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                         &r
                     };
                     out.blit_rgba_affine(&r.data, r.width, r.height, *x as f64, (*y + r.top) as f64);
-                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, 0.0, 0.0);
+                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, *mono, 0.0, 0.0);
                 } else {
                     if !text_reaches_band(*y, text, *font_size, *wrap_at, *line_height, dy, out.height as i64) {
                         continue;
                     }
-                    let r = fonts.rasterize_wrapped(text, *font_size, *bold, fill, *wrap_at, *line_height);
+                    let r = fonts.rasterize_wrapped(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono);
                     let mut owned;
                     let r = if let Some(g) = gradient {
                         owned = (*r).clone();
@@ -1837,7 +1841,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     };
                     // Tile row 0 sits `top` px above the leaf's line-box top.
                     out.blit_text(r, (x - dx).round() as i64, (y - dy + r.top).round() as i64);
-                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, dx, dy);
+                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, *mono, dx, dy);
                 }
             }
         }
@@ -1888,6 +1892,7 @@ mod tests {
                 css_deg: 90.0,
             }),
             decorations: TextDecorations::default(),
+            mono: false,
         }];
         let fonts = crate::diting_fonts::font_book();
         let mut c = Canvas::new_filled(120, 40, [255, 255, 255, 255]);
@@ -2071,7 +2076,7 @@ mod tests {
                 form: None,
                 caret: None,
             },
-            PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default() },
+            PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false },
         ];
         let fonts = crate::diting_fonts::font_book();
         let mut full = Canvas::new_filled(40, 60, [255, 255, 255, 255]);
@@ -2099,6 +2104,7 @@ mod tests {
                 wrap_at: 400.0,
                 gradient: None,
                 decorations,
+                mono: false,
             }];
             let mut c = Canvas::new_filled(80, 32, [255, 255, 255, 255]);
             execute(&items, &fonts, &mut c);
@@ -2140,6 +2146,7 @@ mod tests {
                 wrap_at: 400.0,
                 gradient: None,
                 decorations: TextDecorations { underline: true, ..Default::default() },
+                mono: false,
             },
             PaintItem::ClearXf,
         ];
@@ -2467,8 +2474,8 @@ mod tests {
         let fonts = crate::diting_fonts::font_book();
         // A tall low-content page: only two text leaves, one near the band.
         let items = vec![
-            PaintItem::Text { text: "edge".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 96.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default() },
-            PaintItem::Text { text: "far".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 500.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default() },
+            PaintItem::Text { text: "edge".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 96.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false },
+            PaintItem::Text { text: "far".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 500.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false },
         ];
         let mut band = Canvas::new_filled(40, 80, [255, 255, 255, 255]);
         execute_band(&items, &fonts, &mut band, 0.0, 100.0);
@@ -2592,6 +2599,7 @@ mod tests {
                 wrap_at: 200.0,
                 gradient: None,
                 decorations: TextDecorations::default(),
+                mono: false,
             },
             PaintItem::ClearXf,
         ];
