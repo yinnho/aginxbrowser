@@ -2137,3 +2137,101 @@ fn fallback_segments_pen_across_the_run_not_stacked_at_origin() {
         "emoji-first: combined ink ends at {combined_end}, expected ≥ CJK end {cjk_ink_end} + emoji width {emoji_ink_width}"
     );
 }
+
+/// CSS BG3 §5.4 corner-overlap clamp (batch-59): a `border-radius:999px`
+/// pill on a 200x46 box must resolve every radius down by the tightest
+/// edge ratio to h/2 — Chrome's capsule. Pre-fix the raw
+/// 999 reached the per-corner rasterizers and painted a deformed lens
+/// (probe: 644 px differed vs the clamped render).
+#[test]
+fn oversized_border_radius_clamps_to_half_box() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::PaintItem;
+
+    let html = r#"<html><body style="margin:0">
+        <div id="pill" style="margin-top:50px;width:200px;height:46px;border-radius:999px;border:1px solid #000;background:#eeeeee"></div>
+        <div id="clip" style="margin-top:20px;width:200px;height:46px;border-radius:999px;overflow:hidden"><div style="width:10px;height:10px;background:#000"></div></div>
+        </body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for("", (400.0, 300.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let (rects, items) = crate::diting_layout::layout_dom_with_paint(
+        &tree,
+        &styles,
+        &crate::diting_fonts::font_book(),
+        400.0,
+        300.0,
+    );
+
+    let pill = *rects.get(&tree.query_selector_all("#pill").unwrap()[0]).unwrap();
+    // content-box sizing: the border box is 46 + 2x1px border = 48 tall,
+    // so the capsule radius is 24; the borderless #clip box clamps to 23.
+    let pill_r = pill.height / 2.0;
+    let clamped = |r: f32, want: f32| (r - want).abs() < 0.51;
+
+    let bg_radius = items
+        .iter()
+        .find_map(|it| match it {
+            PaintItem::Bg { rect, radius, .. } if *rect == pill => Some(*radius),
+            _ => None,
+        })
+        .expect("pill paints a Bg fill");
+    assert!(clamped(bg_radius, pill_r), "Bg radius clamps 999 -> h/2 ({pill_r}), got {bg_radius}");
+
+    let border_radii = items
+        .iter()
+        .find_map(|it| match it {
+            PaintItem::Border { rect, radii, .. } if *rect == pill => Some(*radii),
+            _ => None,
+        })
+        .expect("pill paints a Border ring");
+    for (rx, ry) in border_radii {
+        assert!(clamped(rx, pill_r) && clamped(ry, pill_r), "Border corner clamps to ({pill_r}, {pill_r}), got ({rx}, {ry})");
+    }
+
+    // §5.4 invariant on every radii-carrying item: adjacent corners never
+    // sum past their shared edge.
+    for it in &items {
+        let (r, radii) = match it {
+            PaintItem::Border { rect, radii, .. } => (rect, radii),
+            PaintItem::BgCorner { rect, radii, .. } => (rect, radii),
+            PaintItem::BgGradient { rect, radii, .. } => (rect, radii),
+            PaintItem::ClipRounded { rect, radii } => (rect, radii),
+            _ => continue,
+        };
+        assert!(radii[0].0 + radii[1].0 <= r.width + 0.01, "top edge overflow: {it:?}");
+        assert!(radii[3].0 + radii[2].0 <= r.width + 0.01, "bottom edge overflow: {it:?}");
+        assert!(radii[0].1 + radii[3].1 <= r.height + 0.01, "left edge overflow: {it:?}");
+        assert!(radii[1].1 + radii[2].1 <= r.height + 0.01, "right edge overflow: {it:?}");
+    }
+
+    // The ClipRounded path (second resolution site) clamps against the
+    // padding box too.
+    let clip = *rects.get(&tree.query_selector_all("#clip").unwrap()[0]).unwrap();
+    let clip_r = clip.height / 2.0;
+    let clip_radii = items
+        .iter()
+        .find_map(|it| match it {
+            PaintItem::ClipRounded { rect, radii } if *rect == clip => Some(*radii),
+            _ => None,
+        })
+        .expect("overflow:hidden pill emits ClipRounded");
+    for (rx, ry) in clip_radii {
+        assert!(clamped(rx, clip_r) && clamped(ry, clip_r), "ClipRounded corner clamps to ({clip_r}, {clip_r}), got ({rx}, {ry})");
+    }
+
+    // Pixel level: nothing paints above the pill's top edge, and the top
+    // edge row carries the capsule's wide flat segment (the pre-fix lens
+    // only touched a narrow run near the box's midpoint).
+    let mut c = crate::diting_layout::paint::Canvas::new_filled(400, 300, [255, 255, 255, 255]);
+    crate::diting_layout::paint::execute(&items, &crate::diting_fonts::font_book(), &mut c);
+    let ink_at = |x: usize, y: usize| c.data[(y * c.width + x) * 4 + 3] > 0 && c.data[(y * c.width + x) * 4..(y * c.width + x) * 4 + 3] != [255, 255, 255];
+    for y in 0..(pill.y as usize) {
+        for x in 0..400 {
+            assert!(!ink_at(x, y), "stray ink above the pill at ({x}, {y})");
+        }
+    }
+    let top_row_ink = (0..400).filter(|&x| ink_at(x, pill.y as usize)).count();
+    assert!(top_row_ink > 100, "capsule top edge is a wide flat segment, got {top_row_ink} px");
+}

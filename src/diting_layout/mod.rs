@@ -574,6 +574,31 @@ fn side_px(v: Option<crate::diting_css::Length>) -> f32 {
     }
 }
 
+/// CSS BG3 §5.4 corner-overlap rule: when adjacent corner radii sum past
+/// their shared edge, ALL radii scale down by the tightest ratio (Chrome's
+/// behavior) — an unclamped 999px pill radius otherwise paints a stray arc
+/// far above the box (slides-deck probe). Corner order is [TL, TR, BR, BL]
+/// (diting_css border-radius expand). The ratio is invariant under diagonal
+/// affine scaling, so clamping pre- or post-prebake is equivalent.
+fn clamp_corner_radii(radii: [(f32, f32); 4], w: f32, h: f32) -> [(f32, f32); 4] {
+    let mut f = 1.0f32;
+    let edges = [
+        (w, radii[0].0 + radii[1].0), // top: TL.x + TR.x
+        (w, radii[3].0 + radii[2].0), // bottom: BL.x + BR.x
+        (h, radii[0].1 + radii[3].1), // left: TL.y + BL.y
+        (h, radii[1].1 + radii[2].1), // right: TR.y + BR.y
+    ];
+    for (edge, sum) in edges {
+        if sum > 0.0 {
+            f = f.min(edge / sum);
+        }
+    }
+    if f >= 1.0 {
+        return radii;
+    }
+    radii.map(|(rx, ry)| (rx * f, ry * f))
+}
+
 /// Effective font context for a text leaf: nearest ancestor's font-size /
 /// weight / line-height spec (defaults 16px / 400 / normal). Since batch 2e
 /// every cascaded element carries a resolved font-size, so the walk stops at
@@ -5339,7 +5364,7 @@ pub fn layout_collect(
                 .get(dom_id)
                 .and_then(|s| s.corner_radii.as_ref())
                 .map(|corners| {
-                    std::array::from_fn(|i| {
+                    let rs = std::array::from_fn(|i| {
                         // Radii ride the affine only on the prebaked path
                         // (each axis scales by its diagonal entry); under a
                         // SetXf bracket they stay local and the affine
@@ -5349,7 +5374,8 @@ pub fn layout_collect(
                         } else {
                             (res(&corners[i].0, rect.width), res(&corners[i].1, rect.height))
                         }
-                    })
+                    });
+                    clamp_corner_radii(rs, bg_rect.width, bg_rect.height)
                 })
                 .unwrap_or([(0.0, 0.0); 4]);
             if alpha > 0.0 && rect.width > 0.0 && rect.height > 0.0 {
@@ -5684,6 +5710,7 @@ pub fn layout_collect(
                             [(v, v); 4]
                         })
                     })
+                    .map(|rs| clamp_corner_radii(rs, pad_w, pad_h))
                     .map(|rs| {
                         // Descendants paint through child_xf; on the prebaked
                         // path the clip (and its radii) rides the same
