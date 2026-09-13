@@ -35,10 +35,31 @@ pub struct ParsedRule {
     pub declarations: String,
 }
 
+/// One `@keyframes` stop (`from` = 0, `to` = 1, `NN%` = NN/100) with raw
+/// declarations. Values stay raw strings because `var()` in stop values
+/// (e.g. `to { opacity: var(--o, 1) }`) substitutes against the custom
+/// properties of whichever element declares `animation:` — resolved per
+/// element at sample time, not at parse time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeyframeStop {
+    pub offset: f32,
+    pub decls: Vec<(String, String)>,
+}
+
+/// All stops of one `@keyframes` name, sorted by offset ascending.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Keyframes {
+    pub stops: Vec<KeyframeStop>,
+}
+
+pub type KeyframesMap = std::collections::HashMap<String, Keyframes>;
+
 /// Parse a stylesheet into flattened rules. Handles nested braces, comments,
 /// and the at-rules whose bodies contain ordinary rules (`@media`,
-/// `@supports`, `@layer`). Other at-rules (`@font-face`, `@keyframes`,
-/// `@import`, ...) are dropped: they contribute no layout-relevant rule here.
+/// `@supports`, `@layer`). Other at-rules (`@font-face`, `@import`, ...)
+/// are dropped: they contribute no layout-relevant rule here. `@keyframes`
+/// blocks are dropped as rules but their stops land in the animation table
+/// when parsed via [`parse_stylesheet_timed`].
 ///
 /// Error recovery mirrors browsers (and upstream): an unbalanced stray `}`
 /// at top level resynchronizes instead of scrambling every following rule.
@@ -47,7 +68,20 @@ pub fn parse_stylesheet(css: &str) -> Vec<ParsedRule> {
 }
 
 pub fn parse_stylesheet_for(css: &str, viewport: (f32, f32), media_type: CssMediaType) -> Vec<ParsedRule> {
+    parse_stylesheet_timed(css, viewport, media_type).0
+}
+
+/// Full stylesheet parse: flattened rules PLUS the `@keyframes` table the
+/// animation sampler samples from. Rules-only callers keep
+/// [`parse_stylesheet_for`]; this is the entry the layout run uses so a
+/// declarative SVG's `<style>` keyframes reach style resolution.
+pub fn parse_stylesheet_timed(
+    css: &str,
+    viewport: (f32, f32),
+    media_type: CssMediaType,
+) -> (Vec<ParsedRule>, KeyframesMap) {
     let mut rules = Vec::new();
+    let mut keyframes = KeyframesMap::new();
     let mut current_selector = String::new();
     let mut current_decls = String::new();
     let mut block_depth = 0usize;
@@ -82,7 +116,7 @@ pub fn parse_stylesheet_for(css: &str, viewport: (f32, f32), media_type: CssMedi
                 let sel = current_selector.trim();
                 let decls = current_decls.trim();
                 if let Some(at) = sel.strip_prefix('@') {
-                    flush_at_rule(at, decls, &mut rules, viewport, media_type);
+                    flush_at_rule(at, decls, &mut rules, &mut keyframes, viewport, media_type);
                 } else {
                     rules.push(ParsedRule {
                         selector: sel.to_string(),
@@ -105,32 +139,116 @@ pub fn parse_stylesheet_for(css: &str, viewport: (f32, f32), media_type: CssMedi
             current_selector.push(c);
         }
     }
-    rules
+    (rules, keyframes)
 }
 
 /// Handle the at-rules whose bodies contain ordinary rules. `@media` applies
 /// inner rules when the query holds; `@supports` when the condition evaluates
 /// true; `@layer` recurses with the named layer tracked (ordering only — we
-/// have no layer-priority cascade yet, so layers flatten).
+/// have no layer-priority cascade yet, so layers flatten). `@keyframes`
+/// parses its stops into the animation table.
 fn flush_at_rule(
     at: &str,
     inner: &str,
     rules: &mut Vec<ParsedRule>,
+    keyframes: &mut KeyframesMap,
     viewport: (f32, f32),
     media_type: CssMediaType,
 ) {
+    let recurse = |rules: &mut Vec<ParsedRule>, keyframes: &mut KeyframesMap| {
+        let (inner_rules, inner_kf) = parse_stylesheet_timed(inner, viewport, media_type);
+        rules.extend(inner_rules);
+        for (k, v) in inner_kf {
+            keyframes.entry(k).or_insert(v);
+        }
+    };
     if let Some(prelude) = at_rule_prelude(at, "media") {
         if media_query_applies(prelude, viewport, media_type) {
-            rules.extend(parse_stylesheet_for(inner, viewport, media_type));
+            recurse(rules, keyframes);
         }
     } else if let Some(prelude) = at_rule_prelude(at, "supports") {
         if supports_condition_applies(prelude) {
-            rules.extend(parse_stylesheet_for(inner, viewport, media_type));
+            recurse(rules, keyframes);
         }
     } else if let Some(_prelude) = at_rule_prelude(at, "layer") {
-        rules.extend(parse_stylesheet_for(inner, viewport, media_type));
+        recurse(rules, keyframes);
+    } else if let Some(prelude) = at_rule_prelude(at, "keyframes") {
+        // `from`/`to`/`NN%` stops; a stop that fails to parse is skipped,
+        // not fatal — the sampler works with however many stops survive.
+        if let Some(kf) = parse_keyframes_body(inner) {
+            let name = prelude.trim();
+            if !name.is_empty() {
+                keyframes.insert(name.to_string(), kf);
+            }
+        }
     }
     // Other at-rules carry no layout-relevant rules for us; drop them.
+}
+
+/// Parse the body of one `@keyframes` rule: top-level `{ ... }` blocks
+/// whose selector is `from`, `to`, or a percentage. Stops sort by offset;
+/// a body with no surviving stop yields None.
+fn parse_keyframes_body(inner: &str) -> Option<Keyframes> {
+    let mut stops = Vec::new();
+    let mut sel = String::new();
+    let mut body = String::new();
+    let mut depth = 0usize;
+    let mut in_comment = false;
+    let mut chars = inner.chars().peekable();
+    let flush = |sel: &mut String, body: &mut String, stops: &mut Vec<KeyframeStop>| {
+        let offset = match sel.trim() {
+            "from" => Some(0.0),
+            "to" => Some(1.0),
+            s => s.strip_suffix('%').and_then(|n| n.trim().parse::<f32>().ok().map(|p| p / 100.0)),
+        };
+        if let Some(offset) = offset.filter(|o| o.is_finite() && (0.0..=1.0).contains(o)) {
+            let decls = split_declarations(body);
+            if !decls.is_empty() {
+                stops.push(KeyframeStop { offset, decls });
+            }
+        }
+        sel.clear();
+        body.clear();
+    };
+    while let Some(c) = chars.next() {
+        if in_comment {
+            if c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_comment = false;
+            }
+            continue;
+        }
+        if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            in_comment = true;
+            continue;
+        }
+        if c == '{' {
+            depth += 1;
+            if depth > 1 {
+                body.push(c);
+            }
+        } else if c == '}' && depth > 0 {
+            depth -= 1;
+            if depth == 0 {
+                flush(&mut sel, &mut body, &mut stops);
+            } else {
+                body.push(c);
+            }
+        } else if depth == 0 {
+            sel.push(c);
+        } else {
+            body.push(c);
+        }
+    }
+    if !sel.trim().is_empty() {
+        flush(&mut sel, &mut body, &mut stops);
+    }
+    if stops.is_empty() {
+        return None;
+    }
+    stops.sort_by(|a, b| a.offset.partial_cmp(&b.offset).unwrap_or(std::cmp::Ordering::Equal));
+    Some(Keyframes { stops })
 }
 
 fn at_rule_prelude<'a>(at: &'a str, name: &str) -> Option<&'a str> {
@@ -478,6 +596,10 @@ pub struct ComputedStyle {
     pub svg_stroke: Option<SvgPaint>,
     pub svg_stroke_width: Option<f32>,
     pub svg_dasharray: Option<Vec<f32>>,
+    /// `stroke-dashoffset` (animation input): the dash phase shift, in the
+    /// same user units as the dasharray. The svg compiler folds it into the
+    /// stroke so `stroke-dashoffset` keyframes produce the self-draw effect.
+    pub svg_dashoffset: Option<f32>,
     pub background_color: Option<Color>,
     /// Shorthand sides in CSS order (top right bottom left), already expanded.
     pub margin: Sides,
@@ -572,6 +694,11 @@ pub struct ComputedStyle {
     /// gBCR and hit testing but NOT the layout box (Chrome semantics:
     /// transforms never affect layout).
     pub transform: Option<Transform2D>,
+    /// Parsed `animation` shorthand (CSS animations batch). The cascade
+    /// only stores it; `sample_css_animation` resolves it against the
+    /// stylesheet's `@keyframes` table at a time the caller supplies, then
+    /// overrides opacity/transform/stroke-dashoffset in place.
+    pub animation: Option<AnimationSpec>,
     /// Uniform circular `border-radius` (batch 6b): ONE length/percentage
     /// applied to all four corners (the 1-value syntax — by far the most
     /// common form). Percentages resolve against the box width. Per-corner
@@ -897,6 +1024,199 @@ impl Transform2D {
     pub fn is_axis_aligned(&self) -> bool {
         self.b == 0.0 && self.c == 0.0
     }
+
+    /// Concrete [a b c d e f] affine. Percentage translates resolve against
+    /// the reference size the caller supplies (0 when unknown — SVG subtree
+    /// consumers pass the viewBox extent). Non-px/percent translates can't
+    /// appear in a valid transform, so they resolve to 0.
+    pub fn to_matrix_with(self, ref_w: f32, ref_h: f32) -> [f32; 6] {
+        let px = |l: Length, r: f32| match l {
+            Length::Px(v) => v,
+            Length::Percent(p) => p * r / 100.0,
+            _ => 0.0,
+        };
+        [self.a, self.b, self.c, self.d, px(self.tx, ref_w), px(self.ty, ref_h)]
+    }
+}
+
+/// Parsed `animation` shorthand, v1 subset: ONE animation (the first of a
+/// comma list), iteration-count pinned at 1, direction normal, play-state
+/// running. That covers the declarative-SVG motion grammar (fade / rise /
+/// self-draw); the sampler holds the element at the `to` stop once past
+/// `delay + duration` when fill-mode is `forwards`/`both`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnimationSpec {
+    pub name: String,
+    /// Seconds; 0 means the animation snaps (only end states ever visible).
+    pub duration: f32,
+    /// Seconds before the animation starts; before it the element shows its
+    /// underlying cascade value (fill-mode none semantics).
+    pub delay: f32,
+    pub easing: Easing,
+    pub fill_forwards: bool,
+}
+
+/// Timing functions the sampler evaluates. Keywords map to their canonical
+/// cubic-bezier control points; `steps()` invalidates the declaration.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Easing {
+    Linear,
+    CubicBezier(f32, f32, f32, f32),
+}
+
+impl Easing {
+    /// Map linear progress [0, 1] through the curve. `ease`-family curves
+    /// stay monotone in x, so one Newton pass with a bisection fallback
+    /// solves the parameter; a few iterations suffice at f32 precision.
+    pub fn map(&self, p: f32) -> f32 {
+        match *self {
+            Easing::Linear => p,
+            Easing::CubicBezier(x1, y1, x2, y2) => {
+                let x = p.clamp(0.0, 1.0);
+                let bezier = |t: f32, a: f32, b: f32| {
+                    // Bernstein form of 3(1-t)^2 t a + 3(1-t) t^2 b + t^3
+                    let u = 1.0 - t;
+                    3.0 * u * u * t * a + 3.0 * u * t * t * b + t * t * t
+                };
+                let mut t = x;
+                let mut solved = false;
+                for _ in 0..8 {
+                    let xt = bezier(t, x1, x2) - x;
+                    if xt.abs() < 1e-5 {
+                        solved = true;
+                        break;
+                    }
+                    // derivative of the x component
+                    let u = 1.0 - t;
+                    let d = 3.0 * u * u * x1 + 6.0 * u * t * (x2 - x1) + 3.0 * t * t * (1.0 - x2);
+                    if d.abs() < 1e-6 {
+                        break;
+                    }
+                    t -= xt / d;
+                }
+                if !solved && !(0.0..=1.0).contains(&t) {
+                    // Newton diverged (degenerate control points): bisect
+                    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+                    for _ in 0..24 {
+                        t = 0.5 * (lo + hi);
+                        let xt = bezier(t, x1, x2);
+                        if xt < x {
+                            lo = t;
+                        } else {
+                            hi = t;
+                        }
+                    }
+                }
+                bezier(t.clamp(0.0, 1.0), y1, y2)
+            }
+        }
+    }
+}
+
+/// Parse the `animation` shorthand (v1 single-animation subset). Time tokens
+/// fill duration then delay in order; keyword/cubic-bezier tokens set the
+/// easing; `forwards`/`both` set fill; the remaining identifier is the name.
+/// `none` as the first non-keyword token means no animation at all.
+fn parse_animation_shorthand(v: &str) -> Option<AnimationSpec> {
+    let mut duration: Option<f32> = None;
+    let mut delay = 0.0f32;
+    let mut easing: Option<Easing> = None;
+    let mut fill_forwards = false;
+    let mut name: Option<String> = None;
+    for tok in paren_aware_tokens(v) {
+        let secs = tok
+            .strip_suffix("ms")
+            .and_then(|n| n.parse::<f32>().ok().map(|n| n / 1000.0))
+            .or_else(|| tok.strip_suffix('s').and_then(|n| n.parse::<f32>().ok()));
+        if let Some(s) = secs.filter(|s| s.is_finite() && *s >= 0.0) {
+            if duration.is_none() {
+                duration = Some(s);
+            } else if delay == 0.0 {
+                delay = s;
+            }
+            continue;
+        }
+        match tok.as_str() {
+            "linear" => easing = Some(Easing::Linear),
+            "ease" => easing = Some(Easing::CubicBezier(0.25, 0.1, 0.25, 1.0)),
+            "ease-in" => easing = Some(Easing::CubicBezier(0.42, 0.0, 1.0, 1.0)),
+            "ease-out" => easing = Some(Easing::CubicBezier(0.0, 0.0, 0.58, 1.0)),
+            "ease-in-out" => easing = Some(Easing::CubicBezier(0.42, 0.0, 0.58, 1.0)),
+            "forwards" | "both" => fill_forwards = true,
+            "backwards" | "none" | "infinite" | "alternate" | "reverse"
+            | "alternate-reverse" | "running" | "paused" => {}
+            _ => {
+                if let Some(rest) = tok.strip_prefix("cubic-bezier(") {
+                    let args: Vec<Option<f32>> = rest
+                        .strip_suffix(')')?
+                        .split(',')
+                        .map(|a| a.trim().parse::<f32>().ok())
+                        .collect();
+                    let pts: Option<Vec<f32>> = args.into_iter().collect();
+                    let pts = pts?;
+                    if pts.len() == 4 && pts.iter().all(|p| p.is_finite()) {
+                        easing = Some(Easing::CubicBezier(pts[0], pts[1], pts[2], pts[3]));
+                    } else {
+                        return None;
+                    }
+                } else if tok.contains('(') {
+                    // `steps()` and other timing functions we don't evaluate
+                    // invalidate the whole shorthand — silently dropping the
+                    // token would animate with the wrong easing.
+                    return None;
+                } else if tok.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+                    && !tok.is_empty()
+                {
+                    // iteration counts are bare numbers; anything else
+                    // identifier-shaped is the animation name
+                    if tok.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                        continue;
+                    }
+                    if name.is_none() {
+                        name = Some(tok);
+                    }
+                }
+            }
+        }
+    }
+    let name = name?;
+    Some(AnimationSpec {
+        name,
+        duration: duration.unwrap_or(0.0),
+        delay,
+        easing: easing.unwrap_or(Easing::CubicBezier(0.25, 0.1, 0.25, 1.0)),
+        fill_forwards,
+    })
+}
+
+/// Split on whitespace at paren depth 0 so `cubic-bezier(.33, 1, .68, 1)`
+/// stays one token.
+fn paren_aware_tokens(v: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0usize;
+    for c in v.chars() {
+        match c {
+            '(' => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                cur.push(c);
+            }
+            _ if c.is_whitespace() && depth == 0 => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 /// Length arithmetic for transform accumulation: same-unit adds fold, a
@@ -1495,6 +1815,167 @@ pub fn ua_border(tag: &str) -> Option<(f32, BorderStyle)> {
 /// Split a declaration block into (name, value) pairs. Quote- and paren-aware;
 /// nested `{}` blocks become one dropped chunk rather than leaking into the
 /// parent rule (upstream split_declarations semantics).
+/// Resolve one element's CSS animation against the stylesheet's keyframes
+/// table at time `t` (seconds since document start), mutating the computed
+/// style in place. `t: None` means "no clock" — static renders (screenshot,
+/// PDF) sample the END state, so an animated SVG's poster frame is the
+/// finished diagram rather than the blank t=0 one; the engine has no wall
+/// clock and the end state is the only deterministic poster.
+///
+/// v1 interpolates the paint-channel properties (opacity, transform,
+/// stroke-dashoffset — the fade/rise/self-draw grammar); other properties
+/// inside keyframes are ignored. Before the delay the element keeps its
+/// underlying cascade value (fill-mode none semantics); after the end it
+/// holds the final stop when fill-mode is `forwards`/`both`.
+pub fn sample_css_animation(style: &mut ComputedStyle, keyframes: &KeyframesMap, t: Option<f64>) {
+    let Some(anim) = style.animation.clone() else { return };
+    let Some(kf) = keyframes.get(&anim.name) else { return };
+    let progress = match t {
+        None => 1.0,
+        Some(t) => {
+            let elapsed = t as f32 - anim.delay;
+            // Strict: t == delay is the first instant of the active phase
+            // (progress 0, from-stop applies), not the pre-delay hold.
+            if elapsed < 0.0 {
+                return;
+            }
+            let done = anim.duration <= 0.0 || elapsed >= anim.duration;
+            if done {
+                if anim.fill_forwards {
+                    1.0
+                } else {
+                    return;
+                }
+            } else {
+                anim.easing.map(elapsed / anim.duration)
+            }
+        }
+    };
+    apply_stops(style, kf, progress.clamp(0.0, 1.0));
+}
+
+fn lerp(a: f32, b: f32, l: f32) -> f32 {
+    a + (b - a) * l
+}
+
+/// A keyframe transform value, keeping "stop lacks the property" (use the
+/// underlying transform) apart from `transform: none` (identity).
+enum StopTransform {
+    Absent,
+    Identity,
+    T(Transform2D),
+}
+
+fn stop_transform(
+    stop: &KeyframeStop,
+    custom: &std::collections::HashMap<String, String>,
+) -> StopTransform {
+    let Some((_, raw)) = stop.decls.iter().rev().find(|(k, _)| k == "transform") else {
+        return StopTransform::Absent;
+    };
+    let sub = substitute_vars(raw, custom, 0).unwrap_or_else(|| raw.clone());
+    if sub.trim() == "none" {
+        return StopTransform::Identity;
+    }
+    parse_transform(&sub).map(StopTransform::T).unwrap_or(StopTransform::Absent)
+}
+
+fn stop_num(stop: &KeyframeStop, prop: &str, custom: &std::collections::HashMap<String, String>) -> Option<f32> {
+    let (_, raw) = stop.decls.iter().rev().find(|(k, _)| k == prop)?;
+    let sub = substitute_vars(raw, custom, 0).unwrap_or_else(|| raw.clone());
+    sub.trim().parse::<f32>().ok().filter(|n| n.is_finite())
+}
+
+fn lerp_len(a: Length, b: Length, l: f32) -> Length {
+    match (a, b) {
+        (Length::Px(x), Length::Px(y)) => Length::Px(lerp(x, y, l)),
+        (Length::Percent(x), Length::Percent(y)) => Length::Percent(lerp(x, y, l)),
+        // Mixed units have no box to resolve against mid-flight: snap to
+        // the nearer side (discrete interpolation).
+        _ => {
+            if l < 0.5 {
+                a
+            } else {
+                b
+            }
+        }
+    }
+}
+
+/// Interpolate two transforms. `None` on a side is identity for this
+/// purpose (`transform: none` in a `to` stop); the mixed-unit lengths snap
+/// discretely, everything else lerps componentwise.
+fn lerp_transform(a: Option<Transform2D>, b: Option<Transform2D>, l: f32) -> Option<Transform2D> {
+    let mix_to_identity = |x: &Transform2D, l: f32| Transform2D {
+        a: lerp(x.a, 1.0, l),
+        b: lerp(x.b, 0.0, l),
+        c: lerp(x.c, 0.0, l),
+        d: lerp(x.d, 1.0, l),
+        tx: lerp_len(x.tx, Length::Px(0.0), l),
+        ty: lerp_len(x.ty, Length::Px(0.0), l),
+    };
+    match (a, b) {
+        (None, None) => None,
+        (Some(x), None) => Some(mix_to_identity(&x, l)),
+        (None, Some(y)) => Some(mix_to_identity(&y, 1.0 - l)),
+        (Some(x), Some(y)) => Some(Transform2D {
+            a: lerp(x.a, y.a, l),
+            b: lerp(x.b, y.b, l),
+            c: lerp(x.c, y.c, l),
+            d: lerp(x.d, y.d, l),
+            tx: lerp_len(x.tx, y.tx, l),
+            ty: lerp_len(x.ty, y.ty, l),
+        }),
+    }
+}
+
+/// Apply the keyframe bracket around `p` to the three animated properties,
+/// with the element's underlying cascade values as the fallback for stops
+/// that omit them (CSS missing-keyframe semantics).
+fn apply_stops(style: &mut ComputedStyle, kf: &Keyframes, p: f32) {
+    let stops = &kf.stops;
+    if stops.is_empty() {
+        return;
+    }
+    let mut i0 = 0;
+    for (i, s) in stops.iter().enumerate() {
+        if s.offset <= p {
+            i0 = i;
+        } else {
+            break;
+        }
+    }
+    let (local, s1) = match stops.get(i0 + 1) {
+        Some(next) => {
+            let span = next.offset - stops[i0].offset;
+            let local = if span <= 0.0 { 1.0 } else { ((p - stops[i0].offset) / span).clamp(0.0, 1.0) };
+            (local, next)
+        }
+        None => (1.0, &stops[i0]),
+    };
+    let s0 = &stops[i0];
+
+    let base_opacity = style.opacity.unwrap_or(1.0);
+    let v0 = stop_num(s0, "opacity", &style.custom).unwrap_or(base_opacity);
+    let v1 = stop_num(s1, "opacity", &style.custom).unwrap_or(base_opacity);
+    style.opacity = Some(lerp(v0, v1, local).clamp(0.0, 1.0));
+
+    let base_dash = style.svg_dashoffset.unwrap_or(0.0);
+    let d0 = stop_num(s0, "stroke-dashoffset", &style.custom).unwrap_or(base_dash);
+    let d1 = stop_num(s1, "stroke-dashoffset", &style.custom).unwrap_or(base_dash);
+    style.svg_dashoffset = Some(lerp(d0, d1, local));
+
+    let underlying = style.transform;
+    let resolve = |st: StopTransform| match st {
+        StopTransform::Absent => underlying,
+        StopTransform::Identity => None,
+        StopTransform::T(t) => Some(t),
+    };
+    let t0 = resolve(stop_transform(s0, &style.custom));
+    let t1 = resolve(stop_transform(s1, &style.custom));
+    style.transform = lerp_transform(t0, t1, local);
+}
+
 pub fn split_declarations(css: &str) -> Vec<(String, String)> {
     let mut parts = Vec::new();
     let mut depth = 0i32;
@@ -1794,6 +2275,13 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 _ => false,
             }
         }
+        "stroke-dashoffset" => match v.parse::<f32>() {
+            Ok(n) if n.is_finite() => {
+                style.svg_dashoffset = Some(n);
+                true
+            }
+            _ => false,
+        },
         // Raw passthrough: no parsed form, no layout effect — the CSSOM
         // layer reports it verbatim (var() already substituted upstream).
         "background-image" => {
@@ -2089,6 +2577,12 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 }
                 _ => false,
             }
+        }
+        "animation" => {
+            // Stored, not applied here: the sampler resolves it against
+            // the stylesheet's @keyframes table at sample time.
+            style.animation = parse_animation_shorthand(v);
+            style.animation.is_some()
         }
         "border-radius" => {
             // CSS syntax: 1-4 horizontal radii, optionally `/` plus 1-4
@@ -4268,5 +4762,192 @@ mod tests {
         let mut s = ComputedStyle::default();
         assert!(!apply_declarations(&mut s, "background-clip: no-box"));
         assert!(!s.background_clip_text);
+    }
+
+    // ---- CSS animation: shorthand, keyframes, sampler ----
+
+    #[test]
+    fn animation_shorthand_time_order_keywords_and_bezier() {
+        let a = parse_animation_shorthand("agxIn 1.2s cubic-bezier(.2,.7,.2,1) .35s forwards").unwrap();
+        assert_eq!(a.name, "agxIn");
+        assert_eq!(a.duration, 1.2);
+        assert_eq!(a.delay, 0.35);
+        assert!(a.fill_forwards);
+        assert_eq!(a.easing, Easing::CubicBezier(0.2, 0.7, 0.2, 1.0));
+
+        // First time token is duration, second is delay (CSS order).
+        let a = parse_animation_shorthand(".5s 2s agxDraw linear").unwrap();
+        assert_eq!((a.duration, a.delay), (0.5, 2.0));
+        assert_eq!(a.easing, Easing::Linear);
+
+        // Keywords map to canonical beziers; `both` counts as forwards.
+        let a = parse_animation_shorthand("ease-in-out .8s both x").unwrap();
+        assert_eq!(a.easing, Easing::CubicBezier(0.42, 0.0, 0.58, 1.0));
+        assert!(a.fill_forwards);
+
+        // ms suffix, defaults (duration 0 = snap, no fill), `none` kills it.
+        let a = parse_animation_shorthand("400ms agxFade").unwrap();
+        assert_eq!(a.duration, 0.4);
+        assert_eq!(a.delay, 0.0);
+        assert!(!a.fill_forwards);
+        assert_eq!(parse_animation_shorthand("none"), None);
+        assert_eq!(parse_animation_shorthand("1s steps(3) x"), None);
+    }
+
+    #[test]
+    fn keyframes_table_parses_stops_offsets_and_percent_selectors() {
+        let css = "@keyframes agxIn { from { opacity: 0 } 40% { opacity: .4 } to { opacity: 1 } } \
+                   .a { animation: agxIn 1s }";
+        let (rules, kf) = parse_stylesheet_timed(css, (1280.0, 720.0), CssMediaType::Screen);
+        assert_eq!(rules.len(), 1, "{rules:?}");
+        let kf = kf.get("agxIn").expect("keyframes captured");
+        let offsets: Vec<f32> = kf.stops.iter().map(|s| s.offset).collect();
+        assert_eq!(offsets, vec![0.0, 0.4, 1.0]);
+        assert!(kf.stops[2].decls.iter().any(|(k, v)| k == "opacity" && v.trim() == "1"));
+        // Unsorted source still lands sorted.
+        let (_, kf) = parse_stylesheet_timed(
+            "@keyframes r { to { opacity: 1 } from { opacity: 0 } }",
+            (1280.0, 720.0),
+            CssMediaType::Screen,
+        );
+        let kf = kf.get("r").unwrap();
+        assert!(kf.stops[0].offset < kf.stops[1].offset);
+        // Names are case-sensitive and separate entries.
+        let (_, kf) = parse_stylesheet_timed(
+            "@keyframes A { from { opacity: 0 } } @keyframes a { from { opacity: 1 } }",
+            (1280.0, 720.0),
+            CssMediaType::Screen,
+        );
+        assert_eq!(kf.len(), 2);
+    }
+
+    /// Style with `animation: name dur [delay] [fill]` on it, ready for
+    /// sampling against `keyframes`.
+    fn animated_style(decls: &str) -> ComputedStyle {
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, decls), "declaration parse");
+        s
+    }
+
+    fn one_keyframes(body: &str) -> KeyframesMap {
+        let (_, kf) = parse_stylesheet_timed(
+            &format!("@keyframes k {{ {body} }}"),
+            (1280.0, 720.0),
+            CssMediaType::Screen,
+        );
+        assert_eq!(kf.len(), 1, "keyframes body must parse: {body}");
+        kf
+    }
+
+    #[test]
+    fn sampler_before_delay_holds_underlying_value() {
+        let kf = one_keyframes("from { opacity: 0 } to { opacity: 1 }");
+        // Cascade 1 vs from-stop 0 — the boundary only shows when the two
+        // differ (an underlying 0 would pass vacuously either way).
+        let mut s = animated_style("opacity: 1; animation: k 2s 1s");
+        sample_css_animation(&mut s, &kf, Some(0.5));
+        assert_eq!(s.opacity, Some(1.0), "delay window shows cascade value");
+        // Exactly at delay start = first frame of the active phase: the
+        // from-stop applies, not the cascade value.
+        sample_css_animation(&mut s, &kf, Some(1.0));
+        assert_eq!(s.opacity, Some(0.0));
+    }
+
+    #[test]
+    fn sampler_forwards_holds_to_stop_and_none_reverts() {
+        let kf = one_keyframes("from { opacity: 0 } to { opacity: 1 }");
+        let mut fwd = animated_style("opacity: 0; animation: k 1s forwards");
+        sample_css_animation(&mut fwd, &kf, Some(5.0));
+        assert_eq!(fwd.opacity, Some(1.0), "fill: forwards pins the to stop");
+        // t=None (static render) samples the same end state.
+        sample_css_animation(&mut fwd, &kf, None);
+        assert_eq!(fwd.opacity, Some(1.0));
+
+        let mut nofill = animated_style("opacity: 0; animation: k 1s");
+        sample_css_animation(&mut nofill, &kf, Some(5.0));
+        assert_eq!(nofill.opacity, Some(0.0), "fill: none falls back to cascade");
+    }
+
+    #[test]
+    fn sampler_interpolates_mid_flight_with_linear_and_bezier() {
+        let kf = one_keyframes("from { opacity: 0 } to { opacity: 1 }");
+        let mut s = animated_style("opacity: 0; animation: k 2s linear");
+        sample_css_animation(&mut s, &kf, Some(1.0));
+        assert!((s.opacity.unwrap() - 0.5).abs() < 1e-4);
+
+        // ease-in-out at p=.5 is symmetric around the diagonal: y(.5)=.5.
+        let mut s = animated_style("opacity: 0; animation: k 2s ease-in-out");
+        sample_css_animation(&mut s, &kf, Some(1.0));
+        assert!((s.opacity.unwrap() - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn sampler_substitutes_custom_properties_in_stops() {
+        // The generated declarative SVGs write `to { opacity: var(--o) }`.
+        let kf = one_keyframes("from { opacity: 0 } to { opacity: var(--o) }");
+        // No easing token = CSS default `ease`, so pin linear for exact math.
+        let mut s = animated_style("--o: 0.8; opacity: 0; animation: k 1s linear forwards");
+        sample_css_animation(&mut s, &kf, Some(0.5));
+        assert!((s.opacity.unwrap() - 0.4).abs() < 1e-4, "var(--o) resolved mid-lerp");
+        sample_css_animation(&mut s, &kf, None);
+        assert!((s.opacity.unwrap() - 0.8).abs() < 1e-4);
+    }
+
+    #[test]
+    fn sampler_lerps_transform_and_treats_none_as_identity() {
+        let kf = one_keyframes("from { transform: translateY(40px) } to { transform: none }");
+        let mut s = animated_style("animation: k 1s linear");
+        sample_css_animation(&mut s, &kf, Some(0.5));
+        let t = s.transform.as_ref().expect("transform applied");
+        let m = t.to_matrix_with(0.0, 0.0);
+        assert!((m[5] - 20.0).abs() < 1e-3, "translateY 40→0 at midpoint: {m:?}");
+        assert_eq!(m[0], 1.0);
+
+        // Missing transform in a stop falls back to the underlying cascade
+        // transform (missing-keyframe semantics), not to identity.
+        let kf = one_keyframes("50% { opacity: 1 } to { transform: translateX(10px) }");
+        let mut s = animated_style("transform: translateX(30px); animation: k 2s linear");
+        sample_css_animation(&mut s, &kf, Some(0.25));
+        // 0→50% span: both stops lack transform → underlying stays.
+        let m = s.transform.as_ref().unwrap().to_matrix_with(0.0, 0.0);
+        assert!((m[4] - 30.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn sampler_stroke_dashoffset_self_draw_grammar() {
+        // Self-draw: dasharray 1 + pathLength 1, offset 1→0.
+        let kf = one_keyframes("from { stroke-dashoffset: 1 } to { stroke-dashoffset: 0 }");
+        let mut s = animated_style("stroke-dasharray: 1; stroke-dashoffset: 1; animation: k 1s linear forwards");
+        sample_css_animation(&mut s, &kf, Some(0.25));
+        assert!((s.svg_dashoffset.unwrap() - 0.75).abs() < 1e-4);
+        sample_css_animation(&mut s, &kf, None);
+        assert_eq!(s.svg_dashoffset, Some(0.0), "static render shows the drawn state");
+    }
+
+    #[test]
+    fn bezier_easing_endpoints_and_monotone_interior() {
+        let e = Easing::CubicBezier(0.25, 0.1, 0.25, 1.0);
+        assert!((e.map(0.0) - 0.0).abs() < 1e-5);
+        assert!((e.map(1.0) - 1.0).abs() < 1e-5);
+        // Monotone curve: 100 interior samples never decrease.
+        let mut prev = 0.0f32;
+        for i in 1..100 {
+            let y = e.map(i as f32 / 100.0);
+            assert!(y >= prev - 1e-5, "non-monotone at {i}: {prev} → {y}");
+            prev = y;
+        }
+        // Degenerate control points (x flat in a region) must still solve via
+        // the bisection fallback rather than NaN out.
+        let flat = Easing::CubicBezier(0.0, 0.0, 1.0, 1.0);
+        let y = flat.map(0.37);
+        assert!(y.is_finite() && (0.0..=1.0).contains(&y));
+    }
+
+    #[test]
+    fn to_matrix_with_resolves_percent_translation_against_reference() {
+        let t = parse_transform("translate(10%, 25%)").unwrap();
+        let m = t.to_matrix_with(200.0, 100.0);
+        assert!((m[4] - 20.0).abs() < 1e-4, "10% of 200");
+        assert!((m[5] - 25.0).abs() < 1e-4, "25% of 100");
     }
 }

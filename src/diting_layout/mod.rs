@@ -5616,10 +5616,29 @@ pub fn compute_styles(
     tree: &DomTree,
     rules: &[crate::diting_css::ParsedRule],
 ) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
+    compute_styles_timed(tree, rules, &crate::diting_css::KeyframesMap::new(), None)
+}
+
+/// The animated face of [`compute_styles`]: after the cascade resolves each
+/// element, its `animation` shorthand is sampled against the stylesheet's
+/// `@keyframes` table at `css_time`. `None` samples the end state (the
+/// poster posture for static renders); the video pump feeds real seconds
+/// here. Everything the sampler touches is paint-channel only
+/// (opacity/transform/stroke-dashoffset), so this runs inside the
+/// collect-cache (#395) invalidation domain — `set_css_time` drops the
+/// paint-only caches and the next read re-cascades fresh.
+pub fn compute_styles_timed(
+    tree: &DomTree,
+    rules: &[crate::diting_css::ParsedRule],
+    keyframes: &crate::diting_css::KeyframesMap,
+    css_time: Option<f64>,
+) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
     fn visit(
         tree: &DomTree,
         rules: &[crate::diting_css::ParsedRule],
         sets: &crate::diting_dom::selector::RuleMatchSets,
+        keyframes: &crate::diting_css::KeyframesMap,
+        css_time: Option<f64>,
         nid: NodeId,
         parent: Option<&crate::diting_css::ComputedStyle>,
         root_fs: f32,
@@ -5662,6 +5681,8 @@ pub fn compute_styles(
             inline.as_deref(),
             root_fs,
         );
+        let mut cs = cs;
+        crate::diting_css::sample_css_animation(&mut cs, keyframes, css_time);
         let child_root_fs = if parent.is_none() {
             cs.font_size.unwrap_or(crate::diting_css::DEFAULT_ROOT_FONT_SIZE)
         } else {
@@ -5676,6 +5697,8 @@ pub fn compute_styles(
                 tree,
                 rules,
                 sets,
+                keyframes,
+                css_time,
                 child,
                 Some(&cs),
                 child_root_fs,
@@ -5710,6 +5733,8 @@ pub fn compute_styles(
             tree,
             rules,
             &sets,
+            keyframes,
+            css_time,
             child,
             None,
             crate::diting_css::DEFAULT_ROOT_FONT_SIZE,

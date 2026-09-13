@@ -407,10 +407,15 @@ pub async fn render_timeline_video(
     page: &mut Page,
     opts: &TimelineVideoOptions,
 ) -> Result<TimelineVideo, VideoError> {
-    // Wait for the timelines registry. A page still loading scripts populates
-    // it from a <script> at some point after load; settle() between polls lets
-    // timers/fetches progress so the wait isn't a busy spin on a frozen loop.
+    // Wait for the timelines registry — but a CSS-animated page (declarative
+    // SVG keyframes) may never register one, so the CSS animation extent
+    // (computed by the layout run) is an equally valid timeline. Whichever
+    // appears first wins; a page still loading scripts populates either from
+    // a <script>/<style> at some point after load; settle() between polls
+    // lets timers/fetches progress so the wait isn't a busy spin on a frozen
+    // loop.
     let started = Instant::now();
+    let mut timeline;
     loop {
         // V8 numbers round-trip as JSON f64 even for whole values, so
         // as_u64() on Number(1.0) is None — read through as_f64.
@@ -419,6 +424,29 @@ pub async fn render_timeline_video(
             .as_f64()
             .unwrap_or(0.0) as u64;
         if count > 0 {
+            timeline = page
+                .evaluate(
+                    "(() => { let d = 0; \
+                     for (const k in window.__timelines) d = Math.max(d, +window.__timelines[k].duration() || 0); \
+                     return d; })()",
+                )
+                .as_f64()
+                .unwrap_or(0.0);
+            break;
+        }
+        timeline = {
+            // css_extent folds during a layout pass; a freshly navigated page
+            // nobody has read yet has none — poke a layout read so the poll
+            // sees the stylesheet's animations instead of spinning to the
+            // timeout. The read must target a normal element: gBCR on
+            // documentElement/body is the viewport root and short-circuits to
+            // a synthetic rect without running layout.
+            let _ = page.evaluate(
+                "(document.querySelector('body *') || document.body).getBoundingClientRect().width",
+            );
+            page.css_animation_extent()
+        };
+        if timeline > 0.0 {
             break;
         }
         if started.elapsed() >= opts.wait_timelines {
@@ -427,14 +455,6 @@ pub async fn render_timeline_video(
         page.settle(50).await;
     }
 
-    let timeline = page
-        .evaluate(
-            "(() => { let d = 0; \
-             for (const k in window.__timelines) d = Math.max(d, +window.__timelines[k].duration() || 0); \
-             return d; })()",
-        )
-        .as_f64()
-        .unwrap_or(0.0);
     if !timeline.is_finite() || timeline <= 0.0 {
         return Err(VideoError::ZeroDuration);
     }
@@ -798,6 +818,17 @@ async fn seek_and_paint(
     let gen_before = page.layout_rev();
     let t_eval = Instant::now();
     let _ = page.evaluate(&seek);
+    // Drive the CSS animation clock to the same instant — declarative
+    // SVG keyframes sample from it during the next layout run. Bumps the
+    // layout rev (paint-only invalidation) only when t actually moved, so
+    // post-animation holds still feed the static-frame reuse path — which
+    // is also why the clock is only driven inside the stylesheet's extent:
+    // past the end every sample yields the same end state (forwards fill
+    // or revert), so holding the clock flat lets held frames clone.
+    let css_extent = page.css_animation_extent();
+    if css_extent > 0.0 && t <= css_extent {
+        page.set_css_time(t);
+    }
     let eval_dt = t_eval.elapsed();
     // The camera's window.scrollTo lands in the JS root-scroller state (the
     // bootstrap mirrors it to set_scroll_offset) — read it back so the band
@@ -1131,6 +1162,70 @@ window.__timelines = { main: {
         };
         assert_eq!(px(&top), (16, 20, 24), "camera at the top paints the dark screen");
         assert_eq!(px(&bot), (80, 200, 60), "camera scrolled down paints the lower screen");
+    }
+
+    /// Declarative CSS animation fixture: keyframes in the stylesheet, NO
+    /// __timelines entry — the pump must take the timeline length from the
+    /// layout-folded CSS animation extent and drive the virtual clock itself.
+    const CSS_ANIM_HTML: &str = r#"<!doctype html><html><head><style>
+html,body{margin:0;padding:0;width:800px;height:450px;background:#ffffff}
+@keyframes fade { from { opacity: 0 } to { opacity: 1 } }
+#box{width:200px;height:200px;margin:125px auto;background:#000000;
+     animation: fade 2s linear forwards}
+</style></head><body><div id="box"></div></body></html>"#;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn css_only_animation_pumps_without_registered_timelines() {
+        if Command::new("ffmpeg").arg("-version").output().is_err() {
+            eprintln!("skipping: ffmpeg not on PATH");
+            return;
+        }
+        let port = spawn_html_server(CSS_ANIM_HTML);
+        let mut page = test_page();
+        page.navigate_with_wait(
+            &format!("http://127.0.0.1:{port}/css_anim.html"),
+            WaitUntil::Load,
+        )
+        .await
+        .expect("navigate css anim fixture");
+        page.settle_until_idle(5000).await;
+        // The page registers no JS timelines; the extent is the stylesheet's,
+        // folded by the first layout read (the pump's wait loop pokes the
+        // same one).
+        assert_eq!(
+            page.evaluate("Object.keys(window.__timelines || {}).length").as_f64(),
+            Some(0.0),
+            "no __timelines on a declarative page"
+        );
+        let _ = page.evaluate("document.querySelector('#box').getBoundingClientRect().width");
+        assert!((page.css_animation_extent() - 2.0).abs() < 1e-6);
+        let opts = TimelineVideoOptions {
+            fps: 10.0,
+            viewport: (800.0, 450.0),
+            hold_tail_secs: 0.0,
+            max_duration_secs: 30.0,
+            wait_timelines: Duration::from_secs(5),
+            ..Default::default()
+        };
+        let video = render_timeline_video(&mut page, &opts)
+            .await
+            .expect("pump renders CSS animation");
+        assert_eq!(video.frames, 20, "2s CSS extent @ 10fps");
+        assert_eq!(&video.mp4[4..8], b"ftyp", "mp4 magic");
+
+        // Pixel truth through the same seek path the pump used: t=0 holds
+        // the underlying opacity 0 (invisible box), t=2 the forwards-filled
+        // end state (black box on white).
+        let vp = (800.0, 450.0);
+        let (_, _, f0) = seek_and_paint(&mut page, vp, 0.0, &mut PumpPhases::default(), &mut FrameReuse::default())
+            .await
+            .expect("frame at t=0");
+        let (_, _, f2) = seek_and_paint(&mut page, vp, 2.0, &mut PumpPhases::default(), &mut FrameReuse::default())
+            .await
+            .expect("frame at t=2");
+        let dark = |f: &[u8]| f.chunks_exact(4).filter(|p| p[0] < 60 && p[1] < 60 && p[2] < 60).count();
+        assert_eq!(dark(&f0), 0, "opacity 0 hides the box");
+        assert!(dark(&f2) > 200 * 200 * 9 / 10, "forwards fill paints the full box: {}", dark(&f2));
     }
 
     /// End-to-end pump: stub timeline → in-process frames → ffmpeg pipe →

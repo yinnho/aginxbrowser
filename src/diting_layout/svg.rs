@@ -52,6 +52,8 @@ pub enum SvgOp {
         closed: bool,
         width: f32,
         dash: Option<Vec<f32>>,
+        /// Dash phase start in the same user units as `dash`. None = 0.
+        dash_offset: Option<f32>,
         color: [u8; 4],
     },
     Text {
@@ -124,6 +126,7 @@ pub fn compile_svg(
         stroke: None,
         stroke_w: None,
         dash: None,
+        view_box_extent: view_box.map(|(_, _, w, h)| (w, h)),
         font_size: styles.get(&root).and_then(|s| s.font_size).unwrap_or(16.0),
         bold: styles.get(&root).and_then(|s| s.font_weight).is_some_and(|w| w >= 600),
         opacity: 1.0,
@@ -154,6 +157,9 @@ struct Ctx {
     stroke: Option<SvgPaint>,
     stroke_w: Option<f32>,
     dash: Option<Vec<f32>>,
+    /// viewBox (w, h) in user units — percentage CSS transforms resolve
+    /// against it (the svg referencing model's only size truth).
+    view_box_extent: Option<(f32, f32)>,
     font_size: f32,
     bold: bool,
     /// Accumulated group `opacity` (ancestor product). SVG composites a
@@ -238,13 +244,22 @@ fn walk(
         return;
     }
 
-    // Transform attr composes onto the accumulated matrix.
+    // Transform attr composes onto the accumulated matrix. A CSS `transform`
+    // (the animation sampler's output) composes after the attr per the
+    // cascade-vs-presentation rule. Percentage translates resolve against
+    // the viewBox extent (the svg referencing model's only size truth).
     let tf = tree
         .with_node(id, |n| n.get_attribute("transform").map(str::to_string))
         .flatten()
         .and_then(|t| parse_transform(&t))
         .unwrap_or(IDENTITY);
-    let m = mul(&ctx.m, &tf);
+    let m = if let Some(css_t) = &cs.transform {
+        let ref_w = ctx.view_box_extent.map(|v| v.0).unwrap_or(0.0);
+        let ref_h = ctx.view_box_extent.map(|v| v.1).unwrap_or(0.0);
+        mul(&mul(&ctx.m, &tf), &css_t.to_matrix_with(ref_w, ref_h))
+    } else {
+        mul(&ctx.m, &tf)
+    };
     let k = scale_of(&m);
 
     // Paint priority per spec: own CSS declaration > presentation attr >
@@ -269,6 +284,17 @@ fn walk(
             .flatten()
             .and_then(|v| parse_dasharray(&v))
     });
+    // stroke-dashoffset: CSS declaration > presentation attr, in user units.
+    // `pathLength` renormalizes the dash math: the pattern and offset are
+    // authored against a path length of `pathLength`, so scale = real/flattened
+    // length ÷ pathLength converts them into user units (the self-draw idiom —
+    // pathLength=1 + dasharray:1 + dashoffset animating 1→0 — rides this).
+    let dash_offset = cs.svg_dashoffset.or_else(|| attr_f(tree, id, "stroke-dashoffset"));
+    let path_len_norm = tree
+        .with_node(id, |n| n.get_attribute("pathLength").map(str::to_string))
+        .flatten()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|pl| pl.is_finite() && *pl > 0.0);
     // font-size: the ComputedStyle value conflates own-CSS with inherited-CSS,
     // so the attribute is checked FIRST — spec-wrong only when one element
     // declares both (authors don't), spec-right for attr-over-inherited.
@@ -292,8 +318,10 @@ fn walk(
     // Opacity: `opacity` composes down the subtree (accumulated in Ctx);
     // `fill-opacity`/`stroke-opacity` scale only this element's own paints.
     // All three clamp to [0, 1]; anything unparsable falls back to opaque.
+    // CSS cascade wins over the presentation attr — the animation sampler
+    // writes the interpolated value into ComputedStyle.opacity.
     let clamp01 = |v: Option<f32>| v.filter(|o| o.is_finite()).unwrap_or(1.0).clamp(0.0, 1.0);
-    let group_op = clamp01(attr_f(tree, id, "opacity"));
+    let group_op = clamp01(cs.opacity.or_else(|| attr_f(tree, id, "opacity")));
     let fill_op = clamp01(attr_f(tree, id, "fill-opacity"));
     let stroke_op = clamp01(attr_f(tree, id, "stroke-opacity"));
 
@@ -303,6 +331,7 @@ fn walk(
         stroke: stroke.or(ctx.stroke),
         stroke_w,
         dash: dash.clone().or(ctx.dash),
+        view_box_extent: ctx.view_box_extent,
         font_size,
         bold,
         opacity: ctx.opacity * group_op,
@@ -330,6 +359,23 @@ fn walk(
 
     let map_all = |pts: &[(f32, f32)]| pts.iter().map(|&p| apply(&m, p)).collect::<Vec<_>>();
 
+    // pathLength renormalization: pattern/offset are authored against a
+    // nominal length; scale into the real flattened user-unit length. The
+    // flattened length is shape-dependent, so each geometry arm supplies its
+    // mapped polyline through `norm_dash` before emitting the stroke.
+    let norm_dash = |mapped: &[(f32, f32)], closed: bool| -> (Option<Vec<f32>>, Option<f32>) {
+        if let Some(pl) = path_len_norm {
+            let real = polyline_length(mapped, closed);
+            let k = if real > 0.0 { real / pl } else { 1.0 };
+            (
+                dash.as_ref().map(|d| d.iter().map(|n| n * k).collect()),
+                dash_offset.map(|o| o * k),
+            )
+        } else {
+            (dash.clone(), dash_offset)
+        }
+    };
+
     match tag.as_str() {
         "rect" => {
             let (x, y) = (attr_f(tree, id, "x").unwrap_or(0.0), attr_f(tree, id, "y").unwrap_or(0.0));
@@ -348,7 +394,9 @@ fn walk(
             rx = rx.clamp(0.0, w / 2.0);
             ry = ry.clamp(0.0, h / 2.0);
             let poly = rounded_rect_poly(x, y, w, h, rx, ry);
-            emit_fill_stroke(map_all(&poly), true, fill_rgba, stroke_rgba, sw, dash.as_ref(), ops);
+            let mapped = map_all(&poly);
+            let (d, dof) = norm_dash(&mapped, true);
+            emit_fill_stroke(mapped, true, fill_rgba, stroke_rgba, sw, d.as_ref(), dof, ops);
         }
         "circle" | "ellipse" => {
             let (cx, cy) = (attr_f(tree, id, "cx").unwrap_or(0.0), attr_f(tree, id, "cy").unwrap_or(0.0));
@@ -370,13 +418,15 @@ fn walk(
                 .iter()
                 .map(|&(ux, uy)| apply(&m, (cx + ux * rx, cy + uy * ry)))
                 .collect();
-            emit_fill_stroke(pts, true, fill_rgba, stroke_rgba, sw, dash.as_ref(), ops);
+            let (d, dof) = norm_dash(&pts, true);
+            emit_fill_stroke(pts, true, fill_rgba, stroke_rgba, sw, d.as_ref(), dof, ops);
         }
         "line" => {
             let p1 = (attr_f(tree, id, "x1").unwrap_or(0.0), attr_f(tree, id, "y1").unwrap_or(0.0));
             let p2 = (attr_f(tree, id, "x2").unwrap_or(0.0), attr_f(tree, id, "y2").unwrap_or(0.0));
             let mapped = vec![apply(&m, p1), apply(&m, p2)];
-            emit_stroke_if_any(mapped.clone(), false, stroke_rgba, sw, dash.as_ref(), ops);
+            let (d, dof) = norm_dash(&mapped, false);
+            emit_stroke_if_any(mapped.clone(), false, stroke_rgba, sw, d.as_ref(), dof, ops);
             emit_markers(tree, id, markers, &[mapped], sw, ops);
         }
         "polyline" | "polygon" => {
@@ -390,10 +440,11 @@ fn walk(
                 return;
             }
             let mapped = map_all(&pts);
+            let (d, dof) = norm_dash(&mapped, closed);
             if closed {
-                emit_fill_stroke(mapped.clone(), true, fill_rgba, stroke_rgba, sw, dash.as_ref(), ops);
+                emit_fill_stroke(mapped.clone(), true, fill_rgba, stroke_rgba, sw, d.as_ref(), dof, ops);
             } else {
-                emit_stroke_if_any(mapped.clone(), false, stroke_rgba, sw, dash.as_ref(), ops);
+                emit_stroke_if_any(mapped.clone(), false, stroke_rgba, sw, d.as_ref(), dof, ops);
             }
             emit_markers(tree, id, markers, &[mapped], sw, ops);
         }
@@ -416,7 +467,8 @@ fn walk(
                 }
             }
             for s in &subpaths {
-                emit_stroke_if_any(s.pts.clone(), s.closed, stroke_rgba, sw, dash.as_ref(), ops);
+                let (d, dof) = norm_dash(&s.pts, s.closed);
+                emit_stroke_if_any(s.pts.clone(), s.closed, stroke_rgba, sw, d.as_ref(), dof, ops);
             }
             emit_markers(tree, id, markers, &all, sw, ops);
         }
@@ -486,6 +538,7 @@ fn emit_fill_stroke(
     stroke: Option<[u8; 4]>,
     sw: f32,
     dash: Option<&Vec<f32>>,
+    dash_offset: Option<f32>,
     ops: &mut Vec<SvgOp>,
 ) {
     if poly.len() >= 3 {
@@ -493,7 +546,7 @@ fn emit_fill_stroke(
             ops.push(SvgOp::Fill { polys: vec![poly.clone()], color: c });
         }
     }
-    emit_stroke_if_any(poly, closed, stroke, sw, dash, ops);
+    emit_stroke_if_any(poly, closed, stroke, sw, dash, dash_offset, ops);
 }
 
 fn emit_stroke_if_any(
@@ -502,10 +555,11 @@ fn emit_stroke_if_any(
     stroke: Option<[u8; 4]>,
     sw: f32,
     dash: Option<&Vec<f32>>,
+    dash_offset: Option<f32>,
     ops: &mut Vec<SvgOp>,
 ) {
     if let Some(c) = stroke.filter(|c| c[3] > 0 && sw > 0.0) {
-        ops.push(SvgOp::Stroke { poly, closed, width: sw, dash: dash.cloned(), color: c });
+        ops.push(SvgOp::Stroke { poly, closed, width: sw, dash: dash.cloned(), dash_offset, color: c });
     }
 }
 
@@ -1004,13 +1058,14 @@ pub fn paint_svg(
                     polys.iter().map(|p| p.iter().map(|&q| map(q)).collect()).collect();
                 fill_even_odd(&mapped, col(*color), out);
             }
-            SvgOp::Stroke { poly, closed, width, dash, color } => {
+            SvgOp::Stroke { poly, closed, width, dash, dash_offset, color } => {
                 let mapped: Vec<(f32, f32)> = poly.iter().map(|&q| map(q)).collect();
                 stroke_polyline(
                     &mapped,
                     *closed,
                     width * s,
                     dash.as_ref().map(|d| d.iter().map(|n| n * s).collect::<Vec<_>>()).as_deref(),
+                    dash_offset.unwrap_or(0.0) * s,
                     col(*color),
                     out,
                 );
@@ -1101,7 +1156,12 @@ fn segments_of(poly: &[(f32, f32)], closed: bool) -> Vec<((f32, f32), (f32, f32)
 
 /// On-distance runs of a dash pattern (odd-length patterns double up per
 /// spec). Distance 0 is always "on".
-fn dash_on_runs(poly: &[(f32, f32)], closed: bool, pattern: &[f32]) -> Vec<(f32, f32)> {
+fn dash_on_runs(
+    poly: &[(f32, f32)],
+    closed: bool,
+    pattern: &[f32],
+    phase: f32,
+) -> Vec<(f32, f32)> {
     let mut pat: Vec<f32> = pattern.to_vec();
     if pat.len() % 2 == 1 {
         let orig = pat.clone();
@@ -1112,9 +1172,18 @@ fn dash_on_runs(poly: &[(f32, f32)], closed: bool, pattern: &[f32]) -> Vec<(f32,
     if period <= 0.0 {
         return vec![(0.0, total)];
     }
+    // Phase folds into [0, period): a positive offset starts the pattern
+    // `phase` units in, so the run visible at d=0 may be mid-"on".
+    let phase = phase.rem_euclid(period);
+    let mut idx = 0usize;
+    let mut pat_pos = phase;
+    while pat_pos >= pat[idx] && pat[idx] > 0.0 {
+        pat_pos -= pat[idx];
+        idx = (idx + 1) % pat.len();
+    }
     let mut runs = Vec::new();
-    let (mut d, mut idx, mut pat_pos) = (0.0f32, 0usize, 0.0f32);
-    let mut on_start: Option<f32> = None;
+    let mut d = 0.0f32;
+    let mut on_start: Option<f32> = if idx.is_multiple_of(2) { Some(0.0) } else { None };
     for (a, b) in segments_of(poly, closed) {
         let mut remain = (b.0 - a.0).hypot(b.1 - a.1);
         while remain > f32::EPSILON {
@@ -1147,6 +1216,7 @@ fn stroke_polyline(
     closed: bool,
     width: f32,
     dash: Option<&[f32]>,
+    dash_offset: f32,
     color: [u8; 4],
     out: &mut Canvas,
 ) {
@@ -1156,7 +1226,7 @@ fn stroke_polyline(
     let stamp_w = width.max(1.0);
     let half = stamp_w / 2.0;
     let size = stamp_w.ceil() as i64;
-    let on_runs = dash.map(|pattern| dash_on_runs(poly, closed, pattern));
+    let on_runs = dash.map(|pattern| dash_on_runs(poly, closed, pattern, dash_offset));
     let in_on = |d: f32| on_runs.as_ref().is_none_or(|runs| runs.iter().any(|&(a, b)| d >= a && d < b));
 
     let mut d = 0.0f32;
@@ -1437,6 +1507,7 @@ mod tests {
                     closed: false,
                     width: 2.0,
                     dash: None,
+                    dash_offset: None,
                     color: [0, 0, 0, 255],
                 }],
             },
@@ -1461,6 +1532,7 @@ mod tests {
                     closed: false,
                     width: 2.0,
                     dash: Some(vec![4.0, 4.0]),
+                    dash_offset: None,
                     color: [0, 0, 0, 255],
                 }],
             },
@@ -1475,6 +1547,97 @@ mod tests {
         assert!(ink_at(1), "first dash on");
         assert!(!ink_at(6), "first gap off");
         assert!(ink_at(9), "second dash on");
+    }
+
+    #[test]
+    fn dash_offset_rotates_pattern_phase() {
+        // offset 4 on a 4-on/4-off pattern: the line starts inside the gap,
+        // so the first dash shifts +4 — same 8px period, rotated phase.
+        let fonts = crate::diting_fonts::font_book();
+        let mut canvas = Canvas::new_filled(40, 10, [255, 255, 255, 255]);
+        paint_svg(
+            &SvgRender {
+                view_box: None,
+                ops: vec![SvgOp::Stroke {
+                    poly: vec![(0.0, 5.0), (40.0, 5.0)],
+                    closed: false,
+                    width: 2.0,
+                    dash: Some(vec![4.0, 4.0]),
+                    dash_offset: Some(4.0),
+                    color: [0, 0, 0, 255],
+                }],
+            },
+            &Rect { x: 0.0, y: 0.0, width: 40.0, height: 10.0 },
+            &fonts,
+            &mut canvas,
+            0.0,
+            0.0,
+            1.0,
+        );
+        let ink_at = |x: usize| canvas.data[(5 * 40 + x) * 4] < 128;
+        assert!(!ink_at(1), "phase 4: leading gap");
+        assert!(ink_at(6), "phase 4: first dash at +4");
+        assert!(!ink_at(10), "phase 4: gap repeats at +8");
+        assert!(ink_at(14), "phase 4: second dash at +12");
+    }
+
+    #[test]
+    fn path_length_rescales_dash_pattern_and_offset() {
+        // The declarative self-draw grammar: pathLength="1", dasharray 1,
+        // offset 1 (hidden). Real polyline length 40 vs nominal 1 → pattern
+        // and phase both scale ×40 before hitting the rasterizer.
+        let r = compile_of(
+            r#"<svg viewBox="0 0 40 10"><path d="M 0 5 L 40 5" pathLength="1" stroke="black" stroke-dasharray="1" stroke-dashoffset="1"/></svg>"#,
+        );
+        let (dash, off) = r
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                SvgOp::Stroke { dash, dash_offset, .. } => Some((dash.clone(), *dash_offset)),
+                _ => None,
+            })
+            .expect("stroke op emitted");
+        assert_eq!(dash, Some(vec![40.0]), "dasharray 1 → 40 user units");
+        assert_eq!(off, Some(40.0), "dashoffset 1 → 40 user units");
+
+        // Without pathLength the authored values pass through unscaled.
+        let r = compile_of(
+            r#"<svg viewBox="0 0 40 10"><path d="M 0 5 L 40 5" stroke="black" stroke-dasharray="4 4" stroke-dashoffset="2"/></svg>"#,
+        );
+        let (dash, off) = r
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                SvgOp::Stroke { dash, dash_offset, .. } => Some((dash.clone(), *dash_offset)),
+                _ => None,
+            })
+            .expect("stroke op emitted");
+        assert_eq!(dash, Some(vec![4.0, 4.0]));
+        assert_eq!(off, Some(2.0));
+    }
+
+    #[test]
+    fn css_dashoffset_and_opacity_override_presentation_attributes() {
+        // The animated props arrive via the CSS cascade (the sampler writes
+        // them there); presentation attributes are the static fallback. CSS
+        // must win for both, exactly like a browser.
+        let html = r#"<svg viewBox="0 0 40 10"><path d="M 0 5 L 40 5" pathLength="1" stroke="black" stroke-dasharray="1" stroke-dashoffset="1" opacity="1"/></svg>"#;
+        let tree = parse_html(html);
+        let svg_id = tree.query_selector("svg").unwrap().unwrap();
+        let rules = crate::diting_css::parse_stylesheet(
+            "path { stroke-dashoffset: 0.5; opacity: 0.5 }",
+        );
+        let styles = super::super::compute_styles(&tree, &rules);
+        let r = compile_svg(&tree, &styles, svg_id);
+        match r.ops.as_slice() {
+            [SvgOp::Stroke { dash, dash_offset, color, .. }] => {
+                assert_eq!(dash, &Some(vec![40.0]));
+                // CSS 0.5 (not attr 1) renormalized against pathLength.
+                assert_eq!(dash_offset, &Some(20.0));
+                assert_eq!(color[3], 128, "CSS opacity 0.5 scales alpha");
+            }
+            other => panic!("one stroke op expected: {other:?}"),
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::rc::Rc;
@@ -181,6 +181,19 @@ pub struct JsState {
     /// Layout is scroll-blind, so this never feeds the layout cache.
     #[cfg(feature = "screenshot")]
     pub(crate) scroll_offset: (f32, f32),
+    /// CSS animation clock in seconds. `None` = static render, which samples
+    /// every animation at its end state (animated SVGs show the finished
+    /// diagram, not the blank t=0 frame). When the video pump drives it, the
+    /// sampler interpolates keyframes at that time. Sampled props are
+    /// paint-only (opacity/transform/stroke-dashoffset), so advancing it only
+    /// drops the paint caches, never the taffy solve (#395).
+    #[cfg(feature = "screenshot")]
+    pub(crate) css_time: Option<f64>,
+    /// Max (delay + duration) over every element's computed `animation`,
+    /// recomputed each layout run. The video pump uses it as the timeline
+    /// extent for CSS-animated pages (no `__timelines` needed).
+    #[cfg(feature = "screenshot")]
+    pub(crate) css_extent: Cell<f64>,
     /// Layout invalidation revision: bumped wherever `layout_cache` is
     /// dropped. The DomTree epoch is a tree-shape stamp — attribute-level
     /// writes (style/class/attr) clear the cache without allocating nodes,
@@ -338,6 +351,10 @@ impl JsState {
             viewport: (1920.0, 1000.0),
             #[cfg(feature = "screenshot")]
             scroll_offset: (0.0, 0.0),
+            #[cfg(feature = "screenshot")]
+            css_time: None,
+            #[cfg(feature = "screenshot")]
+            css_extent: Cell::new(0.0),
             #[cfg(feature = "screenshot")]
             layout_rev: std::cell::Cell::new(0),
             #[cfg(feature = "screenshot")]
@@ -660,6 +677,21 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         let y = arg2.parse::<f32>().unwrap_or(0.0);
         if x.is_finite() && y.is_finite() {
             gs.borrow_mut().scroll_offset = (x.max(0.0), y.max(0.0));
+        }
+        return "ok".into();
+    }
+    // CSS animation clock, driven by the video pump. Negative/NaN rejected;
+    // t=0 (the pre-delay state) is a legal sample.
+    #[cfg(feature = "screenshot")]
+    if cmd == "set_css_time" {
+        let gs = state.borrow::<SharedState>().clone();
+        let t = arg1.parse::<f64>().unwrap_or(f64::NAN);
+        if t.is_finite() && t >= 0.0 {
+            let mut gs = gs.borrow_mut();
+            if gs.css_time != Some(t) {
+                gs.css_time = Some(t);
+                gs.drop_paint_only();
+            }
         }
         return "ok".into();
     }
@@ -1513,14 +1545,25 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
         css.push('\n');
     }
     let t_css = t0.elapsed();
-    let rules = crate::diting_css::parse_stylesheet_for(
+    let (rules, keyframes) = crate::diting_css::parse_stylesheet_timed(
         &css,
         (viewport_width, viewport_height),
         crate::diting_css::CssMediaType::Screen,
     );
     let t_parse = t0.elapsed();
-    let styles_map = crate::diting_layout::compute_styles(dom, &rules);
+    let styles_map = crate::diting_layout::compute_styles_timed(
+        dom,
+        &rules,
+        &keyframes,
+        gs.css_time,
+    );
     let t_styles = t0.elapsed();
+    let css_extent = styles_map
+        .values()
+        .filter_map(|cs| cs.animation.as_ref())
+        .map(|a| (a.delay + a.duration) as f64)
+        .fold(0.0f64, f64::max);
+    gs.css_extent.set(css_extent);
     let fonts = crate::diting_fonts::font_book();
     // Solve-vs-collect split (#395): the taffy solve is cached keyed by the
     // tree epoch. A paint-only style write (transform/opacity — the choke

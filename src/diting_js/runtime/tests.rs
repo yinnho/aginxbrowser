@@ -7204,6 +7204,56 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[cfg(feature = "screenshot")]
+    async fn test_css_time_clock_and_animation_extent_reach_native_state() {
+        // #417: a declarative CSS animation (SVG keyframes) has no
+        // __timelines entry — the video pump drives a virtual clock through
+        // set_css_time and reads the timeline length from css_extent, both
+        // folded by the layout run.
+        let mut rt = setup_runtime(
+            r#"<html><head><style>
+                @keyframes k { from { opacity: 0 } to { opacity: 1 } }
+                @keyframes slow { from { opacity: 0 } to { opacity: 1 } }
+                .a { animation: k 1s .5s forwards }
+                .b { animation: slow 2s forwards }
+            </style></head><body><div class="a">x</div><div class="b">y</div></body></html>"#,
+        );
+        // Any layout-driven read runs the layout pass that folds the extent.
+        let script = r#"() => document.querySelector('.a').getBoundingClientRect().height"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert!(result.value.is_some(), "layout read succeeds");
+        let extent = rt.with_state(|st| st.css_extent.get());
+        assert!((extent - 2.0).abs() < 1e-6, "max(delay+duration) = 2.0, got {extent}");
+        assert_eq!(rt.with_state(|st| st.css_time), None, "clock starts unset (static)");
+
+        // The pump drives the clock through the same op the Page method uses.
+        async fn set_time(rt: &mut JsRuntime, t: &str) {
+            let script = format!(r#"() => __diting_domRaw('set_css_time', '{t}')"#);
+            rt.call_function_on_for_cdp(&script, None, &[], true, true).await.unwrap();
+        }
+        set_time(&mut rt, "0.75").await;
+        assert_eq!(rt.with_state(|st| st.css_time), Some(0.75));
+        // Non-finite and negative inputs are rejected; the last valid time
+        // holds.
+        set_time(&mut rt, "-1").await;
+        set_time(&mut rt, "NaN").await;
+        set_time(&mut rt, "abc").await;
+        assert_eq!(rt.with_state(|st| st.css_time), Some(0.75));
+
+        // The sampler answers to the clock end-to-end: getComputedStyle
+        // opacity mid-animation reflects the eased stop.
+        let script = r#"() => {
+            __diting_domRaw('set_css_time', '1.5');
+            return getComputedStyle(document.querySelector('.b')).opacity;
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        // .b: 2s linear... no easing token → default ease; at t=1.5/2 = .75
+        // progress, eased well past 0.75 and below 1.
+        let opacity = result.value.unwrap().as_str().unwrap().parse::<f64>().unwrap();
+        assert!(opacity > 0.5 && opacity < 1.0, "mid-flight eased opacity: {opacity}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn test_iframe_load_reaches_onload_and_addeventlistener() {
         // Upstream 2e3f5d8: iframe load used to call el.onload() directly,
         // bypassing addEventListener('load') listeners.

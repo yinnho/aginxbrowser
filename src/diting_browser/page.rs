@@ -1930,6 +1930,29 @@ impl Page {
             .unwrap_or((0.0, 0.0))
     }
 
+    /// Advance the CSS animation clock. The video pump calls this per frame
+    /// before painting; a static render never does, so animated SVGs frame
+    /// their finished state (poster semantics).
+    #[cfg(feature = "screenshot")]
+    pub fn set_css_time(&mut self, t: f64) {
+        let Some(js) = &mut self.js else { return };
+        let _ = js.execute_script(
+            "<css-time>",
+            &format!("__diting_domRaw('set_css_time', '{t:.6}')"),
+        );
+    }
+
+    /// Longest CSS animation on the page (max delay+duration over every
+    /// element's computed `animation`), from the last layout run. 0 when no
+    /// animations exist — the video pump falls back to `__timelines` then.
+    #[cfg(feature = "screenshot")]
+    pub fn css_animation_extent(&self) -> f64 {
+        self.js
+            .as_ref()
+            .map(|js| js.with_state(|st| st.css_extent.get()))
+            .unwrap_or(0.0)
+    }
+
     /// The live tree's mutation epoch — part of the screencast damage
     /// signature, so DOM changes retrigger frames while a static scroll
     /// position does not.
