@@ -1,4 +1,5 @@
 {
+ "args": ["q", "count", "product", "top"],
  "vars": {
   "args_json": "{\"q\": \"\", \"count\": 20, \"top\": 20}"
  },

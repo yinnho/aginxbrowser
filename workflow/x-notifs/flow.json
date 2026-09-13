@@ -1,4 +1,5 @@
 {
+ "args": ["tab", "count", "top"],
  "vars": {
   "args_json": "{\"tab\": \"all\", \"count\": 40, \"top\": 20}"
  },

@@ -1,4 +1,5 @@
 {
+ "args": ["screen_name", "tweet_id"],
  "vars": {
   "args_json": "{\"tweet_id\": \"\"}",
   "uid": "2092400482920656896"

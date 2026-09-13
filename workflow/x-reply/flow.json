@@ -1,4 +1,5 @@
 {
+ "args": ["text", "reply_to"],
  "vars": {
   "args_json": "{\"text\": \"hello from aginxbrowser x-reply flow\", \"reply_to\": \"\"}",
   "uid": "2092400482920656896"

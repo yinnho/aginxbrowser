@@ -270,6 +270,41 @@ fn effective_vars(flow: &Value, call_vars: &Map<String, Value>) -> Map<String, V
     vars
 }
 
+/// Args contract: a flow that consumes `args_json` may declare the keys it
+/// accepts as a top-level `"args"` array. Unknown keys are rejected loudly
+/// before any step runs — a mistyped key used to splice in as nothing and the
+/// flow silently degraded (a reply posted as a root tweet). None = ok (no
+/// declaration, no args_json, or every key known); Some(reason) = reject.
+fn validate_flow_args(flow: &Value, vars: &Map<String, Value>) -> Option<String> {
+    let allowed = flow.get("args")?.as_array()?;
+    let aj = vars.get("args_json")?;
+    let parsed = match aj {
+        Value::String(s) => match serde_json::from_str::<Value>(s) {
+            Ok(v) => v,
+            Err(e) => return Some(format!("args_json is not valid JSON: {e}")),
+        },
+        other => other.clone(),
+    };
+    let obj = match parsed {
+        Value::Object(m) => m,
+        _ => return Some("args_json must be a JSON object".into()),
+    };
+    let allowed: Vec<&str> = allowed.iter().filter_map(|k| k.as_str()).collect();
+    let unknown: Vec<&str> = obj
+        .keys()
+        .map(|k| k.as_str())
+        .filter(|k| !allowed.contains(k))
+        .collect();
+    if unknown.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "unknown args_json key(s): {} — this flow accepts: {}",
+        unknown.join(", "),
+        allowed.join(", ")
+    ))
+}
+
 /// Execute one step against the session — the same SessionCommand path the
 /// HTTP/MCP handlers drive, so quotas, stealth egress, and recording
 /// behavior are identical whether a human, an agent, or a flow does it.
@@ -562,6 +597,19 @@ pub async fn run_flow(
     session_id: Option<String>,
 ) -> Value {
     let vars = effective_vars(flow, call_vars);
+    if let Some(err) = validate_flow_args(flow, &vars) {
+        // Same shape as a pre-session create-block failure: no session was
+        // touched, so there is nothing to take over.
+        return json!({
+            "status": "failed",
+            "session_id": Value::Null,
+            "failed_step": 0,
+            "reason": err,
+            "steps_done": 0,
+            "saved": {},
+            "hint": "fix the args_json keys — see the flow's args declaration",
+        });
+    }
     let steps = flow
         .get("steps")
         .and_then(|s| s.as_array())
@@ -735,7 +783,10 @@ mod tests {
         assert_eq!(step["args"]["selector"], "input[type=file]");
         // Names carried through; no content_base64 key anywhere — the skeleton
         // the author fills in during curation.
-        assert_eq!(step["args"]["files"], json!([{ "name": "a.png" }, { "name": "b.png" }]));
+        assert_eq!(
+            step["args"]["files"],
+            json!([{ "name": "a.png" }, { "name": "b.png" }])
+        );
     }
 
     #[test]
@@ -965,5 +1016,76 @@ mod tests {
         );
         assert!(r2["session_id"].is_null());
         assert_eq!(mgr.list().len(), before);
+    }
+
+    /// An args-declaring flow rejects unknown args_json keys before any step
+    /// runs — the mistyped-key reply-becomes-root-tweet incident, as a
+    /// contract. No session is created, the reason names both the unknown
+    /// key and the accepted set.
+    #[tokio::test]
+    async fn run_flow_args_validation_rejects_unknown_keys() {
+        let mut mgr = SessionManager::new();
+        let flow = json!({
+            "args": ["text", "reply_to"],
+            "steps": [ { "op": "set_content", "args": { "html": "<html><body>x</body></html>" } } ]
+        });
+        let mut vars = Map::new();
+        vars.insert(
+            "args_json".into(),
+            json!({ "tweet_id": "2098960519113642269", "text": "hi" }),
+        );
+        let before = mgr.list().len();
+        let receipt = run_flow(&mut mgr, &flow, &vars, None).await;
+        assert_eq!(receipt["status"], "failed");
+        let reason = receipt["reason"].as_str().unwrap();
+        assert!(reason.contains("tweet_id"), "reason: {reason}");
+        assert!(reason.contains("reply_to"), "reason: {reason}");
+        assert_eq!(receipt["failed_step"], 0);
+        assert_eq!(receipt["steps_done"], 0);
+        assert!(receipt["session_id"].is_null());
+        assert_eq!(mgr.list().len(), before);
+    }
+
+    /// All-known keys pass and the flow runs; a bad args_json JSON string is
+    /// rejected with the parse error rather than splicing into nothing.
+    #[tokio::test]
+    async fn run_flow_args_validation_allows_known_keys() {
+        let mut mgr = SessionManager::new();
+        let flow = json!({
+            "args": ["text", "reply_to"],
+            "vars": { "args_json": { "text": "hi", "reply_to": "" } },
+            "steps": [ { "op": "set_content", "args": { "html": "<html><body>x</body></html>" } } ]
+        });
+        let receipt = run_flow(&mut mgr, &flow, &Map::new(), None).await;
+        assert_eq!(receipt["status"], "ok", "receipt: {receipt}");
+        let sid = receipt["session_id"].as_str().unwrap().to_string();
+        assert!(mgr.close_and_wait(&sid).await);
+
+        // Non-JSON string as args_json: parse error, pre-session.
+        let before = mgr.list().len();
+        let mut vars = Map::new();
+        vars.insert("args_json".into(), json!("not json at all"));
+        let r2 = run_flow(&mut mgr, &flow, &vars, None).await;
+        assert_eq!(r2["status"], "failed");
+        let reason = r2["reason"].as_str().unwrap();
+        assert!(reason.contains("not valid JSON"), "reason: {reason}");
+        assert!(r2["session_id"].is_null());
+        assert_eq!(mgr.list().len(), before);
+    }
+
+    /// No args declaration = no validation — flows that don't consume
+    /// args_json (recorder exports, the playbook flows) stay untouched.
+    #[tokio::test]
+    async fn run_flow_args_validation_skips_undeclared_flows() {
+        let mut mgr = SessionManager::new();
+        let flow = json!({
+            "steps": [ { "op": "set_content", "args": { "html": "<html><body>x</body></html>" } } ]
+        });
+        let mut vars = Map::new();
+        vars.insert("args_json".into(), json!({ "whatever": 1 }));
+        let receipt = run_flow(&mut mgr, &flow, &vars, None).await;
+        assert_eq!(receipt["status"], "ok", "receipt: {receipt}");
+        let sid = receipt["session_id"].as_str().unwrap().to_string();
+        assert!(mgr.close_and_wait(&sid).await);
     }
 }

@@ -1,4 +1,5 @@
 {
+ "args": ["user_id", "action"],
  "vars": {
   "args_json": "{\"action\": \"follow\", \"user_id\": \"\"}"
  },
