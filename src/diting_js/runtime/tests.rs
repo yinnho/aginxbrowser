@@ -8267,3 +8267,49 @@
             "close quote must occupy space before the next sibling (shift={after_shift})"
         );
     }
+
+    // vertical-align authored lengths/percentages are baseline raises on the
+    // line (CSS2 §10.8.1): positive lifts, negative drops, % of the element's
+    // own line-height. Mixed shifts on one line keep the RELATIVE offsets —
+    // the whole line grows so the extreme baseline still fits.
+    #[test]
+    #[cfg(feature = "screenshot")]
+    fn test_vertical_align_length_percent_shift() {
+        let mut rt = setup_runtime(
+            r#"<html><body style="margin:0">
+              <p style="margin:0;line-height:40px">
+                <span id="plain">ab</span>
+                <span id="up" style="vertical-align:10px">ab</span>
+                <span id="pct" style="vertical-align:50%">ab</span>
+                <span id="down" style="vertical-align:-8px">ab</span>
+              </p>
+            </body></html>"#,
+        );
+        let v = rt
+            .evaluate(
+                r#"JSON.stringify((() => {
+                    const g = (id) => document.getElementById(id).getBoundingClientRect();
+                    const cs = (id) => getComputedStyle(document.getElementById(id)).verticalAlign;
+                    const plain = g('plain').top;
+                    return {
+                        up: plain - g('up').top,
+                        pct: plain - g('pct').top,
+                        down: g('down').top - plain,
+                        csUp: cs('up'),
+                        csPct: cs('pct'),
+                        csDown: cs('down'),
+                    };
+                })())"#,
+            )
+            .unwrap();
+        let d: serde_json::Value = serde_json::from_str(v.as_str().unwrap()).unwrap();
+        let close = |key: &str, want: f64| -> bool {
+            d[key].as_f64().map(|got| (got - want).abs() < 2.5).unwrap_or(false)
+        };
+        assert!(close("up", 10.0), "vertical-align:10px must lift 10px (diag={d})");
+        assert!(close("pct", 20.0), "50% of line-height:40px must lift 20px (diag={d})");
+        assert!(close("down", 8.0), "vertical-align:-8px must drop 8px (diag={d})");
+        assert_eq!(d["csUp"].as_str().unwrap(), "10px");
+        assert_eq!(d["csPct"].as_str().unwrap(), "50%");
+        assert_eq!(d["csDown"].as_str().unwrap(), "-8px");
+    }

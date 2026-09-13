@@ -674,9 +674,11 @@ fn decoration_context(
 /// (nested sup compounds). The walk stops at an atomic-inline (inline-block)
 /// or out-of-flow boundary WITHOUT applying the boundary's own declaration:
 /// vertical-align on an inline-block moves the BOX, not the text inside.
-/// Down-positive: sub → +0.2×parent_fs, super → −0.4×parent_fs; baseline/
-/// lengths/percentages are 0 (the line-baseline machinery already handles
-/// baseline, and lengths stay accepted-but-unmodeled in the parse).
+/// Down-positive: sub → +0.2×parent_fs, super → −0.4×parent_fs; an authored
+/// length (up-positive, CSS: positive raises) flips sign; a percentage
+/// resolves against the element's own line-height before the same flip;
+/// baseline/top/middle/bottom are 0 (the line-baseline machinery handles
+/// those at the alignment site).
 fn valign_shift(tree: &DomTree, id: NodeId, styles: &HashMap<NodeId, ComputedStyle>) -> f32 {
     let mut shift = 0.0f32;
     let mut current = Some(id);
@@ -695,6 +697,13 @@ fn valign_shift(tree: &DomTree, id: NodeId, styles: &HashMap<NodeId, ComputedSty
                         } else {
                             -0.4 * parent_fs
                         };
+                    }
+                    Some(crate::diting_css::VerticalAlign::Length(px)) => {
+                        shift -= px;
+                    }
+                    Some(crate::diting_css::VerticalAlign::Percent(p)) => {
+                        let own_lh = font_context(tree, nid, styles).2;
+                        shift -= p / 100.0 * own_lh;
                     }
                     _ => {}
                 }

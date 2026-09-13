@@ -1993,18 +1993,20 @@ fn computed_style_value(
         ),
         // Declared values only: undeclared cells keep the JS caller's own
         // default chain (the UA middle behavior at the alignment site isn't
-        // a declaration).
+        // a declaration). Chrome's computed value: lengths are absolute px,
+        // percentages keep their % shape.
         "vertical-align" => s
             .vertical_align
             .map(|va| match va {
-                VerticalAlign::Top => "top",
-                VerticalAlign::Middle => "middle",
-                VerticalAlign::Bottom => "bottom",
-                VerticalAlign::Baseline => "baseline",
-                VerticalAlign::Sub => "sub",
-                VerticalAlign::Super => "super",
-            })
-            .map(str::to_string),
+                VerticalAlign::Top => "top".to_string(),
+                VerticalAlign::Middle => "middle".to_string(),
+                VerticalAlign::Bottom => "bottom".to_string(),
+                VerticalAlign::Baseline => "baseline".to_string(),
+                VerticalAlign::Sub => "sub".to_string(),
+                VerticalAlign::Super => "super".to_string(),
+                VerticalAlign::Length(px) => format!("{px}px"),
+                VerticalAlign::Percent(p) => format!("{p}%"),
+            }),
         // Not inherited (the paint-time propagation to inline descendants is
         // a layout concern): an element reports its OWN declared/UA set.
         "text-decoration-line" | "text-decoration" => Some(match s.text_decoration_line {

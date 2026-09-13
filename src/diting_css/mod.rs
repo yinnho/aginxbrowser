@@ -543,7 +543,7 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "vertical-align" => matches!(
             value,
             "top" | "middle" | "bottom" | "baseline" | "sub" | "super"
-        ),
+        ) || parse_css_length(value).is_some(),
         "opacity" => match value.parse::<f32>() {
             Ok(n) => n.is_finite() && (0.0..=1.0).contains(&n),
             Err(_) => false,
@@ -819,9 +819,11 @@ pub enum TableLayout {
 /// `vertical-align` modeled subset. On table cells (blitz#508)
 /// top/middle/bottom move the cell's content within a taller cell; baseline
 /// behaves like top for the flex-column cell model. On inline content
-/// sub/super are baseline shifts the layout side resolves per text leaf
-/// (lengths/percentages stay accepted-but-unmodeled).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// sub/super are baseline shifts the layout side resolves per text leaf.
+/// Lengths resolve to px at declaration time (em against the element's own
+/// font-size), percentages keep their % — the spec raises/lowers by a
+/// percentage of the element's own line-height, only known at layout.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VerticalAlign {
     Top,
     Middle,
@@ -829,6 +831,10 @@ pub enum VerticalAlign {
     Baseline,
     Sub,
     Super,
+    /// Authored length in px, up-positive (CSS: positive raises the box).
+    Length(f32),
+    /// Authored percentage, up-positive (CSS: % of the element's line-height).
+    Percent(f32),
 }
 
 /// `text-decoration-line` keyword set (CSS Text Decoration 3): which lines
@@ -2326,9 +2332,14 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 "bottom" => style.vertical_align = Some(VerticalAlign::Bottom),
                 "sub" => style.vertical_align = Some(VerticalAlign::Sub),
                 "super" => style.vertical_align = Some(VerticalAlign::Super),
-                // lengths/percentages are inline-baseline shifts too —
-                // valid declarations, not yet modeled.
-                _ => {}
+                _ => match parse_css_length(v).map(|l| resolve_len(l, fonts)) {
+                    // Lengths resolve to px now (em against the element's own
+                    // font-size); the % keeps its shape for the layout side,
+                    // which resolves it against the element's line-height.
+                    Some(Length::Px(px)) => style.vertical_align = Some(VerticalAlign::Length(px)),
+                    Some(Length::Percent(p)) => style.vertical_align = Some(VerticalAlign::Percent(p)),
+                    _ => return false,
+                },
             }
             true
         }
@@ -4937,11 +4948,28 @@ mod tests {
             apply_declarations(&mut s, &format!("vertical-align: {kw}"));
             assert_eq!(s.vertical_align, Some(want), "keyword {kw}");
         }
-        // Length/percentage shifts are valid declarations (apply_declarations
-        // returns true) but are not modeled — the slot is left untouched.
+        // Length/percentage shifts model through the same slot: px lands
+        // absolute, em folds against the element's own font-size (the test
+        // cascade's own fs = DEFAULT_ROOT_FONT_SIZE), % keeps its shape for
+        // the layout side, `0` is the unitless zero, junk is rejected.
         let mut s = ComputedStyle::default();
         assert!(apply_declarations(&mut s, "vertical-align: 3px"));
-        assert_eq!(s.vertical_align, None, "length shifts parse as valid but are not modeled");
+        assert_eq!(s.vertical_align, Some(VerticalAlign::Length(3.0)));
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "vertical-align: -10px"));
+        assert_eq!(s.vertical_align, Some(VerticalAlign::Length(-10.0)));
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "vertical-align: 0.5em"));
+        assert_eq!(s.vertical_align, Some(VerticalAlign::Length(0.5 * DEFAULT_ROOT_FONT_SIZE)));
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "vertical-align: 0"));
+        assert_eq!(s.vertical_align, Some(VerticalAlign::Length(0.0)));
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "vertical-align: 50%"));
+        assert_eq!(s.vertical_align, Some(VerticalAlign::Percent(50.0)));
+        let mut s = ComputedStyle::default();
+        assert!(!apply_declarations(&mut s, "vertical-align: 2vw"));
+        assert_eq!(s.vertical_align, None);
     }
 
     #[test]
