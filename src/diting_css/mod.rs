@@ -35,6 +35,35 @@ pub struct ParsedRule {
     pub declarations: String,
 }
 
+/// Attribute names referenced by attribute selectors in a rule pool
+/// (`[tabindex]`, `[data-x="1"]`, `[lang|=en]`), lowercased. Feeds the
+/// layout-cache invalidation decision for attribute writes: a write to a
+/// layout-inert attribute is only safe to skip when no rule selects on it
+/// (obscura#983).
+pub fn collect_selector_attr_names(rules: &[ParsedRule]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for rule in rules {
+        let s = rule.selector.as_bytes();
+        let mut i = 0;
+        while i < s.len() {
+            let Some(open) = s[i..].iter().position(|&b| b == b'[').map(|p| p + i) else { break };
+            let mut j = open + 1;
+            while j < s.len() && (s[j].is_ascii_alphanumeric() || s[j] == b'-' || s[j] == b'_') {
+                j += 1;
+            }
+            // A `|` right after the ident followed by another ident is a
+            // namespace prefix, not the attribute name — skip conservatively.
+            // `|=` is the dash-match operator and keeps the name.
+            let namespaced = s.get(j) == Some(&b'|') && s.get(j + 1) != Some(&b'=');
+            if j > open + 1 && !namespaced {
+                out.insert(String::from_utf8_lossy(&s[open + 1..j]).to_ascii_lowercase());
+            }
+            i = j.max(open + 1);
+        }
+    }
+    out
+}
+
 /// One `@keyframes` stop (`from` = 0, `to` = 1, `NN%` = NN/100) with raw
 /// declarations. Values stay raw strings because `var()` in stop values
 /// (e.g. `to { opacity: var(--o, 1) }`) substitutes against the custom
@@ -4602,6 +4631,25 @@ mod tests {
         let rules = parse_stylesheet(css);
         assert_eq!(rules.len(), 1, "{rules:?}");
         assert_eq!(rules[0].selector, ".after");
+    }
+
+    #[test]
+    fn collect_selector_attr_names_extracts_bracket_idents() {
+        let rules = vec![
+            ParsedRule { selector: "[data-x]".into(), declarations: String::new() },
+            ParsedRule { selector: ".a[aria-expanded=\"true\"]:hover".into(), declarations: String::new() },
+            ParsedRule { selector: "[TabIndex]".into(), declarations: String::new() },
+            ParsedRule { selector: "[lang|=en]".into(), declarations: String::new() },
+            ParsedRule { selector: ".plain > #id".into(), declarations: String::new() },
+        ];
+        let names = collect_selector_attr_names(&rules);
+        assert!(names.contains("data-x"), "{names:?}");
+        assert!(names.contains("aria-expanded"), "{names:?}");
+        assert!(names.contains("tabindex"), "lowercased: {names:?}");
+        assert!(names.contains("lang"), "{names:?}");
+        assert!(!names.contains("true"), "value is not a name: {names:?}");
+        assert_eq!(names.len(), 4, "{names:?}");
+        assert!(collect_selector_attr_names(&[]).is_empty());
     }
 
     // ---- declarations & computed style ----

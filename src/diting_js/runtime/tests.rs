@@ -7660,6 +7660,43 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[cfg(feature = "screenshot")]
+    async fn test_inert_attribute_writes_keep_the_layout_cache() {
+        // obscura#983: a docs theme writing tabindex on every heading used
+        // to drop the layout cache per write, so geometry reads alternated
+        // with those writes each paid a full re-layout.
+        let mut rt = setup_runtime(
+            r#"<html><head><style>[data-x] { color: red }</style></head>
+               <body><h1 id="h">heading</h1></body></html>"#,
+        );
+        let force = r#"() => document.getElementById('h').getBoundingClientRect().height"#;
+        rt.call_function_on_for_cdp(force, None, &[], true, true).await.unwrap();
+        let rev0 = rt.with_state(|st| st.layout_rev.get());
+
+        // tabindex is layout-inert and no rule selects on it: no cache drop.
+        let write = r#"() => { document.getElementById('h').setAttribute('tabindex', '0'); }"#;
+        rt.call_function_on_for_cdp(write, None, &[], true, true).await.unwrap();
+        assert_eq!(rt.with_state(|st| st.layout_rev.get()), rev0, "tabindex write keeps the cache");
+        rt.call_function_on_for_cdp(force, None, &[], true, true).await.unwrap();
+        assert_eq!(rt.with_state(|st| st.layout_rev.get()), rev0, "geometry read after inert write");
+
+        // Same for data-* when NO rule references the name — but the
+        // [data-x] rule in this document does, so that write must drop.
+        let write = r#"() => { document.getElementById('h').setAttribute('data-y', '1'); }"#;
+        rt.call_function_on_for_cdp(write, None, &[], true, true).await.unwrap();
+        assert_eq!(rt.with_state(|st| st.layout_rev.get()), rev0, "unreferenced data-* write keeps the cache");
+        let write = r#"() => { document.getElementById('h').setAttribute('data-x', '1'); }"#;
+        rt.call_function_on_for_cdp(write, None, &[], true, true).await.unwrap();
+        assert!(rt.with_state(|st| st.layout_rev.get()) > rev0, "selector-referenced attr invalidates");
+
+        // class always invalidates (selector matching depends on it).
+        let rev1 = rt.with_state(|st| st.layout_rev.get());
+        let write = r#"() => { document.getElementById('h').setAttribute('class', 'c'); }"#;
+        rt.call_function_on_for_cdp(write, None, &[], true, true).await.unwrap();
+        assert!(rt.with_state(|st| st.layout_rev.get()) > rev1, "class write invalidates");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn test_iframe_load_reaches_onload_and_addeventlistener() {
         // Upstream 2e3f5d8: iframe load used to call el.onload() directly,
         // bypassing addEventListener('load') listeners.

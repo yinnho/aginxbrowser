@@ -203,6 +203,13 @@ pub struct JsState {
     /// report fresh geometry (the AginxOS five-mutation report).
     #[cfg(feature = "screenshot")]
     pub(crate) layout_rev: std::cell::Cell<u64>,
+    /// Attribute names referenced by attribute selectors in the last parsed
+    /// rule pool, lowercased (obscura#983). Lets a write to a layout-inert
+    /// attribute skip the layout-cache drop; `None` until the first layout
+    /// run (no caches exist yet, so skipping is free either way).
+    #[cfg(feature = "screenshot")]
+    pub(crate) attr_selector_names:
+        std::cell::RefCell<Option<std::collections::HashSet<String>>>,
     /// Absolute-URL → fetched image body, filled on demand by the CDP
     /// viewport capture / screencast pump so band paint renders real rasters
     /// instead of placeholders (the outerHTML re-render path pre-fetches;
@@ -357,6 +364,8 @@ impl JsState {
             css_extent: std::cell::Cell::new(0.0),
             #[cfg(feature = "screenshot")]
             layout_rev: std::cell::Cell::new(0),
+            #[cfg(feature = "screenshot")]
+            attr_selector_names: std::cell::RefCell::new(None),
             #[cfg(feature = "screenshot")]
             image_bytes: std::cell::RefCell::new(HashMap::new()),
             #[cfg(feature = "screenshot")]
@@ -644,7 +653,26 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             identity = old.as_deref() == new;
             paint_only = !identity && style_write_is_paint_only(old.as_deref(), new);
         }
-        if !identity {
+        // Inert attribute writes (obscura#983): tabindex/title/role/
+        // data-*/aria-* change no computed style and no layout input on
+        // their own — a docs theme writing tabindex per heading used to pay
+        // a full re-layout per write. Escape hatch: if any loaded rule's
+        // selector references the name (`[data-x]`, `[aria-expanded]`), the
+        // write still invalidates. Everything layout, pseudo-classes, or
+        // fetch triggers read (class/id/style, width/height/colspan/…,
+        // disabled/checked/href/src/rel) is deliberately NOT in the inert
+        // set. The DOM write below still happens either way.
+        let attr_name = match cmd.as_str() {
+            "set_attribute" => arg2.split_once('\0').map(|(n, _)| n),
+            "remove_attribute" => Some(arg2.as_str()),
+            _ => None,
+        };
+        let inert = attr_name.is_some_and(|n| {
+            let gs = gs.borrow();
+            let skip = attr_write_is_layout_inert(n, gs.attr_selector_names.borrow().as_ref());
+            skip
+        });
+        if !identity && !inert {
             if paint_only {
                 gs.borrow().drop_paint_only();
             } else {
@@ -1459,6 +1487,25 @@ fn style_write_is_paint_only(old: Option<&str>, new: Option<&str>) -> bool {
         .all(|name| name == "transform" || name == "opacity")
 }
 
+/// Can an attribute write never change computed style or layout on its own?
+/// The inert set is focus/a11y/script hooks (obscura#983); the escape hatch
+/// is the rule pool — a stylesheet selecting on the name (`[data-x]`)
+/// disqualifies it. `None` for the pool means no layout run has happened
+/// yet, so no cache exists to invalidate and skipping is free.
+#[cfg(feature = "screenshot")]
+fn attr_write_is_layout_inert(
+    name: &str,
+    selector_names: Option<&std::collections::HashSet<String>>,
+) -> bool {
+    let n = name.to_ascii_lowercase();
+    let inert = matches!(
+        n.as_str(),
+        "tabindex" | "title" | "role" | "accesskey" | "draggable" | "spellcheck"
+    ) || n.starts_with("data-")
+        || n.starts_with("aria-");
+    inert && !selector_names.is_some_and(|s| s.contains(n.as_str()))
+}
+
 /// One style+layout run over the live tree (see [`JsState::layout_cache`]):
 /// every element's border-box rect, the paint order, the cascaded
 /// ComputedStyle per element, and the flat paint-item list in paint order
@@ -1550,6 +1597,10 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
         (viewport_width, viewport_height),
         crate::diting_css::CssMediaType::Screen,
     );
+    // Refresh the attribute-selector name pool the write path consults for
+    // inert-attribute invalidation skips (obscura#983).
+    *gs.attr_selector_names.borrow_mut() =
+        Some(crate::diting_css::collect_selector_attr_names(&rules));
     let t_parse = t0.elapsed();
     let styles_map = crate::diting_layout::compute_styles_timed(
         dom,
