@@ -298,26 +298,14 @@ pub async fn handle(
                     page.evaluate(&code);
                     let moved = page.process_pending_navigation().await.map_err(|e| e.to_string())?;
                     if moved {
-                        let url = page.url_string();
-                        let frame_id = page.frame_id.clone();
+                        // Full navigation event sequence (frameNavigated +
+                        // lifecycle + the document's network events), the same
+                        // tail Page.navigate uses. A click-triggered form
+                        // submit previously pushed frameNavigated alone, so
+                        // Playwright's click() waiting for load never resolved
+                        // (obscura#886 shape).
                         let page_id = page.id.clone();
-                        let loader_id = ctx
-                            .current_loader_ids
-                            .get(&page_id)
-                            .cloned()
-                            .unwrap_or_else(|| format!("loader-{}", page_id));
-                        ctx.pending_events.push(crate::diting_cdp::types::CdpEvent {
-                            method: "Page.frameNavigated".into(),
-                            params: json!({
-                                "frame": crate::diting_cdp::domains::page::frame_json(
-                                    &frame_id,
-                                    &loader_id,
-                                    &url,
-                                ),
-                                "type": "Navigation",
-                            }),
-                            session_id: Some(session_id.clone().unwrap_or_default()),
-                        });
+                        super::page::emit_navigation_for_page(ctx, session_id, &page_id);
                     }
                 }
             } else if event_type == "mouseWheel" {
@@ -375,6 +363,10 @@ pub async fn handle(
             let code = params.get("code").and_then(|v| v.as_str()).unwrap_or("");
             let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
 
+            // The navigation a key press may queue is loaded AFTER the
+            // `page` borrow ends (emit re-borrows ctx) — Backspace below
+            // still needs the page handle.
+            let mut nav_page_id: Option<String> = None;
             if let Some(page) = ctx.get_session_page_mut(session_id) {
                 page.evaluate(INPUT_HELPERS);
                 match event_type {
@@ -434,6 +426,21 @@ pub async fn handle(
                                 }\
                             })()";
                             page.evaluate(js);
+
+                            // Enter's implicit submission queued a navigation
+                            // (requestSubmit → op_navigate). Load it after the
+                            // page borrow ends — same inline contract as
+                            // mouseReleased below; nothing else reads the
+                            // queue until the next evaluate, so a
+                            // waitForNavigation would hang forever
+                            // (obscura#921 keyboard shape).
+                            if page
+                                .process_pending_navigation()
+                                .await
+                                .map_err(|e| e.to_string())?
+                            {
+                                nav_page_id = Some(page.id.clone());
+                            }
                         }
 
                         if key == "Backspace" {
@@ -478,6 +485,10 @@ pub async fn handle(
                     }
                     _ => {}
                 }
+            }
+
+            if let Some(page_id) = nav_page_id {
+                super::page::emit_navigation_for_page(ctx, session_id, &page_id);
             }
 
             Ok(json!({}))

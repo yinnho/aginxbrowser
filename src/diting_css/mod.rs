@@ -1753,7 +1753,9 @@ pub fn ua_text_align(tag: &str) -> Option<TextAlign> {
 
 /// UA heading font-sizes (blitz default.css / HTML rendering spec). Expressed
 /// as em so the cascade's font-size pre-pass folds them against the PARENT
-/// font-size, where author declarations override.
+/// font-size, where author declarations override. small/big/sub/sup mirror
+/// every browser UA sheet's relative keywords as em factors (smaller = 13.33
+/// at the 16px base, larger = 1.2 × parent).
 pub fn ua_font_size(tag: &str) -> Option<CssLength> {
     match tag {
         "h1" => Some(CssLength::Em(2.0)),
@@ -1762,6 +1764,18 @@ pub fn ua_font_size(tag: &str) -> Option<CssLength> {
         "h4" => Some(CssLength::Em(1.0)),
         "h5" => Some(CssLength::Em(0.83)),
         "h6" => Some(CssLength::Em(0.67)),
+        "small" | "sub" | "sup" => Some(CssLength::Em(0.8333)),
+        "big" => Some(CssLength::Em(1.2)),
+        _ => None,
+    }
+}
+
+/// UA monospace families: code/kbd/samp/tt are monospace in every browser
+/// UA sheet. Beats the inherited family (`.or` at the merge site), author
+/// declarations override it.
+pub fn ua_font_family(tag: &str) -> Option<&'static str> {
+    match tag {
+        "code" | "kbd" | "samp" | "tt" => Some("monospace"),
         _ => None,
     }
 }
@@ -2281,6 +2295,26 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 true
             }
             _ => false,
+        },
+        // `font` shorthand: `[ <style> || <variant> || <weight> || <stretch> ]?
+        // <size> [ / <line-height> ]? <family>`. font-style/variant/stretch
+        // tokens are accepted and skipped (the style struct models none of
+        // them); weight/size/line-height/family apply through the same parse
+        // paths as the longhands. Per shorthand reset semantics the modeled
+        // longhands reset to their initial first, so `font: 20px serif` on a
+        // <b> clears the bold like Chrome (the expanded author-initial
+        // declaration beats the UA bolder).
+        "font" => match parse_font_shorthand(v, fonts) {
+            Some(p) => {
+                style.font_weight = Some(p.weight);
+                style.line_height = Some(p.line_height.unwrap_or(LineHeightSpec::Normal));
+                if let Some(px) = p.size_px {
+                    style.font_size = Some(px);
+                }
+                style.font_family = Some(p.family);
+                true
+            }
+            None => false,
         },
         // Raw passthrough: no parsed form, no layout effect — the CSSOM
         // layer reports it verbatim (var() already substituted upstream).
@@ -3145,6 +3179,145 @@ fn font_size_px(l: CssLength, parent_fs: f32, root_fs: f32) -> f32 {
     }
 }
 
+/// Quote- and paren-aware token split for the `font` shorthand: quoted
+/// family names ("Helvetica Neue", Arial) and calc() bodies stay one token.
+fn split_font_tokens(value: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut start: Option<usize> = None;
+    for (idx, ch) in value.char_indices() {
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => {
+                quote = Some(ch);
+                if start.is_none() {
+                    start = Some(idx);
+                }
+            }
+            '(' => {
+                depth += 1;
+                if start.is_none() {
+                    start = Some(idx);
+                }
+            }
+            ')' => depth = depth.saturating_sub(1),
+            c if depth == 0 && c.is_whitespace() => {
+                if let Some(s) = start.take() {
+                    out.push(&value[s..idx]);
+                }
+            }
+            _ => {
+                if start.is_none() {
+                    start = Some(idx);
+                }
+            }
+        }
+    }
+    if let Some(s) = start {
+        out.push(&value[s..]);
+    }
+    out
+}
+
+struct FontShorthand {
+    weight: u16,
+    size_px: Option<f32>,
+    line_height: Option<LineHeightSpec>,
+    family: String,
+}
+
+/// Parse the `font` shorthand grammar (system font keywords are not
+/// modeled): leading style/variant/weight/stretch tokens in any order, then
+/// the mandatory size (which may carry a `/line-height` with or without
+/// surrounding whitespace), then the mandatory family as the verbatim
+/// remainder. em font-size folds against the current context size — exact
+/// when the shorthand is the only font-size declaration (own == inherited),
+/// an approximation when an earlier declaration already set a size.
+fn parse_font_shorthand(v: &str, fonts: &FontCtx) -> Option<FontShorthand> {
+    let v = v.trim();
+    let first = v.split_whitespace().next()?.to_ascii_lowercase();
+    if matches!(
+        first.as_str(),
+        "caption" | "icon" | "menu" | "message-box" | "small-caption" | "status-bar"
+            | "inherit" | "initial" | "unset" | "revert"
+    ) {
+        return None;
+    }
+    let toks = split_font_tokens(v);
+    let mut weight = 400u16;
+    let mut idx = 0usize;
+    while idx < toks.len() {
+        let t = toks[idx];
+        if let Some(w) = parse_font_weight(t) {
+            weight = w;
+            idx += 1;
+            continue;
+        }
+        match t.to_ascii_lowercase().as_str() {
+            "italic" | "oblique" | "small-caps" | "normal" | "semi-condensed" | "condensed"
+            | "extra-condensed" | "ultra-condensed" | "semi-expanded" | "expanded"
+            | "extra-expanded" | "ultra-expanded" | "bolder" | "lighter" => idx += 1,
+            _ => break,
+        }
+    }
+    // Mandatory size — may carry an attached `/line-height` (`20px/1.5`).
+    // An unparseable size makes the whole shorthand invalid.
+    let size_tok = toks.get(idx)?;
+    let (size_str, mut next) = match size_tok.split_once('/') {
+        Some((s, lh)) if !s.is_empty() => (s, Some(lh)),
+        _ => (*size_tok, None),
+    };
+    let size = size_px(size_str, fonts)?;
+    idx += 1;
+    // Detached `/line-height`: `20px / 1.5` or `20px /1.5`.
+    if next.is_none() {
+        if let Some(t) = toks.get(idx) {
+            if *t == "/" {
+                next = Some(*toks.get(idx + 1)?);
+                idx += 2;
+            } else if let Some(rest) = t.strip_prefix('/') {
+                next = Some(rest);
+                idx += 1;
+            }
+        }
+    }
+    let line_height = next.and_then(parse_line_height).map(|raw| match raw {
+        LineHeightRaw::Normal => LineHeightSpec::Normal,
+        LineHeightRaw::Number(n) => LineHeightSpec::Number(n),
+        LineHeightRaw::Len(CssLength::Px(px)) => LineHeightSpec::Px(px),
+        // em folds against the shorthand's NEW size (spec: line-height
+        // computes after font-size within the shorthand); % behaves like a
+        // number multiplier, matching the line-height longhand arm.
+        LineHeightRaw::Len(CssLength::Em(n)) => LineHeightSpec::Px(n * size),
+        LineHeightRaw::Len(CssLength::Rem(n)) => LineHeightSpec::Px(n * fonts.root),
+        LineHeightRaw::Len(CssLength::Percent(p)) => LineHeightSpec::Number(p / 100.0),
+    });
+    // Mandatory family: the verbatim remainder (quoted names included).
+    if idx >= toks.len() {
+        return None;
+    }
+    let family = toks[idx..].join(" ");
+    Some(FontShorthand {
+        weight,
+        size_px: Some(size),
+        line_height,
+        family,
+    })
+}
+
+/// Fold a font-size token from the shorthand against the context. `None`
+/// when the token is not a parseable size (the whole shorthand is invalid
+/// without one).
+fn size_px(size_str: &str, fonts: &FontCtx) -> Option<f32> {
+    parse_font_size_len(size_str).map(|l| font_size_px(l, fonts.own, fonts.root))
+}
+
 fn parse_font_weight(v: &str) -> Option<u16> {
     match v.trim() {
         "normal" => Some(400),
@@ -3423,6 +3596,18 @@ pub fn cascade_element(
         // Custom properties inherit computed (already-substituted-where-
         // possible) values; author rules below may re-declare per element.
         style.custom = parent.custom.clone();
+    }
+    // UA per-tag family/colors AFTER inherited defaults (an element's own
+    // UA declaration beats an inherited value — same posture as text_align
+    // above) and BEFORE author rules (author declarations override). mark is
+    // yellow-on-black in every browser UA sheet; code/kbd/samp/tt are
+    // monospace (obscura#936 table).
+    if tag == "mark" {
+        style.background_color = Some(Color(255, 255, 0, 255));
+        style.color = Some(Color(0, 0, 0, 255));
+    }
+    if let Some(family) = ua_font_family(tag) {
+        style.font_family = Some(family.to_string());
     }
 
     // Author rules: sort by (specificity, source order) ascending, apply in
@@ -4449,6 +4634,63 @@ mod tests {
         // junk and negative values don't.
         assert!(apply_one(&mut s, "line-height", "1.6", &FontCtx::default()));
         assert!(!apply_one(&mut s, "line-height", "-1.2", &FontCtx::default()));
+    }
+
+    #[test]
+    fn font_shorthand_grammar() {
+        let f = FontCtx::default();
+        // Bare size+family: weight defaults 400, no line-height given.
+        let p = parse_font_shorthand("20px monospace", &f).unwrap();
+        assert_eq!(p.weight, 400);
+        assert_eq!(p.size_px, Some(20.0));
+        assert_eq!(p.line_height, None);
+        assert_eq!(p.family, "monospace");
+
+        // Front-walk consumes style+weight in any order; em size folds
+        // against the context; em line-height folds against the NEW size.
+        let p = parse_font_shorthand("italic bold 1.5em/1.5em serif", &f).unwrap();
+        assert_eq!(p.weight, 700);
+        assert_eq!(p.size_px, Some(24.0));
+        assert_eq!(p.line_height, Some(LineHeightSpec::Px(36.0)));
+        assert_eq!(p.family, "serif");
+
+        // Attached /line-height (px), quoted family stays verbatim.
+        let p = parse_font_shorthand("12px/18px \"Times New Roman\", serif", &f).unwrap();
+        assert_eq!(p.line_height, Some(LineHeightSpec::Px(18.0)));
+        assert_eq!(p.family, "\"Times New Roman\", serif");
+
+        // Detached slash forms + % lh behaves like a multiplier.
+        assert_eq!(
+            parse_font_shorthand("20px / 1.5 serif", &f).unwrap().line_height,
+            Some(LineHeightSpec::Number(1.5))
+        );
+        assert_eq!(
+            parse_font_shorthand("20px /1.5 serif", &f).unwrap().line_height,
+            Some(LineHeightSpec::Number(1.5))
+        );
+        assert_eq!(
+            parse_font_shorthand("20px/120% serif", &f).unwrap().line_height,
+            Some(LineHeightSpec::Number(1.2))
+        );
+
+        // System font keywords and global keywords are not modeled.
+        for kw in ["caption", "status-bar", "inherit", "initial"] {
+            assert!(parse_font_shorthand(kw, &f).is_none(), "{kw}");
+        }
+        // Size and family are both mandatory; a bad size kills the whole
+        // shorthand (no partial application).
+        assert!(parse_font_shorthand("20px", &f).is_none());
+        assert!(parse_font_shorthand("20orpx serif", &f).is_none());
+
+        // apply_one wiring: size/family/weight land, and line-height resets
+        // to normal when the shorthand carries none (shorthand semantics).
+        let mut s = ComputedStyle::default();
+        assert!(apply_one(&mut s, "font", "bold 20px monospace", &f));
+        assert_eq!(s.font_size, Some(20.0));
+        assert_eq!(s.font_family.as_deref(), Some("monospace"));
+        assert_eq!(s.font_weight, Some(700));
+        assert_eq!(s.line_height, Some(LineHeightSpec::Normal));
+        assert!(!apply_one(&mut s, "font", "caption", &f));
     }
 
     #[test]
