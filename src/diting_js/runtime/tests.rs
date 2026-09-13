@@ -8393,6 +8393,10 @@
             (t2h - t4h).abs() <= 1.0 && (x1x - m2x).abs() < 1.0,
             "anon cell matches a real cell with identical content (t2h={t2h} t4h={t4h} x1x={x1x} m2x={m2x}, diag={d})"
         );
+        assert!(
+            t4h < 30.0,
+            "the mixed-run cell fits on ONE line at its max-content pin (no fractional-rounding wrap) (t4h={t4h}, diag={d})"
+        );
         let (yb, ya) = (d["y1Before"].as_f64().unwrap(), d["y1After"].as_f64().unwrap());
         assert!(ya > yb + 5.0, "JS-inserted text synthesizes a cell on re-layout ({yb} -> {ya})");
     }

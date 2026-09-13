@@ -2639,6 +2639,17 @@ fn build_table(
             width: AvailableSpace::MaxContent,
             height: AvailableSpace::MaxContent,
         };
+        // Rounding OFF for the pre-measure: word-leaf widths are fractional
+        // advances, and taffy's round-to-nearest would drop the fractional
+        // residue of a run's sum (61.4 -> 61) — the pinned column then sits
+        // BELOW the content width and the final layout wraps a word
+        // (batch-58 probe: `AA<span>BB</span>CC` needed 61.4, measured 61,
+        // wrapped to two lines). Heights keep the old rounded behavior via
+        // .round() at the harvest sites. The layout MUST be read before
+        // re-enabling: with rounding off `layout()` reads unrounded_layout
+        // (fresh), otherwise it reads final_layout, which the skipped
+        // round_layout never wrote — i.e. stale values.
+        taffy_tree.disable_rounding();
         let _ = taffy_tree.compute_layout_with_measure(node, space, |inputs, _id, ctx, style| {
             match ctx {
                 Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, .. }) => {
@@ -2650,12 +2661,15 @@ fn build_table(
                 }
             }
         });
-        taffy_tree.layout(node).ok().map(|l| (l.size.width, l.size.height))
+        let out = taffy_tree.layout(node).ok().map(|l| (l.size.width, l.size.height));
+        taffy_tree.enable_rounding();
+        out
     };
     // A lifted (rowspan) cell sits in no row wrapper: measure it standalone
     // at the given width availability.
     let measure_cell = |taffy_tree: &mut TaffyTree<TextLeaf>, node: taffy::tree::NodeId, width: AvailableSpace| -> (f32, f32) {
         let space = taffy::geometry::Size { width, height: AvailableSpace::MaxContent };
+        taffy_tree.disable_rounding();
         let _ = taffy_tree.compute_layout_with_measure(node, space, |inputs, _id, ctx, style| {
             match ctx {
                 Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, .. }) => {
@@ -2667,7 +2681,9 @@ fn build_table(
                 }
             }
         });
-        taffy_tree.layout(node).map(|l| (l.size.width, l.size.height)).unwrap_or((0.0, 0.0))
+        let out = taffy_tree.layout(node).map(|l| (l.size.width, l.size.height)).unwrap_or((0.0, 0.0));
+        taffy_tree.enable_rounding();
+        out
     };
     // Column attribution in two passes: single-column cells land wholly in
     // their column; spanning cells then distribute their DEFICIT equally
@@ -2683,9 +2699,13 @@ fn build_table(
         }
         for cell in cells {
             let w = if let Some(real) = lifted.get(&(*row_idx, cell.col)) {
-                measure_cell(taffy_tree, *real, AvailableSpace::MaxContent).0
+                measure_cell(taffy_tree, *real, AvailableSpace::MaxContent).0.ceil()
             } else {
-                taffy_tree.layout(cell.taffy).map(|l| l.size.width).unwrap_or(0.0)
+                taffy_tree
+                    .unrounded_layout(cell.taffy)
+                    .size
+                    .width
+                    .ceil()
             };
             if cell.col_span > 1 {
                 pass_b.push((cell.col, cell.col_span, w));
@@ -2793,7 +2813,7 @@ fn build_table(
         let mut raised: Vec<bool> = vec![false; n_rows];
         for (grid_row, row_node, _) in &row_wrappers {
             if let Some((_, h)) = measure_pass(taffy_tree, *row_node) {
-                row_h[*grid_row] = h;
+                row_h[*grid_row] = h.round();
             }
         }
         for cell in &span_cells {
@@ -2808,6 +2828,7 @@ fn build_table(
                 group_width(cell.col, cell.col_span)
             };
             let (_, ch) = measure_cell(taffy_tree, cell.taffy, AvailableSpace::Definite(group_w));
+            let ch = ch.round();
             let spanned: Vec<usize> = (cell.row..(cell.row + cell.row_span).min(n_rows)).collect();
             if spanned.is_empty() {
                 continue;
