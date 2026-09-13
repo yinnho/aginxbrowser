@@ -2997,16 +2997,19 @@ async fn op_fetch_url(
             deno_error::JsErrorBox::generic(message)
         };
 
-        if !cors_response_allows(credentials, &page_origin, &allowed_origin, &allow_credentials) {
-            return Err(reject_preflight(format!(
-                "CORS preflight: Origin '{}' not allowed by Access-Control-Allow-Origin '{}'",
-                page_origin, allowed_origin
-            )));
-        }
+        // Fetch validates the preflight's HTTP status before its CORS headers;
+        // the only observable difference is which error a 403-without-ACAO
+        // preflight reports.
         if !(200..300).contains(&preflight_status) {
             return Err(reject_preflight(format!(
                 "CORS preflight returned HTTP {}",
                 preflight_status
+            )));
+        }
+        if !cors_response_allows(credentials, &page_origin, &allowed_origin, &allow_credentials) {
+            return Err(reject_preflight(format!(
+                "CORS preflight: Origin '{}' not allowed by Access-Control-Allow-Origin '{}'",
+                page_origin, allowed_origin
             )));
         }
 
@@ -3064,6 +3067,20 @@ async fn op_fetch_url(
     // "went somewhere else" actually went; the walk stops at the limit so
     // the vec needs no separate cap.
     let mut redirect_chain: Vec<String> = Vec::new();
+    // Fetch's redirect stripping (obscura#967 same hole): once the chain
+    // crosses an origin, credentials scripted into custom headers stop
+    // riding (browsers never forward Authorization to the redirect target),
+    // and a 301/302/303 that downgrades the method to GET drops the request
+    // body headers with it. Both sticky for the rest of the chain.
+    let mut strip_credentials = false;
+    let mut strip_body_headers = false;
+    // Fetch's response tainting: once a cors-mode request touches a
+    // cross-origin URL, every response in the chain gets the CORS check —
+    // including the intermediate redirect responses (obscura#973 same hole:
+    // only the terminal response used to be checked).
+    let mut cors_tainted = request_origin(&url)
+        .map(|o| o != page_origin)
+        .unwrap_or(false);
 
     // Passive on_request observers (upstream #408): fire with the request as
     // the script shaped it, once, before the first hop goes out.
@@ -3166,7 +3183,38 @@ async fn op_fetch_url(
             }
         }
 
-        for (k, v) in &custom_headers {
+        // Per-hop effective scripted headers: the first hop sends everything
+        // as the script shaped it; after a credential-triggering or
+        // method-downgrading redirect the stripped subset rides instead.
+        let effective_headers: HashMap<String, String> = custom_headers
+            .iter()
+            .filter(|(k, _)| {
+                let lower = k.to_ascii_lowercase();
+                if strip_credentials
+                    && matches!(
+                        lower.as_str(),
+                        "authorization" | "proxy-authorization" | "cookie"
+                    )
+                {
+                    return false;
+                }
+                if strip_body_headers
+                    && matches!(
+                        lower.as_str(),
+                        "content-type"
+                            | "content-length"
+                            | "content-encoding"
+                            | "content-language"
+                            | "content-location"
+                    )
+                {
+                    return false;
+                }
+                true
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (k, v) in &effective_headers {
             req = req.header(k.as_str(), v.as_str());
         }
 
@@ -3200,7 +3248,7 @@ async fn op_fetch_url(
                 // and the credentials policy, so the legacy transport sends
                 // the same request, not a bare one — Referer-checking WAFs
                 // 403 the bare shape even after the handshake succeeds.
-                let fallback_ctype = custom_headers
+                let fallback_ctype = effective_headers
                     .iter()
                     .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
                     .map(|(_, v)| v.clone());
@@ -3212,7 +3260,7 @@ async fn op_fetch_url(
                     {
                         match url::Url::parse(&current_url) {
                             Ok(u) => {
-                                let mut fallback_headers = custom_headers.clone();
+                                let mut fallback_headers = effective_headers.clone();
                                 fn header_set(
                                     headers: &HashMap<String, String>,
                                     name: &str,
@@ -3373,12 +3421,59 @@ async fn op_fetch_url(
             .to_string());
         }
 
-        // Browser semantics: 301/302/303 downgrade to GET with no body.
-        // 307/308 preserve method and body.
+        // The CORS check applies to every tainted response, redirect
+        // responses included: a cross-origin server must authorize the
+        // redirect itself before the follow happens.
+        if mode == "cors" && cors_tainted {
+            let allowed = resp
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            let allow_credentials = resp
+                .headers()
+                .get("access-control-allow-credentials")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if !cors_response_allows(credentials, &page_origin, allowed, allow_credentials) {
+                let error = format!(
+                    "CORS error: redirect to '{}' blocked: Origin '{}' not in Access-Control-Allow-Origin '{}'",
+                    next_url, page_origin, allowed
+                );
+                record_failed_fetch(&state, &current_url, current_method.as_str(), error.clone());
+                return Ok(serde_json::json!({
+                    "status": 0,
+                    "body": "",
+                    "url": url,
+                    "headers": {},
+                    "corsBlocked": true,
+                    "corsError": error,
+                    "redirect_chain": redirect_chain,
+                })
+                .to_string());
+            }
+        }
+        cors_tainted = cors_tainted
+            || request_origin(next_url.as_str())
+                .map(|o| o != page_origin)
+                .unwrap_or(false);
+
+        // Browser semantics: 301/302/303 downgrade to GET with no body (303
+        // unconditionally; 301/302 only when the method actually changes —
+        // a GET→GET redirect keeps its header list). 307/308 preserve
+        // method and body.
         let status_code = resp.status().as_u16();
-        if status_code == 301 || status_code == 302 || status_code == 303 {
+        let method_downgrades = status_code == 303
+            || ((status_code == 301 || status_code == 302)
+                && current_method != reqwest::Method::GET
+                && current_method != reqwest::Method::HEAD);
+        if method_downgrades {
             current_method = reqwest::Method::GET;
             current_body.clear();
+            strip_body_headers = true;
+        }
+        if request_origin(next_url.as_str()) != request_origin(&current_url) {
+            strip_credentials = true;
         }
 
         current_url = next_url.to_string();

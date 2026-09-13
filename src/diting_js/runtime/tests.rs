@@ -3855,6 +3855,412 @@
         assert_eq!(msg, "ok:200:ok", "consented preflight must let the PUT through, got: {msg}");
     }
 
+    /// Redirect credential retention (obscura#967 same hole): a redirect
+    /// chain that never leaves the origin keeps the scripted Authorization
+    /// header on every hop. Guards against over-stripping implementations
+    /// that drop credentials after ANY redirect.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn same_origin_redirect_keeps_scripted_credentials() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for _ in 0..3 {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                seen.lock().unwrap().push(String::from_utf8_lossy(&buf).to_string());
+                let response = match seen.lock().unwrap().len() {
+                    1 => concat!(
+                        "HTTP/1.1 200 OK\r\n",
+                        "access-control-allow-origin: *\r\n",
+                        "access-control-allow-methods: GET\r\n",
+                        "access-control-allow-headers: authorization\r\n",
+                        "content-length: 0\r\nconnection: close\r\n\r\n",
+                    )
+                    .to_string(),
+                    // The 302 itself carries ACAO because a cors-tainted
+                    // request CORS-checks every response in the chain.
+                    2 => format!(
+                        "HTTP/1.1 302 Found\r\naccess-control-allow-origin: *\r\nlocation: /data\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                    ),
+                    _ => {
+                        let body = b"done";
+                        format!(
+                            "HTTP/1.1 200 OK\r\naccess-control-allow-origin: *\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        ) + std::str::from_utf8(body).unwrap()
+                    }
+                };
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url("https://example.com/page");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    try {
+                        const r = await fetch("http://127.0.0.1:PORT/hop", {
+                            headers: { "Authorization": "Bearer token123" },
+                        });
+                        return "ok:" + r.status + ":" + (await r.text());
+                    } catch (e) {
+                        return "rejected:" + (e && e.message);
+                    }
+                }"#
+                .replace("PORT", &port.to_string())
+                .as_str(),
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let msg = result.value.unwrap().as_str().unwrap_or_default().to_string();
+        assert_eq!(msg, "ok:200:done", "same-origin redirect chain must complete, got: {msg}");
+
+        let hops = requests.lock().unwrap();
+        assert_eq!(hops.len(), 3, "expected preflight + /hop + /data");
+        let data_hop = hops[2].to_ascii_lowercase();
+        assert!(
+            data_hop.starts_with("get /data"),
+            "third hop must be the redirected GET, got: {}",
+            hops[2].lines().next().unwrap_or("")
+        );
+        assert!(
+            data_hop.contains("authorization: bearer token123"),
+            "same-origin redirect must keep the Authorization header, got: {data_hop}"
+        );
+    }
+
+    /// Redirect credential stripping (obscura#967 same hole): once the chain
+    /// crosses origins the scripted Authorization header must stop riding —
+    /// it went out on the first hop (that origin was told at fetch time) but
+    /// must never reach the second, different origin.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn cross_origin_redirect_strips_scripted_credentials() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener_a = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_a = listener_a.local_addr().unwrap().port();
+        let requests_a = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_a = requests_a.clone();
+        let listener_b = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_b = listener_b.local_addr().unwrap().port();
+        let requests_b = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_b = requests_b.clone();
+
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = listener_a.accept() else { return };
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                seen_a.lock().unwrap().push(String::from_utf8_lossy(&buf).to_string());
+                let response = match seen_a.lock().unwrap().len() {
+                    1 => concat!(
+                        "HTTP/1.1 200 OK\r\n",
+                        "access-control-allow-origin: *\r\n",
+                        "access-control-allow-methods: GET\r\n",
+                        "access-control-allow-headers: authorization\r\n",
+                        "content-length: 0\r\nconnection: close\r\n\r\n",
+                    )
+                    .to_string(),
+                    _ => format!(
+                        "HTTP/1.1 302 Found\r\naccess-control-allow-origin: *\r\nlocation: http://127.0.0.1:{}/data\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                        port_b
+                    ),
+                };
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let Ok((mut stream, _)) = listener_b.accept() else { return };
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            seen_b.lock().unwrap().push(String::from_utf8_lossy(&buf).to_string());
+            let body = b"secret";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\naccess-control-allow-origin: *\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url("https://example.com/page");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    try {
+                        const r = await fetch("http://127.0.0.1:PORTA/hop", {
+                            headers: { "Authorization": "Bearer secret-token" },
+                        });
+                        return "ok:" + r.status + ":" + (await r.text());
+                    } catch (e) {
+                        return "rejected:" + (e && e.message);
+                    }
+                }"#
+                .replace("PORTA", &port_a.to_string())
+                .as_str(),
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let msg = result.value.unwrap().as_str().unwrap_or_default().to_string();
+        assert_eq!(msg, "ok:200:secret", "redirect chain must complete, got: {msg}");
+
+        let hops_a = requests_a.lock().unwrap();
+        assert_eq!(hops_a.len(), 2, "origin A sees the preflight and the first GET");
+        let first_hop = hops_a[1].to_ascii_lowercase();
+        assert!(
+            first_hop.contains("authorization: bearer secret-token"),
+            "the initial cross-origin request carries the header it was given, got: {first_hop}"
+        );
+
+        let hops_b = requests_b.lock().unwrap();
+        assert_eq!(hops_b.len(), 1, "origin B sees exactly the redirected GET");
+        let second_hop = hops_b[0].to_ascii_lowercase();
+        assert!(
+            second_hop.starts_with("get /data"),
+            "hop 2 must be the redirected GET, got: {}",
+            hops_b[0].lines().next().unwrap_or("")
+        );
+        assert!(
+            !second_hop.contains("authorization"),
+            "cross-origin redirect must strip the Authorization header, got: {second_hop}"
+        );
+    }
+
+    /// Redirect CORS enforcement (obscura#973 same hole): with a cors-tainted
+    /// request, the 302 response itself must pass the CORS check before the
+    /// follow happens — a redirect response without
+    /// Access-Control-Allow-Origin blocks the fetch (status 0 to JS) and the
+    /// second hop never goes out.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn cross_origin_redirect_without_acao_is_blocked() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            // Exactly one connection: a second one would mean the redirected
+            // GET leaked past the redirect-response CORS check.
+            let Ok((mut stream, _)) = listener.accept() else { return };
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:{}/data\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                port
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url("https://example.com/page");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    try {
+                        await fetch("http://127.0.0.1:PORT/hop");
+                        return "not-blocked";
+                    } catch (e) {
+                        return "rejected:" + (e && e.message);
+                    }
+                }"#
+                .replace("PORT", &port.to_string())
+                .as_str(),
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let msg = result.value.unwrap().as_str().unwrap_or_default().to_string();
+        assert!(msg.starts_with("rejected:Failed to fetch"), "got: {msg}");
+
+        let events = rt.take_js_network_events();
+        let blocked = events
+            .iter()
+            .find(|e| e.error.as_deref().unwrap_or("").contains("redirect"))
+            .expect("blocked redirect must leave a network event");
+        assert_eq!(blocked.status, 0);
+        let error = blocked.error.as_deref().unwrap_or("");
+        assert!(
+            error.contains("CORS error"),
+            "event must carry the redirect-CORS reason, got: {error}"
+        );
+    }
+
+    /// Redirect downgrade (obscura#973 family, body half): a POST that lands
+    /// on a 302 re-issues as GET with the body headers gone — content-type
+    /// describes a body that no longer exists.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn redirect_downgrade_drops_body_headers() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for _ in 0..3 {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                seen.lock().unwrap().push(String::from_utf8_lossy(&buf).to_string());
+                let response = match seen.lock().unwrap().len() {
+                    1 => concat!(
+                        "HTTP/1.1 200 OK\r\n",
+                        "access-control-allow-origin: *\r\n",
+                        "access-control-allow-methods: POST\r\n",
+                        "access-control-allow-headers: content-type\r\n",
+                        "content-length: 0\r\nconnection: close\r\n\r\n",
+                    )
+                    .to_string(),
+                    2 => format!(
+                        "HTTP/1.1 302 Found\r\naccess-control-allow-origin: *\r\nlocation: /data\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                    ),
+                    _ => {
+                        let body = b"moved";
+                        format!(
+                            "HTTP/1.1 200 OK\r\naccess-control-allow-origin: *\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        ) + std::str::from_utf8(body).unwrap()
+                    }
+                };
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url("https://example.com/page");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    try {
+                        const r = await fetch("http://127.0.0.1:PORT/hop", {
+                            method: "POST",
+                            headers: { "content-type": "application/json" },
+                            body: "{\"a\":1}",
+                        });
+                        return "ok:" + r.status + ":" + (await r.text());
+                    } catch (e) {
+                        return "rejected:" + (e && e.message);
+                    }
+                }"#
+                .replace("PORT", &port.to_string())
+                .as_str(),
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let msg = result.value.unwrap().as_str().unwrap_or_default().to_string();
+        assert_eq!(msg, "ok:200:moved", "redirected POST must complete as GET, got: {msg}");
+
+        let hops = requests.lock().unwrap();
+        assert_eq!(hops.len(), 3, "expected preflight + POST + redirected GET");
+        assert!(
+            hops[1].starts_with("POST /hop"),
+            "hop 1 must be the POST, got: {}",
+            hops[1].lines().next().unwrap_or("")
+        );
+        let downgraded = hops[2].to_ascii_lowercase();
+        assert!(
+            downgraded.starts_with("get /data"),
+            "302 must downgrade POST to GET, got: {}",
+            hops[2].lines().next().unwrap_or("")
+        );
+        assert!(
+            !downgraded.contains("content-type"),
+            "the downgraded GET must drop the body's content-type, got: {downgraded}"
+        );
+    }
+
+    /// Preflight validation order (obscura#973 same hole): the preflight's
+    /// HTTP status is checked before its CORS headers, so a 403 preflight
+    /// reports the status — not a misleading "origin not allowed" error.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn preflight_http_status_reported_before_origin() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let Ok((mut stream, _)) = listener.accept() else { return };
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            let response = "HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url("https://example.com/page");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    try {
+                        await fetch("http://127.0.0.1:PORT/api", { method: "PUT" });
+                        return "not-blocked";
+                    } catch (e) {
+                        return "rejected:" + (e && e.message);
+                    }
+                }"#
+                .replace("PORT", &port.to_string())
+                .as_str(),
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let msg = result.value.unwrap().as_str().unwrap_or_default().to_string();
+        assert!(
+            msg.contains("CORS preflight returned HTTP 403"),
+            "403 preflight must report its status, got: {msg}"
+        );
+        assert!(
+            !msg.contains("not in Access-Control-Allow-Origin"),
+            "status check must fire before the origin check, got: {msg}"
+        );
+    }
+
     /// op_fetch_url walks redirects on a raw reqwest client — the one
     /// subresource path that had no Tier2 legacy-TLS fallback (the
     /// g.alicdn.com shape: plain rustls dies on the handshake, the stealth
