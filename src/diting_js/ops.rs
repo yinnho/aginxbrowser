@@ -829,7 +829,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         "node_name" => {
             let nid = arg1.parse::<u32>().unwrap_or(0);
             let name: String = dom.get_node(NodeId::new(nid)).map(|n| match &n.data {
-                NodeData::Document => "#document".to_string(), NodeData::Element { name, .. } => name.local.as_ref().to_ascii_uppercase(),
+                NodeData::Document => "#document".to_string(), NodeData::Element { name, .. } => if name.ns == html5ever::ns!(html) { name.local.as_ref().to_ascii_uppercase() } else { name.local.as_ref().to_string() },
                 NodeData::Text { .. } => "#text".to_string(), NodeData::Comment { .. } => "#comment".to_string(),
                 NodeData::Doctype { name, .. } => name.clone(), NodeData::ProcessingInstruction { target, .. } => target.clone(),
             }).unwrap_or_default();
@@ -911,7 +911,11 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         }
         "tag_name" => {
             let nid = arg1.parse::<u32>().unwrap_or(0);
-            let name = dom.get_node(NodeId::new(nid)).and_then(|n| n.as_element().map(|name| name.local.as_ref().to_ascii_uppercase())).unwrap_or_default();
+            let name = dom.get_node(NodeId::new(nid)).and_then(|n| n.as_element().map(|name|
+                // HTML elements read uppercase (Chrome tagName convention);
+                // XML-namespace elements keep their source case.
+                if name.ns == html5ever::ns!(html) { name.local.as_ref().to_ascii_uppercase() } else { name.local.as_ref().to_string() }
+            )).unwrap_or_default();
             serde_json::to_string(&name).unwrap_or("\"\"".into())
         }
         "get_attribute" => {
@@ -1135,8 +1139,17 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 .unwrap_or("-1".into())
         }
         "create_element" => {
+            // arg2 (optional) records a namespace on the node. The HTML path
+            // passes nothing (ns!(html), keeping tag_name/node_name's
+            // uppercase convention); DOMParser's XML tree builder passes the
+            // xmlns-resolved namespace so case-sensitive names round-trip.
+            let ns = if arg2.is_empty() || arg2 == "http://www.w3.org/1999/xhtml" {
+                html5ever::ns!(html)
+            } else {
+                html5ever::Namespace::from(arg2.as_str())
+            };
             dom.new_node(NodeData::Element {
-                name: html5ever::QualName::new(None, html5ever::ns!(html), html5ever::LocalName::from(arg1.as_str())),
+                name: html5ever::QualName::new(None, ns, html5ever::LocalName::from(arg1.as_str())),
                 attrs: vec![], template_contents: None, mathml_annotation_xml_integration_point: false,
                 live_value: None,
                 live_checked: None,

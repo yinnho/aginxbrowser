@@ -371,6 +371,23 @@ pub async fn handle(
                 page.evaluate(INPUT_HELPERS);
                 match event_type {
                     "keyDown" | "rawKeyDown" => {
+                        if key == "Escape" {
+                            // obscura#952: Escape on a modal dialog runs the
+                            // close request (cancelable `cancel`, then close)
+                            // as the keydown's default action. The page sees
+                            // keydown first; a preventDefault leaves the
+                            // dialog open, like Chrome. The bootstrap helper
+                            // no-ops when no modal dialog is in scope.
+                            let js = "(function() {\
+                                var target = document.activeElement || document.body;\
+                                var evt = globalThis.__diting_markTrusted(new KeyboardEvent('keydown', {bubbles:true,cancelable:true,key:'Escape',code:'Escape'}));\
+                                target.dispatchEvent(evt);\
+                                if (!evt.defaultPrevented && globalThis.__diting_dialogEscapeClose) {\
+                                    try { globalThis.__diting_dialogEscapeClose(); } catch (e) {}\
+                                }\
+                            })()";
+                            page.evaluate(js);
+                        } else {
                         let js = format!(
                             "(function() {{\
                                 var target = document.activeElement || document.body;\
@@ -381,6 +398,7 @@ pub async fn handle(
                             code = code.replace('\\', "\\\\").replace('\'', "\\'"),
                         );
                         page.evaluate(&js);
+                        }
 
                         if !text.is_empty() && text != "\r" && text != "\n" {
                             page.evaluate(&insert_text_js(text));

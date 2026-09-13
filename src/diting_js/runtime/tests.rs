@@ -6041,7 +6041,9 @@
         let first = probe(&mut rt);
         assert_eq!(first["circles"], serde_json::json!(200));
         assert_eq!(first["hit"], serde_json::json!("panel"));
-        assert_eq!(first["svgArea"], serde_json::json!("SVG"));
+        // SVG-namespace elements keep their source-case tag name (Chrome
+        // tagName uppercases only the HTML namespace).
+        assert_eq!(first["svgArea"], serde_json::json!("svg"));
 
         // Mutate: the epoch bumps, the memoized run must be re-run (not
         // served from the stale cache), and the panel must move accordingly.
@@ -7149,7 +7151,10 @@
         // Upstream 53295fa+6927f11+869f700+20c4628: XML mime types get a
         // well-formedness pass; malformed input yields a <parsererror>
         // documentElement that querySelector('parsererror') finds, matching
-        // Chrome. Self-closing roots count as complete elements.
+        // Chrome. Self-closing roots count as complete elements. Well-formed
+        // input (obscura#883) now builds a real tree: the no-xmlns root keeps
+        // its source name read back through the HTML-namespace tagName
+        // convention (uppercased), not an <html> collapse.
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt.evaluate(r#"
             const check = (src) => {
@@ -7170,7 +7175,7 @@
             result,
             serde_json::json!([
                 "E:PARSERERROR", "E:PARSERERROR", "E:PARSERERROR", "E:PARSERERROR",
-                "OK:HTML", "OK:HTML",
+                "OK:ROOT", "OK:ROOT",
             ])
         );
     }
@@ -7193,6 +7198,102 @@
             return [textOnly, htmlOk, skipsNoise];
         "#).unwrap();
         assert_eq!(result, serde_json::json!([true, true, true]));
+    }
+
+    #[test]
+    fn test_domparser_xml_tree_builder_namespaces_and_structure() {
+        // obscura#883: valid XML under an XML mime must come back as a real
+        // tree — source-case qualified names, xmlns-resolved namespaceURI
+        // (prefixed scopes and default-namespace inheritance), self-closing
+        // nesting, CDATA sections, decoded attribute entities — not the
+        // <html> collapse the HTML fragment parser produced.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt.evaluate(r#"
+            const p = (src, mime) => new DOMParser().parseFromString(src, mime || 'application/xml');
+            const d1 = p('<edmx:Edmx xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices/></edmx:Edmx>');
+            const d2 = p('<feed xmlns="http://www.w3.org/2005/Atom"><entry title="a&amp;b">hi</entry></feed>');
+            const d3 = p('<r xmlns="http://example.com/x"><c><![CDATA[a<b & c]]></c><pi/></r>');
+            const d4 = p('<bad><a></b></bad>');
+            const d5 = p('<div>html path</div>', 'text/html');
+            const root1 = d1.documentElement;
+            const entry = d2.documentElement.firstElementChild;
+            return [
+                root1.tagName,
+                root1.namespaceURI,
+                root1.firstElementChild.tagName,
+                root1.firstElementChild.localName,
+                root1.firstElementChild.namespaceURI,
+                d2.documentElement.tagName,
+                d2.documentElement.namespaceURI,
+                entry.namespaceURI,
+                entry.getAttribute('title'),
+                entry.querySelectorAll('ENTRY').length,
+                d2.documentElement.querySelectorAll('entry').length,
+                d3.documentElement.querySelectorAll('c').length,
+                d3.documentElement.firstElementChild.firstChild.nodeType,
+                d3.documentElement.firstElementChild.firstChild.data,
+                d3.documentElement.children.length,
+                !!d4.querySelector('parsererror'),
+                d5.documentElement.tagName,
+            ];
+        "#).unwrap();
+        assert_eq!(result, serde_json::json!([
+            "edmx:Edmx",
+            "http://docs.oasis-open.org/odata/ns/edmx",
+            "edmx:DataServices",
+            "DataServices",
+            "http://docs.oasis-open.org/odata/ns/edmx",
+            "feed",
+            "http://www.w3.org/2005/Atom",
+            "http://www.w3.org/2005/Atom",
+            "a&b",
+            0,
+            1,
+            1,
+            4,
+            "a<b & c",
+            2,
+            true,
+            "HTML",
+        ]));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_dialog_escape_helper_closes_modal_only() {
+        // obscura#952: the bootstrap helper behind the CDP Escape arm walks
+        // from the focused element to the containing modal dialog (falls back
+        // to the open modal dialog in document order), runs the close request
+        // (cancelable `cancel`), and never touches non-modal dialogs.
+        // show()/showModal() schedule setTimeout toggles, whose op_sleep
+        // needs a current-thread reactor — plain #[test] evaluate has none.
+        let mut rt = setup_runtime(r#"<html><body>
+            <dialog id="m"><input id="in"><button id="ok">OK</button></dialog>
+            <dialog id="nm">non-modal</dialog>
+        </body></html>"#);
+        let result = rt.evaluate(r#"
+            const m = document.getElementById('m');
+            const nm = document.getElementById('nm');
+            nm.show();
+            let cancels = 0, wasCancelable = false;
+            m.addEventListener('cancel', () => { cancels++; });
+            // No modal dialog anywhere: helper is a no-op, non-modal untouched.
+            const noneOpen = globalThis.__diting_dialogEscapeClose();
+            const nmUntouched = nm.hasAttribute('open');
+            // Modal open, focus inside it: cancel fires, dialog closes.
+            m.showModal();
+            document.getElementById('in').focus();
+            const viaFocus = globalThis.__diting_dialogEscapeClose();
+            const closedAfterFocus = !m.hasAttribute('open');
+            // preventDefault inside cancel keeps the modal open (Chrome Escape
+            // semantics); the CDP arm checks keydown defaultPrevented too.
+            m.showModal();
+            m.addEventListener('cancel', (e) => { wasCancelable = e.cancelable && !e.defaultPrevented; e.preventDefault(); });
+            document.getElementById('ok').focus();
+            globalThis.__diting_dialogEscapeClose();
+            const stillOpenAfterPrevent = m.hasAttribute('open');
+            return [noneOpen, nmUntouched, viaFocus, closedAfterFocus, stillOpenAfterPrevent, cancels, wasCancelable];
+        "#).unwrap();
+        assert_eq!(result, serde_json::json!([false, true, true, true, true, 2, true]));
     }
 
     #[test]

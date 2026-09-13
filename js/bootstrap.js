@@ -7207,6 +7207,210 @@ function _xmlWellFormed(src) {
   return stack.length === 0 && rootsClosed === 1;
 }
 
+// XML entity decode for text and attribute values: the five predefined
+// entities plus decimal/hex character references. Unknown named entities keep
+// their literal text (strict XML would reject them; we stay conservative).
+function _xmlDecodeEntities(s) {
+  return s.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, (m, body) => {
+    if (body.charCodeAt(0) === 35) {
+      let cp;
+      if (body.charCodeAt(1) === 120 || body.charCodeAt(1) === 88) cp = parseInt(body.slice(2), 16);
+      else cp = parseInt(body.slice(1), 10);
+      if (!Number.isFinite(cp) || cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return "�";
+      try { return String.fromCodePoint(cp); } catch (e) { return "�"; }
+    }
+    if (body === "amp") return "&";
+    if (body === "lt") return "<";
+    if (body === "gt") return ">";
+    if (body === "quot") return '"';
+    if (body === "apos") return "'";
+    return m;
+  });
+}
+
+// Build a real XML tree for DOMParser's XML mime types. Preconditions:
+// _xmlWellFormed(src) already passed, so the state machine below sees one
+// properly closed root and matched tags. What the HTML-parsing path cannot
+// give us — and what obscura#883's callers inspect — lives here: the root
+// keeps its source-case qualified name and namespace, self-closing tags
+// produce siblings instead of unclosed ancestors, and xmlns/xmlns:prefix
+// scopes resolve per element. Unbound prefixes resolve to the null namespace
+// instead of erroring (namespace-well-formedness is stricter than the
+// well-formedness gate we ran).
+// Returns the root element wrapper, or null if anything unexpected shows up
+// (the caller falls back to the parsererror path).
+function _xmlBuildTree(src) {
+  try {
+    const s = String(src);
+    const n = s.length;
+    let root = null;
+    const stack = [];       // open elements
+    const scopes = [];      // parallel ns scopes: { def: string, pfx: Map }
+    let i = 0;
+
+    const nsFor = (qname, scope) => {
+      const c = qname.indexOf(":");
+      if (c === -1) return scope && scope.def !== undefined ? scope.def : "";
+      if (!scope) return "";
+      const v = scope.pfx.get(qname.slice(0, c));
+      return v !== undefined ? v : "";
+    };
+
+    const mkEl = (qname, scope) => {
+      const ns = nsFor(qname, scope);
+      const el = _wrapEl(+_dom("create_element", qname, ns));
+      if (!el) return null;
+      el._ns = ns;
+      const c = qname.indexOf(":");
+      // localName must keep XML case (the prototype getter lowercases for
+      // HTML); the cached _lname short-circuits it.
+      el._lname = c === -1 ? qname : qname.slice(c + 1);
+      return el;
+    };
+
+    const setAttrs = (el, attrPairs) => {
+      for (let k = 0; k < attrPairs.length; k += 2) {
+        try { el.setAttribute(attrPairs[k], attrPairs[k + 1]); } catch (e) { /* reserved name etc. */ }
+      }
+    };
+
+    while (i < n) {
+      if (s.startsWith("<!--", i)) {
+        const e = s.indexOf("-->", i + 4);
+        if (e === -1) return null;
+        const parent = stack.length ? stack[stack.length - 1] : null;
+        // Top-level comments are dropped: the builder's root doubles as
+        // documentElement, so a leading comment must not claim its slot.
+        if (parent) parent.appendChild(c);
+        i = e + 3;
+        continue;
+      }
+      if (s.startsWith("<![CDATA[", i)) {
+        const e = s.indexOf("]]>", i + 9);
+        if (e === -1) return null;
+        const parent = stack.length ? stack[stack.length - 1] : null;
+        if (!parent) return null;
+        const data = s.slice(i + 9, e);
+        const nid = +_dom("create_text_node", data);
+        const cdata = new CDATASection(nid);
+        _cache.set(nid, cdata); // keep the class across re-wraps (nodeType 4)
+        parent.appendChild(cdata);
+        i = e + 3;
+        continue;
+      }
+      if (s.startsWith("<?", i)) {
+        const e = s.indexOf("?>", i + 2);
+        if (e === -1) return null;
+        const body = s.slice(i + 2, e);
+        const sp = body.search(/[\s]/);
+        const target = sp === -1 ? body : body.slice(0, sp);
+        const piData = sp === -1 ? "" : body.slice(sp + 1);
+        const parent = stack.length ? stack[stack.length - 1] : null;
+        if (parent && target) {
+          const pid = +_dom("create_text_node", piData);
+          const pin = new ProcessingInstruction(pid, target);
+          _cache.set(pid, pin);
+          parent.appendChild(pin);
+        }
+        i = e + 2;
+        continue;
+      }
+      if (s.startsWith("<!", i)) {
+        // DOCTYPE and other declarations: skipped (well-formed gate allowed
+        // them; the document keeps its null _docType as before).
+        const e = s.indexOf(">", i + 2);
+        if (e === -1) return null;
+        i = e + 1;
+        continue;
+      }
+      if (s.startsWith("</", i)) {
+        const e = s.indexOf(">", i + 2);
+        if (e === -1) return null;
+        if (stack.length) {
+          stack.pop();
+          scopes.pop();
+        }
+        i = e + 1;
+        continue;
+      }
+      if (s.charCodeAt(i) === 60) { // '<'
+        let j = i + 1;
+        while (j < n && !/[\s\/>]/.test(s[j])) j++;
+        const qname = s.slice(i + 1, j);
+        if (!qname) return null;
+        // Attributes: name, then '=' with a quoted or bare value (well-formed
+        // XML requires quotes; bare kept as a safety net).
+        const attrs = [];
+        let selfClosing = false;
+        while (j < n) {
+          while (j < n && /[\s]/.test(s[j])) j++;
+          if (j >= n) return null;
+          if (s[j] === ">") { j++; break; }
+          if (s[j] === "/" && s[j + 1] === ">") { selfClosing = true; j += 2; break; }
+          let an = j;
+          while (j < n && !/[\s=\/>]/.test(s[j])) j++;
+          const aName = s.slice(an, j);
+          if (!aName) return null;
+          let aVal = "";
+          while (j < n && /[\s]/.test(s[j])) j++;
+          if (s[j] === "=") {
+            j++;
+            while (j < n && /[\s]/.test(s[j])) j++;
+            if (s[j] === '"' || s[j] === "'") {
+              const q = s[j]; j++;
+              const e = s.indexOf(q, j);
+              if (e === -1) return null;
+              aVal = s.slice(j, e);
+              j = e + 1;
+            } else {
+              let e = j;
+              while (e < n && !/[\s>]/.test(s[e])) e++;
+              aVal = s.slice(j, e);
+              j = e;
+            }
+          }
+          attrs.push(aName, _xmlDecodeEntities(aVal));
+        }
+        // This element's own xmlns declarations scope itself and children.
+        // The default namespace inherits like the prefix map does: children
+        // without their own xmlns stay in the ancestor's default namespace.
+        let def = scopes.length ? scopes[scopes.length - 1].def : undefined;
+        const pfx = scopes.length ? new Map(scopes[scopes.length - 1].pfx) : new Map();
+        for (let k = 0; k < attrs.length; k += 2) {
+          if (attrs[k] === "xmlns") def = attrs[k + 1];
+          else if (attrs[k].startsWith("xmlns:")) pfx.set(attrs[k].slice(6), attrs[k + 1]);
+        }
+        const scope = { def, pfx };
+        const el = mkEl(qname, scope);
+        if (!el) return null;
+        setAttrs(el, attrs);
+        const parent = stack.length ? stack[stack.length - 1] : null;
+        if (parent) parent.appendChild(el);
+        else if (!root) root = el;
+        else return null; // second root — the gate should have caught this
+        if (!selfClosing) {
+          stack.push(el);
+          scopes.push(scope);
+        }
+        i = j;
+        continue;
+      }
+      // Text run up to the next '<'.
+      let e = s.indexOf("<", i);
+      if (e === -1) e = n;
+      if (stack.length) {
+        const parent = stack[stack.length - 1];
+        const txt = _xmlDecodeEntities(s.slice(i, e));
+        if (txt) parent.appendChild(document.createTextNode(txt));
+      }
+      i = e;
+    }
+    return stack.length === 0 ? root : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 // Real-enough DOMParser. The previous one-liner returned `globalThis.document`,
 // so anything that did `new DOMParser().parseFromString(s, 'text/html')` and
 // then read `.body.innerHTML` mutated the LIVE page (jQuery 3.x's selector
@@ -7218,15 +7422,23 @@ globalThis.DOMParser = class DOMParser {
   parseFromString(source, mimeType) {
     const html = String(source ?? "");
     const isXml = typeof mimeType === "string" && /xml/i.test(mimeType);
-    const root = document.createElement("html");
 
-    // For XML mime types, check well-formedness first (conservative: only
-    // clear errors like tag mismatch / extra root are flagged).  If the
-    // check fires, build a <parsererror> root so callers doing
-    // doc.querySelector('parsererror') get the same signal as in Chrome.
+    // XML mime types: two well-formedness gates first (conservative
+    // regex pass with specific error text, then the stricter state
+    // machine). Valid input goes to the hand-rolled XML tree builder so
+    // the root element keeps its real name, case, namespace, and
+    // self-closing structure (obscura#883) — the HTML fragment parser
+    // collapsed all of that into an <html> root.
     const xmlError = isXml ? _checkXmlWellFormed(html) : null;
-    const isParserError = xmlError && !xmlError.wellFormed;
-    if (isParserError) {
+    const strictBad = isXml && !_xmlWellFormed(html);
+    let root = document.createElement("html");
+    let built = null;
+    if (isXml && !(xmlError && !xmlError.wellFormed) && !strictBad) {
+      built = _xmlBuildTree(html);
+    }
+    if (built) {
+      root = built;
+    } else if (xmlError && !xmlError.wellFormed) {
       // Build the <parsererror> element directly rather than via innerHTML:
       // the fragment parser routes unknown elements into <head>, which would
       // make firstElementChild (the documentElement) a <head> instead of the
@@ -7234,18 +7446,10 @@ globalThis.DOMParser = class DOMParser {
       const pe = document.createElement('parsererror');
       pe.textContent = xmlError.error;
       root.appendChild(pe);
-    } else {
-      // innerHTML parses children via html5ever fragment-parsing rules. Most
-      // HTML inputs start with `<!DOCTYPE>` / `<html>` / `<head>` etc.; the
-      // fragment parser strips the outer `<html>` and emits its head+body
-      // children, which is what callers want.
-      try { root.innerHTML = html; } catch (e) { /* leave empty on parse error */ }
-    }
-
-    // For XML mime types, surface a <parsererror> on clearly-malformed input so
-    // error-detection code (doc.querySelector('parsererror')) works, matching
-    // Chrome. We have no XML parser, so the tree stays HTML-parsed.
-    if (isXml && !_xmlWellFormed(html)) {
+    } else if (isXml) {
+      // Strict-gate failure or builder bail on clearly-malformed input:
+      // generic <parsererror> so error-detection code
+      // (doc.querySelector('parsererror')) works, matching Chrome.
       try {
         root.innerHTML = '';
         const pe = document.createElement('parsererror');
@@ -7253,7 +7457,16 @@ globalThis.DOMParser = class DOMParser {
         pe.innerHTML = 'This page contains the following errors:<div>error while parsing XML</div>';
         root.appendChild(pe);
       } catch (e) { /* ignore */ }
+    } else {
+      // innerHTML parses children via html5ever fragment-parsing rules. Most
+      // HTML inputs start with `<!DOCTYPE>` / `<html>` / `<head>` etc.; the
+      // fragment parser strips the outer `<html>` and emits its head+body
+      // children, which is what callers want.
+      try { root.innerHTML = html; } catch (e) { /* leave empty on parse error */ }
     }
+    // All XML failure paths leave `root` as the <html> wrapper with a
+    // <parsererror> child; expose that child as documentElement like Chrome.
+    const isParserError = !built && isXml;
 
     // Helper: depth-first walk to find an element by predicate.
     const walk = (node, pred) => {
@@ -8220,6 +8433,29 @@ globalThis.HTMLLegendElement = _htmlInterface('HTMLLegendElement', ['legend']);
 globalThis.HTMLProgressElement = _htmlInterface('HTMLProgressElement', ['progress']);
 globalThis.HTMLDetailsElement = _htmlInterface('HTMLDetailsElement', ['details']);
 globalThis.HTMLDialogElement = _htmlInterface('HTMLDialogElement', ['dialog']);
+
+// Escape on a modal dialog (obscura#952): the CDP keyDown Escape arm lands
+// here. The close request goes to the modal dialog containing the focused
+// element, else the last open modal dialog in document order (topmost
+// opened). Steps mirror requestClose: cancelable `cancel`, then close unless
+// default-prevented. Non-modal dialogs are untouched, matching Chrome.
+globalThis.__diting_dialogEscapeClose = function () {
+  let el = document.activeElement;
+  let dlg = null;
+  while (el) {
+    if (el.localName === 'dialog' && el.hasAttribute && el.hasAttribute('open') && el._dialogModal) { dlg = el; break; }
+    el = el.parentElement;
+  }
+  if (!dlg) {
+    const all = document.querySelectorAll('dialog[open]');
+    for (let i = all.length - 1; i >= 0; i--) {
+      if (all[i]._dialogModal) { dlg = all[i]; break; }
+    }
+  }
+  if (!dlg || typeof dlg.requestClose !== 'function') return false;
+  dlg.requestClose();
+  return true;
+};
 globalThis.SVGElement = Element;
 globalThis.SVGSVGElement = Element;
 // Chrome exposes `viewBox` on the fit-to-viewbox SVG elements (svg, marker,
