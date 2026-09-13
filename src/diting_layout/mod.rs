@@ -1675,7 +1675,8 @@ fn build_normal_sibling(
         } else {
             let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta);
             if let Some(sub) = sub {
-                let sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
+                let mut sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
+                wrap_q_quotes(tree, child, &child_tag, styles, fonts, taffy_tree, &mut sub_children);
                 leaves.extend(sub_children.clone());
                 // Flattening removes the sub's taffy node (invalidating its
                 // SlotMap key) — drop the stale node_map entry with it.
@@ -1699,6 +1700,62 @@ fn build_normal_sibling(
     if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta) {
         direct.push(node);
     }
+}
+
+/// Chrome's UA sheet gives `q::before/::after` the `open-quote`/`close-quote`
+/// keywords, which resolve through auto quote nesting: even depth uses double
+/// curly quotes, odd depth flips to singles.
+fn q_quote_pair(depth: usize) -> (&'static str, &'static str) {
+    if depth % 2 == 0 {
+        ("\u{201C}", "\u{201D}")
+    } else {
+        ("\u{2018}", "\u{2019}")
+    }
+}
+
+fn q_ancestor_quote_depth(tree: &DomTree, mut id: NodeId) -> usize {
+    let mut depth = 0usize;
+    while let Some(parent) = tree.with_node(id, |n| n.parent).flatten() {
+        let is_q = tree
+            .with_node(parent, |n| {
+                n.as_element().map(|e| e.local.to_string() == "q")
+            })
+            .flatten()
+            .unwrap_or(false);
+        if is_q {
+            depth += 1;
+        }
+        id = parent;
+    }
+    depth
+}
+
+/// diting has no ::before/::after generated content; the `q` marks are the
+/// one piece of UA-generated text real pages rely on, so synthesize the
+/// open/close leaves directly around the flattened q's children, in the q's
+/// own font context.
+#[allow(clippy::too_many_arguments)]
+fn wrap_q_quotes(
+    tree: &DomTree,
+    child: NodeId,
+    child_tag: &str,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    fonts: &FontBook,
+    taffy_tree: &mut TaffyTree<TextLeaf>,
+    sub_children: &mut Vec<taffy::tree::NodeId>,
+) {
+    if child_tag != "q" {
+        return;
+    }
+    let (open, close) = q_quote_pair(q_ancestor_quote_depth(tree, child));
+    let (fs, b, lh) = font_context(tree, child, styles);
+    let col = color_context(tree, child, styles);
+    let deco = decoration_context(tree, child, styles);
+    let vs = valign_shift(tree, child, styles);
+    let mut wrapped = build_word_leaves(open, fs, b, col, lh, deco, vs, fonts, taffy_tree);
+    wrapped.append(sub_children);
+    wrapped.extend(build_word_leaves(close, fs, b, col, lh, deco, vs, fonts, taffy_tree));
+    *sub_children = wrapped;
 }
 
 /// Rough content-height estimate for a float (8g; upstream
@@ -1958,7 +2015,8 @@ fn build_flow_column(
         } else if inline_level && !out_of_flow {
             let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta);
             if let Some(sub) = sub {
-                let sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
+                let mut sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
+                wrap_q_quotes(tree, child, &child_tag, styles, fonts, taffy_tree, &mut sub_children);
                 run.push(RunSeg::Nodes(sub_children.clone()));
                 node_map.remove(&sub);
                 let _ = taffy_tree.remove(sub);
@@ -3463,7 +3521,8 @@ fn build_element(
             // is_flattenable_inline): the words wrap at the real block level.
             let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta);
             if let Some(sub) = sub {
-                let sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
+                let mut sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
+                wrap_q_quotes(tree, child, &child_tag, styles, fonts, taffy_tree, &mut sub_children);
                 run.push(RunSeg::Nodes(sub_children.clone()));
                 node_map.remove(&sub);
                 let _ = taffy_tree.remove(sub);
@@ -5971,3 +6030,18 @@ mod fork_deltas;
 /// hence `blitz-reference` on top of `screenshot`.
 #[cfg(all(test, feature = "blitz-reference"))]
 mod bridge_cross_check;
+
+#[cfg(test)]
+mod q_quote_tests {
+    use super::q_quote_pair;
+
+    #[test]
+    fn q_quotes_alternate_by_nesting_depth() {
+        let outer = q_quote_pair(0);
+        let inner = q_quote_pair(1);
+        let deep = q_quote_pair(2);
+        assert_eq!(outer, ("\u{201C}", "\u{201D}"));
+        assert_eq!(inner, ("\u{2018}", "\u{2019}"));
+        assert_eq!(deep, outer);
+    }
+}

@@ -8219,3 +8219,51 @@
         let t = rt.evaluate("document.body.innerText").unwrap();
         assert_eq!(t, serde_json::json!("one\ntwo"), "got: {t}");
     }
+
+    // UA `q` marks (Chrome q::before/::after open-quote/close-quote): diting
+    // has no generated content, so the layout synthesizes the quote leaves
+    // around flattened q content. They must take layout space in front of
+    // the q's own children and give the (boxless-union) q a wider rect.
+    #[test]
+    #[cfg(feature = "screenshot")]
+    fn test_q_element_quote_marks_take_layout_space() {
+        let mut rt = setup_runtime(
+            r#"<html><body style="margin:0">
+              <p style="margin:0"><span id="plain">hi</span></p>
+              <p style="margin:0"><q><span id="quoted">hi</span></q></p>
+              <p style="margin:0"><q id="empty"></q><span id="after">x</span></p>
+            </body></html>"#,
+        );
+        let v = rt
+            .evaluate(
+                r#"JSON.stringify((() => {
+                    const g = (id) => document.getElementById(id).getBoundingClientRect();
+                    const plain = g('plain');
+                    const quoted = g('quoted');
+                    const q = document.querySelector('q').getBoundingClientRect();
+                    const emptyQ = g('empty');
+                    const after = g('after');
+                    return {
+                        shift: quoted.left - plain.left,
+                        qWider: q.width > quoted.width,
+                        emptyW: emptyQ.width,
+                        afterShift: after.left - emptyQ.left,
+                    };
+                })())"#,
+            )
+            .unwrap();
+        let d: serde_json::Value = serde_json::from_str(v.as_str().unwrap()).unwrap();
+        let shift = d["shift"].as_f64().unwrap();
+        assert!(
+            shift > 1.0,
+            "open quote must push the q's content right (shift={shift}, diag={d})"
+        );
+        assert!(d["qWider"].as_bool().unwrap(), "q union rect must include the marks (diag={d})");
+        let empty_w = d["emptyW"].as_f64().unwrap();
+        assert!(empty_w > 0.0, "empty <q></q> still renders both marks (w={empty_w})");
+        let after_shift = d["afterShift"].as_f64().unwrap();
+        assert!(
+            after_shift > 1.0,
+            "close quote must occupy space before the next sibling (shift={after_shift})"
+        );
+    }

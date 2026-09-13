@@ -1776,7 +1776,7 @@ pub enum TextAlign {
 pub fn ua_display(tag: &str) -> Display {
     match tag {
         "span" | "a" | "b" | "i" | "strong" | "em" | "code" | "small" | "sub" | "sup"
-        | "label" | "time" | "abbr" => Display::Inline,
+        | "label" | "time" | "abbr" | "q" => Display::Inline,
         // Form controls are inline-level per every browser UA sheet, and the
         // inline-flavor matters twice: computed-style fidelity (CSSOM) and
         // the run dispatch — inline-block replaced elements join the text

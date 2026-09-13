@@ -39,6 +39,8 @@ CJK = (
     "甲乙丙丁子丑寅卯天地人日月星山水火风雨雪云电气声音光明黑暗影儿无有是否在了不也"
     "这那哪里怎么为何因为所以但是而且或者如果虽然于是然后接着最终开始结束中间旁边附近"
     "天地玄黄宇宙洪荒盈昃辰宿寒暑闰余成岁律吕调阳云腾致雨露结为霜金生丽水玉出昆冈"
+    # q-element UA quote marks (open-quote/close-quote synthesis)
+    "‘’“”"
 )
 
 FIXTURES = Path(__file__).resolve().parent.parent / "src" / "diting_layout" / "fixtures"
