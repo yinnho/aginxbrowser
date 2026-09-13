@@ -12,9 +12,9 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::{json, Value};
 
-use crate::diting_browser::lifecycle::{LifecycleState, WaitUntil};
+use crate::diting_browser::lifecycle::LifecycleState;
 use crate::diting_browser::page::NetworkEvent;
-use crate::diting_cdp::dispatch::CdpContext;
+use crate::diting_cdp::dispatch::{CdpContext, LoadDone, PendingNav};
 #[cfg(feature = "screenshot")]
 use crate::diting_cdp::dispatch::ScreencastState;
 use crate::diting_cdp::types::CdpEvent;
@@ -143,19 +143,65 @@ fn emit_network_event(
     );
 }
 
-pub(crate) fn emit_navigation_events(
+/// Commit-phase announcement for a CDP navigation: the outgoing document's
+/// carried network events stream under the loader they belonged to, the
+/// fresh loaderId is minted, and the frame + execution contexts are
+/// announced for the target URL. Chrome resolves `Page.navigate` here —
+/// before the document has loaded — which is what lets a spawned
+/// navigation hand the socket back to the connection loop while its
+/// fetches run.
+///
+/// `target_url` is the URL being navigated to (the frame announces it at
+/// commit; a redirect chain that lands elsewhere is re-announced by the
+/// tail). Returns `(frame_id, loader_id, old_loader)`.
+pub(crate) fn emit_navigation_prefix(
+    ctx: &mut CdpContext,
+    session_id: &Option<String>,
+    page_id: &str,
+    target_url: &str,
+) -> (String, String, String) {
+    let (frame_id, carried, carried_url) = {
+        let Some(page) = ctx.get_page_mut(page_id) else {
+            return (String::new(), String::new(), String::new());
+        };
+        (
+            page.frame_id.clone(),
+            std::mem::take(&mut page.carried_network_events),
+            page.carried_network_url.clone(),
+        )
+    };
+    // The outgoing document's network events — including its script-initiated
+    // fetch/XHR, which only ever sat in the JS runtime's queue — were carried
+    // across this navigation by the page layer. Emit them first, under the
+    // loader they belonged to (still the current one here), so a client sees
+    // them before the new document's frameNavigated (obscura #920 shape).
+    let old_loader = ctx
+        .current_loader_ids
+        .get(page_id)
+        .cloned()
+        .unwrap_or_default();
+    for ev in &carried {
+        emit_network_event(ctx, session_id, &frame_id, &old_loader, &carried_url, ev);
+    }
+    let loader_id = format!("loader-{}", uuid::Uuid::new_v4());
+    ctx.current_loader_ids
+        .insert(page_id.to_string(), loader_id.clone());
+    emit_context_events(ctx, session_id, &frame_id, &loader_id, target_url, page_id);
+    (frame_id, loader_id, old_loader)
+}
+
+/// Frame + execution-context announcement for a navigation. Chrome tears
+/// down and re-creates the execution context at commit, so these stream
+/// with the prefix — before the new document's resources — rather than
+/// after its lifecycle events.
+fn emit_context_events(
     ctx: &mut CdpContext,
     session_id: &Option<String>,
     frame_id: &str,
     loader_id: &str,
     page_url: &str,
     page_id: &str,
-    network_events: &[NetworkEvent],
-    _wait_until: WaitUntil,
-    reached_idle: bool,
 ) {
-    let ts = now_epoch_seconds();
-
     emit(
         ctx,
         "Page.frameStartedLoading",
@@ -171,45 +217,6 @@ pub(crate) fn emit_navigation_events(
         }),
         session_id,
     );
-
-    for ev in network_events {
-        emit_network_event(ctx, session_id, frame_id, loader_id, page_url, ev);
-    }
-
-    emit(
-        ctx,
-        "Page.domContentEventFired",
-        json!({ "timestamp": ts }),
-        session_id,
-    );
-    emit(ctx, "Page.loadEventFired", json!({ "timestamp": ts }), session_id);
-    emit(
-        ctx,
-        "Page.lifecycleEvent",
-        json!({ "frameId": frame_id, "loaderId": loader_id, "name": "init", "timestamp": ts }),
-        session_id,
-    );
-    emit(
-        ctx,
-        "Page.lifecycleEvent",
-        json!({ "frameId": frame_id, "loaderId": loader_id, "name": "DOMContentLoaded", "timestamp": ts }),
-        session_id,
-    );
-    emit(
-        ctx,
-        "Page.lifecycleEvent",
-        json!({ "frameId": frame_id, "loaderId": loader_id, "name": "load", "timestamp": ts }),
-        session_id,
-    );
-    if reached_idle {
-        emit(
-            ctx,
-            "Page.lifecycleEvent",
-            json!({ "frameId": frame_id, "loaderId": loader_id, "name": "networkIdle", "timestamp": ts }),
-            session_id,
-        );
-    }
-
     emit(ctx, "Runtime.executionContextsCleared", json!({}), session_id);
     emit(
         ctx,
@@ -255,8 +262,97 @@ pub(crate) fn emit_navigation_events(
     }
 }
 
-/// Drain a page's recorded navigation state (frame id, final URL, network
-/// events, idle flag), mint a fresh loaderId, and emit the full
+/// The load-side half: carried events that surfaced after the prefix
+/// drained (a spawned navigation moves the outgoing document's JS-queued
+/// fetch/XHR events into `carried` when its load task starts), then the new
+/// document's network events under its loader, then the lifecycle sequence.
+/// `error` short-circuits into Chrome's failed-navigation shape instead —
+/// frameNavigated carrying `errorText`, then frameStoppedLoading — because
+/// the navigate response already resolved at commit.
+pub(crate) fn emit_navigation_lifecycle(
+    ctx: &mut CdpContext,
+    session_id: &Option<String>,
+    page_id: &str,
+    loader_id: &str,
+    old_loader: &str,
+    error: Option<&str>,
+) {
+    let ts = now_epoch_seconds();
+    let (frame_id, url_str, carried, carried_url, network_events, reached_idle) = {
+        let Some(page) = ctx.get_page_mut(page_id) else {
+            return;
+        };
+        (
+            page.frame_id.clone(),
+            page.url_string(),
+            std::mem::take(&mut page.carried_network_events),
+            page.carried_network_url.clone(),
+            page.network_events.drain(..).collect::<Vec<_>>(),
+            page.lifecycle == LifecycleState::NetworkIdle,
+        )
+    };
+    for ev in &carried {
+        emit_network_event(ctx, session_id, &frame_id, old_loader, &carried_url, ev);
+    }
+
+    if let Some(err) = error {
+        let mut frame = frame_json(&frame_id, loader_id, &url_str);
+        frame["errorText"] = json!(err);
+        emit(
+            ctx,
+            "Page.frameNavigated",
+            json!({ "frame": frame, "type": "Navigation" }),
+            session_id,
+        );
+        emit(
+            ctx,
+            "Page.frameStoppedLoading",
+            json!({ "frameId": frame_id }),
+            session_id,
+        );
+        return;
+    }
+
+    for ev in &network_events {
+        emit_network_event(ctx, session_id, &frame_id, loader_id, &url_str, ev);
+    }
+
+    emit(
+        ctx,
+        "Page.domContentEventFired",
+        json!({ "timestamp": ts }),
+        session_id,
+    );
+    emit(ctx, "Page.loadEventFired", json!({ "timestamp": ts }), session_id);
+    emit(
+        ctx,
+        "Page.lifecycleEvent",
+        json!({ "frameId": frame_id, "loaderId": loader_id, "name": "init", "timestamp": ts }),
+        session_id,
+    );
+    emit(
+        ctx,
+        "Page.lifecycleEvent",
+        json!({ "frameId": frame_id, "loaderId": loader_id, "name": "DOMContentLoaded", "timestamp": ts }),
+        session_id,
+    );
+    emit(
+        ctx,
+        "Page.lifecycleEvent",
+        json!({ "frameId": frame_id, "loaderId": loader_id, "name": "load", "timestamp": ts }),
+        session_id,
+    );
+    if reached_idle {
+        emit(
+            ctx,
+            "Page.lifecycleEvent",
+            json!({ "frameId": frame_id, "loaderId": loader_id, "name": "networkIdle", "timestamp": ts }),
+            session_id,
+        );
+    }
+}
+
+/// Drain a page's recorded navigation state and emit the full
 /// post-navigation event sequence. The shared tail of every "a navigation
 /// just happened" site: `Page.navigate`/`reload`, the post-eval drain for
 /// JS-initiated navigations, and `Target.createTarget`'s inline `url`
@@ -272,55 +368,31 @@ pub(crate) fn emit_navigation_for_page(
     session_id: &Option<String>,
     page_id: &str,
 ) -> (String, String) {
-    let (frame_id, url_str, network_events, reached_idle, carried, carried_url) = {
-        let Some(page) = ctx.get_page_mut(page_id) else {
-            return (String::new(), String::new());
-        };
-        (
-            page.frame_id.clone(),
-            page.url_string(),
-            page.network_events.drain(..).collect::<Vec<_>>(),
-            page.lifecycle == LifecycleState::NetworkIdle,
-            std::mem::take(&mut page.carried_network_events),
-            page.carried_network_url.clone(),
-        )
+    // The load has already finished at every call site here, so the frame
+    // announces its final URL (post-redirect) — matching the old
+    // respond-after-load contract this preserves.
+    let target_url = match ctx.get_page(page_id) {
+        Some(page) => page.url_string(),
+        None => return (String::new(), String::new()),
     };
-    // The outgoing document's network events — including its script-initiated
-    // fetch/XHR, which only ever sat in the JS runtime's queue — were carried
-    // across this navigation by the page layer. Emit them first, under the
-    // loader they belonged to (still the current one here), so a client sees
-    // them before the new document's frameNavigated — the same ordering as a
-    // browser where those events streamed live (obscura #920 shape).
-    if !carried.is_empty() {
-        let old_loader = ctx
-            .current_loader_ids
-            .get(page_id)
-            .cloned()
-            .unwrap_or_default();
-        for ev in &carried {
-            emit_network_event(ctx, session_id, &frame_id, &old_loader, &carried_url, ev);
-        }
+    let (frame_id, loader_id, old_loader) =
+        emit_navigation_prefix(ctx, session_id, page_id, &target_url);
+    if frame_id.is_empty() {
+        return (frame_id, loader_id);
     }
-    let loader_id = format!("loader-{}", uuid::Uuid::new_v4());
-    ctx.current_loader_ids
-        .insert(page_id.to_string(), loader_id.clone());
-    emit_navigation_events(
-        ctx,
-        session_id,
-        &frame_id,
-        &loader_id,
-        &url_str,
-        page_id,
-        &network_events,
-        WaitUntil::Load,
-        reached_idle,
-    );
+    emit_navigation_lifecycle(ctx, session_id, page_id, &loader_id, &old_loader, None);
     (frame_id, loader_id)
 }
 
 /// Drive a full navigation of the session page, then emit the navigation event
 /// sequence. Both `Page.navigate` and `Page.reload` route through here so the
 /// `allow_file_access` gate and preload-script sync cannot diverge.
+///
+/// When the connection loop installed a load channel (`ctx.load_tx`), the
+/// load itself is spawned instead: the command resolves at commit — Chrome's
+/// contract — and the loop keeps serving commands while the fetches run
+/// (`begin_spawned_navigate`). Every other face keeps the inline
+/// respond-after-load contract.
 async fn navigate_page(
     ctx: &mut CdpContext,
     session_id: &Option<String>,
@@ -335,6 +407,21 @@ async fn navigate_page(
         .iter()
         .map(|(_, source)| source.clone())
         .collect();
+
+    if ctx.load_tx.is_some() {
+        {
+            let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
+            if url_is_file_scheme(url) && !crate::diting_net::client::allow_file_access() {
+                return Err(
+                    "file:// navigation is disabled. Restart with `--allow-file-access` to enable."
+                        .to_string(),
+                );
+            }
+            page.set_preload_scripts(preload_sources);
+        }
+        let tx = ctx.load_tx.clone().expect("load_tx checked above");
+        return begin_spawned_navigate(ctx, session_id, url, tx, url);
+    }
 
     let (frame_id, page_id) = {
         let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
@@ -351,6 +438,94 @@ async fn navigate_page(
 
     let (_frame_id, loader_id) = emit_navigation_for_page(ctx, session_id, &page_id);
     Ok(json!({ "frameId": frame_id, "loaderId": loader_id }))
+}
+
+/// Spawned-navigation path: announce the commit events, leave the tail's
+/// bookkeeping, hand the page to a task that owns it through the load, and
+/// resolve the command immediately. The task reports back through the loop's
+/// `load_rx`; the page is re-inserted and the lifecycle events fire there
+/// (`emit_navigation_tail`).
+fn begin_spawned_navigate(
+    ctx: &mut CdpContext,
+    session_id: &Option<String>,
+    url: &str,
+    tx: futures::channel::mpsc::UnboundedSender<LoadDone>,
+    announced_url: &str,
+) -> Result<Value, String> {
+    let page_id = ctx
+        .session_page_id(session_id)
+        .ok_or("No page")?
+        .to_string();
+    let (frame_id, loader_id, old_loader) =
+        emit_navigation_prefix(ctx, session_id, &page_id, announced_url);
+    if frame_id.is_empty() {
+        return Err("No page".to_string());
+    }
+    ctx.pending_loads.insert(
+        page_id.clone(),
+        PendingNav {
+            session_id: session_id.clone(),
+            old_loader,
+            announced_url: announced_url.to_string(),
+        },
+    );
+    let Some(mut page) = ctx.take_page(&page_id) else {
+        ctx.pending_loads.remove(&page_id);
+        return Err("No page".to_string());
+    };
+    let pid = page_id;
+    let url = url.to_string();
+    tokio::task::spawn_local(async move {
+        let result = page.navigate(&url).await.map_err(|e| e.to_string());
+        let _ = tx.unbounded_send(LoadDone {
+            page_id: pid,
+            page,
+            result,
+        });
+    });
+    Ok(json!({ "frameId": frame_id, "loaderId": loader_id }))
+}
+
+/// Spawned-navigation completion (runs in the connection loop's third
+/// select! arm): re-announce the frame if the load followed redirects — the
+/// prefix announced the requested URL at commit — then emit the lifecycle
+/// half, or Chrome's failed-navigation shape, under the bookkeeping the
+/// dispatch recorded at commit time.
+pub(crate) fn emit_navigation_tail(
+    ctx: &mut CdpContext,
+    pending: &PendingNav,
+    page_id: &str,
+    error: Option<&str>,
+) {
+    let loader_id = ctx
+        .current_loader_ids
+        .get(page_id)
+        .cloned()
+        .unwrap_or_default();
+    if error.is_none() {
+        if let Some(page) = ctx.get_page(page_id) {
+            let final_url = page.url_string();
+            if final_url != pending.announced_url {
+                emit(
+                    ctx,
+                    "Page.frameNavigated",
+                    json!({
+                        "frame": frame_json(&page.frame_id, &loader_id, &final_url),
+                        "type": "Navigation",
+                    }),
+                    &pending.session_id,
+                );
+            }
+        }
+    }
+    emit_navigation_lifecycle(
+        ctx,
+        &pending.session_id,
+        page_id,
+        &loader_id,
+        &pending.old_loader,
+        error,
+    );
 }
 
 pub async fn handle(

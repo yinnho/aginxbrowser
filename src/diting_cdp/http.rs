@@ -14,8 +14,9 @@ use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 
-use crate::diting_cdp::dispatch::{self, CdpContext};
-use crate::diting_cdp::types::CdpRequest;
+use crate::diting_cdp::dispatch::{self, CdpContext, LoadDone};
+use crate::diting_cdp::domains::page::emit_navigation_tail;
+use crate::diting_cdp::types::{CdpRequest, CdpResponse};
 
 /// Advertised browser identity. Playwright parses the Chrome major from the
 /// `Browser` field of `/json/version`; a malformed or missing value aborts
@@ -93,6 +94,68 @@ fn run_connection(socket: WebSocket, page_mode: bool) {
     local.block_on(&rt, connection_loop(socket, page_mode));
 }
 
+/// Serialize a command response plus the events dispatch produced onto the
+/// socket. The `Target.attach*` family emits events before the response —
+/// Chrome emits Target.attachedToTarget BEFORE the createTarget /
+/// attachToTarget response, and Playwright's doCreateNewPage looks up the new
+/// page in its internal _crPages map synchronously right after the response
+/// resolves, so flush the event first or the lookup finds nothing and
+/// newPage() throws. Returns false once the socket is gone.
+async fn send_out(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    response: &CdpResponse,
+    method: &str,
+    ctx: &mut CdpContext,
+) -> bool {
+    let events_first = matches!(
+        method,
+        "Target.createTarget" | "Target.attachToTarget" | "Target.attachToBrowserTarget"
+    );
+    let mut out = Vec::new();
+    let mut events = std::mem::take(&mut ctx.pending_events);
+    let push_events = |out: &mut Vec<String>, events: &mut Vec<crate::diting_cdp::types::CdpEvent>| {
+        for ev in events.drain(..) {
+            if let Ok(line) = serde_json::to_string(&ev) {
+                out.push(line);
+            }
+        }
+    };
+    if events_first {
+        push_events(&mut out, &mut events);
+        if let Ok(line) = serde_json::to_string(response) {
+            out.push(line);
+        }
+    } else {
+        if let Ok(line) = serde_json::to_string(response) {
+            out.push(line);
+        }
+        push_events(&mut out, &mut events);
+    }
+    for line in out {
+        if sender.send(Message::Text(line)).await.is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Flush whatever events dispatch (or the navigation tail) queued onto the
+/// socket. Returns false once the socket is gone.
+async fn send_events(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    ctx: &mut CdpContext,
+) -> bool {
+    let events = std::mem::take(&mut ctx.pending_events);
+    for ev in events {
+        if let Ok(line) = serde_json::to_string(&ev) {
+            if sender.send(Message::Text(line)).await.is_err() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 async fn connection_loop(socket: WebSocket, page_mode: bool) {
     let (mut sender, mut receiver) = socket.split();
     // Each connection is a fresh browser: own cookie jar, own HTTP client,
@@ -117,6 +180,13 @@ async fn connection_loop(socket: WebSocket, page_mode: bool) {
             .insert(format!("{page_id}-session"), page_id.clone());
         ctx.default_page = Some(page_id);
     }
+
+    // Spawned-navigation reporting: `Page.navigate` on this connection hands
+    // the page to a `spawn_local` task and resolves at commit; the task
+    // returns the page here when the load settles. futures' unbounded channel
+    // (not tokio's) because `Page` is `!Send`.
+    let (load_tx, mut load_rx) = futures::channel::mpsc::unbounded::<LoadDone>();
+    ctx.load_tx = Some(load_tx);
 
     // Screencast frame pump: 33 ms cadence (~30fps ceiling), skipped while
     // no page has an armed subscription (the guard keeps idle connections at
@@ -153,45 +223,16 @@ async fn connection_loop(socket: WebSocket, page_mode: bool) {
                                 continue;
                             }
                         };
-                        let response = dispatch::dispatch(&req, &mut ctx).await;
-
-                        // Chrome emits Target.attachedToTarget BEFORE the createTarget /
-                        // attachToTarget response. Playwright's doCreateNewPage looks up
-                        // the new page in its internal _crPages map synchronously right
-                        // after the response resolves, and that map is only populated by
-                        // the attachedToTarget event — so flush the event first or the
-                        // lookup finds nothing and newPage() throws.
-                        let events_first = matches!(
-                            req.method.as_str(),
-                            "Target.createTarget"
-                                | "Target.attachToTarget"
-                                | "Target.attachToBrowserTarget"
-                        );
-
-                        let mut out = Vec::new();
-                        let mut events = std::mem::take(&mut ctx.pending_events);
-                        let push_events = |out: &mut Vec<String>, events: &mut Vec<crate::diting_cdp::types::CdpEvent>| {
-                            for ev in events.drain(..) {
-                                if let Ok(line) = serde_json::to_string(&ev) {
-                                    out.push(line);
-                                }
-                            }
-                        };
-                        if events_first {
-                            push_events(&mut out, &mut events);
-                            if let Ok(line) = serde_json::to_string(&response) {
-                                out.push(line);
-                            }
-                        } else {
-                            if let Ok(line) = serde_json::to_string(&response) {
-                                out.push(line);
-                            }
-                            push_events(&mut out, &mut events);
+                        // A navigation is in flight for this page: park the
+                        // command and replay it (in order) when the load
+                        // lands. enable/disable always pass through.
+                        if ctx.should_park(&req) {
+                            ctx.deferred.push(req);
+                            continue;
                         }
-                        for line in out {
-                            if sender.send(Message::Text(line)).await.is_err() {
-                                return;
-                            }
+                        let response = dispatch::dispatch(&req, &mut ctx).await;
+                        if !send_out(&mut sender, &response, &req.method, &mut ctx).await {
+                            return;
                         }
                     }
                     Message::Ping(payload) => {
@@ -207,13 +248,35 @@ async fn connection_loop(socket: WebSocket, page_mode: bool) {
                 #[cfg(feature = "screenshot")]
                 {
                     crate::diting_cdp::domains::page::pump_screencast_frames(&mut ctx).await;
-                    let events = std::mem::take(&mut ctx.pending_events);
-                    for ev in events {
-                        if let Ok(line) = serde_json::to_string(&ev) {
-                            if sender.send(Message::Text(line)).await.is_err() {
-                                return;
-                            }
-                        }
+                    if !send_events(&mut sender, &mut ctx).await {
+                        return;
+                    }
+                }
+            }
+            // A spawned navigation settled: put the page back, emit its
+            // lifecycle events (or Chrome's failed-navigation shape), then
+            // replay whatever parked on the load — parking-aware, since
+            // another page's navigation may still be in flight.
+            done = load_rx.next(), if !ctx.pending_loads.is_empty() => {
+                let Some(done) = done else { break };
+                let Some(pending) = ctx.pending_loads.remove(&done.page_id) else {
+                    continue;
+                };
+                ctx.pages.push(done.page);
+                let error = done.result.as_ref().err().cloned();
+                emit_navigation_tail(&mut ctx, &pending, &done.page_id, error.as_deref());
+                if !send_events(&mut sender, &mut ctx).await {
+                    return;
+                }
+                let deferred = std::mem::take(&mut ctx.deferred);
+                for req in deferred {
+                    if ctx.should_park(&req) {
+                        ctx.deferred.push(req);
+                        continue;
+                    }
+                    let response = dispatch::dispatch(&req, &mut ctx).await;
+                    if !send_out(&mut sender, &response, &req.method, &mut ctx).await {
+                        return;
                     }
                 }
             }

@@ -118,6 +118,40 @@ pub struct CdpContext {
     /// Chrome routes to that one target; without this fallback those commands
     /// would find no page (obscura#680).
     pub default_page: Option<String>,
+    /// CDP navigations currently running on a spawned task (the WebSocket
+    /// loop's LocalSet), keyed by page id. While a load is in flight the
+    /// page is owned by the load task — not `pages` — so commands resolving
+    /// to it are parked in `deferred` until the load lands.
+    pub pending_loads: HashMap<String, PendingNav>,
+    /// Commands that resolved to a loading page, replayed in order once the
+    /// load lands (the WebSocket loop's receiver arm decides via
+    /// `should_park`).
+    pub deferred: Vec<CdpRequest>,
+    /// Spawn channel for CDP-driven navigations. Set only by the WebSocket
+    /// loop (a LocalSet — `Page` is `!Send`); every other face leaves it
+    /// `None` and keeps the navigate-inline, respond-after-load contract.
+    pub load_tx: Option<futures::channel::mpsc::UnboundedSender<LoadDone>>,
+}
+
+/// A CDP navigation handed to a spawned task. The task owns the `Page` for
+/// the duration (removed from `pages`), so the loop keeps serving commands
+/// for every other page — and the socket itself — while the load's network
+/// awaits yield.
+pub struct LoadDone {
+    pub page_id: String,
+    pub page: Page,
+    pub result: Result<(), String>,
+}
+
+/// Commit-phase bookkeeping a spawned navigation leaves behind: which
+/// session drove it (event routing), the loader the outgoing document's
+/// carried events belong to (re-emitted by the tail), and the URL announced
+/// at commit — the tail re-announces the frame if a redirect chain landed
+/// elsewhere.
+pub struct PendingNav {
+    pub session_id: Option<String>,
+    pub old_loader: String,
+    pub announced_url: String,
 }
 
 impl CdpContext {
@@ -150,6 +184,9 @@ impl CdpContext {
             #[cfg(feature = "screenshot")]
             screencast: HashMap::new(),
             default_page: None,
+            pending_loads: HashMap::new(),
+            deferred: Vec::new(),
+            load_tx: None,
         }
     }
 
@@ -325,6 +362,32 @@ impl CdpContext {
         }
 
         self.get_page_mut(&page_id)
+    }
+
+    /// Remove and own a page temporarily — the spawned-navigation handoff.
+    /// Unlike `remove_page`, no subscription cleanup runs: the page comes
+    /// back through `LoadDone`.
+    pub fn take_page(&mut self, id: &str) -> Option<Page> {
+        let idx = self.pages.iter().position(|p| p.id == id)?;
+        Some(self.pages.remove(idx))
+    }
+
+    /// True when this command resolves to a page whose CDP navigation is
+    /// in flight on a spawned task — the loop parks it in `deferred`
+    /// instead of dispatching into a missing page. Chrome answers such
+    /// commands against the provisional document; with a single realm,
+    /// queueing is the honest approximation (identical to the pre-spawn
+    /// behavior, where every command queued behind the load).
+    pub fn should_park(&self, req: &CdpRequest) -> bool {
+        // enable/disable never touch pages; clients arm subscriptions
+        // (Runtime.enable, Fetch.enable) around navigations and must not
+        // stall behind the load.
+        if req.method.ends_with(".enable") || req.method.ends_with(".disable") {
+            return false;
+        }
+        self.session_page_id(&req.session_id)
+            .map(|pid| self.pending_loads.contains_key(pid))
+            .unwrap_or(false)
     }
 }
 
@@ -738,6 +801,7 @@ mod tests {
     use super::*;
     use base64::Engine as _;
     use crate::diting_cdp::types::CdpRequest;
+    use futures::StreamExt as _;
 
     fn create_page(ctx: &mut CdpContext) -> String {
         ctx.create_page_in_context(None)
@@ -4265,5 +4329,225 @@ onclick=\"globalThis.__hits=(globalThis.__hits||0)+1\">go</button></body></html>
             frames, 1,
             "page-driven timer damage must emit a frame without any client message"
         );
+    }
+
+    // --- spawned navigation (connection-loop mode) --------------------------
+    // The WebSocket loop installs `load_tx`; `Page.navigate` then resolves at
+    // commit and the page round-trips through the channel. These tests drive
+    // the same handoff the loop's third select! arm performs.
+
+    fn spawned_harness(ctx: &mut CdpContext) -> (String, String, futures::channel::mpsc::UnboundedReceiver<LoadDone>) {
+        let page_id = create_page(ctx);
+        let session = format!("{page_id}-session");
+        ctx.sessions.insert(session.clone(), page_id.clone());
+        let (load_tx, load_rx) = futures::channel::mpsc::unbounded::<LoadDone>();
+        ctx.load_tx = Some(load_tx);
+        (page_id, session, load_rx)
+    }
+
+    #[test]
+    fn spawned_navigate_resolves_at_commit_and_tail_emits_lifecycle() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(&rt, async {
+            let mut ctx = CdpContext::new_with_options(None, false);
+            let (page_id, session, mut load_rx) = spawned_harness(&mut ctx);
+
+            let nav = CdpRequest {
+                id: 1,
+                method: "Page.navigate".to_string(),
+                params: json!({ "url": "data:text/html,<title>t</title><h1>hi</h1>" }),
+                session_id: Some(session.clone()),
+            };
+            let resp = dispatch(&nav, &mut ctx).await;
+            assert!(resp.error.is_none(), "navigate: {:?}", resp.error);
+            let result = resp.result.expect("commit-time result");
+            assert!(result.get("frameId").and_then(|v| v.as_str()).is_some());
+            assert!(result.get("loaderId").and_then(|v| v.as_str()).is_some());
+            // Commit semantics: the response resolved while the page is still
+            // checked out of the set — the load task owns it now.
+            assert!(ctx.pending_loads.contains_key(&page_id));
+            assert!(ctx.take_page(&page_id).is_none());
+
+            let done = load_rx.next().await.expect("load task reports back");
+            assert_eq!(done.page_id, page_id);
+            assert!(done.result.is_ok(), "data: load must succeed");
+            ctx.pages.push(done.page);
+            let pending = ctx.pending_loads.remove(&page_id).unwrap();
+            crate::diting_cdp::domains::page::emit_navigation_tail(
+                &mut ctx,
+                &pending,
+                &page_id,
+                None,
+            );
+            let methods: Vec<&str> =
+                ctx.pending_events.iter().map(|e| e.method.as_str()).collect();
+            assert!(methods.contains(&"Page.loadEventFired"), "{methods:?}");
+            assert!(methods.contains(&"Page.domContentEventFired"), "{methods:?}");
+            assert!(methods.contains(&"Page.frameNavigated"), "{methods:?}");
+        });
+    }
+
+    #[test]
+    fn spawned_read_parks_then_replays_after_tail() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(&rt, async {
+            let mut ctx = CdpContext::new_with_options(None, false);
+            let (_page_id, session, mut load_rx) = spawned_harness(&mut ctx);
+
+            let nav = CdpRequest {
+                id: 1,
+                method: "Page.navigate".to_string(),
+                params: json!({ "url": "data:text/html,<title>t</title>" }),
+                session_id: Some(session.clone()),
+            };
+            let resp = dispatch(&nav, &mut ctx).await;
+            assert!(resp.error.is_none());
+
+            // A read while the page is checked out parks instead of resolving
+            // against the loading page (the old behavior wedged it on the
+            // socket until the full load, then served the NEW document).
+            let read = CdpRequest {
+                id: 2,
+                method: "Runtime.evaluate".to_string(),
+                params: json!({ "expression": "document.title", "returnByValue": true }),
+                session_id: Some(session.clone()),
+            };
+            assert!(ctx.should_park(&read));
+            ctx.deferred.push(read);
+
+            let done = load_rx.next().await.expect("load task reports back");
+            ctx.pages.push(done.page);
+            let pending = ctx.pending_loads.remove(&done.page_id).unwrap();
+            crate::diting_cdp::domains::page::emit_navigation_tail(
+                &mut ctx,
+                &pending,
+                &done.page_id,
+                None,
+            );
+            ctx.pending_events.clear();
+
+            let mut deferred = std::mem::take(&mut ctx.deferred);
+            assert_eq!(deferred.len(), 1);
+            for req in deferred.drain(..) {
+                assert!(!ctx.should_park(&req), "read must replay after the tail");
+                let resp = dispatch(&req, &mut ctx).await;
+                assert!(resp.error.is_none(), "replayed read: {:?}", resp.error);
+                let result = resp.result.expect("result");
+                let value = result["result"]["value"]
+                    .as_str()
+                    .expect("document.title value");
+                assert_eq!(value, "t");
+            }
+        });
+    }
+
+    #[test]
+    fn failed_spawned_navigation_emits_error_text_shape() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(&rt, async {
+            let mut ctx = CdpContext::new_with_options(None, false);
+            let (page_id, session, mut load_rx) = spawned_harness(&mut ctx);
+
+            // Loopback with nothing listening: fails without touching the
+            // network (private-network gate and/or connection refused).
+            let nav = CdpRequest {
+                id: 1,
+                method: "Page.navigate".to_string(),
+                params: json!({ "url": "http://127.0.0.1:9/" }),
+                session_id: Some(session.clone()),
+            };
+            let resp = dispatch(&nav, &mut ctx).await;
+            assert!(
+                resp.error.is_none(),
+                "commit-time response stays Ok even when the load will fail: {:?}",
+                resp.error
+            );
+
+            let done = load_rx.next().await.expect("load task reports back");
+            assert_eq!(done.page_id, page_id);
+            let err = done.result.as_ref().err().expect("load must fail");
+            assert!(!err.is_empty());
+            ctx.pages.push(done.page);
+            let pending = ctx.pending_loads.remove(&page_id).unwrap();
+            crate::diting_cdp::domains::page::emit_navigation_tail(
+                &mut ctx,
+                &pending,
+                &page_id,
+                Some(err.as_str()),
+            );
+            // Chrome shape: frameNavigated carrying errorText, then
+            // frameStoppedLoading — and no load lifecycle for the dead load.
+            let err_nav = ctx
+                .pending_events
+                .iter()
+                .rev()
+                .find(|e| e.method == "Page.frameNavigated")
+                .expect("error frameNavigated");
+            assert!(
+                err_nav.params["frame"]["errorText"]
+                    .as_str()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false),
+                "{:?}",
+                err_nav.params
+            );
+            assert!(
+                ctx.pending_events
+                    .iter()
+                    .any(|e| e.method == "Page.frameStoppedLoading")
+            );
+            assert!(
+                !ctx
+                    .pending_events
+                    .iter()
+                    .any(|e| e.method == "Page.loadEventFired"),
+                "a failed load must not fire loadEventFired"
+            );
+        });
+    }
+
+    #[test]
+    fn should_park_parks_reads_but_never_enable_or_unknown_sessions() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session = format!("{page_id}-session");
+        ctx.sessions.insert(session.clone(), page_id.clone());
+        ctx.pending_loads.insert(
+            page_id.clone(),
+            super::PendingNav {
+                session_id: None,
+                old_loader: String::new(),
+                announced_url: String::new(),
+            },
+        );
+        let sid = Some(session.clone());
+        let req = |method: &str| CdpRequest {
+            id: 1,
+            method: method.to_string(),
+            params: json!({}),
+            session_id: sid.clone(),
+        };
+        assert!(ctx.should_park(&req("Runtime.evaluate")));
+        assert!(ctx.should_park(&req("Page.captureScreenshot")));
+        assert!(!ctx.should_park(&req("Page.enable")));
+        assert!(!ctx.should_park(&req("Runtime.enable")));
+        assert!(!ctx.should_park(&req("Page.disable")));
+        // Unknown session: no page to resolve to, nothing to park on.
+        let unknown = CdpRequest {
+            id: 2,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({}),
+            session_id: Some("nope".to_string()),
+        };
+        assert!(!ctx.should_park(&unknown));
     }
 }
