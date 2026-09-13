@@ -2082,6 +2082,59 @@ mod tests {
         );
     }
 
+    // attachToBrowserTarget must mint a fresh session per attachment
+    // (obscura#975 same hole): a client that attaches twice and detaches one
+    // session must not silently lose the other. Both sessions still route to
+    // the implicit "browser" target.
+    #[tokio::test(flavor = "current_thread")]
+    async fn attach_to_browser_target_mints_distinct_sessions() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+
+        let mut session_ids = Vec::new();
+        for id in 1..=2 {
+            let resp = dispatch(
+                &CdpRequest {
+                    id,
+                    method: "Target.attachToBrowserTarget".to_string(),
+                    params: json!({}),
+                    session_id: None,
+                },
+                &mut ctx,
+            )
+            .await;
+            assert!(resp.error.is_none());
+            let session_id = resp.result.expect("result")["sessionId"]
+                .as_str()
+                .expect("sessionId")
+                .to_string();
+            assert_eq!(
+                ctx.sessions.get(&session_id).map(String::as_str),
+                Some("browser"),
+                "session must route to the browser target"
+            );
+            session_ids.push(session_id);
+        }
+        assert_ne!(
+            session_ids[0], session_ids[1],
+            "each attachment gets its own session"
+        );
+
+        let events = std::mem::take(&mut ctx.pending_events);
+        let attached: Vec<_> = events
+            .iter()
+            .filter(|e| e.method == "Target.attachedToTarget")
+            .collect();
+        assert_eq!(attached.len(), 2, "one attachedToTarget per attach");
+        let event_sessions: Vec<_> = attached
+            .iter()
+            .map(|e| e.params["sessionId"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(event_sessions, session_ids, "events carry the minted ids");
+        for event in &attached {
+            assert_eq!(event.params["targetInfo"]["type"], "browser");
+        }
+    }
+
     // Target discovery surfaces must agree (obscura#570 class): /json/list,
     // Target.getTargets, and the setDiscoverTargets event stream all read the
     // same per-connection context. A fresh connection has no pages, so all

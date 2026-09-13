@@ -106,7 +106,7 @@ impl Serialize for SessionError {
 /// Called after every command so the queue drains regularly (a long
 /// non-CDP session would otherwise grow it unboundedly) and by the Console
 /// command itself.
-fn drain_console(page: &Page, ring: &mut std::collections::VecDeque<Value>) {
+fn drain_console(page: &mut Page, ring: &mut std::collections::VecDeque<Value>) {
     let calls = page.inner.take_pending_console_calls();
     if calls.is_empty() {
         return;
@@ -1765,7 +1765,7 @@ fn session_thread(
                         }
 
                         SessionCommand::Console { filter, reply } => {
-                            drain_console(&page, &mut console_ring);
+                            drain_console(&mut page, &mut console_ring);
                             let total = console_ring.len();
                             let mut messages: Vec<Value> = console_ring
                                 .iter()
@@ -1790,7 +1790,7 @@ fn session_thread(
                         SessionCommand::Dialog { action, prompt_text, reply } => {
                             let out = match action.as_str() {
                                 "list" => {
-                                    drain_console(&page, &mut console_ring);
+                                    drain_console(&mut page, &mut console_ring);
                                     let (accept, prompt_text) = page.inner.dialog_policy();
                                     let dialogs: Vec<Value> = console_ring
                                         .iter()
@@ -2192,7 +2192,7 @@ fn session_thread(
                     // loop is idle, so quiescent pages pay nothing; busy pages
                     // get up to 1.5s of drain per command.
                     page.settle_until_idle(1500).await;
-                    drain_console(&page, &mut console_ring);
+                    drain_console(&mut page, &mut console_ring);
                 }
             })
             .await;

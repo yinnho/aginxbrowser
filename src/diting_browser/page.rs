@@ -209,6 +209,11 @@ pub struct Page {
     /// after rebuild — otherwise a same-origin navigation or a second target's
     /// evaluate wipes the store (upstream #678).
     session_storage: Option<(String, std::collections::HashMap<String, String>)>,
+    /// Console calls drained out of the realm when it was suspended. Without
+    /// this buffer, anything logged since the last drain died with the realm
+    /// on a target switch or storm-control park, and the client saw an empty
+    /// console after resume (obscura#971 same hole).
+    suspended_console: Vec<(String, String, String)>,
     /// Viewport override for session_viewport / CDP
     /// setDeviceMetricsOverride: (width, height, mobile). Lives on the
     /// Page, not the realm, because every navigation rebuilds the realm and
@@ -369,6 +374,7 @@ impl Page {
             carried_network_url: String::new(),
             network_event_counter: 0,
             session_storage: None,
+            suspended_console: Vec::new(),
             viewport_override: None,
             dpr_override: None,
             fp_seed: u64::from_be_bytes(
@@ -2548,6 +2554,9 @@ impl Page {
             if let Some(dom) = js.take_dom() {
                 self.dom = Some(dom);
             }
+            // Drain before the realm drops: console calls logged since the
+            // last pump must survive suspension like the DOM does.
+            self.suspended_console.extend(js.take_pending_console_calls());
         }
         self.js = None;
     }
@@ -2598,12 +2607,14 @@ impl Page {
 
     /// Drain queued console calls (level, message, page URL at log time)
     /// for CDP `Runtime.consoleAPICalled` and the session console ring.
-    pub fn take_pending_console_calls(&self) -> Vec<(String, String, String)> {
+    /// Returns the suspension buffer first, then the live realm's pending
+    /// calls, so ordering across a suspend/resume round-trip is preserved.
+    pub fn take_pending_console_calls(&mut self) -> Vec<(String, String, String)> {
+        let mut calls = std::mem::take(&mut self.suspended_console);
         if let Some(js) = &self.js {
-            js.take_pending_console_calls()
-        } else {
-            Vec::new()
+            calls.extend(js.take_pending_console_calls());
         }
+        calls
     }
 
     /// Set the session-side dialog policy for window.confirm/prompt (see
@@ -3624,6 +3635,34 @@ ms.addEventListener('sourceopen', function(){ \
         assert_eq!(
             p.evaluate("sessionStorage.getItem('foo')"),
             serde_json::json!("bar")
+        );
+    }
+
+    // Console calls logged before a suspension must survive it (obscura#971
+    // same hole): the realm drops, but the client reading the console ring
+    // after a resume still expects everything it hasn't drained yet.
+    #[tokio::test(flavor = "current_thread")]
+    async fn console_calls_survive_suspend_resume() {
+        let mut p = test_page();
+        p.navigate("data:text/html,<html><title>C</title></html>")
+            .await
+            .unwrap();
+        p.evaluate("console.error('pre-suspend')");
+        p.suspend_js();
+        // The realm is gone here — pre-fix, a take at this point returned
+        // empty and the message was destroyed with it.
+        p.resume_js();
+        p.evaluate("console.error('post-resume')");
+        let calls = p.take_pending_console_calls();
+        let msgs: Vec<&str> = calls.iter().map(|(_, m, _)| m.as_str()).collect();
+        assert_eq!(
+            msgs,
+            vec!["pre-suspend", "post-resume"],
+            "suspension buffer merges ahead of the live realm's calls"
+        );
+        assert!(
+            p.take_pending_console_calls().is_empty(),
+            "a take drains both sources"
         );
     }
 

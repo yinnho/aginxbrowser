@@ -157,8 +157,10 @@ pub async fn handle(
         "attachToBrowserTarget" => {
             // Playwright calls this on connect to obtain a session for the
             // implicit "browser" target. Returning Unknown method aborts the
-            // connect handshake before any user code runs.
-            let session_id = "browser-session".to_string();
+            // connect handshake before any user code runs. Each attachment
+            // mints its own session (Chrome parity): a client that attaches
+            // twice and detaches one session must not lose the other.
+            let session_id = ctx.next_target_session("browser");
             ctx.sessions
                 .insert(session_id.clone(), "browser".to_string());
 
