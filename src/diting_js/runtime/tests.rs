@@ -8806,3 +8806,55 @@
         let (yb, ya) = (d["y1Before"].as_f64().unwrap(), d["y1After"].as_f64().unwrap());
         assert!(ya > yb + 5.0, "JS-inserted text synthesizes a cell on re-layout ({yb} -> {ya})");
     }
+
+/// white-space / text-overflow ride the computed-style table (blitz#888):
+/// the author's declaration reports back verbatim, white-space inherits
+/// through the cascade while text-overflow does not, and the geometry
+/// keeps the full text (scrollWidth outgrows the clip box — Chrome parity,
+/// the ellipsis marker is a paint-time effect).
+#[cfg(feature = "screenshot")]
+#[test]
+fn computed_style_and_geometry_for_nowrap_ellipsis() {
+    let mut rt = setup_runtime(
+        r#"<div id="clip" style="width:80px;overflow:hidden;text-overflow:ellipsis"><span id="nw" style="white-space:nowrap">alpha beta gamma delta epsilon zeta eta theta</span></div><div id="plain">hi</div>"#,
+    );
+    let parts = rt
+        .evaluate(
+            r#"
+            const clip = document.getElementById("clip"),
+                  nw = document.getElementById("nw"),
+                  plain = document.getElementById("plain");
+            const csC = getComputedStyle(clip), csN = getComputedStyle(nw), csP = getComputedStyle(plain);
+            return [
+                csC.getPropertyValue("white-space"), csC.getPropertyValue("text-overflow"),
+                csN.whiteSpace, csN.textOverflow,
+                csP.whiteSpace, csP.textOverflow,
+                clip.scrollWidth, clip.clientWidth,
+                nw.getBoundingClientRect().height,
+            ];
+        "#,
+        )
+        .unwrap();
+    let parts = parts.as_array().expect("array result");
+    assert_eq!(parts[0], serde_json::json!("normal"), "white-space unset on the outer box");
+    assert_eq!(parts[1], serde_json::json!("ellipsis"));
+    assert_eq!(
+        parts[2],
+        serde_json::json!("nowrap"),
+        "white-space comes from the declaration"
+    );
+    assert_eq!(
+        parts[3],
+        serde_json::json!("clip"),
+        "text-overflow does not inherit (CSS UI §5.2)"
+    );
+    assert_eq!(parts[4], serde_json::json!("normal"));
+    assert_eq!(parts[5], serde_json::json!("clip"), "initial text-overflow is clip");
+    let (sw, cw) = (parts[6].as_f64().unwrap(), parts[7].as_f64().unwrap());
+    assert!(
+        sw > cw + 20.0,
+        "scrollWidth keeps the full nowrap text ({sw} > {cw})"
+    );
+    let h = parts[8].as_f64().unwrap();
+    assert!(h > 10.0 && h < 30.0, "nowrap keeps the run on one line ({h})");
+}

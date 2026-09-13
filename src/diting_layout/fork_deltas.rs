@@ -2310,3 +2310,81 @@ fn phrasing_content_uas_share_one_text_line() {
         "all phrasing tokens share one line (baseline tops differ by font size only), y-spread = {spread}"
     );
 }
+
+/// blitz#888 same gap: `white-space: nowrap` + `text-overflow: ellipsis`.
+/// nowrap keeps the run on one line (measure takes the max-content path);
+/// the ellipsis is a PAINT-time marker — the PaintItem keeps the full text
+/// plus a truncate_at limit, so geometry/selection semantics stay Chrome's.
+/// The marker arms only under the classic trio (overflow non-visible +
+/// nowrap + ellipsis); any leg missing leaves the text clipped, no marker.
+#[test]
+fn nowrap_ellipsis_marks_paint_truncation_and_keeps_full_text() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::PaintItem;
+
+    let probe = |style: &str| {
+        let html = format!(
+            r#"<html><body><div style="width:80px;{style}">alpha beta gamma delta epsilon zeta</div></body></html>"#
+        );
+        let tree = parse_html(&html);
+        let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
+        let styles = crate::diting_layout::compute_styles(&tree, &rules);
+        let div = tree.query_selector_all("div").unwrap()[0];
+        let (rects, items, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+            &tree,
+            &styles,
+            &crate::diting_fonts::font_book(),
+            1280.0,
+            800.0,
+            None,
+            None,
+        );
+        (rects[&div], items)
+    };
+    let text_of = |items: &[PaintItem]| {
+        items
+            .iter()
+            .find_map(|it| match it {
+                PaintItem::Text {
+                    text,
+                    wrap_at,
+                    truncate_at,
+                    ..
+                } if text.contains("alpha") => Some((text.clone(), *wrap_at, *truncate_at)),
+                _ => None,
+            })
+            .expect("the run paints as one text item")
+    };
+
+    // Full trio: one line, full text retained, truncate armed at the content
+    // box width, wrap disabled (wrap_at is infinite — paint never wraps).
+    let (r, items) = probe("overflow:hidden;white-space:nowrap;text-overflow:ellipsis");
+    let (text, wrap_at, truncate_at) = text_of(&items);
+    assert!(wrap_at.is_infinite(), "nowrap never wraps, wrap_at={wrap_at}");
+    assert_eq!(truncate_at, Some(80.0), "marker arms at the content box width");
+    assert!(
+        text.contains("epsilon zeta"),
+        "the item keeps the FULL text — truncation is raster-time ({text:?})"
+    );
+    let nowrap_h = r.height;
+
+    // Same text, wrapping: multiple lines, no marker, finite wrap.
+    let (r, items) = probe("overflow:hidden;text-overflow:ellipsis");
+    let (text, wrap_at, truncate_at) = text_of(&items);
+    assert!(wrap_at.is_finite() && wrap_at <= 81.0);
+    assert_eq!(truncate_at, None, "no marker without nowrap (v1)");
+    assert!(r.height > nowrap_h + 10.0, "wrapping stacks lines ({} vs {})", r.height, nowrap_h);
+    let _ = text;
+
+    // nowrap alone: still one line, still no marker.
+    let (_, items) = probe("overflow:hidden;white-space:nowrap");
+    let (_, wrap_at, truncate_at) = text_of(&items);
+    assert!(wrap_at.is_infinite());
+    assert_eq!(truncate_at, None);
+
+    // nowrap + ellipsis but overflow visible: the marker needs a clipping box.
+    let (_, items) = probe("white-space:nowrap;text-overflow:ellipsis");
+    let (_, _, truncate_at) = text_of(&items);
+    assert_eq!(truncate_at, None, "no marker on a visible-overflow box");
+}

@@ -442,6 +442,13 @@ impl Page {
         // attacker-controlled state, trigger a navigation, and then
         // run code in the next document's context.
         self.snapshot_session_storage();
+        // Same drain as suspend_js: console calls the outgoing document
+        // logged since the last pump must survive the realm swap (Chrome
+        // preserves per-tab console history across navigations).
+        if let Some(js) = self.js.as_mut() {
+            let calls = js.take_pending_console_calls();
+            self.suspended_console.extend(calls);
+        }
         if self.js.is_some() {
             let _ = self.js.take();
         }
@@ -1707,6 +1714,10 @@ impl Page {
 
     pub fn navigate_blank(&mut self) {
         self.snapshot_session_storage();
+        if let Some(js) = self.js.as_mut() {
+            let calls = js.take_pending_console_calls();
+            self.suspended_console.extend(calls);
+        }
         self.js = None;
         self.url = Some(Url::parse("about:blank").unwrap());
         self.dom = Some(parse_html("<!DOCTYPE html><html><head></head><body></body></html>"));
@@ -3663,6 +3674,29 @@ ms.addEventListener('sourceopen', function(){ \
         assert!(
             p.take_pending_console_calls().is_empty(),
             "a take drains both sources"
+        );
+    }
+
+    // Console calls logged by the outgoing document must survive the realm
+    // swap in init_js/navigate_blank the same way suspend_js preserves them —
+    // Chrome keeps per-tab console history across navigations.
+    #[tokio::test(flavor = "current_thread")]
+    async fn console_calls_survive_navigation() {
+        let mut p = test_page();
+        p.navigate("data:text/html,<html><title>one</title></html>")
+            .await
+            .unwrap();
+        p.evaluate("console.error('pre-nav')");
+        // Real navigation path (init_js realm rebuild), not suspend/resume.
+        p.navigate("data:text/html,<html><title>two</title></html>")
+            .await
+            .unwrap();
+        let calls = p.take_pending_console_calls();
+        let msgs: Vec<&str> = calls.iter().map(|(_, m, _)| m.as_str()).collect();
+        assert_eq!(msgs, vec!["pre-nav"], "outgoing document's calls survive");
+        assert!(
+            p.take_pending_console_calls().is_empty(),
+            "navigation buffer drains with the take"
         );
     }
 

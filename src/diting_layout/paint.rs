@@ -12,7 +12,7 @@
 //! per-side border colors/styles, network-loaded images (data: PNG only),
 //! gradients, z-index/stacking contexts.
 
-use super::text::{baseline_offset, greedy_wrap, tokens_of, ScaledMetrics, TextRaster};
+use super::text::{baseline_offset, greedy_wrap, tokens_of, truncate_tokens, ScaledMetrics, TextRaster};
 use super::{FontBook, PaintItem, TextGradient};
 use crate::diting_css::TextDecorations;
 
@@ -1094,6 +1094,7 @@ fn paint_text_decorations(
     decorations: TextDecorations,
     mono: bool,
     word_spacing: f32,
+    truncate_at: Option<f32>,
     dx: f32,
     dy: f32,
 ) {
@@ -1101,6 +1102,12 @@ fn paint_text_decorations(
         return;
     }
     let tokens = tokens_of(text, font_size, bold, fonts, mono, word_spacing);
+    // The ellipsis marker is undecorated (Chrome): strokes span the kept
+    // tokens only, so underline/line-through end at the truncation cut.
+    let tokens = match truncate_at.and_then(|limit| truncate_tokens(&tokens, limit, font_size, bold, fonts, mono, word_spacing)) {
+        Some((kept, _marker)) => kept,
+        None => tokens,
+    };
     let lines = greedy_wrap(&tokens, Some(wrap_at.max(0.0)));
     let m = fonts.metrics(font_size, bold).unwrap_or(ScaledMetrics {
         ascent: font_size,
@@ -1324,6 +1331,7 @@ fn paint_form_control(
             line_height,
             false,
             0.0, // control labels carry no inherited word-spacing (v1 boundary)
+            None, // control labels never truncate (input text-overflow is a v2 face)
         );
         out.push_clip(x + 1, y + 1, x + w - 1, y + h - 1);
         out.blit_text(&r, tx.round() as i64, (ty + r.top).round() as i64);
@@ -1703,6 +1711,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                                     *line_height,
                                     false,
                                     0.0,
+                                    None,
                                 );
                                 scratch.blit_text(&r, 0, r.top.round() as i64);
                                 scratch.pop_clip();
@@ -1750,6 +1759,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                                     *line_height,
                                     false,
                                     0.0,
+                                    None,
                                 );
                                 out.blit_text(&r, x, (y as f32 + r.top).round() as i64);
                                 out.pop_clip();
@@ -1790,7 +1800,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     super::svg::paint_svg(render, rect, fonts, out, dx, dy, *alpha);
                 }
             }
-            PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at, gradient, decorations, mono, word_spacing } => {
+            PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at, gradient, decorations, mono, word_spacing, truncate_at } => {
                 // background-clip: text: the fill color is ignored entirely
                 // (CSS paints the background through the glyphs; the
                 // transparent-text-fill half of the idiom is free by
@@ -1817,7 +1827,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     if bx1 <= 0 || by1 <= 0 || bx0 >= out.width as i64 || by0 >= out.height as i64 {
                         continue;
                     }
-                    let r = fonts.rasterize_wrapped(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono, *word_spacing);
+                    let r = fonts.rasterize_wrapped(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at);
                     // Gradient recolor rewrites pixels in place — the cache
                     // hands out Arcs, so that path clones first (#399).
                     let mut owned;
@@ -1829,12 +1839,12 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                         &r
                     };
                     out.blit_rgba_affine(&r.data, r.width, r.height, *x as f64, (*y + r.top) as f64);
-                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, *mono, *word_spacing, 0.0, 0.0);
+                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, 0.0, 0.0);
                 } else {
                     if !text_reaches_band(*y, text, *font_size, *wrap_at, *line_height, dy, out.height as i64) {
                         continue;
                     }
-                    let r = fonts.rasterize_wrapped(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono, *word_spacing);
+                    let r = fonts.rasterize_wrapped(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at);
                     let mut owned;
                     let r = if let Some(g) = gradient {
                         owned = (*r).clone();
@@ -1845,7 +1855,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     };
                     // Tile row 0 sits `top` px above the leaf's line-box top.
                     out.blit_text(r, (x - dx).round() as i64, (y - dy + r.top).round() as i64);
-                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, *mono, *word_spacing, dx, dy);
+                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, dx, dy);
                 }
             }
         }
@@ -1898,6 +1908,7 @@ mod tests {
             decorations: TextDecorations::default(),
             mono: false,
             word_spacing: 0.0,
+            truncate_at: None,
         }];
         let fonts = crate::diting_fonts::font_book();
         let mut c = Canvas::new_filled(120, 40, [255, 255, 255, 255]);
@@ -2081,7 +2092,7 @@ mod tests {
                 form: None,
                 caret: None,
             },
-            PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0 },
+            PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None },
         ];
         let fonts = crate::diting_fonts::font_book();
         let mut full = Canvas::new_filled(40, 60, [255, 255, 255, 255]);
@@ -2111,6 +2122,7 @@ mod tests {
                 decorations,
                 mono: false,
                 word_spacing: 0.0,
+                truncate_at: None,
             }];
             let mut c = Canvas::new_filled(80, 32, [255, 255, 255, 255]);
             execute(&items, &fonts, &mut c);
@@ -2154,6 +2166,7 @@ mod tests {
                 decorations: TextDecorations { underline: true, ..Default::default() },
                 mono: false,
                 word_spacing: 0.0,
+                truncate_at: None,
             },
             PaintItem::ClearXf,
         ];
@@ -2481,8 +2494,8 @@ mod tests {
         let fonts = crate::diting_fonts::font_book();
         // A tall low-content page: only two text leaves, one near the band.
         let items = vec![
-            PaintItem::Text { text: "edge".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 96.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0 },
-            PaintItem::Text { text: "far".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 500.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0 },
+            PaintItem::Text { text: "edge".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 96.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None },
+            PaintItem::Text { text: "far".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 500.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None },
         ];
         let mut band = Canvas::new_filled(40, 80, [255, 255, 255, 255]);
         execute_band(&items, &fonts, &mut band, 0.0, 100.0);
@@ -2608,6 +2621,7 @@ mod tests {
                 decorations: TextDecorations::default(),
                 mono: false,
                 word_spacing: 0.0,
+                truncate_at: None,
             },
             PaintItem::ClearXf,
         ];
@@ -2758,5 +2772,48 @@ mod tests {
         assert_eq!(px(&c, 41, 11), [0, 0, 200, 255], "bracket restored after ClearXf");
         assert_eq!(px(&c, 45, 15), [0, 0, 200, 255], "restored map far corner");
         assert_eq!(px(&c, 50, 15), [255, 255, 255, 255], "restored map edge exclusive");
+    }
+
+    /// text-overflow: ellipsis (blitz#888): the marker is a raster-time
+    /// rendering effect. Ink stops at the truncate limit (the overflow is
+    /// never painted) while the untruncated run inks well past it, and the
+    /// truncated run still carries marker ink near the limit.
+    #[test]
+    fn ellipsis_truncates_paint_ink_at_the_limit() {
+        let fonts = crate::diting_fonts::font_book();
+        let paint = |truncate_at: Option<f32>| {
+            let items = vec![PaintItem::Text {
+                text: "mmmmmmmmmmmmmmmmmmmm".into(),
+                font_size: 16.0,
+                bold: false,
+                color: [0, 0, 0, 255],
+                line_height: 20.0,
+                x: 2.0,
+                y: 4.0,
+                wrap_at: 400.0,
+                gradient: None,
+                decorations: TextDecorations::default(),
+                mono: false,
+                word_spacing: 0.0,
+                truncate_at,
+            }];
+            let mut c = Canvas::new_filled(400, 32, [255, 255, 255, 255]);
+            execute(&items, &fonts, &mut c);
+            c
+        };
+        let right_edge = |c: &Canvas| -> usize {
+            (0..c.width)
+                .rev()
+                .find(|&x| (0..c.height).any(|y| px(c, x, y)[3] > 0 && px(c, x, y)[0] < 128))
+                .unwrap_or(0)
+        };
+        let clipped = right_edge(&paint(Some(60.0)));
+        let full = right_edge(&paint(None));
+        assert!(
+            clipped <= 2 + 62,
+            "ink stops at the limit (x=2 + 60), got {clipped}"
+        );
+        assert!(full > 80, "untruncated run inks past the limit, got {full}");
+        assert!(clipped > 30, "marker ink near the limit, got {clipped}");
     }
 }

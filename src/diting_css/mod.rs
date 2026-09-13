@@ -493,6 +493,7 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "border-color", "border-width", "border-style",
         "border-top-width", "border-right-width", "border-bottom-width", "border-left-width",
         "width", "height", "flex-direction", "gap", "overflow",
+        "white-space", "text-overflow",
         "object-fit", "object-position", "z-index", "border-radius",
         "float", "clear", "border-collapse", "vertical-align", "opacity", "transform",
     ];
@@ -522,6 +523,8 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
             || value.starts_with("url(")
             || value.contains("gradient"),
         "text-align" => matches!(value, "left" | "start" | "center" | "right" | "end" | "justify"),
+        "white-space" => matches!(value, "normal" | "nowrap"),
+        "text-overflow" => matches!(value, "clip" | "ellipsis"),
         "line-height" => parse_line_height(value).is_some(),
         "object-fit" => matches!(
             value,
@@ -636,6 +639,12 @@ pub struct ComputedStyle {
     /// collapsed " " token's advance, CSS Text §7.1). `None` = `normal`
     /// (no extra); negative values tighten.
     pub word_spacing: Option<f32>,
+    /// Inherited: `nowrap` disables wrapping for inline runs inside this box.
+    /// `None` = `normal`.
+    pub white_space: Option<WhiteSpace>,
+    /// `text-overflow` (non-inherited): the marker a clipping box draws over
+    /// overflowing inline content. `None` = `clip`.
+    pub text_overflow: Option<TextOverflow>,
     pub text_align: Option<TextAlign>,
     /// Overflow clipping (batch 4c), uniform for both axes. Any non-visible
     /// value clips descendants' paint to the padding box; per-axis
@@ -927,6 +936,26 @@ pub enum Overflow {
     Clip,
     Scroll,
     Auto,
+}
+
+/// `white-space`. `normal` and `nowrap` are honored (nowrap: collapse
+/// whitespace like normal but never wrap — the run measures at max-content
+/// and overflows its container). The `pre` family is left unparsed for now,
+/// so a `pre` declaration falls through and keeps today's normal behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhiteSpace {
+    Normal,
+    Nowrap,
+}
+
+/// `text-overflow` (non-inherited). Only meaningful on a box that clips
+/// (`overflow` non-visible); the marker itself is applied at paint/raster
+/// time — layout rects, scroll extents and selection keep the full text,
+/// per spec. The `<string>` form is a later batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextOverflow {
+    Clip,
+    Ellipsis,
 }
 
 /// `object-fit` (batch 5c): how replaced content maps into its box. The
@@ -2736,6 +2765,25 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             };
             true
         }
+        "white-space" => {
+            style.white_space = match v {
+                "normal" => Some(WhiteSpace::Normal),
+                "nowrap" => Some(WhiteSpace::Nowrap),
+                // The pre family changes whitespace collapsing, not just
+                // wrapping — not modeled yet, so the declaration stays
+                // unparsed instead of silently reading as normal.
+                _ => return false,
+            };
+            true
+        }
+        "text-overflow" => {
+            style.text_overflow = match v {
+                "clip" => Some(TextOverflow::Clip),
+                "ellipsis" => Some(TextOverflow::Ellipsis),
+                _ => return false,
+            };
+            true
+        }
         "object-fit" => {
             style.object_fit = match v {
                 "fill" => Some(ObjectFit::Fill),
@@ -3763,6 +3811,8 @@ pub fn cascade_element(
         // Same inherited posture as text_align above: the element's own UA
         // declaration beats an inherited value, author rules below re-declare.
         style.word_spacing = style.word_spacing.or(parent.word_spacing);
+        // white-space inherits; the element's own declaration wins.
+        style.white_space = style.white_space.or(parent.white_space);
         // Custom properties inherit computed (already-substituted-where-
         // possible) values; author rules below may re-declare per element.
         style.custom = parent.custom.clone();
@@ -5521,5 +5571,38 @@ mod tests {
         let m = t.to_matrix_with(200.0, 100.0);
         assert!((m[4] - 20.0).abs() < 1e-4, "10% of 200");
         assert!((m[5] - 25.0).abs() < 1e-4, "25% of 100");
+    }
+
+    /// white-space parses normal/nowrap (the pre family stays unparsed),
+    /// text-overflow parses clip/ellipsis; white-space inherits,
+    /// text-overflow does not (CSS UI §5.2).
+    #[test]
+    fn white_space_and_text_overflow_parse_and_inherit() {
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "white-space: nowrap; text-overflow: ellipsis");
+        assert_eq!(s.white_space, Some(WhiteSpace::Nowrap));
+        assert_eq!(s.text_overflow, Some(TextOverflow::Ellipsis));
+
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "white-space: normal; text-overflow: clip");
+        assert_eq!(s.white_space, Some(WhiteSpace::Normal));
+        assert_eq!(s.text_overflow, Some(TextOverflow::Clip));
+
+        // Unknown values drop the whole declaration.
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "white-space: pre; text-overflow: '…'");
+        assert_eq!(s.white_space, None);
+        assert_eq!(s.text_overflow, None);
+
+        let tree = diting_dom::tree_sink::parse_html(r#"<div><p>x</p></div>"#);
+        let p = tree.query_selector("p").unwrap().unwrap();
+        let parent = ComputedStyle {
+            white_space: Some(WhiteSpace::Nowrap),
+            text_overflow: Some(TextOverflow::Ellipsis),
+            ..Default::default()
+        };
+        let child = cascade_element("p", &tree, p, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(child.white_space, Some(WhiteSpace::Nowrap), "white-space inherits");
+        assert_eq!(child.text_overflow, None, "text-overflow does not inherit");
     }
 }

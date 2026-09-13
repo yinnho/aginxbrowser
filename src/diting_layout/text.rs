@@ -365,10 +365,14 @@ impl FontBook {
         line_height: f32,
         mono: bool,
         word_spacing: f32,
+        truncate_at: Option<f32>,
     ) -> Arc<TextRaster> {
         let key = RasterKey {
             fingerprint: self.fingerprint,
-            kind: RasterKind::Wrapped { wrap_at_bits: wrap_at.to_bits() },
+            kind: RasterKind::Wrapped {
+                wrap_at_bits: wrap_at.to_bits(),
+                truncate_at_bits: truncate_at.unwrap_or(0.0).to_bits(),
+            },
             text: text.into(),
             font_size_bits: font_size.to_bits(),
             bold,
@@ -379,7 +383,7 @@ impl FontBook {
         };
         RasterCache::get_or_insert(key, || {
             self.rasterize_wrapped_uncached(
-                text, font_size, bold, color, wrap_at, line_height, mono, word_spacing,
+                text, font_size, bold, color, wrap_at, line_height, mono, word_spacing, truncate_at,
             )
         })
     }
@@ -395,6 +399,7 @@ impl FontBook {
         line_height: f32,
         mono: bool,
         word_spacing: f32,
+        truncate_at: Option<f32>,
     ) -> TextRaster {
         let empty = || TextRaster {
             width: 0,
@@ -407,6 +412,21 @@ impl FontBook {
             return empty();
         }
         let tokens = tokens_of(text, font_size, bold, self, mono, word_spacing);
+        // text-overflow: ellipsis (nowrap+ellipsis batch): when the run
+        // overflows `truncate_at`, drop whole trailing tokens and append the
+        // U+2026 marker (tokenized with the run's own font params, so the
+        // fallback chain covers it). The marker is part of the painted
+        // tokens; decorations take the kept tokens only (Chrome leaves the
+        // ellipsis undecorated).
+        let tokens = match truncate_at.and_then(|limit| {
+            truncate_tokens(&tokens, limit, font_size, bold, self, mono, word_spacing)
+        }) {
+            Some((mut kept, marker)) => {
+                kept.extend(marker);
+                kept
+            }
+            None => tokens,
+        };
         let lines = greedy_wrap(&tokens, Some(wrap_at.max(0.0)));
         if lines.iter().all(|l| l.width <= 0.0) {
             return empty();
@@ -688,6 +708,74 @@ pub(crate) fn greedy_wrap(tokens: &[Token], wrap_at: Option<f32>) -> Vec<WrapLin
     lines
 }
 
+/// `text-overflow: ellipsis` truncation (nowrap+ellipsis batch): drop whole
+/// trailing tokens until the kept run plus the U+2026 marker fits `limit`,
+/// then return `(kept, marker)` — the marker is tokenized with the run's own
+/// font params so the same fallback chain shapes it. Returns `None` when the
+/// run already fits (Chrome only renders an ellipsis for content that
+/// actually overflows). Decoration strokes take `kept` only — Chrome leaves
+/// the ellipsis itself undecorated.
+pub(crate) fn truncate_tokens(
+    tokens: &[Token],
+    limit: f32,
+    font_size: f32,
+    bold: bool,
+    fonts: &FontBook,
+    mono: bool,
+    word_spacing: f32,
+) -> Option<(Vec<Token>, Vec<Token>)> {
+    let total: f32 = tokens.iter().map(|t| t.width).sum();
+    if total <= limit {
+        return None;
+    }
+    let marker = tokens_of("\u{2026}", font_size, bold, fonts, mono, word_spacing);
+    let marker_w = marker.first().map(|t| t.width).unwrap_or(0.0);
+    let mut kept: Vec<Token> = Vec::with_capacity(tokens.len());
+    let mut w = 0.0f32;
+    for t in tokens {
+        if w + t.width + marker_w > limit {
+            // Chrome cuts at glyph boundaries: an unbreakable word that
+            // doesn't fit whole still fills the remaining space char by
+            // char. Per-char widths skip intra-run kerning (v1 posture).
+            if !t.is_space {
+                let mut acc = String::new();
+                let mut acc_w = w;
+                for ch in t.text.chars() {
+                    let cw = tokens_of(&ch.to_string(), font_size, bold, fonts, mono, 0.0)
+                        .first()
+                        .map(|t| t.width)
+                        .unwrap_or(0.0);
+                    if acc_w + cw + marker_w > limit {
+                        break;
+                    }
+                    acc_w += cw;
+                    acc.push(ch);
+                }
+                if !acc.is_empty() {
+                    kept.push(Token {
+                        text: acc,
+                        width: acc_w - w,
+                        is_space: false,
+                    });
+                }
+            }
+            break;
+        }
+        w += t.width;
+        kept.push(Token {
+            text: t.text.clone(),
+            width: t.width,
+            is_space: t.is_space,
+        });
+    }
+    // Whitespace left at the cut carries no ink and would only sit between
+    // the kept glyphs and the marker.
+    while kept.last().is_some_and(|t| t.is_space) {
+        kept.pop();
+    }
+    Some((kept, marker))
+}
+
 /// Font vertical metrics scaled to a given size, all in px. `ascent` is the
 /// distance above the baseline; `descent` the POSITIVE distance below it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -755,7 +843,14 @@ static RASTER_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
 #[derive(PartialEq, Eq, Hash)]
 enum RasterKind {
     Line,
-    Wrapped { wrap_at_bits: u32 },
+    Wrapped {
+        wrap_at_bits: u32,
+        /// `text-overflow: ellipsis` truncation limit, bits of the limit px
+        /// (`truncate_at_bits == 0.0f32.to_bits()` = no truncation). Part of
+        /// the key: a nowrap+ellipsis run and the same run untruncated share
+        /// the +inf wrap width but must rasterize differently.
+        truncate_at_bits: u32,
+    },
 }
 
 #[derive(PartialEq, Eq, Hash)]
@@ -857,12 +952,12 @@ mod raster_cache_tests {
         let (reg, bold) = production_pair();
         let book = FontBook::from_pairs(reg, bold).unwrap();
         let _held = isolated();
-        let black = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false, 0.0);
-        let again = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false, 0.0);
+        let black = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false, 0.0, None);
+        let again = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false, 0.0, None);
         assert!(Arc::ptr_eq(&black, &again), "repeat must hand back the cached Arc");
         assert!(black.ink_bbox().is_some(), "the tile has real ink");
 
-        let red = book.rasterize_wrapped("缓存命中", 16.0, false, [255, 0, 0, 255], 20.0, 24.0, false, 0.0);
+        let red = book.rasterize_wrapped("缓存命中", 16.0, false, [255, 0, 0, 255], 20.0, 24.0, false, 0.0, None);
         assert!(!Arc::ptr_eq(&black, &red), "color rides the key — a new tile");
         let ink = |r: &TextRaster| {
             r.data
@@ -887,7 +982,7 @@ mod raster_cache_tests {
         let line = book.rasterize(text, 16.0, false, [0, 0, 0, 255], 24.0, false);
         // Narrow wrap: the same text breaks across 4+ lines, so the wrapped
         // tile is much taller than the single-line one.
-        let wrapped = book.rasterize_wrapped(text, 16.0, false, [0, 0, 0, 255], 40.0, 24.0, false, 0.0);
+        let wrapped = book.rasterize_wrapped(text, 16.0, false, [0, 0, 0, 255], 40.0, 24.0, false, 0.0, None);
         assert!(!Arc::ptr_eq(&line, &wrapped), "kinds must not collide");
         assert!(
             wrapped.height > line.height * 2,
@@ -1020,8 +1115,8 @@ mod raster_cache_tests {
         let (reg, bold) = production_pair();
         let book = FontBook::from_pairs(reg, bold).unwrap();
         let _held = isolated();
-        let tight = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0);
-        let loose = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 12.0);
+        let tight = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, None);
+        let loose = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 12.0, None);
         assert_eq!(tight.height, loose.height, "one line either way");
         let ink_right = |r: &TextRaster| r.ink_bbox().map(|b| b.2).unwrap_or(0);
         assert!(
@@ -1030,7 +1125,7 @@ mod raster_cache_tests {
             ink_right(&tight), ink_right(&loose)
         );
         // Negative spacing tightens toward overlap — still deterministic.
-        let tight2 = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, -8.0);
+        let tight2 = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, -8.0, None);
         assert!(ink_right(&tight2) < ink_right(&tight), "negative ws pulls the second word left");
     }
 }
@@ -1095,5 +1190,44 @@ mod tests {
         let solid = colorize(&[255, 128, 0], [10, 20, 30, 255]);
         assert_eq!(&solid[0..4], &[10, 20, 30, 255]);
         assert_eq!(&solid[4..8], &[10, 20, 30, 128]);
+    }
+
+    /// text-overflow: ellipsis (blitz#888): fitting text returns None (the
+    /// marker only renders on overflow, Chrome parity); overflowing text
+    /// keeps the longest prefix whose ink plus the marker fits the limit,
+    /// drops the trailing space, and the marker uses the run's own font
+    /// params (U+2026, covered by the fallback chain).
+    #[test]
+    fn truncate_tokens_clips_to_limit_and_appends_marker() {
+        let fonts = crate::diting_fonts::font_book();
+        let tokens = tokens_of("alpha beta gamma delta", 16.0, false, &fonts, false, 0.0);
+        let total: f32 = tokens.iter().map(|t| t.width).sum();
+
+        assert!(
+            truncate_tokens(&tokens, total + 1.0, 16.0, false, &fonts, false, 0.0).is_none(),
+            "fitting text is untouched"
+        );
+
+        let limit = total / 2.0;
+        let (kept, marker) = truncate_tokens(&tokens, limit, 16.0, false, &fonts, false, 0.0)
+            .expect("overflowing text truncates");
+        let kept_w: f32 = kept.iter().map(|t| t.width).sum();
+        let marker_w: f32 = marker.iter().map(|t| t.width).sum();
+        assert!(marker_w > 0.0 && marker.iter().any(|t| t.text.contains('\u{2026}')));
+        assert!(
+            kept_w + marker_w <= limit + f32::EPSILON,
+            "kept {kept_w} + marker {marker_w} within {limit}"
+        );
+        assert!(kept.len() < tokens.len(), "prefix is strictly shorter");
+        assert!(
+            !kept.last().map(|t| t.is_space).unwrap_or(false),
+            "trailing space is popped"
+        );
+
+        // A bold run's marker must measure wider than the normal run's —
+        // font params flow through.
+        let (_, bold_marker) = truncate_tokens(&tokens, limit, 16.0, true, &fonts, false, 0.0).unwrap();
+        let bold_w: f32 = bold_marker.iter().map(|t| t.width).sum();
+        assert!(bold_w > marker_w, "bold marker measures wider ({bold_w} > {marker_w})");
     }
 }

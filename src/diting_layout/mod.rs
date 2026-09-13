@@ -32,7 +32,7 @@ use taffy::prelude::*;
 use crate::diting_css::{
     AlignMode, ComputedStyle, Display as CssDisplay, FlexDirection as CssFlexDirection,
     FlexWrapMode, GridTrack, JustifyMode, ObjectFit, ObjectPositionPart, Overflow, PositionMode,
-    TextAlign, TextDecorations,
+    TextAlign, TextDecorations, TextOverflow, WhiteSpace,
 };
 use crate::diting_dom::tree::{DomTree, NodeId};
 
@@ -73,7 +73,26 @@ fn is_cjk(c: char) -> bool {
 /// flex-row-of-word-leaves fallback from batch 2b.
 #[derive(Clone)]
 enum TextLeaf {
-    Run { text: String, font_size: f32, bold: bool, color: [u8; 4], line_height: f32, decorations: TextDecorations, baseline_shift: f32, mono: bool, word_spacing: f32 },
+    Run {
+        text: String,
+        font_size: f32,
+        bold: bool,
+        color: [u8; 4],
+        line_height: f32,
+        decorations: TextDecorations,
+        baseline_shift: f32,
+        mono: bool,
+        word_spacing: f32,
+        /// `white-space: nowrap` rides the run: measure drops the wrap
+        /// width (one line, max-content — the box overflows its container
+        /// and scrollWidth grows for free), paint wraps at +inf.
+        nowrap: bool,
+        /// `text-overflow: ellipsis` on the owning element (non-inherited,
+        /// so captured from the block that owns the run). Only acted on
+        /// together with `nowrap` at paint time — layout rects, scroll
+        /// extents and selection keep the full text, per spec.
+        ellipsis: bool,
+    },
     /// One word/glyph of a MIXED run (text around inline elements): the
     /// batch-2b word-leaf fallback, now carrying paint context (batch 4d).
     /// Layout is still style-driven — the measure closure passes Word
@@ -459,9 +478,9 @@ fn resolve_sizing_keywords(
         let space = taffy::geometry::Size { width: w, height: AvailableSpace::MaxContent };
         let _ = taffy_tree.compute_layout_with_measure(node, space, |inputs, _id, ctx, style| {
             match ctx {
-                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, .. }) => {
+                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, .. }) => {
                     let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                    measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing)
+                    measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing, *nowrap)
                 }
                 Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | None => {
                     taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO)
@@ -1151,6 +1170,7 @@ fn measure_text_leaf(
     inputs: &taffy::tree::LayoutInput,
     mono: bool,
     word_spacing: f32,
+    nowrap: bool,
 ) -> taffy::tree::LayoutOutput {
     let known = inputs.known_dimensions;
     let lh = line_height;
@@ -1162,15 +1182,22 @@ fn measure_text_leaf(
     let tokens = text::tokens_of(text, font_size, bold, fonts, mono, word_spacing);
     let widest_token = tokens.iter().map(|t| t.width).fold(0.0, f32::max);
 
-    let wrap_at = match inputs.available_space.width {
-        taffy::AvailableSpace::Definite(w) => Some(w),
-        _ => None,
+    let wrap_at = if nowrap {
+        None
+    } else {
+        match inputs.available_space.width {
+            taffy::AvailableSpace::Definite(w) => Some(w),
+            _ => None,
+        }
     };
     // Greedy wrap over the shared breaker (batch 4a): measure and paint see
     // the same lines by construction.
     let lines = text::greedy_wrap(&tokens, wrap_at);
     let min_content = matches!(inputs.available_space.width, taffy::AvailableSpace::MinContent);
-    let max_line = if min_content { widest_token } else { lines.iter().map(|l| l.width).fold(0.0, f32::max) };
+    // nowrap removes every soft wrap opportunity (CSS Text §5): min-content
+    // rises to the full single line, same as max-content.
+    let max_line =
+        if min_content && !nowrap { widest_token } else { lines.iter().map(|l| l.width).fold(0.0, f32::max) };
     let size = taffy::geometry::Size {
         width: known.width.unwrap_or(max_line.ceil()),
         height: known.height.unwrap_or(lines.len() as f32 * lh + pad),
@@ -2004,7 +2031,7 @@ fn build_flow_column(
     lh_elem: f32,
 ) -> Vec<taffy::tree::NodeId> {
     enum RunSeg {
-        Text(String, f32, bool, [u8; 4], f32, TextDecorations, f32, bool, f32),
+        Text(String, f32, bool, [u8; 4], f32, TextDecorations, f32, bool, f32, bool),
         Nodes(Vec<taffy::tree::NodeId>),
     }
     let mut flow_children: Vec<taffy::tree::NodeId> = Vec::new();
@@ -2020,10 +2047,16 @@ fn build_flow_column(
                 .map(|s| match s { RunSeg::Text(t, ..) => t.as_str(), _ => "" })
                 .collect::<String>();
             if !text.trim().is_empty() {
-                let RunSeg::Text(_, fs, bold, color, lh, deco, vs, mono, ws) = &segs[0] else { unreachable!() };
+                let RunSeg::Text(_, fs, bold, color, lh, deco, vs, mono, ws, _nw) = &segs[0] else { unreachable!() };
+                // Any nowrap segment pins the whole run to one line (white-space
+                // inherits, so a nowrap ancestor marks every text child).
+                let run_nowrap = segs.iter().any(|s| matches!(s, RunSeg::Text(.., true)));
+                // Anonymous flow columns own no element style; text-overflow is
+                // non-inherited, so its owner is unknown here — v1-off.
+                let run_ellipsis = false;
                 if let Ok(leaf) = taffy_tree.new_leaf_with_context(
                     Style::default(),
-                    TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *ws },
+                    TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *ws, nowrap: run_nowrap, ellipsis: run_ellipsis },
                 ) {
                     flow_children.push(leaf);
                 }
@@ -2033,7 +2066,7 @@ fn build_flow_column(
         let mut leaves: Vec<taffy::tree::NodeId> = Vec::new();
         for seg in segs {
             match seg {
-                RunSeg::Text(text, fs, bold, color, lh, deco, vs, mono, ws) => {
+                RunSeg::Text(text, fs, bold, color, lh, deco, vs, mono, ws, _nw) => {
                     leaves.extend(build_word_leaves(&text, fs, bold, color, lh, deco, vs, mono, ws, fonts, taffy_tree))
                 }
                 RunSeg::Nodes(nodes) => leaves.extend(nodes),
@@ -2093,7 +2126,8 @@ fn build_flow_column(
             let vs = valign_shift(tree, child, styles);
             let mono = mono_context(tree, child, styles);
             let ws = word_spacing_context(tree, child, styles);
-            run.push(RunSeg::Text(text, fs, b, col, lh, deco, vs, mono, ws));
+            let nw = tree.with_node(child, |n| n.parent).flatten().and_then(|p| styles.get(&p)).and_then(|s| s.white_space) == Some(WhiteSpace::Nowrap);
+            run.push(RunSeg::Text(text, fs, b, col, lh, deco, vs, mono, ws, nw));
         } else if child_display == Some(CssDisplay::InlineBlock) && !out_of_flow {
             // Atomic inline-level box (obscura#750 family): keeps its own
             // subtree box, joins the run as one shrink-to-fit unit.
@@ -2705,9 +2739,9 @@ fn build_table(
         taffy_tree.disable_rounding();
         let _ = taffy_tree.compute_layout_with_measure(node, space, |inputs, _id, ctx, style| {
             match ctx {
-                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, .. }) => {
+                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, .. }) => {
                     let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                    measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing)
+                    measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing, *nowrap)
                 }
                 Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | None => {
                     taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO)
@@ -2725,9 +2759,9 @@ fn build_table(
         taffy_tree.disable_rounding();
         let _ = taffy_tree.compute_layout_with_measure(node, space, |inputs, _id, ctx, style| {
             match ctx {
-                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, .. }) => {
+                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, .. }) => {
                     let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                    measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing)
+                    measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing, *nowrap)
                 }
                 Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | None => {
                     taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO)
@@ -3094,7 +3128,7 @@ fn build_element(
     // greedy wrap, ceiled width) we reproduce in measure_text_leaf. Mixed
     // runs fall back to the batch-2b wrapping flex row of word leaves.
     enum RunSeg {
-        Text(String, f32, bool, [u8; 4], f32, TextDecorations, f32, bool, f32),
+        Text(String, f32, bool, [u8; 4], f32, TextDecorations, f32, bool, f32, bool),
         Nodes(Vec<taffy::tree::NodeId>),
     }
     let mut direct: Vec<taffy::tree::NodeId> = Vec::new();
@@ -3117,10 +3151,20 @@ fn build_element(
             if text.trim().is_empty() {
                 return;
             }
-            let RunSeg::Text(_, fs, bold, color, lh, deco, vs, mono, ws) = &segs[0] else { unreachable!() };
+            let RunSeg::Text(_, fs, bold, color, lh, deco, vs, mono, ws, _nw) = &segs[0] else { unreachable!() };
+            // Any nowrap segment pins the whole run to one line (white-space
+            // inherits, so a nowrap ancestor marks every text child).
+            let run_nowrap = segs.iter().any(|s| matches!(s, RunSeg::Text(.., true)));
+            // text-overflow is non-inherited and acts on the OWNING block's
+            // inline overflow: the run truncates only when its owner also
+            // clips — the classic nowrap + hidden + ellipsis pattern.
+            let run_ellipsis = styles.get(&id).is_some_and(|s| {
+                s.overflow.is_some_and(|o| o != Overflow::Visible)
+                    && s.text_overflow == Some(TextOverflow::Ellipsis)
+            });
             if let Ok(leaf) = taffy_tree.new_leaf_with_context(
                 Style::default(),
-                TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *ws },
+                TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *ws, nowrap: run_nowrap, ellipsis: run_ellipsis },
             ) {
                 direct.push(leaf);
                 return;
@@ -3129,7 +3173,7 @@ fn build_element(
         let mut leaves: Vec<taffy::tree::NodeId> = Vec::new();
         for seg in segs {
             match seg {
-                RunSeg::Text(text, fs, bold, color, lh, deco, vs, mono, ws) => {
+                RunSeg::Text(text, fs, bold, color, lh, deco, vs, mono, ws, _nw) => {
                     leaves.extend(build_word_leaves(&text, fs, bold, color, lh, deco, vs, mono, ws, fonts, taffy_tree))
                 }
                 RunSeg::Nodes(nodes) => leaves.extend(nodes),
@@ -3738,7 +3782,8 @@ fn build_element(
             let vs = valign_shift(tree, child, styles);
             let mono = mono_context(tree, child, styles);
             let ws = word_spacing_context(tree, child, styles);
-            run.push(RunSeg::Text(text, fs, b, col, lh, deco, vs, mono, ws));
+            let nw = tree.with_node(child, |n| n.parent).flatten().and_then(|p| styles.get(&p)).and_then(|s| s.white_space) == Some(WhiteSpace::Nowrap);
+            run.push(RunSeg::Text(text, fs, b, col, lh, deco, vs, mono, ws, nw));
         } else if child_display == Some(CssDisplay::InlineBlock) && !atomic_container && !out_of_flow {
             // An inline-level block is ATOMIC (Chrome line-box model): it keeps
             // its own subtree box and joins the run as one unit, like a replaced
@@ -3986,6 +4031,11 @@ pub enum PaintItem {
         /// space token's advance at measure AND paint so wrap, glyphs and
         /// decorations all separate by the same amount.
         word_spacing: f32,
+        /// `text-overflow: ellipsis` limit (nowrap+ellipsis batch): when
+        /// Some, paint drops trailing tokens and appends "…" so the ink fits
+        /// this width; layout rects, scroll extents and selection keep the
+        /// full text (the marker is a rendering effect, CSS UI §5.2).
+        truncate_at: Option<f32>,
     },
 }
 
@@ -4132,11 +4182,14 @@ fn expand_wrapped_leaves(
         return;
     }
     let Some((r, m)) = local_by_node.get(&node) else { return };
-    if let Some(TextLeaf::Run { text, font_size, bold, line_height, mono, word_spacing, .. }) =
+    if let Some(TextLeaf::Run { text, font_size, bold, line_height, mono, word_spacing, nowrap, .. }) =
         taffy_tree.get_node_context(node)
     {
         let tokens = text::tokens_of(text, *font_size, *bold, fonts, *mono, *word_spacing);
-        let lines = text::greedy_wrap(&tokens, Some(r.width.max(0.0)));
+        // nowrap keeps its single line here too: the affine path expands a
+        // leaf into per-line tiles, and wrapping a nowrap run at the box
+        // width would split ink the rasterizer lays on one line.
+        let lines = text::greedy_wrap(&tokens, if *nowrap { None } else { Some(r.width.max(0.0)) });
         for (i, line) in lines.iter().enumerate() {
             if line.width <= 0.0 {
                 continue;
@@ -4558,9 +4611,9 @@ pub fn layout_solve(
             let laid_out = taffy_tree
                 .compute_layout_with_measure(icb_node, available, |inputs, _id, ctx, style| {
                     match ctx {
-                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, .. }) => {
+                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, .. }) => {
                             let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                            measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing)
+                            measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing, *nowrap)
                         }
                         _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
                     }
@@ -4675,9 +4728,9 @@ pub fn layout_solve(
     // (that's exactly what stock compute_layout does below via the same fn).
     let measured = taffy_tree.compute_layout_with_measure(icb_node, available, |inputs, _id, ctx, style| {
         match ctx {
-            Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, .. }) => {
+            Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, .. }) => {
                 let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing)
+                measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing, *nowrap)
             }
             // Word leaves keep their style-driven sizing (batch 4d only
             // added paint context — zero layout change).
@@ -4850,9 +4903,9 @@ pub fn layout_solve(
                     icb_node,
                     available,
                     |inputs, _id, ctx, style| match ctx {
-                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, .. }) => {
+                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, .. }) => {
                             let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                            measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing)
+                            measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing, *nowrap)
                         }
                         _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
                     },
@@ -4961,9 +5014,9 @@ pub fn layout_solve(
                 icb_node,
                 available,
                 |inputs, _id, ctx, style| match ctx {
-                    Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, .. }) => {
+                    Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, .. }) => {
                         let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                        measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing)
+                        measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing, *nowrap)
                     }
                     _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
                 },
@@ -5032,9 +5085,9 @@ pub fn layout_solve(
                     icb_node,
                     available,
                     |inputs, _id, ctx, style| match ctx {
-                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, .. }) => {
+                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, .. }) => {
                             let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                            measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing)
+                            measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing, *nowrap)
                         }
                         _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
                     },
@@ -5787,7 +5840,7 @@ pub fn layout_collect(
                 stops: g.stops.iter().map(|(p, c)| (*p, with_alpha(*c, alpha))).collect(),
                 css_deg: g.css_deg,
             });
-        if let Some(TextLeaf::Run { text, font_size, bold, color, line_height, decorations, mono, word_spacing, .. }) = taffy_tree.get_node_context(node) {
+        if let Some(TextLeaf::Run { text, font_size, bold, color, line_height, decorations, mono, word_spacing, nowrap, ellipsis, .. }) = taffy_tree.get_node_context(node) {
             // The wrap width the containing block offered at measure time:
             // the direct taffy parent's content box (the run wrapper for
             // mixed runs, the block itself for pure runs — same width).
@@ -5804,6 +5857,10 @@ pub fn layout_collect(
                     .map(|l| l.content_box_width())
                     .unwrap_or(viewport_width)
                     * xf.a;
+                // nowrap measures/paints one line: wrap at +inf (a distinct
+                // RasterKey), ellipsis truncates at the real box width.
+                let truncate_at = if *ellipsis && *nowrap { Some(wrap_at) } else { None };
+                let wrap_at = if *nowrap { f32::INFINITY } else { wrap_at };
                 items.push(PaintItem::Text {
                     text: text.clone(),
                     font_size: font_size * xf.d,
@@ -5817,6 +5874,7 @@ pub fn layout_collect(
                     decorations: *decorations,
                     mono: *mono,
                     word_spacing: word_spacing * xf.d,
+                    truncate_at,
                 });
             } else {
                 let wrap_at = taffy_tree
@@ -5824,6 +5882,8 @@ pub fn layout_collect(
                     .and_then(|p| taffy_tree.layout(p).ok())
                     .map(|l| l.content_box_width())
                     .unwrap_or(viewport_width);
+                let truncate_at = if *ellipsis && *nowrap { Some(wrap_at) } else { None };
+                let wrap_at = if *nowrap { f32::INFINITY } else { wrap_at };
                 items.push(PaintItem::Text {
                     text: text.clone(),
                     font_size: *font_size,
@@ -5837,6 +5897,7 @@ pub fn layout_collect(
                     decorations: *decorations,
                     mono: *mono,
                     word_spacing: *word_spacing,
+                    truncate_at,
                 });
             }
         }
@@ -5859,6 +5920,7 @@ pub fn layout_collect(
                     decorations: *decorations,
                     mono: *mono,
                     word_spacing: 0.0,
+                    truncate_at: None,
                 });
             } else {
                 items.push(PaintItem::Text {
@@ -5874,6 +5936,7 @@ pub fn layout_collect(
                     decorations: *decorations,
                     mono: *mono,
                     word_spacing: 0.0,
+                    truncate_at: None,
                 });
             }
         }

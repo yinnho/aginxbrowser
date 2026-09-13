@@ -252,6 +252,7 @@ mod tests {
             24.0 * 1.2,
             false,
             0.0,
+            None,
         );
         assert!(wrapped.ink_bbox().is_some(), "wrapped mixed run must have ink");
     }

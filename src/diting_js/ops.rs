@@ -1881,6 +1881,8 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "text-align",
     "line-height",
     "word-spacing",
+    "white-space",
+    "text-overflow",
     "color",
     "background-color",
     "background-image",
@@ -2085,6 +2087,20 @@ fn computed_style_value(
                 Some(v) => format!("{}px", format_number(v)),
                 None => "normal".into(),
             },
+        ),
+        "white-space" => Some(
+            match s.white_space {
+                Some(crate::diting_css::WhiteSpace::Nowrap) => "nowrap",
+                _ => "normal",
+            }
+            .into(),
+        ),
+        "text-overflow" => Some(
+            match s.text_overflow {
+                Some(crate::diting_css::TextOverflow::Ellipsis) => "ellipsis",
+                _ => "clip",
+            }
+            .into(),
         ),
         "color" => s.color.as_ref().map(&color),
         "background-color" => s.background_color.as_ref().map(&color),
