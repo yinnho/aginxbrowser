@@ -8344,3 +8344,55 @@
         assert!((w("plain") - w("code")).abs() > 1.0, "proportional digits differ from mono (diag={d})");
         assert!((w("cjk") - 40.0).abs() < 1.5, "CJK in a mono run keeps full-em (diag={d})");
     }
+
+    /// Anon-cell batch: children of a table-row box that are not table-cells
+    /// wrap into ONE anonymous cell per consecutive run (CSS2.2 §17.2.1),
+    /// claiming a column slot like any td. Static HTML never reaches here —
+    /// the parser foster-parents bare text out of the table (verified:
+    /// `<tr>AAA<td>` puts "AAA" on body before the table, Chrome's exact
+    /// behavior) — so the two real entries are CSS-authored rows
+    /// (display:table-row with non-cell content) and JS tree mutations.
+    #[test]
+    fn test_table_anonymous_cell_synthesis() {
+        let mut rt = setup_runtime(
+            r#"<html><body style="margin:0;font-size:16px">
+              <div style="display:table">
+                <div style="display:table-row">AAA<div id="b1" style="display:table-cell">B</div></div>
+                <div style="display:table-row"><div id="c2" style="display:table-cell">C</div><div id="d2" style="display:table-cell">D</div></div>
+              </div>
+              <div id="t2" style="display:table">
+                <div style="display:table-row">AA<span>BB</span>CC<div id="x1" style="display:table-cell">x</div></div>
+              </div>
+              <table><tr id="r3"><td id="y1">Y</td></tr></table>
+              <table id="t4"><tr><td id="m1">AA<span>BB</span>CC</td><td id="m2">x</td></tr></table>
+            </body></html>"#,
+        );
+        let v = rt
+            .evaluate(
+                r#"JSON.stringify((() => {
+                    const r = (id) => { const b = document.getElementById(id).getBoundingClientRect();
+                                        return { x: b.x, w: b.width }; };
+                    const y1Before = r('y1').x;
+                    document.getElementById('r3').insertBefore(document.createTextNode('ZZ'), document.getElementById('y1'));
+                    return { b1: r('b1'), c2: r('c2'), d2: r('d2'), x1: r('x1'),
+                             t2h: document.getElementById('t2').getBoundingClientRect().height,
+                             m1: r('m1'), m2x: r('m2').x, t4h: document.getElementById('t4').getBoundingClientRect().height,
+                             y1Before, y1After: r('y1').x };
+                })())"#,
+            )
+            .unwrap();
+        let d: serde_json::Value = serde_json::from_str(v.as_str().unwrap()).unwrap();
+        let (b1x, c2x, d2x) = (d["b1"]["x"].as_f64().unwrap(), d["c2"]["x"].as_f64().unwrap(), d["d2"]["x"].as_f64().unwrap());
+        assert!(b1x > c2x + 5.0, "the anon cell claims column 0, pushing B right (diag={d})");
+        assert!((b1x - d2x).abs() < 1.0, "B and D share column 1 across rows (diag={d})");
+        assert!(d["x1"]["x"].as_f64().unwrap() > 5.0, "the inline group claims its column (diag={d})");
+        let t2h = d["t2h"].as_f64().unwrap();
+        let t4h = d["t4h"].as_f64().unwrap();
+        let (x1x, m2x) = (d["x1"]["x"].as_f64().unwrap(), d["m2x"].as_f64().unwrap());
+        assert!(
+            (t2h - t4h).abs() <= 1.0 && (x1x - m2x).abs() < 1.0,
+            "anon cell matches a real cell with identical content (t2h={t2h} t4h={t4h} x1x={x1x} m2x={m2x}, diag={d})"
+        );
+        let (yb, ya) = (d["y1Before"].as_f64().unwrap(), d["y1After"].as_f64().unwrap());
+        assert!(ya > yb + 5.0, "JS-inserted text synthesizes a cell on re-layout ({yb} -> {ya})");
+    }

@@ -2185,7 +2185,7 @@ fn cell_valign_justify(styles: &HashMap<NodeId, ComputedStyle>, dom: &NodeId) ->
 /// `border-collapse: collapse` realizes as zero gaps between rows/cells;
 /// the separate initial gets Chrome's default 2px border-spacing.
 ///
-/// v1 known limits: no anonymous cell synthesis; caption renders top-only
+/// v1 known limits: caption renders top-only
 /// (caption-side:bottom unstyled); colgroup/col contribute widths only;
 /// `table-layout: fixed` requires an authored table width (an auto-width
 /// fixed table falls back to the auto algorithm).
@@ -2258,6 +2258,10 @@ fn build_table(
         /// An invisible slot-holder for a lifted rowspan cell — carries the
         /// column basis but paints nothing and takes no valign treatment.
         phantom: bool,
+        /// A synthesized anonymous cell (CSS2.2 §17.2.1): no DOM box of its
+        /// own, so it takes no collapsed-edge marks and never pins a fixed
+        /// column from a member's style.
+        anon: bool,
     }
     let n_rows = row_ids.len();
     let mut occupied: Vec<Vec<bool>> = vec![Vec::new(); n_rows];
@@ -2327,14 +2331,55 @@ fn build_table(
     // (grid row, wrapper node, cells) — wrappers only exist for rows that
     // produced at least one cell box.
     let mut row_wrappers: Vec<(usize, taffy::tree::NodeId, Vec<CellSlot>)> = Vec::new();
+    // CSS2.2 §17.2.1 anonymous cell synthesis: a run of consecutive row
+    // children that are not table-cells — bare text most of all (a real
+    // HTML parser foster-parents it out of the table; ours keeps it in
+    // place, and skipping it here rendered the content invisible) or stray
+    // elements — wraps into ONE anonymous cell box that claims a column
+    // slot like any td. Whitespace-only text, comments, and display:none
+    // elements generate no box.
+    enum RowItem {
+        Cell(NodeId),
+        Anon(Vec<NodeId>),
+    }
     for (row_idx, rid) in row_ids.iter().enumerate() {
-        let mut cells: Vec<CellSlot> = Vec::new();
+        let mut items: Vec<RowItem> = Vec::new();
         for cid in tree.children(*rid) {
-            if styles.get(&cid).and_then(|s| s.display) != Some(CssDisplay::TableCell) {
+            if styles.get(&cid).and_then(|s| s.display) == Some(CssDisplay::TableCell) {
+                items.push(RowItem::Cell(cid));
                 continue;
             }
-            let col_span = span_attr(cid, "colspan").min(1000);
-            let row_span = span_attr(cid, "rowspan").min(65534).min(n_rows - row_idx).max(1);
+            if tree.with_node(cid, |n| n.is_text()).unwrap_or(false) {
+                let blank = tree
+                    .with_node(cid, |n| {
+                        n.text_content_of_text_node().unwrap_or("").trim().is_empty()
+                    })
+                    .unwrap_or(true);
+                if blank {
+                    continue;
+                }
+            } else if tree.with_node(cid, |n| n.as_element().map(|_| ())).flatten().is_none()
+                || styles.get(&cid).and_then(|s| s.display) == Some(CssDisplay::None)
+            {
+                continue;
+            }
+            match items.last_mut() {
+                Some(RowItem::Anon(group)) => group.push(cid),
+                _ => items.push(RowItem::Anon(vec![cid])),
+            }
+        }
+        let (row_fs, _, row_lh) = font_context(tree, *rid, styles);
+        let mut cells: Vec<CellSlot> = Vec::new();
+        for item in items {
+            let (cell_dom, col_span, anon) = match &item {
+                RowItem::Cell(cid) => (*cid, span_attr(*cid, "colspan").min(1000), false),
+                RowItem::Anon(group) => (group[0], 1, true),
+            };
+            let row_span = if anon {
+                1
+            } else {
+                span_attr(cell_dom, "rowspan").min(65534).min(n_rows - row_idx).max(1)
+            };
             // Leftmost run of col_span free slots in this row.
             let mut col = 0usize;
             loop {
@@ -2346,9 +2391,81 @@ fn build_table(
                 }
                 col += 1;
             }
-            let Some(cell_node) = build_element(
-                tree, cid, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta,
-            ) else {
+            let Some(cell_node) = (match &item {
+                RowItem::Cell(cid) => build_element(
+                    tree, *cid, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta,
+                ),
+                RowItem::Anon(group) => {
+                    // Members build through the normal sibling path (text
+                    // runs, inline flattening, replaced atoms included).
+                    // An all-inline group sits on one shared line (the same
+                    // flex row wrap a text run rides); a block-level member
+                    // stacks the group vertically — the block-in-inline
+                    // split reads top to bottom.
+                    let mut kids: Vec<taffy::tree::NodeId> = Vec::new();
+                    for &mid in group {
+                        build_normal_sibling(
+                            mid, tree, styles, images, fonts, taffy_tree, node_map,
+                            flattened, run_wrappers, meta, false, row_fs, row_lh, &mut kids,
+                        );
+                    }
+                    if kids.is_empty() {
+                        None
+                    } else {
+                        let any_block = group.iter().any(|&mid| {
+                            if tree.with_node(mid, |n| n.is_text()).unwrap_or(false) {
+                                return false;
+                            }
+                            // Same default as build_normal_sibling: an element
+                            // with no computed display is block-level.
+                            !matches!(
+                                styles.get(&mid).and_then(|s| s.display),
+                                Some(CssDisplay::Inline) | Some(CssDisplay::InlineBlock)
+                            )
+                        });
+                        // Two-level shape, mirroring a real cell: the OUTER
+                        // node is the cell the pin pass restyles into a
+                        // valign flex-COLUMN (a single-level row-wrap container
+                        // would get clobbered into a column and stack its run
+                        // wrappers); the inner node carries the content.
+                        let inner = if any_block {
+                            // Block-level member: the group stacks vertically
+                            // — the block-in-inline split reads top to bottom.
+                            taffy_tree
+                                .new_with_children(Style { display: Display::Block, ..Default::default() }, &kids)
+                                .ok()
+                        } else {
+                            // All-inline: merge the per-member run wrappers
+                            // into ONE wrapper, the same shape a real cell's
+                            // mixed run builds — nested wrappers inside a
+                            // wrap container wrap at exact-fit widths. Kids
+                            // are reparented before the empty shells drop
+                            // (the span-flatten order at the sibling path).
+                            let mut leaves: Vec<taffy::tree::NodeId> = Vec::new();
+                            for w in &kids {
+                                leaves.extend(taffy_tree.children(*w).unwrap_or_default().to_vec());
+                            }
+                            for w in kids {
+                                run_wrappers.retain(|r| r != &w);
+                                let _ = taffy_tree.remove(w);
+                            }
+                            match taffy_tree.new_with_children(run_wrapper_style(), &leaves) {
+                                Ok(wrapper) => {
+                                    run_wrappers.push(wrapper);
+                                    Some(wrapper)
+                                }
+                                Err(_) => None,
+                            }
+                        };
+                        match inner {
+                            Some(inner) => taffy_tree
+                                .new_with_children(Style::default(), &[inner])
+                                .ok(),
+                            None => None,
+                        }
+                    }
+                }
+            }) else {
                 continue; // display:none builds no box and claims no slot
             };
             // Fixed layout: a first-row single-column cell pins its column
@@ -2357,9 +2474,9 @@ fn build_table(
             // outranks it — CSS2.2 §17.5.2.1: the col element sets the
             // column, the first-row cell only fills a column the cols left
             // auto.
-            if fixed && row_idx == 0 && col_span == 1 {
+            if fixed && !anon && row_idx == 0 && col_span == 1 {
                 let w = styles
-                    .get(&cid)
+                    .get(&cell_dom)
                     .and_then(|s| s.width)
                     .and_then(|l| match l {
                         crate::diting_css::Length::Px(px) => Some(px),
@@ -2391,7 +2508,7 @@ fn build_table(
                     span_cells.push(SpanCell {
                         taffy: cell_node,
                         placeholder,
-                        dom: cid,
+                        dom: cell_dom,
                         col,
                         col_span,
                         row: row_idx,
@@ -2399,38 +2516,41 @@ fn build_table(
                     });
                     cells.push(CellSlot {
                         taffy: placeholder,
-                        dom: cid,
+                        dom: cell_dom,
                         col,
                         col_span,
                         row: row_idx,
                         row_span,
                         phantom: true,
+                        anon,
                     });
                     for pend in &mut pend_ph[row_idx + 1..row_idx + row_span] {
                         if let Ok(ph) = taffy_tree.new_leaf(Style::default()) {
-                            pend.push((ph, cid, col, col_span));
+                            pend.push((ph, cell_dom, col, col_span));
                         }
                     }
                 } else {
                     cells.push(CellSlot {
                         taffy: cell_node,
-                        dom: cid,
+                        dom: cell_dom,
                         col,
                         col_span,
                         row: row_idx,
                         row_span,
                         phantom: false,
+                        anon,
                     });
                 }
             } else {
                 cells.push(CellSlot {
                     taffy: cell_node,
-                    dom: cid,
+                    dom: cell_dom,
                     col,
                     col_span,
                     row: row_idx,
                     row_span: 1,
                     phantom: false,
+                    anon,
                 });
             }
         }
@@ -2446,6 +2566,7 @@ fn build_table(
             row: row_idx,
             row_span: 1,
             phantom: true,
+            anon: false,
         }));
         cells.sort_by_key(|c| c.col);
         if cells.is_empty() {
@@ -2721,7 +2842,9 @@ fn build_table(
             for cell in cells {
                 // Phantoms paint nothing (no node_map entry); the lifted cell
                 // itself carries its true grid extent from its origin row.
-                if cell.phantom {
+                // Anonymous cells own no DOM box either — the mark would land
+                // on a member element and halve its authored border.
+                if cell.phantom || cell.anon {
                     continue;
                 }
                 meta.collapsed_edges.insert(
