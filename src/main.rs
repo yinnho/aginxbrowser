@@ -989,6 +989,14 @@ async fn main() -> anyhow::Result<()> {
         diting_net::client::set_allow_private_network(true);
         tracing::info!("private-network fetch enabled (--allow-private-network)");
     }
+    if let Some(pos) = args.iter().position(|a| a == "--allow-network") {
+        let spec = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
+        diting_net::client::set_allow_network(Some(spec));
+        tracing::info!(
+            "scoped allow-network list set (--allow-network): {} parsed entries",
+            diting_net::client::parse_scoped_cidrs(spec).len()
+        );
+    }
 
     // Check if running in MCP mode
     if args.contains(&"--mcp".to_string()) {

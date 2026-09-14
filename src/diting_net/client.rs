@@ -251,6 +251,106 @@ pub fn env_allows_private_network() -> bool {
     PRIVATE_NETWORK_FLAG.load(Ordering::Relaxed) || env_flag("AGINXBROWSER_ALLOW_PRIVATE_NETWORK")
 }
 
+/// One parsed entry of the scoped allow-network list: network address and
+/// prefix length in the entry's own family.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScopedCidr {
+    net: IpAddr,
+    prefix: u8,
+}
+
+/// Parse a comma/space-separated CIDR list — `10.20.0.0/16,192.168.1.0/24` or
+/// bare addresses (`127.0.0.1` → /32, `::1` → /128). Tokens that don't parse
+/// are skipped, never widened: an unparsable entry means the engine keeps
+/// blocking that range (fail closed), it does not fall back to
+/// allow-everything.
+pub fn parse_scoped_cidrs(spec: &str) -> Vec<ScopedCidr> {
+    let mut out = Vec::new();
+    for token in spec.split([',', ' ', '\t']) {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let (addr_part, default_prefix) = match token.split_once('/') {
+            Some((a, p)) => (a, Some(p)),
+            None => (token, None),
+        };
+        let ip: IpAddr = match addr_part.parse() {
+            Ok(ip) => ip,
+            Err(_) => continue,
+        };
+        let max = match ip {
+            IpAddr::V4(_) => 32u8,
+            IpAddr::V6(_) => 128u8,
+        };
+        let prefix = match default_prefix {
+            Some(p) => match p.parse::<u8>() {
+                Ok(p) if p <= max => p,
+                _ => continue,
+            },
+            None => max,
+        };
+        out.push(ScopedCidr { net: ip, prefix });
+    }
+    out
+}
+
+fn ip_in_scoped_cidr(ip: IpAddr, c: ScopedCidr) -> bool {
+    // Mask-compare in the entry's own family; a v6 entry never matches a v4
+    // target (embedded-v4 targets are reached through the recursive leaf
+    // check inside `is_forbidden_ip`, which re-enters this function with the
+    // extracted v4 address).
+    let (ip_bits, net_bits, max) = match (ip, c.net) {
+        (IpAddr::V4(ip), IpAddr::V4(net)) => (
+            u32::from(ip) as u128,
+            u32::from(net) as u128,
+            32u8,
+        ),
+        (IpAddr::V6(ip), IpAddr::V6(net)) => (u128::from(ip), u128::from(net), 128u8),
+        _ => return false,
+    };
+    if c.prefix == 0 {
+        return true;
+    }
+    let shift = max - c.prefix;
+    (ip_bits >> shift) == (net_bits >> shift)
+}
+
+/// The CLI-flag half of the scoped allow-network opt-in
+/// (`--allow-network <cidr,cidr,...>`). Parsed once at startup because the
+/// value is a list, not a boolean.
+static ALLOW_NETWORK_FLAG: std::sync::RwLock<Vec<ScopedCidr>> = std::sync::RwLock::new(Vec::new());
+
+/// Set the scoped allow-network list from the CLI flag. Pass an empty spec
+/// to clear.
+pub fn set_allow_network(spec: Option<&str>) {
+    let parsed = spec.map(parse_scoped_cidrs).unwrap_or_default();
+    if let Ok(mut slot) = ALLOW_NETWORK_FLAG.write() {
+        *slot = parsed;
+    }
+}
+
+/// The scoped half of the SSRF escape hatch — obscura#856. An address in
+/// this list is allowed THROUGH the deny-set without flipping
+/// `--allow-private-network`'s allow-everything switch: point the engine at
+/// an internal app on 10.20.x.y while the cloud-metadata endpoints
+/// (169.254.169.254, 100.100.100.200) and every other forbidden range stay
+/// closed. Reads both the CLI list and `AGINXBROWSER_ALLOW_NETWORK` (same
+/// syntax) so Docker setups that only speak env keep working.
+fn scoped_allow_network(ip: IpAddr) -> bool {
+    if let Ok(list) = ALLOW_NETWORK_FLAG.read() {
+        if list.iter().any(|c| ip_in_scoped_cidr(ip, *c)) {
+            return true;
+        }
+    }
+    match std::env::var("AGINXBROWSER_ALLOW_NETWORK") {
+        Ok(spec) => parse_scoped_cidrs(&spec)
+            .iter()
+            .any(|c| ip_in_scoped_cidr(ip, *c)),
+        Err(_) => false,
+    }
+}
+
 /// The CLI-flag half of the file:// opt-in (requirements-aginxos P2).
 static FILE_ACCESS_FLAG: AtomicBool = AtomicBool::new(false);
 
@@ -299,17 +399,31 @@ pub(crate) mod file_access_test {
 }
 
 /// True when `ip` must never be the target of an outbound request from the
-/// engine: loopback, RFC1918 private, link-local (incl. the 169.254.169.254
+/// engine, UNLESS a scoped allow-network entry (`--allow-network` /
+/// `AGINXBROWSER_ALLOW_NETWORK`, obscura#856) explicitly covers it. The pure
+/// deny-set lives in [`is_forbidden_base`]; this wrapper subtracts the
+/// scoped allowlist so the literal-host check, the DNS-resolution check
+/// (`SsrfGuardResolver`) and every embedded-IPv4 recursion site can never
+/// disagree about what is allowed.
+pub fn is_forbidden_ip(ip: IpAddr) -> bool {
+    is_forbidden_base(ip) && !scoped_allow_network(ip)
+}
+
+/// The pure SSRF deny-set — see [`is_forbidden_ip`] for the public entry.
+/// Loopback, RFC1918 private, link-local (incl. the 169.254.169.254
 /// cloud-metadata endpoint), broadcast, documentation, the unspecified address
 /// (0.0.0.0 / ::, which the OS routes to localhost), IPv6 unique-local
 /// (fc00::/7), CGNAT (100.64.0.0/10 — where Alibaba's 100.100.100.200
 /// metadata endpoint lives), benchmarking (198.18.0.0/15), multicast and the
 /// reserved/future ranges, and ANY IPv6 form with an embedded IPv4
-/// (IPv4-mapped, IPv4-compatible, 6to4 2002::/16, NAT64 64:ff9b::/96,
-/// Teredo 2001:0000::/32) that itself lands in the deny-set.
-/// Centralizes the SSRF deny-set so the literal-host check and the
-/// DNS-resolution check (`SsrfGuardResolver`) can never disagree.
-pub fn is_forbidden_ip(ip: IpAddr) -> bool {
+/// (IPv4-mapped, IPv4-compatible, 6to4 2002::/16, NAT64 64:ff9b::/96)
+/// whose embedded IPv4 lands in the deny-set — an allow-listed embedded v4
+/// stays reachable through those wrappers. Teredo (2001:0000::/32) is the
+/// exception: all three attacker-writable slots (server, client, XOR-
+/// obfuscated client) must individually clear the deny-set + allowlist, so
+/// a CIDR that opens the client obfuscates to a public address and the
+/// whole form stays blocked (deliberate — fail closed).
+fn is_forbidden_base(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let o = v4.octets();
@@ -1559,19 +1673,122 @@ mod tests {
         assert!(validate_url(&url, false).is_err(), "ftp must be rejected");
     }
 
+    /// Drop-guard fixture for the scoped allow-network knob: clears
+    /// `AGINXBROWSER_ALLOW_NETWORK` and the CLI list even on panic, so the
+    /// deny-set-by-default contract can't leak across tests (1f7486c
+    /// pattern). Hold `PRIVATE_NET_ENV_LOCK` while asserting.
+    struct AllowNetworkGuard;
+    impl Drop for AllowNetworkGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("AGINXBROWSER_ALLOW_NETWORK");
+            set_allow_network(None);
+        }
+    }
+
+    #[test]
+    fn parse_scoped_cidrs_bare_ip_and_bounds() {
+        use std::str::FromStr;
+        let list = parse_scoped_cidrs("10.20.0.0/16, 127.0.0.1, ::1/128, banana, 10.0.0.0/33");
+        // "banana" and the /33 are skipped (fail closed), never widened.
+        assert_eq!(list.len(), 3, "parsed: {list:?}");
+        assert_eq!(list[0], ScopedCidr { net: IpAddr::from_str("10.20.0.0").unwrap(), prefix: 16 });
+        assert_eq!(list[1], ScopedCidr { net: IpAddr::from_str("127.0.0.1").unwrap(), prefix: 32 });
+        assert_eq!(list[2], ScopedCidr { net: IpAddr::from_str("::1").unwrap(), prefix: 128 });
+    }
+
+    #[test]
+    fn scoped_allow_network_opens_only_listed_cidrs() {
+        use std::str::FromStr;
+        let _lock = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        let _guard = AllowNetworkGuard;
+        std::env::set_var(
+            "AGINXBROWSER_ALLOW_NETWORK",
+            "10.20.0.0/16, 127.0.0.1, ::1",
+        );
+
+        let f = |s: &str| is_forbidden_ip(IpAddr::from_str(s).unwrap());
+        // Listed ranges open...
+        assert!(!f("10.20.3.4"), "10.20.3.4 must pass the /16 entry");
+        assert!(!f("127.0.0.1"), "bare-IP entry opens loopback");
+        assert!(!f("::1"), "v6 entry opens ::1");
+        // ...everything else stays shut, metadata endpoints included...
+        assert!(f("10.21.0.1"), "outside the /16 stays forbidden");
+        assert!(f("192.168.1.1"), "unlisted RFC1918 stays forbidden");
+        assert!(f("169.254.169.254"), "cloud metadata stays closed");
+        assert!(f("100.100.100.200"), "CGNAT metadata stays closed");
+        // ...and the embedded-IPv4 recursions respect the list at the leaf.
+        assert!(!f("::ffff:10.20.3.4"), "mapped allow-listed v4 passes");
+        assert!(f("::ffff:169.254.169.254"), "mapped metadata stays closed");
+        assert!(!f("2002:0a14:0304::"), "6to4-wrapped allow-listed v4 passes");
+        assert!(f("2002:a9fe:a9fe::"), "6to4-wrapped metadata stays closed");
+        assert!(!f("64:ff9b::a14:304"), "NAT64-wrapped allow-listed v4 passes");
+        // Teredo is the deliberate exception: the three-slot check (server,
+        // client, XOR-obfuscated client) needs every slot individually
+        // allowed, and a 10.20.0.0/16 client obfuscates to a public
+        // 245.235.x.y — so the whole form stays blocked. Fail closed.
+        assert!(f("2001:0:a14:304::"), "Teredo stays closed even with the server slot allow-listed");
+    }
+
+    #[test]
+    fn validate_url_honors_scoped_allow_network() {
+        let _lock = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        let _guard = AllowNetworkGuard;
+        std::env::set_var("AGINXBROWSER_ALLOW_NETWORK", "10.20.0.0/16");
+
+        let url = Url::parse("http://10.20.3.4:3000/admin").unwrap();
+        assert!(
+            validate_url(&url, false).is_ok(),
+            "listed /16 must pass validate_url without allow-private-network"
+        );
+        let url = Url::parse("http://169.254.169.254/latest/meta-data").unwrap();
+        assert!(
+            validate_url(&url, false).is_err(),
+            "metadata endpoint stays rejected under a scoped list"
+        );
+    }
+
+    #[test]
+    fn cli_allow_network_flag_and_clear_restore_gate() {
+        use std::str::FromStr;
+        let _lock = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        let _guard = AllowNetworkGuard;
+        std::env::remove_var("AGINXBROWSER_ALLOW_NETWORK");
+
+        set_allow_network(Some("10.0.0.0/8"));
+        assert!(!is_forbidden_ip(IpAddr::from_str("10.20.3.4").unwrap()));
+        set_allow_network(None);
+        assert!(is_forbidden_ip(IpAddr::from_str("10.20.3.4").unwrap()));
+    }
+
     #[test]
     fn is_forbidden_ip_covers_mapped_and_unspecified() {
         use std::str::FromStr;
         for bad in [
-            "127.0.0.1", "10.1.2.3", "192.168.0.1", "172.16.5.4", "169.254.169.254",
-            "0.0.0.0", "255.255.255.255", "192.0.2.1", // documentation
-            "::1", "::", "fc00::1", "fe80::1",
-            "::ffff:127.0.0.1", "::ffff:10.0.0.1", // IPv4-mapped
+            "127.0.0.1",
+            "10.1.2.3",
+            "192.168.0.1",
+            "172.16.5.4",
+            "169.254.169.254",
+            "0.0.0.0",
+            "255.255.255.255",
+            "192.0.2.1", // documentation
+            "::1",
+            "::",
+            "fc00::1",
+            "fe80::1",
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1", // IPv4-mapped
         ] {
-            assert!(is_forbidden_ip(IpAddr::from_str(bad).unwrap()), "{bad} must be forbidden");
+            assert!(
+                is_forbidden_ip(IpAddr::from_str(bad).unwrap()),
+                "{bad} must be forbidden"
+            );
         }
         for good in ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"] {
-            assert!(!is_forbidden_ip(IpAddr::from_str(good).unwrap()), "{good} must be allowed");
+            assert!(
+                !is_forbidden_ip(IpAddr::from_str(good).unwrap()),
+                "{good} must be allowed"
+            );
         }
     }
 

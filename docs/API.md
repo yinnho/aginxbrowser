@@ -467,7 +467,7 @@ Stream a file from a URL to disk. Unlike `/fetch` (which returns page content fo
 **Behavior notes:**
 
 - Files land in `AGINXBROWSER_DOWNLOAD_DIR` (default: current working directory). In-flight data is written to `<filename>.part`, then renamed on success.
-- Same SSRF policy as `/fetch`: loopback / private / link-local targets are rejected unless `AGINXBROWSER_ALLOW_PRIVATE_NETWORK=1`.
+- Same SSRF policy as `/fetch`: loopback / private / link-local targets are rejected unless `AGINXBROWSER_ALLOW_PRIVATE_NETWORK=1` (all-or-nothing) or `AGINXBROWSER_ALLOW_NETWORK=<cidrs>` (scoped allowlist — listed ranges open, cloud-metadata endpoints stay blocked).
 - Redirects are followed (up to 20 hops), each hop re-validated against SSRF.
 - A 30s stall timeout aborts if no bytes arrive (dead connection instead of hang). Hard cap: 4 GB per call.
 - Filenames are sanitized (path traversal stripped, length capped).
