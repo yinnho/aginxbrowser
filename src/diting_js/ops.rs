@@ -68,6 +68,11 @@ pub struct JsState {
     /// set it per the strict-origin-when-cross-origin policy (upstream
     /// edb1785).
     pub referrer: String,
+    /// Referrer Policy delivered by the main response's `Referrer-Policy`
+    /// header (last valid comma token). Empty = none delivered; the document
+    /// policy then comes from `<meta name=referrer>` (see
+    /// resolve_referrer_policy_from), falling back to the spec default.
+    pub referrer_policy_header: String,
     pub blocked_urls: Vec<String>,
     pub cookie_jar: Option<Arc<CookieJar>>,
     pub http_client: Option<Arc<HttpClient>>,
@@ -338,6 +343,7 @@ impl JsState {
             encoding: "UTF-8".to_string(),
             title: String::new(),
             referrer: String::new(),
+            referrer_policy_header: String::new(),
             blocked_urls: Vec::new(),
             cookie_jar: None,
             http_client: None,
@@ -760,6 +766,13 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         "document_title" => serde_json::to_string(&gs.title).unwrap_or("\"\"".into()),
         "document_referrer" => serde_json::to_string(&gs.referrer).unwrap_or("\"\"".into()),
         "document_url" => serde_json::to_string(&gs.url).unwrap_or("\"\"".into()),
+        // Document referrer policy (Referrer Policy §"Determine request's
+        // Referrer Policy"): header-delivered policy beats every <meta
+        // name=referrer>; "" = no policy (callers apply the spec default).
+        "document_referrer_policy" => {
+            let policy = resolve_referrer_policy_from(&gs, dom);
+            serde_json::to_string(&policy).unwrap_or("\"\"".into())
+        }
         // Document BASE url (HTML §document-base-url): the document URL with
         // the first <base href> folded in. This is what relative URL
         // resolution (anchor/area href, form action, iframe src, fetch) must
@@ -3371,6 +3384,14 @@ async fn op_fetch_url(
         Some((p, r)) => (p.to_string(), r.to_string()),
         None => (String::new(), "about:client".to_string()),
     };
+    // "" = the caller carried no explicit policy (fetch init unset, loaders,
+    // XHR): fall back to the document's own policy (Referrer-Policy header or
+    // <meta name=referrer>), else fetch_referer applies the spec default.
+    let referrer_policy = if referrer_policy.is_empty() {
+        resolve_document_referrer_policy(&state.borrow())
+    } else {
+        referrer_policy
+    };
     tracing::debug!("op_fetch_url called: {} {} (intercept check pending)", method, url);
 
     let (init, body_is_base64) =
@@ -3538,6 +3559,69 @@ async fn op_fetch_url(
         );
     }
     Ok(outcome.json)
+}
+
+/// The seven Referrer Policy tokens ("" is the "unset" marker, not a policy).
+const REFERRER_POLICY_TOKENS: [&str; 7] = [
+    "no-referrer",
+    "no-referrer-when-downgrade",
+    "origin",
+    "origin-when-cross-origin",
+    "strict-origin",
+    "strict-origin-when-cross-origin",
+    "unsafe-url",
+];
+
+/// Parse a comma-separated policy list (header value or meta content) per
+/// Referrer Policy §"determine policy for token": tokens are
+/// case-insensitive, invalid ones are skipped, the LAST valid token wins.
+/// None = the whole value carries no policy.
+pub(crate) fn last_valid_referrer_token(value: &str) -> Option<String> {
+    let mut found = None;
+    for tok in value.split(',') {
+        let t = tok.trim().to_ascii_lowercase();
+        if REFERRER_POLICY_TOKENS.contains(&t.as_str()) {
+            found = Some(t);
+        }
+    }
+    found
+}
+
+/// The document's own referrer policy (Referrer Policy §"Determine request's
+/// Referrer Policy" base): a policy delivered via the Referrer-Policy
+/// response header wins outright; otherwise the FIRST `<meta name=referrer>`
+/// in tree order whose content yields a valid policy; "" = spec default.
+pub(crate) fn resolve_referrer_policy_from(gs: &JsState, dom: &DomTree) -> String {
+    if !gs.referrer_policy_header.is_empty() {
+        return gs.referrer_policy_header.clone();
+    }
+    for nid in dom.query_selector_all("meta").unwrap_or_default() {
+        let Some(n) = dom.get_node(nid) else { continue };
+        let is_referrer_meta = n
+            .get_attribute("name")
+            .map(|v| v.to_ascii_lowercase() == "referrer")
+            .unwrap_or(false);
+        if !is_referrer_meta {
+            continue;
+        }
+        let Some(content) = n.get_attribute("content").map(|v| v.to_string()) else {
+            continue;
+        };
+        if let Some(p) = last_valid_referrer_token(&content) {
+            return p;
+        }
+    }
+    String::new()
+}
+
+/// Op-time wrapper: same resolution, from OpState's shared document state.
+fn resolve_document_referrer_policy(state: &OpState) -> String {
+    let shared = state.borrow::<SharedState>().clone();
+    let gs = shared.borrow();
+    match gs.dom.as_ref() {
+        Some(dom) => resolve_referrer_policy_from(&gs, dom),
+        None => gs.referrer_policy_header.clone(),
+    }
 }
 
 /// Referer header for scripted fetch() requests per the Fetch standard
@@ -4553,9 +4637,9 @@ fn op_fetch_url_sync(
         http_client,
         proxy_url,
         document_url,
-        // XHR has no referrerPolicy/referrer surface (Fetch-only RequestInit);
-        // the walk's defaults apply — client referrer, default policy.
-        referrer_policy: String::new(),
+        // XHR has no referrerPolicy surface (Fetch-only RequestInit); the
+        // document's own policy (header / <meta name=referrer>) applies.
+        referrer_policy: resolve_document_referrer_policy(state),
         referrer_init: "about:client".to_string(),
         callbacks,
         failures: Vec::new(),

@@ -241,6 +241,11 @@ pub struct Page {
     /// empty; document-initiated navigations (location.href, form submit)
     /// set it per strict-origin-when-cross-origin (upstream edb1785).
     pub referrer: String,
+    /// Referrer Policy the main response delivered via its `Referrer-Policy`
+    /// header (last valid comma token). Establishes the document's policy
+    /// outright — a <meta name=referrer> cannot override it. Empty = none
+    /// delivered; the meta / spec default take over.
+    pub referrer_policy_header: String,
     /// WHATWG canonical name of the current document's character encoding
     /// (e.g. "UTF-8", "EUC-JP"), detected when the response body is decoded.
     /// Exposed to JS as `document.characterSet` and used for the URL query
@@ -366,6 +371,7 @@ impl Page {
             context,
             title: String::new(),
             referrer: String::new(),
+            referrer_policy_header: String::new(),
             encoding: "UTF-8".to_string(),
             history: Vec::new(),
             history_index: 0,
@@ -465,6 +471,7 @@ impl Page {
         rt.set_encoding(&self.encoding);
         rt.set_title(&self.title);
         rt.set_referrer(&self.referrer);
+        rt.set_referrer_policy(&self.referrer_policy_header);
         // Re-pin this page's hardware persona before anything else reads it
         // (the fresh realm just drew a throwaway identity at construction).
         rt.set_fingerprint_seed(self.fp_seed);
@@ -1502,6 +1509,13 @@ impl Page {
         let (body_text, encoding_name) =
             crate::diting_net::decode_response_with_name(&response.body, response.content_type());
         self.encoding = encoding_name.to_string();
+        // Referrer Policy §"Determine request's Referrer Policy": a policy
+        // delivered via the response header wins outright over <meta>. Keep
+        // only the last valid comma token (invalid ones are skipped).
+        self.referrer_policy_header = response
+            .header("referrer-policy")
+            .and_then(crate::diting_js::ops::last_valid_referrer_token)
+            .unwrap_or_default();
         let dom = parse_html(&body_text);
 
         self.title = dom

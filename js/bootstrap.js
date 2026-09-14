@@ -107,7 +107,7 @@ const _domStrA1 = new Set([
   "create_processing_instruction", "create_doctype",
   "create_document_fragment",
   "query_selector", "query_selector_all", "get_element_by_id",
-  "document_node_id", "document_title", "set_document_title", "document_referrer", "document_url", "document_base_url", "document_encoding",
+  "document_node_id", "document_title", "set_document_title", "document_referrer", "document_url", "document_base_url", "document_encoding", "document_referrer_policy",
   "document_element", "document_doctype",
   "document_write", "document_write_reset",
 ]);
@@ -3875,6 +3875,10 @@ class Document extends Node {
   // automation navigations. Computed by the navigation layer per
   // strict-origin-when-cross-origin (upstream edb1785).
   get referrer() { return _domParse("document_referrer") ?? ""; }
+  // Document referrer policy (Referrer Policy spec): header-delivered policy
+  // beats <meta name=referrer>; "" = no policy (spec default applies per
+  // request). Resolved Rust-side so fetch/XHR/loaders see the same value.
+  get referrerPolicy() { return _domParse("document_referrer_policy") ?? ""; }
   // document.domain: legacy same-origin surface. The getter returns the
   // origin's host — bilibili's log-reporter scopes its b_lsid cookie with
   // `document.domain.split(".")`, and an undefined domain took the whole
@@ -8212,6 +8216,7 @@ globalThis.DOMParser = class DOMParser {
         t.textContent = String(value);
       },
       get referrer() { return ""; },
+      get referrerPolicy() { return ""; },
       get firstChild() { return root; },
       get lastChild() { return root; },
       get children() { return [root]; },

@@ -550,6 +550,13 @@ impl JsRuntime {
         self.state.borrow_mut().referrer = referrer.to_string();
     }
 
+    /// Set the Referrer Policy the main response delivered via its
+    /// `Referrer-Policy` header; it establishes the document's policy
+    /// outright, beating any <meta name=referrer> in the markup.
+    pub fn set_referrer_policy(&self, policy: &str) {
+        self.state.borrow_mut().referrer_policy_header = policy.to_string();
+    }
+
     #[allow(dead_code)] // CDP Network.setBlockedURLs parity — no CDP client yet
     pub fn set_blocked_urls(&self, patterns: Vec<String>) {
         self.state.borrow_mut().blocked_urls = patterns;

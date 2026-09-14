@@ -1137,6 +1137,180 @@
         );
     }
 
+    /// The document's own Referrer Policy (batch-84 leftover): a policy from
+    /// the navigation response's Referrer-Policy header beats every <meta
+    /// name=referrer>; among metas the FIRST whose content yields a valid
+    /// token wins; within one value the LAST valid comma token wins. fetch()
+    /// with no init policy and sync XHR resolve the document policy
+    /// Rust-side at op time; an explicit init policy still overrides.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_honors_document_referrer_policy() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        // /probe answers with the request's Referer header value, "(none)"
+        // when the header is absent.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for _ in 0..6 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap();
+                let head = String::from_utf8_lossy(&buf[..n]);
+                let referer = head
+                    .lines()
+                    .find_map(|l| {
+                        let lower = l.to_ascii_lowercase();
+                        lower
+                            .starts_with("referer:")
+                            .then(|| lower["referer:".len()..].trim().to_string())
+                    })
+                    .unwrap_or_else(|| "(none)".to_string());
+                let body = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    referer.len(),
+                    referer
+                );
+                let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        // Page A: two referrer metas — the first valid one ("origin") wins
+        // over the later "no-referrer" (tree order, not last-wins).
+        let mut rt = setup_runtime(
+            r#"<html><head>
+                <meta name="referrer" content="origin">
+                <meta name="referrer" content="no-referrer">
+            </head><body></body></html>"#,
+        );
+        rt.set_url(&format!("http://127.0.0.1:{}/test", port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const out = {};
+                    out.surface = document.referrerPolicy;
+                    // No init policy → document policy ("origin") → Referer is
+                    // just the origin.
+                    out.metaFirstValid = await (await fetch('/probe')).text();
+                    // Explicit init still beats the document policy.
+                    out.initOverridesDocument =
+                        await (await fetch('/probe', { referrerPolicy: 'no-referrer' })).text();
+                    return out;
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!({
+                "surface": "origin",
+                "metaFirstValid": format!("http://127.0.0.1:{}/", port),
+                "initOverridesDocument": "(none)",
+            })
+        );
+
+        // Page B: comma list keeps the LAST valid token ("no-referrer"); a
+        // header-delivered policy (set_referrer_policy) then beats the meta
+        // outright — both on the surface and on the wire.
+        let mut rt = setup_runtime(
+            r#"<html><head>
+                <meta name="referrer" content="unsafe-url, garbage">
+            </head><body></body></html>"#,
+        );
+        rt.set_url(&format!("http://127.0.0.1:{}/test", port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const out = {};
+                    out.lastValidTokenSurface = document.referrerPolicy;
+                    out.lastValidToken = await (await fetch('/probe')).text();
+                    return out;
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!({
+                "lastValidTokenSurface": "unsafe-url",
+                "lastValidToken": format!("http://127.0.0.1:{}/test", port),
+            })
+        );
+        rt.set_referrer_policy("no-referrer");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const out = {};
+                    out.headerBeatsMetaSurface = document.referrerPolicy;
+                    out.headerBeatsMeta = await (await fetch('/probe')).text();
+                    return out;
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!({
+                "headerBeatsMetaSurface": "no-referrer",
+                "headerBeatsMeta": "(none)",
+            })
+        );
+
+        // Page C: an invalid first meta is skipped (its content yields no
+        // valid token), the second applies; sync XHR resolves the same
+        // document policy.
+        let mut rt = setup_runtime(
+            r#"<html><head>
+                <meta name="referrer" content="trash">
+                <meta name="referrer" content="no-referrer">
+            </head><body></body></html>"#,
+        );
+        rt.set_url(&format!("http://127.0.0.1:{}/test", port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const out = {};
+                    out.invalidMetaSkipped = await (await fetch('/probe')).text();
+                    const xhr = new XMLHttpRequest();
+                    xhr.open('GET', '/probe', false);
+                    xhr.send();
+                    out.syncXhr = xhr.responseText;
+                    return out;
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!({
+                "invalidMetaSkipped": "(none)",
+                "syncXhr": "(none)",
+            })
+        );
+    }
+
     /// Sync XHR (obscura#908): open(..., false) + send() must issue the
     /// request and return with status/headers/body populated — before any
     /// event-loop turn. The upstream reporter's legacy pages (dojo/jQuery
@@ -9983,6 +10157,38 @@ fn fetch_referer_policy_table() {
 
     // Non-HTTP(S) referrer values are no-referrer, per spec.
     assert_eq!(fetch_referer("unsafe-url", "file:///etc/passwd", &doc, &cross), "");
+}
+
+/// Comma-separated policy values (Referrer-Policy header or <meta> content):
+/// tokens are case-insensitive, invalid ones are skipped, the LAST valid
+/// token wins; all-invalid yields no policy.
+#[test]
+fn last_valid_referrer_token_parsing() {
+    use crate::diting_js::ops::last_valid_referrer_token;
+    assert_eq!(
+        last_valid_referrer_token("no-referrer").as_deref(),
+        Some("no-referrer")
+    );
+    // Case-insensitive, surrounding whitespace trimmed.
+    assert_eq!(last_valid_referrer_token("  ORIGIN ").as_deref(), Some("origin"));
+    // The last valid token wins over an earlier one.
+    assert_eq!(
+        last_valid_referrer_token("origin, no-referrer").as_deref(),
+        Some("no-referrer")
+    );
+    assert_eq!(
+        last_valid_referrer_token("no-referrer, origin").as_deref(),
+        Some("origin")
+    );
+    // Invalid tokens are skipped around a valid one.
+    assert_eq!(
+        last_valid_referrer_token("garbage, strict-origin").as_deref(),
+        Some("strict-origin")
+    );
+    // All-invalid (including near-miss prefixes) yields no policy.
+    assert_eq!(last_valid_referrer_token("only-garbage"), None);
+    assert_eq!(last_valid_referrer_token(""), None);
+    assert_eq!(last_valid_referrer_token("no-referer"), None);
 }
 
 /// RequestInit's referrerPolicy/referrer reach the wire (obscura#875
