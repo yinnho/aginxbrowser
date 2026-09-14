@@ -444,12 +444,25 @@ impl CookieJar {
         })?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
+            // Session tokens live here; the store must not inherit the
+            // process umask. Tighten explicitly instead of relying on
+            // tempfile's incidental 0600 (obscura#855's perms half).
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+            }
         }
         let mut tmp = tempfile::NamedTempFile::new_in(
             path.parent().unwrap_or(std::path::Path::new(".")),
         )?;
         tmp.write_all(json.as_bytes())?;
         tmp.persist(path).map_err(|e| e.error)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
         Ok(())
     }
 
@@ -622,6 +635,36 @@ mod tests {
 
         let header = jar.get_cookie_header(&url);
         assert!(header.contains("session=abc123"));
+    }
+
+    // obscura #855 perms half: the store file and its directory must not
+    // inherit the process umask — 0600 file, 0700 dir, set explicitly.
+
+    #[cfg(unix)]
+    #[test]
+    fn save_to_file_sets_explicit_permissions() {
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("store");
+        let path = dir.join("cookie-store.json");
+
+        // A hostile umask must not leak into the store.
+        let jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        jar.set_cookie("session=abc; Path=/", &url);
+        jar.save_to_file(&path).unwrap();
+
+        use std::os::unix::fs::PermissionsExt;
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600, "store file must be owner-only");
+        assert_eq!(dir_mode, 0o700, "store dir must be owner-only");
+
+        // Overwriting an existing (loose) file still lands 0600 — the rename
+        // must not preserve the old inode's permissions.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        jar.save_to_file(&path).unwrap();
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600, "re-save must re-tighten a loose file");
     }
 
     // obscura #915: RFC 6265 §5.3 — a non-HTTP (document.cookie) write must
