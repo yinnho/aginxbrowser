@@ -1469,6 +1469,21 @@ function __prepareInsertedStylesheetLink(link) {
   })();
 }
 
+// --- initial-parse stylesheets ------------------------------------------
+// The parser-built tree never passes through the insertion hooks above, so
+// <style>/<link rel=stylesheet> present in the first HTML never fired load.
+// Chrome queues those load events as tasks once each sheet applies; an inline
+// script running during the parse still catches them by registering a
+// listener before the task runs. page.rs invokes this before the script
+// execution loop, which reproduces that ordering: the 0ms tasks queue now
+// and fire between script executions as the loop pumps the event loop.
+function __prepareInitialStylesheets() {
+  const root = globalThis.document && globalThis.document.documentElement;
+  if (!root) return;
+  __prepareInsertedStylesIn(root);
+  __prepareInsertedStylesheetLinksIn(root);
+}
+
 class Node {
   static ELEMENT_NODE = 1;
   static ATTRIBUTE_NODE = 2;
@@ -2175,6 +2190,7 @@ class Element extends Node {
       // any other (the replaced children are new nodes — scripts among them
       // stay inert per the already-started flag, sheets do not).
       __prepareInsertedStylesheetLinksIn(this);
+      __prepareInsertedStylesIn(this);
       // Markup-level animations start when the markup enters the document.
       _scheduleAnimationCheck(this);
     }

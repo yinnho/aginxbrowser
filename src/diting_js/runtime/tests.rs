@@ -10046,7 +10046,8 @@ async fn test_style_element_load_event_on_insert() {
     // blitz#863 family 3: a dynamically connected <style> fires `load` as a
     // task (diting's CSS parser drops @import, so there is nothing to wait
     // for beyond the element's own text). Initial-markup <style> elements
-    // have no mutation hook and stay outside this path by design.
+    // come through __prepareInitialStylesheets instead — page.rs invokes it
+    // before the script loop (see initial_parse_stylesheets_fire_load test).
     let mut rt = setup_runtime("<html><head></head><body></body></html>");
     let script = r#"async () => {
         const s = document.createElement('style');
@@ -10059,6 +10060,114 @@ async fn test_style_element_load_event_on_insert() {
     }"#;
     let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
     assert_eq!(result.value.unwrap(), serde_json::json!(["load", true, true, false]));
+}
+
+/// Batch-78 leftover: initial-parse `<style>`/`<link rel=stylesheet>` also
+/// fire `load`. In Chrome those events are queued as tasks once each sheet
+/// applies, and an inline script registering a listener during the parse
+/// still catches them — page.rs reproduces that ordering by invoking
+/// __prepareInitialStylesheets BEFORE the script loop, so the 0ms tasks land
+/// between script executions. This test mirrors the exact page.rs sequence:
+/// initial-sheets call, then an "inline script" registering listeners, then
+/// the pump. The <link> leg rides the async fetch here (no navigation
+/// prefetch in this harness — production hits the ext-sheet fast path).
+#[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+#[tokio::test(flavor = "current_thread")]
+async fn initial_parse_stylesheets_fire_load_for_early_inline_scripts() {
+    let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+    std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+    let css = ".x { color: rgb(9, 9, 9); }";
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf).unwrap();
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/css\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            css.len(),
+            css
+        );
+        stream.write_all(resp.as_bytes()).unwrap();
+        stream.flush().unwrap();
+    });
+
+    let mut rt = setup_runtime(
+        "<html><head>\
+         <style id=\"s\">.x { color: red; }</style>\
+         <link id=\"l\" rel=\"stylesheet\" href=\"/sheet.css\">\
+         </head><body></body></html>",
+    );
+    rt.set_url(&format!("http://127.0.0.1:{}/page", port));
+
+    // Exactly the line page.rs runs before the script loop.
+    rt.execute_script(
+        "<initial-sheets>",
+        "if (typeof __prepareInitialStylesheets === 'function') __prepareInitialStylesheets();",
+    )
+    .unwrap();
+    // The "inline script": execute_script is synchronous (no event-loop
+    // pump), so these listeners land before the queued 0ms tasks fire.
+    rt.execute_script(
+        "<inline-1>",
+        "globalThis.__heard = []; \
+         for (const id of ['s', 'l']) { \
+           const el = document.getElementById(id); \
+           el.addEventListener('load', (e) => { \
+             globalThis.__heard.push([id, e.type, e.target === el, e.bubbles]); \
+           }); \
+         }",
+    )
+    .unwrap();
+
+    let result = rt
+        .call_function_on_for_cdp(
+            r#"async () => {
+                await new Promise(r => setTimeout(r, 1500));
+                const h = globalThis.__heard || [];
+                const pick = (id) => h.find(x => x[0] === id) || null;
+                return [pick('s'), pick('l')];
+            }"#,
+            None,
+            &[],
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+    std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+    let v = result.value.unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!([
+            ["s", "load", true, false],
+            ["l", "load", true, false]
+        ]),
+        "both initial-parse sheets fire load, catchable by an earlier inline script"
+    );
+}
+
+/// innerHTML-connected markup gets the same style-load treatment as
+/// appendChild-inserted markup: the setter queues the 0ms task, and a
+/// listener attached synchronously after the innerHTML write still catches
+/// it (no pump happens in between).
+#[tokio::test(flavor = "current_thread")]
+async fn inner_html_style_element_fires_load() {
+    let mut rt = setup_runtime("<html><head></head><body><div id=\"host\"></div></body></html>");
+    let script = r#"async () => {
+        const host = document.getElementById('host');
+        host.innerHTML = '<style id="is">.y { color: blue; }</style>';
+        const s = document.getElementById('is');
+        const fired = new Promise(r => s.addEventListener('load', (e) =>
+            r([e.type, e.target === s])));
+        await Promise.race([fired, new Promise(r => setTimeout(r, 2000))]);
+        return fired;
+    }"#;
+    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    assert_eq!(result.value.unwrap(), serde_json::json!(["load", true]));
 }
 
 #[tokio::test(flavor = "current_thread")]

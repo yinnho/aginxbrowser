@@ -916,6 +916,15 @@ impl Page {
         // listeners instead of calling their callback immediately.
         if let Some(js) = &mut self.js {
             let _ = js.execute_script("<ready-state>", "globalThis.__documentReadyState__ = 'loading';");
+            // Parser-built stylesheets never pass through the JS insertion
+            // hooks (js/bootstrap.js), so their load events only fire if we
+            // enumerate them here — before the script loop, so inline scripts
+            // that register listeners still catch the queued tasks, matching
+            // Chrome's task-after-sheet-applies ordering.
+            let _ = js.execute_script(
+                "<initial-sheets>",
+                "if (typeof __prepareInitialStylesheets === 'function') __prepareInitialStylesheets();",
+            );
         }
 
         // CDP `Page.addScriptToEvaluateOnNewDocument` contract: preload
