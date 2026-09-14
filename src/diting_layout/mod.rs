@@ -92,6 +92,13 @@ enum TextLeaf {
         /// together with `nowrap` at paint time — layout rects, scroll
         /// extents and selection keep the full text, per spec.
         ellipsis: bool,
+        /// Shaped wrap tokens, memoized per leaf (obscura#983's measure
+        /// half): taffy probes a run leaf several times per solve
+        /// (min/max-content, definite widths, repair passes) and shaping
+        /// used to re-run on every probe. Tokens are a pure function of
+        /// text+style, which the leaf owns for its whole lifetime — shape
+        /// once via [`run_tokens`], clone the Rc on every later probe.
+        tokens: std::cell::RefCell<Option<std::rc::Rc<[text::Token]>>>,
     },
     /// One word/glyph of a MIXED run (text around inline elements): the
     /// batch-2b word-leaf fallback, now carrying paint context (batch 4d).
@@ -478,9 +485,10 @@ fn resolve_sizing_keywords(
         let space = taffy::geometry::Size { width: w, height: AvailableSpace::MaxContent };
         let _ = taffy_tree.compute_layout_with_measure(node, space, |inputs, _id, ctx, style| {
             match ctx {
-                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, .. }) => {
+                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, tokens, .. }) => {
                     let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                    measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing, *nowrap)
+                    let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, tokens);
+                    measure_text_leaf(&shaped, *line_height, pad, &inputs, *nowrap)
                 }
                 Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | None => {
                     taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO)
@@ -1148,9 +1156,29 @@ fn trim_run_edge_whitespace(
     }
 }
 
+/// Shaped-token memo accessor for a run leaf: shape once, then hand every
+/// later probe a cheap Rc clone (obscura#983's measure half). The leaf owns
+/// its text+style for its whole lifetime, so the memo needs no key — unlike
+/// upstream, which keys a 16-entry per-item cache by (width, Wrap).
+fn run_tokens(
+    text: &String,
+    font_size: f32,
+    bold: bool,
+    fonts: &FontBook,
+    mono: bool,
+    word_spacing: f32,
+    memo: &std::cell::RefCell<Option<std::rc::Rc<[text::Token]>>>,
+) -> std::rc::Rc<[text::Token]> {
+    memo.borrow_mut()
+        .get_or_insert_with(|| text::tokens_of(text, font_size, bold, fonts, mono, word_spacing).into())
+        .clone()
+}
+
 /// Taffy measure function for a pure-text run leaf (batch 3a). Reproduces
 /// the observable behavior of blitz's parley-measured text nodes:
 ///
+/// - `tokens` arrive pre-shaped (once per leaf, via [`run_tokens`]); an
+///   empty slice means the run trims to nothing and measures HIDDEN;
 /// - collapsible whitespace at run EDGES contributes nothing (probe:
 ///   `"hello "` and `" hello"` both measure as `"hello"`, `" "` as zero);
 /// - greedy line breaking over exact shaped advances; a space before a
@@ -1163,25 +1191,17 @@ fn trim_run_edge_whitespace(
 ///   pad, so a shifted (sub/sup) run grows its line box by exactly the
 ///   shift's extent.
 fn measure_text_leaf(
-    text: &str,
-    font_size: f32,
-    bold: bool,
+    tokens: &[text::Token],
     line_height: f32,
     pad: f32,
-    fonts: &FontBook,
     inputs: &taffy::tree::LayoutInput,
-    mono: bool,
-    word_spacing: f32,
     nowrap: bool,
 ) -> taffy::tree::LayoutOutput {
     let known = inputs.known_dimensions;
     let lh = line_height;
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
+    if tokens.is_empty() {
         return taffy::tree::LayoutOutput::HIDDEN;
     }
-    // Token widths (word / single space / per-glyph CJK) with real advances.
-    let tokens = text::tokens_of(text, font_size, bold, fonts, mono, word_spacing);
     let widest_token = tokens.iter().map(|t| t.width).fold(0.0, f32::max);
 
     let wrap_at = if nowrap {
@@ -2060,7 +2080,7 @@ fn build_flow_column(
                 let run_ellipsis = false;
                 if let Ok(leaf) = taffy_tree.new_leaf_with_context(
                     Style::default(),
-                    TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *ws, nowrap: run_nowrap, ellipsis: run_ellipsis },
+                    TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *ws, nowrap: run_nowrap, ellipsis: run_ellipsis, tokens: std::cell::RefCell::new(None) },
                 ) {
                     flow_children.push(leaf);
                 }
@@ -2743,9 +2763,10 @@ fn build_table(
         taffy_tree.disable_rounding();
         let _ = taffy_tree.compute_layout_with_measure(node, space, |inputs, _id, ctx, style| {
             match ctx {
-                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, .. }) => {
+                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, tokens, .. }) => {
                     let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                    measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing, *nowrap)
+                    let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, tokens);
+                    measure_text_leaf(&shaped, *line_height, pad, &inputs, *nowrap)
                 }
                 Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | None => {
                     taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO)
@@ -2763,9 +2784,10 @@ fn build_table(
         taffy_tree.disable_rounding();
         let _ = taffy_tree.compute_layout_with_measure(node, space, |inputs, _id, ctx, style| {
             match ctx {
-                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, .. }) => {
+                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, tokens, .. }) => {
                     let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                    measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing, *nowrap)
+                    let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, tokens);
+                    measure_text_leaf(&shaped, *line_height, pad, &inputs, *nowrap)
                 }
                 Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | None => {
                     taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO)
@@ -3168,7 +3190,7 @@ fn build_element(
             });
             if let Ok(leaf) = taffy_tree.new_leaf_with_context(
                 Style::default(),
-                TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *ws, nowrap: run_nowrap, ellipsis: run_ellipsis },
+                TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *ws, nowrap: run_nowrap, ellipsis: run_ellipsis, tokens: std::cell::RefCell::new(None) },
             ) {
                 direct.push(leaf);
                 return;
@@ -4190,10 +4212,10 @@ fn expand_wrapped_leaves(
         return;
     }
     let Some((r, m)) = local_by_node.get(&node) else { return };
-    if let Some(TextLeaf::Run { text, font_size, bold, line_height, mono, word_spacing, nowrap, .. }) =
+    if let Some(TextLeaf::Run { text, font_size, bold, line_height, mono, word_spacing, nowrap, tokens, .. }) =
         taffy_tree.get_node_context(node)
     {
-        let tokens = text::tokens_of(text, *font_size, *bold, fonts, *mono, *word_spacing);
+        let tokens = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, tokens);
         // nowrap keeps its single line here too: the affine path expands a
         // leaf into per-line tiles, and wrapping a nowrap run at the box
         // width would split ink the rasterizer lays on one line.
@@ -4649,9 +4671,10 @@ pub fn layout_solve_rooted(
             let laid_out = taffy_tree
                 .compute_layout_with_measure(icb_node, available, |inputs, _id, ctx, style| {
                     match ctx {
-                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, .. }) => {
+                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, tokens, .. }) => {
                             let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                            measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing, *nowrap)
+                            let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, tokens);
+                            measure_text_leaf(&shaped, *line_height, pad, &inputs, *nowrap)
                         }
                         _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
                     }
@@ -4766,9 +4789,10 @@ pub fn layout_solve_rooted(
     // (that's exactly what stock compute_layout does below via the same fn).
     let measured = taffy_tree.compute_layout_with_measure(icb_node, available, |inputs, _id, ctx, style| {
         match ctx {
-            Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, .. }) => {
+            Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, tokens, .. }) => {
                 let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing, *nowrap)
+                let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, tokens);
+                measure_text_leaf(&shaped, *line_height, pad, &inputs, *nowrap)
             }
             // Word leaves keep their style-driven sizing (batch 4d only
             // added paint context — zero layout change).
@@ -4941,9 +4965,10 @@ pub fn layout_solve_rooted(
                     icb_node,
                     available,
                     |inputs, _id, ctx, style| match ctx {
-                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, .. }) => {
+                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, tokens, .. }) => {
                             let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                            measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing, *nowrap)
+                            let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, tokens);
+                            measure_text_leaf(&shaped, *line_height, pad, &inputs, *nowrap)
                         }
                         _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
                     },
@@ -5052,9 +5077,10 @@ pub fn layout_solve_rooted(
                 icb_node,
                 available,
                 |inputs, _id, ctx, style| match ctx {
-                    Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, .. }) => {
+                    Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, tokens, .. }) => {
                         let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                        measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing, *nowrap)
+                        let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, tokens);
+                        measure_text_leaf(&shaped, *line_height, pad, &inputs, *nowrap)
                     }
                     _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
                 },
@@ -5123,9 +5149,10 @@ pub fn layout_solve_rooted(
                     icb_node,
                     available,
                     |inputs, _id, ctx, style| match ctx {
-                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, .. }) => {
+                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, tokens, .. }) => {
                             let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                            measure_text_leaf(text, *font_size, *bold, *line_height, pad, fonts, &inputs, *mono, *word_spacing, *nowrap)
+                            let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, tokens);
+                            measure_text_leaf(&shaped, *line_height, pad, &inputs, *nowrap)
                         }
                         _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
                     },
@@ -6485,5 +6512,134 @@ mod q_quote_tests {
         assert_eq!(outer, ("\u{201C}", "\u{201D}"));
         assert_eq!(inner, ("\u{2018}", "\u{2019}"));
         assert_eq!(deep, outer);
+    }
+}
+
+/// obscura#983's measure half: taffy probes a run leaf repeatedly per solve
+/// (min-content, max-content, definite widths, deferred/repair passes) and
+/// every probe used to re-run full shaping of the same text. This module
+/// pins the timing shape of a text-heavy solve and the memo mechanism.
+#[cfg(test)]
+mod run_token_memo_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+
+    fn paragraph(tree: &mut TaffyTree<TextLeaf>, seed: usize) -> taffy::tree::NodeId {
+        // CJK-heavy tokens: shaping + font-book fallback walk is the real
+        // cost upstream measured on COLMAP, not 4-char ASCII words.
+        let text = (0..8)
+            .map(|i| format!("页面布局引擎第{}段第{}节点", seed, i))
+            .collect::<Vec<_>>()
+            .join(" ");
+        tree.new_leaf_with_context(
+            Style::default(),
+            TextLeaf::Run {
+                text,
+                font_size: 16.0,
+                bold: false,
+                color: [0, 0, 0, 255],
+                line_height: 19.2,
+                decorations: crate::diting_css::TextDecorations::default(),
+                baseline_shift: 0.0,
+                mono: false,
+                word_spacing: 0.0,
+                nowrap: false,
+                ellipsis: false,
+                tokens: std::cell::RefCell::new(None),
+            },
+        )
+        .unwrap()
+    }
+
+    fn text_page() -> (TaffyTree<TextLeaf>, taffy::tree::NodeId, Vec<taffy::tree::NodeId>) {
+        let mut tree = TaffyTree::new();
+        let kids: Vec<taffy::tree::NodeId> = (0..40)
+            .map(|s| paragraph(&mut tree, s))
+            .collect();
+        let root = tree
+            .new_with_children(
+                Style {
+                    display: taffy::style::Display::Flex,
+                    flex_direction: taffy::style::FlexDirection::Column,
+                    size: taffy::geometry::Size {
+                        width: Dimension::length(800.0),
+                        height: Dimension::auto(),
+                    },
+                    ..Style::default()
+                },
+                &kids,
+            )
+            .unwrap();
+        (tree, root, kids)
+    }
+
+    fn solve(
+        tree: &mut TaffyTree<TextLeaf>,
+        root: taffy::tree::NodeId,
+        fonts: &FontBook,
+        width: AvailableSpace,
+        calls: &AtomicUsize,
+    ) {
+        let space = taffy::geometry::Size { width, height: AvailableSpace::MaxContent };
+        tree.compute_layout_with_measure(root, space, |inputs, _id, ctx, style| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            match ctx {
+                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, nowrap, tokens, .. }) => {
+                    let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
+                    let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, tokens);
+                    measure_text_leaf(&shaped, *line_height, pad, &inputs, *nowrap)
+                }
+                _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
+            }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn text_heavy_solve_timing() {
+        let t_font = Instant::now();
+        let fonts = crate::diting_fonts::font_book();
+        eprintln!("font book ready: {:?}", t_font.elapsed());
+        let (mut tree, root, leaves) = text_page();
+        let calls = AtomicUsize::new(0);
+        let t0 = Instant::now();
+        solve(&mut tree, root, &fonts, AvailableSpace::Definite(800.0), &calls);
+        eprintln!("first solve of 40x8-token CJK runs ({} measure calls): {:?}",
+            calls.load(Ordering::Relaxed), t0.elapsed());
+        // A plain re-solve is served from taffy's cache (zero measure calls,
+        // ~1ms) — the memo's win is only visible on a dirty tree, the shape
+        // of every real style/attr mutation re-layout.
+        for id in &leaves {
+            let _ = tree.mark_dirty(*id);
+        }
+        let before = calls.load(Ordering::Relaxed);
+        let t1 = Instant::now();
+        solve(&mut tree, root, &fonts, AvailableSpace::Definite(800.0), &calls);
+        eprintln!("forced re-solve ({} measure calls, each re-shaped every token before the memo): {:?}",
+            calls.load(Ordering::Relaxed) - before, t1.elapsed());
+        let h = tree.layout(root).map(|l| l.size.height).unwrap_or(0.0);
+        assert!(h > 0.0, "text page must lay out to a positive height");
+    }
+
+    #[test]
+    fn memo_populated_after_solve_and_survives_dirty_resolve() {
+        let (mut tree, root, leaves) = text_page();
+        let fonts = crate::diting_fonts::font_book();
+        let calls = AtomicUsize::new(0);
+        solve(&mut tree, root, &fonts, AvailableSpace::Definite(800.0), &calls);
+        // A dirty re-solve re-enters the measure closure for every leaf —
+        // the memo must be populated and stay populated (every probe after
+        // the first clones the Rc instead of re-shaping).
+        for id in &leaves {
+            let _ = tree.mark_dirty(*id);
+        }
+        solve(&mut tree, root, &fonts, AvailableSpace::Definite(800.0), &calls);
+        for id in &leaves {
+            match tree.get_node_context(*id) {
+                Some(TextLeaf::Run { tokens, .. }) => assert!(tokens.borrow().is_some()),
+                _ => panic!("expected a Run leaf"),
+            }
+        }
     }
 }
