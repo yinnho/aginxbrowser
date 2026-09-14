@@ -3127,6 +3127,9 @@ class Element extends Node {
   // padding/content extents.
   _ditingExtent(axis, fallback) {
     if (this._isViewportRoot()) {
+      // A fabricated iframe document's html/body span the IFRAME's viewport
+      // (obscura #976), never the host page's.
+      if (_ditingIframeDoc(this)) return axis === "w" ? 300 : 150;
       return axis === "w" ? (globalThis.innerWidth || 1280) : (globalThis.innerHeight || 720);
     }
     if (_ditingDisplayNone(this)) return 0;
@@ -3189,6 +3192,36 @@ class Element extends Node {
   }
   getBoundingClientRect() {
     globalThis.__diting_click_target = this;
+    // Fabricated iframe documents (obscura #976): elements of a sync-created
+    // contentDocument are an orphan subtree — measured by a dedicated
+    // sub-run in the IFRAME'S OWN viewport (Chrome semantics, no coordinate
+    // stitching into the host page). Must precede the viewport-root check:
+    // the iframe doc's own html/body span the iframe's 300x150, not the
+    // host page's viewport.
+    if (this._nid != null && _ditingIframeDoc(this)) {
+      // The iframe doc's own html/body span the IFRAME's viewport (the
+      // 300x150 default box its fabricated window publishes) — the same
+      // contract the host page's viewport roots serve, one world down.
+      if (this._isViewportRoot()) {
+        return {
+          x: 0, y: 0, width: 300, height: 150,
+          top: 0, right: 300, bottom: 150, left: 0,
+          toJSON() { return this; },
+        };
+      }
+      try {
+        const raw = _domRaw("iframe_layout_rect", String(this._nid | 0), "");
+        const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (Array.isArray(arr) && arr.length === 4 && Number.isFinite(arr[0])) {
+          const [x, y, w, h] = arr;
+          return {
+            x, y, width: w, height: h,
+            top: y, right: x + w, bottom: y + h, left: x,
+            toJSON() { return this; },
+          };
+        }
+      } catch (e) { /* fall through */ }
+    }
     // documentElement and body span the full viewport. Without this every
     // hit test against them clips down to a 100x20 synthetic cell and
     // Document.elementFromPoint can never recurse into their children.
@@ -4452,10 +4485,22 @@ function _ditingFontBox(el) {
 // getBoundingClientRect reads, but WITHOUT its __diting_click_target side
 // effect: a plain size read must never stamp the click-target hint.
 // Returns {x,y,w,h} or null (layout feature off / detached node).
+// Fabricated iframe documents (obscura #976): walk up parentNode looking for
+// the marker _IframeDocument stamps on its orphan root. Element.ownerDocument
+// can't do this — it answers the MAIN document for every element, including
+// iframe-doc ones.
+function _ditingIframeDoc(el) {
+  for (let n = el; n; n = n.parentNode) {
+    if (n._isIframeDocRoot) return n._ownerDoc;
+  }
+  return null;
+}
+
 function _ditingLayoutBox(el) {
   try {
     if (el._nid == null) return null;
-    const raw = _domRaw("layout_rect", String(el._nid | 0), "");
+    const op = _ditingIframeDoc(el) ? "iframe_layout_rect" : "layout_rect";
+    const raw = _domRaw(op, String(el._nid | 0), "");
     const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
     if (Array.isArray(arr) && arr.length === 4 && Number.isFinite(arr[0])) {
       return { x: arr[0], y: arr[1], w: arr[2], h: arr[3] };
@@ -4472,7 +4517,8 @@ function _ditingLayoutBox(el) {
 function _ditingLocalBox(el) {
   try {
     if (el._nid == null) return null;
-    const raw = _domRaw("local_geom", String(el._nid | 0), "");
+    const op = _ditingIframeDoc(el) ? "iframe_local_geom" : "local_geom";
+    const raw = _domRaw(op, String(el._nid | 0), "");
     const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
     if (Array.isArray(arr) && arr.length === 10 && Number.isFinite(arr[0])) {
       return { x: arr[0], y: arr[1], w: arr[2], h: arr[3] };
@@ -8967,6 +9013,13 @@ class _IframeDocument {
     this._body = document.createElement('body');
     this._root.appendChild(this._head);
     this._root.appendChild(this._body);
+    // Orphan-subtree marker (obscura #976): these nodes live outside the
+    // main document, so `instanceof _IframeDocument` checks from the JS side
+    // need a reachable pointer — Element.ownerDocument answers the MAIN
+    // document for every element, so gBCR walks up parentNode looking for
+    // this stamp instead.
+    this._root._isIframeDocRoot = true;
+    this._root._ownerDoc = this;
     var bodyContent = html
       .replace(/^<!DOCTYPE[^>]*>/i, '')
       .replace(/<\/?html[^>]*>/gi, '')

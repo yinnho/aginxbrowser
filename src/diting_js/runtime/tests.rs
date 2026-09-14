@@ -6048,6 +6048,92 @@
         );
     }
 
+    // obscura #976: elements of a sync-created iframe document are an
+    // orphan Rust DOM subtree the main-document layout run never covers, so
+    // gBCR answered all zeros. The sub-run measures in the IFRAME'S OWN
+    // viewport (300x150 — the box the fabricated window publishes), so a
+    // body with its UA 8px margin puts the first div at (8,8), like Chrome.
+    #[test]
+    #[cfg(feature = "screenshot")]
+    fn test_sync_iframe_document_elements_have_layout_rects() {
+        let mut rt = setup_runtime(r#"<html><body></body></html>"#);
+        let out = rt
+            .evaluate(
+                r#"JSON.stringify((function() {
+                    const f = document.createElement('iframe');
+                    document.body.appendChild(f);
+                    const doc = f.contentDocument;
+                    doc.body.innerHTML = '<style>body{margin:8px}div{width:100px;height:20px}</style><div id=a></div><div id=b></div>';
+                    const a = doc.getElementById('a');
+                    const b = doc.getElementById('b');
+                    const ra = a.getBoundingClientRect();
+                    const rb = b.getBoundingClientRect();
+                    const before = {
+                        ax: ra.x, ay: ra.y, aw: ra.width, ah: ra.height, ab: ra.bottom,
+                        bx: rb.x, by: rb.y,
+                        rects: a.getClientRects().length,
+                        ow: a.offsetWidth, oh: a.offsetHeight,
+                    };
+                    // A style write inside the iframe doc must re-measure.
+                    a.style.width = '60px';
+                    return { before: before, aw2: a.getBoundingClientRect().width };
+                })())"#,
+            )
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        let b = &v["before"];
+        assert_eq!(b["ax"], serde_json::json!(8), "body UA margin 8px, in the iframe's own viewport");
+        assert_eq!(b["ay"], serde_json::json!(8));
+        assert_eq!(b["aw"], serde_json::json!(100));
+        assert_eq!(b["ah"], serde_json::json!(20));
+        assert_eq!(b["ab"], serde_json::json!(28), "bottom = y + height");
+        assert_eq!(b["bx"], serde_json::json!(8));
+        assert_eq!(b["by"], serde_json::json!(28), "second block stacks below the first");
+        assert_eq!(b["rects"], serde_json::json!(1));
+        assert_eq!(b["ow"], serde_json::json!(100), "offsetWidth rides the same sub-run");
+        assert_eq!(b["oh"], serde_json::json!(20));
+        assert_eq!(
+            v["aw2"], serde_json::json!(60),
+            "a style write inside the iframe doc must invalidate the sub-run cache"
+        );
+    }
+
+    // The two coordinate worlds must not bleed into each other: the iframe
+    // doc's own html/body span the IFRAME's 300x150 default box, while
+    // host-page elements keep measuring against the host viewport.
+    #[test]
+    #[cfg(feature = "screenshot")]
+    fn test_iframe_document_viewport_is_independent() {
+        let mut rt = setup_runtime(
+            r#"<html><head><style>body{margin:0}#main{width:400px;height:50px}</style></head><body><div id="main"></div></body></html>"#,
+        );
+        let out = rt
+            .evaluate(
+                r#"JSON.stringify((function() {
+                    const f = document.createElement('iframe');
+                    document.body.appendChild(f);
+                    const doc = f.contentDocument;
+                    doc.body.innerHTML = '<p>hi</p>';
+                    const rRoot = doc.documentElement.getBoundingClientRect();
+                    const rBody = doc.body.getBoundingClientRect();
+                    const main = document.getElementById('main').getBoundingClientRect();
+                    return {
+                        rootW: rRoot.width, rootH: rRoot.height,
+                        bodyW: rBody.width, bodyH: rBody.height,
+                        mainW: main.width, mainH: main.height,
+                    };
+                })())"#,
+            )
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        assert_eq!(v["rootW"], serde_json::json!(300), "iframe html spans the 300x150 default box");
+        assert_eq!(v["rootH"], serde_json::json!(150));
+        assert_eq!(v["bodyW"], serde_json::json!(300));
+        assert_eq!(v["bodyH"], serde_json::json!(150));
+        assert_eq!(v["mainW"], serde_json::json!(400), "host-page geometry unchanged");
+        assert_eq!(v["mainH"], serde_json::json!(50));
+    }
+
     /// A `display: none` element generates no box, so it cannot be hit however
     /// high its z-index: the zero-size rect filter runs before ranking ever
     /// sees it. Pinning this because a boxless element entering the ranking

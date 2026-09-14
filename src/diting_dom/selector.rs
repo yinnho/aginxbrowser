@@ -869,6 +869,36 @@ impl DomTree {
     /// bucket and no hits, the "never matches" outcome the old per-rule
     /// qSA error path produced.
     pub fn rule_match_sets(&self, rule_selectors: &[&str]) -> RuleMatchSets {
+        // Rule matching is document-rooted (the same scope posture as a
+        // document-rooted querySelectorAll): no :scope binding here. Shadow
+        // descendants join the probe set so shadow `<style>` rules can match
+        // shadow elements — the cascade's global-rule-pool approximation
+        // (spec-scoped styles are a v3 concern). Combinators still stop at
+        // the shadow root: the matcher climbs ordinary parent links, and a
+        // shadow root has none.
+        let mut probe_ids: Vec<NodeId> = self.descendants(self.document());
+        for root in self.shadow_roots() {
+            probe_ids.extend(self.descendants(root));
+        }
+        self.rule_match_sets_probing(rule_selectors, probe_ids)
+    }
+
+    /// Subtree-scoped variant (fabricated iframe documents): probe only the
+    /// descendants of `roots`. The document-rooted probe never reaches an
+    /// orphan tree, so reusing it there would silently match no rule.
+    pub fn rule_match_sets_within(&self, rule_selectors: &[&str], roots: &[NodeId]) -> RuleMatchSets {
+        let mut probe_ids: Vec<NodeId> = Vec::new();
+        for root in roots {
+            probe_ids.extend(self.descendants(*root));
+        }
+        self.rule_match_sets_probing(rule_selectors, probe_ids)
+    }
+
+    fn rule_match_sets_probing(
+        &self,
+        rule_selectors: &[&str],
+        probe_ids: Vec<NodeId>,
+    ) -> RuleMatchSets {
         let mut entries: Vec<Option<SelectorList<DitingSelector>>> =
             Vec::with_capacity(rule_selectors.len());
         let mut specificity: Vec<Option<u32>> = Vec::with_capacity(rule_selectors.len());
@@ -937,17 +967,6 @@ impl DomTree {
             NeedsSelectorFlags::No,
             MatchingForInvalidation::No,
         );
-        // Rule matching is document-rooted (the same scope posture as a
-        // document-rooted querySelectorAll): no :scope binding here. Shadow
-        // descendants join the probe set so shadow `<style>` rules can match
-        // shadow elements — the cascade's global-rule-pool approximation
-        // (spec-scoped styles are a v3 concern). Combinators still stop at
-        // the shadow root: the matcher climbs ordinary parent links, and a
-        // shadow root has none.
-        let mut probe_ids: Vec<NodeId> = self.descendants(self.document());
-        for root in self.shadow_roots() {
-            probe_ids.extend(self.descendants(root));
-        }
         let mut candidates: Vec<usize> = Vec::new();
         for desc_id in probe_ids {
             let Some((local, id, class)) = self

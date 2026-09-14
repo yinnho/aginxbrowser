@@ -4492,15 +4492,40 @@ pub fn layout_solve(
     network_bytes: Option<&HashMap<String, std::sync::Arc<Vec<u8>>>>,
     base_url: Option<&str>,
 ) -> SolvedGeometry {
-    let mut taffy_tree = TaffyTree::new();
-    let mut node_map: HashMap<taffy::tree::NodeId, NodeId> = HashMap::new();
-
     // The document node is not an element; lay out from the first element
     // descendant (the <html> root), like upstream.
     let root = tree
         .children(tree.document())
         .into_iter()
         .find(|id| tree.with_node(*id, |n| n.is_element()).unwrap_or(false));
+    layout_solve_rooted(
+        tree,
+        styles,
+        fonts,
+        viewport_width,
+        viewport_height,
+        network_bytes,
+        base_url,
+        root,
+    )
+}
+
+/// Explicit-root variant (fabricated iframe documents): `root` is the
+/// orphan subtree's topmost element — the whole downstream build
+/// (build_element walk, layout_collect) runs from it, and the ICB is that
+/// subtree's own viewport.
+pub fn layout_solve_rooted(
+    tree: &DomTree,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    fonts: &FontBook,
+    viewport_width: f32,
+    viewport_height: f32,
+    network_bytes: Option<&HashMap<String, std::sync::Arc<Vec<u8>>>>,
+    base_url: Option<&str>,
+    root: Option<NodeId>,
+) -> SolvedGeometry {
+    let mut taffy_tree = TaffyTree::new();
+    let mut node_map: HashMap<taffy::tree::NodeId, NodeId> = HashMap::new();
 
     // Pre-pass (batches 5b + 6c): resolve every img src through the
     // ImageCache — data: URLs decode inline, http(s)/file URLs consult the
@@ -6259,11 +6284,12 @@ pub fn compute_styles(
 /// (opacity/transform/stroke-dashoffset), so this runs inside the
 /// collect-cache (#395) invalidation domain — `set_css_time` drops the
 /// paint-only caches and the next read re-cascades fresh.
-pub fn compute_styles_timed(
+fn compute_styles_impl(
     tree: &DomTree,
     rules: &[crate::diting_css::ParsedRule],
     keyframes: &crate::diting_css::KeyframesMap,
     css_time: Option<f64>,
+    within_root: Option<NodeId>,
 ) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
     fn visit(
         tree: &DomTree,
@@ -6348,7 +6374,12 @@ pub fn compute_styles_timed(
     // set AND each selector's specificity in a single pass, both sorted
     // once for the binary searches in visit.
     let rule_selectors: Vec<&str> = rules.iter().map(|r| r.selector.as_str()).collect();
-    let sets = tree.rule_match_sets(&rule_selectors);
+    // The document run probes document(+shadow) descendants; a within-run
+    // probes only the orphan root's subtree (rule_match_sets_within).
+    let sets = match within_root {
+        Some(root) => tree.rule_match_sets_within(&rule_selectors, &[root]),
+        None => tree.rule_match_sets(&rule_selectors),
+    };
 
     let mut out = HashMap::new();
     if std::env::var("AGINXBROWSER_LAYOUT_TRACE").is_ok() {
@@ -6360,20 +6391,58 @@ pub fn compute_styles_timed(
             sets.hits.len()
         );
     }
-    for child in tree.children(tree.document()) {
-        visit(
+    match within_root {
+        Some(root) => visit(
             tree,
             rules,
             &sets,
             keyframes,
             css_time,
-            child,
+            root,
             None,
             crate::diting_css::DEFAULT_ROOT_FONT_SIZE,
             &mut out,
-        );
+        ),
+        None => {
+            for child in tree.children(tree.document()) {
+                visit(
+                    tree,
+                    rules,
+                    &sets,
+                    keyframes,
+                    css_time,
+                    child,
+                    None,
+                    crate::diting_css::DEFAULT_ROOT_FONT_SIZE,
+                    &mut out,
+                );
+            }
+        }
     }
     out
+}
+
+/// Document-rooted style resolution (main path).
+pub fn compute_styles_timed(
+    tree: &DomTree,
+    rules: &[crate::diting_css::ParsedRule],
+    keyframes: &crate::diting_css::KeyframesMap,
+    css_time: Option<f64>,
+) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
+    compute_styles_impl(tree, rules, keyframes, css_time, None)
+}
+
+/// Subtree variant (fabricated iframe documents, obscura #976 family): the
+/// orphan root plays the root-element role — no parent cascade, default
+/// root font size — and the rule match sets probe only its descendants.
+pub fn compute_styles_timed_within(
+    tree: &DomTree,
+    rules: &[crate::diting_css::ParsedRule],
+    keyframes: &crate::diting_css::KeyframesMap,
+    css_time: Option<f64>,
+    root: NodeId,
+) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
+    compute_styles_impl(tree, rules, keyframes, css_time, Some(root))
 }
 
 /// Trace-only element count (a full walk just for the debug knob; keep out of

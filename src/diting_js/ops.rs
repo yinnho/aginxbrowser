@@ -155,6 +155,14 @@ pub struct JsState {
     #[cfg(feature = "screenshot")]
     geometry_cache:
         std::cell::RefCell<Option<(u64, crate::diting_layout::SolvedGeometry)>>,
+    /// Memoized layout run for an orphan subtree (a fabricated iframe
+    /// document, obscura #976 family), keyed (epoch, subtree root). Kept
+    /// apart from `layout_cache` on purpose: a sub-run's rects answer in
+    /// the iframe's OWN viewport (the 300x150 default box the fabricated
+    /// windows publish), never the main page's.
+    #[cfg(feature = "screenshot")]
+    iframe_layout_cache:
+        std::cell::RefCell<Option<(u64, NodeId, std::sync::Arc<LayoutRun>)>>,
     /// Full taffy solves this state has run — a test probe, so the
     /// paint-only path can assert it stays flat across seeks.
     #[cfg(feature = "screenshot")]
@@ -300,6 +308,10 @@ impl JsState {
     pub(crate) fn drop_layout(&self) {
         *self.layout_cache.borrow_mut() = None;
         *self.geometry_cache.borrow_mut() = None;
+        // A style/class write inside a fabricated iframe document doesn't
+        // bump the tree epoch, so the (epoch, root) key can't see it — the
+        // shared drop points are the only reliable invalidation.
+        *self.iframe_layout_cache.borrow_mut() = None;
         self.layout_rev.set(self.layout_rev.get().wrapping_add(1));
     }
 
@@ -312,6 +324,7 @@ impl JsState {
     #[cfg(feature = "screenshot")]
     pub(crate) fn drop_paint_only(&self) {
         *self.layout_cache.borrow_mut() = None;
+        *self.iframe_layout_cache.borrow_mut() = None;
         self.layout_rev.set(self.layout_rev.get().wrapping_add(1));
     }
 
@@ -350,6 +363,8 @@ impl JsState {
             layout_cache: std::cell::RefCell::new(None),
             #[cfg(feature = "screenshot")]
             geometry_cache: std::cell::RefCell::new(None),
+            #[cfg(feature = "screenshot")]
+            iframe_layout_cache: std::cell::RefCell::new(None),
             #[cfg(feature = "screenshot")]
             solves: std::cell::Cell::new(0),
             #[cfg(feature = "screenshot")]
@@ -1367,6 +1382,57 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 None => "null".into(),
             }
         }
+        // getBoundingClientRect / getClientRects inside a fabricated iframe
+        // document (obscura #976): a sync-created contentDocument is an
+        // orphan Rust DOM subtree the main run's rect map never covers, so
+        // the main-document `layout_rect` answered all zeros. This sub-run
+        // answers in the IFRAME'S OWN viewport (the 300x150 default box the
+        // fabricated _IframeWindow publishes), matching Chrome — which
+        // measures iframe-doc elements against the iframe's viewport with no
+        // coordinate stitching into the host page. arg1 must belong to an
+        // orphan subtree; the walk reaching the document node means a
+        // main-document element was misrouted here (the JS side only calls
+        // this through the iframe-doc marker) and gets "null".
+        #[cfg(feature = "screenshot")]
+        "iframe_layout_rect" => {
+            let nid = match parse_nid(&arg1) { Some(id) => id, None => return "null".into() };
+            let mut root = nid;
+            while let Some(p) = dom.get_node(root).and_then(|n| n.parent) {
+                root = p;
+            }
+            if root == dom.document() {
+                return "null".into();
+            }
+            let run = iframe_layout_run(&gs, dom, root);
+            match run.0.get(&nid) {
+                Some(&[x, y, w, h]) => format!("[{},{},{},{}]", x, y, w, h),
+                // A fresh run without the nid = boxless element in the iframe
+                // doc (display:none, …) — the same all-zero DOMRect contract
+                // the main-document `layout_rect` serves.
+                None => "[0,0,0,0]".into(),
+            }
+        }
+        // The event-coordinate surface (offsetX/Y inverse mapping, exact
+        // hit shapes) inside a fabricated iframe document — same 10-tuple
+        // wire format as `local_geom`, served from the iframe-subtree run.
+        #[cfg(feature = "screenshot")]
+        "iframe_local_geom" => {
+            let nid = match parse_nid(&arg1) { Some(id) => id, None => return "null".into() };
+            let mut root = nid;
+            while let Some(p) = dom.get_node(root).and_then(|n| n.parent) {
+                root = p;
+            }
+            if root == dom.document() {
+                return "null".into();
+            }
+            let run = iframe_layout_run(&gs, dom, root);
+            match run.4.get(&nid) {
+                Some(&([x, y, w, h], [a, b, c, d, e, f])) => {
+                    format!("[{},{},{},{},{},{},{},{},{},{}]", x, y, w, h, a, b, c, d, e, f)
+                }
+                None => "null".into(),
+            }
+        }
         // offsetX/offsetY for a hit at a document-space point (arg2
         // "docX,docY" — client + scroll) on element arg1 (blitz #663
         // family): the point inverse-maps through the element's TOTAL
@@ -1543,6 +1609,10 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         "local_geom" => "null".into(),
         #[cfg(not(feature = "screenshot"))]
         "event_offset" => "null".into(),
+        #[cfg(not(feature = "screenshot"))]
+        "iframe_layout_rect" => "null".into(),
+        #[cfg(not(feature = "screenshot"))]
+        "iframe_local_geom" => "null".into(),
         _ => "null".into(),
     }
 }
@@ -1804,6 +1874,81 @@ fn ensure_layout_run(gs: &JsState, dom: &DomTree, epoch: u64) {
         let run = layout_run_all(gs, dom);
         *gs.layout_cache.borrow_mut() = Some((epoch, run));
     }
+}
+
+/// One style+layout run over an ORPHAN SUBTREE — a fabricated iframe
+/// document (obscura #976 family), memoized per (epoch, root) in
+/// [`JsState::iframe_layout_cache`]. The sub-run anchors to the 300x150
+/// default box the fabricated `_IframeWindow` publishes (the iframe's own
+/// viewport, per Chrome's gBCR semantics) and never touches the main page's
+/// layout caches. Inline <style> sheets only (v1 boundary): external <link>
+/// sheets inside a fabricated iframe doc would need the navigation-time
+/// fetch cascade the main document owns.
+#[cfg(feature = "screenshot")]
+fn iframe_layout_run(gs: &JsState, dom: &DomTree, root: NodeId) -> std::sync::Arc<LayoutRun> {
+    let epoch = dom.epoch();
+    if let Some(hit) = gs.iframe_layout_cache.borrow().as_ref().and_then(|(e, r, run)| {
+        (*e == epoch && *r == root).then(|| std::sync::Arc::clone(run))
+    }) {
+        return hit;
+    }
+    let mut css = String::new();
+    let mut stack = dom.children(root);
+    while let Some(cur) = stack.pop() {
+        stack.extend(dom.children(cur));
+        let is_style = dom
+            .with_node(cur, |n| {
+                n.as_element().map(|e| *e.local.to_ascii_lowercase() == *"style")
+            })
+            .flatten()
+            .unwrap_or(false);
+        if is_style {
+            css.push_str(&dom.text_content(cur));
+            css.push('\n');
+        }
+    }
+    const IFRAME_VW: f32 = 300.0;
+    const IFRAME_VH: f32 = 150.0;
+    let (rules, keyframes) = crate::diting_css::parse_stylesheet_timed(
+        &css,
+        (IFRAME_VW, IFRAME_VH),
+        crate::diting_css::CssMediaType::Screen,
+    );
+    let styles_map = crate::diting_layout::compute_styles_timed_within(
+        dom,
+        &rules,
+        &keyframes,
+        None,
+        root,
+    );
+    let fonts = crate::diting_fonts::font_book();
+    let solved = crate::diting_layout::layout_solve_rooted(
+        dom,
+        &styles_map,
+        &fonts,
+        IFRAME_VW,
+        IFRAME_VH,
+        None,
+        None,
+        Some(root),
+    );
+    let (rects, items, paint_order, local_geom) =
+        crate::diting_layout::layout_collect(dom, &styles_map, &fonts, &solved, IFRAME_VW);
+    let run = std::sync::Arc::new((
+        rects
+            .into_iter()
+            .map(|(id, r)| (id, [r.x, r.y, r.width, r.height]))
+            .collect(),
+        paint_order,
+        styles_map,
+        items,
+        local_geom
+            .into_iter()
+            .map(|(id, (r, m))| (id, ([r.x, r.y, r.width, r.height], m)))
+            .collect(),
+    ));
+    *gs.iframe_layout_cache.borrow_mut() = Some((epoch, root, std::sync::Arc::clone(&run)));
+    run
 }
 
 /// Whether `node` is a position:fixed box whose containing block is the
