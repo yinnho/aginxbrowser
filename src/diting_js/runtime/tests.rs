@@ -8123,7 +8123,9 @@
         // Upstream f6ca133: window scroll methods move the page offset stored
         // on the scrolling element; scrollX/scrollY/pageXOffset/pageYOffset are
         // views of it, and a window scroll reaches document AND window listeners.
-        let mut rt = setup_runtime(r#"<html><body><div id="d"></div></body></html>"#);
+        // Tall page: the root scroller clamps to the real scroll range now, so
+        // the offsets below must stay inside it to actually move.
+        let mut rt = setup_runtime(r#"<html><body><div id="d"></div><div style="height:5000px"></div><div style="width:5000px;height:1px"></div></body></html>"#);
         let script = r#"async () => {
             const isDocEl = document.scrollingElement === document.documentElement;
             window.scrollTo(0, 500);
@@ -8160,8 +8162,9 @@
         // so the element scrollend also reaches document listeners (as in
         // Chrome), while window listeners hear only the window-path fire.
         // The negative clause holds too: a scroll op that translated nothing
-        // fires neither scroll nor scrollend.
-        let mut rt = setup_runtime("<html><body></body></html>");
+        // fires neither scroll nor scrollend. Tall page so the window scroll
+        // has a real range to move in (the root scroller clamps to it now).
+        let mut rt = setup_runtime("<html><body><div style=\"height:5000px\"></div></body></html>");
         let script = r#"async () => {
             const el = document.createElement('div');
             document.body.appendChild(el);
@@ -8187,7 +8190,11 @@
         // JsState. window.scrollTo and direct root writes (through either the
         // html or the body wrapper — CSSOM View proxies body to the scrolling
         // element) must all land in that one native pair.
-        let mut rt = setup_runtime(r#"<html><body><div style="height:5000px"></div></body></html>"#);
+        // Tall AND wide: the root scroller clamps to the real scroll range on
+        // both axes now, so the horizontal writes below need a wide document
+        // to stay inside the range (a viewport-wide page pins scrollLeft at 0,
+        // the same way Chrome does).
+        let mut rt = setup_runtime(r#"<html><body><div style="height:5000px"></div><div style="width:5000px;height:1px"></div></body></html>"#);
         let script = r#"async () => {
             window.scrollTo(0, 300);
             document.documentElement.scrollLeft = 20;
@@ -8782,6 +8789,87 @@
             parts[2],
             serde_json::json!(true),
             "clientHeight keeps the viewport contract"
+        );
+    }
+
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn test_body_overflow_hidden_propagates_to_viewport() {
+        // blitz#880 (css-overflow-3 §3.3): body's overflow hands up to the
+        // viewport when html is visible — the scrolling area collapses to
+        // exactly the viewport (window.scrollTo pins at 0), while body's own
+        // scrollHeight keeps its content extent (its used overflow flipped
+        // back to `visible`). Before the fix the viewport scrolled freely:
+        // the extent walk never consulted overflow at all.
+        let mut rt = setup_runtime(
+            "<html><body style=\"overflow:hidden\"><div style=\"height:5000px\"></div></body></html>",
+        );
+        let result = rt.evaluate(r#"
+            window.scrollTo(0, 1000);
+            return [document.documentElement.scrollHeight === innerHeight,
+                    window.scrollY === 0,
+                    document.body.scrollHeight > innerHeight];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        assert_eq!(
+            parts[0],
+            serde_json::json!(true),
+            "propagated hidden collapses scrollingElement.scrollHeight to the viewport"
+        );
+        assert_eq!(
+            parts[1],
+            serde_json::json!(true),
+            "window scrolling is pinned at 0 for a hidden viewport"
+        );
+        assert_eq!(
+            parts[2],
+            serde_json::json!(true),
+            "body keeps its content extent (used overflow became visible)"
+        );
+    }
+
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn test_html_overflow_hidden_collapses_scroll_range() {
+        // Same propagation rule for html's own overflow: it belongs to the
+        // viewport, so hidden there pins the scroll range at the viewport
+        // instead of leaving html/body clamping up to a 5000px content
+        // extent. A visible body does NOT propagate over it — html's own
+        // non-visible value wins either way.
+        let mut rt = setup_runtime(
+            "<html style=\"overflow:hidden\"><body><div style=\"height:5000px\"></div></body></html>",
+        );
+        let result = rt.evaluate(r#"
+            window.scrollTo(0, 1000);
+            return [document.documentElement.scrollHeight === innerHeight,
+                    window.scrollY === 0];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        assert_eq!(parts[0], serde_json::json!(true));
+        assert_eq!(parts[1], serde_json::json!(true));
+    }
+
+    #[cfg(feature = "screenshot")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_body_overflow_scroll_still_scrollable() {
+        // Regression guard for the propagation fix: an explicit scrollable
+        // value on body propagates too (viewport overflow = auto/scroll) and
+        // the viewport must keep scrolling — the collapse only fires for
+        // hidden/clip.
+        let mut rt = setup_runtime(
+            "<html><body style=\"overflow:scroll\"><div style=\"height:5000px\"></div></body></html>",
+        );
+        let result = rt.evaluate(r#"
+            window.scrollTo(0, 1000);
+            return [document.documentElement.scrollHeight > innerHeight,
+                    window.scrollY === 1000];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        assert_eq!(parts[0], serde_json::json!(true));
+        assert_eq!(
+            parts[1],
+            serde_json::json!(true),
+            "propagated scroll keeps the viewport scrollable"
         );
     }
 

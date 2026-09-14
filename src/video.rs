@@ -1142,6 +1142,11 @@ window.__timelines = { main: {
     async fn scrolling_camera_paints_the_band_the_page_scrolled_to() {
         let port = spawn_html_server(SCROLL_HTML);
         let mut page = test_page();
+        // The camera scrolls the JS root scroller, which now clamps to the
+        // real scroll range (content 900px vs the frame viewport 450px) —
+        // the page must be laid out at the output viewport for the range
+        // to exist, the way a real render does.
+        page.set_viewport_override(800.0, 450.0, false, None);
         page.navigate_with_wait(
             &format!("http://127.0.0.1:{port}/scroll.html"),
             WaitUntil::Load,

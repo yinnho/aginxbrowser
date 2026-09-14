@@ -3455,13 +3455,30 @@ class Element extends Node {
     const t = this.tagName;
     return t === 'HTML' || t === 'BODY';
   }
-  // No layout engine, so there is no real overflow to scroll and the offset is
-  // deliberately NOT clamped: without real geometry any synthetic max is a
-  // guess, and a max derived from a stub scroll box pins scrollTop at 0, which
-  // deadlocks scroll-driven lazy loaders (no scroll -> no content -> no scroll).
-  // We track the offset so scrollTop/scrollLeft round-trip, and fire a scroll
-  // event on direct assignment — lazy loaders that set `el.scrollTop = N` rely
-  // on that event, and scrollTo/scrollBy below would otherwise be its only source.
+  // Max scrollable offset of the viewport root from the REAL extents, so the
+  // root scroller clamps like a real browser: scrollTo(0, 1e9) lands on the
+  // last screenful, and a viewport whose overflow propagated to hidden
+  // (css-overflow-3 §3.3) pins the range at 0 because the root scrollHeight
+  // collapses to the viewport. Only the viewport root clamps — element
+  // scrollers keep wrapper-local offsets. Null extent (no layout data,
+  // no screenshot feature) keeps the old unclamped path: any synthetic max
+  // there would deadlock scroll-driven lazy loaders.
+  _rootScrollMax(axis) {
+    if (!this._isViewportRoot()) return null;
+    const scroller = this._rootScroller();
+    const ext = scroller._ditingScrollExtent(axis);
+    if (ext == null) return null;
+    const win = axis === 'w' ? (globalThis.innerWidth || 1280) : (globalThis.innerHeight || 720);
+    return Math.max(0, ext - win);
+  }
+  // The offset used to be deliberately unclamped (pre-layout-engine era:
+  // any synthetic max was a guess and pinned lazy loaders dead). With real
+  // extents the viewport root clamps like a real browser via
+  // _rootScrollMax; element scrollers and extent-less docs stay unclamped.
+  // We track the offset so scrollTop/scrollLeft round-trip, and fire a
+  // scroll event on direct assignment — lazy loaders that set
+  // `el.scrollTop = N` rely on that event, and scrollTo/scrollBy below
+  // would otherwise be its only source.
   // CSSOM View: in standards mode the body element proxies root scrolling to
   // the document's scrolling element, so body.scrollTop/Left read and write
   // the SAME scroll box as documentElement (two wrappers, one offset).
@@ -3475,9 +3492,11 @@ class Element extends Node {
   get scrollTop() { return this._rootScroller()._scrollTop || 0; }
   set scrollTop(v) {
     v = +v;
-    const nv = Number.isFinite(v) && v > 0 ? v : 0;
+    let nv = Number.isFinite(v) && v > 0 ? v : 0;
     const target = this._rootScroller();
     if (target !== this) { target.scrollTop = nv; return; }
+    const max = this._rootScrollMax('h');
+    if (max != null) nv = Math.min(nv, max);
     const changed = nv !== (this._scrollTop || 0);
     this._scrollTop = nv;
     // Viewport-root mirror: publish the root scroller offset to the native
@@ -3493,9 +3512,11 @@ class Element extends Node {
   get scrollLeft() { return this._rootScroller()._scrollLeft || 0; }
   set scrollLeft(v) {
     v = +v;
-    const nv = Number.isFinite(v) && v > 0 ? v : 0;
+    let nv = Number.isFinite(v) && v > 0 ? v : 0;
     const target = this._rootScroller();
     if (target !== this) { target.scrollLeft = nv; return; }
+    const max = this._rootScrollMax('w');
+    if (max != null) nv = Math.min(nv, max);
     const changed = nv !== (this._scrollLeft || 0);
     this._scrollLeft = nv;
     if (changed && this._isViewportRoot()) {
@@ -3608,13 +3629,14 @@ class Element extends Node {
   get ariaSelected() { return this.getAttribute('aria-selected'); }
   set ariaSelected(v) { if (v == null) this.removeAttribute('aria-selected'); else this.setAttribute('aria-selected', String(v)); }
   scrollIntoView() { globalThis.__diting_click_target = this; }
-  // scrollTo/scrollBy/scroll accept either (x, y) or a ScrollToOptions object.
-  // Without layout the offset cannot be clamped to a real max, but updating it
-  // and firing a scroll event lets scroll-driven lazy loaders advance instead
-  // of throwing "scrollBy is not a function" (#429). The setters fire a scroll
-  // event of their own, so suppress the per-axis ones here and emit a single
-  // event for the whole movement, the way a real browser coalesces one scroll
-  // per scroll operation rather than one per axis.
+  // scrollTo/scrollBy/scroll accept either (x, y) or a ScrollToOptions
+  // object. They write through the scrollTop/scrollLeft setters, so the
+  // viewport root inherits the real-extent clamp and element scrollers keep
+  // wrapper-local offsets; firing a scroll event lets scroll-driven lazy
+  // loaders advance (#429). The setters fire a scroll event of their own, so
+  // suppress the per-axis ones here and emit a single event for the whole
+  // movement, the way a real browser coalesces one scroll per scroll
+  // operation rather than one per axis.
   scrollTo(x, y) {
     let left, top;
     if (x !== null && typeof x === 'object') { left = x.left; top = x.top; }

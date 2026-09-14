@@ -5214,6 +5214,80 @@ pub fn layout_solve_rooted(
     }
 }
 
+/// css-overflow-3 §3.3 overflow propagation (blitz#880): overflow on the
+/// root element applies to the VIEWPORT itself; when that value is
+/// `visible`, the first `body` child that generates a box hands ITS overflow
+/// to the viewport instead (a `display:none` body generates no box and
+/// propagates nothing). `hidden`/`clip` arriving there makes the page
+/// unscrollable — the scrolling area collapses to exactly the viewport.
+/// Every reader of the root scroll range (`scroll_extent`, `band_frame`)
+/// must consult this or they disagree on the scrollable range.
+pub(crate) fn effective_viewport_overflow(
+    dom: &DomTree,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    root: NodeId,
+    has_box: impl Fn(NodeId) -> bool,
+) -> Overflow {
+    let ov = |id: NodeId| styles.get(&id).and_then(|s| s.overflow).unwrap_or(Overflow::Visible);
+    let local = |id: NodeId| -> Option<String> {
+        dom.get_node(id).and_then(|n| {
+            n.as_element()
+                .map(|e| e.local.to_ascii_lowercase().as_ref().to_string())
+        })
+    };
+    // The viewport-carrying element: a body query climbs to its parent (the
+    // root element in a normal document); anything else is taken as-is.
+    let root_elem = if local(root).as_deref() == Some("body") {
+        dom.get_node(root).and_then(|n| n.parent).unwrap_or(root)
+    } else {
+        root
+    };
+    let root_ov = ov(root_elem);
+    if root_ov != Overflow::Visible {
+        return root_ov;
+    }
+    for child in dom.children(root_elem) {
+        if local(child).as_deref() == Some("body") {
+            // First body child only: no box → no propagation, and no
+            // fallback to a later body (WPT overflow-body-propagation-016).
+            return if has_box(child) { ov(child) } else { root_ov };
+        }
+    }
+    root_ov
+}
+
+/// Whether `body`'s overflow propagated to the viewport (css-overflow-3
+/// §3.3, blitz#880): its used value then flips back to `visible`, so the
+/// body must not clip its own descendants in paint.
+pub(crate) fn body_overflow_propagates(
+    dom: &DomTree,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    body: NodeId,
+    has_box: impl Fn(NodeId) -> bool,
+) -> bool {
+    let Some(html) = dom.get_node(body).and_then(|n| n.parent) else {
+        return false;
+    };
+    let html_ov = styles.get(&html).and_then(|s| s.overflow).unwrap_or(Overflow::Visible);
+    if html_ov != Overflow::Visible {
+        return false;
+    }
+    // Propagation only ever happens for the first body child of the root
+    // element, and only when it generates a box and carries a non-visible
+    // value (visible hands up nothing).
+    let first_body = dom.children(html).into_iter().find(|c| {
+        dom.get_node(*c)
+            .and_then(|n| {
+                n.as_element()
+                    .map(|e| e.local.to_ascii_lowercase().as_ref() == "body")
+            })
+            .unwrap_or(false)
+    });
+    first_body == Some(body)
+        && has_box(body)
+        && styles.get(&body).and_then(|s| s.overflow).is_some_and(|o| o != Overflow::Visible)
+}
+
 /// Collect the paint-facing half from a solve (the second half of what
 /// [`layout_dom_with_paint_order_and_images`] used to do in one body): walk
 /// the solved taffy tree accumulating border-box rects and emitting paint
@@ -5926,6 +6000,25 @@ pub fn layout_collect(
             clips = style.is_some_and(|s| {
                 s.overflow.is_some_and(|o| o != Overflow::Visible)
             });
+            if clips {
+                // blitz#880 (css-overflow-3 §3.3): html's overflow belongs to
+                // the viewport — the canvas bounds are the clip, never an
+                // html clip push. A body whose overflow propagated to the
+                // viewport has its used value flipped back to `visible` and
+                // must not clip either.
+                let tag = tree.get_node(*dom_id).and_then(|n| {
+                    n.as_element()
+                        .map(|e| e.local.to_ascii_lowercase().as_ref().to_string())
+                });
+                if tag.as_deref() == Some("html")
+                    || (tag.as_deref() == Some("body")
+                        && body_overflow_propagates(tree, styles, *dom_id, |id| {
+                            rects.contains_key(&id)
+                        }))
+                {
+                    clips = false;
+                }
+            }
             if clips {
                 let st = style.expect("checked above");
                 let bline = st.border_style.is_some();

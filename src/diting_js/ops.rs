@@ -1552,6 +1552,38 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 max_w = max_w.max(ink_w);
                 max_h = max_h.max(ink_h);
             }
+            // Viewport overflow propagation (blitz#880, css-overflow-3
+            // §3.3): hidden/clip carried by the root element — its own or
+            // handed up by the first body child — makes the viewport itself
+            // unscrollable, so the scrolling area collapses to exactly the
+            // viewport (Chrome: scrollingElement.scrollHeight ==
+            // clientHeight there). Only the root-element query collapses;
+            // body keeps its content extent (its used overflow became
+            // `visible`). Same clamp `band_frame` applies, so the JS range
+            // and the pump's stay in agreement.
+            let is_html = dom
+                .with_node(nid, |n| {
+                    n.as_element()
+                        .map(|e| e.local.to_ascii_lowercase().as_ref() == "html")
+                })
+                .flatten()
+                .unwrap_or(false);
+            if is_html {
+                let eff = crate::diting_layout::effective_viewport_overflow(
+                    dom,
+                    styles,
+                    nid,
+                    |id| rects.contains_key(&id),
+                );
+                if matches!(
+                    eff,
+                    crate::diting_css::Overflow::Hidden | crate::diting_css::Overflow::Clip
+                ) {
+                    let (vw, vh) = gs.viewport;
+                    max_w = vw;
+                    max_h = vh;
+                }
+            }
             format!("[{},{}]", max_w, max_h)
         }
         // Cascaded computed values for one element as a single JSON object,
@@ -2078,6 +2110,28 @@ pub(crate) fn band_frame(
     let (ink_w, ink_h) = crate::diting_layout::paint::text_ink_extent(items);
     content_w = content_w.max(ink_w);
     content_h = content_h.max(ink_h);
+    // Viewport overflow propagation (blitz#880, css-overflow-3 §3.3):
+    // hidden/clip carried by the root element — its own or handed up by the
+    // first body child — makes the viewport itself unscrollable, so the
+    // scrolling area collapses to exactly the viewport, overriding the
+    // unions above. Same clamp the `scroll_extent` op serves the JS side:
+    // the two walks must agree or window.scrollY and the pump's clamp
+    // disagree on the scroll range.
+    if let Some(root) = root.filter(|r| rects.contains_key(r)) {
+        let eff = crate::diting_layout::effective_viewport_overflow(
+            dom,
+            styles,
+            root,
+            |id| rects.contains_key(&id),
+        );
+        if matches!(
+            eff,
+            crate::diting_css::Overflow::Hidden | crate::diting_css::Overflow::Clip
+        ) {
+            content_w = vw;
+            content_h = vh;
+        }
+    }
     let dx = (if scroll_x.is_finite() { scroll_x.max(0.0) } else { 0.0 })
         .min((content_w - vw).max(0.0));
     let dy = (if scroll_y.is_finite() { scroll_y.max(0.0) } else { 0.0 })
