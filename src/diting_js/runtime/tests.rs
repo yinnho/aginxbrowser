@@ -3624,6 +3624,52 @@
         );
     }
 
+    // A real worker executes its top-level script the moment the source
+    // lands — collectors that only set up timers/probes and never wait for
+    // a parent message must still run. The old flow deferred the whole body
+    // to the first postMessage, so message-less workers never booted
+    // (obscura#851 family).
+    #[tokio::test(flavor = "current_thread")]
+    async fn worker_top_level_runs_without_any_postmessage() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate_for_cdp(
+                r#"new Promise((resolve, reject) => {
+                    const body = "postMessage('booted');";
+                    const w = new Worker(URL.createObjectURL(new Blob([body])));
+                    w.onerror = e => reject(new Error('worker error: ' + e.message));
+                    w.onmessage = e => resolve(e.data);
+                })"#,
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.value.unwrap(), serde_json::json!("booted"));
+    }
+
+    // WebIDL (Node or string) coercion: replaceWith(undefined) inserts the
+    // text node "undefined" — jQuery 1.12's domManip routes raw fragments
+    // through here, and a silent no-op desyncs the DOM the page just asked
+    // to update (obscura#888 family). Detached no-parent calls stay no-ops.
+    #[test]
+    fn replace_with_coerces_non_node_arguments_to_text() {
+        let mut rt = setup_runtime("<html><body><div id=p><b id=c>old</b></div></body></html>");
+        let result = rt
+            .evaluate(
+                r#"(() => {
+                    document.getElementById('c').replaceWith(undefined);
+                    const coerced = document.getElementById('p').textContent;
+                    const d = document.createElement('div');
+                    let detachedNoop = false;
+                    try { d.replaceWith(); d.replaceWith(undefined); detachedNoop = true; } catch {}
+                    return [coerced, detachedNoop];
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(result, serde_json::json!(["undefined", true]));
+    }
+
     // One stream per document. The tokenizer carries its state across the calls.
     // https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-document-write
     #[test]

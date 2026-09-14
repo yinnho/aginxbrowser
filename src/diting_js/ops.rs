@@ -4481,12 +4481,15 @@ pub(crate) fn validate_fetch_url(url: &url::Url) -> Result<(), String> {
     if let Some(host) = url.host() {
         match host {
             url::Host::Ipv4(ip) => {
-                if ip.is_loopback()
-                    || ip.is_private()
-                    || ip.is_link_local()
-                    || ip.is_broadcast()
-                    || ip.is_documentation()
-                {
+                // Shared deny-set with navigation (is_forbidden_base), not a
+                // local re-listing: the hand-rolled loopback/RFC1918 checks
+                // here missed the IANA special-purpose ranges (198.18.0.0/15
+                // benchmarking, 100.64/10 CGNAT metadata, 0.0.0.0/8) and the
+                // embedded-IPv4 forms (mapped, 6to4, NAT64), so a page could
+                // fetch addresses the navigation gate blocks (obscura #852
+                // family). Scoped allow-network subtraction is built into
+                // is_forbidden_ip.
+                if crate::diting_net::client::is_forbidden_ip(std::net::IpAddr::V4(ip)) {
                     return Err(format!(
                         "Access to private/internal IP address {} is not allowed",
                         ip
@@ -4494,7 +4497,7 @@ pub(crate) fn validate_fetch_url(url: &url::Url) -> Result<(), String> {
                 }
             }
             url::Host::Ipv6(ip) => {
-                if ip.is_loopback() || ip.is_unicast_link_local() {
+                if crate::diting_net::client::is_forbidden_ip(std::net::IpAddr::V6(ip)) {
                     return Err(format!(
                         "Access to private/internal IPv6 address {} is not allowed",
                         ip
@@ -5517,6 +5520,36 @@ mod tests {
 
         let https = url::Url::parse("https://example.com/x").unwrap();
         assert!(validate_fetch_url(&https).is_ok());
+    }
+
+    // The fetch gate must share the navigation deny-set, not a local
+    // re-listing: 198.18.0.0/15 (benchmarking), 100.64/10 (CGNAT metadata),
+    // 0.0.0.0, IPv4-mapped loopback and 6to4-wrapped link-local were all
+    // fetchable from page JS while the navigation gate blocked them
+    // (obscura #852 family).
+    #[test]
+    fn fetch_gate_shares_navigation_deny_set() {
+        let _lock = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        let prev = std::env::var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK").ok();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        for bad in [
+            "http://198.18.0.1/",         // benchmarking range
+            "http://100.100.100.200/",    // CGNAT cloud metadata
+            "http://0.0.0.0/",            // unspecified, routes to localhost
+            "http://[::ffff:127.0.0.1]/", // IPv4-mapped loopback
+            "http://[2002:a9fe:a9fe::]/", // 6to4-wrapped link-local
+        ] {
+            let u = url::Url::parse(bad).unwrap();
+            let err = validate_fetch_url(&u).unwrap_err();
+            assert!(err.contains("not allowed"), "{bad}: got {err}");
+        }
+
+        assert!(validate_fetch_url(&url::Url::parse("http://example.com/x").unwrap()).is_ok());
+
+        if let Some(v) = prev {
+            std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", v);
+        }
     }
 
     // Upstream b744b9b.

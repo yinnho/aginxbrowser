@@ -6043,8 +6043,10 @@ if (!Element.prototype.replaceWith) {
     const parent = this.parentNode;
     if (!parent) return;
     for (const n of nodes) {
-      if (typeof n === 'string') parent.insertBefore(document.createTextNode(n), this);
-      else parent.insertBefore(n, this);
+      // WebIDL (Node or string): non-Node values stringify — jQuery 1.12's
+      // domManip feeds raw fragments through here and replaceWith(undefined)
+      // must land the text "undefined", not silently drop the node.
+      parent.insertBefore(n instanceof Node ? n : document.createTextNode(String(n)), this);
     }
     parent.removeChild(this);
   };
@@ -6055,8 +6057,7 @@ if (!Element.prototype.before) {
     const parent = this.parentNode;
     if (!parent) return;
     for (const n of nodes) {
-      if (typeof n === 'string') parent.insertBefore(document.createTextNode(n), this);
-      else parent.insertBefore(n, this);
+      parent.insertBefore(n instanceof Node ? n : document.createTextNode(String(n)), this);
     }
   };
   _markNative(Element.prototype.before);
@@ -6067,8 +6068,7 @@ if (!Element.prototype.after) {
     if (!parent) return;
     const ref = this.nextSibling;
     for (const n of nodes) {
-      if (typeof n === 'string') parent.insertBefore(document.createTextNode(n), ref);
-      else parent.insertBefore(n, ref);
+      parent.insertBefore(n instanceof Node ? n : document.createTextNode(String(n)), ref);
     }
   };
   _markNative(Element.prototype.after);
@@ -11000,6 +11000,16 @@ globalThis.Worker = class Worker {
       .then(code => {
       worker._code = code;
       worker._codeReady = true;
+      // A real worker executes its top-level script the moment the source
+      // lands. Anti-fraud collectors boot themselves — timers, XHR probes,
+      // a self-posting pump — and never wait for a parent message, so
+      // deferring the whole body to the first postMessage meant those
+      // workers sat dead forever (obscura#851 family).
+      try { bootWorker(worker); }
+      catch (e) {
+        console.error('Worker error:', e.message);
+        fireWorkerError(worker, e, worker._listeners);
+      }
       // Drain messages that queued while the source loaded. Delivery here
       // runs as a microtask at the next JS yield - immune to macro-task
       // starvation. A busy event loop (Next.js hydration executing dozens
@@ -11111,14 +11121,16 @@ async function preloadWorkerImports(worker, code) {
   }
 }
 
-function runWorkerMessage(worker, data) {
-  try {
-    if (!worker._workerSelf) {
-        // WorkerGlobalScope-shaped `self`: real workers expose ~40 props
-        // and NO window/document. Parameter shadowing in the Function
-        // wrapper keeps the page realm's DOM out of the worker's scope,
-        // so `typeof window` inside the worker reads "undefined".
-        const workerSelf = {
+// Build the worker scope and execute the body's top level. Idempotent —
+// the constructor calls it once the source is ready, and every delivered
+// message lands here first.
+function bootWorker(worker) {
+  if (worker._workerSelf) return;
+    // WorkerGlobalScope-shaped `self`: real workers expose ~40 props
+    // and NO window/document. Parameter shadowing in the Function
+    // wrapper keeps the page realm's DOM out of the worker's scope,
+    // so `typeof window` inside the worker reads "undefined".
+    const workerSelf = {
           onmessage: null,
           postMessage: (msg) => {
             const evt = { data: msg };
@@ -11186,7 +11198,11 @@ function runWorkerMessage(worker, data) {
         const fn = new Function('self', 'postMessage', 'addEventListener', 'removeEventListener', 'close', 'window', 'document', 'navigator', 'location', 'importScripts',
           'with (self) {\n' + worker._code + '\n}');
         fn(workerSelf, workerSelf.postMessage, workerSelf.addEventListener, workerSelf.removeEventListener, workerSelf.close, undefined, undefined, workerSelf.navigator, workerSelf.location, workerSelf.importScripts);
-    }
+}
+
+function runWorkerMessage(worker, data) {
+  try {
+    bootWorker(worker);
     if (worker._workerSelf.onmessage) worker._workerSelf.onmessage({ data });
   } catch(e) {
     console.error('Worker error:', e.message);
