@@ -142,6 +142,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # --- http client (non-stealth path) ---
 reqwest = { version = "0.12", features = ["cookies", "gzip", "brotli", "deflate", "rustls-tls", "socks", "json", "stream"], default-features = false }
+# Page-facing WebSocket transport: handshake runs over our own TcpStream/TLS
+# stack (client_async validates the 101 upgrade itself); tokio-tungstenite is
+# already in the tree via axum's ws feature.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect"] }
+http = "1"
+# Same versions the tree already carries (reqwest rustls-tls path) — pinning
+# the same lines keeps the lockfile free of duplicate major versions.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+webpki-roots = "0.26"
+tokio-socks = "0.5"
 encoding_rs = "0.8"
 tempfile = "3"
 url = "2"

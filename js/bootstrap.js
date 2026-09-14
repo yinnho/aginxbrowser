@@ -2480,6 +2480,34 @@ class Element extends Node {
     }
     return element;
   }
+  // insertAdjacentText: inserts a text node relative to this element. DDoS-Guard
+  // challenge view.js (annas-archive.gl) calls this inside NodeList.forEach —
+  // missing here, the TypeError aborted the whole challenge bootstrap and
+  // window.DDG was never defined.
+  insertAdjacentText(position, text) {
+    const pos = String(position).toLowerCase();
+    const node = document.createTextNode(String(text));
+    const parent = this.parentNode;
+    switch (pos) {
+      case 'beforebegin':
+        if (parent) parent.insertBefore(node, this);
+        break;
+      case 'afterbegin':
+        this.insertBefore(node, this.firstChild);
+        break;
+      case 'beforeend':
+        this.appendChild(node);
+        break;
+      case 'afterend':
+        if (parent) parent.insertBefore(node, this.nextSibling);
+        break;
+      default:
+        throw new DOMException(
+          "Failed to execute 'insertAdjacentText' on 'Element': The value provided ('" + position + "') is not one of 'beforeBegin', 'afterBegin', 'beforeEnd', or 'afterEnd'.",
+          "SyntaxError"
+        );
+    }
+  }
   addEventListener(type, handler, opts) {
     // Animations already present in initial markup are unobservable through
     // the mutation hooks above — a listener registration is the practical
@@ -9381,7 +9409,8 @@ _markNative(globalThis.Selection);
   Element.prototype.focus, Element.prototype.blur,
   Element.prototype.showPopover, Element.prototype.hidePopover, Element.prototype.togglePopover,
   Element.prototype.cloneNode, Element.prototype.attachShadow,
-  Element.prototype.insertAdjacentHTML, Element.prototype.scrollIntoView,
+  Element.prototype.insertAdjacentHTML, Element.prototype.insertAdjacentText,
+  Element.prototype.scrollIntoView,
   Element.prototype.scrollTo, Element.prototype.scrollBy, Element.prototype.scroll,
   Element.prototype.append, Element.prototype.prepend, Element.prototype.remove,
   Element.prototype.before, Element.prototype.after, Element.prototype.replaceWith,
@@ -12025,32 +12054,159 @@ if (typeof EventSource === 'undefined') {
 }
 
 if (typeof WebSocket === 'undefined') {
+  // Real page-facing WebSocket over the op_ws_* family (diting_js::ws): the
+  // DDoS-Guard challenge negotiates its answer through a WS round-trip, so a
+  // stub that fires `open` from a microtask and drops `send` can never finish.
   globalThis.WebSocket = class WebSocket {
     constructor(url, protocols) {
-      this.url = url;
+      let parsed;
+      try {
+        parsed = new URL(url, (globalThis.location && globalThis.location.href) || undefined);
+      } catch (e) {
+        throw new DOMException("Failed to construct 'WebSocket': The URL '" + url + "' is invalid.", 'SyntaxError');
+      }
+      const scheme = (parsed.protocol || '').replace(/:$/, '').toLowerCase();
+      if (scheme !== 'ws' && scheme !== 'wss') {
+        throw new DOMException("Failed to construct 'WebSocket': The URL's scheme must be either 'ws' or 'wss'. '" + scheme + "' is not allowed.", 'SyntaxError');
+      }
+      if (parsed.hash) {
+        throw new DOMException("Failed to construct 'WebSocket': The URL contains a fragment identifier ('" + parsed.hash.slice(1) + "'). Fragment identifiers are not allowed in WebSocket URLs.", 'SyntaxError');
+      }
+      let list = [];
+      if (protocols !== undefined && protocols !== null) {
+        list = Array.isArray(protocols) ? protocols.map(String) : [String(protocols)];
+        const seen = new Set();
+        for (const p of list) {
+          if (seen.has(p)) {
+            throw new DOMException("Failed to construct 'WebSocket': The subprotocol '" + p + "' is duplicated.", 'SyntaxError');
+          }
+          seen.add(p);
+        }
+      }
+      this.url = parsed.href;
       this.readyState = 0; // CONNECTING
       this.bufferedAmount = 0;
       this.binaryType = 'blob';
       this.extensions = '';
-      this.protocol = Array.isArray(protocols) ? (protocols[0] || '') : (protocols || '');
+      this.protocol = list[0] || '';
       this.onopen = null; this.onmessage = null; this.onerror = null; this.onclose = null;
+      this._id = undefined;
+      this._terminal = false; // close event fired; no further events
       _makeListenerBox(this);
+      const protocolsJson = JSON.stringify(list);
       Promise.resolve().then(() => {
-        if (this.readyState !== 0) return;
-        this.readyState = 1; // OPEN
-        const ev = new Event('open');
-        if (typeof this.onopen === 'function') { try { this.onopen(ev); } catch (e) {} }
-        try { this.dispatchEvent(ev); } catch (e) {}
+        _OPS.op_ws_open(this.url, protocolsJson).then((raw) => {
+          let res;
+          try { res = JSON.parse(raw); } catch (e) { res = { error: 'malformed open response' }; }
+          if (res.error) {
+            if (!this._terminal) this._fail();
+            return;
+          }
+          if (this._terminal) {
+            // User closed while CONNECTING: release the just-registered socket.
+            try { _OPS.op_ws_close(res.id, 1000, ''); } catch (e) {}
+            return;
+          }
+          this._id = res.id;
+          this._pump(res.id);
+        }).catch((e) => {
+          if (!this._terminal) this._fail();
+        });
       });
     }
-    send(data) { /* drop; no real socket */ }
+    _emit(ev) {
+      const on = this['on' + ev.type];
+      if (typeof on === 'function') { try { on.call(this, ev); } catch (e) {} }
+      try { this.dispatchEvent(ev); } catch (e) {}
+    }
+    _fail() {
+      if (this._terminal) return;
+      this._terminal = true;
+      this.readyState = 3; // CLOSED
+      this._id = undefined;
+      this._emit(new Event('error'));
+      this._fireCloseEvent(1006, '', false);
+    }
+    _finish(code, reason, wasClean) {
+      if (this._terminal) return;
+      this._terminal = true;
+      this.readyState = 3; // CLOSED
+      this._id = undefined;
+      this._fireCloseEvent(code, reason, wasClean);
+    }
+    _fireCloseEvent(code, reason, wasClean) {
+      const ev = new Event('close');
+      ev.code = code; ev.reason = reason; ev.wasClean = wasClean;
+      this._emit(ev);
+    }
+    async _pump(id) {
+      while (!this._terminal && this._id === id) {
+        let raw;
+        try { raw = await _OPS.op_ws_next_message(id); } catch (e) { break; }
+        let ev;
+        try { ev = JSON.parse(raw); } catch (e) { break; }
+        if (!ev || !ev.kind) break;
+        if (ev.kind === 'open') {
+          if (this._terminal || this._id !== id) break;
+          this.readyState = 1; // OPEN
+          this._emit(new Event('open'));
+        } else if (ev.kind === 'message') {
+          if (this._terminal) break;
+          const data = ev.binary ? _base64ToUint8Array(ev.data) : ev.data;
+          this._emit(new MessageEvent('message', { data }));
+        } else if (ev.kind === 'error') {
+          if (this._terminal) break;
+          this._emit(new Event('error'));
+        } else if (ev.kind === 'close') {
+          const code = ev.code || 1006;
+          this._finish(code, ev.reason || '', code !== 1006);
+          break;
+        }
+      }
+    }
+    send(data) {
+      if (this.readyState === 0) {
+        throw new DOMException("Failed to execute 'send' on 'WebSocket': Still in CONNECTING state.", 'InvalidStateError');
+      }
+      if (this.readyState >= 2) {
+        throw new DOMException("Failed to execute 'send' on 'WebSocket': WebSocket is already in CLOSING or CLOSED state.", 'InvalidStateError');
+      }
+      if (typeof data === 'string') {
+        _OPS.op_ws_send(this._id, 'text', data);
+        return;
+      }
+      let bytes;
+      if (data instanceof ArrayBuffer) {
+        bytes = new Uint8Array(data);
+      } else if (ArrayBuffer.isView(data)) {
+        bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+      } else {
+        throw new TypeError("Failed to execute 'send' on 'WebSocket': parameter 1 is not of type 'ArrayBuffer' or 'ArrayBufferView'.");
+      }
+      _OPS.op_ws_send(this._id, 'binary', _bytesToBase64(bytes));
+    }
     close(code, reason) {
       if (this.readyState >= 2) return;
-      this.readyState = 3; // CLOSED
-      const ev = new Event('close');
-      ev.code = code || 1000; ev.reason = reason || ''; ev.wasClean = true;
-      if (typeof this.onclose === 'function') { try { this.onclose(ev); } catch (e) {} }
-      try { this.dispatchEvent(ev); } catch (e) {}
+      if (code !== undefined && code !== null) {
+        const c = Number(code);
+        if (c !== 1000 && !(c >= 3000 && c <= 4999)) {
+          throw new DOMException("Failed to execute 'close' on 'WebSocket': The code must be either 1000, or between 3000 and 4999. " + c + " is neither.", 'InvalidAccessError');
+        }
+      }
+      const r = reason === undefined || reason === null ? '' : String(reason);
+      if (r.length > 123) {
+        throw new DOMException("Failed to execute 'close' on 'WebSocket': The message must not be greater than 123 bytes.", 'SyntaxError');
+      }
+      const c2 = code === undefined || code === null ? 1000 : Number(code);
+      if (this._id !== undefined) {
+        try { _OPS.op_ws_close(this._id, c2, r); } catch (e) {}
+      }
+      if (this.readyState === 0) {
+        // CONNECTING: fail the connection attempt — close event now, clean.
+        this._finish(c2, r, true);
+        return;
+      }
+      this.readyState = 2; // CLOSING; pump delivers the negotiated close later
     }
     static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
   };

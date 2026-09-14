@@ -138,6 +138,9 @@ pub struct JsState {
     /// `Page::sync_js_network_events` so the CDP layer emits
     /// requestWillBeSent / responseReceived for them (upstream #406).
     pub(crate) js_network_events: Vec<JsNetworkEvent>,
+    /// Live page-facing WebSocket sockets (registry + channels, op land
+    /// owned); see `diting_js::ws`.
+    pub(crate) ws_registry: crate::diting_js::ws::WsRegistry,
     /// Memoized diting-layout run for the live DOM tree, keyed by the
     /// tree's epoch (see DomTree::epoch): element rects, the paint order,
     /// and the cascaded ComputedStyle per element. Filled on the first
@@ -356,6 +359,7 @@ impl JsState {
             network_response_body_order: std::collections::VecDeque::new(),
             network_response_body_counter: 0,
             js_network_events: Vec::new(),
+            ws_registry: Default::default(),
             // Memoized diting-layout rects for the live DOM tree, keyed by
             // the tree's epoch (see DomTree::epoch). Filled on the first
             // `layout_rect` op after each mutation; backs getBoundingClientRect.
@@ -4284,7 +4288,7 @@ async fn fetch_url_walk(
     })
 }
 
-fn glob_match(pattern: &str, url: &str) -> bool {
+pub(crate) fn glob_match(pattern: &str, url: &str) -> bool {
     if pattern == "*" {
         return true;
     }
@@ -5297,6 +5301,10 @@ pub fn build_extension() -> Extension {
             op_encoding_for_label(),
             op_text_decode(),
             op_url_encode_query(),
+            crate::diting_js::ws::op_ws_open(),
+            crate::diting_js::ws::op_ws_next_message(),
+            crate::diting_js::ws::op_ws_send(),
+            crate::diting_js::ws::op_ws_close(),
         ]),
         ..Default::default()
     }
