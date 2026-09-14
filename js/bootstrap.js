@@ -110,6 +110,7 @@ const _domStrA1 = new Set([
   "document_node_id", "document_title", "set_document_title", "document_referrer", "document_url", "document_base_url", "document_encoding", "document_referrer_policy",
   "document_element", "document_doctype",
   "document_write", "document_write_reset",
+  "add_css_transition",
 ]);
 const _domNumA2 = new Set(["append_child", "insert_before", "compare_order"]);
 const _dom = (cmd, a1, a2) => {
@@ -1301,6 +1302,14 @@ function _scheduleAnimationCheck(root) {
     const batch = Array.from(_animPendingChecks);
     _animPendingChecks.clear();
     for (const r of batch) _animationCheckIn(r);
+    // Transition diffs ride the same drain (one recompute per batch, the
+    // elements already warm from the animation pass). Attribute-write
+    // callers only — subtree insertions must not arm diffs.
+    const tb = Array.from(_transPending);
+    _transPending.clear();
+    for (const el of tb) {
+      try { _transitionCheckOne(el); } catch (e) {}
+    }
   });
 }
 
@@ -1327,6 +1336,101 @@ function _cancelAnimationsInSubtree(root) {
   for (const [nid, st] of Array.from(_animTracked)) {
     if (_animNodeInSubtree(st.el, root)) _cancelAnimation(nid, st);
   }
+}
+
+// --- CSS transition lifecycle (v1) ---------------------------------------
+// A transition is defined by a *diff* between before/after computed values,
+// which the engine's sampler cannot see — it only overrides the cascade at
+// css_time. Trigger detection therefore lives here: every style/class
+// attribute write queues the element, and the same microtask that drains
+// animation checks diffs each queued element against its last observed
+// values. One recompute per mutation batch (amortized, epoch-cached) — the
+// same coalescing posture as animationstart; a per-write synchronous read
+// was rejected because it forces a full cascade on every class write during
+// hydration. Elements never observed before cannot diff, which matches
+// Chrome: no transition on an element's first style resolution. v1 watches
+// opacity/color/background-color; CSSOM rule mutations surface on the next
+// observation rather than at the rule change. transitioncancel is not
+// modeled: a re-trigger on the same property replaces the pending entry
+// silently, and detachment at the end timer just drops the events.
+const _transWatched = ["opacity", "color", "background-color"];
+const _transLast = new WeakMap();  // el -> {opacity, color, background-color}
+const _transPending = new Set();
+const _transTracked = new Map();   // nid -> { el, timers: Map(prop -> {run,start,end}) }
+
+function _dispatchTransitionEvent(el, type, prop, elapsed) {
+  try {
+    el.dispatchEvent(new TransitionEvent(type, {
+      bubbles: true, composed: true,
+      propertyName: prop, elapsedTime: elapsed, pseudoElement: "",
+    }));
+  } catch (e) {}
+}
+
+function _armTransitionEvents(el, prop, duration, delay) {
+  let tr = _transTracked.get(el._nid);
+  if (!tr) { tr = { el, timers: new Map() }; _transTracked.set(el._nid, tr); }
+  const old = tr.timers.get(prop);
+  if (old) for (const t of [old.run, old.start, old.end]) if (t != null) clearTimeout(t);
+  const t = { run: null, start: null, end: null };
+  tr.timers.set(prop, t);
+  _dispatchTransitionEvent(el, "transitionrun", prop, 0);
+  const fireStart = () => {
+    if (_transTracked.get(el._nid) !== tr || tr.timers.get(prop) !== t) return;
+    _dispatchTransitionEvent(el, "transitionstart", prop, 0);
+  };
+  if (delay > 0) t.start = setTimeout(fireStart, delay * 1000);
+  else fireStart();
+  t.end = setTimeout(() => {
+    if (_transTracked.get(el._nid) !== tr || tr.timers.get(prop) !== t) return;
+    tr.timers.delete(prop);
+    if (!tr.timers.size) _transTracked.delete(el._nid);
+    if (!_nodeInDocument(el)) return;
+    _dispatchTransitionEvent(el, "transitionend", prop, duration);
+  }, (delay + duration) * 1000);
+}
+
+function _transitionCheckOne(el) {
+  if (!el || el.nodeType !== 1 || el._nid == null) return;
+  if (!_nodeInDocument(el)) return;
+  let snap = null;
+  try { snap = getComputedStyle(el); } catch (e) { return; }
+  const now = {};
+  for (const p of _transWatched) now[p] = snap.getPropertyValue(p);
+  const prev = _transLast.get(el);
+  if (prev) {
+    const durations = String(snap.getPropertyValue("transition-duration") || "").split(",").map(_cssSeconds);
+    let durMax = 0;
+    for (const d of durations) if (d > durMax) durMax = d;
+    if (durMax > 0) {
+      const props = String(snap.getPropertyValue("transition-property") || "all").split(",").map((s) => s.trim());
+      const delays = String(snap.getPropertyValue("transition-delay") || "").split(",").map(_cssSeconds);
+      const easings = String(snap.getPropertyValue("transition-timing-function") || "ease").split(",").map((s) => s.trim());
+      for (const p of _transWatched) {
+        if (String(now[p]) === String(prev[p])) continue;
+        let k = props.indexOf(p);
+        if (k < 0) k = props.indexOf("all");
+        if (k < 0) continue;
+        const duration = durations[k % durations.length] || 0;
+        const delay = delays[k % delays.length] || 0;
+        if (duration <= 0 && delay <= 0) continue;
+        try {
+          _dom("add_css_transition", String(el._nid), JSON.stringify({
+            prop: p, from: prev[p], to: now[p],
+            duration: duration * 1000, delay: delay * 1000,
+            easing: easings[k % easings.length] || "ease",
+          }));
+        } catch (e) { continue; }
+        _armTransitionEvents(el, p, duration, delay);
+      }
+    }
+  }
+  _transLast.set(el, now);
+}
+
+function _scheduleTransitionCheck(el) {
+  if (!el || el.nodeType !== 1) return;
+  _transPending.add(el);
 }
 
 function __prepareInsertedSubtree(root) {
@@ -2355,16 +2459,17 @@ class Element extends Node {
       __prepareInsertedStylesheetLink(this);
     }
     if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('attributes', this._nid, [], [], n);
-    // class/style writes can start or stop a CSS animation on this element.
-    if (n === "class" || n === "style") _scheduleAnimationCheck(this);
+    // class/style writes can start or stop a CSS animation on this element,
+    // and may start a transition (before/after computed-value diff).
+    if (n === "class" || n === "style") { _scheduleAnimationCheck(this); _scheduleTransitionCheck(this); }
   }
   setAttributeNS(ns, n, v) {
     _dom("set_attribute", this._nid, String(n) + "\0" + String(v)); // exact name, no HTML folding
     const ln = String(n).toLowerCase();
-    if (ln === "class" || ln === "style") _scheduleAnimationCheck(this);
+    if (ln === "class" || ln === "style") { _scheduleAnimationCheck(this); _scheduleTransitionCheck(this); }
   }
-  removeAttribute(n) { n = _htmlAttrName(this, n); const popoverPrev = (n === "popover") ? this.popover : undefined; _dom("remove_attribute", this._nid, n); if (popoverPrev !== undefined) this._popoverTypeMaybeChanged(popoverPrev); if (n === "class" || n === "style") _scheduleAnimationCheck(this); }
-  removeAttributeNS(ns, n) { _dom("remove_attribute", this._nid, String(n)); const ln = String(n).toLowerCase(); if (ln === "class" || ln === "style") _scheduleAnimationCheck(this); }
+  removeAttribute(n) { n = _htmlAttrName(this, n); const popoverPrev = (n === "popover") ? this.popover : undefined; _dom("remove_attribute", this._nid, n); if (popoverPrev !== undefined) this._popoverTypeMaybeChanged(popoverPrev); if (n === "class" || n === "style") { _scheduleAnimationCheck(this); _scheduleTransitionCheck(this); } }
+  removeAttributeNS(ns, n) { _dom("remove_attribute", this._nid, String(n)); const ln = String(n).toLowerCase(); if (ln === "class" || ln === "style") { _scheduleAnimationCheck(this); _scheduleTransitionCheck(this); } }
   hasAttribute(n) { return this.getAttribute(n) !== null; }
   hasAttributes() { return true; } // Simplified
   get attributes() {

@@ -9955,6 +9955,71 @@ async fn test_css_animation_cancel_on_class_removal() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn test_css_transition_computed_values() {
+    // The computed table spells transition-* in seconds with `all` as the
+    // property default and `ease` as the timing default (Chrome spellings).
+    let mut rt = setup_runtime(
+        "<html><head><style>#b{transition:opacity 1s ease 250ms}\n#c{transition-property:color;transition-duration:2s}</style></head><body><div id=\"b\"></div><div id=\"c\"></div><div id=\"p\"></div></body></html>",
+    );
+    let script = r#"() => {
+        const cs = (id) => {
+            const s = getComputedStyle(document.getElementById(id));
+            return [s.transitionProperty, s.transitionDuration, s.transitionDelay, s.transitionTimingFunction];
+        };
+        return [cs('b'), cs('c'), cs('p')];
+    }"#;
+    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    assert_eq!(
+        result.value.unwrap(),
+        serde_json::json!([
+            ["opacity", "1s", "0.25s", "ease"],
+            ["color", "2s", "0s", "ease"],
+            ["all", "0s", "0s", "ease"],
+        ])
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_css_transition_events_and_registry() {
+    // The JS face diffs watched properties across style writes: the first
+    // resolution only observes (no transition on a first style resolution),
+    // the second registers an entry (start=0 on the video timeline) and
+    // fires run → start → end with the declared curve length.
+    let mut rt = setup_runtime("<html><body><div id=\"d\">x</div></body></html>");
+    let script = r#"async () => {
+        const el = document.getElementById('d');
+        const seq = [];
+        el.addEventListener('transitionrun', (e) => seq.push(['run', e.propertyName, e.elapsedTime, e instanceof TransitionEvent]));
+        el.addEventListener('transitionstart', (e) => seq.push(['start', e.propertyName]));
+        el.addEventListener('transitionend', (e) => seq.push(['end', e.propertyName, e.elapsedTime]));
+        el.style.transition = 'opacity 80ms linear';
+        el.style.opacity = '1';
+        await new Promise(r => setTimeout(r, 5));
+        el.style.opacity = '0';
+        await new Promise(r => setTimeout(r, 200));
+        return seq;
+    }"#;
+    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    assert_eq!(
+        result.value.unwrap(),
+        serde_json::json!([
+            ["run", "opacity", 0, true],
+            ["start", "opacity"],
+            ["end", "opacity", 0.08],
+        ])
+    );
+    let list = rt.with_state(|st| st.css_transitions.borrow().clone());
+    assert_eq!(list.len(), 1, "one registered transition");
+    let tr = &list[0];
+    assert_eq!(tr.property, "opacity");
+    assert_eq!(tr.from, crate::diting_css::TransitionValue::Opacity(1.0));
+    assert_eq!(tr.to, crate::diting_css::TransitionValue::Opacity(0.0));
+    assert_eq!(tr.start, 0.0, "video-timeline outset");
+    assert!((tr.duration - 0.08).abs() < 1e-5);
+    assert!(matches!(tr.easing, crate::diting_css::Easing::Linear));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn test_element_animate_lifecycle_events() {
     // WAAPI Element.animate fires the same lifecycle events with an empty
     // animationName (Chrome parity); detached elements never start.

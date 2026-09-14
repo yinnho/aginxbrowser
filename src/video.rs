@@ -1265,6 +1265,50 @@ html,body{{margin:0;padding:0;width:800px;height:450px;background:#ffffff}}
         }
     }
 
+    /// Registered transitions join the extent so a clip runs long enough to
+    /// show them land. Two separate evaluate tasks: the first style write is
+    /// only observed (no transition on a first style resolution), the second
+    /// diffs and registers — then a layout pass folds delay+duration into
+    /// the extent.
+    #[tokio::test(flavor = "current_thread")]
+    async fn css_extent_spans_registered_transitions() {
+        let html = r#"<!doctype html><html><head><style>
+html,body{margin:0;padding:0;width:800px;height:450px;background:#ffffff}
+#box{width:200px;height:200px;margin:125px auto;background:#000000;
+     transition:opacity 500ms linear}
+</style></head><body><div id="box"></div></body></html>"#;
+        let mut page = test_page();
+        let port = spawn_html_server(html);
+        page.navigate_with_wait(
+            &format!("http://127.0.0.1:{port}/css_trans.html"),
+            WaitUntil::Load,
+        )
+        .await
+        .expect("navigate transition fixture");
+        page.settle_until_idle(5000).await;
+        // The sync evaluate path doesn't pump microtasks, so the trigger
+        // drain would never run — go through the CDP path (await_promise)
+        // for the style writes.
+        page.evaluate_for_cdp(
+            "document.querySelector('#box').style.opacity = '0'",
+            true,
+            true,
+        )
+        .await;
+        page.evaluate_for_cdp(
+            "document.querySelector('#box').style.opacity = '1'",
+            true,
+            true,
+        )
+        .await;
+        let _ = page.evaluate("document.querySelector('#box').getBoundingClientRect().width");
+        let got = page.css_animation_extent();
+        assert!(
+            (got - 0.5).abs() < 1e-6,
+            "transition delay+duration joins the extent: got {got}"
+        );
+    }
+
     /// End-to-end pump: stub timeline → in-process frames → ffmpeg pipe →
     /// MP4 bytes. 2 s @ 10 fps, no hold tail = 20 frames.
     #[tokio::test(flavor = "current_thread")]

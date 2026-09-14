@@ -520,12 +520,15 @@ impl JsRuntime {
         st.dom = Some(dom);
         // New document: the previous page's scroll offset and image bodies
         // mean nothing here (stale URLs would simply miss, but they'd hold
-        // memory until the entry cap evicts them).
+        // memory until the entry cap evicts them). Transitions must be
+        // cleared outright: their node ids are per-document, and the new
+        // document reuses the same id space.
         #[cfg(feature = "screenshot")]
         {
             st.scroll_offset = (0.0, 0.0);
             st.image_bytes.borrow_mut().clear();
             st.image_order.borrow_mut().clear();
+            st.css_transitions.borrow_mut().clear();
         }
     }
 

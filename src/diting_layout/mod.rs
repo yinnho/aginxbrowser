@@ -6502,7 +6502,15 @@ pub fn compute_styles(
     tree: &DomTree,
     rules: &[crate::diting_css::ParsedRule],
 ) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
-    compute_styles_timed(tree, rules, &crate::diting_css::KeyframesMap::new(), None)
+    // Static renders (screenshot/svg paths): no registered transitions —
+    // the cascade values stand.
+    compute_styles_timed(
+        tree,
+        rules,
+        &crate::diting_css::KeyframesMap::new(),
+        None,
+        &[],
+    )
 }
 
 /// The animated face of [`compute_styles`]: after the cascade resolves each
@@ -6519,6 +6527,7 @@ fn compute_styles_impl(
     keyframes: &crate::diting_css::KeyframesMap,
     css_time: Option<f64>,
     within_root: Option<NodeId>,
+    transitions: &[crate::diting_css::CssTransition],
 ) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
     fn visit(
         tree: &DomTree,
@@ -6648,6 +6657,11 @@ fn compute_styles_impl(
             }
         }
     }
+    // Exit-phase transition sampling (CSS transitions batch): registered
+    // entries override cascade values once per pass, after the visit.
+    if !transitions.is_empty() {
+        crate::diting_css::sample_css_transitions(transitions, css_time, &mut out);
+    }
     out
 }
 
@@ -6657,8 +6671,9 @@ pub fn compute_styles_timed(
     rules: &[crate::diting_css::ParsedRule],
     keyframes: &crate::diting_css::KeyframesMap,
     css_time: Option<f64>,
+    transitions: &[crate::diting_css::CssTransition],
 ) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
-    compute_styles_impl(tree, rules, keyframes, css_time, None)
+    compute_styles_impl(tree, rules, keyframes, css_time, None, transitions)
 }
 
 /// Subtree variant (fabricated iframe documents, obscura #976 family): the
@@ -6670,8 +6685,9 @@ pub fn compute_styles_timed_within(
     keyframes: &crate::diting_css::KeyframesMap,
     css_time: Option<f64>,
     root: NodeId,
+    transitions: &[crate::diting_css::CssTransition],
 ) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
-    compute_styles_impl(tree, rules, keyframes, css_time, Some(root))
+    compute_styles_impl(tree, rules, keyframes, css_time, Some(root), transitions)
 }
 
 /// Trace-only element count (a full walk just for the debug knob; keep out of

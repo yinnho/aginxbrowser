@@ -773,6 +773,12 @@ pub struct ComputedStyle {
     /// stylesheet's `@keyframes` table at a time the caller supplies, then
     /// overrides opacity/transform/stroke-dashoffset in place.
     pub animation: Option<AnimationSpec>,
+    /// Parsed `transition` shorthand (CSS transitions batch). Like the
+    /// animation shorthand the cascade only stores it; the JS face diffs a
+    /// tracked property and registers a `CssTransition` with the engine,
+    /// and `sample_css_transitions` resolves registered entries against the
+    /// virtual clock. Comma lists collapse to the first entry.
+    pub transition: Option<TransitionSpec>,
     /// Uniform circular `border-radius` (batch 6b): ONE length/percentage
     /// applied to all four corners (the 1-value syntax — by far the most
     /// common form). Percentages resolve against the box width. Per-corner
@@ -1245,6 +1251,190 @@ pub struct AnimationSpec {
 pub enum Easing {
     Linear,
     CubicBezier(f32, f32, f32, f32),
+}
+
+/// One comma entry of the `transition` shorthand, shared shape with
+/// AnimationSpec: `transition-property` (`None` = all), duration and delay
+/// in seconds, timing function. Like animation lists, a comma-separated
+/// transition list is tracked by its first entry only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransitionSpec {
+    pub property: Option<String>,
+    pub duration: f32,
+    pub delay: f32,
+    pub easing: Easing,
+}
+
+/// `linear` / `ease` family keywords and `cubic-bezier(...)`. `steps()` and
+/// other timing functions we don't evaluate return None (the caller
+/// invalidates the whole declaration rather than animating with the wrong
+/// curve). Shared by the animation and transition shorthands, and by the
+/// `add_css_transition` op (the JS face passes the easing token through).
+pub(crate) fn parse_easing_token(tok: &str) -> Option<Easing> {
+    match tok {
+        "linear" => Some(Easing::Linear),
+        "ease" => Some(Easing::CubicBezier(0.25, 0.1, 0.25, 1.0)),
+        "ease-in" => Some(Easing::CubicBezier(0.42, 0.0, 1.0, 1.0)),
+        "ease-out" => Some(Easing::CubicBezier(0.0, 0.0, 0.58, 1.0)),
+        "ease-in-out" => Some(Easing::CubicBezier(0.42, 0.0, 0.58, 1.0)),
+        _ => {
+            let rest = tok.strip_prefix("cubic-bezier(")?;
+            let args: Vec<Option<f32>> = rest
+                .strip_suffix(')')?
+                .split(',')
+                .map(|a| a.trim().parse::<f32>().ok())
+                .collect();
+            let pts: Option<Vec<f32>> = args.into_iter().collect();
+            let pts = pts?;
+            if pts.len() == 4 && pts.iter().all(|p| p.is_finite()) {
+                Some(Easing::CubicBezier(pts[0], pts[1], pts[2], pts[3]))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// `transition` shorthand: `<property> <duration> <easing> <delay>` in any
+/// order, times by position (first time = duration, second = delay).
+/// `transition-property: none` disables the entry (returns None); `steps()`
+/// invalidates the whole shorthand. Comma lists collapse to the first entry.
+fn parse_transition_shorthand(v: &str) -> Option<TransitionSpec> {
+    let mut duration: Option<f32> = None;
+    let mut delay = 0.0f32;
+    let mut easing: Option<Easing> = None;
+    let mut property: Option<String> = None;
+    for tok in paren_aware_tokens(v) {
+        let secs = tok
+            .strip_suffix("ms")
+            .and_then(|n| n.parse::<f32>().ok().map(|n| n / 1000.0))
+            .or_else(|| tok.strip_suffix('s').and_then(|n| n.parse::<f32>().ok()));
+        if let Some(s) = secs.filter(|s| s.is_finite() && *s >= 0.0) {
+            if duration.is_none() {
+                duration = Some(s);
+            } else if delay == 0.0 {
+                delay = s;
+            }
+            continue;
+        }
+        if let Some(e) = parse_easing_token(&tok) {
+            easing = Some(e);
+            continue;
+        }
+        if tok.contains('(') {
+            return None;
+        }
+        if tok.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            && !tok.is_empty()
+        {
+            match property {
+                None if tok == "none" => return None,
+                None => property = Some(tok),
+                _ => {}
+            }
+        }
+    }
+    Some(TransitionSpec {
+        property,
+        duration: duration.unwrap_or(0.0),
+        delay,
+        easing: easing.unwrap_or(Easing::CubicBezier(0.25, 0.1, 0.25, 1.0)),
+    })
+}
+
+/// The v1 interpolable value set: opacity scalars and RGBA colors.
+/// Transform lerps are tracked for a later batch (per-component
+/// interpolation of the affine is its own slice of work).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TransitionValue {
+    Opacity(f32),
+    Color([f32; 4]),
+}
+
+impl TransitionValue {
+    /// Pairwise lerp. Mismatched kinds (never produced by the register
+    /// op, which snapshots one property) yield None and the caller snaps
+    /// to the end value.
+    pub fn lerp(a: TransitionValue, b: TransitionValue, p: f32) -> Option<TransitionValue> {
+        match (a, b) {
+            (TransitionValue::Opacity(x), TransitionValue::Opacity(y)) => {
+                Some(TransitionValue::Opacity(x + (y - x) * p))
+            }
+            (TransitionValue::Color(x), TransitionValue::Color(y)) => {
+                let mix = |i: usize| x[i] + (y[i] - x[i]) * p;
+                Some(TransitionValue::Color([mix(0), mix(1), mix(2), mix(3)]))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// One registered property transition (CSS transitions batch): the JS
+/// face detects a tracked-property style write, snapshots both computed
+/// values, and registers one of these through the `add_css_transition`
+/// op. `start` is page-timeline seconds; the /video path collapses it to
+/// 0 so clips play transitions from their outset.
+#[derive(Debug, Clone)]
+pub struct CssTransition {
+    pub nid: usize,
+    pub property: String,
+    pub from: TransitionValue,
+    pub to: TransitionValue,
+    pub start: f64,
+    pub duration: f32,
+    pub delay: f32,
+    pub easing: Easing,
+}
+
+/// Exit-phase transition sampling (CSS transitions batch). Runs once per
+/// style pass after the cascade visit: registered entries override the
+/// resolved values. Per-node sampling inside the visit would instead let
+/// a transitioning parent drag its whole subtree through the interpolated
+/// value (children cascade the parent) — v1 collapses that corner and
+/// keeps children on the pre-transition parent value. `t = None` is the
+/// live path and no-ops: the style write already carries the end state,
+/// so the cascade shows it and a registered entry would only re-derive
+/// the same numbers.
+pub fn sample_css_transitions(
+    transitions: &[CssTransition],
+    t: Option<f64>,
+    styles: &mut std::collections::HashMap<crate::diting_dom::NodeId, ComputedStyle>,
+) {
+    let Some(t) = t else { return };
+    for tr in transitions {
+        let Some(cs) = styles.get_mut(&crate::diting_dom::NodeId(tr.nid as u32)) else {
+            continue;
+        };
+        let elapsed = t - tr.start - tr.delay as f64;
+        let p = if tr.duration <= 0.0 {
+            if elapsed >= 0.0 {
+                1.0
+            } else {
+                0.0
+            }
+        } else {
+            ((elapsed / tr.duration as f64).clamp(0.0, 1.0)) as f32
+        };
+        let eased = tr.easing.map(p);
+        let Some(v) = TransitionValue::lerp(tr.from, tr.to, eased) else {
+            continue;
+        };
+        match (tr.property.as_str(), v) {
+            ("opacity", TransitionValue::Opacity(o)) => cs.opacity = Some(o),
+            ("color", TransitionValue::Color(c)) => {
+                cs.color = Some(to_color(c));
+            }
+            ("background-color", TransitionValue::Color(c)) => {
+                cs.background_color = Some(to_color(c));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn to_color(c: [f32; 4]) -> Color {
+    let ch = |x: f32| -> u8 { (x.round().clamp(0.0, 255.0)) as u8 };
+    Color(ch(c[0]), ch(c[1]), ch(c[2]), ch(c[3]))
 }
 
 impl Easing {
@@ -2950,6 +3140,82 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             // the stylesheet's @keyframes table at sample time.
             style.animation = parse_animation_shorthand(v);
             style.animation.is_some()
+        }
+        "transition" => {
+            // Same storage-only contract as `animation`: the cascade
+            // records the spec; trigger detection lives in the JS face
+            // and interpolation in the exit sampler. Comma lists collapse
+            // to the first entry.
+            style.transition = parse_transition_shorthand(v);
+            style.transition.is_some()
+        }
+        "transition-property" => {
+            // First comma entry only. `none` disables transitions for the
+            // element (the spec is dropped); a later duration/delay
+            // longhand would re-create it with the initial value "all".
+            let tok = v.split(',').next().unwrap_or("").trim();
+            if tok.eq_ignore_ascii_case("none") {
+                style.transition = None;
+                true
+            } else if !tok.is_empty()
+                && tok
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            {
+                let spec = style.transition.get_or_insert(TransitionSpec {
+                    property: None,
+                    duration: 0.0,
+                    delay: 0.0,
+                    easing: Easing::CubicBezier(0.25, 0.1, 0.25, 1.0),
+                });
+                spec.property = Some(tok.to_ascii_lowercase());
+                true
+            } else {
+                false
+            }
+        }
+        "transition-duration" | "transition-delay" => {
+            // First comma entry; ms folds to seconds. Negative times are
+            // invalid here (the sampler never sees a phase offset).
+            let t = v.split(',').next().unwrap_or("").trim();
+            let secs = t
+                .strip_suffix("ms")
+                .and_then(|n| n.parse::<f32>().ok().map(|n| n / 1000.0))
+                .or_else(|| t.strip_suffix('s').and_then(|n| n.parse::<f32>().ok()));
+            match secs {
+                Some(s) if s.is_finite() && s >= 0.0 => {
+                    let spec = style.transition.get_or_insert(TransitionSpec {
+                        property: None,
+                        duration: 0.0,
+                        delay: 0.0,
+                        easing: Easing::CubicBezier(0.25, 0.1, 0.25, 1.0),
+                    });
+                    if name == "transition-duration" {
+                        spec.duration = s;
+                    } else {
+                        spec.delay = s;
+                    }
+                    true
+                }
+                _ => false,
+            }
+        }
+        "transition-timing-function" => {
+            // Keyword or cubic-bezier(); steps() and other curves we do
+            // not evaluate invalidate the declaration, same rule as the
+            // shorthand.
+            match parse_easing_token(v.trim()) {
+                Some(e) => {
+                    style.transition.get_or_insert(TransitionSpec {
+                        property: None,
+                        duration: 0.0,
+                        delay: 0.0,
+                        easing: e,
+                    });
+                    true
+                }
+                None => false,
+            }
         }
         "border-radius" => {
             // CSS syntax: 1-4 horizontal radii, optionally `/` plus 1-4
@@ -5805,6 +6071,144 @@ mod tests {
         let mut s = animated_style("opacity: 0; animation: k 2s ease-in-out");
         sample_css_animation(&mut s, &kf, Some(1.0));
         assert!((s.opacity.unwrap() - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn transition_shorthand_and_longhands_parse() {
+        let s = animated_style("transition: opacity 0.3s ease 0.2s");
+        let t = s.transition.as_ref().expect("shorthand parses");
+        assert_eq!(t.property.as_deref(), Some("opacity"));
+        assert!((t.duration - 0.3).abs() < 1e-5);
+        assert!((t.delay - 0.2).abs() < 1e-5, "second time token is the delay");
+        assert_eq!(t.easing, Easing::CubicBezier(0.25, 0.1, 0.25, 1.0));
+
+        // ms folds to seconds; `all` is a property token like any other.
+        let t = animated_style("transition: color 200ms linear")
+            .transition
+            .expect("ms shorthand parses");
+        assert_eq!(t.property.as_deref(), Some("color"));
+        assert!((t.duration - 0.2).abs() < 1e-5);
+        assert_eq!(t.delay, 0.0);
+        assert_eq!(t.easing, Easing::Linear);
+
+        // `none` disables outright; a curve we don't evaluate kills the
+        // whole declaration (the shorthand arm reports the decl rejected).
+        let mut s = ComputedStyle::default();
+        assert!(!apply_declarations(&mut s, "transition: none"));
+        assert!(s.transition.is_none());
+        let mut s = ComputedStyle::default();
+        assert!(!apply_declarations(&mut s, "transition: opacity 1s steps(4)"));
+        assert!(s.transition.is_none());
+
+        // Longhands re-create the spec with the initial values for the
+        // parts they don't carry (property "all", 0s delay, `ease`).
+        let s = animated_style(
+            "transition-property: background-color; transition-duration: 1.5s",
+        );
+        let t = s.transition.as_ref().expect("longhands build the spec");
+        assert_eq!(t.property.as_deref(), Some("background-color"));
+        assert!((t.duration - 1.5).abs() < 1e-5);
+        assert_eq!(t.delay, 0.0);
+        // `none` longhand drops the spec entirely.
+        let mut s2 = animated_style("transition: opacity 1s");
+        assert!(apply_declarations(&mut s2, "transition-property: none"));
+        assert!(s2.transition.is_none());
+    }
+
+    #[test]
+    fn transition_sampler_overrides_values_along_the_clock() {
+        let mut list = vec![CssTransition {
+            nid: 7,
+            property: "opacity".into(),
+            from: TransitionValue::Opacity(0.0),
+            to: TransitionValue::Opacity(1.0),
+            start: 0.0,
+            duration: 1.0,
+            delay: 0.0,
+            easing: Easing::Linear,
+        }];
+        // A registration pointing at a detached node (99) is skipped, not
+        // a panic — the page can drop the element between the register op
+        // and the next style pass.
+        let stale = list[0].clone();
+        list.push(CssTransition { nid: 99, ..stale });
+
+        let mut styles = std::collections::HashMap::new();
+        let mut cs = ComputedStyle::default();
+        cs.opacity = Some(1.0);
+        styles.insert(crate::diting_dom::NodeId(7), cs);
+
+        sample_css_transitions(&list, None, &mut styles);
+        assert_eq!(
+            styles[&crate::diting_dom::NodeId(7)].opacity,
+            Some(1.0),
+            "t=None is the live path: the style write already carries the end state"
+        );
+
+        sample_css_transitions(&list, Some(0.5), &mut styles);
+        assert!((styles[&crate::diting_dom::NodeId(7)].opacity.unwrap() - 0.5).abs() < 1e-4);
+        sample_css_transitions(&list, Some(9.0), &mut styles);
+        assert_eq!(
+            styles[&crate::diting_dom::NodeId(7)].opacity,
+            Some(1.0),
+            "past the active window clamps at `to`"
+        );
+
+        // The delay window holds the from value; a nonzero start shifts it.
+        let mut delayed = list[0].clone();
+        delayed.delay = 0.5;
+        let mut styles = std::collections::HashMap::new();
+        styles.insert(crate::diting_dom::NodeId(7), ComputedStyle::default());
+        sample_css_transitions(&[delayed], Some(0.25), &mut styles);
+        assert_eq!(styles[&crate::diting_dom::NodeId(7)].opacity, Some(0.0));
+
+        let mut shifted = list[0].clone();
+        shifted.start = 2.0;
+        sample_css_transitions(&[shifted], Some(2.5), &mut styles);
+        assert!((styles[&crate::diting_dom::NodeId(7)].opacity.unwrap() - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn transition_sampler_lerps_colors_and_kind_mismatch_keeps_cascade() {
+        let base = CssTransition {
+            nid: 3,
+            property: "color".into(),
+            from: TransitionValue::Color([255.0, 0.0, 0.0, 255.0]),
+            to: TransitionValue::Color([0.0, 0.0, 255.0, 255.0]),
+            start: 0.0,
+            duration: 1.0,
+            delay: 0.0,
+            easing: Easing::Linear,
+        };
+        let mut styles = std::collections::HashMap::new();
+        styles.insert(crate::diting_dom::NodeId(3), ComputedStyle::default());
+        sample_css_transitions(&[base.clone()], Some(0.5), &mut styles);
+        let c = styles[&crate::diting_dom::NodeId(3)]
+            .color
+            .expect("color overridden");
+        assert_eq!(
+            (c.0, c.1, c.2, c.3),
+            (128, 0, 128, 255),
+            "red→blue midpoint is purple (127.5 rounds to 128)"
+        );
+
+        // A from/to whose kind doesn't match the property name is never
+        // produced by the register op; if it ever shows up the sampler
+        // falls through and the cascade value stands.
+        let bad = CssTransition {
+            from: TransitionValue::Opacity(1.0),
+            to: TransitionValue::Opacity(0.0),
+            ..base
+        };
+        let mut cs = ComputedStyle::default();
+        cs.color = Some(Color(9, 9, 9, 255));
+        let mut styles = std::collections::HashMap::new();
+        styles.insert(crate::diting_dom::NodeId(3), cs);
+        sample_css_transitions(&[bad], Some(0.5), &mut styles);
+        assert_eq!(
+            styles[&crate::diting_dom::NodeId(3)].color,
+            Some(Color(9, 9, 9, 255))
+        );
     }
 
     #[test]

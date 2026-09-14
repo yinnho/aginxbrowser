@@ -210,6 +210,13 @@ pub struct JsState {
     /// extent for CSS-animated pages (no `__timelines` needed).
     #[cfg(feature = "screenshot")]
     pub(crate) css_extent: std::cell::Cell<f64>,
+    /// Registered property transitions (CSS transitions batch): the JS
+    /// face snapshots a tracked-property style write and registers one
+    /// entry per (nid, property); a re-trigger on the same pair replaces
+    /// the old entry. Sampled at the exit of compute_styles_timed.
+    #[cfg(feature = "screenshot")]
+    pub(crate) css_transitions:
+        std::cell::RefCell<Vec<crate::diting_css::CssTransition>>,
     /// Layout invalidation revision: bumped wherever `layout_cache` is
     /// dropped. The DomTree epoch is a tree-shape stamp — attribute-level
     /// writes (style/class/attr) clear the cache without allocating nodes,
@@ -387,6 +394,8 @@ impl JsState {
             css_time: None,
             #[cfg(feature = "screenshot")]
             css_extent: std::cell::Cell::new(0.0),
+            #[cfg(feature = "screenshot")]
+            css_transitions: std::cell::RefCell::new(Vec::new()),
             #[cfg(feature = "screenshot")]
             layout_rev: std::cell::Cell::new(0),
             #[cfg(feature = "screenshot")]
@@ -746,6 +755,90 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 gs.drop_paint_only();
             }
         }
+        return "ok".into();
+    }
+    // Transition registry (JS face detects the trigger and hands us the
+    // before/after computed values). The a2 slot carries a JSON blob —
+    // _domRaw only forwards two args. start=0 on the video timeline: page
+    // scripts run once during settle, so a registered transition plays from
+    // the pump's t=0. Live screenshots keep css_time=None and the sampler
+    // no-ops (end state stands) — the settled-posture collapse.
+    #[cfg(feature = "screenshot")]
+    if cmd == "add_css_transition" {
+        let gs = state.borrow::<SharedState>().clone();
+        let Some(nid) = arg1.parse::<u32>().ok().map(NodeId::new) else {
+            return "ok".into();
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&arg2) else {
+            return "ok".into();
+        };
+        let Some(prop) = v
+            .get("prop")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_ascii_lowercase())
+        else {
+            return "ok".into();
+        };
+        let parse_val = |name: &str, s: &str| -> Option<crate::diting_css::TransitionValue> {
+            match name {
+                "opacity" => s
+                    .trim()
+                    .parse::<f32>()
+                    .ok()
+                    .map(|n| crate::diting_css::TransitionValue::Opacity(n.clamp(0.0, 1.0))),
+                "color" | "background-color" => crate::diting_css::parse_color(s).map(|c| {
+                    crate::diting_css::TransitionValue::Color([
+                        c.0 as f32, c.1 as f32, c.2 as f32, c.3 as f32,
+                    ])
+                }),
+                _ => None,
+            }
+        };
+        let (Some(from), Some(to)) = (
+            v.get("from")
+                .and_then(|x| x.as_str())
+                .and_then(|s| parse_val(&prop, s)),
+            v.get("to")
+                .and_then(|x| x.as_str())
+                .and_then(|s| parse_val(&prop, s)),
+        ) else {
+            return "ok".into();
+        };
+        let duration = (v.get("duration").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32) / 1000.0;
+        let delay = (v.get("delay").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32) / 1000.0;
+        if !duration.is_finite()
+            || duration < 0.0
+            || !delay.is_finite()
+            || delay < 0.0
+            || duration + delay <= 0.0
+        {
+            return "ok".into();
+        }
+        let easing = v
+            .get("easing")
+            .and_then(|x| x.as_str())
+            .and_then(crate::diting_css::parse_easing_token)
+            .unwrap_or(crate::diting_css::Easing::CubicBezier(0.25, 0.1, 0.25, 1.0));
+        let gs = gs.borrow_mut();
+        let mut list = gs.css_transitions.borrow_mut();
+        // A re-trigger on the same (node, property) replaces the pending
+        // entry; the cap bounds a page that spams writes every frame.
+        list.retain(|tr| !(tr.nid == nid.index() && tr.property == prop));
+        if list.len() >= 256 {
+            list.remove(0);
+        }
+        list.push(crate::diting_css::CssTransition {
+            nid: nid.index(),
+            property: prop,
+            from,
+            to,
+            start: 0.0,
+            duration,
+            delay,
+            easing,
+        });
+        drop(list);
+        gs.drop_paint_only();
         return "ok".into();
     }
     let gs = state.borrow::<SharedState>().clone();
@@ -1820,12 +1913,15 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
         &rules,
         &keyframes,
         gs.css_time,
+        &gs.css_transitions.borrow(),
     );
     let t_styles = t0.elapsed();
     // Finite animations span delay + duration * iterations. An endless one
     // can't pin a length on its own, so it contributes nothing unless it is
     // the only animation — then one full cycle keeps the extent the
     // single-cycle sampler used to report (a -t pin overrides anyway).
+    // Registered transitions join the extent: a clip must run long enough
+    // to show them finish.
     let mut css_extent = 0.0f64;
     let mut endless_cycle = 0.0f64;
     for a in styles_map.values().filter_map(|cs| cs.animation.as_ref()) {
@@ -1834,6 +1930,9 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
         } else {
             endless_cycle = endless_cycle.max((a.delay + a.duration) as f64);
         }
+    }
+    for tr in gs.css_transitions.borrow().iter() {
+        css_extent = css_extent.max(tr.start + (tr.delay + tr.duration) as f64);
     }
     if css_extent <= 0.0 {
         css_extent = endless_cycle;
@@ -1980,6 +2079,9 @@ fn iframe_layout_run(gs: &JsState, dom: &DomTree, root: NodeId) -> std::rc::Rc<L
         &keyframes,
         None,
         root,
+        // Transitions are registered against main-document node ids; the
+        // subtree id space here is separate, so the empty slice stands.
+        &[],
     );
     let fonts = crate::diting_fonts::font_book();
     let solved = crate::diting_layout::layout_solve_rooted(
@@ -2290,6 +2392,10 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "animation-iteration-count",
     "animation-direction",
     "animation-play-state",
+    "transition-property",
+    "transition-duration",
+    "transition-delay",
+    "transition-timing-function",
 ];
 
 /// Chrome's UA-sheet display for the tags whose CSSOM value differs from the
@@ -2309,6 +2415,27 @@ fn ua_display_cssom(tag: Option<&str>) -> Option<&'static str> {
         "caption" => Some("table-caption"),
         "li" => Some("list-item"),
         _ => None,
+    }
+}
+
+/// Chrome's computed spelling for a timing function (shared by the
+/// animation-timing-function and transition-timing-function arms).
+#[cfg(feature = "screenshot")]
+fn easing_cssom(e: crate::diting_css::Easing) -> String {
+    use crate::diting_css::Easing;
+    match e {
+        Easing::Linear => "linear".into(),
+        Easing::CubicBezier(0.25, 0.1, 0.25, 1.0) => "ease".into(),
+        Easing::CubicBezier(0.42, 0.0, 1.0, 1.0) => "ease-in".into(),
+        Easing::CubicBezier(0.0, 0.0, 0.58, 1.0) => "ease-out".into(),
+        Easing::CubicBezier(0.42, 0.0, 0.58, 1.0) => "ease-in-out".into(),
+        Easing::CubicBezier(a, b, c, d) => format!(
+            "cubic-bezier({}, {}, {}, {})",
+            format_number(a),
+            format_number(b),
+            format_number(c),
+            format_number(d)
+        ),
     }
 }
 
@@ -2684,27 +2811,12 @@ fn computed_style_value(
             "{}s",
             format_number(s.animation.as_ref().map(|a| a.delay).unwrap_or(0.0))
         )),
-        "animation-timing-function" => {
-            let e = s
-                .animation
+        "animation-timing-function" => Some(easing_cssom(
+            s.animation
                 .as_ref()
                 .map(|a| a.easing)
-                .unwrap_or(Easing::CubicBezier(0.25, 0.1, 0.25, 1.0));
-            Some(match e {
-                Easing::Linear => "linear".into(),
-                Easing::CubicBezier(0.25, 0.1, 0.25, 1.0) => "ease".into(),
-                Easing::CubicBezier(0.42, 0.0, 1.0, 1.0) => "ease-in".into(),
-                Easing::CubicBezier(0.0, 0.0, 0.58, 1.0) => "ease-out".into(),
-                Easing::CubicBezier(0.42, 0.0, 0.58, 1.0) => "ease-in-out".into(),
-                Easing::CubicBezier(a, b, c, d) => format!(
-                    "cubic-bezier({}, {}, {}, {})",
-                    format_number(a),
-                    format_number(b),
-                    format_number(c),
-                    format_number(d)
-                ),
-            })
-        },
+                .unwrap_or(Easing::CubicBezier(0.25, 0.1, 0.25, 1.0)),
+        )),
         "animation-fill-mode" => Some(
             match s.animation.as_ref().map(|a| a.fill_forwards) {
                 Some(true) => "forwards",
@@ -2719,6 +2831,29 @@ fn computed_style_value(
         }),
         "animation-direction" => Some("normal".into()),
         "animation-play-state" => Some("running".into()),
+        // CSS transition longhands from the shorthand's TransitionSpec. Chrome
+        // spells an unset transition-property "all" (the initial), and the
+        // spec table's "none" keyword only appears when declared.
+        "transition-property" => Some(
+            s.transition
+                .as_ref()
+                .and_then(|t| t.property.clone())
+                .unwrap_or_else(|| "all".into()),
+        ),
+        "transition-duration" => Some(format!(
+            "{}s",
+            format_number(s.transition.as_ref().map(|t| t.duration).unwrap_or(0.0))
+        )),
+        "transition-delay" => Some(format!(
+            "{}s",
+            format_number(s.transition.as_ref().map(|t| t.delay).unwrap_or(0.0))
+        )),
+        "transition-timing-function" => Some(easing_cssom(
+            s.transition
+                .as_ref()
+                .map(|t| t.easing)
+                .unwrap_or(Easing::CubicBezier(0.25, 0.1, 0.25, 1.0)),
+        )),
         _ => None,
     }
 }
