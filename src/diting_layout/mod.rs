@@ -3909,13 +3909,13 @@ pub enum PaintItem {
     /// Per-corner radii variant of `Bg` (batch 7c): CSS corner order
     /// (TL TR BR BL), each (rx, ry) already resolved to px.
     BgCorner { rect: Rect, color: [u8; 4], radii: [(f32, f32); 4] },
-    /// An outer `box-shadow` layer (blitz#349 family, v1): `rect` is the
-    /// element's own box (the paint half knocks the element interior out),
-    /// `radii` the same clamped per-corner values a `Bg` on this box gets,
-    /// and dx/dy/blur/spread are the layer's px lengths. `inset` layers
-    /// never reach the paint half — they're CSSOM-only for now. Paints
-    /// BEFORE the element's `Bg` so the background covers the shadow
-    /// inside the box edge.
+    /// A `box-shadow` layer (blitz#349 family): `rect` is the element's own
+    /// box, `radii` the same clamped per-corner values a `Bg` on this box
+    /// gets, and dx/dy/blur/spread are the layer's px lengths. Outer layers
+    /// paint BEFORE the element's `Bg` so the background covers the shadow
+    /// inside the box edge; inset layers (`inset: true`) paint AFTER the
+    /// background (and gradient) but BEFORE the `Border`, hard-clipped to
+    /// the box — Chrome's inner-shadow phase.
     BoxShadow {
         rect: Rect,
         color: [u8; 4],
@@ -3924,6 +3924,7 @@ pub enum PaintItem {
         dy: f32,
         blur: f32,
         spread: f32,
+        inset: bool,
     },
     /// A `background-image: linear-gradient(...)` fill (gradient batch).
     /// `stops` are (0..1 position, straight RGBA) ascending, the CSS angle
@@ -5587,6 +5588,7 @@ pub fn layout_collect(
                             dy: sh.dy,
                             blur: sh.blur,
                             spread: sh.spread,
+                            inset: false,
                         });
                     }
                 }
@@ -5642,6 +5644,23 @@ pub fn layout_collect(
                             .map(|(p, c)| (*p, with_alpha([c.0, c.1, c.2, c.3], alpha)))
                             .collect();
                         items.push(PaintItem::BgGradient { rect: bg_rect, stops, css_deg: g.css_deg, radii });
+                    }
+                }
+                // inset layers above the background (and gradient) but
+                // under the border, same reversed first-on-top order —
+                // Chrome's inner-shadow phase sits between the two.
+                if let Some(shadows) = styles.get(dom_id).and_then(|s| s.box_shadow.as_ref()) {
+                    for sh in shadows.iter().rev().filter(|sh| sh.inset) {
+                        items.push(PaintItem::BoxShadow {
+                            rect: bg_rect,
+                            color: with_alpha([sh.color.0, sh.color.1, sh.color.2, sh.color.3], alpha),
+                            radii,
+                            dx: sh.dx,
+                            dy: sh.dy,
+                            blur: sh.blur,
+                            spread: sh.spread,
+                            inset: true,
+                        });
                     }
                 }
             }
@@ -6818,8 +6837,9 @@ mod run_token_memo_tests {
 #[cfg(test)]
 mod box_shadow_paint_tests {
     // blitz#349 family: outer shadows emit one BoxShadow item per layer
-    // UNDER the element's own background, emit order reversed (first-declared
-    // layer paints on top), and an inset-only value emits nothing.
+    // UNDER the element's own background, inset layers one per layer
+    // ABOVE it (still under the border) — both emit orders reversed
+    // (first-declared layer paints on top).
     use super::*;
     use crate::diting_css::{parse_stylesheet_for, CssMediaType};
     use crate::diting_dom::tree_sink::parse_html;
@@ -6857,11 +6877,24 @@ mod box_shadow_paint_tests {
     }
 
     #[test]
-    fn inset_only_emits_no_shadow_item() {
+    fn inset_layers_above_background_below_border() {
         let items = items(
-            "#card { width: 40px; height: 20px; box-shadow: inset 1px 1px red }",
+            "#card { width: 40px; height: 20px; background: blue; border: 1px solid black; box-shadow: 2px 2px red, inset 2px 2px green }",
             r#"<div id="card"></div>"#,
         );
-        assert!(!items.iter().any(|it| matches!(it, PaintItem::BoxShadow { .. })));
+        let outer = items
+            .iter()
+            .position(|it| matches!(it, PaintItem::BoxShadow { inset: false, .. }));
+        let inset = items
+            .iter()
+            .position(|it| matches!(it, PaintItem::BoxShadow { inset: true, .. }));
+        let bg = items
+            .iter()
+            .position(|it| matches!(it, PaintItem::Bg { color, .. } if *color == [0, 0, 255, 255]));
+        let border = items.iter().position(|it| matches!(it, PaintItem::Border { .. }));
+        let (outer, inset, bg, border) = (outer.unwrap(), inset.unwrap(), bg.unwrap(), border.unwrap());
+        assert!(outer < bg, "outer shadow under the background");
+        assert!(bg < inset, "inset shadow above the background");
+        assert!(inset < border, "inset shadow under the border");
     }
 }
