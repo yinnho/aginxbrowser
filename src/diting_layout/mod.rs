@@ -4120,7 +4120,7 @@ pub fn layout_dom_with_paint_and_images(
     network_bytes: Option<&HashMap<String, std::sync::Arc<Vec<u8>>>>,
     base_url: Option<&str>,
 ) -> (HashMap<NodeId, Rect>, Vec<PaintItem>) {
-    let (rects, items, _order) = layout_dom_with_paint_order_and_images(
+    let (rects, items, _order, _local_geom) = layout_dom_with_paint_order_and_images(
         tree,
         styles,
         fonts,
@@ -4414,7 +4414,12 @@ pub fn layout_dom_with_paint_order_and_images(
     viewport_height: f32,
     network_bytes: Option<&HashMap<String, std::sync::Arc<Vec<u8>>>>,
     base_url: Option<&str>,
-) -> (HashMap<NodeId, Rect>, Vec<PaintItem>, Vec<NodeId>) {
+) -> (
+    HashMap<NodeId, Rect>,
+    Vec<PaintItem>,
+    Vec<NodeId>,
+    HashMap<NodeId, (Rect, [f32; 6])>,
+) {
     let solved = layout_solve(
         tree,
         styles,
@@ -5140,15 +5145,29 @@ pub fn layout_collect(
     fonts: &FontBook,
     solved: &SolvedGeometry,
     viewport_width: f32,
-) -> (HashMap<NodeId, Rect>, Vec<PaintItem>, Vec<NodeId>) {
+) -> (
+    HashMap<NodeId, Rect>,
+    Vec<PaintItem>,
+    Vec<NodeId>,
+    HashMap<NodeId, (Rect, [f32; 6])>,
+) {
     let mut rects = HashMap::new();
     let mut items: Vec<PaintItem> = Vec::new();
     // Paint sequence of the boxed elements (obscura #738): filled by the
     // `collect` walk, sibling bands already z-sorted. See the doc on
     // [`layout_dom_with_paint_order_and_images`].
     let mut paint_order: Vec<NodeId> = Vec::new();
+    // Per-element LOCAL geometry for the event-coordinate surface (blitz
+    // #663 family): the PRE-map border box plus the element's TOTAL
+    // accumulated map (own linear part composed over ancestors — the same
+    // map gBCR's `rects` entry was produced with). offsetX/Y inverse-maps
+    // the hit point through it into the element's local space; hit testing
+    // uses it to keep rotate/skew elements from swallowing corners of their
+    // mapped bounding box. Keyed by DOM nid directly; the inline-band pass's
+    // taffy-keyed `local_by_node` keeps its own shape untouched.
+    let mut local_geom: HashMap<NodeId, (Rect, [f32; 6])> = HashMap::new();
     let Some(icb_node) = solved.icb_node else {
-        return (rects, items, paint_order);
+        return (rects, items, paint_order, local_geom);
     };
     let SolvedGeometry {
         taffy_tree,
@@ -5242,6 +5261,7 @@ pub fn layout_collect(
         baseline_shifts: &HashMap<taffy::tree::NodeId, f32>,
         collapsed_edges: &HashMap<NodeId, [bool; 4]>,
         rects: &mut HashMap<NodeId, Rect>,
+        local_geom: &mut HashMap<NodeId, (Rect, [f32; 6])>,
         abs_by_node: &mut HashMap<taffy::tree::NodeId, Rect>,
         local_by_node: &mut HashMap<taffy::tree::NodeId, (Rect, [f32; 6])>,
         node_first_item: &mut HashMap<taffy::tree::NodeId, usize>,
@@ -5413,6 +5433,10 @@ pub fn layout_collect(
             // translate is already in `rect` via the offset fold).
             let mrect = child_xf.map_rect(rect);
             rects.insert(*dom_id, mrect);
+            // The un-mapped twin plus the total map (event-coordinate
+            // surface, blitz #663 family): offsetX/Y inverse-maps the hit
+            // point through the map and subtracts this box's padding edge.
+            local_geom.insert(*dom_id, (rect, child_xf.to_array()));
             // Items under a SetXf bracket paint in LOCAL coordinates (raw
             // `rect`); the prebaked path uses the mapped box.
             let bg_rect = if prebake { mrect } else { rect };
@@ -6029,7 +6053,7 @@ pub fn layout_collect(
         pos.sort_by_key(|(z, _)| *z);
         for list in [neg, mid, pos] {
             for (_, i) in list {
-                collect(tree, taffy_tree, node_map, styles, images, static_pos, baseline_shifts, collapsed_edges, rects, abs_by_node, local_by_node, node_first_item, items, paint_order, children[i], abs, viewport_width, child_xf, alpha, text_gradient.as_ref());
+                collect(tree, taffy_tree, node_map, styles, images, static_pos, baseline_shifts, collapsed_edges, rects, local_geom, abs_by_node, local_by_node, node_first_item, items, paint_order, children[i], abs, viewport_width, child_xf, alpha, text_gradient.as_ref());
             }
         }
         if clips {
@@ -6052,6 +6076,7 @@ pub fn layout_collect(
         baseline_shifts,
         collapsed_edges,
         &mut rects,
+        &mut local_geom,
         &mut abs_by_node,
         &mut local_by_node,
         &mut node_first_item,
@@ -6209,7 +6234,7 @@ pub fn layout_collect(
             items.splice(idx..idx, band_items);
         }
     }
-    (rects, items, paint_order)
+    (rects, items, paint_order, local_geom)
 }
 
 

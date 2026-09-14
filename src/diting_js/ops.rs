@@ -1344,6 +1344,79 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             s.push(']');
             s
         }
+        // Per-element LOCAL geometry (blitz #663 family): the pre-map
+        // border box and the element's TOTAL accumulated paint map as
+        // "[x,y,w,h,a,b,c,d,e,f]", or "null" for a boxless element or a
+        // failed run. Backs offsetX/Y inverse mapping and exact-shape hit
+        // testing — the JS side rejects hit points that fall inside the
+        // element's axis-aligned bounding box but outside the true
+        // transformed shape.
+        #[cfg(feature = "screenshot")]
+        "local_geom" => {
+            let nid = match parse_nid(&arg1) { Some(id) => id, None => return "null".into() };
+            let epoch = dom.epoch();
+            ensure_layout_run(&gs, dom, epoch);
+            let guard = gs.layout_cache.borrow();
+            let geom = guard.as_ref().and_then(|(e, run)| {
+                if *e == epoch { run.4.get(&nid) } else { None }
+            });
+            match geom {
+                Some(&([x, y, w, h], [a, b, c, d, e, f])) => {
+                    format!("[{},{},{},{},{},{},{},{},{},{}]", x, y, w, h, a, b, c, d, e, f)
+                }
+                None => "null".into(),
+            }
+        }
+        // offsetX/offsetY for a hit at a document-space point (arg2
+        // "docX,docY" — client + scroll) on element arg1 (blitz #663
+        // family): the point inverse-maps through the element's TOTAL
+        // accumulated map into its local space, minus the padding-edge
+        // origin. Singular or non-finite maps answer "null"; the JS side
+        // keeps its constructor defaults there.
+        #[cfg(feature = "screenshot")]
+        "event_offset" => {
+            let nid = match parse_nid(&arg1) { Some(id) => id, None => return "null".into() };
+            let Some((px, py)) = arg2.split_once(',').and_then(|(xs, ys)| {
+                let x = xs.trim().parse::<f32>().ok()?;
+                let y = ys.trim().parse::<f32>().ok()?;
+                Some((x, y))
+            }) else {
+                return "null".into();
+            };
+            let epoch = dom.epoch();
+            ensure_layout_run(&gs, dom, epoch);
+            let guard = gs.layout_cache.borrow();
+            let Some((_, run)) = guard.as_ref().filter(|(e, _)| *e == epoch) else {
+                return "null".into();
+            };
+            let Some(&([bx, by, _, _], [a, b, c, d, ex, ey])) = run.4.get(&nid) else {
+                return "null".into();
+            };
+            let det = a * d - b * c;
+            if det.abs() < 1e-9 {
+                return "null".into();
+            }
+            let lx = (d * (px - ex) - c * (py - ey)) / det;
+            let ly = (a * (py - ey) - b * (px - ex)) / det;
+            if !lx.is_finite() || !ly.is_finite() {
+                return "null".into();
+            }
+            // Padding edge = border box origin + border + padding on each
+            // axis. Px dominates click targets; percent/calc sides answer
+            // 0 there (v1 boundary — those elements keep working, just
+            // without the sub-box nudge).
+            let edge = |len: &Option<crate::diting_css::Length>| match len {
+                Some(crate::diting_css::Length::Px(v)) => *v,
+                _ => 0.0,
+            };
+            if let Some(style) = run.2.get(&nid) {
+                let ox = lx - bx - edge(&style.border_width.left) - edge(&style.padding.left);
+                let oy = ly - by - edge(&style.border_width.top) - edge(&style.padding.top);
+                format!("[{},{}]", ox, oy)
+            } else {
+                format!("[{},{}]", lx - bx, ly - by)
+            }
+        }
         // CSSOM scrollWidth/scrollHeight for one element as "[w,h]", from
         // the same layout run as `layout_rect`: the element's own box
         // unioned with every laid-out DOM descendant's overflow extent
@@ -1361,7 +1434,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             let epoch = dom.epoch();
             ensure_layout_run(&gs, dom, epoch);
             let guard = gs.layout_cache.borrow();
-            let Some((_, (rects, _, styles, items))) = guard.as_ref().filter(|(e, _)| *e == epoch)
+            let Some((_, (rects, _, styles, items, _))) = guard.as_ref().filter(|(e, _)| *e == epoch)
             else {
                 return "null".into();
             };
@@ -1434,7 +1507,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 .flatten();
             let epoch = dom.epoch();
             ensure_layout_run(&gs, dom, epoch);
-            let style = gs.layout_cache.borrow().as_ref().and_then(|(e, (_, _, s, _))| {
+            let style = gs.layout_cache.borrow().as_ref().and_then(|(e, (_, _, s, _, _))| {
                 if *e == epoch { s.get(&nid).cloned() } else { None }
             });
             match style {
@@ -1466,6 +1539,10 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         "paint_order" => "null".into(),
         #[cfg(not(feature = "screenshot"))]
         "scroll_extent" => "null".into(),
+        #[cfg(not(feature = "screenshot"))]
+        "local_geom" => "null".into(),
+        #[cfg(not(feature = "screenshot"))]
+        "event_offset" => "null".into(),
         _ => "null".into(),
     }
 }
@@ -1521,14 +1598,18 @@ fn attr_write_is_layout_inert(
 
 /// One style+layout run over the live tree (see [`JsState::layout_cache`]):
 /// every element's border-box rect, the paint order, the cascaded
-/// ComputedStyle per element, and the flat paint-item list in paint order
-/// (band paint's input — computed anyway, so caching it is free).
+/// ComputedStyle per element, the flat paint-item list in paint order
+/// (band paint's input — computed anyway, so caching it is free), and the
+/// per-element LOCAL geometry pair (pre-map border box + total accumulated
+/// map) backing the event-coordinate surface (`local_geom`/`event_offset`
+/// ops, blitz #663 family).
 #[cfg(feature = "screenshot")]
 type LayoutRun = (
     HashMap<NodeId, [f32; 4]>,
     Vec<NodeId>,
     HashMap<NodeId, crate::diting_css::ComputedStyle>,
     Vec<crate::diting_layout::PaintItem>,
+    HashMap<NodeId, ([f32; 4], [f32; 6])>,
 );
 
 /// Run the full diting style + layout pipeline over the live DOM tree and
@@ -1642,7 +1723,7 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
         .as_ref()
         .is_some_and(|(e, _)| *e == epoch);
     let solve_src = if reuse { "cached" } else { "full" };
-    let (rects, items, paint_order) = if reuse {
+    let (rects, items, paint_order, local_geom) = if reuse {
         // Borrow held only across layout_collect, which never touches
         // JsState — nothing else can interleave on this single thread.
         let guard = gs.geometry_cache.borrow();
@@ -1696,6 +1777,12 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
         paint_order,
         styles_map,
         items,
+        local_geom
+            .into_iter()
+            .map(|(id, (r, m))| {
+                (id, ([r.x, r.y, r.width, r.height], m))
+            })
+            .collect(),
     )
 }
 
@@ -1798,7 +1885,7 @@ pub(crate) fn band_frame(
     let epoch = dom.epoch();
     ensure_layout_run(gs, dom, epoch);
     let guard = gs.layout_cache.borrow();
-    let (_, (rects, _, styles, items)) = guard.as_ref().filter(|(e, _)| *e == epoch)?;
+    let (_, (rects, _, styles, items, _)) = guard.as_ref().filter(|(e, _)| *e == epoch)?;
 
     // Scrollable content extent: the root scroller's box unioned with every
     // laid-out descendant, clamped up to the viewport — the same union the
@@ -1895,7 +1982,7 @@ pub(crate) fn text_ink_extent(gs: &JsState) -> Option<(f32, f32)> {
     let epoch = dom.epoch();
     ensure_layout_run(gs, dom, epoch);
     let guard = gs.layout_cache.borrow();
-    let (_, (_, _, _, items)) = guard.as_ref().filter(|(e, _)| *e == epoch)?;
+    let (_, (_, _, _, items, _)) = guard.as_ref().filter(|(e, _)| *e == epoch)?;
     Some(crate::diting_layout::paint::text_ink_extent(items))
 }
 

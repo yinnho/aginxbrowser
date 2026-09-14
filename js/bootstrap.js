@@ -2220,6 +2220,26 @@ class Element extends Node {
     // element the page actually dispatched on.
     const isOrigin = !event.target;
     if (isOrigin) event.target = this;
+    // Event-coordinate surface (blitz #663 family): resolve offsetX/Y
+    // against the origin target once — the doc-space hit point
+    // (client + root scroll) inverse-maps through the element's total
+    // paint transform into its local space, minus its padding edge. The
+    // op answers "null" for boxless targets or singular maps; the
+    // constructor defaults survive.
+    if (isOrigin && typeof event.clientX === 'number' && typeof event.clientY === 'number'
+        && this._nid !== undefined) {
+      try {
+        const sx = (globalThis.scrollX || globalThis.pageXOffset || 0);
+        const sy = (globalThis.scrollY || globalThis.pageYOffset || 0);
+        const raw = _domRaw('event_offset', String(this._nid | 0),
+                            (event.clientX + sx) + ',' + (event.clientY + sy));
+        const pair = raw && raw !== 'null' ? JSON.parse(raw) : null;
+        if (Array.isArray(pair) && pair.length === 2 && isFinite(pair[0]) && isFinite(pair[1])) {
+          event.offsetX = pair[0];
+          event.offsetY = pair[1];
+        }
+      } catch (e) { /* keep constructor defaults */ }
+    }
     // Activation for an unmanaged click: Chrome runs activation behavior for
     // untrusted clicks too, so `cb.dispatchEvent(new MouseEvent('click'))`
     // toggles a checkbox and a label click forwards to its control. click()
@@ -3070,8 +3090,10 @@ class Element extends Node {
   }
   get offsetWidth() { return this._ditingExtent("w", 100); }
   get offsetHeight() { return this._ditingExtent("h", 20); }
-  get offsetTop() { const b = _ditingLayoutBox(this); return b ? Math.round(b.y) : 0; }
-  get offsetLeft() { const b = _ditingLayoutBox(this); return b ? Math.round(b.x) : 0; }
+  // Local-first (blitz #663 family): the pre-map box, so a transformed
+  // element's offset* stay layout-true instead of tracking its mapped gBCR.
+  get offsetTop() { const b = _ditingLocalBox(this); return b ? Math.round(b.y) : 0; }
+  get offsetLeft() { const b = _ditingLocalBox(this); return b ? Math.round(b.x) : 0; }
   // documentElement / body / window expose VIEWPORT geometry, not their own content box.
   // Puppeteer's #clickableBox clips boxes to document.documentElement.clientWidth/Height;
   // returning 100x20 there made every element appear off-screen and broke .click().
@@ -4440,6 +4462,23 @@ function _ditingLayoutBox(el) {
     }
   } catch { /* no layout box */ }
   return null;
+}
+
+// Transform-free LOCAL box origin (blitz #663 family): offsetLeft/offsetTop
+// ignore the element's own (and ancestors') paint transforms — they read
+// the pre-map border box, which gBCR (transform-mapped) can't answer once
+// rotate/skew land. Falls back to the mapped box when the element is
+// boxless or the layout feature is off.
+function _ditingLocalBox(el) {
+  try {
+    if (el._nid == null) return null;
+    const raw = _domRaw("local_geom", String(el._nid | 0), "");
+    const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (Array.isArray(arr) && arr.length === 10 && Number.isFinite(arr[0])) {
+      return { x: arr[0], y: arr[1], w: arr[2], h: arr[3] };
+    }
+  } catch { /* no local geometry */ }
+  return _ditingLayoutBox(el);
 }
 
 // CSSOM: offset*/client*/scroll* of a display:none element are all 0 — the
@@ -6748,7 +6787,10 @@ globalThis.UIEvent = class extends Event {
   }
 };
 globalThis.MouseEvent = class extends UIEvent {
-  constructor(t,o={}) { super(t,o);this.view=o.view||null;this.detail=o.detail||0;this.screenX=o.screenX||0;this.screenY=o.screenY||0;this.clientX=o.clientX||0;this.clientY=o.clientY||0;this.ctrlKey=!!o.ctrlKey;this.altKey=!!o.altKey;this.shiftKey=!!o.shiftKey;this.metaKey=!!o.metaKey;this.button=o.button||0;this.buttons=o.buttons||0;this.relatedTarget=o.relatedTarget||null; }
+  // Chrome shape: offsetX/Y are NOT constructor-dict settable — a script
+  // constructed event reads 0 until dispatch resolves them against the
+  // target (the dispatchEvent chokepoint below).
+  constructor(t,o={}) { super(t,o);this.view=o.view||null;this.detail=o.detail||0;this.screenX=o.screenX||0;this.screenY=o.screenY||0;this.clientX=o.clientX||0;this.clientY=o.clientY||0;this.ctrlKey=!!o.ctrlKey;this.altKey=!!o.altKey;this.shiftKey=!!o.shiftKey;this.metaKey=!!o.metaKey;this.button=o.button||0;this.buttons=o.buttons||0;this.relatedTarget=o.relatedTarget||null;this.offsetX=0;this.offsetY=0; }
   // Legacy DOM Level 2 initializer. Positional signature per UI Events spec.
   initMouseEvent(type,canBubble,cancelable,view,detail,screenX,screenY,clientX,clientY,ctrlKey,altKey,shiftKey,metaKey,button,relatedTarget) {
     if (arguments.length < 1) throw new TypeError("Failed to execute 'initMouseEvent' on 'MouseEvent': 1 argument required, but only 0 present.");
@@ -6767,6 +6809,12 @@ globalThis.MouseEvent = class extends UIEvent {
     this.relatedTarget=relatedTarget===undefined?null:relatedTarget;
   }
 };
+// x/y alias clientX/Y and pageX/pageY add the root scroll — all read-time
+// getters (blitz #663 family), so initMouseEvent rewires keep them true.
+Object.defineProperty(globalThis.MouseEvent.prototype, 'x', { get() { return this.clientX; }, configurable: true, enumerable: true });
+Object.defineProperty(globalThis.MouseEvent.prototype, 'y', { get() { return this.clientY; }, configurable: true, enumerable: true });
+Object.defineProperty(globalThis.MouseEvent.prototype, 'pageX', { get() { return this.clientX + (globalThis.scrollX || globalThis.pageXOffset || 0); }, configurable: true, enumerable: true });
+Object.defineProperty(globalThis.MouseEvent.prototype, 'pageY', { get() { return this.clientY + (globalThis.scrollY || globalThis.pageYOffset || 0); }, configurable: true, enumerable: true });
 globalThis.KeyboardEvent = class extends UIEvent {
   constructor(t,o={}) { super(t,o);this.view=o.view||null;this.detail=o.detail||0;this.key=o.key||"";this.code=o.code||"";this.location=o.location||0;this.ctrlKey=!!o.ctrlKey;this.altKey=!!o.altKey;this.shiftKey=!!o.shiftKey;this.metaKey=!!o.metaKey;this.repeat=!!o.repeat; }
   // Legacy DOM Level 3 initializer. Positional signature per the WebKit/Gecko form.
@@ -11750,7 +11798,32 @@ if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
       var r = el.getBoundingClientRect();
       if (r.width === 0 || r.height === 0) continue;
       if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
-        cands.push(el);
+        // Transform-tainted boxes (blitz #663 family): a rotated/skewed
+        // element's mapped bounding box swallows corners no pixel of the
+        // element covers. With local geometry available and a non-diagonal
+        // total map, inverse-map the hit point (same space the mapped
+        // rects live in) and keep only true-shape containment; diagonal
+        // maps keep the AABB path, which is exact for them.
+        var outside = false;
+        try {
+          if (el._nid !== undefined) {
+            var lgraw = _domRaw('local_geom', String(el._nid | 0), '');
+            if (lgraw && lgraw !== 'null') {
+              var g = JSON.parse(lgraw);
+              if (g.length === 10 && (g[5] !== 0 || g[6] !== 0)) {
+                var det = g[4] * g[7] - g[5] * g[6];
+                if (det !== 0) {
+                  var lx = (g[7] * (x - g[8]) - g[6] * (y - g[9])) / det;
+                  var ly = (g[4] * (y - g[9]) - g[5] * (x - g[8])) / det;
+                  if (lx < g[0] || lx > g[0] + g[2] || ly < g[1] || ly > g[1] + g[3]) {
+                    outside = true;
+                  }
+                }
+              }
+            }
+          }
+        } catch (e) { /* geometry unavailable — keep the AABB verdict */ }
+        if (!outside) cands.push(el);
       }
     }
     if (!cands.length) return cands;

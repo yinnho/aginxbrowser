@@ -5958,6 +5958,96 @@
         );
     }
 
+    // Event-coordinate surface under transforms (blitz #663 family).
+    // pageX/pageY ride the client point plus root scroll; x/y alias
+    // clientX/clientY; offsetX/offsetY inverse-map the hit point through
+    // the element's TOTAL paint transform into its local space. The box is
+    // 100x100 at doc (100,100) rotated 45° about its center (150,150); a
+    // hit at (150,110) inverse-maps to local (121.716, 121.716), i.e.
+    // offset (21.716, 21.716) from the box origin.
+    #[test]
+    #[cfg(feature = "screenshot")]
+    fn test_mouse_event_coordinates_under_rotation() {
+        let mut rt = setup_runtime(
+            r#"<html><head><style>
+            body { margin: 0; }
+            #rot { position: absolute; left: 100px; top: 100px; width: 100px; height: 100px;
+                   transform: rotate(45deg); }
+          </style></head><body><div id="rot"></div></body></html>"#,
+        );
+        let out = rt
+            .evaluate(
+                r#"JSON.stringify((function() {
+                    const d = document.getElementById('rot');
+                    const ev = new MouseEvent('click', { clientX: 150, clientY: 110 });
+                    d.dispatchEvent(ev);
+                    const r = d.getBoundingClientRect();
+                    return {
+                        ox: +ev.offsetX.toFixed(3), oy: +ev.offsetY.toFixed(3),
+                        px: ev.pageX, py: ev.pageY, x: ev.x, y: ev.y,
+                        gleft: +r.left.toFixed(2), gtop: +r.top.toFixed(2),
+                        gwidth: +r.width.toFixed(2),
+                        offsetLeft: d.offsetLeft, offsetTop: d.offsetTop,
+                    };
+                })())"#,
+            )
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        assert_eq!(v["px"], serde_json::json!(150), "pageX = clientX + root scroll (0 here)");
+        assert_eq!(v["py"], serde_json::json!(110));
+        assert_eq!(v["x"], serde_json::json!(150), "x aliases clientX");
+        assert_eq!(v["y"], serde_json::json!(110));
+        let ox = v["ox"].as_f64().unwrap();
+        let oy = v["oy"].as_f64().unwrap();
+        assert!(
+            (ox - 21.716).abs() < 0.05 && (oy - 21.716).abs() < 0.05,
+            "offset must be the inverse-mapped local point (21.716,21.716), got ({ox},{oy})"
+        );
+        // gBCR carries the mapped bounding box (a rotated square's AABB is
+        // the 141.42 diagonal box); offsetLeft/Top stay layout-true.
+        assert_eq!(v["offsetLeft"], serde_json::json!(100), "offsetLeft ignores the transform");
+        assert_eq!(v["offsetTop"], serde_json::json!(100));
+        assert_eq!(v["gleft"], serde_json::json!(79.29), "gBCR is the mapped AABB");
+        assert_eq!(v["gtop"], serde_json::json!(79.29));
+        assert_eq!(v["gwidth"], serde_json::json!(141.42));
+    }
+
+    // Exact-shape hit testing (blitz #663 family): the corner of a rotated
+    // box's AABB covers no pixel of the element, so elementFromPoint there
+    // must NOT hand back the rotated element — while its center still hits.
+    #[test]
+    #[cfg(feature = "screenshot")]
+    fn test_element_from_point_rejects_rotated_aabb_corners() {
+        let mut rt = setup_runtime(
+            r#"<html><head><style>
+            body { margin: 0; }
+            #rot { position: absolute; left: 100px; top: 100px; width: 100px; height: 100px;
+                   transform: rotate(45deg); }
+          </style></head><body><div id="rot"></div></body></html>"#,
+        );
+        let out = rt
+            .evaluate(
+                r#"JSON.stringify((function() {
+                    return {
+                        center: document.elementFromPoint(150, 110)?.id || null,
+                        corner: document.elementFromPoint(85, 85)?.id || null,
+                    };
+                })())"#,
+            )
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        assert_eq!(
+            v["center"],
+            serde_json::json!("rot"),
+            "a point inside the rotated shape must hit the element"
+        );
+        assert_ne!(
+            v["corner"],
+            serde_json::json!("rot"),
+            "the AABB corner (85,85) is outside the rotated diamond — must not hit"
+        );
+    }
+
     /// A `display: none` element generates no box, so it cannot be hit however
     /// high its z-index: the zero-size rect filter runs before ranking ever
     /// sees it. Pinning this because a boxless element entering the ranking
