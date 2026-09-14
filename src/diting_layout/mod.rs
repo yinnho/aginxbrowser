@@ -932,7 +932,9 @@ fn form_control_run(
     }
     let ty = attr("type").unwrap_or_default().to_ascii_lowercase();
     match ty.as_str() {
-        "checkbox" | "radio" => None,
+        // Checkbox/radio are drawn as widgets; range's value is the thumb
+        // position, not text (blitz#456).
+        "checkbox" | "radio" | "range" => None,
         "button" | "submit" | "reset" => {
             let label = live
                 .or_else(|| attr("value"))
@@ -1481,6 +1483,8 @@ fn build_replaced_leaf(
                 .unwrap_or_default();
             match ty.as_str() {
                 "checkbox" | "radio" => (13.0, 13.0, false),
+                // Chrome's default slider box (blitz#456).
+                "range" => (129.0, 16.0, false),
                 "button" | "submit" | "reset" => {
                     // Same precedence as the paint run: dirty value, then the
                     // parsed value attribute, then Chrome's default "Submit".
@@ -3864,6 +3868,10 @@ pub enum FormRun {
 pub enum FormWidget {
     Checkbox { checked: bool },
     Radio { checked: bool },
+    /// A range slider's static geometry (blitz#456): the thumb's position
+    /// along the track as a 0..1 fraction of the inset track span, read
+    /// from the live value at widget-construction time.
+    Range { fraction: f32 },
 }
 
 /// One paint primitive in document order (batch 4a) — the minimal output
@@ -5643,6 +5651,32 @@ pub fn layout_collect(
                             match ty.as_str() {
                                 "checkbox" => Some(FormWidget::Checkbox { checked }),
                                 "radio" => Some(FormWidget::Radio { checked }),
+                                "range" => {
+                                    // Fraction of the inset track the thumb
+                                    // sits at: live value (dirty mirror of a
+                                    // click) over the value attribute, over
+                                    // the spec default (min+max)/2. min/max
+                                    // fall back to 0/100; max<=min pins the
+                                    // thumb at the start (the spec clamps
+                                    // value to min).
+                                    let num = |name: &str, def: f32| {
+                                        n.get_attribute(name)
+                                            .and_then(|v| v.parse::<f32>().ok())
+                                            .unwrap_or(def)
+                                    };
+                                    let (min, max) = (num("min", 0.0), num("max", 100.0));
+                                    let value = n
+                                        .live_value()
+                                        .or_else(|| n.get_attribute("value"))
+                                        .and_then(|v| v.parse::<f32>().ok())
+                                        .unwrap_or((min + max) / 2.0);
+                                    let fraction = if max > min {
+                                        ((value - min) / (max - min)).clamp(0.0, 1.0)
+                                    } else {
+                                        0.0
+                                    };
+                                    Some(FormWidget::Range { fraction })
+                                }
                                 _ => None,
                             }
                         })

@@ -4020,6 +4020,80 @@ onclick=\"globalThis.__hits=(globalThis.__hits||0)+1\">go</button></body></html>
         );
     }
 
+    /// blitz#456: a range input's mousedown default action snaps the thumb
+    /// to the click position (stepped per `step`), fires `input`, and
+    /// release fires `change` — only when the value actually moved.
+    /// `el.click()` carries no coordinates, so it must NOT move the thumb.
+    #[cfg(feature = "screenshot")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn mouse_click_snaps_range_thumb_and_fires_input_change() {
+        let html = "<html><body style=\"margin:0\">\
+<div style=\"height:40px\"></div>\
+<input id=r type=range min=0 max=100 value=20 style=\"width:200px\">\
+<script>globalThis.__ev=[];var r=document.getElementById('r');\
+r.addEventListener('input',function(){globalThis.__ev.push('input:'+r.value)});\
+r.addEventListener('change',function(){globalThis.__ev.push('change:'+r.value)});</script>\
+</body></html>";
+        let (mut ctx, session) = band_setup(html).await;
+        set_viewport_320x200(&mut ctx, &session).await;
+
+        // rect = (0,40,200,16) → thumb-inset track [7,193], span 186.
+        // Click at x=100: frac 0.5 → value 50 exactly.
+        for (i, ty) in ["mousePressed", "mouseReleased"].iter().enumerate() {
+            let r = band_dispatch(
+                &mut ctx,
+                &session,
+                3 + i as u64,
+                "Input.dispatchMouseEvent",
+                json!({ "type": ty, "x": 100, "y": 48, "button": "left", "clickCount": 1 }),
+            )
+            .await;
+            assert!(r.error.is_none(), "dispatchMouseEvent {ty}: {:?}", r.error);
+        }
+
+        let v = band_dispatch(
+            &mut ctx,
+            &session,
+            5,
+            "Runtime.evaluate",
+            json!({ "expression": "JSON.stringify([r.value, globalThis.__ev])", "returnByValue": true }),
+        )
+        .await;
+        let result = v.result.expect("result");
+        let got = result["result"]["value"].as_str().expect("json str");
+        assert_eq!(
+            got,
+            "[\"50\",[\"input:50\",\"change:50\"]]",
+            "thumb snapped to 50, input then change fired: {got}"
+        );
+
+        // el.click() has no coordinates — Chrome never moves the thumb
+        // through it, and neither must we.
+        let _ = band_dispatch(
+            &mut ctx,
+            &session,
+            6,
+            "Runtime.evaluate",
+            json!({ "expression": "r.click()", "returnByValue": true }),
+        )
+        .await;
+        let v = band_dispatch(
+            &mut ctx,
+            &session,
+            7,
+            "Runtime.evaluate",
+            json!({ "expression": "JSON.stringify([r.value, globalThis.__ev])", "returnByValue": true }),
+        )
+        .await;
+        let result = v.result.expect("result");
+        let got = result["result"]["value"].as_str().expect("json str");
+        assert_eq!(
+            got,
+            "[\"50\",[\"input:50\",\"change:50\"]]",
+            "el.click() must not move the thumb or fire events"
+        );
+    }
+
     #[cfg(feature = "screenshot")]
     #[tokio::test(flavor = "current_thread")]
     async fn capture_screenshot_no_params_keeps_legacy_full_page() {

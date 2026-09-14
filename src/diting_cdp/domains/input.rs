@@ -79,6 +79,34 @@ globalThis.__diting_focusTextEntry = globalThis.__diting_focusTextEntry || funct
     }
   } catch (_e) {}
 };
+// Chrome's mousedown default action for a range input (blitz#456): the
+// thumb snaps to the click position — mapped over the same thumb-inset
+// track span the paint uses, stepped per the step attribute, committed
+// through the value setter (React tracker + live mirror) — and `input`
+// fires. The recorded pre-click value gates `change` on release: a
+// gesture that never moved the value commits nothing. `el.click()` never
+// reaches this (no coordinates → no snap), which is Chrome-faithful.
+globalThis.__diting_rangeMouseDown = globalThis.__diting_rangeMouseDown || function(t, x, y) {
+  try {
+    if (!t || t.localName !== "input" || t.disabled) return;
+    if (String(t.getAttribute("type") || "").toLowerCase() !== "range") return;
+    const r = (t.getBoundingClientRect && t.getBoundingClientRect()) || null;
+    if (!r || r.width <= 0) return;
+    let min = parseFloat(t.min); if (isNaN(min)) min = 0;
+    let max = parseFloat(t.max); if (isNaN(max) || max < min) max = min;
+    let step = parseFloat(t.step); if (isNaN(step) || step <= 0) step = 1;
+    const thumb = 7;
+    const span = Math.max(r.width - thumb * 2, 1);
+    const frac = Math.max(0, Math.min(1, (x - r.left - thumb) / span));
+    const raw = min + frac * (max - min);
+    let v = min + Math.round((raw - min) / step) * step;
+    v = Math.max(min, Math.min(max, v));
+    const old = String(t.value ?? "");
+    globalThis.__diting_setFieldValue(t, "value", String(v));
+    t.dispatchEvent(new Event("input", { bubbles: true }));
+    globalThis.__diting_range_down = { el: t, old: old };
+  } catch (_e) {}
+};
 })();
 "#;
 
@@ -190,7 +218,7 @@ pub(crate) fn mouse_down_js(
             var pd = globalThis.__diting_markTrusted(new PointerEvent('pointerdown', {{bubbles:true,cancelable:true,composed:true,view:globalThis,clientX:{x},clientY:{y},button:{button_code},buttons:{buttons},pointerId:1,pointerType:'mouse',isPrimary:true,pressure:{buttons}!==0?0.5:0,width:1,height:1}}));\
             if (target.dispatchEvent(pd)) {{\
                 var evt = globalThis.__diting_markTrusted(new MouseEvent('mousedown', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:{button_code},buttons:{buttons},detail:{click_count},altKey:{alt_key},ctrlKey:{ctrl_key},metaKey:{meta_key},shiftKey:{shift_key}}}));\
-                if (target.dispatchEvent(evt)) globalThis.__diting_focusTextEntry(target);\
+                if (target.dispatchEvent(evt)) {{ globalThis.__diting_focusTextEntry(target); if ({button_code} === 0) globalThis.__diting_rangeMouseDown(target, {x}, {y}); }}\
             }}\
         }})()",
         x = x, y = y, button_code = button_code, buttons = buttons,
@@ -234,6 +262,8 @@ pub(crate) fn mouse_up_js(
             target.dispatchEvent(pu);\
             var evt = globalThis.__diting_markTrusted(new MouseEvent('mouseup', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:{button_code},buttons:0,detail:{click_count},altKey:{alt_key},ctrlKey:{ctrl_key},metaKey:{meta_key},shiftKey:{shift_key}}}));\
             target.dispatchEvent(evt);\
+            var rd = globalThis.__diting_range_down; globalThis.__diting_range_down = null;\
+            if (rd && rd.el && String(rd.el.value) !== rd.old) rd.el.dispatchEvent(new Event('change', {{bubbles:true}}));\
             if (!down || down.button !== {button_code} || {button_code} !== 0) return;\
             var clickTarget = down.target;\
             while (clickTarget && clickTarget !== target && !(clickTarget.contains && clickTarget.contains(target))) {{\

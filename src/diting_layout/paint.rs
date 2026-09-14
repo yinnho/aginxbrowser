@@ -1199,10 +1199,36 @@ fn paint_form_widget(
     if w <= 0 || h <= 0 {
         return;
     }
-    let (radio, checked) = match widget {
-        super::FormWidget::Checkbox { checked } => (false, checked),
-        super::FormWidget::Radio { checked } => (true, checked),
+    let (radio, checked, range) = match widget {
+        super::FormWidget::Checkbox { checked } => (false, checked, None),
+        super::FormWidget::Radio { checked } => (true, checked, None),
+        super::FormWidget::Range { fraction } => (false, false, Some(fraction)),
     };
+    // A slider (blitz#456) has no outer shell: a 4px track spanning the box
+    // inset by the thumb radius, a filled leading segment and a 14px thumb
+    // — the same neutral gray ramp as the checkables (light track, gray
+    // fill, ink thumb) reads on both light and dark pages.
+    if let Some(fraction) = range {
+        let track = alpha_color([203, 203, 203, 255], alpha);
+        let border = alpha_color([118, 118, 118, 255], alpha);
+        let ink = alpha_color([26, 26, 26, 255], alpha);
+        let thumb_r = 7i64;
+        let cy = y + h / 2;
+        let tx = x + thumb_r;
+        let tw = (w - 2 * thumb_r).max(1);
+        let thumb_cx = tx + ((tw as f32 * fraction.clamp(0.0, 1.0)).round() as i64);
+        out.fill_rounded_rect(tx, cy - 2, tw, 4, 2.0, track);
+        out.fill_rounded_rect(tx, cy - 2, (thumb_cx - tx).max(0), 4, 2.0, border);
+        out.fill_rounded_rect(
+            thumb_cx - thumb_r,
+            cy - thumb_r,
+            thumb_r * 2,
+            thumb_r * 2,
+            thumb_r as f32,
+            ink,
+        );
+        return;
+    }
     let border = alpha_color([118, 118, 118, 255], alpha);
     let fill = alpha_color([255, 255, 255, 255], alpha);
     let ink = alpha_color([26, 26, 26, 255], alpha);
@@ -2236,6 +2262,40 @@ mod tests {
         execute(&items, &fonts, &mut c);
         assert_eq!(px(&c, 12, 12), [26, 26, 26, 255], "center dot survives the bracket (invariant point)");
         assert_eq!(px(&c, 6, 12), field, "field band rides the bracket");
+    }
+
+    /// A range slider (blitz#456) paints a 4px track spanning the
+    /// thumb-inset box, the leading segment in the fill gray, and a round
+    /// thumb parked at the value's fraction — no outer shell, no text.
+    #[test]
+    fn form_widget_paint_range_slider() {
+        let fonts = crate::diting_fonts::font_book();
+        let track = [203, 203, 203, 255];
+        let fill = [118, 118, 118, 255];
+        let ink = [26, 26, 26, 255];
+        let range = |fraction| PaintItem::Replaced {
+            rect: super::super::Rect { x: 4.0, y: 4.0, width: 120.0, height: 16.0 },
+            alt: None,
+            fill_placeholder: false,
+            widget: Some(super::super::FormWidget::Range { fraction }),
+            alpha: 1.0,
+            form: None,
+            caret: None,
+        };
+        // Track x ∈ [11, 117), cy = 12; fraction 0.25 parks the thumb
+        // center at 11 + round(106 × 0.25) = 38.
+        let mut c = Canvas::new_filled(128, 24, [0, 255, 0, 255]);
+        execute(&[range(0.25)], &fonts, &mut c);
+        assert_eq!(px(&c, 20, 12), fill, "leading segment behind the thumb");
+        assert_eq!(px(&c, 38, 12), ink, "thumb center");
+        assert_eq!(px(&c, 100, 12), track, "trailing track");
+
+        // Fraction 0: thumb parked at the start, nothing filled.
+        let mut c = Canvas::new_filled(128, 24, [0, 255, 0, 255]);
+        execute(&[range(0.0)], &fonts, &mut c);
+        assert_eq!(px(&c, 11, 12), ink, "thumb at the track start");
+        assert_eq!(px(&c, 38, 12), track, "no fill segment ahead");
+        assert_eq!(px(&c, 100, 12), track, "trailing track");
     }
 
     /// Text-run layout for the text-carrying form controls (form paint
