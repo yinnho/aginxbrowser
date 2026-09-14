@@ -3909,6 +3909,22 @@ pub enum PaintItem {
     /// Per-corner radii variant of `Bg` (batch 7c): CSS corner order
     /// (TL TR BR BL), each (rx, ry) already resolved to px.
     BgCorner { rect: Rect, color: [u8; 4], radii: [(f32, f32); 4] },
+    /// An outer `box-shadow` layer (blitz#349 family, v1): `rect` is the
+    /// element's own box (the paint half knocks the element interior out),
+    /// `radii` the same clamped per-corner values a `Bg` on this box gets,
+    /// and dx/dy/blur/spread are the layer's px lengths. `inset` layers
+    /// never reach the paint half — they're CSSOM-only for now. Paints
+    /// BEFORE the element's `Bg` so the background covers the shadow
+    /// inside the box edge.
+    BoxShadow {
+        rect: Rect,
+        color: [u8; 4],
+        radii: [(f32, f32); 4],
+        dx: f32,
+        dy: f32,
+        blur: f32,
+        spread: f32,
+    },
     /// A `background-image: linear-gradient(...)` fill (gradient batch).
     /// `stops` are (0..1 position, straight RGBA) ascending, the CSS angle
     /// is in degrees (0 = to top, clockwise), and `radii` are the same
@@ -5559,6 +5575,21 @@ pub fn layout_collect(
                 })
                 .unwrap_or([(0.0, 0.0); 4]);
             if alpha > 0.0 && rect.width > 0.0 && rect.height > 0.0 {
+                // box-shadow below everything: CSS stacks shadows under the
+                // background, first-declared layer on top, so emit reversed.
+                if let Some(shadows) = styles.get(dom_id).and_then(|s| s.box_shadow.as_ref()) {
+                    for sh in shadows.iter().rev().filter(|sh| !sh.inset) {
+                        items.push(PaintItem::BoxShadow {
+                            rect: bg_rect,
+                            color: with_alpha([sh.color.0, sh.color.1, sh.color.2, sh.color.3], alpha),
+                            radii,
+                            dx: sh.dx,
+                            dy: sh.dy,
+                            blur: sh.blur,
+                            spread: sh.spread,
+                        });
+                    }
+                }
                 // background-color: the bottom CSS layer.
                 if let Some(c) = bg.filter(|c| c.3 != 0) {
                     let color = with_alpha([c.0, c.1, c.2, c.3], alpha);
@@ -6539,6 +6570,83 @@ mod q_quote_tests {
 }
 
 #[cfg(test)]
+mod reparent_anchoring_tests {
+    // blitz#764's repro matrix, pinned against the reparent pass: fixed
+    // anchors to the viewport (immune to UA body margin), absolute anchors
+    // to the nearest positioned ancestor's padding box (not the DOM
+    // parent's flow position), a collapsed top margin displaces the CB and
+    // the abs box follows its final position, and an abs box with no
+    // positioned ancestor falls back to the ICB.
+    use super::*;
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    fn layout(sheet: &str, body: &str) -> HashMap<NodeId, Rect> {
+        let html = format!("<html><body>{body}</body></html>");
+        let tree = parse_html(&html);
+        let rules = parse_stylesheet_for(sheet, (800.0, 600.0), CssMediaType::Screen);
+        let styles = compute_styles(&tree, &rules);
+        let (rects, _, _, _) = layout_dom_with_paint_order_and_images(
+            &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
+        );
+        rects
+    }
+
+    fn find(rects: &HashMap<NodeId, Rect>, w: f32, h: f32) -> (f32, f32) {
+        let hits: Vec<(f32, f32)> = rects
+            .values()
+            .filter(|r| r.width == w && r.height == h)
+            .map(|r| (r.x, r.y))
+            .collect();
+        assert_eq!(hits.len(), 1, "signature {w}x{h} matched {hits:?}");
+        hits[0]
+    }
+
+    fn assert_at(rects: &HashMap<NodeId, Rect>, w: f32, h: f32, x: f32, y: f32) {
+        assert_eq!(find(rects, w, h), (x, y), "{w}x{h} misplaced");
+    }
+
+    #[test]
+    fn fixed_under_body_ignores_ua_margin() {
+        let rects = layout("", r#"<p>hello</p><div style="position: fixed; top: 0; left: 0; width: 26px; height: 14px"></div>"#);
+        assert_at(&rects, 26.0, 14.0, 0.0, 0.0);
+    }
+
+    #[test]
+    fn abs_anchors_to_positioned_ancestor_padding_box() {
+        let sheet = "#gp { position: relative; width: 300px; height: 200px; padding-top: 1px } #mid { width: 200px; height: 100px; margin-left: 30px } #abs { position: absolute; top: 5px; left: 15px; width: 40px; height: 20px }";
+        let rects = layout(sheet, r#"<div id="gp"><div id="mid"><div id="abs"></div></div></div>"#);
+        assert_at(&rects, 200.0, 100.0, 38.0, 9.0);
+        // gp padding box (8,8) + insets, NOT #mid border box + insets (53,14).
+        assert_at(&rects, 40.0, 20.0, 23.0, 13.0);
+    }
+
+    #[test]
+    fn collapsed_top_margin_does_not_leak_into_abs_anchor() {
+        let sheet = "#gp { position: relative; width: 300px; height: 200px; padding-top: 1px } #mid { width: 200px; height: 100px; margin-left: 30px; margin-top: 40px } #abs { position: absolute; top: 5px; left: 15px; width: 40px; height: 20px }";
+        let rects = layout(sheet, r#"<div id="gp"><div id="mid"><div id="abs"></div></div></div><div style="position: absolute; top: 5px; left: 10px; width: 42px; height: 22px"></div><div style="position: fixed; top: 8px; left: 12px; width: 44px; height: 24px"></div>"#);
+        // #mid's 40px margin stays in flow (gp padding blocks the collapse).
+        assert_at(&rects, 300.0, 201.0, 8.0, 8.0);
+        assert_at(&rects, 200.0, 100.0, 38.0, 49.0);
+        assert_at(&rects, 40.0, 20.0, 23.0, 13.0);
+        // No positioned ancestor → ICB; fixed → viewport.
+        assert_at(&rects, 42.0, 22.0, 10.0, 5.0);
+        assert_at(&rects, 44.0, 24.0, 12.0, 8.0);
+    }
+
+    #[test]
+    fn collapse_through_displaces_cb_and_abs_follows() {
+        let sheet = "#gp { position: relative; width: 300px; height: 200px } #mid { width: 200px; height: 100px; margin-left: 30px; margin-top: 40px } #abs { position: absolute; top: 5px; left: 15px; width: 40px; height: 20px }";
+        let rects = layout(sheet, r#"<div id="gp"><div id="mid"><div id="abs"></div></div></div>"#);
+        // mid's margin collapses through gp and past the 8px body margin
+        // (max(8,40)); gp and mid both start at y=40.
+        assert_at(&rects, 300.0, 200.0, 8.0, 40.0);
+        assert_at(&rects, 200.0, 100.0, 38.0, 40.0);
+        assert_at(&rects, 40.0, 20.0, 23.0, 45.0);
+    }
+}
+
+#[cfg(test)]
 mod paint_token_memo_tests {
     use super::*;
     use crate::diting_css::{parse_stylesheet_for, CssMediaType};
@@ -6704,5 +6812,56 @@ mod run_token_memo_tests {
                 _ => panic!("expected a Run leaf"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod box_shadow_paint_tests {
+    // blitz#349 family: outer shadows emit one BoxShadow item per layer
+    // UNDER the element's own background, emit order reversed (first-declared
+    // layer paints on top), and an inset-only value emits nothing.
+    use super::*;
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    fn items(sheet: &str, body: &str) -> Vec<PaintItem> {
+        let html = format!("<html><body>{body}</body></html>");
+        let tree = parse_html(&html);
+        let rules = parse_stylesheet_for(sheet, (800.0, 600.0), CssMediaType::Screen);
+        let styles = compute_styles(&tree, &rules);
+        let (_, items, _, _) = layout_dom_with_paint_order_and_images(
+            &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
+        );
+        items
+    }
+
+    #[test]
+    fn shadow_items_reversed_under_background() {
+        let items = items(
+            "#card { width: 40px; height: 20px; background: blue; box-shadow: 1px 1px red, 2px 2px green }",
+            r#"<div id="card"></div>"#,
+        );
+        let at: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| matches!(it, PaintItem::BoxShadow { .. }))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(at.len(), 2);
+        assert!(matches!(&items[at[0]], PaintItem::BoxShadow { dx, .. } if *dx == 2.0), "reversed: green first");
+        assert!(matches!(&items[at[1]], PaintItem::BoxShadow { dx, .. } if *dx == 1.0), "red second");
+        let bg = items
+            .iter()
+            .position(|it| matches!(it, PaintItem::Bg { color, .. } if *color == [0, 0, 255, 255]));
+        assert!(bg.is_some_and(|b| at.iter().all(|s| *s < b)), "shadows under the background");
+    }
+
+    #[test]
+    fn inset_only_emits_no_shadow_item() {
+        let items = items(
+            "#card { width: 40px; height: 20px; box-shadow: inset 1px 1px red }",
+            r#"<div id="card"></div>"#,
+        );
+        assert!(!items.iter().any(|it| matches!(it, PaintItem::BoxShadow { .. })));
     }
 }

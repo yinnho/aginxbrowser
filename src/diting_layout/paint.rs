@@ -13,7 +13,7 @@
 //! gradients, z-index/stacking contexts.
 
 use super::text::{baseline_offset, greedy_wrap, tokens_of, truncate_tokens, ScaledMetrics, TextRaster, Token};
-use super::{FontBook, PaintItem, TextGradient};
+use super::{FontBook, PaintItem, Rect, TextGradient};
 use crate::diting_css::TextDecorations;
 
 /// A straight-alpha RGBA8 image, row-major — our paint target.
@@ -774,6 +774,148 @@ impl Canvas {
         }
     }
 
+    /// Outer box-shadow (blitz#349 family, v1): per-pixel SDF around the
+    /// offset/spread-inflated shadow box, the element's own border box
+    /// knocked out (a transparent background must not show the shadow
+    /// inside it — Chrome semantics). The feather is a linear falloff over
+    /// [0, blur]: the same visible extent as Chrome's gaussian σ=blur/2,
+    /// cheaper per pixel, no blur taps.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_box_shadow(
+        &mut self,
+        rect: &Rect,
+        color: [u8; 4],
+        radii: [(f32, f32); 4],
+        dx: f32,
+        dy: f32,
+        blur: f32,
+        spread: f32,
+    ) {
+        if rect.width <= 0.0 || rect.height <= 0.0 || color[3] == 0 {
+            return;
+        }
+        let ehw = rect.width as f64 / 2.0;
+        let ehh = rect.height as f64 / 2.0;
+        let (ecx, ecy) = (rect.x as f64 + ehw, rect.y as f64 + ehh);
+        let shw = ehw + spread as f64;
+        let shh = ehh + spread as f64;
+        if shw <= 0.0 || shh <= 0.0 {
+            return;
+        }
+        let (scx, scy) = (ecx + dx as f64, ecy + dy as f64);
+        let feather = blur.max(0.0) as f64;
+        let (ax0, ay0, ax1, ay1) = self.allowed();
+        let pad = feather.ceil() as i64 + 1;
+        let x0 = ((scx - shw).floor() as i64 - pad).max(ax0).max(0);
+        let y0 = ((scy - shh).floor() as i64 - pad).max(ay0).max(0);
+        let x1 = ((scx + shw).ceil() as i64 + pad).min(ax1).min(self.width as i64);
+        let y1 = ((scy + shh).ceil() as i64 + pad).min(ay1).min(self.height as i64);
+        for gy in y0..y1 {
+            for gx in x0..x1 {
+                let (cx, cy) = (gx as f64 + 0.5, gy as f64 + 0.5);
+                // Knockout: a pixel inside the element's own box gets no
+                // shadow, whatever its background is.
+                let (qx, qy) = (cx - ecx, cy - ecy);
+                let er = shadow_corner_radius(radii, qx, qy).min(ehw.min(ehh));
+                if sd_rounded_box(qx, qy, ehw - er, ehh - er, er) < 0.0 {
+                    continue;
+                }
+                let (px, py) = (cx - scx, cy - scy);
+                let sr = (shadow_corner_radius(radii, px, py) + spread as f64).min(shw.min(shh));
+                let d = sd_rounded_box(px, py, shw - sr, shh - sr, sr);
+                let a = if feather > 0.0 {
+                    (1.0 - d / feather).clamp(0.0, 1.0)
+                } else if d < 0.0 {
+                    1.0
+                } else {
+                    0.0
+                };
+                if a <= 0.0 {
+                    continue;
+                }
+                let mut src = color;
+                src[3] = ((color[3] as f64 * a).round() as i64).clamp(0, 255) as u8;
+                if src[3] == 0 {
+                    continue;
+                }
+                let i = (gy as usize * self.width + gx as usize) * 4;
+                over(&mut self.data[i..i + 4], src);
+            }
+        }
+    }
+
+    /// The affine twin: the shadow box lives in LOCAL space (the offset
+    /// rides the element's transform), the loop bounds are the
+    /// feather-inflated local box mapped through the bracket, and every
+    /// canvas pixel inverse-maps into local space for the same SDF test.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_shadow_affine(
+        &mut self,
+        rect: &Rect,
+        color: [u8; 4],
+        radii: [(f32, f32); 4],
+        dx: f32,
+        dy: f32,
+        blur: f32,
+        spread: f32,
+    ) {
+        if rect.width <= 0.0 || rect.height <= 0.0 || color[3] == 0 {
+            return;
+        }
+        let Some(m) = self.xf() else { return };
+        let Some(inv) = mat_inv(m) else { return };
+        let ehw = rect.width as f64 / 2.0;
+        let ehh = rect.height as f64 / 2.0;
+        let (ecx, ecy) = (rect.x as f64 + ehw, rect.y as f64 + ehh);
+        let shw = ehw + spread as f64;
+        let shh = ehh + spread as f64;
+        if shw <= 0.0 || shh <= 0.0 {
+            return;
+        }
+        let (scx, scy) = (ecx + dx as f64, ecy + dy as f64);
+        let feather = blur.max(0.0) as f64;
+        let pad = feather + 1.0;
+        let (bx0, by0, bx1, by1) = mapped_bounds(
+            m,
+            scx - shw - pad,
+            scy - shh - pad,
+            (shw + pad) * 2.0,
+            (shh + pad) * 2.0,
+        );
+        let (ax0, ay0, ax1, ay1) = self.allowed();
+        for gy in by0.max(ay0).max(0)..by1.min(ay1).min(self.height as i64) {
+            for gx in bx0.max(ax0).max(0)..bx1.min(ax1).min(self.width as i64) {
+                let (cx, cy) = (gx as f64 + 0.5, gy as f64 + 0.5);
+                let (lx, ly) = mat_apply(inv, cx, cy);
+                let (qx, qy) = (lx - ecx, ly - ecy);
+                let er = shadow_corner_radius(radii, qx, qy).min(ehw.min(ehh));
+                if sd_rounded_box(qx, qy, ehw - er, ehh - er, er) < 0.0 {
+                    continue;
+                }
+                let (px, py) = (lx - scx, ly - scy);
+                let sr = (shadow_corner_radius(radii, px, py) + spread as f64).min(shw.min(shh));
+                let d = sd_rounded_box(px, py, shw - sr, shh - sr, sr);
+                let a = if feather > 0.0 {
+                    (1.0 - d / feather).clamp(0.0, 1.0)
+                } else if d < 0.0 {
+                    1.0
+                } else {
+                    0.0
+                };
+                if a <= 0.0 || !self.clip_accepts(cx, cy) {
+                    continue;
+                }
+                let mut src = color;
+                src[3] = ((color[3] as f64 * a).round() as i64).clamp(0, 255) as u8;
+                if src[3] == 0 {
+                    continue;
+                }
+                let i = (gy as usize * self.width + gx as usize) * 4;
+                over(&mut self.data[i..i + 4], src);
+            }
+        }
+    }
+
     /// Source-over composite of a text tile's straight-alpha pixels at
     /// integer offset `(x, y)`, clipped to the canvas and the clip stack.
     pub fn blit_text(&mut self, r: &TextRaster, x: i64, y: i64) {
@@ -943,6 +1085,33 @@ fn rounded_contains(
             }
         }
     }
+}
+
+/// Rounded-box signed distance (iq's formula, box-shadow v1): negative
+/// inside, zero on the edge, the distance in px outside. `b` is the
+/// half-extent MINUS the corner radius, `r` the radius.
+fn sd_rounded_box(px: f64, py: f64, bx: f64, by: f64, r: f64) -> f64 {
+    let qx = px.abs() - bx;
+    let qy = py.abs() - by;
+    let (ox, oy) = (qx.max(0.0), qy.max(0.0));
+    (ox * ox + oy * oy).sqrt() + qx.max(qy).min(0.0) - r
+}
+
+/// Per-quadrant corner radius (CSS order TL TR BR BL) as the mean of the
+/// corner's (rx, ry): the SDF is circular, so an elliptical corner
+/// approximates to its mean — uniform radii (the overwhelming case) are
+/// exact. Quadrants read off the point's sign relative to the box center.
+fn shadow_corner_radius(radii: [(f32, f32); 4], qx: f64, qy: f64) -> f64 {
+    let i = if qx < 0.0 && qy < 0.0 {
+        0
+    } else if qx >= 0.0 && qy < 0.0 {
+        1
+    } else if qx >= 0.0 && qy >= 0.0 {
+        2
+    } else {
+        3
+    };
+    (radii[i].0 + radii[i].1) as f64 / 2.0
 }
 
 /// LOCAL-space border-ring containment (affine residuals batch): inside the
@@ -1575,6 +1744,21 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                         *radii,
                         *color,
                     );
+                }
+            }
+            PaintItem::BoxShadow { rect, color, radii, dx: sdx, dy: sdy, blur, spread } => {
+                if out.xf().is_some() {
+                    out.fill_shadow_affine(rect, *color, *radii, *sdx, *sdy, *blur, *spread);
+                } else {
+                    // No bracket: the collect walk's paint translation still
+                    // applies (the affine path folds it into the matrix).
+                    let moved = Rect {
+                        x: rect.x - dx,
+                        y: rect.y - dy,
+                        width: rect.width,
+                        height: rect.height,
+                    };
+                    out.fill_box_shadow(&moved, *color, *radii, *sdx, *sdy, *blur, *spread);
                 }
             }
             PaintItem::Bg { rect, color, radius, .. } => {
@@ -2914,5 +3098,47 @@ mod tests {
         };
         assert_eq!(stroke(None, None), stroke(Some(&tokens), None), "wrapped: pre-shaped == re-shaped");
         assert_eq!(stroke(None, Some(200.0)), stroke(Some(&tokens), Some(200.0)), "truncated: pre-shaped == re-shaped");
+    }
+
+    // ---- box-shadow (blitz#349 family, v1) ----
+
+    /// A zero-blur offset shadow paints hard: visible in the offset band
+    /// outside the element, knocked out inside the element's own box even
+    /// though the element paints no background of its own.
+    #[test]
+    fn box_shadow_offset_band_knocked_out_inside() {
+        let mut c = Canvas::new_filled(40, 40, [255, 255, 255, 255]);
+        let rect = Rect { x: 10.0, y: 10.0, width: 10.0, height: 10.0 };
+        c.fill_box_shadow(&rect, [255, 0, 0, 255], [(0.0, 0.0); 4], 5.0, 5.0, 0.0, 0.0);
+        assert_eq!(px(&c, 20, 20), [255, 0, 0, 255], "offset band right/below");
+        assert_eq!(px(&c, 19, 19), [255, 255, 255, 255], "inside the element: knocked out");
+        assert_eq!(px(&c, 5, 5), [255, 255, 255, 255], "opposite corner: no shadow");
+        assert_eq!(px(&c, 30, 30), [255, 255, 255, 255], "past the offset box: none");
+    }
+
+    /// The feather falls off monotonically with distance from the shadow
+    /// box edge; under the feather the element interior stays knocked out,
+    /// and past blur px nothing paints at all.
+    #[test]
+    fn box_shadow_blur_falloff_monotonic() {
+        let mut c = Canvas::new_filled(60, 30, [255, 255, 255, 255]);
+        let rect = Rect { x: 10.0, y: 10.0, width: 10.0, height: 10.0 };
+        c.fill_box_shadow(&rect, [0, 0, 0, 255], [(0.0, 0.0); 4], 0.0, 0.0, 8.0, 0.0);
+        let ink = |x: usize, y: usize| 255 - px(&c, x, y)[0];
+        assert_eq!(ink(19, 14), 0, "knocked out even under the feather");
+        let near = ink(21, 14); // 1.5px past the right edge (edge at 20)
+        let far = ink(26, 14); // 6.5px past
+        assert!(near > far, "monotonic: {near} > {far}");
+        assert!(near < 255 && near > 0, "feather band is partial: {near}");
+        assert_eq!(ink(0, 14), 0, "past the feather extent: none");
+    }
+
+    /// The SDF is exact on the straight edges: -5 at the center of a
+    /// 10x10 box (r=2), 0 on the right edge, +3 three px out.
+    #[test]
+    fn sd_rounded_box_exact_on_edges() {
+        assert_eq!(sd_rounded_box(0.0, 0.0, 3.0, 3.0, 2.0), -5.0);
+        assert!(sd_rounded_box(5.0, 0.0, 3.0, 3.0, 2.0).abs() < 1e-9, "edge distance 0");
+        assert!((sd_rounded_box(8.0, 0.0, 3.0, 3.0, 2.0) - 3.0).abs() < 1e-9, "+3 outside");
     }
 }

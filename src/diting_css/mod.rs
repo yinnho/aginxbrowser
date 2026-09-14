@@ -605,6 +605,21 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
 // Computed style: minimal property subset + inheritance
 // ---------------------------------------------------------------------------
 
+/// One parsed `box-shadow` layer (blitz#349 family, v1): offsets/blur/
+/// spread in px (em/rem folded at cascade time), color resolved at parse
+/// time (`currentColor` folds against the color value cascaded so far).
+/// `inset` parses and reports through the CSSOM but the paint half is
+/// outer-only for v1 — a documented divergence, not a parse failure.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoxShadow {
+    pub dx: f32,
+    pub dy: f32,
+    pub blur: f32,
+    pub spread: f32,
+    pub color: Color,
+    pub inset: bool,
+}
+
 /// The computed values this slice models. Deliberately tiny: enough to lock
 /// cascade ordering, specificity, inline override, and inheritance semantics.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -633,6 +648,9 @@ pub struct ComputedStyle {
     /// stroke so `stroke-dashoffset` keyframes produce the self-draw effect.
     pub svg_dashoffset: Option<f32>,
     pub background_color: Option<Color>,
+    /// `box-shadow` layers (blitz#349 family, v1), non-inherited; first
+    /// layer paints on top (CSS paint order). `None` = `none`.
+    pub box_shadow: Option<Vec<BoxShadow>>,
     /// Shorthand sides in CSS order (top right bottom left), already expanded.
     pub margin: Sides,
     pub padding: Sides,
@@ -2794,6 +2812,19 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             };
             true
         }
+        "box-shadow" => {
+            if v.eq_ignore_ascii_case("none") {
+                style.box_shadow = None;
+                return true;
+            }
+            match parse_box_shadow(v, style.color, fonts) {
+                Some(layers) if !layers.is_empty() => {
+                    style.box_shadow = Some(layers);
+                    true
+                }
+                _ => false,
+            }
+        }
         "white-space" => {
             style.white_space = match v {
                 "normal" => Some(WhiteSpace::Normal),
@@ -3571,6 +3602,125 @@ fn parse_font_weight(v: &str) -> Option<u16> {
             (1..=9).contains(&(n / 100)).then_some(n)
         }
     }
+}
+
+/// `box-shadow` v1 parser (blitz#349 family): comma-separated `<shadow>`
+/// layers, each `<color>? && <length>{2,4} && inset?` in any order. Two
+/// lengths minimum (dx, dy, then blur, then spread); a negative blur
+/// invalidates the layer, a negative spread is legal. A missing color folds
+/// against the `color` value cascaded so far (the spec's order-dependent
+/// currentColor rule). `inset` layers parse and report through the CSSOM
+/// but never reach the paint half — documented v1 divergence.
+pub fn parse_box_shadow(
+    value: &str,
+    current_color: Option<Color>,
+    fonts: &FontCtx,
+) -> Option<Vec<BoxShadow>> {
+    let mut layers = Vec::new();
+    for part in split_top_level_commas(value) {
+        let mut inset = false;
+        let mut color: Option<Color> = None;
+        let mut lengths: Vec<f32> = Vec::new();
+        for tok in split_top_level_units(&part) {
+            if tok.eq_ignore_ascii_case("inset") {
+                if inset {
+                    return None;
+                }
+                inset = true;
+            } else if let Some(c) = parse_color(tok) {
+                if color.is_some() {
+                    return None;
+                }
+                color = Some(c);
+            } else {
+                if lengths.len() >= 4 {
+                    return None;
+                }
+                lengths.push(resolve_shadow_len(tok, fonts)?);
+            }
+        }
+        if lengths.len() < 2 {
+            return None;
+        }
+        let blur = lengths.get(2).copied().unwrap_or(0.0);
+        if blur < 0.0 {
+            return None;
+        }
+        layers.push(BoxShadow {
+            dx: lengths[0],
+            dy: lengths[1],
+            blur,
+            spread: lengths.get(3).copied().unwrap_or(0.0),
+            color: color.unwrap_or_else(|| current_color.unwrap_or(Color(0, 0, 0, 255))),
+            inset,
+        });
+    }
+    Some(layers)
+}
+
+/// Shadow lengths resolve em/rem against the cascade fonts and fold calc();
+/// % is rejected (it would need the shadow receiver's box).
+fn resolve_shadow_len(val: &str, fonts: &FontCtx) -> Option<f32> {
+    let t = val.trim();
+    if t.len() >= 6 && t[..5].eq_ignore_ascii_case("calc(") && t.ends_with(')') {
+        return match eval_calc(&t[5..t.len() - 1], fonts) {
+            Some(Length::Px(px)) => Some(px),
+            _ => None,
+        };
+    }
+    match parse_css_length(t).map(|l| resolve_len(l, fonts)) {
+        Some(Length::Px(px)) => Some(px),
+        _ => None,
+    }
+}
+
+/// Split on commas outside any parenthesis — `rgb(1, 2, 3)` stays one piece.
+fn split_top_level_commas(value: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (i, b) in value.bytes().enumerate() {
+        match b {
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                parts.push(value[start..i].trim().to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(value[start..].trim().to_string());
+    parts.retain(|p| !p.is_empty());
+    parts
+}
+
+/// Whitespace split at parenthesis depth 0 — the functional token
+/// (`rgb(0 0 0 / 50%)`) stays whole, its inner spaces unsplit.
+fn split_top_level_units(value: &str) -> Vec<&str> {
+    let mut units = Vec::new();
+    let mut depth = 0usize;
+    let mut start: Option<usize> = None;
+    for (i, b) in value.bytes().enumerate() {
+        match b {
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            _ if b.is_ascii_whitespace() && depth == 0 => {
+                if let Some(s) = start.take() {
+                    units.push(&value[s..i]);
+                }
+            }
+            _ => {
+                if start.is_none() {
+                    start = Some(i);
+                }
+            }
+        }
+    }
+    if let Some(s) = start {
+        units.push(&value[s..]);
+    }
+    units
 }
 
 /// Named colors + #rgb/#rrggbbaa hex (the forms real sheets overwhelmingly use).
@@ -5652,5 +5802,60 @@ mod tests {
         let child = cascade_element("p", &tree, p, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
         assert_eq!(child.white_space, Some(WhiteSpace::Nowrap), "white-space inherits");
         assert_eq!(child.text_overflow, None, "text-overflow does not inherit");
+    }
+
+    // ---- box-shadow (blitz#349 family, v1) ----
+
+    fn shadow(v: &str) -> Option<Vec<BoxShadow>> {
+        let mut s = ComputedStyle::default();
+        s.color = Some(Color(10, 20, 30, 255));
+        apply_declarations(&mut s, &format!("box-shadow: {v}"));
+        s.box_shadow
+    }
+
+    #[test]
+    fn box_shadow_two_lengths_fold_current_color() {
+        let layers = shadow("2px 3px").unwrap();
+        assert_eq!(
+            layers,
+            vec![BoxShadow { dx: 2.0, dy: 3.0, blur: 0.0, spread: 0.0, color: Color(10, 20, 30, 255), inset: false }],
+        );
+    }
+
+    #[test]
+    fn box_shadow_four_lengths_and_color_on_either_side() {
+        for v in ["red 4px 5px 6px 7px", "4px 5px 6px 7px red"] {
+            assert_eq!(
+                shadow(v).unwrap(),
+                vec![BoxShadow { dx: 4.0, dy: 5.0, blur: 6.0, spread: 7.0, color: Color(255, 0, 0, 255), inset: false }],
+                "{v}"
+            );
+        }
+    }
+
+    #[test]
+    fn box_shadow_layers_and_inset_parse() {
+        let layers = shadow("2px 2px rgba(0, 0, 0, 0.5), inset 0 1px red").unwrap();
+        assert_eq!(layers.len(), 2);
+        assert_eq!(layers[0].inset, false);
+        assert_eq!(layers[0].color, Color(0, 0, 0, 128));
+        assert_eq!(layers[1], BoxShadow { dx: 0.0, dy: 1.0, blur: 0.0, spread: 0.0, color: Color(255, 0, 0, 255), inset: true });
+    }
+
+    #[test]
+    fn box_shadow_rejections_and_reset() {
+        assert!(shadow("50% 50%").is_none(), "% needs the receiver box");
+        assert!(shadow("2px 2px -1px").is_none(), "negative blur invalid");
+        assert!(shadow("red").is_none(), "one length is not a shadow");
+        assert!(shadow("1px 1px 2px 3px 4px").is_none(), "five lengths");
+        assert!(shadow("1px 1px red red").is_none(), "two colors");
+        assert_eq!(shadow("none"), None);
+        // `none` clears a prior value; an invalid re-declaration must not.
+        let mut s = ComputedStyle::default();
+        s.color = Some(Color(0, 0, 0, 255));
+        apply_declarations(&mut s, "box-shadow: 1px 1px red; box-shadow: none");
+        assert_eq!(s.box_shadow, None, "none clears");
+        apply_declarations(&mut s, "box-shadow: 1px 1px red; box-shadow: blue blue");
+        assert!(s.box_shadow.is_some(), "invalid re-declaration keeps the prior value");
     }
 }

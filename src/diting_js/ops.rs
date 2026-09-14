@@ -2181,6 +2181,7 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "text-overflow",
     "color",
     "background-color",
+    "box-shadow",
     "background-image",
     "font-family",
     "padding-top",
@@ -2473,6 +2474,28 @@ fn computed_style_value(
                 }
                 None => "0px".to_string(),
             }
+        }),
+        // Chrome's computed box-shadow: one entry per layer (first-declared
+        // first), each "inset? color dx dy blur spread"; unset serializes
+        // as "none".
+        "box-shadow" => Some(match &s.box_shadow {
+            None => "none".to_string(),
+            Some(layers) => layers
+                .iter()
+                .map(|l| {
+                    let c = color(&l.color);
+                    let inset = if l.inset { "inset " } else { "" };
+                    format!(
+                        "{inset}{} {}px {}px {}px {}px",
+                        c,
+                        format_number(l.dx),
+                        format_number(l.dy),
+                        format_number(l.blur),
+                        format_number(l.spread)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
         }),
         "flex-direction" => Some(
             match s.flex_direction {
