@@ -367,6 +367,32 @@ impl FontBook {
         word_spacing: f32,
         truncate_at: Option<f32>,
     ) -> Arc<TextRaster> {
+        self.rasterize_wrapped_with(
+            text, font_size, bold, color, wrap_at, line_height, mono, word_spacing, truncate_at, None,
+        )
+    }
+
+    /// Same raster with the run's wrap tokens handed in pre-shaped
+    /// (obscura#983's paint half): the leaf memo from the measure half is
+    /// still warm at first-raster time, so a cache miss reuses it instead of
+    /// shaping the run a second time. Tokens must have been shaped with the
+    /// same (text, font_size, bold, mono, word_spacing) — the paint arm only
+    /// forwards them when the item's font params are the leaf's unscaled
+    /// ones.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rasterize_wrapped_with(
+        &self,
+        text: &str,
+        font_size: f32,
+        bold: bool,
+        color: [u8; 4],
+        wrap_at: f32,
+        line_height: f32,
+        mono: bool,
+        word_spacing: f32,
+        truncate_at: Option<f32>,
+        tokens: Option<std::rc::Rc<[Token]>>,
+    ) -> Arc<TextRaster> {
         let key = RasterKey {
             fingerprint: self.fingerprint,
             kind: RasterKind::Wrapped {
@@ -383,7 +409,16 @@ impl FontBook {
         };
         RasterCache::get_or_insert(key, || {
             self.rasterize_wrapped_uncached(
-                text, font_size, bold, color, wrap_at, line_height, mono, word_spacing, truncate_at,
+                text,
+                font_size,
+                bold,
+                color,
+                wrap_at,
+                line_height,
+                mono,
+                word_spacing,
+                truncate_at,
+                tokens.as_deref(),
             )
         })
     }
@@ -400,6 +435,7 @@ impl FontBook {
         mono: bool,
         word_spacing: f32,
         truncate_at: Option<f32>,
+        pre_shaped: Option<&[Token]>,
     ) -> TextRaster {
         let empty = || TextRaster {
             width: 0,
@@ -411,23 +447,32 @@ impl FontBook {
         if text.trim().is_empty() {
             return empty();
         }
-        let tokens = tokens_of(text, font_size, bold, self, mono, word_spacing);
+        let owned;
+        let tokens = match pre_shaped {
+            Some(t) => t,
+            None => {
+                owned = tokens_of(text, font_size, bold, self, mono, word_spacing);
+                &owned
+            }
+        };
         // text-overflow: ellipsis (nowrap+ellipsis batch): when the run
         // overflows `truncate_at`, drop whole trailing tokens and append the
         // U+2026 marker (tokenized with the run's own font params, so the
         // fallback chain covers it). The marker is part of the painted
         // tokens; decorations take the kept tokens only (Chrome leaves the
         // ellipsis undecorated).
-        let tokens = match truncate_at.and_then(|limit| {
-            truncate_tokens(&tokens, limit, font_size, bold, self, mono, word_spacing)
+        let truncated;
+        let tokens: &[Token] = match truncate_at.and_then(|limit| {
+            truncate_tokens(tokens, limit, font_size, bold, self, mono, word_spacing)
         }) {
             Some((mut kept, marker)) => {
                 kept.extend(marker);
-                kept
+                truncated = kept;
+                &truncated
             }
             None => tokens,
         };
-        let lines = greedy_wrap(&tokens, Some(wrap_at.max(0.0)));
+        let lines = greedy_wrap(tokens, Some(wrap_at.max(0.0)));
         if lines.iter().all(|l| l.width <= 0.0) {
             return empty();
         }
@@ -637,6 +682,7 @@ fn colorize_layered(alpha: &[u8], layer: Option<&[u8]>, color: [u8; 4]) -> Vec<u
 /// One wrap token — a word, a single space, or a per-glyph CJK char — with
 /// its real shaped advance. The measure path reads `width`/`is_space`; the
 /// paint path (batch 4a) additionally reads `text` to rebuild each line.
+#[derive(Clone, Debug)]
 pub(crate) struct Token {
     pub text: String,
     pub width: f32,
@@ -1229,5 +1275,25 @@ mod tests {
         let (_, bold_marker) = truncate_tokens(&tokens, limit, 16.0, true, &fonts, false, 0.0).unwrap();
         let bold_w: f32 = bold_marker.iter().map(|t| t.width).sum();
         assert!(bold_w > marker_w, "bold marker measures wider ({bold_w} > {marker_w})");
+    }
+
+    /// Paint half of obscura#983: a pre-shaped token slice must rasterize
+    /// byte-identically to re-shaping from scratch — same wrap lines, same
+    /// ellipsis truncation, same tile.
+    #[test]
+    fn rasterize_wrapped_pre_shaped_matches_reshaped() {
+        let fonts = crate::diting_fonts::font_book();
+        let text = "淘宝商品列表页的一段中文文本需要折行处理".repeat(4);
+        let tokens = tokens_of(&text, 16.0, false, &fonts, false, 0.0);
+
+        let plain = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, None, None);
+        let pre = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, None, Some(&tokens));
+        assert_eq!((plain.width, plain.height, plain.baseline), (pre.width, pre.height, pre.baseline));
+        assert_eq!(plain.data, pre.data);
+
+        let plain_t = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, Some(320.0), None);
+        let pre_t = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, Some(320.0), Some(&tokens));
+        assert_eq!((plain_t.width, plain_t.height, plain_t.baseline), (pre_t.width, pre_t.height, pre_t.baseline));
+        assert_eq!(plain_t.data, pre_t.data);
     }
 }

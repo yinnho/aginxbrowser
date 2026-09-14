@@ -12,7 +12,7 @@
 //! per-side border colors/styles, network-loaded images (data: PNG only),
 //! gradients, z-index/stacking contexts.
 
-use super::text::{baseline_offset, greedy_wrap, tokens_of, truncate_tokens, ScaledMetrics, TextRaster};
+use super::text::{baseline_offset, greedy_wrap, tokens_of, truncate_tokens, ScaledMetrics, TextRaster, Token};
 use super::{FontBook, PaintItem, TextGradient};
 use crate::diting_css::TextDecorations;
 
@@ -1095,20 +1095,36 @@ fn paint_text_decorations(
     mono: bool,
     word_spacing: f32,
     truncate_at: Option<f32>,
+    // The item's wrap tokens, pre-shaped when the item carries the run
+    // leaf's memo (unscaled font params): the decorations painter needs the
+    // wrap LINES, which the glyph-pixel RasterCache doesn't hold, so
+    // without this every repaint re-shaped the run here.
+    pre_shaped: Option<&[Token]>,
     dx: f32,
     dy: f32,
 ) {
     if decorations.is_empty() || text.trim().is_empty() {
         return;
     }
-    let tokens = tokens_of(text, font_size, bold, fonts, mono, word_spacing);
+    let owned;
+    let tokens = match pre_shaped {
+        Some(t) => t,
+        None => {
+            owned = tokens_of(text, font_size, bold, fonts, mono, word_spacing);
+            &owned
+        }
+    };
     // The ellipsis marker is undecorated (Chrome): strokes span the kept
     // tokens only, so underline/line-through end at the truncation cut.
-    let tokens = match truncate_at.and_then(|limit| truncate_tokens(&tokens, limit, font_size, bold, fonts, mono, word_spacing)) {
-        Some((kept, _marker)) => kept,
+    let kept;
+    let tokens: &[Token] = match truncate_at.and_then(|limit| truncate_tokens(tokens, limit, font_size, bold, fonts, mono, word_spacing)) {
+        Some((t, _marker)) => {
+            kept = t;
+            &kept
+        }
         None => tokens,
     };
-    let lines = greedy_wrap(&tokens, Some(wrap_at.max(0.0)));
+    let lines = greedy_wrap(tokens, Some(wrap_at.max(0.0)));
     let m = fonts.metrics(font_size, bold).unwrap_or(ScaledMetrics {
         ascent: font_size,
         descent: font_size * 0.2,
@@ -1826,7 +1842,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     super::svg::paint_svg(render, rect, fonts, out, dx, dy, *alpha);
                 }
             }
-            PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at, gradient, decorations, mono, word_spacing, truncate_at } => {
+            PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at, gradient, decorations, mono, word_spacing, truncate_at, tokens } => {
                 // background-clip: text: the fill color is ignored entirely
                 // (CSS paints the background through the glyphs; the
                 // transparent-text-fill half of the idiom is free by
@@ -1853,7 +1869,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     if bx1 <= 0 || by1 <= 0 || bx0 >= out.width as i64 || by0 >= out.height as i64 {
                         continue;
                     }
-                    let r = fonts.rasterize_wrapped(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at);
+                    let r = fonts.rasterize_wrapped_with(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, tokens.clone());
                     // Gradient recolor rewrites pixels in place — the cache
                     // hands out Arcs, so that path clones first (#399).
                     let mut owned;
@@ -1865,12 +1881,12 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                         &r
                     };
                     out.blit_rgba_affine(&r.data, r.width, r.height, *x as f64, (*y + r.top) as f64);
-                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, 0.0, 0.0);
+                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, tokens.as_deref(), 0.0, 0.0);
                 } else {
                     if !text_reaches_band(*y, text, *font_size, *wrap_at, *line_height, dy, out.height as i64) {
                         continue;
                     }
-                    let r = fonts.rasterize_wrapped(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at);
+                    let r = fonts.rasterize_wrapped_with(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, tokens.clone());
                     let mut owned;
                     let r = if let Some(g) = gradient {
                         owned = (*r).clone();
@@ -1881,7 +1897,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     };
                     // Tile row 0 sits `top` px above the leaf's line-box top.
                     out.blit_text(r, (x - dx).round() as i64, (y - dy + r.top).round() as i64);
-                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, dx, dy);
+                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, tokens.as_deref(), dx, dy);
                 }
             }
         }
@@ -1935,6 +1951,7 @@ mod tests {
             mono: false,
             word_spacing: 0.0,
             truncate_at: None,
+            tokens: None,
         }];
         let fonts = crate::diting_fonts::font_book();
         let mut c = Canvas::new_filled(120, 40, [255, 255, 255, 255]);
@@ -2118,7 +2135,7 @@ mod tests {
                 form: None,
                 caret: None,
             },
-            PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None },
+            PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None },
         ];
         let fonts = crate::diting_fonts::font_book();
         let mut full = Canvas::new_filled(40, 60, [255, 255, 255, 255]);
@@ -2149,6 +2166,7 @@ mod tests {
                 mono: false,
                 word_spacing: 0.0,
                 truncate_at: None,
+                tokens: None,
             }];
             let mut c = Canvas::new_filled(80, 32, [255, 255, 255, 255]);
             execute(&items, &fonts, &mut c);
@@ -2193,6 +2211,7 @@ mod tests {
                 mono: false,
                 word_spacing: 0.0,
                 truncate_at: None,
+                tokens: None,
             },
             PaintItem::ClearXf,
         ];
@@ -2554,8 +2573,8 @@ mod tests {
         let fonts = crate::diting_fonts::font_book();
         // A tall low-content page: only two text leaves, one near the band.
         let items = vec![
-            PaintItem::Text { text: "edge".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 96.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None },
-            PaintItem::Text { text: "far".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 500.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None },
+            PaintItem::Text { text: "edge".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 96.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None },
+            PaintItem::Text { text: "far".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 500.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None },
         ];
         let mut band = Canvas::new_filled(40, 80, [255, 255, 255, 255]);
         execute_band(&items, &fonts, &mut band, 0.0, 100.0);
@@ -2682,6 +2701,7 @@ mod tests {
                 mono: false,
                 word_spacing: 0.0,
                 truncate_at: None,
+                tokens: None,
             },
             PaintItem::ClearXf,
         ];
@@ -2856,6 +2876,7 @@ mod tests {
                 mono: false,
                 word_spacing: 0.0,
                 truncate_at,
+                tokens: None,
             }];
             let mut c = Canvas::new_filled(400, 32, [255, 255, 255, 255]);
             execute(&items, &fonts, &mut c);
@@ -2875,5 +2896,23 @@ mod tests {
         );
         assert!(full > 80, "untruncated run inks past the limit, got {full}");
         assert!(clipped > 30, "marker ink near the limit, got {clipped}");
+    }
+
+    /// Paint half of obscura#983: handing the decorations painter the item's
+    /// pre-shaped wrap tokens must stroke byte-identically to re-shaping —
+    /// the multi-line wrap and the ellipsis truncation cut included.
+    #[test]
+    fn decorations_pre_shaped_matches_reshaped() {
+        let fonts = crate::diting_fonts::font_book();
+        let text = "淘宝商品列表页的一段中文文本需要折行处理".repeat(3);
+        let deco = TextDecorations { underline: true, line_through: true, ..Default::default() };
+        let tokens = tokens_of(&text, 16.0, false, &fonts, false, 0.0);
+        let stroke = |pre: Option<&[Token]>, truncate_at: Option<f32>| {
+            let mut c = Canvas::new_filled(320, 200, [255, 255, 255, 255]);
+            paint_text_decorations(&mut c, &fonts, &text, 16.0, false, [0, 0, 0, 255], 24.0, 2.0, 4.0, 300.0, deco, false, 0.0, truncate_at, pre, 0.0, 0.0);
+            c.data
+        };
+        assert_eq!(stroke(None, None), stroke(Some(&tokens), None), "wrapped: pre-shaped == re-shaped");
+        assert_eq!(stroke(None, Some(200.0)), stroke(Some(&tokens), Some(200.0)), "truncated: pre-shaped == re-shaped");
     }
 }

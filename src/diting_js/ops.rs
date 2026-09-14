@@ -162,7 +162,7 @@ pub struct JsState {
     /// windows publish), never the main page's.
     #[cfg(feature = "screenshot")]
     iframe_layout_cache:
-        std::cell::RefCell<Option<(u64, NodeId, std::sync::Arc<LayoutRun>)>>,
+        std::cell::RefCell<Option<(u64, NodeId, std::rc::Rc<LayoutRun>)>>,
     /// Full taffy solves this state has run — a test probe, so the
     /// paint-only path can assert it stays flat across seeks.
     #[cfg(feature = "screenshot")]
@@ -1885,10 +1885,10 @@ fn ensure_layout_run(gs: &JsState, dom: &DomTree, epoch: u64) {
 /// sheets inside a fabricated iframe doc would need the navigation-time
 /// fetch cascade the main document owns.
 #[cfg(feature = "screenshot")]
-fn iframe_layout_run(gs: &JsState, dom: &DomTree, root: NodeId) -> std::sync::Arc<LayoutRun> {
+fn iframe_layout_run(gs: &JsState, dom: &DomTree, root: NodeId) -> std::rc::Rc<LayoutRun> {
     let epoch = dom.epoch();
     if let Some(hit) = gs.iframe_layout_cache.borrow().as_ref().and_then(|(e, r, run)| {
-        (*e == epoch && *r == root).then(|| std::sync::Arc::clone(run))
+        (*e == epoch && *r == root).then(|| std::rc::Rc::clone(run))
     }) {
         return hit;
     }
@@ -1934,7 +1934,7 @@ fn iframe_layout_run(gs: &JsState, dom: &DomTree, root: NodeId) -> std::sync::Ar
     );
     let (rects, items, paint_order, local_geom) =
         crate::diting_layout::layout_collect(dom, &styles_map, &fonts, &solved, IFRAME_VW);
-    let run = std::sync::Arc::new((
+    let run = std::rc::Rc::new((
         rects
             .into_iter()
             .map(|(id, r)| (id, [r.x, r.y, r.width, r.height]))
@@ -1947,7 +1947,7 @@ fn iframe_layout_run(gs: &JsState, dom: &DomTree, root: NodeId) -> std::sync::Ar
             .map(|(id, (r, m))| (id, ([r.x, r.y, r.width, r.height], m)))
             .collect(),
     ));
-    *gs.iframe_layout_cache.borrow_mut() = Some((epoch, root, std::sync::Arc::clone(&run)));
+    *gs.iframe_layout_cache.borrow_mut() = Some((epoch, root, std::rc::Rc::clone(&run)));
     run
 }
 

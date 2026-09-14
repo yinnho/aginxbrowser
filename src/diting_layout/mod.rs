@@ -4066,6 +4066,15 @@ pub enum PaintItem {
         /// this width; layout rects, scroll extents and selection keep the
         /// full text (the marker is a rendering effect, CSS UI §5.2).
         truncate_at: Option<f32>,
+        /// The run's wrap tokens, pre-shaped from the leaf's measure-time
+        /// memo (obscura#983's paint half): the glyph-pixel RasterCache
+        /// holds no wrap geometry, so the decorations painter and a
+        /// first-raster cache miss would re-shape the run on every repaint
+        /// without this. Some only when the item's font params are the
+        /// leaf's UNSCALED ones (identity d — a diagonal scale folds d into
+        /// font_size/word_spacing and the memo no longer matches); word
+        /// leaves carry None.
+        tokens: Option<std::rc::Rc<[text::Token]>>,
     },
 }
 
@@ -5308,6 +5317,7 @@ pub fn layout_collect(
         taffy_tree: &TaffyTree<TextLeaf>,
         node_map: &HashMap<taffy::tree::NodeId, NodeId>,
         styles: &HashMap<NodeId, ComputedStyle>,
+        fonts: &FontBook,
         images: &HashMap<NodeId, DecodedImage>,
         static_pos: &HashMap<NodeId, (f32, f32)>,
         baseline_shifts: &HashMap<taffy::tree::NodeId, f32>,
@@ -5950,7 +5960,7 @@ pub fn layout_collect(
                 stops: g.stops.iter().map(|(p, c)| (*p, with_alpha(*c, alpha))).collect(),
                 css_deg: g.css_deg,
             });
-        if let Some(TextLeaf::Run { text, font_size, bold, color, line_height, decorations, mono, word_spacing, nowrap, ellipsis, .. }) = taffy_tree.get_node_context(node) {
+        if let Some(TextLeaf::Run { text, font_size, bold, color, line_height, decorations, mono, word_spacing, nowrap, ellipsis, tokens, .. }) = taffy_tree.get_node_context(node) {
             // The wrap width the containing block offered at measure time:
             // the direct taffy parent's content box (the run wrapper for
             // mixed runs, the block itself for pure runs — same width).
@@ -5985,6 +5995,15 @@ pub fn layout_collect(
                     mono: *mono,
                     word_spacing: word_spacing * xf.d,
                     truncate_at,
+                    // Paint half of obscura#983: hand the leaf's measure-time
+                    // wrap tokens to the paint item so repaints stop re-shaping.
+                    // Only valid unscaled — a diagonal scale folds d into
+                    // font_size/word_spacing and the memo no longer matches.
+                    tokens: if xf.d == 1.0 {
+                        Some(run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, tokens))
+                    } else {
+                        None
+                    },
                 });
             } else {
                 let wrap_at = taffy_tree
@@ -6008,6 +6027,7 @@ pub fn layout_collect(
                     mono: *mono,
                     word_spacing: *word_spacing,
                     truncate_at,
+                    tokens: Some(run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, tokens)),
                 });
             }
         }
@@ -6031,6 +6051,7 @@ pub fn layout_collect(
                     mono: *mono,
                     word_spacing: 0.0,
                     truncate_at: None,
+                    tokens: None,
                 });
             } else {
                 items.push(PaintItem::Text {
@@ -6047,6 +6068,7 @@ pub fn layout_collect(
                     mono: *mono,
                     word_spacing: 0.0,
                     truncate_at: None,
+                    tokens: None,
                 });
             }
         }
@@ -6105,7 +6127,7 @@ pub fn layout_collect(
         pos.sort_by_key(|(z, _)| *z);
         for list in [neg, mid, pos] {
             for (_, i) in list {
-                collect(tree, taffy_tree, node_map, styles, images, static_pos, baseline_shifts, collapsed_edges, rects, local_geom, abs_by_node, local_by_node, node_first_item, items, paint_order, children[i], abs, viewport_width, child_xf, alpha, text_gradient.as_ref());
+                collect(tree, taffy_tree, node_map, styles, fonts, images, static_pos, baseline_shifts, collapsed_edges, rects, local_geom, abs_by_node, local_by_node, node_first_item, items, paint_order, children[i], abs, viewport_width, child_xf, alpha, text_gradient.as_ref());
             }
         }
         if clips {
@@ -6123,6 +6145,7 @@ pub fn layout_collect(
         taffy_tree,
         node_map,
         styles,
+        fonts,
         images,
         static_pos,
         baseline_shifts,
@@ -6512,6 +6535,46 @@ mod q_quote_tests {
         assert_eq!(outer, ("\u{201C}", "\u{201D}"));
         assert_eq!(inner, ("\u{2018}", "\u{2019}"));
         assert_eq!(deep, outer);
+    }
+}
+
+#[cfg(test)]
+mod paint_token_memo_tests {
+    use super::*;
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    /// The collection walk hands each Run leaf's measure-time wrap tokens to
+    /// its Text paint item (obscura#983's paint half): identity maps carry
+    /// Some (the memo matches only unscaled font params), while a diagonal
+    /// scale(2) folds d into font_size/word_spacing and must fall back to
+    /// None so paint re-shapes with the scaled params.
+    #[test]
+    fn run_items_carry_wrap_tokens_unscaled_only() {
+        let html = r#"<html><body><p>淘宝商品列表页的一段中文文本需要折行处理，再长一点保证折行。</p></body></html>"#;
+        let collect_items = |sheet: &str| {
+            let tree = parse_html(html);
+            let rules = parse_stylesheet_for(sheet, (1280.0, 800.0), CssMediaType::Screen);
+            let styles = compute_styles(&tree, &rules);
+            let (_, items, _, _) = layout_dom_with_paint_order_and_images(
+                &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
+            );
+            items
+        };
+
+        let runs = |items: &[PaintItem]| -> Vec<bool> {
+            items
+                .iter()
+                .filter_map(|it| match it {
+                    PaintItem::Text { text, tokens, .. } if text.contains("淘宝") => Some(tokens.is_some()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let got = runs(&collect_items("p { font-size: 16px; text-decoration: underline; }"));
+        assert!(!got.is_empty() && got.iter().all(|&t| t), "unscaled run carries tokens: {got:?}");
+        let scaled = runs(&collect_items("p { font-size: 16px; text-decoration: underline; transform: scale(2); }"));
+        assert!(!scaled.is_empty() && scaled.iter().all(|&t| !t), "scaled run drops tokens: {scaled:?}");
     }
 }
 
