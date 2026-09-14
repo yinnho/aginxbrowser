@@ -1231,6 +1231,11 @@ pub struct AnimationSpec {
     pub delay: f32,
     pub easing: Easing,
     pub fill_forwards: bool,
+    /// Iteration count; `f32::INFINITY` for `infinite`. Non-integer counts
+    /// are legal (the active duration ends mid-iteration). Consumed by the
+    /// computed-style longhand and the event face; the keyframe sampler
+    /// still renders a single cycle and clamps at its end.
+    pub iterations: f32,
 }
 
 /// Timing functions the sampler evaluates. Keywords map to their canonical
@@ -1299,6 +1304,7 @@ fn parse_animation_shorthand(v: &str) -> Option<AnimationSpec> {
     let mut delay = 0.0f32;
     let mut easing: Option<Easing> = None;
     let mut fill_forwards = false;
+    let mut iterations = 1.0f32;
     let mut name: Option<String> = None;
     for tok in paren_aware_tokens(v) {
         let secs = tok
@@ -1320,7 +1326,8 @@ fn parse_animation_shorthand(v: &str) -> Option<AnimationSpec> {
             "ease-out" => easing = Some(Easing::CubicBezier(0.0, 0.0, 0.58, 1.0)),
             "ease-in-out" => easing = Some(Easing::CubicBezier(0.42, 0.0, 0.58, 1.0)),
             "forwards" | "both" => fill_forwards = true,
-            "backwards" | "none" | "infinite" | "alternate" | "reverse"
+            "infinite" => iterations = f32::INFINITY,
+            "backwards" | "none" | "alternate" | "reverse"
             | "alternate-reverse" | "running" | "paused" => {}
             _ => {
                 if let Some(rest) = tok.strip_prefix("cubic-bezier(") {
@@ -1344,9 +1351,15 @@ fn parse_animation_shorthand(v: &str) -> Option<AnimationSpec> {
                 } else if tok.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
                     && !tok.is_empty()
                 {
-                    // iteration counts are bare numbers; anything else
-                    // identifier-shaped is the animation name
-                    if tok.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                    // A bare number token is the iteration count (<number>,
+                    // fractional legal); anything else identifier-shaped is
+                    // the animation name.
+                    if tok.chars().next().is_some_and(|c| c.is_ascii_digit() || c == '.') {
+                        if let Ok(n) = tok.parse::<f32>() {
+                            if n.is_finite() && n >= 0.0 {
+                                iterations = n;
+                            }
+                        }
                         continue;
                     }
                     if name.is_none() {
@@ -1363,6 +1376,7 @@ fn parse_animation_shorthand(v: &str) -> Option<AnimationSpec> {
         delay,
         easing: easing.unwrap_or(Easing::CubicBezier(0.25, 0.1, 0.25, 1.0)),
         fill_forwards,
+        iterations,
     })
 }
 

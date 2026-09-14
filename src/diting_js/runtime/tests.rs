@@ -9556,3 +9556,84 @@ async fn test_static_markup_animation_listener_scan() {
     let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
     assert_eq!(result.value.unwrap(), serde_json::json!([["start", "pulse"], ["end", "pulse"]]));
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_css_animation_iteration_event() {
+    // blitz#863 family 1: the interior iteration boundary of a 2-iteration
+    // animation fires animationiteration (elapsedTime = iteration start =
+    // delay + duration×k) between start and end. Values chosen so every
+    // elapsedTime is an exact binary float (0.05×2 is 0.1 bit-for-bit).
+    let mut rt = setup_runtime(
+        "<html><head><style>@keyframes pulse{from{opacity:0}to{opacity:1}} .p{animation:pulse 50ms linear 2;}</style></head><body></body></html>",
+    );
+    let script = r#"async () => {
+        const seq = [];
+        const ended = new Promise(r =>
+            document.body.addEventListener('animationend', r));
+        document.body.addEventListener('animationstart', (e) =>
+            seq.push(['start', e.animationName, e.elapsedTime]));
+        document.body.addEventListener('animationiteration', (e) =>
+            seq.push(['iteration', e.animationName, e.elapsedTime, e instanceof AnimationEvent]));
+        document.body.addEventListener('animationend', (e) =>
+            seq.push(['end', e.animationName, e.elapsedTime]));
+        const el = document.createElement('div');
+        el.setAttribute('class', 'p');
+        document.body.appendChild(el);
+        await Promise.race([ended, new Promise(r => setTimeout(r, 3000))]);
+        return seq;
+    }"#;
+    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    assert_eq!(
+        result.value.unwrap(),
+        serde_json::json!([
+            ["start", "pulse", 0],
+            ["iteration", "pulse", 0.05, true],
+            ["end", "pulse", 0.1]
+        ])
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_style_element_load_event_on_insert() {
+    // blitz#863 family 3: a dynamically connected <style> fires `load` as a
+    // task (diting's CSS parser drops @import, so there is nothing to wait
+    // for beyond the element's own text). Initial-markup <style> elements
+    // have no mutation hook and stay outside this path by design.
+    let mut rt = setup_runtime("<html><head></head><body></body></html>");
+    let script = r#"async () => {
+        const s = document.createElement('style');
+        s.textContent = '.x { color: red; }';
+        const fired = new Promise(r => s.addEventListener('load', (e) =>
+            r([e.type, e instanceof Event, e.target === s, e.bubbles])));
+        document.head.appendChild(s);
+        await Promise.race([fired, new Promise(r => setTimeout(r, 2000))]);
+        return fired;
+    }"#;
+    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    assert_eq!(result.value.unwrap(), serde_json::json!(["load", true, true, false]));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_transition_event_interface() {
+    // blitz#863 family 2: TransitionEvent carries propertyName / elapsedTime /
+    // pseudoElement with the WebIDL defaults and the 1-argument requirement —
+    // it used to be an empty Event subclass, so every read was undefined.
+    let mut rt = setup_runtime("<html><body></body></html>");
+    let script = r#"() => {
+        const e1 = new TransitionEvent('transitionend', {
+            propertyName: 'opacity', elapsedTime: 1.5, pseudoElement: '::before' });
+        const e2 = new TransitionEvent('transitionrun');
+        let threw = '';
+        try { new TransitionEvent(); } catch (err) { threw = err.constructor.name; }
+        return [
+            e1 instanceof TransitionEvent, e1 instanceof Event,
+            e1.propertyName, e1.elapsedTime, e1.pseudoElement,
+            e2.propertyName, e2.elapsedTime, e2.pseudoElement, threw,
+        ];
+    }"#;
+    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    assert_eq!(
+        result.value.unwrap(),
+        serde_json::json!([true, true, "opacity", 1.5, "::before", "", 0, "", "TypeError"])
+    );
+}

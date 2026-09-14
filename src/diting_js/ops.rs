@@ -2585,9 +2585,9 @@ fn computed_style_value(
         },
         // CSS animation longhands resolved from the shorthand's AnimationSpec
         // (the engine stores only the shorthand — parse_animation_shorthand).
-        // Chrome spells durations in bare seconds ("0.1s"); iteration-count
-        // and direction are unmodeled in the sampler, so they report their
-        // initials ("1", "normal") like every other unmodeled longhand.
+        // Chrome spells durations in bare seconds ("0.1s"); direction and
+        // play-state are unmodeled in the sampler, so they report their
+        // initials ("normal", "running") like every other unmodeled longhand.
         "animation-name" => Some(
             s.animation
                 .as_ref()
@@ -2630,7 +2630,11 @@ fn computed_style_value(
             }
             .into(),
         ),
-        "animation-iteration-count" => Some("1".into()),
+        "animation-iteration-count" => Some(match s.animation.as_ref().map(|a| a.iterations) {
+            Some(v) if v.is_infinite() => "infinite".into(),
+            Some(v) => format_number(v),
+            None => "1".into(),
+        }),
         "animation-direction" => Some("normal".into()),
         "animation-play-state" => Some("running".into()),
         _ => None,

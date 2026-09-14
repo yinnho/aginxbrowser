@@ -1111,9 +1111,12 @@ function __prepareInsertedScript(script) {
 // (their fetch never gets a slice), and reactor-less test isolates abort
 // inside op_sleep. elapsedTime reports the declared active duration
 // (delay + duration × iteration-count) from computed style, and
-// `await animationend` scripts proceed. animationiteration never fires in
-// the collapsed model (mid-flight boundaries are unobservable), and
-// comma-separated animation lists are tracked by their first name only.
+// `await animationend` scripts proceed. Iteration boundaries are collapsed
+// too but *are* observable: for a finite animation of N iterations the N-1
+// interior boundaries fire `animationiteration` from chained timers, and an
+// infinite one chains without bound (a 0s duration has no representable
+// boundary and is left unarmed — otherwise the chain would busy-spin).
+// Comma-separated animation lists are tracked by their first name only.
 const _animTracked = new Map();      // nid -> animation state
 let _animScanDepth = 0;              // dispatch handlers mutate too — reentrancy guard
 const _animDeferredChecks = new Set();
@@ -1145,6 +1148,7 @@ function _animationNameOf(el) {
 
 function _cancelAnimation(nid, st) {
   if (st.endTimer != null) clearTimeout(st.endTimer);
+  if (st.iterTimer != null) clearTimeout(st.iterTimer);
   _animTracked.delete(nid);
   _dispatchAnimationEvent(st.el, "animationcancel", st.name, st.startElapsed);
 }
@@ -1160,9 +1164,26 @@ function _startAnimation(el, name) {
     iterations = infinite ? 1 : (parseFloat(iterRaw) || 0);
   } catch (e) {}
   const startElapsed = delay < 0 ? -delay : 0;
-  const st = { el, name, startElapsed, endTimer: null };
+  const st = { el, name, startElapsed, endTimer: null, iterTimer: null };
   _animTracked.set(el._nid, st);
   _dispatchAnimationEvent(el, "animationstart", name, startElapsed);
+  // Iteration boundaries — the start of iteration k sits at delay + duration×k.
+  // The chain re-arms one timer at a time, so an animating element holds at
+  // most one pending iteration timer alongside its end timer: the same posture
+  // as the end timer, and never a per-mutation tick. A 0s duration leaves no
+  // representable boundary, so it stays unarmed rather than busy-spinning.
+  if ((infinite || iterations > 1) && duration > 0) {
+    const iterDelayMs = duration * 1000;
+    const armIteration = (k, waitMs) => {
+      st.iterTimer = setTimeout(() => {
+        if (_animTracked.get(el._nid) !== st) return;
+        st.iterTimer = null;
+        _dispatchAnimationEvent(el, "animationiteration", name, Math.max(0, delay) + duration * k);
+        if (infinite || k < iterations - 1) armIteration(k + 1, iterDelayMs);
+      }, waitMs);
+    };
+    armIteration(1, (Math.max(0, delay) + duration) * 1000);
+  }
   if (!infinite) {
     // End fires after the declared active duration (Chrome timing): that
     // also keeps a wall-clock window in which a cancel can still be
@@ -1170,6 +1191,7 @@ function _startAnimation(el, name) {
     const activeMs = (Math.max(0, delay) + duration * iterations) * 1000;
     st.endTimer = setTimeout(() => {
       if (_animTracked.get(el._nid) !== st) return;
+      if (st.iterTimer != null) { clearTimeout(st.iterTimer); st.iterTimer = null; }
       _animTracked.delete(el._nid);
       // Detached before the duration ran out: the end never happened, the
       // removal did (Chrome fires animationcancel at detach; ours lands on
@@ -1325,8 +1347,41 @@ function __prepareInsertedSubtree(root) {
   }
   for (const script of scripts) __prepareInsertedScript(script);
   __prepareInsertedStylesheetLinksIn(root);
+  __prepareInsertedStylesIn(root);
   // Elements entering the document start their CSS animations.
   _scheduleAnimationCheck(root);
+}
+
+// --- dynamic <style> load events ---------------------------------------
+// Per HTML, a <style> element fires `load` (and its <link rel=stylesheet>
+// sibling) once its sheet **and every @import** has loaded. diting's CSS
+// parser drops @import outright (diting_css parses it away — there is no
+// second fetch to wait on), so a connected <style>'s sheet is ready the
+// moment its text is in the tree: the spec's "queue a task" collapses to a
+// 0ms task. Loader-side code that awaits `style.onload` (common around
+// @import-based theming) would otherwise hang forever on a pending promise.
+// Firing happens only on connection, mirroring the <link> path's per-element
+// guard; a text mutation of an already-connected <style> does not re-fire.
+function __prepareInsertedStylesIn(root) {
+  if (!root || !root.isConnected) return;
+  const styles = [];
+  const seen = new Set();
+  if (root.nodeType === 1 && (root.tagName || '').toUpperCase() === 'STYLE') {
+    styles.push(root);
+    seen.add(root._nid);
+  }
+  const ids = _domParse("query_selector_all_scoped", root._nid, "style") || [];
+  for (const nid of ids) {
+    if (seen.has(+nid)) continue;
+    const el = _wrapEl(+nid);
+    if (el) { styles.push(el); seen.add(+nid); }
+  }
+  for (const el of styles) {
+    setTimeout(() => {
+      // Disconnected before the task ran: no sheet is live, so no load.
+      if (_nodeInDocument(el)) __fireLinkLoadEvent(el, 'load');
+    }, 0);
+  }
 }
 
 // --- dynamic <link rel=stylesheet> -------------------------------------
@@ -7225,7 +7280,18 @@ globalThis.AnimationEvent = class AnimationEvent extends Event {
     this.pseudoElement = o.pseudoElement !== undefined ? String(o.pseudoElement) : "";
   }
 };
-globalThis.TransitionEvent = class extends Event {};
+globalThis.TransitionEvent = class TransitionEvent extends Event {
+  // WebIDL TransitionEventInit: propertyName "" / elapsedTime 0 /
+  // pseudoElement "" defaults (blitz#863 family 2). Was an empty Event
+  // subclass, so every property read came back undefined.
+  constructor(t, o = {}) {
+    if (arguments.length < 1) throw new TypeError("Failed to construct 'TransitionEvent': 1 argument required, but only 0 present.");
+    super(t, o);
+    this.propertyName = o.propertyName !== undefined ? String(o.propertyName) : "";
+    this.elapsedTime = o.elapsedTime !== undefined ? Number(o.elapsedTime) : 0;
+    this.pseudoElement = o.pseudoElement !== undefined ? String(o.pseudoElement) : "";
+  }
+};
 globalThis.WheelEvent = class extends MouseEvent { constructor(t,o={}) { super(t,o);this.deltaX=o.deltaX||0;this.deltaY=o.deltaY||0;this.deltaZ=o.deltaZ||0;this.deltaMode=o.deltaMode||0; } };
 
 globalThis.CompositionEvent = class extends UIEvent {
