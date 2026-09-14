@@ -5330,7 +5330,39 @@ function _percentDecodeToBytes(s) {
   return new Uint8Array(bytes);
 }
 
+// Race a fetch op promise against an AbortSignal. Rejects with the signal's
+// reason the moment abort fires; the op's own settlement is swallowed so an
+// aborted-then-failing walk never surfaces as an unhandled rejection.
+function _raceAbortSignal(signal, opCall) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      reject(signal.reason);
+      opCall.then(() => {}, () => {});
+    };
+    if (signal.aborted) { onAbort(); return; }
+    signal.addEventListener("abort", onAbort);
+    opCall.then(
+      (v) => { if (!settled) { settled = true; signal.removeEventListener("abort", onAbort); resolve(v); } },
+      (e) => { if (!settled) { settled = true; signal.removeEventListener("abort", onAbort); reject(e); } }
+    );
+  });
+}
+
 globalThis.fetch = async (input, init = {}) => {
+  // AbortSignal (fetch §4.1): a pre-aborted signal rejects before anything
+  // else happens — no request, no scheme handling. Checked first so data:
+  // fetches abort too (Chrome does the same: the signal gate precedes the
+  // scheme fetch).
+  const signal = init.signal !== undefined
+    ? init.signal
+    : (input instanceof Request ? input.signal : undefined);
+  if (signal && signal.aborted) {
+    throw signal.reason;
+  }
   let url = typeof input === "string"
     ? input
     : (input instanceof Request
@@ -5460,7 +5492,12 @@ globalThis.fetch = async (input, init = {}) => {
     ? String(init.referrer)
     : (input instanceof Request ? input.referrer : "about:client");
   const pageOrigin = (function() { try { const u = new URL(_domParse("document_url") || "about:blank"); return u.origin; } catch(e) { return ""; } })();
-  const raw = await _OPS.op_fetch_url(url, method, hdrs, body, pageOrigin, fetchMode, fetchCredentials, fetchReferrerPolicy + '\u0000' + fetchReferrer);
+  const opCall = _OPS.op_fetch_url(url, method, hdrs, body, pageOrigin, fetchMode, fetchCredentials, fetchReferrerPolicy + '\u0000' + fetchReferrer);
+  // Mid-flight abort: race the op against the signal. There is no JS-to-Rust
+  // cancellation channel, so the underlying walk keeps going and its eventual
+  // settlement is swallowed — but the fetch() promise rejects at abort time
+  // with the signal's reason, which is the observable contract pages race on.
+  const raw = await (signal ? _raceAbortSignal(signal, opCall) : opCall);
   const parsed = JSON.parse(raw);
   if (parsed.blocked) {
     const err = new TypeError('net::ERR_FAILED');
@@ -5991,7 +6028,12 @@ if (typeof Request === 'undefined') {
       if (REFERRER_POLICIES.indexOf(this.referrerPolicy) < 0) {
         throw new TypeError("Failed to construct 'Request': '" + this.referrerPolicy + "' is not a valid ReferrerPolicy value");
       }
-      this.signal = init.signal || { aborted: false, addEventListener(){}, removeEventListener(){} };
+      // Fetch spec: an absent signal means a fresh, never-aborted one — not
+      // null, not a shared dummy (the old literal stub failed instanceof
+      // checks pages run on request.signal).
+      this.signal = init.signal !== undefined
+        ? init.signal
+        : (typeof AbortController === "function" ? new AbortController().signal : { aborted: false, addEventListener(){}, removeEventListener(){} });
       this.cache = init.cache || 'default';
     }
     clone() {
@@ -7453,8 +7495,72 @@ globalThis.StorageEvent = class StorageEvent extends Event {
 };
 _markNative(globalThis.StorageEvent);
 
-globalThis.AbortController = class AbortController { constructor(){this.signal={aborted:false,addEventListener(){},removeEventListener(){},onabort:null};} abort(){this.signal.aborted=true;} };
-globalThis.AbortSignal = { timeout(ms){return {aborted:false,addEventListener(){},removeEventListener(){}}; } };
+// AbortSignal/AbortController (fetch §abort family): the old pair was a dead
+// stub — abort() flipped a flag nothing read, and AbortSignal.timeout handed
+// back an object with no listener machinery at all. Pages that hand fetch()
+// an AbortController (React Query cancellation, AbortSignal.timeout guards)
+// got a fetch that never rejects on abort. Real surface here: abort reasons
+// (caller-supplied, or the "signal is aborted without reason" AbortError
+// DOMException), the abort event with addEventListener/onabort, static
+// abort()/timeout()/any(), and throwIfAborted(). fetch() consumes the signal
+// pre-flight and races it mid-flight (see _raceAbortSignal at the fetch site).
+let _abortSignalConstructionKey = false;
+class AbortSignal extends XMLHttpRequestEventTarget {
+  constructor() {
+    super();
+    if (!_abortSignalConstructionKey) throw new TypeError("Illegal constructor");
+    _abortSignalConstructionKey = false;
+    this._aborted = false;
+    this._reason = undefined;
+  }
+  get aborted() { return this._aborted; }
+  get reason() { return this._reason; }
+  get onabort() { return this._onabort || null; }
+  set onabort(fn) { this._onabort = fn; }
+  throwIfAborted() { if (this._aborted) throw this._reason; }
+  _signalAbort(reason) {
+    if (this._aborted) return;
+    this._aborted = true;
+    this._reason = reason !== undefined ? reason
+      : new DOMException("signal is aborted without reason", "AbortError");
+    this.dispatchEvent({ type: "abort" });
+  }
+  static abort(reason) {
+    const ac = new AbortController();
+    ac.abort(reason);
+    return ac.signal;
+  }
+  static timeout(ms) {
+    if (!Number.isFinite(ms) || ms < 0) {
+      throw new TypeError("The provided value is negative or not a finite number");
+    }
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(new DOMException("signal timed out", "TimeoutError")), ms);
+    return ac.signal;
+  }
+  static any(signals) {
+    const ac = new AbortController();
+    for (const s of Array.from(signals || [])) {
+      if (!s || typeof s !== "object") {
+        throw new TypeError("Argument 1 can not be converted to a sequence");
+      }
+      if (s.aborted) { ac.abort(s.reason); break; }
+      s.addEventListener("abort", () => ac.abort(s.reason));
+    }
+    return ac.signal;
+  }
+}
+globalThis.AbortSignal = AbortSignal;
+globalThis.AbortController = class AbortController {
+  constructor() { _abortSignalConstructionKey = true; this.signal = new AbortSignal(); }
+  abort(reason) { this.signal._signalAbort(reason); }
+};
+_markNative(AbortSignal);
+_markNative(AbortSignal.prototype.throwIfAborted);
+_markNative(AbortSignal.abort);
+_markNative(AbortSignal.timeout);
+_markNative(AbortSignal.any);
+_markNative(globalThis.AbortController);
 // Normalize one Blob part to bytes. `native` newline normalization applies to
 // string parts when the Blob/File `endings` option is "native".
 function _blobPartToBytes(p, native) {

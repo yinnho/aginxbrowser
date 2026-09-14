@@ -1041,6 +1041,102 @@
         );
     }
 
+    /// fetch must honor AbortSignal (batch-82 leftover): pre-flight reject
+    /// (no request at all), mid-flight reject with the signal's reason while
+    /// the underlying walk is still pending, AbortSignal.timeout's
+    /// TimeoutError, reason identity for abort(reason), throwIfAborted, and a
+    /// real default signal on Request objects.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_honors_abort_signal() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            // Two slow responses: leg 1 (mid-flight abort) and leg 3
+            // (AbortSignal.timeout) both hit the server but must reject long
+            // before the 800ms body lands. Leg 2 (pre-aborted) never connects.
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(800));
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok");
+                let _ = stream.flush();
+            }
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/test", port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const out = {};
+                    // Leg 1: abort lands while the response is still in flight.
+                    let fired = 0;
+                    const ac1 = new AbortController();
+                    ac1.signal.addEventListener('abort', () => { fired++; });
+                    const p1 = fetch('/slow', { signal: ac1.signal })
+                        .then(() => 'resolved', e => 'rejected:' + e.name);
+                    setTimeout(() => ac1.abort(), 50);
+                    out.midFlight = await p1;
+                    out.abortEventFired = fired === 1;
+
+                    // Leg 2: pre-aborted signal rejects with the caller's
+                    // reason before any network activity.
+                    const ac2 = new AbortController();
+                    const myErr = new Error('mine');
+                    ac2.abort(myErr);
+                    out.reasonIdentity = ac2.signal.reason === myErr;
+                    let threw = null;
+                    try { ac2.signal.throwIfAborted(); } catch (e) { threw = e; }
+                    out.throwIfAbortedSameObject = threw === myErr;
+                    out.preAborted = await fetch('/slow', { signal: ac2.signal })
+                        .then(() => 'resolved', e => 'rejected:' + e.name);
+
+                    // Leg 3: AbortSignal.timeout rejects with TimeoutError.
+                    out.timeout = await fetch('/slow', { signal: AbortSignal.timeout(120) })
+                        .then(() => 'resolved', e => 'rejected:' + e.name);
+
+                    // Surface: default reason is an AbortError DOMException,
+                    // any() follows an already-aborted source, and Request's
+                    // default signal is a real AbortSignal.
+                    const ac4 = new AbortController();
+                    ac4.abort();
+                    out.defaultReasonName = ac4.signal.reason.name;
+                    out.anyFollowsAborted = AbortSignal.any([ac2.signal]).aborted === true;
+                    out.requestDefaultSignal = new Request('/x').signal instanceof AbortSignal;
+                    return out;
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!({
+                "midFlight": "rejected:AbortError",
+                "abortEventFired": true,
+                "reasonIdentity": true,
+                "throwIfAbortedSameObject": true,
+                // plain Error('mine') — the reason passes through untouched
+                "preAborted": "rejected:Error",
+                "timeout": "rejected:TimeoutError",
+                "defaultReasonName": "AbortError",
+                "anyFollowsAborted": true,
+                "requestDefaultSignal": true,
+            })
+        );
+    }
+
     /// Sync XHR (obscura#908): open(..., false) + send() must issue the
     /// request and return with status/headers/body populated — before any
     /// event-loop turn. The upstream reporter's legacy pages (dojo/jQuery
