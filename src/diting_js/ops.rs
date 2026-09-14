@@ -2198,6 +2198,14 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "align-items",
     "opacity",
     "transform",
+    "animation-name",
+    "animation-duration",
+    "animation-delay",
+    "animation-timing-function",
+    "animation-fill-mode",
+    "animation-iteration-count",
+    "animation-direction",
+    "animation-play-state",
 ];
 
 /// Chrome's UA-sheet display for the tags whose CSSOM value differs from the
@@ -2533,6 +2541,56 @@ fn computed_style_value(
                 _ => None,
             },
         },
+        // CSS animation longhands resolved from the shorthand's AnimationSpec
+        // (the engine stores only the shorthand — parse_animation_shorthand).
+        // Chrome spells durations in bare seconds ("0.1s"); iteration-count
+        // and direction are unmodeled in the sampler, so they report their
+        // initials ("1", "normal") like every other unmodeled longhand.
+        "animation-name" => Some(
+            s.animation
+                .as_ref()
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| "none".into()),
+        ),
+        "animation-duration" => Some(format!(
+            "{}s",
+            format_number(s.animation.as_ref().map(|a| a.duration).unwrap_or(0.0))
+        )),
+        "animation-delay" => Some(format!(
+            "{}s",
+            format_number(s.animation.as_ref().map(|a| a.delay).unwrap_or(0.0))
+        )),
+        "animation-timing-function" => {
+            let e = s
+                .animation
+                .as_ref()
+                .map(|a| a.easing)
+                .unwrap_or(Easing::CubicBezier(0.25, 0.1, 0.25, 1.0));
+            Some(match e {
+                Easing::Linear => "linear".into(),
+                Easing::CubicBezier(0.25, 0.1, 0.25, 1.0) => "ease".into(),
+                Easing::CubicBezier(0.42, 0.0, 1.0, 1.0) => "ease-in".into(),
+                Easing::CubicBezier(0.0, 0.0, 0.58, 1.0) => "ease-out".into(),
+                Easing::CubicBezier(0.42, 0.0, 0.58, 1.0) => "ease-in-out".into(),
+                Easing::CubicBezier(a, b, c, d) => format!(
+                    "cubic-bezier({}, {}, {}, {})",
+                    format_number(a),
+                    format_number(b),
+                    format_number(c),
+                    format_number(d)
+                ),
+            })
+        },
+        "animation-fill-mode" => Some(
+            match s.animation.as_ref().map(|a| a.fill_forwards) {
+                Some(true) => "forwards",
+                _ => "none",
+            }
+            .into(),
+        ),
+        "animation-iteration-count" => Some("1".into()),
+        "animation-direction" => Some("normal".into()),
+        "animation-play-state" => Some("running".into()),
         _ => None,
     }
 }
@@ -4593,6 +4651,13 @@ fn op_navigate(state: &OpState, #[string] url: &str, #[string] method: &str, #[s
 
 #[op2(async(deferred), fast)]
 async fn op_sleep(#[number] millis: u64) {
+    // Reactor-less contexts (plain #[test] isolates): a tokio timer would
+    // panic mid-poll inside v8, which aborts the whole test binary. Resolve
+    // at the next event-loop checkpoint instead — production always runs
+    // under a reactor and never takes this path.
+    if tokio::runtime::Handle::try_current().is_err() {
+        return;
+    }
     tokio::time::sleep(std::time::Duration::from_millis(millis)).await;
 }
 

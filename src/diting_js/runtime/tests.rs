@@ -9445,3 +9445,114 @@ fn computed_style_and_geometry_for_nowrap_ellipsis() {
     let h = parts[8].as_f64().unwrap();
     assert!(h > 10.0 && h < 30.0, "nowrap keeps the run on one line ({h})");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_css_animation_start_end_events() {
+    // blitz#863 family 1: diting samples CSS animations at a fixed clock (no
+    // compositor loop), so `await animationend` scripts used to hang forever.
+    // The collapsed lifecycle fires animationstart synchronously when the
+    // animation becomes observable and animationend after the declared
+    // active duration, with elapsedTime = that duration.
+    let mut rt = setup_runtime(
+        "<html><head><style>@keyframes fade{from{opacity:1}to{opacity:0}} .box{animation:fade 100ms linear;}</style></head><body></body></html>",
+    );
+    let script = r#"async () => {
+        const seq = [];
+        // In an isolated test process the first layout run (font book init)
+        // blocks the loop for ~0.9s; it lands inside the check drain here, so
+        // the end timer is armed only after that block and a wall-clock
+        // await armed earlier expires first — await the event, not a window.
+        const ended = new Promise(r =>
+            document.body.addEventListener('animationend', r));
+        document.body.addEventListener('animationstart', (e) =>
+            seq.push(['start', e.animationName, e.elapsedTime, e instanceof AnimationEvent, e.target.id]));
+        document.body.addEventListener('animationend', (e) =>
+            seq.push(['end', e.animationName, e.elapsedTime]));
+        const el = document.createElement('div');
+        el.id = 'box';
+        el.setAttribute('class', 'box');
+        document.body.appendChild(el);
+        await Promise.race([ended, new Promise(r => setTimeout(r, 3000))]);
+        return seq;
+    }"#;
+    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    assert_eq!(
+        result.value.unwrap(),
+        serde_json::json!([["start", "fade", 0, true, "box"], ["end", "fade", 0.1]])
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_css_animation_cancel_on_class_removal() {
+    // Removing the animation between start and end must fire animationcancel
+    // and suppress animationend (the pending end timer is cleared).
+    let mut rt = setup_runtime(
+        "<html><head><style>@keyframes fade{from{opacity:1}to{opacity:0}} .box{animation:fade 100ms;}</style></head><body></body></html>",
+    );
+    let script = r#"async () => {
+        const seq = [];
+        const el = document.createElement('div');
+        el.addEventListener('animationstart', () => seq.push('start'));
+        el.addEventListener('animationcancel', (e) => seq.push('cancel:' + e.animationName));
+        el.addEventListener('animationend', () => seq.push('end'));
+        document.body.appendChild(el);
+        el.setAttribute('class', 'box');
+        await new Promise(r => setTimeout(r, 10));
+        el.removeAttribute('class');
+        await new Promise(r => setTimeout(r, 30));
+        return seq;
+    }"#;
+    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    assert_eq!(result.value.unwrap(), serde_json::json!(["start", "cancel:fade"]));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_element_animate_lifecycle_events() {
+    // WAAPI Element.animate fires the same lifecycle events with an empty
+    // animationName (Chrome parity); detached elements never start.
+    let mut rt = setup_runtime("<html><body></body></html>");
+    let script = r#"async () => {
+        const seq = [];
+        const el = document.createElement('div');
+        document.body.appendChild(el);
+        el.addEventListener('animationstart', (e) => seq.push(['start', e.animationName]));
+        el.addEventListener('animationend', (e) => seq.push(['end', e.animationName, e.elapsedTime]));
+        const anim = el.animate([{opacity: 1}, {opacity: 0}], {duration: 80});
+        const detached = document.createElement('div');
+        detached.animate([{opacity: 1}, {opacity: 0}], {duration: 10});
+        await new Promise(r => setTimeout(r, 150));
+        return [seq, anim.playState];
+    }"#;
+    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    assert_eq!(
+        result.value.unwrap(),
+        serde_json::json!([[["start", ""], ["end", "", 0.08]], "finished"])
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_static_markup_animation_listener_scan() {
+    // Animations already present in initial markup have no mutation hook to
+    // ride on; registering an animation* listener is the signal that the page
+    // cares and triggers a capped subtree scan, so the lifecycle still fires.
+    let mut rt = setup_runtime(
+        "<html><head><style>@keyframes pulse{from{opacity:0}to{opacity:1}} .p{animation:pulse 50ms;}</style></head><body><div id=\"t\" class=\"p\">x</div></body></html>",
+    );
+    let script = r#"async () => {
+        const seq = [];
+        // Await the end event itself: in an isolated test process the first
+        // layout run (font book init) blocks the loop for ~0.9s, so any
+        // wall-clock await armed before the listener-scan microtask would
+        // expire before the end timer — a test artifact, not engine behavior.
+        const ended = new Promise(r =>
+            document.getElementById('t').addEventListener('animationend', r));
+        document.getElementById('t').addEventListener('animationstart', (e) =>
+            seq.push(['start', e.animationName]));
+        document.getElementById('t').addEventListener('animationend', (e) =>
+            seq.push(['end', e.animationName]));
+        await ended;
+        return seq;
+    }"#;
+    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    assert_eq!(result.value.unwrap(), serde_json::json!([["start", "pulse"], ["end", "pulse"]]));
+}

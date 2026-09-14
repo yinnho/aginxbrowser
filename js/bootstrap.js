@@ -1095,6 +1095,218 @@ function __prepareInsertedScript(script) {
 // HTML's script preparation algorithm leaves a disconnected script unstarted.
 // When an ancestor is later connected, insertion steps visit every script in
 // that subtree in tree order.
+// --- CSS animation lifecycle events (blitz#863 family 1) -----------------
+// diting's animation engine samples styles at css_time (None = end state)
+// and has no compositor loop, so by the time page script can observe an
+// animation it has already finished. The lifecycle collapses to match:
+// `animationstart` fires synchronously at the mutation that makes the
+// animation observable (same policy as Element.animate below),
+// `animationcancel` fires at the mutation that un-makes it (name changed,
+// removed, or the element detached), and `animationend` on a timer carrying
+// the declared active duration. Timers are armed only for elements that
+// actually animate — animation-less pages (the overwhelming majority) never
+// touch the timer system from these hooks. Per-mutation tick scheduling was
+// tried and is forbidden: a pending 0ms timer keeps every event-loop slice
+// of the nav settle pump timing out, so dynamic imports stop settling
+// (their fetch never gets a slice), and reactor-less test isolates abort
+// inside op_sleep. elapsedTime reports the declared active duration
+// (delay + duration × iteration-count) from computed style, and
+// `await animationend` scripts proceed. animationiteration never fires in
+// the collapsed model (mid-flight boundaries are unobservable), and
+// comma-separated animation lists are tracked by their first name only.
+const _animTracked = new Map();      // nid -> animation state
+let _animScanDepth = 0;              // dispatch handlers mutate too — reentrancy guard
+const _animDeferredChecks = new Set();
+
+function _cssSeconds(v) {
+  const s = String(v == null ? "" : v).trim();
+  const n = parseFloat(s);
+  if (isNaN(n)) return 0;
+  return /ms\s*$/.test(s) ? n / 1000 : n;
+}
+
+function _dispatchAnimationEvent(el, type, name, elapsed) {
+  try {
+    el.dispatchEvent(new AnimationEvent(type, {
+      bubbles: true, composed: true,
+      animationName: name, elapsedTime: elapsed, pseudoElement: "",
+    }));
+  } catch (e) {}
+}
+
+function _animationNameOf(el) {
+  try {
+    const raw = String(getComputedStyle(el).getPropertyValue("animation-name") || "").trim();
+    if (!raw || raw === "none") return null;
+    const first = raw.split(",")[0].trim();
+    return first && first !== "none" ? first : null;
+  } catch (e) { return null; }
+}
+
+function _cancelAnimation(nid, st) {
+  if (st.endTimer != null) clearTimeout(st.endTimer);
+  _animTracked.delete(nid);
+  _dispatchAnimationEvent(st.el, "animationcancel", st.name, st.startElapsed);
+}
+
+function _startAnimation(el, name) {
+  let duration = 0, delay = 0, infinite = false, iterations = 1;
+  try {
+    const cs = getComputedStyle(el);
+    duration = Math.max(0, _cssSeconds(cs.getPropertyValue("animation-duration")));
+    delay = _cssSeconds(cs.getPropertyValue("animation-delay"));
+    const iterRaw = String(cs.getPropertyValue("animation-iteration-count") || "1").trim();
+    infinite = iterRaw === "infinite";
+    iterations = infinite ? 1 : (parseFloat(iterRaw) || 0);
+  } catch (e) {}
+  const startElapsed = delay < 0 ? -delay : 0;
+  const st = { el, name, startElapsed, endTimer: null };
+  _animTracked.set(el._nid, st);
+  _dispatchAnimationEvent(el, "animationstart", name, startElapsed);
+  if (!infinite) {
+    // End fires after the declared active duration (Chrome timing): that
+    // also keeps a wall-clock window in which a cancel can still be
+    // observed between start and end.
+    const activeMs = (Math.max(0, delay) + duration * iterations) * 1000;
+    st.endTimer = setTimeout(() => {
+      if (_animTracked.get(el._nid) !== st) return;
+      _animTracked.delete(el._nid);
+      // Detached before the duration ran out: the end never happened, the
+      // removal did (Chrome fires animationcancel at detach; ours lands on
+      // the next checkpoint via this timer).
+      if (!_nodeInDocument(el)) {
+        _dispatchAnimationEvent(el, "animationcancel", name, startElapsed);
+        return;
+      }
+      _dispatchAnimationEvent(el, "animationend", name, Math.max(0, delay) + duration * iterations);
+    }, activeMs);
+  }
+}
+
+// One element: cancel a tracked animation whose name went away or changed,
+// start a newly-observable one. Runs synchronously in the mutation.
+function _animationCheckOne(el) {
+  if (!_nodeInDocument(el)) return;
+  const existing = _animTracked.get(el._nid);
+  const name = _animationNameOf(el);
+  if (existing && existing.name !== name) _cancelAnimation(el._nid, existing);
+  if (name && (!existing || existing.name !== name)) _startAnimation(el, name);
+}
+
+// A page with no CSS anywhere cannot start an animation, but the check's
+// computed-style read would still force a full layout run on every mutation
+// batch — on style-less pages (deep-DOM fixtures, plain markup) that layout
+// is the entire cost. The probe is cached per mutation epoch: <style>,
+// <link>, [style] arrive or leave only through tree/attribute writes, which
+// all bump the epoch, so the cache can't hide a newly-animatable page.
+// Constructible stylesheets never reach the engine cascade (their rules are
+// a JS-side shim) and WAAPI doesn't go through this path — both unaffected.
+let _animCssProbeEpoch = -1, _animCssPossible = false, _animCssTransition = 0;
+function _animationCssGate() {
+  if (_animCssProbeEpoch === _ditingMutationEpoch) return _animCssPossible;
+  const was = _animCssPossible;
+  _animCssProbeEpoch = _ditingMutationEpoch;
+  try {
+    _animCssPossible = !!document.querySelector('style, link[rel~="stylesheet"], [style]');
+  } catch (e) { _animCssPossible = true; }
+  _animCssTransition = (!was && _animCssPossible) ? 1 : ((was && !_animCssPossible) ? -1 : 0);
+  return _animCssPossible;
+}
+
+// Collect animation-capable elements (class or style attribute) from a
+// subtree that just entered the document, plus the root itself. The cap
+// bounds the per-element computed-style reads on big insertions.
+function _animationCheckIn(root) {
+  if (!root || root.nodeType !== 1 || !root.isConnected) return;
+  if (_animScanDepth > 0) { _animDeferredChecks.add(root); return; }
+  if (!_animationCssGate()) {
+    // CSS just disappeared: anything still tracked lost its declarations —
+    // cancel them the way Chrome does when its sheet is removed mid-run.
+    if (_animTracked.size) _cancelAnimationsInSubtree(document.documentElement);
+    return;
+  }
+  if (_animCssTransition > 0) {
+    // CSS arrived after content was already checked through this gate
+    // (async style injection): previously-skipped subtrees may animate now.
+    // One capped whole-document sweep mirrors Chrome — animationstart
+    // belongs to when the style lands, not when the element did. Riding the
+    // depth guard defers it to the end of this very call.
+    _animCssTransition = 0;
+    if (root !== document.documentElement) {
+      _animScanDepth = 1;
+      try { _animationCheckIn(document.documentElement); } catch (e) {}
+      _animScanDepth = 0;
+      _drainDeferredAnimationChecks();
+      return;
+    }
+  }
+  _animScanDepth = 1;
+  try {
+    _animationCheckOne(root);
+    let count = 1;
+    for (const sel of ["[class]", "[style]"]) {
+      const ids = _domParse("query_selector_all_scoped", root._nid, sel) || [];
+      for (const id of ids) {
+        if (count >= 128) break;
+        const el = _wrapEl(+id);
+        if (el) { _animationCheckOne(el); count++; }
+      }
+      if (count >= 128) break;
+    }
+  } catch (e) {}
+  _animScanDepth = 0;
+  _drainDeferredAnimationChecks();
+}
+
+// Attribute mutations concern the one element; subtree insertions the new
+// root. Both are QUEUED, not run in the mutation: a script building a deep
+// subtree via N appendChild calls would otherwise force N full layout runs
+// (every tree write drops the layout cache, so each check's computed-style
+// read re-lays-out the whole document — 2000 nested appends overflowed the
+// stack inside layout). One microtask drain after the script's synchronous
+// section does the work once on the final tree, which is also Chrome's own
+// coalescing: style recalc and animationstart happen at the next rendering
+// opportunity, never mid-task.
+const _animPendingChecks = new Set();
+let _animCheckQueued = false;
+function _scheduleAnimationCheck(root) {
+  if (!root || root.nodeType !== 1) return;
+  _animPendingChecks.add(root);
+  if (_animCheckQueued) return;
+  _animCheckQueued = true;
+  Promise.resolve().then(() => {
+    _animCheckQueued = false;
+    const batch = Array.from(_animPendingChecks);
+    _animPendingChecks.clear();
+    for (const r of batch) _animationCheckIn(r);
+  });
+}
+
+function _drainDeferredAnimationChecks() {
+  if (_animDeferredChecks.size === 0) return;
+  const pending = Array.from(_animDeferredChecks);
+  _animDeferredChecks.clear();
+  for (const el of pending) _animationCheckIn(el);
+}
+
+function _animNodeInSubtree(el, root) {
+  let n = el;
+  while (n) {
+    if (n === root) return true;
+    n = n.parentNode;
+  }
+  return false;
+}
+
+// Detachment cancels (Chrome semantics); _animTracked only ever holds
+// elements that actually animated, so the walk is trivially small.
+function _cancelAnimationsInSubtree(root) {
+  if (!root || root.nodeType !== 1) return;
+  for (const [nid, st] of Array.from(_animTracked)) {
+    if (_animNodeInSubtree(st.el, root)) _cancelAnimation(nid, st);
+  }
+}
+
 function __prepareInsertedSubtree(root) {
   if (!root || !root.isConnected) return;
   const scripts = [];
@@ -1113,6 +1325,8 @@ function __prepareInsertedSubtree(root) {
   }
   for (const script of scripts) __prepareInsertedScript(script);
   __prepareInsertedStylesheetLinksIn(root);
+  // Elements entering the document start their CSS animations.
+  _scheduleAnimationCheck(root);
 }
 
 // --- dynamic <link rel=stylesheet> -------------------------------------
@@ -1306,6 +1520,8 @@ class Node {
   removeChild(c) {
     if (!c) return c;
     _dom("remove_child", c._nid);
+    // A tracked animation on a removed element must fire animationcancel.
+    _cancelAnimationsInSubtree(c);
     if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('childList', this._nid, [], [c._nid]);
     return c;
   }
@@ -1901,6 +2117,8 @@ class Element extends Node {
       // any other (the replaced children are new nodes — scripts among them
       // stay inert per the already-started flag, sheets do not).
       __prepareInsertedStylesheetLinksIn(this);
+      // Markup-level animations start when the markup enters the document.
+      _scheduleAnimationCheck(this);
     }
     if (globalThis.__mutationObservers?.length) {
       newChildren = _domParse("child_nodes", this._nid) || [];
@@ -2063,10 +2281,16 @@ class Element extends Node {
       __prepareInsertedStylesheetLink(this);
     }
     if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('attributes', this._nid, [], [], n);
+    // class/style writes can start or stop a CSS animation on this element.
+    if (n === "class" || n === "style") _scheduleAnimationCheck(this);
   }
-  setAttributeNS(ns, n, v) { _dom("set_attribute", this._nid, String(n) + "\0" + String(v)); } // exact name, no HTML folding
-  removeAttribute(n) { n = _htmlAttrName(this, n); const popoverPrev = (n === "popover") ? this.popover : undefined; _dom("remove_attribute", this._nid, n); if (popoverPrev !== undefined) this._popoverTypeMaybeChanged(popoverPrev); }
-  removeAttributeNS(ns, n) { _dom("remove_attribute", this._nid, String(n)); }
+  setAttributeNS(ns, n, v) {
+    _dom("set_attribute", this._nid, String(n) + "\0" + String(v)); // exact name, no HTML folding
+    const ln = String(n).toLowerCase();
+    if (ln === "class" || ln === "style") _scheduleAnimationCheck(this);
+  }
+  removeAttribute(n) { n = _htmlAttrName(this, n); const popoverPrev = (n === "popover") ? this.popover : undefined; _dom("remove_attribute", this._nid, n); if (popoverPrev !== undefined) this._popoverTypeMaybeChanged(popoverPrev); if (n === "class" || n === "style") _scheduleAnimationCheck(this); }
+  removeAttributeNS(ns, n) { _dom("remove_attribute", this._nid, String(n)); const ln = String(n).toLowerCase(); if (ln === "class" || ln === "style") _scheduleAnimationCheck(this); }
   hasAttribute(n) { return this.getAttribute(n) !== null; }
   hasAttributes() { return true; } // Simplified
   get attributes() {
@@ -2202,6 +2426,12 @@ class Element extends Node {
     return element;
   }
   addEventListener(type, handler, opts) {
+    // Animations already present in initial markup are unobservable through
+    // the mutation hooks above — a listener registration is the practical
+    // signal that this page cares, so scan once (capped) for candidates.
+    if (typeof type === "string" && type.indexOf("animation") === 0 && _nodeInDocument(this)) {
+      _scheduleAnimationCheck(document.body || this);
+    }
     const key = this._nid;
     if (!_eventRegistry[key]) _eventRegistry[key] = {};
     if (!_eventRegistry[key][type]) _eventRegistry[key][type] = [];
@@ -3344,6 +3574,16 @@ class Element extends Node {
   }
   animate(keyframes, options) {
     const duration = typeof options === 'number' ? options : (options?.duration || 0);
+    // WAAPI animations fire the same lifecycle events as CSS animations
+    // (with an empty animationName, like Chrome — keyframe names are not
+    // part of the API). Detached elements never start.
+    if (_nodeInDocument(this)) {
+      const durSec = Math.max(0, (Number(duration) || 0) / 1000);
+      _dispatchAnimationEvent(this, "animationstart", "", 0);
+      setTimeout(() => {
+        if (_nodeInDocument(this)) _dispatchAnimationEvent(this, "animationend", "", durSec);
+      }, durSec * 1000);
+    }
     return {
       finished: Promise.resolve(), currentTime: 0, playState: 'finished',
       effect: { getComputedTiming() { return { duration }; } },
@@ -6974,7 +7214,17 @@ globalThis.KeyboardEvent = class extends UIEvent {
 globalThis.FocusEvent = class extends UIEvent { constructor(t,o={}) { super(t,o);this.relatedTarget=o.relatedTarget||null; } };
 globalThis.InputEvent = class extends UIEvent { constructor(t,o={}) { super(t,o);this.data=o.data||null;this.inputType=o.inputType||""; } };
 globalThis.ErrorEvent = class extends Event { constructor(t,o={}) { super(t,o);this.message=o.message||"";this.error=o.error||null; } };
-globalThis.AnimationEvent = class extends Event {};
+globalThis.AnimationEvent = class AnimationEvent extends Event {
+  // WebIDL AnimationEventInit: animationName "" / elapsedTime 0 /
+  // pseudoElement "" defaults.
+  constructor(t, o = {}) {
+    if (arguments.length < 1) throw new TypeError("Failed to construct 'AnimationEvent': 1 argument required, but only 0 present.");
+    super(t, o);
+    this.animationName = o.animationName !== undefined ? String(o.animationName) : "";
+    this.elapsedTime = o.elapsedTime !== undefined ? Number(o.elapsedTime) : 0;
+    this.pseudoElement = o.pseudoElement !== undefined ? String(o.pseudoElement) : "";
+  }
+};
 globalThis.TransitionEvent = class extends Event {};
 globalThis.WheelEvent = class extends MouseEvent { constructor(t,o={}) { super(t,o);this.deltaX=o.deltaX||0;this.deltaY=o.deltaY||0;this.deltaZ=o.deltaZ||0;this.deltaMode=o.deltaMode||0; } };
 
