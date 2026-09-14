@@ -212,7 +212,10 @@ impl BrowserContext {
     #[allow(dead_code)]
     pub fn save_cookies(&self) {
         if let Some(ref dir) = self.storage_dir {
-            let _ = std::fs::create_dir_all(dir);
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                tracing::warn!("storage dir create failed ({}): {}", dir.display(), e);
+                return;
+            }
             let cookie_path = dir.join("cookies.json");
             if let Err(e) = self.cookie_jar.save_to_file(&cookie_path) {
                 tracing::warn!("Failed to save cookies to {}: {}", cookie_path.display(), e);

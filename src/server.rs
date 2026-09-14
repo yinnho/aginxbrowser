@@ -40,10 +40,14 @@ static SHARED_COOKIE_JAR: std::sync::LazyLock<Arc<CookieJar>> = std::sync::LazyL
         return jar;
     }
     let path = cookie_store_path();
-    if let Ok(n) = jar.load_from_file(&path) {
-        if n > 0 {
+    match jar.load_from_file(&path) {
+        Ok(n) if n > 0 => {
             tracing::info!("restored {} cookies from {}", n, path.display());
         }
+        // A corrupt or unreadable store must not silently reset (obscura#855
+        // item 1 shape): the user would come back logged-out with no clue why.
+        Ok(_) => {}
+        Err(e) => tracing::warn!("cookie store load failed, starting fresh: {}", e),
     }
     jar
 });

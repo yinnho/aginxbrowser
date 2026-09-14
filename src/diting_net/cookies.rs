@@ -667,6 +667,27 @@ mod tests {
         assert_eq!(file_mode, 0o600, "re-save must re-tighten a loose file");
     }
 
+    // obscura #855 item 1 error-surfacing half: an unwritable store location
+    // must return Err, never silently succeed. A file where the parent
+    // directory should be is a deterministic failure that also works when
+    // tests run as root (where a chmod-0 directory would still be writable).
+
+    #[test]
+    fn save_to_file_errors_when_parent_is_not_a_directory() {
+        let base = tempfile::tempdir().unwrap();
+        let blocker = base.path().join("not-a-dir");
+        std::fs::write(&blocker, b"x").unwrap();
+
+        let jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        jar.set_cookie("session=abc; Path=/", &url);
+
+        assert!(
+            jar.save_to_file(&blocker.join("cookie-store.json")).is_err(),
+            "unwritable store path must surface an error (obscura#855)"
+        );
+    }
+
     // obscura #915: RFC 6265 §5.3 — a non-HTTP (document.cookie) write must
     // not overwrite or evict a cookie whose http_only flag is set.
 

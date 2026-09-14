@@ -5015,7 +5015,17 @@ fn op_storage_write(#[string] origin: &str, #[string] json: &str) {
         return;
     };
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            // An unwritable store must be loud (obscura#855 item 1 shape):
+            // silently returning here loses every subsequent localStorage
+            // write with zero diagnostics.
+            tracing::warn!(
+                "localStorage persist: create_dir_all({}) failed: {}",
+                parent.display(),
+                e
+            );
+            return;
+        }
     }
     let payload = LOCAL_STORAGE
         .lock()
@@ -5051,7 +5061,11 @@ fn op_storage_write(#[string] origin: &str, #[string] json: &str) {
         .and_then(|mut f| f.write_all(payload.as_bytes()))
         .is_ok();
     if write_ok {
-        let _ = std::fs::rename(&tmp, &path);
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            tracing::warn!("localStorage persist: rename to {} failed: {}", path.display(), e);
+        }
+    } else {
+        tracing::warn!("localStorage persist: write to {} failed", tmp.display());
     }
 }
 
