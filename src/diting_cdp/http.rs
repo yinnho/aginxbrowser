@@ -15,7 +15,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 
 use crate::diting_cdp::dispatch::{self, CdpContext, LoadDone};
-use crate::diting_cdp::domains::page::emit_navigation_tail;
+use crate::diting_cdp::domains::page::{emit_navigation_for_page, emit_navigation_tail};
 use crate::diting_cdp::types::{CdpRequest, CdpResponse};
 
 /// Advertised browser identity. Playwright parses the Chrome major from the
@@ -199,6 +199,14 @@ async fn connection_loop(socket: WebSocket, page_mode: bool) {
     #[cfg(not(feature = "screenshot"))]
     let has_screencast = false;
 
+    // Idle event-loop pump: nothing else polls page JS between commands, so
+    // timers and promise continuations would never fire while the client is
+    // quiet — an SPA that self-navigates on a timer would wedge forever
+    // (obscura#866). Same pump the session face runs in its own loop; 200 ms
+    // cadence with `Skip` so a long pump doesn't stampede ticks.
+    let mut idle_pump = tokio::time::interval(std::time::Duration::from_millis(200));
+    idle_pump.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         #[cfg(feature = "screenshot")]
         {
@@ -280,6 +288,165 @@ async fn connection_loop(socket: WebSocket, page_mode: bool) {
                     }
                 }
             }
+            // No command in flight: still give page JS its slices and adopt
+            // any self-navigation, so timers fire while the client is quiet.
+            _ = idle_pump.tick() => {
+                pump_idle_pages(&mut ctx).await;
+                if !send_events(&mut sender, &mut ctx).await {
+                    return;
+                }
+            }
         }
+    }
+}
+
+/// One idle pass over the connection's pages (obscura#866): advance each
+/// page's JS event loop by a slice so timers, promise continuations and
+/// answered-fetch continuations run even while no command arrives, then
+/// adopt whatever navigation the page performed for itself — a real reload
+/// queued by a timer/click, or SPA history adoption — and emit its
+/// lifecycle events per attached session (sessionless channel when none).
+/// Returns the ids of pages that navigated. Cancellation-safe at pump-slice
+/// boundaries: the select drops this future when a command lands, and any
+/// navigation queued but not yet adopted is picked up by the next
+/// dispatch's post-eval nav check (pending-nav state lives in the Page).
+pub(crate) async fn pump_idle_pages(ctx: &mut CdpContext) -> Vec<String> {
+    let mut navigated = Vec::new();
+    for i in 0..ctx.pages.len() {
+        ctx.pages[i].pump_event_loop_slice(150).await;
+        match ctx.pages[i].process_pending_navigation().await {
+            Ok(true) => {
+                let page_id = ctx.pages[i].id.clone();
+                let sessions: Vec<String> = ctx
+                    .sessions
+                    .iter()
+                    .filter(|(_, pid)| pid.as_str() == page_id)
+                    .map(|(sid, _)| sid.clone())
+                    .collect();
+                if sessions.is_empty() {
+                    emit_navigation_for_page(ctx, &None, &page_id);
+                } else {
+                    for sid in sessions {
+                        emit_navigation_for_page(ctx, &Some(sid), &page_id);
+                    }
+                }
+                navigated.push(page_id);
+            }
+            Ok(false) => {}
+            Err(e) => tracing::debug!("CDP: idle-pump navigation failed: {e}"),
+        }
+    }
+    dispatch::drain_and_settle(ctx).await;
+    navigated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diting_cdp::types::CdpRequest;
+
+    /// Provision a page-mode connection's default page and load a real
+    /// document, mirroring what connection_loop does before any command.
+    async fn setup(ctx: &mut CdpContext, body: &str) -> String {
+        let page_id = ctx
+            .create_page_in_context(None)
+            .expect("default browser context must exist");
+        let session_id = format!("{page_id}-session");
+        ctx.sessions.insert(session_id.clone(), page_id.clone());
+        ctx.default_page = Some(page_id.clone());
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": format!("data:text/html,<html><body>{body}</body></html>") }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch::dispatch(&nav, ctx).await;
+        assert!(resp.error.is_none(), "navigate failed: {:?}", resp.error);
+        session_id
+    }
+
+    async fn evaluate(
+        ctx: &mut CdpContext,
+        session_id: &str,
+        expression: &str,
+    ) -> serde_json::Value {
+        let req = CdpRequest {
+            id: 2,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({ "expression": expression, "returnByValue": true }),
+            session_id: Some(session_id.to_string()),
+        };
+        let resp = dispatch::dispatch(&req, ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        resp.result.expect("result")["result"]["value"].clone()
+    }
+
+    /// obscura#866: a timer scheduled by page JS must fire while no CDP
+    /// command arrives — the idle pump advances the event loop between
+    /// commands. Before the pump existed, `__t` stayed 0 forever on a quiet
+    /// connection and any SPA parked on a timer wedged.
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_pump_fires_timers_between_commands() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let sid = setup(&mut ctx, "<p>probe</p>").await;
+
+        evaluate(
+            &mut ctx,
+            &sid,
+            "globalThis.__t = 0; setTimeout(() => { globalThis.__t = 1; }, 30);",
+        )
+        .await;
+        let before = evaluate(&mut ctx, &sid, "globalThis.__t").await;
+        assert_eq!(before, json!(0), "sanity: commands alone never pump timers");
+        pump_idle_pages(&mut ctx).await;
+        let after = evaluate(&mut ctx, &sid, "globalThis.__t").await;
+        assert_eq!(after, json!(1), "timer must fire via the idle pump");
+    }
+
+    /// The Maps symptom from obscura#866: a page that navigates itself from a
+    /// timer gets the navigation adopted by the idle pump — real reload,
+    /// lifecycle events scoped to the attached session.
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_pump_adopts_timer_driven_self_navigation() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let sid = setup(&mut ctx, "<p>origin</p>").await;
+        let target = "data:text/html,<html><body><h1>landed</h1></body></html>";
+        evaluate(
+            &mut ctx,
+            &sid,
+            &format!("setTimeout(() => {{ location.href = {:?}; }}, 30);", target),
+        )
+        .await;
+
+        let page_id = ctx.default_page.clone().expect("provisioned page");
+        let navigated = pump_idle_pages(&mut ctx).await;
+        assert_eq!(navigated, vec![page_id.clone()], "self-navigation adopted");
+
+        let page = ctx.get_page(&page_id).expect("page");
+        assert_eq!(page.url_string(), target);
+
+        let methods: Vec<&str> = ctx
+            .pending_events
+            .iter()
+            .map(|e| e.method.as_str())
+            .collect();
+        assert!(
+            methods.contains(&"Page.frameNavigated"),
+            "lifecycle events emitted: {methods:?}"
+        );
+        assert!(
+            methods.contains(&"Page.loadEventFired"),
+            "load lifecycle emitted: {methods:?}"
+        );
+        let nav_ev = ctx
+            .pending_events
+            .iter()
+            .find(|e| e.method == "Page.frameNavigated")
+            .expect("frameNavigated");
+        assert_eq!(
+            nav_ev.session_id.as_deref(),
+            Some(sid.as_str()),
+            "scoped to the attached session"
+        );
     }
 }

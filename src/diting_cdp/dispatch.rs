@@ -430,18 +430,7 @@ pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
         _ => Err(format!("Unknown domain: {}", domain)),
     };
 
-    drain_binding_calls(ctx);
-    drain_console_calls(ctx);
-    drain_write_navs(ctx);
-    let settle_pages = drain_intercept_calls(ctx);
-    // Run the continuations of every fetch the drain just answered itself.
-    // Nothing else polls the event loop between commands, so without this the
-    // auto-continued request sits parked until an unrelated awaited command.
-    for page_id in settle_pages {
-        if let Some(page) = ctx.get_page_mut(&page_id) {
-            page.settle(50).await;
-        }
-    }
+    drain_and_settle(ctx).await;
 
     match result {
         Ok(value) => CdpResponse::success(req.id, value, req.session_id.clone()),
@@ -456,6 +445,25 @@ pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
             };
             tracing::warn!("CDP error for {}: {}", req.method, msg);
             CdpResponse::error(req.id, code, msg, req.session_id.clone())
+        }
+    }
+}
+
+/// The post-V8 drain shared by `dispatch` and the connection loop's idle
+/// pump: both just ran JS, so flush everything that could only have queued
+/// while V8 was running — binding/console calls, `document.write`
+/// navigation tails, and answered intercept requests. The intercept settle
+/// runs the continuations of every fetch the drain just answered itself;
+/// without it an auto-continued request sits parked until the event loop is
+/// next polled.
+pub(crate) async fn drain_and_settle(ctx: &mut CdpContext) {
+    drain_binding_calls(ctx);
+    drain_console_calls(ctx);
+    drain_write_navs(ctx);
+    let settle_pages = drain_intercept_calls(ctx);
+    for page_id in settle_pages {
+        if let Some(page) = ctx.get_page_mut(&page_id) {
+            page.settle(50).await;
         }
     }
 }
