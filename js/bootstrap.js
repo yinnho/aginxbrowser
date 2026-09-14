@@ -3251,26 +3251,41 @@ class Element extends Node {
     let left, top;
     if (x !== null && typeof x === 'object') { left = x.left; top = x.top; }
     else { left = x; top = y; }
+    const root = this._rootScroller();
+    const beforeLeft = root.scrollLeft || 0;
+    const beforeTop = root.scrollTop || 0;
     this._scrollSuppress = true;
     if (left !== undefined) this.scrollLeft = +left || 0;
     if (top !== undefined) this.scrollTop = +top || 0;
     this._scrollSuppress = false;
-    this._fireScroll();
+    // A scroll op that translated nothing fires neither scroll nor
+    // scrollend (blitz#354's negative clause).
+    if ((root.scrollLeft || 0) !== beforeLeft || (root.scrollTop || 0) !== beforeTop) this._fireScroll();
   }
   scroll(x, y) { this.scrollTo(x, y); }
   scrollBy(x, y) {
     let dl, dt;
     if (x !== null && typeof x === 'object') { dl = x.left; dt = x.top; }
     else { dl = x; dt = y; }
+    const root = this._rootScroller();
+    const beforeLeft = root.scrollLeft || 0;
+    const beforeTop = root.scrollTop || 0;
     this._scrollSuppress = true;
     this.scrollLeft = (this.scrollLeft || 0) + (+dl || 0);
     this.scrollTop = (this.scrollTop || 0) + (+dt || 0);
     this._scrollSuppress = false;
-    this._fireScroll();
+    if ((root.scrollLeft || 0) !== beforeLeft || (root.scrollTop || 0) !== beforeTop) this._fireScroll();
   }
   _fireScroll() {
     const self = this;
-    setTimeout(() => { try { self.dispatchEvent(new Event('scroll', { bubbles: false })); } catch (e) {} }, 0);
+    // scrollend (blitz#354) trails the scroll in the same tick: our scrolls
+    // are instant, so "scrolling finished" is the moment after the scroll
+    // event. Fires with bubbles: true, as the spec has it (unlike scroll,
+    // scrollend bubbles) even though this shim's dispatch doesn't propagate.
+    setTimeout(() => {
+      try { self.dispatchEvent(new Event('scroll', { bubbles: false })); } catch (e) {}
+      try { self.dispatchEvent(new Event('scrollend', { bubbles: true })); } catch (e) {}
+    }, 0);
   }
   animate(keyframes, options) {
     const duration = typeof options === 'number' ? options : (options?.duration || 0);
@@ -10734,24 +10749,35 @@ function _windowScroll(x, y, relative) {
   let left, top;
   if (x !== null && typeof x === 'object') { left = x.left; top = x.top; }
   else { left = x; top = y; }
+  // The scrollTop/scrollLeft setters fire their own element-path scroll when
+  // not suppressed; the window path dispatches for itself below, so silence
+  // the setter's implicit fire or the document hears the scrollend twice
+  // (once bubbled from the root element, once dispatched).
+  root._scrollSuppress = true;
   if (left !== undefined) {
     root.scrollLeft = (relative ? (root.scrollLeft || 0) : 0) + (+left || 0);
   }
   if (top !== undefined) {
     root.scrollTop = (relative ? (root.scrollTop || 0) : 0) + (+top || 0);
   }
+  root._scrollSuppress = false;
   if ((root.scrollLeft || 0) === beforeLeft && (root.scrollTop || 0) === beforeTop) {
     return;
   }
   // Async, matching the element path. Dispatched at the document AND the
   // window: a page scroll event reaches both in Chrome, but
   // Document.dispatchEvent here runs only its own listeners and does not
-  // propagate, so firing once would strand half the listeners.
+  // propagate, so firing once would strand half the listeners. scrollend
+  // (blitz#354) trails in the same tick — our scrolls are instant, so
+  // "finished scrolling" is the moment after the scroll event, and the
+  // caller's no-translation guard already covered the negative clause.
   setTimeout(() => {
     try {
       const doc = globalThis.document;
       if (doc) doc.dispatchEvent(new Event('scroll', { bubbles: false }));
       globalThis.dispatchEvent(new Event('scroll', { bubbles: false }));
+      if (doc) doc.dispatchEvent(new Event('scrollend', { bubbles: true }));
+      globalThis.dispatchEvent(new Event('scrollend', { bubbles: true }));
     } catch (e) {}
   }, 0);
 }

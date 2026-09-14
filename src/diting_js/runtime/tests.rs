@@ -7686,6 +7686,33 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn test_scrollend_fires_after_scroll_completes_and_not_without_translation() {
+        // Blitz#354: scrollend trails scroll once scrolling finishes (same
+        // tick here — our scrolls are instant) and, unlike scroll, bubbles —
+        // so the element scrollend also reaches document listeners (as in
+        // Chrome), while window listeners hear only the window-path fire.
+        // The negative clause holds too: a scroll op that translated nothing
+        // fires neither scroll nor scrollend.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"async () => {
+            const el = document.createElement('div');
+            document.body.appendChild(el);
+            let se = 0, wse = 0, dse = 0;
+            el.addEventListener('scrollend', () => se++);
+            window.addEventListener('scrollend', () => wse++);
+            document.addEventListener('scrollend', () => dse++);
+            el.scrollTop = 100;       // moved -> element scrollend, bubbles to document
+            el.scrollTo(0, 100);      // same position -> no move -> nothing
+            window.scrollTo(0, 400);  // moved -> document + window scrollend
+            window.scrollTo(0, 400);  // same position -> no move -> nothing
+            await new Promise(r => setTimeout(r, 10));
+            return [se, wse, dse];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(result.value.unwrap(), serde_json::json!([1, 1, 2]));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     #[cfg(feature = "screenshot")]
     async fn test_root_scroll_mirrors_to_native_band_paint_state() {
         // AginxOS P0: the CDP band painter reads the root scroll offset from
