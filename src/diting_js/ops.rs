@@ -2182,6 +2182,7 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "color",
     "background-color",
     "box-shadow",
+    "text-shadow",
     "background-image",
     "font-family",
     "padding-top",
@@ -2492,6 +2493,24 @@ fn computed_style_value(
                         format_number(l.dy),
                         format_number(l.blur),
                         format_number(l.spread)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        }),
+        // Chrome's computed text-shadow: "color dx dy blur" per layer
+        // (first-declared first); unset serializes as "none".
+        "text-shadow" => Some(match &s.text_shadow {
+            None => "none".to_string(),
+            Some(layers) => layers
+                .iter()
+                .map(|l| {
+                    format!(
+                        "{} {}px {}px {}px",
+                        color(&l.color),
+                        format_number(l.dx),
+                        format_number(l.dy),
+                        format_number(l.blur)
                     )
                 })
                 .collect::<Vec<_>>()

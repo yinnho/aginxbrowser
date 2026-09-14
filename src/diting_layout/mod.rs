@@ -32,7 +32,7 @@ use taffy::prelude::*;
 use crate::diting_css::{
     AlignMode, ComputedStyle, Display as CssDisplay, FlexDirection as CssFlexDirection,
     FlexWrapMode, GridTrack, JustifyMode, ObjectFit, ObjectPositionPart, Overflow, PositionMode,
-    TextAlign, TextDecorations, TextOverflow, WhiteSpace,
+    TextAlign, TextDecorations, TextOverflow, TextShadow, WhiteSpace,
 };
 use crate::diting_dom::tree::{DomTree, NodeId};
 
@@ -4092,6 +4092,10 @@ pub enum PaintItem {
         /// font_size/word_spacing and the memo no longer matches); word
         /// leaves carry None.
         tokens: Option<std::rc::Rc<[text::Token]>>,
+        /// `text-shadow` layers (blitz#271 family, inherited), element
+        /// opacity already folded into each color: painted UNDER the glyphs
+        /// (and decorations), first-declared layer on top.
+        text_shadow: Option<Vec<TextShadow>>,
     },
 }
 
@@ -6010,6 +6014,34 @@ pub fn layout_collect(
                 stops: g.stops.iter().map(|(p, c)| (*p, with_alpha(*c, alpha))).collect(),
                 css_deg: g.css_deg,
             });
+        // Inherited text-shadow layers with this element's opacity folded
+        // into each color (the item colors carry alpha, shadows ride along).
+        // Text leaves sit outside `node_map` — walk up to the nearest boxed
+        // ancestor, whose style already carries the inherited layer list.
+        let mut shadow_dom = node_map.get(&node).copied();
+        let mut shadow_up = taffy_tree.parent(node);
+        while shadow_dom.is_none() {
+            match shadow_up {
+                Some(p) => {
+                    shadow_dom = node_map.get(&p).copied();
+                    shadow_up = taffy_tree.parent(p);
+                }
+                None => break,
+            }
+        }
+        let run_text_shadow = shadow_dom
+            .and_then(|dom_id| styles.get(&dom_id))
+            .and_then(|s| s.text_shadow.clone())
+            .map(|layers| {
+                layers
+                    .into_iter()
+                    .map(|mut sh| {
+                        let c = with_alpha([sh.color.0, sh.color.1, sh.color.2, sh.color.3], alpha);
+                        sh.color = crate::diting_css::Color(c[0], c[1], c[2], c[3]);
+                        sh
+                    })
+                    .collect()
+            });
         if let Some(TextLeaf::Run { text, font_size, bold, color, line_height, decorations, mono, word_spacing, nowrap, ellipsis, tokens, .. }) = taffy_tree.get_node_context(node) {
             // The wrap width the containing block offered at measure time:
             // the direct taffy parent's content box (the run wrapper for
@@ -6054,6 +6086,7 @@ pub fn layout_collect(
                     } else {
                         None
                     },
+                    text_shadow: run_text_shadow.clone(),
                 });
             } else {
                 let wrap_at = taffy_tree
@@ -6078,6 +6111,7 @@ pub fn layout_collect(
                     word_spacing: *word_spacing,
                     truncate_at,
                     tokens: Some(run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, tokens)),
+                    text_shadow: run_text_shadow.clone(),
                 });
             }
         }
@@ -6102,6 +6136,7 @@ pub fn layout_collect(
                     word_spacing: 0.0,
                     truncate_at: None,
                     tokens: None,
+                    text_shadow: run_text_shadow.clone(),
                 });
             } else {
                 items.push(PaintItem::Text {
@@ -6119,6 +6154,7 @@ pub fn layout_collect(
                     word_spacing: 0.0,
                     truncate_at: None,
                     tokens: None,
+                    text_shadow: run_text_shadow.clone(),
                 });
             }
         }

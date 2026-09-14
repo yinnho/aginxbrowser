@@ -14,7 +14,7 @@
 
 use super::text::{baseline_offset, greedy_wrap, tokens_of, truncate_tokens, ScaledMetrics, TextRaster, Token};
 use super::{FontBook, PaintItem, Rect, TextGradient};
-use crate::diting_css::TextDecorations;
+use crate::diting_css::{TextDecorations, TextShadow};
 
 /// A straight-alpha RGBA8 image, row-major — our paint target.
 #[derive(Debug)]
@@ -1686,6 +1686,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
     // the same wrap model rasterize_wrapped uses; `top` can lift ink above
     // the line-box top by up to a line's leading, so the top edge gets a
     // full line of slack.
+    #[allow(clippy::too_many_arguments)]
     fn text_reaches_band(
         y: f32,
         text: &str,
@@ -1694,12 +1695,13 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
         line_height: f32,
         dy: f32,
         band_h: i64,
+        pad: f32,
     ) -> bool {
         let wrap = wrap_at.max(1.0);
         let lines = (est_width(text, font_size) / wrap).ceil().max(1.0);
         let top = y - line_height;
         let bottom = y + lines * line_height;
-        bottom > dy && top < dy + band_h as f32
+        bottom + pad > dy && top - pad < dy + band_h as f32
     }
 
     for item in items {
@@ -2067,7 +2069,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     super::svg::paint_svg(render, rect, fonts, out, dx, dy, *alpha);
                 }
             }
-            PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at, gradient, decorations, mono, word_spacing, truncate_at, tokens } => {
+            PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at, gradient, decorations, mono, word_spacing, truncate_at, tokens, text_shadow } => {
                 // background-clip: text: the fill color is ignored entirely
                 // (CSS paints the background through the glyphs; the
                 // transparent-text-fill half of the idiom is free by
@@ -2078,11 +2080,21 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                 // space `area` was captured in, so the gradient rides the
                 // affine through rotations too.
                 let fill = if gradient.is_some() { [255, 255, 255, 255] } else { *color };
+                // Shadow extent (blur feather + offset) for prefilter
+                // widening; shadows ride under the glyphs, first-declared
+                // layer on top (blitz#271 family).
+                let shadow_pad = text_shadow.as_ref().and_then(|s| {
+                    s.iter()
+                        .map(|sh| sh.blur.ceil().max(sh.dx.abs()).max(sh.dy.abs()) + 1.0)
+                        .fold(None::<f32>, |acc, v| Some(acc.map_or(v, |m| m.max(v))))
+                });
                 if out.xf().is_some() {
                     // Rasterize at RAW local metrics — the bracket maps the
                     // tile, so no scale folds into font metrics — prefiltered
                     // by the mapped bbox of the same estimated tile box the
-                    // band check below uses.
+                    // band check below uses, widened by the shadow extent so
+                    // an offset/blur reaching the canvas isn't skipped.
+                    let pad = shadow_pad.unwrap_or(0.0) as i64;
                     let est_w = est_width(text, *font_size).max(*wrap_at);
                     let lines = (est_width(text, *font_size) / wrap_at.max(1.0)).ceil().max(1.0);
                     let (bx0, by0, bx1, by1) = out.mapped_xf_bounds(
@@ -2091,8 +2103,13 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                         est_w as f64,
                         ((lines + 1.0) * *line_height) as f64,
                     );
-                    if bx1 <= 0 || by1 <= 0 || bx0 >= out.width as i64 || by0 >= out.height as i64 {
+                    if bx1 + pad <= 0 || by1 + pad <= 0 || bx0 - pad >= out.width as i64 || by0 - pad >= out.height as i64 {
                         continue;
+                    }
+                    if let Some(shadows) = text_shadow {
+                        for sh in shadows.iter().rev() {
+                            stamp_text_shadow(out, fonts, text, *font_size, *bold, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, tokens.as_deref(), sh, true, (*x + sh.dx) as f64, (*y + sh.dy) as f64);
+                        }
                     }
                     let r = fonts.rasterize_wrapped_with(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, tokens.clone());
                     // Gradient recolor rewrites pixels in place — the cache
@@ -2108,8 +2125,14 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     out.blit_rgba_affine(&r.data, r.width, r.height, *x as f64, (*y + r.top) as f64);
                     paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, tokens.as_deref(), 0.0, 0.0);
                 } else {
-                    if !text_reaches_band(*y, text, *font_size, *wrap_at, *line_height, dy, out.height as i64) {
+                    let pad = shadow_pad.unwrap_or(0.0);
+                    if !text_reaches_band(*y, text, *font_size, *wrap_at, *line_height, dy, out.height as i64, pad) {
                         continue;
+                    }
+                    if let Some(shadows) = text_shadow {
+                        for sh in shadows.iter().rev() {
+                            stamp_text_shadow(out, fonts, text, *font_size, *bold, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, tokens.as_deref(), sh, false, (*x + sh.dx - dx) as f64, (*y + sh.dy - dy) as f64);
+                        }
                     }
                     let r = fonts.rasterize_wrapped_with(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, tokens.clone());
                     let mut owned;
@@ -2127,6 +2150,121 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
             }
         }
     }
+}
+
+/// One text-shadow layer stamped UNDER the glyphs (blitz#271 family):
+/// re-rasterize the run in the layer color (the RasterCache keys on color,
+/// so shadow layers memo independently), box-blur its alpha when the layer
+/// asks for a blur, and blit at the offset. `affine` selects the
+/// transformed blit (page space; the open bracket folds dx/dy) vs the
+/// band-space rounded blit.
+#[allow(clippy::too_many_arguments)]
+fn stamp_text_shadow(
+    out: &mut Canvas,
+    fonts: &FontBook,
+    text: &str,
+    font_size: f32,
+    bold: bool,
+    wrap_at: f32,
+    line_height: f32,
+    mono: bool,
+    word_spacing: f32,
+    truncate_at: Option<f32>,
+    tokens: Option<&[Token]>,
+    sh: &TextShadow,
+    affine: bool,
+    ox: f64,
+    oy: f64,
+) {
+    let r = fonts.rasterize_wrapped_with(
+        text,
+        font_size,
+        bold,
+        [sh.color.0, sh.color.1, sh.color.2, sh.color.3],
+        wrap_at,
+        line_height,
+        mono,
+        word_spacing,
+        truncate_at,
+        tokens.map(std::rc::Rc::from),
+    );
+    if sh.blur <= 0.0 {
+        if affine {
+            out.blit_rgba_affine(&r.data, r.width, r.height, ox, oy + r.top as f64);
+        } else {
+            out.blit_text(&r, ox.round() as i64, (oy + r.top as f64).round() as i64);
+        }
+        return;
+    }
+    // Soft layer: blur the raster's ALPHA channel in place of a renderer
+    // blur filter (upstream blitz#271 blocks blur on renderer support; the
+    // per-pixel path here just does it). The padded buffer gives the
+    // feather room so the run tile's edge can't clip it.
+    let pad = sh.blur.ceil() as usize;
+    let radius = ((sh.blur * 0.5).round() as usize).max(1);
+    let pw = r.width + pad * 2;
+    let ph = r.height + pad * 2;
+    let mut alpha = vec![0u8; pw * ph];
+    for (row, src_row) in r.data.chunks_exact(r.width * 4).enumerate() {
+        for (col, p) in src_row.chunks_exact(4).enumerate() {
+            alpha[(row + pad) * pw + col + pad] = p[3];
+        }
+    }
+    for round in 0..2 {
+        alpha = box_blur_alpha(&alpha, pw, ph, radius, round == 0);
+    }
+    let mut data = Vec::with_capacity(pw * ph * 4);
+    for a in &alpha {
+        data.extend_from_slice(&[sh.color.0, sh.color.1, sh.color.2, *a]);
+    }
+    let blurred = TextRaster {
+        width: pw,
+        height: ph,
+        baseline: 0.0,
+        top: 0.0,
+        data,
+    };
+    // Row 0 of the padded tile is `pad` px above the run tile's row 0,
+    // which itself sits `r.top` px above the line box top.
+    if affine {
+        out.blit_rgba_affine(&blurred.data, blurred.width, blurred.height, ox - pad as f64, oy + r.top as f64 - pad as f64);
+    } else {
+        out.blit_text(&blurred, (ox - pad as f64).round() as i64, (oy + r.top as f64 - pad as f64).round() as i64);
+    }
+}
+
+/// One separable box-blur pass (H or V) over an alpha plane with
+/// edge-clamped windows. Two rounds ≈ a triangular kernel — the same
+/// extent convention as the box-shadow linear feather (support ≈ blur).
+fn box_blur_alpha(src: &[u8], w: usize, h: usize, r: usize, horizontal: bool) -> Vec<u8> {
+    let mut out = vec![0u8; src.len()];
+    if horizontal {
+        for y in 0..h {
+            let row = y * w;
+            for x in 0..w {
+                let lo = x.saturating_sub(r);
+                let hi = (x + r + 1).min(w);
+                let mut sum = 0u32;
+                for k in lo..hi {
+                    sum += src[row + k] as u32;
+                }
+                out[row + x] = (sum / (hi - lo) as u32) as u8;
+            }
+        }
+    } else {
+        for x in 0..w {
+            for y in 0..h {
+                let lo = y.saturating_sub(r);
+                let hi = (y + r + 1).min(h);
+                let mut sum = 0u32;
+                for k in lo..hi {
+                    sum += src[k * w + x] as u32;
+                }
+                out[y * w + x] = (sum / (hi - lo) as u32) as u8;
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -2177,6 +2315,7 @@ mod tests {
             word_spacing: 0.0,
             truncate_at: None,
             tokens: None,
+            text_shadow: None,
         }];
         let fonts = crate::diting_fonts::font_book();
         let mut c = Canvas::new_filled(120, 40, [255, 255, 255, 255]);
@@ -2360,7 +2499,7 @@ mod tests {
                 form: None,
                 caret: None,
             },
-            PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None },
+            PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None, text_shadow: None },
         ];
         let fonts = crate::diting_fonts::font_book();
         let mut full = Canvas::new_filled(40, 60, [255, 255, 255, 255]);
@@ -2392,6 +2531,7 @@ mod tests {
                 word_spacing: 0.0,
                 truncate_at: None,
                 tokens: None,
+                text_shadow: None,
             }];
             let mut c = Canvas::new_filled(80, 32, [255, 255, 255, 255]);
             execute(&items, &fonts, &mut c);
@@ -2437,6 +2577,7 @@ mod tests {
                 word_spacing: 0.0,
                 truncate_at: None,
                 tokens: None,
+                text_shadow: None,
             },
             PaintItem::ClearXf,
         ];
@@ -2798,8 +2939,8 @@ mod tests {
         let fonts = crate::diting_fonts::font_book();
         // A tall low-content page: only two text leaves, one near the band.
         let items = vec![
-            PaintItem::Text { text: "edge".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 96.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None },
-            PaintItem::Text { text: "far".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 500.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None },
+            PaintItem::Text { text: "edge".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 96.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None, text_shadow: None },
+            PaintItem::Text { text: "far".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 500.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None, text_shadow: None },
         ];
         let mut band = Canvas::new_filled(40, 80, [255, 255, 255, 255]);
         execute_band(&items, &fonts, &mut band, 0.0, 100.0);
@@ -2927,6 +3068,7 @@ mod tests {
                 word_spacing: 0.0,
                 truncate_at: None,
                 tokens: None,
+                text_shadow: None,
             },
             PaintItem::ClearXf,
         ];
@@ -3102,6 +3244,7 @@ mod tests {
                 word_spacing: 0.0,
                 truncate_at,
                 tokens: None,
+                text_shadow: None,
             }];
             let mut c = Canvas::new_filled(400, 32, [255, 255, 255, 255]);
             execute(&items, &fonts, &mut c);
@@ -3213,5 +3356,197 @@ mod tests {
         assert_eq!(sd_rounded_box(0.0, 0.0, 3.0, 3.0, 2.0), -5.0);
         assert!(sd_rounded_box(5.0, 0.0, 3.0, 3.0, 2.0).abs() < 1e-9, "edge distance 0");
         assert!((sd_rounded_box(8.0, 0.0, 3.0, 3.0, 2.0) - 3.0).abs() < 1e-9, "+3 outside");
+    }
+
+    // ---- text-shadow (blitz#271 family) ----
+
+    fn shadow_item(layers: Vec<TextShadow>) -> Vec<PaintItem> {
+        vec![PaintItem::Text {
+            text: "mmmmm".into(),
+            font_size: 16.0,
+            bold: false,
+            color: [0, 0, 0, 255],
+            line_height: 20.0,
+            x: 10.0,
+            y: 20.0,
+            wrap_at: 400.0,
+            gradient: None,
+            decorations: TextDecorations::default(),
+            mono: false,
+            word_spacing: 0.0,
+            truncate_at: None,
+            tokens: None,
+            text_shadow: if layers.is_empty() { None } else { Some(layers) },
+        }]
+    }
+
+    fn reds(c: &Canvas) -> Vec<(usize, usize)> {
+        // Red-over-white composites keep r > g exactly when a red layer
+        // contributed — pure white and pure black both have r == g, so any
+        // nonzero red coverage (a 1/255 feather sliver included) matches.
+        let mut out = Vec::new();
+        for y in 0..c.height {
+            for x in 0..c.width {
+                if px(c, x, y)[0] > px(c, x, y)[1] {
+                    out.push((x, y));
+                }
+            }
+        }
+        out
+    }
+
+    fn darks(c: &Canvas) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for y in 0..c.height {
+            for x in 0..c.width {
+                let p = px(c, x, y);
+                if p[0] < 80 && p[1] < 80 && p[2] < 80 {
+                    out.push((x, y));
+                }
+            }
+        }
+        out
+    }
+
+    /// A hard (blur 0) layer is an exact recolored copy of the glyph raster
+    /// at the offset: every red pixel has glyph ink `(-dx, -dy)` from it in
+    /// a shadow-less render, glyphs stay black, and the offset makes the
+    /// shadow stick out where the glyphs aren't.
+    #[test]
+    fn text_shadow_hard_offset_recolor() {
+        let fonts = crate::diting_fonts::font_book();
+        let plain = {
+            let mut c = Canvas::new_filled(140, 40, [255, 255, 255, 255]);
+            execute(&shadow_item(vec![]), &fonts, &mut c);
+            c
+        };
+        let mut c = Canvas::new_filled(140, 40, [255, 255, 255, 255]);
+        execute(&shadow_item(vec![TextShadow { dx: 8.0, dy: 0.0, blur: 0.0, color: crate::diting_css::Color(255, 0, 0, 255) }]), &fonts, &mut c);
+        let red = reds(&c);
+        assert!(!red.is_empty(), "shadow ink exists");
+        // The shadow is a byte-identical recolored copy: every red pixel
+        // (any nonzero coverage) mirrors glyph coverage at (-8,0).
+        let plain_ink: std::collections::HashSet<(usize, usize)> = (0..plain.height)
+            .flat_map(|y| (0..plain.width).map(move |x| (x, y)))
+            .filter(|(x, y)| px(&plain, *x, *y)[0] < 255)
+            .collect();
+        for (x, y) in &red {
+            assert!(x >= &8 && plain_ink.contains(&(x - 8, *y)), "red pixel ({x},{y}) mirrors glyph ink at (-8,0)");
+        }
+        // Glyphs paint OVER the shadow: solid glyph pixels stay pure black.
+        for (x, y) in darks(&plain) {
+            assert!(px(&c, x, y)[0] < 80, "solid glyph ({x},{y}) wins over the shadow");
+        }
+    }
+
+    /// A co-located layer (dx=dy=0) sits entirely UNDER the glyphs: solid
+    /// glyph pixels stay pure glyph ink — none of the shadow color leaks
+    /// through full coverage.
+    #[test]
+    fn text_shadow_under_glyphs() {
+        let fonts = crate::diting_fonts::font_book();
+        let mut c = Canvas::new_filled(140, 40, [255, 255, 255, 255]);
+        execute(&shadow_item(vec![TextShadow { dx: 0.0, dy: 0.0, blur: 0.0, color: crate::diting_css::Color(255, 0, 0, 255) }]), &fonts, &mut c);
+        let plain = {
+            let mut c2 = Canvas::new_filled(140, 40, [255, 255, 255, 255]);
+            execute(&shadow_item(vec![]), &fonts, &mut c2);
+            c2
+        };
+        for (x, y) in darks(&plain) {
+            assert!(px(&c, x, y)[0] < 80, "solid glyph ({x},{y}) covers the shadow");
+        }
+    }
+
+    /// A blurred layer spreads past the hard extent (feather reaches
+    /// `pad` px beyond the raster on both sides) and falls off toward the
+    /// edge — center-row alpha above the feather-tip alpha.
+    #[test]
+    fn text_shadow_blur_spreads_and_falls_off() {
+        let fonts = crate::diting_fonts::font_book();
+        let span = |blur: f32| {
+            let mut c = Canvas::new_filled(200, 80, [255, 255, 255, 255]);
+            execute(
+                &shadow_item(vec![TextShadow { dx: 0.0, dy: 14.0, blur, color: crate::diting_css::Color(255, 0, 0, 255) }]),
+                &fonts,
+                &mut c,
+            );
+            let rows: Vec<usize> = reds(&c).iter().map(|(_, y)| *y).collect();
+            (*rows.iter().min().unwrap(), *rows.iter().max().unwrap())
+        };
+        let (hard_top, hard_bot) = span(0.0);
+        let (soft_top, soft_bot) = span(6.0);
+        assert!(soft_top < hard_top, "feather reaches above the hard extent: {} < {hard_top}", soft_top);
+        assert!(soft_bot > hard_bot, "feather reaches below the hard extent: {} > {hard_bot}", soft_bot);
+        // Falloff: at the hard span's center row, alpha (redness) exceeds
+        // the feather tip rows of the soft render.
+        let mid_alpha = |c_row: usize, blur: f32| {
+            let mut c = Canvas::new_filled(200, 80, [255, 255, 255, 255]);
+            execute(
+                &shadow_item(vec![TextShadow { dx: 0.0, dy: 14.0, blur, color: crate::diting_css::Color(255, 0, 0, 255) }]),
+                &fonts,
+                &mut c,
+            );
+            255 - px(&c, 30, c_row)[1]
+        };
+        let center = (hard_top + hard_bot) / 2;
+        assert!(mid_alpha(center, 6.0) > mid_alpha(soft_top, 6.0), "center ink above feather tip");
+        assert!(mid_alpha(center, 6.0) > mid_alpha(soft_bot, 6.0), "center ink above feather tip (bottom)");
+    }
+
+    /// Layer order: first-declared paints ON TOP. Two layers at the SAME
+    /// offset — the later (second-declared, painted first) blue must be
+    /// fully covered by the first-declared red.
+    #[test]
+    fn text_shadow_first_layer_on_top() {
+        let fonts = crate::diting_fonts::font_book();
+        let mut c = Canvas::new_filled(140, 40, [255, 255, 255, 255]);
+        execute(
+            &shadow_item(vec![
+                TextShadow { dx: 8.0, dy: 0.0, blur: 0.0, color: crate::diting_css::Color(255, 0, 0, 255) },
+                TextShadow { dx: 8.0, dy: 0.0, blur: 0.0, color: crate::diting_css::Color(0, 0, 255, 255) },
+            ]),
+            &fonts,
+            &mut c,
+        );
+        assert!(!reds(&c).is_empty(), "first-declared red shows");
+        let mut blue = 0;
+        for y in 0..c.height {
+            for x in 0..c.width {
+                let p = px(&c, x, y);
+                if p[2] > 150 && p[0] < 80 {
+                    blue += 1;
+                }
+            }
+        }
+        assert_eq!(blue, 0, "second-declared blue never surfaces under an identical red");
+    }
+
+    /// The separable box blur preserves the plane's total mass up to edge
+    /// clamping and is idempotent-flat on a constant plane.
+    #[test]
+    fn box_blur_alpha_preserves_mass_and_flat() {
+        let src = vec![0u8; 100];
+        let flat = vec![200u8; 100];
+        assert_eq!(box_blur_alpha(&flat, 10, 10, 2, true), flat, "constant plane stays constant");
+        // Non-square plane: the vertical pass smears down the lit column
+        // only. Guards the transposed-stride bug (a square buffer hides it
+        // because w == h makes row and column strides coincide).
+        let mut col = vec![0u8; 21]; // 7 wide, 3 tall
+        col[1 * 7 + 2] = 255; // row 1, col 2
+        let out = box_blur_alpha(&col, 7, 3, 1, false);
+        for x in 0..7 {
+            for y in 0..3 {
+                let expect = if x == 2 { [127u8, 85, 127][y] } else { 0 };
+                assert_eq!(out[y * 7 + x], expect, "vertical blur at ({x},{y})");
+            }
+        }
+        let mut one = vec![0u8; 100];
+        one[45] = 255;
+        let out = box_blur_alpha(&one, 10, 10, 2, true);
+        let total: u32 = out.iter().map(|&v| v as u32).sum();
+        assert!(total > 200 && total <= 255 * 5, "mass spreads into the window, got {total}");
+        assert!(out[45] < 255, "peak diluted");
+        let empty: Vec<u8> = box_blur_alpha(&src, 10, 10, 1, false).to_vec();
+        assert!(empty.iter().all(|&v| v == 0), "zero plane stays zero");
     }
 }

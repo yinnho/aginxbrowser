@@ -620,6 +620,16 @@ pub struct BoxShadow {
     pub inset: bool,
 }
 
+/// One `text-shadow` layer (blitz#271 family): offset + optional blur
+/// around a color. No spread, no `inset` — both are parse errors here.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextShadow {
+    pub dx: f32,
+    pub dy: f32,
+    pub blur: f32,
+    pub color: Color,
+}
+
 /// The computed values this slice models. Deliberately tiny: enough to lock
 /// cascade ordering, specificity, inline override, and inheritance semantics.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -651,6 +661,10 @@ pub struct ComputedStyle {
     /// `box-shadow` layers (blitz#349 family, v1), non-inherited; first
     /// layer paints on top (CSS paint order). `None` = `none`.
     pub box_shadow: Option<Vec<BoxShadow>>,
+    /// `text-shadow` layers (blitz#271 family), INHERITED (copied down in
+    /// `cascade_element` like `color`); first layer paints on top.
+    /// `None` = `none`.
+    pub text_shadow: Option<Vec<TextShadow>>,
     /// Shorthand sides in CSS order (top right bottom left), already expanded.
     pub margin: Sides,
     pub padding: Sides,
@@ -2825,6 +2839,19 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 _ => false,
             }
         }
+        "text-shadow" => {
+            if v.eq_ignore_ascii_case("none") {
+                style.text_shadow = None;
+                return true;
+            }
+            match parse_text_shadow(v, style.color, fonts) {
+                Some(layers) if !layers.is_empty() => {
+                    style.text_shadow = Some(layers);
+                    true
+                }
+                _ => false,
+            }
+        }
         "white-space" => {
             style.white_space = match v {
                 "normal" => Some(WhiteSpace::Normal),
@@ -3658,6 +3685,51 @@ pub fn parse_box_shadow(
     Some(layers)
 }
 
+/// `text-shadow` layers (blitz#271 family): `<color>? && <length>{2,3}` per
+/// comma-separated layer — no 4th length, no `inset` (either is an invalid
+/// declaration, not a parse-through), negative blur invalid, missing color
+/// folds to currentColor like box-shadow.
+pub fn parse_text_shadow(
+    value: &str,
+    current_color: Option<Color>,
+    fonts: &FontCtx,
+) -> Option<Vec<TextShadow>> {
+    let mut layers = Vec::new();
+    for part in split_top_level_commas(value) {
+        let mut color: Option<Color> = None;
+        let mut lengths: Vec<f32> = Vec::new();
+        for tok in split_top_level_units(&part) {
+            if tok.eq_ignore_ascii_case("inset") {
+                return None;
+            } else if let Some(c) = parse_color(tok) {
+                if color.is_some() {
+                    return None;
+                }
+                color = Some(c);
+            } else {
+                if lengths.len() >= 3 {
+                    return None;
+                }
+                lengths.push(resolve_shadow_len(tok, fonts)?);
+            }
+        }
+        if lengths.len() < 2 {
+            return None;
+        }
+        let blur = lengths.get(2).copied().unwrap_or(0.0);
+        if blur < 0.0 {
+            return None;
+        }
+        layers.push(TextShadow {
+            dx: lengths[0],
+            dy: lengths[1],
+            blur,
+            color: color.unwrap_or_else(|| current_color.unwrap_or(Color(0, 0, 0, 255))),
+        });
+    }
+    Some(layers)
+}
+
 /// Shadow lengths resolve em/rem against the cascade fonts and fold calc();
 /// % is rejected (it would need the shadow receiver's box).
 fn resolve_shadow_len(val: &str, fonts: &FontCtx) -> Option<f32> {
@@ -3992,6 +4064,9 @@ pub fn cascade_element(
         style.word_spacing = style.word_spacing.or(parent.word_spacing);
         // white-space inherits; the element's own declaration wins.
         style.white_space = style.white_space.or(parent.white_space);
+        // text-shadow inherits the whole layer list (blitz#271 family) —
+        // like color, author rules below re-declare per element.
+        style.text_shadow = parent.text_shadow.clone();
         // Custom properties inherit computed (already-substituted-where-
         // possible) values; author rules below may re-declare per element.
         style.custom = parent.custom.clone();
@@ -5857,5 +5932,75 @@ mod tests {
         assert_eq!(s.box_shadow, None, "none clears");
         apply_declarations(&mut s, "box-shadow: 1px 1px red; box-shadow: blue blue");
         assert!(s.box_shadow.is_some(), "invalid re-declaration keeps the prior value");
+    }
+
+    // ---- text-shadow (blitz#271 family) ----
+
+    fn tshadow(v: &str) -> Option<Vec<TextShadow>> {
+        let mut s = ComputedStyle::default();
+        s.color = Some(Color(10, 20, 30, 255));
+        apply_declarations(&mut s, &format!("text-shadow: {v}"));
+        s.text_shadow
+    }
+
+    #[test]
+    fn text_shadow_two_lengths_fold_current_color() {
+        assert_eq!(
+            tshadow("2px 3px").unwrap(),
+            vec![TextShadow { dx: 2.0, dy: 3.0, blur: 0.0, color: Color(10, 20, 30, 255) }],
+        );
+    }
+
+    #[test]
+    fn text_shadow_color_on_either_side_and_blur() {
+        for v in ["red 4px 5px 6px", "4px 5px 6px red"] {
+            assert_eq!(
+                tshadow(v).unwrap(),
+                vec![TextShadow { dx: 4.0, dy: 5.0, blur: 6.0, color: Color(255, 0, 0, 255) }],
+                "{v}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_shadow_layers_parse_in_order() {
+        let layers = tshadow("1px 1px 2px red, 0 0 4px rgba(0, 0, 0, 0.5)").unwrap();
+        assert_eq!(layers.len(), 2);
+        assert_eq!(layers[0], TextShadow { dx: 1.0, dy: 1.0, blur: 2.0, color: Color(255, 0, 0, 255) });
+        assert_eq!(layers[1], TextShadow { dx: 0.0, dy: 0.0, blur: 4.0, color: Color(0, 0, 0, 128) });
+    }
+
+    #[test]
+    fn text_shadow_rejections_and_reset() {
+        assert!(tshadow("inset 1px 1px").is_none(), "inset is not a text-shadow keyword");
+        assert!(tshadow("red").is_none(), "one length is not a shadow");
+        assert!(tshadow("2px 2px -1px").is_none(), "negative blur invalid");
+        assert!(tshadow("1px 1px 2px 3px").is_none(), "no spread length");
+        assert!(tshadow("red 1px 1px red").is_none(), "two colors");
+        assert_eq!(tshadow("none"), None);
+        // `none` clears a prior value; an invalid re-declaration must not.
+        let mut s = ComputedStyle::default();
+        s.color = Some(Color(0, 0, 0, 255));
+        apply_declarations(&mut s, "text-shadow: 1px 1px red; text-shadow: none");
+        assert_eq!(s.text_shadow, None, "none clears");
+        apply_declarations(&mut s, "text-shadow: 1px 1px red; text-shadow: blue blue");
+        assert!(s.text_shadow.is_some(), "invalid re-declaration keeps the prior value");
+    }
+
+    #[test]
+    fn text_shadow_inherits_like_color() {
+        let tree = diting_dom::tree_sink::parse_html(r#"<div><p>x</p></div>"#);
+        let p = tree.query_selector("p").unwrap().unwrap();
+        let parent = ComputedStyle {
+            text_shadow: Some(vec![TextShadow { dx: 1.0, dy: 1.0, blur: 2.0, color: Color(9, 9, 9, 255) }]),
+            ..Default::default()
+        };
+        let child = cascade_element("p", &tree, p, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(child.text_shadow, parent.text_shadow, "text-shadow inherits");
+        // An explicit `none` on the child stops the inheritance.
+        let tree2 = diting_dom::tree_sink::parse_html(r#"<p>x</p>"#);
+        let p2 = tree2.query_selector("p").unwrap().unwrap();
+        let child2 = cascade_element("p", &tree2, p2, &[], Some(&parent), Some("text-shadow: none"), DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(child2.text_shadow, None, "author `none` beats inheritance");
     }
 }
