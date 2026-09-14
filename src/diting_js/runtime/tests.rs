@@ -1041,6 +1041,252 @@
         );
     }
 
+    /// Sync XHR (obscura#908): open(..., false) + send() must issue the
+    /// request and return with status/headers/body populated — before any
+    /// event-loop turn. The upstream reporter's legacy pages (dojo/jQuery
+    /// era) read xhr.responseText on the line right after send() and see ""
+    /// + status 0 forever when the flag is ignored.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn sync_xhr_get_populates_status_and_body_inline() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\nx-probe: yes\r\ncontent-length: 6\r\nconnection: close\r\n\r\nsyncok")
+                .unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"() => {
+                    const x = new XMLHttpRequest();
+                    x.open('GET', '/api', false);
+                    let events = 0;
+                    const bump = () => { events += 1; };
+                    x.addEventListener('loadstart', bump);
+                    x.addEventListener('load', bump);
+                    x.addEventListener('loadend', bump);
+                    x.addEventListener('readystatechange', bump);
+                    x.send();
+                    // All response fields must already be populated here —
+                    // no promise, no event loop turn.
+                    return {
+                        status: x.status,
+                        text: x.responseText,
+                        probe: x.getResponseHeader('x-probe'),
+                        allHeaders: x.getAllResponseHeaders().includes('content-type'),
+                        state: x.readyState,
+                        events: events,
+                    };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!({
+                "status": 200,
+                "text": "syncok",
+                "probe": "yes",
+                "allHeaders": true,
+                "state": 4,
+                "events": 0,
+            })
+        );
+    }
+
+    /// Sync POST round-trips the body; the server must have received the
+    /// exact bytes send() was handed (form-POST legacy flows).
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn sync_xhr_post_body_roundtrip() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            // Read until the full body (per content-length) has landed.
+            let body;
+            loop {
+                let n = stream.read(&mut chunk).unwrap();
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = find_subsequence(&buf, b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&buf[..pos]).to_lowercase();
+                    let clen: usize = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .map(|v| v.trim().parse().unwrap_or(0))
+                        .unwrap_or(0);
+                    let have = buf.len() - (pos + 4);
+                    if have >= clen {
+                        body = buf[pos + 4..pos + 4 + clen].to_vec();
+                        break;
+                    }
+                }
+                if n == 0 {
+                    body = Vec::new();
+                    break;
+                }
+            }
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+            stream.write_all(&body).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"() => {
+                    const x = new XMLHttpRequest();
+                    x.open('POST', '/submit', false);
+                    x.setRequestHeader('content-type', 'application/x-www-form-urlencoded');
+                    x.send('a=1&b=two');
+                    return { status: x.status, echoed: x.responseText, state: x.readyState };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!({
+                "status": 200,
+                "echoed": "a=1&b=two",
+                "state": 4,
+            })
+        );
+    }
+
+    /// Sync XHR to a dead endpoint is a network error surfaced through the
+    /// fields (status 0, readyState 4), not an exception.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn sync_xhr_dead_endpoint_status_zero() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"() => {
+                    const x = new XMLHttpRequest();
+                    x.open('GET', '/gone', false);
+                    let threw = 'no';
+                    try { x.send(); } catch (e) { threw = 'yes'; }
+                    return { threw, status: x.status, text: x.responseText, state: x.readyState };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!({
+                "threw": "no",
+                "status": 0,
+                "text": "",
+                "state": 4,
+            })
+        );
+    }
+
+    /// Set-Cookie on a sync same-origin XHR must land in the cookie jar and
+    /// become visible to document.cookie.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn sync_xhr_set_cookie_reaches_jar() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\nset-cookie: synck=1; Path=/\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok")
+                .unwrap();
+            stream.flush().unwrap();
+        });
+
+        let (mut rt, _jar) = setup_runtime_with_cookies("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"() => {
+                    const x = new XMLHttpRequest();
+                    x.open('GET', '/login', false);
+                    x.send();
+                    return { status: x.status, cookie: document.cookie };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!({
+                "status": 200,
+                "cookie": "synck=1",
+            })
+        );
+    }
+
+    fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|w| w == needle)
+    }
+
     /// A dynamically inserted `<link rel=stylesheet>` must fetch its sheet,
     /// expose it through document.styleSheets, and fire the element's `load`
     /// event. The event is the load-bearing part: webpack's mini-css chunk

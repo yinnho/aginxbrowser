@@ -5222,6 +5222,9 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     const up = String(method).toUpperCase();
     this._method = /^(CONNECT|DELETE|GET|HEAD|OPTIONS|POST|PUT|TRACE)$/.test(up) ? up : String(method);
     this._url = url;
+    // obscura#908: open()'s third argument decides whether send() blocks for
+    // the response or resolves it through the event loop.
+    this._async = async_ === undefined ? true : !!async_;
     this._headers = {};
     this._responseHeaders = {};
     this._aborted = false;
@@ -5257,7 +5260,6 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     if (this._aborted) return;
 
     const xhr = this;
-    this._fireEvent('loadstart');
 
     let url = this._url;
     if (url && !url.includes('://')) {
@@ -5267,6 +5269,99 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
       } catch(e) {}
     }
 
+    if (this._async === false) {
+      // Sync XHR (obscura#908): the request must complete inside send() —
+      // async ops only resolve when the embedding pumps the event loop after
+      // the eval returns, which can never happen while JS holds the thread
+      // here. The sync op runs the identical server-side request walk on a
+      // worker thread and blocks. Spec: no events fire in the sync path
+      // (not even loadstart); the caller reads status/response inline.
+      // CDP Fetch interception has no sync story for the same reason.
+      try {
+        const hdrs = {};
+        let bodyStr = '';
+        if (body !== undefined && body !== null) {
+          if (typeof body === 'string') {
+            bodyStr = body;
+          } else if (body instanceof ArrayBuffer) {
+            bodyStr = _bytesToBase64(new Uint8Array(body));
+            hdrs['__diting_body_b64'] = '1';
+          } else if (ArrayBuffer.isView(body)) {
+            bodyStr = _bytesToBase64(new Uint8Array(body.buffer, body.byteOffset, body.byteLength));
+            hdrs['__diting_body_b64'] = '1';
+          } else if (body instanceof Blob) {
+            // v1: Blob bodies ride the async path only.
+            console.warn('Synchronous XHR does not support Blob bodies');
+            xhr.status = 0;
+            xhr.responseText = '';
+            xhr.response = '';
+            xhr.readyState = 4;
+            return;
+          } else {
+            bodyStr = String(body);
+          }
+        }
+        for (const [k, v] of Object.entries(this._headers)) hdrs[k] = String(v);
+        let pageOrigin = '';
+        try { pageOrigin = new URL(_docBase()).origin; } catch(e) {}
+        const raw = _OPS.op_fetch_url_sync(url, this._method, JSON.stringify(hdrs), bodyStr, pageOrigin, 'cors', this.withCredentials ? 'include' : 'same-origin');
+        const parsed = JSON.parse(raw);
+        xhr.responseURL = parsed.final_url || parsed.url || url;
+        if (parsed.blocked || parsed.corsBlocked) {
+          xhr.status = 0;
+          xhr.statusText = '';
+          xhr._responseHeaders = {};
+          xhr.responseText = '';
+          xhr.response = '';
+          xhr.readyState = 4;
+          return;
+        }
+        xhr.status = parsed.status;
+        xhr.statusText = '';
+        xhr._responseHeaders = parsed.headers || {};
+        const bytes = _base64ToUint8Array(parsed.bodyBase64 || '');
+        const text = _decodeBodyWithCharset(bytes, {
+          get: (name) => {
+            const lower = String(name).toLowerCase();
+            for (const [k, v] of Object.entries(xhr._responseHeaders)) {
+              if (k.toLowerCase() === lower) return v;
+            }
+            return null;
+          },
+        });
+        xhr.responseText = text;
+        switch (xhr.responseType) {
+          case 'json':
+            try { xhr.response = JSON.parse(text); } catch(e) { xhr.response = null; }
+            break;
+          case 'text':
+          case '':
+            xhr.response = text;
+            break;
+          case 'arraybuffer':
+            xhr.response = bytes.slice().buffer;
+            break;
+          case 'blob':
+            xhr.response = new Blob([bytes]);
+            break;
+          case 'document':
+            xhr.response = text; // simplified
+            break;
+          default:
+            xhr.response = text;
+        }
+        xhr.readyState = 4;
+      } catch (e) {
+        xhr.status = 0;
+        xhr.statusText = '';
+        xhr.responseText = '';
+        xhr.response = '';
+        xhr.readyState = 4;
+      }
+      return;
+    }
+
+    this._fireEvent('loadstart');
     fetch(url, {
       method: this._method,
       headers: this._headers,

@@ -2988,24 +2988,76 @@ enum OpFetchOutcome {
     Buffered(crate::diting_net::Response),
 }
 
-#[op2(async(deferred), fast)]
-#[string]
-async fn op_fetch_url(
-    state: Rc<RefCell<OpState>>,
-    #[string] url: String,
-    #[string] method: String,
-    #[string] headers_json: String,
-    #[string] body: String,
-    #[string] origin: String,
-    #[string] mode: String,
-    #[string] credentials: String,
-) -> Result<String, deno_error::JsErrorBox> {
-    tracing::debug!("op_fetch_url called: {} {} (intercept check pending)", method, url);
+/// Network-event payload the walk hands back to its driver, which records it
+/// into OpState (`fetch-{N}` id space, body store, js_network_events) once
+/// the walk returns and OpState is reachable again.
+struct FetchNetworkEvent {
+    url: String,
+    method: String,
+    status: u16,
+    response_headers: std::collections::HashMap<String, String>,
+    body_size: usize,
+    stored_text: Option<String>,
+    resp_body_base64: String,
+}
 
-    if let Ok(parsed_url) = url::Url::parse(&url) {
+/// What [`fetch_url_walk`] produces: the exact JSON envelope the op returns,
+/// plus the network event to record (None on the preflight-reject paths,
+/// which carry their failure through `deps.failures` instead).
+struct FetchWalkOutcome {
+    json: String,
+    network: Option<FetchNetworkEvent>,
+}
+
+/// Send-clonable inputs both fetch drivers (the deferred async op and the
+/// sync-XHR op) hand to [`fetch_url_walk`]. Nothing here borrows OpState —
+/// the sync driver runs the walk on a worker thread, where the Rc/RefCell
+/// state cannot follow. Failure network events recorded mid-walk are
+/// collected here and replayed by the driver.
+struct FetchWalkDeps {
+    url: String,
+    method: String,
+    custom_headers: std::collections::HashMap<String, String>,
+    body_bytes: Vec<u8>,
+    page_origin: String,
+    mode: String,
+    credentials: FetchCredentials,
+    cookie_jar: Option<Arc<CookieJar>>,
+    in_flight: Option<Arc<std::sync::atomic::AtomicU32>>,
+    http_client: Option<Arc<HttpClient>>,
+    proxy_url: Option<String>,
+    document_url: String,
+    callbacks: Option<std::sync::Arc<crate::diting_net::CallbackRegistry>>,
+    failures: Vec<(String, String, String)>,
+}
+
+/// OpState-cloned inputs the fetch front half gathers before any network
+/// I/O, shared by both drivers.
+struct FetchRequestInit {
+    cookie_jar: Option<Arc<CookieJar>>,
+    in_flight: Option<Arc<std::sync::atomic::AtomicU32>>,
+    proxy_url: Option<String>,
+    http_client: Option<Arc<HttpClient>>,
+    callbacks: Option<std::sync::Arc<crate::diting_net::CallbackRegistry>>,
+    document_url: String,
+    intercept_tx: Option<tokio::sync::mpsc::UnboundedSender<InterceptedRequest>>,
+}
+
+/// Shared front half of op_fetch_url and op_fetch_url_sync: the SSRF gate,
+/// the base64-body marker probe, and the OpState clones both drivers hand
+/// to the walk. Returns Err(the exact JSON the op must return) for the two
+/// short-circuits (SSRF reject, setBlockedURLs pattern), each recorded into
+/// the network-event log first.
+fn gather_fetch_parts(
+    state: &OpState,
+    url: &str,
+    method: &str,
+    headers_json: &str,
+) -> Result<(FetchRequestInit, bool), String> {
+    if let Ok(parsed_url) = url::Url::parse(url) {
         if let Err(e) = validate_fetch_url(&parsed_url) {
-            record_failed_fetch(&state, &url, &method, e.clone());
-            return Ok(serde_json::json!({
+            record_failed_fetch(state, url, method, e.clone());
+            return Err(serde_json::json!({
                 "status": 0,
                 "body": "",
                 "url": url,
@@ -3020,7 +3072,7 @@ async fn op_fetch_url(
     // base64-encoded raw bytes (upstream obscura #716). Detected from the
     // original headers_json, before any interception rewrite, since a
     // Continue rewrite supplies a plain-text body, never the base64 wire form.
-    let body_is_base64 = serde_json::from_str::<serde_json::Value>(&headers_json)
+    let body_is_base64 = serde_json::from_str::<serde_json::Value>(headers_json)
         .ok()
         .and_then(|v| {
             v.get("__diting_body_b64")
@@ -3029,39 +3081,43 @@ async fn op_fetch_url(
         })
         .unwrap_or(false);
 
-    let (cookie_jar, in_flight, intercept_tx, proxy_url, http_client, callbacks, document_url, blocked_pattern) = {
-        let state_borrow = state.borrow();
-        let gs = state_borrow.borrow::<SharedState>().clone();
+    let (init, blocked_pattern) = {
+        let gs = state.borrow::<SharedState>().clone();
         let gs = gs.borrow_mut();
-        // Recorded after the scope closes — record_failed_fetch re-borrows
-        // this state, which cannot nest under the held borrow_mut.
         let blocked_pattern = gs
             .blocked_urls
             .iter()
-            .find(|p| *p == "*" || url.contains(p.as_str()) || glob_match(p, &url))
+            .find(|p| *p == "*" || url.contains(p.as_str()) || glob_match(p, url))
             .cloned();
-        let jar = gs.cookie_jar.clone();
-        let in_flight = gs.http_client.as_ref().map(|c| c.in_flight.clone());
-        // #139: thread the configured proxy through to the per-request
-        // reqwest::Client. Without this, op_fetch_url silently bypasses
-        // BrowserContext.proxy_url for every JS fetch() / XHR call.
-        let proxy_url = gs.http_client.as_ref().and_then(|c| c.proxy_url().map(|s| s.to_string()));
         tracing::debug!("op_fetch_url: intercept_enabled={}, has_tx={}", gs.intercept_enabled, gs.intercept_tx.is_some());
-        let itx = if gs.intercept_enabled {
-            gs.intercept_tx.clone()
-        } else {
-            None
+        let init = FetchRequestInit {
+            cookie_jar: gs.cookie_jar.clone(),
+            in_flight: gs.http_client.as_ref().map(|c| c.in_flight.clone()),
+            // #139: thread the configured proxy through to the per-request
+            // reqwest::Client. Without this, op_fetch_url silently bypasses
+            // BrowserContext.proxy_url for every JS fetch() / XHR call.
+            proxy_url: gs.http_client.as_ref().and_then(|c| c.proxy_url().map(|s| s.to_string())),
+            http_client: gs.http_client.clone(),
+            callbacks: gs.callbacks.clone(),
+            document_url: gs.url.clone(),
+            intercept_tx: if gs.intercept_enabled {
+                gs.intercept_tx.clone()
+            } else {
+                None
+            },
         };
-        (jar, in_flight, itx, proxy_url, gs.http_client.clone(), gs.callbacks.clone(), gs.url.clone(), blocked_pattern)
+        (init, blocked_pattern)
     };
+    // Recorded after the scope closes — record_failed_fetch re-borrows
+    // this state, which cannot nest under the held borrow_mut.
     if let Some(pattern) = blocked_pattern {
         record_failed_fetch(
-            &state,
-            &url,
-            &method,
+            state,
+            url,
+            method,
             format!("blocked by Network.setBlockedURLs pattern: {pattern}"),
         );
-        return Ok(serde_json::json!({
+        return Err(serde_json::json!({
             "status": 0,
             "body": "",
             "url": url,
@@ -3069,6 +3125,97 @@ async fn op_fetch_url(
             "blocked": true,
         }).to_string());
     }
+    Ok((init, body_is_base64))
+}
+
+/// Records a successful fetch's body + network event (upstream #406/#360):
+/// keyed `fetch-{N}`, LRU-bounded, so the CDP layer can emit Network events
+/// and resolve getResponseBody for fetch()/XHR traffic. Extracted from the
+/// walk so the sync driver can record after its worker thread returns.
+fn record_fetch_network_event(state: &OpState, ev: &FetchNetworkEvent) -> String {
+    let gs = state.borrow::<SharedState>().clone();
+    let mut gs = gs.borrow_mut();
+    gs.network_response_body_counter += 1;
+    let request_id = format!("fetch-{}", gs.network_response_body_counter);
+    let max_entries = response_body_entry_limit();
+    let max_bytes = response_body_byte_limit();
+    let (stored_body, base64_encoded) = match &ev.stored_text {
+        Some(text) => (text.clone(), false),
+        None => (ev.resp_body_base64.clone(), true),
+    };
+    if max_entries > 0 && max_bytes > 0 && ev.body_size <= max_bytes {
+        gs.network_response_bodies.insert(
+            request_id.clone(),
+            StoredNetworkResponseBody {
+                body: stored_body,
+                base64_encoded,
+            },
+        );
+        gs.network_response_body_order.push_back(request_id.clone());
+        while gs.network_response_body_order.len() > max_entries {
+            if let Some(oldest) = gs.network_response_body_order.pop_front() {
+                gs.network_response_bodies.remove(&oldest);
+            }
+        }
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    gs.js_network_events.push(JsNetworkEvent {
+        request_id: request_id.clone(),
+        url: ev.url.clone(),
+        method: ev.method.clone(),
+        status: ev.status,
+        response_headers: ev.response_headers.clone(),
+        body_size: ev.body_size,
+        timestamp,
+        error: None,
+    });
+    const MAX_JS_NETWORK_EVENTS: usize = 4096;
+    if gs.js_network_events.len() > MAX_JS_NETWORK_EVENTS {
+        let overflow = gs.js_network_events.len() - MAX_JS_NETWORK_EVENTS;
+        gs.js_network_events.drain(0..overflow);
+    }
+    request_id
+}
+
+/// Replays the failure events the walk collected into the network-event log
+/// (a sequential walk yields at most one).
+fn replay_fetch_failures(state: &OpState, failures: &[(String, String, String)]) {
+    for (url, method, reason) in failures {
+        record_failed_fetch(state, url, method, reason.clone());
+    }
+}
+
+#[op2(async(deferred), fast)]
+#[string]
+async fn op_fetch_url(
+    state: Rc<RefCell<OpState>>,
+    #[string] url: String,
+    #[string] method: String,
+    #[string] headers_json: String,
+    #[string] body: String,
+    #[string] origin: String,
+    #[string] mode: String,
+    #[string] credentials: String,
+) -> Result<String, deno_error::JsErrorBox> {
+    tracing::debug!("op_fetch_url called: {} {} (intercept check pending)", method, url);
+
+    let (init, body_is_base64) =
+        match gather_fetch_parts(&state.borrow(), &url, &method, &headers_json) {
+            Ok(parts) => parts,
+            Err(json) => return Ok(json),
+        };
+    let FetchRequestInit {
+        cookie_jar,
+        in_flight,
+        proxy_url,
+        http_client,
+        callbacks,
+        document_url,
+        intercept_tx,
+    } = init;
 
     let mut override_url: Option<String> = None;
     let mut override_method: Option<String> = None;
@@ -3106,7 +3253,7 @@ async fn op_fetch_url(
                     }).to_string());
                 }
                 Ok(Ok(InterceptResolution::Fail { reason })) => {
-                    record_failed_fetch(&state, &url, &method, reason.clone());
+                    record_failed_fetch(&state.borrow(), &url, &method, reason.clone());
                     return Ok(serde_json::json!({
                         "status": 0,
                         "body": "",
@@ -3138,7 +3285,7 @@ async fn op_fetch_url(
         if let Ok(parsed) = url::Url::parse(&new_url) {
             if let Err(reason) = validate_fetch_url(&parsed) {
                 let error = format!("Intercept rewrite to forbidden URL blocked: {}", reason);
-                record_failed_fetch(&state, &new_url, &method, error.clone());
+                record_failed_fetch(&state.borrow(), &new_url, &method, error.clone());
                 return Ok(serde_json::json!({
                     "status": 0,
                     "body": "",
@@ -3171,6 +3318,80 @@ async fn op_fetch_url(
         None => headers_json,
     };
 
+    let mut custom_headers: std::collections::HashMap<String, String> =
+        serde_json::from_str(&headers_json).unwrap_or_default();
+    // The out-of-band base64 marker must not leak to the wire or into the
+    // preflight Access-Control-Request-Headers list.
+    custom_headers.remove("__diting_body_b64");
+
+    // url::Url::origin() normalizes default ports, so an explicit :443 still
+    // compares same-origin (the old hand-rolled form did not).
+    let initial_request_origin = request_origin(&url).unwrap_or_default();
+    let page_origin = if origin.is_empty() { initial_request_origin } else { origin };
+
+    let mut deps = FetchWalkDeps {
+        url,
+        method,
+        custom_headers,
+        body_bytes,
+        page_origin,
+        mode,
+        credentials: FetchCredentials::parse(&credentials),
+        cookie_jar,
+        in_flight,
+        http_client,
+        proxy_url,
+        document_url,
+        callbacks,
+        failures: Vec::new(),
+    };
+
+    let outcome = match fetch_url_walk(&mut deps).await {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            replay_fetch_failures(&state.borrow(), &deps.failures);
+            return Err(e);
+        }
+    };
+    replay_fetch_failures(&state.borrow(), &deps.failures);
+    if let Some(ev) = outcome.network.as_ref() {
+        let request_id = record_fetch_network_event(&state.borrow(), ev);
+        tracing::debug!(
+            "op_fetch_url completed: {} {} ({} bytes, network event {})",
+            ev.method,
+            ev.url,
+            ev.body_size,
+            request_id,
+        );
+    }
+    Ok(outcome.json)
+}
+
+/// The transport half of op_fetch_url, shared verbatim by the deferred async
+/// op and the sync-XHR op (obscura#908): client selection, CORS preflight,
+/// the manual SSRF-revalidated redirect walk, scripted per-hop headers, the
+/// terminal CORS check, the body cap, and response-callback dispatch. Touches
+/// no OpState — everything stateful rides inside `deps` as Send clones;
+/// failure events collect into `deps.failures` and the success network event
+/// returns in the outcome, both for the driver to record once the walk
+/// returns and OpState is reachable again.
+async fn fetch_url_walk(
+    deps: &mut FetchWalkDeps,
+) -> Result<FetchWalkOutcome, deno_error::JsErrorBox> {
+    let url = deps.url.clone();
+    let method = deps.method.clone();
+    let mode = deps.mode.clone();
+    let page_origin = deps.page_origin.clone();
+    let document_url = deps.document_url.clone();
+    let custom_headers = std::mem::take(&mut deps.custom_headers);
+    let body_bytes = std::mem::take(&mut deps.body_bytes);
+    let credentials = deps.credentials;
+    let cookie_jar = deps.cookie_jar.clone();
+    let in_flight = deps.in_flight.clone();
+    let http_client = deps.http_client.clone();
+    let callbacks = deps.callbacks.clone();
+    let proxy_url = deps.proxy_url.clone();
+
     // Pages use their context-scoped client so sequential runtimes never
     // share an async connection pool (upstream ab6fa0e, #453). The
     // process-wide cache remains the fallback for runtimes with no owning
@@ -3182,20 +3403,11 @@ async fn op_fetch_url(
             .map_err(deno_error::JsErrorBox::generic)?,
     };
 
-    // url::Url::origin() normalizes default ports, so an explicit :443 still
-    // compares same-origin (the old hand-rolled form did not).
-    let initial_request_origin = request_origin(&url).unwrap_or_default();
-    let page_origin = if origin.is_empty() { initial_request_origin.clone() } else { origin.clone() };
-    let is_cross_origin = !page_origin.is_empty() && initial_request_origin != page_origin;
-    let credentials = FetchCredentials::parse(&credentials);
-
     let req_method: reqwest::Method = method.parse().unwrap_or(reqwest::Method::GET);
 
-    let mut custom_headers: std::collections::HashMap<String, String> =
-        serde_json::from_str(&headers_json).unwrap_or_default();
-    // The out-of-band base64 marker must not leak to the wire or into the
-    // preflight Access-Control-Request-Headers list.
-    custom_headers.remove("__diting_body_b64");
+    let is_cross_origin = request_origin(&url)
+        .map(|initial| !page_origin.is_empty() && initial != page_origin)
+        .unwrap_or(false);
 
     let unsafe_header_names = if is_cross_origin && mode == "cors" {
         cors_unsafe_request_header_names(&custom_headers)
@@ -3293,7 +3505,7 @@ async fn op_fetch_url(
                         }
                         _ => {
                             let error = format!("CORS preflight failed: {}", e);
-                            record_failed_fetch(&state, &url, &method, error.clone());
+                            deps.failures.push((url.clone(), method.clone(), error.clone()));
                             return Err(deno_error::JsErrorBox::generic(error));
                         }
                     }
@@ -3304,8 +3516,8 @@ async fn op_fetch_url(
         // a rejected promise — each must leave a status-0 network event with
         // the reason, or the request vanishes from /network (the same ghost
         // the taobao punished-mtop report chased on the response-side gate).
-        let reject_preflight = |message: String| -> deno_error::JsErrorBox {
-            record_failed_fetch(&state, &url, &method, message.clone());
+        let mut reject_preflight = |message: String| -> deno_error::JsErrorBox {
+            deps.failures.push((url.clone(), method.clone(), message.clone()));
             deno_error::JsErrorBox::generic(message)
         };
 
@@ -3650,11 +3862,11 @@ async fn op_fetch_url(
                 match fallback {
                     Some(Ok(buffered)) => break OpFetchOutcome::Buffered(buffered),
                     Some(Err(fallback_err)) => {
-                        record_failed_fetch(&state, &current_url, current_method.as_str(), fallback_err.to_string());
+                        deps.failures.push((current_url.clone(), current_method.as_str().to_string(), fallback_err.to_string()));
                         return Err(deno_error::JsErrorBox::generic(fallback_err.to_string()))
                     }
                     None => {
-                        record_failed_fetch(&state, &current_url, current_method.as_str(), e.to_string());
+                        deps.failures.push((current_url.clone(), current_method.as_str().to_string(), e.to_string()));
                         return Err(deno_error::JsErrorBox::generic(e.to_string()))
                     }
                 }
@@ -3703,34 +3915,40 @@ async fn op_fetch_url(
         // Re-validate every redirect target against the SSRF policy.
         if let Err(reason) = validate_fetch_url(&next_url) {
             let error = format!("Redirect to forbidden URL blocked: {}", reason);
-            record_failed_fetch(&state, next_url.as_str(), current_method.as_str(), error.clone());
-            return Ok(serde_json::json!({
-                "status": 0,
-                "body": "",
-                "url": next_url.to_string(),
-                "headers": {},
-                "blocked": true,
-                "error": error,
-                "redirect_chain": redirect_chain,
-            })
-            .to_string());
+            deps.failures.push((next_url.to_string(), current_method.as_str().to_string(), error.clone()));
+            return Ok(FetchWalkOutcome {
+                json: serde_json::json!({
+                    "status": 0,
+                    "body": "",
+                    "url": next_url.to_string(),
+                    "headers": {},
+                    "blocked": true,
+                    "error": error,
+                    "redirect_chain": redirect_chain,
+                })
+                .to_string(),
+                network: None,
+            });
         }
 
         redirect_chain.push(next_url.to_string());
         redirects_followed += 1;
         if redirects_followed > FETCH_REDIRECT_LIMIT {
             let error = format!("Too many redirects (>{})", FETCH_REDIRECT_LIMIT);
-            record_failed_fetch(&state, next_url.as_str(), current_method.as_str(), error.clone());
-            return Ok(serde_json::json!({
-                "status": 0,
-                "body": "",
-                "url": next_url.to_string(),
-                "headers": {},
-                "blocked": true,
-                "error": error,
-                "redirect_chain": redirect_chain,
-            })
-            .to_string());
+            deps.failures.push((next_url.to_string(), current_method.as_str().to_string(), error.clone()));
+            return Ok(FetchWalkOutcome {
+                json: serde_json::json!({
+                    "status": 0,
+                    "body": "",
+                    "url": next_url.to_string(),
+                    "headers": {},
+                    "blocked": true,
+                    "error": error,
+                    "redirect_chain": redirect_chain,
+                })
+                .to_string(),
+                network: None,
+            });
         }
 
         // The CORS check applies to every tainted response, redirect
@@ -3752,17 +3970,20 @@ async fn op_fetch_url(
                     "CORS error: redirect to '{}' blocked: Origin '{}' not in Access-Control-Allow-Origin '{}'",
                     next_url, page_origin, allowed
                 );
-                record_failed_fetch(&state, &current_url, current_method.as_str(), error.clone());
-                return Ok(serde_json::json!({
-                    "status": 0,
-                    "body": "",
-                    "url": url,
-                    "headers": {},
-                    "corsBlocked": true,
-                    "corsError": error,
-                    "redirect_chain": redirect_chain,
-                })
-                .to_string());
+                deps.failures.push((current_url.clone(), current_method.as_str().to_string(), error.clone()));
+                return Ok(FetchWalkOutcome {
+                    json: serde_json::json!({
+                        "status": 0,
+                        "body": "",
+                        "url": url,
+                        "headers": {},
+                        "corsBlocked": true,
+                        "corsError": error,
+                        "redirect_chain": redirect_chain,
+                    })
+                    .to_string(),
+                    network: None,
+                });
             }
         }
         cors_tainted = cors_tainted
@@ -3829,16 +4050,19 @@ async fn op_fetch_url(
             } else {
                 format!("CORS error: Origin '{}' not in Access-Control-Allow-Origin '{}'", page_origin, allowed)
             };
-            record_failed_fetch(&state, &current_url, current_method.as_str(), error.clone());
-            return Ok(serde_json::json!({
-                "status": 0,
-                "body": "",
-                "url": url,
-                "headers": {},
-                "corsBlocked": true,
-                "corsError": error,
-            })
-            .to_string());
+            deps.failures.push((current_url.clone(), current_method.as_str().to_string(), error.clone()));
+            return Ok(FetchWalkOutcome {
+                json: serde_json::json!({
+                    "status": 0,
+                    "body": "",
+                    "url": url,
+                    "headers": {},
+                    "corsBlocked": true,
+                    "corsError": error,
+                })
+                .to_string(),
+                network: None,
+            });
         }
     }
 
@@ -3906,65 +4130,18 @@ async fn op_fetch_url(
     );
     let resp_body_base64 = BASE64.encode(&resp_bytes);
 
-    // Retain the body + record a network event for this script-initiated
-    // request (upstream #406/#360): keyed `fetch-{N}`, LRU-bounded, so the
-    // CDP layer can emit Network events and resolve getResponseBody for
-    // fetch()/XHR traffic. Then fire the passive on_response observers.
-    let request_id = {
-        let state_borrow = state.borrow();
-        let gs = state_borrow.borrow::<SharedState>().clone();
-        let mut gs = gs.borrow_mut();
-        gs.network_response_body_counter += 1;
-        let request_id = format!("fetch-{}", gs.network_response_body_counter);
-        let max_entries = response_body_entry_limit();
-        let max_bytes = response_body_byte_limit();
-        let (stored_body, base64_encoded) = match &stored_text {
-            Some(text) => (text.clone(), false),
-            None => (resp_body_base64.clone(), true),
-        };
-        if max_entries > 0 && max_bytes > 0 && resp_bytes.len() <= max_bytes {
-            gs.network_response_bodies.insert(
-                request_id.clone(),
-                StoredNetworkResponseBody {
-                    body: stored_body,
-                    base64_encoded,
-                },
-            );
-            gs.network_response_body_order.push_back(request_id.clone());
-            while gs.network_response_body_order.len() > max_entries {
-                if let Some(oldest) = gs.network_response_body_order.pop_front() {
-                    gs.network_response_bodies.remove(&oldest);
-                }
-            }
-        }
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64();
-        gs.js_network_events.push(JsNetworkEvent {
-            request_id: request_id.clone(),
-            url: url.clone(),
-            method: method.clone(),
-            status,
-            response_headers: resp_headers.clone(),
-            body_size: resp_bytes.len(),
-            timestamp,
-            error: None,
-        });
-        const MAX_JS_NETWORK_EVENTS: usize = 4096;
-        if gs.js_network_events.len() > MAX_JS_NETWORK_EVENTS {
-            let overflow = gs.js_network_events.len() - MAX_JS_NETWORK_EVENTS;
-            gs.js_network_events.drain(0..overflow);
-        }
-        request_id
+    // Hand the success network event to the driver (recorded once the walk
+    // returns and OpState is reachable again), then fire the passive
+    // on_response observers.
+    let network = FetchNetworkEvent {
+        url: url.clone(),
+        method: method.clone(),
+        status,
+        response_headers: resp_headers.clone(),
+        body_size: resp_bytes.len(),
+        stored_text: stored_text.clone(),
+        resp_body_base64: resp_body_base64.clone(),
     };
-    tracing::debug!(
-        "op_fetch_url completed: {} {} ({} bytes, network event {})",
-        method,
-        url,
-        resp_bytes.len(),
-        request_id,
-    );
 
     if let Some(cbs) = callbacks.as_ref() {
         if cbs.has_response_callbacks().await {
@@ -3987,17 +4164,20 @@ async fn op_fetch_url(
         }
     }
 
-    Ok(serde_json::json!({
-        "status": status,
-        "body": stored_text.unwrap_or_default(),
-        "bodyBase64": resp_body_base64,
-        "url": url,
-        "final_url": current_url,
-        "redirected": redirects_followed > 0,
-        "redirect_chain": redirect_chain,
-        "headers": resp_headers,
+    Ok(FetchWalkOutcome {
+        json: serde_json::json!({
+            "status": status,
+            "body": stored_text.unwrap_or_default(),
+            "bodyBase64": resp_body_base64,
+            "url": url,
+            "final_url": current_url,
+            "redirected": redirects_followed > 0,
+            "redirect_chain": redirect_chain,
+            "headers": resp_headers,
+        })
+        .to_string(),
+        network: Some(network),
     })
-    .to_string())
 }
 
 fn glob_match(pattern: &str, url: &str) -> bool {
@@ -4018,20 +4198,19 @@ fn glob_match(pattern: &str, url: &str) -> bool {
 
 /// Record a `status: 0` network event for a fetch that never produced a
 /// servable response — SSRF-blocked, URL-blocklisted, CORS-refused, or dead
-/// at the transport layer. The success path records at the bottom of
-/// `op_fetch_url`; without this companion every early exit vanished from the
-/// session /network log, and a page whose API calls all died here read as
-/// "never issued a request" — exactly the ghost the taobao shop-SPA report
-/// chased (punished mtop XHRs are CORS-refused after the body arrives, so
-/// the whole call site went dark).
+/// at the transport layer. The success path records via
+/// `record_fetch_network_event`; without this companion every early exit
+/// vanished from the session /network log, and a page whose API calls all
+/// died here read as "never issued a request" — exactly the ghost the taobao
+/// shop-SPA report chased (punished mtop XHRs are CORS-refused after the
+/// body arrives, so the whole call site went dark).
 fn record_failed_fetch(
-    state: &Rc<RefCell<OpState>>,
+    state: &OpState,
     url: &str,
     method: &str,
     error: String,
 ) {
-    let state_borrow = state.borrow();
-    let gs = state_borrow.borrow::<SharedState>().clone();
+    let gs = state.borrow::<SharedState>().clone();
     let mut gs = gs.borrow_mut();
     gs.network_response_body_counter += 1;
     // Same `fetch-{N}` id space as the success path (no body is stored under
@@ -4057,6 +4236,115 @@ fn record_failed_fetch(
         let overflow = gs.js_network_events.len() - MAX_JS_NETWORK_EVENTS;
         gs.js_network_events.drain(0..overflow);
     }
+}
+
+/// Synchronous twin of op_fetch_url (obscura#908): XHR.open(..., false) +
+/// send() must issue the request and return with status populated, with no
+/// event-loop turn in between. deno_core async ops only resolve when the
+/// embedding pumps the event loop after the eval returns — impossible while
+/// JS holds the thread inside send() — so the shared walk runs on a worker
+/// thread with its own current-thread tokio runtime and this op blocks on
+/// the reply channel.
+///
+/// Two divergences from the async path, both inherent to holding the JS
+/// thread:
+/// - CDP Fetch interception is skipped: a resolution cannot be delivered
+///   while the dispatch that raised the request is parked here (the same
+///   reason the async path's interception wait is bounded).
+/// - The shared reqwest client is touched from a second runtime.
+///   Per-request connection tasks spawn on the driving runtime, so this is
+///   sound; a pooled keep-alive connection left by a dead temporary runtime
+///   can error transiently ("dispatch task is gone") and surface as a
+///   network error — rare on this legacy path.
+const SYNC_XHR_TIMEOUT_MS: u64 = 120_000;
+
+#[op2]
+#[string]
+fn op_fetch_url_sync(
+    state: &OpState,
+    #[string] url: String,
+    #[string] method: String,
+    #[string] headers_json: String,
+    #[string] body: String,
+    #[string] origin: String,
+    #[string] mode: String,
+    #[string] credentials: String,
+) -> Result<String, deno_error::JsErrorBox> {
+    let (init, body_is_base64) = gather_fetch_parts(state, &url, &method, &headers_json)
+        .map_err(deno_error::JsErrorBox::generic)?;
+    let FetchRequestInit {
+        cookie_jar,
+        in_flight,
+        proxy_url,
+        http_client,
+        callbacks,
+        document_url,
+        ..
+    } = init;
+
+    let body_bytes = if body_is_base64 {
+        BASE64.decode(&body).unwrap_or_default()
+    } else {
+        body.into_bytes()
+    };
+    let mut custom_headers: std::collections::HashMap<String, String> =
+        serde_json::from_str(&headers_json).unwrap_or_default();
+    custom_headers.remove("__diting_body_b64");
+
+    let initial_request_origin = request_origin(&url).unwrap_or_default();
+    let page_origin = if origin.is_empty() { initial_request_origin } else { origin };
+
+    let mut deps = FetchWalkDeps {
+        url,
+        method,
+        custom_headers,
+        body_bytes,
+        page_origin,
+        mode,
+        credentials: FetchCredentials::parse(&credentials),
+        cookie_jar,
+        in_flight,
+        http_client,
+        proxy_url,
+        document_url,
+        callbacks,
+        failures: Vec::new(),
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("sync-xhr".to_string())
+        .spawn(move || {
+            let result = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt.block_on(fetch_url_walk(&mut deps)),
+                Err(e) => Err(deno_error::JsErrorBox::generic(format!(
+                    "sync XHR transport runtime: {}",
+                    e
+                ))),
+            };
+            let failures = deps.failures;
+            let _ = tx.send((result, failures));
+        })
+        .map_err(|e| deno_error::JsErrorBox::generic(format!("sync XHR worker: {}", e)))?;
+
+    let (result, failures) =
+        match rx.recv_timeout(std::time::Duration::from_millis(SYNC_XHR_TIMEOUT_MS)) {
+            Ok(pair) => pair,
+            Err(_) => {
+                return Err(deno_error::JsErrorBox::generic(
+                    "Synchronous XMLHttpRequest timed out or its worker died",
+                ));
+            }
+        };
+    replay_fetch_failures(state, &failures);
+    let outcome = result?;
+    if let Some(ev) = outcome.network.as_ref() {
+        record_fetch_network_event(state, ev);
+    }
+    Ok(outcome.json)
 }
 
 /// Also applied by the ES module loader (obscura #849): dynamic import() is
@@ -4875,6 +5163,7 @@ pub fn build_extension() -> Extension {
             op_blob_register(),
             op_blob_revoke(),
             op_fetch_url(),
+            op_fetch_url_sync(),
             op_get_cookies(),
             op_set_cookie(),
             op_storage_read(),
