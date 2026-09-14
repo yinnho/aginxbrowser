@@ -8740,6 +8740,50 @@
 
     #[cfg(feature = "screenshot")]
     #[test]
+    fn test_rotated_text_ink_does_not_fake_horizontal_scroll() {
+        // blitz#841 transform half: the root ink-extent fold must map
+        // bracketed text through its transform. A nowrap rotate(90deg) line
+        // is a ~14px-wide vertical stripe on screen; folding its raw LOCAL
+        // x + est width instead reports ~8000px of horizontal ink and fakes
+        // a scrollable page. The element box is width:100 at left:0, so its
+        // mapped stripe (x within ~[43,57]) sits inside every persona
+        // viewport — the ONLY thing that can push scrollWidth past
+        // innerWidth is the stale untransformed ink fold. 8000px of text
+        // overshoots every screen the persona can draw, so the assertion
+        // holds relative to whatever viewport it picked. gBCR already
+        // serves the mapped AABB (the element-box half of the walk is
+        // transform-correct), so the text fold was the only stale source.
+        let html = format!(
+            "<html><body><div id=\"r\" style=\"position:absolute;left:0px;top:40px;width:100px;height:14px;font-size:10px;white-space:nowrap;transform:rotate(90deg)\">{}</div></body></html>",
+            "字".repeat(800)
+        );
+        let mut rt = setup_runtime(&html);
+        let result = rt.evaluate(r#"
+            const r = document.getElementById("r").getBoundingClientRect();
+            return [document.documentElement.scrollWidth === window.innerWidth,
+                    r.width < 50,
+                    document.documentElement.scrollHeight > 7500];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        assert_eq!(
+            parts[0],
+            serde_json::json!(true),
+            "rotated text must not leak its unrotated width into scrollWidth"
+        );
+        assert_eq!(
+            parts[1],
+            serde_json::json!(true),
+            "gBCR keeps serving the mapped (vertical stripe) box"
+        );
+        assert_eq!(
+            parts[2],
+            serde_json::json!(true),
+            "the rotated length lands vertically in the mapped box"
+        );
+    }
+
+    #[cfg(feature = "screenshot")]
+    #[test]
     fn test_document_scroll_height_tracks_page_extent_with_viewport_floor() {
         // The document scrolling area must track real page extent (tall page
         // -> scrollHeight > innerHeight) and clamp UP to the viewport on

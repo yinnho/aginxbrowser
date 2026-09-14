@@ -1389,19 +1389,68 @@ fn paint_text_decorations(
 /// html/body stretch to the viewport — so this is the only place its true
 /// extent exists: the scroll-union in `band_frame` and the print pump's page
 /// count both read it. Errs high, never low.
+/// Fold the wrap-model ink extent of every Text item, in CANVAS space
+/// (blitz#841 transform half). Under a non-diagonal transform the collect
+/// walk brackets the subtree's items in LOCAL coordinates (`SetXf`); a
+/// naive union of raw x/y then overestimates the scrollable region — a
+/// rotated long line reports its unrotated width as horizontal ink.
+/// Track the bracket exactly like the paint pass (SetXf composes on top of
+/// the open map, SetXfCanvas cancels it, ClearXf pops) and map each item's
+/// ink box through the active map before it joins the union. Prebaked
+/// (diagonal) chains carry no bracket, so their items — already in canvas
+/// space — pass through an identity map and the fold is bit-identical to
+/// the pre-transform behavior.
 pub fn text_ink_extent(items: &[PaintItem]) -> (f32, f32) {
     let mut w = 0.0f32;
     let mut h = 0.0f32;
+    let mut cur = [1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0];
+    let mut open: Vec<[f32; 6]> = Vec::new();
     for item in items {
-        if let PaintItem::Text { text, font_size, line_height, x, y, wrap_at, .. } = item {
-            let wrap = wrap_at.max(1.0);
-            let est = est_width(text, *font_size);
-            let lines = (est / wrap).ceil().max(1.0);
-            w = w.max(x + est.min(wrap));
-            h = h.max(y + lines * line_height);
+        match item {
+            PaintItem::SetXf { xf } => {
+                open.push(cur);
+                cur = compose_arr(cur, *xf);
+            }
+            PaintItem::SetXfCanvas => {
+                open.push(cur);
+                cur = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+            }
+            PaintItem::ClearXf => {
+                if let Some(prev) = open.pop() {
+                    cur = prev;
+                }
+            }
+            PaintItem::Text { text, font_size, line_height, x, y, wrap_at, .. } => {
+                let wrap = wrap_at.max(1.0);
+                let est = est_width(text, *font_size);
+                let lines = (est / wrap).ceil().max(1.0);
+                let local = Rect {
+                    x: *x,
+                    y: *y,
+                    width: est.min(wrap),
+                    height: lines * line_height,
+                };
+                let r = super::map_rect_arr(cur, local);
+                w = w.max(r.x + r.width);
+                h = h.max(r.y + r.height);
+            }
+            _ => {}
         }
     }
     (w, h)
+}
+
+/// Compose two CSS-order affine arrays, `m` outer and `n` inner (m·n) —
+/// array twin of the collect walk's fn-local `Xf::compose`.
+fn compose_arr(m: [f32; 6], n: [f32; 6]) -> [f32; 6] {
+    [
+        m[0] * n[0] + m[2] * n[1],
+        m[1] * n[0] + m[3] * n[1],
+        m[0] * n[2] + m[2] * n[3],
+        m[1] * n[2] + m[3] * n[3],
+        m[0] * n[4] + m[2] * n[5] + m[4],
+        m[1] * n[4] + m[3] * n[5] + m[5],
+    ]
 }
 
 /// Draw a checkable input's native widget (form paint batch): a bordered
@@ -2284,6 +2333,136 @@ mod tests {
         assert_eq!(px(&c, 9, 0), [200, 40, 40, 255], "clipped fill still paints");
         assert_eq!(px(&c, 7, 0), [255, 255, 255, 255], "outside the rect untouched");
         assert_eq!(px(&c, 0, 9), [255, 255, 255, 255], "below the rect untouched");
+    }
+
+    /// blitz#841 transform half: a Text item inside a non-diagonal SetXf
+    /// bracket carries LOCAL coordinates, so the ink extent fold must map
+    /// its ink box through the active map — a rotate(90deg) long line
+    /// contributes its length to the VERTICAL extent, not the horizontal
+    /// one. `字`×50 at 10px = 500px single-line ink; under [0,1,-1,0,200,0]
+    /// (p → (200−y, x)) the (10,20,500,12) box maps to x'∈[168,180],
+    /// y'∈[10,510].
+    #[test]
+    fn ink_extent_maps_bracketed_text_through_the_transform() {
+        let items = vec![
+            PaintItem::SetXf { xf: [0.0, 1.0, -1.0, 0.0, 200.0, 0.0] },
+            PaintItem::Text {
+                text: "字".repeat(50),
+                font_size: 10.0,
+                bold: false,
+                color: [0, 0, 0, 255],
+                line_height: 12.0,
+                x: 10.0,
+                y: 20.0,
+                wrap_at: 500.0,
+                gradient: None,
+                decorations: TextDecorations::default(),
+                mono: false,
+                word_spacing: 0.0,
+                truncate_at: None,
+                tokens: None,
+                text_shadow: None,
+            },
+            PaintItem::ClearXf,
+        ];
+        let (w, h) = text_ink_extent(&items);
+        assert!((w - 180.0).abs() < 0.01, "rotated line must not report its unrotated 510px width, got {w}");
+        assert!((h - 510.0).abs() < 0.01, "rotated line's length lands vertically, got {h}");
+    }
+
+    /// ClearXf pops the bracket: a text after the close folds through the
+    /// identity again (raw x + ink width, the historical behavior).
+    #[test]
+    fn ink_extent_clearxf_restores_identity() {
+        let plain = |x: f32, y: f32| PaintItem::Text {
+            text: "字".repeat(50),
+            font_size: 10.0,
+            bold: false,
+            color: [0, 0, 0, 255],
+            line_height: 12.0,
+            x,
+            y,
+            wrap_at: 500.0,
+            gradient: None,
+            decorations: TextDecorations::default(),
+            mono: false,
+            word_spacing: 0.0,
+            truncate_at: None,
+            tokens: None,
+            text_shadow: None,
+        };
+        let items = vec![
+            PaintItem::SetXf { xf: [0.0, 1.0, -1.0, 0.0, 200.0, 0.0] },
+            plain(10.0, 20.0),
+            PaintItem::ClearXf,
+            plain(10.0, 20.0),
+        ];
+        let (w, h) = text_ink_extent(&items);
+        assert!((w - 510.0).abs() < 0.01, "post-bracket text is unrotated, got {w}");
+        assert!((h - 510.0).abs() < 0.01, "the rotated text still owns the vertical max, got {h}");
+    }
+
+    /// SetXfCanvas cancels the open map (inline-band splice): text inside it
+    /// folds through the identity, like the paint pass treats it.
+    #[test]
+    fn ink_extent_canvas_bracket_resets_the_map() {
+        let items = vec![
+            PaintItem::SetXf { xf: [0.0, 1.0, -1.0, 0.0, 200.0, 0.0] },
+            PaintItem::SetXfCanvas,
+            PaintItem::Text {
+                text: "字".repeat(50),
+                font_size: 10.0,
+                bold: false,
+                color: [0, 0, 0, 255],
+                line_height: 12.0,
+                x: 10.0,
+                y: 20.0,
+                wrap_at: 500.0,
+                gradient: None,
+                decorations: TextDecorations::default(),
+                mono: false,
+                word_spacing: 0.0,
+                truncate_at: None,
+                tokens: None,
+                text_shadow: None,
+            },
+            PaintItem::ClearXf,
+            PaintItem::ClearXf,
+        ];
+        let (w, _h) = text_ink_extent(&items);
+        assert!((w - 510.0).abs() < 0.01, "canvas-spliced text ignores the open rotation, got {w}");
+    }
+
+    /// Nested brackets compose outer∘inner (the walk's relative-own maps):
+    /// translate(100,0) outside rotate(90deg) maps p → (100−y, x).
+    #[test]
+    fn ink_extent_nested_brackets_compose() {
+        let items = vec![
+            PaintItem::SetXf { xf: [1.0, 0.0, 0.0, 1.0, 100.0, 0.0] },
+            PaintItem::SetXf { xf: [0.0, 1.0, -1.0, 0.0, 0.0, 0.0] },
+            PaintItem::Text {
+                text: "字".repeat(50),
+                font_size: 10.0,
+                bold: false,
+                color: [0, 0, 0, 255],
+                line_height: 12.0,
+                x: 10.0,
+                y: 20.0,
+                wrap_at: 500.0,
+                gradient: None,
+                decorations: TextDecorations::default(),
+                mono: false,
+                word_spacing: 0.0,
+                truncate_at: None,
+                tokens: None,
+                text_shadow: None,
+            },
+            PaintItem::ClearXf,
+            PaintItem::ClearXf,
+        ];
+        let (w, h) = text_ink_extent(&items);
+        assert!((w - 80.0).abs() < 0.01, "T∘R maps the box to x'∈[68,80], got {w}");
+        assert!((h - 510.0).abs() < 0.01, "T∘R keeps the length vertical, got {h}");
     }
 
     /// background-clip: text (gradient-text batch): a Text item carrying a
