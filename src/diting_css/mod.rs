@@ -1217,10 +1217,11 @@ impl Transform2D {
 }
 
 /// Parsed `animation` shorthand, v1 subset: ONE animation (the first of a
-/// comma list), iteration-count pinned at 1, direction normal, play-state
-/// running. That covers the declarative-SVG motion grammar (fade / rise /
-/// self-draw); the sampler holds the element at the `to` stop once past
-/// `delay + duration` when fill-mode is `forwards`/`both`.
+/// comma list), direction normal, play-state running. That covers the
+/// declarative-SVG motion grammar (fade / rise / self-draw); the sampler
+/// cycles through `iterations` iterations and holds the element at the final
+/// iteration's state once past `delay + duration * iterations` when fill-mode
+/// is `forwards`/`both`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnimationSpec {
     pub name: String,
@@ -1232,9 +1233,9 @@ pub struct AnimationSpec {
     pub easing: Easing,
     pub fill_forwards: bool,
     /// Iteration count; `f32::INFINITY` for `infinite`. Non-integer counts
-    /// are legal (the active duration ends mid-iteration). Consumed by the
-    /// computed-style longhand and the event face; the keyframe sampler
-    /// still renders a single cycle and clamps at its end.
+    /// are legal (the active duration ends mid-iteration). The sampler loops
+    /// per-iteration (easing restarts each cycle) and the after-phase fill
+    /// holds the fractional-final-iteration state.
     pub iterations: f32,
 }
 
@@ -1348,7 +1349,9 @@ fn parse_animation_shorthand(v: &str) -> Option<AnimationSpec> {
                     // invalidate the whole shorthand — silently dropping the
                     // token would animate with the wrong easing.
                     return None;
-                } else if tok.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+                } else if tok
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
                     && !tok.is_empty()
                 {
                     // A bare number token is the iteration count (<number>,
@@ -2083,15 +2086,29 @@ pub fn sample_css_animation(style: &mut ComputedStyle, keyframes: &KeyframesMap,
             if elapsed < 0.0 {
                 return;
             }
-            let done = anim.duration <= 0.0 || elapsed >= anim.duration;
-            if done {
-                if anim.fill_forwards {
-                    1.0
-                } else {
+            // Active duration spans iteration-count cycles (CSS Animations 1).
+            // `infinite` multiplies out to +inf, so the animation never ends;
+            // a zero count never enters the active phase at all.
+            let active = anim.duration * anim.iterations;
+            if anim.duration <= 0.0 || elapsed >= active {
+                if !anim.fill_forwards {
                     return;
                 }
+                // After-phase fill holds the final iteration's state (Web
+                // Animations after-phase iteration progress): the fractional
+                // part of the count, or the 100% keyframe when it lands on a
+                // whole iteration (a zero count holds the 0% one).
+                if anim.iterations == 0.0 {
+                    0.0
+                } else if anim.iterations.fract() == 0.0 {
+                    1.0
+                } else {
+                    anim.iterations.fract()
+                }
             } else {
-                anim.easing.map(elapsed / anim.duration)
+                // Easing transforms progress within each iteration, so it
+                // restarts every cycle.
+                anim.easing.map((elapsed / anim.duration) % 1.0)
             }
         }
     };
@@ -5788,6 +5805,46 @@ mod tests {
         let mut s = animated_style("opacity: 0; animation: k 2s ease-in-out");
         sample_css_animation(&mut s, &kf, Some(1.0));
         assert!((s.opacity.unwrap() - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn sampler_multi_iteration_cycles_and_fills() {
+        let kf = one_keyframes("from { opacity: 0 } to { opacity: 1 }");
+        // Mid-second-cycle of a 3-count run: progress is cycle-local, so
+        // 25% into cycle 2 samples like 25% into cycle 1.
+        let mut s = animated_style("animation: k 2s 3 linear");
+        sample_css_animation(&mut s, &kf, Some(2.5));
+        assert!((s.opacity.unwrap() - 0.25).abs() < 1e-4);
+
+        // Easing restarts each cycle: `ease` at cycle-local 0 maps to 0.
+        let mut s = animated_style("animation: k 2s 2 ease");
+        sample_css_animation(&mut s, &kf, Some(2.0));
+        assert!(s.opacity.unwrap() < 1e-3, "cycle 2 opens at the from stop");
+
+        // Exactly at the end of the active duration without fill reverts.
+        let mut s = animated_style("opacity: 0.5; animation: k 2s 2 linear");
+        sample_css_animation(&mut s, &kf, Some(4.0));
+        assert_eq!(s.opacity, Some(0.5), "active duration over, no fill: cascade");
+
+        // Whole-count forwards fill holds the to stop.
+        let mut s = animated_style("animation: k 2s 3 linear forwards");
+        sample_css_animation(&mut s, &kf, Some(100.0));
+        assert_eq!(s.opacity, Some(1.0));
+
+        // Fractional count (2.5) freezes mid-flight at the fractional part.
+        let mut s = animated_style("animation: k 2s 2.5 linear forwards");
+        sample_css_animation(&mut s, &kf, Some(100.0));
+        assert!((s.opacity.unwrap() - 0.5).abs() < 1e-4);
+
+        // Zero count never enters the active phase: fill holds the from stop.
+        let mut s = animated_style("opacity: 1; animation: k 2s 0 forwards");
+        sample_css_animation(&mut s, &kf, Some(100.0));
+        assert_eq!(s.opacity, Some(0.0));
+
+        // Infinite keeps cycling no matter how far out t goes.
+        let mut s = animated_style("animation: k 2s infinite linear");
+        sample_css_animation(&mut s, &kf, Some(2.0 * 7.0 + 1.5));
+        assert!((s.opacity.unwrap() - 0.75).abs() < 1e-4);
     }
 
     #[test]

@@ -1822,11 +1822,22 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
         gs.css_time,
     );
     let t_styles = t0.elapsed();
-    let css_extent = styles_map
-        .values()
-        .filter_map(|cs| cs.animation.as_ref())
-        .map(|a| (a.delay + a.duration) as f64)
-        .fold(0.0f64, f64::max);
+    // Finite animations span delay + duration * iterations. An endless one
+    // can't pin a length on its own, so it contributes nothing unless it is
+    // the only animation — then one full cycle keeps the extent the
+    // single-cycle sampler used to report (a -t pin overrides anyway).
+    let mut css_extent = 0.0f64;
+    let mut endless_cycle = 0.0f64;
+    for a in styles_map.values().filter_map(|cs| cs.animation.as_ref()) {
+        if a.iterations.is_finite() {
+            css_extent = css_extent.max((a.delay + a.duration * a.iterations) as f64);
+        } else {
+            endless_cycle = endless_cycle.max((a.delay + a.duration) as f64);
+        }
+    }
+    if css_extent <= 0.0 {
+        css_extent = endless_cycle;
+    }
     gs.css_extent.set(css_extent);
     let fonts = crate::diting_fonts::font_book();
     // Solve-vs-collect split (#395): the taffy solve is cached keyed by the

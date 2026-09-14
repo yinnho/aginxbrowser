@@ -1233,6 +1233,38 @@ html,body{margin:0;padding:0;width:800px;height:450px;background:#ffffff}
         assert!(dark(&f2) > 200 * 200 * 9 / 10, "forwards fill paints the full box: {}", dark(&f2));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn css_extent_spans_iterations_and_infinite_falls_back_to_one_cycle() {
+        let html = |decl: &str| {
+            format!(
+                r#"<!doctype html><html><head><style>
+html,body{{margin:0;padding:0;width:800px;height:450px;background:#ffffff}}
+@keyframes fade {{ from {{ opacity: 0 }} to {{ opacity: 1 }} }}
+#box{{width:200px;height:200px;margin:125px auto;background:#000000;
+     animation: {decl}}}
+</style></head><body><div id="box"></div></body></html>"#
+            )
+        };
+        let mut page = test_page();
+        for (decl, want, why) in [
+            ("fade 2s 1s 3 linear forwards", 7.0, "delay + duration * iterations"),
+            ("fade 2s 1s 2.5 linear forwards", 6.0, "fractional count multiplies through"),
+            ("fade 2s infinite linear", 2.0, "infinite-only page keeps one cycle"),
+        ] {
+            let port = spawn_html_server(Box::leak(html(decl).into_boxed_str()));
+            page.navigate_with_wait(
+                &format!("http://127.0.0.1:{port}/css_anim.html"),
+                WaitUntil::Load,
+            )
+            .await
+            .expect("navigate css anim fixture");
+            page.settle_until_idle(5000).await;
+            let _ = page.evaluate("document.querySelector('#box').getBoundingClientRect().width");
+            let got = page.css_animation_extent();
+            assert!((got - want).abs() < 1e-6, "{why}: got {got}, want {want}");
+        }
+    }
+
     /// End-to-end pump: stub timeline → in-process frames → ffmpeg pipe →
     /// MP4 bytes. 2 s @ 10 fps, no hold tail = 20 frames.
     #[tokio::test(flavor = "current_thread")]
