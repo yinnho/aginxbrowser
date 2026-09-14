@@ -9771,3 +9771,155 @@ async fn test_transition_event_interface() {
         serde_json::json!([true, true, "opacity", 1.5, "::before", "", 0, "", "TypeError"])
     );
 }
+
+#[test]
+fn fetch_referer_policy_table() {
+    use crate::diting_js::ops::fetch_referer;
+    let doc = url::Url::parse("http://example.com/page?a=1").unwrap();
+    let same = url::Url::parse("http://example.com/other").unwrap();
+    let cross = url::Url::parse("http://other.example/x").unwrap();
+    let http_target = url::Url::parse("http://127.0.0.1:9/x").unwrap();
+    let https_doc = url::Url::parse("https://example.com/page").unwrap();
+
+    // Default policy (empty token): same-origin full URL, cross-origin origin.
+    assert_eq!(
+        fetch_referer("", "about:client", &doc, &same),
+        "http://example.com/page?a=1"
+    );
+    assert_eq!(
+        fetch_referer("", "about:client", &doc, &cross),
+        "http://example.com/"
+    );
+
+    // Explicit no-referrer and empty-string referrer suppress entirely.
+    assert_eq!(fetch_referer("no-referrer", "about:client", &doc, &same), "");
+    assert_eq!(fetch_referer("", "", &doc, &same), "");
+
+    // unsafe-url sends the full URL cross-origin.
+    assert_eq!(
+        fetch_referer("unsafe-url", "about:client", &doc, &cross),
+        "http://example.com/page?a=1"
+    );
+
+    // origin strips even same-origin down to the origin.
+    assert_eq!(
+        fetch_referer("origin", "about:client", &doc, &same),
+        "http://example.com/"
+    );
+
+    // strict-origin and the default suppress on https->http downgrade;
+    // the legacy origin policies do not.
+    assert_eq!(
+        fetch_referer("strict-origin", "about:client", &https_doc, &http_target),
+        ""
+    );
+    assert_eq!(
+        fetch_referer("", "about:client", &https_doc, &http_target),
+        ""
+    );
+    assert_eq!(
+        fetch_referer("origin", "about:client", &https_doc, &http_target),
+        "https://example.com/"
+    );
+
+    // no-referrer-when-downgrade keeps the full URL (same scheme).
+    assert_eq!(
+        fetch_referer("no-referrer-when-downgrade", "about:client", &doc, &same),
+        "http://example.com/page?a=1"
+    );
+
+    // Explicit referrer override replaces the document; this override is
+    // same-origin with the target, so the default policy keeps the full URL
+    // (fragment stripped). The policy still strips cross-origin overrides,
+    // and credentials/fragments never reach the wire.
+    assert_eq!(
+        fetch_referer("", "http://other.example/deep#frag", &doc, &cross),
+        "http://other.example/deep"
+    );
+    assert_eq!(
+        fetch_referer("unsafe-url", "http://u:p@example.com/a#f", &doc, &cross),
+        "http://example.com/a"
+    );
+
+    // Non-HTTP(S) referrer values are no-referrer, per spec.
+    assert_eq!(fetch_referer("unsafe-url", "file:///etc/passwd", &doc, &cross), "");
+}
+
+/// RequestInit's referrerPolicy/referrer reach the wire (obscura#875
+/// family): the default policy strips cross-origin to the origin,
+/// no-referrer sends nothing, unsafe-url sends the full document URL, and an
+/// explicit referrer override rides through the same policy table. Before
+/// the fix all three scripted options were ignored on the wire.
+#[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+#[tokio::test(flavor = "current_thread")]
+async fn fetch_referrer_policy_reaches_the_wire() {
+    let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+    std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = captured.clone();
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        for _ in 0..4 {
+            let (mut stream, _) = match listener.accept() {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).unwrap();
+            seen.lock().unwrap().push(String::from_utf8_lossy(&buf[..n]).to_string());
+            let body = b"{}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\naccess-control-allow-origin: *\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+            stream.flush().unwrap();
+        }
+    });
+
+    let mut rt = setup_runtime("<html><body></body></html>");
+    rt.set_url("http://example.com/page?a=1");
+    let result = rt
+        .call_function_on_for_cdp(
+            r#"async () => {
+                const base = "http://127.0.0.1:PORT";
+                await fetch(base + "/default");
+                await fetch(base + "/noref", { referrerPolicy: "no-referrer" });
+                await fetch(base + "/unsafe", { referrerPolicy: "unsafe-url" });
+                await fetch(base + "/explicit", { referrer: "http://other.example/deep" });
+                return "done";
+            }"#
+            .replace("PORT", &port.to_string())
+            .as_str(),
+            None,
+            &[],
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.value.unwrap().as_str().unwrap_or_default(), "done");
+
+    let requests = captured.lock().unwrap();
+    let referer_of = |path: &str| -> Option<String> {
+        requests
+            .iter()
+            .find(|r| r.contains(&format!("GET {path} ")))
+            .and_then(|r| {
+                r.lines()
+                    .find(|l| l.to_ascii_lowercase().starts_with("referer:"))
+                    .map(|l| l.splitn(2, ':').nth(1).unwrap_or("").trim().to_string())
+            })
+    };
+    assert_eq!(referer_of("/default").as_deref(), Some("http://example.com/"));
+    assert_eq!(referer_of("/noref"), None);
+    assert_eq!(
+        referer_of("/unsafe").as_deref(),
+        Some("http://example.com/page?a=1")
+    );
+    assert_eq!(referer_of("/explicit").as_deref(), Some("http://other.example/"));
+}

@@ -3189,6 +3189,8 @@ struct FetchWalkDeps {
     http_client: Option<Arc<HttpClient>>,
     proxy_url: Option<String>,
     document_url: String,
+    referrer_policy: String,
+    referrer_init: String,
     callbacks: Option<std::sync::Arc<crate::diting_net::CallbackRegistry>>,
     failures: Vec<(String, String, String)>,
 }
@@ -3361,7 +3363,14 @@ async fn op_fetch_url(
     #[string] origin: String,
     #[string] mode: String,
     #[string] credentials: String,
+    // "policy\0init" — bundled to stay under deno_core's async op arg limit.
+    #[string] referrer: String,
 ) -> Result<String, deno_error::JsErrorBox> {
+    // deno_core async op codegen caps explicit args; the Referer pair rides one slot.
+    let (referrer_policy, referrer_init) = match referrer.split_once('\u{0}') {
+        Some((p, r)) => (p.to_string(), r.to_string()),
+        None => (String::new(), "about:client".to_string()),
+    };
     tracing::debug!("op_fetch_url called: {} {} (intercept check pending)", method, url);
 
     let (init, body_is_base64) =
@@ -3504,6 +3513,8 @@ async fn op_fetch_url(
         http_client,
         proxy_url,
         document_url,
+        referrer_policy,
+        referrer_init,
         callbacks,
         failures: Vec::new(),
     };
@@ -3529,6 +3540,74 @@ async fn op_fetch_url(
     Ok(outcome.json)
 }
 
+/// Referer header for scripted fetch() requests per the Fetch standard
+/// (obscura#875). `referrer_init` is the resolved RequestInit referrer: ""
+/// sends none, "about:client" uses the document URL, anything else parses as
+/// a URL (non-HTTP(S) or unparseable → no referrer, per spec). `policy` is
+/// the validated referrerPolicy token; "" means the default
+/// strict-origin-when-cross-origin. Same/cross-origin and the https→http
+/// downgrade are judged against each hop's target so redirects re-strip.
+/// Origin-only results keep the trailing "/" that our navigation_referrer
+/// established (Chrome serializes without it; servers parse the header as a
+/// URL either way).
+pub(crate) fn fetch_referer(policy: &str, referrer_init: &str, document: &Url, target: &Url) -> String {
+    let referrer = if referrer_init.is_empty() {
+        return String::new();
+    } else if referrer_init == "about:client" {
+        document.clone()
+    } else {
+        match Url::parse(referrer_init) {
+            Ok(u) if matches!(u.scheme(), "http" | "https") => u,
+            _ => return String::new(),
+        }
+    };
+    let full = |u: &Url| -> String {
+        let mut u = u.clone();
+        u.set_fragment(None);
+        let _ = u.set_username("");
+        let _ = u.set_password(None);
+        u.to_string()
+    };
+    let origin = format!("{}/", referrer.origin().ascii_serialization());
+    let same_origin = referrer.origin() == target.origin();
+    let downgrade = referrer.scheme() == "https" && target.scheme() != "https";
+    let policy = if policy.is_empty() {
+        "strict-origin-when-cross-origin"
+    } else {
+        policy
+    };
+    match policy {
+        "no-referrer" => String::new(),
+        "unsafe-url" => full(&referrer),
+        "origin" => origin,
+        "strict-origin" => {
+            if downgrade {
+                String::new()
+            } else {
+                origin
+            }
+        }
+        "no-referrer-when-downgrade" => {
+            if downgrade {
+                String::new()
+            } else {
+                full(&referrer)
+            }
+        }
+        "origin-when-cross-origin" | "strict-origin-when-cross-origin" => {
+            if same_origin {
+                full(&referrer)
+            } else if downgrade && policy == "strict-origin-when-cross-origin" {
+                String::new()
+            } else {
+                origin
+            }
+        }
+        // JS validates the token; an unreachable value must not leak a URL.
+        _ => String::new(),
+    }
+}
+
 /// The transport half of op_fetch_url, shared verbatim by the deferred async
 /// op and the sync-XHR op (obscura#908): client selection, CORS preflight,
 /// the manual SSRF-revalidated redirect walk, scripted per-hop headers, the
@@ -3545,6 +3624,8 @@ async fn fetch_url_walk(
     let mode = deps.mode.clone();
     let page_origin = deps.page_origin.clone();
     let document_url = deps.document_url.clone();
+    let referrer_policy = deps.referrer_policy.clone();
+    let referrer_init = deps.referrer_init.clone();
     let custom_headers = std::mem::take(&mut deps.custom_headers);
     let body_bytes = std::mem::take(&mut deps.body_bytes);
     let credentials = deps.credentials;
@@ -3854,15 +3935,17 @@ async fn fetch_url_walk(
             }
         }
 
-        // The initiating document is the Referer (strict-origin-when-cross-origin,
-        // trimmed per hop like client.rs). Domain-whitelist APIs (e.g. AMap keys
-        // bound to a domain) reject bare requests. Origin on non-GET already
-        // handled above. Explicit Referer in fetch init wins.
-        if !document_url.is_empty()
-            && !custom_headers.keys().any(|k| k.eq_ignore_ascii_case("referer"))
+        // The Referer honors RequestInit's referrerPolicy/referrer when the
+        // fetch carried them (obscura#875); the default
+        // strict-origin-when-cross-origin trims per hop like client.rs.
+        // Domain-whitelist APIs (e.g. AMap keys bound to a domain) reject
+        // bare requests. Explicit Referer in fetch init still wins.
+        if !custom_headers.keys().any(|k| k.eq_ignore_ascii_case("referer"))
+            && (!document_url.is_empty() || referrer_init != "about:client")
         {
-            if let (Ok(doc), Ok(target)) = (Url::parse(&document_url), Url::parse(&current_url)) {
-                let ref_val = crate::diting_net::client::HttpClient::navigation_referrer(&doc, &target);
+            if let Ok(target) = Url::parse(&current_url) {
+                let doc = Url::parse(&document_url).unwrap_or_else(|_| target.clone());
+                let ref_val = fetch_referer(&referrer_policy, &referrer_init, &doc, &target);
                 if !ref_val.is_empty() {
                     req = req.header(reqwest::header::REFERER, ref_val);
                 }
@@ -3992,14 +4075,15 @@ async fn fetch_url_walk(
                                         fallback_headers.insert(name.to_string(), value);
                                     }
                                 }
-                                if !document_url.is_empty()
+                                if (!document_url.is_empty()
+                                    || referrer_init != "about:client")
                                     && !header_set(&fallback_headers, "referer")
                                 {
-                                    if let Ok(doc) = Url::parse(&document_url) {
-                                        let referrer = crate::diting_net::client::HttpClient::navigation_referrer(&doc, &u);
-                                        if !referrer.is_empty() {
-                                            fallback_headers.insert("Referer".into(), referrer);
-                                        }
+                                    let doc = Url::parse(&document_url).unwrap_or_else(|_| u.clone());
+                                    let referrer =
+                                        fetch_referer(&referrer_policy, &referrer_init, &doc, &u);
+                                    if !referrer.is_empty() {
+                                        fallback_headers.insert("Referer".into(), referrer);
                                     }
                                 }
                                 Some(
@@ -4469,6 +4553,10 @@ fn op_fetch_url_sync(
         http_client,
         proxy_url,
         document_url,
+        // XHR has no referrerPolicy/referrer surface (Fetch-only RequestInit);
+        // the walk's defaults apply — client referrer, default policy.
+        referrer_policy: String::new(),
+        referrer_init: "about:client".to_string(),
         callbacks,
         failures: Vec::new(),
     };

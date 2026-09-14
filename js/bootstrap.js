@@ -1034,7 +1034,7 @@ function __prepareInsertedScript(script) {
             // forever, leaving decorated shop pages empty).
             _OPS.op_dyn_script_fetch_begin();
             try {
-              const raw = await _OPS.op_fetch_url(fullUrl, "GET", "{}", "", pageOrigin, "no-cors", "include");
+              const raw = await _OPS.op_fetch_url(fullUrl, "GET", "{}", "", pageOrigin, "no-cors", "include", "\u0000about:client");
               const parsed = JSON.parse(raw);
               if (!(parsed.status >= 200 && parsed.status <= 299)) {
                 // status 0 means the op refused before any wire traffic —
@@ -1447,7 +1447,7 @@ function __prepareInsertedStylesheetLink(link) {
         // Stylesheet requests are no-cors with same-origin credentials (no
         // crossorigin attribute) — unlike classic scripts, whose JSONP-era
         // include policy is deliberately looser.
-        const rawResp = await _OPS.op_fetch_url(abs, "GET", "{}", "", pageOrigin, "no-cors", "same-origin");
+        const rawResp = await _OPS.op_fetch_url(abs, "GET", "{}", "", pageOrigin, "no-cors", "same-origin", "\u0000about:client");
         const parsed = JSON.parse(rawResp);
         if (!(parsed.status >= 200 && parsed.status <= 299)) {
           const why = parsed.error || parsed.corsError;
@@ -1778,6 +1778,9 @@ class Comment extends CharacterData {
 // relList.supports("preload"); throwing there aborts their load chains.
 // a/area relList stays unsupported (supports() throws), matching Chrome.
 const LINK_REL_SUPPORTED = ["alternate","author","bookmark","canonical","dns-prefetch","external","help","icon","license","manifest","me","modulepreload","next","nofollow","noopener","noreferrer","opener","pingback","preconnect","prefetch","preload","prev","privacy-policy","search","stylesheet","tag","terms-of-service"];
+// Fetch-standard RequestInit referrerPolicy tokens; '' = spec default
+// (strict-origin-when-cross-origin).
+const REFERRER_POLICIES = ["", "no-referrer", "no-referrer-when-downgrade", "origin", "origin-when-cross-origin", "strict-origin", "strict-origin-when-cross-origin", "unsafe-url"];
 const SANDBOX_SUPPORTED = ["allow-downloads","allow-forms","allow-modals","allow-orientation-lock","allow-pointer-lock","allow-popups","allow-popups-to-escape-sandbox","allow-presentation","allow-same-origin","allow-scripts","allow-storage-access-by-user-activation","allow-top-navigation","allow-top-navigation-by-user-activation","allow-top-navigation-to-custom-protocols"];
 
 // DOMTokenList backs class/rel/sandbox/etc. attribute reflection. It parses the
@@ -5443,8 +5446,21 @@ globalThis.fetch = async (input, init = {}) => {
   if (fetchCredentials !== "omit" && fetchCredentials !== "same-origin" && fetchCredentials !== "include") {
     throw new TypeError("Failed to execute 'fetch': '" + fetchCredentials + "' is not a valid RequestCredentials value");
   }
+  // referrerPolicy/referrer ride down to the op so each redirect hop can
+  // re-strip the Referer per the policy (obscura#875). Absent init falls
+  // back to the Request object's value; a plain-URL fetch uses the document
+  // with the default policy. '' referrer = explicitly no referrer.
+  const fetchReferrerPolicy = init.referrerPolicy !== undefined
+    ? String(init.referrerPolicy)
+    : (input instanceof Request ? input.referrerPolicy : "");
+  if (REFERRER_POLICIES.indexOf(fetchReferrerPolicy) < 0) {
+    throw new TypeError("Failed to execute 'fetch': '" + fetchReferrerPolicy + "' is not a valid ReferrerPolicy value");
+  }
+  const fetchReferrer = init.referrer !== undefined
+    ? String(init.referrer)
+    : (input instanceof Request ? input.referrer : "about:client");
   const pageOrigin = (function() { try { const u = new URL(_domParse("document_url") || "about:blank"); return u.origin; } catch(e) { return ""; } })();
-  const raw = await _OPS.op_fetch_url(url, method, hdrs, body, pageOrigin, fetchMode, fetchCredentials);
+  const raw = await _OPS.op_fetch_url(url, method, hdrs, body, pageOrigin, fetchMode, fetchCredentials, fetchReferrerPolicy + '\u0000' + fetchReferrer);
   const parsed = JSON.parse(raw);
   if (parsed.blocked) {
     const err = new TypeError('net::ERR_FAILED');
@@ -5968,7 +5984,13 @@ if (typeof Request === 'undefined') {
         throw new TypeError("Failed to construct 'Request': '" + this.credentials + "' is not a valid RequestCredentials value");
       }
       this.redirect = init.redirect || 'follow';
-      this.referrer = init.referrer || '';
+      // Fetch spec: absent referrer means "about:client" (the document); the
+      // empty string means no-referrer — the two must not collapse.
+      this.referrer = init.referrer === undefined ? 'about:client' : String(init.referrer);
+      this.referrerPolicy = init.referrerPolicy || '';
+      if (REFERRER_POLICIES.indexOf(this.referrerPolicy) < 0) {
+        throw new TypeError("Failed to construct 'Request': '" + this.referrerPolicy + "' is not a valid ReferrerPolicy value");
+      }
       this.signal = init.signal || { aborted: false, addEventListener(){}, removeEventListener(){} };
       this.cache = init.cache || 'default';
     }
@@ -5981,6 +6003,7 @@ if (typeof Request === 'undefined') {
         credentials: this.credentials,
         redirect: this.redirect,
         referrer: this.referrer,
+        referrerPolicy: this.referrerPolicy,
         signal: this.signal,
         cache: this.cache,
       });
