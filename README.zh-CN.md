@@ -1,3 +1,5 @@
+<p align="center"><img src="web/brand/icon.svg" width="160" alt="AginxBrowser"></p>
+
 # AginxBrowser
 
 **Agent 的浏览器。看 live web，读它，操作它，记住它。**

@@ -1,3 +1,5 @@
+<p align="center"><img src="web/brand/icon.svg" width="160" alt="AginxBrowser"></p>
+
 # AginxBrowser
 
 **The Browser for AI Agents. See the live web. Read it. Act on it. Remember it.**
