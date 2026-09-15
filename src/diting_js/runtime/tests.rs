@@ -10020,6 +10020,66 @@ async fn test_css_transition_events_and_registry() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn test_css_transition_cancel_on_retrigger_and_detach() {
+    // Chrome fires transitioncancel two ways: a re-trigger on the same
+    // property preempts the in-flight entry (elapsedTime = active time so
+    // far), and removing the element from the document cancels every
+    // pending timer. Both legs here, transform included in the watched set.
+    let mut rt = setup_runtime("<html><body><div id=\"d\">x</div><div id=\"e\">y</div></body></html>");
+    let script = r#"async () => {
+        const d = document.getElementById('d');
+        const e = document.getElementById('e');
+        const seq = [];
+        d.addEventListener('transitioncancel', (ev) => seq.push(['cancel', ev.propertyName, Math.round(ev.elapsedTime * 1000)]));
+        d.addEventListener('transitionend', () => seq.push(['end']));
+        // Check 1 observes (no transition on a first style resolution),
+        // check 2 arms the run, check 3 re-triggers mid-flight — that is
+        // the write that must preempt check 2's entry with a cancel.
+        d.style.transition = 'opacity 500ms linear';
+        d.style.opacity = '0.5';
+        await new Promise(r => setTimeout(r, 60));
+        d.style.opacity = '0';
+        await new Promise(r => setTimeout(r, 60));
+        d.style.opacity = '1';
+        await new Promise(r => setTimeout(r, 40));
+        const eSeq = [];
+        e.addEventListener('transitionrun', (ev) => eSeq.push(['run', ev.propertyName]));
+        e.addEventListener('transitioncancel', (ev) => eSeq.push(['cancel', ev.propertyName]));
+        e.style.transition = 'transform 500ms linear';
+        e.style.transform = 'translate(40px, 0px)';
+        await new Promise(r => setTimeout(r, 40));
+        e.style.transform = 'translate(0px, 0px)';
+        await new Promise(r => setTimeout(r, 30));
+        e.remove();
+        return [seq, eSeq];
+    }"#;
+    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    let (seq, e_seq) = match result.value.unwrap() {
+        serde_json::Value::Array(a) => (a[0].clone(), a[1].clone()),
+        _ => panic!("expected [seq, eSeq]"),
+    };
+    assert_eq!(seq.as_array().unwrap().len(), 1, "one cancel, old end timer cleared");
+    let entry = seq.as_array().unwrap().last().unwrap();
+    assert_eq!(entry[0], "cancel");
+    assert_eq!(entry[1], "opacity");
+    let elapsed_ms = entry[2].as_i64().unwrap();
+    assert!(
+        elapsed_ms > 20 && elapsed_ms < 300,
+        "cancel elapsed tracks active time, got {elapsed_ms}ms"
+    );
+    assert_eq!(
+        e_seq,
+        serde_json::json!([["run", "transform"], ["cancel", "transform"]])
+    );
+    let list = rt.with_state(|st| st.css_transitions.borrow().clone());
+    assert_eq!(
+        list.len(),
+        2,
+        "d's re-trigger replaced its entry; e's stale entry stays but the sampler skips detached nids"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn test_element_animate_lifecycle_events() {
     // WAAPI Element.animate fires the same lifecycle events with an empty
     // animationName (Chrome parity); detached elements never start.

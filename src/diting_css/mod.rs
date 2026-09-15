@@ -1342,13 +1342,14 @@ fn parse_transition_shorthand(v: &str) -> Option<TransitionSpec> {
     })
 }
 
-/// The v1 interpolable value set: opacity scalars and RGBA colors.
-/// Transform lerps are tracked for a later batch (per-component
-/// interpolation of the affine is its own slice of work).
+/// The interpolable value set: opacity scalars, RGBA colors, and 2D
+/// affines (batch 93; the affine lerps per component via `lerp_transform`,
+/// the same path CSS keyframe animations use).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TransitionValue {
     Opacity(f32),
     Color([f32; 4]),
+    Transform(Option<Transform2D>),
 }
 
 impl TransitionValue {
@@ -1363,6 +1364,9 @@ impl TransitionValue {
             (TransitionValue::Color(x), TransitionValue::Color(y)) => {
                 let mix = |i: usize| x[i] + (y[i] - x[i]) * p;
                 Some(TransitionValue::Color([mix(0), mix(1), mix(2), mix(3)]))
+            }
+            (TransitionValue::Transform(x), TransitionValue::Transform(y)) => {
+                lerp_transform(x, y, p).map(|t| TransitionValue::Transform(Some(t)))
             }
             _ => None,
         }
@@ -1426,6 +1430,9 @@ pub fn sample_css_transitions(
             }
             ("background-color", TransitionValue::Color(c)) => {
                 cs.background_color = Some(to_color(c));
+            }
+            ("transform", TransitionValue::Transform(m)) => {
+                cs.transform = m;
             }
             _ => {}
         }
@@ -1634,7 +1641,9 @@ fn mul_len(a: Length, s: f32) -> Length {
 /// output this exists for writes deg/rad angles and full `matrix(…)` forms.
 /// `none` and anything unparsable yield None — spec: one unknown function
 /// invalidates the whole declaration, so the element renders untransformed.
-fn parse_transform(v: &str) -> Option<Transform2D> {
+/// component keeps symbolic lengths; the transition register op reuses this
+/// so a before/after snapshot matches the sampler's affine.
+pub(crate) fn parse_transform(v: &str) -> Option<Transform2D> {
     let v = v.trim();
     if v.is_empty() || v.eq_ignore_ascii_case("none") {
         return None; // `none` is the initial value → no transform
@@ -6209,6 +6218,62 @@ mod tests {
             styles[&crate::diting_dom::NodeId(3)].color,
             Some(Color(9, 9, 9, 255))
         );
+    }
+
+    #[test]
+    fn transition_sampler_lerps_transform_components() {
+        let mk = |from: Option<Transform2D>, to: Option<Transform2D>| CssTransition {
+            nid: 5,
+            property: "transform".into(),
+            from: TransitionValue::Transform(from),
+            to: TransitionValue::Transform(to),
+            start: 0.0,
+            duration: 1.0,
+            delay: 0.0,
+            easing: Easing::Linear,
+        };
+        let mut styles = std::collections::HashMap::new();
+        styles.insert(crate::diting_dom::NodeId(5), ComputedStyle::default());
+
+        // Two full affines lerp componentwise, translate included.
+        let a = parse_transform("translate(200px, 40px) scale(2)").unwrap();
+        let b = parse_transform("translate(0px, 0px)").unwrap();
+        sample_css_transitions(&[mk(Some(a), Some(b))], Some(0.5), &mut styles);
+        let t = styles[&crate::diting_dom::NodeId(5)]
+            .transform
+            .expect("transform overridden");
+        match (t.tx, t.ty, t.a) {
+            (Length::Px(tx), Length::Px(ty), a) => {
+                assert!((tx - 100.0).abs() < 1e-3 && (ty - 20.0).abs() < 1e-3);
+                assert!((a - 1.5).abs() < 1e-4, "scale lerps 2→1 midpoint 1.5");
+            }
+            _ => panic!("expected px translate and scale"),
+        }
+
+        // `none` on a side is identity for the mix (computed snapshot of an
+        // untransformed element), so none→matrix still interpolates.
+        let to = parse_transform("translate(100px, 0px)").unwrap();
+        let mut styles = std::collections::HashMap::new();
+        styles.insert(crate::diting_dom::NodeId(5), ComputedStyle::default());
+        sample_css_transitions(&[mk(None, Some(to))], Some(0.25), &mut styles);
+        match styles[&crate::diting_dom::NodeId(5)].transform.expect("none→T mix").tx {
+            Length::Px(tx) => assert!((tx - 25.0).abs() < 1e-3),
+            _ => panic!("expected px"),
+        }
+
+        // A property/value kind mismatch (never produced by the register
+        // op) falls through and the cascade transform stands.
+        let bad = CssTransition {
+            property: "transform".into(),
+            from: TransitionValue::Opacity(1.0),
+            to: TransitionValue::Opacity(0.0),
+            ..mk(None, None)
+        };
+        let mut styles = std::collections::HashMap::new();
+        styles.insert(crate::diting_dom::NodeId(5), ComputedStyle::default());
+        sample_css_transitions(&[bad], Some(0.5), &mut styles);
+        let cs = &styles[&crate::diting_dom::NodeId(5)];
+        assert!(cs.transform.is_none(), "mismatch keeps cascade");
     }
 
     #[test]

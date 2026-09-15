@@ -791,6 +791,20 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                         c.0 as f32, c.1 as f32, c.2 as f32, c.3 as f32,
                     ])
                 }),
+                // The computed snapshot is "none" or a `matrix(...)` string;
+                // `none` maps to the identity-side arm of lerp_transform so
+                // none↔matrix transitions still interpolate. A percentage
+                // translate has no used value at snapshot time (the computed
+                // table omits it) and fails to parse — no transition.
+                "transform" => {
+                    let s = s.trim();
+                    if s == "none" || s.is_empty() {
+                        Some(crate::diting_css::TransitionValue::Transform(None))
+                    } else {
+                        crate::diting_css::parse_transform(s)
+                            .map(|t| crate::diting_css::TransitionValue::Transform(Some(t)))
+                    }
+                }
                 _ => None,
             }
         };

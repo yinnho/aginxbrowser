@@ -1349,12 +1349,12 @@ function _cancelAnimationsInSubtree(root) {
 // was rejected because it forces a full cascade on every class write during
 // hydration. Elements never observed before cannot diff, which matches
 // Chrome: no transition on an element's first style resolution. v1 watches
-// opacity/color/background-color; CSSOM rule mutations surface on the next
-// observation rather than at the rule change. transitioncancel is not
-// modeled: a re-trigger on the same property replaces the pending entry
-// silently, and detachment at the end timer just drops the events.
-const _transWatched = ["opacity", "color", "background-color"];
-const _transLast = new WeakMap();  // el -> {opacity, color, background-color}
+// opacity/color/background-color/transform; CSSOM rule mutations surface
+// on the next observation rather than at the rule change. transitioncancel
+// fires the two ways Chrome fires it: a re-trigger on the same property
+// preempts the in-flight entry, and removing the element from the document.
+const _transWatched = ["opacity", "color", "background-color", "transform"];
+const _transLast = new WeakMap();  // el -> {opacity, color, background-color, transform}
 const _transPending = new Set();
 const _transTracked = new Map();   // nid -> { el, timers: Map(prop -> {run,start,end}) }
 
@@ -1367,16 +1367,28 @@ function _dispatchTransitionEvent(el, type, prop, elapsed) {
   } catch (e) {}
 }
 
+// Seconds the transition had been running when it was canceled (Chrome
+// fills transitioncancel.elapsedTime with the active duration so far; a
+// cancel during the delay window reports 0).
+function _transElapsed(t) {
+  if (t.startWall == null) return 0;
+  return Math.max(0, (Date.now() - t.startWall) / 1000);
+}
+
 function _armTransitionEvents(el, prop, duration, delay) {
   let tr = _transTracked.get(el._nid);
   if (!tr) { tr = { el, timers: new Map() }; _transTracked.set(el._nid, tr); }
   const old = tr.timers.get(prop);
-  if (old) for (const t of [old.run, old.start, old.end]) if (t != null) clearTimeout(t);
-  const t = { run: null, start: null, end: null };
+  if (old) {
+    for (const t of [old.run, old.start, old.end]) if (t != null) clearTimeout(t);
+    _dispatchTransitionEvent(el, "transitioncancel", prop, _transElapsed(old));
+  }
+  const t = { run: null, start: null, end: null, startWall: null };
   tr.timers.set(prop, t);
   _dispatchTransitionEvent(el, "transitionrun", prop, 0);
   const fireStart = () => {
     if (_transTracked.get(el._nid) !== tr || tr.timers.get(prop) !== t) return;
+    t.startWall = Date.now();
     _dispatchTransitionEvent(el, "transitionstart", prop, 0);
   };
   if (delay > 0) t.start = setTimeout(fireStart, delay * 1000);
@@ -1388,6 +1400,21 @@ function _armTransitionEvents(el, prop, duration, delay) {
     if (!_nodeInDocument(el)) return;
     _dispatchTransitionEvent(el, "transitionend", prop, duration);
   }, (delay + duration) * 1000);
+}
+
+// Detachment cancels a running transition (Chrome semantics): every
+// pending timer in the removed subtree fires transitioncancel and its
+// tracking entry goes away, exactly like animationcancel above.
+function _cancelTransitionsInSubtree(root) {
+  if (!root || root.nodeType !== 1) return;
+  for (const [nid, tr] of Array.from(_transTracked)) {
+    if (!_animNodeInSubtree(tr.el, root)) continue;
+    for (const [prop, t] of Array.from(tr.timers)) {
+      for (const k of [t.run, t.start, t.end]) if (k != null) clearTimeout(k);
+      _dispatchTransitionEvent(tr.el, "transitioncancel", prop, _transElapsed(t));
+    }
+    _transTracked.delete(nid);
+  }
 }
 
 function _transitionCheckOne(el) {
@@ -1696,6 +1723,7 @@ class Node {
     _dom("remove_child", c._nid);
     // A tracked animation on a removed element must fire animationcancel.
     _cancelAnimationsInSubtree(c);
+    _cancelTransitionsInSubtree(c);
     if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('childList', this._nid, [], [c._nid]);
     return c;
   }
