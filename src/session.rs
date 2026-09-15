@@ -1514,6 +1514,18 @@ fn session_thread(
                 // started by page scripts stalled until the next command -
                 // WorkOS Radar's 5s worker-response window expired with its
                 // timer un-pumped (measured 31s frozen).
+                //
+                // After a command the slice stretches to 1.5s: async work the
+                // command started (a fetch fired from a submit/click handler,
+                // promise chains, timers) needs event-loop turns to progress,
+                // and only evaluating synchronously would strand it. The
+                // drain lives in the pump arm so it stays cancellation-safe:
+                // a queued command preempts it at once. Draining inside the
+                // command handler instead blocked the loop for the full 1.5s
+                // on every never-idle page — back-to-back commands each paid
+                // ~1505ms (measured), which is the "eval takes seconds" class
+                // of report.
+                let mut drain_budget: u64 = 0;
                 loop {
                     let cmd = tokio::select! {
                         biased;
@@ -1521,7 +1533,11 @@ fn session_thread(
                             Some(c) => c,
                             None => break,
                         },
-                        _ = page.pump_event_loop_slice(200) => continue,
+                        _ = page.pump_event_loop_slice(if drain_budget > 0 { 1500 } else { 200 }) => {
+                            drain_console(&mut page, &mut console_ring);
+                            drain_budget = 0;
+                            continue;
+                        }
                     };
                     match cmd {
                         SessionCommand::Navigate { url, reply } => {
@@ -2181,18 +2197,10 @@ fn session_thread(
                         }
                     }
 
-                    // Pump the JS event loop briefly after every command.
-                    // Commands that only evaluate synchronously (Eval
-                    // returning a non-Promise, Scroll, State) can still have
-                    // started async work — a fetch fired from a submit/click
-                    // handler, promise chains, timers — which needs
-                    // event-loop turns to progress. Without this the work
-                    // stranded until the next navigation (React server-action
-                    // fetches never resolved). Returns immediately when the
-                    // loop is idle, so quiescent pages pay nothing; busy pages
-                    // get up to 1.5s of drain per command.
-                    page.settle_until_idle(1500).await;
+                    // The post-command drain happens in the pump arm above
+                    // (stretched slice, preemptible by the next command).
                     drain_console(&mut page, &mut console_ring);
+                    drain_budget = 1500;
                 }
             })
             .await;
