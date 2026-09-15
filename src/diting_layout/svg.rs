@@ -1432,6 +1432,29 @@ mod tests {
         }
     }
 
+    /// blitz#897 data point: upstream renders SVG text blank where system
+    /// fonts are unavailable. Here `<text>` rasterizes through the shared
+    /// bundled font book (CJK + ASCII + mono, `include_bytes!`d) — the
+    /// compiler doesn't model font-family at all, so an unavailable family
+    /// is a no-op attribute and text ink is independent of the host's
+    /// installed fonts. A font-less container keeps painting labels.
+    #[test]
+    fn svg_text_paints_with_unavailable_font_family() {
+        let r = compile_of(
+            r#"<svg viewBox="0 0 120 40"><text x="2" y="28" font-size="20" font-family="Totally Missing Font">Hello</text></svg>"#,
+        );
+        match r.ops.as_slice() {
+            [SvgOp::Text { content, .. }] => assert_eq!(content, "Hello"),
+            other => panic!("expected one text op: {other:?}"),
+        }
+        let fonts = crate::diting_fonts::font_book();
+        let rect = Rect { x: 0.0, y: 0.0, width: 120.0, height: 40.0 };
+        let mut canvas = Canvas::new_filled(120, 40, [255, 255, 255, 255]);
+        paint_svg(&r, &rect, &fonts, &mut canvas, 0.0, 0.0, 1.0);
+        let ink = canvas.data.chunks_exact(4).filter(|p| p[0] < 128).count();
+        assert!(ink > 20, "svg text must paint ink regardless of host fonts ({ink} px)");
+    }
+
     #[test]
     fn group_transform_bakes_into_geometry() {
         let r = compile_of(

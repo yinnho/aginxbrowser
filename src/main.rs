@@ -997,6 +997,14 @@ async fn main() -> anyhow::Result<()> {
             diting_net::client::parse_scoped_cidrs(spec).len()
         );
     }
+    // The font supply itself is screenshot-gated (diting_layout renders with
+    // it); a bare server build has no faces to point at.
+    #[cfg(feature = "screenshot")]
+    if let Some(pos) = args.iter().position(|a| a == "--font-dir") {
+        let dir = args.get(pos + 1).map(|s| s.as_str());
+        diting_fonts::set_font_dir(dir);
+        tracing::info!("font dir fallbacks (--font-dir): {:?}", dir.unwrap_or("(none)"));
+    }
 
     // Check if running in MCP mode
     if args.contains(&"--mcp".to_string()) {

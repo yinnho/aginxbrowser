@@ -35,6 +35,60 @@ pub const FAMILY: &str = "Noto Sans SC";
 const REGULAR: &[u8] = include_bytes!("diting_fonts/diting-cjk-regular.ttf");
 const BOLD: &[u8] = include_bytes!("diting_fonts/diting-cjk-bold.ttf");
 
+/// Directory font supply (obscura#992 absorption): `--font-dir <PATH>` or
+/// `AGINXBROWSER_FONT_DIR` appends every .ttf/.otf/.ttc in a directory as
+/// tail fallback faces. Chars outside the bundled pair — Korean, Thai,
+/// Arabic, vendor Han variants — resolve through them via the normal
+/// per-char cascade; chars the bundle already covers keep bundle rendering,
+/// because appended faces are coverage tails, not named-family overrides
+/// (the diting stack doesn't route families). Dir faces precede the
+/// platform emoji: user intent beats auto-detection, and the emoji strike
+/// carries no text-script glyphs. Absent dir, unreadable files and
+/// unparseable faces all drop silently — the exact pre-knob posture.
+static FONT_DIR: std::sync::RwLock<Option<std::path::PathBuf>> = std::sync::RwLock::new(None);
+
+/// Wire the `--font-dir` CLI flag (main.rs, parsed before server boot; the
+/// book is built lazily on first render, after this).
+pub fn set_font_dir(dir: Option<&str>) {
+    if let Ok(mut slot) = FONT_DIR.write() {
+        *slot = dir.map(std::path::PathBuf::from);
+    }
+}
+
+fn font_dir() -> Option<std::path::PathBuf> {
+    FONT_DIR
+        .read()
+        .ok()
+        .and_then(|slot| slot.clone())
+        .or_else(|| std::env::var("AGINXBROWSER_FONT_DIR").ok().map(Into::into))
+}
+
+/// Every loadable font file in `dir`, sorted by path so the same directory
+/// always yields the same face order — and therefore the same book
+/// fingerprint, which is the raster cache's identity.
+fn faces_in_dir(dir: &std::path::Path) -> Vec<Vec<u8>> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<std::path::PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            matches!(
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|s| s.to_ascii_lowercase())
+                    .as_deref(),
+                Some("ttf" | "otf" | "ttc")
+            )
+        })
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .filter_map(|p| std::fs::read(p).ok())
+        .collect()
+}
+
 /// The monospace face (mono batch) — see the module docs. Single-weight:
 /// bold mono runs shape the same face, and CJK in a mono run falls through
 /// to the pair above per-character.
@@ -104,15 +158,27 @@ fn build_ctx(system_fonts: bool) -> parley::FontContext {
 pub fn font_book() -> Arc<FontBook> {
     static BOOK: std::sync::OnceLock<Arc<FontBook>> = std::sync::OnceLock::new();
     BOOK.get_or_init(|| {
-        let book = FontBook::from_pairs(REGULAR.to_vec(), BOLD.to_vec())
-            .expect("bundled CJK fonts parse (regenerate via scripts/make_font_bundle.py)")
-            .with_mono(MONO.to_vec());
-        match platform_emoji_font() {
-            Some(bytes) => Arc::new(book.with_fallbacks(vec![bytes])),
-            None => Arc::new(book),
-        }
+        let dir_faces = font_dir().map(|d| faces_in_dir(&d)).unwrap_or_default();
+        build_book(dir_faces)
     })
     .clone()
+}
+
+/// The production construction, parameterized over the dir faces so the
+/// font-dir tests can drive it without touching process-global state.
+fn build_book(dir_faces: Vec<Vec<u8>>) -> Arc<FontBook> {
+    let book = FontBook::from_pairs(REGULAR.to_vec(), BOLD.to_vec())
+        .expect("bundled CJK fonts parse (regenerate via scripts/make_font_bundle.py)")
+        .with_mono(MONO.to_vec());
+    let mut fallbacks = dir_faces;
+    if let Some(emoji) = platform_emoji_font() {
+        fallbacks.push(emoji);
+    }
+    if fallbacks.is_empty() {
+        Arc::new(book)
+    } else {
+        Arc::new(book.with_fallbacks(fallbacks))
+    }
 }
 
 /// Best-effort read of the host's color-emoji font (emoji batch): the
@@ -162,6 +228,15 @@ pub(crate) fn bundled_pair_for_tests() -> (Vec<u8>, Vec<u8>) {
 pub(crate) fn bundled_mono_for_tests() -> Vec<u8> {
     MONO.to_vec()
 }
+
+/// Test fixture for the font-dir supply: the mono face subset to one glyph
+/// with its cmap remapped to U+E000 (private use — outside every bundled
+/// subset's coverage), so a dir face demonstrably carrying a char the
+/// bundled pair lacks is deterministic on every host. Regenerate with
+/// fontTools: subset diting-mono-regular.ttf to U+0041, then replace the
+/// cmap entry with {U+E000: "A"}.
+#[cfg(test)]
+const TEST_FALLBACK_FACE: &[u8] = include_bytes!("diting_fonts/test-fallback-face.ttf");
 
 #[cfg(test)]
 mod tests {
@@ -274,6 +349,44 @@ mod tests {
         );
         let mono_raster = book.rasterize("code()", 20.0, false, [0, 0, 0, 255], 24.0, true);
         assert!(mono_raster.ink_bbox().is_some(), "a mono run must paint");
+    }
+
+    /// The font-dir supply (obscura#992 absorption): .ttf entries load in
+    /// sorted path order, non-font extensions and unreadable entries (the
+    /// "c.ttf" directory) drop, and a loaded face demonstrably carries a
+    /// char the bundled pair lacks — the fixture face maps U+E000 (private
+    /// use, outside every bundled subset) to a 0.6em glyph, so the advance
+    /// flips from the primary .notdef to the fallback's fixed 0.6em once
+    /// the dir face is in the book.
+    #[test]
+    fn font_dir_faces_load_sorted_and_route() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fixture = TEST_FALLBACK_FACE.to_vec();
+        std::fs::write(dir.path().join("a.ttf"), &fixture).unwrap();
+        std::fs::write(dir.path().join("b.ttf"), bundled_mono_for_tests()).unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"not a font").unwrap();
+        std::fs::create_dir(dir.path().join("c.ttf")).unwrap();
+
+        let faces = faces_in_dir(dir.path());
+        assert_eq!(faces.len(), 2, "only loadable font files join");
+        assert_eq!(faces[0], fixture, "sorted by path: a.ttf first");
+
+        let with_dir = build_book(faces);
+        assert!(with_dir.has_fallbacks(), "dir faces joined as fallbacks");
+        let routed = with_dir.advance_width("\u{E000}", 20.0, false, false);
+        assert!(
+            (routed - 12.0).abs() < 0.05,
+            "U+E000 routes to the dir face (0.6em of 20px = 12, got {routed})"
+        );
+
+        // Without the dir face the same char rides the primary .notdef —
+        // the routing above is the dir face's doing, not a coverage change.
+        let base = build_book(Vec::new());
+        let notdef = base.advance_width("\u{E000}", 20.0, false, false);
+        assert!(
+            (notdef - routed).abs() > 0.5,
+            "base book must not cover U+E000 ({notdef} vs {routed})"
+        );
     }
 
     /// The product claim: CJK text renders with the bundled collection and
