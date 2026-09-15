@@ -10907,3 +10907,47 @@ fn calc_width_inside_flex_subtree() {
         blk_w
     );
 }
+
+/// Batch 99 follow-up probe: the Bootstrap 3 clearfix. A host whose only
+/// child is a float must reach the float's height once its ::after runs
+/// `content:"";display:table;clear:both` — the pseudo leaf clears below the
+/// float zone and the host's height accounts for the pushed-out box.
+#[cfg(feature = "screenshot")]
+#[test]
+fn clearfix_pseudo_clears_float_zone() {
+    let mut rt = setup_runtime(
+        r#"<style>
+          .row::after{content:"";display:table;clear:both}
+          .col{float:left;width:50px;height:40px}
+        </style>
+        <div class="row" id="row"><div class="col"></div></div>
+        <div id="plain" style="position:relative"><div class="col"></div></div>"#,
+    );
+    let h_of = |rt: &mut JsRuntime, sel: &str| {
+        rt.evaluate(&format!(
+            "Math.round(document.querySelector('{}').getBoundingClientRect().height)",
+            sel
+        ))
+        .unwrap()
+    };
+    let row_h = h_of(&mut rt, "#row").as_f64().unwrap_or(0.0);
+    let plain_h = h_of(&mut rt, "#plain").as_f64().unwrap_or(0.0);
+    assert!(
+        (row_h - 40.0).abs() <= 1.0,
+        "clearfix row collapsed to {} (plain float host {}); ::after clear:both must end the float zone",
+        row_h,
+        plain_h
+    );
+    // Posture pin: this engine contains floats in the parent unconditionally
+    // (Chrome does so only for BFC roots, where a clearfix-less host would
+    // collapse to 0). The protective posture makes the Bootstrap 3 idiom
+    // work without the pseudo's clear being load-bearing. If this ever
+    // tightens to Chrome's exact BFC semantics, the ::after clear path must
+    // start carrying the containment (see zone_end_at_budget, which reads
+    // clear_side by NodeId and cannot see pseudo leaves).
+    assert!(
+        (plain_h - 40.0).abs() <= 1.0,
+        "float containment posture changed: plain host is now {} (was 40 = contains)",
+        plain_h
+    );
+}
