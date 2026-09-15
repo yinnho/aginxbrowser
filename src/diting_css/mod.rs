@@ -5364,7 +5364,12 @@ mod tests {
         close(&t, (0.0, 1.0, -1.0, 0.0));
         assert!(!t.is_axis_aligned());
         let t = parse_transform("rotate(45deg)").unwrap();
-        close(&t, (0.70710678, 0.70710678, -0.70710678, 0.70710678));
+        close(&t, (
+            std::f32::consts::FRAC_1_SQRT_2,
+            std::f32::consts::FRAC_1_SQRT_2,
+            -std::f32::consts::FRAC_1_SQRT_2,
+            std::f32::consts::FRAC_1_SQRT_2,
+        ));
         // Angle units: 0.25 turn and ~π/2 rad are both 90°.
         let t = parse_transform("rotate(0.25turn)").unwrap();
         close(&t, (0.0, 1.0, -1.0, 0.0));
@@ -7053,6 +7058,7 @@ mod tests {
     /// The UA stylesheet gives pre/xmp/listing/plaintext `white-space: pre`,
     /// filled only when neither inheritance nor an author declaration
     /// provides one.
+    #[cfg(feature = "screenshot")]
     #[test]
     fn ua_pre_default_and_author_override() {
         let tree = diting_dom::tree_sink::parse_html("<pre>x</pre>");

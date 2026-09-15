@@ -39,6 +39,22 @@ pub fn is_blocked(host: &str) -> bool {
     false
 }
 
+/// Whether transports that default tracker blocking on (the stealth client;
+/// stealth contexts also flip HttpClient's `block_trackers`) should consult
+/// the blocklist. `AGINXBROWSER_BLOCK_TRACKERS=0|false|no|off` unwelds
+/// tracker blocking from stealth TLS: auditing what a page actually loads,
+/// or reproducing a bug that only happens with analytics present, needs the
+/// blocklist off while the stealth transport stays on (obscura#995).
+pub fn block_trackers_from_env() -> bool {
+    match std::env::var("AGINXBROWSER_BLOCK_TRACKERS") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => true,
+    }
+}
+
 static EXTRA_DOMAINS: &[&str] = &[];
 
 #[cfg(test)]
@@ -73,5 +89,29 @@ mod tests {
     #[test]
     fn test_blocklist_size() {
         assert!(blocklist().len() > 3500);
+    }
+
+    struct BlockTrackersGuard;
+
+    impl Drop for BlockTrackersGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("AGINXBROWSER_BLOCK_TRACKERS");
+        }
+    }
+
+    #[test]
+    fn block_trackers_env_off_values_release_the_gate() {
+        let _guard = BlockTrackersGuard;
+        std::env::remove_var("AGINXBROWSER_BLOCK_TRACKERS");
+        assert!(block_trackers_from_env(), "unset keeps the documented stealth default");
+
+        for off in ["0", "false", "no", "off", " OFF ", "No"] {
+            std::env::set_var("AGINXBROWSER_BLOCK_TRACKERS", off);
+            assert!(!block_trackers_from_env(), "value {off:?} must release the gate");
+        }
+        for on in ["1", "yes", "true", "on"] {
+            std::env::set_var("AGINXBROWSER_BLOCK_TRACKERS", on);
+            assert!(block_trackers_from_env(), "value {on:?} keeps blocking");
+        }
     }
 }

@@ -189,6 +189,13 @@ pub struct StealthHttpClient {
     /// (`AGINXBROWSER_ALLOW_PRIVATE_NETWORK`) is OR'd inside `validate_url`
     /// itself, so this field only carries the per-context flag.
     pub allow_private_network: bool,
+    /// Whether the bundled tracker blocklist is consulted before any
+    /// request. Stealth documents block trackers as documented, so this
+    /// defaults on — but HttpClient carries the same field and honors the
+    /// same env release (`AGINXBROWSER_BLOCK_TRACKERS=0`), because auditing
+    /// a page's real third-party stack needs stealth TLS with the blocklist
+    /// off (obscura#995: the stealth path used to check unconditionally).
+    pub block_trackers: bool,
 }
 
 #[cfg(feature = "stealth")]
@@ -330,6 +337,7 @@ impl StealthHttpClient {
                     .unwrap_or_else(|_| "zh-CN,zh;q=0.9,en;q=0.8".to_string()),
             ),
             allow_private_network: false,
+            block_trackers: crate::diting_net::blocklist::block_trackers_from_env(),
         }
     }
 
@@ -417,16 +425,18 @@ impl StealthHttpClient {
 
         let mut current_url = url.clone();
 
-        if let Some(host) = current_url.host_str() {
-            if crate::diting_net::blocklist::is_blocked(host) {
-                tracing::debug!("Blocked tracker: {}", current_url);
-                return Ok(Response {
-                    status: 0,
-                    url: current_url,
-                    headers: HashMap::new(),
-                    body: Vec::new(),
-                    redirected_from: Vec::new(),
-                });
+        if self.block_trackers {
+            if let Some(host) = current_url.host_str() {
+                if crate::diting_net::blocklist::is_blocked(host) {
+                    tracing::debug!("Blocked tracker: {}", current_url);
+                    return Ok(Response {
+                        status: 0,
+                        url: current_url,
+                        headers: HashMap::new(),
+                        body: Vec::new(),
+                        redirected_from: Vec::new(),
+                    });
+                }
             }
         }
 
@@ -762,6 +772,52 @@ mod tests {
         let client = StealthHttpClient::new(Arc::new(CookieJar::new()));
         let url = Url::parse("http://127.0.0.1:1/").unwrap();
         assert!(client.fetch(&url).await.is_err(), "loopback must be rejected");
+    }
+
+    // obscura#995: the stealth transport consulted the tracker blocklist
+    // unconditionally, welding tracker blocking onto stealth TLS. The field
+    // defaults on (documented stealth behavior) and the env release must be
+    // readable at construction time.
+    #[test]
+    fn stealth_client_block_trackers_defaults_on_env_releases() {
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("AGINXBROWSER_BLOCK_TRACKERS");
+        let client = StealthHttpClient::new(Arc::new(CookieJar::new()));
+        assert!(client.block_trackers, "stealth blocks trackers as documented");
+
+        std::env::set_var("AGINXBROWSER_BLOCK_TRACKERS", "0");
+        let client = StealthHttpClient::new(Arc::new(CookieJar::new()));
+        std::env::remove_var("AGINXBROWSER_BLOCK_TRACKERS");
+        assert!(!client.block_trackers, "env=0 unwelds tracker blocking");
+    }
+
+    // Live probe for the obscura#995 gate: with the default field on, a PGL
+    // host never leaves the process (empty status-0 response, no request);
+    // with the env release the same host gets a real response. Skipped in
+    // CI — hits the network. Run explicitly:
+    //   cargo test --features stealth probe_blocklist_gate_live -- --ignored
+    #[tokio::test]
+    #[ignore = "live network (obscura#995 probe); run explicitly with --ignored"]
+    async fn probe_blocklist_gate_live() {
+        // Same host for both halves. www.google-analytics.com is in the PGL
+        // but 301s to www.google.com, which is unreachable from several
+        // networks; googletagmanager.com answers directly (no redirect).
+        let url = Url::parse("https://www.googletagmanager.com/gtm.js").unwrap();
+
+        let blocked = StealthHttpClient::new(Arc::new(CookieJar::new()))
+            .fetch(&url)
+            .await
+            .expect("a blocked tracker returns an empty 0 response, not an error");
+        assert_eq!(blocked.status, 0, "default stealth must block PGL hosts");
+
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_BLOCK_TRACKERS", "0");
+        let released = StealthHttpClient::new(Arc::new(CookieJar::new()))
+            .fetch(&url)
+            .await
+            .expect("released gate should reach the origin");
+        std::env::remove_var("AGINXBROWSER_BLOCK_TRACKERS");
+        assert_ne!(released.status, 0, "env=0 must let the request leave");
     }
 
     // obscura#793 same shape: the per-context allow-private flag must ride

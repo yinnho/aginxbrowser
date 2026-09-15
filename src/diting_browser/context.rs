@@ -116,7 +116,11 @@ impl BrowserContext {
             allow_private_network,
         );
         if stealth {
-            client.block_trackers = true;
+            // AGINXBROWSER_BLOCK_TRACKERS=0 unwelds tracker blocking from
+            // stealth on both transports (obscura#995); unset keeps the
+            // documented stealth default.
+            client.block_trackers =
+                crate::diting_net::blocklist::block_trackers_from_env();
         }
         // Resolution chain: explicit per-context UA → AGINXBROWSER_UA → the
         // fingerprint pool's stable default (macOS Chrome 145; pin or rotate
@@ -185,7 +189,8 @@ impl BrowserContext {
             self.allow_private_network,
         );
         if self.stealth {
-            client.block_trackers = true;
+            client.block_trackers =
+                crate::diting_net::blocklist::block_trackers_from_env();
         }
         if let Ok(mut guard) = client.user_agent.try_write() {
             *guard = self.user_agent.clone();
@@ -255,6 +260,22 @@ mod tests {
         let client_ua = ctx.http_client.user_agent.read().await.clone();
         assert!(client_ua.contains("Chrome"));
         assert_eq!(ctx.user_agent, client_ua);
+    }
+
+    // obscura#995: stealth welds tracker blocking on, and the env release
+    // must unwind it on the context's reqwest transport too (the stealth
+    // transport reads the same env at its own construction).
+    #[tokio::test(flavor = "current_thread")]
+    async fn stealth_context_block_trackers_honors_env_release() {
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("AGINXBROWSER_BLOCK_TRACKERS");
+        let ctx = BrowserContext::with_full_options("t".to_string(), None, true, None);
+        assert!(ctx.http_client.block_trackers, "stealth default blocks trackers");
+
+        std::env::set_var("AGINXBROWSER_BLOCK_TRACKERS", "0");
+        let ctx = BrowserContext::with_full_options("t".to_string(), None, true, None);
+        std::env::remove_var("AGINXBROWSER_BLOCK_TRACKERS");
+        assert!(!ctx.http_client.block_trackers, "env=0 unwelds tracker blocking");
     }
 
     #[tokio::test(flavor = "current_thread")]

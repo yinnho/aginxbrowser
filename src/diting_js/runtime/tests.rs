@@ -10336,6 +10336,7 @@ async fn test_css_transition_computed_values() {
     );
 }
 
+#[cfg(feature = "screenshot")]
 #[tokio::test(flavor = "current_thread")]
 async fn test_css_transition_events_and_registry() {
     // The JS face diffs watched properties across style writes: the first
@@ -10376,6 +10377,7 @@ async fn test_css_transition_events_and_registry() {
     assert!(matches!(tr.easing, crate::diting_css::Easing::Linear));
 }
 
+#[cfg(feature = "screenshot")]
 #[tokio::test(flavor = "current_thread")]
 async fn test_css_transition_cancel_on_retrigger_and_detach() {
     // Chrome fires transitioncancel two ways: a re-trigger on the same

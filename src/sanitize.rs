@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn zero_width_characters_stripped_and_counted() {
-        let (out, report) = sanitize_text("hello​world‌ cozy­", &[]);
+        let (out, report) = sanitize_text("hello\u{200B}world\u{200C} cozy\u{AD}", &[]);
         assert_eq!(out, "helloworld cozy");
         assert_eq!(report.zero_width_removed, 3);
     }
