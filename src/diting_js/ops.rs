@@ -2160,6 +2160,9 @@ pub(crate) struct BandFrame {
     pub dy: f32,
     /// CSS-pixel content size (root scrollWidth×scrollHeight).
     pub content_size: (f32, f32),
+    /// PDF text-layer glyph ops for this band, band-local (vector-text
+    /// batch). Empty unless the band was painted via `band_frame_with_text`.
+    pub text_ops: Vec<crate::diting_layout::paint::PdfOp>,
 }
 
 /// Paint the viewport band `[dx, dx+vw) × [dy, dy+vh)` of the live tree's
@@ -2180,6 +2183,31 @@ pub(crate) fn band_frame(
     scroll_x: f32,
     scroll_y: f32,
     viewport: (f32, f32),
+) -> Option<(BandFrame, Vec<String>)> {
+    band_frame_inner(gs, scroll_x, scroll_y, viewport, false)
+}
+
+/// Same band paint but ALSO collects the PDF text layer (vector-text batch):
+/// vectorizable `Text` items leave the raster — the PDF layer redraws them as
+/// glyphs, and painting twice would double the antialiasing — and come back
+/// as band-local glyph ops on the frame.
+#[cfg(feature = "screenshot")]
+pub(crate) fn band_frame_with_text(
+    gs: &JsState,
+    scroll_x: f32,
+    scroll_y: f32,
+    viewport: (f32, f32),
+) -> Option<(BandFrame, Vec<String>)> {
+    band_frame_inner(gs, scroll_x, scroll_y, viewport, true)
+}
+
+#[cfg(feature = "screenshot")]
+fn band_frame_inner(
+    gs: &JsState,
+    scroll_x: f32,
+    scroll_y: f32,
+    viewport: (f32, f32),
+    collect_text: bool,
 ) -> Option<(BandFrame, Vec<String>)> {
     gs.band_paints.set(gs.band_paints.get() + 1);
     let dom = gs.dom.as_ref()?;
@@ -2285,7 +2313,37 @@ pub(crate) fn band_frame(
     let mut canvas =
         crate::diting_layout::paint::Canvas::new_filled(vw as usize, vh as usize, [255, 255, 255, 255]);
     let fonts = crate::diting_fonts::font_book();
-    crate::diting_layout::paint::execute_band(items, &fonts, &mut canvas, dx, dy);
+    // Vector-text collect: the items the PDF layer will redraw as glyphs drop
+    // out of the raster pass (painting both would double the antialiasing).
+    // Their ops come back band-local — the writer needs no per-band offset.
+    let mut text_ops: Vec<crate::diting_layout::paint::PdfOp> = Vec::new();
+    if collect_text {
+        let (ops, vectorized) = crate::diting_layout::paint::pdf_text_ops(items, &fonts);
+        let background: Vec<crate::diting_layout::PaintItem> = items
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !vectorized.contains(i))
+            .map(|(_, it)| it.clone())
+            .collect();
+        crate::diting_layout::paint::execute_band(&background, &fonts, &mut canvas, dx, dy);
+        let mut ops = ops;
+        // Band-window filter: ops are still document-space here (translate
+        // below). Drop glyph lines whose baselines fall outside the band
+        // (with a font-size margin) so each PDF page carries only its own
+        // text instead of the whole document shifted off-page.
+        let band_top = dy;
+        let band_bottom = dy + canvas.height as f32;
+        ops.retain(|op| match op {
+            crate::diting_layout::paint::PdfOp::Line(l) => l.glyphs.iter().any(|g| {
+                g.y > band_top - l.font_size * 1.5 && g.y < band_bottom + l.font_size
+            }),
+            _ => true,
+        });
+        crate::diting_layout::paint::pdf_ops_translate(&mut ops, dx, dy);
+        text_ops = ops;
+    } else {
+        crate::diting_layout::paint::execute_band(items, &fonts, &mut canvas, dx, dy);
+    }
     drop(guard);
     Some((
         BandFrame {
@@ -2295,6 +2353,7 @@ pub(crate) fn band_frame(
             dx,
             dy,
             content_size: (content_w, content_h),
+            text_ops,
         },
         missing,
     ))

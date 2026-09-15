@@ -32,6 +32,10 @@ pub struct PagePumpOptions {
     pub page_size: (f32, f32),
     /// Safety cap on emitted pages.
     pub max_pages: usize,
+    /// Collect the vector text layer (PDF path): vectorizable text drops out
+    /// of the band raster and comes back as font ops in `PageSet::text_ops`.
+    /// Raster-only formats must leave this off or their pages lose text.
+    pub collect_text: bool,
 }
 
 impl Default for PagePumpOptions {
@@ -40,6 +44,7 @@ impl Default for PagePumpOptions {
             mode: PageMode::Print,
             page_size: (794.0, 1123.0),
             max_pages: 50,
+            collect_text: false,
         }
     }
 }
@@ -57,6 +62,9 @@ pub struct PageImage {
 #[derive(Debug)]
 pub struct PageSet {
     pub pages: Vec<PageImage>,
+    /// Per-page PDF text ops (band-local), parallel to `pages`; empty vecs
+    /// when the pump ran without `collect_text`.
+    pub text_ops: Vec<Vec<crate::diting_layout::paint::PdfOp>>,
     /// Document content extent the set was cut from (CSS px).
     pub content_size: (f32, f32),
 }
@@ -126,6 +134,7 @@ pub async fn render_page_set(
     }
 
     let mut pages = Vec::with_capacity(bands.len());
+    let mut text_ops = Vec::with_capacity(bands.len());
     for band in bands {
         // Missing images that surface per-page (fetch failures stay missing;
         // a painted placeholder beats a stall).
@@ -134,7 +143,13 @@ pub async fn render_page_set(
         if !missing.is_empty() {
             page.fetch_band_images(missing).await;
         }
-        let (frame, _) = paint(page, 0.0, band.y, (w, band.vh)).ok_or(PageError::NoLiveDocument)?;
+        let (frame, _) = if opts.collect_text {
+            paint_with_text(page, 0.0, band.y, (w, band.vh))
+        } else {
+            paint(page, 0.0, band.y, (w, band.vh))
+        }
+        .ok_or(PageError::NoLiveDocument)?;
+        text_ops.push(frame.text_ops);
         pages.push(PageImage {
             rgba: frame.rgba,
             width: frame.width,
@@ -142,7 +157,7 @@ pub async fn render_page_set(
             origin_y: band.y,
         });
     }
-    Ok(PageSet { pages, content_size })
+    Ok(PageSet { pages, text_ops, content_size })
 }
 
 /// Print pagination: greedy breaks at top-level block bottoms. For each
@@ -277,6 +292,18 @@ fn paint(
     page.viewport_band_frame(scroll_x, scroll_y, viewport)
 }
 
+/// One band paint with the vector text layer collected (the PDF path): the
+/// band raster comes back without vectorizable text; `frame.text_ops` carries
+/// the glyph lines to re-emit as font objects.
+fn paint_with_text(
+    page: &Page,
+    scroll_x: f32,
+    scroll_y: f32,
+    viewport: (f32, f32),
+) -> Option<(crate::diting_js::ops::BandFrame, Vec<String>)> {
+    page.viewport_band_frame_with_text(scroll_x, scroll_y, viewport)
+}
+
 // ---------------------------------------------------------------------------
 // Packaging encoders — bytes out of the painted pages.
 // ---------------------------------------------------------------------------
@@ -309,20 +336,121 @@ pub fn png_of(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
 /// CSS px → PDF points (96dpi assumption, the same one CSS `px` carries).
 const PX_TO_PT: f64 = 72.0 / 96.0;
 
-/// Pack per-page JPEGs as an image-based PDF 1.4: one page object, one
-/// DCTDecode XObject (`/Filter /DCTDecode` embeds the JPEG stream verbatim —
-/// no re-encode), and one `q W 0 0 H 0 0 cm /Im0 Do Q` content stream per
-/// page. MediaBoxes are in points; every page carries its own box, so
-/// variable-height print bands need no normalization. Hand-rolled writer —
-/// zero new dependencies.
-pub fn pdf_of_pages(pages: &[(u32, u32, &[u8])]) -> Vec<u8> {
+/// Pack per-page JPEGs + vector text layers as a PDF 1.4: each page embeds
+/// the painted band as a DCTDecode XObject (`/Filter /DCTDecode` — the JPEG
+/// stream goes in verbatim, no re-encode) and redraws vectorizable text on
+/// top as a real text layer — Type0/CIDFontType2 fonts with the bundled
+/// TTFs as FontFile2, per-glyph /W widths, and a ToUnicode CMap so text
+/// extraction gets real Unicode back. Text ops are band-local px; the
+/// writer flips y to the PDF bottom-up point space itself. Hand-rolled
+/// writer — zero new dependencies.
+pub fn pdf_of_pages(
+    pages: &[(u32, u32, &[u8], &[crate::diting_layout::paint::PdfOp])],
+) -> Vec<u8> {
+    use crate::diting_layout::paint::PdfOp;
+    use crate::diting_layout::text::PdfFace;
+    use std::collections::BTreeMap;
+
+    let fonts = crate::diting_fonts::font_book();
+
+    // Face usage scan: widths stored as px/em ratio (scaled to font units
+    // once the face's upem is known) and first-text-per-gid for ToUnicode.
+    let mut widths: BTreeMap<PdfFace, BTreeMap<u16, f32>> = BTreeMap::new();
+    let mut to_unicode: BTreeMap<PdfFace, BTreeMap<u16, String>> = BTreeMap::new();
+    for (_, _, _, ops) in pages {
+        for op in *ops {
+            let PdfOp::Line(l) = op else { continue };
+            for g in &l.glyphs {
+                widths
+                    .entry(g.face)
+                    .or_default()
+                    .entry(g.gid)
+                    .or_insert(g.advance / l.font_size.max(1.0));
+                if !g.unicode.is_empty() {
+                    to_unicode
+                        .entry(g.face)
+                        .or_default()
+                        .entry(g.gid)
+                        .or_insert_with(|| g.unicode.clone());
+                }
+            }
+        }
+    }
+    let used_faces: Vec<PdfFace> = [PdfFace::Regular, PdfFace::Bold, PdfFace::Mono]
+        .into_iter()
+        .filter(|f| widths.contains_key(f))
+        .collect();
+    let mut metrics: BTreeMap<PdfFace, (f32, f32, f32)> = BTreeMap::new();
+    for f in &used_faces {
+        let m = fonts.pdf_face_metrics(*f).unwrap_or((800.0, -200.0, 1000.0));
+        metrics.insert(*f, m);
+    }
+    for (f, ws) in widths.iter_mut() {
+        let upem = metrics[f].2;
+        for w in ws.values_mut() {
+            *w = (*w * upem).round();
+        }
+    }
+
+    let base_font = |f: &PdfFace| -> &'static str {
+        match f {
+            PdfFace::Regular => "DitingCJK-Regular",
+            PdfFace::Bold => "DitingCJK-Bold",
+            PdfFace::Mono => "DitingMono-Regular",
+        }
+    };
+    let res_name = |f: &PdfFace| -> &'static str {
+        match f {
+            PdfFace::Regular => "F1",
+            PdfFace::Bold => "F2",
+            PdfFace::Mono => "F3",
+        }
+    };
+    let w_array = |f: &PdfFace| -> String {
+        let mut s = String::from("[");
+        for (gid, w) in &widths[f] {
+            s.push_str(&format!(" {gid} [{w:.0}]"));
+        }
+        s.push_str(" ]");
+        s
+    };
+    let to_unicode_stream = |f: &PdfFace| -> String {
+        let mut s = String::from(
+            "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+             /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+             /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
+             1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
+        );
+        let entries: Vec<(&u16, &String)> = to_unicode[f].iter().collect();
+        for chunk in entries.chunks(100) {
+            s.push_str(&format!("{} beginbfchar\n", chunk.len()));
+            for (gid, text) in chunk {
+                let mut hex = String::new();
+                for u in text.encode_utf16() {
+                    hex.push_str(&format!("{u:04X}"));
+                }
+                s.push_str(&format!("<{gid:04X}> <{hex}>\n"));
+            }
+            s.push_str("endbfchar\n");
+        }
+        s.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+        s
+    };
+
+    let face_base = 3 + 3 * pages.len();
+    let face_ids: BTreeMap<PdfFace, usize> = used_faces
+        .iter()
+        .enumerate()
+        .map(|(j, f)| (*f, face_base + 5 * j))
+        .collect();
+
     let mut out: Vec<u8> = Vec::new();
     // The binary marker comment line flags the file as containing binary
     // streams (the JPEG data), so transport that peeks at the head doesn't
     // treat the file as text.
     out.extend_from_slice(b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
     // offsets[i] is the byte offset of object (i + 1).
-    let mut offsets: Vec<usize> = Vec::with_capacity(2 + 3 * pages.len());
+    let mut offsets: Vec<usize> = Vec::with_capacity(2 + 3 * pages.len() + 5 * used_faces.len());
 
     offsets.push(out.len());
     out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
@@ -338,19 +466,90 @@ pub fn pdf_of_pages(pages: &[(u32, u32, &[u8])]) -> Vec<u8> {
         .as_bytes(),
     );
 
-    for (i, &(w, h, jpeg)) in pages.iter().enumerate() {
+    for (i, &(w, h, jpeg, text_ops)) in pages.iter().enumerate() {
         let wpt = w as f64 * PX_TO_PT;
         let hpt = h as f64 * PX_TO_PT;
         let page_num = 3 + 3 * i;
         let img_num = page_num + 1;
         let content_num = page_num + 2;
+        let font_res = if used_faces.is_empty() {
+            String::new()
+        } else {
+            let list: Vec<String> = used_faces
+                .iter()
+                .map(|f| format!("/{} {} 0 R", res_name(f), face_ids[f]))
+                .collect();
+            format!(" /Font << {} >>", list.join(" "))
+        };
+
+        // Text layer over the flattened raster: clip brackets re-expressed
+        // as `q re W n` pairs, then BT/Tf/Tm/Tj runs with decoration fills.
+        let mut content = format!("q {wpt:.2} 0 0 {hpt:.2} 0 0 cm /Im0 Do Q\n");
+        let mut clip_depth = 0usize;
+        for op in text_ops {
+            match op {
+                PdfOp::Clip { x, y, w: cw, h: ch } => {
+                    content.push_str(&format!(
+                        "q {:.2} {:.2} {:.2} {:.2} re W n\n",
+                        *x as f64 * PX_TO_PT,
+                        (h as f64 - (*y + *ch) as f64) * PX_TO_PT,
+                        *cw as f64 * PX_TO_PT,
+                        *ch as f64 * PX_TO_PT,
+                    ));
+                    clip_depth += 1;
+                }
+                PdfOp::PopClip => {
+                    if clip_depth > 0 {
+                        content.push_str("Q\n");
+                        clip_depth -= 1;
+                    }
+                }
+                PdfOp::Line(l) => {
+                    let [r, g, b, _] = l.color;
+                    content.push_str(&format!(
+                        "{:.3} {:.3} {:.3} rg\nBT\n",
+                        r as f64 / 255.0,
+                        g as f64 / 255.0,
+                        b as f64 / 255.0,
+                    ));
+                    let mut cur: Option<PdfFace> = None;
+                    for glyph in &l.glyphs {
+                        if cur != Some(glyph.face) {
+                            content.push_str(&format!(
+                                "/{} {:.3} Tf\n",
+                                res_name(&glyph.face),
+                                l.font_size as f64 * PX_TO_PT,
+                            ));
+                            cur = Some(glyph.face);
+                        }
+                        content.push_str(&format!(
+                            "1 0 0 1 {:.2} {:.2} Tm <{:04X}> Tj\n",
+                            glyph.x as f64 * PX_TO_PT,
+                            (h as f64 - glyph.y as f64) * PX_TO_PT,
+                            glyph.gid,
+                        ));
+                    }
+                    content.push_str("ET\n");
+                    let th = (l.font_size / 16.0).round().max(1.0) as f64;
+                    for &(sx, sy, sw) in &l.strokes {
+                        content.push_str(&format!(
+                            "{:.2} {:.2} {:.2} {:.2} re f\n",
+                            sx as f64 * PX_TO_PT,
+                            (h as f64 - (sy + th as f32) as f64) * PX_TO_PT,
+                            sw as f64 * PX_TO_PT,
+                            th * PX_TO_PT,
+                        ));
+                    }
+                }
+            }
+        }
 
         offsets.push(out.len());
         out.extend_from_slice(
             format!(
                 "{page_num} 0 obj\n<< /Type /Page /Parent 2 0 R \
                  /MediaBox [0 0 {wpt:.2} {hpt:.2}] \
-                 /Resources << /XObject << /Im0 {img_num} 0 R >> >> \
+                 /Resources <<{font_res} /XObject << /Im0 {img_num} 0 R >> >> \
                  /Contents {content_num} 0 R >>\nendobj\n"
             )
             .as_bytes(),
@@ -368,7 +567,6 @@ pub fn pdf_of_pages(pages: &[(u32, u32, &[u8])]) -> Vec<u8> {
         out.extend_from_slice(jpeg);
         out.extend_from_slice(b"\nendstream\nendobj\n");
 
-        let content = format!("q {wpt:.2} 0 0 {hpt:.2} 0 0 cm /Im0 Do Q\n");
         offsets.push(out.len());
         out.extend_from_slice(
             format!(
@@ -379,8 +577,73 @@ pub fn pdf_of_pages(pages: &[(u32, u32, &[u8])]) -> Vec<u8> {
         );
     }
 
+    // Embedded font programs: five objects per used face — Type0 wrapper,
+    // CIDFontType2, FontDescriptor, FontFile2 (raw TTF), ToUnicode CMap.
+    for f in &used_faces {
+        let fid = face_ids[f];
+        let (cid, desc, file, cmap) = (fid + 1, fid + 2, fid + 3, fid + 4);
+        let name = base_font(f);
+        let (asc, dsc, upem) = metrics[f];
+        let bytes = fonts.pdf_face_bytes(*f);
+
+        offsets.push(out.len());
+        out.extend_from_slice(
+            format!(
+                "{fid} 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /{name} \
+                 /Encoding /Identity-H /DescendantFonts [{cid} 0 R] \
+                 /ToUnicode {cmap} 0 R >>\nendobj\n"
+            )
+            .as_bytes(),
+        );
+
+        offsets.push(out.len());
+        out.extend_from_slice(
+            format!(
+                "{cid} 0 obj\n<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{name} \
+                 /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> \
+                 /FontDescriptor {desc} 0 R /DW {:.0} /W {} /CIDToGIDMap /Identity >>\nendobj\n",
+                upem * 0.6,
+                w_array(f),
+            )
+            .as_bytes(),
+        );
+
+        offsets.push(out.len());
+        out.extend_from_slice(
+            format!(
+                "{desc} 0 obj\n<< /Type /FontDescriptor /FontName /{name} /Flags 4 \
+                 /FontBBox [-1000 -300 2100 1100] /ItalicAngle 0 \
+                 /Ascent {asc:.0} /Descent {dsc:.0} /CapHeight 700 /StemV 80 \
+                 /FontFile2 {file} 0 R >>\nendobj\n"
+            )
+            .as_bytes(),
+        );
+
+        offsets.push(out.len());
+        out.extend_from_slice(
+            format!(
+                "{file} 0 obj\n<< /Length {} /Length1 {} >>\nstream\n",
+                bytes.len(),
+                bytes.len()
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(bytes);
+        out.extend_from_slice(b"\nendstream\nendobj\n");
+
+        let tounicode = to_unicode_stream(f);
+        offsets.push(out.len());
+        out.extend_from_slice(
+            format!(
+                "{cmap} 0 obj\n<< /Length {} >>\nstream\n{tounicode}endstream\nendobj\n",
+                tounicode.len()
+            )
+            .as_bytes(),
+        );
+    }
+
     let xref_pos = out.len();
-    let total_objs = 2 + 3 * pages.len();
+    let total_objs = 2 + 3 * pages.len() + 5 * used_faces.len();
     out.extend_from_slice(format!("xref\n0 {}\n", total_objs + 1).as_bytes());
     out.extend_from_slice(b"0000000000 65535 f \n");
     for off in &offsets {
@@ -515,6 +778,7 @@ html,body{{margin:0;padding:0;width:400px;font-size:16px;line-height:20px;color:
             mode: PageMode::Print,
             page_size: (400.0, 300.0),
             max_pages: 10,
+            collect_text: false,
         };
         let set = render_page_set(&mut page, &opts).await.expect("page set renders");
         assert_eq!(set.pages.len(), 4, "one page per 200px block at page_h 300: {:?}", set.pages.iter().map(|p| (p.origin_y, p.height)).collect::<Vec<_>>());
@@ -535,6 +799,7 @@ html,body{{margin:0;padding:0;width:400px;font-size:16px;line-height:20px;color:
             dx: 0.0,
             dy: 0.0,
             content_size: (p.width as f32, p.height as f32),
+            text_ops: Vec::new(),
         }
     }
 
@@ -545,6 +810,7 @@ html,body{{margin:0;padding:0;width:400px;font-size:16px;line-height:20px;color:
             mode: PageMode::Slides(".slide".to_string()),
             page_size: (400.0, 300.0),
             max_pages: 10,
+            collect_text: false,
         };
         let set = render_page_set(&mut page, &opts).await.expect("slides render");
         assert_eq!(set.pages.len(), 3, "gap div is not a .slide: {:?}", set.pages.iter().map(|p| (p.origin_y, p.height)).collect::<Vec<_>>());
@@ -569,6 +835,7 @@ html,body{{margin:0;padding:0;width:400px;font-size:16px;line-height:20px;color:
             mode: PageMode::Slides(".missing".to_string()),
             page_size: (400.0, 300.0),
             max_pages: 10,
+            collect_text: false,
         };
         let err = render_page_set(&mut page, &opts).await.unwrap_err();
         assert!(matches!(err, PageError::NoSelectorMatches { .. }), "{err}");
@@ -581,6 +848,7 @@ html,body{{margin:0;padding:0;width:400px;font-size:16px;line-height:20px;color:
             mode: PageMode::Print,
             page_size: (400.0, 300.0),
             max_pages: 2,
+            collect_text: false,
         };
         let err = render_page_set(&mut page, &opts).await.unwrap_err();
         assert!(matches!(err, PageError::PageCapExceeded { asked: 4, cap: 2 }), "{err}");
@@ -600,6 +868,7 @@ html,body{{margin:0;padding:0;width:400px;font-size:16px;line-height:20px;color:
             mode: PageMode::Print,
             page_size: (400.0, 300.0),
             max_pages: 10,
+            collect_text: false,
         };
         let set = render_page_set(&mut page, &opts).await.expect("bare text renders");
         assert_eq!(set.pages.len(), 2, "ink extent 480px at page_h 300 is 2 pages: {:?}", set.pages.iter().map(|p| (p.origin_y, p.height)).collect::<Vec<_>>());
@@ -616,7 +885,7 @@ html,body{{margin:0;padding:0;width:400px;font-size:16px;line-height:20px;color:
         // parses the stream).
         let j1 = vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 0xFF, 0xD9];
         let j2 = vec![0xFF, 0xD8, 9, 9, 0xFF, 0xD9];
-        let pdf = pdf_of_pages(&[(794, 1123, &j1), (794, 200, &j2)]);
+        let pdf = pdf_of_pages(&[(794, 1123, &j1, &[]), (794, 200, &j2, &[])]);
         assert!(pdf.starts_with(b"%PDF-1.4\n%\xE2\xE3\xCF\xD3"), "header + binary marker");
         assert!(pdf.ends_with(b"%%EOF\n"), "trailer");
         let text = String::from_utf8_lossy(&pdf);
@@ -654,6 +923,218 @@ html,body{{margin:0;padding:0;width:400px;font-size:16px;line-height:20px;color:
             let expect = format!("{} 0 obj", i + 1);
             assert!(pdf[off..].starts_with(expect.as_bytes()), "obj {} offset", i + 1);
         }
+    }
+
+    /// The vector text layer end-to-end at the writer level: hand-built
+    /// glyph ops in, Type0/CIDFontType2/FontFile2/ToUnicode out, BT/Tf/Tm/Tj
+    /// runs with clip brackets and decoration fills, and an xref that still
+    /// points at every object once the 5-per-face block is appended.
+    #[test]
+    fn pdf_text_layer_embeds_fonts_and_glyph_ops() {
+        use crate::diting_layout::paint::{PdfLine, PdfOp};
+        use crate::diting_layout::text::{PdfFace, PdfGlyph};
+
+        let j1 = vec![0xFF, 0xD8, 0xFF, 0xE0, 0xFF, 0xD9];
+        let ops = vec![
+            PdfOp::Clip { x: 0.0, y: 0.0, w: 400.0, h: 100.0 },
+            PdfOp::Line(PdfLine {
+                font_size: 16.0,
+                color: [0, 0, 0, 255],
+                glyphs: vec![
+                    PdfGlyph {
+                        gid: 68,
+                        x: 10.0,
+                        y: 20.0,
+                        advance: 9.0,
+                        face: PdfFace::Regular,
+                        unicode: "A".into(),
+                    },
+                    PdfGlyph {
+                        gid: 120,
+                        x: 25.0,
+                        y: 20.0,
+                        advance: 8.0,
+                        face: PdfFace::Regular,
+                        unicode: String::new(),
+                    },
+                    PdfGlyph {
+                        gid: 1234,
+                        x: 50.0,
+                        y: 40.0,
+                        advance: 16.0,
+                        face: PdfFace::Regular,
+                        unicode: "中".into(),
+                    },
+                ],
+                strokes: vec![(10.0, 24.0, 9.0)],
+            }),
+            PdfOp::PopClip,
+            PdfOp::Line(PdfLine {
+                font_size: 16.0,
+                color: [0, 0, 0, 255],
+                glyphs: vec![PdfGlyph {
+                    gid: 70,
+                    x: 10.0,
+                    y: 60.0,
+                    advance: 9.0,
+                    face: PdfFace::Bold,
+                    unicode: "B".into(),
+                }],
+                strokes: Vec::new(),
+            }),
+        ];
+        let pdf = pdf_of_pages(&[(794, 1123, &j1, &ops)]);
+        // contains() is position-free, so the lossy whole-file string is
+        // safe even though the JPEG bytes sit mid-file; the xref walk below
+        // stays on raw bytes.
+        let text = String::from_utf8_lossy(&pdf);
+
+        // Font stack: one 5-object block per used face (Regular + Bold, no
+        // Mono since nothing routes to it).
+        assert!(text.contains("/Subtype /Type0"), "Type0 wrapper");
+        assert!(text.contains("/Subtype /CIDFontType2"), "CID font");
+        assert!(text.contains("/Encoding /Identity-H"));
+        assert!(text.contains("/FontFile2"), "embedded TTF");
+        assert!(
+            text.contains("/ToUnicode 10 0 R") && text.contains("/ToUnicode 15 0 R"),
+            "Type0 dict links its CMap (what extractors follow)"
+        );
+        assert!(text.contains("DitingCJK-Regular"), "regular base font");
+        assert!(text.contains("DitingCJK-Bold"), "bold base font");
+        assert!(!text.contains("DitingMono-Regular"), "unused mono face not embedded");
+
+        // The FontFile2 stream is the shaper's own bytes, verbatim.
+        let fonts = crate::diting_fonts::font_book();
+        let regular = fonts.pdf_face_bytes(PdfFace::Regular);
+        assert!(
+            text.contains(&format!("/Length1 {}", regular.len())),
+            "FontFile2 carries the full TTF"
+        );
+
+        // Content stream: image draw, clip bracket (y flipped), color +
+        // BT/ET, face-switched Tf, per-glyph Tm/Tj, underline fill.
+        assert!(text.contains("q 595.50 0 0 842.25 0 0 cm /Im0 Do Q"), "image draw");
+        assert!(text.contains("/MediaBox [0 0 595.50 842.25]"), "px → pt");
+        assert!(text.contains("q 0.00 767.25 300.00 75.00 re W n"), "clip, y flipped");
+        assert!(text.contains("0.000 0.000 0.000 rg\nBT\n"), "color then BT");
+        assert!(text.contains("/F1 12.000 Tf"), "16px @96dpi → 12pt");
+        assert!(text.contains("1 0 0 1 7.50 827.25 Tm <0044> Tj"), "glyph 'A'");
+        assert!(text.contains("<0078> Tj"), "continuation glyph, no extra Tf");
+        assert!(text.contains("<04D2> Tj"), "CJK glyph '中'");
+        assert!(text.contains("/F2 12.000 Tf"), "bold face switch");
+        assert!(text.contains("<0046> Tj"), "bold glyph 'B'");
+        assert!(text.contains("ET\n"));
+        assert!(text.contains("7.50 823.50 6.75 0.75 re f"), "underline fill");
+        assert!(text.contains("Q\n"), "pop clip");
+
+        // Page resources reference exactly the used faces.
+        assert!(text.contains("/Font << /F1 6 0 R /F2 11 0 R >>"), "F1@6 F2@11");
+
+        // CID widths: px advances scaled to font units per em.
+        let (_, _, upem) = fonts.pdf_face_metrics(PdfFace::Regular).unwrap();
+        assert!(
+            text.contains(&format!("68 [{}", (9.0 / 16.0 * upem).round())),
+            "/W entry for gid 68"
+        );
+        assert!(text.contains(&format!("/DW {:.0}", upem * 0.6)), "default width");
+
+        // ToUnicode CMap: first text per gid as UTF-16BE, decoded back the
+        // way a PDF text extractor reads it.
+        assert!(text.contains("beginbfchar"));
+        fn decode_cmap_entry(text: &str, gid_hex: &str) -> Option<String> {
+            let marker = format!("<{gid_hex}> <");
+            let at = text.find(&marker)? + marker.len();
+            let hex: String = text[at..].chars().take_while(|c| *c != '>').collect();
+            let units: Vec<u16> = (0..hex.len())
+                .step_by(4)
+                .filter_map(|i| u16::from_str_radix(&hex[i..i + 4], 16).ok())
+                .collect();
+            String::from_utf16(&units).ok()
+        }
+        assert_eq!(decode_cmap_entry(&text, "0044").as_deref(), Some("A"));
+        assert_eq!(decode_cmap_entry(&text, "04D2").as_deref(), Some("中"));
+        assert_eq!(decode_cmap_entry(&text, "0046").as_deref(), Some("B"));
+
+        // xref integrity with the face block appended.
+        let start = text.rfind("startxref").expect("marker");
+        let xref_at: usize = text[start..]
+            .trim_start_matches("startxref\n")
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse().ok())
+            .expect("numeric startxref");
+        let entries: Vec<&[u8]> = pdf[xref_at..]
+            .split(|&b| b == b'\n')
+            .skip(3)
+            .take_while(|l| l.trim_ascii().ends_with(b"n"))
+            .collect();
+        assert_eq!(entries.len(), 15, "2 fixed + 3×1 page objs + 5×2 face objs");
+        for (i, e) in entries.iter().enumerate() {
+            let off: usize = std::str::from_utf8(&e[..10])
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .expect("10-digit offset");
+            let expect = format!("{} 0 obj", i + 1);
+            assert!(pdf[off..].starts_with(expect.as_bytes()), "obj {} offset", i + 1);
+        }
+    }
+
+    /// The collection half of the flag: ordinary text comes back as glyph
+    /// ops while a text-shadow run stays raster-only and never reaches the
+    /// text layer (it would paint twice).
+    #[tokio::test(flavor = "current_thread")]
+    async fn collect_text_vectors_plain_and_skips_shadow() {
+        use crate::diting_layout::paint::PdfOp;
+
+        const HTML: &str = r#"<!doctype html><html><head><style>
+html,body{margin:0;padding:0}
+</style></head><body>
+<div style="font-size:16px;color:#111">PLAINTEXT</div>
+<div style="font-size:16px;text-shadow:2px 2px 2px #888">zzshadowzz</div>
+</body></html>"#;
+        let mut page = navigated(HTML, "collect.html").await;
+        let opts = PagePumpOptions {
+            mode: PageMode::Print,
+            page_size: (400.0, 300.0),
+            max_pages: 10,
+            collect_text: true,
+        };
+        let set = render_page_set(&mut page, &opts).await.expect("render");
+        let has_glyph = |needle: char| {
+            set.text_ops.iter().flatten().any(|op| match op {
+                PdfOp::Line(l) => l.glyphs.iter().any(|g| g.unicode.contains(needle)),
+                _ => false,
+            })
+        };
+        assert!(has_glyph('P'), "plain text run vectorizes");
+        assert!(!has_glyph('z'), "text-shadow run stays raster");
+    }
+
+    /// Emoji glyphs come from the fallback face — the shaper can't route
+    /// them to an embedded face, so an emoji-only page yields no glyph lines.
+    #[tokio::test(flavor = "current_thread")]
+    async fn emoji_only_page_stays_raster() {
+        use crate::diting_layout::paint::PdfOp;
+
+        const HTML: &str = r#"<!doctype html><html><head><style>
+html,body{margin:0;padding:0}
+</style></head><body><div style="font-size:32px">🚀🔥</div></body></html>"#;
+        let mut page = navigated(HTML, "emoji.html").await;
+        let opts = PagePumpOptions {
+            mode: PageMode::Print,
+            page_size: (400.0, 300.0),
+            max_pages: 10,
+            collect_text: true,
+        };
+        let set = render_page_set(&mut page, &opts).await.expect("render");
+        assert!(
+            set.text_ops
+                .iter()
+                .flatten()
+                .all(|op| !matches!(op, PdfOp::Line(_))),
+            "no glyph lines for fallback-face glyphs: {:?}",
+            set.text_ops
+        );
     }
 
     /// The encoders produce their format magics from an RGBA frame.

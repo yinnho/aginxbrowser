@@ -48,6 +48,31 @@ enum FaceSel {
     Fallback(usize),
 }
 
+/// The embedded PDF face a shaped glyph belongs to (vector-text batch): the
+/// primary pair by weight plus the monospace face. Fallback faces (emoji
+/// color bitmaps) never get one — a run visiting a fallback stays raster.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+pub(crate) enum PdfFace {
+    Regular,
+    Bold,
+    Mono,
+}
+
+/// One shaped glyph positioned for the PDF text layer: glyph id in the
+/// embedded face's own space (the writer embeds the exact same face bytes,
+/// so ids need no remap), absolute x / baseline-relative y in px, the
+/// shaped advance in px (feeds the CIDFont /W table), and the cluster's
+/// source text on the cluster's first glyph only (ToUnicode CMap).
+#[derive(Clone, Debug)]
+pub(crate) struct PdfGlyph {
+    pub gid: u16,
+    pub x: f32,
+    pub y: f32,
+    pub advance: f32,
+    pub face: PdfFace,
+    pub unicode: String,
+}
+
 /// A regular/bold face pair loaded from raw TTF/OTF bytes.
 ///
 /// Deliberately minimal: one family, two weights, index-0 face. Weight
@@ -250,6 +275,86 @@ impl FontBook {
             });
         }
         total
+    }
+
+    /// Shape `text` into per-glyph records for the PDF text layer
+    /// (vector-text batch) — the SAME face segmentation and swash shaping
+    /// `blit_line` runs, so glyph ids and pen positions match the raster
+    /// bit-for-bit. Returns `None` when any segment routes to a fallback
+    /// face: those glyphs (emoji color bitmaps) have no outline in the
+    /// embedded faces and stay in the raster; the caller keeps the whole
+    /// item raster-only.
+    pub(crate) fn pdf_shape(
+        &self,
+        text: &str,
+        font_size: f32,
+        bold: bool,
+        mono: bool,
+    ) -> Option<Vec<PdfGlyph>> {
+        let mut out: Vec<PdfGlyph> = Vec::new();
+        let mut pen = 0.0f32;
+        for (sel, seg) in self.segments(text, bold, mono) {
+            let face = match sel {
+                FaceSel::Primary if bold => PdfFace::Bold,
+                FaceSel::Primary => PdfFace::Regular,
+                FaceSel::Mono => PdfFace::Mono,
+                FaceSel::Fallback(_) => return None,
+            };
+            let bytes = self.face_bytes(sel, bold);
+            let Some(font) = FontRef::from_index(bytes, 0) else { continue };
+            SHAPE_CTX.with_borrow_mut(|ctx| {
+                let mut shaper = ctx.builder(font).size(font_size).build();
+                shaper.add_str(seg);
+                shaper.shape_with(|cluster| {
+                    // Cluster source offsets are byte indices into the
+                    // segment (add_str feeds char_indices offsets).
+                    let cluster_text = &seg[cluster.source.to_range()];
+                    for (gi, g) in cluster.glyphs.iter().enumerate() {
+                        out.push(PdfGlyph {
+                            gid: g.id,
+                            x: pen + g.x,
+                            y: g.y,
+                            advance: g.advance,
+                            face,
+                            // Ligature/mark clusters: the first glyph
+                            // carries the cluster's text for ToUnicode;
+                            // the rest map to nothing.
+                            unicode: if gi == 0 { cluster_text.to_string() } else { String::new() },
+                        });
+                        pen += g.advance;
+                    }
+                });
+            });
+        }
+        Some(out)
+    }
+
+    /// Vertical metrics of a [`PdfFace`] in FONT UNITS (the
+    /// FontDescriptor coordinate space — not the px-scaled `metrics`).
+    /// `(ascent, descent, units_per_em)` with descent negative per PDF.
+    pub(crate) fn pdf_face_metrics(&self, face: PdfFace) -> Option<(f32, f32, f32)> {
+        let sel = match face {
+            PdfFace::Regular => FaceSel::Primary,
+            PdfFace::Bold => FaceSel::Primary,
+            PdfFace::Mono => FaceSel::Mono,
+        };
+        let bytes = self.face_bytes(sel, face == PdfFace::Bold);
+        let font = FontRef::from_index(bytes, 0)?;
+        let m = MetricsProxy::from_font(&font).materialize_metrics(&font, &[]);
+        // swash reports the descender as a positive magnitude (see
+        // `metrics`); PDF /Descent is negative below the baseline.
+        Some((m.ascent, -m.descent.abs(), m.units_per_em as f32))
+    }
+
+    /// Raw TTF bytes of a [`PdfFace`] — the FontFile2 payload for the PDF
+    /// text layer. `PdfFace::Mono` only ever appears when the mono face
+    /// parsed (see `pdf_shape`), so the fallback arm is unreachable.
+    pub(crate) fn pdf_face_bytes(&self, face: PdfFace) -> &[u8] {
+        match face {
+            PdfFace::Regular => &self.regular,
+            PdfFace::Bold => &self.bold,
+            PdfFace::Mono => self.mono.as_deref().unwrap_or(&self.regular),
+        }
     }
 
     /// Vertical metrics of the face, normalized to px at `font_size` — for

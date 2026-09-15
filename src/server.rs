@@ -1053,10 +1053,23 @@ pub fn do_pdf(req: crate::PdfRequest) -> Result<crate::PdfResponse> {
                 Some(sel) => crate::pages::PageMode::Slides(sel.to_string()),
                 None => crate::pages::PageMode::Print,
             };
+            // Only the PDF path consumes the vector text layer — collecting
+            // it strips vectorizable text from the band raster, so the
+            // raster-only formats must not turn it on.
+            let format = if req.format.eq_ignore_ascii_case("png") {
+                "png"
+            } else if req.format.eq_ignore_ascii_case("pptx") {
+                "pptx"
+            } else if req.format.eq_ignore_ascii_case("docx") {
+                "docx"
+            } else {
+                "pdf"
+            };
             let opts = crate::pages::PagePumpOptions {
                 mode,
                 page_size: (req.width as f32, req.height as f32),
                 max_pages: req.max_pages,
+                collect_text: format == "pdf",
             };
             let set = crate::pages::render_page_set(&mut page.inner, &opts).await?;
             tracing::debug!(
@@ -1077,15 +1090,6 @@ pub fn do_pdf(req: crate::PdfRequest) -> Result<crate::PdfResponse> {
                     .filter(|s| !s.is_empty())
             };
 
-            let format = if req.format.eq_ignore_ascii_case("png") {
-                "png"
-            } else if req.format.eq_ignore_ascii_case("pptx") {
-                "pptx"
-            } else if req.format.eq_ignore_ascii_case("docx") {
-                "docx"
-            } else {
-                "pdf"
-            };
             // PNG wants per-page PNGs; the other three formats all embed
             // per-page JPEGs, so they share one encode pass.
             let mut pngs: Vec<String> = Vec::new();
@@ -1107,6 +1111,11 @@ pub fn do_pdf(req: crate::PdfRequest) -> Result<crate::PdfResponse> {
                 .iter()
                 .map(|(w, h, j)| (*w, *h, j.as_slice()))
                 .collect();
+            let pdf_refs: Vec<(u32, u32, &[u8], &[crate::diting_layout::paint::PdfOp])> = jpegs
+                .iter()
+                .zip(set.text_ops.iter())
+                .map(|((w, h, j), ops)| (*w, *h, j.as_slice(), ops.as_slice()))
+                .collect();
             let (pdf_base64, pptx_base64, docx_base64) = match format {
                 "pptx" => (
                     None,
@@ -1119,7 +1128,7 @@ pub fn do_pdf(req: crate::PdfRequest) -> Result<crate::PdfResponse> {
                     Some(base64_png(&crate::ooxml::docx_of_pages(&refs))),
                 ),
                 "pdf" => (
-                    Some(base64_png(&crate::pages::pdf_of_pages(&refs))),
+                    Some(base64_png(&crate::pages::pdf_of_pages(&pdf_refs))),
                     None,
                     None,
                 ),

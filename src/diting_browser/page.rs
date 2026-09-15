@@ -1870,6 +1870,22 @@ impl Page {
         js.with_state(|st| crate::diting_js::ops::band_frame(st, scroll_x, scroll_y, viewport))
     }
 
+    /// Same band frame but also collecting the PDF text layer (vector-text
+    /// batch): `frame.text_ops` carries the band-local glyph ops and the
+    /// raster pass skips those items.
+    #[cfg(feature = "screenshot")]
+    pub fn viewport_band_frame_with_text(
+        &self,
+        scroll_x: f32,
+        scroll_y: f32,
+        viewport: (f32, f32),
+    ) -> Option<(crate::diting_js::ops::BandFrame, Vec<String>)> {
+        let js = self.js.as_ref()?;
+        js.with_state(|st| {
+            crate::diting_js::ops::band_frame_with_text(st, scroll_x, scroll_y, viewport)
+        })
+    }
+
     /// The document's text-ink extent (CSS px) from the same cached layout
     /// run band paint rides — the true content height of a bare-text body,
     /// whose only element boxes (html/body) stretch to the viewport.
