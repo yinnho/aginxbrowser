@@ -944,6 +944,55 @@
         );
     }
 
+    /// Float + percentage width + margin (obscura #757 family): a float's
+    /// percentage width must survive adding a margin (percent or px) — the
+    /// combination is the Bootstrap 3 offset grid. Chrome keeps every column
+    /// at 83.333% of the 1600px row regardless of the margin.
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn float_percentage_width_survives_margin() {
+        let mut rt = setup_runtime(
+            r#"<style>
+              body{margin:0}
+              .row{width:1600px}
+              .inner{width:370px}
+            </style>
+            <div class="row"><div id="c1" style="float:left;width:83.33333333%"><div class="inner">1</div></div></div>
+            <div class="row"><div id="c2" style="float:left;width:83.33333333%;margin-left:8.33333333%"><div class="inner">2</div></div></div>
+            <div class="row"><div id="c3" style="float:left;width:83.33333333%;margin-left:133px"><div class="inner">3</div></div></div>
+            <div class="row"><div id="c4" style="width:83.33333333%;margin-left:8.33333333%"><div class="inner">4</div></div></div>"#,
+        );
+        let result = rt.evaluate(r#"
+            const g = (id) => {
+                const b = document.getElementById(id).getBoundingClientRect();
+                return [Math.round(b.x), Math.round(b.width)];
+            };
+            return { c1: g('c1'), c2: g('c2'), c3: g('c3'), c4: g('c4') };
+        "#).unwrap();
+        let v = result;
+        // Widths wobble 1333/1334 with the integral-coordinate posture
+        // (obscura #576): gBCR width is round(right) - round(left), so a
+        // 1333.33px column shifts by 1 depending on its fractional x. The
+        // property under test is NO collapse — upstream #757 dropped the
+        // column to 420/873 the moment a margin appeared.
+        assert_eq!(
+            v["c1"], serde_json::json!([0, 1333]),
+            "bare float percentage width resolves against the row"
+        );
+        assert_eq!(
+            v["c2"], serde_json::json!([133, 1334]),
+            "percentage margin must not collapse the float's percentage width"
+        );
+        assert_eq!(
+            v["c3"], serde_json::json!([133, 1333]),
+            "px margin must not collapse the float's percentage width either"
+        );
+        assert_eq!(
+            v["c4"], serde_json::json!([133, 1334]),
+            "in-flow control: percentage width + percentage margin without float"
+        );
+    }
+
     /// Regression for #105: `HTMLFormElement` must expose `.elements` so
     /// frameworks that probe form field collections work.
     #[test]
