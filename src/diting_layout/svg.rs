@@ -518,16 +518,20 @@ fn rounded_rect_poly(x: f32, y: f32, w: f32, h: f32, rx: f32, ry: f32) -> Vec<(f
         return vec![(x, y), (x + w, y), (x + w, y + h), (x, y + h)];
     }
     let mut pts = Vec::new();
+    // One continuous clockwise (screen) sweep around the perimeter: each
+    // quarter-arc must END on the edge where the next corner's arc begins,
+    // otherwise the implicit chords between arcs cut through the interior
+    // and the corner arcs detach as isolated petals.
     let mut corner = |cx: f32, cy: f32, a0: f32| {
         for i in 0..8 {
-            let a = a0 + i as f32 * (std::f32::consts::FRAC_PI_2 / 8.0);
+            let a = a0 - i as f32 * (std::f32::consts::FRAC_PI_2 / 8.0);
             pts.push((cx + rx * a.cos(), cy - ry * a.sin()));
         }
     };
-    corner(x + w - rx, y + ry, 0.0);
-    corner(x + w - rx, y + h - ry, -std::f32::consts::FRAC_PI_2);
-    corner(x + rx, y + h - ry, std::f32::consts::PI);
-    corner(x + rx, y + ry, std::f32::consts::FRAC_PI_2);
+    corner(x + rx, y + ry, std::f32::consts::PI); // TL: left edge -> top edge
+    corner(x + w - rx, y + ry, std::f32::consts::FRAC_PI_2); // TR: top -> right
+    corner(x + w - rx, y + h - ry, 0.0); // BR: right -> bottom
+    corner(x + rx, y + h - ry, -std::f32::consts::FRAC_PI_2); // BL: bottom -> left
     pts
 }
 
@@ -1313,6 +1317,46 @@ mod tests {
         // Arc params are consumed without derailing the following command.
         let arc = parse_path("M 0 0 A 30 30 0 0 1 60 0 L 60 30", &IDENTITY);
         assert_eq!(arc[0].pts, vec![(0.0, 0.0), (60.0, 0.0), (60.0, 30.0)]);
+    }
+
+    #[test]
+    fn rounded_rect_walks_the_perimeter() {
+        // A scrambled corner order draws a pinwheel: the chords between arc
+        // groups slice the interior and the corner arcs detach as isolated
+        // petals (found rendering a brand icon — window shrank by ~2*rx on
+        // every side with stray wedges at the bottom corners).
+        let pts = rounded_rect_poly(100.0, 136.0, 312.0, 240.0, 26.0, 26.0);
+        assert_eq!(pts.len(), 32);
+        // Starts on the left edge beside the TL corner.
+        assert_eq!(pts[0], (100.0, 162.0));
+        for &(px, py) in &pts {
+            assert!(
+                (100.0..=412.0).contains(&px) && (136.0..=376.0).contains(&py),
+                "({px},{py}) escapes the box"
+            );
+            // No vertex pokes into a cut corner (arc vertices sit exactly on
+            // the corner circle; chords stay within cos(pi/32) of it).
+            for (cx, cy) in [(126.0, 162.0), (386.0, 162.0), (386.0, 350.0), (126.0, 350.0)] {
+                let d = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
+                assert!(d >= 25.0, "({px},{py}) enters cut corner at ({cx},{cy})");
+            }
+        }
+        // Convex and consistently wound: cross products of consecutive edge
+        // pairs share a sign (zero allowed on collinear chord/arc joints).
+        let n = pts.len();
+        let mut sign = 0.0f32;
+        for i in 0..n {
+            let a = pts[i];
+            let b = pts[(i + 1) % n];
+            let c = pts[(i + 2) % n];
+            let cross = (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0);
+            if cross.abs() > 1e-6 {
+                let s = cross.signum();
+                assert!(sign == 0.0 || sign == s, "non-convex turn at {b:?} (cross {cross})");
+                sign = s;
+            }
+        }
+        assert!(sign != 0.0, "degenerate: all edges collinear");
     }
 
     #[test]
