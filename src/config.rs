@@ -43,6 +43,7 @@ pub fn should_auto_proxy(url: &str) -> bool {
         "medium.com",
         "x.com",
         "twitter.com",
+        "twimg.com",
         "youtube.com",
         "reddit.com",
         "openai.com",
@@ -67,6 +68,11 @@ mod tests {
         assert!(should_auto_proxy("https://en.wikipedia.org/wiki/Rust"));
         assert!(should_auto_proxy("https://wikipedia.org/"));
         assert!(should_auto_proxy("https://raw.githubusercontent.com/x/y"));
+        // Twitter's CDN: every x.com page load pulls scripts/images from
+        // abs.twimg.com/pbs.twimg.com — a page whose HTML proxied but whose
+        // CDN assets went direct arrives scriptless.
+        assert!(should_auto_proxy("https://abs.twimg.com/client-web/main.js"));
+        assert!(should_auto_proxy("https://pbs.twimg.com/profile/x.jpg"));
         assert!(!should_auto_proxy("https://notwikipedia.org/"));
         assert!(!should_auto_proxy("https://example.com/"));
         assert!(!should_auto_proxy("not a url"));
