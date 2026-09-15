@@ -10751,3 +10751,93 @@ async fn fetch_referrer_policy_reaches_the_wire() {
     );
     assert_eq!(referer_of("/explicit").as_deref(), Some("http://other.example/"));
 }
+
+/// Generated content v1 (batch 99): ::before/::after boxes synthesize into
+/// layout. Block pseudos grow the host (the Bootstrap 3 clearfix family —
+/// `display:table` coerces to block for flow presence), inline pseudos
+/// merge onto the adjacent text run without adding a line, attr() resolves
+/// against the host, and content:none cascades but produces no box.
+#[cfg(feature = "screenshot")]
+#[test]
+fn generated_content_before_after_layout() {
+    let mut rt = setup_runtime(
+        r#"<style>
+          body{margin:0}
+          .grow::after{content:"";display:block;height:20px}
+          .tbl::before{content:"";display:table;height:15px}
+          .merge li::before{content:"• "}
+          .attr::after{content:attr(data-tip)}
+          .none::after{content:none}
+        </style>
+        <ul class="merge"><li id="li">one</li></ul>
+        <ul><li id="liCtrl">one</li></ul>
+        <div id="grow" class="grow"></div>
+        <div id="tbl" class="tbl"></div>
+        <div id="attr" class="attr" data-tip="abc"></div>
+        <div id="none" class="none"></div>"#,
+    );
+    let v = rt
+        .evaluate(
+            r#"
+            const h = (id) => Math.round(document.getElementById(id).getBoundingClientRect().height);
+            return { li: h('li'), liCtrl: h('liCtrl'), grow: h('grow'), tbl: h('tbl'), attr: h('attr'), none: h('none') };
+        "#,
+        )
+        .unwrap();
+    assert_eq!(
+        v["li"], v["liCtrl"],
+        "inline ::before merges onto the adjacent run: no extra line"
+    );
+    assert_eq!(
+        v["grow"], serde_json::json!(20),
+        "block ::after with a height grows the host (clearfix box)"
+    );
+    assert_eq!(
+        v["tbl"], serde_json::json!(15),
+        "display:table pseudos coerce to block: flow presence, not the table walk"
+    );
+    assert!(
+        v["attr"].as_f64().unwrap_or(0.0) >= 10.0,
+        "attr() content on a childless host still produces a line"
+    );
+    assert_eq!(
+        v["none"], serde_json::json!(0),
+        "content:none cascades but produces no box"
+    );
+}
+
+/// getComputedStyle face for `content` (batch 99): the default reads
+/// "normal" (Chrome's initial), declared values re-serialize quoted,
+/// attr() keeps its functional shape, and pseudo-only declarations never
+/// leak onto the host element.
+#[cfg(feature = "screenshot")]
+#[test]
+fn computed_style_content_face() {
+    let mut rt = setup_runtime(
+        r#"<style>
+          #q::before{content:"P"}
+          #a{content:attr(k)}
+          #s{content:"S"}
+        </style>
+        <span id="q"></span><span id="a" k="v1"></span><span id="s"></span><span id="d"></span>"#,
+    );
+    let cs = |rt: &mut JsRuntime, sel: &str| {
+        rt.evaluate(&format!(
+            "getComputedStyle(document.querySelector('{}')).content",
+            sel
+        ))
+        .unwrap()
+    };
+    assert_eq!(
+        cs(&mut rt, "#q"),
+        serde_json::json!("normal"),
+        "pseudo-only rule never lands on the host"
+    );
+    assert_eq!(cs(&mut rt, "#a"), serde_json::json!("attr(k)"));
+    assert_eq!(cs(&mut rt, "#s"), serde_json::json!("\"S\""));
+    assert_eq!(
+        cs(&mut rt, "#d"),
+        serde_json::json!("normal"),
+        "default computed content is Chrome's 'normal'"
+    );
+}

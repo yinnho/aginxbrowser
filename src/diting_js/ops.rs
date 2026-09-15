@@ -2421,6 +2421,7 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "display",
     "float",
     "clear",
+    "content",
     "box-sizing",
     "background-clip",
     "overflow",
@@ -2635,6 +2636,15 @@ fn computed_style_value(
         ),
         // Chrome's computed value is the declared keyword itself (not a used
         // value), so the CSS initial surfaces as content-box.
+        // Chrome's initial computed content is "normal"; declared strings
+        // re-serialize quoted, attr() keeps its functional shape.
+        "content" => Some(match &s.content {
+            Some(ContentValue::Str(t)) => {
+                format!("\"{}\"", t.replace('\\', "\\\\").replace('"', "\\\""))
+            },
+            Some(ContentValue::Attr(name)) => format!("attr({})", name),
+            None => "normal".into(),
+        }),
         "box-sizing" => Some(
             match s.box_sizing {
                 Some(BoxSizing::BorderBox) => "border-box",

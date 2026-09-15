@@ -571,6 +571,22 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "z-index" => value == "auto" || value.parse::<i32>().is_ok(),
         "float" => matches!(value, "left" | "right" | "none"),
         "clear" => matches!(value, "left" | "right" | "both" | "inline-start" | "inline-end" | "none"),
+        "content" => {
+            // Generated content: strings (quoted), attr()/counter()/quotes,
+            // none/normal. Deeper grammars (counter styles) pass the probe
+            // and simply produce no box at apply time.
+            let t = value.trim();
+            let lower = t.to_ascii_lowercase();
+            matches!(lower.as_str(), "none" | "normal")
+                || lower.starts_with("attr(")
+                || lower.starts_with("counter")
+                || lower.starts_with("open-quote")
+                || lower.starts_with("close-quote")
+                || lower.starts_with("no-open-quote")
+                || lower.starts_with("no-close-quote")
+                || t.starts_with('"')
+                || t.starts_with('\'')
+        }
         "border-collapse" => matches!(value, "collapse" | "separate"),
         "vertical-align" => matches!(
             value,
@@ -841,6 +857,87 @@ pub struct ComputedStyle {
     /// source. Values are stored raw (author tokens) — !important stripped at
     /// insertion; resolution to colors/lengths happens at use sites.
     pub custom: std::collections::HashMap<String, String>,
+    /// `content` (generated content batch): only pseudo boxes read it.
+    /// `attr()` stays unresolved here — the host's attributes live outside
+    /// this module — and resolves at the cascade's visit site.
+    pub content: Option<ContentValue>,
+    /// Generated-content pseudos keyed on the HOST element (the cascade's
+    /// visit fills them; layout synthesizes the boxes). `None` = no matching
+    /// pseudo rule — the overwhelmingly common case, zero cost.
+    pub pseudos: Option<Box<PseudoPair>>,
+}
+
+/// `content` value on a generated-content pseudo, string forms only this
+/// batch (quoted strings with CSS escapes; `attr(name)` as the unresolved
+/// name; `none`/`normal` never reach here — they mean "no box").
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContentValue {
+    Str(String),
+    Attr(String),
+}
+
+/// The two box-generating pseudos, each cascaded from its host element.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PseudoPair {
+    pub before: Option<ComputedStyle>,
+    pub after: Option<ComputedStyle>,
+}
+
+/// Parse a `content` value: quoted string (CSS `\` escapes incl. `\e116`
+/// hex codepoints), `attr(name)`, or none/normal (None — no box). Other
+/// forms (counters, quotes) fail closed: no box.
+pub fn parse_content_value(value: &str) -> Option<ContentValue> {
+    let v = value.trim();
+    let lower = v.to_ascii_lowercase();
+    if lower == "none" || lower == "normal" || v.is_empty() {
+        return None;
+    }
+    let bytes = v.as_bytes();
+    if bytes[0] == b'"' || bytes[0] == b'\'' {
+        let quote = bytes[0];
+        let inner = v.strip_prefix(quote as char)?;
+        let inner = inner.strip_suffix(quote as char)?;
+        let mut out = String::new();
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            // CSS escape: 1-6 hex digits (optionally ONE whitespace
+            // terminator) → codepoint; any other char escapes itself
+            // (`\x` → x). The 7th hex digit is a regular char.
+            let mut hex = String::new();
+            let mut term: Option<char> = None;
+            for h in chars.by_ref() {
+                if hex.len() < 6 && h.is_ascii_hexdigit() {
+                    hex.push(h);
+                } else {
+                    term = Some(h);
+                    break;
+                }
+            }
+            if hex.is_empty() {
+                if let Some(t) = term {
+                    out.push(t);
+                }
+                continue;
+            }
+            if let Some(cp) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                out.push(cp);
+            }
+            if let Some(t) = term {
+                if !t.is_ascii_whitespace() {
+                    out.push(t);
+                }
+            }
+        }
+        return Some(ContentValue::Str(out));
+    }
+    if let Some(name) = lower.strip_prefix("attr(").and_then(|s| s.strip_suffix(')')) {
+        return Some(ContentValue::Attr(name.trim().to_string()));
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3543,6 +3640,16 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             };
             true
         }
+        "content" => match parse_content_value(value) {
+            // none/normal (or unparseable — counters/quotes) leave the
+            // field unset: no pseudo box. `content` only ever matters on
+            // a generated-content pseudo.
+            Some(cv) => {
+                style.content = Some(cv);
+                true
+            }
+            None => false,
+        },
         "top" => {
             style.top = len(v);
             style.top.is_some()
@@ -6711,5 +6818,54 @@ mod tests {
         assert!(!supports_declaration("overflow", "hidden auto scroll"), "three keywords are invalid");
         assert!(!supports_declaration("overflow-x", "hidden auto"), "longhand takes one keyword");
         assert!(!supports_declaration("overflow", "elbow"));
+    }
+
+    // ---- generated content (::before/::after v1) ----
+
+    #[test]
+    fn parse_content_value_forms() {
+        // Plain string, either quote style.
+        assert_eq!(
+            parse_content_value(r#""• ""#),
+            Some(ContentValue::Str("• ".into())),
+        );
+        assert_eq!(
+            parse_content_value("'X'"),
+            Some(ContentValue::Str("X".into())),
+        );
+        // Quoted-empty must produce a box: the clearfix idiom is
+        // `content: ""` — only the UNQUOTED empty token is invalid.
+        assert_eq!(parse_content_value(r#""""#), Some(ContentValue::Str("".into())));
+        // CSS escapes: hex codepoints (\e116 → U+E116, Bootstrap
+        // glyphicons) and the one-whitespace terminator (\41 bc → "Abc").
+        assert_eq!(
+            parse_content_value(r#""\e116""#),
+            Some(ContentValue::Str("\u{e116}".into())),
+        );
+        assert_eq!(
+            parse_content_value(r#""\41 bc""#),
+            Some(ContentValue::Str("Abc".into())),
+        );
+        assert_eq!(
+            parse_content_value("attr(data-tip)"),
+            Some(ContentValue::Attr("data-tip".into())),
+        );
+        // none/normal and the unquoted empty token produce no box.
+        assert_eq!(parse_content_value("none"), None);
+        assert_eq!(parse_content_value("normal"), None);
+        assert_eq!(parse_content_value(""), None);
+        // Counters/quotes fail closed for now: no box.
+        assert_eq!(parse_content_value("counter(x)"), None);
+        assert_eq!(parse_content_value("open-quote"), None);
+        assert_eq!(parse_content_value("unquoted"), None);
+    }
+
+    #[test]
+    fn content_declaration_lands_in_computed_style() {
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, r#"content: "X""#);
+        assert_eq!(s.content, Some(ContentValue::Str("X".into())));
+        // Default stays unset — the getComputedStyle face maps it to "normal".
+        assert_eq!(ComputedStyle::default().content, None);
     }
 }

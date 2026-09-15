@@ -914,9 +914,47 @@ impl DomTree {
         // both spellings there. Over-bucketing is always safe (the matcher
         // has the final word); a bucket the probe cannot reach never is.
         let quirks = self.selector_quirks_mode() == QuirksMode::Quirks;
+        let mut pseudo_kinds: HashMap<usize, PseudoKind> = HashMap::new();
 
         for (ri, selector) in rule_selectors.iter().enumerate() {
-            let Ok(list) = parse_selector(selector) else {
+            // A trailing pseudo-element suffix routes the rule to the
+            // pseudo cascade instead of the normal one. Only a suffix at
+            // the very end of a comma-free selector is recognized; anything
+            // else (`a::before b`, `a::before:hover`, comma lists) parses
+            // with the suffix attached and stays dead — exactly what
+            // MatchingMode::Normal did to it before pseudo support.
+            let mut base_selector = *selector;
+            let sel_trim = selector.trim();
+            if !sel_trim.contains(',') {
+                let lower = sel_trim.to_ascii_lowercase();
+                let stripped = lower
+                    .strip_suffix("::before")
+                    .map(|rest| (rest.len(), PseudoKind::Before))
+                    .or_else(|| {
+                        lower
+                            .strip_suffix("::after")
+                            .map(|rest| (rest.len(), PseudoKind::After))
+                    })
+                    .or_else(|| {
+                        lower
+                            .strip_suffix(":before")
+                            .map(|rest| (rest.len(), PseudoKind::Before))
+                    })
+                    .or_else(|| {
+                        lower
+                            .strip_suffix(":after")
+                            .map(|rest| (rest.len(), PseudoKind::After))
+                    });
+                // to_ascii_lowercase is byte-for-byte, so slicing the
+                // original by the lowered length keeps the author's case.
+                if let Some((base_len, kind)) = stripped {
+                    if let Some(base) = sel_trim.get(..base_len) {
+                        base_selector = base;
+                        pseudo_kinds.insert(ri, kind);
+                    }
+                }
+            }
+            let Ok(list) = parse_selector(base_selector) else {
                 entries.push(None);
                 specificity.push(None);
                 continue;
@@ -958,6 +996,7 @@ impl DomTree {
         }
 
         let mut hits: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut pseudo_hits: HashMap<usize, Vec<usize>> = HashMap::new();
         let mut caches = selectors::context::SelectorCaches::default();
         let mut context = MatchingContext::new(
             MatchingMode::Normal,
@@ -1015,16 +1054,25 @@ impl DomTree {
             for ri in candidates.drain(..) {
                 let Some(list) = entries[ri].as_ref() else { continue };
                 if selectors::matching::matches_selector_list(list, &element, &mut context) {
-                    hits.entry(ri).or_default().push(desc_id.index());
+                    if pseudo_kinds.contains_key(&ri) {
+                        pseudo_hits.entry(ri).or_default().push(desc_id.index());
+                    } else {
+                        hits.entry(ri).or_default().push(desc_id.index());
+                    }
                 }
             }
         }
         // The walk is document order, not node-index order; the cascade
         // binary-searches these, so each rule's hit set ends ascending.
-        for rule_hits in hits.values_mut() {
+        for rule_hits in hits.values_mut().chain(pseudo_hits.values_mut()) {
             rule_hits.sort_unstable();
         }
-        RuleMatchSets { hits, specificity }
+        RuleMatchSets {
+            hits,
+            specificity,
+            pseudo_kinds,
+            pseudo_hits,
+        }
     }
 }
 
@@ -1108,6 +1156,31 @@ pub struct RuleMatchSets {
     /// instead of re-parsed per matched element (the old cascade called
     /// `compile_rule_selector` per element x matched rule).
     pub specificity: Vec<Option<u32>>,
+    /// Pseudo-element rules (`div::before { ... }`), keyed by rule index.
+    /// A rule carries at most one kind (the suffix sits on the single
+    /// selector), and its hits live in [`RuleMatchSets::pseudo_hits`] so
+    /// the normal cascade never applies the base compound to real elements.
+    pub pseudo_kinds: HashMap<usize, PseudoKind>,
+    /// Pseudo-element rule hit sets, same shape as `hits` but keyed by the
+    /// rule indexes present in `pseudo_kinds`.
+    pub pseudo_hits: HashMap<usize, Vec<usize>>,
+}
+
+/// The pseudo-element suffix a rule selector may end with. Single-colon
+/// legacy spellings (`:before`/`:after`) fold into the same kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PseudoKind {
+    Before,
+    After,
+}
+
+impl PseudoKind {
+    pub fn css_name(self) -> &'static str {
+        match self {
+            PseudoKind::Before => "::before",
+            PseudoKind::After => "::after",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1575,5 +1648,47 @@ mod tests {
         assert!(star.len() >= 5, "universal rule matched only {star:?}");
         // Never-matching unkeyed rule contributes nothing.
         assert!(sets.hits.get(&2).is_none());
+    }
+
+    // ---- pseudo-element rule routing (::before/::after v1) ----
+    use super::PseudoKind;
+
+    #[test]
+    fn pseudo_element_rules_route_out_of_normal_hits() {
+        let tree = parse_html(r#"<div class="row">x</div><p class="row">y</p>"#);
+        let sets = tree.rule_match_sets(&[".row:after"]);
+        assert_eq!(sets.pseudo_kinds.get(&0), Some(&PseudoKind::After));
+        assert_eq!(sets.pseudo_hits.get(&0).map(|v| v.len()), Some(2));
+        assert!(
+            !sets.hits.contains_key(&0),
+            "pseudo rule must never reach the normal cascade"
+        );
+    }
+
+    #[test]
+    fn pseudo_suffix_spellings_and_case() {
+        let tree = parse_html(r#"<ul><li id="a">one</li><li id="b">two</li></ul>"#);
+        let sets = tree.rule_match_sets(&["li::before", "li:after", ".LI:BEFORE"]);
+        assert_eq!(sets.pseudo_kinds.get(&0), Some(&PseudoKind::Before));
+        assert_eq!(sets.pseudo_kinds.get(&1), Some(&PseudoKind::After));
+        assert_eq!(sets.pseudo_hits.get(&0).map(|v| v.len()), Some(2));
+        // The suffix matches case-insensitively but the base keeps the
+        // author's case, so class matching stays case-sensitive: routing
+        // is orthogonal to matching.
+        assert_eq!(sets.pseudo_kinds.get(&2), Some(&PseudoKind::Before));
+        assert!(sets.pseudo_hits.get(&2).is_none(), ".LI matches nothing");
+    }
+
+    #[test]
+    fn comma_lists_and_non_trailing_suffixes_stay_dead() {
+        let tree = parse_html(r##"<a id="x" href="#">l</a><b class="b">t</b>"##);
+        let sets = tree.rule_match_sets(&["a::before, b", ".b a::before:hover", "a::before .b"]);
+        assert!(
+            sets.pseudo_kinds.is_empty(),
+            "comma list / non-trailing suffix must not route"
+        );
+        assert!(sets.pseudo_hits.is_empty());
+        assert!(!sets.hits.contains_key(&0), "comma'd pseudo list never matches real elements");
+        assert!(!sets.hits.contains_key(&2), "descendant-of-pseudo never matches real elements");
     }
 }

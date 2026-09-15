@@ -3103,7 +3103,215 @@ pub fn shadow_style_texts(tree: &crate::diting_dom::DomTree) -> Vec<String> {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_element(
+    tree: &DomTree,
+    id: NodeId,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    images: &HashMap<NodeId, DecodedImage>,
+    fonts: &FontBook,
+    taffy_tree: &mut TaffyTree<TextLeaf>,
+    node_map: &mut HashMap<taffy::tree::NodeId, NodeId>,
+    flattened: &mut HashMap<NodeId, Vec<taffy::tree::NodeId>>,
+    run_wrappers: &mut Vec<taffy::tree::NodeId>,
+    meta: &mut TableBuildMeta,
+) -> Option<taffy::tree::NodeId> {
+    let node = build_element_inner(
+        tree, id, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta,
+    )?;
+    append_pseudo_leaves(tree, id, styles, node, taffy_tree);
+    Some(node)
+}
+
+/// ::before/::after boxes for a host whose taffy node was just built
+/// (generated-content v1). The pseudo computed styles ride the host's entry
+/// in `styles` (cascade side: pseudo_styles); here they become leaves spliced
+/// into the host's child list. Replaced and table hosts are skipped in v1:
+/// replaced boxes own no layout children, and table hosts reify their own
+/// row structure through build_table.
+fn append_pseudo_leaves(
+    tree: &DomTree,
+    id: NodeId,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    node: taffy::tree::NodeId,
+    taffy_tree: &mut TaffyTree<TextLeaf>,
+) {
+    let Some(style) = styles.get(&id) else { return };
+    let Some(pair) = style.pseudos.as_deref() else { return };
+    let tag = tree
+        .with_node(id, |n| n.as_element().map(|e| e.local.to_string()))
+        .flatten()
+        .unwrap_or_default();
+    if is_replaced_tag(&tag) || style.display == Some(CssDisplay::Table) {
+        return;
+    }
+    let mut children: Vec<taffy::tree::NodeId> =
+        taffy_tree.children(node).unwrap_or_default().to_vec();
+    let mut changed = false;
+    if let Some(before) = &pair.before {
+        changed |= pseudo_leaf(before, taffy_tree, &mut children, true);
+    }
+    if let Some(after) = &pair.after {
+        changed |= pseudo_leaf(after, taffy_tree, &mut children, false);
+    }
+    if changed {
+        let _ = taffy_tree.set_children(node, &children);
+    }
+}
+
+/// Build one pseudo box and splice it into the host's child list; returns
+/// whether the list changed. Block-ish pseudos become leaves carrying the
+/// pseudo's taffy style — an EMPTY content box stays a plain style leaf so
+/// padding/border/background/height survive (the clearfix shape). Inline
+/// pseudos join the host's text: when the adjacent leaf is a pure-text run
+/// their texts merge onto one leaf, so `li:before { content: "• " }` shares
+/// the line with the label (Chrome's inline generated boxes take part in the
+/// host's first/last line box). The merged text takes the run's
+/// metrics/color — the v1 divergence.
+fn pseudo_leaf(
+    p: &ComputedStyle,
+    taffy_tree: &mut TaffyTree<TextLeaf>,
+    children: &mut Vec<taffy::tree::NodeId>,
+    is_before: bool,
+) -> bool {
+    if p.display == Some(CssDisplay::None) {
+        return false;
+    }
+    let Some(crate::diting_css::ContentValue::Str(content)) = &p.content else {
+        return false;
+    };
+    let insert = |leaf: taffy::tree::NodeId, children: &mut Vec<taffy::tree::NodeId>| {
+        if is_before {
+            children.insert(0, leaf);
+        } else {
+            children.push(leaf);
+        }
+    };
+    match p.display {
+        None | Some(CssDisplay::Inline) => {
+            if content.trim().is_empty() {
+                return false;
+            }
+            // Merge into the adjacent pure-text run when there is one
+            // (first child for ::before, last for ::after).
+            let adj_idx = if is_before { 0 } else { children.len().saturating_sub(1) };
+            if let Some(&adj) = children.get(adj_idx) {
+                if let Some(TextLeaf::Run {
+                    text,
+                    font_size,
+                    bold,
+                    color,
+                    line_height,
+                    decorations,
+                    baseline_shift,
+                    mono,
+                    word_spacing,
+                    nowrap,
+                    ellipsis,
+                    ..
+                }) = taffy_tree.get_node_context(adj)
+                {
+                    let merged = if is_before {
+                        format!("{}{}", content, text)
+                    } else {
+                        format!("{}{}", text, content)
+                    };
+                    let leaf = taffy_tree
+                        .new_leaf_with_context(
+                            Style::default(),
+                            TextLeaf::Run {
+                                text: merged,
+                                font_size: *font_size,
+                                bold: *bold,
+                                color: *color,
+                                line_height: *line_height,
+                                decorations: *decorations,
+                                baseline_shift: *baseline_shift,
+                                mono: *mono,
+                                word_spacing: *word_spacing,
+                                nowrap: *nowrap,
+                                ellipsis: *ellipsis,
+                                tokens: std::cell::RefCell::new(None),
+                            },
+                        )
+                        .ok();
+                    if let Some(leaf) = leaf {
+                        let _ = taffy_tree.remove(adj);
+                        children[adj_idx] = leaf;
+                        return true;
+                    }
+                    return false;
+                }
+            }
+            match taffy_tree.new_leaf_with_context(Style::default(), {
+                let fs = p.font_size.unwrap_or(crate::diting_css::DEFAULT_ROOT_FONT_SIZE);
+                TextLeaf::Run {
+                    text: content.clone(),
+                    font_size: fs,
+                    bold: p.font_weight.is_some_and(|w| w >= 600),
+                    color: p.color.map_or([0, 0, 0, 255], |c| [c.0, c.1, c.2, c.3]),
+                    line_height: effective_line_height(p.line_height.as_ref(), fs),
+                    decorations: p.text_decoration_line.unwrap_or_default(),
+                    baseline_shift: 0.0,
+                    mono: p.font_family.as_deref().is_some_and(crate::diting_css::wants_monospace),
+                    word_spacing: p.word_spacing.unwrap_or(0.0),
+                    nowrap: p.white_space == Some(WhiteSpace::Nowrap),
+                    ellipsis: false,
+                    tokens: std::cell::RefCell::new(None),
+                }
+            }) {
+                Ok(leaf) => {
+                    insert(leaf, children);
+                    true
+                }
+                Err(_) => false,
+            }
+        }
+        _ => {
+            let taffy_style = to_taffy_style(p);
+            let leaf = if content.trim().is_empty() {
+                taffy_tree.new_leaf(taffy_style).ok()
+            } else {
+                taffy_tree
+                    .new_leaf_with_context(
+                        taffy_style,
+                        {
+                            let fs = p
+                                .font_size
+                                .unwrap_or(crate::diting_css::DEFAULT_ROOT_FONT_SIZE);
+                            TextLeaf::Run {
+                                text: content.clone(),
+                                font_size: fs,
+                                bold: p.font_weight.is_some_and(|w| w >= 600),
+                                color: p.color.map_or([0, 0, 0, 255], |c| [c.0, c.1, c.2, c.3]),
+                                line_height: effective_line_height(p.line_height.as_ref(), fs),
+                                decorations: p.text_decoration_line.unwrap_or_default(),
+                                baseline_shift: 0.0,
+                                mono: p
+                                    .font_family
+                                    .as_deref()
+                                    .is_some_and(crate::diting_css::wants_monospace),
+                                word_spacing: p.word_spacing.unwrap_or(0.0),
+                                nowrap: p.white_space == Some(WhiteSpace::Nowrap),
+                                ellipsis: false,
+                                tokens: std::cell::RefCell::new(None),
+                            }
+                        },
+                    )
+                    .ok()
+            };
+            match leaf {
+                Some(leaf) => {
+                    insert(leaf, children);
+                    true
+                }
+                None => false,
+            }
+        }
+    }
+}
+
+fn build_element_inner(
     tree: &DomTree,
     id: NodeId,
     styles: &HashMap<NodeId, ComputedStyle>,
@@ -6593,6 +6801,14 @@ fn compute_styles_impl(
         );
         let mut cs = cs;
         crate::diting_css::sample_css_animation(&mut cs, keyframes, css_time);
+        // Generated content: pseudo-element rules cascade a synthetic span
+        // against the host's own matched set and hang off the host's
+        // computed style; build_element synthesizes their boxes.
+        if !sets.pseudo_kinds.is_empty() {
+            if let Some(pair) = pseudo_styles(tree, rules, sets, nid, &cs, root_fs) {
+                cs.pseudos = Some(Box::new(pair));
+            }
+        }
         let child_root_fs = if parent.is_none() {
             cs.font_size.unwrap_or(crate::diting_css::DEFAULT_ROOT_FONT_SIZE)
         } else {
@@ -6616,6 +6832,71 @@ fn compute_styles_impl(
             );
         }
         out.insert(nid, cs);
+    }
+    // Pseudo-element rules (::before/::after) for one host: their matched
+    // sets live in pseudo_hits (the selector layer kept them OUT of hits so
+    // the normal cascade above never sees them), and each kind cascades a
+    // synthetic span whose parent is the host — undeclared properties
+    // inherit exactly like a real child's would.
+    fn pseudo_styles(
+        tree: &DomTree,
+        rules: &[crate::diting_css::ParsedRule],
+        sets: &crate::diting_dom::selector::RuleMatchSets,
+        nid: NodeId,
+        host: &crate::diting_css::ComputedStyle,
+        root_fs: f32,
+    ) -> Option<crate::diting_css::PseudoPair> {
+        use crate::diting_css::ContentValue;
+        use crate::diting_dom::selector::PseudoKind;
+        let mut pair = crate::diting_css::PseudoPair::default();
+        for (wanted, slot) in [
+            (PseudoKind::Before, &mut pair.before),
+            (PseudoKind::After, &mut pair.after),
+        ] {
+            let matched: Vec<(&crate::diting_css::ParsedRule, u32)> = rules
+                .iter()
+                .enumerate()
+                .filter_map(|(ri, rule)| {
+                    if sets.pseudo_kinds.get(&ri) != Some(&wanted) {
+                        return None;
+                    }
+                    let hits = sets.pseudo_hits.get(&ri)?;
+                    if hits.binary_search(&nid.index()).is_err() {
+                        return None;
+                    }
+                    Some((rule, sets.specificity.get(ri).copied().flatten()?))
+                })
+                .collect();
+            if matched.is_empty() {
+                continue;
+            }
+            // Tag "span": the UA sheet's inline display and none of the
+            // tag-gated UA branches (their attribute reads fire only on
+            // a/td/th/tr hosts).
+            let mut p = crate::diting_css::cascade_element(
+                "span", tree, nid, &matched, Some(host), None, root_fs,
+            );
+            // attr() resolves against the HOST's attributes; a missing
+            // attribute yields the empty string.
+            if let Some(ContentValue::Attr(name)) = p.content.clone() {
+                let v = tree
+                    .with_node(nid, |n| n.get_attribute(&name).map(|s| s.to_string()))
+                    .flatten();
+                p.content = Some(ContentValue::Str(v.unwrap_or_default()));
+            }
+            // Clearfix box: display:table coerces to block — the generated
+            // box needs flow presence (it becomes a taffy child of the host),
+            // not the table walk.
+            if p.display == Some(crate::diting_css::Display::Table) {
+                p.display = Some(crate::diting_css::Display::Block);
+            }
+            *slot = Some(p);
+        }
+        if pair.before.is_none() && pair.after.is_none() {
+            None
+        } else {
+            Some(pair)
+        }
     }
     // One querySelectorAll per RULE over the whole document, sorted for the
     // binary search in visit. This replaces the per-element-per-rule full-doc
