@@ -552,7 +552,10 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
             || value.starts_with("url(")
             || value.contains("gradient"),
         "text-align" => matches!(value, "left" | "start" | "center" | "right" | "end" | "justify"),
-        "white-space" => matches!(value, "normal" | "nowrap"),
+        "white-space" => matches!(
+            value,
+            "normal" | "nowrap" | "pre" | "pre-wrap" | "pre-line" | "break-spaces"
+        ),
         "text-overflow" => matches!(value, "clip" | "ellipsis"),
         "line-height" => parse_line_height(value).is_some(),
         "object-fit" => matches!(
@@ -1498,14 +1501,40 @@ pub enum Overflow {
     Auto,
 }
 
-/// `white-space`. `normal` and `nowrap` are honored (nowrap: collapse
-/// whitespace like normal but never wrap — the run measures at max-content
-/// and overflows its container). The `pre` family is left unparsed for now,
-/// so a `pre` declaration falls through and keeps today's normal behavior.
+/// `white-space`. `normal` collapses whitespace runs and wraps; `nowrap`
+/// collapses but never wraps. The `pre` family preserves: `pre` never wraps
+/// at all, `pre-wrap` wraps with hanging spaces, `break-spaces` lets every
+/// preserved space end a line (spaces never hang), `pre-line` collapses
+/// spaces but keeps newlines as hard breaks. Honored end to end for
+/// pure-text runs — mixed inline runs keep normal collapsing, the same
+/// limitation `nowrap` already has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WhiteSpace {
     Normal,
     Nowrap,
+    Pre,
+    PreWrap,
+    PreLine,
+    BreakSpaces,
+}
+
+impl WhiteSpace {
+    /// Modes with no soft wrap opportunities at all: the run measures and
+    /// paints as one line per hard break only.
+    pub fn no_soft_wrap(self) -> bool {
+        matches!(self, WhiteSpace::Nowrap | WhiteSpace::Pre)
+    }
+
+    /// Modes that keep whitespace characters verbatim (no trim, no run
+    /// collapsing). `pre-line` is NOT here: it collapses spaces.
+    pub fn preserves_spaces(self) -> bool {
+        matches!(self, WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::BreakSpaces)
+    }
+
+    /// Modes that render newline characters as line breaks.
+    pub fn preserves_newlines(self) -> bool {
+        !matches!(self, WhiteSpace::Normal | WhiteSpace::Nowrap)
+    }
 }
 
 /// `text-overflow` (non-inherited). Only meaningful on a box that clips
@@ -2708,8 +2737,17 @@ pub fn wants_monospace(family: &str) -> bool {
 /// UA margins in CSS order (top right bottom left), from the same blitz
 /// default.css block every other browser UA sheet mirrors. Em folds against
 /// the element's OWN font-size at cascade time (h1's .67em × its 2em size).
-pub fn ua_margin(tag: &str) -> Option<[CssLength; 4]> {
-    let em = |n: f32| CssLength::Em(n);
+/// UA white-space defaults: the preformatted group keeps whitespace and
+/// newlines in every browser UA sheet. Fills after inheritance so an author
+/// declaration (`pre { white-space: normal }`) still wins.
+pub fn ua_white_space(tag: &str) -> Option<WhiteSpace> {
+    match tag {
+        "pre" | "xmp" | "listing" | "plaintext" => Some(WhiteSpace::Pre),
+        _ => None,
+    }
+}
+
+pub fn ua_margin(tag: &str) -> Option<[CssLength; 4]> {    let em = |n: f32| CssLength::Em(n);
     let px = |n: f32| CssLength::Px(n);
     match tag {
         "body" => Some([px(8.0), px(8.0), px(8.0), px(8.0)]),
@@ -3607,9 +3645,10 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             style.white_space = match v {
                 "normal" => Some(WhiteSpace::Normal),
                 "nowrap" => Some(WhiteSpace::Nowrap),
-                // The pre family changes whitespace collapsing, not just
-                // wrapping — not modeled yet, so the declaration stays
-                // unparsed instead of silently reading as normal.
+                "pre" => Some(WhiteSpace::Pre),
+                "pre-wrap" => Some(WhiteSpace::PreWrap),
+                "pre-line" => Some(WhiteSpace::PreLine),
+                "break-spaces" => Some(WhiteSpace::BreakSpaces),
                 _ => return false,
             };
             true
@@ -4979,6 +5018,12 @@ pub fn cascade_element(
         "sub" => style.vertical_align = Some(VerticalAlign::Sub),
         "sup" => style.vertical_align = Some(VerticalAlign::Super),
         _ => {}
+    }
+    // UA white-space (the preformatted group). Runs after inheritance, so a
+    // plain `<pre>` inherits normal, then the UA default fills None — author
+    // declarations still win.
+    if let Some(ws) = ua_white_space(tag) {
+        style.white_space = style.white_space.or(Some(ws));
     }
 
     // Author rules: sort by (specificity, source order) ascending, apply in
@@ -6958,9 +7003,9 @@ mod tests {
         assert!((m[5] - 25.0).abs() < 1e-4, "25% of 100");
     }
 
-    /// white-space parses normal/nowrap (the pre family stays unparsed),
-    /// text-overflow parses clip/ellipsis; white-space inherits,
-    /// text-overflow does not (CSS UI §5.2).
+    /// white-space parses the full normal/nowrap/pre family, text-overflow
+    /// parses clip/ellipsis; white-space inherits, text-overflow does not
+    /// (CSS UI §5.2).
     #[test]
     fn white_space_and_text_overflow_parse_and_inherit() {
         let mut s = ComputedStyle::default();
@@ -6973,9 +7018,23 @@ mod tests {
         assert_eq!(s.white_space, Some(WhiteSpace::Normal));
         assert_eq!(s.text_overflow, Some(TextOverflow::Clip));
 
+        // The preserve modes all parse (the pre family — batch 106).
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "white-space: pre");
+        assert_eq!(s.white_space, Some(WhiteSpace::Pre));
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "white-space: pre-wrap");
+        assert_eq!(s.white_space, Some(WhiteSpace::PreWrap));
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "white-space: pre-line");
+        assert_eq!(s.white_space, Some(WhiteSpace::PreLine));
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "white-space: break-spaces");
+        assert_eq!(s.white_space, Some(WhiteSpace::BreakSpaces));
+
         // Unknown values drop the whole declaration.
         let mut s = ComputedStyle::default();
-        apply_declarations(&mut s, "white-space: pre; text-overflow: '…'");
+        apply_declarations(&mut s, "white-space: nowrapish; text-overflow: '…'");
         assert_eq!(s.white_space, None);
         assert_eq!(s.text_overflow, None);
 
@@ -6989,6 +7048,21 @@ mod tests {
         let child = cascade_element("p", &tree, p, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
         assert_eq!(child.white_space, Some(WhiteSpace::Nowrap), "white-space inherits");
         assert_eq!(child.text_overflow, None, "text-overflow does not inherit");
+    }
+
+    /// The UA stylesheet gives pre/xmp/listing/plaintext `white-space: pre`,
+    /// filled only when neither inheritance nor an author declaration
+    /// provides one.
+    #[test]
+    fn ua_pre_default_and_author_override() {
+        let tree = diting_dom::tree_sink::parse_html("<pre>x</pre>");
+        let pre = tree.query_selector("pre").unwrap().unwrap();
+        let ua = crate::diting_layout::compute_styles(&tree, &[]);
+        assert_eq!(ua[&pre].white_space, Some(WhiteSpace::Pre), "UA default for <pre>");
+
+        let rules = parse_stylesheet_for("pre { white-space: normal }", (800.0, 600.0), CssMediaType::Screen);
+        let authored = crate::diting_layout::compute_styles(&tree, &rules);
+        assert_eq!(authored[&pre].white_space, Some(WhiteSpace::Normal), "author declaration beats the UA default");
     }
 
     // ---- box-shadow (blitz#349 family, v1) ----

@@ -471,9 +471,11 @@ impl FontBook {
         mono: bool,
         word_spacing: f32,
         truncate_at: Option<f32>,
+        ws: crate::diting_css::WhiteSpace,
     ) -> Arc<TextRaster> {
         self.rasterize_wrapped_with(
-            text, font_size, bold, color, wrap_at, line_height, mono, word_spacing, truncate_at, None,
+            text, font_size, bold, color, wrap_at, line_height, mono, word_spacing, truncate_at,
+            ws, None,
         )
     }
 
@@ -481,9 +483,9 @@ impl FontBook {
     /// (obscura#983's paint half): the leaf memo from the measure half is
     /// still warm at first-raster time, so a cache miss reuses it instead of
     /// shaping the run a second time. Tokens must have been shaped with the
-    /// same (text, font_size, bold, mono, word_spacing) — the paint arm only
-    /// forwards them when the item's font params are the leaf's unscaled
-    /// ones.
+    /// same (text, font_size, bold, mono, word_spacing, ws) — the paint arm
+    /// only forwards them when the item's font params are the leaf's
+    /// unscaled ones.
     #[allow(clippy::too_many_arguments)]
     pub fn rasterize_wrapped_with(
         &self,
@@ -496,6 +498,7 @@ impl FontBook {
         mono: bool,
         word_spacing: f32,
         truncate_at: Option<f32>,
+        ws: crate::diting_css::WhiteSpace,
         tokens: Option<std::rc::Rc<[Token]>>,
     ) -> Arc<TextRaster> {
         let key = RasterKey {
@@ -503,6 +506,7 @@ impl FontBook {
             kind: RasterKind::Wrapped {
                 wrap_at_bits: wrap_at.to_bits(),
                 truncate_at_bits: truncate_at.unwrap_or(0.0).to_bits(),
+                ws_bits: ws as u32,
             },
             text: text.into(),
             font_size_bits: font_size.to_bits(),
@@ -523,6 +527,7 @@ impl FontBook {
                 mono,
                 word_spacing,
                 truncate_at,
+                ws,
                 tokens.as_deref(),
             )
         })
@@ -540,6 +545,7 @@ impl FontBook {
         mono: bool,
         word_spacing: f32,
         truncate_at: Option<f32>,
+        ws: crate::diting_css::WhiteSpace,
         pre_shaped: Option<&[Token]>,
     ) -> TextRaster {
         let empty = || TextRaster {
@@ -556,7 +562,7 @@ impl FontBook {
         let tokens = match pre_shaped {
             Some(t) => t,
             None => {
-                owned = tokens_of(text, font_size, bold, self, mono, word_spacing);
+                owned = tokens_of(text, font_size, bold, self, mono, word_spacing, ws);
                 &owned
             }
         };
@@ -568,7 +574,7 @@ impl FontBook {
         // ellipsis undecorated).
         let truncated;
         let tokens: &[Token] = match truncate_at.and_then(|limit| {
-            truncate_tokens(tokens, limit, font_size, bold, self, mono, word_spacing)
+            truncate_tokens(tokens, limit, font_size, bold, self, mono, word_spacing, ws)
         }) {
             Some((mut kept, marker)) => {
                 kept.extend(marker);
@@ -577,7 +583,7 @@ impl FontBook {
             }
             None => tokens,
         };
-        let lines = greedy_wrap(tokens, Some(wrap_at.max(0.0)));
+        let lines = greedy_wrap(tokens, Some(wrap_at.max(0.0)), ws);
         if lines.iter().all(|l| l.width <= 0.0) {
             return empty();
         }
@@ -792,12 +798,16 @@ pub(crate) struct Token {
     pub text: String,
     pub width: f32,
     pub is_space: bool,
+    /// A preserved newline (white-space pre family): greedy_wrap ends the
+    /// current line on it; it never joins a WrapLine itself.
+    pub is_break: bool,
 }
 
-/// Tokenize a run's trimmed text and shape every token (shared by
-/// `measure_text_leaf` and `rasterize_wrapped`). `word_spacing` (px) adds to
-/// each rendered space token's advance (CSS Text §7.1) so measure, paint and
-/// the shared wrap breaker all see the same widened widths.
+/// Tokenize a run's text under its computed `white-space` mode and shape
+/// every token (shared by `measure_text_leaf` and `rasterize_wrapped`).
+/// `word_spacing` (px) adds to each rendered space token's advance
+/// (CSS Text §7.1) so measure, paint and the shared wrap breaker all see
+/// the same widened widths.
 pub(crate) fn tokens_of(
     text: &str,
     font_size: f32,
@@ -805,15 +815,22 @@ pub(crate) fn tokens_of(
     fonts: &FontBook,
     mono: bool,
     word_spacing: f32,
+    ws: crate::diting_css::WhiteSpace,
 ) -> Vec<Token> {
-    super::tokenize(text.trim())
+    super::tokenize_ws(text, ws)
         .into_iter()
         .map(|t| {
-            let is_space = t.trim().is_empty();
+            let is_break = t == "\n";
+            let is_space = !is_break && t.trim().is_empty();
             Token {
                 is_space,
-                width: fonts.advance_width(&t, font_size, bold, mono)
-                    + if is_space { word_spacing } else { 0.0 },
+                is_break,
+                width: if is_break {
+                    0.0
+                } else {
+                    fonts.advance_width(&t, font_size, bold, mono)
+                        + if is_space { word_spacing } else { 0.0 }
+                },
                 text: t,
             }
         })
@@ -832,7 +849,14 @@ pub(crate) struct WrapLine {
 /// path (`measure_text_leaf`) and the paint path (`rasterize_wrapped`),
 /// locked by the batch-3a probes: break before a token that would overflow
 /// `wrap_at`, drop the whitespace before every break.
-pub(crate) fn greedy_wrap(tokens: &[Token], wrap_at: Option<f32>) -> Vec<WrapLine> {
+pub(crate) fn greedy_wrap(
+    tokens: &[Token],
+    wrap_at: Option<f32>,
+    ws: crate::diting_css::WhiteSpace,
+) -> Vec<WrapLine> {
+    if ws.preserves_newlines() {
+        return greedy_wrap_preserved(tokens, wrap_at, ws);
+    }
     let mut lines = vec![WrapLine { token_idx: Vec::new(), width: 0.0 }];
     let mut pending_space = 0.0f32;
     let mut pending_idx: Vec<usize> = Vec::new();
@@ -859,6 +883,55 @@ pub(crate) fn greedy_wrap(tokens: &[Token], wrap_at: Option<f32>) -> Vec<WrapLin
     lines
 }
 
+/// The wrap breaker for the `pre` family (white-space batch): newlines end
+/// lines unconditionally (each break token opens the next line, so blank
+/// source lines stay blank), preserved spaces belong to their line.
+///
+/// - `pre` never gets here with a `wrap_at` (no soft wrap opportunities);
+/// - `pre-wrap` lets spaces HANG: a space that overflows stays on the line,
+///   only a word breaks to the next line;
+/// - `break-spaces` never hangs: any token that overflows — space included —
+///   starts the next line, so every preserved space can end a line.
+fn greedy_wrap_preserved(
+    tokens: &[Token],
+    wrap_at: Option<f32>,
+    ws: crate::diting_css::WhiteSpace,
+) -> Vec<WrapLine> {
+    let mut lines = vec![WrapLine { token_idx: Vec::new(), width: 0.0 }];
+    let mut break_opened_last = false;
+    for (i, t) in tokens.iter().enumerate() {
+        if t.is_break {
+            lines.push(WrapLine { token_idx: Vec::new(), width: 0.0 });
+            break_opened_last = true;
+            continue;
+        }
+        break_opened_last = false;
+        let cur = lines.last_mut().expect("always one line");
+        if let Some(avail) = wrap_at {
+            if cur.width > 0.0 && cur.width + t.width > avail {
+                if ws == crate::diting_css::WhiteSpace::BreakSpaces {
+                    lines.push(WrapLine { token_idx: vec![i], width: t.width });
+                    continue;
+                }
+                // pre-wrap: the overflowing space hangs; a word breaks.
+                if !t.is_space {
+                    lines.push(WrapLine { token_idx: vec![i], width: t.width });
+                    continue;
+                }
+            }
+        }
+        cur.width += t.width;
+        cur.token_idx.push(i);
+    }
+    // A trailing newline ends the last line — it doesn't open an empty one
+    // (Chrome drops the final newline of a block). At most one: "a\n\n"
+    // still keeps its middle blank line.
+    if break_opened_last {
+        lines.pop();
+    }
+    lines
+}
+
 /// `text-overflow: ellipsis` truncation (nowrap+ellipsis batch): drop whole
 /// trailing tokens until the kept run plus the U+2026 marker fits `limit`,
 /// then return `(kept, marker)` — the marker is tokenized with the run's own
@@ -866,6 +939,7 @@ pub(crate) fn greedy_wrap(tokens: &[Token], wrap_at: Option<f32>) -> Vec<WrapLin
 /// run already fits (Chrome only renders an ellipsis for content that
 /// actually overflows). Decoration strokes take `kept` only — Chrome leaves
 /// the ellipsis itself undecorated.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn truncate_tokens(
     tokens: &[Token],
     limit: f32,
@@ -874,12 +948,13 @@ pub(crate) fn truncate_tokens(
     fonts: &FontBook,
     mono: bool,
     word_spacing: f32,
+    ws: crate::diting_css::WhiteSpace,
 ) -> Option<(Vec<Token>, Vec<Token>)> {
     let total: f32 = tokens.iter().map(|t| t.width).sum();
     if total <= limit {
         return None;
     }
-    let marker = tokens_of("\u{2026}", font_size, bold, fonts, mono, word_spacing);
+    let marker = tokens_of("\u{2026}", font_size, bold, fonts, mono, word_spacing, ws);
     let marker_w = marker.first().map(|t| t.width).unwrap_or(0.0);
     let mut kept: Vec<Token> = Vec::with_capacity(tokens.len());
     let mut w = 0.0f32;
@@ -892,7 +967,7 @@ pub(crate) fn truncate_tokens(
                 let mut acc = String::new();
                 let mut acc_w = w;
                 for ch in t.text.chars() {
-                    let cw = tokens_of(&ch.to_string(), font_size, bold, fonts, mono, 0.0)
+                    let cw = tokens_of(&ch.to_string(), font_size, bold, fonts, mono, 0.0, ws)
                         .first()
                         .map(|t| t.width)
                         .unwrap_or(0.0);
@@ -907,6 +982,7 @@ pub(crate) fn truncate_tokens(
                         text: acc,
                         width: acc_w - w,
                         is_space: false,
+                        is_break: false,
                     });
                 }
             }
@@ -917,6 +993,7 @@ pub(crate) fn truncate_tokens(
             text: t.text.clone(),
             width: t.width,
             is_space: t.is_space,
+            is_break: t.is_break,
         });
     }
     // Whitespace left at the cut carries no ink and would only sit between
@@ -1001,6 +1078,10 @@ enum RasterKind {
         /// the key: a nowrap+ellipsis run and the same run untruncated share
         /// the +inf wrap width but must rasterize differently.
         truncate_at_bits: u32,
+        /// `white-space` mode (pre family): wrap_at=+inf alone can't tell
+        /// `nowrap` (collapse, one line) from `pre` (preserve, hard breaks),
+        /// and the token shapes themselves diverge.
+        ws_bits: u32,
     },
 }
 
@@ -1103,12 +1184,12 @@ mod raster_cache_tests {
         let (reg, bold) = production_pair();
         let book = FontBook::from_pairs(reg, bold).unwrap();
         let _held = isolated();
-        let black = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false, 0.0, None);
-        let again = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false, 0.0, None);
+        let black = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal);
+        let again = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal);
         assert!(Arc::ptr_eq(&black, &again), "repeat must hand back the cached Arc");
         assert!(black.ink_bbox().is_some(), "the tile has real ink");
 
-        let red = book.rasterize_wrapped("缓存命中", 16.0, false, [255, 0, 0, 255], 20.0, 24.0, false, 0.0, None);
+        let red = book.rasterize_wrapped("缓存命中", 16.0, false, [255, 0, 0, 255], 20.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal);
         assert!(!Arc::ptr_eq(&black, &red), "color rides the key — a new tile");
         let ink = |r: &TextRaster| {
             r.data
@@ -1133,7 +1214,7 @@ mod raster_cache_tests {
         let line = book.rasterize(text, 16.0, false, [0, 0, 0, 255], 24.0, false);
         // Narrow wrap: the same text breaks across 4+ lines, so the wrapped
         // tile is much taller than the single-line one.
-        let wrapped = book.rasterize_wrapped(text, 16.0, false, [0, 0, 0, 255], 40.0, 24.0, false, 0.0, None);
+        let wrapped = book.rasterize_wrapped(text, 16.0, false, [0, 0, 0, 255], 40.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal);
         assert!(!Arc::ptr_eq(&line, &wrapped), "kinds must not collide");
         assert!(
             wrapped.height > line.height * 2,
@@ -1239,8 +1320,8 @@ mod raster_cache_tests {
     fn tokens_of_applies_word_spacing_to_space_tokens_only() {
         let (reg, bold) = production_pair();
         let book = FontBook::from_pairs(reg, bold).unwrap();
-        let plain = tokens_of("ab cd ef", 16.0, false, &book, false, 0.0);
-        let spaced = tokens_of("ab cd ef", 16.0, false, &book, false, 9.0);
+        let plain = tokens_of("ab cd ef", 16.0, false, &book, false, 0.0, crate::diting_css::WhiteSpace::Normal);
+        let spaced = tokens_of("ab cd ef", 16.0, false, &book, false, 9.0, crate::diting_css::WhiteSpace::Normal);
         assert_eq!(plain.len(), spaced.len(), "spacing never changes the token count");
         for (p, s) in plain.iter().zip(&spaced) {
             assert_eq!(p.text, s.text);
@@ -1252,7 +1333,7 @@ mod raster_cache_tests {
             }
         }
         // `normal` is modeled as 0.0 — identical tokens.
-        let normal = tokens_of("ab cd", 16.0, false, &book, false, 0.0);
+        let normal = tokens_of("ab cd", 16.0, false, &book, false, 0.0, crate::diting_css::WhiteSpace::Normal);
         assert_eq!(normal[1].is_space, true);
     }
 
@@ -1266,8 +1347,8 @@ mod raster_cache_tests {
         let (reg, bold) = production_pair();
         let book = FontBook::from_pairs(reg, bold).unwrap();
         let _held = isolated();
-        let tight = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, None);
-        let loose = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 12.0, None);
+        let tight = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal);
+        let loose = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 12.0, None, crate::diting_css::WhiteSpace::Normal);
         assert_eq!(tight.height, loose.height, "one line either way");
         let ink_right = |r: &TextRaster| r.ink_bbox().map(|b| b.2).unwrap_or(0);
         assert!(
@@ -1276,7 +1357,7 @@ mod raster_cache_tests {
             ink_right(&tight), ink_right(&loose)
         );
         // Negative spacing tightens toward overlap — still deterministic.
-        let tight2 = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, -8.0, None);
+        let tight2 = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, -8.0, None, crate::diting_css::WhiteSpace::Normal);
         assert!(ink_right(&tight2) < ink_right(&tight), "negative ws pulls the second word left");
     }
 }
@@ -1351,16 +1432,16 @@ mod tests {
     #[test]
     fn truncate_tokens_clips_to_limit_and_appends_marker() {
         let fonts = crate::diting_fonts::font_book();
-        let tokens = tokens_of("alpha beta gamma delta", 16.0, false, &fonts, false, 0.0);
+        let tokens = tokens_of("alpha beta gamma delta", 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::Normal);
         let total: f32 = tokens.iter().map(|t| t.width).sum();
 
         assert!(
-            truncate_tokens(&tokens, total + 1.0, 16.0, false, &fonts, false, 0.0).is_none(),
+            truncate_tokens(&tokens, total + 1.0, 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::Normal).is_none(),
             "fitting text is untouched"
         );
 
         let limit = total / 2.0;
-        let (kept, marker) = truncate_tokens(&tokens, limit, 16.0, false, &fonts, false, 0.0)
+        let (kept, marker) = truncate_tokens(&tokens, limit, 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::Normal)
             .expect("overflowing text truncates");
         let kept_w: f32 = kept.iter().map(|t| t.width).sum();
         let marker_w: f32 = marker.iter().map(|t| t.width).sum();
@@ -1377,7 +1458,7 @@ mod tests {
 
         // A bold run's marker must measure wider than the normal run's —
         // font params flow through.
-        let (_, bold_marker) = truncate_tokens(&tokens, limit, 16.0, true, &fonts, false, 0.0).unwrap();
+        let (_, bold_marker) = truncate_tokens(&tokens, limit, 16.0, true, &fonts, false, 0.0, crate::diting_css::WhiteSpace::Normal).unwrap();
         let bold_w: f32 = bold_marker.iter().map(|t| t.width).sum();
         assert!(bold_w > marker_w, "bold marker measures wider ({bold_w} > {marker_w})");
     }
@@ -1389,16 +1470,105 @@ mod tests {
     fn rasterize_wrapped_pre_shaped_matches_reshaped() {
         let fonts = crate::diting_fonts::font_book();
         let text = "淘宝商品列表页的一段中文文本需要折行处理".repeat(4);
-        let tokens = tokens_of(&text, 16.0, false, &fonts, false, 0.0);
+        let tokens = tokens_of(&text, 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::Normal);
 
-        let plain = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, None, None);
-        let pre = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, None, Some(&tokens));
+        let plain = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, None);
+        let pre = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, Some(&tokens));
         assert_eq!((plain.width, plain.height, plain.baseline), (pre.width, pre.height, pre.baseline));
         assert_eq!(plain.data, pre.data);
 
-        let plain_t = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, Some(320.0), None);
-        let pre_t = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, Some(320.0), Some(&tokens));
+        let plain_t = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, Some(320.0), crate::diting_css::WhiteSpace::Normal, None);
+        let pre_t = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, Some(320.0), crate::diting_css::WhiteSpace::Normal, Some(&tokens));
         assert_eq!((plain_t.width, plain_t.height, plain_t.baseline), (pre_t.width, pre_t.height, pre_t.baseline));
         assert_eq!(plain_t.data, pre_t.data);
+    }
+
+    // ---- white-space pre family (batch 106) ----
+
+    fn ws_lines(text: &str, ws: crate::diting_css::WhiteSpace, wrap_at: Option<f32>) -> Vec<WrapLine> {
+        let fonts = crate::diting_fonts::font_book();
+        let tokens = tokens_of(text, 16.0, false, &fonts, false, 0.0, ws);
+        greedy_wrap(&tokens, wrap_at, ws)
+    }
+
+    /// `pre` tokenization preserves every space as its own token, expands a
+    /// tab to 8 columns, and models CRLF (and lone CR) as one break.
+    #[test]
+    fn pre_tokens_preserve_whitespace_and_breaks() {
+        let fonts = crate::diting_fonts::font_book();
+        let toks = tokens_of("a  b\tc\r\nd", 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::Pre);
+        let texts: Vec<&str> = toks.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, vec!["a", " ", " ", "b", "        ", "c", "\n", "d"]);
+        assert!(toks[6].is_break && toks[6].width == 0.0);
+        assert!(toks[4].is_space && toks[4].text.chars().all(|c| c == ' '));
+    }
+
+    /// `pre` wraps only on hard breaks; blank source lines stay blank lines.
+    #[test]
+    fn pre_wraps_on_newlines_and_keeps_blank_lines() {
+        let lines = ws_lines("a\n\nb", crate::diting_css::WhiteSpace::Pre, None);
+        assert_eq!(lines.len(), 3, "a, blank, b");
+        assert_eq!(lines[1].width, 0.0, "the middle line is empty, not merged");
+        // No soft wrap at all: an arbitrarily long run stays one line even
+        // with a tiny wrap_at handed in (defensive — measure passes None).
+        let lines = ws_lines(&"x".repeat(200), crate::diting_css::WhiteSpace::Pre, Some(10.0));
+        assert_eq!(lines.len(), 1, "pre has no soft wrap opportunities");
+    }
+
+    /// `pre-wrap`: an overflowing space HANGS at the line end; only a word
+    /// breaks down.
+    #[test]
+    fn pre_wrap_spaces_hang_at_line_end() {
+        let fonts = crate::diting_fonts::font_book();
+        let toks = tokens_of("aa   bb", 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::PreWrap);
+        let (w_aa, sp) = (toks[0].width, toks[1].width);
+        let wrap_at = w_aa + 2.5 * sp; // "aa  " fits, the 3rd space hangs, "bb" breaks
+        let lines = ws_lines("aa   bb", crate::diting_css::WhiteSpace::PreWrap, Some(wrap_at));
+        assert_eq!(lines.len(), 2, "one break, before bb");
+        assert_eq!(lines[0].token_idx, vec![0, 1, 2, 3], "aa + all three spaces hang on line 1");
+        assert_eq!(lines[1].token_idx, vec![4], "bb alone on line 2");
+    }
+
+    /// `break-spaces`: nothing hangs — the overflowing space itself starts
+    /// the next line, so preserved spaces can end a line.
+    #[test]
+    fn break_spaces_wraps_space_tokens_down() {
+        let fonts = crate::diting_fonts::font_book();
+        let toks = tokens_of("aa   bb", 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::BreakSpaces);
+        let w_aa = toks[0].width;
+        let lines = ws_lines("aa   bb", crate::diting_css::WhiteSpace::BreakSpaces, Some(w_aa + 0.5));
+        assert_eq!(lines[0].token_idx, vec![0], "aa alone — the first space already overflows");
+        let spaced: Vec<usize> = lines[1..lines.len() - 1].iter().flat_map(|l| l.token_idx.iter().copied()).collect();
+        assert_eq!(spaced, vec![1, 2, 3], "the three spaces wrap down together");
+        assert_eq!(lines.last().unwrap().token_idx, vec![4], "bb on the last line");
+    }
+
+    /// `pre-line`: spaces collapse within each newline-separated segment and
+    /// newlines are hard breaks (the tokenizer keeps a trailing break; the
+    /// breaker is what drops its line box).
+    #[test]
+    fn pre_line_collapses_spaces_but_breaks_on_newlines() {
+        let fonts = crate::diting_fonts::font_book();
+        let toks = tokens_of("  a  b  \n c\nd  \n", 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::PreLine);
+        let texts: Vec<&str> = toks.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, vec!["a", " ", "b", "\n", "c", "\n", "d", "\n"], "collapsed segments, breaks between, trailing break kept for the breaker");
+        let lines = ws_lines("  a  b  \n c\nd  \n", crate::diting_css::WhiteSpace::PreLine, None);
+        let line_texts: Vec<Vec<&str>> = lines
+            .iter()
+            .map(|l| l.token_idx.iter().map(|&i| texts[i]).collect())
+            .collect();
+        assert_eq!(line_texts, vec![vec!["a", " ", "b"], vec!["c"], vec!["d"]], "trailing newline opens no empty line");
+    }
+
+    /// A trailing newline in any preserved mode ends the last line instead
+    /// of adding a phantom empty one; a doubled trailing newline still keeps
+    /// exactly one blank line.
+    #[test]
+    fn trailing_newline_drops_not_doubles() {
+        assert_eq!(ws_lines("a\n", crate::diting_css::WhiteSpace::Pre, None).len(), 1);
+        assert_eq!(ws_lines("a\n\n", crate::diting_css::WhiteSpace::Pre, None).len(), 2);
+        assert_eq!(ws_lines("a\n", crate::diting_css::WhiteSpace::BreakSpaces, None).len(), 1);
+        // Un-touched content (no break) never pops its only line.
+        assert_eq!(ws_lines("", crate::diting_css::WhiteSpace::Pre, None).len(), 1);
     }
 }

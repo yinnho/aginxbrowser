@@ -2779,6 +2779,10 @@ fn computed_style_value(
         "white-space" => Some(
             match s.white_space {
                 Some(crate::diting_css::WhiteSpace::Nowrap) => "nowrap",
+                Some(crate::diting_css::WhiteSpace::Pre) => "pre",
+                Some(crate::diting_css::WhiteSpace::PreWrap) => "pre-wrap",
+                Some(crate::diting_css::WhiteSpace::PreLine) => "pre-line",
+                Some(crate::diting_css::WhiteSpace::BreakSpaces) => "break-spaces",
                 _ => "normal",
             }
             .into(),

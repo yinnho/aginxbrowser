@@ -17,7 +17,7 @@ use super::text::{
     Token,
 };
 use super::{FontBook, PaintItem, Rect, TextGradient};
-use crate::diting_css::{TextDecorations, TextShadow};
+use crate::diting_css::{TextDecorations, TextShadow, WhiteSpace};
 use std::collections::HashSet;
 
 /// A straight-alpha RGBA8 image, row-major — our paint target.
@@ -1309,6 +1309,7 @@ fn paint_text_decorations(
     mono: bool,
     word_spacing: f32,
     truncate_at: Option<f32>,
+    ws: WhiteSpace,
     // The item's wrap tokens, pre-shaped when the item carries the run
     // leaf's memo (unscaled font params): the decorations painter needs the
     // wrap LINES, which the glyph-pixel RasterCache doesn't hold, so
@@ -1324,21 +1325,21 @@ fn paint_text_decorations(
     let tokens = match pre_shaped {
         Some(t) => t,
         None => {
-            owned = tokens_of(text, font_size, bold, fonts, mono, word_spacing);
+            owned = tokens_of(text, font_size, bold, fonts, mono, word_spacing, ws);
             &owned
         }
     };
     // The ellipsis marker is undecorated (Chrome): strokes span the kept
     // tokens only, so underline/line-through end at the truncation cut.
     let kept;
-    let tokens: &[Token] = match truncate_at.and_then(|limit| truncate_tokens(tokens, limit, font_size, bold, fonts, mono, word_spacing)) {
+    let tokens: &[Token] = match truncate_at.and_then(|limit| truncate_tokens(tokens, limit, font_size, bold, fonts, mono, word_spacing, ws)) {
         Some((t, _marker)) => {
             kept = t;
             &kept
         }
         None => tokens,
     };
-    let lines = greedy_wrap(tokens, Some(wrap_at.max(0.0)));
+    let lines = greedy_wrap(tokens, Some(wrap_at.max(0.0)), ws);
     let m = fonts.metrics(font_size, bold).unwrap_or(ScaledMetrics {
         ascent: font_size,
         descent: font_size * 0.2,
@@ -1524,6 +1525,7 @@ pub(crate) fn pdf_text_ops(items: &[PaintItem], fonts: &FontBook) -> (Vec<PdfOp>
                 word_spacing,
                 truncate_at,
                 tokens,
+                ws,
                 text_shadow,
             } => {
                 // Vector gate: the shaper must cover every segment (fallback
@@ -1545,7 +1547,7 @@ pub(crate) fn pdf_text_ops(items: &[PaintItem], fonts: &FontBook) -> (Vec<PdfOp>
                 }
                 let Some(line) = pdf_vectorize_line(
                     text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at,
-                    *decorations, *mono, *word_spacing, *truncate_at, tokens.as_deref(), fonts,
+                    *decorations, *mono, *word_spacing, *truncate_at, *ws, tokens.as_deref(), fonts,
                 ) else {
                     continue;
                 };
@@ -1576,6 +1578,7 @@ fn pdf_vectorize_line(
     mono: bool,
     word_spacing: f32,
     truncate_at: Option<f32>,
+    ws: WhiteSpace,
     pre_shaped: Option<&[Token]>,
     fonts: &FontBook,
 ) -> Option<PdfLine> {
@@ -1583,7 +1586,7 @@ fn pdf_vectorize_line(
     let tokens: &[Token] = match pre_shaped {
         Some(t) => t,
         None => {
-            owned = tokens_of(text, font_size, bold, fonts, mono, word_spacing);
+            owned = tokens_of(text, font_size, bold, fonts, mono, word_spacing, ws);
             &owned
         }
     };
@@ -1592,7 +1595,7 @@ fn pdf_vectorize_line(
     // only (the marker is undecorated, Chrome).
     let truncated;
     let painted: &[Token] = match truncate_at.and_then(|limit| {
-        truncate_tokens(tokens, limit, font_size, bold, fonts, mono, word_spacing)
+        truncate_tokens(tokens, limit, font_size, bold, fonts, mono, word_spacing, ws)
     }) {
         Some((mut kept, marker)) => {
             kept.extend(marker);
@@ -1603,7 +1606,7 @@ fn pdf_vectorize_line(
     };
     let decorated;
     let kept: &[Token] = match truncate_at.and_then(|limit| {
-        truncate_tokens(tokens, limit, font_size, bold, fonts, mono, word_spacing)
+        truncate_tokens(tokens, limit, font_size, bold, fonts, mono, word_spacing, ws)
     }) {
         Some((k, _)) => {
             decorated = k;
@@ -1611,7 +1614,7 @@ fn pdf_vectorize_line(
         }
         None => tokens,
     };
-    let lines = greedy_wrap(painted, Some(wrap_at.max(0.0)));
+    let lines = greedy_wrap(painted, Some(wrap_at.max(0.0)), ws);
     if lines.iter().all(|l| l.width <= 0.0) {
         return None;
     }
@@ -1671,7 +1674,7 @@ fn pdf_vectorize_line(
         // Mirror paint_text_decorations to the pixel: kept-token wrap, same
         // baseline steps. Stroke height (1px per 16px font) is the writer's
         // business — it lives in the PDF op stream, not here.
-        let dlines = greedy_wrap(kept, Some(wrap_at.max(0.0)));
+        let dlines = greedy_wrap(kept, Some(wrap_at.max(0.0)), ws);
         for (i, line) in dlines.iter().enumerate() {
             if line.width <= 0.0 {
                 continue;
@@ -1895,6 +1898,7 @@ fn paint_form_control(
             false,
             0.0, // control labels carry no inherited word-spacing (v1 boundary)
             None, // control labels never truncate (input text-overflow is a v2 face)
+            WhiteSpace::Normal, // control labels always collapse (textarea value editing is a v2 face)
         );
         out.push_clip(x + 1, y + 1, x + w - 1, y + h - 1);
         out.blit_text(&r, tx.round() as i64, (ty + r.top).round() as i64);
@@ -1910,8 +1914,8 @@ fn paint_form_control(
     // the ink so the placeholder gray can never leak into the bar.
     if let Some((off, ink)) = caret {
         if matches!(form, super::FormRun::Input | super::FormRun::Textarea) {
-            let tokens = tokens_of(text, font_size, bold, fonts, false, 0.0);
-            let lines = greedy_wrap(&tokens, Some(wrap_at.max(1) as f32));
+            let tokens = tokens_of(text, font_size, bold, fonts, false, 0.0, WhiteSpace::Normal);
+            let lines = greedy_wrap(&tokens, Some(wrap_at.max(1) as f32), WhiteSpace::Normal);
             // tokens_of tokenizes the TRIMMED text: map the offset into
             // trimmed coordinates. A caret inside the leading whitespace
             // pins to the line start — accepted v1 imprecision.
@@ -2292,6 +2296,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                                     false,
                                     0.0,
                                     None,
+                                    WhiteSpace::Normal,
                                 );
                                 scratch.blit_text(&r, 0, r.top.round() as i64);
                                 scratch.pop_clip();
@@ -2340,6 +2345,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                                     false,
                                     0.0,
                                     None,
+                                    WhiteSpace::Normal,
                                 );
                                 out.blit_text(&r, x, (y as f32 + r.top).round() as i64);
                                 out.pop_clip();
@@ -2380,7 +2386,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     super::svg::paint_svg(render, rect, fonts, out, dx, dy, *alpha);
                 }
             }
-            PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at, gradient, decorations, mono, word_spacing, truncate_at, tokens, text_shadow } => {
+            PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at, gradient, decorations, mono, word_spacing, truncate_at, tokens, ws, text_shadow } => {
                 // background-clip: text: the fill color is ignored entirely
                 // (CSS paints the background through the glyphs; the
                 // transparent-text-fill half of the idiom is free by
@@ -2419,10 +2425,10 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     }
                     if let Some(shadows) = text_shadow {
                         for sh in shadows.iter().rev() {
-                            stamp_text_shadow(out, fonts, text, *font_size, *bold, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, tokens.as_deref(), sh, true, (*x + sh.dx) as f64, (*y + sh.dy) as f64);
+                            stamp_text_shadow(out, fonts, text, *font_size, *bold, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, *ws, tokens.as_deref(), sh, true, (*x + sh.dx) as f64, (*y + sh.dy) as f64);
                         }
                     }
-                    let r = fonts.rasterize_wrapped_with(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, tokens.clone());
+                    let r = fonts.rasterize_wrapped_with(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, *ws, tokens.clone());
                     // Gradient recolor rewrites pixels in place — the cache
                     // hands out Arcs, so that path clones first (#399).
                     let mut owned;
@@ -2434,7 +2440,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                         &r
                     };
                     out.blit_rgba_affine(&r.data, r.width, r.height, *x as f64, (*y + r.top) as f64);
-                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, tokens.as_deref(), 0.0, 0.0);
+                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, *ws, tokens.as_deref(), 0.0, 0.0);
                 } else {
                     let pad = shadow_pad.unwrap_or(0.0);
                     if !text_reaches_band(*y, text, *font_size, *wrap_at, *line_height, dy, out.height as i64, pad) {
@@ -2442,10 +2448,10 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     }
                     if let Some(shadows) = text_shadow {
                         for sh in shadows.iter().rev() {
-                            stamp_text_shadow(out, fonts, text, *font_size, *bold, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, tokens.as_deref(), sh, false, (*x + sh.dx - dx) as f64, (*y + sh.dy - dy) as f64);
+                            stamp_text_shadow(out, fonts, text, *font_size, *bold, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, *ws, tokens.as_deref(), sh, false, (*x + sh.dx - dx) as f64, (*y + sh.dy - dy) as f64);
                         }
                     }
-                    let r = fonts.rasterize_wrapped_with(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, tokens.clone());
+                    let r = fonts.rasterize_wrapped_with(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, *ws, tokens.clone());
                     let mut owned;
                     let r = if let Some(g) = gradient {
                         owned = (*r).clone();
@@ -2456,7 +2462,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     };
                     // Tile row 0 sits `top` px above the leaf's line-box top.
                     out.blit_text(r, (x - dx).round() as i64, (y - dy + r.top).round() as i64);
-                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, tokens.as_deref(), dx, dy);
+                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, *ws, tokens.as_deref(), dx, dy);
                 }
             }
         }
@@ -2481,6 +2487,7 @@ fn stamp_text_shadow(
     mono: bool,
     word_spacing: f32,
     truncate_at: Option<f32>,
+    ws: WhiteSpace,
     tokens: Option<&[Token]>,
     sh: &TextShadow,
     affine: bool,
@@ -2497,6 +2504,7 @@ fn stamp_text_shadow(
         mono,
         word_spacing,
         truncate_at,
+        ws,
         tokens.map(std::rc::Rc::from),
     );
     if sh.blur <= 0.0 {
@@ -2623,6 +2631,7 @@ mod tests {
                 word_spacing: 0.0,
                 truncate_at: None,
                 tokens: None,
+                ws: WhiteSpace::Normal,
                 text_shadow: None,
             },
             PaintItem::ClearXf,
@@ -2651,6 +2660,7 @@ mod tests {
             word_spacing: 0.0,
             truncate_at: None,
             tokens: None,
+            ws: WhiteSpace::Normal,
             text_shadow: None,
         };
         let items = vec![
@@ -2686,6 +2696,7 @@ mod tests {
                 word_spacing: 0.0,
                 truncate_at: None,
                 tokens: None,
+                ws: WhiteSpace::Normal,
                 text_shadow: None,
             },
             PaintItem::ClearXf,
@@ -2717,6 +2728,7 @@ mod tests {
                 word_spacing: 0.0,
                 truncate_at: None,
                 tokens: None,
+                ws: WhiteSpace::Normal,
                 text_shadow: None,
             },
             PaintItem::ClearXf,
@@ -2756,6 +2768,7 @@ mod tests {
             word_spacing: 0.0,
             truncate_at: None,
             tokens: None,
+            ws: WhiteSpace::Normal,
             text_shadow: None,
         }];
         let fonts = crate::diting_fonts::font_book();
@@ -2940,7 +2953,7 @@ mod tests {
                 form: None,
                 caret: None,
             },
-            PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None, text_shadow: None },
+            PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None, ws: WhiteSpace::Normal, text_shadow: None },
         ];
         let fonts = crate::diting_fonts::font_book();
         let mut full = Canvas::new_filled(40, 60, [255, 255, 255, 255]);
@@ -2972,6 +2985,7 @@ mod tests {
                 word_spacing: 0.0,
                 truncate_at: None,
                 tokens: None,
+                ws: WhiteSpace::Normal,
                 text_shadow: None,
             }];
             let mut c = Canvas::new_filled(80, 32, [255, 255, 255, 255]);
@@ -3018,6 +3032,7 @@ mod tests {
                 word_spacing: 0.0,
                 truncate_at: None,
                 tokens: None,
+                ws: WhiteSpace::Normal,
                 text_shadow: None,
             },
             PaintItem::ClearXf,
@@ -3380,8 +3395,8 @@ mod tests {
         let fonts = crate::diting_fonts::font_book();
         // A tall low-content page: only two text leaves, one near the band.
         let items = vec![
-            PaintItem::Text { text: "edge".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 96.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None, text_shadow: None },
-            PaintItem::Text { text: "far".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 500.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None, text_shadow: None },
+            PaintItem::Text { text: "edge".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 96.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None, ws: WhiteSpace::Normal, text_shadow: None },
+            PaintItem::Text { text: "far".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 500.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None, ws: WhiteSpace::Normal, text_shadow: None },
         ];
         let mut band = Canvas::new_filled(40, 80, [255, 255, 255, 255]);
         execute_band(&items, &fonts, &mut band, 0.0, 100.0);
@@ -3509,6 +3524,7 @@ mod tests {
                 word_spacing: 0.0,
                 truncate_at: None,
                 tokens: None,
+                ws: WhiteSpace::Normal,
                 text_shadow: None,
             },
             PaintItem::ClearXf,
@@ -3685,6 +3701,7 @@ mod tests {
                 word_spacing: 0.0,
                 truncate_at,
                 tokens: None,
+                ws: WhiteSpace::Normal,
                 text_shadow: None,
             }];
             let mut c = Canvas::new_filled(400, 32, [255, 255, 255, 255]);
@@ -3715,10 +3732,10 @@ mod tests {
         let fonts = crate::diting_fonts::font_book();
         let text = "淘宝商品列表页的一段中文文本需要折行处理".repeat(3);
         let deco = TextDecorations { underline: true, line_through: true, ..Default::default() };
-        let tokens = tokens_of(&text, 16.0, false, &fonts, false, 0.0);
+        let tokens = tokens_of(&text, 16.0, false, &fonts, false, 0.0, WhiteSpace::Normal);
         let stroke = |pre: Option<&[Token]>, truncate_at: Option<f32>| {
             let mut c = Canvas::new_filled(320, 200, [255, 255, 255, 255]);
-            paint_text_decorations(&mut c, &fonts, &text, 16.0, false, [0, 0, 0, 255], 24.0, 2.0, 4.0, 300.0, deco, false, 0.0, truncate_at, pre, 0.0, 0.0);
+            paint_text_decorations(&mut c, &fonts, &text, 16.0, false, [0, 0, 0, 255], 24.0, 2.0, 4.0, 300.0, deco, false, 0.0, truncate_at, WhiteSpace::Normal, pre, 0.0, 0.0);
             c.data
         };
         assert_eq!(stroke(None, None), stroke(Some(&tokens), None), "wrapped: pre-shaped == re-shaped");
@@ -3817,6 +3834,7 @@ mod tests {
             word_spacing: 0.0,
             truncate_at: None,
             tokens: None,
+            ws: WhiteSpace::Normal,
             text_shadow: if layers.is_empty() { None } else { Some(layers) },
         }]
     }
