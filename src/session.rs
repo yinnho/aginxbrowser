@@ -1484,8 +1484,28 @@ fn session_thread(
                                 "text": format!("initial navigation failed: {}", e),
                                 "url": url,
                             }));
+                            // A failed navigation leaves the page with no JS
+                            // runtime (js: None) — every eval would silently
+                            // return null while document.URL still serves the
+                            // stub string, which reads as "logged-in but
+                            // scriptless". Chrome keeps a working JS context
+                            // on its error page; land on about:blank for the
+                            // same guarantee (live-reproven 2026-09-15: an
+                            // x.com session behind an unreachable network
+                            // returned Null for every flow script).
+                            let _ = page.goto("about:blank").await;
                         }
                     }
+                } else {
+                    // A real browser tab is never runtime-less: about:blank
+                    // carries a full JS context. A never-navigated Page has
+                    // `js: None`, and eval fell back to a stub that returned
+                    // Null for every script (only literal `document.title`
+                    // and `document.URL` were served from Rust state) — an
+                    // agent evaluating right after session_create saw silent
+                    // nulls (the 0.4.1 report's intermittent `result: null`).
+                    // Land on about:blank so the runtime exists from birth.
+                    let _ = page.goto("about:blank").await;
                 }
 
                 // Inject storage after landing so the entries are scoped to
@@ -3194,6 +3214,114 @@ mod tests {
             exported.contains("set_content"),
             "export must record the setContent action, got: {exported}"
         );
+
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
+    // A session created without a url (and one whose initial navigation
+    // fails) must still own a live JS context, like a real browser's blank
+    // tab. Until 2026-09-15 a never-navigated Page kept `js: None` and every
+    // eval silently returned null — only literal `document.title`/`document.
+    // URL` were served from Rust state, so agents saw "the page exists but no
+    // script runs" (the 0.4.1 report's intermittent `result: null`).
+    #[tokio::test]
+    async fn no_url_session_has_a_live_js_context_from_birth() {
+        let _net = crate::server::test_util::net_env_guard();
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(None, false, vec![], None, None, None, false, false, None);
+
+        let two = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "1+1".to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(two.as_i64(), Some(2), "eval must run, got: {two}");
+
+        // Side effects persist — the script really executed.
+        mgr.send(&sid, |reply| SessionCommand::Eval {
+            script: "window.__born = 42; 0".to_string(),
+            timeout_ms: None,
+            reply,
+        })
+        .await
+        .unwrap();
+        let born = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "window.__born".to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(born.as_i64(), Some(42));
+
+        // The exception contract survives: a throw is an Err, not a null.
+        let threw = mgr.send(&sid, |reply| SessionCommand::Eval {
+            script: "throw new Error('born-live')".to_string(),
+            timeout_ms: None,
+            reply,
+        })
+        .await;
+        assert!(threw.is_err(), "throw must surface as Err, got: {threw:?}");
+
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
+    // Same guarantee when the initial navigation itself fails: Chrome keeps a
+    // working JS context on its error page, so the agent can eval, read the
+    // console entry, and navigate on from the dead URL.
+    #[tokio::test]
+    async fn failed_initial_navigation_still_leaves_a_live_js_context() {
+        let _net = crate::server::test_util::net_env_guard();
+        let mut mgr = SessionManager::new();
+        // Port 1 on loopback: nothing listens, connection refused immediately.
+        let sid = mgr.create(
+            Some("http://127.0.0.1:1/"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+
+        let two = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "1+1".to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            two.as_i64(),
+            Some(2),
+            "eval after failed initial nav must run, got: {two}"
+        );
+
+        // And the session stays usable: navigating elsewhere works.
+        let _ = mgr
+            .send(&sid, |reply| SessionCommand::SetContent {
+                html: "<html><body><p id='ok'>landed</p></body></html>".to_string(),
+                reply,
+            })
+            .await
+            .unwrap();
+
+        let landed = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "document.getElementById('ok').textContent".to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(landed.as_str(), Some("landed"));
 
         assert!(mgr.close_and_wait(&sid).await);
     }
