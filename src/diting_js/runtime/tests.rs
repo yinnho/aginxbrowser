@@ -7134,6 +7134,115 @@
         assert_eq!(v["iw"].as_f64().unwrap(), 50.0);
     }
 
+    // obscura #937 family: transforms only apply to transformable boxes
+    // (block-level or atomic inline-level). A non-replaced inline box is
+    // not transformable — Chrome ignores its transform for gBCR,
+    // hit-testing AND ink extent (paint already ignores it here).
+    #[test]
+    #[cfg(feature = "screenshot")]
+    fn transform_on_non_replaced_inline_is_ignored_by_gbcr() {
+        let mut rt = setup_runtime(r#"<html><head><style>
+          #i1, #i2 { display: inline; }
+          #i2 { transform: translateX(100px); }
+          #b1, #b2 { display: inline-block; }
+          #b2 { transform: translateX(100px); }
+          .row { width: 50px; }
+        </style></head><body>
+        <div class="row"><span id="i1">hi</span></div>
+        <div class="row"><span id="i2">hi</span></div>
+        <div><span id="b1">yo</span></div>
+        <div><span id="b2">yo</span></div>
+        </body></html>"#);
+        let diag = rt
+            .evaluate(
+                r#"JSON.stringify((() => {
+                    try {
+                        const e = id => document.getElementById(id);
+                        const g = id => e(id).getBoundingClientRect();
+                        const i1 = g('i1'), i2 = g('i2'), b1 = g('b1'), b2 = g('b2');
+                        const midY = i2.top + i2.height / 2;
+                        const atStatic = document.elementFromPoint(i2.left + i2.width / 2, midY);
+                        const atShifted = document.elementFromPoint(i2.left + 100 + i2.width / 2, midY);
+                        return { iDx: i2.left - i1.left, bDx: b2.left - b1.left,
+                                 atStatic: atStatic ? atStatic.id : null,
+                                 atShifted: atShifted ? atShifted.id : null,
+                                 sw1: e('i1').parentElement.scrollWidth,
+                                 sw2: e('i2').parentElement.scrollWidth };
+                    } catch (err) { return { error: String(err) }; }
+                })())"#,
+            )
+            .unwrap();
+        println!("inline transform diagnostics: {diag}");
+        let v: serde_json::Value = serde_json::from_str(diag.as_str().unwrap()).unwrap();
+        assert_eq!(
+            v["bDx"].as_f64().unwrap(),
+            100.0,
+            "control: inline-block IS transformable, must shift: {diag}"
+        );
+        assert_eq!(
+            v["iDx"].as_f64().unwrap(),
+            0.0,
+            "non-replaced inline is not transformable — gBCR must ignore the transform: {diag}"
+        );
+        let static_hit = v["atStatic"].as_str().unwrap_or("(null)");
+        let shifted_hit = v["atShifted"].as_str().unwrap_or("(null)");
+        assert_eq!(
+            static_hit, "i2",
+            "hit-testing must also ignore the inline transform: {diag}"
+        );
+        assert_ne!(
+            shifted_hit, "i2",
+            "the shifted position must not hit the inline box: {diag}"
+        );
+        assert_eq!(
+            v["sw1"].as_u64().unwrap(),
+            v["sw2"].as_u64().unwrap(),
+            "ink extent must ignore the inline transform too: {diag}"
+        );
+    }
+
+    // Batch-67 leftover: form widgets honor position:absolute. An input
+    // carrying `position:absolute; left/top` must land at that offset like
+    // any other box — replaced-widget boxes used to stay in flow position.
+    #[test]
+    #[cfg(feature = "screenshot")]
+    fn form_widget_honors_absolute_positioning() {
+        let mut rt = setup_runtime(r#"<html><head><style>
+          .abs { position: absolute; left: 100px; top: 50px; }
+        </style></head><body>
+        <div id="d" class="abs">x</div>
+        <input id="txt" class="abs" type="text" value="hi">
+        <input id="chk" class="abs" type="checkbox">
+        </body></html>"#);
+        let diag = rt
+            .evaluate(
+                r#"JSON.stringify((() => {
+                    try {
+                        const g = id => { const r = document.getElementById(id).getBoundingClientRect();
+                                          return [Math.round(r.left), Math.round(r.top)]; };
+                        return { d: g('d'), txt: g('txt'), chk: g('chk') };
+                    } catch (err) { return { error: String(err) }; }
+                })())"#,
+            )
+            .unwrap();
+        println!("form widget abspos diagnostics: {diag}");
+        let v: serde_json::Value = serde_json::from_str(diag.as_str().unwrap()).unwrap();
+        if v.get("error").is_some() {
+            panic!("probe threw: {diag}");
+        }
+        assert_eq!(v["d"], serde_json::json!([100, 50]), "control div: {diag}");
+        assert_eq!(
+            v["txt"],
+            serde_json::json!([100, 50]),
+            "text input must honor position:absolute: {diag}"
+        );
+        assert_eq!(
+            v["chk"],
+            serde_json::json!([100, 50]),
+            "checkbox must honor position:absolute: {diag}"
+        );
+    }
+
     // Regression (companion to obscura #738): getComputedStyle consulted
     // inline styles, dimensions and a defaults table — but never the
     // stylesheet cascade, so a z-index/position set in a <style> block

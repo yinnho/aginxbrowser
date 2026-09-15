@@ -1622,6 +1622,38 @@ fn build_replaced_leaf(
 
     let mut s = Style::default();
     s.item_is_replaced = true;
+    // Positioning rides into replaced leaves too (to_taffy_style does this
+    // for every boxed element): without it an absolutely-positioned
+    // input/img/select kept its taffy-relative style, the reparent pass
+    // still moved it to the containing block, and it then stacked in flow
+    // there ignoring its insets.
+    s.position = match style.position {
+        Some(crate::diting_css::PositionMode::Absolute)
+        | Some(crate::diting_css::PositionMode::Fixed) => Position::Absolute,
+        _ => Position::Relative,
+    };
+    // Inset/clamp unset values are CSS `auto` (same mapping as
+    // to_taffy_style's local lpa_auto).
+    let lpa_auto = |v: Option<crate::diting_css::Length>| match v {
+        Some(crate::diting_css::Length::Px(px)) => LengthPercentageAuto::length(px),
+        Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
+        Some(crate::diting_css::Length::Calc { percent, .. }) => {
+            LengthPercentageAuto::percent(percent / 100.0)
+        }
+        Some(crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent) | None => LengthPercentageAuto::auto(),
+    };
+    if style.top.is_some()
+        || style.right.is_some()
+        || style.bottom.is_some()
+        || style.left.is_some()
+    {
+        s.inset = taffy::geometry::Rect {
+            top: lpa_auto(style.top),
+            right: lpa_auto(style.right),
+            bottom: lpa_auto(style.bottom),
+            left: lpa_auto(style.left),
+        };
+    }
     // UA/author border lays out on replaced boxes too (batch 7a): the
     // iframe's UA `2px inset` makes a width=600 attr box come out 604.
     // taffy sizes are border-box, so the attr/CSS size gets the widths
