@@ -1525,6 +1525,42 @@ impl Page {
             .header("referrer-policy")
             .and_then(crate::diting_js::ops::last_valid_referrer_token)
             .unwrap_or_default();
+        // A bare SVG document navigated as a document (content-type
+        // image/svg+xml; the html5 parser wraps it in html>body>svg):
+        // Chrome sizes the root svg at 100%x100% of the initial containing
+        // block with no body UA margin. Reproduce that by injecting the
+        // effective viewport as width/height attributes on the root svg
+        // (author attributes win — only absent ones are filled in) plus a
+        // head style resetting the body margin. The replaced-leaf intrinsic
+        // arm and the viewBox meet scaling (svg.rs) do the rest. Layout
+        // only runs in the screenshot pipeline, so the whole branch gates
+        // with it.
+        #[cfg(feature = "screenshot")]
+        let dom = {
+            let is_svg_doc = response
+                .content_type()
+                .is_some_and(|ct| ct.starts_with("image/svg"));
+            if is_svg_doc {
+                let dom = parse_html(&format!(
+                    "<style>html,body{{margin:0;padding:0}}</style>{body_text}"
+                ));
+                if let Some(svg_id) = dom.query_selector("svg").ok().flatten() {
+                    let (vw, vh) = self.effective_viewport();
+                    dom.with_node_mut(svg_id, |n| {
+                        if n.get_attribute("width").is_none() {
+                            n.set_attribute("width", vw.to_string());
+                        }
+                        if n.get_attribute("height").is_none() {
+                            n.set_attribute("height", vh.to_string());
+                        }
+                    });
+                }
+                dom
+            } else {
+                parse_html(&body_text)
+            }
+        };
+        #[cfg(not(feature = "screenshot"))]
         let dom = parse_html(&body_text);
 
         self.title = dom
@@ -4767,6 +4803,58 @@ ms.addEventListener('sourceopen', function(){ \
             served.len(),
             1,
             "the unblocked sibling in the batch must still load (negative control)"
+        );
+    }
+
+    /// A bare SVG document navigated as a document: Chrome sizes the root
+    /// svg at 100%x100% of the viewport with no body UA margin. Author
+    /// width/height attributes on the root stay authoritative.
+    #[cfg(feature = "screenshot")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn svg_document_root_fills_viewport() {
+        let _g = net_test_guard();
+        let bare = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" fill="#0d1520"/></svg>"##.to_string();
+        let authored = r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20" viewBox="0 0 512 512"/>"#.to_string();
+        let port = local_http_server_typed(vec![
+            ("/bare.svg", 200, "image/svg+xml", bare),
+            ("/authored.svg", 200, "image/svg+xml", authored),
+        ]);
+        let mut p = test_page();
+        p.set_viewport_override(300.0, 200.0, false, None);
+        p.navigate(&format!("http://127.0.0.1:{port}/bare.svg"))
+            .await
+            .unwrap();
+        // x=0 pins the body UA margin as reset; 300x200 pins the injected
+        // viewport intrinsic (not the 512x512 viewBox, not 300x150).
+        assert_eq!(
+            p.evaluate("document.querySelector('svg').getBoundingClientRect().x").as_f64(),
+            Some(0.0),
+            "body margin must be reset"
+        );
+        assert_eq!(
+            p.evaluate("document.querySelector('svg').getBoundingClientRect().y").as_f64(),
+            Some(0.0)
+        );
+        assert_eq!(
+            p.evaluate("document.querySelector('svg').getBoundingClientRect().width").as_f64(),
+            Some(300.0)
+        );
+        assert_eq!(
+            p.evaluate("document.querySelector('svg').getBoundingClientRect().height").as_f64(),
+            Some(200.0)
+        );
+
+        // Author attrs on the document root win over the injection.
+        p.navigate(&format!("http://127.0.0.1:{port}/authored.svg"))
+            .await
+            .unwrap();
+        assert_eq!(
+            p.evaluate("document.querySelector('svg').getBoundingClientRect().width").as_f64(),
+            Some(40.0)
+        );
+        assert_eq!(
+            p.evaluate("document.querySelector('svg').getBoundingClientRect().height").as_f64(),
+            Some(20.0)
         );
     }
 }
