@@ -694,6 +694,11 @@ pub struct ComputedStyle {
     /// `cascade_element` like `color`); first layer paints on top.
     /// `None` = `none`.
     pub text_shadow: Option<Vec<TextShadow>>,
+    /// `backdrop-filter: blur(<length>)` (blitz#901 family), v1 blur-only,
+    /// NON-inherited: the px blur radius applied to whatever painted
+    /// beneath the element's border box before its own background. `None`
+    /// = `none`.
+    pub backdrop_blur: Option<f32>,
     /// Shorthand sides in CSS order (top right bottom left), already expanded.
     pub margin: Sides,
     pub padding: Sides,
@@ -3628,6 +3633,19 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 _ => false,
             }
         }
+        "backdrop-filter" => {
+            if v.eq_ignore_ascii_case("none") {
+                style.backdrop_blur = None;
+                return true;
+            }
+            match parse_backdrop_blur(v, fonts) {
+                Some(px) => {
+                    style.backdrop_blur = Some(px);
+                    true
+                }
+                _ => false,
+            }
+        }
         "text-shadow" => {
             if v.eq_ignore_ascii_case("none") {
                 style.text_shadow = None;
@@ -4624,6 +4642,27 @@ pub fn parse_text_shadow(
         });
     }
     Some(layers)
+}
+
+/// `backdrop-filter` v1: exactly one `blur(<length>)` function or `none`
+/// (handled at the declaration arm). A filter-function list or any other
+/// filter function is an invalid declaration, not a parse-through — the
+/// prior computed value survives, matching the other shadow parsers.
+pub fn parse_backdrop_blur(value: &str, fonts: &FontCtx) -> Option<f32> {
+    let v = value.trim();
+    let open = v.find('(')?;
+    if !v[..open].eq_ignore_ascii_case("blur") || !v.ends_with(')') {
+        return None;
+    }
+    let inner = &v[open + 1..v.len() - 1];
+    if inner.trim() != inner || inner.trim().is_empty() {
+        return None;
+    }
+    let px = resolve_shadow_len(inner, fonts)?;
+    if px < 0.0 {
+        return None;
+    }
+    Some(px)
 }
 
 /// Shadow lengths resolve em/rem against the cascade fonts and fold calc();
@@ -7124,6 +7163,49 @@ mod tests {
         assert_eq!(s.box_shadow, None, "none clears");
         apply_declarations(&mut s, "box-shadow: 1px 1px red; box-shadow: blue blue");
         assert!(s.box_shadow.is_some(), "invalid re-declaration keeps the prior value");
+    }
+
+    // ---- backdrop-filter (blitz#901 family) ----
+
+    fn backdrop(v: &str) -> Option<f32> {
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, &format!("backdrop-filter: {v}"));
+        s.backdrop_blur
+    }
+
+    #[test]
+    fn backdrop_filter_blur_only_v1() {
+        assert_eq!(backdrop("blur(12px)"), Some(12.0));
+        assert_eq!(backdrop("BLUR(2.5px)"), Some(2.5), "function name case-insensitive");
+        assert!(backdrop("blur(0.5em)").is_some(), "em resolves via fonts");
+        assert_eq!(backdrop("none"), None);
+    }
+
+    #[test]
+    fn backdrop_filter_rejections_and_reset() {
+        assert!(backdrop("brightness(0.5)").is_none(), "v1 is blur-only");
+        assert!(backdrop("blur(4px) blur(4px)").is_none(), "no filter lists in v1");
+        assert!(backdrop("blur(-3px)").is_none(), "negative blur invalid");
+        assert!(backdrop("blur(50%)").is_none(), "% needs the receiver box");
+        assert!(backdrop("blur").is_none(), "missing arguments");
+        // `none` clears a prior value; an invalid re-declaration must not.
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "backdrop-filter: blur(8px); backdrop-filter: none");
+        assert_eq!(s.backdrop_blur, None, "none clears");
+        apply_declarations(&mut s, "backdrop-filter: blur(8px); backdrop-filter: invert(1)");
+        assert_eq!(s.backdrop_blur, Some(8.0), "invalid re-declaration keeps the prior value");
+    }
+
+    #[test]
+    fn backdrop_filter_does_not_inherit() {
+        let tree = diting_dom::tree_sink::parse_html(r#"<div><p>x</p></div>"#);
+        let p = tree.query_selector("p").unwrap().unwrap();
+        let parent = ComputedStyle {
+            backdrop_blur: Some(6.0),
+            ..Default::default()
+        };
+        let child = cascade_element("p", &tree, p, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
+        assert_eq!(child.backdrop_blur, None, "backdrop-filter is non-inherited");
     }
 
     // ---- text-shadow (blitz#271 family) ----

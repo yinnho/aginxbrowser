@@ -4394,6 +4394,18 @@ pub enum PaintItem {
         spread: f32,
         inset: bool,
     },
+    /// A `backdrop-filter: blur()` region (blitz#901 family): the first
+    /// item a glass element emits, so it filters everything painted
+    /// beneath it so far. `rect` is the element's border box and `radii`
+    /// the same clamped per-corner values a `Bg` on this box gets. The
+    /// blur may SAMPLE outside the box (a blur needs input) but the
+    /// composited output clips to the ROUNDED border shape, not the
+    /// axis-aligned rect — the exact bug upstream blitz#901 hit.
+    BackdropFilter {
+        rect: Rect,
+        radii: [(f32, f32); 4],
+        blur: f32,
+    },
     /// A `background-image: linear-gradient(...)` fill (gradient batch).
     /// `stops` are (0..1 position, straight RGBA) ascending, the CSS angle
     /// is in degrees (0 = to top, clockwise), and `radii` are the same
@@ -6143,6 +6155,20 @@ pub fn layout_collect(
                 })
                 .unwrap_or([(0.0, 0.0); 4]);
             if alpha > 0.0 && rect.width > 0.0 && rect.height > 0.0 {
+                // backdrop-filter filters everything beneath this element,
+                // so it must emit BEFORE any of the element's own ink
+                // (shadows, background, border) — first item in the block.
+                if let Some(blur) = styles
+                    .get(dom_id)
+                    .and_then(|s| s.backdrop_blur)
+                    .filter(|b| *b > 0.0)
+                {
+                    items.push(PaintItem::BackdropFilter {
+                        rect: bg_rect,
+                        radii,
+                        blur,
+                    });
+                }
                 // box-shadow below everything: CSS stacks shadows under the
                 // background, first-declared layer on top, so emit reversed.
                 if let Some(shadows) = styles.get(dom_id).and_then(|s| s.box_shadow.as_ref()) {
@@ -7664,6 +7690,34 @@ mod box_shadow_paint_tests {
         assert!(outer < bg, "outer shadow under the background");
         assert!(bg < inset, "inset shadow above the background");
         assert!(inset < border, "inset shadow under the border");
+    }
+
+    /// blitz#901 family: the backdrop filter is the element's FIRST item —
+    /// it must see everything painted beneath the element and none of the
+    /// element's own ink.
+    #[test]
+    fn backdrop_filter_is_first_item_of_its_element() {
+        let items = items(
+            "#card { width: 40px; height: 20px; background: blue; border-radius: 8px; box-shadow: 2px 2px red; backdrop-filter: blur(6px) }",
+            r#"<div id="card"></div>"#,
+        );
+        let bd = items
+            .iter()
+            .position(|it| matches!(it, PaintItem::BackdropFilter { blur, .. } if *blur == 6.0));
+        let outer = items
+            .iter()
+            .position(|it| matches!(it, PaintItem::BoxShadow { inset: false, .. }));
+        let bg = items
+            .iter()
+            .position(|it| matches!(it, PaintItem::Bg { color, .. } if *color == [0, 0, 255, 255]));
+        let (bd, outer, bg) = (bd.unwrap(), outer.unwrap(), bg.unwrap());
+        assert!(bd < outer, "backdrop filter beneath the element's own shadow");
+        assert!(bd < bg, "backdrop filter beneath its own background");
+        let radii = match &items[bd] {
+            PaintItem::BackdropFilter { radii, .. } => *radii,
+            _ => unreachable!(),
+        };
+        assert!(radii.iter().all(|r| r.0 > 0.0), "carries the clamped corner radii: {radii:?}");
     }
 }
 

@@ -2468,6 +2468,7 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "color",
     "background-color",
     "box-shadow",
+    "backdrop-filter",
     "text-shadow",
     "background-image",
     "font-family",
@@ -2883,6 +2884,11 @@ fn computed_style_value(
                 })
                 .collect::<Vec<_>>()
                 .join(", "),
+        }),
+        // Chrome's computed backdrop-filter: "blur(<length>)" or "none".
+        "backdrop-filter" => Some(match s.backdrop_blur {
+            None => "none".to_string(),
+            Some(px) => format!("blur({}px)", format_number(px)),
         }),
         // Chrome's computed text-shadow: "color dx dy blur" per layer
         // (first-declared first); unset serializes as "none".
@@ -5889,6 +5895,30 @@ mod tests {
     /// {transform, opacity} may keep the solve cache. Value changes,
     /// whitelist additions/removals, prefixed properties and missing
     /// before-states must all fall back to the full invalidation.
+    /// Chrome's computed backdrop-filter face: "blur(<length>)" or "none".
+    /// The props-table membership is asserted here too — a serialization
+    /// arm without a table entry is invisible to getComputedStyle.
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn backdrop_filter_computed_face() {
+        assert!(super::COMPUTED_STYLE_PROPS.contains(&"backdrop-filter"));
+        let mut s = crate::diting_css::ComputedStyle::default();
+        assert_eq!(
+            super::computed_style_value(&s, "backdrop-filter", None).as_deref(),
+            Some("none")
+        );
+        s.backdrop_blur = Some(12.0);
+        assert_eq!(
+            super::computed_style_value(&s, "backdrop-filter", None).as_deref(),
+            Some("blur(12px)")
+        );
+        s.backdrop_blur = Some(2.5);
+        assert_eq!(
+            super::computed_style_value(&s, "backdrop-filter", None).as_deref(),
+            Some("blur(2.5px)")
+        );
+    }
+
     #[cfg(feature = "screenshot")]
     #[test]
     fn style_write_paint_only_diff_matrix() {

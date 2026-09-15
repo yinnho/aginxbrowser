@@ -778,6 +778,86 @@ impl Canvas {
         }
     }
 
+    /// backdrop-filter: blur() (blitz#901 family). Snapshot the canvas
+    /// region under the box (padded by the blur's support so the kernel
+    /// has input OUTSIDE the box), separable box-blur it in premultiplied
+    /// RGBA, and write the result back ONLY inside the rounded border
+    /// shape — the blur may sample outside the box, the output may not.
+    fn blur_backdrop(&mut self, x: f32, y: f32, w: f32, h: f32, radii: [(f32, f32); 4], blur: f32) {
+        if w <= 0.0 || h <= 0.0 || self.width == 0 || self.height == 0 {
+            return;
+        }
+        let pad = blur.ceil() as i64;
+        let radius = ((blur * 0.5).round() as usize).max(1);
+        let x0 = (x.floor() as i64 - pad).max(0);
+        let y0 = (y.floor() as i64 - pad).max(0);
+        let x1 = ((x + w).ceil() as i64 + pad).min(self.width as i64);
+        let y1 = ((y + h).ceil() as i64 + pad).min(self.height as i64);
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let rw = (x1 - x0) as usize;
+        let rh = (y1 - y0) as usize;
+        // Deinterleave the snapshot, then premultiply RGB by A so bright
+        // pixels can't bleed across transparent ones.
+        let mut planes: [Vec<u8>; 4] =
+            [vec![0u8; rw * rh], vec![0u8; rw * rh], vec![0u8; rw * rh], vec![0u8; rw * rh]];
+        for (row, plane_rows) in planes.iter_mut().enumerate() {
+            for gy in 0..rh {
+                let src = ((y0 + gy as i64) as usize * self.width + x0 as usize) * 4;
+                let dst = gy * rw;
+                for gx in 0..rw {
+                    plane_rows[dst + gx] = self.data[src + gx * 4 + row];
+                }
+            }
+        }
+        let alphas = planes[3].clone();
+        for plane in planes.iter_mut().take(3) {
+            for (v, a) in plane.iter_mut().zip(&alphas) {
+                *v = ((*v as u32 * *a as u32 + 127) / 255) as u8;
+            }
+        }
+        // One separable pass each way — the same two-round box kernel the
+        // text-shadow feather uses (support ≈ blur).
+        for plane in planes.iter_mut() {
+            *plane = box_blur_alpha(plane, rw, rh, radius, true);
+            *plane = box_blur_alpha(plane, rw, rh, radius, false);
+        }
+        // Composite: backdrop pixels inside the rounded shape are REPLACED
+        // with their blur (blending blurred-over-sharp would double-count);
+        // outside the shape the original stays crisp.
+        let (bx, by) = (x as f64 + w as f64 / 2.0, y as f64 + h as f64 / 2.0);
+        let (hw, hh) = (w as f64 / 2.0, h as f64 / 2.0);
+        let rx0 = (x.floor() as i64).max(x0).max(0);
+        let ry0 = (y.floor() as i64).max(y0).max(0);
+        let ry1 = ((y + h).ceil() as i64).min(y1);
+        let rx1 = ((x + w).ceil() as i64).min(x1);
+        for gy in ry0..ry1 {
+            for gx in rx0..rx1 {
+                let (cx, cy) = (gx as f64 + 0.5, gy as f64 + 0.5);
+                if !self.clip_accepts(cx, cy) {
+                    continue;
+                }
+                let (px, py) = (cx - bx, cy - by);
+                let r = shadow_corner_radius(radii, px, py).min(hw).min(hh);
+                if sd_rounded_box(px, py, hw - r, hh - r, r) > 0.0 {
+                    continue;
+                }
+                let (col, row) = ((gx - x0) as usize, (gy - y0) as usize);
+                let av = planes[3][row * rw + col] as u32;
+                let i = (gy as usize * self.width + gx as usize) * 4;
+                for (c, plane) in planes.iter().take(3).enumerate() {
+                    self.data[i + c] = if av == 0 {
+                        0
+                    } else {
+                        (((plane[row * rw + col] as u32) * 255 + av / 2) / av).min(255) as u8
+                    };
+                }
+                self.data[i + 3] = av as u8;
+            }
+        }
+    }
+
     /// Outer box-shadow (blitz#349 family, v1): per-pixel SDF around the
     /// offset/spread-inflated shadow box, the element's own border box
     /// knocked out (a transparent background must not show the shadow
@@ -2102,6 +2182,14 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                         *radii,
                         *color,
                     );
+                }
+            }
+            PaintItem::BackdropFilter { rect, radii, blur } => {
+                // v1: skipped under an open transform bracket (no
+                // canvas-space snapshot on the affine path); axis-aligned
+                // glass is the blitz#901 shape.
+                if out.xf().is_none() && *blur > 0.0 {
+                    out.blur_backdrop(rect.x - dx, rect.y - dy, rect.width, rect.height, *radii, *blur);
                 }
             }
             PaintItem::BoxShadow { rect, color, radii, dx: sdx, dy: sdy, blur, spread, inset } => {
@@ -3814,6 +3902,38 @@ mod tests {
         assert_eq!(sd_rounded_box(0.0, 0.0, 3.0, 3.0, 2.0), -5.0);
         assert!(sd_rounded_box(5.0, 0.0, 3.0, 3.0, 2.0).abs() < 1e-9, "edge distance 0");
         assert!((sd_rounded_box(8.0, 0.0, 3.0, 3.0, 2.0) - 3.0).abs() < 1e-9, "+3 outside");
+    }
+
+    // ---- backdrop-filter: blur() (blitz#901 family) ----
+
+    /// The blitz#901 criterion end to end on the canvas: a hard red/blue
+    /// seam under a rounded glass box — the seam smears INSIDE the rounded
+    /// shape, the corner-cut zone keeps the SHARP backdrop.
+    #[test]
+    fn backdrop_blur_smears_inside_rounded_shape_only() {
+        let mut out = Canvas::new_filled(120, 60, [255, 0, 0, 255]);
+        out.fill_rect(60, 0, 60, 60, [0, 0, 255, 255]);
+        // Glass box x [20,100) y [10,50), uniform 20px corners.
+        out.blur_backdrop(20.0, 10.0, 80.0, 40.0, [(20.0, 20.0); 4], 6.0);
+        let px = |x: usize, y: usize| {
+            let i = (y * 120 + x) * 4;
+            (out.data[i], out.data[i + 1], out.data[i + 2], out.data[i + 3])
+        };
+        // Seam center inside the shape: red and blue both bled in.
+        let (r, g, b, a) = px(60, 30);
+        assert!(r > 40 && r < 215, "red bled right: {r}");
+        assert!(b > 40 && b < 215, "blue bled left: {b}");
+        assert_eq!(g, 0);
+        assert_eq!(a, 255);
+        // 1px left of the seam, still inside the shape: the blur kernel
+        // (radius 3) definitely reaches it with blue.
+        assert!(px(59, 30).2 > 0, "blur reaches the shape interior");
+        // Corner-cut zone: (22,12) is inside the bounding box but 25.5px
+        // from the TL corner circle center (40,30) — outside the shape,
+        // the backdrop must stay SHARP pure red (blitz#901's exact bug).
+        assert_eq!(px(22, 12), (255, 0, 0, 255), "corner-cut zone keeps the sharp backdrop");
+        // Fully outside the box: untouched.
+        assert_eq!(px(5, 5), (255, 0, 0, 255));
     }
 
     // ---- text-shadow (blitz#271 family) ----
