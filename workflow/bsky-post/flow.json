@@ -1,0 +1,36 @@
+{
+  "args": [
+    "text",
+    "reply_to",
+    "reply_to_cid",
+    "root_uri",
+    "root_cid"
+  ],
+  "vars": {
+    "args_json": "{\"text\": \"hello from aginxbrowser bsky-post flow\", \"reply_to\": \"\", \"reply_to_cid\": \"\", \"root_uri\": \"\", \"root_cid\": \"\"}",
+    "creds_json": "{\"identifier\": \"CHANGE_ME.bsky.social\", \"password\": \"CHANGE_ME\"}"
+  },
+  "steps": [
+    {
+      "op": "eval",
+      "args": {
+        "script": "// bsky-post step 1: createSession with the account's app password.\n// creds come in via vars (creds_json) — runner reads them from a local file,\n// never echoed. Tokens live in page context only (window.__bsky), not saved.\n(async () => {\n  const CREDS = {{creds_json}};\n  try {\n    const r = await fetch('https://bsky.social/xrpc/com.atproto.server.createSession', {\n      method: 'POST',\n      credentials: 'omit',\n      headers: {'content-type': 'application/json'},\n      body: JSON.stringify({identifier: CREDS.identifier, password: CREDS.password})\n    });\n    const t = await r.text();\n    let j = null; try { j = JSON.parse(t); } catch (e) {}\n    if (!r.ok || !j || !j.accessJwt) {\n      // 401 = bad identifier/app-password; never retry with the same creds\n      return JSON.stringify({ok: false, status: r.status, err_head: t.slice(0, 140)});\n    }\n    window.__bsky = {accessJwt: j.accessJwt, did: j.did, handle: j.handle};\n    return JSON.stringify({ok: true, handle: j.handle, did: j.did});\n  } catch (e) {\n    return JSON.stringify({ok: false, err: e.name + ': ' + e.message});\n  }\n})()\n"
+      },
+      "save": "login"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "// bsky-post step 2: createRecord app.bsky.feed.post.\n// 300-grapheme limit enforced in-engine (fallback to code points if no\n// Intl.Segmenter). Threading: reply needs BOTH root and parent {uri, cid}.\n(async () => {\n  const ARGS = {{args_json}};\n  try {\n    const auth = window.__bsky;\n    if (!auth) return JSON.stringify({ok: false, err: 'not logged in - login step failed?'});\n    let n;\n    if (typeof Intl.Segmenter === 'function') {\n      const seg = new Intl.Segmenter('en', {granularity: 'grapheme'});\n      n = [...seg.segment(ARGS.text)].length;\n    } else {\n      n = [...ARGS.text].length;\n    }\n    if (n > 300) return JSON.stringify({ok: false, err: 'over 300 graphemes: ' + n});\n    const record = {text: ARGS.text, createdAt: new Date().toISOString(), langs: ['en']};\n    if (ARGS.reply_to) {\n      record.reply = {\n        root: {uri: ARGS.root_uri, cid: ARGS.root_cid},\n        parent: {uri: ARGS.reply_to, cid: ARGS.reply_to_cid}\n      };\n    }\n    const r = await fetch('https://bsky.social/xrpc/com.atproto.repo.createRecord', {\n      method: 'POST',\n      credentials: 'omit',\n      headers: {'content-type': 'application/json', 'authorization': 'Bearer ' + auth.accessJwt},\n      body: JSON.stringify({repo: auth.did, collection: 'app.bsky.feed.post', record: record})\n    });\n    const t = await r.text();\n    let j = null; try { j = JSON.parse(t); } catch (e) {}\n    if (!r.ok || !j || !j.uri) {\n      return JSON.stringify({ok: false, status: r.status, err_head: t.slice(0, 160)});\n    }\n    return JSON.stringify({ok: true, uri: j.uri, cid: j.cid, graphemes: n});\n  } catch (e) {\n    return JSON.stringify({ok: false, err: e.name + ': ' + e.message});\n  }\n})()\n"
+      },
+      "save": "post"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "// bsky-post step 3: verify the post landed — getAuthorFeed, match text head.\n(async () => {\n  const ARGS = {{args_json}};\n  try {\n    const auth = window.__bsky;\n    if (!auth) return JSON.stringify({ok: false, err: 'not logged in'});\n    const head = (ARGS.text || '').replace(/\\s+/g, ' ').trim().slice(0, 48);\n    const r = await fetch('https://bsky.social/xrpc/app.bsky.feed.getAuthorFeed?actor='\n      + encodeURIComponent(auth.did) + '&limit=10',\n      {headers: {'authorization': 'Bearer ' + auth.accessJwt}});\n    const t = await r.text();\n    let j = null; try { j = JSON.parse(t); } catch (e) {}\n    if (!r.ok || !j || !Array.isArray(j.feed)) {\n      return JSON.stringify({ok: false, status: r.status, err_head: t.slice(0, 120)});\n    }\n    for (const item of j.feed) {\n      const p = item && item.post;\n      if (!p) continue;\n      const flat = (p.record && p.record.text || '').replace(/\\s+/g, ' ').trim();\n      if (flat.startsWith(head.slice(0, 32))) {\n        return JSON.stringify({ok: true, uri: p.uri, cid: p.cid, indexed_at: p.indexedAt});\n      }\n    }\n    return JSON.stringify({ok: false, err: 'post not found in author feed (top 10)'});\n  } catch (e) {\n    return JSON.stringify({ok: false, err: e.name + ': ' + e.message});\n  }\n})()\n"
+      },
+      "save": "verify"
+    }
+  ]
+}
