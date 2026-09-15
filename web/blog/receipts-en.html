@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Read timestamps, not landing pages · AginxBrowser</title>
+<meta name="description" content="The best benchmark for spec-compliance work is the date a spec corner got closed. Our scoreboard against a 35k-star headless browser, receipts style: every claim links to a public commit or ticket.">
+<meta property="og:title" content="Read timestamps, not landing pages">
+<meta property="og:description" content="Our scoreboard against a 35k-star headless browser — timestamps only, every line links to a public commit or ticket.">
+<link rel="canonical" href="https://browser.aginx.net/blog/receipts-en.html">
+<link rel="alternate" hreflang="zh-CN" href="https://browser.aginx.net/blog/receipts-zh.html">
+<link rel="alternate" hreflang="en" href="https://browser.aginx.net/blog/receipts-en.html">
+<link rel="alternate" hreflang="x-default" href="https://browser.aginx.net/blog/receipts-en.html">
+<link rel="stylesheet" href="/blog/blog.css">
+<style>
+  .rx-table { width: 100%; border-collapse: collapse; margin: 1.2em 0; font-size: 14px; }
+  .rx-table th, .rx-table td { text-align: left; padding: 8px 10px; border: 1px solid var(--border, #30363d); vertical-align: top; }
+  .rx-table th { background: rgba(88,166,255,.08); font-size: 12px; text-transform: uppercase; letter-spacing: .4px; }
+  .rx-table td code, .rx-table td a { font-size: 13px; white-space: nowrap; }
+  .rx-note { font-size: 13px; color: var(--text-dim, #8b949e); }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a href="/" class="brand"><span class="dot"></span>AginxBrowser</a>
+    <div class="nav-links">
+      <a href="/blog/">Blog</a>
+      <a href="/blog/en.html">English</a>
+      <a href="/" style="color:var(--text-dim)">← Home</a>
+    </div>
+  </div>
+</nav>
+
+<article class="article">
+  <h1>Read timestamps, not landing pages</h1>
+  <div class="meta">AginxBrowser engineering notes · 2026-09-15 · <a href="/blog/receipts-zh.html">中文版</a></div>
+
+  <p>I have a habit: on every release day of the big headless browsers, I read their issue trackers. Not to gawk — because a project's self-filed engineering tickets are the most honest browser-spec checklist anywhere. Star counts measure attention. Landing pages measure copywriting. The date a corner of the spec actually got <em>closed</em> is the only thing that measures engineering.</p>
+
+  <p>Today a 35k-star Zig headless browser shipped 0.4.1. Reading the release notes against our own git log, a pattern showed up: several things they filed tickets for — or shipped — this week, we had already shipped days earlier. No adjectives below. Timestamps, and links. Verify everything.</p>
+
+  <h2>The receipts</h2>
+
+  <table class="rx-table">
+    <tr><th>Capability</th><th>Them</th><th>Us</th><th>Delta</th></tr>
+    <tr>
+      <td>Click dispatches the full pointer/mouse event sequence, not one bare <code>click</code></td>
+      <td>Shipped in <a href="https://github.com/lightpanda-io/browser/releases">0.4.1</a>, Sep 15</td>
+      <td><a href="https://github.com/yinnho/aginxbrowser/commit/ab2baa7">ab2baa7</a>, Sep 6</td>
+      <td>9 days</td>
+    </tr>
+    <tr>
+      <td>A redirect rewrites POST→GET: the body and its headers must go (fetch redirect semantics)</td>
+      <td><a href="https://github.com/lightpanda-io/browser/issues/3526">#3526</a>, filed Sep 15 — open</td>
+      <td><a href="https://github.com/yinnho/aginxbrowser/commit/3d5f0bc">3d5f0bc</a> + <a href="https://github.com/yinnho/aginxbrowser/commit/48fa1ec">48fa1ec</a>, Sep 11</td>
+      <td>4 days, open vs shipped</td>
+    </tr>
+    <tr>
+      <td>Which box actually scrolls when <code>&lt;body&gt;</code> has <code>overflow</code> — css-overflow-3 §3.3 propagation to viewport</td>
+      <td><a href="https://github.com/lightpanda-io/browser/issues/3523">#3523</a>, filed Sep 15 — open</td>
+      <td><a href="https://github.com/yinnho/aginxbrowser/commit/4f26dec">4f26dec</a>, Sep 14</td>
+      <td>1 day, open vs shipped</td>
+    </tr>
+    <tr>
+      <td>CSS custom properties</td>
+      <td>"Basic support" in <a href="https://github.com/lightpanda-io/browser/releases">0.4.1</a>, Sep 15</td>
+      <td><a href="https://github.com/yinnho/aginxbrowser/commit/208518a">208518a</a>, Sep 4 — <code>var()</code> substitution + CSSOM readback</td>
+      <td>11 days</td>
+    </tr>
+    <tr>
+      <td>Fetch Referrer Policy — document header, <code>&lt;meta&gt;</code>, per-request override</td>
+      <td><a href="https://github.com/lightpanda-io/browser/issues/3485">#3485</a>, filed Sep 10 — open</td>
+      <td><a href="https://github.com/yinnho/aginxbrowser/commit/cb0c34e">cb0c34e</a> + <a href="https://github.com/yinnho/aginxbrowser/commit/42deef0">42deef0</a>, Sep 14–15</td>
+      <td>They filed first; we shipped</td>
+    </tr>
+    <tr>
+      <td>Storage state on context creation</td>
+      <td><a href="https://github.com/lightpanda-io/browser/issues/1550">#1550</a>, open since Feb 14</td>
+      <td><a href="https://github.com/yinnho/aginxbrowser/releases/tag/v0.2.7">v0.2.7</a>, Sep 4 — session export/import incl. localStorage</td>
+      <td>7 months open</td>
+    </tr>
+  </table>
+
+  <p>Note the fifth row: on Referrer Policy <em>they filed the ticket four days before we shipped ours</em>. We include it anyway, because the point of a scoreboard is that it survives scrutiny. The scoreboard was never "who files first" — it's who ships. Five of six corners are shipped here and open (or just-shipped) there.</p>
+
+  <h2>Why these collisions happen</h2>
+
+  <p>Two teams grinding through the same specs hit the same corners in the same order — fetch redirect semantics, overflow propagation, pointer events. That's exactly why timestamps are a fair benchmark here: nobody is copying anybody; the spec is public, and the date you closed the corner is public.</p>
+
+  <p>And credit where due, with scope kept precise: their 0.4.1 shipped an experimental full CORS implementation (<code>--experimental-features cors</code>). Ours covers CORS preflight enforcement. On breadth, they lead there. Races like this one are good for everyone building agents on top.</p>
+
+  <h2>The things that aren't races</h2>
+
+  <p>Three lines where the projects aren't competing on the same axis at all:</p>
+
+  <ul>
+    <li><strong>Pixels.</strong> They deliberately render zero pixels ("no rendering overhead" — <code>--dump png</code> is a text dump). We ship real screenshots, PDFs, and video from the Rust layout/paint stack we maintain: a full page costs 532&nbsp;ms and 227&nbsp;MB in our pipeline where Chrome needs 4053&nbsp;ms and 2.1&nbsp;GB.</li>
+    <li><strong>Fingerprint.</strong> Their network stack is libcurl, and it fingerprints as libcurl. Ours impersonates Chrome 145 at the TLS layer — because half the production web answers "wrong JA3" with a wall.</li>
+    <li><strong>License.</strong> AGPL-3.0 vs Apache-2.0. If your legal team has opinions, this one is decided before the demo.</li>
+  </ul>
+
+  <h2>Steal this</h2>
+
+  <p>This post is a method, not a dunk. If you're evaluating an agent browser, don't read landing pages — pick the five corners of the web platform your agents actually touch, and go read the dates. Ours are all public; every link above resolves.</p>
+
+  <p><strong>This page is a snapshot.</strong> The living scoreboard — same method, expanded to the whole agent-browser field (browser-use and Kitesurf included), re-audited every release cycle — lives in the repo: <a href="https://github.com/yinnho/aginxbrowser/blob/main/docs/RECEIPTS.md">docs/RECEIPTS.md</a>.</p>
+
+  <p>And it's Apache-2.0. If you're building your own and any of the commits above would save you a week — take it.</p>
+
+  <div class="related">📚 Related: <a href="/blog/rendering-en.html">How to screenshot a page without Chromium</a> · <a href="/blog/launch-en.html">Cloudflare shipped an agent browser and admitted what it can't do</a> · More at <a href="/blog/">/blog</a>.</div>
+
+  <div class="cta">
+    <p>Want to check a timestamp yourself?</p>
+    <a class="btn" href="/">Try it</a>
+    <a class="btn ghost" href="https://github.com/yinnho/aginxbrowser/commits/main/">Read the git log</a>
+  </div>
+</article>
+
+<footer>
+  AginxBrowser · the agent's browser · Apache-2.0 · browser.aginx.net
+</footer>
+
+</body>
+</html>

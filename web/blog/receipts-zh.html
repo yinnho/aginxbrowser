@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>读时间戳，别读落地页 · AginxBrowser</title>
+<meta name="description" content="衡量规范兼容性做没做出来，唯一硬的指标是这处规范角落被关掉的日期。我们跟一个 35k star headless 浏览器的对账单：每一条都链到公开 commit 或 issue，欢迎逐条验。">
+<meta property="og:title" content="读时间戳，别读落地页">
+<meta property="og:description" content="跟 35k star headless 浏览器的对账单——只有时间戳，每条都链到公开 commit 或 issue。">
+<link rel="canonical" href="https://browser.aginx.net/blog/receipts-zh.html">
+<link rel="alternate" hreflang="en" href="https://browser.aginx.net/blog/receipts-en.html">
+<link rel="alternate" hreflang="zh-CN" href="https://browser.aginx.net/blog/receipts-zh.html">
+<link rel="alternate" hreflang="x-default" href="https://github.com/yinnho/aginxbrowser/blob/main/web/blog/receipts-en.html">
+<link rel="stylesheet" href="/blog/blog.css">
+<style>
+  .rx-table { width: 100%; border-collapse: collapse; margin: 1.2em 0; font-size: 14px; }
+  .rx-table th, .rx-table td { text-align: left; padding: 8px 10px; border: 1px solid var(--border, #30363d); vertical-align: top; }
+  .rx-table th { background: rgba(88,166,255,.08); font-size: 12px; letter-spacing: .4px; }
+  .rx-table td code, .rx-table td a { font-size: 13px; white-space: nowrap; }
+  .rx-note { font-size: 13px; color: var(--text-dim, #8b949e); }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a href="/" class="brand"><span class="dot"></span>AginxBrowser</a>
+    <div class="nav-links">
+      <a href="/blog/">Blog</a>
+      <a href="/blog/index.html">中文</a>
+      <a href="/" style="color:var(--text-dim)">← 首页</a>
+    </div>
+  </div>
+</nav>
+
+<article class="article">
+  <h1>读时间戳，别读落地页</h1>
+  <div class="meta">AginxBrowser 工程笔记 · 2026-09-15 · <a href="/blog/receipts-en.html">English</a></div>
+
+  <p>我有个习惯：几个大的 headless 浏览器一发版，我就去翻它们的 issue 区。不是去看热闹——一个项目自己给自己开的工程票，是全网最诚实的浏览器规范进度表。star 数量衡量的关注度，落地页衡量的是文案水平，而某处规范角落到底是哪天关掉的，衡量的才是工程。这个没法吹。</p>
+
+  <p>今天有个 35k star 的 Zig 写的 headless 浏览器发了 0.4.1。我对着它的 release notes 翻我们自己的 git log，发现一件事：这周它们开票的、刚发版的几个东西，我们几天前就已经 ship 了。下面不放形容词，只有时间戳和链接，每条都可以自己去点开验。</p>
+
+  <h2>对账单</h2>
+
+  <table class="rx-table">
+    <tr><th>能力</th><th>他们</th><th>我们</th><th>差距</th></tr>
+    <tr>
+      <td>click 派发完整 pointer/mouse 事件序列，不是孤零零一个 <code>click</code></td>
+      <td><a href="https://github.com/lightpanda-io/browser/releases">0.4.1</a> 发版，9 月 15 日</td>
+      <td><a href="https://github.com/yinnho/aginxbrowser/commit/ab2baa7">ab2baa7</a>，9 月 6 日</td>
+      <td>早 9 天</td>
+    </tr>
+    <tr>
+      <td>重定向把 POST 改写成 GET 时，body 和描述它的那堆头必须跟着丢（fetch 重定向语义）</td>
+      <td><a href="https://github.com/lightpanda-io/browser/issues/3526">#3526</a>，9 月 15 日开票，还开着</td>
+      <td><a href="https://github.com/yinnho/aginxbrowser/commit/3d5f0bc">3d5f0bc</a> + <a href="https://github.com/yinnho/aginxbrowser/commit/48fa1ec">48fa1ec</a>，9 月 11 日</td>
+      <td>早 4 天；一边开着一边已落地</td>
+    </tr>
+    <tr>
+      <td><code>&lt;body&gt;</code> 上写了 <code>overflow</code>，到底哪个盒子在滚——css-overflow-3 §3.3 向视口传播</td>
+      <td><a href="https://github.com/lightpanda-io/browser/issues/3523">#3523</a>，9 月 15 日开票，还开着</td>
+      <td><a href="https://github.com/yinnho/aginxbrowser/commit/4f26dec">4f26dec</a>，9 月 14 日</td>
+      <td>早 1 天；一边开着一边已落地</td>
+    </tr>
+    <tr>
+      <td>CSS 自定义属性</td>
+      <td>0.4.1 里是 "basic support"，9 月 15 日</td>
+      <td><a href="https://github.com/yinnho/aginxbrowser/commit/208518a">208518a</a>，9 月 4 日——<code>var()</code> 替换 + CSSOM 读回</td>
+      <td>早 11 天</td>
+    </tr>
+    <tr>
+      <td>Fetch Referrer Policy——文档头、<code>&lt;meta&gt;</code>、逐请求覆盖</td>
+      <td><a href="https://github.com/lightpanda-io/browser/issues/3485">#3485</a>，9 月 10 日开票，还开着</td>
+      <td><a href="https://github.com/yinnho/aginxbrowser/commit/cb0c34e">cb0c34e</a> + <a href="https://github.com/yinnho/aginxbrowser/commit/42deef0">42deef0</a>，9 月 14–15 日</td>
+      <td>他们先开的票，我们先落地</td>
+    </tr>
+    <tr>
+      <td>建 context 时带 storage state</td>
+      <td><a href="https://github.com/lightpanda-io/browser/issues/1550">#1550</a>，2 月 14 日开的，到现在</td>
+      <td><a href="https://github.com/yinnho/aginxbrowser/releases/tag/v0.2.7">v0.2.7</a>，9 月 4 日——session 导出/恢复，含 localStorage</td>
+      <td>开了 7 个月</td>
+    </tr>
+  </table>
+
+  <p>第五行要单独说：Referrer Policy 那条，他们开票比我们落地早四天。照样放进来，因为对账单要是经不起看，就不是对账单了。而且这个比法本来就不是「谁先开票」——是「谁先 ship」。六条里五条，我们这边已经落地，他们那边还开着（或刚发）。</p>
+
+  <h2>为什么老是撞车</h2>
+
+  <p>两个团队都在啃同一套规范，撞到的角落自然是同一批——fetch 重定向语义、overflow 传播、pointer 事件，规范摆在那，顺序也差不多。这恰恰是时间戳公平的原因：谁也没抄谁，规范是公开的，你哪天关掉这个角落也是公开的。</p>
+
+  <p>该给的分也要给，而且口径要说准：他们 0.4.1 上了实验性的完整 CORS（<code>--experimental-features cors</code>），我们这块做的是 preflight 强制执行。论广度他们领先。这种良性你追我赶，对在上面盖 agent 的所有人都是好事。</p>
+
+  <h2>不算比赛的三件事</h2>
+
+  <p>有三条线，两边根本不在同一个轴上比：</p>
+
+  <ul>
+    <li><strong>像素。</strong>他们明确一个像素都不渲染（"no rendering overhead"，<code>--dump png</code> 输出的是文本）。我们这边真出图：截图、PDF、视频都从我们维护的 Rust 布局绘制栈里来，整页 532 毫秒、227 MB——同一页 Chrome 要 4053 毫秒、2.1 GB。</li>
+    <li><strong>指纹。</strong>他们的网络栈是 libcurl，指纹就是 libcurl。我们 TLS 层仿的是 Chrome 145——因为生产环境里半个互联网对「JA3 不对」的回答就是一堵墙。</li>
+    <li><strong>许可证。</strong>AGPL-3.0 对 Apache-2.0。法务部门有意见的公司，这一条在 demo 之前就分出胜负了。</li>
+  </ul>
+
+  <h2>随便抄</h2>
+
+  <p>这篇是方法论，不是踩人。你要选 agent 浏览器，别读落地页——把你家 agent 真正会碰到的五处 web 平台角落列出来，去查日期。我们的日期全部公开，上面每个链接都点得开。</p>
+
+  <p><strong>这篇是快照。</strong>活版本的记分牌——同一套方法，扩到整个 agent browser 赛道（browser-use、Kitesurf 都在），每轮发版重新对一次账——住在仓库里：<a href="https://github.com/yinnho/aginxbrowser/blob/main/docs/RECEIPTS.md">docs/RECEIPTS.md</a>。</p>
+
+  <p>而且是 Apache-2.0。你要自己做浏览器，上面哪个 commit 能帮你省一周，拿去。</p>
+
+  <div class="related">📚 相关：<a href="/blog/rendering-zh.html">纯 Rust 的浏览器截图是怎么做的</a> · <a href="/blog/launch-zh.html">Cloudflare 做了个 Agent 浏览器，却公开承认了三件干不了的事</a> · 更多在 <a href="/blog/">/blog</a>。</div>
+
+  <div class="cta">
+    <p>想自己查一条时间戳？</p>
+    <a class="btn" href="/">试一下</a>
+    <a class="btn ghost" href="https://github.com/yinnho/aginxbrowser/commits/main/">去读 git log</a>
+  </div>
+</article>
+
+<footer>
+  AginxBrowser · the agent's browser · Apache-2.0 · browser.aginx.net
+</footer>
+
+</body>
+</html>
