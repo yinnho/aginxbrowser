@@ -4737,8 +4737,11 @@ pub fn layout_solve_rooted(
     // Absolute/fixed reparent pass (upstream's containing-block fix-up):
     // taffy resolves an absolute child against its DIRECT taffy parent, so
     // move each out-of-flow box to its CSS containing block — the nearest
-    // ancestor with position != static; fixed (and no positioned ancestor)
-    // resolves to the root = the initial containing block stand-in.
+    // ancestor with position != static OR a non-none transform (CSS
+    // Transforms §: a transformed ancestor is a containing block for both
+    // absolute and fixed descendants). Fixed with no such ancestor —
+    // positioned ancestors don't pin it — resolves to the root = the
+    // initial containing block stand-in.
     {
         let dom_of: HashMap<NodeId, taffy::tree::NodeId> =
             node_map.iter().map(|(k, v)| (*v, *k)).collect();
@@ -4750,20 +4753,28 @@ pub fn layout_solve_rooted(
                 if style.position != Some(PositionMode::Absolute) && !fixed {
                     return None;
                 }
-                let target_dom = if fixed {
-                    None
-                } else {
+                let target_dom = {
                     let mut cur = tree.with_node(*dom_id, |n| n.parent).flatten();
                     while let Some(nid) = cur {
-                        let positioned = styles.get(&nid).is_some_and(|s| {
-                            matches!(
-                                s.position,
-                                Some(PositionMode::Relative)
-                                    | Some(PositionMode::Absolute)
-                                    | Some(PositionMode::Fixed)
-                            )
-                        });
-                        if positioned {
+                        let ancestor = styles.get(&nid);
+                        // CSS Transforms: a non-none transform makes an
+                        // ancestor the containing block for BOTH absolute
+                        // and fixed descendants. For fixed that's the only
+                        // ancestor kind that overrides the viewport — a
+                        // merely positioned ancestor doesn't pin it.
+                        let transformed =
+                            ancestor.is_some_and(|s| s.transform.is_some());
+                        if transformed
+                            || (!fixed
+                                && ancestor.is_some_and(|s| {
+                                    matches!(
+                                        s.position,
+                                        Some(PositionMode::Relative)
+                                            | Some(PositionMode::Absolute)
+                                            | Some(PositionMode::Fixed)
+                                    )
+                                }))
+                        {
                             break;
                         }
                         cur = tree.with_node(nid, |n| n.parent).flatten();

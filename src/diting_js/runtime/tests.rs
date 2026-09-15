@@ -869,6 +869,81 @@
         assert_eq!(v["optCtor"], serde_json::json!(true));
     }
 
+    /// Containing-block resolution for out-of-flow boxes (blitz#764 family):
+    /// an absolute box reparents to the nearest POSITIONED ancestor's padding
+    /// box (not its DOM parent's flow position), a transformed ancestor is a
+    /// containing block for BOTH absolute and fixed descendants (CSS
+    /// Transforms — positioned ancestors don't pin fixed), and fixed with no
+    /// such ancestor stays viewport-anchored on the ICB.
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn abspos_containing_block_resolution() {
+        let mut rt = setup_runtime(
+            r#"<body style="margin:8px">
+              <div id="outer" style="position:relative">
+                <div id="mid" style="margin-left:100px">
+                  <div id="a" style="position:absolute; left:0; top:0">X</div>
+                </div>
+              </div>
+              <div id="tf" style="transform:translateX(50px)">
+                <div id="f" style="position:fixed; left:0; top:0">F</div>
+              </div>
+              <div id="tg" style="transform:translateX(30px)">
+                <div><div id="a2" style="position:absolute; left:0; top:0">A2</div></div>
+              </div>
+              <div id="pos" style="position:relative; margin-left:200px">
+                <div id="tr2" style="transform:translateX(10px)">
+                  <div id="f3" style="position:fixed; left:0; top:0">F3</div>
+                </div>
+              </div>
+              <div id="f2" style="position:fixed; left:0; top:0">F2</div>
+              <div id="outer2" style="position:relative; padding:20px">
+                <div style="height:10px"></div>
+                <div id="b" style="position:absolute">B</div>
+              </div>
+            </body>"#,
+        );
+        let result = rt.evaluate(r#"
+            const g = (id) => {
+                const b = document.getElementById(id).getBoundingClientRect();
+                return [Math.round(b.x), Math.round(b.y)];
+            };
+            return {
+                a: g('a'),
+                f: g('f'),
+                a2: g('a2'),
+                f3: g('f3'),
+                f2: g('f2'),
+                b: g('b'),
+            };
+        "#).unwrap();
+        let v = result;
+        assert_eq!(
+            v["a"], serde_json::json!([8, 8]),
+            "absolute anchors to the positioned ancestor's padding box, not the DOM parent's flow spot"
+        );
+        assert_eq!(
+            v["f"], serde_json::json!([58, 8]),
+            "fixed under a transformed ancestor anchors to that ancestor (8 + translateX(50))"
+        );
+        assert_eq!(
+            v["a2"], serde_json::json!([38, 8]),
+            "a transformed (non-positioned) ancestor is the absolute containing block"
+        );
+        assert_eq!(
+            v["f3"], serde_json::json!([218, 8]),
+            "fixed skips the positioned ancestor but still pins to the farther transformed one"
+        );
+        assert_eq!(
+            v["f2"], serde_json::json!([0, 0]),
+            "fixed with no transformed ancestor stays viewport-anchored (ICB)"
+        );
+        assert_eq!(
+            v["b"], serde_json::json!([28, 38]),
+            "auto insets resolve at the static position (body margin + padding + sibling)"
+        );
+    }
+
     /// Regression for #105: `HTMLFormElement` must expose `.elements` so
     /// frameworks that probe form field collections work.
     #[test]
