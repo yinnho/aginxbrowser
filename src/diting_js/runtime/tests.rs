@@ -10951,3 +10951,82 @@ fn clearfix_pseudo_clears_float_zone() {
         plain_h
     );
 }
+
+/// Batch 102: getComputedStyle(el, pseudoElt) — the pseudo-element computed
+/// face. The second argument routes to the host's cascaded ::before/::after
+/// styles (batch 99 cascade), pseudos with no matching rule answer the
+/// initial-value table (Chrome's no-throw posture extends to unknown `::`
+/// forms), junk arguments throw TypeError, and pseudo declarations never
+/// leak into the host face.
+#[cfg(feature = "screenshot")]
+#[test]
+fn computed_style_pseudo_element_face() {
+    let mut rt = setup_runtime(
+        r#"<style>
+          #q::before{content:"P";color:rgb(255, 0, 0)}
+          #q{color:rgb(0, 0, 255)}
+          #a::after{content:attr(k)}
+        </style>
+        <span id="q">host</span><span id="a" k="v1"></span><span id="n"></span>"#,
+    );
+    let read = |rt: &mut JsRuntime, expr: &str| -> String {
+        match rt.evaluate(expr) {
+            Ok(serde_json::Value::String(s)) => s,
+            other => panic!("{expr} -> {other:?}"),
+        }
+    };
+    // Pseudo face reads the pseudo cascade, not the host's.
+    assert_eq!(
+        read(&mut rt, "getComputedStyle(document.getElementById('q'),'::before').getPropertyValue('content')"),
+        r#""P""#
+    );
+    assert_eq!(
+        read(&mut rt, "getComputedStyle(document.getElementById('q'),'::before').color"),
+        "rgb(255, 0, 0)"
+    );
+    // Host face untouched by the pseudo declarations.
+    assert_eq!(
+        read(&mut rt, "getComputedStyle(document.getElementById('q')).color"),
+        "rgb(0, 0, 255)"
+    );
+    // Legacy single-colon spelling, ASCII case-insensitive.
+    assert_eq!(
+        read(&mut rt, "getComputedStyle(document.getElementById('q'),':BEFORE').getPropertyValue('content')"),
+        r#""P""#
+    );
+    // attr() resolves against the host's attributes at cascade time.
+    assert_eq!(
+        read(&mut rt, "getComputedStyle(document.getElementById('a'),'::after').getPropertyValue('content')"),
+        r#""v1""#
+    );
+    // Pseudo with no matching rule (and unmodeled `::name` forms) answers
+    // the initial-value table.
+    assert_eq!(
+        read(&mut rt, "getComputedStyle(document.getElementById('q'),'::after').getPropertyValue('content')"),
+        "normal"
+    );
+    assert_eq!(
+        read(&mut rt, "getComputedStyle(document.getElementById('n'),'::before').getPropertyValue('content')"),
+        "normal"
+    );
+    assert_eq!(
+        read(&mut rt, "getComputedStyle(document.getElementById('q'),'::fancy').getPropertyValue('content')"),
+        "normal"
+    );
+    // The pseudo generates no box: geometry reads 'auto' instead of the
+    // host's bounding rect.
+    assert_eq!(
+        read(&mut rt, "getComputedStyle(document.getElementById('q'),'::before').width"),
+        "auto"
+    );
+    // Junk arguments throw TypeError (CSSOM argument grammar: only the four
+    // legacy single-colon names and `::name` forms are valid). The eval
+    // harness swallows throws to null, so the probe catches in-script.
+    for junk in ["fancy", ":selection"] {
+        let expr = format!(
+            "(function(){{try{{getComputedStyle(document.getElementById('q'),'{}');return 'no-throw';}}catch(e){{return e instanceof TypeError?'TypeError':'other:'+e;}}}})()",
+            junk
+        );
+        assert_eq!(read(&mut rt, &expr), "TypeError", "junk arg {junk}");
+    }
+}

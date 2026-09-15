@@ -6903,14 +6903,48 @@ const _computedSet = () => { if (!_computedSet._s) { _computedSet._s = new Set(_
 // call, so a fresh snapshot per wrapper would dominate real-page startup
 // (upstream learned this the same way).
 const _computedStyleSnapshotCache = new WeakMap();
-globalThis.getComputedStyle = (el) => {
+// Pseudo-element wrappers cache separately: the host's snapshot holds only
+// the element's own cascade, and (::before, ::after) live in per-element
+// pseudo tables on the native side.
+const _pseudoStyleSnapshotCache = new WeakMap();
+// CSSOM GetComputedStyle argument grammar: null/undefined/'' select the
+// element itself; the four legacy single-colon names stay valid; any
+// `::name` is accepted (Chrome answers an initial-value declaration for
+// ones it doesn't model — it does NOT throw for unknown `::` forms);
+// everything else is a TypeError.
+const _normalizePseudoElt = (pseudoElt) => {
+  if (pseudoElt == null) return null;
+  const s = String(pseudoElt).trim().toLowerCase();
+  if (s === '') return null;
+  if (s.startsWith('::')) return s;
+  if (s === ':before' || s === ':after' || s === ':first-line' || s === ':first-letter') {
+    return ':' + s;
+  }
+  throw new TypeError(`Failed to execute 'getComputedStyle' on 'Window': '${pseudoElt}' is not a valid pseudo-element.`);
+};
+globalThis.getComputedStyle = (el, pseudoElt) => {
+  const pseudoName = _normalizePseudoElt(pseudoElt);
   if (!el) el = document.body || {};
   const style = el?.style || el?._style || new CSSStyleDeclaration();
   const cacheable = (typeof el === 'object' && el !== null) || typeof el === 'function';
-  let snapshot = cacheable ? _computedStyleSnapshotCache.get(el) : null;
-  if (!snapshot) {
-    snapshot = { rendered: null, epoch: -1 };
-    if (cacheable) _computedStyleSnapshotCache.set(el, snapshot);
+  let snapshot;
+  if (pseudoName) {
+    let perPseudo = cacheable ? _pseudoStyleSnapshotCache.get(el) : null;
+    if (!perPseudo) {
+      perPseudo = new Map();
+      if (cacheable) _pseudoStyleSnapshotCache.set(el, perPseudo);
+    }
+    snapshot = perPseudo.get(pseudoName);
+    if (!snapshot) {
+      snapshot = { rendered: null, epoch: -1 };
+      perPseudo.set(pseudoName, snapshot);
+    }
+  } else {
+    snapshot = cacheable ? _computedStyleSnapshotCache.get(el) : null;
+    if (!snapshot) {
+      snapshot = { rendered: null, epoch: -1 };
+      if (cacheable) _computedStyleSnapshotCache.set(el, snapshot);
+    }
   }
   // The cascade snapshot from the layout run (whole table per call,
   // upstream's op shape): stylesheet rules + the folded inline style
@@ -6923,7 +6957,7 @@ globalThis.getComputedStyle = (el) => {
     snapshot.rendered = null;
     if (el?._nid != null) {
       try {
-        const raw = _domRaw("computed_style", String(el._nid | 0), "");
+        const raw = _domRaw("computed_style", String(el._nid | 0), pseudoName || "");
         if (raw && raw !== 'null') snapshot.rendered = JSON.parse(raw);
       } catch (e) {}
     }
@@ -7020,11 +7054,23 @@ globalThis.getComputedStyle = (el) => {
       return snapshot.rendered[kebab];
     }
     // Inline value next — CSSOM writes not yet folded into a snapshot
-    // (or no layout run at all).
-    const inlineVal = target.getPropertyValue ? target.getPropertyValue(rawProp) : '';
-    if (inlineVal) return inlineVal;
-    const dim = dimensionFor(kebab);
-    if (dim != null) return dim;
+    // (or no layout run at all). Pseudo-elements carry no inline style
+    // (their cascade lives in the host's pseudo tables), so this branch
+    // is element-only.
+    if (!pseudoName) {
+      const inlineVal = target.getPropertyValue ? target.getPropertyValue(rawProp) : '';
+      if (inlineVal) return inlineVal;
+    }
+    // A pseudo-element generates no box of its own: Chrome answers 'auto'
+    // for width/height instead of the host's geometry, and the remaining
+    // dimensionFor entries (left/top/offset-*) are host geometry too —
+    // both stay element-only.
+    if (pseudoName) {
+      if (kebab === 'width' || kebab === 'inline-size' || kebab === 'height' || kebab === 'block-size') return 'auto';
+    } else {
+      const dim = dimensionFor(kebab);
+      if (dim != null) return dim;
+    }
     if (defaultsKebab[rawProp]) return defaultsKebab[rawProp];
     if (defaultsKebab[kebab]) return defaultsKebab[kebab];
     return '';

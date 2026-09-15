@@ -1722,6 +1722,19 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         #[cfg(feature = "screenshot")]
         "computed_style" => {
             let nid = match parse_nid(&arg1) { Some(id) => id, None => return "null".into() };
+            // Pseudo-element face (batch 102): arg2 routes to the host's
+            // cascaded ::before/::after styles. The JS wrapper validates the
+            // argument (TypeError for anything not `::name` or a legacy
+            // single-colon form), so anything non-empty reaching here answers
+            // either a pseudo cascade or — for pseudos with no matching rule
+            // and for `::name` forms the engine doesn't model — an
+            // initial-value table, matching Chrome's no-throw posture.
+            let pseudo_kind = match arg2.trim().to_ascii_lowercase().as_str() {
+                "" => 0u8,
+                "::before" | ":before" => 1,
+                "::after" | ":after" => 2,
+                _ => 3,
+            };
             let cssom_tag = dom
                 .with_node(nid, |n| {
                     n.as_element().map(|e| e.local.as_ref().to_ascii_lowercase())
@@ -1734,18 +1747,31 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             });
             match style {
                 Some(s) => {
+                    // The pseudo cascade lives on the host's ComputedStyle;
+                    // a pseudo with no rule serializes the initial-value
+                    // table rather than an empty declaration.
+                    let pseudo_style = match pseudo_kind {
+                        1 => s.pseudos.as_ref().and_then(|p| p.before.as_ref()).cloned(),
+                        2 => s.pseudos.as_ref().and_then(|p| p.after.as_ref()).cloned(),
+                        _ => None,
+                    };
+                    let (target, tag) = match pseudo_style {
+                        Some(ps) => (ps, None),
+                        None if pseudo_kind == 0 => (s, cssom_tag),
+                        None => (crate::diting_css::ComputedStyle::default(), None),
+                    };
                     let mut obj = serde_json::Map::with_capacity(
-                        COMPUTED_STYLE_PROPS.len() + s.custom.len(),
+                        COMPUTED_STYLE_PROPS.len() + target.custom.len(),
                     );
                     for prop in COMPUTED_STYLE_PROPS {
-                        if let Some(v) = computed_style_value(&s, prop, cssom_tag.as_deref()) {
+                        if let Some(v) = computed_style_value(&target, prop, tag.as_deref()) {
                             obj.insert((*prop).to_string(), serde_json::Value::String(v));
                         }
                     }
                     // Custom properties ride the same snapshot (case-sensitive
                     // keys — the JS lookup skips its kebab-lowercase step for
                     // `--` names): getComputedStyle(el).getPropertyValue('--x').
-                    for (k, v) in &s.custom {
+                    for (k, v) in &target.custom {
                         obj.insert(k.clone(), serde_json::Value::String(v.clone()));
                     }
                     serde_json::Value::Object(obj).to_string()
