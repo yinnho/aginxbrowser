@@ -4295,7 +4295,10 @@ class Document extends Node {
   getElementsByClassName(c) { return _getElementsByClassName(this, c); }
   getElementsByName(name) { return this.querySelectorAll('[name="' + String(name).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]'); }
   createElement(t) {
-    const el = _wrapEl(+_dom("create_element", t.toLowerCase()));
+    // The namespace is passed explicitly: create_element maps an empty
+    // second arg to the null namespace (correct for XML elements with no
+    // xmlns), so the HTML path must say XHTML here.
+    const el = _wrapEl(+_dom("create_element", t.toLowerCase(), "http://www.w3.org/1999/xhtml"));
     if (el && t.toLowerCase() === 'template') {
       el._templateContent = this.createDocumentFragment();
     }

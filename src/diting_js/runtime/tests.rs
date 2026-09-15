@@ -8270,7 +8270,7 @@
             result,
             serde_json::json!([
                 "E:PARSERERROR", "E:PARSERERROR", "E:PARSERERROR", "E:PARSERERROR",
-                "OK:ROOT", "OK:ROOT",
+                "OK:root", "OK:root",
             ])
         );
     }
@@ -8351,6 +8351,33 @@
             true,
             "HTML",
         ]));
+    }
+
+    #[test]
+    fn test_domparser_xml_img_serializes_with_closing_tag() {
+        // Report 2026-09-15: an XML `<img size="123">text</img>` serialized
+        // as a self-closing HTML void element — text child and closing tag
+        // both dropped from outerHTML. Void-element self-closing is HTML-
+        // only; null-namespace (no xmlns) XML elements must keep theirs.
+        // No-xmlns XML elements also carry the null namespace, so tagName
+        // keeps its source case (Chrome: XML docs never uppercase).
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt.evaluate(r#"
+            const doc = new DOMParser().parseFromString('<img size="123">text</img>', 'text/xml');
+            const root = doc.documentElement;
+            return [
+                root.tagName,
+                root.getAttribute('size'),
+                root.textContent,
+                root.outerHTML,
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                "img", "123", "text", "<img size=\"123\">text</img>",
+            ])
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

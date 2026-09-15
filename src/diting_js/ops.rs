@@ -1278,11 +1278,15 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 .unwrap_or("-1".into())
         }
         "create_element" => {
-            // arg2 (optional) records a namespace on the node. The HTML path
-            // passes nothing (ns!(html), keeping tag_name/node_name's
+            // arg2 records a namespace on the node. The HTML path passes the
+            // XHTML namespace explicitly (keeping tag_name/node_name's
             // uppercase convention); DOMParser's XML tree builder passes the
-            // xmlns-resolved namespace so case-sensitive names round-trip.
-            let ns = if arg2.is_empty() || arg2 == "http://www.w3.org/1999/xhtml" {
+            // xmlns-resolved namespace, and an empty string is the null
+            // namespace — what XML semantics require for elements with no
+            // xmlns in scope. Serialization keys off this distinction: HTML
+            // void elements self-close, XML elements always keep their
+            // closing tag and text children.
+            let ns = if arg2 == "http://www.w3.org/1999/xhtml" {
                 html5ever::ns!(html)
             } else {
                 html5ever::Namespace::from(arg2.as_str())

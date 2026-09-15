@@ -91,6 +91,11 @@ impl DomTree {
                 }
                 NodeData::Element { name, attrs, template_contents, .. } => {
                     let tag = name.local.as_ref();
+                    // The void-element rule only exists in HTML. An XML
+                    // <img size="123">text</img> parses with a text child, and
+                    // serializing it as self-closing dropped both the text and
+                    // the closing tag (report 2026-09-15).
+                    let html_ns = name.ns.as_ref() == "http://www.w3.org/1999/xhtml";
                     if include_self {
                         buf.push('<');
                         buf.push_str(tag);
@@ -108,7 +113,7 @@ impl DomTree {
                         buf.push('>');
                     }
 
-                    if !is_void_element(tag) {
+                    if !html_ns || !is_void_element(tag) {
                         // Push the closing tag first so it pops after all the
                         // children we push next.
                         if include_self {
@@ -251,6 +256,38 @@ mod tests {
         let html = tree.outer_html(img);
         assert!(html.contains("<img"));
         assert!(!html.contains("</img>"));
+    }
+
+    #[test]
+    fn test_xml_elements_keep_closing_tag_and_children() {
+        use crate::diting_dom::tree::{Attribute, NodeData};
+        use html5ever::{LocalName, Namespace, QualName};
+
+        // Report 2026-09-15: DOMParser XML `<img size="123">text</img>`
+        // serialized as a self-closing HTML void element, dropping both the
+        // text child and the closing tag. Void-element self-closing is an
+        // HTML-only rule; a null-namespace (no xmlns) element must serialize
+        // with its full content.
+        let tree = parse_html(r#"<div id="host"></div>"#);
+        let host = tree.get_element_by_id("host").unwrap();
+        let img = tree.new_node(NodeData::Element {
+            name: QualName::new(None, Namespace::from(""), LocalName::from("img")),
+            attrs: vec![Attribute {
+                name: QualName::new(None, Namespace::from(""), LocalName::from("size")),
+                value: "123".into(),
+            }],
+            template_contents: None,
+            mathml_annotation_xml_integration_point: false,
+            live_value: None,
+            live_checked: None,
+        });
+        let text = tree.new_node(NodeData::Text { contents: "text".into() });
+        tree.append_child(host, img);
+        tree.append_child(img, text);
+
+        let html = tree.outer_html(img);
+        assert!(html.contains(r#"size="123""#), "attrs lost: {html}");
+        assert!(html.contains(">text</img>"), "children/closing tag lost: {html}");
     }
 
     #[test]
