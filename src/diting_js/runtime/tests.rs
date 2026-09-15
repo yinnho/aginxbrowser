@@ -10841,3 +10841,69 @@ fn computed_style_content_face() {
         "default computed content is Chrome's 'normal'"
     );
 }
+
+/// obscura #722 probe: a plain inline element sharing a line with an atomic
+/// inline (inline-block sibling) or a float must still report real gBCR
+/// geometry — 0x0 there means the run refused to fold and dropped the box.
+#[cfg(feature = "screenshot")]
+#[test]
+fn inline_next_to_atomic_inline_has_rect() {
+    let mut rt = setup_runtime(
+        r#"<style>p{margin:0;font-size:16px;line-height:20px}</style>
+        <p><span style="display:inline-block;width:50px;height:20px"></span><b id="b">hi</b></p>
+        <p><i id="alone">solo</i></p>"#,
+    );
+    let box_of = |rt: &mut JsRuntime, sel: &str| {
+        rt.evaluate(&format!(
+            "(function(){{const r=document.querySelector('{}').getBoundingClientRect();\
+              return {{w:Math.round(r.width),h:Math.round(r.height),x:Math.round(r.x)}};}})()",
+            sel
+        ))
+        .unwrap()
+    };
+    let b = box_of(&mut rt, "#b");
+    let alone = box_of(&mut rt, "#alone");
+    assert!(
+        b["w"].as_f64().unwrap_or(0.0) > 0.0 && b["h"].as_f64().unwrap_or(0.0) > 0.0,
+        "inline beside an atomic inline reports 0x0: {:?} (control {:?})",
+        b,
+        alone
+    );
+    assert!(
+        alone["w"].as_f64().unwrap_or(0.0) > 0.0,
+        "control inline alone must have a rect"
+    );
+}
+
+/// obscura #767 probe: width:calc(100% - 32px) inside a flex subtree must
+/// resolve against the flex container's content box (400px → 368), same as
+/// the identical block-level control.
+#[cfg(feature = "screenshot")]
+#[test]
+fn calc_width_inside_flex_subtree() {
+    let mut rt = setup_runtime(
+        r#"<style>
+          #flex{display:flex;width:400px}
+          #item{width:calc(100% - 32px);height:10px}
+          #wrap{width:400px}
+          #blk{width:calc(100% - 32px);height:10px}
+        </style>
+        <div id="flex"><div id="item"></div></div>
+        <div id="wrap"><div id="blk"></div></div>"#,
+    );
+    let w_of = |rt: &mut JsRuntime, sel: &str| {
+        rt.evaluate(&format!(
+            "Math.round(document.querySelector('{}').getBoundingClientRect().width)",
+            sel
+        ))
+        .unwrap()
+    };
+    let flex_w = w_of(&mut rt, "#item").as_f64().unwrap_or(0.0);
+    let blk_w = w_of(&mut rt, "#blk").as_f64().unwrap_or(0.0);
+    assert!(
+        (flex_w - 368.0).abs() <= 1.0,
+        "calc() width collapsed in flex subtree: {} (block control {})",
+        flex_w,
+        blk_w
+    );
+}
