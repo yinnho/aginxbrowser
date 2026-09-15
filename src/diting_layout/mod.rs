@@ -3185,8 +3185,7 @@ fn build_element(
             // inline overflow: the run truncates only when its owner also
             // clips — the classic nowrap + hidden + ellipsis pattern.
             let run_ellipsis = styles.get(&id).is_some_and(|s| {
-                s.overflow.is_some_and(|o| o != Overflow::Visible)
-                    && s.text_overflow == Some(TextOverflow::Ellipsis)
+                s.clips_descendants() && s.text_overflow == Some(TextOverflow::Ellipsis)
             });
             if let Ok(leaf) = taffy_tree.new_leaf_with_context(
                 Style::default(),
@@ -5228,7 +5227,8 @@ pub(crate) fn effective_viewport_overflow(
     root: NodeId,
     has_box: impl Fn(NodeId) -> bool,
 ) -> Overflow {
-    let ov = |id: NodeId| styles.get(&id).and_then(|s| s.overflow).unwrap_or(Overflow::Visible);
+    let ov =
+        |id: NodeId| styles.get(&id).map(|s| s.effective_overflow()).unwrap_or(Overflow::Visible);
     let local = |id: NodeId| -> Option<String> {
         dom.get_node(id).and_then(|n| {
             n.as_element()
@@ -5268,7 +5268,8 @@ pub(crate) fn body_overflow_propagates(
     let Some(html) = dom.get_node(body).and_then(|n| n.parent) else {
         return false;
     };
-    let html_ov = styles.get(&html).and_then(|s| s.overflow).unwrap_or(Overflow::Visible);
+    let html_ov =
+        styles.get(&html).map(|s| s.effective_overflow()).unwrap_or(Overflow::Visible);
     if html_ov != Overflow::Visible {
         return false;
     }
@@ -5285,7 +5286,11 @@ pub(crate) fn body_overflow_propagates(
     });
     first_body == Some(body)
         && has_box(body)
-        && styles.get(&body).and_then(|s| s.overflow).is_some_and(|o| o != Overflow::Visible)
+        && styles
+            .get(&body)
+            .map(|s| s.effective_overflow())
+            .unwrap_or(Overflow::Visible)
+            != Overflow::Visible
 }
 
 /// Collect the paint-facing half from a solve (the second half of what
@@ -5997,9 +6002,7 @@ pub fn layout_collect(
             // border box inset by the border widths. Text runs are taffy
             // children here, so they land inside the clip pair too.
             let style = styles.get(dom_id);
-            clips = style.is_some_and(|s| {
-                s.overflow.is_some_and(|o| o != Overflow::Visible)
-            });
+            clips = style.is_some_and(|s| s.clips_descendants());
             if clips {
                 // blitz#880 (css-overflow-3 §3.3): html's overflow belongs to
                 // the viewport — the canvas bounds are the clip, never an

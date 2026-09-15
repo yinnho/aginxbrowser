@@ -745,6 +745,36 @@
         assert_eq!(parts[2], serde_json::json!("120px"), "getComputedStyle sees the shadow rule");
     }
 
+    /// getComputedStyle overflow face pinned to the Chrome probe matrix
+    /// (css-overflow-3): the pair form reads as "x y", single keywords stay
+    /// single, and the §3.1 coercion surfaces through overflowY ("auto").
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn computed_style_overflow_per_axis_matrix() {
+        let mut rt = setup_runtime(
+            r#"<body><div id="a" style="overflow: clip"></div><div id="b" style="overflow: hidden auto"></div><div id="c" style="overflow-x: hidden"></div><div id="d"></div></body>"#,
+        );
+        let result = rt.evaluate(r#"
+            const g = id => getComputedStyle(document.getElementById(id));
+            return {
+                a: g('a').overflow, aX: g('a').overflowX,
+                b: g('b').overflow, bX: g('b').overflowX, bY: g('b').overflowY,
+                c: g('c').overflow, cX: g('c').overflowX, cY: g('c').overflowY,
+                d: g('d').overflow,
+            };
+        "#).unwrap();
+        let v = result;
+        assert_eq!(v["a"], serde_json::json!("clip"), "single keyword serializes alone");
+        assert_eq!(v["aX"], serde_json::json!("clip"));
+        assert_eq!(v["b"], serde_json::json!("hidden auto"), "pair form reads back as pair");
+        assert_eq!(v["bX"], serde_json::json!("hidden"));
+        assert_eq!(v["bY"], serde_json::json!("auto"));
+        assert_eq!(v["c"], serde_json::json!("hidden auto"), "§3.1: visible axis coerces to auto");
+        assert_eq!(v["cX"], serde_json::json!("hidden"));
+        assert_eq!(v["cY"], serde_json::json!("auto"), "Chrome reports the coerced pair");
+        assert_eq!(v["d"], serde_json::json!("visible"), "default stays visible");
+    }
+
     /// Regression for #105: `HTMLFormElement` must expose `.elements` so
     /// frameworks that probe form field collections work.
     #[test]

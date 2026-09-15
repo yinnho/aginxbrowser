@@ -521,7 +521,7 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "text-align", "border", "border-top", "border-right", "border-bottom", "border-left",
         "border-color", "border-width", "border-style",
         "border-top-width", "border-right-width", "border-bottom-width", "border-left-width",
-        "width", "height", "flex-direction", "gap", "overflow",
+        "width", "height", "flex-direction", "gap", "overflow", "overflow-x", "overflow-y",
         "white-space", "text-overflow",
         "object-fit", "object-position", "z-index", "border-radius",
         "float", "clear", "border-collapse", "vertical-align", "opacity", "transform",
@@ -597,6 +597,16 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         }
         "font-weight" => parse_font_weight(value).is_some(),
         "font-size" => parse_font_size_len(value).is_some(),
+        "overflow" => {
+            let toks: Vec<&str> = value.split_whitespace().collect();
+            (1..=2).contains(&toks.len())
+                && toks
+                    .iter()
+                    .all(|t| matches!(*t, "visible" | "hidden" | "clip" | "scroll" | "auto"))
+        }
+        "overflow-x" | "overflow-y" => {
+            matches!(value, "visible" | "hidden" | "clip" | "scroll" | "auto")
+        }
         _ => true, // remaining modeled properties accept any non-empty value here
     }
 }
@@ -707,10 +717,13 @@ pub struct ComputedStyle {
     /// overflowing inline content. `None` = `clip`.
     pub text_overflow: Option<TextOverflow>,
     pub text_align: Option<TextAlign>,
-    /// Overflow clipping (batch 4c), uniform for both axes. Any non-visible
-    /// value clips descendants' paint to the padding box; per-axis
-    /// overflow-x/y is a later batch.
-    pub overflow: Option<Overflow>,
+    /// Per-axis overflow (css-overflow-3). `None` = not declared (visible
+    /// initial); the `overflow` shorthand writes both axes, so it clobbers
+    /// prior longhands the way a real shorthand does. The §3.1 pair rule
+    /// (visible + non-visible coerces the visible side to auto) applies on
+    /// read in [`ComputedStyle::resolved_overflow`].
+    pub overflow_x: Option<Overflow>,
+    pub overflow_y: Option<Overflow>,
     // --- flex/grid pass-through (batch 2c): px/fr-only, non-inherited ---
     pub flex_direction: Option<FlexDirection>,
     pub flex_wrap: Option<FlexWrapMode>,
@@ -991,6 +1004,60 @@ enum BorderStyleKw {
     NotAStyle,
     NoBorder,
     Line(BorderStyle),
+}
+
+impl ComputedStyle {
+    /// css-overflow-3 §3.1 pair rule: when one axis is `visible` and the
+    /// other is not, the visible side computes to `auto`. Chrome reports the
+    /// coerced pair (body{overflow-x:hidden} → y reads "auto"), so the
+    /// getComputedStyle face and the internal consumers both read through
+    /// this.
+    pub fn resolved_overflow(&self) -> (Overflow, Overflow) {
+        let x = self.overflow_x.unwrap_or(Overflow::Visible);
+        let y = self.overflow_y.unwrap_or(Overflow::Visible);
+        match (x, y) {
+            (Overflow::Visible, o) if o != Overflow::Visible => (Overflow::Auto, o),
+            (o, Overflow::Visible) if o != Overflow::Visible => (o, Overflow::Auto),
+            pair => pair,
+        }
+    }
+
+    /// The single-value merge the coarse internal consumers classify with
+    /// (any-axis clip, viewport propagation): the strongest axis wins
+    /// (scroll > auto > hidden > clip > visible).
+    pub fn effective_overflow(&self) -> Overflow {
+        let (x, y) = self.resolved_overflow();
+        let rank = |o: Overflow| match o {
+            Overflow::Scroll => 4,
+            Overflow::Auto => 3,
+            Overflow::Hidden => 2,
+            Overflow::Clip => 1,
+            Overflow::Visible => 0,
+        };
+        if rank(x) >= rank(y) {
+            x
+        } else {
+            y
+        }
+    }
+
+    /// True when either axis clips descendants' paint (the paint clip gates
+    /// read through this).
+    pub fn clips_descendants(&self) -> bool {
+        let (x, y) = self.resolved_overflow();
+        x != Overflow::Visible || y != Overflow::Visible
+    }
+}
+
+/// Keyword serialization for [`Overflow`] (the getComputedStyle face).
+pub fn overflow_name(o: Overflow) -> &'static str {
+    match o {
+        Overflow::Visible => "visible",
+        Overflow::Hidden => "hidden",
+        Overflow::Clip => "clip",
+        Overflow::Scroll => "scroll",
+        Overflow::Auto => "auto",
+    }
 }
 
 /// Overflow behavior. Paint-side only in this slice: non-visible values
@@ -3046,14 +3113,42 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             }
         }
         "overflow" => {
-            style.overflow = match v {
+            let (a, b) = match v.split_whitespace().collect::<Vec<_>>().as_slice() {
+                [one] => (*one, *one),
+                [x, y] => (*x, *y),
+                _ => return false,
+            };
+            let kw = |t: &str| match t {
                 "visible" => Some(Overflow::Visible),
                 "hidden" => Some(Overflow::Hidden),
                 "clip" => Some(Overflow::Clip),
                 "scroll" => Some(Overflow::Scroll),
                 "auto" => Some(Overflow::Auto),
-                _ => return false,
+                _ => None,
             };
+            let (Some(x), Some(y)) = (kw(a), kw(b)) else {
+                return false;
+            };
+            style.overflow_x = Some(x);
+            style.overflow_y = Some(y);
+            true
+        }
+        "overflow-x" | "overflow-y" => {
+            let Some(o) = (match v.trim() {
+                "visible" => Some(Overflow::Visible),
+                "hidden" => Some(Overflow::Hidden),
+                "clip" => Some(Overflow::Clip),
+                "scroll" => Some(Overflow::Scroll),
+                "auto" => Some(Overflow::Auto),
+                _ => None,
+            }) else {
+                return false;
+            };
+            if name.ends_with("-x") {
+                style.overflow_x = Some(o);
+            } else {
+                style.overflow_y = Some(o);
+            }
             true
         }
         "box-shadow" => {
@@ -6542,5 +6637,79 @@ mod tests {
         let p2 = tree2.query_selector("p").unwrap().unwrap();
         let child2 = cascade_element("p", &tree2, p2, &[], Some(&parent), Some("text-shadow: none"), DEFAULT_ROOT_FONT_SIZE);
         assert_eq!(child2.text_shadow, None, "author `none` beats inheritance");
+    }
+
+    #[test]
+    fn overflow_shorthand_and_longhands() {
+        // Single-keyword shorthand writes both axes.
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "overflow: hidden"));
+        assert_eq!(s.overflow_x, Some(Overflow::Hidden));
+        assert_eq!(s.overflow_y, Some(Overflow::Hidden));
+
+        // Two-value form: first token = x, second = y (css-overflow-3 §3.1).
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "overflow: hidden auto"));
+        assert_eq!(s.overflow_x, Some(Overflow::Hidden));
+        assert_eq!(s.overflow_y, Some(Overflow::Auto));
+
+        // Longhands survive shorthand clobbering and partial declarations.
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "overflow-x: clip"));
+        assert_eq!(s.overflow_x, Some(Overflow::Clip));
+        assert_eq!(s.overflow_y, None, "the other axis stays undeclared");
+        assert!(apply_declarations(&mut s, "overflow: scroll"));
+        assert_eq!(
+            (s.overflow_x, s.overflow_y),
+            (Some(Overflow::Scroll), Some(Overflow::Scroll)),
+            "shorthand clobbers prior longhands like a real shorthand"
+        );
+
+        // Bogus forms drop the whole declaration.
+        let mut s = ComputedStyle::default();
+        assert!(!apply_declarations(&mut s, "overflow: hidden auto scroll"));
+        assert!(!apply_declarations(&mut s, "overflow: elbow"));
+        assert!(!apply_declarations(&mut s, "overflow-x: elbow"));
+        assert_eq!(s, ComputedStyle::default());
+    }
+
+    #[test]
+    fn overflow_pair_coercion_and_merge() {
+        // §3.1: visible + non-visible coerces the visible side to auto,
+        // and the undeclared axis reads as visible before coercion.
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "overflow-x: hidden");
+        assert_eq!(s.resolved_overflow(), (Overflow::Hidden, Overflow::Auto));
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "overflow-y: clip");
+        assert_eq!(s.resolved_overflow(), (Overflow::Auto, Overflow::Clip));
+        // Both visible (or undeclared) stays visible; both non-visible passes through.
+        assert_eq!(ComputedStyle::default().resolved_overflow(), (Overflow::Visible, Overflow::Visible));
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "overflow: hidden scroll");
+        assert_eq!(s.resolved_overflow(), (Overflow::Hidden, Overflow::Scroll));
+
+        // The coarse merge picks the strongest axis; no declaration = visible.
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "overflow: hidden auto");
+        assert_eq!(s.effective_overflow(), Overflow::Auto, "the scrollable axis is the strongest");
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "overflow-x: scroll");
+        assert_eq!(s.effective_overflow(), Overflow::Scroll);
+        assert_eq!(ComputedStyle::default().effective_overflow(), Overflow::Visible);
+        // clips_descendants gates the paint clip: clip/hidden count, plain visible doesn't.
+        assert!(s.clips_descendants());
+        assert!(!ComputedStyle::default().clips_descendants());
+    }
+
+    #[test]
+    fn overflow_supports_probe_grammar() {
+        assert!(supports_declaration("overflow", "hidden"));
+        assert!(supports_declaration("overflow", "hidden auto"));
+        assert!(supports_declaration("overflow-x", "clip"));
+        assert!(supports_declaration("overflow-y", "scroll"));
+        assert!(!supports_declaration("overflow", "hidden auto scroll"), "three keywords are invalid");
+        assert!(!supports_declaration("overflow-x", "hidden auto"), "longhand takes one keyword");
+        assert!(!supports_declaration("overflow", "elbow"));
     }
 }

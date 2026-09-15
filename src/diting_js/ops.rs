@@ -2424,6 +2424,8 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "box-sizing",
     "background-clip",
     "overflow",
+    "overflow-x",
+    "overflow-y",
     "border-collapse",
     "table-layout",
     "vertical-align",
@@ -2643,16 +2645,22 @@ fn computed_style_value(
         // Same declared-keyword convention: `text` or the CSS initial's
         // border-box. The -webkit- alias reads through here too.
         "background-clip" => Some(if s.background_clip_text { "text" } else { "border-box" }.into()),
-        "overflow" => Some(
-            match s.overflow {
-                Some(Overflow::Hidden) => "hidden",
-                Some(Overflow::Clip) => "clip",
-                Some(Overflow::Scroll) => "scroll",
-                Some(Overflow::Auto) => "auto",
-                _ => "visible",
-            }
-            .into(),
-        ),
+        "overflow" => {
+            let (x, y) = s.resolved_overflow();
+            Some(if x == y {
+                crate::diting_css::overflow_name(x).into()
+            } else {
+                format!("{} {}", crate::diting_css::overflow_name(x), crate::diting_css::overflow_name(y))
+            })
+        }
+        "overflow-x" => {
+            let (x, _) = s.resolved_overflow();
+            Some(crate::diting_css::overflow_name(x).into())
+        }
+        "overflow-y" => {
+            let (_, y) = s.resolved_overflow();
+            Some(crate::diting_css::overflow_name(y).into())
+        }
         "font-size" => s.font_size.map(|f| format!("{}px", f)),
         "font-weight" => s.font_weight.map(|w| w.to_string()),
         "text-align" => Some(
