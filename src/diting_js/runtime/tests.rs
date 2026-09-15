@@ -11139,3 +11139,159 @@ fn computed_style_pseudo_element_face() {
         assert_eq!(read(&mut rt, &expr), "TypeError", "junk arg {junk}");
     }
 }
+
+/// Batch 105: counter()/counters() numbering — the css-lists-3 §4.3 worked
+/// example's canonical shapes: flat 1..n, nested ol joins "3.1", the li after
+/// the nested list continues the OUTER counter (inner counter never reaches
+/// following siblings of its creator's parent), and a sibling ol restarts
+/// because reset shadows previous-sibling-origin counters (§4.4.2).
+#[cfg(feature = "screenshot")]
+#[test]
+fn counters_numbering_scoping_and_restart() {
+    let mut rt = setup_runtime(
+        r#"<style>
+          ol{counter-reset:item;list-style:none;margin:0;padding:0}
+          li::before{counter-increment:item;content:counters(item,".") " "}
+        </style>
+        <ol>
+          <li id="a">alpha</li>
+          <li id="b">beta</li>
+          <li id="c">gamma<ol><li id="d">delta</li></ol></li>
+          <li id="e">epsilon</li>
+        </ol>
+        <ol><li id="f">zeta</li></ol>"#,
+    );
+    let before = |rt: &mut JsRuntime, id: &str| -> String {
+        match rt.evaluate(&format!(
+            "getComputedStyle(document.getElementById('{}'),'::before').getPropertyValue('content')",
+            id
+        )) {
+            Ok(serde_json::Value::String(s)) => s,
+            other => panic!("{id} ::before -> {other:?}"),
+        }
+    };
+    assert_eq!(before(&mut rt, "a"), "\"1 \"");
+    assert_eq!(before(&mut rt, "b"), "\"2 \"");
+    assert_eq!(before(&mut rt, "c"), "\"3 \"");
+    assert_eq!(before(&mut rt, "d"), "\"3.1 \"", "nested ol joins the join");
+    assert_eq!(
+        before(&mut rt, "e"),
+        "\"4 \"",
+        "li after the nested list keeps counting the outer counter"
+    );
+    assert_eq!(
+        before(&mut rt, "f"),
+        "\"1 \"",
+        "sibling ol's reset shadows the previous sibling's counter"
+    );
+}
+
+/// Batch 105: counter style formatting, implicit-zero counters, same-element
+/// reset+increment composition (reset then increment → 6), and the host
+/// gCS face keeping the source shape functional (Chrome parity).
+#[cfg(feature = "screenshot")]
+#[test]
+fn counter_styles_composition_and_host_face() {
+    let mut rt = setup_runtime(
+        r#"<style>
+          .r::before{content:counter(x, upper-roman) " "}
+          .al::before{content:counter(y, lower-alpha) " "}
+          .ci::before{content:counter(n) " "}
+          .z::before{content:counter(ghost)}
+          #h{content:counter(w, upper-roman) " " attr(data-k)}
+        </style>
+        <div style="counter-reset:x 3"><span class="r"></span></div>
+        <div style="counter-reset:y"><span class="al"></span></div>
+        <span class="ci" style="counter-reset:n 5;counter-increment:n"></span>
+        <span class="z"></span>
+        <span id="h" data-k="K"></span>"#,
+    );
+    let read = |rt: &mut JsRuntime, expr: &str| -> String {
+        match rt.evaluate(expr) {
+            Ok(serde_json::Value::String(s)) => s,
+            other => panic!("{expr} -> {other:?}"),
+        }
+    };
+    assert_eq!(
+        read(&mut rt, "getComputedStyle(document.querySelector('.r'),'::before').getPropertyValue('content')"),
+        "\"III \"",
+        "reset to 3 renders upper-roman"
+    );
+    assert_eq!(
+        read(&mut rt, "getComputedStyle(document.querySelector('.al'),'::before').getPropertyValue('content')"),
+        "\"0 \"",
+        "lower-alpha of 0 falls back to decimal"
+    );
+    assert_eq!(
+        read(&mut rt, "getComputedStyle(document.querySelector('.ci'),'::before').getPropertyValue('content')"),
+        "\"6 \"",
+        "reset 5 then increment on the same element"
+    );
+    assert_eq!(
+        read(&mut rt, "getComputedStyle(document.querySelector('.z'),'::before').getPropertyValue('content')"),
+        "\"0\"",
+        "counter of a name never reset is 0"
+    );
+    // Host face: source shape round-trips functional notation.
+    assert_eq!(
+        read(&mut rt, "getComputedStyle(document.getElementById('h')).content"),
+        "counter(w, upper-roman) \" \" attr(data-k)"
+    );
+}
+
+/// Batch 105: quotes — open/close-quote pick the depth'th pair (last pair
+/// repeats), `quotes: none` yields empty strings, and the property-less
+/// default is curly quotes.
+#[cfg(feature = "screenshot")]
+#[test]
+fn quotes_depth_pairs_none_and_default() {
+    let mut rt = setup_runtime(
+        r#"<style>
+          .o::before{content:open-quote}
+          .o::after{content:close-quote}
+          #nn{quotes:none}
+          #nn::before{content:open-quote}
+          #dd::before{content:open-quote}
+          #dd::after{content:close-quote}
+        </style>
+        <div style="quotes: '«' '»' '‹' '›'"><span class="o"><span class="o"></span></span></div>
+        <span id="dd"></span>
+        <span id="nn"></span>"#,
+    );
+    let read = |rt: &mut JsRuntime, expr: &str| -> String {
+        match rt.evaluate(expr) {
+            Ok(serde_json::Value::String(s)) => s,
+            other => panic!("{expr} -> {other:?}"),
+        }
+    };
+    let outer = "getComputedStyle(document.querySelector('div > span'),'";
+    assert_eq!(
+        read(&mut rt, &format!("{outer}::before').getPropertyValue('content')")),
+        "\"«\"",
+        "outermost quote takes the first pair"
+    );
+    assert_eq!(
+        read(&mut rt, &format!("{outer}::after').getPropertyValue('content')")),
+        "\"»\""
+    );
+    let inner = "getComputedStyle(document.querySelector('div > span > span'),'";
+    assert_eq!(
+        read(&mut rt, &format!("{inner}::before').getPropertyValue('content')")),
+        "\"‹\"",
+        "nested quote takes the depth'th pair"
+    );
+    assert_eq!(
+        read(&mut rt, &format!("{inner}::after').getPropertyValue('content')")),
+        "\"›\""
+    );
+    assert_eq!(
+        read(&mut rt, "getComputedStyle(document.getElementById('nn'),'::before').getPropertyValue('content')"),
+        "\"\"",
+        "quotes:none makes open-quote empty"
+    );
+    assert_eq!(
+        read(&mut rt, "getComputedStyle(document.getElementById('dd'),'::before').getPropertyValue('content')"),
+        "\"\u{201C}\"",
+        "property-less default is the curly left double quote"
+    );
+}

@@ -1897,6 +1897,142 @@ fn q_ancestor_quote_depth(tree: &DomTree, mut id: NodeId) -> usize {
     depth
 }
 
+/// CSS counter state for one compute_styles pass: per-name stacks of
+/// (value, walk depth of the element that created it) plus the
+/// generated-quote nesting depth. A counter created at depth d stays
+/// visible to the creator's following siblings and their subtrees, and
+/// pops when the walk leaves its creating parent — the css-lists-3 scope
+/// rule that makes `ol{counter-reset} li::before{counter-increment}`
+/// number nested lists as "1.1" and the next outer item as plain "2".
+#[derive(Default)]
+struct CounterState {
+    map: HashMap<String, Vec<(i64, usize)>>,
+    quote_depth: usize,
+}
+
+fn apply_counter_modifiers(
+    state: &mut CounterState,
+    reset: &[(String, i32)],
+    increment: &[(String, i32)],
+    depth: usize,
+) {
+    // Reset pushes a counter nested inside any ancestor-origin same-name
+    // counter, but shadows every same-name counter created at this depth
+    // or deeper (the previous-sibling removal of css-lists-3 §4.4.2 —
+    // sibling <ol>s each restart at 1). Increment then bumps the
+    // innermost; both compose on one element.
+    for (name, v) in reset {
+        let entry = state.map.entry(name.clone()).or_default();
+        while matches!(entry.last(), Some(e) if e.1 >= depth) {
+            entry.pop();
+        }
+        entry.push((*v as i64, depth));
+    }
+    for (name, d) in increment {
+        let entry = state.map.entry(name.clone()).or_default();
+        if entry.is_empty() {
+            entry.push((0, depth));
+        }
+        if let Some(last) = entry.last_mut() {
+            last.0 += *d as i64;
+        }
+    }
+}
+
+/// End-of-subtree scope pop: counters created strictly inside the exiting
+/// element die with their creating parent; ones created at this depth or
+/// shallower survive for the following siblings.
+fn pop_out_of_scope(state: &mut CounterState, depth: usize) {
+    for stack in state.map.values_mut() {
+        while matches!(stack.last(), Some(e) if e.1 > depth) {
+            stack.pop();
+        }
+    }
+}
+
+/// The depth'th declared pair, repeating the last pair once the depth runs
+/// past it; `quotes: none` renders nothing and no declared `quotes` falls
+/// back to the same curly pair the UA `q` marks use.
+fn quote_pair(quotes: Option<&[String]>, depth: usize) -> (&str, &str) {
+    match quotes {
+        Some([]) => ("", ""),
+        Some(q) => {
+            let n = q.len() / 2;
+            let i = depth.min(n - 1) * 2;
+            (q[i].as_str(), q[i + 1].as_str())
+        }
+        None if depth.is_multiple_of(2) => ("\u{201C}", "\u{201D}"),
+        None => ("\u{2018}", "\u{2019}"),
+    }
+}
+
+fn resolve_content_into(
+    cv: &crate::diting_css::ContentValue,
+    tree: &DomTree,
+    nid: NodeId,
+    state: &mut CounterState,
+    quotes: Option<&[String]>,
+    out: &mut String,
+) {
+    use crate::diting_css::ContentValue;
+    match cv {
+        ContentValue::Str(s) => out.push_str(s),
+        ContentValue::Attr(name) => {
+            let v = tree
+                .with_node(nid, |n| n.get_attribute(name).map(|s| s.to_string()))
+                .flatten();
+            out.push_str(&v.unwrap_or_default());
+        }
+        ContentValue::Counter { name, style } => {
+            let v = state
+                .map
+                .get(name)
+                .and_then(|s| s.last())
+                .map(|e| e.0)
+                .unwrap_or(0);
+            out.push_str(&crate::diting_css::format_counter_value(v, *style));
+        }
+        ContentValue::Counters { name, sep, style } => {
+            let stack = state.map.get(name);
+            match stack {
+                Some(s) if !s.is_empty() => {
+                    let parts: Vec<String> = s
+                        .iter()
+                        .map(|e| crate::diting_css::format_counter_value(e.0, *style))
+                        .collect();
+                    out.push_str(&parts.join(sep));
+                }
+                _ => out.push_str(&crate::diting_css::format_counter_value(0, *style)),
+            }
+        }
+        ContentValue::OpenQuote => {
+            let (open, _) = quote_pair(quotes, state.quote_depth);
+            out.push_str(open);
+            state.quote_depth += 1;
+        }
+        ContentValue::CloseQuote => {
+            // Unbalanced close-quote (nothing open) generates nothing.
+            if state.quote_depth > 0 {
+                state.quote_depth -= 1;
+                let (_, close) = quote_pair(quotes, state.quote_depth);
+                out.push_str(close);
+            }
+        }
+        ContentValue::NoQuote { close } => {
+            if *close {
+                state.quote_depth = state.quote_depth.saturating_sub(1);
+            } else {
+                state.quote_depth += 1;
+            }
+        }
+        ContentValue::List(parts) => {
+            for part in parts {
+                resolve_content_into(part, tree, nid, state, quotes, out);
+            }
+        }
+    }
+}
+
 /// diting has no ::before/::after generated content; the `q` marks are the
 /// one piece of UA-generated text real pages rely on, so synthesize the
 /// open/close leaves directly around the flattened q's children, in the q's
@@ -6793,6 +6929,8 @@ fn compute_styles_impl(
         parent: Option<&crate::diting_css::ComputedStyle>,
         root_fs: f32,
         out: &mut HashMap<NodeId, crate::diting_css::ComputedStyle>,
+        counters: &mut CounterState,
+        depth: usize,
     ) {
         let Some(tag) = tree
             .with_node(nid, |n| n.as_element().map(|e| e.local.to_string()))
@@ -6833,13 +6971,36 @@ fn compute_styles_impl(
         );
         let mut cs = cs;
         crate::diting_css::sample_css_animation(&mut cs, keyframes, css_time);
+        // CSS counters: apply this element's own reset/increment before its
+        // pseudos resolve. The reset pushes a shadowing counter whose scope
+        // lasts until this element's parent's subtree ends (see
+        // pop_out_of_scope) — css-lists-3 scoping, not a flat clobber.
+        // display:none elements generate no boxes and no counters.
+        if cs.display != Some(crate::diting_css::Display::None)
+            && (!cs.counter_reset.is_empty() || !cs.counter_increment.is_empty())
+        {
+            apply_counter_modifiers(counters, &cs.counter_reset, &cs.counter_increment, depth);
+        }
         // Generated content: pseudo-element rules cascade a synthetic span
         // against the host's own matched set and hang off the host's
-        // computed style; build_element synthesizes their boxes.
+        // computed style; build_element synthesizes their boxes. ::before
+        // resolves before the children and ::after after — quote depth and
+        // counter mutations interleave with the subtree walk (css-content-3
+        // box order), so one-shot resolution would close quotes opened
+        // before the children ever ran.
+        let mut pseudo_pair = crate::diting_css::PseudoPair::default();
         if !sets.pseudo_kinds.is_empty() {
-            if let Some(pair) = pseudo_styles(tree, rules, sets, nid, &cs, root_fs) {
-                cs.pseudos = Some(Box::new(pair));
-            }
+            pseudo_pair.before = pseudo_styles(
+                tree,
+                rules,
+                sets,
+                nid,
+                &cs,
+                root_fs,
+                counters,
+                depth,
+                crate::diting_dom::selector::PseudoKind::Before,
+            );
         }
         let child_root_fs = if parent.is_none() {
             cs.font_size.unwrap_or(crate::diting_css::DEFAULT_ROOT_FONT_SIZE)
@@ -6861,8 +7022,27 @@ fn compute_styles_impl(
                 Some(&cs),
                 child_root_fs,
                 out,
+                counters,
+                depth + 1,
             );
         }
+        if !sets.pseudo_kinds.is_empty() {
+            pseudo_pair.after = pseudo_styles(
+                tree,
+                rules,
+                sets,
+                nid,
+                &cs,
+                root_fs,
+                counters,
+                depth,
+                crate::diting_dom::selector::PseudoKind::After,
+            );
+        }
+        if pseudo_pair.before.is_some() || pseudo_pair.after.is_some() {
+            cs.pseudos = Some(Box::new(pseudo_pair));
+        }
+        pop_out_of_scope(counters, depth);
         out.insert(nid, cs);
     }
     // Pseudo-element rules (::before/::after) for one host: their matched
@@ -6870,6 +7050,7 @@ fn compute_styles_impl(
     // the normal cascade above never sees them), and each kind cascades a
     // synthetic span whose parent is the host — undeclared properties
     // inherit exactly like a real child's would.
+    #[allow(clippy::too_many_arguments)]
     fn pseudo_styles(
         tree: &DomTree,
         rules: &[crate::diting_css::ParsedRule],
@@ -6877,14 +7058,18 @@ fn compute_styles_impl(
         nid: NodeId,
         host: &crate::diting_css::ComputedStyle,
         root_fs: f32,
-    ) -> Option<crate::diting_css::PseudoPair> {
+        counters: &mut CounterState,
+        depth: usize,
+        wanted: crate::diting_dom::selector::PseudoKind,
+    ) -> Option<crate::diting_css::ComputedStyle> {
         use crate::diting_css::ContentValue;
         use crate::diting_dom::selector::PseudoKind;
         let mut pair = crate::diting_css::PseudoPair::default();
-        for (wanted, slot) in [
-            (PseudoKind::Before, &mut pair.before),
-            (PseudoKind::After, &mut pair.after),
-        ] {
+        let slot = match wanted {
+            PseudoKind::Before => &mut pair.before,
+            _ => &mut pair.after,
+        };
+        {
             let matched: Vec<(&crate::diting_css::ParsedRule, u32)> = rules
                 .iter()
                 .enumerate()
@@ -6900,7 +7085,7 @@ fn compute_styles_impl(
                 })
                 .collect();
             if matched.is_empty() {
-                continue;
+                return None;
             }
             // Tag "span": the UA sheet's inline display and none of the
             // tag-gated UA branches (their attribute reads fire only on
@@ -6909,12 +7094,20 @@ fn compute_styles_impl(
                 "span", tree, nid, &matched, Some(host), None, root_fs,
             );
             // attr() resolves against the HOST's attributes; a missing
-            // attribute yields the empty string.
-            if let Some(ContentValue::Attr(name)) = p.content.clone() {
-                let v = tree
-                    .with_node(nid, |n| n.get_attribute(&name).map(|s| s.to_string()))
-                    .flatten();
-                p.content = Some(ContentValue::Str(v.unwrap_or_default()));
+            // attribute yields the empty string. Counters and quotes resolve
+            // against the walk state: the pseudo's OWN reset/increment apply
+            // to the persistent state (css-lists-3 — `li::before
+            // {counter-increment: item}` is the canonical pattern; the entry
+            // lives at the host's depth, so it survives the host's own
+            // subtree exit and dies with the host's parent), then the whole
+            // content flattens to a plain string for the box builder.
+            apply_counter_modifiers(counters, &p.counter_reset, &p.counter_increment, depth);
+            let quotes = p.quotes.clone();
+            let cv = p.content.take();
+            if let Some(cv) = cv {
+                let mut out = String::new();
+                resolve_content_into(&cv, tree, nid, counters, quotes.as_deref(), &mut out);
+                p.content = Some(ContentValue::Str(out));
             }
             // Clearfix box: display:table coerces to block — the generated
             // box needs flow presence (it becomes a taffy child of the host),
@@ -6924,11 +7117,7 @@ fn compute_styles_impl(
             }
             *slot = Some(p);
         }
-        if pair.before.is_none() && pair.after.is_none() {
-            None
-        } else {
-            Some(pair)
-        }
+        slot.clone()
     }
     // One querySelectorAll per RULE over the whole document, sorted for the
     // binary search in visit. This replaces the per-element-per-rule full-doc
@@ -6956,6 +7145,7 @@ fn compute_styles_impl(
             sets.hits.len()
         );
     }
+    let mut counters = CounterState::default();
     match within_root {
         Some(root) => visit(
             tree,
@@ -6967,6 +7157,8 @@ fn compute_styles_impl(
             None,
             crate::diting_css::DEFAULT_ROOT_FONT_SIZE,
             &mut out,
+            &mut counters,
+            0,
         ),
         None => {
             for child in tree.children(tree.document()) {
@@ -6980,6 +7172,8 @@ fn compute_styles_impl(
                     None,
                     crate::diting_css::DEFAULT_ROOT_FONT_SIZE,
                     &mut out,
+                    &mut counters,
+                    0,
                 );
             }
         }

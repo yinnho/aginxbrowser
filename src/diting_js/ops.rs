@@ -2541,6 +2541,21 @@ fn easing_cssom(e: crate::diting_css::Easing) -> String {
     }
 }
 
+/// `", lower-roman"`-style suffix for counter()/counters() re-serialization;
+/// decimal is the initial value so Chrome omits it.
+#[cfg(feature = "screenshot")]
+fn counter_style_suffix(style: crate::diting_css::CounterStyle) -> String {
+    use crate::diting_css::CounterStyle;
+    match style {
+        CounterStyle::Decimal => String::new(),
+        CounterStyle::DecimalLeadingZero => ", decimal-leading-zero".into(),
+        CounterStyle::LowerAlpha => ", lower-alpha".into(),
+        CounterStyle::UpperAlpha => ", upper-alpha".into(),
+        CounterStyle::LowerRoman => ", lower-roman".into(),
+        CounterStyle::UpperRoman => ", upper-roman".into(),
+    }
+}
+
 /// Serialize one property of a cascaded [`ComputedStyle`] in Chrome's
 /// computed-value spelling, for the `computed_style` op (getComputedStyle's
 /// cascade layer). `None` means "not in the table" — the JS caller falls
@@ -2663,12 +2678,53 @@ fn computed_style_value(
         // Chrome's computed value is the declared keyword itself (not a used
         // value), so the CSS initial surfaces as content-box.
         // Chrome's initial computed content is "normal"; declared strings
-        // re-serialize quoted, attr() keeps its functional shape.
+        // re-serialize quoted, attr()/counter()/counters()/quotes keywords
+        // keep their functional shape. On pseudos the resolved plain string
+        // surfaces instead (documented divergence).
         "content" => Some(match &s.content {
             Some(ContentValue::Str(t)) => {
                 format!("\"{}\"", t.replace('\\', "\\\\").replace('"', "\\\""))
             },
             Some(ContentValue::Attr(name)) => format!("attr({})", name),
+            Some(ContentValue::Counter { name, style }) => {
+                format!("counter({}{})", name, counter_style_suffix(*style))
+            },
+            Some(ContentValue::Counters { name, sep, style }) => format!(
+                "counters({}, \"{}\"{})",
+                name,
+                sep.replace('\\', "\\\\").replace('"', "\\\""),
+                counter_style_suffix(*style)
+            ),
+            Some(ContentValue::OpenQuote) => "open-quote".into(),
+            Some(ContentValue::CloseQuote) => "close-quote".into(),
+            Some(ContentValue::NoQuote { close }) => {
+                if *close { "no-close-quote".into() } else { "no-open-quote".into() }
+            },
+            Some(ContentValue::List(parts)) => parts
+                .iter()
+                .map(|p| match p {
+                    ContentValue::Str(t) => {
+                        format!("\"{}\"", t.replace('\\', "\\\\").replace('"', "\\\""))
+                    },
+                    ContentValue::Attr(name) => format!("attr({})", name),
+                    ContentValue::Counter { name, style } => {
+                        format!("counter({}{})", name, counter_style_suffix(*style))
+                    },
+                    ContentValue::Counters { name, sep, style } => format!(
+                        "counters({}, \"{}\"{})",
+                        name,
+                        sep.replace('\\', "\\\\").replace('"', "\\\""),
+                        counter_style_suffix(*style)
+                    ),
+                    ContentValue::OpenQuote => "open-quote".into(),
+                    ContentValue::CloseQuote => "close-quote".into(),
+                    ContentValue::NoQuote { close } => {
+                        if *close { "no-close-quote" } else { "no-open-quote" }.into()
+                    },
+                    ContentValue::List(_) => "normal".into(),
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
             None => "normal".into(),
         }),
         "box-sizing" => Some(
