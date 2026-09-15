@@ -775,6 +775,100 @@
         assert_eq!(v["d"], serde_json::json!("visible"), "default stays visible");
     }
 
+    /// Table DOM API family (WHATWG §4.9): script-built tables — insertRow
+    /// auto-creates the tbody, `rows` reads in spec order (thead, tbodies,
+    /// tfoot — not tree order), and the per-row/cell index getters report
+    /// position (Sina's TabSwitchController trips exactly these).
+    #[test]
+    fn table_dom_api_family() {
+        let mut rt = setup_runtime(r#"<body><table id="t"></table></body>"#);
+        let result = rt.evaluate(r#"
+            const t = document.getElementById('t');
+            const head = t.createTHead();
+            const hr = head.insertRow(); hr.insertCell().textContent = 'h';
+            const r0 = t.insertRow(); r0.insertCell().textContent = 'a';
+            const r1 = t.insertRow(); r1.insertCell().textContent = 'b';
+            const fr = t.createTFoot().insertRow(); fr.insertCell().textContent = 'f';
+            const rows = Array.from(t.rows).map((r) => r.cells[0].textContent);
+            const rowIndexes = Array.from(t.rows).map((r) => r.rowIndex);
+            const sectionRowIndexes = [r0.sectionRowIndex, r1.sectionRowIndex];
+            const cellIndex = r1.cells[0].cellIndex;
+            const tbodies = t.tBodies.length;
+            const caption = t.createCaption().localName;
+            const mid = t.insertRow(0);
+            let threw = null;
+            try { t.insertRow(99); } catch (err) { threw = err.name; }
+            t.deleteRow(-1);
+            const blank = document.createElement('table');
+            const auto = blank.insertRow();
+            return {
+                rows, rowIndexes, sectionRowIndexes, cellIndex, tbodies, caption,
+                midInSection: mid.parentNode.localName,
+                midCells: mid.cells.length,
+                threw,
+                afterDelete: t.rows.length,
+                autoBody: [blank.tBodies.length, auto.parentNode.localName],
+            };
+        "#).unwrap();
+        let v = result;
+        assert_eq!(
+            v["rows"],
+            serde_json::json!(["h", "a", "b", "f"]),
+            "spec order: thead rows, then tbodies, then tfoot — not tree order"
+        );
+        assert_eq!(v["rowIndexes"], serde_json::json!([0, 1, 2, 3]));
+        assert_eq!(v["sectionRowIndexes"], serde_json::json!([0, 1]));
+        assert_eq!(v["cellIndex"], serde_json::json!(0));
+        assert_eq!(v["tbodies"], serde_json::json!(1));
+        assert_eq!(v["caption"], serde_json::json!("caption"));
+        assert_eq!(
+            v["midInSection"],
+            serde_json::json!("thead"),
+            "insertRow(0) targets the section OWNING rows[0] (thead's row), never the table directly"
+        );
+        assert_eq!(v["midCells"], serde_json::json!(0), "insertRow creates bare rows");
+        assert_eq!(v["threw"], serde_json::json!("IndexSizeError"), "out-of-range index throws");
+        assert_eq!(
+            v["afterDelete"],
+            serde_json::json!(4),
+            "deleteRow(-1) drops the table-order last row (tfoot's), the bare thead row stays"
+        );
+        assert_eq!(v["autoBody"], serde_json::json!([1, "tbody"]), "empty-table insertRow synthesizes a tbody");
+    }
+
+    /// Select surface residuals (obscura#991's list): selectedOptions /
+    /// multiple / size, and the per-tag interface discriminators the table
+    /// family relies on.
+    #[test]
+    fn select_options_surface_and_table_interfaces() {
+        let mut rt = setup_runtime(
+            r#"<body><select id="s" multiple size="3"><option value="x">x</option><option value="y" selected>y</option></select></body>"#,
+        );
+        let result = rt.evaluate(r#"
+            const s = document.getElementById('s');
+            s.options.add(new Option('z', 'z'));
+            return {
+                optionsLen: s.options.length,
+                selected: Array.from(s.selectedOptions).map((o) => o.value),
+                multiple: s.multiple,
+                size: s.size,
+                optgroup: document.createElement('optgroup') instanceof HTMLOptGroupElement,
+                row: document.createElement('tr') instanceof HTMLTableRowElement,
+                cell: document.createElement('th') instanceof HTMLTableCellElement,
+                optCtor: s.options[2] instanceof HTMLOptionElement,
+            };
+        "#).unwrap();
+        let v = result;
+        assert_eq!(v["optionsLen"], serde_json::json!(3), "new Option + options.add");
+        assert_eq!(v["selected"], serde_json::json!(["y"]));
+        assert_eq!(v["multiple"], serde_json::json!(true));
+        assert_eq!(v["size"], serde_json::json!(3));
+        assert_eq!(v["optgroup"], serde_json::json!(true));
+        assert_eq!(v["row"], serde_json::json!(true));
+        assert_eq!(v["cell"], serde_json::json!(true));
+        assert_eq!(v["optCtor"], serde_json::json!(true));
+    }
+
     /// Regression for #105: `HTMLFormElement` must expose `.elements` so
     /// frameworks that probe form field collections work.
     #[test]

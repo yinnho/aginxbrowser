@@ -3436,6 +3436,203 @@ class Element extends Node {
     }
     _mirrorSelectLabel(this);
   }
+  // selectedOptions: the multiple-select filtered view (spec §4.10.8).
+  get selectedOptions() {
+    if (this.localName !== 'select') return undefined;
+    return HTMLCollection._from(Array.from(this.options).filter((o) => o.selected));
+  }
+  get multiple() {
+    if (this.localName !== 'select') return undefined;
+    return this.hasAttribute('multiple');
+  }
+  set multiple(v) {
+    if (this.localName !== 'select') return;
+    if (v) this.setAttribute('multiple', '');
+    else this.removeAttribute('multiple');
+  }
+  get size() {
+    if (this.localName !== 'select') return undefined;
+    const n = parseInt(this.getAttribute('size'), 10);
+    return Number.isFinite(n) && n > 0 ? n : (this.hasAttribute('multiple') ? 4 : 1);
+  }
+  set size(v) {
+    if (this.localName !== 'select') return;
+    if (v != null && +v > 0) this.setAttribute('size', String(+v));
+  }
+  // ---- Table DOM API family (WHATWG §4.9) — the classes were bare interface
+  // aliases, so script-built tables (Sina's TabSwitchController: insertRow /
+  // insertCell; anything calling new-section accessors) threw "is not a
+  // function". Shared-prototype accessors with localName guards, same shape
+  // as the select family above. `rows` is spec order (thead, then each tbody
+  // in tree order, then tfoot), NOT tree order.
+  get rows() {
+    const t = this.localName;
+    if (t === 'table') {
+      const out = [];
+      for (const name of ['thead', 'tbody', 'tfoot']) {
+        for (const s of Array.from(this.children)) {
+          if (s.localName === name) out.push(...Array.from(s.children));
+        }
+      }
+      return HTMLCollection._from(out);
+    }
+    if (t === 'thead' || t === 'tbody' || t === 'tfoot') {
+      return HTMLCollection._from(Array.from(this.children).filter((c) => c.localName === 'tr'));
+    }
+    return undefined;
+  }
+  get tBodies() {
+    if (this.localName !== 'table') return undefined;
+    return HTMLCollection._from(Array.from(this.children).filter((c) => c.localName === 'tbody'));
+  }
+  get tHead() {
+    if (this.localName !== 'table') return undefined;
+    return Array.from(this.children).find((c) => c.localName === 'thead') || null;
+  }
+  get tFoot() {
+    if (this.localName !== 'table') return undefined;
+    return Array.from(this.children).find((c) => c.localName === 'tfoot') || null;
+  }
+  get caption() {
+    if (this.localName !== 'table') return undefined;
+    return Array.from(this.children).find((c) => c.localName === 'caption') || null;
+  }
+  createTHead() {
+    if (this.localName !== 'table') return undefined;
+    const head = this.tHead;
+    if (head) return head;
+    const created = document.createElement('thead');
+    // caption/colgroup stay ahead of the thead, matching Chrome placement.
+    const firstRowish = Array.from(this.children).find(
+      (c) => c.localName !== 'caption' && c.localName !== 'colgroup'
+    );
+    this.insertBefore(created, firstRowish || null);
+    return created;
+  }
+  createTBody() {
+    if (this.localName !== 'table') return undefined;
+    const body = document.createElement('tbody');
+    this.appendChild(body);
+    return body;
+  }
+  createTFoot() {
+    if (this.localName !== 'table') return undefined;
+    const foot = this.tFoot;
+    if (foot) return foot;
+    const created = document.createElement('tfoot');
+    this.appendChild(created);
+    return created;
+  }
+  createCaption() {
+    if (this.localName !== 'table') return undefined;
+    const cap = this.caption;
+    if (cap) return cap;
+    const created = document.createElement('caption');
+    this.insertBefore(created, this.firstChild);
+    return created;
+  }
+  deleteTHead() { if (this.localName === 'table') { const h = this.tHead; if (h) h.remove(); } }
+  deleteTFoot() { if (this.localName === 'table') { const f = this.tFoot; if (f) f.remove(); } }
+  deleteCaption() { if (this.localName === 'table') { const c = this.caption; if (c) c.remove(); } }
+  insertRow(index) {
+    const t = this.localName;
+    const rows = t === 'table' || t === 'thead' || t === 'tbody' || t === 'tfoot'
+      ? Array.from(this.rows) : null;
+    if (!rows) return undefined;
+    index = index == null || Number.isNaN(+index) ? -1 : Math.trunc(+index);
+    const owner = t === 'table' ? 'HTMLTableElement' : 'HTMLTableSectionElement';
+    if (index < -1 || index > rows.length) {
+      throw new DOMException(
+        "Failed to execute 'insertRow' on '" + owner + "': The index provided (" + index + ") is out of range.",
+        'IndexSizeError'
+      );
+    }
+    const tr = document.createElement('tr');
+    if (index === -1 || index === rows.length) {
+      if (t === 'table') {
+        // Append into the last tbody, creating one when the table has none.
+        let body = null;
+        for (const c of this.children) { if (c.localName === 'tbody') body = c; }
+        if (!body) { body = document.createElement('tbody'); this.appendChild(body); }
+        body.appendChild(tr);
+      } else {
+        this.appendChild(tr);
+      }
+    } else {
+      const ref = rows[index];
+      // Intermediate index: the new row belongs to the section OWNING that
+      // row, never as a direct child of the table.
+      ref.parentNode.insertBefore(tr, ref);
+    }
+    return tr;
+  }
+  deleteRow(index) {
+    const t = this.localName;
+    if (t !== 'table' && t !== 'thead' && t !== 'tbody' && t !== 'tfoot') return;
+    index = index == null || Number.isNaN(+index) ? -1 : Math.trunc(+index);
+    const rows = Array.from(this.rows);
+    const row = index === -1 ? rows[rows.length - 1] : rows[index];
+    const owner = t === 'table' ? 'HTMLTableElement' : 'HTMLTableSectionElement';
+    if (!row) {
+      throw new DOMException(
+        "Failed to execute 'deleteRow' on '" + owner + "': The index provided (" + index + ") is out of range.",
+        'IndexSizeError'
+      );
+    }
+    row.remove();
+  }
+  get cells() {
+    if (this.localName !== 'tr') return undefined;
+    return HTMLCollection._from(Array.from(this.children).filter(
+      (c) => c.localName === 'td' || c.localName === 'th'
+    ));
+  }
+  get rowIndex() {
+    if (this.localName !== 'tr') return -1;
+    const table = typeof this.closest === 'function' ? this.closest('table') : null;
+    if (!table) return -1;
+    return Array.from(table.rows).indexOf(this);
+  }
+  get sectionRowIndex() {
+    if (this.localName !== 'tr') return -1;
+    if (!this.parentNode || !this.parentNode.children) return -1;
+    return Array.from(this.parentNode.children)
+      .filter((c) => c.localName === 'tr')
+      .indexOf(this);
+  }
+  insertCell(index) {
+    if (this.localName !== 'tr') return undefined;
+    index = index == null || Number.isNaN(+index) ? -1 : Math.trunc(+index);
+    const cells = Array.from(this.cells);
+    if (index < -1 || index > cells.length) {
+      throw new DOMException(
+        "Failed to execute 'insertCell' on 'HTMLTableRowElement': The index provided (" + index + ") is out of range.",
+        'IndexSizeError'
+      );
+    }
+    const cell = document.createElement('td');
+    if (index === -1 || index === cells.length) this.appendChild(cell);
+    else this.insertBefore(cell, cells[index]);
+    return cell;
+  }
+  deleteCell(index) {
+    if (this.localName !== 'tr') return;
+    index = index == null || Number.isNaN(+index) ? -1 : Math.trunc(+index);
+    const cells = Array.from(this.cells);
+    const cell = index === -1 ? cells[cells.length - 1] : cells[index];
+    if (!cell) {
+      throw new DOMException(
+        "Failed to execute 'deleteCell' on 'HTMLTableRowElement': The index provided (" + index + ") is out of range.",
+        'IndexSizeError'
+      );
+    }
+    cell.remove();
+  }
+  get cellIndex() {
+    if (this.localName !== 'td' && this.localName !== 'th') return -1;
+    if (!this.parentNode || !this.parentNode.cells) return -1;
+    return Array.from(this.parentNode.cells).indexOf(this);
+  }
   // Per the HTML spec, the submit() METHOD submits the form WITHOUT firing a
   // cancelable `submit` event — a page's submit listener cannot veto it. Only
   // requestSubmit() and user-initiated submits fire the cancelable event.
@@ -9218,6 +9415,11 @@ Object.defineProperty(Element.prototype, 'control', {
   configurable: true,
 });
 globalThis.HTMLTableElement = _htmlInterface('HTMLTableElement', ['table']);
+globalThis.HTMLTableRowElement = _htmlInterface('HTMLTableRowElement', ['tr']);
+globalThis.HTMLTableCellElement = _htmlInterface('HTMLTableCellElement', ['td', 'th']);
+globalThis.HTMLTableSectionElement = _htmlInterface('HTMLTableSectionElement', ['thead', 'tbody', 'tfoot']);
+globalThis.HTMLTableCaptionElement = _htmlInterface('HTMLTableCaptionElement', ['caption']);
+globalThis.HTMLOptGroupElement = _htmlInterface('HTMLOptGroupElement', ['optgroup']);
 globalThis.HTMLIFrameElement = _htmlInterface('HTMLIFrameElement', ['iframe']);
 globalThis.HTMLCanvasElement = _htmlInterface('HTMLCanvasElement', ['canvas']);
 globalThis.HTMLVideoElement = _htmlInterface('HTMLVideoElement', ['video']);
