@@ -8971,6 +8971,104 @@
 
     #[tokio::test(flavor = "current_thread")]
     #[cfg(feature = "screenshot")]
+    async fn test_element_scroller_clamps_and_shifts_descendant_gbcr() {
+        // sticky v2: an overflow:auto element is a real scroll container.
+        // scrollTop clamps to extent-client (1000-200), the write mirrors
+        // into the native scroll table, and the child's gBCR travels by
+        // exactly the scroll — gBCR and paint read the same shift map.
+        let mut rt = setup_runtime(
+            r#"<html><body><div id="box" style="height:200px; overflow:auto; margin:0; padding:0; border:none"><div id="kid" style="height:1000px">x</div></div></body></html>"#,
+        );
+        let script = r#"async () => {
+            const box = document.getElementById('box');
+            const kid = document.getElementById('kid');
+            const before = kid.getBoundingClientRect().top;
+            box.scrollTop = 99999;
+            await new Promise(r => setTimeout(r, 10));
+            const after = kid.getBoundingClientRect().top;
+            const sh = box.scrollHeight;
+            return [box.scrollTop, Math.round(before - after), sh >= 1000 && sh <= 1016];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!([800, 800, true]),
+            "clamped to extent-client, child gBCR drops by the scroll, scrollHeight reflects content"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(feature = "screenshot")]
+    async fn test_sticky_pins_inside_element_scroller() {
+        // sticky v2's composition case: a sticky header inside a scrolled
+        // container reads TOTAL zero (its own +400 pin cancels the
+        // scroller's -400 base) yet must stay pinned at the port top in
+        // gBCR — the delta-liveness semantics apply_sticky_to_items pins.
+        let mut rt = setup_runtime(
+            r#"<html><body><div id="box" style="height:300px; overflow:auto; margin:0; padding:0; border:none"><div id="head" style="position:sticky; top:0; height:30px">H</div><div id="tall" style="height:1500px">filler</div></div></body></html>"#,
+        );
+        let script = r#"async () => {
+            const box = document.getElementById('box');
+            const head = document.getElementById('head');
+            const tall = document.getElementById('tall');
+            const boxTop = box.getBoundingClientRect().top;
+            const rest = head.getBoundingClientRect().top;
+            const tallBefore = tall.getBoundingClientRect().top;
+            box.scrollTop = 400;
+            await new Promise(r => setTimeout(r, 10));
+            const mid = box.scrollTop;
+            const stuck = head.getBoundingClientRect().top;
+            const tallAfter = tall.getBoundingClientRect().top;
+            box.scrollTop = 0;
+            await new Promise(r => setTimeout(r, 10));
+            const back = head.getBoundingClientRect().top;
+            return [
+                mid,
+                Math.abs(stuck - boxTop) < 0.5,
+                Math.abs((tallBefore - tallAfter) - 400) < 0.5,
+                Math.abs(back - rest) < 0.5,
+            ];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!([400, true, true, true]),
+            "head stays at the scroller's port top, tall travels with the scroll, reset restores in-flow"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(feature = "screenshot")]
+    async fn test_nested_element_scrollers_compose_shifts() {
+        // Two stacked scrollers: outer=100 shifts the inner BOX (and its
+        // subtree) by -100; inner=50 shifts the leaf another -50. The
+        // nearest-source base telescopes, so the leaf's gBCR drop is the
+        // SUM, 150 — outer's later write must not clobber inner's more
+        // specific descendant shift.
+        let mut rt = setup_runtime(
+            r#"<html><body><div id="outer" style="height:200px; overflow:auto; margin:0; padding:0; border:none"><div id="spacer" style="height:500px"></div><div id="inner" style="height:150px; overflow:auto; margin:0; padding:0; border:none"><div id="leaf" style="height:600px">L</div></div></div></body></html>"#,
+        );
+        let script = r#"async () => {
+            const outer = document.getElementById('outer');
+            const inner = document.getElementById('inner');
+            const leaf = document.getElementById('leaf');
+            const before = leaf.getBoundingClientRect().top;
+            outer.scrollTop = 100;
+            inner.scrollTop = 50;
+            await new Promise(r => setTimeout(r, 10));
+            const after = leaf.getBoundingClientRect().top;
+            return [outer.scrollTop, inner.scrollTop, Math.round(before - after)];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!([100, 50, 150]),
+            "both writes round-trip clamped, leaf drop = outer + inner"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(feature = "screenshot")]
     async fn test_css_time_clock_and_animation_extent_reach_native_state() {
         // #417: a declarative CSS animation (SVG keyframes) has no
         // __timelines entry — the video pump drives a virtual clock through

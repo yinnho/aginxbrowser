@@ -246,16 +246,17 @@ pub struct JsState {
     /// clearing wholesale would thrash pages with more images than the cap).
     #[cfg(feature = "screenshot")]
     pub(crate) image_order: std::cell::RefCell<std::collections::VecDeque<String>>,
-    /// Sticky (root-scroller v1): per-node scroll-dependent shift map
-    /// ([dx, dy] in document space), memoized per (epoch, layout_rev,
-    /// scroll, viewport) — scroll and viewport moves don't bump the epoch,
-    /// and layout_rev covers attr-level writes the epoch can't see (the
-    /// same pairing as the screencast damage signature). Cleared alongside
-    /// the layout caches in drop_layout. See the `sticky_shifts` fn.
+    /// Sticky (v2): per-node scroll-dependent shift map ([dx, dy] in
+    /// document space), memoized per (epoch, layout_rev, root scroll,
+    /// viewport, scroll_gen) — scroll and viewport moves don't bump the
+    /// epoch, layout_rev covers attr-level writes the epoch can't see (the
+    /// same pairing as the screencast damage signature), and scroll_gen
+    /// covers element-scroller writes, which bump neither. Cleared
+    /// alongside the layout caches in drop_layout. See `sticky_shifts`.
     #[cfg(feature = "screenshot")]
     pub(crate) sticky_shift_cache: std::cell::RefCell<
         Option<(
-            (u64, u64, f32, f32, f32, f32),
+            (u64, u64, f32, f32, f32, f32, u64),
             std::rc::Rc<HashMap<NodeId, [f32; 2]>>,
         )>,
     >,
@@ -1672,7 +1673,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             let epoch = dom.epoch();
             ensure_layout_run(&gs, dom, epoch);
             let guard = gs.layout_cache.borrow();
-            let Some((_, (rects, _, styles, items, _, _))) = guard.as_ref().filter(|(e, _)| *e == epoch)
+            let Some((_, (rects, _, styles, items, _, _, _))) = guard.as_ref().filter(|(e, _)| *e == epoch)
             else {
                 return "null".into();
             };
@@ -1754,6 +1755,43 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             }
             format!("[{},{}]", max_w, max_h)
         }
+        // Sticky v2: gate for the bootstrap's scrollTop/scrollLeft setters —
+        // is this element a real scroll container the shift walk will
+        // honor? "1"/"0"; bare builds answer "null" (falls through to the
+        // catch-all below) and the JS side treats that as not-a-scroller.
+        #[cfg(feature = "screenshot")]
+        "is_scroll_container" => {
+            let Some(nid) = parse_nid(&arg1) else { return "0".into() };
+            let epoch = dom.epoch();
+            ensure_layout_run(&gs, dom, epoch);
+            let guard = gs.layout_cache.borrow();
+            let Some((_, (rects, _, styles, _, _, _, _))) =
+                guard.as_ref().filter(|(e, _)| *e == epoch)
+            else {
+                return "0".into();
+            };
+            if is_element_scroller(dom, rects, styles, nid) {
+                "1".into()
+            } else {
+                "0".into()
+            }
+        }
+        // Sticky v2 write-through: record one element scroller's offset.
+        // arg1 = nid, arg2 = "left\0top"; the JS setter clamped to the
+        // scrollable range before calling. scroll_gen (not the epoch)
+        // invalidates the shift caches, so scrolling never re-lays-out.
+        #[cfg(feature = "screenshot")]
+        "set_node_scroll" => {
+            let Some(nid) = parse_nid(&arg1) else { return "ok".into() };
+            if let Some((x, y)) = arg2.split_once('\0').and_then(|(x, y)| {
+                Some((x.parse::<f32>().ok()?, y.parse::<f32>().ok()?))
+            }) {
+                if x.is_finite() && y.is_finite() {
+                    dom.set_node_scroll(nid, x, y);
+                }
+            }
+            "ok".into()
+        }
         // Cascaded computed values for one element as a single JSON object,
         // from the same style+layout run as layout_rect — the layer
         // getComputedStyle was missing: only inline styles were consulted,
@@ -1790,7 +1828,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 .flatten();
             let epoch = dom.epoch();
             ensure_layout_run(&gs, dom, epoch);
-            let style = gs.layout_cache.borrow().as_ref().and_then(|(e, (_, _, s, _, _, _))| {
+            let style = gs.layout_cache.borrow().as_ref().and_then(|(e, (_, _, s, _, _, _, _))| {
                 if *e == epoch { s.get(&nid).cloned() } else { None }
             });
             match style {
@@ -1913,6 +1951,11 @@ type LayoutRun = (
     // Sticky subtree item spans (root-scroller v1): (node, start, end) into
     // the items vec — see layout_collect. Readers pair them with the
     // scroll-dependent shift map (sticky_shifts).
+    Vec<crate::diting_layout::StickySpan>,
+    // Scroller subtree item spans (sticky v2): same shape, one per real
+    // scroll container, recorded after its Clip and closed before its
+    // PopClip — the read-time shift walk translates the span when the
+    // container's scrollTop/scrollLeft is non-zero.
     Vec<crate::diting_layout::StickySpan>,
 );
 
@@ -2044,7 +2087,7 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
         .as_ref()
         .is_some_and(|(e, _)| *e == epoch);
     let solve_src = if reuse { "cached" } else { "full" };
-    let (rects, items, paint_order, local_geom, sticky_spans) = if reuse {
+    let (rects, items, paint_order, local_geom, sticky_spans, scroller_spans) = if reuse {
         // Borrow held only across layout_collect, which never touches
         // JsState — nothing else can interleave on this single thread.
         let guard = gs.geometry_cache.borrow();
@@ -2105,6 +2148,7 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
             })
             .collect(),
         sticky_spans,
+        scroller_spans,
     )
 }
 
@@ -2187,7 +2231,7 @@ fn iframe_layout_run(gs: &JsState, dom: &DomTree, root: NodeId) -> std::rc::Rc<L
         None,
         Some(root),
     );
-    let (rects, items, paint_order, local_geom, sticky_spans) =
+    let (rects, items, paint_order, local_geom, sticky_spans, scroller_spans) =
         crate::diting_layout::layout_collect(dom, &styles_map, &fonts, &solved, IFRAME_VW);
     let run = std::rc::Rc::new((
         rects
@@ -2202,6 +2246,7 @@ fn iframe_layout_run(gs: &JsState, dom: &DomTree, root: NodeId) -> std::rc::Rc<L
             .map(|(id, (r, m))| (id, ([r.x, r.y, r.width, r.height], m)))
             .collect(),
         sticky_spans,
+        scroller_spans,
     ));
     *gs.iframe_layout_cache.borrow_mut() = Some((epoch, root, std::rc::Rc::clone(&run)));
     run
@@ -2240,27 +2285,84 @@ fn is_viewport_fixed(
     true
 }
 
-/// The sticky shift map for the CURRENT read (root-scroller v1): one
-/// [dx, dy] per node inside a sticky subtree — the sticky box plus all its
-/// DOM descendants (a nested sticky adds its own shift on top of the
-/// nearest sticky ancestor's total). Constraints are computed HERE, not at
-/// layout time: they depend on the scroll offset, which is orthogonal to
-/// the layout epoch (scroll-blind layout — the same invariant that lets
-/// the band pump re-blit without re-solving). Memoized per (epoch,
-/// layout_rev, scroll, viewport) in [`JsState::sticky_shift_cache`].
+/// A real element scroll container for sticky v2: boxed, clipping,
+/// scrollable used overflow (hidden IS a scroll container per css-overflow,
+/// clip is not), and not one the viewport owns by propagation — html's
+/// overflow always propagates to the viewport, body's when html is visible
+/// (body_overflow_propagates, the same predicate the clip-emission walk
+/// used, so the walks agree on what the viewport owns). Shared by the
+/// `is_scroll_container` op and the sticky_shifts source filter: what JS
+/// may write and what paint consumes cannot drift apart.
+#[cfg(feature = "screenshot")]
+fn is_element_scroller(
+    dom: &DomTree,
+    rects: &HashMap<NodeId, [f32; 4]>,
+    styles: &HashMap<NodeId, crate::diting_css::ComputedStyle>,
+    id: NodeId,
+) -> bool {
+    if !rects.contains_key(&id) {
+        return false;
+    }
+    let Some(s) = styles.get(&id) else { return false };
+    if !(s.clips_descendants() && s.effective_overflow() != crate::diting_css::Overflow::Clip) {
+        return false;
+    }
+    let tag = dom
+        .with_node(id, |n| {
+            n.as_element().map(|e| e.local.to_ascii_lowercase().to_string())
+        })
+        .flatten();
+    match tag.as_deref() {
+        Some("html") => false,
+        Some("body") => !crate::diting_layout::body_overflow_propagates(
+            dom,
+            styles,
+            id,
+            |x| rects.contains_key(&x),
+        ),
+        _ => true,
+    }
+}
+
+/// The sticky shift map for the CURRENT read (sticky v2): one [dx, dy]
+/// per node inside a shifted subtree — sticky boxes AND element-scroller
+/// contents. A sticky's value is its constraint shift composed over
+/// enclosing sources; a scroller's descendants carry the negated scroll
+/// offset the same way. Constraints are computed HERE, not at layout
+/// time: they depend on the scroll offsets, which are orthogonal to the
+/// layout epoch (scroll-blind layout — the same invariant that lets the
+/// band pump re-blit without re-solving). Memoized per (epoch,
+/// layout_rev, root scroll, viewport, scroll_gen) in
+/// [`JsState::sticky_shift_cache`].
 ///
-/// v1 gates (documented Chrome divergences, each degrades to plain
-/// relative):
-/// - ROOT SCROLLER ONLY: the scrollport is the viewport at
-///   [`JsState::scroll_offset`] (mirrored from the bootstrap's root
-///   scrollTop/scrollLeft writes). Sticky inside an element-level scroller
-///   doesn't stick yet.
-/// - A sticky under a position:fixed or transformed ANCESTOR gets no
-///   shift: the fixed subtree has no root-scroller relation, and a
+/// Sources — sticky nodes and scrolled element scrollers — are processed
+/// SHALLOW-FIRST with one composition rule: a source's total is its own
+/// contribution plus whatever shallower sources already wrote onto it
+/// (out[nid] IS the nearest enclosing source's total, because every
+/// shallower subtree write covered this node). Each source then writes
+/// its folded total across its subtree, which composes
+/// sticky-in-scroller, scroller-in-sticky, and a node that is BOTH — its
+/// sticky branch runs first (covers self), its scroller branch bases on
+/// that and rewrites only the descendants, exactly the two nested paint
+/// spans its element records.
+///
+/// Gates (documented Chrome divergences, each degrades to plain relative
+/// or unscrolled paint):
+/// - A source under a position:fixed or transformed ANCESTOR gets no
+///   shift: the fixed subtree has no scroller relation, and a
 ///   transformed ancestor brackets its subtree's paint in local coords,
 ///   where a uniform document-space translate can't compose from inside
-///   the span. The sticky's OWN transform is fine — its bracket sits
-///   inside the span and apply_sticky_to_items folds the shift into it.
+///   the span. This also gates a transformed element scroller and sticky
+///   inside one (accepted v2 approximation). The source's OWN transform
+///   is fine — its bracket sits inside its span and
+///   apply_sticky_to_items folds the shift into it.
+/// - Sticky scrollport = the nearest element scroller's padding box plus
+///   that scroller's OWN offset (outer scrollers cancel: port and
+///   content ride them together); with none, the root scroller /
+///   viewport (v1). html/body never count as element scrollers — their
+///   overflow propagates to the viewport (css-overflow §3.3;
+///   body_overflow_propagates is the same predicate the clip-emission
+///   walk uses, so the two walks agree on what the viewport owns).
 /// - Containing block = nearest boxed ancestor's border box (Blink uses
 ///   margin-box/content-box refinements).
 /// - Boxless sticky (display:contents, inline wrappers) is skipped.
@@ -2271,7 +2373,10 @@ fn sticky_shifts(gs: &JsState, dom: &DomTree) -> std::rc::Rc<HashMap<NodeId, [f3
     let epoch = dom.epoch();
     let (sx, sy) = gs.scroll_offset;
     let (vw, vh) = gs.viewport;
-    let key = (epoch, gs.layout_rev.get(), sx, sy, vw, vh);
+    // scroll_gen joins the key: element-scroller offsets change WITHOUT an
+    // epoch or layout_rev bump (read-time paint state), so without it a
+    // scrollTop write would keep serving the stale map.
+    let key = (epoch, gs.layout_rev.get(), sx, sy, vw, vh, dom.scroll_gen());
     if let Some((k, v)) = gs.sticky_shift_cache.borrow().as_ref() {
         if *k == key {
             return std::rc::Rc::clone(v);
@@ -2280,19 +2385,31 @@ fn sticky_shifts(gs: &JsState, dom: &DomTree) -> std::rc::Rc<HashMap<NodeId, [f3
     ensure_layout_run(gs, dom, epoch);
     let guard = gs.layout_cache.borrow();
     let empty = std::rc::Rc::new(HashMap::new());
-    let Some((_, (rects, _, styles, _, _, _))) = guard.as_ref().filter(|(e, _)| *e == epoch)
+    let Some((_, (rects, _, styles, _, _, _, _))) = guard.as_ref().filter(|(e, _)| *e == epoch)
     else {
         return empty;
     };
-    // Shallow-first: a nested sticky reads the nearest sticky ancestor's
-    // TOTAL from `out`, which only exists once the ancestor was processed.
-    let mut stickies: Vec<NodeId> = styles
+
+    // Unified shift sources: (node, is_scroller). Sticky entries are
+    // appended before scroller entries, so at equal depth a node that is
+    // both runs its sticky branch first — the composition order its two
+    // nested paint spans resolve in. NO dedup: dedup would drop the
+    // second entry of a both-node and lose its scroll.
+    let scrolls = dom.scroll_offsets();
+    let mut sources: Vec<(NodeId, bool)> = styles
         .iter()
         .filter(|(_, s)| s.position == Some(PositionMode::Sticky))
-        .map(|(n, _)| *n)
-        .filter(|n| rects.contains_key(n))
+        .map(|(n, _)| (*n, false))
+        .filter(|(n, _)| rects.contains_key(n))
         .collect();
-    stickies.sort_by_key(|n| {
+    sources.extend(
+        scrolls
+            .iter()
+            .filter(|(_n, o)| o[0] != 0.0 || o[1] != 0.0)
+            .map(|(n, _)| (*n, true))
+            .filter(|(n, _)| is_element_scroller(dom, rects, styles, *n)),
+    );
+    sources.sort_by_key(|(n, _)| {
         let mut d = 0usize;
         let mut cur = dom.get_node(*n).and_then(|nd| nd.parent);
         while let Some(p) = cur {
@@ -2301,20 +2418,28 @@ fn sticky_shifts(gs: &JsState, dom: &DomTree) -> std::rc::Rc<HashMap<NodeId, [f3
         }
         d
     });
+
     let resolve = |l: &Option<Length>, port: f32| {
         l.as_ref()
             .map(|l| crate::diting_layout::sticky_inset_px(l, port))
     };
+    // Border widths count only with a border-style — the clip walk's
+    // side_px rule; the scrollport is the padding box.
+    let side_px = |l: &Option<Length>| match l {
+        Some(Length::Px(v)) => *v,
+        _ => 0.0,
+    };
+
     let mut out: HashMap<NodeId, [f32; 2]> = HashMap::new();
-    for nid in stickies {
-        let Some(&[x, y, w, h]) = rects.get(&nid) else { continue };
+    for (nid, scroller_source) in sources {
         // One ancestor walk, three uses: gate on fixed/transformed (no
-        // shift), first boxed ancestor's border box (the CB), first sticky
-        // ancestor's total (the nested base). The gate must see the WHOLE
-        // chain — a transform above the CB still brackets the paint.
+        // shift), first boxed ancestor's border box (the CB), nearest
+        // element scroller (the sticky's scrollport). The gate must see
+        // the WHOLE chain — a transform above the CB still brackets the
+        // paint.
         let mut gated = false;
-        let mut cb: Option<[f32; 4]> = None;
-        let mut base: Option<[f32; 2]> = None;
+        let mut cb: Option<(NodeId, [f32; 4])> = None;
+        let mut port: Option<([f32; 4], [f32; 2])> = None;
         let mut cur = dom.get_node(nid).and_then(|nd| nd.parent);
         while let Some(p) = cur {
             if let Some(st) = styles.get(&p) {
@@ -2325,56 +2450,143 @@ fn sticky_shifts(gs: &JsState, dom: &DomTree) -> std::rc::Rc<HashMap<NodeId, [f3
             }
             if cb.is_none() {
                 if let Some(&r) = rects.get(&p) {
-                    cb = Some(r);
+                    cb = Some((p, r));
                 }
             }
-            if base.is_none() {
-                if let Some(&s) = out.get(&p) {
-                    base = Some(s);
-                }
+            if port.is_none() && is_element_scroller(dom, rects, styles, p) {
+                let [px, py, pw, ph] = rects[&p];
+                let st = &styles[&p];
+                // Padding box = border box inset by border widths, which
+                // apply only with a border-style.
+                let (bt, br, bb, bl) = if st.border_style.is_some() {
+                    (
+                        side_px(&st.border_width.top),
+                        side_px(&st.border_width.right),
+                        side_px(&st.border_width.bottom),
+                        side_px(&st.border_width.left),
+                    )
+                } else {
+                    (0.0, 0.0, 0.0, 0.0)
+                };
+                port = Some((
+                    [
+                        px + bl,
+                        py + bt,
+                        (pw - bl - br).max(0.0),
+                        (ph - bt - bb).max(0.0),
+                    ],
+                    scrolls.get(&p).copied().unwrap_or([0.0, 0.0]),
+                ));
             }
             cur = dom.get_node(p).and_then(|nd| nd.parent);
         }
         if gated {
             continue;
         }
-        let Some([cx, cy, cw, ch]) = cb else { continue };
-        let st = &styles[&nid];
-        // Sticky insets resolve percentages against the SCROLLPORT (the
-        // viewport here), per Blink — not the containing block.
-        let dy = crate::diting_layout::sticky_axis_shift(
-            y,
-            h,
-            resolve(&st.top, vh),
-            resolve(&st.bottom, vh),
-            sy,
-            vh,
-            cy,
-            cy + ch,
-        );
-        let dx = crate::diting_layout::sticky_axis_shift(
-            x,
-            w,
-            resolve(&st.left, vw),
-            resolve(&st.right, vw),
-            sx,
-            vw,
-            cx,
-            cx + cw,
-        );
-        if dx == 0.0 && dy == 0.0 {
-            // Still in flow at this scroll — descendants read no base
-            // shift from us, and this subtree keeps any ancestor total.
-            continue;
+        // A scroll container's rect in the map is its CLIP box, but a
+        // sticky inside it travels the whole scrollable content — the
+        // clamp range is the subtree union, the same extent scrollHeight
+        // reports. v1 never noticed: at the root the body box already
+        // spans the full document, so union == rect there.
+        if let Some((cb_node, cb_rect)) = cb.as_mut() {
+            if is_element_scroller(dom, rects, styles, *cb_node) {
+                let [bx, by, _, _] = *cb_rect;
+                let mut stack = dom.children(*cb_node);
+                while let Some(c) = stack.pop() {
+                    if let Some(&[rx, ry, rw, rh]) = rects.get(&c) {
+                        cb_rect[2] = cb_rect[2].max(rx + rw - bx);
+                        cb_rect[3] = cb_rect[3].max(ry + rh - by);
+                    }
+                    stack.extend(dom.children(c));
+                }
+            }
         }
-        let [bx, by] = base.unwrap_or([0.0, 0.0]);
-        let total = [dx + bx, dy + by];
-        // Write the total over the whole DOM subtree: every read point
-        // (gBCR, hit testing, band paint) shifts the sticky AND its
-        // descendants uniformly. A nested sticky later in the
-        // shallow-first loop overwrites its own subtree with ITS total,
-        // which already folds this one via the base lookup above.
-        let mut stack = vec![nid];
+        // Base = the total already written on this node by shallower
+        // sources; out[nid] is the nearest enclosing source's total
+        // because every shallower subtree write covered this node.
+        let base = out.get(&nid).copied().unwrap_or([0.0, 0.0]);
+        let (own, covers_self) = if scroller_source {
+            // Content translates UP by the scroll offset; the scroller's
+            // own box/border/clip stay fixed (its span opens after its
+            // clip, the map write skips the node itself).
+            let o = scrolls.get(&nid).copied().unwrap_or([0.0, 0.0]);
+            ([-o[0], -o[1]], false)
+        } else {
+            let Some(&[x, y, w, h]) = rects.get(&nid) else { continue };
+            let Some((_, [cx, cy, cw, ch])) = cb else { continue };
+            let st = &styles[&nid];
+            // Port: nearest element scroller (v2) with its OWN offset —
+            // outer scrollers cancel because the port rides them with the
+            // content. No scroller ancestor: the root scroller (v1).
+            // (py + oy) against the UNSCROLLED y is the pinned read: the
+            // port rides every outer source with the content, so only the
+            // port's own scroll distinguishes them.
+            let (dy, dx) = if let Some(([px, py, pw, ph], [ox, oy])) = port {
+                (
+                    crate::diting_layout::sticky_axis_shift(
+                        y,
+                        h,
+                        resolve(&st.top, ph),
+                        resolve(&st.bottom, ph),
+                        py + oy,
+                        ph,
+                        cy,
+                        cy + ch,
+                    ),
+                    crate::diting_layout::sticky_axis_shift(
+                        x,
+                        w,
+                        resolve(&st.left, pw),
+                        resolve(&st.right, pw),
+                        px + ox,
+                        pw,
+                        cx,
+                        cx + cw,
+                    ),
+                )
+            } else {
+                (
+                    crate::diting_layout::sticky_axis_shift(
+                        y,
+                        h,
+                        resolve(&st.top, vh),
+                        resolve(&st.bottom, vh),
+                        sy,
+                        vh,
+                        cy,
+                        cy + ch,
+                    ),
+                    crate::diting_layout::sticky_axis_shift(
+                        x,
+                        w,
+                        resolve(&st.left, vw),
+                        resolve(&st.right, vw),
+                        sx,
+                        vw,
+                        cx,
+                        cx + cw,
+                    ),
+                )
+            };
+            if dx == 0.0 && dy == 0.0 {
+                // Still in flow at this scroll — descendants read no base
+                // shift from us, and this subtree keeps any ancestor total.
+                continue;
+            }
+            ([dx, dy], true)
+        };
+        let total = [own[0] + base[0], own[1] + base[1]];
+        // Write the total over the subtree (self included for a sticky —
+        // its own box moves; excluded for a scroller — only its content
+        // does). Every read point (gBCR, hit testing, band paint) shifts
+        // uniformly; a deeper source later overwrites its own subtree
+        // with its total, which already folded this one via the base
+        // lookup above.
+        let mut stack = if covers_self {
+            vec![nid]
+        } else {
+            dom.children(nid)
+        };
         while let Some(cur) = stack.pop() {
             out.insert(cur, total);
             stack.extend(dom.children(cur));
@@ -2460,7 +2672,8 @@ fn band_frame_inner(
     let epoch = dom.epoch();
     ensure_layout_run(gs, dom, epoch);
     let guard = gs.layout_cache.borrow();
-    let (_, (rects, _, styles, items, _, spans)) = guard.as_ref().filter(|(e, _)| *e == epoch)?;
+    let (_, (rects, _, styles, items, _, sticky_spans, scroller_spans)) =
+        guard.as_ref().filter(|(e, _)| *e == epoch)?;
 
     // Scrollable content extent: the root scroller's box unioned with every
     // laid-out descendant, clamped up to the viewport — the same union the
@@ -2531,25 +2744,33 @@ fn band_frame_inner(
     let dy = (if scroll_y.is_finite() { scroll_y.max(0.0) } else { 0.0 })
         .min((content_h - vh).max(0.0));
 
-    // Sticky (root-scroller v1): translate sticky-subtree spans by the
-    // scroll-dependent shift before the band translate, so the frame shows
-    // the sticky where it visually sits. No shifted sticky on the page →
+    // Sticky v2 paint half: resolve each layout-recorded span to the
+    // total its items must carry — sticky spans take the node's read
+    // total (box and all), scroller spans subtract the scroller's own
+    // offset (its box and clip stay fixed while its content translates).
+    // Sticky spans first so a both-node's sticky span precedes its
+    // scroller span in the nesting order. Nothing shifted on the page →
     // paint the cached run untouched, zero copy. Per-frame translate, not
     // memoized: paint-only writes re-collect items without bumping the
     // tree epoch, so a cached shifted copy could go stale mid-animation.
     let sticky_map = sticky_shifts(gs, dom);
-    let shifted_items: Option<Vec<crate::diting_layout::PaintItem>> =
-        if spans.iter().any(|(n, _, _)| {
-            sticky_map.get(n).is_some_and(|s| s[0] != 0.0 || s[1] != 0.0)
-        }) {
-            Some(crate::diting_layout::apply_sticky_to_items(
-                items,
-                spans,
-                &sticky_map,
-            ))
-        } else {
-            None
-        };
+    let mut live: Vec<(usize, usize, [f32; 2])> = sticky_spans
+        .iter()
+        .filter_map(|&(n, s, e)| sticky_map.get(&n).map(|&v| (s, e, v)))
+        .collect();
+    live.extend(scroller_spans.iter().map(|&(n, s, e)| {
+        let [ox, oy] = dom.node_scroll(n);
+        let base = sticky_map.get(&n).copied().unwrap_or([0.0, 0.0]);
+        (s, e, [base[0] - ox, base[1] - oy])
+    }));
+    // No zero-VALUE filter here: liveness is per-delta inside
+    // apply_sticky_to_items (a pinned sticky inside a scroller has total
+    // zero yet a nonzero delta over the scroller's base).
+    let shifted_items: Option<Vec<crate::diting_layout::PaintItem>> = if live.is_empty() {
+        None
+    } else {
+        Some(crate::diting_layout::apply_sticky_to_items(items, &live))
+    };
     let items: &[crate::diting_layout::PaintItem] =
         shifted_items.as_deref().unwrap_or(items.as_slice());
 
@@ -2632,7 +2853,7 @@ pub(crate) fn text_ink_extent(gs: &JsState) -> Option<(f32, f32)> {
     let epoch = dom.epoch();
     ensure_layout_run(gs, dom, epoch);
     let guard = gs.layout_cache.borrow();
-    let (_, (_, _, _, items, _, _)) = guard.as_ref().filter(|(e, _)| *e == epoch)?;
+    let (_, (_, _, _, items, _, _, _)) = guard.as_ref().filter(|(e, _)| *e == epoch)?;
     Some(crate::diting_layout::paint::text_ink_extent(items))
 }
 

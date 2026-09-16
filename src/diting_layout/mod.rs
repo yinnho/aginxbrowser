@@ -4666,7 +4666,7 @@ pub fn layout_dom_with_paint_and_images(
     network_bytes: Option<&HashMap<String, std::sync::Arc<Vec<u8>>>>,
     base_url: Option<&str>,
 ) -> (HashMap<NodeId, Rect>, Vec<PaintItem>) {
-    let (rects, items, _order, _local_geom, _sticky_spans) = layout_dom_with_paint_order_and_images(
+    let (rects, items, _order, _local_geom, _sticky_spans, _scroller_spans) = layout_dom_with_paint_order_and_images(
         tree,
         styles,
         fonts,
@@ -5877,44 +5877,57 @@ fn translate_item(it: &mut PaintItem, tx: f32, ty: f32) {
     }
 }
 
-/// One sticky subtree's item span (root-scroller v1): (sticky node, start,
-/// end) into a paint run's items vec, recorded by the collect walk while
-/// both ends are exact — see [`apply_sticky_to_items`].
+/// One shifted subtree's item span: (source node, start, end) into a
+/// paint run's items vec, recorded by the collect walk while both ends
+/// are exact — sticky spans open before the node's own first item,
+/// scroller spans after the node's clip (its own box stays fixed). See
+/// [`apply_sticky_to_items`].
 pub type StickySpan = (NodeId, usize, usize);
-
-/// Sticky shifts per node (root-scroller v1): the node's TOTAL document-
-/// space translation (x, y) — a sticky's own shift composed over its
-/// sticky ancestors', written across its whole DOM subtree so any point
-/// read inside the subtree picks up everything that visually moved it.
-pub type StickyShifts = HashMap<NodeId, [f32; 2]>;
 
 /// The collect half's full output: per-element border-box rects, the flat
 /// paint-item list in paint order, the boxed-element paint ranking
 /// (obscura #738), the event-coordinate local geometry map (blitz #663
-/// family), and the sticky subtree item spans (root-scroller v1).
+/// family), the sticky subtree item spans (root-scroller v1), and the
+/// scroller subtree item spans (sticky v2) — same span shape, recorded for
+/// every real scroll container at layout time so the read-time shift walk
+/// can translate a scrolled subtree without re-laying-out.
 pub type LayoutCollect = (
     HashMap<NodeId, Rect>,
     Vec<PaintItem>,
     Vec<NodeId>,
     HashMap<NodeId, (Rect, [f32; 6])>,
     Vec<StickySpan>,
+    Vec<StickySpan>,
 );
 
-/// Apply sticky shifts to a paint run: for every (sticky node, item span)
-/// whose shift is non-zero, translate that span's items by the shift in
-/// document space. The input (cached) run is never mutated — callers get a
-/// shifted copy only when some span has a shift.
+/// Apply sticky shifts to a paint run: for every span whose value is
+/// non-zero, translate that span's items by the shift in document space.
+/// The input (cached) run is never mutated — callers get a shifted copy
+/// only when some span has a shift.
 ///
-/// Nested stickies: an ancestor sticky's span strictly contains a
-/// descendant's (the collect walk records both in document order), and the
-/// shift map holds CUMULATIVE totals — so a nested span must translate by
-/// its DELTA over the nearest enclosing live span; the ancestor's pass
-/// already moved these items by its own total. Spans nest or are disjoint
-/// by tree construction, so range containment alone identifies the
-/// enclosing span — no DOM walk needed here. A gated sticky has no map
-/// entry and its span drops out; its descendants' deltas then measure
-/// against the next enclosing live span, which is whose translation
-/// actually landed on those items.
+/// Spans arrive PRE-RESOLVED as (start, end, value): `value` is the total
+/// document-space translation the items inside the span must carry. The
+/// caller pairs a layout-recorded span with its value — a sticky span's
+/// is the node's read total, a scroller span's is that total minus the
+/// scroller's own offset (sticky v2: the scroller's own box stays fixed,
+/// so a node that is BOTH carries two different values over its two
+/// nested spans — exactly why the value rides the span, not a node-keyed
+/// map).
+///
+/// Nested spans: an ancestor span strictly contains a descendant's (the
+/// collect walk records both in document order; a both-node's sticky span
+/// opens before its clip, its scroller span after it), and values are
+/// CUMULATIVE totals — so a nested span must translate by its DELTA over
+/// the nearest enclosing live span; the ancestor's pass already moved
+/// these items by its own total. Spans nest or are disjoint by tree
+/// construction, so range containment alone identifies the enclosing span
+/// — no DOM walk needed here. Liveness is a DELTA question, not a value
+/// question: a pinned sticky inside a scrolled container reads total ZERO
+/// (its own +shift cancels the scroller's base) yet must still move its
+/// items by +shift over that base — dropping zero-valued spans was v1's
+/// (root-only) shortcut, where value and delta were always equal. A
+/// zero-DELTA span is a pure no-op (its total equals its enclosing base,
+/// so skipping it leaves even the stack unchanged) and is skipped.
 ///
 /// Bracket discipline: items inside a SetXf bracket are in local coords,
 /// so translating them raw would double-map the shift (M·(p+t) ≠ M·p+t).
@@ -5923,19 +5936,14 @@ pub type LayoutCollect = (
 /// uniformly. SetXfCanvas content is already canvas (document) space, so
 /// its items translate directly — tracked with a small bracket stack of
 /// (is_local) flags. A span can only contain brackets from its own
-/// subtree: a sticky under any transformed ancestor is gated to zero
+/// subtree: a source under any transformed ancestor is gated to zero
 /// shift, so an ancestor's bracket never reaches into a live nested span.
 pub fn apply_sticky_to_items(
     items: &[PaintItem],
-    spans: &[StickySpan],
-    shifts: &StickyShifts,
+    spans: &[(usize, usize, [f32; 2])],
 ) -> Vec<PaintItem> {
     let mut out = items.to_vec();
-    let mut live: Vec<(usize, usize, [f32; 2])> = spans
-        .iter()
-        .filter_map(|(n, s, e)| shifts.get(n).map(|&sh| (*s, *e, sh)))
-        .filter(|&(_, _, sh)| sh[0] != 0.0 || sh[1] != 0.0)
-        .collect();
+    let mut live: Vec<(usize, usize, [f32; 2])> = spans.to_vec();
     // Pre-order (start asc, end desc) so enclosing spans precede the spans
     // they contain; the open-span stack then answers "nearest enclosing".
     live.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
@@ -5946,6 +5954,11 @@ pub fn apply_sticky_to_items(
         }
         let base = open.last().map(|&(_, b)| b).unwrap_or([0.0, 0.0]);
         let d = [sh[0] - base[0], sh[1] - base[1]];
+        // Zero DELTA over the nearest enclosing span: a no-op for both the
+        // items and the stack (the total equals the base it would push).
+        if d[0] == 0.0 && d[1] == 0.0 {
+            continue;
+        }
         open.push((end, sh));
         let mut brackets: Vec<bool> = Vec::new(); // true = SetXf (local)
         for it in &mut out[start..end] {
@@ -6006,8 +6019,13 @@ pub fn layout_collect(
     // taffy-keyed `local_by_node` keeps its own shape untouched.
     let mut local_geom: HashMap<NodeId, (Rect, [f32; 6])> = HashMap::new();
     let mut sticky_spans: Vec<StickySpan> = Vec::new();
+    // Scroller spans (sticky v2): one per real scroll container, recorded
+    // unconditionally at layout time — scroll offsets are read-time paint
+    // state that changes without a layout epoch bump, so the spans cannot
+    // be gated on the current offset.
+    let mut scroller_spans: Vec<StickySpan> = Vec::new();
     let Some(icb_node) = solved.icb_node else {
-        return (rects, items, paint_order, local_geom, sticky_spans);
+        return (rects, items, paint_order, local_geom, sticky_spans, scroller_spans);
     };
     let SolvedGeometry {
         taffy_tree,
@@ -6107,6 +6125,7 @@ pub fn layout_collect(
         local_by_node: &mut HashMap<taffy::tree::NodeId, (Rect, [f32; 6])>,
         node_first_item: &mut HashMap<taffy::tree::NodeId, usize>,
         sticky_spans: &mut Vec<StickySpan>,
+        scroller_spans: &mut Vec<StickySpan>,
         items: &mut Vec<PaintItem>,
         paint_order: &mut Vec<NodeId>,
         node: taffy::tree::NodeId,
@@ -6212,6 +6231,13 @@ pub fn layout_collect(
         );
         let mut clips = false;
         let mut xf_bracket = false;
+        // Sticky v2: while `clips` is true and the used overflow is
+        // scrollable (anything but `clip` — `hidden` IS a scroll container
+        // per css-overflow), this element is a scroll container. Its subtree
+        // items form a span recorded AFTER the Clip push (the clip rect
+        // itself must not translate when the subtree is scrolled) and closed
+        // BEFORE the PopClip push.
+        let mut scroll_span: Option<(NodeId, usize)> = None;
         if let Some(dom_id) = node_map.get(&node) {
             let mut rect = Rect { x: abs.0, y: abs.1, width: layout.size.width, height: layout.size.height - strut_pad };
             // Static-position override (the harvest pass above): a
@@ -6789,6 +6815,14 @@ pub fn layout_collect(
                     },
                 };
                 items.push(clip_item);
+                // Sticky v2: a scroll container's span opens after its clip
+                // — the clip rect (and the element's own bg/border above)
+                // stay fixed while the scrolled subtree translates under
+                // them. html/body never get here (viewport owns their
+                // overflow, `clips` was flipped back to false above).
+                if st.effective_overflow() != Overflow::Clip {
+                    scroll_span = Some((*dom_id, items.len()));
+                }
             }
         }
         // background-clip: text attach: the inherited fill lands only while
@@ -7013,8 +7047,14 @@ pub fn layout_collect(
         pos.sort_by_key(|(z, _)| *z);
         for list in [neg, mid, pos] {
             for (_, i) in list {
-                collect(tree, taffy_tree, node_map, styles, fonts, images, static_pos, baseline_shifts, collapsed_edges, rects, local_geom, abs_by_node, local_by_node, node_first_item, sticky_spans, items, paint_order, children[i], abs, viewport_width, child_xf, alpha, text_gradient.as_ref());
+                collect(tree, taffy_tree, node_map, styles, fonts, images, static_pos, baseline_shifts, collapsed_edges, rects, local_geom, abs_by_node, local_by_node, node_first_item, sticky_spans, scroller_spans, items, paint_order, children[i], abs, viewport_width, child_xf, alpha, text_gradient.as_ref());
             }
+        }
+        // Sticky v2: the scroller's span closes before the PopClip — the
+        // closing bracket itself must not translate. Same span shape as the
+        // sticky spans above, consumed by the same apply_sticky_to_items.
+        if let Some((sid, s0)) = scroll_span {
+            scroller_spans.push((sid, s0, items.len()));
         }
         if clips {
             items.push(PaintItem::PopClip);
@@ -7055,6 +7095,7 @@ pub fn layout_collect(
         &mut local_by_node,
         &mut node_first_item,
         &mut sticky_spans,
+        &mut scroller_spans,
         &mut items,
         &mut paint_order,
         icb_node,
@@ -7231,7 +7272,7 @@ pub fn layout_collect(
             }
         }
     }
-    (rects, items, paint_order, local_geom, sticky_spans)
+    (rects, items, paint_order, local_geom, sticky_spans, scroller_spans)
 }
 
 
@@ -7624,7 +7665,7 @@ mod reparent_anchoring_tests {
         let tree = parse_html(&html);
         let rules = parse_stylesheet_for(sheet, (800.0, 600.0), CssMediaType::Screen);
         let styles = compute_styles(&tree, &rules);
-        let (rects, _, _, _, _) = layout_dom_with_paint_order_and_images(
+        let (rects, _, _, _, _, _) = layout_dom_with_paint_order_and_images(
             &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
         );
         rects
@@ -7702,7 +7743,7 @@ mod paint_token_memo_tests {
             let tree = parse_html(html);
             let rules = parse_stylesheet_for(sheet, (1280.0, 800.0), CssMediaType::Screen);
             let styles = compute_styles(&tree, &rules);
-            let (_, items, _, _, _) = layout_dom_with_paint_order_and_images(
+            let (_, items, _, _, _, _) = layout_dom_with_paint_order_and_images(
                 &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
             );
             items
@@ -7868,7 +7909,7 @@ mod box_shadow_paint_tests {
         let tree = parse_html(&html);
         let rules = parse_stylesheet_for(sheet, (800.0, 600.0), CssMediaType::Screen);
         let styles = compute_styles(&tree, &rules);
-        let (_, items, _, _, _) = layout_dom_with_paint_order_and_images(
+        let (_, items, _, _, _, _) = layout_dom_with_paint_order_and_images(
             &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
         );
         items
@@ -7962,7 +8003,7 @@ mod white_space_pre_family_tests {
         let tree = parse_html(&html);
         let rules = parse_stylesheet_for("", (800.0, 600.0), CssMediaType::Screen);
         let styles = compute_styles(&tree, &rules);
-        let (rects, _, _, _, _) = layout_dom_with_paint_order_and_images(
+        let (rects, _, _, _, _, _) = layout_dom_with_paint_order_and_images(
             &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
         );
         let pre = tree.query_selector("pre").expect("selector parse").expect("pre in body");
@@ -8013,8 +8054,6 @@ def</pre>"#);
 mod sticky_tests {
     use super::{apply_sticky_to_items, sticky_axis_shift, sticky_inset_px, PaintItem, Rect};
     use crate::diting_css::Length;
-    use crate::diting_dom::tree::NodeId;
-    use std::collections::HashMap;
 
     fn bg(x: f32, y: f32) -> PaintItem {
         PaintItem::Bg {
@@ -8103,10 +8142,8 @@ mod sticky_tests {
             PaintItem::ClearXf,
             bg(30.0, 30.0),
         ];
-        let mut shifts = HashMap::new();
-        shifts.insert(NodeId(7), [30.0, 40.0]);
-        let spans = vec![(NodeId(7), 0usize, 5usize)];
-        let out = apply_sticky_to_items(&items, &spans, &shifts);
+        let spans = vec![(0usize, 5usize, [30.0f32, 40.0f32])];
+        let out = apply_sticky_to_items(&items, &spans);
         assert_eq!(bg_xy(&out[0]), (30.0, 40.0), "outside any bracket: raw translate");
         let PaintItem::SetXf { xf } = &out[1] else { panic!("not a SetXf") };
         assert_eq!(
@@ -8127,11 +8164,11 @@ mod sticky_tests {
         // items must land at +260, not +460 — the child pass adds only its
         // delta over the enclosing span's already-applied translation.
         let items = vec![bg(0.0, 8.0), bg(0.0, 48.0)];
-        let mut shifts = HashMap::new();
-        shifts.insert(NodeId(1), [0.0, 200.0]);
-        shifts.insert(NodeId(2), [0.0, 260.0]);
-        let spans = vec![(NodeId(1), 0usize, 2usize), (NodeId(2), 1usize, 2usize)];
-        let out = apply_sticky_to_items(&items, &spans, &shifts);
+        let spans = vec![
+            (0usize, 2usize, [0.0f32, 200.0f32]),
+            (1usize, 2usize, [0.0f32, 260.0f32]),
+        ];
+        let out = apply_sticky_to_items(&items, &spans);
         assert_eq!(bg_xy(&out[0]).1, 208.0, "parent's own item: parent total");
         assert_eq!(bg_xy(&out[1]).1, 308.0, "child item: 48 + cumulative 260");
     }
@@ -8139,10 +8176,28 @@ mod sticky_tests {
     #[test]
     fn apply_zero_shift_span_is_a_noop() {
         let items = vec![bg(0.0, 8.0)];
-        let mut shifts = HashMap::new();
-        shifts.insert(NodeId(3), [0.0, 0.0]);
-        let spans = vec![(NodeId(3), 0usize, 1usize)];
-        let out = apply_sticky_to_items(&items, &spans, &shifts);
+        let spans = vec![(0usize, 1usize, [0.0f32, 0.0f32])];
+        let out = apply_sticky_to_items(&items, &spans);
         assert_eq!(bg_xy(&out[0]), (0.0, 8.0));
+    }
+
+    #[test]
+    fn apply_pinned_sticky_inside_scroller_keeps_its_delta() {
+        // The sticky-v2 composition case: a scroller span total [0,-400]
+        // enclosing a PINNED sticky span total [0,0] — the sticky's own
+        // +400 pin shift exactly cancels the scroller's -400 base, so the
+        // sticky span's VALUE is zero while its DELTA over the base is
+        // +400. Liveness must be judged per-delta (zero-value filtering
+        // was v1's root-only shortcut; here it would drop the pin and
+        // scroll the head away with the content).
+        let items = vec![bg(0.0, 8.0), bg(0.0, 48.0), bg(0.0, 2048.0)];
+        let spans = vec![
+            (0usize, 3usize, [0.0f32, -400.0f32]),
+            (1usize, 2usize, [0.0f32, 0.0f32]),
+        ];
+        let out = apply_sticky_to_items(&items, &spans);
+        assert_eq!(bg_xy(&out[1]).1, 48.0, "pinned head: NET ZERO total, it keeps its layout position while the port rides over it");
+        assert_eq!(bg_xy(&out[2]).1, 1648.0, "tall content travels with the scroller base");
+        assert_eq!(bg_xy(&out[0]).1, -392.0, "pre-clip item takes the scroller base only");
     }
 }

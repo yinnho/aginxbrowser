@@ -3820,6 +3820,31 @@ class Element extends Node {
     const win = axis === 'w' ? (globalThis.innerWidth || 1280) : (globalThis.innerHeight || 720);
     return Math.max(0, ext - win);
   }
+  // Element-scroller counterparts (sticky v2): a real scroll container
+  // clamps to its own scrollable range (scroll extent minus the client
+  // box) and mirrors the offset into the native tree, where the shift
+  // walks read it — the sticky scrollport, the paint band, and the gBCR
+  // shift lookups all key off the same stored offset. Non-containers
+  // (and extent-less elements) keep the wrapper-local legacy path.
+  _isNativeScrollContainer() {
+    try {
+      if (this._nid == null) return false;
+      return _domRaw('is_scroll_container', String(this._nid | 0), '') === '1';
+    } catch (e) { return false; }
+  }
+  _elemScrollMax(axis) {
+    const ext = this._ditingScrollExtent(axis);
+    if (ext == null) return null;
+    const client = this._ditingExtent(axis, 0);
+    return Math.max(0, ext - client);
+  }
+  _elemScrollMirror(left, top) {
+    try {
+      if (this._nid == null) return;
+      if (_domRaw('is_scroll_container', String(this._nid | 0), '') !== '1') return;
+      _domRaw('set_node_scroll', String(this._nid | 0), left + '\0' + top);
+    } catch (e) { /* not a container here */ }
+  }
   // The offset used to be deliberately unclamped (pre-layout-engine era:
   // any synthetic max was a guess and pinned lazy loaders dead). With real
   // extents the viewport root clamps like a real browser via
@@ -3846,15 +3871,28 @@ class Element extends Node {
     if (target !== this) { target.scrollTop = nv; return; }
     const max = this._rootScrollMax('h');
     if (max != null) nv = Math.min(nv, max);
+    else if (this._isNativeScrollContainer()) {
+      // Clamp only REAL element scrollers (the same native predicate the
+      // shift walks filter with). A plain div's extent reads 0, so an
+      // ungated clamp would pin every legacy wrapper-local write to 0
+      // and kill the scroll events lazy loaders key on.
+      const emax = this._elemScrollMax('h');
+      if (emax != null) nv = Math.min(nv, emax);
+    }
     const changed = nv !== (this._scrollTop || 0);
     this._scrollTop = nv;
     // Viewport-root mirror: publish the root scroller offset to the native
     // layout state so the CDP frame pump paints the right viewport band.
     // The engine has ONE root scroll box (html/body share the viewport
-    // scroll), so both roots write the same offset — unlike element-level
-    // scrolling, which stays wrapper-local.
+    // scroll), so both roots write the same offset. Element scrollers
+    // (sticky v2) mirror through _elemScrollMirror instead — gated on the
+    // same native predicate the shift walks filter with, so a wrapper can
+    // never write an offset paint would ignore.
     if (changed && this._isViewportRoot()) {
       try { _domRaw('set_scroll_offset', String(this._scrollLeft || 0), String(nv)); } catch (e) {}
+    }
+    if (changed && !this._isViewportRoot()) {
+      this._elemScrollMirror(String(this._scrollLeft || 0), String(nv));
     }
     if (changed && !this._scrollSuppress) this._fireScroll();
   }
@@ -3866,10 +3904,17 @@ class Element extends Node {
     if (target !== this) { target.scrollLeft = nv; return; }
     const max = this._rootScrollMax('w');
     if (max != null) nv = Math.min(nv, max);
+    else if (this._isNativeScrollContainer()) {
+      const emax = this._elemScrollMax('w');
+      if (emax != null) nv = Math.min(nv, emax);
+    }
     const changed = nv !== (this._scrollLeft || 0);
     this._scrollLeft = nv;
     if (changed && this._isViewportRoot()) {
       try { _domRaw('set_scroll_offset', String(nv), String(this._scrollTop || 0)); } catch (e) {}
+    }
+    if (changed && !this._isViewportRoot()) {
+      this._elemScrollMirror(String(nv), String(this._scrollTop || 0));
     }
     if (changed && !this._scrollSuppress) this._fireScroll();
   }

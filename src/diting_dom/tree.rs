@@ -283,6 +283,17 @@ pub(crate) struct DomTreeInner {
     /// Text selection in a text-entry control as (node, start, end) — see
     /// [`DomTree::selection`].
     selection: Option<(NodeId, usize, usize)>,
+    /// Per-node element-scroller offsets (scrollTop/scrollLeft mirrors,
+    /// sticky v2). Truth lives HERE, not in a JsState map: NodeId slots are
+    /// recycled through `free_list`, so a side table that outlives its node
+    /// would hand a new node a dead offset. Slot freeing drops the entry —
+    /// the offset dies with its node, exactly like a real scroll container.
+    scroll_offsets: HashMap<NodeId, [f32; 2]>,
+    /// Bumped on every `set_node_scroll` write. Scroll must NOT invalidate
+    /// the layout caches (it is read-time paint state, like the root
+    /// offset), so consumers fingerprint their caches with this instead of
+    /// the tree epoch.
+    scroll_gen: u64,
 }
 
 impl DomTree {
@@ -306,6 +317,8 @@ impl DomTree {
                 quirks: false,
                 focused_node: None,
                 selection: None,
+                scroll_offsets: HashMap::new(),
+                scroll_gen: 0,
             }),
         }
     }
@@ -336,6 +349,33 @@ impl DomTree {
 
     pub fn set_selection(&self, sel: Option<(NodeId, usize, usize)>) {
         self.inner.borrow_mut().selection = sel;
+    }
+
+    /// Record one element-scroller's (scrollLeft, scrollTop). Write-through
+    /// from the bootstrap's scrollTop/scrollLeft setters (sticky v2); the
+    /// JS wrapper keeps its own copy for reads, so this is the paint-side
+    /// truth only. Does NOT bump the tree epoch — scroll is read-time paint
+    /// state; `scroll_gen` is the fingerprint shift-dependent caches key on.
+    pub fn set_node_scroll(&self, id: NodeId, x: f32, y: f32) {
+        let mut inner = self.inner.borrow_mut();
+        let v = [x.max(0.0), y.max(0.0)];
+        if inner.scroll_offsets.get(&id) != Some(&v) {
+            inner.scroll_offsets.insert(id, v);
+            inner.scroll_gen += 1;
+        }
+    }
+
+    pub fn node_scroll(&self, id: NodeId) -> [f32; 2] {
+        self.inner.borrow().scroll_offsets.get(&id).copied().unwrap_or([0.0, 0.0])
+    }
+
+    /// The live element-scroller offsets, for the read-time shift walks.
+    pub fn scroll_offsets(&self) -> HashMap<NodeId, [f32; 2]> {
+        self.inner.borrow().scroll_offsets.clone()
+    }
+
+    pub fn scroll_gen(&self) -> u64 {
+        self.inner.borrow().scroll_gen
     }
 
     pub fn document(&self) -> NodeId {
@@ -898,6 +938,9 @@ impl DomTree {
             if matches!(inner.nodes.get(id.index()), Some(Some(_))) {
                 inner.nodes[id.index()] = None;
                 inner.free_list.push(id.0);
+                // Slot recycle safety: the freed NodeId can come back as a
+                // different node — its scroll offset must not follow it.
+                inner.scroll_offsets.remove(&id);
             }
         }
     }
