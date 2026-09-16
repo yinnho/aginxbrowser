@@ -1,5 +1,7 @@
 # aginxbrowser — DeepSeek Harness plugin
 
+[![dshfind](https://dshfind.com/api/badge/yinnho/aginxbrowser?lang=en)](https://dshfind.com/en/plugins/yinnho/aginxbrowser?ref=badge)
+
 Web access for DSH agents: **fetch JS-rendered / protected pages as clean markdown**, **aggregated search across 14 engines**, and **stateful interactive sessions** — all against a single-binary Rust browser engine, no local Chrome, no Node runtime.
 
 Every session returns a **live view URL**: open it in any browser to watch the agent browse frame-by-frame and take over with the mouse. Oversight without screen-sharing.
@@ -19,7 +21,7 @@ The plugin talks to an aginxbrowser engine over HTTP. The default is the hosted 
 Install via `dshx` — the package is on npm ([dsh-aginxbrowser](https://www.npmjs.com/package/dsh-aginxbrowser)), so the registry tarball works directly (local `npm pack` tgz and git URL work too):
 
 ```bash
-dshx install aginxbrowser https://registry.npmjs.org/dsh-aginxbrowser/-/dsh-aginxbrowser-0.1.0.tgz
+dshx install aginxbrowser https://registry.npmjs.org/dsh-aginxbrowser/-/dsh-aginxbrowser-0.1.1.tgz
 dshx list                    # should show: [on] aginxbrowser
 ```
 

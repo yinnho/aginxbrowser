@@ -1,0 +1,16 @@
+# Insert dsh-aginxbrowser: 15 agx_* tools (fetch / search / doctor + a 12-piece
+# session kit: create/list/navigate/state/click/click_xy/input/scroll/wait/eval/
+# screenshot/close) that talk to an aginxbrowser engine over HTTP — hosted
+# browser.aginx.net by default, or a self-hosted binary. Every session carries a
+# live view URL: open it in any browser to watch the agent work and take over
+# with the mouse.
+#
+# All Config fields are optional — defaults are computed in lib/index.js
+# (baseUrl = the hosted instance, timeoutMs / screenshotDir sane fallbacks).
+#
+# [client contract] the loader row specifier MUST equal the package.json `name`
+# (`dsh-aginxbrowser`) — the client-modules scan matches the nearest manifest
+# name against the Loader specifier, and the boot row id is the plugin id.
+- insert:
+    - id: aginxbrowser
+      name: "dsh-aginxbrowser"
