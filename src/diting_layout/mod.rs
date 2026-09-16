@@ -5884,6 +5884,25 @@ fn translate_item(it: &mut PaintItem, tx: f32, ty: f32) {
 /// [`apply_sticky_to_items`].
 pub type StickySpan = (NodeId, usize, usize);
 
+/// Stacking-context predicates for the cross-parent z walk: positioned
+/// with an integer z-index (z:0 included), any transform, opacity<1,
+/// backdrop-filter. The PAINT-order view; `collect` adds two walk-internal
+/// barriers on top — clipping (a hoisted range would escape its Clip pair)
+/// and sticky subtrees (their shift span must stay contiguous).
+fn establishes_stacking_context(s: &ComputedStyle) -> bool {
+    let positioned = matches!(
+        s.position,
+        Some(PositionMode::Relative)
+            | Some(PositionMode::Absolute)
+            | Some(PositionMode::Fixed)
+            | Some(PositionMode::Sticky)
+    );
+    (positioned && s.z_index.is_some())
+        || s.transform.is_some()
+        || s.opacity.is_some_and(|o| o < 1.0)
+        || s.backdrop_blur.is_some_and(|b| b > 0.0)
+}
+
 /// The collect half's full output: per-element border-box rects, the flat
 /// paint-item list in paint order, the boxed-element paint ranking
 /// (obscura #738), the event-coordinate local geometry map (blitz #663
@@ -6097,6 +6116,21 @@ pub fn layout_collect(
         }
     }
 
+    /// A positioned z>0 child deferred past a non-context parent: emitted
+    /// at the nearest stacking-context ancestor instead (cross-parent z,
+    /// the narrow slice). Carries the deferring frame's walk env — geometry
+    /// is recursion-order-free, so the subtree paints pixel-identical at
+    /// its z slot; only the sequence in the flat item list moves. Lives
+    /// beside `Xf` because that map type is fn-scoped.
+    struct ZEscape {
+        z: i32,
+        child: taffy::tree::NodeId,
+        offset: (f32, f32),
+        xf: Xf,
+        alpha: f32,
+        gradient: Option<(TextGradient, [f32; 6])>,
+    }
+
     /// Multiply a straight-alpha color's alpha channel (animation batch A):
     /// the paint pipeline is straight-alpha source-over throughout, so
     /// folding element opacity into item colors composites the subtree.
@@ -6128,6 +6162,7 @@ pub fn layout_collect(
         scroller_spans: &mut Vec<StickySpan>,
         items: &mut Vec<PaintItem>,
         paint_order: &mut Vec<NodeId>,
+        escaped: &mut Vec<ZEscape>,
         node: taffy::tree::NodeId,
         offset: (f32, f32),
         viewport_width: f32,
@@ -7006,9 +7041,33 @@ pub fn layout_collect(
         // of its own band), positioned z-auto 2 above. Same-z ties keep
         // tree order; text leaves are always in-flow.
         let children = taffy_tree.children(node).unwrap_or_default().to_vec();
+        // Cross-parent z (the narrow slice): a positioned z>0 child of a
+        // NON-stacking-context parent must hoist past it — in Chrome,
+        // A{relative}>B{absolute z:5} out-paints A's later sibling
+        // C{relative z:1}. This frame is a BARRIER when it consumes such
+        // children locally: a stacking context, a clipper (a hoisted range
+        // would tear its Clip/PopClip pair), or a sticky subtree (its
+        // shift span must stay contiguous). Every bracket producer implies
+        // a barrier condition — xf_bracket needs a transform, clips needs
+        // clips_descendants — so a hoisted subtree can never land inside
+        // someone else's brackets. Negative z stays per-parent: the linear
+        // walk cannot emit before this node's own background, and a neg-z
+        // child already paints above it today (pre-existing inaccuracy,
+        // out of this slice). The synthetic ICB is not in node_map →
+        // always a barrier.
+        let barrier = match node_map.get(&node).and_then(|d| styles.get(d)) {
+            None => true,
+            Some(s) => {
+                establishes_stacking_context(s)
+                    || s.clips_descendants()
+                    || s.position == Some(PositionMode::Sticky)
+            }
+        };
         let mut neg: Vec<(i32, usize)> = Vec::new();
         let mut mid: Vec<(i32, usize)> = Vec::new();
         let mut pos: Vec<(i32, usize)> = Vec::new();
+        // z>0 children this non-barrier frame defers up to the barrier.
+        let mut pending: Vec<ZEscape> = Vec::new();
         for (i, &child) in children.iter().enumerate() {
             let child_style = node_map.get(&child).and_then(|d| styles.get(d));
             // Sticky counts as positioned here (CSS App. E step 8): a stuck
@@ -7031,8 +7090,22 @@ pub fn layout_collect(
                 // middle band, ascending within the band.
                 if z < 0 {
                     neg.push((z, i));
-                } else {
+                } else if barrier {
                     pos.push((z, i));
+                } else {
+                    // Defer past this non-context parent, carrying the walk
+                    // env the direct call would have received — geometry is
+                    // recursion-order-free, so the subtree paints identical
+                    // wherever its slot lands; the barrier emits it in ITS
+                    // positive band below.
+                    pending.push(ZEscape {
+                        z,
+                        child,
+                        offset: abs,
+                        xf: child_xf,
+                        alpha,
+                        gradient: text_gradient.clone(),
+                    });
                 }
             } else if positioned {
                 mid.push((2, i)); // paint level 2: above in-flow content
@@ -7045,10 +7118,61 @@ pub fn layout_collect(
         neg.sort_by_key(|(z, _)| *z);
         mid.sort_by_key(|(lvl, _)| *lvl);
         pos.sort_by_key(|(z, _)| *z);
-        for list in [neg, mid, pos] {
-            for (_, i) in list {
-                collect(tree, taffy_tree, node_map, styles, fonts, images, static_pos, baseline_shifts, collapsed_edges, rects, local_geom, abs_by_node, local_by_node, node_first_item, sticky_spans, scroller_spans, items, paint_order, children[i], abs, viewport_width, child_xf, alpha, text_gradient.as_ref());
+        // Emission, neg → mid → pos as before. `below` catches escapes
+        // bubbled up from non-context mid children — neg/pos children carry
+        // z≠0, are themselves contexts, and consume locally, so only the
+        // mid band can hand escapes up.
+        let mut below: Vec<ZEscape> = Vec::new();
+        macro_rules! emit {
+            ($n:expr, $o:expr, $x:expr, $a:expr, $g:expr) => {
+                collect(
+                    tree, taffy_tree, node_map, styles, fonts, images, static_pos,
+                    baseline_shifts, collapsed_edges, rects, local_geom, abs_by_node,
+                    local_by_node, node_first_item, sticky_spans, scroller_spans, items,
+                    paint_order, &mut below, $n, $o, viewport_width, $x, $a, $g,
+                )
+            };
+        }
+        for (_, i) in neg {
+            emit!(children[i], abs, child_xf, alpha, text_gradient.as_ref());
+        }
+        for (_, i) in mid {
+            emit!(children[i], abs, child_xf, alpha, text_gradient.as_ref());
+        }
+        // Positive band: own z>0 children merged with the bubbled escapes,
+        // stable-sorted by z — own children precede escapes on equal z
+        // (direct children ahead of hoisted descendants). ONLY a barrier
+        // may consume escapes here; a non-barrier frame hands `below` up
+        // untouched with its own pending, or a nephew would settle at this
+        // frame's level instead of the real stacking context.
+        enum PosSlot {
+            Own(usize),
+            Up(ZEscape),
+        }
+        let mut seq: Vec<(i32, PosSlot)> =
+            pos.into_iter().map(|(z, i)| (z, PosSlot::Own(i))).collect();
+        if barrier {
+            seq.extend(below.drain(..).map(|e| (e.z, PosSlot::Up(e))));
+        }
+        seq.sort_by_key(|(z, _)| *z);
+        for (_, slot) in seq {
+            match slot {
+                PosSlot::Own(i) => {
+                    emit!(children[i], abs, child_xf, alpha, text_gradient.as_ref())
+                }
+                PosSlot::Up(e) => emit!(e.child, e.offset, e.xf, e.alpha, e.gradient.as_ref()),
             }
+        }
+        if barrier {
+            // Pos-band emission targets are all contexts, so `below` is
+            // empty again here — asserted rather than assumed.
+            debug_assert!(below.is_empty());
+        } else {
+            // Hand the deferred band to the parent frame's walk: own
+            // pending children first, then bubbled nephews, matching the
+            // own-before-escapes tie rule above.
+            escaped.append(&mut pending);
+            escaped.append(&mut below);
         }
         // Sticky v2: the scroller's span closes before the PopClip — the
         // closing bracket itself must not translate. Same span shape as the
@@ -7079,6 +7203,9 @@ pub fn layout_collect(
     let mut abs_by_node: HashMap<taffy::tree::NodeId, Rect> = HashMap::new();
     let mut local_by_node: HashMap<taffy::tree::NodeId, (Rect, [f32; 6])> = HashMap::new();
     let mut node_first_item: HashMap<taffy::tree::NodeId, usize> = HashMap::new();
+    // The ICB is not in node_map → always a barrier, so the deferred band
+    // never survives the walk — asserted rather than assumed.
+    let mut root_escapes: Vec<ZEscape> = Vec::new();
     collect(
         tree,
         taffy_tree,
@@ -7098,6 +7225,7 @@ pub fn layout_collect(
         &mut scroller_spans,
         &mut items,
         &mut paint_order,
+        &mut root_escapes,
         icb_node,
         (0.0, 0.0),
         viewport_width,
@@ -7105,6 +7233,7 @@ pub fn layout_collect(
         1.0,
         None,
     );
+    debug_assert!(root_escapes.is_empty());
     // Flattened inline wrappers (span/label/a/… — obscura#722 lineage) own no
     // taffy box: the run hoisted their children. getBoundingClientRect still
     // owes them a rect, so union the hoisted kids' absolute boxes into one

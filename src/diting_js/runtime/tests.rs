@@ -8969,6 +8969,90 @@
         );
     }
 
+    // Cross-parent z (the narrow slice): a positioned z>0 child of a
+    // non-stacking-context parent hoists to the nearest context ancestor.
+    // Chrome ground truth: elementFromPoint(50,50) is B, not the later
+    // sibling C(z:1) — diting used to answer C because B never left A's
+    // per-parent band.
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(feature = "screenshot")]
+    async fn test_cross_parent_z_hoists_to_stacking_context() {
+        let mut rt = setup_runtime(
+            r#"<!doctype html><html><body style="margin:0">
+    <div id="A" style="position:relative;height:100px"><div id="B" style="position:absolute;z-index:5;top:0;left:0;width:100px;height:100px;background:red"></div></div>
+    <div id="C" style="position:relative;z-index:1;margin-top:-100px;width:100px;height:100px;background:blue"></div>
+    </body></html>"#,
+        );
+        let script = r#"() => {
+          const el = document.elementFromPoint(50, 50);
+          return el ? el.id : 'none';
+        }"#;
+        let out = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(out.value.unwrap(), serde_json::json!("B"));
+    }
+
+    // The escape bubbles through a CHAIN of non-context frames: two
+    // relative z-auto intermediates both refuse to consume B(z:5), so it
+    // lands at the root context and out-paints C(z:1) — Chrome parity,
+    // since relative z:auto establishes no context.
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(feature = "screenshot")]
+    async fn test_cross_parent_z_bubbles_through_two_non_context_levels() {
+        let mut rt = setup_runtime(
+            r#"<!doctype html><html><body style="margin:0">
+    <div id="A" style="position:relative;height:100px"><div id="M" style="position:relative;height:50px"><div id="B" style="position:absolute;z-index:5;top:0;left:0;width:100px;height:100px;background:red"></div></div></div>
+    <div id="C" style="position:relative;z-index:1;margin-top:-100px;width:100px;height:100px;background:blue"></div>
+    </body></html>"#,
+        );
+        let script = r#"() => {
+          const el = document.elementFromPoint(50, 50);
+          return el ? el.id : 'none';
+        }"#;
+        let out = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(out.value.unwrap(), serde_json::json!("B"));
+    }
+
+    // A context intermediate consumes the hoist: opacity<1 makes A its own
+    // stacking context, so B(z:5) is confined inside A's group and the
+    // later C(z:1) out-paints the whole group — Chrome parity.
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(feature = "screenshot")]
+    async fn test_cross_parent_z_context_intermediate_consume() {
+        let mut rt = setup_runtime(
+            r#"<!doctype html><html><body style="margin:0">
+    <div id="A" style="position:relative;height:100px;opacity:0.5"><div id="B" style="position:absolute;z-index:5;top:0;left:0;width:100px;height:100px;background:red"></div></div>
+    <div id="C" style="position:relative;z-index:1;margin-top:-100px;width:100px;height:100px;background:blue"></div>
+    </body></html>"#,
+        );
+        let script = r#"() => {
+          const el = document.elementFromPoint(50, 50);
+          return el ? el.id : 'none';
+        }"#;
+        let out = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(out.value.unwrap(), serde_json::json!("C"));
+    }
+
+    // DOCUMENTED DEVIATION (narrow slice): a clipping intermediate pins the
+    // z child locally (a hoisted range would tear the Clip/PopClip pair).
+    // Chrome hoists AND keeps the clip, answering B here; diting answers C
+    // until clip-pair surgery makes hoisting clip-aware — flip this pin
+    // consciously when that lands.
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(feature = "screenshot")]
+    async fn test_cross_parent_z_clip_intermediate_pins_locally() {
+        let mut rt = setup_runtime(
+            r#"<!doctype html><html><body style="margin:0">
+    <div id="A" style="position:relative;height:100px;overflow:hidden"><div id="B" style="position:absolute;z-index:5;top:0;left:0;width:100px;height:100px;background:red"></div></div>
+    <div id="C" style="position:relative;z-index:1;margin-top:-100px;width:100px;height:100px;background:blue"></div>
+    </body></html>"#,
+        );
+        let script = r#"() => {
+          const el = document.elementFromPoint(50, 50);
+          return el ? el.id : 'none';
+        }"#;
+        let out = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(out.value.unwrap(), serde_json::json!("C"));
+    }
     #[tokio::test(flavor = "current_thread")]
     #[cfg(feature = "screenshot")]
     async fn test_element_scroller_clamps_and_shifts_descendant_gbcr() {
