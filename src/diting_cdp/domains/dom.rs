@@ -296,6 +296,13 @@ pub async fn handle(
                 .unwrap_or_default();
             Ok(json!({ "quads": quads }))
         }
+        // objectId → nodeId: agent-browser resolves its AX refs (captured as
+        // objectIds from Runtime.evaluate) through this before DOM.* calls.
+        "requestNode" => {
+            let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
+            let node_id = resolve_node_id(page, params)?;
+            Ok(json!({ "nodeId": node_id }))
+        }
         _ => Err(format!("Unknown DOM method: {method}")),
     }
 }

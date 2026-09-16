@@ -939,6 +939,75 @@ pub async fn handle(
                 Ok(json!({}))
             }
         }
+        // Chrome re-lays the page out at paper size for print; the page
+        // pump cuts bands at `page_size`, so pin the viewport to the paper
+        // for the render and restore the session's emulation after — the
+        // same transient Chrome's print pipeline makes. Agent-browser's
+        // `pdf` command is this method's caller.
+        "printToPDF" => {
+            #[cfg(feature = "screenshot")]
+            {
+                let landscape = params.get("landscape").and_then(Value::as_bool).unwrap_or(false);
+                let pw = params
+                    .get("paperWidth")
+                    .and_then(Value::as_f64)
+                    .filter(|v| *v > 0.0)
+                    .unwrap_or(8.5);
+                let ph = params
+                    .get("paperHeight")
+                    .and_then(Value::as_f64)
+                    .filter(|v| *v > 0.0)
+                    .unwrap_or(11.0);
+                // CSS px per inch, the print pipeline's shared unit: paper
+                // dims are inches, the page pump eats CSS px.
+                let (w, h) = if landscape {
+                    (ph * 96.0, pw * 96.0)
+                } else {
+                    (pw * 96.0, ph * 96.0)
+                };
+                let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
+                let prior_viewport = page.viewport_override();
+                let prior_dpr = page.dpr_override();
+                page.set_viewport_override(w as f32, h as f32, false, prior_dpr);
+                let set = crate::pages::render_page_set(
+                    page,
+                    &crate::pages::PagePumpOptions {
+                        mode: crate::pages::PageMode::Print,
+                        page_size: (w as f32, h as f32),
+                        max_pages: 50,
+                        collect_text: true,
+                    },
+                )
+                .await;
+                // Restore the client's emulation regardless of render outcome.
+                match prior_viewport {
+                    Some((vw, vh, mobile)) => {
+                        page.set_viewport_override(vw, vh, mobile, prior_dpr)
+                    }
+                    None => page.clear_viewport_override(),
+                }
+                let set = set.map_err(|e| format!("printToPDF failed: {e}"))?;
+                let mut jpegs = Vec::with_capacity(set.pages.len());
+                for p in &set.pages {
+                    let j = crate::pages::jpeg_of(p.width, p.height, &p.rgba, 90)
+                        .map_err(|e| format!("printToPDF failed: {e}"))?;
+                    jpegs.push(j);
+                }
+                let refs: Vec<(u32, u32, &[u8], &[crate::diting_layout::paint::PdfOp])> = set
+                    .pages
+                    .iter()
+                    .zip(jpegs.iter())
+                    .zip(set.text_ops.iter())
+                    .map(|((p, j), ops)| (p.width, p.height, j.as_slice(), ops.as_slice()))
+                    .collect();
+                let pdf = crate::pages::pdf_of_pages(&refs);
+                Ok(json!({ "data": BASE64.encode(&pdf) }))
+            }
+            #[cfg(not(feature = "screenshot"))]
+            {
+                Err("printToPDF requires the `screenshot` feature".to_string())
+            }
+        }
         _ => Err(format!("Unknown Page method: {}", method)),
     }
 }

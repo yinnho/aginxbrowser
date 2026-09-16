@@ -412,6 +412,9 @@ pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
 
     let result = match domain {
         "Target" => domains::target::handle(method, &req.params, ctx, &req.session_id).await,
+        "Accessibility" => {
+            domains::accessibility::handle(method, &req.params, ctx, &req.session_id).await
+        }
         "Browser" => domains::browser::handle(method, &req.params).await,
         "Page" => domains::page::handle(method, &req.params, ctx, &req.session_id).await,
         "DOM" => domains::dom::handle(method, &req.params, ctx, &req.session_id).await,
@@ -4684,5 +4687,66 @@ r.addEventListener('change',function(){globalThis.__ev.push('change:'+r.value)})
             session_id: Some("nope".to_string()),
         };
         assert!(!ctx.should_park(&unknown));
+    }
+
+    // Accessibility.getFullAXTree over the wire: the synthesized tree's
+    // backendDOMNodeId must round-trip into DOM.requestNode (agent-browser's
+    // snapshot → @ref → click chain).
+    #[tokio::test(flavor = "current_thread")]
+    async fn accessibility_tree_feeds_request_node() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-1".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({
+                "url": "data:text/html,<html><head><title>AX</title></head><body><button id='b'>Buy now</button></body></html>"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        let enable = CdpRequest {
+            id: 2,
+            method: "Accessibility.enable".to_string(),
+            params: json!({}),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&enable, &mut ctx).await.error.is_none());
+
+        let tree = CdpRequest {
+            id: 3,
+            method: "Accessibility.getFullAXTree".to_string(),
+            params: json!({}),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&tree, &mut ctx).await;
+        assert!(resp.error.is_none(), "unexpected CDP error: {:?}", resp.error);
+        let nodes = resp.result.unwrap()["nodes"].as_array().cloned().unwrap();
+        let root = &nodes[0];
+        assert_eq!(root["role"]["value"], "RootWebArea");
+        assert_eq!(root["name"]["value"], "AX");
+        let button = nodes
+            .iter()
+            .find(|n| n["role"]["value"] == "button")
+            .expect("button in AX tree");
+        assert_eq!(button["name"]["value"], "Buy now");
+        let backend = button["backendDOMNodeId"].as_u64().expect("backend id");
+
+        // The AX id must resolve through the DOM domain — this is the exact
+        // crossing agent-browser makes when acting on a @ref.
+        let req_node = CdpRequest {
+            id: 4,
+            method: "DOM.requestNode".to_string(),
+            params: json!({ "backendNodeId": backend }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&req_node, &mut ctx).await;
+        assert!(resp.error.is_none(), "unexpected CDP error: {:?}", resp.error);
+        let node_id = resp.result.unwrap()["nodeId"].as_u64().expect("nodeId");
+        assert_eq!(node_id, backend);
     }
 }

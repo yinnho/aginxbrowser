@@ -1874,6 +1874,13 @@ impl Page {
         self.viewport_override
     }
 
+    /// The pinned device-pixel ratio, if any — read back so scoped viewport
+    /// changes (Page.printToPDF pins paper size for the render) restore the
+    /// session's emulation exactly, dpr included.
+    pub fn dpr_override(&self) -> Option<f64> {
+        self.dpr_override
+    }
+
     /// The viewport every frame-producing surface agrees on: the pinned
     /// emulation override when valid, else the live realm's persona
     /// viewport, else the CDP default 1280x720 (what getLayoutMetrics used
