@@ -1,8 +1,8 @@
-# Using AginxBrowser from Playwright, Puppeteer, browser-use, Firecrawl, and MCP clients
+# Using AginxBrowser from Playwright, Puppeteer, browser-use, agent-browser, Firecrawl, and MCP clients
 
 AginxBrowser speaks three protocols, so existing automation tools drive it by pointing at one URL — no Chromium, no WebDriver server, no Docker. This doc shows each integration.
 
-- **CDP** (Chrome DevTools Protocol): Playwright `connectOverCDP`, Puppeteer `connect`, browser-use
+- **CDP** (Chrome DevTools Protocol): Playwright `connectOverCDP`, Puppeteer `connect`, browser-use, agent-browser `--cdp`
 - **HTTP**: the native API plus a Firecrawl-compatible `/v1/scrape`
 - **MCP**: Claude Code / Cursor / Claude Desktop
 
@@ -12,6 +12,7 @@ AginxBrowser speaks three protocols, so existing automation tools drive it by po
 cargo build --release --features stealth,screenshot
 ./target/release/aginxbrowser
 # → Listening on 0.0.0.0:8089
+# Local agent-tooling entry instead: aginxbrowser --cdp-port 9223 (loopback bind)
 ```
 
 Everything below assumes `http://127.0.0.1:8089`; use `https://browser.aginx.net` for the hosted instance (same surface).
@@ -26,7 +27,9 @@ The engine advertises itself as a Chrome instance on the standard discovery endp
 | `GET /json/list` | `[]` — targets are per-connection, created over the browser socket |
 | `WS /devtools/{browser\|page}/{id}` | the debugger WebSocket |
 
-Implemented CDP domains: `browser`, `dom`, `emulation`, `fetch`, `input`, `network`, `page`, `runtime`, `storage`, `target`. Playwright and Puppeteer create targets themselves via `Target.createTarget`, so the empty `/json/list` is normal.
+Implemented CDP domains: `accessibility`, `browser`, `dom`, `emulation`, `fetch`, `input`, `network`, `page`, `runtime`, `storage`, `target`. Playwright and Puppeteer create targets themselves via `Target.createTarget`, so the empty `/json/list` is normal.
+
+`Accessibility.getFullAXTree` is synthesized from the live DOM (roles, computed names by ARIA precedence, heading levels, checked/focusable/url properties), which is what agent-browser's `snapshot` and its `@ref` element handles resolve through — `DOM.requestNode` closes the ref→node loop and `Page.printToPDF` backs the `pdf` command.
 
 ### Request interception (`page.route()` / `setRequestInterception`)
 
@@ -109,6 +112,20 @@ agent = Agent(
 await agent.run()
 await session.kill()
 ```
+
+### agent-browser
+
+[agent-browser](https://github.com/vercel-labs/agent-browser) accepts any CDP endpoint through its `--cdp` flag, so it drives AginxBrowser with no adapter code. `--cdp-port` binds the engine on loopback for exactly this use (it wins over `AGINXBROWSER_BIND`):
+
+```bash
+aginxbrowser --cdp-port 9223 --allow-private-network &
+agent-browser --cdp 9223 open http://localhost:3000
+agent-browser --cdp 9223 snapshot
+agent-browser --cdp 9223 click @e2        # a ref from the snapshot
+agent-browser --cdp 9223 pdf page.pdf
+```
+
+`snapshot` returns the accessibility tree with stable `@ref` handles — headings, buttons, links, textboxes with their names, checkbox state. `--allow-private-network` is only needed when the pages you drive live on loopback/LAN (localhost dev servers); the gate stays on by default. One quirk inherited from agent-browser's daemon: **repeat the same flags on every invocation** — a flag drift between commands makes the daemon relaunch and reset the page.
 
 ## Firecrawl-compatible `/v1/scrape`
 

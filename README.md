@@ -77,7 +77,7 @@ The [local cache](#capabilities) builds on the same idea: search hits come back 
 - **Image search**: `categories=images` hits Baidu/Bing image indexes and returns direct binary `image_url` links (downloadable straight to jpg/png) plus `source_url` provenance
 - **Interactive sessions**: persistent browser sessions with indexed interaction (`state/click/input/scroll/eval`) — agents browse like humans do, and `session_export` turns what an agent figured out into a runnable curl replay script (zero model tokens on re-run) — or, with `format=json`, into a flow document (`flow_run` replays it server-side with `{{var}}` substitution, `wait`/`expect` gates and saved outputs; installed flows live in `workflow/<name>/flow.json`, dropped in without a rebuild). Session tools also cover the acting part: `session_viewport` simulates device viewports (media queries respond), `session_wait` blocks on a selector or predicate with a timeout, `session_screenshot` renders the live state, `session_console` replays the page's console ring, and `session_storage` exports/restores cookies plus localStorage for login hand-off
 - **Playback-link sniffer**: `session_network(filter=media)` extracts the m3u8/mp4/dash URLs a page's player *actually requested* at runtime — links found only in page HTML are often decoys, so the request log is the source of truth. `GET /session/{id}/har` exports the same traffic as HAR 1.2 (retained bodies included)
-- **CDP bridge**: `/json/version` + `/devtools/{kind}/{id}` WebSocket — `chromium.connectOverCDP()` from Playwright, Puppeteer, or browser-use attaches with one line ([integration guide](docs/integrations.md)). DevTools ecosystem compatibility without becoming a CDP shim
+- **CDP bridge**: `/json/version` + `/devtools/{kind}/{id}` WebSocket — `chromium.connectOverCDP()` from Playwright, Puppeteer, or browser-use attaches with one line, and agent-browser drives it via `--cdp` (`snapshot` returns the synthesized accessibility tree with `@ref` handles) ([integration guide](docs/integrations.md)). DevTools ecosystem compatibility without becoming a CDP shim
 - **File download**: streaming to disk (no memory buffering), SHA-256 integrity, resume of interrupted transfers — for binaries, archives, datasets
 - **Local cache that remembers**: every fetch/search lands in SQLite (FTS5) at `~/.aginxbrowser/cache.db`. The `cache` tool re-answers from what the agent already read instead of re-paying network time: full-text search with CJK substring matching, keyword × freshness fusion ranking, `[§ heading]` section-aware snippets, per-URL content hashes for drift detection, TTL-bounded, per-session scoping for shared deployments
 - **CAPTCHA handling**: type detection with automatic Cloudflare challenge wait and optional 2captcha integration — search never stalls on verification pages
@@ -313,6 +313,7 @@ If your network can't reach the rusty_v8 CDN (build hangs with zero progress aft
 | Variable | Default | Description |
 |------|------|------|
 | `AGINXBROWSER_BIND` | `0.0.0.0:8089` | Listen address |
+| `--cdp-port N` (flag) | unset | Bind on `127.0.0.1:N` instead — the local agent-tooling entry (`agent-browser --cdp N`, Playwright `connectOverCDP`). Beats `AGINXBROWSER_BIND` when both are set |
 | `AGINXBROWSER_STEALTH` | enabled | `0` disables stealth (for diagnostics) |
 | `AGINXBROWSER_UA` | Linux Chrome145 | Spoofed User-Agent |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language header |
@@ -359,7 +360,7 @@ Three attach points:
 
 - **HTTP** — `/fetch`, `/search`, `/screenshot`, `/download` for any language with an HTTP client
 - **MCP** — one line into Claude Code / Cursor / Claude Desktop (above)
-- **CDP** — point Playwright / Puppeteer / browser-use at `ws://your-host:8089/devtools/browser/<id>`; see [`docs/integrations.md`](docs/integrations.md)
+- **CDP** — point Playwright / Puppeteer / browser-use at `ws://your-host:8089/devtools/browser/<id>`; agent-browser drives it with `--cdp` (`--cdp-port N` binds loopback for that). See [`docs/integrations.md`](docs/integrations.md)
 
 Integration: read the environment variable `AGINXBROWSER_URL=http://127.0.0.1:8089`. Unset → behavior unchanged; set → risk-controlled sites automatically route through AginxBrowser for rendering, falling back gracefully on failure.
 

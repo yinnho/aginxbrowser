@@ -941,6 +941,28 @@ pub struct SessionNavigateRequest {
     pub url: String,
 }
 
+/// `--cdp-port N`: bind the whole surface on loopback at N — the local
+/// agent-tooling entry (agent-browser `--cdp`, Playwright `connectOverCDP`).
+/// Wins over `AGINXBROWSER_BIND` (an explicit launch flag beats ambient env);
+/// wider or non-loopback binds still go through the env.
+fn cdp_port_from_args(args: &[String]) -> Result<Option<u16>, String> {
+    let Some(pos) = args.iter().position(|a| a == "--cdp-port") else {
+        return Ok(None);
+    };
+    let raw = args
+        .get(pos + 1)
+        .ok_or_else(|| "--cdp-port requires a port number".to_string())?;
+    let port: u16 = raw
+        .parse()
+        .map_err(|_| format!("--cdp-port: {raw:?} is not a valid port"))?;
+    if port == 0 {
+        // OS-assigned ports are useless here — the caller must already know
+        // the port to connect, so refuse instead of starting unreachable.
+        return Err("--cdp-port: port 0 is OS-assigned; pick a fixed port".to_string());
+    }
+    Ok(Some(port))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -981,6 +1003,7 @@ async fn main() -> anyhow::Result<()> {
     // and MCP stdio both see them. Both were previously documented as CLI
     // flags without wiring (only the env vars worked) — issue #33 and
     // requirements-aginxos P2.
+    let cdp_port = cdp_port_from_args(&args).map_err(|e| anyhow::anyhow!(e))?;
     if args.contains(&"--allow-file-access".to_string()) {
         diting_net::client::set_allow_file_access(true);
         tracing::info!("file:// access enabled (--allow-file-access)");
@@ -1091,10 +1114,19 @@ async fn main() -> anyhow::Result<()> {
             post(pdf_handler).layer(axum::extract::DefaultBodyLimit::max(max_body_bytes())),
         );
 
-    let bind_addr =
-        std::env::var("AGINXBROWSER_BIND").unwrap_or_else(|_| "0.0.0.0:8089".to_string());
+    let bind_addr = if let Some(port) = cdp_port {
+        format!("127.0.0.1:{port}")
+    } else {
+        std::env::var("AGINXBROWSER_BIND").unwrap_or_else(|_| "0.0.0.0:8089".to_string())
+    };
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     tracing::info!("aginxbrowser listening on {}", listener.local_addr()?);
+    if let Some(port) = cdp_port {
+        tracing::info!(
+            "CDP on loopback — agent-browser: `agent-browser --cdp {port}` · \
+             Playwright: connectOverCDP(\"http://127.0.0.1:{port}\")"
+        );
+    }
 
     // Standard proxy env vars do NOT configure this engine (reqwest/wreq's
     // implicit env matcher is pinned off on every engine client); make that
@@ -2407,6 +2439,22 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --cdp-port: the local agent-tooling entry. Valid port wins, garbage
+    // and port 0 refuse loudly instead of silently starting unreachable.
+    #[test]
+    fn cdp_port_flag_parses_and_validates() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(cdp_port_from_args(&a(&["aginxbrowser"])).unwrap(), None);
+        assert_eq!(
+            cdp_port_from_args(&a(&["aginxbrowser", "--cdp-port", "9223"])).unwrap(),
+            Some(9223)
+        );
+        assert!(cdp_port_from_args(&a(&["aginxbrowser", "--cdp-port"])).is_err());
+        assert!(cdp_port_from_args(&a(&["aginxbrowser", "--cdp-port", "abc"])).is_err());
+        assert!(cdp_port_from_args(&a(&["aginxbrowser", "--cdp-port", "0"])).is_err());
+        assert!(cdp_port_from_args(&a(&["aginxbrowser", "--cdp-port", "99999"])).is_err());
+    }
 
     // 0.3.0 tmall report P2: /health must answer "which build am I talking
     // to and what is it presenting" — commit, UA, TLS — in one cheap call,

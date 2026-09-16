@@ -77,7 +77,7 @@ Agent 是照着浏览器说的话行事的，所以响应里要写清楚实际�
 - **图片搜索**：`categories=images` 接百度图片/必应图片，返回 `image_url` 二进制直链（可直接下成 jpg/png）+ `source_url` 溯源
 - **交互式 Session**：持久化浏览器会话，索引化交互（state/click/input/scroll/eval），Agent 像人一样浏览；`session_export` 把 Agent 摸索出来的操作导出成能直接跑的 curl 回放脚本，重放零模型 token；`format=json` 则导出成 flow 文档（`flow_run` 服务端复跑：`{{var}}` 替换、`wait`/`expect` 设门、`save` 收产出；装好的 flow 放在 `workflow/<name>/flow.json`，丢目录进去即部署，不用重编）。操作面也补齐了：`session_viewport` 模拟设备视口（media query 会响应）、`session_wait` 按 selector/谓词带超时等待、`session_screenshot` 截会话当前状态、`session_console` 回放页面 console 环形日志、`session_storage` 导出/恢复 cookie + localStorage 方便交接登录态
 - **播放链接嗅探**：`session_network(filter=media)` 从页面播放器运行时真正发出的请求里挖 m3u8/mp4/dash 链接——写在 HTML 里的播放地址多半是诱饵，请求日志才是真相。`GET /session/{id}/har` 把同一份流量导出成 HAR 1.2（含已保留的响应体）
-- **CDP 桥**：`/json/version` + `/devtools/{kind}/{id}` WebSocket——Playwright / Puppeteer / browser-use 的 `chromium.connectOverCDP()` 一行接入（[集成指南](docs/integrations.md)）。兼容 DevTools 生态，但自己不做 CDP 套壳
+- **CDP 桥**：`/json/version` + `/devtools/{kind}/{id}` WebSocket——Playwright / Puppeteer / browser-use 的 `chromium.connectOverCDP()` 一行接入，agent-browser 走 `--cdp` 直驱（`snapshot` 吐合成无障碍树带 `@ref` 句柄）（[集成指南](docs/integrations.md)）。兼容 DevTools 生态，但自己不做 CDP 套壳
 - **文件下载**：流式落盘（不吃内存）、SHA-256 校验、断点续传——二进制、压缩包、数据集用这个
 - **记得住本地缓存**：每次 fetch/搜索自动进 SQLite（FTS5），落 `~/.aginxbrowser/cache.db`。`cache` 工具从 Agent 已读过的内容里找答案，不再重付网络时间：全文检索支持中文逐字匹配、关键词×新鲜度融合排序、`[§ 标题]` 小节感知摘要、每 URL 内容哈希测漂移、TTL 有界、共享部署可按 session 隔离
 - **CAPTCHA 处理**：类型识别 + Cloudflare 挑战自动等待 + 可选 2captcha 解算，搜索不卡验证页
@@ -313,6 +313,7 @@ cargo build --release --features stealth,screenshot
 | 变量 | 默认 | 说明 |
 |------|------|------|
 | `AGINXBROWSER_BIND` | `0.0.0.0:8089` | 监听地址 |
+| `--cdp-port N`（旗标） | 未设 | 改绑 `127.0.0.1:N`——本地 agent 工具入口（`agent-browser --cdp N`、Playwright `connectOverCDP`）。与 `AGINXBROWSER_BIND` 同时设置时旗标优先 |
 | `AGINXBROWSER_STEALTH` | 启用 | `0` 关闭 stealth（诊断用） |
 | `AGINXBROWSER_UA` | Linux Chrome145 | 伪装 UA |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language 头 |
