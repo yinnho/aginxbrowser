@@ -122,7 +122,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 uuid = { version = "1", features = ["v4"] }
 
 # --- MCP (Model Context Protocol) ---
-rmcp = { version = "1.7", features = ["server", "transport-io", "transport-streamable-http-server"] }
+rmcp = { version = "3.3", features = ["server", "transport-io", "transport-streamable-http-server"] }
 schemars = "1"
 
 # --- serialization ---
