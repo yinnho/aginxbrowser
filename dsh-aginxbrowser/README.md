@@ -16,18 +16,17 @@ Every session returns a **live view URL**: open it in any browser to watch the a
 
 The plugin talks to an aginxbrowser engine over HTTP. The default is the hosted instance at `https://browser.aginx.net`; to run your own, see [Self-hosting](#self-hosting).
 
-Install via `dshx` (tarball or git URL both work):
+Install via `dshx` — the package is on npm ([dsh-aginxbrowser](https://www.npmjs.com/package/dsh-aginxbrowser)), so the registry tarball works directly (local `npm pack` tgz and git URL work too):
 
 ```bash
-npm pack                     # produces dsh-aginxbrowser-0.1.0.tgz
-dshx install aginxbrowser dsh-aginxbrowser-0.1.0.tgz
+dshx install aginxbrowser https://registry.npmjs.org/dsh-aginxbrowser/-/dsh-aginxbrowser-0.1.0.tgz
 dshx list                    # should show: [on] aginxbrowser
 ```
 
 For DSH Desktop profiles, reference the package under its real name in **both** places — the `package.json` dependency key and the `dsh.profile.bundles` entry:
 
 ```json
-"dependencies": { "dsh-aginxbrowser": "file:./dsh-aginxbrowser-0.1.0.tgz" }
+"dependencies": { "dsh-aginxbrowser": "^0.1.0" }
 ```
 
 DSH Desktop 2.0.5+ enforces dependency-key == actual package name and drops into recovery mode otherwise.
