@@ -717,7 +717,7 @@ fn form_controls_paint_their_value_run() {
 
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
     let styles = crate::diting_layout::compute_styles(&tree, &rules);
-    let (_, items, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+    let (_, items, _, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
         &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
     );
     let run = |want: &str| {
@@ -788,7 +788,7 @@ fn select_paints_one_option_label_not_the_option_list() {
 
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
     let styles = crate::diting_layout::compute_styles(&tree, &rules);
-    let (_, items, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+    let (_, items, _, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
         &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
     );
     let run = |want: &str| {
@@ -818,7 +818,7 @@ fn select_paints_one_option_label_not_the_option_list() {
     // as the value-run test above.
     tree.with_node_mut(sel("#plain"), |n| n.set_live_value("Typed".into()));
     let styles = crate::diting_layout::compute_styles(&tree, &rules);
-    let (_, items, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+    let (_, items, _, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
         &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
     );
     let run = |want: &str| {
@@ -864,7 +864,7 @@ fn checkable_inputs_paint_native_widgets() {
     // 1 unchecked — and the text input must carry NO widget.
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
     let styles = crate::diting_layout::compute_styles(&tree, &rules);
-    let (_, items, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+    let (_, items, _, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
         &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
     );
     let mut checkboxes = [0usize; 2]; // [unchecked, checked]
@@ -901,7 +901,7 @@ fn checkable_inputs_paint_native_widgets() {
     tree.with_node_mut(sel("#cb-dirty"), |n| n.set_live_checked(false));
     tree.with_node_mut(sel("#cb-attr"), |n| n.set_live_checked(false));
     let styles = crate::diting_layout::compute_styles(&tree, &rules);
-    let (_, items, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+    let (_, items, _, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
         &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
     );
     let checked = items.iter().filter(|it| matches!(
@@ -942,7 +942,7 @@ fn form_runs_resolve_layout_kind() {
 
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
     let styles = crate::diting_layout::compute_styles(&tree, &rules);
-    let (_, items, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+    let (_, items, _, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
         &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
     );
     // (run text, form kind, fill) per Replaced item carrying an alt run,
@@ -2253,7 +2253,7 @@ fn word_spacing_widens_word_gaps_in_mixed_runs() {
     let tree = parse_html(html);
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
     let styles = crate::diting_layout::compute_styles(&tree, &rules);
-    let (_, items, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+    let (_, items, _, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
         &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
     );
     let words_of = |needle: &str| -> Vec<(f32, f32)> {
@@ -2296,7 +2296,7 @@ fn phrasing_content_uas_share_one_text_line() {
     let tree = parse_html(html);
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
     let styles = crate::diting_layout::compute_styles(&tree, &rules);
-    let (_, items, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+    let (_, items, _, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
         &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
     );
     let ys: Vec<f32> = items.iter().filter_map(|it| match it {
@@ -2331,7 +2331,7 @@ fn nowrap_ellipsis_marks_paint_truncation_and_keeps_full_text() {
         let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
         let styles = crate::diting_layout::compute_styles(&tree, &rules);
         let div = tree.query_selector_all("div").unwrap()[0];
-        let (rects, items, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+        let (rects, items, _, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
             &tree,
             &styles,
             &crate::diting_fonts::font_book(),

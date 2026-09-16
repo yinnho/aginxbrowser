@@ -246,6 +246,19 @@ pub struct JsState {
     /// clearing wholesale would thrash pages with more images than the cap).
     #[cfg(feature = "screenshot")]
     pub(crate) image_order: std::cell::RefCell<std::collections::VecDeque<String>>,
+    /// Sticky (root-scroller v1): per-node scroll-dependent shift map
+    /// ([dx, dy] in document space), memoized per (epoch, layout_rev,
+    /// scroll, viewport) — scroll and viewport moves don't bump the epoch,
+    /// and layout_rev covers attr-level writes the epoch can't see (the
+    /// same pairing as the screencast damage signature). Cleared alongside
+    /// the layout caches in drop_layout. See the `sticky_shifts` fn.
+    #[cfg(feature = "screenshot")]
+    pub(crate) sticky_shift_cache: std::cell::RefCell<
+        Option<(
+            (u64, u64, f32, f32, f32, f32),
+            std::rc::Rc<HashMap<NodeId, [f32; 2]>>,
+        )>,
+    >,
 }
 
 /// A script-initiated request as a CDP-shaped network event. Static
@@ -327,6 +340,9 @@ impl JsState {
         // bump the tree epoch, so the (epoch, root) key can't see it — the
         // shared drop points are the only reliable invalidation.
         *self.iframe_layout_cache.borrow_mut() = None;
+        // Sticky shifts key on (epoch, layout_rev, scroll, viewport); the
+        // rev bump below kills the entry either way — clear for tidiness.
+        *self.sticky_shift_cache.borrow_mut() = None;
         self.layout_rev.set(self.layout_rev.get().wrapping_add(1));
     }
 
@@ -390,6 +406,8 @@ impl JsState {
             viewport: (1920.0, 1000.0),
             #[cfg(feature = "screenshot")]
             scroll_offset: (0.0, 0.0),
+            #[cfg(feature = "screenshot")]
+            sticky_shift_cache: std::cell::RefCell::new(None),
             #[cfg(feature = "screenshot")]
             css_time: None,
             #[cfg(feature = "screenshot")]
@@ -1444,7 +1462,14 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 if *e == epoch { m.get(&nid).copied() } else { None }
             });
             match rect {
-                Some([x, y, w, h]) => format!("[{},{},{},{}]", x, y, w, h),
+                // Sticky v1: the border-box rect carries the scroll-dependent
+                // shift so gBCR/offsetTop track the visual position (the
+                // same in-flow + sticky pairing the paint side applies).
+                // Plain elements read a zero entry — bytes unchanged.
+                Some([x, y, w, h]) => {
+                    let sh = *sticky_shifts(&gs, dom).get(&nid).unwrap_or(&[0.0, 0.0]);
+                    format!("[{},{},{},{}]", x + sh[0], y + sh[1], w, h)
+                }
                 None => {
                     // A valid layout run for this epoch says the element has
                     // NO box (display:none, detached, or composed-tree-hidden:
@@ -1501,11 +1526,30 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             ensure_layout_run(&gs, dom, epoch);
             let guard = gs.layout_cache.borrow();
             let geom = guard.as_ref().and_then(|(e, run)| {
-                if *e == epoch { run.4.get(&nid) } else { None }
+                if *e == epoch { run.4.get(&nid).copied() } else { None }
             });
+            drop(guard);
             match geom {
-                Some(&([x, y, w, h], [a, b, c, d, e, f])) => {
-                    format!("[{},{},{},{},{},{},{},{},{},{}]", x, y, w, h, a, b, c, d, e, f)
+                // Sticky v1: shift the border box and prepend the shift onto
+                // the TOTAL map's e/f (T·M — a document-space translate, the
+                // same fold the paint side composes into a bracket), so
+                // offset inverse-mapping and exact-shape hit tests land on
+                // the visual geometry.
+                Some(([x, y, w, h], [a, b, c, d, e, f])) => {
+                    let sh = *sticky_shifts(&gs, dom).get(&nid).unwrap_or(&[0.0, 0.0]);
+                    format!(
+                        "[{},{},{},{},{},{},{},{},{},{}]",
+                        x + sh[0],
+                        y + sh[1],
+                        w,
+                        h,
+                        a,
+                        b,
+                        c,
+                        d,
+                        e + sh[0],
+                        f + sh[1]
+                    )
                 }
                 None => "null".into(),
             }
@@ -1628,7 +1672,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             let epoch = dom.epoch();
             ensure_layout_run(&gs, dom, epoch);
             let guard = gs.layout_cache.borrow();
-            let Some((_, (rects, _, styles, items, _))) = guard.as_ref().filter(|(e, _)| *e == epoch)
+            let Some((_, (rects, _, styles, items, _, _))) = guard.as_ref().filter(|(e, _)| *e == epoch)
             else {
                 return "null".into();
             };
@@ -1746,7 +1790,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 .flatten();
             let epoch = dom.epoch();
             ensure_layout_run(&gs, dom, epoch);
-            let style = gs.layout_cache.borrow().as_ref().and_then(|(e, (_, _, s, _, _))| {
+            let style = gs.layout_cache.borrow().as_ref().and_then(|(e, (_, _, s, _, _, _))| {
                 if *e == epoch { s.get(&nid).cloned() } else { None }
             });
             match style {
@@ -1866,6 +1910,10 @@ type LayoutRun = (
     HashMap<NodeId, crate::diting_css::ComputedStyle>,
     Vec<crate::diting_layout::PaintItem>,
     HashMap<NodeId, ([f32; 4], [f32; 6])>,
+    // Sticky subtree item spans (root-scroller v1): (node, start, end) into
+    // the items vec — see layout_collect. Readers pair them with the
+    // scroll-dependent shift map (sticky_shifts).
+    Vec<crate::diting_layout::StickySpan>,
 );
 
 /// Run the full diting style + layout pipeline over the live DOM tree and
@@ -1996,7 +2044,7 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
         .as_ref()
         .is_some_and(|(e, _)| *e == epoch);
     let solve_src = if reuse { "cached" } else { "full" };
-    let (rects, items, paint_order, local_geom) = if reuse {
+    let (rects, items, paint_order, local_geom, sticky_spans) = if reuse {
         // Borrow held only across layout_collect, which never touches
         // JsState — nothing else can interleave on this single thread.
         let guard = gs.geometry_cache.borrow();
@@ -2056,6 +2104,7 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
                 (id, ([r.x, r.y, r.width, r.height], m))
             })
             .collect(),
+        sticky_spans,
     )
 }
 
@@ -2138,7 +2187,7 @@ fn iframe_layout_run(gs: &JsState, dom: &DomTree, root: NodeId) -> std::rc::Rc<L
         None,
         Some(root),
     );
-    let (rects, items, paint_order, local_geom) =
+    let (rects, items, paint_order, local_geom, sticky_spans) =
         crate::diting_layout::layout_collect(dom, &styles_map, &fonts, &solved, IFRAME_VW);
     let run = std::rc::Rc::new((
         rects
@@ -2152,6 +2201,7 @@ fn iframe_layout_run(gs: &JsState, dom: &DomTree, root: NodeId) -> std::rc::Rc<L
             .into_iter()
             .map(|(id, (r, m))| (id, ([r.x, r.y, r.width, r.height], m)))
             .collect(),
+        sticky_spans,
     ));
     *gs.iframe_layout_cache.borrow_mut() = Some((epoch, root, std::rc::Rc::clone(&run)));
     run
@@ -2188,6 +2238,152 @@ fn is_viewport_fixed(
         cur = dom.get_node(id).and_then(|n| n.parent);
     }
     true
+}
+
+/// The sticky shift map for the CURRENT read (root-scroller v1): one
+/// [dx, dy] per node inside a sticky subtree — the sticky box plus all its
+/// DOM descendants (a nested sticky adds its own shift on top of the
+/// nearest sticky ancestor's total). Constraints are computed HERE, not at
+/// layout time: they depend on the scroll offset, which is orthogonal to
+/// the layout epoch (scroll-blind layout — the same invariant that lets
+/// the band pump re-blit without re-solving). Memoized per (epoch,
+/// layout_rev, scroll, viewport) in [`JsState::sticky_shift_cache`].
+///
+/// v1 gates (documented Chrome divergences, each degrades to plain
+/// relative):
+/// - ROOT SCROLLER ONLY: the scrollport is the viewport at
+///   [`JsState::scroll_offset`] (mirrored from the bootstrap's root
+///   scrollTop/scrollLeft writes). Sticky inside an element-level scroller
+///   doesn't stick yet.
+/// - A sticky under a position:fixed or transformed ANCESTOR gets no
+///   shift: the fixed subtree has no root-scroller relation, and a
+///   transformed ancestor brackets its subtree's paint in local coords,
+///   where a uniform document-space translate can't compose from inside
+///   the span. The sticky's OWN transform is fine — its bracket sits
+///   inside the span and apply_sticky_to_items folds the shift into it.
+/// - Containing block = nearest boxed ancestor's border box (Blink uses
+///   margin-box/content-box refinements).
+/// - Boxless sticky (display:contents, inline wrappers) is skipped.
+#[cfg(feature = "screenshot")]
+fn sticky_shifts(gs: &JsState, dom: &DomTree) -> std::rc::Rc<HashMap<NodeId, [f32; 2]>> {
+    use crate::diting_css::{Length, PositionMode};
+
+    let epoch = dom.epoch();
+    let (sx, sy) = gs.scroll_offset;
+    let (vw, vh) = gs.viewport;
+    let key = (epoch, gs.layout_rev.get(), sx, sy, vw, vh);
+    if let Some((k, v)) = gs.sticky_shift_cache.borrow().as_ref() {
+        if *k == key {
+            return std::rc::Rc::clone(v);
+        }
+    }
+    ensure_layout_run(gs, dom, epoch);
+    let guard = gs.layout_cache.borrow();
+    let empty = std::rc::Rc::new(HashMap::new());
+    let Some((_, (rects, _, styles, _, _, _))) = guard.as_ref().filter(|(e, _)| *e == epoch)
+    else {
+        return empty;
+    };
+    // Shallow-first: a nested sticky reads the nearest sticky ancestor's
+    // TOTAL from `out`, which only exists once the ancestor was processed.
+    let mut stickies: Vec<NodeId> = styles
+        .iter()
+        .filter(|(_, s)| s.position == Some(PositionMode::Sticky))
+        .map(|(n, _)| *n)
+        .filter(|n| rects.contains_key(n))
+        .collect();
+    stickies.sort_by_key(|n| {
+        let mut d = 0usize;
+        let mut cur = dom.get_node(*n).and_then(|nd| nd.parent);
+        while let Some(p) = cur {
+            d += 1;
+            cur = dom.get_node(p).and_then(|nd| nd.parent);
+        }
+        d
+    });
+    let resolve = |l: &Option<Length>, port: f32| {
+        l.as_ref()
+            .map(|l| crate::diting_layout::sticky_inset_px(l, port))
+    };
+    let mut out: HashMap<NodeId, [f32; 2]> = HashMap::new();
+    for nid in stickies {
+        let Some(&[x, y, w, h]) = rects.get(&nid) else { continue };
+        // One ancestor walk, three uses: gate on fixed/transformed (no
+        // shift), first boxed ancestor's border box (the CB), first sticky
+        // ancestor's total (the nested base). The gate must see the WHOLE
+        // chain — a transform above the CB still brackets the paint.
+        let mut gated = false;
+        let mut cb: Option<[f32; 4]> = None;
+        let mut base: Option<[f32; 2]> = None;
+        let mut cur = dom.get_node(nid).and_then(|nd| nd.parent);
+        while let Some(p) = cur {
+            if let Some(st) = styles.get(&p) {
+                if st.position == Some(PositionMode::Fixed) || st.transform.is_some() {
+                    gated = true;
+                    break;
+                }
+            }
+            if cb.is_none() {
+                if let Some(&r) = rects.get(&p) {
+                    cb = Some(r);
+                }
+            }
+            if base.is_none() {
+                if let Some(&s) = out.get(&p) {
+                    base = Some(s);
+                }
+            }
+            cur = dom.get_node(p).and_then(|nd| nd.parent);
+        }
+        if gated {
+            continue;
+        }
+        let Some([cx, cy, cw, ch]) = cb else { continue };
+        let st = &styles[&nid];
+        // Sticky insets resolve percentages against the SCROLLPORT (the
+        // viewport here), per Blink — not the containing block.
+        let dy = crate::diting_layout::sticky_axis_shift(
+            y,
+            h,
+            resolve(&st.top, vh),
+            resolve(&st.bottom, vh),
+            sy,
+            vh,
+            cy,
+            cy + ch,
+        );
+        let dx = crate::diting_layout::sticky_axis_shift(
+            x,
+            w,
+            resolve(&st.left, vw),
+            resolve(&st.right, vw),
+            sx,
+            vw,
+            cx,
+            cx + cw,
+        );
+        if dx == 0.0 && dy == 0.0 {
+            // Still in flow at this scroll — descendants read no base
+            // shift from us, and this subtree keeps any ancestor total.
+            continue;
+        }
+        let [bx, by] = base.unwrap_or([0.0, 0.0]);
+        let total = [dx + bx, dy + by];
+        // Write the total over the whole DOM subtree: every read point
+        // (gBCR, hit testing, band paint) shifts the sticky AND its
+        // descendants uniformly. A nested sticky later in the
+        // shallow-first loop overwrites its own subtree with ITS total,
+        // which already folds this one via the base lookup above.
+        let mut stack = vec![nid];
+        while let Some(cur) = stack.pop() {
+            out.insert(cur, total);
+            stack.extend(dom.children(cur));
+        }
+    }
+    drop(guard);
+    let rc = std::rc::Rc::new(out);
+    *gs.sticky_shift_cache.borrow_mut() = Some((key, std::rc::Rc::clone(&rc)));
+    rc
 }
 
 /// One viewport-band frame: RGBA pixels plus the scroll offset actually
@@ -2264,7 +2460,7 @@ fn band_frame_inner(
     let epoch = dom.epoch();
     ensure_layout_run(gs, dom, epoch);
     let guard = gs.layout_cache.borrow();
-    let (_, (rects, _, styles, items, _)) = guard.as_ref().filter(|(e, _)| *e == epoch)?;
+    let (_, (rects, _, styles, items, _, spans)) = guard.as_ref().filter(|(e, _)| *e == epoch)?;
 
     // Scrollable content extent: the root scroller's box unioned with every
     // laid-out descendant, clamped up to the viewport — the same union the
@@ -2334,6 +2530,28 @@ fn band_frame_inner(
         .min((content_w - vw).max(0.0));
     let dy = (if scroll_y.is_finite() { scroll_y.max(0.0) } else { 0.0 })
         .min((content_h - vh).max(0.0));
+
+    // Sticky (root-scroller v1): translate sticky-subtree spans by the
+    // scroll-dependent shift before the band translate, so the frame shows
+    // the sticky where it visually sits. No shifted sticky on the page →
+    // paint the cached run untouched, zero copy. Per-frame translate, not
+    // memoized: paint-only writes re-collect items without bumping the
+    // tree epoch, so a cached shifted copy could go stale mid-animation.
+    let sticky_map = sticky_shifts(gs, dom);
+    let shifted_items: Option<Vec<crate::diting_layout::PaintItem>> =
+        if spans.iter().any(|(n, _, _)| {
+            sticky_map.get(n).is_some_and(|s| s[0] != 0.0 || s[1] != 0.0)
+        }) {
+            Some(crate::diting_layout::apply_sticky_to_items(
+                items,
+                spans,
+                &sticky_map,
+            ))
+        } else {
+            None
+        };
+    let items: &[crate::diting_layout::PaintItem] =
+        shifted_items.as_deref().unwrap_or(items.as_slice());
 
     // Images the page references but the byte table lacks. Sources come
     // back absolutized against the document URL (resolve_img_source's base
@@ -2414,7 +2632,7 @@ pub(crate) fn text_ink_extent(gs: &JsState) -> Option<(f32, f32)> {
     let epoch = dom.epoch();
     ensure_layout_run(gs, dom, epoch);
     let guard = gs.layout_cache.borrow();
-    let (_, (_, _, _, items, _)) = guard.as_ref().filter(|(e, _)| *e == epoch)?;
+    let (_, (_, _, _, items, _, _)) = guard.as_ref().filter(|(e, _)| *e == epoch)?;
     Some(crate::diting_layout::paint::text_ink_extent(items))
 }
 
@@ -2588,6 +2806,7 @@ fn computed_style_value(
                 Some(PositionMode::Relative) => "relative",
                 Some(PositionMode::Absolute) => "absolute",
                 Some(PositionMode::Fixed) => "fixed",
+                Some(PositionMode::Sticky) => "sticky",
                 _ => "static",
             }
             .into(),

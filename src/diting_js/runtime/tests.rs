@@ -8868,6 +8868,109 @@
 
     #[tokio::test(flavor = "current_thread")]
     #[cfg(feature = "screenshot")]
+    async fn test_sticky_header_pins_gbcr_and_hit_test_under_root_scroll() {
+        // #434 sticky v1: sticky vs the ROOT scroller. gBCR serves doc-space
+        // boxes with the sticky shift folded in, so a top:0 header that has
+        // stuck reads top === scrollY; elementFromPoint is a CLIENT-space
+        // query, so the same stuck header must win at client y=5 once the
+        // hit-test rides the root scroll. The tall later static sibling is
+        // the load-bearing part of the hit assertion: its box covers the
+        // stuck band, so the header only wins because sticky is a POSITIONED
+        // paint level (App. E step 8), not document order.
+        let mut rt = setup_runtime(
+            r#"<html><body><div id="head" style="position:sticky; top:0; height:40px; background:#ccc">H</div><div id="tall" style="height:4000px; background:#eee">filler</div></body></html>"#,
+        );
+        let script = r#"async () => {
+            const head = document.getElementById('head');
+            const pos = getComputedStyle(head).position;
+            const inFlow = head.getBoundingClientRect().top;
+            window.scrollTo(0, 300);
+            const stuck = head.getBoundingClientRect().top;
+            const hitEl = document.elementFromPoint(10, 5);
+            const hitId = hitEl ? (hitEl.id || '') : 'null';
+            window.scrollTo(0, 0);
+            await new Promise(r => setTimeout(r, 10));
+            const back = head.getBoundingClientRect().top;
+            return [
+                pos,
+                inFlow < 50,
+                Math.abs(stuck - 300) < 0.5,
+                hitId,
+                Math.abs(back - inFlow) < 0.5,
+            ];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!(["sticky", true, true, "head", true]),
+            "computed face, in-flow rest, stuck top == scrollY, client hit lands on the stuck header, back to in-flow"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(feature = "screenshot")]
+    async fn test_sticky_with_z_index_outranks_later_static_content() {
+        // #434 second half: a sticky with an explicit z-index joins the
+        // hoisted positive band. On uv-docs (mkdocs-material) the stuck
+        // .md-header carries z-index:4 while a later static .md-container
+        // spans the whole scroll — before sticky counted as positioned, the
+        // header ranked static (level 0) and lost both paint and hit order
+        // to that sibling. (Cross-level ordering vs an absolute overlay
+        // parented at the ICB stays out of scope: per-parent bands are the
+        // engine's documented approximation.)
+        let mut rt = setup_runtime(
+            r#"<html><body><div id="head" style="position:sticky; top:0; height:40px; background:#ccc; z-index:4">H</div><div id="tall" style="height:4000px; background:#eee">filler</div></body></html>"#,
+        );
+        let script = r#"async () => {
+            window.scrollTo(0, 300);
+            await new Promise(r => setTimeout(r, 10));
+            const pick = (y) => {
+                const el = document.elementFromPoint(10, y);
+                return el ? (el.id || el.tagName) : 'null';
+            };
+            const stack = document.elementsFromPoint(10, 5)
+                .slice(0, 2).map(el => el.id || el.tagName);
+            const out = [pick(5), pick(45), stack];
+            window.scrollTo(0, 0);
+            return out;
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!(["head", "tall", ["head", "tall"]]),
+            "stuck z:4 header owns its band; past the band the static sibling answers again"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(feature = "screenshot")]
+    async fn test_sticky_header_stops_at_containing_block_end() {
+        // #434: the sticky shift clamps to the containing block — a 40px
+        // header inside a 200px wrap never scrolls past wrap.bottom - 40,
+        // however deep the document scrolls.
+        let mut rt = setup_runtime(
+            r#"<html><body><div id="wrap" style="height:200px"><div id="head" style="position:sticky; top:0; height:40px; background:#ccc">H</div></div><div style="height:4000px"></div></body></html>"#,
+        );
+        let script = r#"async () => {
+            const head = document.getElementById('head');
+            const wrap = document.getElementById('wrap');
+            window.scrollTo(0, 300);
+            await new Promise(r => setTimeout(r, 10));
+            const stuck = head.getBoundingClientRect().top;
+            const stop = wrap.getBoundingClientRect().top + wrap.getBoundingClientRect().height - 40;
+            return [Math.abs(stuck - stop) < 0.5, stuck];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let value = result.value.unwrap();
+        assert_eq!(
+            value.as_array().unwrap().first().unwrap(),
+            &serde_json::json!(true),
+            "stuck top == wrap.bottom - 40 (raw value: {value})"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(feature = "screenshot")]
     async fn test_css_time_clock_and_animation_extent_reach_native_state() {
         // #417: a declarative CSS animation (SVG keyframes) has no
         // __timelines entry — the video pump drives a virtual clock through

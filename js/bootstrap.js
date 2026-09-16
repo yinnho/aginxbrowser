@@ -12978,6 +12978,13 @@ if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
     var w = (typeof window !== 'undefined' && window.innerWidth) || 1280;
     var h = (typeof window !== 'undefined' && window.innerHeight) || 720;
     if (x < 0 || y < 0 || x > w || y > h) return null;
+    // Containment compares in the RECT space — document coordinates (the
+    // layout is scroll-blind and gBCR serves doc-space boxes, the sticky
+    // shift included). The client-space query must ride the root scroll or
+    // every hit test on a scrolled page answers the wrong band (#434: a
+    // stuck header is exactly the case where client y and doc y differ).
+    var qx = x + (globalThis.scrollX || 0);
+    var qy = y + (globalThis.scrollY || 0);
     var all = this.querySelectorAll('*');
     var rank = __ditingPaintRanks();
     var cands = [];
@@ -12989,7 +12996,7 @@ if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
       if (el === this.documentElement || el === this.body) continue;
       var r = el.getBoundingClientRect();
       if (r.width === 0 || r.height === 0) continue;
-      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
+      if (qx >= r.left && qx <= r.right && qy >= r.top && qy <= r.bottom) {
         // Transform-tainted boxes (blitz #663 family): a rotated/skewed
         // element's mapped bounding box swallows corners no pixel of the
         // element covers. With local geometry available and a non-diagonal
@@ -13005,8 +13012,8 @@ if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
               if (g.length === 10 && (g[5] !== 0 || g[6] !== 0)) {
                 var det = g[4] * g[7] - g[5] * g[6];
                 if (det !== 0) {
-                  var lx = (g[7] * (x - g[8]) - g[6] * (y - g[9])) / det;
-                  var ly = (g[4] * (y - g[9]) - g[5] * (x - g[8])) / det;
+                  var lx = (g[7] * (qx - g[8]) - g[6] * (qy - g[9])) / det;
+                  var ly = (g[4] * (qy - g[9]) - g[5] * (qx - g[8])) / det;
                   if (lx < g[0] || lx > g[0] + g[2] || ly < g[1] || ly > g[1] + g[3]) {
                     outside = true;
                   }

@@ -1283,6 +1283,12 @@ pub enum PositionMode {
     Relative,
     Absolute,
     Fixed,
+    /// In-flow like relative, but the insets are STICK THRESHOLDS against
+    /// the scrollport, not offsets: layout places the box in flow (taffy
+    /// Relative, insets forced AUTO at the taffy boundary), and readers
+    /// paint/measure the box shifted by a scroll-dependent amount clamped
+    /// to the containing block (CSS Position 3; root-scroller v1).
+    Sticky,
 }
 
 /// `box-sizing`: which box edge an authored width/height/min/max measures to.
@@ -4001,6 +4007,7 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 "relative" => Some(PositionMode::Relative),
                 "absolute" => Some(PositionMode::Absolute),
                 "fixed" => Some(PositionMode::Fixed),
+                "sticky" => Some(PositionMode::Sticky),
                 _ => return false,
             };
             true

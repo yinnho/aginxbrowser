@@ -395,9 +395,19 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
             // Fixed pins to the viewport; the nearest slice stands is the
             // root as containing block (see the reparent pass in layout_dom).
             PositionMode::Absolute | PositionMode::Fixed => Position::Absolute,
+            // Sticky lays out exactly in flow — the insets are stick
+            // thresholds against the scrollport, NOT relative offsets, so
+            // they must never reach taffy as insets. Readers compute the
+            // scroll-dependent shift (see sticky_axis_shift).
+            PositionMode::Sticky => Position::Relative,
         };
     }
-    if style.top.is_some() || style.right.is_some() || style.bottom.is_some() || style.left.is_some() {
+    if style.position != Some(PositionMode::Sticky)
+        && (style.top.is_some()
+            || style.right.is_some()
+            || style.bottom.is_some()
+            || style.left.is_some())
+    {
         s.inset = taffy::geometry::Rect {
             top: lpa_auto(style.top),
             right: lpa_auto(style.right),
@@ -4656,7 +4666,7 @@ pub fn layout_dom_with_paint_and_images(
     network_bytes: Option<&HashMap<String, std::sync::Arc<Vec<u8>>>>,
     base_url: Option<&str>,
 ) -> (HashMap<NodeId, Rect>, Vec<PaintItem>) {
-    let (rects, items, _order, _local_geom) = layout_dom_with_paint_order_and_images(
+    let (rects, items, _order, _local_geom, _sticky_spans) = layout_dom_with_paint_order_and_images(
         tree,
         styles,
         fonts,
@@ -4950,12 +4960,7 @@ pub fn layout_dom_with_paint_order_and_images(
     viewport_height: f32,
     network_bytes: Option<&HashMap<String, std::sync::Arc<Vec<u8>>>>,
     base_url: Option<&str>,
-) -> (
-    HashMap<NodeId, Rect>,
-    Vec<PaintItem>,
-    Vec<NodeId>,
-    HashMap<NodeId, (Rect, [f32; 6])>,
-) {
+) -> LayoutCollect {
     let solved = layout_solve(
         tree,
         styles,
@@ -5789,25 +5794,202 @@ pub(crate) fn body_overflow_propagates(
             != Overflow::Visible
 }
 
-/// Collect the paint-facing half from a solve (the second half of what
-/// [`layout_dom_with_paint_order_and_images`] used to do in one body): walk
-/// the solved taffy tree accumulating border-box rects and emitting paint
-/// items in document order, then the flattened-inline union pass and the
-/// inline-background splice. This is the half that reads transform and
-/// opacity — so this is the half a paint-only style write must re-run,
-/// against the cached solve, instead of paying for a fresh taffy pass.
+/// Resolve a sticky inset (`top`/`bottom`/`left`/`right`) to px against the
+/// scrollport dimension it sticks to — per Blink, sticky insets resolve
+/// percentages against the SCROLLPORT (the viewport for the root scroller),
+/// not the containing block.
+pub fn sticky_inset_px(l: &crate::diting_css::Length, port_dim: f32) -> f32 {
+    match l {
+        crate::diting_css::Length::Px(v) => *v,
+        crate::diting_css::Length::Percent(p) => port_dim * p / 100.0,
+        crate::diting_css::Length::Calc { percent, px } => port_dim * percent / 100.0 + px,
+        // Keyword sizing lengths (auto/min-content/max-content/…) are not
+        // valid inset values — the inset parse rejects them, but the enum
+        // allows them, so compute as "no inset" rather than panicking.
+        _ => 0.0,
+    }
+}
+
+/// One axis of the sticky constraint math (CSS Position 3, horizontal-tb
+/// v1 — root scroller only): how far the box travels to stay visible in the
+/// scrollport, given its in-flow position/size, the two stick insets
+/// (start = top/left, end = bottom/right, already px), the scrollport's
+/// origin/size, and the containing-block span the shift clamps to.
+/// End applies first, start overrides on overconstraint (Blink's
+/// sticky_constraining_rect order — start wins in LTR horizontal-tb).
+#[allow(clippy::too_many_arguments)]
+pub fn sticky_axis_shift(
+    pos: f32,
+    size: f32,
+    start: Option<f32>,
+    end: Option<f32>,
+    port_start: f32,
+    port_size: f32,
+    cb_start: f32,
+    cb_end: f32,
+) -> f32 {
+    let mut shift = 0.0f32;
+    if let Some(end) = end {
+        // Keep the box's end edge at least `end` inside the port's end
+        // edge — pushes the box back (negative shift) as the port scrolls
+        // past; never pulls it forward.
+        shift = ((port_start + port_size - end) - (pos + size)).min(0.0);
+    }
+    if let Some(start) = start {
+        // Pin to the port's start edge + inset once the port scrolls past
+        // the in-flow spot; start wins over the end inset when both fire.
+        shift = ((port_start + start) - pos).max(shift).max(0.0);
+    }
+    // The box never escapes its containing block: full down-travel stops
+    // where the box's end edge meets the CB's end, and up-travel stops at
+    // the CB's start (v1 uses the CB border box; spec says margin box).
+    shift.max(cb_start - pos).min((cb_end - size) - pos)
+}
+
+/// Translate one rect-carrying paint item by (tx, ty) in its own coordinate
+/// space. Shadow dx/dy and gradient angles are offsets/directions, not
+/// positions — untouched.
+fn translate_item(it: &mut PaintItem, tx: f32, ty: f32) {
+    fn tr(r: &mut Rect, tx: f32, ty: f32) {
+        r.x += tx;
+        r.y += ty;
+    }
+    match it {
+        PaintItem::Bg { rect, .. }
+        | PaintItem::BgCorner { rect, .. }
+        | PaintItem::BoxShadow { rect, .. }
+        | PaintItem::BackdropFilter { rect, .. }
+        | PaintItem::BgGradient { rect, .. }
+        | PaintItem::Replaced { rect, .. }
+        | PaintItem::Svg { rect, .. }
+        | PaintItem::Clip { rect }
+        | PaintItem::ClipRounded { rect, .. }
+        | PaintItem::Border { rect, .. } => tr(rect, tx, ty),
+        PaintItem::Image { rect, paint_rect, .. } => {
+            tr(rect, tx, ty);
+            tr(paint_rect, tx, ty);
+        }
+        PaintItem::Text { x, y, .. } => {
+            *x += tx;
+            *y += ty;
+        }
+        PaintItem::SetXf { .. } | PaintItem::SetXfCanvas | PaintItem::ClearXf | PaintItem::PopClip => {}
+    }
+}
+
+/// One sticky subtree's item span (root-scroller v1): (sticky node, start,
+/// end) into a paint run's items vec, recorded by the collect walk while
+/// both ends are exact — see [`apply_sticky_to_items`].
+pub type StickySpan = (NodeId, usize, usize);
+
+/// Sticky shifts per node (root-scroller v1): the node's TOTAL document-
+/// space translation (x, y) — a sticky's own shift composed over its
+/// sticky ancestors', written across its whole DOM subtree so any point
+/// read inside the subtree picks up everything that visually moved it.
+pub type StickyShifts = HashMap<NodeId, [f32; 2]>;
+
+/// The collect half's full output: per-element border-box rects, the flat
+/// paint-item list in paint order, the boxed-element paint ranking
+/// (obscura #738), the event-coordinate local geometry map (blitz #663
+/// family), and the sticky subtree item spans (root-scroller v1).
+pub type LayoutCollect = (
+    HashMap<NodeId, Rect>,
+    Vec<PaintItem>,
+    Vec<NodeId>,
+    HashMap<NodeId, (Rect, [f32; 6])>,
+    Vec<StickySpan>,
+);
+
+/// Apply sticky shifts to a paint run: for every (sticky node, item span)
+/// whose shift is non-zero, translate that span's items by the shift in
+/// document space. The input (cached) run is never mutated — callers get a
+/// shifted copy only when some span has a shift.
+///
+/// Nested stickies: an ancestor sticky's span strictly contains a
+/// descendant's (the collect walk records both in document order), and the
+/// shift map holds CUMULATIVE totals — so a nested span must translate by
+/// its DELTA over the nearest enclosing live span; the ancestor's pass
+/// already moved these items by its own total. Spans nest or are disjoint
+/// by tree construction, so range containment alone identifies the
+/// enclosing span — no DOM walk needed here. A gated sticky has no map
+/// entry and its span drops out; its descendants' deltas then measure
+/// against the next enclosing live span, which is whose translation
+/// actually landed on those items.
+///
+/// Bracket discipline: items inside a SetXf bracket are in local coords,
+/// so translating them raw would double-map the shift (M·(p+t) ≠ M·p+t).
+/// Instead the translation composes into the bracket matrix (T·M: e/f
+/// shift, linear part untouched), moving the whole transformed subtree
+/// uniformly. SetXfCanvas content is already canvas (document) space, so
+/// its items translate directly — tracked with a small bracket stack of
+/// (is_local) flags. A span can only contain brackets from its own
+/// subtree: a sticky under any transformed ancestor is gated to zero
+/// shift, so an ancestor's bracket never reaches into a live nested span.
+pub fn apply_sticky_to_items(
+    items: &[PaintItem],
+    spans: &[StickySpan],
+    shifts: &StickyShifts,
+) -> Vec<PaintItem> {
+    let mut out = items.to_vec();
+    let mut live: Vec<(usize, usize, [f32; 2])> = spans
+        .iter()
+        .filter_map(|(n, s, e)| shifts.get(n).map(|&sh| (*s, *e, sh)))
+        .filter(|&(_, _, sh)| sh[0] != 0.0 || sh[1] != 0.0)
+        .collect();
+    // Pre-order (start asc, end desc) so enclosing spans precede the spans
+    // they contain; the open-span stack then answers "nearest enclosing".
+    live.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+    let mut open: Vec<(usize, [f32; 2])> = Vec::new(); // (end, total shift)
+    for &(start, end, sh) in &live {
+        while open.last().is_some_and(|e| e.0 <= start) {
+            open.pop();
+        }
+        let base = open.last().map(|&(_, b)| b).unwrap_or([0.0, 0.0]);
+        let d = [sh[0] - base[0], sh[1] - base[1]];
+        open.push((end, sh));
+        let mut brackets: Vec<bool> = Vec::new(); // true = SetXf (local)
+        for it in &mut out[start..end] {
+            match it {
+                PaintItem::SetXf { xf } => {
+                    if !brackets.last().is_some_and(|&local| local) {
+                        // Compose T·M — the shift is document-space, applied
+                        // AFTER the bracket maps local content: e' = e + d0,
+                        // f' = f + d1, linear part untouched. (M·T would
+                        // rotate/scale the shift by the element's own map.)
+                        xf[4] += d[0];
+                        xf[5] += d[1];
+                    }
+                    brackets.push(true);
+                }
+                PaintItem::SetXfCanvas => brackets.push(false),
+                PaintItem::ClearXf => {
+                    brackets.pop();
+                }
+                _ => {
+                    if !brackets.last().is_some_and(|&local| local) {
+                        translate_item(it, d[0], d[1]);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Re-run ONLY the collect half against a cached solve. Layout splits in
+/// two halves for #395: the taffy solve (build, static-position harvest,
+/// reparent, main solve, float continuation, calc repair, table placement)
+/// is blind to paint-only properties — transform and opacity never reach
+/// `to_taffy_style` — so this is the half a paint-only style write must
+/// re-run, against the cached solve, instead of paying for a fresh taffy
+/// pass (43 solves × 114ms on the probe page).
 pub fn layout_collect(
     tree: &DomTree,
     styles: &HashMap<NodeId, ComputedStyle>,
     fonts: &FontBook,
     solved: &SolvedGeometry,
     viewport_width: f32,
-) -> (
-    HashMap<NodeId, Rect>,
-    Vec<PaintItem>,
-    Vec<NodeId>,
-    HashMap<NodeId, (Rect, [f32; 6])>,
-) {
+) -> LayoutCollect {
     let mut rects = HashMap::new();
     let mut items: Vec<PaintItem> = Vec::new();
     // Paint sequence of the boxed elements (obscura #738): filled by the
@@ -5823,8 +6005,9 @@ pub fn layout_collect(
     // mapped bounding box. Keyed by DOM nid directly; the inline-band pass's
     // taffy-keyed `local_by_node` keeps its own shape untouched.
     let mut local_geom: HashMap<NodeId, (Rect, [f32; 6])> = HashMap::new();
+    let mut sticky_spans: Vec<StickySpan> = Vec::new();
     let Some(icb_node) = solved.icb_node else {
-        return (rects, items, paint_order, local_geom);
+        return (rects, items, paint_order, local_geom, sticky_spans);
     };
     let SolvedGeometry {
         taffy_tree,
@@ -5923,6 +6106,7 @@ pub fn layout_collect(
         abs_by_node: &mut HashMap<taffy::tree::NodeId, Rect>,
         local_by_node: &mut HashMap<taffy::tree::NodeId, (Rect, [f32; 6])>,
         node_first_item: &mut HashMap<taffy::tree::NodeId, usize>,
+        sticky_spans: &mut Vec<StickySpan>,
         items: &mut Vec<PaintItem>,
         paint_order: &mut Vec<NodeId>,
         node: taffy::tree::NodeId,
@@ -6793,12 +6977,17 @@ pub fn layout_collect(
         let mut pos: Vec<(i32, usize)> = Vec::new();
         for (i, &child) in children.iter().enumerate() {
             let child_style = node_map.get(&child).and_then(|d| styles.get(d));
+            // Sticky counts as positioned here (CSS App. E step 8): a stuck
+            // overlay must out-paint — and so out-rank in elementFromPoint,
+            // which sorts by this order — any later static sibling whose tall
+            // box covers the stuck band (uv-docs' .md-header case, #434).
             let positioned = child_style.is_some_and(|s| {
                 matches!(
                     s.position,
                     Some(PositionMode::Relative)
                         | Some(PositionMode::Absolute)
                         | Some(PositionMode::Fixed)
+                        | Some(PositionMode::Sticky)
                 )
             });
             let floated = child_style.is_some_and(|s| s.float_side.is_some());
@@ -6824,7 +7013,7 @@ pub fn layout_collect(
         pos.sort_by_key(|(z, _)| *z);
         for list in [neg, mid, pos] {
             for (_, i) in list {
-                collect(tree, taffy_tree, node_map, styles, fonts, images, static_pos, baseline_shifts, collapsed_edges, rects, local_geom, abs_by_node, local_by_node, node_first_item, items, paint_order, children[i], abs, viewport_width, child_xf, alpha, text_gradient.as_ref());
+                collect(tree, taffy_tree, node_map, styles, fonts, images, static_pos, baseline_shifts, collapsed_edges, rects, local_geom, abs_by_node, local_by_node, node_first_item, sticky_spans, items, paint_order, children[i], abs, viewport_width, child_xf, alpha, text_gradient.as_ref());
             }
         }
         if clips {
@@ -6832,6 +7021,19 @@ pub fn layout_collect(
         }
         if xf_bracket {
             items.push(PaintItem::ClearXf);
+        }
+        // Sticky spans (root-scroller v1): a sticky subtree's items are a
+        // contiguous run — the walk emits the node's own band, then its
+        // children (z-sorted), then the closing brackets — so the span is
+        // exactly [item0, len) recorded here, pre-splice. Item0 was
+        // captured at entry, before this node pushed anything.
+        if let Some(dom_id) = node_map.get(&node) {
+            if styles
+                .get(dom_id)
+                .is_some_and(|s| s.position == Some(PositionMode::Sticky))
+            {
+                sticky_spans.push((*dom_id, item0, items.len()));
+            }
         }
     }
     let mut abs_by_node: HashMap<taffy::tree::NodeId, Rect> = HashMap::new();
@@ -6852,6 +7054,7 @@ pub fn layout_collect(
         &mut abs_by_node,
         &mut local_by_node,
         &mut node_first_item,
+        &mut sticky_spans,
         &mut items,
         &mut paint_order,
         icb_node,
@@ -7002,11 +7205,33 @@ pub fn layout_collect(
         // Later splice points first, deeper element first on ties, so each
         // batch lands under everything recorded after it.
         inserts.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
-        for (idx, _, band_items) in inserts {
-            items.splice(idx..idx, band_items);
+        // By reference: the sticky-span adjustment below re-reads the
+        // pre-splice indices and band sizes after this loop.
+        for (idx, _, band_items) in &inserts {
+            items.splice(*idx..*idx, band_items.iter().cloned());
+        }
+        // Sticky spans were recorded pre-splice, and the insert indices are
+        // pre-splice too: shift each endpoint by every insert landing inside
+        // it. A start counts an insert AT the boundary (a band spliced at
+        // the sticky node's own first item is its inline background); an
+        // end is exclusive, so only strictly-inside inserts count.
+        if !sticky_spans.is_empty() {
+            for (_, start, end) in sticky_spans.iter_mut() {
+                let (s0, e0) = (*start, *end);
+                *start = s0
+                    + inserts
+                        .iter()
+                        .map(|(idx, _, band)| usize::from(*idx <= s0) * band.len())
+                        .sum::<usize>();
+                *end = e0
+                    + inserts
+                        .iter()
+                        .map(|(idx, _, band)| usize::from(*idx < e0) * band.len())
+                        .sum::<usize>();
+            }
         }
     }
-    (rects, items, paint_order, local_geom)
+    (rects, items, paint_order, local_geom, sticky_spans)
 }
 
 
@@ -7399,7 +7624,7 @@ mod reparent_anchoring_tests {
         let tree = parse_html(&html);
         let rules = parse_stylesheet_for(sheet, (800.0, 600.0), CssMediaType::Screen);
         let styles = compute_styles(&tree, &rules);
-        let (rects, _, _, _) = layout_dom_with_paint_order_and_images(
+        let (rects, _, _, _, _) = layout_dom_with_paint_order_and_images(
             &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
         );
         rects
@@ -7477,7 +7702,7 @@ mod paint_token_memo_tests {
             let tree = parse_html(html);
             let rules = parse_stylesheet_for(sheet, (1280.0, 800.0), CssMediaType::Screen);
             let styles = compute_styles(&tree, &rules);
-            let (_, items, _, _) = layout_dom_with_paint_order_and_images(
+            let (_, items, _, _, _) = layout_dom_with_paint_order_and_images(
                 &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
             );
             items
@@ -7643,7 +7868,7 @@ mod box_shadow_paint_tests {
         let tree = parse_html(&html);
         let rules = parse_stylesheet_for(sheet, (800.0, 600.0), CssMediaType::Screen);
         let styles = compute_styles(&tree, &rules);
-        let (_, items, _, _) = layout_dom_with_paint_order_and_images(
+        let (_, items, _, _, _) = layout_dom_with_paint_order_and_images(
             &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
         );
         items
@@ -7737,7 +7962,7 @@ mod white_space_pre_family_tests {
         let tree = parse_html(&html);
         let rules = parse_stylesheet_for("", (800.0, 600.0), CssMediaType::Screen);
         let styles = compute_styles(&tree, &rules);
-        let (rects, _, _, _) = layout_dom_with_paint_order_and_images(
+        let (rects, _, _, _, _) = layout_dom_with_paint_order_and_images(
             &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
         );
         let pre = tree.query_selector("pre").expect("selector parse").expect("pre in body");
@@ -7776,5 +8001,148 @@ def</pre>"#);
     fn whitespace_only_pre_content_keeps_a_line() {
         let r = pre_rect(r#"<pre>   </pre>"#);
         assert!(r.height >= 16.0, "preserved spaces still paint a line box, h={}", r.height);
+    }
+}
+
+/// #434 sticky v1 (root scroller): the pure math halves. The layout-run
+/// halves (span recording, read-time shifts) are covered end-to-end in
+/// diting_js runtime tests — these pin the inset/shift arithmetic and the
+/// paint-run translation, where the bracket-fold and nested-delta logic
+/// live.
+#[cfg(test)]
+mod sticky_tests {
+    use super::{apply_sticky_to_items, sticky_axis_shift, sticky_inset_px, PaintItem, Rect};
+    use crate::diting_css::Length;
+    use crate::diting_dom::tree::NodeId;
+    use std::collections::HashMap;
+
+    fn bg(x: f32, y: f32) -> PaintItem {
+        PaintItem::Bg {
+            rect: Rect { x, y, width: 10.0, height: 10.0 },
+            color: [0, 0, 0, 255],
+            radius: 0.0,
+        }
+    }
+
+    fn bg_xy(it: &PaintItem) -> (f32, f32) {
+        let PaintItem::Bg { rect, .. } = it else { panic!("not a Bg") };
+        (rect.x, rect.y)
+    }
+
+    #[test]
+    fn inset_px_resolves_against_the_scrollport() {
+        assert_eq!(sticky_inset_px(&Length::Px(10.0), 1000.0), 10.0);
+        assert_eq!(sticky_inset_px(&Length::Percent(50.0), 1000.0), 500.0);
+        // calc(10% + 5px) against an 800px scrollport
+        assert_eq!(
+            sticky_inset_px(&Length::Calc { percent: 10.0, px: 5.0 }, 800.0),
+            85.0
+        );
+    }
+
+    #[test]
+    fn shift_rests_until_scrolled_past() {
+        // In-flow at 100, top:0, scroll 0 — the port start has not reached it.
+        assert_eq!(
+            sticky_axis_shift(100.0, 40.0, Some(0.0), None, 0.0, 1000.0, 8.0, 4008.0),
+            0.0
+        );
+    }
+
+    #[test]
+    fn shift_pins_to_the_inset_at_scroll() {
+        // Scrolled to 300: the box at 100 travels 200 to sit at the port top.
+        assert_eq!(
+            sticky_axis_shift(100.0, 40.0, Some(0.0), None, 300.0, 1000.0, 8.0, 4008.0),
+            200.0
+        );
+        assert_eq!(
+            sticky_axis_shift(100.0, 40.0, Some(10.0), None, 300.0, 1000.0, 8.0, 4008.0),
+            210.0
+        );
+    }
+
+    #[test]
+    fn end_inset_pulls_back_only() {
+        // bottom:0 with the port's end edge 40px past the box's end edge:
+        // the box is dragged back to stay inside — negative shift, never
+        // pulled forward by the end inset.
+        assert_eq!(
+            sticky_axis_shift(1600.0, 40.0, None, Some(0.0), 600.0, 1000.0, 8.0, 4008.0),
+            -40.0
+        );
+    }
+
+    #[test]
+    fn start_wins_the_overconstraint() {
+        // Both insets constrain in opposite directions (box taller than the
+        // port): the computed end shift is -50, the start inset overrides
+        // to 0 — Blink's constraining-rect order.
+        assert_eq!(
+            sticky_axis_shift(50.0, 100.0, Some(0.0), Some(0.0), 0.0, 100.0, 0.0, 5000.0),
+            0.0
+        );
+    }
+
+    #[test]
+    fn shift_clamps_to_the_containing_block() {
+        // A 40px box in an 8..208 CB: the raw pin shift is 140 but travel
+        // stops where the box's end edge meets the CB's end — 8.
+        assert_eq!(
+            sticky_axis_shift(160.0, 40.0, Some(0.0), None, 300.0, 1000.0, 8.0, 208.0),
+            8.0
+        );
+    }
+
+    #[test]
+    fn apply_translates_raw_and_folds_brackets() {
+        let items = vec![
+            bg(0.0, 0.0),
+            PaintItem::SetXf { xf: [2.0, 0.0, 0.0, 2.0, 50.0, 60.0] },
+            bg(10.0, 20.0), // inside the local bracket — the matrix carries it
+            PaintItem::ClearXf,
+            bg(30.0, 30.0),
+        ];
+        let mut shifts = HashMap::new();
+        shifts.insert(NodeId(7), [30.0, 40.0]);
+        let spans = vec![(NodeId(7), 0usize, 5usize)];
+        let out = apply_sticky_to_items(&items, &spans, &shifts);
+        assert_eq!(bg_xy(&out[0]), (30.0, 40.0), "outside any bracket: raw translate");
+        let PaintItem::SetXf { xf } = &out[1] else { panic!("not a SetXf") };
+        assert_eq!(
+            *xf,
+            [2.0, 0.0, 0.0, 2.0, 80.0, 100.0],
+            "T·M fold: e/f take the shift, linear part untouched"
+        );
+        assert_eq!(bg_xy(&out[2]), (10.0, 20.0), "inside the local bracket: untouched");
+        assert_eq!(bg_xy(&out[4]), (60.0, 70.0), "after ClearXf: raw translate again");
+        // The input run is the cached one — never mutated.
+        assert_eq!(bg_xy(&items[0]), (0.0, 0.0));
+    }
+
+    #[test]
+    fn apply_nested_span_adds_only_its_delta() {
+        // Parent span 0..2 total [0,200]; child span 1..2 CUMULATIVE
+        // [0,260] (its own 60 on top of the parent's 200). The child's
+        // items must land at +260, not +460 — the child pass adds only its
+        // delta over the enclosing span's already-applied translation.
+        let items = vec![bg(0.0, 8.0), bg(0.0, 48.0)];
+        let mut shifts = HashMap::new();
+        shifts.insert(NodeId(1), [0.0, 200.0]);
+        shifts.insert(NodeId(2), [0.0, 260.0]);
+        let spans = vec![(NodeId(1), 0usize, 2usize), (NodeId(2), 1usize, 2usize)];
+        let out = apply_sticky_to_items(&items, &spans, &shifts);
+        assert_eq!(bg_xy(&out[0]).1, 208.0, "parent's own item: parent total");
+        assert_eq!(bg_xy(&out[1]).1, 308.0, "child item: 48 + cumulative 260");
+    }
+
+    #[test]
+    fn apply_zero_shift_span_is_a_noop() {
+        let items = vec![bg(0.0, 8.0)];
+        let mut shifts = HashMap::new();
+        shifts.insert(NodeId(3), [0.0, 0.0]);
+        let spans = vec![(NodeId(3), 0usize, 1usize)];
+        let out = apply_sticky_to_items(&items, &spans, &shifts);
+        assert_eq!(bg_xy(&out[0]), (0.0, 8.0));
     }
 }
