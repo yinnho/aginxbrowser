@@ -724,6 +724,39 @@
         assert_eq!(parts[4], serde_json::json!(0), "the slot element itself never boxes");
     }
 
+    /// Flat-tree inheritance through the slot, pinned to local Chrome
+    /// (2026-09-16, headless 152): inherited properties reach a slotted
+    /// light child FROM THE SLOT — `color` declared on the slot colors the
+    /// slotted span, and with it undeclared the host's value walks through.
+    /// (The classic "slotted content only takes ::slotted rules" gotcha is
+    /// about selector matching crossing the boundary, not inheritance.)
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn slotted_content_inherits_through_the_slot() {
+        let mut rt = setup_runtime(
+            r#"<div id="outer" style="color:rgb(0,0,255)"><my-el id="h1"><span id="s1">a</span></my-el><my-el id="h2"><span id="s2">b</span></my-el></div>"#,
+        );
+        let result = rt.evaluate(r#"
+            const sr1 = document.getElementById('h1').attachShadow({ mode: 'open' });
+            sr1.innerHTML = '<slot style="color:rgb(255,0,0)"></slot>';
+            const sr2 = document.getElementById('h2').attachShadow({ mode: 'open' });
+            sr2.innerHTML = '<slot></slot>';
+            return [getComputedStyle(document.getElementById('s1')).color,
+                    getComputedStyle(sr1.querySelector('slot')).color,
+                    getComputedStyle(document.getElementById('s2')).color,
+                    getComputedStyle(sr2.querySelector('slot')).color];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        assert_eq!(parts[0], serde_json::json!("rgb(255, 0, 0)"),
+            "color declared on the slot inherits into the slotted light child");
+        assert_eq!(parts[1], serde_json::json!("rgb(255, 0, 0)"),
+            "the slot itself computes its inline color (not a JS-side fallback)");
+        assert_eq!(parts[2], serde_json::json!("rgb(0, 0, 255)"),
+            "with the slot undeclared, blue walks outer -> host -> slot -> slotted");
+        assert_eq!(parts[3], serde_json::json!("rgb(0, 0, 255)"),
+            "shadow content itself inherits from the host");
+    }
+
     /// Shadow `<style>` joins the CSS pool and styles shadow content; rules
     /// match by class across the tree scopes (global-pool approximation).
     #[cfg(feature = "screenshot")]

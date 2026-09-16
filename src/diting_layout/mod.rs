@@ -7530,11 +7530,47 @@ fn compute_styles_impl(
         } else {
             root_fs
         };
-        // Composed-tree children (render_children): a shadow host's shadow
-        // tree inherits from the host, and slotted light children splice in
-        // at their slot's position. Unassigned light children of a host are
-        // never visited — they render nothing, so no computed style either.
-        for child in render_children(tree, nid) {
+        // Composed-tree children, each paired with its flat-tree
+        // inheritance parent. A shadow host's shadow children inherit from
+        // the host; a slot's assigned light children inherit from the SLOT
+        // (pinned to Chrome 2026-09-16: `color` on the slot colors the
+        // slotted child, and with it undeclared the host's value walks
+        // through) — so the slot is walked before its assigned nodes and
+        // its computed style is already in `out` when they cascade. A slot
+        // with nothing assigned composes nothing here; its own visit
+        // enumerates the fallback children against it. Unassigned light
+        // children of a host are never visited — they render nothing, so
+        // no computed style either.
+        let slot_consumed = tree.is_html_slot_element(nid)
+            && tree.assigned_nodes(nid).is_some_and(|a| !a.is_empty());
+        let walk: Vec<(NodeId, NodeId)> = if slot_consumed {
+            Vec::new()
+        } else {
+            let raw: Vec<NodeId> = match tree.shadow_root(nid) {
+                Some(root) => tree.children(root),
+                None => tree.children(nid),
+            };
+            let mut w = Vec::with_capacity(raw.len());
+            for child in raw {
+                w.push((child, nid));
+                if tree.is_html_slot_element(child) {
+                    if let Some(assigned) = tree.assigned_nodes(child) {
+                        for node in assigned {
+                            w.push((node, child));
+                        }
+                    }
+                }
+            }
+            w
+        };
+        for (child, inherit_from) in walk {
+            let parent = if inherit_from == nid {
+                cs.clone()
+            } else {
+                out.get(&inherit_from)
+                    .cloned()
+                    .unwrap_or_else(|| cs.clone())
+            };
             visit(
                 tree,
                 rules,
@@ -7542,7 +7578,7 @@ fn compute_styles_impl(
                 keyframes,
                 css_time,
                 child,
-                Some(&cs),
+                Some(&parent),
                 child_root_fs,
                 out,
                 counters,
