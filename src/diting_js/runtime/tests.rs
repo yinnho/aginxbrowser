@@ -1118,8 +1118,11 @@
             ("document.getElementById('f') instanceof HTMLFormElement", true),
             ("document.getElementById('f') instanceof HTMLDivElement", false),
             ("'x' instanceof HTMLIFrameElement", false),
-            ("HTMLDivElement.prototype === Element.prototype", true),
-            ("document.getElementById('d').constructor === Element", true),
+            // #27: each interface owns its prototype now (they used to share
+            // Element.prototype, which made constructor.name read "Element"
+            // for every tag and let per-interface patches leak everywhere).
+            ("HTMLDivElement.prototype === Element.prototype", false),
+            ("document.getElementById('d').constructor === HTMLDivElement", true),
         ];
         for (expr, expected) in checks {
             let got = rt.evaluate(expr).unwrap();
@@ -1129,6 +1132,103 @@
             .evaluate("(() => { try { new HTMLDivElement(); } catch (e) { return e.name; } return 'no-throw'; })()")
             .unwrap();
         assert_eq!(ctor, serde_json::json!("TypeError"));
+    }
+
+    /// #27: the interface prototype chain must read like Chrome's —
+    /// HTMLDivElement → HTMLElement → Element → Node → EventTarget — with
+    /// per-interface prototypes that actually isolate patches, and
+    /// constructor.name per tag (unknown tags report HTMLElement).
+    #[test]
+    fn interface_prototype_chain_and_patch_isolation() {
+        let mut rt = setup_runtime(
+            r#"<body><div id="d"></div><span id="s"></span><x-foo id="x"></x-foo></body>"#,
+        );
+        let checks: &[(&str, bool)] = &[
+            ("document.getElementById('d') instanceof HTMLElement", true),
+            ("document.getElementById('d') instanceof Element", true),
+            ("document.getElementById('d') instanceof Node", true),
+            ("document.getElementById('d') instanceof EventTarget", true),
+            ("Object.getPrototypeOf(HTMLElement.prototype) === Element.prototype", true),
+            ("Object.getPrototypeOf(Element.prototype) === Node.prototype", true),
+            ("Object.getPrototypeOf(Node.prototype) === EventTarget.prototype", true),
+            ("document instanceof EventTarget", true),
+            ("EventTarget.prototype !== Node.prototype", true),
+        ];
+        for (expr, expected) in checks {
+            let got = rt.evaluate(expr).unwrap();
+            assert_eq!(got, serde_json::json!(expected), "expr: {expr}");
+        }
+        // constructor.name per interface; unknown tag falls back to HTMLElement.
+        let names = rt
+            .evaluate(
+                r#"JSON.stringify([
+                    document.getElementById('d').constructor.name,
+                    document.getElementById('s').constructor.name,
+                    document.getElementById('x').constructor.name,
+                ])"#,
+            )
+            .unwrap();
+        assert_eq!(
+            names,
+            serde_json::json!(r#"["HTMLDivElement","HTMLSpanElement","HTMLElement"]"#)
+        );
+        // A patch on one interface's prototype reaches its own tags only.
+        let isolation = rt
+            .evaluate(
+                r#"(() => {
+                    HTMLDivElement.prototype._probe = 'div';
+                    Element.prototype._probe2 = 'all';
+                    const d = document.getElementById('d');
+                    const s = document.getElementById('s');
+                    return JSON.stringify([d._probe, s._probe === undefined, d._probe2, s._probe2]);
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(
+            isolation,
+            serde_json::json!(r#"["div",true,"all","all"]"#)
+        );
+    }
+
+    /// #27 (obscura#999 face): Web IDL operations are enumerable — zone.js
+    /// patchClass() discovers methods with `for (prop in instance)` and only
+    /// walks enumerable properties, so non-enumerable class methods made
+    /// Angular die with "n.observe is not a function".
+    #[test]
+    fn interface_operations_are_enumerable() {
+        let mut rt = setup_runtime(r#"<body><div id="d"></div></body>"#);
+        let checks: &[(&str, bool)] = &[
+            (
+                "Object.getOwnPropertyDescriptor(MutationObserver.prototype, 'observe').enumerable",
+                true,
+            ),
+            (
+                "Object.getOwnPropertyDescriptor(Element.prototype, 'getAttribute').enumerable",
+                true,
+            ),
+            (
+                "Object.getOwnPropertyDescriptor(Node.prototype, 'appendChild').enumerable",
+                true,
+            ),
+            // The zone.js patchClass discovery pattern: for-in over an
+            // instance must surface the interface operations as functions.
+            (
+                "(() => { const mo = new MutationObserver(function(){}); let saw = 0; \
+                  for (const k in mo) { if (k === 'observe' && typeof mo[k] === 'function') saw++; } \
+                  return saw === 1; })()",
+                true,
+            ),
+            // window.constructor.prototype members (WindowProxy face) stay out
+            // of scope: Object.prototype built-ins must NOT become enumerable.
+            (
+                "Object.getOwnPropertyDescriptor(Object.prototype, 'hasOwnProperty').enumerable",
+                false,
+            ),
+        ];
+        for (expr, expected) in checks {
+            let got = rt.evaluate(expr).unwrap();
+            assert_eq!(got, serde_json::json!(expected), "expr: {expr}");
+        }
     }
 
     /// Regression for #105: `Element.prepend` must actually insert at the

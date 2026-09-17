@@ -5035,10 +5035,19 @@ class DocumentType extends Node {
 }
 
 const _cache = new Map();
+// (#27) per-tag interface routing: a div wraps as HTMLDivElement (its OWN
+// prototype, not Element's), an unknown tag as HTMLElement — so
+// constructor.name and instanceof read like Chrome, and a patch on
+// HTMLDivElement.prototype reaches divs but never spans. The registry is
+// filled by _htmlInterface below; until bootstrap reaches that block the
+// callers fall back to Element exactly like before.
+const _tagInterfaces = new Map();
 function _elementClassFor(nid) {
   const tag = _domParse("tag_name", nid);
   if (tag === "FORM" && globalThis.HTMLFormElement) return globalThis.HTMLFormElement;
-  return Element;
+  const C = typeof tag === "string" ? _tagInterfaces.get(tag.toLowerCase()) : null;
+  if (C) return C;
+  return globalThis.HTMLElement || Element;
 }
 function _wrap(nid) {
   if (nid < 0 || nid === null || nid === undefined || isNaN(nid)) return null;
@@ -9591,27 +9600,55 @@ globalThis.scrollX = 0; globalThis.scrollY = 0;
 
 globalThis.CSS = { supports(){return false;}, escape(s){return s;} };
 
-globalThis.HTMLElement = Element;
+// (#27) HTMLElement is a REAL layer between Element and the per-tag
+// interfaces — Chrome's chain is HTMLDivElement → HTMLElement → Element →
+// Node → EventTarget. Page code does `el instanceof HTMLElement` for feature
+// tests and unknown tags (x-foo) report constructor.name "HTMLElement", so
+// the alias `= Element` that used to live here was wrong twice: no
+// HTMLElement level in the chain, and no per-interface prototype at all.
+// Constructing from page code is illegal (only the engine passes a nid).
+globalThis.HTMLElement = {
+  HTMLElement: class HTMLElement extends Element {
+    constructor(nid) {
+      if (typeof nid !== "number") {
+        throw new DOMException(
+          "Failed to construct 'HTMLElement': Illegal constructor.",
+          "TypeError",
+        );
+      }
+      super(nid);
+    }
+  },
+}.HTMLElement;
 
 // Real pages discriminate elements per interface — webpack style-loader
 // gates style injection on `document.querySelector('head') instanceof
-// window.HTMLIFrameElement`, and player/form libs do the same. Element
-// wrappers share Element.prototype (only FORM gets a per-tag class in
-// _elementClassFor), so the check must consult tagName, not the prototype
-// chain. The old `= Element` aliases made every instanceof true for every
-// element — bilibili's player core threw "Couldn't find a style target" at
-// boot because head passed the iframe test, and the player never mounted.
-// .prototype stays === Element.prototype so property patches written against
-// these globals keep landing on (and reading back from) the shared prototype.
+// window.HTMLIFrameElement`, and player/form libs do the same. The old
+// `= Element` aliases made every instanceof true for every element —
+// bilibili's player core threw "Couldn't find a style target" at boot
+// because head passed the iframe test, and the player never mounted. That
+// was fixed first with a Symbol.hasInstance tagName check over throwing
+// constructor shells sharing Element.prototype (#1001 v0); the remaining
+// half (#27): those shared prototypes made constructor.name read "Element"
+// for everything and let a patch on HTMLDivElement.prototype leak onto every
+// element. Now each interface is a real class extending the real HTMLElement
+// above; _elementClassFor routes by tagName through _tagInterfaces, and
+// hasInstance stays as a second opinion so wrappers built before this
+// block (or cross-realm objects) still classify by tag.
 function _htmlInterface(name, tags) {
-  const C = { [name]: function () {
-    throw new DOMException("Failed to construct '" + name + "': Illegal constructor.", 'TypeError');
+  const C = { [name]: class extends globalThis.HTMLElement {
+    constructor(nid) {
+      if (typeof nid !== "number") {
+        throw new DOMException("Failed to construct '" + name + "': Illegal constructor.", "TypeError");
+      }
+      super(nid);
+    }
   } }[name];
-  C.prototype = Element.prototype;
   Object.defineProperty(C, Symbol.hasInstance, {
     value(obj) { return !!obj && tags.includes(String(obj.tagName || '').toLowerCase()); },
     configurable: true,
   });
+  for (const t of tags) _tagInterfaces.set(t, C);
   return C;
 }
 globalThis.HTMLDivElement = _htmlInterface('HTMLDivElement', ['div']);
@@ -9621,7 +9658,7 @@ globalThis.HTMLAnchorElement = _htmlInterface('HTMLAnchorElement', ['a']);
 globalThis.HTMLImageElement = _htmlInterface('HTMLImageElement', ['img']);
 globalThis.HTMLInputElement = _htmlInterface('HTMLInputElement', ['input']);
 globalThis.HTMLButtonElement = _htmlInterface('HTMLButtonElement', ['button']);
-globalThis.HTMLFormElement = class HTMLFormElement extends Element {
+globalThis.HTMLFormElement = class HTMLFormElement extends globalThis.HTMLElement {
   get elements() { return HTMLCollection._from(this.querySelectorAll("input, select, textarea, button, fieldset, output, object")); }
   get length() { return this.elements.length; }
   // Inherit submit() from Element.prototype: it dispatches the cancelable
@@ -9792,6 +9829,48 @@ globalThis.HTMLProgressElement = _htmlInterface('HTMLProgressElement', ['progres
 globalThis.HTMLDetailsElement = _htmlInterface('HTMLDetailsElement', ['details']);
 globalThis.HTMLDialogElement = _htmlInterface('HTMLDialogElement', ['dialog']);
 
+// (#27) Element carries the whole kitchen sink of accessors (everything the
+// bootstrap reflects lives on Element.prototype), but Chrome spreads them
+// across the interfaces — `indeterminate` on HTMLInputElement.prototype,
+// `src` on HTMLImageElement.prototype, table geometry on the table family.
+// With shared prototypes nobody noticed; now each interface owns its level,
+// code that looks up a property ON the interface (getOwnPropertyDescriptor,
+// for-in over a direct prototype, zone.js patchProperty) must find it there.
+// MIRROR, don't move: the same descriptor (same getter/setter functions) is
+// re-defined one level down, so Element-level behavior for every other tag
+// and bootstrap-internal reads are untouched.
+{
+  const _interfaceProps = {
+    HTMLAnchorElement: ['href', 'hash', 'host', 'hostname', 'origin', 'password', 'pathname', 'port', 'protocol', 'search', 'username', 'rel', 'relList', 'type', 'name'],
+    HTMLImageElement: ['src', 'sizes'],
+    HTMLInputElement: ['checked', 'indeterminate', 'value', 'files', 'form', 'disabled', 'name', 'type', 'placeholder', 'max', 'min', 'step', 'multiple', 'size', 'valueAsDate', 'valueAsNumber'],
+    HTMLSelectElement: ['selectedIndex', 'selectedOptions', 'options', 'value', 'form', 'disabled', 'name', 'type', 'multiple'],
+    HTMLOptionElement: ['selected', 'value', 'form', 'disabled'],
+    HTMLTextAreaElement: ['value', 'placeholder', 'form', 'disabled', 'name', 'type'],
+    HTMLButtonElement: ['form', 'disabled', 'name', 'type', 'value'],
+    HTMLTableElement: ['caption', 'rows', 'tBodies', 'tFoot', 'tHead'],
+    HTMLTableRowElement: ['cells', 'rowIndex', 'sectionRowIndex'],
+    HTMLTableCellElement: ['cellIndex'],
+    HTMLLinkElement: ['rel', 'relList', 'sizes', 'disabled'],
+    HTMLMetaElement: ['content'],
+    HTMLLabelElement: ['htmlFor', 'form'],
+    HTMLIFrameElement: ['sandbox', 'contentDocument', 'contentWindow', 'src'],
+    HTMLDialogElement: ['open', 'returnValue', 'closedBy'],
+    HTMLFieldSetElement: ['disabled', 'form', 'name', 'type'],
+    HTMLProgressElement: ['max', 'value'],
+    HTMLMeterElement: ['max', 'min', 'value'],
+  };
+  for (const [iname, props] of Object.entries(_interfaceProps)) {
+    const C = globalThis[iname];
+    if (!C || !C.prototype) continue;
+    for (const p of props) {
+      if (Object.prototype.hasOwnProperty.call(C.prototype, p)) continue;
+      const d = Object.getOwnPropertyDescriptor(Element.prototype, p);
+      if (d) Object.defineProperty(C.prototype, p, d);
+    }
+  }
+}
+
 // Escape on a modal dialog (obscura#952): the CDP keyDown Escape arm lands
 // here. The close request goes to the modal dialog containing the focused
 // element, else the last open modal dialog in document order (topmost
@@ -9948,7 +10027,15 @@ for (const _proto of [Document.prototype, DocumentFragment.prototype]) {
   _proto.prepend = Element.prototype.prepend;
   _proto.replaceChildren = Element.prototype.replaceChildren;
 }
-globalThis.EventTarget = Node;
+// (#27) EventTarget used to be a bare `= Node` alias, which made the chain
+// Node → Object — `el instanceof EventTarget` was false. Real chain: Node's
+// prototype inherits from EventTarget.prototype. The level is EMPTY by
+// design: every method lives on Node.prototype and below, so patches on
+// EventTarget.prototype still reach all nodes through inheritance, exactly
+// like Chrome.
+const _EventTarget = { EventTarget: class EventTarget {} }.EventTarget;
+Object.setPrototypeOf(Node.prototype, _EventTarget.prototype);
+globalThis.EventTarget = _EventTarget;
 globalThis.HTMLCollection = class HTMLCollection extends Array {
   item(i) {
     i = i >>> 0;
@@ -12878,9 +12965,10 @@ if (typeof FileReader === 'undefined') {
 // forever otherwise. Fire `open` after a microtask so the consumer at least
 // proceeds; subsequent messages never arrive, which is no worse than the
 // current "no signal whatsoever" behaviour.
-// Minimal EventTarget shared by socket-like classes. Real `EventTarget` is
-// currently aliased to `Node`, which would drag DOM-tree assumptions into a
-// `WebSocket`. Defining a private shim avoids that.
+// Minimal EventTarget shared by socket-like classes. Real `EventTarget`
+// sits above Node in the inheritance chain, so extending it would drag
+// DOM-tree assumptions into a `WebSocket`. Defining a private shim avoids
+// that.
 function _makeListenerBox(self) {
   const map = new Map();
   self.addEventListener = function (type, fn) {
@@ -14203,5 +14291,45 @@ globalThis.dispatchEvent = function(event) {
     if (!d || !d.configurable || d.enumerable === false) continue;
     d.enumerable = false;
     try { Object.defineProperty(globalThis, names[i], d); } catch (e) {}
+  }
+})();
+
+// (#27) Web IDL installs interface operations as {writable, enumerable,
+// configurable} — but every method above was defined with plain assignment
+// inside a class body (non-enumerable) or defineProperty without enumerable
+// (defaults false). zone.js's patchClass() — the standard Angular/Protractor
+// bootstrap — discovers methods via `for (const prop in instance)` and only
+// walks ENUMERABLE properties, so it saw nothing but engine internal fields
+// (_callback) and Angular died with "n.observe is not a function".
+// Explicit-list sweep over the DOM-ish prototypes: never walk chains upward,
+// that would reach Object.prototype and make hasOwnProperty etc. enumerable.
+(function _makeInterfaceMembersEnumerable() {
+  const protos = new Set();
+  const add = (C) => {
+    if (typeof C === "function" && C.prototype) protos.add(C.prototype);
+  };
+  for (const C of [
+    globalThis.EventTarget, globalThis.Node, globalThis.Element,
+    globalThis.HTMLElement, globalThis.HTMLFormElement, globalThis.Document,
+    globalThis.DocumentFragment, globalThis.ShadowRoot, globalThis.Text,
+    globalThis.Comment, globalThis.Attr, globalThis.CDATASection,
+    globalThis.MutationObserver, globalThis.IntersectionObserver,
+    globalThis.ResizeObserver, globalThis.PerformanceObserver,
+    globalThis.FileReader, globalThis.XMLHttpRequest,
+    globalThis.XMLHttpRequestEventTarget, globalThis.Image,
+    globalThis.NodeList, globalThis.HTMLCollection, globalThis.DOMTokenList,
+    globalThis.CSSStyleDeclaration, globalThis.Range, globalThis.Selection,
+    globalThis.Option, globalThis.FormData, globalThis.Headers, globalThis.URL,
+  ]) add(C);
+  for (const n of Object.getOwnPropertyNames(globalThis)) {
+    if (/^HTML[A-Za-z]*Element$/.test(n)) add(globalThis[n]);
+  }
+  for (const P of protos) {
+    for (const k of Object.getOwnPropertyNames(P)) {
+      if (k === "constructor") continue;
+      const d = Object.getOwnPropertyDescriptor(P, k);
+      if (!d || d.enumerable || !d.configurable) continue;
+      try { Object.defineProperty(P, k, { enumerable: true }); } catch (e) {}
+    }
   }
 })();
