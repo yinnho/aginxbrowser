@@ -1113,94 +1113,108 @@ impl Page {
         }
 
         if let Some(js) = &mut self.js {
-            // Spec order: readyState -> interactive, fire DOMContentLoaded on both
-            // document and window, then readyState -> complete, fire load.
+            // Spec order: readyState -> interactive, fire DOMContentLoaded on
+            // both document and window. The window `load` event intentionally
+            // does NOT fire here: script elements — parser-inserted and
+            // dynamically-inserted alike — delay the load event until they
+            // execute (#44), so load waits for the settle loop below. A
+            // listener registered by a late-arriving dynamic script
+            // (proxydetect-style visual suites hang their whole scheduler on
+            // `window.addEventListener("load", …)`) must catch the event.
             // A page's DOMContentLoaded listener can spin exactly like a
             // script can — without a bound it would pin this synchronous
             // execute_script (and the whole session thread) forever. 5s
             // matches the per-script guard.
-            let load_wd = js.arm_watchdog(std::time::Duration::from_secs(5));
-            let _ = js.execute_script("<load-events>",
+            let dcl_wd = js.arm_watchdog(std::time::Duration::from_secs(5));
+            let _ = js.execute_script("<dcl-events>",
                 "globalThis.__documentReadyState__ = 'interactive';\n\
                  try { document.dispatchEvent(new Event('DOMContentLoaded', {bubbles:false,cancelable:false})); } catch(e) {}\n\
-                 try { window.dispatchEvent(new Event('DOMContentLoaded', {bubbles:false,cancelable:false})); } catch(e) {}\n\
-                 // (#37) readyState flips to complete before load fires, like
-                 // Chrome. The load dispatch fires every handler path exactly
-                 // once, with a real Event: the window.onload property via
-                 // __windowOnHandlers, and the `<body onload=\"...\">` content
-                 // attribute via the body-reflecting fallback in the window
-                 // dispatch wrapper. The old form called window.onload()
-                 // directly (no event argument, while readyState was still
-                 // interactive) and the dispatch then fired the property
-                 // handler a second time. Byte-WAF challenge pages
-                 // (juejin.cn class) drive their whole PoW from
-                 // `<body onload=\"readygo()\">`, which this still runs.
-                 globalThis.__documentReadyState__ = 'complete';\n\
+                 try { window.dispatchEvent(new Event('DOMContentLoaded', {bubbles:false,cancelable:false})); } catch(e) {}");
+            js.disarm_watchdog(dcl_wd);
+        }
+
+        // (#44) Give dynamically-inserted scripts their landing window before
+        // load fires (script elements delay the load event until they
+        // execute, parser-inserted or not).
+        self.settle_pending_work().await;
+
+        if let Some(js) = &mut self.js {
+            // (#44) Now that the settle loop has let dynamically-inserted
+            // scripts land and execute, the load lifecycle closes: readyState
+            // flips to complete and load fires. The dispatch fires every
+            // handler path exactly once, with a real Event: the window.onload
+            // property via __windowOnHandlers, and the `<body onload="...">`
+            // content attribute via the body-reflecting fallback in the
+            // window dispatch wrapper (the #37 contract — byte-WAF challenge
+            // pages drive their whole PoW from `<body onload="readygo()">`).
+            // A load listener can spin exactly like a script can, so the 5s
+            // watchdog bound carries over.
+            let load_wd = js.arm_watchdog(std::time::Duration::from_secs(5));
+            let _ = js.execute_script("<load-events>",
+                "globalThis.__documentReadyState__ = 'complete';\n\
                  try { window.dispatchEvent(new Event('load', {bubbles:false,cancelable:false})); } catch(e) {}");
             js.disarm_watchdog(load_wd);
         }
 
-        if let Some(js) = &mut self.js {
-            // Bound the post-script settle loop by wall clock, not just by the
-            // 10ms-tick branch. The old code only consulted `deadline` inside
-            // the `Err(_)` arm (when the inner tick timed out), so a steady
-            // stream of inflight XHR/fetch (active_requests() > 0) kept the
-            // loop running indefinitely because it took the `Ok(Ok(()))` arm
-            // and slept 1ms each iteration without ever checking the clock.
-            // On busy sites this could keep the V8 lock held for tens of
-            // seconds, wedging the entire CDP dispatcher (see triage for
-            // issue series around the 40-site compat sweep).
-            // A single run_event_loop poll that pins the thread inside V8 makes
-            // the per-poll tokio timeouts below useless, so guard the whole loop
-            // with a watchdog that fires 250ms past the longest deadline.
-            //
-            // A dynamic external script may still be in flight at 500ms. Keep
-            // pumping only while such a fetch is pending, up to a separate
-            // bounded budget, so normal pages and unrelated fetches retain the
-            // fast path (upstream a6bb741).
-            let dynamic_settle_ms = std::env::var("AGINXBROWSER_DYNAMIC_SCRIPT_SETTLE_MS")
-                .ok()
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(3_000)
-                .max(500);
-            let settle_wd = js.arm_watchdog(std::time::Duration::from_millis(dynamic_settle_ms + 250));
-            let started = tokio::time::Instant::now();
-            let deadline = started + tokio::time::Duration::from_millis(500);
-            let dynamic_deadline = started + tokio::time::Duration::from_millis(dynamic_settle_ms);
-            let mut idle_count = 0u32;
-            loop {
-                let now = tokio::time::Instant::now();
-                if now >= deadline
-                    && (now >= dynamic_deadline || !js.has_pending_dynamic_scripts())
-                {
-                    break;
-                }
-                let result = tokio::time::timeout(
-                    tokio::time::Duration::from_millis(10),
-                    js.run_event_loop(),
-                ).await;
+        // Load handlers routinely kick off their own async work: the
+        // byte-WAF PoW spins a setInterval from `<body onload="readygo()">`
+        // that ends in a location.reload(), analytics fire fetches. Before
+        // the #44 reorder this work was pumped by the settle loop above
+        // (load fired first); now it needs its own bounded window or the
+        // JS-triggered navigation chain started from a load handler never
+        // lands before the navigation call returns.
+        self.settle_pending_work().await;
+    }
 
-                match result {
-                    Ok(Ok(())) => {
-                        if self.http_client.active_requests() == 0 {
-                            idle_count += 1;
-                            if idle_count >= 2 {
-                                break;
-                            }
-                            tokio::task::yield_now().await;
-                        } else {
-                            idle_count = 0;
-                            tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+    /// Pump the event loop until pending work settles: dynamic external
+    /// script fetches land and execute, inflight XHR/fetch resolve, and
+    /// timers tick. Bounded twice over — a 500ms fast path for pages with
+    /// nothing pending, and `AGINXBROWSER_DYNAMIC_SCRIPT_SETTLE_MS`
+    /// (default 3s) while a dynamic script fetch is still in flight, so
+    /// normal pages and unrelated fetches retain the fast path (upstream
+    /// a6bb741).
+    async fn settle_pending_work(&mut self) {
+        let Some(js) = self.js.as_mut() else { return };
+        let dynamic_settle_ms = std::env::var("AGINXBROWSER_DYNAMIC_SCRIPT_SETTLE_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(3_000)
+            .max(500);
+        let settle_wd = js.arm_watchdog(std::time::Duration::from_millis(dynamic_settle_ms + 250));
+        let started = tokio::time::Instant::now();
+        let deadline = started + tokio::time::Duration::from_millis(500);
+        let dynamic_deadline = started + tokio::time::Duration::from_millis(dynamic_settle_ms);
+        let mut idle_count = 0u32;
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= deadline && (now >= dynamic_deadline || !js.has_pending_dynamic_scripts()) {
+                break;
+            }
+            let result = tokio::time::timeout(
+                tokio::time::Duration::from_millis(10),
+                js.run_event_loop(),
+            ).await;
+
+            match result {
+                Ok(Ok(())) => {
+                    if self.http_client.active_requests() == 0 {
+                        idle_count += 1;
+                        if idle_count >= 2 {
+                            break;
                         }
-                    }
-                    Ok(Err(_)) => break,
-                    Err(_) => {
+                        tokio::task::yield_now().await;
+                    } else {
                         idle_count = 0;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
                     }
+                }
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    idle_count = 0;
                 }
             }
-            js.disarm_watchdog(settle_wd);
         }
+        js.disarm_watchdog(settle_wd);
     }
 
     pub async fn navigate(&mut self, url_str: &str) -> Result<(), PageError> {
@@ -3654,6 +3668,74 @@ ms.addEventListener('sourceopen', function(){ \
             "the handler receives a real load Event, not a bare argument-less call");
         assert_eq!(p.evaluate("window.__rs"), serde_json::json!("complete"),
             "readyState is already complete when load fires, like Chrome");
+    }
+
+    /// (#44) Script elements — parser-inserted and dynamically-inserted
+    /// alike — delay the window load event until they execute. A load
+    /// listener registered BY a late dynamic script (proxydetect visual
+    /// suites hang their scheduler on `window.addEventListener("load", …)`
+    /// from inside pd-lib.js) must catch the event; the old order fired load
+    /// straight after the parser phase, before the settle loop let dynamic
+    /// scripts land, so the listener missed the event and the suite never
+    /// started.
+    #[tokio::test(flavor = "current_thread")]
+    async fn load_event_waits_for_dynamically_inserted_scripts() {
+        let _g = net_test_guard();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for _ in 0..8 {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let path = String::from_utf8_lossy(&buf[..n])
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_string();
+                let (ctype, body) = if path == "/slow.js" {
+                    // Hold the response well past the parser phase so the
+                    // script is provably still in flight when DCL fires.
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    (
+                        "application/javascript",
+                        "window.__order.push('slow-exec');\
+                         window.addEventListener('load', function() { window.__order.push('late-load'); });"
+                            .to_string(),
+                    )
+                } else {
+                    (
+                        "text/html",
+                        "<html><head></head><body><script>\
+                         window.__order = [];\
+                         window.addEventListener('load', function() { window.__order.push('load'); });\
+                         var s = document.createElement('script');\
+                         s.src = 'http://127.0.0.1:PORT/slow.js';\
+                         document.head.appendChild(s);\
+                         window.__order.push('appended');\
+                         </script></body></html>"
+                            .replace("PORT", &port.to_string()),
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: {ctype}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/a")).await.unwrap();
+        assert_eq!(
+            p.evaluate("JSON.stringify(window.__order)"),
+            serde_json::json!("[\"appended\",\"slow-exec\",\"load\",\"late-load\"]"),
+            "load must fire after the dynamic script executes, and the \
+             listener the script registered must catch the event"
+        );
     }
 
     /// Byte-WAF JS challenge (juejin.cn class) auto-solves end to end:
