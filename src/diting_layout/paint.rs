@@ -2274,10 +2274,32 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                         (rect.y - dy).round() as i64,
                     );
                     let (w, h) = (rect.width.round() as i64, rect.height.round() as i64);
-                    out.fill_rect(x, y, w, t as i64, *color);
-                    out.fill_rect(x, y + h - b as i64, w, b as i64, *color);
-                    out.fill_rect(x, y + t as i64, l as i64, h - t as i64 - b as i64, *color);
-                    out.fill_rect(x + w - r as i64, y + t as i64, r as i64, h - t as i64 - b as i64, *color);
+                    // #38: widths arrive fractional in the wild (border:
+                    // 0.8px) and the old `as i64` cast truncated every side
+                    // below 1px to zero — the border vanished entirely. Snap
+                    // each side to the nearest device pixel and scale that
+                    // side's alpha by the coverage (0.8px -> 1px at 0.8
+                    // alpha), the integer-canvas stand-in for Chrome's
+                    // antialiasing. Exact-zero sides still paint nothing;
+                    // integer widths stay bit-for-bit the old bands.
+                    let band = |cw: f32| -> (i64, [u8; 4]) {
+                        if cw <= 0.0 {
+                            return (0, *color);
+                        }
+                        let pix = (cw.round() as i64).max(1);
+                        let cov = (cw / pix as f32).clamp(0.0, 1.0);
+                        let mut c = *color;
+                        c[3] = ((c[3] as f32) * cov).round() as u8;
+                        (pix, c)
+                    };
+                    let (tp, tc) = band(t);
+                    let (bp, bc) = band(b);
+                    let (lp, lc) = band(l);
+                    let (rp, rc) = band(r);
+                    out.fill_rect(x, y, w, tp, tc);
+                    out.fill_rect(x, y + h - bp, w, bp, bc);
+                    out.fill_rect(x, y + tp, lp, h - tp - bp, lc);
+                    out.fill_rect(x + w - rp, y + tp, rp, h - tp - bp, rc);
                 } else {
                     // Rounded ring: outer rounded box minus the widths-inset
                     // inner rounded box — Chrome's border shape when
@@ -3727,6 +3749,43 @@ mod tests {
         assert_eq!(px(&c, 20, 0), [200, 40, 40, 255], "top band");
         assert_eq!(px(&c, 0, 20), [200, 40, 40, 255], "left band");
         assert_eq!(px(&c, 20, 20), [255, 255, 255, 255], "hole open");
+    }
+
+    /// #38: fractional border widths on the square four-band path used to
+    /// `as i64`-truncate to zero (border: 0.8px painted NOTHING). Now each
+    /// side snaps to the nearest device pixel with alpha scaled by the
+    /// coverage, a zero-width side stays unpainted, and integer widths are
+    /// unchanged.
+    #[test]
+    fn fractional_border_widths_paint_with_coverage() {
+        let fonts = crate::diting_fonts::font_book();
+        let paint = |widths: [f32; 4]| {
+            let items = vec![PaintItem::Border {
+                rect: super::super::Rect { x: 0.0, y: 0.0, width: 40.0, height: 30.0 },
+                widths,
+                color: [200, 40, 40, 255],
+                radii: [(0.0, 0.0); 4],
+            }];
+            let mut c = Canvas::new_filled(40, 30, [255, 255, 255, 255]);
+            execute(&items, &fonts, &mut c);
+            c
+        };
+        // 0.8px: every side 1px at coverage 0.8 -> alpha 204 over white.
+        let c = paint([0.8, 0.8, 0.8, 0.8]);
+        assert_eq!(px(&c, 20, 0), [211, 83, 83, 255], "0.8px top paints 1px at 0.8 coverage");
+        assert_eq!(px(&c, 20, 29), [211, 83, 83, 255], "0.8px bottom");
+        assert_eq!(px(&c, 0, 15), [211, 83, 83, 255], "0.8px left");
+        assert_eq!(px(&c, 39, 15), [211, 83, 83, 255], "0.8px right");
+        assert_eq!(px(&c, 20, 15), [255, 255, 255, 255], "interior untouched");
+        // 1.5px: snaps to 2px at coverage 0.75 -> alpha 191 on both rows.
+        let c = paint([1.5, 1.5, 1.5, 1.5]);
+        assert_eq!(px(&c, 20, 0), [213, 93, 93, 255], "1.5px row 0");
+        assert_eq!(px(&c, 20, 1), [213, 93, 93, 255], "1.5px row 1");
+        assert_eq!(px(&c, 20, 2), [255, 255, 255, 255], "1.5px stops at 2 rows");
+        // A zero side still paints nothing (blitz#837's zero-side repro shape).
+        let c = paint([0.0, 1.0, 1.0, 1.0]);
+        assert_eq!(px(&c, 20, 0), [255, 255, 255, 255], "zero top stays unpainted");
+        assert_eq!(px(&c, 20, 29), [200, 40, 40, 255], "1px bottom full alpha");
     }
 
     /// SetXfCanvas cancels the enclosing bracket: the canvas-space Bg paints
