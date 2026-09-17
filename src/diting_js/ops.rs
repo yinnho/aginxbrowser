@@ -1076,6 +1076,18 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             )).unwrap_or_default();
             serde_json::to_string(&name).unwrap_or("\"\"".into())
         }
+        // True per-node namespace from the tree (parsed SVG children inherit
+        // theirs from the html5ever foreign-content parse; create_element
+        // records what the caller passed). The JS-side namespaceURI getter
+        // reads this — a JS-only heuristic used to report XHTML for every
+        // parsed <path>/<g>/... (#28).
+        "namespace_uri" => {
+            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let ns = dom
+                .get_node(NodeId::new(nid))
+                .and_then(|n| n.as_element().map(|name| name.ns.as_ref().to_string()));
+            serde_json::to_string(&ns).unwrap_or("null".into())
+        }
         "get_attribute" => {
             let nid = arg1.parse::<u32>().unwrap_or(0);
             let val = dom.get_node(NodeId::new(nid)).and_then(|n| n.get_attribute(&arg2).map(|s| s.to_string()));

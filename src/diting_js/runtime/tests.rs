@@ -1231,6 +1231,107 @@
         }
     }
 
+    /// #28: SVG elements wrap in their real interfaces (constructor.name,
+    /// instanceof, patch isolation) and read the true per-node namespace from
+    /// the tree — parsed SVG children inherit theirs, createElementNS keeps
+    /// the XML tag case, and svg/HTML <a> discriminate by namespace.
+    #[test]
+    fn svg_interface_family_and_namespace() {
+        let mut rt = setup_runtime(
+            r#"<body><svg id="sv"><path id="pa"></path><linearGradient id="lg"></linearGradient><a id="sa"></a></svg><a id="ha" href="/h">h</a></body>"#,
+        );
+        let checks: &[(&str, bool)] = &[
+            // Chrome chain: SVGSVGElement → SVGGraphicsElement → SVGElement
+            // → HTMLElement → Element (Blink routes SVG through HTMLElement).
+            ("document.getElementById('sv') instanceof SVGSVGElement", true),
+            ("document.getElementById('sv') instanceof SVGGraphicsElement", true),
+            ("document.getElementById('sv') instanceof SVGElement", true),
+            ("document.getElementById('sv') instanceof HTMLElement", true),
+            ("document.getElementById('sv') instanceof Element", true),
+            ("document.getElementById('pa') instanceof SVGGeometryElement", true),
+            // svg is graphics but NOT geometry; shapes are both.
+            ("document.getElementById('sv') instanceof SVGGeometryElement", false),
+            // Namespace discrimination: svg <a> vs HTML <a> never collide.
+            ("document.getElementById('sa') instanceof SVGAElement", true),
+            ("document.getElementById('sa') instanceof HTMLAnchorElement", false),
+            ("document.getElementById('ha') instanceof HTMLAnchorElement", true),
+            ("document.getElementById('ha') instanceof SVGAElement", false),
+            // The old bare alias made EVERY node instanceof SVGSVGElement.
+            ("document.body instanceof SVGSVGElement", false),
+            ("SVGSVGElement !== Element", true),
+            (
+                "Object.getPrototypeOf(SVGSVGElement.prototype) === SVGGraphicsElement.prototype",
+                true,
+            ),
+            (
+                "Object.getPrototypeOf(SVGGraphicsElement.prototype) === SVGElement.prototype",
+                true,
+            ),
+            (
+                "Object.getPrototypeOf(SVGElement.prototype) === HTMLElement.prototype",
+                true,
+            ),
+            // Parsed SVG children inherit the namespace from the tree; HTML
+            // elements keep XHTML. Case: linearGradient keeps its camelCase.
+            (
+                "document.getElementById('pa').namespaceURI === 'http://www.w3.org/2000/svg'",
+                true,
+            ),
+            (
+                "document.getElementById('ha').namespaceURI === 'http://www.w3.org/1999/xhtml'",
+                true,
+            ),
+            ("document.getElementById('lg').localName === 'linearGradient'", true),
+            ("document.getElementById('lg').tagName === 'linearGradient'", true),
+            // createElementNS: XML tag case preserved, namespace true.
+            (
+                "(() => { const c = document.createElementNS('http://www.w3.org/2000/svg', 'linearGradient'); \
+                  return c.tagName === 'linearGradient' && c.namespaceURI === 'http://www.w3.org/2000/svg' \
+                  && c instanceof SVGLinearGradientElement; })()",
+                true,
+            ),
+            // Empty namespace string is the null namespace per spec.
+            ("document.createElementNS('', 'foo').namespaceURI === null", true),
+            // Class-body methods stay enumerable after the tail pass.
+            (
+                "Object.getOwnPropertyDescriptor(SVGGraphicsElement.prototype, 'getBBox').enumerable",
+                true,
+            ),
+        ];
+        for (expr, expected) in checks {
+            let got = rt.evaluate(expr).unwrap();
+            assert_eq!(got, serde_json::json!(expected), "expr: {expr}");
+        }
+        let names = rt
+            .evaluate(
+                r#"JSON.stringify([
+                    document.getElementById('sv').constructor.name,
+                    document.getElementById('pa').constructor.name,
+                    document.getElementById('lg').constructor.name,
+                    document.getElementById('sa').constructor.name,
+                    document.getElementById('ha').constructor.name,
+                ])"#,
+            )
+            .unwrap();
+        assert_eq!(
+            names,
+            serde_json::json!(
+                r#"["SVGSVGElement","SVGPathElement","SVGLinearGradientElement","SVGAElement","HTMLAnchorElement"]"#
+            )
+        );
+        // A patch on SVGSVGElement's prototype reaches the svg root only.
+        let isolation = rt
+            .evaluate(
+                r#"(() => {
+                    SVGSVGElement.prototype._probe = 'svg';
+                    const sv = document.getElementById('sv');
+                    return JSON.stringify([sv._probe, document.body._probe === undefined]);
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(isolation, serde_json::json!(r#"["svg",true]"#));
+    }
+
     /// Regression for #105: `Element.prepend` must actually insert at the
     /// start, not silently no-op.
     #[test]

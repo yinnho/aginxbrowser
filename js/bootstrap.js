@@ -2406,11 +2406,15 @@ class Element extends Node {
   }
   get tagName() { return _domParse("tag_name", this._nid) || ""; }
   get localName() {
-    // tagName is an op call and the tag never changes, so cache the lowercased
-    // localName. This keeps the new <a>/<area> href getters (which read
-    // localName) and every other localName consumer off the op path.
+    // tagName is an op call and the tag never changes, so cache the localName.
+    // This keeps the new <a>/<area> href getters (which read localName) and
+    // every other localName consumer off the op path. HTML lowercases; the op
+    // reports ns=html tags ALWAYS uppercased and XML-namespace tags in source
+    // case, so a lowercase first letter already means non-HTML (svg
+    // linearGradient must not fold, #28).
     if (this._lname !== undefined) return this._lname;
-    const ln = (this.tagName || "").toLowerCase();
+    const t = this.tagName || "";
+    const ln = t && t[0] === t[0].toLowerCase() ? t : t.toLowerCase();
     if (ln) this._lname = ln;
     return ln;
   }
@@ -2419,11 +2423,14 @@ class Element extends Node {
   get className() { return this.getAttribute("class") || ""; }
   set className(v) { this.setAttribute("class", v); }
   get namespaceURI() {
-    // createElementNS records the requested namespace on _ns; an empty string
-    // maps to the null namespace per spec. Elements made via createElement (or
-    // parsed) have no _ns: default to XHTML, except <svg> which is SVG.
+    // The tree carries the true per-node namespace (namespace_uri): parsed
+    // SVG children inherit theirs, create_element records what was asked.
+    // Legacy mirror: DOMParser's XML builder and old createElementNS set _ns
+    // as an own prop, where "" maps to the null namespace per spec — keep
+    // honoring it so those paths stay exact, then fall back to the tree.
     if (this._ns !== undefined) return this._ns === "" ? null : this._ns;
-    if (this.localName === "svg") return "http://www.w3.org/2000/svg";
+    const ns = _domParse("namespace_uri", this._nid);
+    if (typeof ns === "string") return ns === "" ? null : ns;
     return "http://www.w3.org/1999/xhtml";
   }
   get innerHTML() { return _domParse("inner_html", this._nid) ?? ""; }
@@ -4497,8 +4504,15 @@ class Document extends Node {
     return el;
   }
   createElementNS(ns, t) {
-    const el = this.createElement(t);
-    if (el) el._ns = ns;
+    // Pass the namespace straight to the tree (create_element maps "" to the
+    // null namespace and keeps the XML tag case), so tagName/localName/
+    // namespaceURI all read true — the old path ran it through createElement,
+    // which lowercased the tag and hardcoded XHTML (#28).
+    const name = String(t);
+    const el = _wrapEl(+_dom("create_element", name, String(ns ?? "")));
+    if (el && name.toLowerCase() === 'template') {
+      el._templateContent = this.createDocumentFragment();
+    }
     return el;
   }
   createTextNode(t) { return _wrap(+_dom("create_text_node", String(t))); }
@@ -5042,9 +5056,23 @@ const _cache = new Map();
 // filled by _htmlInterface below; until bootstrap reaches that block the
 // callers fall back to Element exactly like before.
 const _tagInterfaces = new Map();
+// (#28) SVG local names → interface, keyed by the EXACT local name (Rust
+// keeps XML-namespace tags in source case), so SVG <a> and HTML <A> never
+// collide — the HTML table above is only consulted for uppercase tags.
+const _svgTagInterfaces = new Map();
 function _elementClassFor(nid) {
   const tag = _domParse("tag_name", nid);
   if (tag === "FORM" && globalThis.HTMLFormElement) return globalThis.HTMLFormElement;
+  // Rust reports HTML tags uppercase and XML-namespace tags in source case
+  // (tag_name's convention), so a lowercase first letter means a non-HTML
+  // namespace: confirm SVG (MathML falls to the default), then route through
+  // the SVG table. The HTML hot path pays nothing extra.
+  if (typeof tag === "string" && tag && tag[0] === tag[0].toLowerCase()) {
+    if (_domParse("namespace_uri", nid) === "http://www.w3.org/2000/svg") {
+      return _svgTagInterfaces.get(tag) || globalThis.SVGElement || Element;
+    }
+    return globalThis.HTMLElement || Element;
+  }
   const C = typeof tag === "string" ? _tagInterfaces.get(tag.toLowerCase()) : null;
   if (C) return C;
   return globalThis.HTMLElement || Element;
@@ -9645,7 +9673,15 @@ function _htmlInterface(name, tags) {
     }
   } }[name];
   Object.defineProperty(C, Symbol.hasInstance, {
-    value(obj) { return !!obj && tags.includes(String(obj.tagName || '').toLowerCase()); },
+    value(obj) {
+      if (!obj) return false;
+      if (!tags.includes(String(obj.tagName || '').toLowerCase())) return false;
+      // Namespace-blind matching answered true for svg <a> against
+      // HTMLAnchorElement — the HTML interfaces never claim an SVG/MathML
+      // element (#28).
+      const ns = obj.namespaceURI;
+      return ns === undefined || ns === "http://www.w3.org/1999/xhtml";
+    },
     configurable: true,
   });
   for (const t of tags) _tagInterfaces.set(t, C);
@@ -9940,8 +9976,13 @@ globalThis.__diting_tabNavigate = function (shift) {
   order[next].focus();
   return true;
 };
-globalThis.SVGElement = Element;
-globalThis.SVGSVGElement = Element;
+// (#28) Real SVG interface chain. Chrome routes SVG through HTMLElement
+// (SVGSVGElement → SVGGraphicsElement → SVGElement → HTMLElement → Element),
+// so `svg instanceof HTMLElement` is true there — matching that keeps every
+// Element-level accessor reachable AND instanceof discriminating. The old
+// bare aliases made every node instanceof SVGSVGElement and constructor.name
+// read "Element".
+globalThis.SVGElement = class SVGElement extends globalThis.HTMLElement {};
 // Chrome exposes `viewBox` on the fit-to-viewbox SVG elements (svg, marker,
 // pattern, view) as an animated rect — never undefined on those elements, and
 // an all-zero baseVal when the attribute is absent or malformed. Export and
@@ -9966,16 +10007,68 @@ Object.defineProperty(Element.prototype, "viewBox", {
 });
 // API-tamper probes check these globals exist with the listed methods on
 // their prototypes (e.g. `SVGTextContentElement.prototype.getExtentOfChar`).
-globalThis.SVGGraphicsElement = class SVGGraphicsElement extends Element {
+globalThis.SVGGraphicsElement = class SVGGraphicsElement extends globalThis.SVGElement {
   getBBox() { return { x: 0, y: 0, width: 0, height: 0 }; }
   getScreenCTM() { return null; }
   getCTM() { return null; }
 };
-globalThis.SVGTextContentElement = class SVGTextContentElement extends Element {
+// Chrome sits geometry between graphics and the shapes (path instanceof
+// SVGGeometryElement).
+globalThis.SVGGeometryElement = class SVGGeometryElement extends globalThis.SVGGraphicsElement {};
+globalThis.SVGSVGElement = class SVGSVGElement extends globalThis.SVGGraphicsElement {};
+globalThis.SVGTextContentElement = class SVGTextContentElement extends globalThis.SVGGraphicsElement {
   getExtentOfChar() { return { x: 0, y: 0, width: 0, height: 0 }; }
   getSubStringLength() { return 0; }
   getComputedTextLength() { return 0; }
 };
+// (#28) Element interfaces for the common SVG tags, registered by exact
+// local name in _svgTagInterfaces (see _elementClassFor). Computed-name
+// classes keep constructor.name; bases mirror Chrome's chains.
+(() => {
+  const defs = [
+    // [name, base, [local names]]
+    ["SVGGElement", SVGGraphicsElement, ["g"]],
+    ["SVGDefsElement", SVGGraphicsElement, ["defs"]],
+    ["SVGSwitchElement", SVGGraphicsElement, ["switch"]],
+    ["SVGImageElement", SVGGraphicsElement, ["image"]],
+    ["SVGUseElement", SVGGraphicsElement, ["use"]],
+    ["SVGAElement", SVGGraphicsElement, ["a"]],
+    ["SVGForeignObjectElement", SVGGraphicsElement, ["foreignObject"]],
+    ["SVGClipPathElement", SVGGraphicsElement, ["clipPath"]],
+    ["SVGPathElement", SVGGeometryElement, ["path"]],
+    ["SVGRectElement", SVGGeometryElement, ["rect"]],
+    ["SVGCircleElement", SVGGeometryElement, ["circle"]],
+    ["SVGEllipseElement", SVGGeometryElement, ["ellipse"]],
+    ["SVGLineElement", SVGGeometryElement, ["line"]],
+    ["SVGPolylineElement", SVGGeometryElement, ["polyline"]],
+    ["SVGPolygonElement", SVGGeometryElement, ["polygon"]],
+    ["SVGTextElement", SVGTextContentElement, ["text"]],
+    ["SVGTSpanElement", SVGTextContentElement, ["tspan"]],
+    ["SVGTitleElement", SVGElement, ["title"]],
+    ["SVGDescElement", SVGElement, ["desc"]],
+    ["SVGStyleElement", SVGElement, ["style"]],
+    ["SVGSymbolElement", SVGElement, ["symbol"]],
+    ["SVGMarkerElement", SVGElement, ["marker"]],
+    ["SVGPatternElement", SVGElement, ["pattern"]],
+    ["SVGStopElement", SVGElement, ["stop"]],
+  ];
+  for (const [name, Base, tags] of defs) {
+    const C = { [name]: class extends Base {} }[name];
+    globalThis[name] = C;
+    for (const t of tags) _svgTagInterfaces.set(t, C);
+  }
+  // Gradients: linear/radial share the SVGGradientElement level (Chrome).
+  const Grad = { SVGGradientElement: class extends globalThis.SVGElement {} }.SVGGradientElement;
+  globalThis.SVGGradientElement = Grad;
+  const lin = { SVGLinearGradientElement: class extends Grad {} }.SVGLinearGradientElement;
+  const rad = { SVGRadialGradientElement: class extends Grad {} }.SVGRadialGradientElement;
+  globalThis.SVGLinearGradientElement = lin;
+  globalThis.SVGRadialGradientElement = rad;
+  _svgTagInterfaces.set("linearGradient", lin);
+  _svgTagInterfaces.set("radialGradient", rad);
+  // The svg root itself.
+  _svgTagInterfaces.set("svg", globalThis.SVGSVGElement);
+})();
 globalThis.TextMetrics = class TextMetrics {
   constructor() { this.width = 0; this.actualBoundingBoxLeft = 0; this.actualBoundingBoxRight = 0;
     this.actualBoundingBoxAscent = 0; this.actualBoundingBoxDescent = 0; }
@@ -14322,7 +14415,7 @@ globalThis.dispatchEvent = function(event) {
     globalThis.Option, globalThis.FormData, globalThis.Headers, globalThis.URL,
   ]) add(C);
   for (const n of Object.getOwnPropertyNames(globalThis)) {
-    if (/^HTML[A-Za-z]*Element$/.test(n)) add(globalThis[n]);
+    if (/^(HTML|SVG)[A-Za-z]*Element$/.test(n)) add(globalThis[n]);
   }
   for (const P of protos) {
     for (const k of Object.getOwnPropertyNames(P)) {
