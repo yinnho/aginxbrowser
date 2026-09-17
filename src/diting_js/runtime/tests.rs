@@ -11642,3 +11642,97 @@ fn quotes_depth_pairs_none_and_default() {
         "property-less default is the curly left double quote"
     );
 }
+
+/// obscura#993 lineage: custom elements created AFTER define() must upgrade.
+/// craigslist's search shell defines <cl-search-result> at boot, then
+/// document.createElement's one per result inside the fetch callback — the
+/// parse-time sweep in define() never sees those, so the shell rendered an
+/// empty list. createElement must hand back an already-upgraded element
+/// (methods attached, connectedCallback held while detached) and appendChild
+/// must fire the callback so the element can render its own children.
+#[test]
+fn custom_elements_created_after_define_upgrade_on_insert() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    let js = r#"
+        globalThis.__log = [];
+        customElements.define('ce-after', class extends HTMLElement {
+          connectedCallback() {
+            globalThis.__log.push('ccb');
+            const a = document.createElement('a');
+            a.className = 'hit'; a.textContent = 'go';
+            this.appendChild(a);
+          }
+        });
+        const el = document.createElement('ce-after');
+        const bornUpgraded = typeof el.connectedCallback === 'function';
+        const silentWhileDetached = globalThis.__log.join('') === '';
+        document.body.appendChild(el);
+        const out = {
+          bornUpgraded: bornUpgraded,
+          silentWhileDetached: silentWhileDetached,
+          firedOnInsert: globalThis.__log.join('') === 'ccb',
+          rendered: document.querySelectorAll('ce-after a.hit').length === 1,
+          text: document.querySelector('ce-after a.hit').textContent
+        };
+        out
+    "#;
+    let v = rt.evaluate(js).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "bornUpgraded": true,
+            "silentWhileDetached": true,
+            "firedOnInsert": true,
+            "rendered": true,
+            "text": "go"
+        })
+    );
+}
+
+/// The markup half of the same hole: elements entering through innerHTML
+/// markup (never seen by createElement) must upgrade on the connected
+/// container. Scripts inside innerHTML stay inert per spec — elements do not.
+#[test]
+fn custom_elements_in_innerhtml_markup_upgrade_when_connected() {
+    let mut rt = setup_runtime("<html><body><div id='host'></div></body></html>");
+    let js = r#"
+        globalThis.__n = 0;
+        customElements.define('ce-markup', class extends HTMLElement {
+          connectedCallback() { globalThis.__n++; this.setAttribute('data-seen', 'yes'); }
+        });
+        const host = document.getElementById('host');
+        host.innerHTML = '<p>x</p><ce-markup></ce-markup>';
+        const fired = globalThis.__n === 1;
+        const seen = document.querySelector('ce-markup').getAttribute('data-seen');
+        host.innerHTML = '<ce-markup id="two"></ce-markup>';
+        ({ fired: fired, seen: seen, refire: globalThis.__n === 2 })
+    "#;
+    let v = rt.evaluate(js).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({ "fired": true, "seen": "yes", "refire": true })
+    );
+}
+
+/// Chrome's connect/disconnect cycle: an upgraded element leaving the
+/// document fires disconnectedCallback, and a later re-insertion fires
+/// connectedCallback again — move/reshuffle logic in lit-style frameworks
+/// depends on the pairing.
+#[test]
+fn custom_elements_reconnect_refires_connected_callback() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    let js = r#"
+        globalThis.__log = [];
+        customElements.define('ce-cycle', class extends HTMLElement {
+          connectedCallback() { globalThis.__log.push('c'); }
+          disconnectedCallback() { globalThis.__log.push('d'); }
+        });
+        const el = document.createElement('ce-cycle');
+        document.body.appendChild(el);
+        document.body.removeChild(el);
+        document.body.appendChild(el);
+        globalThis.__log.join('')
+    "#;
+    let v = rt.evaluate(js).unwrap();
+    assert_eq!(v, serde_json::json!("cdc"));
+}

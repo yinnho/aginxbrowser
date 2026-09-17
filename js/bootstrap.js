@@ -1460,8 +1460,73 @@ function _scheduleTransitionCheck(el) {
   _transPending.add(el);
 }
 
+// --- dynamic custom element upgrades (obscura #993 lineage) ------------
+// define() only sweeps elements already in the document at definition time.
+// Elements that appear LATER — document.createElement + append, markup set
+// through innerHTML, subtrees built detached then attached — were never
+// upgraded: the constructor never ran and connectedCallback never fired.
+// That is exactly how craigslist's search shell hydrates (it defines
+// <cl-search-result> at boot, then createElement's one per result inside
+// the fetch callback), and any data-driven web-component render path hits
+// the same hole. The walk rides the insertion hook that dynamic scripts
+// already use, and is gated on a non-empty registry so pages defining no
+// custom elements pay one boolean check.
+function __customRegistry() {
+  return (typeof customElements !== 'undefined' && customElements._registry) ? customElements._registry : null;
+}
+function __upgradeCustomElementsIn(root, includeRoot) {
+  const reg = __customRegistry();
+  if (!reg || !reg.size || !root) return;
+  const queue = [];
+  if (includeRoot) {
+    queue.push(root);
+  } else if (root.nodeType === 1 || root.nodeType === 11) {
+    const kids = root.childNodes;
+    for (let i = 0; i < kids.length; i++) queue.push(kids[i]);
+  }
+  // Cursor walk instead of recursion: hydration bursts insert deep markup
+  // and the JS stack must not be the depth limit (cloneNode uses the same
+  // posture). Children enqueue before an element's own callbacks run, so
+  // upgrades land in tree order; children an upgrade itself appends arrive
+  // through their own appendChild hook and re-visit idempotently here.
+  for (let i = 0; i < queue.length; i++) {
+    const el = queue[i];
+    const kids = el.childNodes;
+    for (let j = 0; j < kids.length; j++) queue.push(kids[j]);
+    if (el.nodeType !== 1) continue;
+    const cls = reg.get(el.localName);
+    if (!cls) continue;
+    if (!el.__customUpgraded) {
+      // In-document: _upgradeElement fires connectedCallback itself.
+      customElements._upgradeElement(el, cls);
+    } else if (!el.__customConnected && typeof el.connectedCallback === 'function') {
+      el.__customConnected = true;
+      try { el.connectedCallback(); } catch (e) {}
+    }
+  }
+}
+// Removal is the mirror: upgraded elements leaving the document get
+// disconnectedCallback and drop their connection flag, so a later
+// re-insertion fires connectedCallback again (Chrome's connect/disconnect
+// cycle — move/reshuffle logic in lit-style frameworks depends on it).
+function __disconnectCustomElementsIn(root) {
+  const reg = __customRegistry();
+  if (!reg || !reg.size || !root) return;
+  const queue = [root];
+  for (let i = 0; i < queue.length; i++) {
+    const el = queue[i];
+    const kids = el.childNodes;
+    for (let j = 0; j < kids.length; j++) queue.push(kids[j]);
+    if (el.nodeType !== 1 || !el.__customConnected) continue;
+    el.__customConnected = false;
+    if (typeof el.disconnectedCallback === 'function') {
+      try { el.disconnectedCallback(); } catch (e) {}
+    }
+  }
+}
 function __prepareInsertedSubtree(root) {
   if (!root || !root.isConnected) return;
+  __upgradeCustomElementsIn(root, true);
   const scripts = [];
   const seen = new Set();
   if (root.nodeType === 1 && root.tagName === 'SCRIPT') {
@@ -1721,6 +1786,7 @@ class Node {
   removeChild(c) {
     if (!c) return c;
     _dom("remove_child", c._nid);
+    __disconnectCustomElementsIn(c);
     // A tracked animation on a removed element must fire animationcancel.
     _cancelAnimationsInSubtree(c);
     _cancelTransitionsInSubtree(c);
@@ -1740,6 +1806,7 @@ class Node {
     }
     _dom("insert_before", newChild._nid, oldChild._nid);
     _dom("remove_child", oldChild._nid);
+    __disconnectCustomElementsIn(oldChild);
     // A replacement is an insertion and a removal; an observer saw neither so far.
     if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('childList', this._nid, [newChild._nid], [oldChild._nid]);
     if (_nodeInDocument(this)) _registerIframesIn(newChild);
@@ -2318,6 +2385,11 @@ class Element extends Node {
     _dom("set_inner_html", this._nid, String(v ?? ""));
     if (_nodeInDocument(this)) {
       _registerIframesIn(this);
+      // Custom elements instanced by the markup upgrade as it enters the
+      // document — scripts among the new children stay inert (the
+      // already-started flag), elements do not (Chrome upgrades innerHTML
+      // custom elements synchronously).
+      __upgradeCustomElementsIn(this, false);
       // Stylesheets arriving through innerHTML-connected markup load like
       // any other (the replaced children are new nodes — scripts among them
       // stay inert per the already-started flag, sheets do not).
@@ -4343,8 +4415,17 @@ class Document extends Node {
     // The namespace is passed explicitly: create_element maps an empty
     // second arg to the null namespace (correct for XML elements with no
     // xmlns), so the HTML path must say XHTML here.
-    const el = _wrapEl(+_dom("create_element", t.toLowerCase(), "http://www.w3.org/1999/xhtml"));
-    if (el && t.toLowerCase() === 'template') {
+    const lower = t.toLowerCase();
+    const el = _wrapEl(+_dom("create_element", lower, "http://www.w3.org/1999/xhtml"));
+    if (el) {
+      // Chrome runs a registered custom element's constructor during
+      // createElement — the element is born upgraded, detached, so
+      // connectedCallback waits for insertion (obscura #993 lineage).
+      const reg = (typeof customElements !== 'undefined' && customElements._registry) ? customElements._registry : null;
+      const cls = reg ? reg.get(lower) : null;
+      if (cls) customElements._upgradeElement(el, cls);
+    }
+    if (el && lower === 'template') {
       el._templateContent = this.createDocumentFragment();
     }
     return el;
@@ -7463,6 +7544,9 @@ class CustomElementRegistry {
       // class defines without needing a new allocation.
       try { cls.call(el); } catch (e) {}
       if (typeof el.connectedCallback === 'function' && globalThis.document?.contains?.(el)) {
+        // Mark the connection so the insertion/removal walks can cycle it
+        // (Chrome fires connectedCallback again on every re-insertion).
+        el.__customConnected = true;
         try { el.connectedCallback(); } catch (e) {}
       }
     } catch (e) {}
