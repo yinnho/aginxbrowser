@@ -3661,13 +3661,135 @@ class Element extends Node {
     else this.removeAttribute('multiple');
   }
   get size() {
+    // input.size: reflected unsigned long limited to only positive numbers,
+    // default 20 (Chrome 152 probed). Parse is the HTML non-negative
+    // integer grammar (leading ws/+ tolerated, stops at the first
+    // non-digit); 0, parse-fail and >= 2^31 all fall back to the default.
+    if (this.localName === 'input') {
+      const v = this.getAttribute('size');
+      if (v !== null) {
+        const m = /^\s*\+?(\d+)/.exec(v);
+        if (m !== null) {
+          const p = +m[1];
+          if (p >= 1 && p <= 2147483647) return p;
+        }
+      }
+      return 20;
+    }
     if (this.localName !== 'select') return undefined;
     const n = parseInt(this.getAttribute('size'), 10);
     return Number.isFinite(n) && n > 0 ? n : (this.hasAttribute('multiple') ? 4 : 1);
   }
   set size(v) {
+    // Chrome's input.size setter THROWS IndexSizeError on a ToUint32 of 0
+    // ("which is an invalid size") instead of writing; values above
+    // 2^31-1 after the mod-2^32 wrap write the default string, smaller
+    // wrapped values write verbatim (1e10 -> "1410065408").
+    if (this.localName === 'input') {
+      const n = Number(v) >>> 0;
+      if (n === 0) {
+        throw new DOMException(
+          "Failed to set the 'size' property on 'HTMLInputElement': The value provided is 0, which is an invalid size.",
+          'IndexSizeError');
+      }
+      this.setAttribute('size', String(n > 2147483647 ? 20 : n));
+      return;
+    }
     if (this.localName !== 'select') return;
     if (v != null && +v > 0) this.setAttribute('size', String(+v));
+  }
+  // (#36) maxLength/minLength: [ReflectNonNegative] long, missing-value
+  // default -1 on both input and textarea (Chrome 152 probed — MDN's 0 is
+  // stale). Getter takes the HTML signed-integer parse and falls back on
+  // anything negative or above 2^31-1; the setter is ToInt32 and THROWS
+  // IndexSizeError on negatives — including -1, the very value that is the
+  // getter's default.
+  get maxLength() {
+    const t = this.localName;
+    if (t !== 'input' && t !== 'textarea') return undefined;
+    const v = this.getAttribute('maxlength');
+    if (v !== null) {
+      const m = /^\s*([+-]?\d+)/.exec(v);
+      if (m !== null) {
+        const p = +m[1];
+        if (p >= 0 && p <= 2147483647) return p;
+      }
+    }
+    return -1;
+  }
+  set maxLength(v) {
+    const t = this.localName;
+    if (t !== 'input' && t !== 'textarea') return;
+    const n = Number(v) | 0;
+    if (n < 0) {
+      throw new DOMException(
+        "Failed to set the 'maxLength' property on '" + this.constructor.name + "': The value provided (" + n + ") is not positive or 0.",
+        'IndexSizeError');
+    }
+    this.setAttribute('maxlength', String(n));
+  }
+  get minLength() {
+    const t = this.localName;
+    if (t !== 'input' && t !== 'textarea') return undefined;
+    const v = this.getAttribute('minlength');
+    if (v !== null) {
+      const m = /^\s*([+-]?\d+)/.exec(v);
+      if (m !== null) {
+        const p = +m[1];
+        if (p >= 0 && p <= 2147483647) return p;
+      }
+    }
+    return -1;
+  }
+  set minLength(v) {
+    const t = this.localName;
+    if (t !== 'input' && t !== 'textarea') return;
+    const n = Number(v) | 0;
+    if (n < 0) {
+      throw new DOMException(
+        "Failed to set the 'minLength' property on '" + this.constructor.name + "': The value provided (" + n + ") is not positive or 0.",
+        'IndexSizeError');
+    }
+    this.setAttribute('minlength', String(n));
+  }
+  // (#36) textarea.rows/cols: [ReflectPositiveWithFallback] unsigned long —
+  // same positive-parse getter as input.size (defaults 2 / 20), but the
+  // setter never throws: a ToUint32 of 0 or anything above 2^31-1 writes
+  // the DEFAULT string ("2"/"20"), not the number. The rows GETTER lives
+  // with the table family below (duplicate object-literal keys would
+  // silently overwrite each other); this is just the setter.
+  set rows(v) {
+    if (this.localName !== 'textarea') return;
+    const n = Number(v) >>> 0;
+    this.setAttribute('rows', String(n === 0 || n > 2147483647 ? 2 : n));
+  }
+  get cols() {
+    if (this.localName !== 'textarea') return undefined;
+    const v = this.getAttribute('cols');
+    if (v !== null) {
+      const m = /^\s*\+?(\d+)/.exec(v);
+      if (m !== null) {
+        const p = +m[1];
+        if (p >= 1 && p <= 2147483647) return p;
+      }
+    }
+    return 20;
+  }
+  set cols(v) {
+    if (this.localName !== 'textarea') return;
+    const n = Number(v) >>> 0;
+    this.setAttribute('cols', String(n === 0 || n > 2147483647 ? 20 : n));
+  }
+  // (#36) textarea.wrap is a PLAIN [Reflect] DOMString — no keyword
+  // folding: the getter returns the attribute verbatim ("" when absent,
+  // "HARD" stays "HARD") and the setter is String(v) with no validation.
+  get wrap() {
+    if (this.localName !== 'textarea') return undefined;
+    return this.getAttribute('wrap') || '';
+  }
+  set wrap(v) {
+    if (this.localName !== 'textarea') return;
+    this.setAttribute('wrap', String(v));
   }
   // ---- Table DOM API family (WHATWG §4.9) — the classes were bare interface
   // aliases, so script-built tables (Sina's TabSwitchController: insertRow /
@@ -3676,6 +3798,21 @@ class Element extends Node {
   // as the select family above. `rows` is spec order (thead, then each tbody
   // in tree order, then tfoot), NOT tree order.
   get rows() {
+    // (#36) textarea.rows is a reflected positive long (default 2) — it
+    // shares this key with the table rows collection, so it dispatches
+    // first; the setter next to the cols family above writes the default
+    // string instead of throwing.
+    if (this.localName === 'textarea') {
+      const v = this.getAttribute('rows');
+      if (v !== null) {
+        const m = /^\s*\+?(\d+)/.exec(v);
+        if (m !== null) {
+          const p = +m[1];
+          if (p >= 1 && p <= 2147483647) return p;
+        }
+      }
+      return 2;
+    }
     const t = this.localName;
     if (t === 'table') {
       const out = [];
@@ -10109,10 +10246,10 @@ globalThis.HTMLDialogElement = _htmlInterface('HTMLDialogElement', ['dialog']);
   const _interfaceProps = {
     HTMLAnchorElement: ['href', 'hash', 'host', 'hostname', 'origin', 'password', 'pathname', 'port', 'protocol', 'search', 'username', 'rel', 'relList', 'type', 'name'],
     HTMLImageElement: ['src', 'sizes'],
-    HTMLInputElement: ['checked', 'indeterminate', 'value', 'files', 'form', 'disabled', 'name', 'type', 'placeholder', 'max', 'min', 'step', 'multiple', 'size', 'valueAsDate', 'valueAsNumber'],
+    HTMLInputElement: ['checked', 'indeterminate', 'value', 'files', 'form', 'disabled', 'name', 'type', 'placeholder', 'max', 'min', 'step', 'multiple', 'size', 'maxLength', 'minLength', 'valueAsDate', 'valueAsNumber'],
     HTMLSelectElement: ['selectedIndex', 'selectedOptions', 'options', 'value', 'form', 'disabled', 'name', 'type', 'multiple'],
     HTMLOptionElement: ['selected', 'value', 'form', 'disabled'],
-    HTMLTextAreaElement: ['value', 'placeholder', 'form', 'disabled', 'name', 'type'],
+    HTMLTextAreaElement: ['value', 'placeholder', 'form', 'disabled', 'name', 'type', 'maxLength', 'minLength', 'rows', 'cols', 'wrap'],
     HTMLButtonElement: ['form', 'disabled', 'name', 'type', 'value'],
     HTMLTableElement: ['caption', 'rows', 'tBodies', 'tFoot', 'tHead'],
     HTMLTableRowElement: ['cells', 'rowIndex', 'sectionRowIndex'],

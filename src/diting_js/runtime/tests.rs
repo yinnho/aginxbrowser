@@ -695,6 +695,124 @@
             "headers is plain reflect: null -> \"null\"");
     }
 
+    #[test]
+    fn reflected_long_form_control_families() {
+        let mut rt = setup_runtime(
+            "<html><body><input id='i' size='7' maxlength='5'>\
+             <textarea id='t' rows='4' cols='6' wrap='HARD' maxlength='5'>x</textarea></body></html>",
+        );
+        let out = rt.evaluate(r#"
+            var i = document.getElementById('i'), ta = document.getElementById('t');
+            var inp = document.createElement('input'), tx = document.createElement('textarea');
+            var defaults = [inp.size, inp.maxLength, inp.minLength,
+                            tx.rows, tx.cols, tx.wrap, tx.maxLength, tx.minLength];
+            var parsed = [i.size, i.maxLength, ta.rows, ta.cols, ta.wrap, ta.maxLength];
+            // GETTER: HTML integer parse. size/rows/cols are positive-only
+            // (0/garbage/overflow -> default); maxLength is signed with a -1
+            // missing-value default (Chrome 152 — MDN's 0 is stale).
+            var g = function(el, prop, attr, val) { el.setAttribute(attr, val); return el[prop]; };
+            var gets = [
+                g(inp, 'size', 'size', '0'), g(inp, 'size', 'size', 'abc'),
+                g(inp, 'size', 'size', '-2'), g(inp, 'size', 'size', '  3  '),
+                g(inp, 'size', 'size', '12abc'), g(inp, 'size', 'size', '+5'),
+                g(inp, 'size', 'size', '2147483647'), g(inp, 'size', 'size', '2147483648'),
+                g(inp, 'size', 'size', '3.9'),
+                g(inp, 'maxLength', 'maxlength', '0'), g(inp, 'maxLength', 'maxlength', '-2'),
+                g(inp, 'maxLength', 'maxlength', 'abc'), g(inp, 'maxLength', 'maxlength', '3.9'),
+                g(inp, 'maxLength', 'maxlength', '2147483648'),
+                g(tx, 'rows', 'rows', '0'), g(tx, 'rows', 'rows', 'abc'),
+                g(tx, 'rows', 'rows', '-2'), g(tx, 'rows', 'rows', '10abc'),
+                g(tx, 'cols', 'cols', '0'), g(tx, 'cols', 'cols', '+33'),
+            ];
+            // SETTER: three behaviors — size THROWS on a ToUint32 of 0,
+            // maxLength/minLength THROW on a ToInt32 negative (including -1,
+            // the getter's own default), rows/cols never throw and write the
+            // DEFAULT string on 0 or 2^31 overflow.
+            var T = function(f) { try { f(); return 'ok'; } catch(e) { return 'THROW:'+e.name; } };
+            var s = function(el, prop, attr, v) {
+                el.removeAttribute(attr);
+                var r = T(function(){ el[prop] = v; });
+                var a = el.getAttribute(attr);
+                return [r, a];
+            };
+            var sets = [
+                s(inp, 'size', 'size', 0), s(inp, 'size', 'size', 1e10),
+                s(inp, 'size', 'size', -1), s(inp, 'size', 'size', 12),
+                s(inp, 'maxLength', 'maxlength', 0), s(inp, 'maxLength', 'maxlength', -5),
+                s(inp, 'maxLength', 'maxlength', -1), s(inp, 'maxLength', 'maxlength', 2147483648),
+                s(inp, 'maxLength', 'maxlength', null), s(inp, 'maxLength', 'maxlength', '5x'),
+                s(inp, 'maxLength', 'maxlength', 3.9),
+                s(tx, 'minLength', 'minlength', -1), s(tx, 'minLength', 'minlength', 5),
+                s(tx, 'rows', 'rows', 0), s(tx, 'rows', 'rows', null),
+                s(tx, 'rows', 'rows', 1e10), s(tx, 'rows', 'rows', -2),
+                s(tx, 'cols', 'cols', 0), s(tx, 'cols', 'cols', 40),
+            ];
+            // The throw is an IndexSizeError naming the receiving interface.
+            var errMsg = (function(){ try { inp.size = 0; } catch(e) { return e.name + '|' + e.message.indexOf('HTMLInputElement'); } return '?'; })();
+            // wrap is a PLAIN reflect: verbatim getter, String(v) setter.
+            ta.setAttribute('wrap', ' hard ');
+            var wVerbatim = ta.wrap;
+            ta.wrap = 'soft';
+            var wSet = ta.getAttribute('wrap');
+            ta.wrap = null;
+            var wSetNull = ta.getAttribute('wrap');
+            // Negative maxlength attribute reads back as the default.
+            ta.setAttribute('maxlength', '-5');
+            var tripNeg = ta.maxLength;
+            var inFace = Object.keys(HTMLInputElement.prototype);
+            var taFace = Object.keys(HTMLTextAreaElement.prototype);
+            return JSON.stringify({
+                defaults: defaults,
+                ifaces: [i.constructor.name, ta.constructor.name],
+                parsed: parsed,
+                gets: gets, sets: sets,
+                errMsg: errMsg,
+                wrap: [wVerbatim, wSet, wSetNull],
+                tripNeg: tripNeg,
+                faces: [
+                    ['size', 'maxLength', 'minLength'].every(function(k){ return inFace.indexOf(k) >= 0; }),
+                    ['rows', 'cols', 'wrap'].every(function(k){ return inFace.indexOf(k) < 0; }),
+                    ['rows', 'cols', 'wrap', 'maxLength', 'minLength'].every(function(k){ return taFace.indexOf(k) >= 0; }),
+                ],
+            });
+        "#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        assert_eq!(v["defaults"], serde_json::json!([20, -1, -1, 2, 20, "", -1, -1]),
+            "ReflectDefault: size 20, maxLength/minLength -1 (not MDN's 0), rows 2, cols 20, wrap ''");
+        assert_eq!(v["ifaces"], serde_json::json!(["HTMLInputElement", "HTMLTextAreaElement"]));
+        assert_eq!(v["parsed"], serde_json::json!([7, 5, 4, 6, "HARD", 5]),
+            "parsed-in size/maxlength/rows/cols/wrap read through (#36)");
+        assert_eq!(
+            v["gets"],
+            serde_json::json!([20, 20, 20, 3, 12, 5, 2147483647, 20, 3,
+                               0, -1, -1, 3, -1,
+                               2, 2, 2, 10,
+                               20, 33]),
+            "positive-only parse defaults on 0/garbage/overflow; maxLength keeps 0 and defaults -1"
+        );
+        assert_eq!(
+            v["sets"],
+            serde_json::json!([["THROW:IndexSizeError", null], ["ok", "1410065408"],
+                               ["ok", "20"], ["ok", "12"],
+                               ["ok", "0"], ["THROW:IndexSizeError", null],
+                               ["THROW:IndexSizeError", null], ["THROW:IndexSizeError", null],
+                               ["ok", "0"], ["ok", "0"], ["ok", "3"],
+                               ["THROW:IndexSizeError", null], ["ok", "5"],
+                               ["ok", "2"], ["ok", "2"],
+                               ["ok", "1410065408"], ["ok", "2"],
+                               ["ok", "20"], ["ok", "40"]]),
+            "size throws on 0; maxLength throws on ToInt32 negatives; rows/cols write defaults"
+        );
+        assert!(v["errMsg"].as_str().unwrap().starts_with("IndexSizeError|"),
+            "the throw is an IndexSizeError naming HTMLInputElement, got {:?}", v["errMsg"]);
+        assert_eq!(v["wrap"], serde_json::json!([" hard ", "soft", "null"]),
+            "wrap is a plain reflect: no keyword folding, null -> \"null\"");
+        assert_eq!(v["tripNeg"], serde_json::json!(-1),
+            "maxlength='-5' attribute reads back as the -1 default");
+        assert_eq!(v["faces"], serde_json::json!([true, true, true]),
+            "input face gains size/maxLength/minLength only; textarea gains all five");
+    }
+
 
     #[cfg(feature = "screenshot")]
     #[test]
