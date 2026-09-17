@@ -4462,7 +4462,9 @@ fn parse_px_f32_ctx(v: &str, fonts: &FontCtx) -> Option<f32> {
 
 /// font-size accepts px/em/rem/% and the common absolute keywords. em/%
 /// resolve against the PARENT font-size, rem against the root — done by the
-/// cascade's pre-pass via `font_size_px`.
+/// cascade's pre-pass via `font_size_px`. The relative keywords fold to em
+/// factors (CSS 2.1 leaves the exact ratio UA-defined; 1.2 is the Chrome
+/// ladder, so smaller == ÷1.2, larger == ×1.2).
 fn parse_font_size_len(v: &str) -> Option<CssLength> {
     let v = v.trim();
     if let Some(l) = parse_css_length(v) {
@@ -4473,6 +4475,8 @@ fn parse_font_size_len(v: &str) -> Option<CssLength> {
         "medium" => Some(CssLength::Px(16.0)),
         "large" => Some(CssLength::Px(18.0)),
         "x-large" => Some(CssLength::Px(24.0)),
+        "larger" => Some(CssLength::Em(1.2)),
+        "smaller" => Some(CssLength::Em(1.0 / 1.2)),
         _ => None,
     }
 }
@@ -6528,6 +6532,52 @@ mod tests {
         assert_eq!(mk("font-size: 150%", 16.0).font_size, Some(30.0), "% against parent");
         assert_eq!(mk("font-size: 1.25rem", 24.0).font_size, Some(30.0), "rem against root");
         assert_eq!(mk("color: red", 16.0).font_size, Some(20.0), "inherits parent");
+    }
+
+    #[test]
+    fn font_size_relative_keywords_larger_smaller() {
+        // inline `font-size: smaller/larger` used to be dropped as an
+        // unparseable keyword (element kept the inherited 16px). They fold
+        // against the parent with the 1.2 ladder — same treatment the UA
+        // sheet gives the <small>/<big> tags.
+        let tree = diting_dom::tree_sink::parse_html(r#"<div><p>x</p></div>"#);
+        let p = tree.query_selector("p").unwrap().unwrap();
+        let parent = ComputedStyle { font_size: Some(20.0), ..Default::default() };
+        let mk = |decl: &str, parent: &ComputedStyle| {
+            cascade_element(
+                "p", &tree, p, &[],
+                Some(parent), Some(decl), DEFAULT_ROOT_FONT_SIZE,
+            )
+        };
+        assert_eq!(
+            mk("font-size: smaller", &parent).font_size,
+            Some(20.0 / 1.2),
+            "smaller = parent / 1.2"
+        );
+        assert_eq!(
+            mk("font-size: larger", &parent).font_size,
+            Some(24.0),
+            "larger = parent * 1.2"
+        );
+        let default = ComputedStyle::default();
+        assert_eq!(
+            mk("font-size: smaller", &default).font_size,
+            Some(16.0 / 1.2),
+            "16px base: 13.33"
+        );
+        assert_eq!(
+            mk("font-size: larger", &default).font_size,
+            Some(19.2),
+            "16px base: 19.2"
+        );
+        // Compound declarations still work — the keyword is one token among
+        // the rest of the block.
+        let cs = cascade_element(
+            "p", &tree, p, &[],
+            Some(&default), Some("color: red; font-size: larger; width: 10em"), DEFAULT_ROOT_FONT_SIZE,
+        );
+        assert_eq!(cs.font_size, Some(19.2));
+        assert_eq!(cs.width, Some(Length::Px(192.0)), "width em folds against the keyword result");
     }
 
     #[test]
