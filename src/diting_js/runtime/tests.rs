@@ -7991,6 +7991,98 @@
         assert_eq!(result.value.unwrap(), serde_json::json!([2, 1]));
     }
 
+    // #15 (obscura#984): the DOM conversion trio must match Chrome —
+    // contains() self-short-circuits to true, isSameNode() is identity (not
+    // equality), and getElementById() coerces its argument to string (a
+    // numeric 42 finds id="42") with the empty needle returning null.
+    #[test]
+    fn dom_conversion_trio_matches_chrome() {
+        let mut rt = setup_runtime(
+            r#"<html><body><div id="p"><span id="c">x</span></div><div id="q">y</div><div id="42">z</div></body></html>"#,
+        );
+        let v = rt
+            .evaluate(
+                r#"JSON.stringify([
+                    document.getElementById('p').contains(document.getElementById('p')),
+                    document.getElementById('p').contains(document.getElementById('c')),
+                    document.getElementById('c').contains(document.getElementById('p')),
+                    document.getElementById('p').contains(document.getElementById('q')),
+                    document.getElementById('p').isSameNode(document.getElementById('p')),
+                    document.getElementById('p').isSameNode(document.getElementById('q')),
+                    document.getElementById('p').isSameNode(null),
+                    document.getElementById(42) === document.getElementById('42'),
+                    document.getElementById('') === null
+                ])"#,
+            )
+            .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!(r#"[true,true,false,false,true,false,false,true,true]"#)
+        );
+    }
+
+    // #17: an uncaught exception inside a timer callback reaches BOTH error
+    // surfaces Chrome exposes — window.onerror with (message, source, line)
+    // and an ErrorEvent on window whose .error preserves the Error object.
+    #[tokio::test(flavor = "current_thread")]
+    async fn uncaught_timer_error_fires_onerror_and_error_event() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"async () => {
+            const out = {};
+            window.onerror = function (msg, src, line) {
+                out.onerror = [
+                    String(msg).indexOf('boom') !== -1,
+                    typeof src === 'string' && src.length > 0,
+                    typeof line === 'number' && line > 0,
+                ];
+            };
+            window.addEventListener('error', function (e) {
+                out.evt = [
+                    e instanceof ErrorEvent,
+                    String(e.message).indexOf('boom') !== -1,
+                    e.error instanceof Error,
+                    e.error && e.error.message === 'boom',
+                    typeof e.filename === 'string' && e.filename.length > 0,
+                    typeof e.lineno === 'number' && e.lineno > 0,
+                ];
+            });
+            setTimeout(function () { throw new Error('boom'); }, 0);
+            await new Promise(r => setTimeout(r, 20));
+            return [out.onerror, out.evt];
+        }"#;
+        let result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!([
+                [true, true, true],
+                [true, true, true, true, true, true]
+            ])
+        );
+    }
+
+    // #17: an exception raised INSIDE onerror must not re-enter the error
+    // pipeline (Chrome does not re-report errors thrown by the error
+    // handler) — exactly one onerror call for the original throw.
+    #[tokio::test(flavor = "current_thread")]
+    async fn throwing_onerror_does_not_reenter_error_pipeline() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"async () => {
+            window.__calls = 0;
+            window.onerror = function () { window.__calls++; throw new Error('inside onerror'); };
+            setTimeout(function () { throw new Error('outer'); }, 0);
+            await new Promise(r => setTimeout(r, 20));
+            return window.__calls;
+        }"#;
+        let result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        assert_eq!(result.value.unwrap(), serde_json::json!(1));
+    }
+
     // b12405d closed fetch()/XHR and classic <script src=data:>; the module
     // path was the remaining gap — import() and <script type=module> died in
     // the Rust module loader (validate_fetch_url/reqwest). The loader now

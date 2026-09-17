@@ -21,6 +21,62 @@ globalThis.__diting_errors = [];
 globalThis.onerror = function(msg, src, line, col, error) {
   globalThis.__diting_errors.push({msg: String(msg), src: String(src||""), line, error: String(error||"")});
 };
+
+// Uncaught-exception reporting (Chrome parity): a classic script that
+// throws, or a listener/timer callback that throws, must surface on the
+// window error hooks — onerror + an ErrorEvent('error') dispatched on
+// window — and as an "Uncaught …" console entry, not just a host-side
+// log line. Error-monitoring SDKs (Sentry family) install through exactly
+// these hooks and otherwise see a silent page. Rust calls the string
+// form when a classic script's Err crosses the bridge; the in-JS catch
+// sites use the error-object wrapper below to preserve `error`.
+globalThis.__diting_reportUncaught = function(msg, src, line, err) {
+  try {
+    const message = String(msg == null ? '' : msg);
+    const source = String(src || '');
+    const label = /^Uncaught /.test(message) ? message : 'Uncaught ' + message;
+    if (globalThis.__diting_reporting) {
+      // An error-event listener (or onerror) threw while we were already
+      // reporting: Chrome does not re-enter the error pipeline for it.
+      try { console.error(err && err.stack ? err : label); } catch (_) {}
+      return;
+    }
+    globalThis.__diting_reporting = true;
+    try {
+      if (typeof globalThis.onerror === 'function') {
+        try { globalThis.onerror(message, source, line | 0, 0, err || null); } catch (_) {}
+      }
+      try {
+        globalThis.dispatchEvent(new ErrorEvent('error', {
+          message: message, filename: source, lineno: line | 0, error: err || null
+        }));
+      } catch (_) {}
+      try {
+        if (err && err.stack) console.error(err); else console.error(label);
+      } catch (_) {}
+    } finally { globalThis.__diting_reporting = false; }
+  } catch (_) {}
+};
+globalThis.__diting_reportUncaughtError = function(err, src) {
+  const message = (err && err.message)
+    ? ((err.name && err.name !== 'Error' && String(err.message).indexOf(err.name) !== 0)
+        ? err.name + ': ' + err.message : String(err.message))
+    : String(err);
+  var source = src || '';
+  var line = 0;
+  if (!source && err && err.stack) {
+    // Chrome reports the throw site's script URL and line; a callback we
+    // invoked runs eval'd code whose frames read "<anonymous>:L:C" (or
+    // "url:L:C"). The first stack frame after the message line is the
+    // honest analog — better than reporting no position at all.
+    var frames = String(err.stack).split('\n');
+    for (var i = 1; i < frames.length; i++) {
+      var m = /([^\s()]+):(\d+):\d+/.exec(frames[i]);
+      if (m) { source = m[1]; line = m[2] | 0; break; }
+    }
+  }
+  globalThis.__diting_reportUncaught(message, source, line, err);
+};
 globalThis.__windowListeners = {};
 globalThis.addEventListener = function(type, fn) {
   if (!globalThis.__windowListeners[type]) globalThis.__windowListeners[type] = [];
@@ -34,7 +90,7 @@ globalThis.removeEventListener = function(type, fn) {
 globalThis.dispatchEvent = function(event) {
   if (!event) return true;
   const handlers = globalThis.__windowListeners[event.type] || [];
-  for (const h of handlers) { try { h.call(globalThis, event); } catch(e) { console.error(e); } }
+  for (const h of handlers) { try { h.call(globalThis, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); } }
   return !event.defaultPrevented;
 };
 
@@ -410,7 +466,7 @@ globalThis.setTimeout = (fn, delay = 0, ...args) => {
   const id = ++_tid;
   _scheduleAfter(delay, () => {
     if (_clearedTimers.has(id)) return;
-    try { handler(...args); } catch(e) { console.error("Timer error:", e); }
+    try { handler(...args); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
   });
   return id;
 };
@@ -424,7 +480,7 @@ globalThis.setInterval = (fn, delay = 0, ...args) => {
   _intervals.add(id);
   const tick = () => {
     if (!_intervals.has(id)) return;
-    try { handler(...args); } catch(e) { console.error("Interval error:", e); }
+    try { handler(...args); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
     if (!_intervals.has(id)) return;
     _scheduleAfter(delay, tick);
   };
@@ -1060,7 +1116,7 @@ function __prepareInsertedScript(script) {
           if (body) {
             globalThis.__currentScriptNid = script._nid;
             try { (0, eval)(body); }
-            catch(e) { console.error('Dynamic script error (' + fullUrl + '):', e.message); }
+            catch(e) { globalThis.__diting_reportUncaughtError(e, fullUrl); }
             finally { globalThis.__currentScriptNid = prevNid || 0; }
           }
         }
@@ -1081,12 +1137,12 @@ function __prepareInsertedScript(script) {
         const dataUrl = 'data:text/javascript;base64,' + btoa(unescape(encodeURIComponent(code)));
         (async () => {
           try { await import(dataUrl); }
-          catch(e) { console.error('Dynamic inline module error:', e.message); }
+          catch(e) { globalThis.__diting_reportUncaughtError(e); }
         })();
       } else {
         globalThis.__currentScriptNid = script._nid;
         try { (0, eval)(code); }
-        catch(e) { console.error('Dynamic inline script error:', e.message); }
+        catch(e) { globalThis.__diting_reportUncaughtError(e); }
         finally { globalThis.__currentScriptNid = prevNid || 0; }
       }
     }
@@ -1829,7 +1885,12 @@ class Node {
     __prepareInsertedSubtree(n);
     return n;
   }
-  contains(o) { return o ? _dom("contains", this._nid, o._nid) === "true" : false; }
+  // Self-containment short-circuits to true (spec: "a node contains
+  // itself") — the Rust op's descendants walk excludes the node itself.
+  contains(o) {
+    if (o === this) return true;
+    return o ? _dom("contains", this._nid, o._nid) === "true" : false;
+  }
   hasChildNodes() { return _dom("has_child_nodes", this._nid) === "true"; }
   cloneNode(deep) {
     const t = this.nodeType;
@@ -1928,7 +1989,7 @@ class Node {
     }
     return true;
   }
-  isSameNode(other) { return other && this._nid === other._nid; }
+  isSameNode(other) { return !!other && this._nid === other._nid; }
   addEventListener() {} removeEventListener() {} dispatchEvent() { return true; }
 }
 class CharacterData extends Node {
@@ -2799,11 +2860,11 @@ class Element extends Node {
       try {
         const ret = inlineFn.call(this, event);
         if (ret === false) event.preventDefault();
-      } catch(e) { console.error(e); }
+      } catch(e) { globalThis.__diting_reportUncaughtError(e); }
     }
     const handlers = (_eventRegistry[this._nid] || {})[event.type] || [];
     for (const h of handlers) {
-      try { h.call(this, event); } catch(e) { console.error(e); }
+      try { h.call(this, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
       if (event._immediatePropagationStopped) break;
     }
     if (event.bubbles && !event._propagationStopped && this.parentNode) {
@@ -4402,7 +4463,12 @@ class Document extends Node {
   }
   get hidden() { return false; }
   get visibilityState() { return "visible"; }
-  getElementById(id) { return _wrapEl(+_dom("get_element_by_id", id)); }
+  getElementById(id) {
+    // WebIDL: the argument string-coerces (null → "null" finds
+    // <div id="null">), and the empty string never matches.
+    const needle = String(id);
+    return needle === "" ? null : _wrapEl(+_dom("get_element_by_id", needle));
+  }
   querySelector(s) { return _wrapEl(+_dom("query_selector", s)); }
   querySelectorAll(s) {
     const ids = _domParse("query_selector_all", s) || [];
@@ -4534,7 +4600,7 @@ class Document extends Node {
   dispatchEvent(event) {
     if (!event) return true;
     const handlers = (this._listeners?.[event.type] || []).slice();
-    for (const h of handlers) { try { h.call(this, event); } catch(e) { console.error('document event error:', e); } }
+    for (const h of handlers) { try { h.call(this, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); } }
     return !event.defaultPrevented;
   }
   createTreeWalker(root, whatToShow, filter) {
@@ -4933,6 +4999,7 @@ class DocumentFragment extends Node {
   get lastElementChild() { const ch = this.children; return ch[ch.length - 1] || null; }
   getElementById(id) {
     const needle = String(id);
+    if (needle === "") return null;
     const stack = Array.from(this.childNodes || []).reverse();
     while (stack.length) {
       const node = stack.pop();
@@ -7911,7 +7978,7 @@ globalThis.KeyboardEvent = class extends UIEvent {
 };
 globalThis.FocusEvent = class extends UIEvent { constructor(t,o={}) { super(t,o);this.relatedTarget=o.relatedTarget||null; } };
 globalThis.InputEvent = class extends UIEvent { constructor(t,o={}) { super(t,o);this.data=o.data||null;this.inputType=o.inputType||""; } };
-globalThis.ErrorEvent = class extends Event { constructor(t,o={}) { super(t,o);this.message=o.message||"";this.error=o.error||null; } };
+globalThis.ErrorEvent = class extends Event { constructor(t,o={}) { super(t,o);this.message=o.message||"";this.filename=o.filename||"";this.lineno=o.lineno||0;this.colno=o.colno||0;this.error=o.error||null; } };
 globalThis.AnimationEvent = class AnimationEvent extends Event {
   // WebIDL AnimationEventInit: animationName "" / elapsedTime 0 /
   // pseudoElement "" defaults.
@@ -8767,7 +8834,8 @@ globalThis.DOMParser = class DOMParser {
       },
       querySelectorAll(s) { return root.querySelectorAll(s); },
       getElementById(id) {
-        return walk(root, n => n.getAttribute && n.getAttribute("id") === id);
+        const needle = String(id);
+        return needle === "" ? null : walk(root, n => n.getAttribute && n.getAttribute("id") === needle);
       },
       getElementsByTagName(t) {
         return root.querySelectorAll(t);
@@ -9687,6 +9755,53 @@ globalThis.__diting_dialogEscapeClose = function () {
   }
   if (!dlg || typeof dlg.requestClose !== 'function') return false;
   dlg.requestClose();
+  return true;
+};
+
+// Sequential focus navigation (#14, blitz#899): Tab's default action walks
+// the focusable set in Chrome's tab order — positive tabindex first
+// (ascending, DOM order on ties), then tabindex=0/natural candidates in
+// DOM order — skipping disabled controls, hidden inputs, tabindex="-1",
+// and anything hidden via display:none/visibility:hidden (ancestors
+// included). Wraps at both ends; an empty set leaves focus alone.
+globalThis.__diting_tabNavigate = function (shift) {
+  const sel = 'a[href], area[href], button, input, select, textarea, iframe, [tabindex]';
+  let nodes;
+  try { nodes = document.querySelectorAll(sel); } catch (e) { return false; }
+  const hidden = function (el) {
+    for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+      const cs = getComputedStyle(n);
+      if (cs.display === 'none' || cs.visibility === 'hidden') return true;
+    }
+    return false;
+  };
+  const positives = [];
+  const naturals = [];
+  for (let i = 0; i < nodes.length; i++) {
+    const el = nodes[i];
+    if (_isFormControlDisabled(el)) continue;
+    if (el.tagName === 'INPUT' && String(el.type || '').toLowerCase() === 'hidden') continue;
+    let ti = null;
+    const raw = el.getAttribute('tabindex');
+    if (raw != null) {
+      const n = parseInt(raw, 10);
+      if (!isNaN(n)) ti = n;
+    }
+    if (ti === -1) continue;
+    if (hidden(el)) continue;
+    if (ti != null && ti > 0) positives.push({el: el, ti: ti, i: i});
+    else naturals.push({el: el, i: i});
+  }
+  positives.sort(function (a, b) { return a.ti - b.ti || a.i - b.i; });
+  const order = positives.concat(naturals).map(function (e) { return e.el; });
+  if (!order.length) return false;
+  const cur = globalThis.__diting_focused;
+  let idx = -1;
+  for (let i = 0; i < order.length; i++) { if (order[i] === cur) { idx = i; break; } }
+  let next;
+  if (idx === -1) next = shift ? order.length - 1 : 0;
+  else next = shift ? (idx - 1 + order.length) % order.length : (idx + 1) % order.length;
+  order[next].focus();
   return true;
 };
 globalThis.SVGElement = Element;

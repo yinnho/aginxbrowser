@@ -2129,6 +2129,151 @@ mod tests {
         );
     }
 
+    // Tab focus navigation (#14, blitz#899): Tab's default action walks the
+    // focusable set in Chrome's tab order — positive tabindex ascending
+    // first, then tabindex=0/natural candidates in DOM order — skipping
+    // disabled controls. Shift inverts and wraps at both ends; a
+    // preventDefault'd keydown leaves focus alone; and a client sending the
+    // CDP-conventional text:"\t" must not splice a tab into the control.
+    #[tokio::test(flavor = "current_thread")]
+    async fn input_tab_walks_chrome_focus_order() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-tab-nav".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        // Chrome order: #c (tabindex 1) → #b (tabindex 2) → naturals in DOM
+        // order #a → #e. #d is disabled and never visited.
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({
+                "url": "data:text/html,<form><input id=a><input id=b tabindex=2><input id=c tabindex=1><input id=d disabled><button id=e type=button>Go</button></form>"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        async fn eval(
+            ctx: &mut CdpContext,
+            session: &str,
+            id: u64,
+            expr: &str,
+        ) -> serde_json::Value {
+            let resp = dispatch(
+                &CdpRequest {
+                    id,
+                    method: "Runtime.evaluate".to_string(),
+                    params: json!({"expression": expr, "returnByValue": true}),
+                    session_id: Some(session.to_string()),
+                },
+                ctx,
+            )
+            .await;
+            assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+            resp.result.expect("result")["result"]["value"].clone()
+        }
+        fn key_req(id: u64, modifiers: u64) -> CdpRequest {
+            CdpRequest {
+                id,
+                method: "Input.dispatchKeyEvent".to_string(),
+                params: json!({
+                    "type": "keyDown",
+                    "key": "Tab",
+                    "code": "Tab",
+                    "modifiers": modifiers,
+                }),
+                session_id: Some("sess-tab-nav".to_string()),
+            }
+        }
+        let tab = |id: u64| key_req(id, 0);
+        let shift_tab = |id: u64| key_req(id, 8);
+
+        // Nothing focused yet: forward starts at the first candidate.
+        for (id, expect) in [(2u64, "c"), (3, "b"), (4, "a"), (5, "e")] {
+            assert!(dispatch(&tab(id), &mut ctx).await.error.is_none());
+            let active = eval(
+                &mut ctx,
+                &session_id,
+                id + 100,
+                "document.activeElement && document.activeElement.id",
+            )
+            .await;
+            assert_eq!(active, json!(expect), "after Tab #{id}");
+        }
+        // Wrap at the end: #e → #c.
+        assert!(dispatch(&tab(6), &mut ctx).await.error.is_none());
+        assert_eq!(
+            eval(&mut ctx, &session_id, 106, "document.activeElement.id").await,
+            json!("c"),
+            "forward wraps to the first candidate"
+        );
+        // Shift+Tab from #c wraps backward to #e.
+        assert!(dispatch(&shift_tab(7), &mut ctx).await.error.is_none());
+        assert_eq!(
+            eval(&mut ctx, &session_id, 107, "document.activeElement.id").await,
+            json!("e"),
+            "backward wraps to the last candidate"
+        );
+        // The disabled input never appears anywhere in the observed cycle
+        // (c→b→a→e→c across the five walks above).
+        // preventDefault leaves focus where it is, like Chrome.
+        assert!(dispatch(&tab(8), &mut ctx).await.error.is_none()); // → #c
+        let arm = eval(
+            &mut ctx,
+            &session_id,
+            109,
+            "(function(){document.__tabGuard=function(e){if(e.key==='Tab')e.preventDefault();};document.addEventListener('keydown',document.__tabGuard,true);return document.activeElement.id;})()",
+        )
+        .await;
+        assert_eq!(arm, json!("c"));
+        assert!(dispatch(&tab(9), &mut ctx).await.error.is_none());
+        assert_eq!(
+            eval(&mut ctx, &session_id, 110, "document.activeElement.id").await,
+            json!("c"),
+            "preventDefault'd Tab does not move focus"
+        );
+        // Remove the guard and confirm navigation resumes (proves the block
+        // above tested the event path, not a wedged dispatcher).
+        eval(
+            &mut ctx,
+            &session_id,
+            111,
+            "(function(){document.removeEventListener('keydown',document.__tabGuard,true);document.activeElement.blur();return 1;})()",
+        )
+        .await;
+
+        // CDP clients send text:"\t" with Tab — it must never splice.
+        let park = eval(
+            &mut ctx,
+            &session_id,
+            112,
+            "(function(){document.getElementById('a').focus();document.getElementById('a').value='';return 1;})()",
+        )
+        .await;
+        assert_eq!(park, json!(1));
+        let with_text = CdpRequest {
+            id: 13,
+            method: "Input.dispatchKeyEvent".to_string(),
+            params: json!({
+                "type": "keyDown",
+                "key": "Tab",
+                "code": "Tab",
+                "text": "\t",
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&with_text, &mut ctx).await.error.is_none());
+        let after = eval(
+            &mut ctx,
+            &session_id,
+            114,
+            "document.getElementById('a').value + '|' + document.activeElement.id",
+        )
+        .await;
+        assert_eq!(after, json!("|e"), "no tab spliced; focus still moved");
+    }
+
     // attachToBrowserTarget must mint a fresh session per attachment
     // (obscura#975 same hole): a client that attaches twice and detaches one
     // session must not silently lose the other. Both sessions still route to

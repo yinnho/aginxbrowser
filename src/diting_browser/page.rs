@@ -971,11 +971,27 @@ impl Page {
                         let _ = js.execute_script("<current-script>", &format!("globalThis.__currentScriptNid={};", script.nid));
                         if let Err(e) = js.execute_script_guarded(&url, &code) {
                             tracing::warn!("Script error ({}): {}", url, e);
+                            // Chrome parity (#17): the uncaught throw must
+                            // reach the window error hooks (onerror +
+                            // ErrorEvent('error')) and the console, not just
+                            // this host-side log line.
+                            let msg = e.strip_prefix("JS error: ").unwrap_or(&e);
+                            if let (Ok(m), Ok(s)) =
+                                (serde_json::to_string(msg), serde_json::to_string(url.as_str()))
+                            {
+                                let _ = js.execute_script(
+                                    "<window-error>",
+                                    &format!(
+                                        "globalThis.__diting_reportUncaught({m}, {s}, 0, null);"
+                                    ),
+                                );
+                            }
                         }
                         let _ = js.execute_script("<current-script>", "globalThis.__currentScriptNid=0;");
                     }
                 }
             } else if !script.inline.is_empty() {
+                let doc_url = self.url_string();
                 if let Some(js) = &mut self.js {
                     tracing::info!(
                         "Executing inline script ({} bytes) [nid {}]",
@@ -985,6 +1001,21 @@ impl Page {
                     let _ = js.execute_script("<current-script>", &format!("globalThis.__currentScriptNid={};", script.nid));
                     if let Err(e) = js.execute_script_guarded("<inline>", &script.inline) {
                         tracing::warn!("Inline script error: {}", e);
+                        // Same window-error reporting as external scripts
+                        // (#17); Chrome attributes inline throws to the
+                        // document URL.
+                        let msg = e.strip_prefix("JS error: ").unwrap_or(&e);
+                        if let (Ok(m), Ok(s)) = (
+                            serde_json::to_string(msg),
+                            serde_json::to_string(doc_url.as_str()),
+                        ) {
+                            let _ = js.execute_script(
+                                "<window-error>",
+                                &format!(
+                                    "globalThis.__diting_reportUncaught({m}, {s}, 0, null);"
+                                ),
+                            );
+                        }
                     }
                     let _ = js.execute_script("<current-script>", "globalThis.__currentScriptNid=0;");
                 }

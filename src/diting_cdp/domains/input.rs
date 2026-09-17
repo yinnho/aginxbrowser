@@ -424,6 +424,30 @@ pub async fn handle(
                                 }\
                             })()";
                             page.evaluate(js);
+                        } else if key == "Tab" {
+                            // #14 (blitz#899): Tab's default action is
+                            // sequential focus navigation. The page sees the
+                            // keydown first; a preventDefault leaves focus
+                            // where it is, like Chrome. Shift comes from the
+                            // modifiers bitmask (bit 3).
+                            let shift = params
+                                .get("modifiers")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0)
+                                & 8
+                                != 0;
+                            let js = format!(
+                                "(function() {{\
+                                    var target = document.activeElement || document.body;\
+                                    var evt = globalThis.__diting_markTrusted(new KeyboardEvent('keydown', {{bubbles:true,cancelable:true,key:'Tab',code:'Tab',shiftKey:{shift}}}));\
+                                    target.dispatchEvent(evt);\
+                                    if (!evt.defaultPrevented && globalThis.__diting_tabNavigate) {{\
+                                        try {{ globalThis.__diting_tabNavigate({shift}); }} catch (e) {{}}\
+                                    }}\
+                                }})()",
+                                shift = shift,
+                            );
+                            page.evaluate(&js);
                         } else {
                         let js = format!(
                             "(function() {{\
@@ -437,7 +461,10 @@ pub async fn handle(
                         page.evaluate(&js);
                         }
 
-                        if !text.is_empty() && text != "\r" && text != "\n" {
+                        // Tab's default action is focus navigation, not text
+                        // insertion: a client passing text:"\t" (the CDP
+                        // convention) must not splice a tab into the control.
+                        if !text.is_empty() && text != "\r" && text != "\n" && key != "Tab" {
                             page.evaluate(&insert_text_js(text));
                         }
 
