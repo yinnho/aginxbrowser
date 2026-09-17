@@ -6387,6 +6387,154 @@
         );
     }
 
+    /// navigator.sendBeacon used to be a stub that returned true without
+    /// sending anything — pd-lib's three detection beacons silently vanished
+    /// (proxydetect.live never settled). A beacon must leave the machine as a
+    /// fire-and-forget POST; the relative URL resolves against the document.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_beacon_relative_url_posts_with_text_plain() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let Ok((mut stream, _)) = listener.accept() else { return };
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            seen.lock().unwrap().push(String::from_utf8_lossy(&buf).to_string());
+            let response = "HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{port}/page"));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const ok = navigator.sendBeacon("/beacon", "hello");
+                    await new Promise(r => setTimeout(r, 800));
+                    return "queued:" + ok;
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let msg = result.value.unwrap().as_str().unwrap_or_default().to_string();
+        assert_eq!(msg, "queued:true", "sendBeacon must report a queued transfer");
+
+        let hops = requests.lock().unwrap();
+        assert_eq!(hops.len(), 1, "exactly one beacon must reach the wire");
+        let raw = hops[0].to_ascii_lowercase();
+        assert!(
+            raw.starts_with("post /beacon"),
+            "beacon must POST to the resolved relative URL, got: {}",
+            hops[0].lines().next().unwrap_or("")
+        );
+        assert!(
+            raw.contains("content-type: text/plain;charset=UTF-8".to_ascii_lowercase().as_str()),
+            "string data must ride text/plain;charset=UTF-8, got: {raw}"
+        );
+        assert!(raw.contains("\r\n\r\nhello"), "string data must be the body, got: {raw}");
+    }
+
+    /// Spec content-type mapping by data type: URLSearchParams → urlencoded
+    /// (fetch's own default), BufferSource → application/octet-stream (the
+    /// caller must supply it — fetch does not), Blob → the blob's own type.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_beacon_body_type_to_content_type_map() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for _ in 0..3 {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                seen.lock().unwrap().push(String::from_utf8_lossy(&buf).to_string());
+                let response = "HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url("https://example.com/page");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const base = "http://127.0.0.1:PORT/beacon";
+                    navigator.sendBeacon(base + "?k=urlsp", new URLSearchParams("a=1&b=2"));
+                    navigator.sendBeacon(base + "?k=binary", new Uint8Array([104, 105]));
+                    navigator.sendBeacon(base + "?k=blob", new Blob(["csv,data"], { type: "text/csv" }));
+                    await new Promise(r => setTimeout(r, 1200));
+                    return "queued";
+                }"#
+                .replace("PORT", &port.to_string())
+                .as_str(),
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let msg = result.value.unwrap().as_str().unwrap_or_default().to_string();
+        assert_eq!(msg, "queued");
+
+        let hops = requests.lock().unwrap();
+        assert_eq!(hops.len(), 3, "all three beacons must reach the wire");
+        let find = |needle: &str| hops.iter().any(|h| h.to_ascii_lowercase().contains(needle));
+        assert!(
+            find("content-type: application/x-www-form-urlencoded;charset=utf-8") && find("\r\n\r\na=1&b=2"),
+            "URLSearchParams must ride the urlencoded content-type with its serialized body, got: {hops:?}"
+        );
+        assert!(
+            find("content-type: application/octet-stream") && find("\r\n\r\nhi"),
+            "BufferSource must ride octet-stream with its raw bytes, got: {hops:?}"
+        );
+        assert!(
+            find("content-type: text/csv") && find("\r\n\r\ncsv,data"),
+            "Blob must ride its own type, got: {hops:?}"
+        );
+    }
+
+    /// An unresolvable URL fails synchronously with false — the caller gets to
+    /// fall back to XHR, exactly like a real browser (no queued, no network).
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_beacon_invalid_url_returns_false() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url("https://example.com/page");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"() => {
+                    return "bad:" + navigator.sendBeacon("http://[bad", "x");
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let msg = result.value.unwrap().as_str().unwrap_or_default().to_string();
+        assert_eq!(msg, "bad:false", "an unresolvable URL must fail synchronously with false");
+    }
+
     /// Preflight validation order (obscura#973 same hole): the preflight's
     /// HTTP status is checked before its CORS headers, so a 403 preflight
     /// reports the status — not a misleading "origin not allowed" error.

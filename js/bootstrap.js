@@ -5833,7 +5833,38 @@ globalThis.navigator = {
   } },
   getBattery() { return Promise.resolve({ charging: _fp('batteryCharging'), chargingTime: _fp('batteryCharging') ? 0 : Infinity, dischargingTime: _fp('batteryCharging') ? Infinity : Math.floor(3600 + _fpRand(250) * 7200), level: _fp('batteryLevel'), addEventListener(){} }); },
   getGamepads() { return []; },
-  sendBeacon() { return true; },
+  sendBeacon(url, data) {
+    let abs;
+    try {
+      abs = new URL(String(url), _docBase()).href;
+    } catch (e) {
+      return false;
+    }
+    let body = data == null ? "" : data;
+    let hdrs;
+    if (typeof data === "string") {
+      hdrs = { "content-type": "text/plain;charset=UTF-8" };
+    } else if (typeof Blob === "function" && data instanceof Blob) {
+      // fetch already rides blob.type as the content-type.
+    } else if (typeof URLSearchParams === "function" && data instanceof URLSearchParams) {
+      // fetch already applies the urlencoded content-type.
+    } else if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+      hdrs = { "content-type": "application/octet-stream" };
+    } else if (typeof FormData === "function" && data instanceof FormData) {
+      // fetch serializes multipart with a generated boundary.
+    } else {
+      body = String(data);
+      hdrs = { "content-type": "text/plain;charset=UTF-8" };
+    }
+    // Fire-and-forget: a beacon outlives the page that queued it, so the
+    // response is never observed — the promise is discarded and its rejection
+    // swallowed (a failing endpoint must not surface as an unhandled
+    // rejection). true means the transfer was queued, not delivered.
+    const init = { method: "POST", body, mode: "no-cors", credentials: "include", keepalive: true };
+    if (hdrs) init.headers = hdrs;
+    Promise.resolve(globalThis.fetch(abs, init)).catch(() => {});
+    return true;
+  },
   javaEnabled() { return false; },
   geolocation: {
     getCurrentPosition(success, error) {
