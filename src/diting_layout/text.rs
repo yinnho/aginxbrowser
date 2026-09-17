@@ -115,6 +115,10 @@ thread_local! {
     static SHAPE_CTX: RefCell<ShapeContext> = RefCell::new(ShapeContext::new());
     /// Same for the scaler (glyph outline raster state, batch 3b).
     static SCALE_CTX: RefCell<ScaleContext> = RefCell::new(ScaleContext::new());
+    /// `line-height: normal` ratios (ascent+descent+line_gap at size 1) for
+    /// [regular, bold], keyed by book fingerprint — the same identity
+    /// contract as the raster cache (#16).
+    static NORMAL_LH_RATIOS: RefCell<HashMap<u64, [f32; 2]>> = RefCell::new(HashMap::new());
 }
 
 impl FontBook {
@@ -359,8 +363,8 @@ impl FontBook {
 
     /// Vertical metrics of the face, normalized to px at `font_size` — for
     /// the paint batch (baseline placement, 3b). Layout line height does NOT
-    /// use these: blitz pins CSS `normal` to `font_size * 1.2`
-    /// (blitz-dom/src/layout/mod.rs:76), and we match that.
+    /// hard-pin CSS `normal` to `font_size * 1.2` anymore: it derives from
+    /// these metrics (see [`FontBook::normal_line_height`], #16/blitz#878).
     ///
     /// `descent` is the positive distance BELOW the baseline (swash reports
     /// the descender magnitude; we normalize with `abs` so the sign
@@ -375,6 +379,32 @@ impl FontBook {
             descent: m.descent.abs() * scale,
             line_gap: m.leading.abs() * scale,
         })
+    }
+
+    /// Used line height for `line-height: normal`: the face's own vertical
+    /// extent (ascent + descent + line gap) like a real browser, not a flat
+    /// 1.2× (#16, blitz#878). Layout asks once per text leaf, so the ratio
+    /// is memoized per book fingerprint — the same book-identity contract
+    /// as the raster cache. Falls back to the legacy 1.2 when the face
+    /// won't parse.
+    pub fn normal_line_height(&self, font_size: f32, bold: bool) -> f32 {
+        let fp = self.fingerprint;
+        let ratios = NORMAL_LH_RATIOS.with(|memo| {
+            if let Some(r) = memo.borrow().get(&fp) {
+                return *r;
+            }
+            let r = [
+                self.metrics(1.0, false)
+                    .map(|m| m.ascent + m.descent + m.line_gap)
+                    .unwrap_or(1.2),
+                self.metrics(1.0, true)
+                    .map(|m| m.ascent + m.descent + m.line_gap)
+                    .unwrap_or(1.2),
+            ];
+            memo.borrow_mut().insert(fp, r);
+            r
+        });
+        font_size * ratios[usize::from(bold)]
     }
 
     /// Rasterize one line of `text` into an RGBA tile (batch 3b): shape →

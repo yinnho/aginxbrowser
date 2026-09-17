@@ -462,7 +462,7 @@ fn flattened_inline_union_carries_strut_height() {
     );
     let b_id = tree2.query_selector_all("b").unwrap()[0];
     let rb = rects2.get(&b_id).expect("flattened <b> must own a union rect");
-    let (_, _, lh) = super::font_context(&tree2, b_id, &styles2);
+    let (_, _, lh) = super::font_context(&tree2, b_id, &styles2, &crate::diting_fonts::font_book());
     assert!(
         rb.height >= lh - 1.0 && rb.height <= lh + 8.0,
         "text inline should sit at its line height {lh}; got {rb:?}"
@@ -502,30 +502,37 @@ fn sub_super_grows_line_box_and_strut_keeps_img_honest() {
 
     let plain_h = h("#plain");
     let plain_id = tree.query_selector_all("#plain").unwrap()[0];
-    let (_, _, lh) = super::font_context(&tree, plain_id, &styles);
+    let (_, _, lh) = super::font_context(&tree, plain_id, &styles, &crate::diting_fonts::font_book());
     assert!(
         (plain_h - lh).abs() <= 1.0,
         "plain line sits at the strut {lh}; got {plain_h}"
     );
 
+    // The #16 landing flips these from Chrome-oracle absolutes (28/32, which
+    // the flat-1.2 pitch hit by arithmetic coincidence) to model-relative:
+    // leaf pitch (metrics-derived) + the 8px 0.4×parent lift — the Chromium
+    // CONSTANT is the font-independent part worth pinning.
+    let sup_fs = 20.0 * 0.8333;
     let sup_h = h("#sup");
+    let want_sup = fonts.normal_line_height(sup_fs, false) + 8.0;
     assert!(
-        (sup_h - 28.0).abs() <= 1.5,
-        "UA sup (fs smaller, valign super) lifts by 0.4×parent fs: 20+8 (Chrome 28); got {sup_h}"
+        (sup_h - want_sup).abs() <= 1.0,
+        "UA sup line = own metrics pitch + the 0.4×parent lift (8px at 20px, the #420 probe's Chromium constant); got {sup_h} want {want_sup}"
     );
 
     let sub_h = h("#sub");
-    let sup_fs = 20.0 * 0.8333;
-    let want_sub = sup_fs * 1.2 + (0.2 * 20.0 + super::leaf_descent(&fonts, sup_fs, false)).ceil();
+    let want_sub =
+        fonts.normal_line_height(sup_fs, false) + (0.2 * 20.0 + super::leaf_descent(&fonts, sup_fs, false)).ceil();
     assert!(
         (sub_h - want_sub).abs() <= 1.0,
         "sub drops by 0.2×parent fs plus its own (whole-px) descent; got {sub_h} want {want_sub}"
     );
 
     let ex_h = h("#explicit");
+    let want_ex = fonts.normal_line_height(20.0, false) + 8.0;
     assert!(
-        (ex_h - 32.0).abs() <= 1.5,
-        "explicit vertical-align:super at 20px: 24+8 (Chrome 32); got {ex_h}"
+        (ex_h - want_ex).abs() <= 1.0,
+        "explicit super at 20px = own pitch + the same 8px lift; got {ex_h} want {want_ex}"
     );
 
     let wrap_h = h("#imgwrap");
@@ -590,7 +597,7 @@ fn inline_block_is_atomic_shrink_to_fit_and_wraps() {
         "17 items must shrink-wrap to more than one item's width; got {rl:?}"
     );
     let lh = {
-        let (_, _, lh) = super::font_context(&tree, list, &styles);
+        let (_, _, lh) = super::font_context(&tree, list, &styles, &crate::diting_fonts::font_book());
         lh
     };
     assert!(
@@ -1165,8 +1172,8 @@ fn mixed_font_run_aligns_baselines() {
     let b_id = tree.query_selector_all("#b").unwrap()[0];
     let ra = rects.get(&a_id).expect("16px span rect");
     let rb = rects.get(&b_id).expect("24px span rect");
-    let (fs_a, bold_a, lh_a) = super::font_context(&tree, a_id, &styles);
-    let (fs_b, bold_b, lh_b) = super::font_context(&tree, b_id, &styles);
+    let (fs_a, bold_a, lh_a) = super::font_context(&tree, a_id, &styles, &crate::diting_fonts::font_book());
+    let (fs_b, bold_b, lh_b) = super::font_context(&tree, b_id, &styles, &crate::diting_fonts::font_book());
 
     let base_a = span_baseline_y(ra, &fonts, fs_a, bold_a, lh_a);
     let base_b = span_baseline_y(rb, &fonts, fs_b, bold_b, lh_b);
@@ -1203,9 +1210,9 @@ fn mixed_font_run_aligns_baselines_per_wrapped_line() {
     let ra = rects.get(&a_id).expect("span a rect");
     let rb = rects.get(&b_id).expect("span b rect");
     let rc = rects.get(&c_id).expect("span c rect");
-    let (fs_a, bold_a, lh_a) = super::font_context(&tree, a_id, &styles);
-    let (fs_b, bold_b, lh_b) = super::font_context(&tree, b_id, &styles);
-    let (fs_c, bold_c, lh_c) = super::font_context(&tree, c_id, &styles);
+    let (fs_a, bold_a, lh_a) = super::font_context(&tree, a_id, &styles, &crate::diting_fonts::font_book());
+    let (fs_b, bold_b, lh_b) = super::font_context(&tree, b_id, &styles, &crate::diting_fonts::font_book());
+    let (fs_c, bold_c, lh_c) = super::font_context(&tree, c_id, &styles, &crate::diting_fonts::font_book());
 
     let base_a = span_baseline_y(ra, &fonts, fs_a, bold_a, lh_a);
     let base_b = span_baseline_y(rb, &fonts, fs_b, bold_b, lh_b);
@@ -1244,8 +1251,8 @@ fn inline_block_baseline_is_its_last_line() {
     let box_id = tree.query_selector_all("#box").unwrap()[0];
     let rt = rects.get(&t_id).expect("text span rect");
     let rbox = rects.get(&box_id).expect("inline-block rect");
-    let (fs_t, bold_t, lh_t) = super::font_context(&tree, t_id, &styles);
-    let (fs_b, bold_b, lh_b) = super::font_context(&tree, box_id, &styles);
+    let (fs_t, bold_t, lh_t) = super::font_context(&tree, t_id, &styles, &crate::diting_fonts::font_book());
+    let (fs_b, bold_b, lh_b) = super::font_context(&tree, box_id, &styles, &crate::diting_fonts::font_book());
     assert!(
         rbox.height > lh_b * 1.5,
         "the narrow box must wrap onto multiple lines: {rbox:?} lh={lh_b}"
@@ -1286,7 +1293,7 @@ fn empty_inline_block_aligns_bottom_edge() {
     let box_id = tree.query_selector_all("#box").unwrap()[0];
     let rt = rects.get(&t_id).expect("text span rect");
     let rbox = rects.get(&box_id).expect("empty inline-block keeps its box");
-    let (fs_t, bold_t, lh_t) = super::font_context(&tree, t_id, &styles);
+    let (fs_t, bold_t, lh_t) = super::font_context(&tree, t_id, &styles, &crate::diting_fonts::font_book());
 
     let base_t = span_baseline_y(rt, &fonts, fs_t, bold_t, lh_t);
     let bottom = rbox.y + rbox.height;

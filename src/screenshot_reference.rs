@@ -708,7 +708,7 @@ mod cross_check {
     /// blitz document, projected into diting_css's property subset.
     fn stylo_view(doc: &BaseDocument, node_id: NodeId) -> Option<ComputedStyle> {
         let node = doc.get_node(node_id)?;
-        let data = node.stylo_element_data_opt()?.get()?;
+        let data = node.try_stylo_element_data()?.get()?;
         let style = data.styles.get_primary()?;
 
         let mut cs = ComputedStyle::default();

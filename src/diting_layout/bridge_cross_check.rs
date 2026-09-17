@@ -66,7 +66,7 @@
         // Pin the family so every text run hits the fixture collection.
         let sheet = format!("body {{ font-family: {FIXTURE_FAMILY}; }}\n{stylesheet}");
         let css_doc = format!("<style>{sheet}</style>{html}");
-        let mut doc = blitz_html::HtmlDocument::from_html(
+        let doc = blitz_html::HtmlDocument::from_html(
             &css_doc,
             DocumentConfig {
                 base_url: Some("https://example.com/".to_string()),
@@ -487,8 +487,9 @@
         let (_doc, tree, _styles, rects) = both_engines(html, sheet);
         let zh = rects[&tree.query_selector("#zh").unwrap().unwrap()];
         assert!((zh.width - 200.0).abs() < EPS as f32, "width: {}", zh.width);
-        // 2 lines × (20 × 1.2)
-        assert!((zh.height - 48.0).abs() < EPS as f32, "2 CJK lines: {}", zh.height);
+        // 2 lines × the face's normal pitch (#16: metrics-derived, 1.448em).
+        let pitch = fixture_fonts().normal_line_height(20.0, false);
+        assert!((zh.height - 2.0 * pitch).abs() < 1.5, "2 CJK lines: {}", zh.height);
     }
 
     /// Inline content of one block shares a single wrapping run: words from
@@ -505,8 +506,10 @@
         let s = rects
             .get(&s_id)
             .expect("flattened span keeps a synthesized rect");
-        // One line of 16px text = 19.2 → 19 after taffy's rounding.
-        assert!((p.height - 19.2).abs() < EPS as f32, "one line: {}", p.height);
+        // One line of 16px text = the face's normal pitch (16 × 1.448 =
+        // 23.168; taffy's rounding may snap it to 23 — EPS absorbs that).
+        let pitch = fixture_fonts().normal_line_height(16.0, false);
+        assert!((p.height - pitch).abs() < EPS as f32, "one line: {}", p.height);
         // The span's rect hugs "beta gamma": starts after "alpha ", same
         // line box height as p, inside p's bounds.
         assert!(s.x > 0.0, "span starts after leading text: {:?}", s);
@@ -534,7 +537,7 @@
         // Run width = ceil(real shaped advance of "hi" at 16px in the fixture
         // face) (batch 3a: 14.112 → 15 ceiled — the old deterministic model
         // guessed 17.6).
-        let hi = fixture_fonts().advance_width("hi", 16.0, false).ceil();
+        let hi = fixture_fonts().advance_width("hi", 16.0, false, false).ceil();
         assert!((mi.width - hi).abs() < EPS as f32, "run width: {} want {hi}", mi.width);
         assert!((mi.x - (200.0 - mi.width) / 2.0).abs() < EPS as f32, "centered x: {}", mi.x);
     }
@@ -1059,17 +1062,20 @@
         let (_doc, tree, _styles, rects) = both_engines(html, sheet);
         let fonts = fixture_fonts();
         let text = "谛听引擎中文渲染测试文本一行";
-        let tokens = text::tokens_of(text, 16.0, false, &fonts, crate::diting_css::WhiteSpace::Normal);
+        let tokens = text::tokens_of(text, 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::Normal);
         let lines = text::greedy_wrap(&tokens, Some(160.0), crate::diting_css::WhiteSpace::Normal).len() as f32;
         assert!(lines >= 2.0, "the fixture must wrap to ≥2 lines");
 
         let normal = rects[&tree.query_selector("#lorem").unwrap().unwrap()];
         let wide = rects[&tree.query_selector("#wide").unwrap().unwrap()];
-        let expect_normal = lines * 16.0 * 1.2;
+        // #16: `normal` now derives from the face's vertical metrics
+        // (ascent+descent+line gap), not a flat 1.2× — the same value the
+        // layout engine consults via FontBook::normal_line_height.
+        let expect_normal = lines * fonts.normal_line_height(16.0, false);
         let expect_wide = lines * 16.0 * 1.6;
         assert!(
             (normal.height - expect_normal).abs() < 1.5,
-            "normal line-height 1.2×fs × {lines} lines: {:?}",
+            "normal line-height = face metrics × {lines} lines: {:?}",
             normal
         );
         assert!(
@@ -1354,7 +1360,7 @@
         let fonts = fixture_fonts();
         for fs in [12.0, 16.0, 20.0, 24.0] {
             for ch in ["你", "界", "测", "渲"] {
-                let w = fonts.advance_width(ch, fs, false);
+                let w = fonts.advance_width(ch, fs, false, false);
                 assert!((w - fs).abs() < 0.01, "{ch} at {fs}px: {w} (want one em)");
             }
         }
@@ -1375,7 +1381,7 @@
         // ceil(shaped advance sum) — blitz rounds text runs UP so the box
         // never under-fits its glyphs; taffy's round-to-nearest would.
         let fonts = fixture_fonts();
-        let want = fonts.advance_width("hello world WebKit", 16.0, false).ceil();
+        let want = fonts.advance_width("hello world WebKit", 16.0, false, false).ceil();
         assert!((w.width - want).abs() < EPS as f32, "ascii run: {} want {want}", w.width);
         // Cross-assert against blitz's parley/harfrust shaping of the same
         // bytes. Kerning differences between shapers stay inside EPS.
@@ -1403,8 +1409,8 @@
         let (doc, tree, _styles, rects) = both_engines(html, sheet);
         let b = rects[&tree.query_selector("#b").unwrap().unwrap()];
         let fonts = fixture_fonts();
-        let bold_w = fonts.advance_width("加粗Bold文本", 20.0, true);
-        let reg_w = fonts.advance_width("加粗Bold文本", 20.0, false);
+        let bold_w = fonts.advance_width("加粗Bold文本", 20.0, true, false);
+        let reg_w = fonts.advance_width("加粗Bold文本", 20.0, false, false);
         assert!(bold_w > reg_w + 1.0, "fixture faces must differ: bold={bold_w} reg={reg_w}");
         assert!((b.width - bold_w.ceil()).abs() < EPS as f32, "bold run: {} want {}", b.width, bold_w.ceil());
         assert!((b.width - reg_w).abs() > EPS as f32, "bold must not measure with the regular face");
@@ -1432,18 +1438,21 @@
         let blitz_nid = doc.query_selector("#t").unwrap().expect("#t");
         let theirs = element_rect(&doc, blitz_nid);
         assert_close("mixed wrap height vs blitz", t.height, theirs.height);
-        // One line of 20px text is 24px; height must be a whole multiple.
-        let lines = (t.height / 24.0).round();
+        // One line of 20px text = the face's normal pitch; height must be a
+        // whole multiple.
+        let pitch = fixture_fonts().normal_line_height(20.0, false);
+        let lines = (t.height / pitch).round();
         assert!(lines >= 2.0 && lines <= 4.0, "plausible line count: {lines} (h={})", t.height);
-        assert!((t.height - lines * 24.0).abs() < EPS as f32, "height = lines × 1.2×fs: {}", t.height);
+        assert!((t.height - lines * pitch).abs() < 1.5, "height = lines × normal pitch: {}", t.height);
     }
 
     /// Baseline placement model (batch 3b): parley 0.10 quantized Chrome-style
     /// metrics — round(ascent)/round(descent) separately, below keeps the
-    /// larger leading half. The Noto SC fixture's natural extent (1.448em)
-    /// exceeds the 1.2em line box, so leading is NEGATIVE and the baseline
-    /// lands at exactly fs below the line top for 12/16/20/24px — the cramped
-    /// CJK look, locked numerically.
+    /// larger leading half. #16: `normal` line-height now derives from the
+    /// face's vertical metrics (ascent+descent+line gap = 1.448em), so
+    /// leading ≈ 0 instead of the old negative 1.2em squeeze — the baseline
+    /// lands at round(ascent) (±1px from the half-leading quantization),
+    /// not at exactly fs below the line top.
     #[test]
     fn baseline_model_is_parley_quantized() {
         use crate::diting_layout::text::baseline_offset;
@@ -1456,8 +1465,14 @@
             assert!((m.ascent - fs * 1.16).abs() < 0.05, "ascent@{fs}: {}", m.ascent);
             assert!((m.descent - fs * 0.288).abs() < 0.05, "descent@{fs}: {}", m.descent);
             assert!(m.line_gap.abs() < 0.05, "line_gap@{fs}: {}", m.line_gap);
-            let b = baseline_offset(m.ascent, m.descent, line_height(fs));
-            assert!((b - fs).abs() < 1e-6, "baseline@{fs}: {b} (want exactly fs)");
+            let lh = fonts.normal_line_height(fs, false);
+            assert!((lh - fs * 1.448).abs() < 0.05, "normal pitch@{fs}: {lh}");
+            let b = baseline_offset(m.ascent, m.descent, lh);
+            assert!(
+                (b - m.ascent.round()).abs() <= 1.0,
+                "baseline@{fs}: {b} (want ≈ round(ascent) {})",
+                m.ascent.round()
+            );
         }
     }
 
@@ -1515,11 +1530,12 @@
             let (bx0, by0, bx1, by1) = bbox.expect("blitz painted some ink");
 
             // Our tile: same text, same fixture bytes, baseline per the model.
-            let raster = fixture_fonts().rasterize("你好gapa渲染", fs, false, [0, 0, 0, 255], line_height(fs));
-            let (ox0, oy0, ox1, oy1) = raster.ink_bbox().expect("our raster has ink");
             let fonts = fixture_fonts();
+            let lh = fonts.normal_line_height(fs, false);
+            let raster = fonts.rasterize("你好gapa渲染", fs, false, [0, 0, 0, 255], lh, false);
+            let (ox0, oy0, ox1, oy1) = raster.ink_bbox().expect("our raster has ink");
             let m = fonts.metrics(fs, false).unwrap();
-            let baseline = baseline_offset(m.ascent, m.descent, line_height(fs));
+            let baseline = baseline_offset(m.ascent, m.descent, lh);
 
             // Line 1's box top is y=0 in the page (body margin 0), so blitz's
             // ink distances decode against `baseline` directly.
@@ -1547,8 +1563,8 @@
 
         let fonts = fixture_fonts();
         let (text, fs, wrap_at) = ("谛听引擎渲染测试文本行", 20.0f32, 105.0f32);
-        let lh = line_height(fs);
-        let tokens = text::tokens_of(text, fs, false, &fonts, crate::diting_css::WhiteSpace::Normal);
+        let lh = fonts.normal_line_height(fs, false);
+        let tokens = text::tokens_of(text, fs, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::Normal);
         let lines = text::greedy_wrap(&tokens, Some(wrap_at), crate::diting_css::WhiteSpace::Normal);
         assert_eq!(lines.len(), 3, "5 glyphs per 105px line, 11 glyphs → 3 lines");
         assert!((lines[0].width - 100.0).abs() < 0.05, "5 × 1em");
@@ -1797,9 +1813,11 @@
         ] {
             assert!((o as i64 - b as i64).abs() <= 1, "{what}: ours={o} blitz={b}");
         }
-        // And the border-box itself is 133×100: content 105 + 2×(6+8) wide,
-        // 3×24 + 2×(6+8) tall.
-        assert_eq!((obx1 - obx0 + 1, oby1 - oby0 + 1), (133, 100), "our border box");
+        // And the border-box itself is 133 wide: content 105 + 2×(6+8);
+        // tall: 3 lines of the face's normal pitch + 2×(6+8).
+        let pitch = fixture_fonts().normal_line_height(20.0, false);
+        let want_h = (3.0 * pitch + 2.0 * 14.0).round() as usize;
+        assert_eq!((obx1 - obx0 + 1, oby1 - oby0 + 1), (133, want_h), "our border box");
 
         // The visible red interior is the border-box inset by the 6px bands.
         let (orx0, ory0, orx1, ory1) = bbox(&ours.data, w as usize, h as usize, is_bg);

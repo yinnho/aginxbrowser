@@ -42,9 +42,10 @@ screenshot = [
     # (render claim batches 3a/3b). Same stack upstream obscura-render builds
     # on. scale/render are the outline raster features (3b paint).
     "dep:swash",
-    # diting_fonts builds the FontContext (bundled faces registered) and
-    # diting_layout shapes text through parley — a runtime dep, not just the
-    # cross-check fixture it started as.
+    # parley is consumed ONLY behind `blitz-reference` (diting_fonts'
+    # FontContext + the cross-check fixtures); diting's own text stack is
+    # swash + its own greedy_wrap (batch 72). Kept under `screenshot` for
+    # historical layering — blitz-reference gates on screenshot.
     "dep:parley",
     # musl cross builds cannot link fontconfig at build time (no pkg-config
     # sysroot). dlopen defers libfontconfig to runtime; fontique degrades
@@ -70,9 +71,9 @@ blitz-reference = [
 
 [dependencies]
 # The alias is how blitz-dom names upstream stylo; same crate, same version.
-stylo_alias = { version = "0.20", package = "stylo", optional = true }
-# Taffy git pin, mirroring blitz's workspace declaration after their #835
-# (taffy#1177 grid contribution-skip + #1178 floor available sizes at zero).
+stylo_alias = { version = "0.21", package = "stylo", optional = true }
+# Taffy git pin, mirroring blitz's workspace declaration (their tree tracks
+# taffy main; c17b313 is the rev blitz 916fa89 pins).
 # When blitz-reference is also enabled, features must EXACTLY mirror blitz's
 # workspace declaration (default-features = false, no float_layout): cargo
 # unifies features across the graph, so any extra feature would silently
@@ -82,7 +83,7 @@ stylo_alias = { version = "0.20", package = "stylo", optional = true }
 # taffy_tree is additionally listed because the unified graph already enables
 # it (Cargo.lock shows taffy pulling slotmap) — an explicit no-op.
 # Used by diting_layout box layout and the fork-delta tests (docs/engine/render.md).
-taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "1b918bafcab101dd234ebeb27da0443e24fd9de2", optional = true, default-features = false, features = [
+taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "c17b313cd1be5a4def91522cf3ea5995e664ebf7", optional = true, default-features = false, features = [
     "std",
     "taffy_tree",
     "flexbox",
@@ -101,13 +102,13 @@ swash = { version = "0.2", optional = true, default-features = false, features =
     "scale",
     "render",
 ] }
-# parley shapes diting_layout text and (via diting_fonts) provides the
-# FontContext the render paths build. Mirrors blitz's own declaration
+# parley provides the FontContext the blitz-reference cross-check fixtures
+# build (diting itself shapes via swash). Mirrors blitz's own declaration
 # (default-features false, std) so the unified graph can't drift blitz's
 # parley behavior when blitz-reference is on.
-parley = { version = "0.10", optional = true, default-features = false, features = ["std"] }
+parley = { version = "0.11.1", optional = true, default-features = false, features = ["std"] }
 # Runtime-dlopen fontconfig for musl cross builds (see `screenshot` feature).
-fontique = { version = "0.10", optional = true }
+fontique = { version = "0.11", optional = true }
 # --- async runtime ---
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
@@ -201,29 +202,28 @@ wreq-util = { version = "=3.0.0-rc.10", optional = true }
 # fork existed only for the no-op NetProvider critical-resource fix — merged
 # upstream as DioxusLabs/blitz#636 (2026-08-08), so the fork is retired.
 #
-# WHY 2fa6434d (#724, parley 0.10) AND NOT main: parley 0.11 (#725 — a pure dep
-# bump, zero blitz code change) hangs line breaking indefinitely on CJK-heavy
-# pages. baidu.com never finishes layout even in release (spins in parley
-# BreakLines::break_remaining under blitz compute_inline_layout). Bisected:
-# #724 renders baidu in ~4s / 1533 colors; #726 (parley 0.11.1) still spinning
-# at 150s. Reported upstream as linebender/parley#752 (repro minimized to a
-# 1.4KB baidu IME-menu fragment + page CSS; not CJK-text-dependent).
-#
-# NOTE (2026-08-25): this pin is a REFERENCE-engine constraint only — the
-# default /screenshot engine is diting, which has zero parley. Bump past
-# 2fa6434d only if/when blitz is upgraded again AND parley#752 has landed
-# upstream; doing so also unblocks #726–#735 (taffy sizing + spurious
-# horizontal-scroll fixes).
+# WHY 916fa89 (#878, parley 0.11.1) AND NOT main: #878 resolves line-height:
+# normal from font metrics instead of 1.2 × font-size — the upstream mirror of
+# our #16, which the diting side of this batch matches (the cross-check test
+# asserts both engines agree on metrics-derived normal line height, so the two
+# must land together). CAVEAT: parley 0.11.1 still carries the #752 hang
+# (linebender/parley#752 — BreakLines::break_remaining spins forever on CJK
+# nesting like baidu's IME menu; fix 1aba7cac is on parley main but UNRELEASED,
+# and [patch.crates-io] can't take it — workspace version there is still
+# 0.11.0, semver-incompatible with blitz's ^0.11.1 requirement). So the
+# reference engine can still hang on such pages; diting cannot — its layout
+# shapes via swash and breaks via its own greedy_wrap, zero parley. Revisit
+# when parley >0.11.1 ships.
 #
 # crates.io's blitz 0.3.0-beta.1 is a stale snapshot and upstream pins taffy to
 # an unreleased git rev, so blitz-* must come from git. anyrender 0.13 /
-# anyrender_vello_cpu 0.16 are on crates.io and are what blitz consumes here.
-blitz-dom = { git = "https://github.com/DioxusLabs/blitz", rev = "2fa6434d", optional = true, features = ["default"] }
-blitz-html = { git = "https://github.com/DioxusLabs/blitz", rev = "2fa6434d", optional = true }
-blitz-paint = { git = "https://github.com/DioxusLabs/blitz", rev = "2fa6434d", optional = true }
-blitz-traits = { git = "https://github.com/DioxusLabs/blitz", rev = "2fa6434d", optional = true }
+# anyrender_vello_cpu 0.17 are on crates.io and are what blitz consumes here.
+blitz-dom = { git = "https://github.com/DioxusLabs/blitz", rev = "916fa89", optional = true, features = ["default"] }
+blitz-html = { git = "https://github.com/DioxusLabs/blitz", rev = "916fa89", optional = true }
+blitz-paint = { git = "https://github.com/DioxusLabs/blitz", rev = "916fa89", optional = true }
+blitz-traits = { git = "https://github.com/DioxusLabs/blitz", rev = "916fa89", optional = true }
 anyrender = { version = "0.13", optional = true }
-anyrender_vello_cpu = { version = "0.16", optional = true, features = ["multithreading"] }
+anyrender_vello_cpu = { version = "0.17", optional = true, features = ["multithreading"] }
 peniko = { version = "0.6", optional = true }
 png = { version = "0.18", optional = true }
 # Same version blitz-dom pins (0.25.x); jpeg/webp/gif are the only features we need.

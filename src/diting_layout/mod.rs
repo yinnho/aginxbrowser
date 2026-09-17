@@ -116,22 +116,23 @@ enum TextLeaf {
     Replaced { strut_descent: f32 },
 }
 
-/// Approximate used line height for text leaves. Matches blitz exactly:
-/// blitz-dom maps CSS `line-height: normal` to `font_size * 1.2`
-/// (src/layout/mod.rs:76) rather than deriving from font metrics, and the
-/// cross-check asserts text-derived heights against it.
-fn line_height(font_size: f32) -> f32 {
-    font_size * 1.2
-}
-
 /// Used line height for a text run: the element's declared `line-height`
-/// (unitless multiplier against its own font-size, or absolute px) with
-/// `normal`/unset falling back to the same `font_size * 1.2` blitz pins.
-fn effective_line_height(spec: Option<&crate::diting_css::LineHeightSpec>, font_size: f32) -> f32 {
+/// (unitless multiplier against its own font-size, or absolute px).
+/// `normal`/unset derives from the face's vertical metrics —
+/// ascent+descent+line gap — like a real browser, not a flat 1.2×
+/// (#16, blitz#878; the ratio is memoized inside the FontBook).
+fn effective_line_height(
+    fonts: &FontBook,
+    spec: Option<&crate::diting_css::LineHeightSpec>,
+    font_size: f32,
+    bold: bool,
+) -> f32 {
     match spec {
         Some(crate::diting_css::LineHeightSpec::Number(n)) => font_size * n,
         Some(crate::diting_css::LineHeightSpec::Px(px)) => *px,
-        Some(crate::diting_css::LineHeightSpec::Normal) | None => line_height(font_size),
+        Some(crate::diting_css::LineHeightSpec::Normal) | None => {
+            fonts.normal_line_height(font_size, bold)
+        }
     }
 }
 
@@ -649,6 +650,7 @@ fn font_context(
     tree: &DomTree,
     id: NodeId,
     styles: &HashMap<NodeId, ComputedStyle>,
+    fonts: &FontBook,
 ) -> (f32, bool, f32) {
     let mut font_size: Option<f32> = None;
     let mut bold: Option<bool> = None;
@@ -676,7 +678,8 @@ fn font_context(
         current = tree.with_node(nid, |n| n.parent).flatten();
     }
     let fs = font_size.unwrap_or(16.0);
-    (fs, bold.unwrap_or(false), effective_line_height(lh_spec.as_ref(), fs))
+    let b = bold.unwrap_or(false);
+    (fs, b, effective_line_height(fonts, lh_spec.as_ref(), fs, b))
 }
 
 /// Inherited text color for a node — the same nearest-set ancestor walk as
@@ -781,7 +784,12 @@ fn decoration_context(
 /// resolves against the element's own line-height before the same flip;
 /// baseline/top/middle/bottom are 0 (the line-baseline machinery handles
 /// those at the alignment site).
-fn valign_shift(tree: &DomTree, id: NodeId, styles: &HashMap<NodeId, ComputedStyle>) -> f32 {
+fn valign_shift(
+    tree: &DomTree,
+    id: NodeId,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    fonts: &FontBook,
+) -> f32 {
     let mut shift = 0.0f32;
     let mut current = Some(id);
     while let Some(nid) = current {
@@ -792,7 +800,7 @@ fn valign_shift(tree: &DomTree, id: NodeId, styles: &HashMap<NodeId, ComputedSty
                     | Some(crate::diting_css::VerticalAlign::Super) => {
                         let parent = tree.with_node(nid, |n| n.parent).flatten();
                         let parent_fs = parent
-                            .map(|p| font_context(tree, p, styles).0)
+                            .map(|p| font_context(tree, p, styles, fonts).0)
                             .unwrap_or(16.0);
                         shift += if s.vertical_align == Some(crate::diting_css::VerticalAlign::Sub) {
                             0.2 * parent_fs
@@ -804,7 +812,7 @@ fn valign_shift(tree: &DomTree, id: NodeId, styles: &HashMap<NodeId, ComputedSty
                         shift -= px;
                     }
                     Some(crate::diting_css::VerticalAlign::Percent(p)) => {
-                        let own_lh = font_context(tree, nid, styles).2;
+                        let own_lh = font_context(tree, nid, styles, fonts).2;
                         shift -= p / 100.0 * own_lh;
                     }
                     _ => {}
@@ -918,6 +926,7 @@ fn form_control_run(
     tree: &DomTree,
     id: NodeId,
     styles: &HashMap<NodeId, ComputedStyle>,
+    fonts: &FontBook,
 ) -> Option<(String, f32, bool, f32, [u8; 4])> {
     let tag = tree
         .with_node(id, |n| n.as_element().map(|e| e.local.to_string()))
@@ -926,7 +935,7 @@ fn form_control_run(
     if tag != "input" && tag != "textarea" && tag != "select" {
         return None;
     }
-    let (font_size, bold, lh) = font_context(tree, id, styles);
+    let (font_size, bold, lh) = font_context(tree, id, styles, fonts);
     let ink = color_context(tree, id, styles);
     let attr = |name: &str| {
         tree.with_node(id, |n| n.get_attribute(name).map(|v| v.to_string()))
@@ -1766,7 +1775,18 @@ fn build_replaced_leaf(
         bottom: bw(bb),
         left: bw(bl),
     };
-    s.aspect_ratio = ratio_transfer.then(|| nat_w / nat_h);
+    // The strut descent bakes into the leaf's DEFINITE height (line-box
+    // bookkeeping; collect subtracts it back from the rect). taffy's ratio
+    // transfer off that height — the cyclic-percent case, where a percent
+    // width against a content-sized ancestor can't resolve and the width
+    // derives from the height — must land on nat_w, not nat_w + strut×ratio
+    // (the +9px hero width). Fold the strut into the denominator instead.
+    // Both-definite leaves never transfer (the ratio is inert there) and the
+    // width→height direction can't fire for inline atoms — their height arm
+    // is always the baked definite length — so the compensated ratio only
+    // ever feeds the height→width transfer. Block-level callers pass strut
+    // 0 and keep the raw natural ratio.
+    s.aspect_ratio = ratio_transfer.then(|| nat_w / (nat_h + strut_descent));
     // CSS width/height win per axis; missing axis derives from the ratio.
     // Percent CSS sizes pass through (the CB resolves them; the natural
     // ratio only backfills auto axes). Px sizes are content-box per the
@@ -1826,7 +1846,7 @@ fn strut_descent_for(
     styles: &HashMap<NodeId, ComputedStyle>,
     fonts: &FontBook,
 ) -> f32 {
-    let (fs, bold, _) = font_context(tree, id, styles);
+    let (fs, bold, _) = font_context(tree, id, styles, fonts);
     // Whole-pixel pad so the padded leaf height survives taffy's integer
     // rounding exactly and collect's subtract-back lands on the true box.
     leaf_descent(fonts, fs, bold).ceil()
@@ -1922,12 +1942,12 @@ fn build_normal_sibling(
             if text.trim().is_empty() {
                 return;
             }
-            let (fs, b, lh) = font_context(tree, child, styles);
+            let (fs, b, lh) = font_context(tree, child, styles, fonts);
             let fs = if styles.get(&child).is_some() { fs } else { font_size };
             let lh = if styles.get(&child).is_some() { lh } else { line_height };
             let col = color_context(tree, child, styles);
             let deco = decoration_context(tree, child, styles);
-            let vs = valign_shift(tree, child, styles);
+            let vs = valign_shift(tree, child, styles, fonts);
             let mono = mono_context(tree, child, styles);
             let ws = word_spacing_context(tree, child, styles);
             leaves.extend(build_word_leaves(&text, fs, b, col, lh, deco, vs, mono, ws, fonts, taffy_tree));
@@ -2143,10 +2163,10 @@ fn wrap_q_quotes(
         return;
     }
     let (open, close) = q_quote_pair(q_ancestor_quote_depth(tree, child));
-    let (fs, b, lh) = font_context(tree, child, styles);
+    let (fs, b, lh) = font_context(tree, child, styles, fonts);
     let col = color_context(tree, child, styles);
     let deco = decoration_context(tree, child, styles);
-    let vs = valign_shift(tree, child, styles);
+    let vs = valign_shift(tree, child, styles, fonts);
     let mono = mono_context(tree, child, styles);
     let ws = word_spacing_context(tree, child, styles);
     let mut wrapped = build_word_leaves(open, fs, b, col, lh, deco, vs, mono, ws, fonts, taffy_tree);
@@ -2409,12 +2429,12 @@ fn build_flow_column(
         }
         if is_text {
             let text = tree.with_node(child, |n| n.text_content_of_text_node().unwrap_or("").to_string()).unwrap_or_default();
-            let (fs, b, lh) = font_context(tree, child, styles);
+            let (fs, b, lh) = font_context(tree, child, styles, fonts);
             let fs = if styles.get(&child).is_some() { fs } else { font_size };
             let lh = if styles.get(&child).is_some() { lh } else { lh_elem };
             let col = color_context(tree, child, styles);
             let deco = decoration_context(tree, child, styles);
-            let vs = valign_shift(tree, child, styles);
+            let vs = valign_shift(tree, child, styles, fonts);
             let mono = mono_context(tree, child, styles);
             let ws = word_spacing_context(tree, child, styles);
             let nws = tree.with_node(child, |n| n.parent).flatten().and_then(|p| styles.get(&p)).and_then(|s| s.white_space).unwrap_or(WhiteSpace::Normal);
@@ -2746,7 +2766,7 @@ fn build_table(
                 _ => items.push(RowItem::Anon(vec![cid])),
             }
         }
-        let (row_fs, _, row_lh) = font_context(tree, *rid, styles);
+        let (row_fs, _, row_lh) = font_context(tree, *rid, styles, fonts);
         let mut cells: Vec<CellSlot> = Vec::new();
         for item in items {
             let (cell_dom, col_span, anon) = match &item {
@@ -3386,7 +3406,7 @@ fn build_element(
     let node = build_element_inner(
         tree, id, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta,
     )?;
-    append_pseudo_leaves(tree, id, styles, node, taffy_tree);
+    append_pseudo_leaves(tree, id, styles, node, fonts, taffy_tree);
     Some(node)
 }
 
@@ -3401,6 +3421,7 @@ fn append_pseudo_leaves(
     id: NodeId,
     styles: &HashMap<NodeId, ComputedStyle>,
     node: taffy::tree::NodeId,
+    fonts: &FontBook,
     taffy_tree: &mut TaffyTree<TextLeaf>,
 ) {
     let Some(style) = styles.get(&id) else { return };
@@ -3416,10 +3437,10 @@ fn append_pseudo_leaves(
         taffy_tree.children(node).unwrap_or_default().to_vec();
     let mut changed = false;
     if let Some(before) = &pair.before {
-        changed |= pseudo_leaf(before, taffy_tree, &mut children, true);
+        changed |= pseudo_leaf(before, taffy_tree, &mut children, fonts, true);
     }
     if let Some(after) = &pair.after {
-        changed |= pseudo_leaf(after, taffy_tree, &mut children, false);
+        changed |= pseudo_leaf(after, taffy_tree, &mut children, fonts, false);
     }
     if changed {
         let _ = taffy_tree.set_children(node, &children);
@@ -3439,6 +3460,7 @@ fn pseudo_leaf(
     p: &ComputedStyle,
     taffy_tree: &mut TaffyTree<TextLeaf>,
     children: &mut Vec<taffy::tree::NodeId>,
+    fonts: &FontBook,
     is_before: bool,
 ) -> bool {
     if p.display == Some(CssDisplay::None) {
@@ -3512,12 +3534,13 @@ fn pseudo_leaf(
             }
             match taffy_tree.new_leaf_with_context(Style::default(), {
                 let fs = p.font_size.unwrap_or(crate::diting_css::DEFAULT_ROOT_FONT_SIZE);
+                let bold = p.font_weight.is_some_and(|w| w >= 600);
                 TextLeaf::Run {
                     text: content.clone(),
                     font_size: fs,
-                    bold: p.font_weight.is_some_and(|w| w >= 600),
+                    bold,
                     color: p.color.map_or([0, 0, 0, 255], |c| [c.0, c.1, c.2, c.3]),
-                    line_height: effective_line_height(p.line_height.as_ref(), fs),
+                    line_height: effective_line_height(fonts, p.line_height.as_ref(), fs, bold),
                     decorations: p.text_decoration_line.unwrap_or_default(),
                     baseline_shift: 0.0,
                     mono: p.font_family.as_deref().is_some_and(crate::diting_css::wants_monospace),
@@ -3546,12 +3569,13 @@ fn pseudo_leaf(
                             let fs = p
                                 .font_size
                                 .unwrap_or(crate::diting_css::DEFAULT_ROOT_FONT_SIZE);
+                            let bold = p.font_weight.is_some_and(|w| w >= 600);
                             TextLeaf::Run {
                                 text: content.clone(),
                                 font_size: fs,
-                                bold: p.font_weight.is_some_and(|w| w >= 600),
+                                bold,
                                 color: p.color.map_or([0, 0, 0, 255], |c| [c.0, c.1, c.2, c.3]),
-                                line_height: effective_line_height(p.line_height.as_ref(), fs),
+                                line_height: effective_line_height(fonts, p.line_height.as_ref(), fs, bold),
                                 decorations: p.text_decoration_line.unwrap_or_default(),
                                 baseline_shift: 0.0,
                                 mono: p
@@ -3692,7 +3716,7 @@ fn build_element_inner(
         }
     };
 
-    let (font_size, _bold, lh_elem) = font_context(tree, id, styles);
+    let (font_size, _bold, lh_elem) = font_context(tree, id, styles, fonts);
 
     // --- float zone (batch 8b/8c): floats reified as synthetic flex rows ---
     // taffy (as configured — float_layout is a non-default feature that must
@@ -4276,14 +4300,14 @@ fn build_element_inner(
         }
         if is_text {
             let text = tree.with_node(child, |n| n.text_content_of_text_node().unwrap_or("").to_string()).unwrap_or_default();
-            let (fs, b, lh) = font_context(tree, child, styles);
+            let (fs, b, lh) = font_context(tree, child, styles, fonts);
             let fs = if styles.get(&child).is_some() { fs } else { font_size };
             let lh = if styles.get(&child).is_some() { lh } else { lh_elem };
             // First segment's node donates the whole run's color — the same
             // first-segment approximation fs/bold already use.
             let col = color_context(tree, child, styles);
             let deco = decoration_context(tree, child, styles);
-            let vs = valign_shift(tree, child, styles);
+            let vs = valign_shift(tree, child, styles, fonts);
             let mono = mono_context(tree, child, styles);
             let ws = word_spacing_context(tree, child, styles);
             let nws = tree.with_node(child, |n| n.parent).flatten().and_then(|p| styles.get(&p)).and_then(|s| s.white_space).unwrap_or(WhiteSpace::Normal);
@@ -6593,11 +6617,11 @@ pub fn layout_collect(
                         tree.with_node(*dom_id, |n| n.get_attribute("alt").map(|v| v.to_string()))
                             .flatten()
                             .map(|text| {
-                                let (font_size, bold, lh) = font_context(tree, *dom_id, styles);
+                                let (font_size, bold, lh) = font_context(tree, *dom_id, styles, fonts);
                                 (text, font_size, bold, lh, color_context(tree, *dom_id, styles))
                             })
                     } else {
-                        form_control_run(tree, *dom_id, styles)
+                        form_control_run(tree, *dom_id, styles, fonts)
                     };
                     // The gray box only when the author gave no visible
                     // background — an authored bg already reads as "box here".
@@ -6730,7 +6754,7 @@ pub fn layout_collect(
                     // empty run for it (the rasterizer blits nothing for
                     // empty text; only the caret consumes the metrics).
                     let alt = if alt.is_none() && caret.is_some() {
-                        let (font_size, bold, lh) = font_context(tree, *dom_id, styles);
+                        let (font_size, bold, lh) = font_context(tree, *dom_id, styles, fonts);
                         Some((
                             String::new(),
                             font_size,
@@ -7265,7 +7289,7 @@ pub fn layout_collect(
             // Sub-pixel shortfalls (< 1px) are run-metric rounding, not a
             // missing strut — growing there just pushes the first line's
             // inline above y=0, which Chrome never reports.
-            let (_, _, lh) = font_context(tree, *dom, styles);
+            let (_, _, lh) = font_context(tree, *dom, styles, fonts);
             let h = max_y - min_y;
             if lh - h > 1.0 {
                 let grow = (lh - h) / 2.0;
