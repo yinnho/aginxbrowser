@@ -399,6 +399,63 @@
         assert_eq!(v["desc"], serde_json::json!(true));
     }
 
+    /// Issue #32: legacy reflected attributes (align on div/p/h*) are real
+    /// [Reflect] DOMString members on the per-tag interfaces — Chrome's
+    /// Object.keys(HTMLDivElement.prototype) is ["align"] — and
+    /// ReadableStream gains the enumerable values() member with
+    /// Symbol.asyncIterator aliased to it (#31's v1 boundary).
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn reflected_align_and_stream_values() {
+        let mut rt = setup_runtime("<html><body><div id='t'>x</div></body></html>");
+        let out = rt.evaluate(r#"
+            var d = document.createElement('div');
+            d.setAttribute('align', 'center');
+            var viaGetter = d.align;
+            d.align = 'right';
+            var viaSetter = d.getAttribute('align');
+            var p = document.createElement('p'); p.align = 'left';
+            var h = document.createElement('h2'); h.align = 'top';
+            var rs = new ReadableStream({ start: function(c){ c.enqueue('a'); } });
+            var it = rs.values();
+            return JSON.stringify({
+                faces: [
+                    Object.keys(HTMLDivElement.prototype),
+                    Object.keys(HTMLParagraphElement.prototype),
+                    Object.keys(HTMLHeadingElement.prototype),
+                    Object.keys(HTMLSpanElement.prototype),
+                    Object.keys(ReadableStream.prototype).slice(-1),
+                ],
+                align: [viaGetter, viaSetter,
+                        p.getAttribute('align'), h.getAttribute('align')],
+                blank: document.createElement('div').align,
+                span: document.createElement('span').align,
+                hasValues: typeof rs.values,
+                alias: ReadableStream.prototype[Symbol.asyncIterator]
+                        === ReadableStream.prototype.values,
+                itNext: typeof it.next(),
+                itSelf: it[Symbol.asyncIterator]() === it,
+            });
+        "#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        let faces = v["faces"].as_array().unwrap();
+        assert_eq!(faces[0], serde_json::json!(["align"]), "div prototype face");
+        assert_eq!(faces[1], serde_json::json!(["align"]), "p prototype face");
+        assert_eq!(faces[2], serde_json::json!(["align"]), "heading prototype face");
+        assert_eq!(faces[3], serde_json::json!([]), "span has no align");
+        assert_eq!(faces[4], serde_json::json!(["values"]), "values is the newest RS member");
+        assert_eq!(
+            v["align"], serde_json::json!(["center", "right", "left", "top"]),
+            "align get/set round-trips through the content attribute"
+        );
+        assert_eq!(v["blank"], serde_json::json!(""), "no attribute -> empty string");
+        assert_eq!(v["span"], serde_json::Value::Null, "span.align is undefined");
+        assert_eq!(v["hasValues"], serde_json::json!("function"));
+        assert_eq!(v["alias"], serde_json::json!(true), "Symbol.asyncIterator aliases values");
+        assert_eq!(v["itNext"], serde_json::json!("object"), "values().next() is a promise");
+        assert_eq!(v["itSelf"], serde_json::json!(true), "iterator is self-async-iterable");
+    }
+
 
     #[cfg(feature = "screenshot")]
     #[test]

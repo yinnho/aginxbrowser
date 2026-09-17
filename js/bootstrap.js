@@ -9780,7 +9780,7 @@ globalThis.HTMLElement = {
 // above; _elementClassFor routes by tagName through _tagInterfaces, and
 // hasInstance stays as a second opinion so wrappers built before this
 // block (or cross-realm objects) still classify by tag.
-function _htmlInterface(name, tags) {
+function _htmlInterface(name, tags, attrs) {
   const C = { [name]: class extends globalThis.HTMLElement {
     constructor(nid) {
       if (typeof nid !== "number") {
@@ -9801,12 +9801,23 @@ function _htmlInterface(name, tags) {
     },
     configurable: true,
   });
+  // (#32) Legacy reflected attributes (div/p/h* align in Chrome:
+  // Object.keys(HTMLDivElement.prototype) is ["align"]): [Reflect] DOMString
+  // — getter returns the content attribute or "", setter writes it back.
+  for (const a of attrs || []) {
+    Object.defineProperty(C.prototype, a, {
+      get() { const v = this.getAttribute(a); return v === null ? '' : v; },
+      set(v) { this.setAttribute(a, v === undefined || v === null ? '' : String(v)); },
+      configurable: true,
+      enumerable: true,
+    });
+  }
   for (const t of tags) _tagInterfaces.set(t, C);
   return C;
 }
-globalThis.HTMLDivElement = _htmlInterface('HTMLDivElement', ['div']);
+globalThis.HTMLDivElement = _htmlInterface('HTMLDivElement', ['div'], ['align']);
 globalThis.HTMLSpanElement = _htmlInterface('HTMLSpanElement', ['span']);
-globalThis.HTMLParagraphElement = _htmlInterface('HTMLParagraphElement', ['p']);
+globalThis.HTMLParagraphElement = _htmlInterface('HTMLParagraphElement', ['p'], ['align']);
 globalThis.HTMLAnchorElement = _htmlInterface('HTMLAnchorElement', ['a']);
 globalThis.HTMLImageElement = _htmlInterface('HTMLImageElement', ['img']);
 globalThis.HTMLInputElement = _htmlInterface('HTMLInputElement', ['input']);
@@ -9930,7 +9941,7 @@ globalThis.HTMLUListElement = _htmlInterface('HTMLUListElement', ['ul']);
 globalThis.HTMLOListElement = _htmlInterface('HTMLOListElement', ['ol']);
 globalThis.HTMLLIElement = _htmlInterface('HTMLLIElement', ['li']);
 globalThis.HTMLPreElement = _htmlInterface('HTMLPreElement', ['pre']);
-globalThis.HTMLHeadingElement = _htmlInterface('HTMLHeadingElement', ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
+globalThis.HTMLHeadingElement = _htmlInterface('HTMLHeadingElement', ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'], ['align']);
 globalThis.HTMLTemplateElement = _htmlInterface('HTMLTemplateElement', ['template']);
 globalThis.HTMLSlotElement = _htmlInterface('HTMLSlotElement', ['slot']);
 // Slot assignment over native shadow trees: the Rust tree computes the
@@ -12685,11 +12696,27 @@ if (typeof ReadableStream === 'undefined') {
       });
       return [mk(), mk()];
     }
-    [Symbol.asyncIterator]() {
+    // (#32) Chrome: values() is an enumerable prototype member returning the
+    // async iterator, and Symbol.asyncIterator aliases it. The returned
+    // iterator is itself async-iterable ([Symbol.asyncIterator] => this) —
+    // for-await over rs.values() directly needs that.
+    values() {
       const reader = this.getReader();
-      return { next: () => reader.read(), return: () => { reader.releaseLock(); return Promise.resolve({done:true}); } };
+      const it = {
+        next: () => reader.read(),
+        return: () => { reader.releaseLock(); return Promise.resolve({done:true}); },
+      };
+      Object.defineProperty(it, Symbol.asyncIterator, {
+        value: function () { return this; },
+        writable: true, configurable: true, enumerable: false,
+      });
+      return it;
     }
   };
+  Object.defineProperty(globalThis.ReadableStream.prototype, Symbol.asyncIterator, {
+    value: globalThis.ReadableStream.prototype.values,
+    writable: true, configurable: true, enumerable: false,
+  });
 }
 if (typeof WritableStream === 'undefined') {
   globalThis.WritableStream = class WritableStream {
