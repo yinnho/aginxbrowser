@@ -456,6 +456,76 @@
         assert_eq!(v["itSelf"], serde_json::json!(true), "iterator is self-async-iterable");
     }
 
+    #[test]
+    fn reflected_body_color_and_table_family() {
+        let mut rt = setup_runtime(
+            "<html><body bgcolor='#eeeeee' text='navy'><div id='t'>x</div></body></html>",
+        );
+        let out = rt.evaluate(r#"
+            var b = document.body, t = document.createElement('table');
+            var d = document.createElement('div');
+            var parsed0 = [b.bgColor, b.text];
+            b.text = 'red'; b.aLink = 'maroon'; b.vLink = 'purple';
+            b.link = 'blue'; b.background = 'bg.png';
+            t.align = 'center'; t.border = '2'; t.bgColor = '#f0f0f0';
+            t.cellPadding = '4'; t.cellSpacing = '0';
+            return JSON.stringify({
+                bodyFace: Object.keys(HTMLBodyElement.prototype).sort(),
+                tblFace: Object.keys(HTMLTableElement.prototype).sort(),
+                parsed: parsed0,
+                bodyAttrs: [b.getAttribute('text'), b.getAttribute('alink'),
+                            b.getAttribute('vlink'), b.getAttribute('link'),
+                            b.getAttribute('background')],
+                tblAttrs: [t.getAttribute('align'), t.getAttribute('border'),
+                           t.getAttribute('bgcolor'), t.getAttribute('cellpadding'),
+                           t.getAttribute('cellspacing')],
+                attrToProp: (t.setAttribute('border', '5'), t.border),
+                // [LegacyNullToEmptyString] applies to null only — the
+                // [Reflect] plain members coerce null -> "null".
+                nullEmpty: [(b.text = null, b.getAttribute('text')),
+                            (t.cellPadding = null, t.getAttribute('cellpadding'))],
+                plainNull: [(t.border = null, t.getAttribute('border')),
+                            (d.align = null, d.getAttribute('align'))],
+                undef: (t.border = undefined, t.getAttribute('border')),
+                blank: [document.createElement('table').border, b.aLink === 'maroon' && ''],
+            });
+        "#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        assert_eq!(
+            v["bodyFace"],
+            serde_json::json!(["aLink", "background", "bgColor", "link", "text", "vLink"]),
+            "body prototype carries the legacy color family"
+        );
+        assert_eq!(
+            v["tblFace"],
+            serde_json::json!(["align", "bgColor", "border", "caption", "cellPadding",
+                               "cellSpacing", "frame", "rows", "rules", "summary",
+                               "tBodies", "tFoot", "tHead", "width"]),
+            "table prototype carries the legacy family + table DOM members"
+        );
+        assert_eq!(v["parsed"], serde_json::json!(["#eeeeee", "navy"]),
+            "content attrs parsed into the document are readable through the accessors");
+        assert_eq!(
+            v["bodyAttrs"],
+            serde_json::json!(["red", "maroon", "purple", "blue", "bg.png"]),
+            "IDL writes land under the lowercase content-attr names (alink/vlink)"
+        );
+        assert_eq!(
+            v["tblAttrs"],
+            serde_json::json!(["center", "2", "#f0f0f0", "4", "0"]),
+            "table IDL writes land under cellpadding/cellspacing"
+        );
+        assert_eq!(v["attrToProp"], serde_json::json!("5"), "attr write -> accessor read");
+        assert_eq!(v["nullEmpty"], serde_json::json!(["", ""]),
+            "[LegacyNullToEmptyString]: null setter -> empty content attribute");
+        assert_eq!(v["plainNull"], serde_json::json!(["null", "null"]),
+            "plain [Reflect]: null setter -> \"null\" (incl. #32's div.align correction)");
+        assert_eq!(v["undef"], serde_json::json!("undefined"),
+            "undefined -> \"undefined\" in both modes");
+        assert_eq!(v["blank"], serde_json::json!(["", ""]),
+            "absent attribute -> empty string getter");
+    }
+
 
     #[cfg(feature = "screenshot")]
     #[test]

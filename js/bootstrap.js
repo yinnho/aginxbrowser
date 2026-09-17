@@ -9801,13 +9801,18 @@ function _htmlInterface(name, tags, attrs) {
     },
     configurable: true,
   });
-  // (#32) Legacy reflected attributes (div/p/h* align in Chrome:
-  // Object.keys(HTMLDivElement.prototype) is ["align"]): [Reflect] DOMString
-  // — getter returns the content attribute or "", setter writes it back.
+  // (#32/#33) Legacy reflected attributes ([Reflect] DOMString; div/p/h*
+  // align, body color family, table family). Getter: absent content attr
+  // -> "" (className precedent). Setter null handling is the only thing
+  // [LegacyNullToEmptyString] changes — entries are either a plain name
+  // (null -> "null") or {name, nullEmpty} for the legacy-color trio style
+  // (null -> ""). undefined -> "undefined" in both modes.
   for (const a of attrs || []) {
-    Object.defineProperty(C.prototype, a, {
-      get() { const v = this.getAttribute(a); return v === null ? '' : v; },
-      set(v) { this.setAttribute(a, v === undefined || v === null ? '' : String(v)); },
+    const an = typeof a === 'string' ? a : a.name;
+    const nullEmpty = a !== null && typeof a === 'object' && a.nullEmpty;
+    Object.defineProperty(C.prototype, an, {
+      get() { const v = this.getAttribute(an); return v === null ? '' : v; },
+      set(v) { this.setAttribute(an, v === null && nullEmpty ? '' : String(v)); },
       configurable: true,
       enumerable: true,
     });
@@ -9918,7 +9923,12 @@ Object.defineProperty(Element.prototype, 'control', {
   get() { return this.tagName === 'LABEL' ? _labeledControl(this) : undefined; },
   configurable: true,
 });
-globalThis.HTMLTableElement = _htmlInterface('HTMLTableElement', ['table']);
+globalThis.HTMLTableElement = _htmlInterface('HTMLTableElement', ['table'], [
+  'align', 'border', 'frame', 'rules', 'summary', 'width',
+  { name: 'bgColor', nullEmpty: true },
+  { name: 'cellPadding', nullEmpty: true },
+  { name: 'cellSpacing', nullEmpty: true },
+]);
 globalThis.HTMLTableRowElement = _htmlInterface('HTMLTableRowElement', ['tr']);
 globalThis.HTMLTableCellElement = _htmlInterface('HTMLTableCellElement', ['td', 'th']);
 globalThis.HTMLTableSectionElement = _htmlInterface('HTMLTableSectionElement', ['thead', 'tbody', 'tfoot']);
@@ -9933,7 +9943,12 @@ globalThis.HTMLStyleElement = _htmlInterface('HTMLStyleElement', ['style']);
 globalThis.HTMLLinkElement = _htmlInterface('HTMLLinkElement', ['link']);
 globalThis.HTMLMetaElement = _htmlInterface('HTMLMetaElement', ['meta']);
 globalThis.HTMLHeadElement = _htmlInterface('HTMLHeadElement', ['head']);
-globalThis.HTMLBodyElement = _htmlInterface('HTMLBodyElement', ['body']);
+globalThis.HTMLBodyElement = _htmlInterface('HTMLBodyElement', ['body'], [
+  'background',
+  { name: 'text', nullEmpty: true }, { name: 'link', nullEmpty: true },
+  { name: 'vLink', nullEmpty: true }, { name: 'aLink', nullEmpty: true },
+  { name: 'bgColor', nullEmpty: true },
+]);
 globalThis.HTMLHtmlElement = _htmlInterface('HTMLHtmlElement', ['html']);
 globalThis.HTMLBRElement = _htmlInterface('HTMLBRElement', ['br']);
 globalThis.HTMLHRElement = _htmlInterface('HTMLHRElement', ['hr']);
