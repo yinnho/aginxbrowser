@@ -9810,9 +9810,63 @@ function _htmlInterface(name, tags, attrs) {
   // (ch -> "char"), {name, boolean} for reflected booleans (presence is
   // the bit; setter true -> empty value, false -> removeAttribute).
   // undefined -> "undefined" for the string modes.
+  //
+  // (#35) {name, ulong: [min, max, def]} — [Reflect, ReflectRange,
+  // ReflectDefault] unsigned long (colSpan/rowSpan/span). The asymmetry is
+  // the trap (WHATWG common-dom-interfaces.html, verified against Chrome
+  // 152): the GETTER clamps — parse the content attribute with the HTML
+  // non-negative integer rules (skip leading whitespace, optional '+',
+  // digits, stop at the first non-digit so "12abc" is 12 and "3.9" is 3);
+  // a parsed value outside [min, max] comes back as the boundary, while a
+  // missing/garbage attribute comes back as def. The SETTER never clamps:
+  // ToUint32 the value (Number(v) >>> 0 does NaN/inf -> 0, truncation and
+  // mod 2^32 in one op — Chrome writes "1410065408" for colSpan = 1e10),
+  // write it verbatim while it fits in [0, 2^31-1], otherwise write def.
+  // {name, keywords: [...]} — enumerated reflect (th scope): getter
+  // lowercases and returns the keyword only on an exact match (no
+  // whitespace trimming, "auto" is NOT in the set), else ""; setter is the
+  // plain verbatim write.
   for (const a of attrs || []) {
     const an = typeof a === 'string' ? a : a.name;
     const cn = (a !== null && typeof a === 'object' && a.attr) || an;
+    if (a !== null && typeof a === 'object' && a.ulong) {
+      const [umin, umax, udef] = a.ulong;
+      Object.defineProperty(C.prototype, an, {
+        get() {
+          const v = this.getAttribute(cn);
+          if (v !== null) {
+            const m = /^\s*\+?(\d+)/.exec(v);
+            if (m !== null) {
+              const p = +m[1];
+              if (p >= umin && p <= umax) return p;
+              return p < umin ? umin : umax;
+            }
+          }
+          return udef;
+        },
+        set(v) {
+          const x = Number(v) >>> 0;
+          this.setAttribute(cn, String(x <= 2147483647 ? x : udef));
+        },
+        configurable: true,
+        enumerable: true,
+      });
+      continue;
+    }
+    if (a !== null && typeof a === 'object' && a.keywords) {
+      Object.defineProperty(C.prototype, an, {
+        get() {
+          const v = this.getAttribute(cn);
+          if (v === null) return '';
+          const lv = v.toLowerCase();
+          return a.keywords.indexOf(lv) !== -1 ? lv : '';
+        },
+        set(v) { this.setAttribute(cn, String(v)); },
+        configurable: true,
+        enumerable: true,
+      });
+      continue;
+    }
     if (a !== null && typeof a === 'object' && a.boolean) {
       Object.defineProperty(C.prototype, an, {
         get() { return this.hasAttribute(cn); },
@@ -9947,13 +10001,23 @@ globalThis.HTMLTableRowElement = _htmlInterface('HTMLTableRowElement', ['tr'], [
   'vAlign', { name: 'bgColor', nullEmpty: true },
 ]);
 globalThis.HTMLTableCellElement = _htmlInterface('HTMLTableCellElement', ['td', 'th'], [
-  'align', 'axis', 'height', 'width',
+  'align', 'axis', 'height', 'width', 'headers', 'abbr',
   { name: 'ch', attr: 'char' }, { name: 'chOff', attr: 'charoff' },
   { name: 'noWrap', boolean: true }, 'vAlign',
   { name: 'bgColor', nullEmpty: true },
+  { name: 'colSpan', ulong: [1, 1000, 1] },
+  { name: 'rowSpan', ulong: [0, 65534, 1] },
+  { name: 'scope', keywords: ['row', 'col', 'rowgroup', 'colgroup'] },
 ]);
 globalThis.HTMLTableSectionElement = _htmlInterface('HTMLTableSectionElement', ['thead', 'tbody', 'tfoot'], [
   'align', { name: 'ch', attr: 'char' }, { name: 'chOff', attr: 'charoff' }, 'vAlign',
+]);
+// (#35) col and colgroup share HTMLTableColElement in Chrome (same face on
+// both): the ulong span plus the obsolete.html legacy string family.
+globalThis.HTMLTableColElement = _htmlInterface('HTMLTableColElement', ['col', 'colgroup'], [
+  'align', { name: 'ch', attr: 'char' }, { name: 'chOff', attr: 'charoff' },
+  'vAlign', 'width',
+  { name: 'span', ulong: [1, 1000, 1] },
 ]);
 globalThis.HTMLTableCaptionElement = _htmlInterface('HTMLTableCaptionElement', ['caption']);
 globalThis.HTMLOptGroupElement = _htmlInterface('HTMLOptGroupElement', ['optgroup']);

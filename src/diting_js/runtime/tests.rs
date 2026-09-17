@@ -580,9 +580,10 @@
         );
         assert_eq!(
             faces[2],
-            serde_json::json!(["align", "axis", "bgColor", "cellIndex", "ch",
-                               "chOff", "height", "noWrap", "vAlign", "width"]),
-            "cell prototype face"
+            serde_json::json!(["abbr", "align", "axis", "bgColor", "cellIndex", "ch",
+                               "chOff", "colSpan", "headers", "height", "noWrap",
+                               "rowSpan", "scope", "vAlign", "width"]),
+            "cell prototype face: matches Chrome's enumerable face exactly (#35)"
         );
         assert_eq!(
             v["parsed"], serde_json::json!([".", "2", true, "name", "center", "top"]),
@@ -600,6 +601,98 @@
             serde_json::json!([false, "", true, true, [false, false]]),
             "boolean reflect: absent false; true -> empty-valued attribute; '0' -> true; false -> removed"
         );
+    }
+
+    #[test]
+    fn reflected_ulong_and_keyword_families() {
+        let mut rt = setup_runtime(
+            "<html><body><table><tr><td id='c' colspan='2' rowspan='3' headers='h1 h2'>x</td>\
+             <th id='h' scope='col'>H</th></tr></table></body></html>",
+        );
+        let out = rt.evaluate(r#"
+            var td = document.getElementById('c'), th = document.getElementById('h');
+            var col = document.createElement('col'), cg = document.createElement('colgroup');
+            var fresh = document.createElement('td');
+            var defaults = [fresh.colSpan, fresh.rowSpan, fresh.headers, fresh.scope, col.span];
+            var parsed = [td.colSpan, td.rowSpan, td.headers, th.scope];
+            // GETTER: clamp to the ReflectRange boundaries, default on
+            // missing/garbage. HTML non-negative integer parsing: leading
+            // whitespace, '+', digits, stop at first non-digit.
+            var g = function(el, prop, attr, val) { el.setAttribute(attr, val); return el[prop]; };
+            var gets = [
+                g(fresh, 'colSpan', 'colspan', '3'), g(fresh, 'colSpan', 'colspan', '0'),
+                g(fresh, 'colSpan', 'colspan', '1001'), g(fresh, 'colSpan', 'colspan', '4294967296'),
+                g(fresh, 'colSpan', 'colspan', 'abc'), g(fresh, 'colSpan', 'colspan', '-2'),
+                g(fresh, 'colSpan', 'colspan', '  7  '), g(fresh, 'colSpan', 'colspan', '+9'),
+                g(fresh, 'colSpan', 'colspan', '12abc'), g(fresh, 'colSpan', 'colspan', '3.9'),
+                g(fresh, 'rowSpan', 'rowspan', '0'), g(fresh, 'rowSpan', 'rowspan', '65535'),
+                g(fresh, 'rowSpan', 'rowspan', '70000'),
+                g(col, 'span', 'span', '0'), g(col, 'span', 'span', '1001'),
+            ];
+            // SETTER: never clamps — ToUint32 (Number(v) >>> 0), written
+            // verbatim inside [0, 2^31-1], default written above that.
+            var s = function(el, prop, attr, v) { el[prop] = v; var a = el.getAttribute(attr); el.removeAttribute(attr); return a; };
+            var sets = [
+                s(fresh, 'colSpan', 'colspan', 0), s(fresh, 'colSpan', 'colspan', 5000),
+                s(fresh, 'colSpan', 'colspan', -1), s(fresh, 'colSpan', 'colspan', 4294967295),
+                s(fresh, 'colSpan', 'colspan', 4294967296), s(fresh, 'colSpan', 'colspan', null),
+                s(fresh, 'colSpan', 'colspan', undefined), s(fresh, 'colSpan', 'colspan', '12'),
+                s(fresh, 'colSpan', 'colspan', 3.9), s(fresh, 'colSpan', 'colspan', 'abc'),
+                s(fresh, 'colSpan', 'colspan', true), s(fresh, 'colSpan', 'colspan', 1e10),
+                s(fresh, 'rowSpan', 'rowspan', 0), s(fresh, 'rowSpan', 'rowspan', 70000),
+                s(col, 'span', 'span', 0), s(col, 'span', 'span', 2000),
+            ];
+            // The 0 quirk: setter writes "0" (legal), getter reads 1 (clamped).
+            var zeroTrip = (fresh.colSpan = 0, [fresh.getAttribute('colspan'), fresh.colSpan]);
+            var overTrip = (fresh.colSpan = 1001, [fresh.getAttribute('colspan'), fresh.colSpan]);
+            // scope: lowercase exact keyword match, no "auto", no trimming; setter verbatim.
+            var kw = (th.setAttribute('scope', 'ROW'), th.scope);
+            var kwAuto = (th.setAttribute('scope', 'auto'), th.scope);
+            var kwBogus = (th.setAttribute('scope', 'bogus'), th.scope);
+            var kwSpaces = (th.setAttribute('scope', ' col '), th.scope);
+            th.scope = 'bogus';
+            var kwSetAttr = th.getAttribute('scope');
+            th.scope = null;
+            var kwSetNull = th.getAttribute('scope');
+            var headersNull = (fresh.headers = null, fresh.getAttribute('headers'));
+            return JSON.stringify({
+                defaults: defaults,
+                ifaces: [col.constructor.name, cg.constructor.name],
+                colFace: Object.keys(HTMLTableColElement.prototype).sort(),
+                parsed: parsed,
+                gets: gets, sets: sets,
+                trips: [zeroTrip, overTrip],
+                kw: [kw, kwAuto, kwBogus, kwSpaces, kwSetAttr, kwSetNull],
+                headersNull: headersNull,
+            });
+        "#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        assert_eq!(v["defaults"], serde_json::json!([1, 1, "", "", 1]),
+            "ReflectDefault: colSpan/rowSpan/span 1, string reflects ''");
+        assert_eq!(v["ifaces"], serde_json::json!(["HTMLTableColElement", "HTMLTableColElement"]),
+            "col and colgroup share HTMLTableColElement");
+        assert_eq!(v["colFace"],
+            serde_json::json!(["align", "ch", "chOff", "span", "vAlign", "width"]),
+            "col prototype face: legacy five + ulong span");
+        assert_eq!(v["parsed"], serde_json::json!([2, 3, "h1 h2", "col"]),
+            "parsed-in colspan/rowspan/headers/scope read through");
+        assert_eq!(
+            v["gets"],
+            serde_json::json!([3, 1, 1000, 1000, 1, 1, 7, 9, 12, 3, 0, 65534, 65534, 1, 1000]),
+            "getter clamps to [min,max], defaults on missing/garbage, parses per HTML integer rules"
+        );
+        assert_eq!(
+            v["sets"],
+            serde_json::json!(["0", "5000", "1", "1", "0", "0", "0", "12", "3", "0", "1",
+                               "1410065408", "0", "70000", "0", "2000"]),
+            "setter never clamps: ToUint32 verbatim within [0,2^31-1], default above"
+        );
+        assert_eq!(v["trips"], serde_json::json!([["0", 1], ["1001", 1000]]),
+            "the 0/1001 round trips: attribute keeps what was written, getter clamps");
+        assert_eq!(v["kw"], serde_json::json!(["row", "", "", "", "bogus", "null"]),
+            "scope keyword reflect: canonical lowercase match, auto/bogus/spaces -> '', setter verbatim");
+        assert_eq!(v["headersNull"], serde_json::json!("null"),
+            "headers is plain reflect: null -> \"null\"");
     }
 
 
