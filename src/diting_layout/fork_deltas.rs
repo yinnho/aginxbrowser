@@ -2395,3 +2395,41 @@ fn nowrap_ellipsis_marks_paint_truncation_and_keeps_full_text() {
     let (_, _, truncate_at) = text_of(&items);
     assert_eq!(truncate_at, None, "no marker on a visible-overflow box");
 }
+
+/// taffy#1008's exact shape, transposed to HTML: the containing block for an
+/// absolute box is the PADDING box of the nearest positioned ancestor —
+/// border eats into the anchor. `#outer` (relative, border 2, padding 25)
+/// around a static `#middle` (margin-left 35, padding 30) around the
+/// absolute `#target` (left/top 10). Chrome puts the target at page
+/// (12, 12) = outer border(2) + inset(10); taffy's direct-parent
+/// resolution (its #1008) lands it at (72, 77). The reparent pass fixes
+/// the ancestor choice; this pins the padding-box anchoring half, which
+/// the other reparent tests (no border/padding on the CB) never exercised.
+#[test]
+fn absolute_containing_block_is_padding_box_of_positioned_ancestor() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    let html = r#"<html><body>
+        <div id="outer"><div id="spacer"></div><div id="middle"><div id="target"></div></div></div>
+    </body></html>"#;
+    let sheet = r#"
+        body { margin: 0; }
+        #outer { position: relative; padding: 25px; border: 2px solid black; width: 400px; height: 300px; }
+        #spacer { height: 40px; }
+        #middle { margin-left: 35px; padding: 30px; width: 200px; height: 100px; }
+        #target { position: absolute; left: 10px; top: 10px; width: 60px; height: 20px; }
+    "#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for(sheet, (1280.0, 800.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let fonts = crate::diting_fonts::font_book();
+    let rects = crate::diting_layout::layout_dom(&tree, &styles, &fonts, 1280.0, 800.0);
+
+    let target_id = tree.query_selector_all("#target").unwrap()[0];
+    let target = rects.get(&target_id).expect("target rect");
+    assert!(
+        (target.x - 12.0).abs() < 0.5 && (target.y - 12.0).abs() < 0.5,
+        "target anchors at outer's PADDING box (border 2 + inset 10 = 12,12), got {target:?}"
+    );
+}
