@@ -1905,6 +1905,16 @@ impl Page {
         self.viewport_override
     }
 
+    /// Browser.setContentsSize path: resize the window *contents* (the
+    /// viewport) without disturbing the emulation knobs — a pinned mobile
+    /// flag or dpr survives, only the dimensions move (Chrome's resize is a
+    /// contents-size change, not a device-metrics re-pin). With nothing
+    /// pinned, this is a plain desktop viewport pin.
+    pub fn resize_contents(&mut self, w: f32, h: f32) {
+        let mobile = self.viewport_override.map(|(_, _, m)| m).unwrap_or(false);
+        self.set_viewport_override(w, h, mobile, self.dpr_override);
+    }
+
     /// The pinned device-pixel ratio, if any — read back so scoped viewport
     /// changes (Page.printToPDF pins paper size for the render) restore the
     /// session's emulation exactly, dpr included.

@@ -448,7 +448,7 @@ pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
         "Accessibility" => {
             domains::accessibility::handle(method, &req.params, ctx, &req.session_id).await
         }
-        "Browser" => domains::browser::handle(method, &req.params).await,
+        "Browser" => domains::browser::handle(method, &req.params, ctx, &req.session_id).await,
         "Page" => domains::page::handle(method, &req.params, ctx, &req.session_id).await,
         "DOM" => domains::dom::handle(method, &req.params, ctx, &req.session_id).await,
         "Runtime" => domains::runtime::handle(method, &req.params, ctx, &req.session_id).await,
@@ -4204,6 +4204,51 @@ mod tests {
             .expect("result");
         assert_eq!(v["result"]["value"][0].as_f64(), Some(persona_dpr));
         assert_eq!(v["result"]["value"][1].as_f64(), Some(320.0));
+    }
+
+    /// Browser.setContentsSize (Chrome >=129 resize path; chrome-devtools-mcp's
+    /// resize_page) moves the viewport dimensions but leaves a pinned dpr alone
+    /// — a resize is a contents change, not a device-metrics re-pin — and the
+    /// window bounds a resize round-trip reads back reflect the new size (#18).
+    #[cfg(feature = "screenshot")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn browser_set_contents_size_resizes_viewport_and_keeps_dpr() {
+        let (mut ctx, session) = band_setup(BAND_PAGE).await;
+        let r = band_dispatch(
+            &mut ctx,
+            &session,
+            2,
+            "Emulation.setDeviceMetricsOverride",
+            json!({ "width": 320, "height": 200, "deviceScaleFactor": 2.625, "mobile": false }),
+        )
+        .await;
+        assert!(r.error.is_none(), "dpr pin: {:?}", r.error);
+
+        let r = band_dispatch(
+            &mut ctx,
+            &session,
+            3,
+            "Browser.setContentsSize",
+            json!({ "width": 800, "height": 600 }),
+        )
+        .await;
+        assert!(r.error.is_none(), "setContentsSize: {:?}", r.error);
+
+        let v = band_dispatch(&mut ctx, &session, 4, "Runtime.evaluate",
+            json!({ "expression": "[innerWidth, innerHeight, devicePixelRatio]", "returnByValue": true }))
+            .await
+            .result
+            .expect("result");
+        assert_eq!(v["result"]["value"][0].as_f64(), Some(800.0));
+        assert_eq!(v["result"]["value"][1].as_f64(), Some(600.0));
+        assert_eq!(v["result"]["value"][2].as_f64(), Some(2.625), "resize must not re-pin dpr");
+
+        let v = band_dispatch(&mut ctx, &session, 5, "Browser.getWindowForTarget", json!({}))
+            .await
+            .result
+            .expect("result");
+        assert_eq!(v["bounds"]["width"].as_i64(), Some(800));
+        assert_eq!(v["bounds"]["height"].as_i64(), Some(600));
     }
 
     /// Input.dispatchMouseEvent consumes the same coordinate world the layout
