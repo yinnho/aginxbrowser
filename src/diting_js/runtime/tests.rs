@@ -1929,6 +1929,40 @@
         }
     }
 
+    /// #39 (obscura#999 residue): WebKitMutationObserver is an alias of the
+    /// same constructor (zone.js patches both names; Chrome 151 face), and
+    /// IntersectionObserver's prototype carries scrollMargin/delay/
+    /// trackVisibility alongside root/rootMargin/thresholds — the sorted
+    /// 10-name Chrome-parity face, getters enumerable like every other
+    /// interface member.
+    #[test]
+    fn webkit_mutation_observer_alias_and_io_attribute_face() {
+        let mut rt = setup_runtime(r#"<body><div id="d"></div></body>"#);
+        let out = rt
+            .evaluate(
+                r#"(() => {
+                    const ioKeys = Object.keys(IntersectionObserver.prototype).sort();
+                    const io = new IntersectionObserver(function(){});
+                    let sawScrollMargin = false;
+                    for (const k in io) { if (k === 'scrollMargin') sawScrollMargin = true; }
+                    return JSON.stringify([
+                        typeof WebKitMutationObserver,
+                        WebKitMutationObserver === MutationObserver,
+                        ioKeys,
+                        io.delay, io.trackVisibility, io.scrollMargin,
+                        sawScrollMargin,
+                    ]);
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(
+            out,
+            serde_json::json!(
+                r#"["function",true,["delay","disconnect","observe","root","rootMargin","scrollMargin","takeRecords","thresholds","trackVisibility","unobserve"],0,false,"0px 0px 0px 0px",true]"#
+            )
+        );
+    }
+
     /// #28: SVG elements wrap in their real interfaces (constructor.name,
     /// instanceof, patch isolation) and read the true per-node namespace from
     /// the tree — parsed SVG children inherit theirs, createElementNS keeps

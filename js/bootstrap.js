@@ -7803,6 +7803,11 @@ globalThis.MutationObserver = class MutationObserver {
     });
   }
 };
+// (#39) Chrome exposes WebKitMutationObserver as an alias of the same
+// constructor (zone.js patches both names; it skips absent classes, but
+// `typeof WebKitMutationObserver` must be 'function'). A data prop holding
+// the shared function survives the V8 snapshot and shares its native mark.
+globalThis.WebKitMutationObserver = globalThis.MutationObserver;
 globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNodes, attributeName, oldValue) {
   if (!globalThis.__mutationObservers.length) return;
   // Use `_wrap` (the canonical node-id → wrapper resolver) instead of a
@@ -8109,6 +8114,13 @@ globalThis.IntersectionObserver = class IntersectionObserver {
     if (t == null) return [0];
     return Array.isArray(t) ? t.slice() : [t];
   }
+  // (#39) Chrome 151's IntersectionObserver face carries these three
+  // attributes (scroll-margin spec + visibility tracking); defaults mirror
+  // Chrome. The #27 enumerability sweep flips the getters like any other
+  // member.
+  get scrollMargin() { return this._options.scrollMargin || "0px 0px 0px 0px"; }
+  get delay() { return 0; }
+  get trackVisibility() { return false; }
 };
 // When the DOM mutates (e.g. infinite scroll loads a batch of items), re-fire
 // every active IntersectionObserver so libraries observing dynamic content
