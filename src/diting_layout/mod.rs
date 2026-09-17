@@ -8390,3 +8390,79 @@ mod sticky_tests {
         assert_eq!(bg_xy(&out[0]).1, -392.0, "pre-clip item takes the scroller base only");
     }
 }
+
+/// Batch 124 (takumi#1489 probe, learn-only channel): leading collapsible
+/// whitespace. Browsers trim a space sequence at the start of a line —
+/// the IFC start (css-text-3 §4.1.3) and after a forced break (§4.1.2) —
+/// so an indented `<p>\\n  Due <span>x</span></p>` renders flush, and a
+/// space right after `<br>` never indents the next line. The opposite
+/// edge is pinned too: separators BETWEEN inline siblings must survive.
+#[cfg(test)]
+mod batch_124_leading_ws_tests {
+    use super::*;
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    fn text_x(body: &str, needle: &str) -> f32 {
+        let html = format!("<html><body>{body}</body></html>");
+        let tree = parse_html(&html);
+        let rules = parse_stylesheet_for("", (800.0, 600.0), CssMediaType::Screen);
+        let styles = compute_styles(&tree, &rules);
+        let (_, items, _, _, _, _) = layout_dom_with_paint_order_and_images(
+            &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
+        );
+        items
+            .iter()
+            .find_map(|it| match it {
+                // Run leaves carry the RAW node text (trimming lives in the
+                // tokens); Word leaves carry the token itself.
+                PaintItem::Text { text, x, .. } if text.trim_start().starts_with(needle) => Some(*x),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                let all: Vec<String> = items
+                    .iter()
+                    .filter_map(|it| match it {
+                        PaintItem::Text { text, .. } => Some(format!("{text:?}")),
+                        _ => None,
+                    })
+                    .collect();
+                panic!("no text item starting with {needle:?}; texts: {all:?}")
+            })
+    }
+
+    #[test]
+    fn leading_ws_at_ifc_start_is_trimmed_mixed_run() {
+        // takumi#1489's exact shape: newline+indent text node, then a span.
+        let flush = text_x(r#"<p id="f">Due <span>x</span></p>"#, "Due");
+        let indented = text_x(r#"<p id="i">
+  Due <span>x</span></p>"#, "Due");
+        assert_eq!(indented, flush, "newline+indent at IFC start must not shift the paragraph");
+    }
+
+    #[test]
+    fn leading_ws_at_ifc_start_is_trimmed_pure_text() {
+        let flush = text_x(r#"<p>Due</p>"#, "Due");
+        let indented = text_x(r#"<p>
+  Due</p>"#, "Due");
+        assert_eq!(indented, flush);
+    }
+
+    #[test]
+    fn mid_run_space_between_inline_siblings_survives() {
+        // The opposite edge: the separator between inline siblings is
+        // mid-line whitespace — per-node trimming would glue these.
+        let glued = text_x(r#"<p><span>a</span>b<span>c</span></p>"#, "b");
+        let spaced = text_x(r#"<p><span>a</span> b <span>c</span></p>"#, "b");
+        assert!(spaced > glued + 2.0, "separator space must advance: glued={glued} spaced={spaced}");
+    }
+
+    #[test]
+    fn leading_ws_after_forced_break_is_trimmed() {
+        // css-text-3 §4.1.2: a collapsible space sequence at the beginning
+        // of a line is removed — including the line opened by a <br>.
+        let base = text_x(r#"<p>abc<br>def</p>"#, "def");
+        let spaced = text_x(r#"<p>abc<br> def</p>"#, "def");
+        assert_eq!(spaced, base, "space after <br> opens the next line and must be removed");
+    }
+}
