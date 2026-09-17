@@ -3115,6 +3115,143 @@
         assert_eq!(v["complete"], serde_json::json!("true"));
     }
 
+    /// (#42) Sync XHR resolves data: URLs locally — status 200, decoded
+    /// payload, content-type header, responseURL keeps the data: URL. The
+    /// old behavior fell into the network-op catch and zeroed status.
+    #[tokio::test(flavor = "current_thread")]
+    async fn xhr_sync_data_url_reports_200() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const x = new XMLHttpRequest();
+                    x.open('GET', 'data:text/plain,XYZZY', false);
+                    x.send();
+                    return {
+                        status: String(x.status),
+                        body: x.responseText,
+                        ready: String(x.readyState),
+                        url: x.responseURL === 'data:text/plain,XYZZY',
+                        ct: x.getResponseHeader('content-type'),
+                    };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let v = result.value.unwrap();
+        assert_eq!(v["status"], serde_json::json!("200"));
+        assert_eq!(v["body"], serde_json::json!("XYZZY"));
+        assert_eq!(v["ready"], serde_json::json!("4"));
+        assert_eq!(v["url"], serde_json::json!(true));
+        assert_eq!(v["ct"], serde_json::json!("text/plain"));
+    }
+
+    /// (#42) base64 payloads decode through the same RFC 2397 walk, and an
+    /// unparseable data: URL lands on status 0 (Chrome: network error face).
+    #[tokio::test(flavor = "current_thread")]
+    async fn xhr_sync_data_url_base64_and_broken() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const b = new XMLHttpRequest();
+                    b.open('GET', 'data:text/plain;base64,WFlaWlk=', false);
+                    b.send();
+                    const broken = new XMLHttpRequest();
+                    broken.open('GET', 'data:text/plain-nocomma', false);
+                    broken.send();
+                    return {
+                        status: String(b.status),
+                        body: b.responseText,
+                        brokenStatus: String(broken.status),
+                    };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let v = result.value.unwrap();
+        assert_eq!(v["status"], serde_json::json!("200"));
+        assert_eq!(v["body"], serde_json::json!("XYZZY"));
+        assert_eq!(v["brokenStatus"], serde_json::json!("0"));
+    }
+
+    /// (#42) blob: URLs read through the createObjectURL registry with the
+    /// blob's own type surfacing as content-type.
+    #[tokio::test(flavor = "current_thread")]
+    async fn xhr_sync_blob_url_reads_registry() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const u = URL.createObjectURL(new Blob(['BLOBOK'], { type: 'text/x-demo' }));
+                    const x = new XMLHttpRequest();
+                    x.open('GET', u, false);
+                    x.send();
+                    return {
+                        status: String(x.status),
+                        body: x.responseText,
+                        ct: x.getResponseHeader('content-type'),
+                    };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let v = result.value.unwrap();
+        assert_eq!(v["status"], serde_json::json!("200"));
+        assert_eq!(v["body"], serde_json::json!("BLOBOK"));
+        assert_eq!(v["ct"], serde_json::json!("text/x-demo"));
+    }
+
+    /// (#42) regression: async data: XHR keeps firing load through the same
+    /// local branch instead of the fetch() path.
+    #[tokio::test(flavor = "current_thread")]
+    async fn xhr_async_data_url_fires_load() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const x = new XMLHttpRequest();
+                    const how = await new Promise((resolve) => {
+                        x.onload = () => resolve('load');
+                        x.onerror = () => resolve('error');
+                        x.open('GET', 'data:text/plain,XYZZY', true);
+                        x.send();
+                    });
+                    return {
+                        how,
+                        status: String(x.status),
+                        body: x.responseText,
+                    };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let v = result.value.unwrap();
+        assert_eq!(v["how"], serde_json::json!("load"));
+        assert_eq!(v["status"], serde_json::json!("200"));
+        assert_eq!(v["body"], serde_json::json!("XYZZY"));
+    }
+
     #[test]
     fn test_button_click_dispatches_listener() {
         let mut rt = setup_runtime(r#"<button id="go">Go</button>"#);

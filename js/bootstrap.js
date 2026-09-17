@@ -6469,6 +6469,87 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
       } catch(e) {}
     }
 
+    // (#42) data:/blob: resolve locally, not through the network ops — the
+    // sync path would otherwise fall into the JSON.parse catch and zero
+    // status. Chrome reports 200 + content-type for both; responseURL keeps
+    // the original URL. Sync fills state inline with no events (same
+    // semantics as the network sync path); async defers to a task so the
+    // usual readystatechange/load/loadend sequence stays ordered.
+    if (url.startsWith('data:') || url.startsWith('blob:')) {
+      const applyLocal = function () {
+        let bytes = null;
+        let ctype = '';
+        try {
+          if (url.startsWith('blob:')) {
+            const b = globalThis.__blobObjs && globalThis.__blobObjs[url];
+            if (b && b._bytes instanceof Uint8Array) { bytes = b._bytes; ctype = b.type || ''; }
+          } else {
+            const d = _dataUrlBytes(url);
+            bytes = d.bytes;
+            ctype = d.mime;
+          }
+        } catch (e) { bytes = null; }
+        if (!bytes) {
+          xhr.status = 0;
+          xhr.statusText = '';
+          xhr._responseHeaders = {};
+          xhr.responseText = '';
+          xhr.response = '';
+          if (xhr._async) {
+            xhr._setReadyState(4);
+            xhr._fireEvent('error');
+            xhr._fireEvent('loadend');
+          } else {
+            xhr.readyState = 4;
+          }
+          return;
+        }
+        xhr.responseURL = url;
+        xhr.status = 200;
+        xhr.statusText = '';
+        xhr._responseHeaders = ctype ? { 'content-type': ctype } : {};
+        const text = _decodeBodyWithCharset(bytes, {
+          get: (name) => {
+            const lower = String(name).toLowerCase();
+            for (const [k, v] of Object.entries(xhr._responseHeaders)) {
+              if (k.toLowerCase() === lower) return v;
+            }
+            return null;
+          },
+        });
+        xhr.responseText = text;
+        switch (xhr.responseType) {
+          case 'json':
+            try { xhr.response = JSON.parse(text); } catch(e) { xhr.response = null; }
+            break;
+          case 'text':
+          case '':
+            xhr.response = text;
+            break;
+          case 'arraybuffer':
+            xhr.response = bytes.slice().buffer;
+            break;
+          case 'blob':
+            xhr.response = new Blob([bytes]);
+            break;
+          case 'document':
+            xhr.response = text; // simplified
+            break;
+          default:
+            xhr.response = text;
+        }
+        if (xhr._async) {
+          xhr._setReadyState(4);
+          xhr._fireEvent('load');
+          xhr._fireEvent('loadend');
+        } else {
+          xhr.readyState = 4;
+        }
+      };
+      if (this._async) { setTimeout(applyLocal, 0); } else { applyLocal(); }
+      return;
+    }
+
     if (this._async === false) {
       // Sync XHR (obscura#908): the request must complete inside send() —
       // async ops only resolve when the embedding pumps the event loop after
