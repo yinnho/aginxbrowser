@@ -101,6 +101,9 @@ enum TextLeaf {
         /// text+style, which the leaf owns for its whole lifetime — shape
         /// once via [`run_tokens`], clone the Rc on every later probe.
         tokens: std::cell::RefCell<Option<std::rc::Rc<[text::Token]>>>,
+        /// `font-variant-caps: small-caps` synthesis: lowercase runs shape
+        /// as uppercase glyphs at 70% size (case-run token segmentation).
+        small_caps: bool,
     },
     /// One word/glyph of a MIXED run (text around inline elements): the
     /// batch-2b word-leaf fallback, now carrying paint context (batch 4d).
@@ -498,9 +501,9 @@ fn resolve_sizing_keywords(
         let space = taffy::geometry::Size { width: w, height: AvailableSpace::MaxContent };
         let _ = taffy_tree.compute_layout_with_measure(node, space, |inputs, _id, ctx, style| {
             match ctx {
-                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, .. }) => {
+                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, .. }) => {
                     let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                    let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens);
+                    let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps);
                     measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws)
                 }
                 Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | None => {
@@ -736,6 +739,23 @@ fn word_spacing_context(
         current = tree.with_node(nid, |n| n.parent).flatten();
     }
     0.0
+}
+
+/// `font-variant-caps` inherits, so a text node's synthesis flag walks the
+/// ancestor chain like word-spacing does (None = unset → no synthesis).
+fn small_caps_context(
+    tree: &DomTree,
+    id: NodeId,
+    styles: &HashMap<NodeId, ComputedStyle>,
+) -> bool {
+    let mut current = Some(id);
+    while let Some(nid) = current {
+        if let Some(sc) = styles.get(&nid).and_then(|s| s.font_variant_caps) {
+            return sc;
+        }
+        current = tree.with_node(nid, |n| n.parent).flatten();
+    }
+    false
 }
 
 /// text-decoration resolution for a text node: the property PROPAGATES
@@ -1173,43 +1193,67 @@ fn build_word_leaves(
     shift: f32,
     mono: bool,
     word_spacing: f32,
+    small_caps: bool,
     fonts: &FontBook,
     taffy_tree: &mut TaffyTree<TextLeaf>,
 ) -> Vec<taffy::tree::NodeId> {
+    let mut word_leaf = |seg_text: &str, seg_size: f32, is_space: bool| {
+        // The separator token's advance carries the inherited
+        // word-spacing (same token model measurement uses), so
+        // taffy positions the following word leaves accordingly.
+        let width = fonts.advance_width(seg_text, seg_size, bold, mono)
+            + if is_space { word_spacing } else { 0.0 };
+        // Pure-whitespace tokens contribute no height (they sit between
+        // block siblings without adding a spurious blank row).
+        let height = if is_space {
+            0.0
+        } else {
+            line_height + shift_pad(shift, leaf_descent(fonts, seg_size, bold))
+        };
+        let style = Style {
+            size: Size {
+                width: Dimension::length(width.max(0.0)),
+                height: Dimension::length(height.max(0.0)),
+            },
+            ..Style::default()
+        };
+        let leaf = TextLeaf::Word {
+            text: seg_text.to_string(),
+            font_size: seg_size,
+            bold,
+            color,
+            line_height,
+            decorations,
+            baseline_shift: shift,
+            mono,
+        };
+        taffy_tree.new_leaf_with_context(style, leaf).ok()
+    };
     tokenize(text)
         .into_iter()
-        .filter_map(|token| {
+        .flat_map(|token| {
             let is_space = token.trim().is_empty();
-            // The separator token's advance carries the inherited
-            // word-spacing (same token model measurement uses), so
-            // taffy positions the following word leaves accordingly.
-            let width = fonts.advance_width(&token, font_size, bold, mono)
-                + if is_space { word_spacing } else { 0.0 };
-            // Pure-whitespace tokens contribute no height (they sit between
-            // block siblings without adding a spurious blank row).
-            let height = if is_space {
-                0.0
+            if small_caps && !is_space && token.chars().any(|c| c.is_lowercase()) {
+                // Synthesized small-caps: lowercase runs render as
+                // uppercase glyphs at 70% size, mixed case stays
+                // full-size (Blink's model). Each segment is its own
+                // leaf so taffy positions them by shaped width.
+                text::caps_case_runs(&token)
+                    .into_iter()
+                    .filter_map(|(seg, lower)| {
+                        let seg_size = if lower {
+                            font_size * text::SMALL_CAPS_RATIO
+                        } else {
+                            font_size
+                        };
+                        // Synthesis uppercases the glyphs (`ß` → "SS");
+                        // already-uppercase segments are unaffected.
+                        word_leaf(&seg.to_uppercase(), seg_size, false)
+                    })
+                    .collect::<Vec<_>>()
             } else {
-                line_height + shift_pad(shift, leaf_descent(fonts, font_size, bold))
-            };
-            let style = Style {
-                size: Size {
-                    width: Dimension::length(width.max(0.0)),
-                    height: Dimension::length(height.max(0.0)),
-                },
-                ..Style::default()
-            };
-            let leaf = TextLeaf::Word {
-                text: token.clone(),
-                font_size,
-                bold,
-                color,
-                line_height,
-                decorations,
-                baseline_shift: shift,
-                mono,
-            };
-            taffy_tree.new_leaf_with_context(style, leaf).ok()
+                word_leaf(&token, font_size, is_space).into_iter().collect::<Vec<_>>()
+            }
         })
         .collect()
 }
@@ -1255,9 +1299,10 @@ fn run_tokens(
     word_spacing: f32,
     ws: WhiteSpace,
     memo: &std::cell::RefCell<Option<std::rc::Rc<[text::Token]>>>,
+    small_caps: bool,
 ) -> std::rc::Rc<[text::Token]> {
     memo.borrow_mut()
-        .get_or_insert_with(|| text::tokens_of(text, font_size, bold, fonts, mono, word_spacing, ws).into())
+        .get_or_insert_with(|| text::tokens_of(text, font_size, bold, fonts, mono, word_spacing, ws, small_caps).into())
         .clone()
 }
 
@@ -1950,7 +1995,8 @@ fn build_normal_sibling(
             let vs = valign_shift(tree, child, styles, fonts);
             let mono = mono_context(tree, child, styles);
             let ws = word_spacing_context(tree, child, styles);
-            leaves.extend(build_word_leaves(&text, fs, b, col, lh, deco, vs, mono, ws, fonts, taffy_tree));
+            let sc = small_caps_context(tree, child, styles);
+            leaves.extend(build_word_leaves(&text, fs, b, col, lh, deco, vs, mono, ws, sc, fonts, taffy_tree));
         } else {
             let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta);
             if let Some(sub) = sub {
@@ -2169,9 +2215,10 @@ fn wrap_q_quotes(
     let vs = valign_shift(tree, child, styles, fonts);
     let mono = mono_context(tree, child, styles);
     let ws = word_spacing_context(tree, child, styles);
-    let mut wrapped = build_word_leaves(open, fs, b, col, lh, deco, vs, mono, ws, fonts, taffy_tree);
+    let sc = small_caps_context(tree, child, styles);
+    let mut wrapped = build_word_leaves(open, fs, b, col, lh, deco, vs, mono, ws, sc, fonts, taffy_tree);
     wrapped.append(sub_children);
-    wrapped.extend(build_word_leaves(close, fs, b, col, lh, deco, vs, mono, ws, fonts, taffy_tree));
+    wrapped.extend(build_word_leaves(close, fs, b, col, lh, deco, vs, mono, ws, sc, fonts, taffy_tree));
     *sub_children = wrapped;
 }
 
@@ -2335,7 +2382,7 @@ fn build_flow_column(
     lh_elem: f32,
 ) -> Vec<taffy::tree::NodeId> {
     enum RunSeg {
-        Text(String, f32, bool, [u8; 4], f32, TextDecorations, f32, bool, f32, WhiteSpace),
+        Text(String, f32, bool, [u8; 4], f32, TextDecorations, f32, bool, f32, WhiteSpace, bool),
         Nodes(Vec<taffy::tree::NodeId>),
     }
     let mut flow_children: Vec<taffy::tree::NodeId> = Vec::new();
@@ -2351,15 +2398,15 @@ fn build_flow_column(
                 .map(|s| match s { RunSeg::Text(t, ..) => t.as_str(), _ => "" })
                 .collect::<String>();
             if !text.trim().is_empty() || {
-                let any_preserve = segs.iter().any(|s| matches!(s, RunSeg::Text(.., w) if w.preserves_spaces() || w.preserves_newlines()));
+                let any_preserve = segs.iter().any(|s| matches!(s, RunSeg::Text(.., w, _) if w.preserves_spaces() || w.preserves_newlines()));
                 any_preserve
             } {
-                let RunSeg::Text(_, fs, bold, color, lh, deco, vs, mono, wsp, _) = &segs[0] else { unreachable!() };
+                let RunSeg::Text(_, fs, bold, color, lh, deco, vs, mono, wsp, _, sc) = &segs[0] else { unreachable!() };
                 // white-space inherits, so the preserve-wins winner across
                 // segments rides the whole run (the "any nowrap pins the
                 // run" precedent, ranked across the family).
                 let run_ws = segs.iter().fold(WhiteSpace::Normal, |acc, s| match s {
-                    RunSeg::Text(.., w) if ws_rank(*w) > ws_rank(acc) => *w,
+                    RunSeg::Text(.., w, _) if ws_rank(*w) > ws_rank(acc) => *w,
                     _ => acc,
                 });
                 // Anonymous flow columns own no element style; text-overflow is
@@ -2367,7 +2414,7 @@ fn build_flow_column(
                 let run_ellipsis = false;
                 if let Ok(leaf) = taffy_tree.new_leaf_with_context(
                     Style::default(),
-                    TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *wsp, ws: run_ws, ellipsis: run_ellipsis, tokens: std::cell::RefCell::new(None) },
+                    TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *wsp, ws: run_ws, ellipsis: run_ellipsis, tokens: std::cell::RefCell::new(None), small_caps: *sc },
                 ) {
                     flow_children.push(leaf);
                 }
@@ -2377,8 +2424,8 @@ fn build_flow_column(
         let mut leaves: Vec<taffy::tree::NodeId> = Vec::new();
         for seg in segs {
             match seg {
-                RunSeg::Text(text, fs, bold, color, lh, deco, vs, mono, wsp, _) => {
-                    leaves.extend(build_word_leaves(&text, fs, bold, color, lh, deco, vs, mono, wsp, fonts, taffy_tree))
+                RunSeg::Text(text, fs, bold, color, lh, deco, vs, mono, wsp, _, sc) => {
+                    leaves.extend(build_word_leaves(&text, fs, bold, color, lh, deco, vs, mono, wsp, sc, fonts, taffy_tree))
                 }
                 RunSeg::Nodes(nodes) => leaves.extend(nodes),
             }
@@ -2438,7 +2485,8 @@ fn build_flow_column(
             let mono = mono_context(tree, child, styles);
             let ws = word_spacing_context(tree, child, styles);
             let nws = tree.with_node(child, |n| n.parent).flatten().and_then(|p| styles.get(&p)).and_then(|s| s.white_space).unwrap_or(WhiteSpace::Normal);
-            run.push(RunSeg::Text(text, fs, b, col, lh, deco, vs, mono, ws, nws));
+            let sc = small_caps_context(tree, child, styles);
+            run.push(RunSeg::Text(text, fs, b, col, lh, deco, vs, mono, ws, nws, sc));
         } else if child_display == Some(CssDisplay::InlineBlock) && !out_of_flow {
             // Atomic inline-level box (obscura#750 family): keeps its own
             // subtree box, joins the run as one shrink-to-fit unit.
@@ -3050,9 +3098,9 @@ fn build_table(
         taffy_tree.disable_rounding();
         let _ = taffy_tree.compute_layout_with_measure(node, space, |inputs, _id, ctx, style| {
             match ctx {
-                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, .. }) => {
+                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, .. }) => {
                     let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                    let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens);
+                    let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps);
                     measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws)
                 }
                 Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | None => {
@@ -3071,9 +3119,9 @@ fn build_table(
         taffy_tree.disable_rounding();
         let _ = taffy_tree.compute_layout_with_measure(node, space, |inputs, _id, ctx, style| {
             match ctx {
-                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, .. }) => {
+                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, .. }) => {
                     let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                    let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens);
+                    let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps);
                     measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws)
                 }
                 Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | None => {
@@ -3497,6 +3545,7 @@ fn pseudo_leaf(
                     word_spacing,
                     ws,
                     ellipsis,
+                    small_caps,
                     ..
                 }) = taffy_tree.get_node_context(adj)
                 {
@@ -3521,6 +3570,7 @@ fn pseudo_leaf(
                                 ws: *ws,
                                 ellipsis: *ellipsis,
                                 tokens: std::cell::RefCell::new(None),
+                                small_caps: *small_caps,
                             },
                         )
                         .ok();
@@ -3548,6 +3598,7 @@ fn pseudo_leaf(
                     ws: p.white_space.unwrap_or(WhiteSpace::Normal),
                     ellipsis: false,
                     tokens: std::cell::RefCell::new(None),
+                    small_caps: p.font_variant_caps.unwrap_or(false),
                 }
             }) {
                 Ok(leaf) => {
@@ -3586,6 +3637,7 @@ fn pseudo_leaf(
                                 ws: p.white_space.unwrap_or(WhiteSpace::Normal),
                                 ellipsis: false,
                                 tokens: std::cell::RefCell::new(None),
+                                small_caps: p.font_variant_caps.unwrap_or(false),
                             }
                         },
                     )
@@ -3653,7 +3705,7 @@ fn build_element_inner(
     // greedy wrap, ceiled width) we reproduce in measure_text_leaf. Mixed
     // runs fall back to the batch-2b wrapping flex row of word leaves.
     enum RunSeg {
-        Text(String, f32, bool, [u8; 4], f32, TextDecorations, f32, bool, f32, WhiteSpace),
+        Text(String, f32, bool, [u8; 4], f32, TextDecorations, f32, bool, f32, WhiteSpace, bool),
         Nodes(Vec<taffy::tree::NodeId>),
     }
     let mut direct: Vec<taffy::tree::NodeId> = Vec::new();
@@ -3673,15 +3725,15 @@ fn build_element_inner(
                 .iter()
                 .map(|s| match s { RunSeg::Text(t, ..) => t.as_str(), _ => "" })
                 .collect::<String>();
-            if text.trim().is_empty() && !segs.iter().any(|s| matches!(s, RunSeg::Text(.., w) if w.preserves_spaces() || w.preserves_newlines())) {
+            if text.trim().is_empty() && !segs.iter().any(|s| matches!(s, RunSeg::Text(.., w, _) if w.preserves_spaces() || w.preserves_newlines())) {
                 return;
             }
-            let RunSeg::Text(_, fs, bold, color, lh, deco, vs, mono, wsp, _) = &segs[0] else { unreachable!() };
+            let RunSeg::Text(_, fs, bold, color, lh, deco, vs, mono, wsp, _, sc) = &segs[0] else { unreachable!() };
             // white-space inherits, so the preserve-wins winner across
             // segments rides the whole run (the "any nowrap pins the run"
             // precedent, ranked across the family).
             let run_ws = segs.iter().fold(WhiteSpace::Normal, |acc, s| match s {
-                RunSeg::Text(.., w) if ws_rank(*w) > ws_rank(acc) => *w,
+                RunSeg::Text(.., w, _) if ws_rank(*w) > ws_rank(acc) => *w,
                 _ => acc,
             });
             // text-overflow is non-inherited and acts on the OWNING block's
@@ -3692,7 +3744,7 @@ fn build_element_inner(
             });
             if let Ok(leaf) = taffy_tree.new_leaf_with_context(
                 Style::default(),
-                TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *wsp, ws: run_ws, ellipsis: run_ellipsis, tokens: std::cell::RefCell::new(None) },
+                TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *wsp, ws: run_ws, ellipsis: run_ellipsis, tokens: std::cell::RefCell::new(None), small_caps: *sc },
             ) {
                 direct.push(leaf);
                 return;
@@ -3701,8 +3753,8 @@ fn build_element_inner(
         let mut leaves: Vec<taffy::tree::NodeId> = Vec::new();
         for seg in segs {
             match seg {
-                RunSeg::Text(text, fs, bold, color, lh, deco, vs, mono, wsp, _) => {
-                    leaves.extend(build_word_leaves(&text, fs, bold, color, lh, deco, vs, mono, wsp, fonts, taffy_tree))
+                RunSeg::Text(text, fs, bold, color, lh, deco, vs, mono, wsp, _, sc) => {
+                    leaves.extend(build_word_leaves(&text, fs, bold, color, lh, deco, vs, mono, wsp, sc, fonts, taffy_tree))
                 }
                 RunSeg::Nodes(nodes) => leaves.extend(nodes),
             }
@@ -4311,7 +4363,8 @@ fn build_element_inner(
             let mono = mono_context(tree, child, styles);
             let ws = word_spacing_context(tree, child, styles);
             let nws = tree.with_node(child, |n| n.parent).flatten().and_then(|p| styles.get(&p)).and_then(|s| s.white_space).unwrap_or(WhiteSpace::Normal);
-            run.push(RunSeg::Text(text, fs, b, col, lh, deco, vs, mono, ws, nws));
+            let sc = small_caps_context(tree, child, styles);
+            run.push(RunSeg::Text(text, fs, b, col, lh, deco, vs, mono, ws, nws, sc));
         } else if child_display == Some(CssDisplay::InlineBlock) && !atomic_container && !out_of_flow {
             // An inline-level block is ATOMIC (Chrome line-box model): it keeps
             // its own subtree box and joins the run as one unit, like a replaced
@@ -4614,6 +4667,10 @@ pub enum PaintItem {
         /// opacity already folded into each color: painted UNDER the glyphs
         /// (and decorations), first-declared layer on top.
         text_shadow: Option<Vec<TextShadow>>,
+        /// Synthesized small-caps (small-caps batch, inherited): lowercase
+        /// runs render as uppercase glyphs at 70% size. Word leaves carry
+        /// false — their segments are pre-uppercased at build time.
+        small_caps: bool,
     },
 }
 
@@ -4760,10 +4817,10 @@ fn expand_wrapped_leaves(
         return;
     }
     let Some((r, m)) = local_by_node.get(&node) else { return };
-    if let Some(TextLeaf::Run { text, font_size, bold, line_height, mono, word_spacing, ws, tokens, .. }) =
+    if let Some(TextLeaf::Run { text, font_size, bold, line_height, mono, word_spacing, ws, tokens, small_caps, .. }) =
         taffy_tree.get_node_context(node)
     {
-        let tokens = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens);
+        let tokens = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps);
         // no-soft-wrap modes keep their single line here too: the affine
         // path expands a leaf into per-line tiles, and wrapping such a run
         // at the box width would split ink the rasterizer lays on one line.
@@ -5214,9 +5271,9 @@ pub fn layout_solve_rooted(
             let laid_out = taffy_tree
                 .compute_layout_with_measure(icb_node, available, |inputs, _id, ctx, style| {
                     match ctx {
-                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, .. }) => {
+                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, .. }) => {
                             let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                            let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens);
+                            let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps);
                             measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws)
                         }
                         _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
@@ -5343,9 +5400,9 @@ pub fn layout_solve_rooted(
     // (that's exactly what stock compute_layout does below via the same fn).
     let measured = taffy_tree.compute_layout_with_measure(icb_node, available, |inputs, _id, ctx, style| {
         match ctx {
-            Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, .. }) => {
+            Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, .. }) => {
                 let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens);
+                let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps);
                 measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws)
             }
             // Word leaves keep their style-driven sizing (batch 4d only
@@ -5519,9 +5576,9 @@ pub fn layout_solve_rooted(
                     icb_node,
                     available,
                     |inputs, _id, ctx, style| match ctx {
-                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, .. }) => {
+                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, .. }) => {
                             let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                            let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens);
+                            let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps);
                             measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws)
                         }
                         _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
@@ -5631,9 +5688,9 @@ pub fn layout_solve_rooted(
                 icb_node,
                 available,
                 |inputs, _id, ctx, style| match ctx {
-                    Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, .. }) => {
+                    Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, .. }) => {
                         let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                        let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens);
+                        let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps);
                         measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws)
                     }
                     _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
@@ -5703,9 +5760,9 @@ pub fn layout_solve_rooted(
                     icb_node,
                     available,
                     |inputs, _id, ctx, style| match ctx {
-                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, .. }) => {
+                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, .. }) => {
                             let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                            let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens);
+                            let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps);
                             measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws)
                         }
                         _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
@@ -6925,7 +6982,7 @@ pub fn layout_collect(
                     })
                     .collect()
             });
-        if let Some(TextLeaf::Run { text, font_size, bold, color, line_height, decorations, mono, word_spacing, ws, ellipsis, tokens, .. }) = taffy_tree.get_node_context(node) {
+        if let Some(TextLeaf::Run { text, font_size, bold, color, line_height, decorations, mono, word_spacing, ws, ellipsis, tokens, small_caps, .. }) = taffy_tree.get_node_context(node) {
             // The wrap width the containing block offered at measure time:
             // the direct taffy parent's content box (the run wrapper for
             // mixed runs, the block itself for pure runs — same width).
@@ -6966,12 +7023,13 @@ pub fn layout_collect(
                     // Only valid unscaled — a diagonal scale folds d into
                     // font_size/word_spacing and the memo no longer matches.
                     tokens: if xf.d == 1.0 {
-                        Some(run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens))
+                        Some(run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps))
                     } else {
                         None
                     },
                     ws: *ws,
                     text_shadow: run_text_shadow.clone(),
+                    small_caps: *small_caps,
                 });
             } else {
                 let wrap_at = taffy_tree
@@ -6995,9 +7053,10 @@ pub fn layout_collect(
                     mono: *mono,
                     word_spacing: *word_spacing,
                     truncate_at,
-                    tokens: Some(run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens)),
+                    tokens: Some(run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps)),
                     ws: *ws,
                     text_shadow: run_text_shadow.clone(),
+                    small_caps: *small_caps,
                 });
             }
         }
@@ -7024,6 +7083,8 @@ pub fn layout_collect(
                     tokens: None,
                     ws: WhiteSpace::Normal,
                     text_shadow: run_text_shadow.clone(),
+                    // Word leaves are pre-uppercased at build time.
+                    small_caps: false,
                 });
             } else {
                 items.push(PaintItem::Text {
@@ -7043,6 +7104,8 @@ pub fn layout_collect(
                     tokens: None,
                     ws: WhiteSpace::Normal,
                     text_shadow: run_text_shadow.clone(),
+                    // Word leaves are pre-uppercased at build time.
+                    small_caps: false,
                 });
             }
         }
@@ -8171,6 +8234,7 @@ mod run_token_memo_tests {
                 ws: WhiteSpace::Normal,
                 ellipsis: false,
                 tokens: std::cell::RefCell::new(None),
+                small_caps: false,
             },
         )
         .unwrap()
@@ -8209,9 +8273,9 @@ mod run_token_memo_tests {
         tree.compute_layout_with_measure(root, space, |inputs, _id, ctx, style| {
             calls.fetch_add(1, Ordering::Relaxed);
             match ctx {
-                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, .. }) => {
+                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, .. }) => {
                     let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                    let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens);
+                    let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps);
                     measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws)
                 }
                 _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
@@ -8733,6 +8797,38 @@ mod batch_125_inline_fragment_deco_tests {
             band_rects.iter().any(|b| b.width < grads[0].width),
             "at least one fragment is narrower than the union: {band_rects:?} vs {:?}",
             grads[0]
+        );
+    }
+
+    /// Small-caps word leaves are PRE-uppercased at build time (`ß` →
+    /// "SS") and carry the reduced size on lowercase segments — the leaf
+    /// must never paint lowercase glyphs, only smaller uppercase ones.
+    #[test]
+    fn small_caps_word_leaves_pre_uppercase_at_ratio() {
+        let tree = parse_html("<html><body>x</body></html>");
+        let rules = parse_stylesheet_for("", (800.0, 600.0), CssMediaType::Screen);
+        let _styles = compute_styles(&tree, &rules);
+        let mut tt = TaffyTree::<TextLeaf>::new();
+        let leaves = build_word_leaves(
+            "hello AB", 16.0, false, [0, 0, 0, 255], 20.0, TextDecorations::default(),
+            0.0, false, 0.0, true, &crate::diting_fonts::font_book(), &mut tt,
+        );
+        let got: Vec<(String, f32)> = leaves
+            .iter()
+            .filter_map(|id| match tt.get_node_context(*id) {
+                Some(TextLeaf::Word { text, font_size, .. }) => Some((text.clone(), *font_size)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("HELLO".to_string(), 16.0 * text::SMALL_CAPS_RATIO),
+                // The whitespace token stays its own full-size leaf.
+                (" ".to_string(), 16.0),
+                ("AB".to_string(), 16.0),
+            ],
+            "lowercase run uppercases at 70%, uppercase run stays full size"
         );
     }
 

@@ -259,6 +259,37 @@
         );
     }
 
+    /// Small-caps batch: `font-variant-caps` parses, inherits, rides both
+    /// shorthands (`font: small-caps …` / `font-variant: small-caps`) and
+    /// reads back through getComputedStyle as "small-caps"/"normal".
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn font_variant_caps_parse_inherit_and_computed() {
+        let mut rt = setup_runtime(
+            "<html><head><style>\
+             #t { font-variant-caps: small-caps; }\
+             #f { font: small-caps 20px serif; }\
+             #v { font-variant: small-caps; }\
+             </style></head><body>\
+             <div id='t'><span id='c'>x</span></div>\
+             <div id='f'>y</div><div id='v'>z</div><div id='n'>w</div>\
+             </body></html>",
+        );
+        let mut gcs = |sel: &str, expr: &str| {
+            rt.evaluate(&format!(
+                "getComputedStyle(document.getElementById('{}')).{}",
+                sel, expr
+            ))
+            .unwrap()
+        };
+        assert_eq!(gcs("t", "getPropertyValue('font-variant-caps')"), serde_json::json!("small-caps"));
+        assert_eq!(gcs("c", "fontVariantCaps"), serde_json::json!("small-caps"), "font-variant-caps inherits");
+        assert_eq!(gcs("f", "fontVariantCaps"), serde_json::json!("small-caps"), "font shorthand carries small-caps");
+        assert_eq!(gcs("v", "fontVariantCaps"), serde_json::json!("small-caps"));
+        assert_eq!(gcs("v", "getPropertyValue('font-variant')"), serde_json::json!("small-caps"), "font-variant shorthand sets both faces");
+        assert_eq!(gcs("n", "fontVariantCaps"), serde_json::json!("normal"), "unset computes to normal");
+    }
+
     /// Issue #30: engine-internal `_`-prefixed state must be invisible to
     /// enumerability. Chrome keeps DOM state in native slots —
     /// `Object.keys(div)` is `[]` there — and `for..in` walkers like zone.js's

@@ -819,6 +819,11 @@ pub struct ComputedStyle {
     /// collapsed " " token's advance, CSS Text §7.1). `None` = `normal`
     /// (no extra); negative values tighten.
     pub word_spacing: Option<f32>,
+    /// Inherited: `font-variant-caps` synthesis (`small-caps`). `None` =
+    /// unset (inherits as `normal`). Synthesized small caps render lowercase
+    /// runs as uppercase glyphs at 70% of the font size (Blink's synthesis
+    /// ratio); true capitals and caseless chars keep the full size.
+    pub font_variant_caps: Option<bool>,
     /// Inherited: `nowrap` disables wrapping for inline runs inside this box.
     /// `None` = `normal`.
     pub white_space: Option<WhiteSpace>,
@@ -3406,6 +3411,10 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                     style.font_size = Some(px);
                 }
                 style.font_family = Some(p.family);
+                // font-variant-caps is modeled now, so the shorthand reset
+                // covers it too: `font: 20px serif` after small-caps drops
+                // the caps like Chrome; `font: small-caps 20px serif` sets it.
+                style.font_variant_caps = Some(p.small_caps);
                 true
             }
             None => false,
@@ -3672,6 +3681,28 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 _ => false,
             }
         }
+        "font-variant-caps" => {
+            style.font_variant_caps = match v {
+                "small-caps" => Some(true),
+                "normal" => Some(false),
+                _ => return false,
+            };
+            true
+        }
+        // `font-variant` shorthand: v1 models only the caps subset the
+        // engine can synthesize; other feature keywords (ligatures,
+        // numeric, east-asian...) reject like other unmodeled values.
+        "font-variant" => match v {
+            "small-caps" => {
+                style.font_variant_caps = Some(true);
+                true
+            }
+            "normal" => {
+                style.font_variant_caps = Some(false);
+                true
+            }
+            _ => false,
+        },
         "overflow" => {
             let (a, b) = match v.split_whitespace().collect::<Vec<_>>().as_slice() {
                 [one] => (*one, *one),
@@ -4542,6 +4573,7 @@ struct FontShorthand {
     size_px: Option<f32>,
     line_height: Option<LineHeightSpec>,
     family: String,
+    small_caps: bool,
 }
 
 /// Parse the `font` shorthand grammar (system font keywords are not
@@ -4563,6 +4595,7 @@ fn parse_font_shorthand(v: &str, fonts: &FontCtx) -> Option<FontShorthand> {
     }
     let toks = split_font_tokens(v);
     let mut weight = 400u16;
+    let mut small_caps = false;
     let mut idx = 0usize;
     while idx < toks.len() {
         let t = toks[idx];
@@ -4572,7 +4605,11 @@ fn parse_font_shorthand(v: &str, fonts: &FontCtx) -> Option<FontShorthand> {
             continue;
         }
         match t.to_ascii_lowercase().as_str() {
-            "italic" | "oblique" | "small-caps" | "normal" | "semi-condensed" | "condensed"
+            "small-caps" => {
+                small_caps = true;
+                idx += 1;
+            }
+            "italic" | "oblique" | "normal" | "semi-condensed" | "condensed"
             | "extra-condensed" | "ultra-condensed" | "semi-expanded" | "expanded"
             | "extra-expanded" | "ultra-expanded" | "bolder" | "lighter" => idx += 1,
             _ => break,
@@ -4620,6 +4657,7 @@ fn parse_font_shorthand(v: &str, fonts: &FontCtx) -> Option<FontShorthand> {
         size_px: Some(size),
         line_height,
         family,
+        small_caps,
     })
 }
 
@@ -5113,6 +5151,8 @@ pub fn cascade_element(
         style.word_spacing = style.word_spacing.or(parent.word_spacing);
         // white-space inherits; the element's own declaration wins.
         style.white_space = style.white_space.or(parent.white_space);
+        // font-variant-caps inherits (small-caps synthesis flows down).
+        style.font_variant_caps = style.font_variant_caps.or(parent.font_variant_caps);
         // `quotes` inherits so a pseudo's open-quote picks up an ancestor's
         // declared pairs.
         style.quotes = style.quotes.or(parent.quotes.clone());

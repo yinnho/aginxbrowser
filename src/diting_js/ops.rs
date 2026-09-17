@@ -2954,6 +2954,8 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "text-align",
     "line-height",
     "word-spacing",
+    "font-variant-caps",
+    "font-variant",
     "white-space",
     "text-overflow",
     "color",
@@ -3267,6 +3269,18 @@ fn computed_style_value(
             match s.word_spacing {
                 Some(v) => format!("{}px", format_number(v)),
                 None => "normal".into(),
+            },
+        ),
+        "font-variant-caps" => Some(
+            match s.font_variant_caps {
+                Some(true) => "small-caps".into(),
+                _ => "normal".into(),
+            },
+        ),
+        "font-variant" => Some(
+            match s.font_variant_caps {
+                Some(true) => "small-caps".into(),
+                _ => "normal".into(),
             },
         ),
         "white-space" => Some(

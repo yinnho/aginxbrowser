@@ -318,8 +318,8 @@ fn rasterize_cue_tile(text: &str, w: u32, h: u32, fonts: &FontBook) -> CueTile {
     let wrap_at = w as f32 * 0.9;
     let stroke = ((font_size / 12.0).round() as i32).max(1);
     let pad = stroke as usize;
-    let white = fonts.rasterize_wrapped(text, font_size, true, [255, 255, 255, 255], wrap_at, line_height, false, 0.0, None, crate::diting_css::WhiteSpace::Normal);
-    let black = fonts.rasterize_wrapped(text, font_size, true, [12, 12, 12, 255], wrap_at, line_height, false, 0.0, None, crate::diting_css::WhiteSpace::Normal);
+    let white = fonts.rasterize_wrapped(text, font_size, true, [255, 255, 255, 255], wrap_at, line_height, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, false);
+    let black = fonts.rasterize_wrapped(text, font_size, true, [12, 12, 12, 255], wrap_at, line_height, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, false);
     let width = white.width + pad * 2;
     let height = white.height + pad * 2;
     let mut data = vec![0u8; width * height * 4];

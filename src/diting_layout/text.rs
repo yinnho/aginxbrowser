@@ -463,6 +463,7 @@ impl FontBook {
             color,
             line_height_bits: line_height.to_bits(),
             word_spacing_bits: 0.0f32.to_bits(), // single-line path applies no word-spacing
+            small_caps: false, // single-line path renders verbatim (no caps synthesis)
         };
         RasterCache::get_or_insert(key, || {
             self.rasterize_line_uncached(text, font_size, bold, color, line_height, mono)
@@ -530,10 +531,11 @@ impl FontBook {
         word_spacing: f32,
         truncate_at: Option<f32>,
         ws: crate::diting_css::WhiteSpace,
+        small_caps: bool,
     ) -> Arc<TextRaster> {
         self.rasterize_wrapped_with(
             text, font_size, bold, color, wrap_at, line_height, mono, word_spacing, truncate_at,
-            ws, None,
+            ws, None, small_caps,
         )
     }
 
@@ -558,6 +560,7 @@ impl FontBook {
         truncate_at: Option<f32>,
         ws: crate::diting_css::WhiteSpace,
         tokens: Option<std::rc::Rc<[Token]>>,
+        small_caps: bool,
     ) -> Arc<TextRaster> {
         let key = RasterKey {
             fingerprint: self.fingerprint,
@@ -573,6 +576,7 @@ impl FontBook {
             color,
             line_height_bits: line_height.to_bits(),
             word_spacing_bits: word_spacing.to_bits(),
+            small_caps,
         };
         RasterCache::get_or_insert(key, || {
             self.rasterize_wrapped_uncached(
@@ -587,6 +591,7 @@ impl FontBook {
                 truncate_at,
                 ws,
                 tokens.as_deref(),
+                small_caps,
             )
         })
     }
@@ -605,6 +610,7 @@ impl FontBook {
         truncate_at: Option<f32>,
         ws: crate::diting_css::WhiteSpace,
         pre_shaped: Option<&[Token]>,
+        small_caps: bool,
     ) -> TextRaster {
         let empty = || TextRaster {
             width: 0,
@@ -620,7 +626,7 @@ impl FontBook {
         let tokens = match pre_shaped {
             Some(t) => t,
             None => {
-                owned = tokens_of(text, font_size, bold, self, mono, word_spacing, ws);
+                owned = tokens_of(text, font_size, bold, self, mono, word_spacing, ws, small_caps);
                 &owned
             }
         };
@@ -665,7 +671,7 @@ impl FontBook {
         // max-blend into the same RGBA surface, then colorize merges it over
         // the mono coverage once.
         let mut layer = self.color_layer_for(&tokens.iter().map(|t| t.text.as_str()).collect::<String>(), bold, mono, width, height);
-        if word_spacing == 0.0 {
+        if word_spacing == 0.0 && tokens.iter().all(|t| t.scale == 1.0) {
             for (line, baseline) in lines.iter().zip(&baselines) {
                 if line.token_idx.is_empty() {
                     continue;
@@ -675,16 +681,17 @@ impl FontBook {
                 self.blit_line(&mut alpha, layer.as_deref_mut(), width, height, &s, font_size, bold, mono, 0.0, baseline - top);
             }
         } else {
-            // Word-spacing run: blit token by token at the cumulative pen so
-            // the widened space advances actually separate the words (the
-            // whole-line shape above would draw them at natural spacing).
+            // Word-spacing or small-caps run: blit token by token at the
+            // cumulative pen so the widened space advances actually separate
+            // the words and reduced-size caps segments shape at their own
+            // scale (the whole-line shape above would draw them uniform).
             // Same token model measurement uses — one shape per token.
             for (line, baseline) in lines.iter().zip(&baselines) {
                 let mut pen = 0.0f32;
                 for &i in &line.token_idx {
                     let t = &tokens[i];
                     if !t.is_space {
-                        self.blit_line(&mut alpha, layer.as_deref_mut(), width, height, &t.text, font_size, bold, mono, pen, baseline - top);
+                        self.blit_line(&mut alpha, layer.as_deref_mut(), width, height, &t.text, font_size * t.scale, bold, mono, pen, baseline - top);
                     }
                     pen += t.width;
                 }
@@ -867,13 +874,86 @@ pub(crate) struct Token {
     /// A preserved newline (white-space pre family): greedy_wrap ends the
     /// current line on it; it never joins a WrapLine itself.
     pub is_break: bool,
+    /// Glyph-size ratio for `font-variant-caps: small-caps` synthesis
+    /// (1.0 = normal). Small-caps segments carry 0.7 (Blink's ratio) and
+    /// already-uppercased text; the paint path multiplies the font size.
+    pub scale: f32,
+}
+
+/// The small-caps synthesis ratio (Blink's kSmallCapsFontSizeMultiplier).
+pub(crate) const SMALL_CAPS_RATIO: f32 = 0.7;
+
+/// Split `text` into case-runs for small-caps synthesis: (run, lowercase?)
+/// pairs. Lowercase runs synthesize as uppercase glyphs at 0.7× size;
+/// capitals and caseless chars (digits, punctuation, CJK, emoji) keep the
+/// full size.
+pub(crate) fn caps_case_runs(text: &str) -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = Vec::new();
+    let mut seg = String::new();
+    let mut seg_lower = false;
+    for c in text.chars() {
+        let lower = c.is_lowercase();
+        if seg.is_empty() {
+            seg_lower = lower;
+            seg.push(c);
+        } else if lower == seg_lower {
+            seg.push(c);
+        } else {
+            out.push((std::mem::take(&mut seg), seg_lower));
+            seg_lower = lower;
+            seg.push(c);
+        }
+    }
+    if !seg.is_empty() {
+        out.push((seg, seg_lower));
+    }
+    out
+}
+
+/// Append one case-run of a small-caps token: lowercase runs are uppercased
+/// and shaped at the reduced size; other runs keep the full size. `ß`
+/// expands to "SS" per Unicode case mapping.
+fn push_caps_segment(
+    seg: &str,
+    lower: bool,
+    fonts: &FontBook,
+    font_size: f32,
+    bold: bool,
+    mono: bool,
+    out: &mut Vec<Token>,
+) {
+    if seg.is_empty() {
+        return;
+    }
+    if lower {
+        let up: String = seg.chars().flat_map(char::to_uppercase).collect();
+        let width = fonts.advance_width(&up, font_size * SMALL_CAPS_RATIO, bold, mono);
+        out.push(Token {
+            is_space: false,
+            is_break: false,
+            width,
+            text: up,
+            scale: SMALL_CAPS_RATIO,
+        });
+    } else {
+        let width = fonts.advance_width(seg, font_size, bold, mono);
+        out.push(Token {
+            is_space: false,
+            is_break: false,
+            width,
+            text: seg.to_string(),
+            scale: 1.0,
+        });
+    }
 }
 
 /// Tokenize a run's text under its computed `white-space` mode and shape
 /// every token (shared by `measure_text_leaf` and `rasterize_wrapped`).
 /// `word_spacing` (px) adds to each rendered space token's advance
 /// (CSS Text §7.1) so measure, paint and the shared wrap breaker all see
-/// the same widened widths.
+/// the same widened widths. With `small_caps`, lowercase runs inside a
+/// token become separate uppercase tokens at the reduced scale (case-run
+/// segmentation: "Hello" → "H"@1.0 + "ELLO"@0.7).
 pub(crate) fn tokens_of(
     text: &str,
     font_size: f32,
@@ -882,22 +962,32 @@ pub(crate) fn tokens_of(
     mono: bool,
     word_spacing: f32,
     ws: crate::diting_css::WhiteSpace,
+    small_caps: bool,
 ) -> Vec<Token> {
     super::tokenize_ws(text, ws)
         .into_iter()
-        .map(|t| {
+        .flat_map(|t| {
             let is_break = t == "\n";
             let is_space = !is_break && t.trim().is_empty();
-            Token {
-                is_space,
-                is_break,
-                width: if is_break {
-                    0.0
-                } else {
-                    fonts.advance_width(&t, font_size, bold, mono)
-                        + if is_space { word_spacing } else { 0.0 }
-                },
-                text: t,
+            if is_break || is_space || !small_caps {
+                vec![Token {
+                    is_space,
+                    is_break,
+                    width: if is_break {
+                        0.0
+                    } else {
+                        fonts.advance_width(&t, font_size, bold, mono)
+                            + if is_space { word_spacing } else { 0.0 }
+                    },
+                    text: t,
+                    scale: 1.0,
+                }]
+            } else {
+                let mut out: Vec<Token> = Vec::new();
+                for (seg, lower) in caps_case_runs(&t) {
+                    push_caps_segment(&seg, lower, fonts, font_size, bold, mono, &mut out);
+                }
+                out
             }
         })
         .collect()
@@ -1020,7 +1110,7 @@ pub(crate) fn truncate_tokens(
     if total <= limit {
         return None;
     }
-    let marker = tokens_of("\u{2026}", font_size, bold, fonts, mono, word_spacing, ws);
+    let marker = tokens_of("\u{2026}", font_size, bold, fonts, mono, word_spacing, ws, false);
     let marker_w = marker.first().map(|t| t.width).unwrap_or(0.0);
     let mut kept: Vec<Token> = Vec::with_capacity(tokens.len());
     let mut w = 0.0f32;
@@ -1029,14 +1119,25 @@ pub(crate) fn truncate_tokens(
             // Chrome cuts at glyph boundaries: an unbreakable word that
             // doesn't fit whole still fills the remaining space char by
             // char. Per-char widths skip intra-run kerning (v1 posture).
+            // Small-caps tokens are already uppercased — shape their chars
+            // at the token's own scale, no re-segmentation.
             if !t.is_space {
                 let mut acc = String::new();
                 let mut acc_w = w;
                 for ch in t.text.chars() {
-                    let cw = tokens_of(&ch.to_string(), font_size, bold, fonts, mono, 0.0, ws)
-                        .first()
-                        .map(|t| t.width)
-                        .unwrap_or(0.0);
+                    let cw = tokens_of(
+                        &ch.to_string(),
+                        font_size * t.scale,
+                        bold,
+                        fonts,
+                        mono,
+                        0.0,
+                        ws,
+                        false,
+                    )
+                    .first()
+                    .map(|t| t.width)
+                    .unwrap_or(0.0);
                     if acc_w + cw + marker_w > limit {
                         break;
                     }
@@ -1049,6 +1150,7 @@ pub(crate) fn truncate_tokens(
                         width: acc_w - w,
                         is_space: false,
                         is_break: false,
+                        scale: t.scale,
                     });
                 }
             }
@@ -1060,6 +1162,7 @@ pub(crate) fn truncate_tokens(
             width: t.width,
             is_space: t.is_space,
             is_break: t.is_break,
+            scale: t.scale,
         });
     }
     // Whitespace left at the cut carries no ink and would only sit between
@@ -1162,6 +1265,7 @@ struct RasterKey {
     color: [u8; 4],
     line_height_bits: u32,
     word_spacing_bits: u32,
+    small_caps: bool,
 }
 
 impl RasterCache {
@@ -1250,12 +1354,12 @@ mod raster_cache_tests {
         let (reg, bold) = production_pair();
         let book = FontBook::from_pairs(reg, bold).unwrap();
         let _held = isolated();
-        let black = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal);
-        let again = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal);
+        let black = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, false);
+        let again = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, false);
         assert!(Arc::ptr_eq(&black, &again), "repeat must hand back the cached Arc");
         assert!(black.ink_bbox().is_some(), "the tile has real ink");
 
-        let red = book.rasterize_wrapped("缓存命中", 16.0, false, [255, 0, 0, 255], 20.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal);
+        let red = book.rasterize_wrapped("缓存命中", 16.0, false, [255, 0, 0, 255], 20.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, false);
         assert!(!Arc::ptr_eq(&black, &red), "color rides the key — a new tile");
         let ink = |r: &TextRaster| {
             r.data
@@ -1280,7 +1384,7 @@ mod raster_cache_tests {
         let line = book.rasterize(text, 16.0, false, [0, 0, 0, 255], 24.0, false);
         // Narrow wrap: the same text breaks across 4+ lines, so the wrapped
         // tile is much taller than the single-line one.
-        let wrapped = book.rasterize_wrapped(text, 16.0, false, [0, 0, 0, 255], 40.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal);
+        let wrapped = book.rasterize_wrapped(text, 16.0, false, [0, 0, 0, 255], 40.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, false);
         assert!(!Arc::ptr_eq(&line, &wrapped), "kinds must not collide");
         assert!(
             wrapped.height > line.height * 2,
@@ -1419,8 +1523,8 @@ mod raster_cache_tests {
     fn tokens_of_applies_word_spacing_to_space_tokens_only() {
         let (reg, bold) = production_pair();
         let book = FontBook::from_pairs(reg, bold).unwrap();
-        let plain = tokens_of("ab cd ef", 16.0, false, &book, false, 0.0, crate::diting_css::WhiteSpace::Normal);
-        let spaced = tokens_of("ab cd ef", 16.0, false, &book, false, 9.0, crate::diting_css::WhiteSpace::Normal);
+        let plain = tokens_of("ab cd ef", 16.0, false, &book, false, 0.0, crate::diting_css::WhiteSpace::Normal, false);
+        let spaced = tokens_of("ab cd ef", 16.0, false, &book, false, 9.0, crate::diting_css::WhiteSpace::Normal, false);
         assert_eq!(plain.len(), spaced.len(), "spacing never changes the token count");
         for (p, s) in plain.iter().zip(&spaced) {
             assert_eq!(p.text, s.text);
@@ -1432,7 +1536,7 @@ mod raster_cache_tests {
             }
         }
         // `normal` is modeled as 0.0 — identical tokens.
-        let normal = tokens_of("ab cd", 16.0, false, &book, false, 0.0, crate::diting_css::WhiteSpace::Normal);
+        let normal = tokens_of("ab cd", 16.0, false, &book, false, 0.0, crate::diting_css::WhiteSpace::Normal, false);
         assert_eq!(normal[1].is_space, true);
     }
 
@@ -1446,8 +1550,8 @@ mod raster_cache_tests {
         let (reg, bold) = production_pair();
         let book = FontBook::from_pairs(reg, bold).unwrap();
         let _held = isolated();
-        let tight = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal);
-        let loose = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 12.0, None, crate::diting_css::WhiteSpace::Normal);
+        let tight = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, false);
+        let loose = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 12.0, None, crate::diting_css::WhiteSpace::Normal, false);
         assert_eq!(tight.height, loose.height, "one line either way");
         let ink_right = |r: &TextRaster| r.ink_bbox().map(|b| b.2).unwrap_or(0);
         assert!(
@@ -1456,7 +1560,7 @@ mod raster_cache_tests {
             ink_right(&tight), ink_right(&loose)
         );
         // Negative spacing tightens toward overlap — still deterministic.
-        let tight2 = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, -8.0, None, crate::diting_css::WhiteSpace::Normal);
+        let tight2 = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, -8.0, None, crate::diting_css::WhiteSpace::Normal, false);
         assert!(ink_right(&tight2) < ink_right(&tight), "negative ws pulls the second word left");
     }
 }
@@ -1503,6 +1607,49 @@ impl TextRaster {
 mod tests {
     use super::*;
 
+    /// Small-caps synthesis segments a token at case boundaries (`ß` is a
+    /// lowercase char whose uppercase is "SS"); caseless chars ride the
+    /// current segment (digits after a capital stay full-size).
+    #[test]
+    fn caps_case_runs_segments_at_case_boundaries() {
+        assert_eq!(
+            caps_case_runs("hello"),
+            vec![("hello".to_string(), true)]
+        );
+        assert_eq!(
+            caps_case_runs("ßaB1c"),
+            vec![("ßa".to_string(), true), ("B1".to_string(), false), ("c".to_string(), true)]
+        );
+        // Caseless-only text stays one full-size segment.
+        assert_eq!(caps_case_runs("123"), vec![("123".to_string(), false)]);
+        assert_eq!(caps_case_runs(""), Vec::new());
+    }
+
+    /// tokens_of with `small_caps` emits pre-uppercased tokens carrying
+    /// SMALL_CAPS_RATIO on lowercase runs; already-uppercase text keeps
+    /// scale 1.0 and the plain tokenizer passes `false` never rescales.
+    #[test]
+    fn tokens_of_small_caps_uppercases_lower_runs_at_ratio() {
+        let book = crate::diting_fonts::font_book();
+        let toks = tokens_of(
+            "hello AB", 16.0, false, &book, false, 0.0,
+            crate::diting_css::WhiteSpace::Normal, true,
+        );
+        let words: Vec<&Token> = toks.iter().filter(|t| !t.is_space).collect();
+        assert_eq!(words.len(), 2, "hello + AB");
+        assert_eq!(words[0].text, "HELLO");
+        assert!((words[0].scale - SMALL_CAPS_RATIO).abs() < 1e-6);
+        assert_eq!(words[1].text, "AB");
+        assert_eq!(words[1].scale, 1.0, "already-uppercase stays full-size");
+
+        let plain = tokens_of(
+            "hello AB", 16.0, false, &book, false, 0.0,
+            crate::diting_css::WhiteSpace::Normal, false,
+        );
+        assert!(plain.iter().all(|t| t.scale == 1.0));
+        assert_eq!(plain.iter().find(|t| !t.is_space).unwrap().text, "hello");
+    }
+
     /// Element opacity rides the text color's alpha channel (the layout
     /// walk's `with_alpha`); `colorize` must multiply it into the glyph
     /// coverage — not paste RGB at full coverage, which made `opacity: 0`
@@ -1531,7 +1678,7 @@ mod tests {
     #[test]
     fn truncate_tokens_clips_to_limit_and_appends_marker() {
         let fonts = crate::diting_fonts::font_book();
-        let tokens = tokens_of("alpha beta gamma delta", 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::Normal);
+        let tokens = tokens_of("alpha beta gamma delta", 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::Normal, false);
         let total: f32 = tokens.iter().map(|t| t.width).sum();
 
         assert!(
@@ -1569,15 +1716,15 @@ mod tests {
     fn rasterize_wrapped_pre_shaped_matches_reshaped() {
         let fonts = crate::diting_fonts::font_book();
         let text = "淘宝商品列表页的一段中文文本需要折行处理".repeat(4);
-        let tokens = tokens_of(&text, 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::Normal);
+        let tokens = tokens_of(&text, 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::Normal, false);
 
-        let plain = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, None);
-        let pre = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, Some(&tokens));
+        let plain = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, None, false);
+        let pre = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, Some(&tokens), false);
         assert_eq!((plain.width, plain.height, plain.baseline), (pre.width, pre.height, pre.baseline));
         assert_eq!(plain.data, pre.data);
 
-        let plain_t = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, Some(320.0), crate::diting_css::WhiteSpace::Normal, None);
-        let pre_t = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, Some(320.0), crate::diting_css::WhiteSpace::Normal, Some(&tokens));
+        let plain_t = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, Some(320.0), crate::diting_css::WhiteSpace::Normal, None, false);
+        let pre_t = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, Some(320.0), crate::diting_css::WhiteSpace::Normal, Some(&tokens), false);
         assert_eq!((plain_t.width, plain_t.height, plain_t.baseline), (pre_t.width, pre_t.height, pre_t.baseline));
         assert_eq!(plain_t.data, pre_t.data);
     }
@@ -1586,7 +1733,7 @@ mod tests {
 
     fn ws_lines(text: &str, ws: crate::diting_css::WhiteSpace, wrap_at: Option<f32>) -> Vec<WrapLine> {
         let fonts = crate::diting_fonts::font_book();
-        let tokens = tokens_of(text, 16.0, false, &fonts, false, 0.0, ws);
+        let tokens = tokens_of(text, 16.0, false, &fonts, false, 0.0, ws, false);
         greedy_wrap(&tokens, wrap_at, ws)
     }
 
@@ -1595,7 +1742,7 @@ mod tests {
     #[test]
     fn pre_tokens_preserve_whitespace_and_breaks() {
         let fonts = crate::diting_fonts::font_book();
-        let toks = tokens_of("a  b\tc\r\nd", 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::Pre);
+        let toks = tokens_of("a  b\tc\r\nd", 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::Pre, false);
         let texts: Vec<&str> = toks.iter().map(|t| t.text.as_str()).collect();
         assert_eq!(texts, vec!["a", " ", " ", "b", "        ", "c", "\n", "d"]);
         assert!(toks[6].is_break && toks[6].width == 0.0);
@@ -1619,7 +1766,7 @@ mod tests {
     #[test]
     fn pre_wrap_spaces_hang_at_line_end() {
         let fonts = crate::diting_fonts::font_book();
-        let toks = tokens_of("aa   bb", 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::PreWrap);
+        let toks = tokens_of("aa   bb", 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::PreWrap, false);
         let (w_aa, sp) = (toks[0].width, toks[1].width);
         let wrap_at = w_aa + 2.5 * sp; // "aa  " fits, the 3rd space hangs, "bb" breaks
         let lines = ws_lines("aa   bb", crate::diting_css::WhiteSpace::PreWrap, Some(wrap_at));
@@ -1633,7 +1780,7 @@ mod tests {
     #[test]
     fn break_spaces_wraps_space_tokens_down() {
         let fonts = crate::diting_fonts::font_book();
-        let toks = tokens_of("aa   bb", 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::BreakSpaces);
+        let toks = tokens_of("aa   bb", 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::BreakSpaces, false);
         let w_aa = toks[0].width;
         let lines = ws_lines("aa   bb", crate::diting_css::WhiteSpace::BreakSpaces, Some(w_aa + 0.5));
         assert_eq!(lines[0].token_idx, vec![0], "aa alone — the first space already overflows");
@@ -1648,7 +1795,7 @@ mod tests {
     #[test]
     fn pre_line_collapses_spaces_but_breaks_on_newlines() {
         let fonts = crate::diting_fonts::font_book();
-        let toks = tokens_of("  a  b  \n c\nd  \n", 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::PreLine);
+        let toks = tokens_of("  a  b  \n c\nd  \n", 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::PreLine, false);
         let texts: Vec<&str> = toks.iter().map(|t| t.text.as_str()).collect();
         assert_eq!(texts, vec!["a", " ", "b", "\n", "c", "\n", "d", "\n"], "collapsed segments, breaks between, trailing break kept for the breaker");
         let lines = ws_lines("  a  b  \n c\nd  \n", crate::diting_css::WhiteSpace::PreLine, None);

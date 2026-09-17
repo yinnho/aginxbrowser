@@ -1062,7 +1062,7 @@
         let (_doc, tree, _styles, rects) = both_engines(html, sheet);
         let fonts = fixture_fonts();
         let text = "谛听引擎中文渲染测试文本一行";
-        let tokens = text::tokens_of(text, 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::Normal);
+        let tokens = text::tokens_of(text, 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::Normal, false);
         let lines = text::greedy_wrap(&tokens, Some(160.0), crate::diting_css::WhiteSpace::Normal).len() as f32;
         assert!(lines >= 2.0, "the fixture must wrap to ≥2 lines");
 
@@ -1564,12 +1564,12 @@
         let fonts = fixture_fonts();
         let (text, fs, wrap_at) = ("谛听引擎渲染测试文本行", 20.0f32, 105.0f32);
         let lh = fonts.normal_line_height(fs, false);
-        let tokens = text::tokens_of(text, fs, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::Normal);
+        let tokens = text::tokens_of(text, fs, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::Normal, false);
         let lines = text::greedy_wrap(&tokens, Some(wrap_at), crate::diting_css::WhiteSpace::Normal);
         assert_eq!(lines.len(), 3, "5 glyphs per 105px line, 11 glyphs → 3 lines");
         assert!((lines[0].width - 100.0).abs() < 0.05, "5 × 1em");
 
-        let r = fonts.rasterize_wrapped(text, fs, false, [0, 0, 0, 255], wrap_at, lh, false, 0.0, None, crate::diting_css::WhiteSpace::Normal);
+        let r = fonts.rasterize_wrapped(text, fs, false, [0, 0, 0, 255], wrap_at, lh, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, false);
         // One ink band per wrapped line (band = maximal run of ink rows).
         let band_tops: Vec<usize> = {
             let mut tops = Vec::new();
