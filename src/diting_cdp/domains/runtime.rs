@@ -33,7 +33,8 @@ async fn emit_post_eval_nav(
         let p = ctx.get_session_page_mut(session_id).ok_or("No page")?;
         p.id.clone()
     };
-    super::page::emit_navigation_for_page(ctx, session_id, &page_id);
+    let extra_network = ctx.other_network_sessions(session_id, &page_id);
+    super::page::emit_navigation_for_page(ctx, session_id, &extra_network, &page_id);
     Ok(())
 }
 

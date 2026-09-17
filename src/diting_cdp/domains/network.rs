@@ -30,8 +30,19 @@ pub async fn handle(
     session_id: &Option<String>,
 ) -> Result<Value, String> {
     match method {
-        "enable" => Ok(json!({})),
+        "enable" => {
+            // Arm per-session delivery: a navigation's Network.* events go to
+            // every enabled session of the page, not just the one that issued
+            // the Page.navigate (see CdpContext::other_network_sessions, #13).
+            if let Some(sid) = session_id {
+                ctx.network_enabled_sessions.insert(sid.clone());
+            }
+            Ok(json!({}))
+        }
         "disable" => {
+            if let Some(sid) = session_id {
+                ctx.network_enabled_sessions.remove(sid);
+            }
             if let Some(page) = ctx.get_session_page_mut(session_id) {
                 page.clear_response_bodies();
             } else {

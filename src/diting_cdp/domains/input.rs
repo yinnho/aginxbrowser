@@ -335,7 +335,14 @@ pub async fn handle(
                         // Playwright's click() waiting for load never resolved
                         // (obscura#886 shape).
                         let page_id = page.id.clone();
-                        super::page::emit_navigation_for_page(ctx, session_id, &page_id);
+                        let extra_network =
+                            ctx.other_network_sessions(session_id, &page_id);
+                        super::page::emit_navigation_for_page(
+                            ctx,
+                            session_id,
+                            &extra_network,
+                            &page_id,
+                        );
                     }
                 }
             } else if event_type == "mouseWheel" {
@@ -536,7 +543,8 @@ pub async fn handle(
             }
 
             if let Some(page_id) = nav_page_id {
-                super::page::emit_navigation_for_page(ctx, session_id, &page_id);
+                let extra_network = ctx.other_network_sessions(session_id, &page_id);
+                super::page::emit_navigation_for_page(ctx, session_id, &extra_network, &page_id);
             }
 
             Ok(json!({}))

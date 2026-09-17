@@ -324,10 +324,13 @@ pub(crate) async fn pump_idle_pages(ctx: &mut CdpContext) -> Vec<String> {
                     .map(|(sid, _)| sid.clone())
                     .collect();
                 if sessions.is_empty() {
-                    emit_navigation_for_page(ctx, &None, &page_id);
+                    emit_navigation_for_page(ctx, &None, &[], &page_id);
                 } else {
+                    // Per-session enumeration: each session already gets the
+                    // full sequence here, so no extra Network fan-out targets
+                    // (double delivery otherwise).
                     for sid in sessions {
-                        emit_navigation_for_page(ctx, &Some(sid), &page_id);
+                        emit_navigation_for_page(ctx, &Some(sid), &[], &page_id);
                     }
                 }
                 navigated.push(page_id);

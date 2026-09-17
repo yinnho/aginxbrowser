@@ -145,9 +145,12 @@ pub async fn handle(
             // never — Page-domain waiters otherwise hang on the initial load
             // (obscura#833 shape).
             if navigated {
+                // Fresh page: its only session is the one minted above, so
+                // there is no other Network-enabled session to fan out to.
                 super::page::emit_navigation_for_page(
                     ctx,
                     &Some(session_id),
+                    &[],
                     &page_id,
                 );
             }
@@ -250,6 +253,8 @@ pub async fn handle(
         "detachFromTarget" => {
             if let Some(session_id) = params.get("sessionId").and_then(Value::as_str) {
                 ctx.sessions.remove(session_id);
+                // Network-enable state must not outlive its session (#13).
+                ctx.network_enabled_sessions.remove(session_id);
             }
             Ok(json!({}))
         }

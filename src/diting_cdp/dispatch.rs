@@ -88,6 +88,11 @@ pub struct CdpContext {
     // that registered the name rather than to whichever session of the page
     // happens to come first out of a HashMap.
     pub binding_sessions: HashMap<String, Vec<String>>, // binding name -> session ids
+    // Sessions that called `Network.enable`. Chrome delivers a target's
+    // Network.* events to every session that enabled the domain, not just
+    // the one that drove the navigation — the Playwright `newCDPSession`
+    // observer shape (#13).
+    pub network_enabled_sessions: HashSet<String>,
     // World names registered via Page.createIsolatedWorld. After every
     // navigation execution contexts are cleared and must be re-emitted,
     // otherwise Playwright/Puppeteer hang waiting for their utility world to
@@ -175,6 +180,7 @@ impl CdpContext {
             target_session_counter: 0,
             preload_scripts: Vec::new(),
             binding_sessions: HashMap::new(),
+            network_enabled_sessions: HashSet::new(),
             preload_counter: 0,
             isolated_worlds: Vec::new(),
             valid_context_ids,
@@ -314,6 +320,33 @@ impl CdpContext {
         self.current_loader_ids.remove(id);
         self.announced_frames.remove(id);
         self.sessions.retain(|_, v| v != id);
+        // Sessions of the closed page are gone from `sessions`; their
+        // Network-enable state must not outlive them.
+        self.network_enabled_sessions
+            .retain(|sid| self.sessions.contains_key(sid));
+    }
+
+    /// Sessions besides `navigating` that should receive a page's Network.*
+    /// navigation events: attached to `page_id` and armed via
+    /// `Network.enable`. Chrome delivers a target's network events to every
+    /// enabled session, not just the one that drove the navigation — the
+    /// Playwright `newCDPSession(page)` observer watching a goto another
+    /// session issued (#13). Sorted so delivery order is deterministic.
+    pub fn other_network_sessions(
+        &self,
+        navigating: &Option<String>,
+        page_id: &str,
+    ) -> Vec<String> {
+        let mut others: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, pid)| pid.as_str() == page_id)
+            .map(|(sid, _)| sid.clone())
+            .filter(|sid| self.network_enabled_sessions.contains(sid))
+            .filter(|sid| navigating.as_deref() != Some(sid.as_str()))
+            .collect();
+        others.sort_unstable();
+        others
     }
 
     /// Session lookup with the page-connection fallback: a command with no
@@ -637,10 +670,13 @@ fn drain_write_navs(ctx: &mut CdpContext) {
     }
     for (page_id, sessions) in writers {
         if sessions.is_empty() {
-            domains::page::emit_navigation_for_page(ctx, &None, &page_id);
+            domains::page::emit_navigation_for_page(ctx, &None, &[], &page_id);
         } else {
+            // Per-session enumeration: each session already gets the full
+            // sequence here, so no extra Network fan-out targets (double
+            // delivery otherwise).
             for sid in sessions {
-                domains::page::emit_navigation_for_page(ctx, &Some(sid), &page_id);
+                domains::page::emit_navigation_for_page(ctx, &Some(sid), &[], &page_id);
             }
         }
     }
@@ -3154,6 +3190,67 @@ mod tests {
             ctx.pending_events[api_idx].params["loaderId"].as_str().unwrap(),
             first_loader,
             "carried events belong to the outgoing document's loader"
+        );
+        drop(net);
+    }
+
+    // Chrome delivers a target's Network.* events to every session that
+    // called Network.enable on it, not just the one that drove the
+    // navigation — the Playwright `newCDPSession(page)` observer shape
+    // (#13, obscura#994 same hole).
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn navigation_network_events_fan_out_to_enabled_sessions() {
+        let port = nav_carry_fixture().await;
+        let net = crate::server::test_util::net_env_guard();
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let driver = "sess-driver".to_string();
+        let observer = "sess-observer".to_string();
+        let plain = "sess-plain".to_string();
+        for sid in [&driver, &observer, &plain] {
+            ctx.sessions.insert(sid.clone(), page_id.clone());
+        }
+        // Only the observer arms Network delivery.
+        let enable = CdpRequest {
+            id: 1,
+            method: "Network.enable".to_string(),
+            params: json!({}),
+            session_id: Some(observer.clone()),
+        };
+        assert!(dispatch(&enable, &mut ctx).await.error.is_none());
+        ctx.pending_events.clear();
+
+        let nav = CdpRequest {
+            id: 2,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": format!("http://127.0.0.1:{port}/app") }),
+            session_id: Some(driver.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        let doc_events = |sid: &str| {
+            ctx.pending_events
+                .iter()
+                .filter(|e| e.session_id.as_deref() == Some(sid))
+                .filter(|e| e.method == "Network.requestWillBeSent"
+                    && e.params["request"]["url"].as_str().unwrap_or("").ends_with("/app"))
+                .count()
+        };
+        assert_eq!(
+            doc_events(&observer),
+            1,
+            "Network-enabled observer session must see the navigation's Network events"
+        );
+        assert_eq!(
+            doc_events(&driver),
+            1,
+            "the navigating session keeps its own copy"
+        );
+        assert_eq!(
+            doc_events(&plain),
+            0,
+            "a session that never called Network.enable stays untouched"
         );
         drop(net);
     }

@@ -72,9 +72,15 @@ fn emit(ctx: &mut CdpContext, method: &str, params: Value, session_id: &Option<S
 /// for one recorded network event. Shared by the post-navigation batch and
 /// by the outgoing document's carried events, which must ride under the
 /// loader they actually belonged to.
+///
+/// `extra` carries the page's other Network-enabled sessions (Chrome
+/// delivers a target's events to every session that enabled the domain,
+/// #13); the navigating session always receives the trio regardless, so
+/// clients that never call Network.enable keep the old behavior.
 fn emit_network_event(
     ctx: &mut CdpContext,
     session_id: &Option<String>,
+    extra: &[String],
     frame_id: &str,
     loader_id: &str,
     document_url: &str,
@@ -82,65 +88,72 @@ fn emit_network_event(
 ) {
     let ts = now_epoch_seconds();
     let request_id = ev.request_id.clone();
-    emit(
-        ctx,
-        "Network.requestWillBeSent",
-        json!({
-            "requestId": request_id,
-            "loaderId": loader_id,
-            "documentURL": document_url,
-            "request": {
-                "url": ev.url,
-                "method": ev.method,
-                "headers": ev.headers,
-                "initialPriority": "High",
-                "referrerPolicy": "no-referrer-when-downgrade",
-            },
-            "timestamp": ev.timestamp,
-            "wallTime": ts,
-            "initiator": { "type": "other" },
-            "type": ev.resource_type,
-            "frameId": frame_id,
-            "hasUserGesture": false,
-        }),
-        session_id,
-    );
-    emit(
-        ctx,
-        "Network.responseReceived",
-        json!({
-            "requestId": request_id,
-            "loaderId": loader_id,
-            "timestamp": ev.timestamp,
-            "type": ev.resource_type,
-            "response": {
-                "url": ev.url,
-                "status": ev.status,
-                "statusText": "",
-                "headers": ev.response_headers.as_ref(),
-                "mimeType": "text/html",
-                "connectionReused": false,
-                "connectionId": 0,
-                "encodedDataLength": ev.body_size,
-                "securityState": "secure",
-                "protocol": "http/1.1",
-                "fromDiskCache": false,
-                "fromServiceWorker": false,
-            },
-            "frameId": frame_id,
-        }),
-        session_id,
-    );
-    emit(
-        ctx,
-        "Network.loadingFinished",
-        json!({
-            "requestId": request_id,
-            "timestamp": ev.timestamp,
+    let will_be_sent = json!({
+        "requestId": request_id,
+        "loaderId": loader_id,
+        "documentURL": document_url,
+        "request": {
+            "url": ev.url,
+            "method": ev.method,
+            "headers": ev.headers,
+            "initialPriority": "High",
+            "referrerPolicy": "no-referrer-when-downgrade",
+        },
+        "timestamp": ev.timestamp,
+        "wallTime": ts,
+        "initiator": { "type": "other" },
+        "type": ev.resource_type,
+        "frameId": frame_id,
+        "hasUserGesture": false,
+    });
+    let response_received = json!({
+        "requestId": request_id,
+        "loaderId": loader_id,
+        "timestamp": ev.timestamp,
+        "type": ev.resource_type,
+        "response": {
+            "url": ev.url,
+            "status": ev.status,
+            "statusText": "",
+            "headers": ev.response_headers.as_ref(),
+            "mimeType": "text/html",
+            "connectionReused": false,
+            "connectionId": 0,
             "encodedDataLength": ev.body_size,
-        }),
-        session_id,
-    );
+            "securityState": "secure",
+            "protocol": "http/1.1",
+            "fromDiskCache": false,
+            "fromServiceWorker": false,
+        },
+        "frameId": frame_id,
+    });
+    let loading_finished = json!({
+        "requestId": request_id,
+        "timestamp": ev.timestamp,
+        "encodedDataLength": ev.body_size,
+    });
+    let mut targets: Vec<Option<String>> = vec![session_id.clone()];
+    targets.extend(extra.iter().map(|sid| Some(sid.clone())));
+    for target in targets {
+        emit(
+            ctx,
+            "Network.requestWillBeSent",
+            will_be_sent.clone(),
+            &target,
+        );
+        emit(
+            ctx,
+            "Network.responseReceived",
+            response_received.clone(),
+            &target,
+        );
+        emit(
+            ctx,
+            "Network.loadingFinished",
+            loading_finished.clone(),
+            &target,
+        );
+    }
 }
 
 /// Commit-phase announcement for a CDP navigation: the outgoing document's
@@ -157,6 +170,7 @@ fn emit_network_event(
 pub(crate) fn emit_navigation_prefix(
     ctx: &mut CdpContext,
     session_id: &Option<String>,
+    extra_network: &[String],
     page_id: &str,
     target_url: &str,
 ) -> (String, String, String) {
@@ -181,7 +195,15 @@ pub(crate) fn emit_navigation_prefix(
         .cloned()
         .unwrap_or_default();
     for ev in &carried {
-        emit_network_event(ctx, session_id, &frame_id, &old_loader, &carried_url, ev);
+        emit_network_event(
+            ctx,
+            session_id,
+            extra_network,
+            &frame_id,
+            &old_loader,
+            &carried_url,
+            ev,
+        );
     }
     let loader_id = format!("loader-{}", uuid::Uuid::new_v4());
     ctx.current_loader_ids
@@ -272,6 +294,7 @@ fn emit_context_events(
 pub(crate) fn emit_navigation_lifecycle(
     ctx: &mut CdpContext,
     session_id: &Option<String>,
+    extra_network: &[String],
     page_id: &str,
     loader_id: &str,
     old_loader: &str,
@@ -292,7 +315,15 @@ pub(crate) fn emit_navigation_lifecycle(
         )
     };
     for ev in &carried {
-        emit_network_event(ctx, session_id, &frame_id, old_loader, &carried_url, ev);
+        emit_network_event(
+            ctx,
+            session_id,
+            extra_network,
+            &frame_id,
+            old_loader,
+            &carried_url,
+            ev,
+        );
     }
 
     if let Some(err) = error {
@@ -314,7 +345,15 @@ pub(crate) fn emit_navigation_lifecycle(
     }
 
     for ev in &network_events {
-        emit_network_event(ctx, session_id, &frame_id, loader_id, &url_str, ev);
+        emit_network_event(
+            ctx,
+            session_id,
+            extra_network,
+            &frame_id,
+            loader_id,
+            &url_str,
+            ev,
+        );
     }
 
     emit(
@@ -366,6 +405,7 @@ pub(crate) fn emit_navigation_lifecycle(
 pub(crate) fn emit_navigation_for_page(
     ctx: &mut CdpContext,
     session_id: &Option<String>,
+    extra_network: &[String],
     page_id: &str,
 ) -> (String, String) {
     // The load has already finished at every call site here, so the frame
@@ -376,11 +416,19 @@ pub(crate) fn emit_navigation_for_page(
         None => return (String::new(), String::new()),
     };
     let (frame_id, loader_id, old_loader) =
-        emit_navigation_prefix(ctx, session_id, page_id, &target_url);
+        emit_navigation_prefix(ctx, session_id, extra_network, page_id, &target_url);
     if frame_id.is_empty() {
         return (frame_id, loader_id);
     }
-    emit_navigation_lifecycle(ctx, session_id, page_id, &loader_id, &old_loader, None);
+    emit_navigation_lifecycle(
+        ctx,
+        session_id,
+        extra_network,
+        page_id,
+        &loader_id,
+        &old_loader,
+        None,
+    );
     (frame_id, loader_id)
 }
 
@@ -436,7 +484,9 @@ async fn navigate_page(
         (page.frame_id.clone(), page.id.clone())
     };
 
-    let (_frame_id, loader_id) = emit_navigation_for_page(ctx, session_id, &page_id);
+    let extra_network = ctx.other_network_sessions(session_id, &page_id);
+    let (_frame_id, loader_id) =
+        emit_navigation_for_page(ctx, session_id, &extra_network, &page_id);
     Ok(json!({ "frameId": frame_id, "loaderId": loader_id }))
 }
 
@@ -456,8 +506,9 @@ fn begin_spawned_navigate(
         .session_page_id(session_id)
         .ok_or("No page")?
         .to_string();
+    let extra_network = ctx.other_network_sessions(session_id, &page_id);
     let (frame_id, loader_id, old_loader) =
-        emit_navigation_prefix(ctx, session_id, &page_id, announced_url);
+        emit_navigation_prefix(ctx, session_id, &extra_network, &page_id, announced_url);
     if frame_id.is_empty() {
         return Err("No page".to_string());
     }
@@ -518,9 +569,11 @@ pub(crate) fn emit_navigation_tail(
             }
         }
     }
+    let extra_network = ctx.other_network_sessions(&pending.session_id, page_id);
     emit_navigation_lifecycle(
         ctx,
         &pending.session_id,
+        &extra_network,
         page_id,
         &loader_id,
         &pending.old_loader,
