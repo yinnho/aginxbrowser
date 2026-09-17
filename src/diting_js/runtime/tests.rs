@@ -259,6 +259,68 @@
         );
     }
 
+    /// Issue #30: engine-internal `_`-prefixed state must be invisible to
+    /// enumerability. Chrome keeps DOM state in native slots —
+    /// `Object.keys(div)` is `[]` there — and `for..in` walkers like zone.js's
+    /// patchClass see only the interface operations. Our JS-implemented DOM
+    /// stores internals as own props; they used to enumerate on every
+    /// element, observer, and prototype (a one-line engine tell).
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn internal_underscore_state_is_not_enumerable() {
+        let mut rt = setup_runtime(
+            "<html><body><div id='d' class='x'>t</div><a id='l' rel='nofollow'>l</a></body></html>",
+        );
+        let out = rt.evaluate(r#"
+            var el = document.getElementById('d');
+            el.classList.add('y');                 // lazy _classList
+            var link = document.getElementById('l');
+            void link.relList;                     // lazy _relList
+            var mo = new MutationObserver(function(){});
+            var ro = new ResizeObserver(function(){});
+            var io = new IntersectionObserver(function(){});
+            var forIn = [];
+            for (var k in mo) forIn.push(k);       // zone.js patchClass walk
+            return JSON.stringify([
+                Object.keys(el),
+                Object.keys(document.body),
+                Object.keys(document.documentElement),
+                Object.keys(mo), Object.keys(ro), Object.keys(io),
+                Object.keys(new FileReader())
+                    .filter(function(k){ return k[0] === '_'; }),
+                Object.keys(new URL('http://x.test/a?b=c')),
+                Object.keys(new Headers()),
+                Object.keys(new URLSearchParams('a=b')),
+                Object.keys(MutationObserver.prototype),
+                Object.keys(ResizeObserver.prototype),
+                Object.keys(IntersectionObserver.prototype),
+                Object.keys(FileReader.prototype).filter(function(k){ return k[0] === '_'; }),
+                forIn,
+            ]);
+        "#).unwrap();
+        let faces: Vec<Vec<String>> = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        // All instance faces (0-9) hold no own ENUMERABLE props: that is the
+        // Chrome face — for-in walkers (zone.js patchClass, Object.keys
+        // fingerprints) see nothing. Chrome's `[]` comes from native slots;
+        // our `_` internals still exist as non-enumerable own props (v1
+        // boundary, issue #30), which only getOwnPropertyNames reveals.
+        for (i, face) in faces.iter().take(10).enumerate() {
+            assert!(face.is_empty(), "face {i} leaked internals: {face:?}");
+        }
+        // Prototypes expose the public operations only — no `_notify`,
+        // `_fireFor`, `_read`, `_fire`, `_pull`, `_push`.
+        for (i, face) in faces.iter().enumerate().skip(10).take(4) {
+            let bad: Vec<&String> = face.iter().filter(|k| k.starts_with('_')).collect();
+            assert!(bad.is_empty(), "prototype face {i} leaked internals: {bad:?}");
+        }
+        // The zone.js walk still finds the interface operations (that's the
+        // #27 face — ops must stay enumerable) and nothing else.
+        assert_eq!(
+            faces[14], vec!["observe", "disconnect", "takeRecords"],
+            "for-in over a MutationObserver must see exactly the operations"
+        );
+    }
+
     /// Computed-style property reads must resolve through the lookup chain
     /// (inline → bounding-rect geometry → defaults), not get short-circuited
     /// by element.style's named-property surface: that surface claims every

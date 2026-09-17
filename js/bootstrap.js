@@ -199,6 +199,28 @@ const _functionToString = {
   },
 }.toString;
 Function.prototype.toString = _functionToString;
+// (#30) Engine-internal state lives in `_`-prefixed own properties because
+// the DOM here is JS-implemented. Chrome keeps its state in native slots and
+// exposes nothing — Object.keys(el) is [] there — so hide ours the same way:
+// `for..in` walkers (zone.js patchClass, jQuery-style copies, fingerprint
+// probes) must not see implementation fields. Only first creation defines
+// enumerability; later plain assignments keep the hidden descriptor.
+function __def(o, k, v) {
+  Object.defineProperty(o, k, { value: v, writable: true, configurable: true });
+  return v;
+}
+function __hideOwn(o) {
+  const names = Object.getOwnPropertyNames(o);
+  for (let i = 0; i < names.length; i++) {
+    const k = names[i];
+    if (k.charCodeAt(0) !== 95) continue;
+    const d = Object.getOwnPropertyDescriptor(o, k);
+    if (!d || !d.enumerable) continue;
+    Object.defineProperty(o, k, { enumerable: false });
+  }
+  return o;
+}
+
 function _markNative(fn) { if (typeof fn === 'function') _nativeFns.add(fn); return fn; }
 // Mark every method AND accessor on a shim prototype as native. Lie
 // detectors (fingerprintjs-style) verify `Function.prototype.toString.call(fn)`
@@ -614,6 +636,7 @@ class CSSStyleDeclaration {
     // `this._x = …` assignment (which the style proxy would reroute into
     // setProperty).
     Object.defineProperty(this, "_sync", { value: { last: null }, writable: true, enumerable: false, configurable: true });
+    __hideOwn(this);
   }
   // Pull the owner's `style` attribute into `_props` if it changed since our
   // last read/write. Keeps parsed HTML and setAttribute('style', …) visible via
@@ -1761,7 +1784,7 @@ class Node {
   static DOCUMENT_POSITION_CONTAINED_BY = 16;
   static DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC = 32;
 
-  constructor(nid) { this._nid = nid; }
+  constructor(nid) { this._nid = nid;  __hideOwn(this);}
   get nodeType() { return +_dom("node_type", this._nid); }
   get nodeName() { return _domParse("node_name", this._nid) || ""; }
   get ownerDocument() { return globalThis.document; }
@@ -2182,7 +2205,7 @@ class CDATASection extends Text {
 // and carries a separate target. Backed by a text node so data/nodeValue/
 // textContent/length work without native PI support.
 class ProcessingInstruction extends CharacterData {
-  constructor(nid, target) { super(nid); this._target = target; }
+  constructor(nid, target) { super(nid); this._target = target;  __hideOwn(this);}
   get target() { return this._target; }
   get nodeName() { return this._target; }
   get nodeType() { return 7; }
@@ -2408,6 +2431,7 @@ class Element extends Node {
   constructor(nid) {
     super(nid);
     this._style = _styleProxy(new CSSStyleDeclaration(this));
+    __hideOwn(this);
   }
   get tagName() { return _domParse("tag_name", this._nid) || ""; }
   get localName() {
@@ -2533,7 +2557,7 @@ class Element extends Node {
         content._fragmentContext = 'template';
         return content;
       }
-      if (!this._templateContent) this._templateContent = document.createDocumentFragment();
+      if (!this._templateContent) __def(this, '_templateContent', document.createDocumentFragment());
       return this._templateContent;
     }
     if (tag === 'meta') return this.getAttribute('content') || '';
@@ -2550,7 +2574,7 @@ class Element extends Node {
   get nextElementSibling() { let s = this.nextSibling; while(s && s.nodeType !== 1) s = s.nextSibling; return s; }
   get previousElementSibling() { let s = this.previousSibling; while(s && s.nodeType !== 1) s = s.previousSibling; return s; }
   get classList() {
-    if (!this._classList) this._classList = new DOMTokenList(this, "class");
+    if (!this._classList) __def(this, '_classList', new DOMTokenList(this, "class"));
     return this._classList;
   }
   get relList() {
@@ -2559,8 +2583,8 @@ class Element extends Node {
                (ns === "http://www.w3.org/1999/xhtml" && (ln === "a" || ln === "area" || ln === "link"));
     if (!ok) return undefined;
     if (!this._relList) {
-      this._relList = new DOMTokenList(this, "rel",
-        (ns === "http://www.w3.org/1999/xhtml" && ln === "link") ? LINK_REL_SUPPORTED : undefined);
+      __def(this, '_relList', new DOMTokenList(this, "rel",
+        (ns === "http://www.w3.org/1999/xhtml" && ln === "link") ? LINK_REL_SUPPORTED : undefined));
     }
     return this._relList;
   }
@@ -2585,19 +2609,19 @@ class Element extends Node {
   }
   get sandbox() {
     if (this.namespaceURI !== "http://www.w3.org/1999/xhtml" || this.localName !== "iframe") return undefined;
-    if (!this._sandboxList) this._sandboxList = new DOMTokenList(this, "sandbox", SANDBOX_SUPPORTED);
+    if (!this._sandboxList) __def(this, '_sandboxList', new DOMTokenList(this, "sandbox", SANDBOX_SUPPORTED));
     return this._sandboxList;
   }
   get sizes() {
     if (this.namespaceURI !== "http://www.w3.org/1999/xhtml" || this.localName !== "link") return undefined;
-    if (!this._sizesList) this._sizesList = new DOMTokenList(this, "sizes");
+    if (!this._sizesList) __def(this, '_sizesList', new DOMTokenList(this, "sizes"));
     return this._sizesList;
   }
   get htmlFor() {
     if (this.namespaceURI !== "http://www.w3.org/1999/xhtml") return undefined;
     const ln = this.localName;
     if (ln === "output") {
-      if (!this._htmlForList) this._htmlForList = new DOMTokenList(this, "for");
+      if (!this._htmlForList) __def(this, '_htmlForList', new DOMTokenList(this, "for"));
       return this._htmlForList;
     }
     if (ln === "label") return this.getAttribute("for") || "";
@@ -2898,7 +2922,7 @@ class Element extends Node {
   _resolveInlineHandler(name) {
     // name = 'onclick' / 'onsubmit' / etc. Compile the content attribute
     // as a function body on first read and cache it on the instance.
-    const cache = this.__inlineHandlerCache || (this.__inlineHandlerCache = {});
+    const cache = this.__inlineHandlerCache || __def(this, '__inlineHandlerCache', {});
     if (Object.prototype.hasOwnProperty.call(cache, name)) return cache[name];
     const src = this.getAttribute && this.getAttribute(name);
     if (!src) { cache[name] = null; return null; }
@@ -2919,7 +2943,7 @@ class Element extends Node {
     // be a full no-op, not a second state flip. This also stops a control's
     // handler clicking its own label from bouncing the click back.
     if (this._ditingClickInProgress) return;
-    this._ditingClickInProgress = true;
+    __def(this, '_ditingClickInProgress', true);
     try {
       // Pre-click activation steps (HTML spec): a checkbox/radio flips BEFORE
       // the click event dispatches, so listeners observe the new state, and
@@ -3027,14 +3051,14 @@ class Element extends Node {
     if (!this.dispatchEvent(beforeEvent)) return;
     // The beforetoggle handler may have changed our type or shown us; re-check.
     if (!this._checkPopoverValidity(/*expectedToBeShowing*/false)) return;
-    this._popoverState = "showing";
+    __def(this, '_popoverState', "showing");
     const target = this;
     setTimeout(() => { try { target.dispatchEvent(new ToggleEvent("toggle", { oldState: "closed", newState: "open" })); } catch (e) {} }, 0);
   }
   hidePopover() {
     if (!this._checkPopoverValidity(/*expectedToBeShowing*/true)) return;
     this.dispatchEvent(new ToggleEvent("beforetoggle", { oldState: "open", newState: "closed" }));
-    this._popoverState = "hidden";
+    __def(this, '_popoverState', "hidden");
     const target = this;
     setTimeout(() => { try { target.dispatchEvent(new ToggleEvent("toggle", { oldState: "open", newState: "closed" })); } catch (e) {} }, 0);
   }
@@ -3059,7 +3083,7 @@ class Element extends Node {
       // popover attribute, which may now be removed (No Popover), and would
       // throw NotSupportedError. This mirrors the spec hide with throw=false.
       this.dispatchEvent(new ToggleEvent("beforetoggle", { oldState: "open", newState: "closed" }));
-      this._popoverState = "hidden";
+      __def(this, '_popoverState', "hidden");
       const target = this;
       setTimeout(() => { try { target.dispatchEvent(new ToggleEvent("toggle", { oldState: "open", newState: "closed" })); } catch (e) {} }, 0);
     }
@@ -3071,11 +3095,11 @@ class Element extends Node {
   get open() { return this.hasAttribute('open'); }
   set open(v) { if (v) { if (!this.hasAttribute('open')) this.setAttribute('open', ''); } else if (this.hasAttribute('open')) { this.removeAttribute('open'); this._dialogModal = false; } }
   get returnValue() { return this._returnValue != null ? this._returnValue : ''; }
-  set returnValue(v) { this._returnValue = String(v); }
+  set returnValue(v) { __def(this, '_returnValue', String(v)); }
   get oncancel() { return this._oncancel || null; }
-  set oncancel(f) { this._oncancel = typeof f === 'function' ? f : null; }
+  set oncancel(f) { __def(this, '_oncancel', typeof f === 'function' ? f : null); }
   get onclose() { return this._onclose || null; }
-  set onclose(f) { this._onclose = typeof f === 'function' ? f : null; }
+  set onclose(f) { __def(this, '_onclose', typeof f === 'function' ? f : null); }
   get closedBy() { const v = (this.getAttribute('closedby') || '').toLowerCase(); return (v === 'any' || v === 'closerequest' || v === 'none') ? v : 'auto'; }
   set closedBy(v) { this.setAttribute('closedby', String(v)); }
   show() {
@@ -3083,7 +3107,7 @@ class Element extends Node {
     const before = new ToggleEvent("beforetoggle", { cancelable: true, oldState: "closed", newState: "open" });
     if (!this.dispatchEvent(before)) return;
     if (this.hasAttribute('open')) return;
-    this.setAttribute('open', ''); this._dialogModal = false;
+    this.setAttribute('open', ''); __def(this, '_dialogModal', false);
     const self = this; setTimeout(() => { try { self.dispatchEvent(new ToggleEvent("toggle", { oldState: "closed", newState: "open" })); } catch (e) {} }, 0);
   }
   showModal() {
@@ -3092,13 +3116,13 @@ class Element extends Node {
     const before = new ToggleEvent("beforetoggle", { cancelable: true, oldState: "closed", newState: "open" });
     if (!this.dispatchEvent(before)) return;
     if (this.hasAttribute('open')) return;
-    this.setAttribute('open', ''); this._dialogModal = true;
+    this.setAttribute('open', ''); __def(this, '_dialogModal', true);
     const self = this; setTimeout(() => { try { self.dispatchEvent(new ToggleEvent("toggle", { oldState: "closed", newState: "open" })); } catch (e) {} }, 0);
   }
   _dialogClose(result, fireClose) {
     if (!this.hasAttribute('open')) return;
     this.dispatchEvent(new ToggleEvent("beforetoggle", { oldState: "open", newState: "closed" }));
-    this.removeAttribute('open'); this._dialogModal = false;
+    this.removeAttribute('open'); __def(this, '_dialogModal', false);
     if (result !== undefined) this._returnValue = String(result);
     const self = this;
     setTimeout(() => { try { self.dispatchEvent(new ToggleEvent("toggle", { oldState: "open", newState: "closed" })); } catch (e) {} }, 0);
@@ -3108,7 +3132,7 @@ class Element extends Node {
   requestClose(result) {
     if (!this.hasAttribute('open')) return;
     if (this._dialogCancelFiring) return; // no re-entrant cancel
-    this._dialogCancelFiring = true;
+    __def(this, '_dialogCancelFiring', true);
     let canceled = false;
     try { const ev = new Event('cancel', { bubbles: false, cancelable: true }); this.dispatchEvent(ev); canceled = ev.defaultPrevented; }
     finally { this._dialogCancelFiring = false; }
@@ -3353,7 +3377,7 @@ class Element extends Node {
         if (siblings[i] !== this) siblings[i]._selected = false;
       }
     }
-    this._selected = v;
+    __def(this, '_selected', v);
     // The displayed label may have moved — recompute the owning select's
     // mirror once, covering both this write and the sibling clears above.
     if (p) _mirrorSelectLabel(p);
@@ -3484,8 +3508,8 @@ class Element extends Node {
       // creation), so contentWindow.location.origin and postMessage
       // targetOrigin checks see the authored origin, not about:blank.
       const lazyUrl = (this.src && this.src.includes('://')) ? this.src : 'about:blank';
-      this._iframeDoc = new _IframeDocument('<!DOCTYPE html><html><head></head><body></body></html>', lazyUrl, this);
-      this._iframeWin = new _IframeWindow(this._iframeDoc, lazyUrl);
+      __def(this, '_iframeDoc', new _IframeDocument('<!DOCTYPE html><html><head></head><body></body></html>', lazyUrl, this));
+      __def(this, '_iframeWin', new _IframeWindow(this._iframeDoc, lazyUrl));
     }
     return this._iframeDoc;
   }
@@ -4025,7 +4049,7 @@ class Element extends Node {
       if (emax != null) nv = Math.min(nv, emax);
     }
     const changed = nv !== (this._scrollTop || 0);
-    this._scrollTop = nv;
+    __def(this, '_scrollTop', nv);
     // Viewport-root mirror: publish the root scroller offset to the native
     // layout state so the CDP frame pump paints the right viewport band.
     // The engine has ONE root scroll box (html/body share the viewport
@@ -4054,7 +4078,7 @@ class Element extends Node {
       if (emax != null) nv = Math.min(nv, emax);
     }
     const changed = nv !== (this._scrollLeft || 0);
-    this._scrollLeft = nv;
+    __def(this, '_scrollLeft', nv);
     if (changed && this._isViewportRoot()) {
       try { _domRaw('set_scroll_offset', String(nv), String(this._scrollTop || 0)); } catch (e) {}
     }
@@ -4183,7 +4207,7 @@ class Element extends Node {
     const root = this._rootScroller();
     const beforeLeft = root.scrollLeft || 0;
     const beforeTop = root.scrollTop || 0;
-    this._scrollSuppress = true;
+    __def(this, '_scrollSuppress', true);
     if (left !== undefined) this.scrollLeft = +left || 0;
     if (top !== undefined) this.scrollTop = +top || 0;
     this._scrollSuppress = false;
@@ -4199,7 +4223,7 @@ class Element extends Node {
     const root = this._rootScroller();
     const beforeLeft = root.scrollLeft || 0;
     const beforeTop = root.scrollTop || 0;
-    this._scrollSuppress = true;
+    __def(this, '_scrollSuppress', true);
     this.scrollLeft = (this.scrollLeft || 0) + (+dl || 0);
     this.scrollTop = (this.scrollTop || 0) + (+dt || 0);
     this._scrollSuppress = false;
@@ -4385,9 +4409,9 @@ class Document extends Node {
     if (this._doctype !== undefined) return this._doctype;
     const info = _domParse("document_doctype");
     if (info && info.name) {
-      this._doctype = new DocumentType(info.nodeId, info.name, info.publicId || "", info.systemId || "");
+      __def(this, '_doctype', new DocumentType(info.nodeId, info.name, info.publicId || "", info.systemId || ""));
     } else {
-      this._doctype = null;
+      __def(this, '_doctype', null);
     }
     return this._doctype;
   }
@@ -4428,7 +4452,7 @@ class Document extends Node {
   set domain(v) {
     v = String(v);
     const cur = this.domain;
-    if (v === cur || (v && cur.endsWith("." + v))) this._domainOverride = v;
+    if (v === cur || (v && cur.endsWith("." + v))) __def(this, '_domainOverride', v);
     else throw new DOMException("Illegal document.domain value \"" + v + "\"", "SecurityError");
   }
   get location() { return globalThis.location; }
@@ -4607,7 +4631,7 @@ class Document extends Node {
   createRange() { return new Range(); }
   addEventListener(type, fn, opts) {
     if (typeof fn !== 'function') return;
-    if (!this._listeners) this._listeners = {};
+    if (!this._listeners) __def(this, '_listeners', {});
     if (!this._listeners[type]) this._listeners[type] = [];
     if (!this._listeners[type].includes(fn)) this._listeners[type].push(fn);
   }
@@ -4966,8 +4990,8 @@ class Document extends Node {
       }
     }
     if (scriptNid && after) {
-      this._writeAnchorScript = scriptNid;
-      this._writeAnchorNid = after._nid;
+      __def(this, '_writeAnchorScript', scriptNid);
+      __def(this, '_writeAnchorNid', after._nid);
     }
   }
   writeln(...args) {
@@ -4978,8 +5002,8 @@ class Document extends Node {
     if (body) body.innerHTML = '';
     // A new parse begins. Whatever the input stream still held is gone.
     _dom("document_write_reset");
-    this._writeAnchorScript = 0;
-    this._writeAnchorNid = 0;
+    __def(this, '_writeAnchorScript', 0);
+    __def(this, '_writeAnchorNid', 0);
     return this;
   }
   close() {
@@ -5042,6 +5066,7 @@ class DocumentType extends Node {
     this._name = name;
     this._publicId = publicId;
     this._systemId = systemId;
+    __hideOwn(this);
   }
   get nodeType() { return 10; }
   get nodeName() { return this._name; }
@@ -5507,7 +5532,7 @@ let _pluginsInst = null, _mimeTypesInst = null;
 // `navigator.connection.addEventListener` threw). dispatchEvent also runs
 // the matching on* property handler, like a real EventTarget.
 class NetworkInformation {
-  constructor() { this._listeners = Object.create(null); }
+  constructor() { this._listeners = Object.create(null);  __hideOwn(this);}
   get downlink() { return 10; }
   get downlinkMax() { return Infinity; }
   get effectiveType() { return '4g'; }
@@ -6115,7 +6140,7 @@ globalThis.fetch = async (input, init = {}) => {
 
 if (typeof Headers === "undefined") {
   globalThis.Headers = class Headers {
-    constructor(init={}) { this._h={}; if(init) { if(init instanceof Headers) { init.forEach((v,k)=>{this._h[k]=v;}); } else if(typeof init==="object") { for(const[k,v]of Object.entries(init)) this._h[k.toLowerCase()]=String(v); } } }
+    constructor(init={}) { this._h={}; if(init) { if(init instanceof Headers) { init.forEach((v,k)=>{this._h[k]=v;}); } else if(typeof init==="object") { for(const[k,v]of Object.entries(init)) this._h[k.toLowerCase()]=String(v); } }  __hideOwn(this);}
     get(n) { return this._h[n.toLowerCase()]??null; } set(n,v) { this._h[n.toLowerCase()]=String(v); }
     has(n) { return n.toLowerCase() in this._h; } delete(n) { delete this._h[n.toLowerCase()]; }
     append(n,v) { this._h[n.toLowerCase()]=String(v); }
@@ -6132,7 +6157,7 @@ if (typeof Headers === "undefined") {
 // removeEventListener/dispatchEvent descriptors before falling back to XHR.prototype.
 class XMLHttpRequestEventTarget {
   addEventListener(type, handler) {
-    if (!this._listeners) this._listeners = {};
+    if (!this._listeners) __def(this, '_listeners', {});
     if (!this._listeners[type]) this._listeners[type] = [];
     this._listeners[type].push(handler);
   }
@@ -6197,6 +6222,7 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     this.ontimeout = null;
     this.onloadstart = null;
     this.onloadend = null;
+    __hideOwn(this);
   }
 
   open(method, url, async_) {
@@ -6239,7 +6265,7 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
       .join('\r\n');
   }
 
-  overrideMimeType(mime) { this._overrideMime = mime; }
+  overrideMimeType(mime) { __def(this, '_overrideMime', mime); }
 
   send(body) {
     if (this.readyState !== 1) return;
@@ -6521,6 +6547,7 @@ if (typeof URL === 'undefined' || !URL.prototype || !URL.__diting) {
       if (!c) throw new TypeError("Failed to construct 'URL': Invalid URL");
       this._c = c;
       this._sp = null;
+      __hideOwn(this);
     }
     get href() { return this._c.href; }
     set href(v) { const c = _urlParseOp(v, undefined); if (!c) throw new TypeError("Failed to set the 'href' property on 'URL': Invalid URL"); this._c = c; this._refreshSP(); }
@@ -6544,7 +6571,7 @@ if (typeof URL === 'undefined' || !URL.prototype || !URL.__diting) {
     set hash(v) { this._set('hash', v); }
     get origin() { return this._c.origin; }
     get searchParams() {
-      if (!this._sp) { this._sp = new URLSearchParams(this._c.search); this._sp._url = this; }
+      if (!this._sp) { __def(this, '_sp', new URLSearchParams(this._c.search)); this._sp._url = this; }
       return this._sp;
     }
     _set(part, value) { const c = _urlSetOp(this._c.href, part, value); if (c) this._c = c; }
@@ -6679,13 +6706,14 @@ if (typeof Response === 'undefined') {
       this.ok = this.status >= 200 && this.status < 300;
       this.headers = new Headers(init.headers);
       this.type = init.type || 'basic'; this.url = init.url || ''; this.redirected = !!init.redirected;
+      __hideOwn(this);
     }
-    async text() { this._bodyUsed = true; return _decodeBodyWithCharset(this._bodyBytes, this.headers); }
-    async json() { this._bodyUsed = true; return JSON.parse(await this.text()); }
-    async arrayBuffer() { this._bodyUsed = true; return _arrayBufferFromBytes(this._bodyBytes); }
-    async blob() { this._bodyUsed = true; return new Blob([this._bodyBytes]); }
+    async text() { __def(this, '_bodyUsed', true); return _decodeBodyWithCharset(this._bodyBytes, this.headers); }
+    async json() { __def(this, '_bodyUsed', true); return JSON.parse(await this.text()); }
+    async arrayBuffer() { __def(this, '_bodyUsed', true); return _arrayBufferFromBytes(this._bodyBytes); }
+    async blob() { __def(this, '_bodyUsed', true); return new Blob([this._bodyBytes]); }
     async formData() {
-      this._bodyUsed = true;
+      __def(this, '_bodyUsed', true);
       const ct = this.headers.get ? (this.headers.get('content-type') || '') : '';
       return _formDataFromString(_decodeBodyWithCharset(this._bodyBytes, this.headers), ct);
     }
@@ -6702,6 +6730,7 @@ if (typeof Response === 'undefined') {
         this._bodyStream = new ReadableStream({
           start(c) { if (bytes && bytes.length) c.enqueue(new Uint8Array(bytes)); c.close(); },
         });
+        __hideOwn(this);
       }
       return this._bodyStream;
     }
@@ -6778,6 +6807,7 @@ globalThis.ResizeObserver = class ResizeObserver {
     this._targets = new Set();
     this._connected = true;
     this._fireCount = 0;
+    __hideOwn(this);
   }
   _fireFor(targets) {
     if (!this._connected || !targets.length) return;
@@ -6863,6 +6893,7 @@ if (typeof TextDecoder === 'undefined') {
       // (TextDecoderStream splits chunks at arbitrary byte offsets).
       this._pending = new Uint8Array(0);
       this._bomChecked = false;
+      __hideOwn(this);
     }
     decode(input, options) {
       const stream = !!(options && options.stream);
@@ -7460,6 +7491,7 @@ globalThis.CSSStyleSheet = class CSSStyleSheet {
     this.ownerRule = null;
     this.disabled = false;
     this._rules = [];
+    __hideOwn(this);
   }
   insertRule(rule, index) {
     const idx = index ?? this._rules.length;
@@ -7561,6 +7593,7 @@ globalThis.MutationObserver = class MutationObserver {
     this._callback = callback;
     this._targets = [];
     this._records = [];
+    __hideOwn(this);
   }
   observe(target, options) {
     this._targets.push({ target, options: options || {} });
@@ -7657,6 +7690,7 @@ globalThis.ShadowRoot = class ShadowRoot extends DocumentFragment {
     this._slotAssignment = options && options.slotAssignment === 'manual' ? 'manual' : 'named';
     this._clonable = !!(options && options.clonable);
     this._serializable = !!(options && options.serializable);
+    __hideOwn(this);
   }
   get host() { return this._host; }
   get mode() { return this._mode; }
@@ -7688,7 +7722,7 @@ function _isValidCustomElementName(name) {
   return /^[a-z][a-z0-9._·À-￿-]*-[a-z0-9._·À-￿-]*$/.test(name);
 }
 class CustomElementRegistry {
-  constructor() { this._registry = new Map(); this._byCtor = new Map(); this._whenDefinedResolvers = new Map(); this._defining = false; }
+  constructor() { this._registry = new Map(); this._byCtor = new Map(); this._whenDefinedResolvers = new Map(); this._defining = false;  __hideOwn(this);}
   define(name, cls, opts) {
     if (!_isConstructorCE(cls)) throw new TypeError("Failed to execute 'define' on 'CustomElementRegistry': parameter 2 is not a constructor.");
     if (!_isValidCustomElementName(name)) throw new DOMException("Failed to execute 'define' on 'CustomElementRegistry': \"" + name + "\" is not a valid custom element name", "SyntaxError");
@@ -7771,7 +7805,7 @@ globalThis.HTMLUnknownElement = Element;
 // ElementInternals: form-associated custom element internals. Validity/state
 // are JS-observable; ARIA reflection that needs the accessibility tree is not.
 globalThis.ElementInternals = class ElementInternals {
-  constructor(el) { this._el = el; this._valid = true; this._flags = {}; this._message = ''; this._value = null; this._states = new Set(); }
+  constructor(el) { this._el = el; this._valid = true; this._flags = {}; this._message = ''; this._value = null; this._states = new Set();  __hideOwn(this);}
   setFormValue(value, state) { this._value = value; }
   setValidity(flags, message, anchor) {
     flags = flags || {};
@@ -7842,6 +7876,7 @@ globalThis.IntersectionObserver = class IntersectionObserver {
     this._connected = true;
     this._fireCount = 0;
     globalThis.__intersectionObservers.push(this);
+    __hideOwn(this);
   }
   _fireFor(targets) {
     if (!this._connected || !targets.length || this._fireCount >= 256) return;
@@ -7971,7 +8006,7 @@ globalThis.Event = class Event {
   // WebIDL: type is a required argument and is coerced to a string — Chrome
   // throws "1 argument required, but only 0 present." and `new Event(123).type`
   // is "123", not the number (issue #552). Subclasses inherit both via super.
-  constructor(t,o={}) { if (arguments.length < 1) throw new TypeError("Failed to construct 'Event': 1 argument required, but only 0 present."); this.type=String(t);this.bubbles=!!o.bubbles;this.cancelable=!!o.cancelable;this.composed=!!o.composed;this.defaultPrevented=false;this.target=null;this.currentTarget=null;this.eventPhase=0;this.timeStamp=Date.now();this._propagationStopped=false;this._immediatePropagationStopped=false; }
+  constructor(t,o={}) { if (arguments.length < 1) throw new TypeError("Failed to construct 'Event': 1 argument required, but only 0 present."); this.type=String(t);this.bubbles=!!o.bubbles;this.cancelable=!!o.cancelable;this.composed=!!o.composed;this.defaultPrevented=false;this.target=null;this.currentTarget=null;this.eventPhase=0;this.timeStamp=Date.now();this._propagationStopped=false;this._immediatePropagationStopped=false;  __hideOwn(this);}
   get isTrusted() { return true; }
   preventDefault() { if (this.cancelable) this.defaultPrevented=true; } stopPropagation(){ this._propagationStopped=true; } stopImmediatePropagation(){ this._propagationStopped=true; this._immediatePropagationStopped=true; }
   initEvent(type,bubbles,cancelable) { if (arguments.length < 1) throw new TypeError("Failed to execute 'initEvent' on 'Event': 1 argument required, but only 0 present."); this.type=String(type);this.bubbles=!!bubbles;this.cancelable=!!cancelable;this.defaultPrevented=false;this._propagationStopped=false;this._immediatePropagationStopped=false; }
@@ -8231,6 +8266,7 @@ class AbortSignal extends XMLHttpRequestEventTarget {
     _abortSignalConstructionKey = false;
     this._aborted = false;
     this._reason = undefined;
+    __hideOwn(this);
   }
   get aborted() { return this._aborted; }
   get reason() { return this._reason; }
@@ -8309,6 +8345,7 @@ if (typeof Blob === "undefined") globalThis.Blob = class Blob {
     this.size = total;
     const t = opts.type != null ? String(opts.type) : "";
     this.type = /^[\x20-\x7e]*$/.test(t) ? t.toLowerCase() : "";
+    __hideOwn(this);
   }
   get [Symbol.toStringTag]() { return "Blob"; }
   slice(start, end, contentType) {
@@ -8371,6 +8408,7 @@ if (typeof FormData === "undefined") globalThis.FormData = class FormData {
     }
     // The submitter's name/value is included (it is the clicked button).
     if (submitter && submitter.name) this._d.push([submitter.name, String(submitter.value ?? "")]);
+    __hideOwn(this);
   }
   // Blob values stay objects (spec: append(name, blobValue, filename));
   // everything else converts to USVString. Stringifying a File here used to
@@ -8476,6 +8514,7 @@ if (typeof URLSearchParams === "undefined") globalThis.URLSearchParams = class U
     } else if (init && typeof init === 'object') {
       Object.keys(init).forEach(k => this._p.push([String(k), String(init[k])]));
     }
+    __hideOwn(this);
   }
   _decode(s){
     // application/x-www-form-urlencoded percent-decoding: decode each valid %XX
@@ -9051,6 +9090,7 @@ class PerformanceEntry {
     this._peName = name; this._peType = entryType;
     this._peStart = startTime; this._peDur = duration;
     this._peDetail = null;
+    __hideOwn(this);
   }
   get name() { return this._peName; }
   get entryType() { return this._peType; }
@@ -9076,6 +9116,7 @@ class _Performance {
       totalJSHeapSize: 19321856,
       usedJSHeapSize: 16781520,
     };
+    __hideOwn(this);
   }
   now() {
     var ms = Date.now() - (this.timeOrigin || 0);
@@ -9171,7 +9212,7 @@ class _Performance {
       return Object.assign(PerformanceEntry.prototype.toJSON.call(this), extra);
     };
     _markNative(e.toJSON);
-    this._navEntry = e;
+    __def(this, '_navEntry', e);
     return e;
   }
   // Paint timings derived from the (simulated) DCL offset: FP lands before
@@ -9187,6 +9228,7 @@ class _Performance {
       new PerformanceEntry('first-paint', 'paint', fp, 0),
       new PerformanceEntry('first-contentful-paint', 'paint', fcp, 0),
     ];
+    __hideOwn(this);
     return this._paintEntries;
   }
   _all() {
@@ -9270,6 +9312,7 @@ class FontFace {
     this._ffFeatureSettings = d.featureSettings || 'normal';
     this._ffStatus = 'unloaded';
     this._ffLoaded = null;
+    __hideOwn(this);
   }
   get family() { return this._ffFamily; }
   set family(v) { this._ffFamily = String(v == null ? '' : v); }
@@ -9291,7 +9334,7 @@ class FontFace {
   set featureSettings(v) { this._ffFeatureSettings = String(v == null ? 'normal' : v); }
   get status() { return this._ffStatus; }
   get loaded() {
-    if (!this._ffLoaded) this._ffLoaded = this.load();
+    if (!this._ffLoaded) __def(this, '_ffLoaded', this.load());
     return this._ffLoaded;
   }
   load() {
@@ -10289,6 +10332,7 @@ globalThis.Range = class Range {
   constructor() {
     const d = globalThis.document || null;
     this._sc = d; this._so = 0; this._ec = d; this._eo = 0;
+    __hideOwn(this);
   }
   get startContainer() { return this._sc; }
   get startOffset() { return this._so; }
@@ -10410,6 +10454,7 @@ globalThis.StaticRange = class StaticRange {
     if (sc.nodeType === 10 || ec.nodeType === 10 || sc.nodeType === 7 || ec.nodeType === 7)
       throw new DOMException("StaticRange endpoints cannot be DocumentType or ProcessingInstruction", "InvalidNodeTypeError");
     this._sc = sc; this._so = init.startOffset >>> 0; this._ec = ec; this._eo = init.endOffset >>> 0;
+    __hideOwn(this);
   }
   get startContainer() { return this._sc; }
   get startOffset() { return this._so; }
@@ -10421,7 +10466,7 @@ globalThis.StaticRange = class StaticRange {
 // instance per document. Everything except modify() (needs visual line/word
 // layout) is layout-free, built on the Range boundary-point helpers above.
 globalThis.Selection = class Selection {
-  constructor(doc) { this._doc = doc; this._range = null; this._direction = 'none'; }
+  constructor(doc) { this._doc = doc; this._range = null; this._direction = 'none';  __hideOwn(this);}
   _setRange(r, dir) { this._range = r; this._direction = dir; }
   _inDoc(node) { return !!(node && this._doc && this._doc.contains && this._doc.contains(node)); }
   get rangeCount() { return this._range ? 1 : 0; }
@@ -10545,6 +10590,7 @@ class _IframeDocument {
       const titleEl = this._head.querySelector('title');
       if (titleEl) this._title = titleEl.textContent;
     }
+    __hideOwn(this);
   }
 
   get documentElement() { return this._root; }
@@ -10594,7 +10640,7 @@ class _IframeDocument {
   // like silently did nothing (upstream #478).
   addEventListener(type, listener) {
     if (typeof listener !== 'function') return;
-    if (!this._listeners) this._listeners = Object.create(null);
+    if (!this._listeners) __def(this, '_listeners', Object.create(null));
     const list = this._listeners[type] || (this._listeners[type] = []);
     if (!list.includes(listener)) list.push(listener);
   }
@@ -10666,6 +10712,7 @@ class _IframeWindow {
     } catch(e) {
       this.location = { href: url, origin: '', protocol: '', host: '', hostname: '', port: '', pathname: '/', search: '', hash: '', toString() { return url; }, assign(){}, reload(){}, replace(){} };
     }
+    __hideOwn(this);
   }
 
   postMessage(data, targetOrigin) {
@@ -10706,7 +10753,7 @@ class _IframeWindow {
   requestAnimationFrame(fn) { return globalThis.requestAnimationFrame(fn); }
 
   addEventListener(type, fn) {
-    if (!this._listeners) this._listeners = {};
+    if (!this._listeners) __def(this, '_listeners', {});
     if (!this._listeners[type]) this._listeners[type] = [];
     this._listeners[type].push(fn);
   }
@@ -10753,6 +10800,7 @@ class _Canvas2D {
     this.globalAlpha = 1;
     this.globalCompositeOperation = 'source-over';
     this._stateStack = [];
+    __hideOwn(this);
   }
   _parseColor(css) {
     if (typeof css !== 'string') css = String(css ?? '');
@@ -10926,7 +10974,7 @@ class _Canvas2D {
 Element.prototype.getContext = function getContext(type) {
   if (type === '2d') {
     if (!this._ctx) {
-      this._ctx = new _Canvas2D(this);
+      __def(this, '_ctx', new _Canvas2D(this));
     }
     return this._ctx;
   }
@@ -10985,7 +11033,7 @@ Element.prototype.getContext = function getContext(type) {
         return numNoop;
       },
     });
-    this._glCtx = gl;
+    __def(this, '_glCtx', gl);
     return gl;
   }
   return null;
@@ -11228,6 +11276,7 @@ globalThis.SourceBuffer = class SourceBuffer extends _MseEventTarget {
     this.appendWindowEnd = Infinity;
     this._ranges = [];
     this._tracks = {};
+    __hideOwn(this);
   }
   get buffered() {
     // Chrome hands out a fresh TimeRanges object per access.
@@ -11301,9 +11350,10 @@ globalThis.MediaSource = class MediaSource extends _MseEventTarget {
     this._mediaElement = null;
     this.sourceBuffers = new _SourceBufferList();
     this.activeSourceBuffers = new _SourceBufferList();
+    __hideOwn(this);
   }
   get readyState() { return this._readyState || 'closed'; }
-  set readyState(v) { this._readyState = v; }
+  set readyState(v) { __def(this, '_readyState', v); }
   // Spec: with no explicit duration set, duration is the highest end
   // timestamp across source buffers.
   get duration() {
@@ -11466,7 +11516,7 @@ Object.defineProperties(Element.prototype, {
 });
 Element.prototype.play = function() {
   const wasPaused = this._playing !== true;
-  this._playing = true;
+  __def(this, '_playing', true);
   if (wasPaused) {
     setTimeout(() => {
       try { this.dispatchEvent(new Event('play')); this.dispatchEvent(new Event('playing')); } catch (_) {}
@@ -11519,7 +11569,7 @@ Element.prototype.attachShadow = function attachShadow(opts) {
   }
   const shadow = new ShadowRoot(rootNid, this, opts);
   _cache.set(rootNid, shadow);
-  this._shadowRoot = shadow;
+  __def(this, '_shadowRoot', shadow);
   return shadow;
 };
 
@@ -11586,6 +11636,7 @@ globalThis.AudioBuffer = class AudioBuffer {
     }
     this._length = len;
     this._sr = o.sampleRate || 44100;
+    __hideOwn(this);
   }
   get numberOfChannels() { return this._channels.length; }
   get length() { return this._length; }
@@ -11717,6 +11768,7 @@ globalThis.speechSynthesis = {
         mk('Google русский', 'ru-RU', false), mk('Google 普通话（中国大陆）', 'zh-CN', false),
         mk('Google 粤語（香港）', 'zh-HK', false), mk('Google闽南话（台湾）', 'zh-TW', false),
       ];
+      __hideOwn(this);
     }
     return this._voices;
   },
@@ -12095,6 +12147,7 @@ globalThis.Worker = class Worker {
         }
       }
     });
+    __hideOwn(this);
   }
   postMessage(data) {
     if (this._terminated) return;
@@ -12506,6 +12559,7 @@ if (typeof ReadableStream === 'undefined') {
       if (source.start) {
         try { source.start(this._controller); } catch (e) { this._controller.error(e); }
       }
+      __hideOwn(this);
     }
     getReader() {
       this.locked = true;
@@ -12597,7 +12651,7 @@ if (typeof ReadableStream === 'undefined') {
 }
 if (typeof WritableStream === 'undefined') {
   globalThis.WritableStream = class WritableStream {
-    constructor(sink = {}) { this._sink = sink; this.locked = false; }
+    constructor(sink = {}) { this._sink = sink; this.locked = false;  __hideOwn(this);}
     getWriter() {
       this.locked = true;
       const stream = this;
@@ -13040,6 +13094,7 @@ if (typeof FileReader === 'undefined') {
       this.onloadstart = null; this.onprogress = null; this.onload = null;
       this.onabort = null; this.onerror = null; this.onloadend = null;
       this._listeners = {};
+      __hideOwn(this);
     }
     get [Symbol.toStringTag]() { return "FileReader"; }
     _read(blob, kind, encoding) {
@@ -13200,6 +13255,7 @@ if (typeof WebSocket === 'undefined') {
           if (!this._terminal) this._fail();
         });
       });
+      __hideOwn(this);
     }
     _emit(ev) {
       const on = this['on' + ev.type];
@@ -13382,7 +13438,7 @@ if (typeof ServiceWorkerContainer === 'undefined') {
 
 if (typeof URLPattern === 'undefined') {
   globalThis.URLPattern = class URLPattern {
-    constructor(pattern){this._pattern=pattern||{};} test(){return false;} exec(){return null;}
+    constructor(pattern){this._pattern=pattern||{};} test(){return false;} exec(){return null; __hideOwn(this);}
   };
 }
 
@@ -14473,7 +14529,7 @@ globalThis.dispatchEvent = function(event) {
   }
   for (const P of protos) {
     for (const k of Object.getOwnPropertyNames(P)) {
-      if (k === "constructor") continue;
+if (k === "constructor" || k.charCodeAt(0) === 95) continue; // #30: engine-internal _ members stay non-enumerable
       const d = Object.getOwnPropertyDescriptor(P, k);
       if (!d || d.enumerable || !d.configurable) continue;
       try { Object.defineProperty(P, k, { enumerable: true }); } catch (e) {}
