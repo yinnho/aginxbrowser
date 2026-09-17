@@ -142,13 +142,25 @@ fn insert_text_js(text: &str) -> String {
     )
 }
 
+// Backspace deletes a whole code point: when the unit at the cut is a
+// trail surrogate, its lead partner goes with it — slicing a single
+// UTF-16 unit after an astral character would strand a lone surrogate in
+// the value (obscura#1005 same lineage).
 const BACKSPACE_JS: &str = "(function() {\
+    function cut(v, s) {\
+        var k = Math.max(0, s - 1);\
+        if (k > 0) {\
+            var del = v.charCodeAt(k), prev = v.charCodeAt(k - 1);\
+            if (del >= 0xDC00 && del <= 0xDFFF && prev >= 0xD800 && prev <= 0xDBFF) k = k - 1;\
+        }\
+        return k;\
+    }\
     var t = document.activeElement;\
     if (!t || (t.localName !== 'input' && t.localName !== 'textarea')) return;\
     var v = t.value || '';\
     var s = t.selectionStart, e = t.selectionEnd;\
     if (s == null) {\
-        globalThis.__diting_setFieldValue(t, 'value', v.slice(0, -1));\
+        globalThis.__diting_setFieldValue(t, 'value', v.slice(0, cut(v, v.length)));\
     } else {\
         s = Math.max(0, Math.min(s, v.length));\
         e = (e == null) ? s : Math.max(0, Math.min(e, v.length));\
@@ -157,8 +169,9 @@ const BACKSPACE_JS: &str = "(function() {\
             globalThis.__diting_setFieldValue(t, 'value', v.slice(0, lo) + v.slice(hi));\
             t.setSelectionRange(lo, lo);\
         } else if (s > 0) {\
-            globalThis.__diting_setFieldValue(t, 'value', v.slice(0, s - 1) + v.slice(s));\
-            t.setSelectionRange(s - 1, s - 1);\
+            var k = cut(v, s);\
+            globalThis.__diting_setFieldValue(t, 'value', v.slice(0, k) + v.slice(s));\
+            t.setSelectionRange(k, k);\
         }\
     }\
     t.dispatchEvent(globalThis.__diting_markTrusted(new Event('input', {bubbles:true})));\

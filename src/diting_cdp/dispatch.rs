@@ -1941,6 +1941,110 @@ mod tests {
         );
     }
 
+    // Backspace deletes a whole code point (obscura#1005 same lineage,
+    // issue #24): with the caret after an astral character the unit at the
+    // cut is a trail surrogate, and removing just it would strand the lead
+    // partner in the value — which serializes to U+FFFD the moment the
+    // page submits it. The BMP case pins the other direction: exactly one
+    // unit, never two.
+    #[tokio::test(flavor = "current_thread")]
+    async fn input_backspace_deletes_full_surrogate_pair() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-backspace-pair".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({ "url": "data:text/html,<input id=t>" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        // Astral after a BMP char: "a😀" is three UTF-16 units, caret at the
+        // end. One Backspace must remove the pair, leaving "a" and the caret
+        // after it — with the input event announcing the clean value.
+        let park = CdpRequest {
+            id: 2,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "(function(){var el=document.getElementById('t');el.value='a\\ud83d\\ude00';el.focus();el.setSelectionRange(3,3);window.seen=[];el.addEventListener('input',function(){seen.push(el.value)});})()"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&park, &mut ctx).await.error.is_none());
+
+        let bs = CdpRequest {
+            id: 3,
+            method: "Input.dispatchKeyEvent".to_string(),
+            params: json!({ "type": "keyDown", "key": "Backspace", "code": "Backspace" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&bs, &mut ctx).await.error.is_none());
+
+        let check = CdpRequest {
+            id: 4,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "(function(){var el=document.getElementById('t');return el.value + '|' + el.value.length + '|' + el.selectionStart + '|' + window.seen.join(',');})()",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&check, &mut ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        let result = resp.result.expect("result");
+        let value = result["result"]["value"].as_str().expect("string value");
+        assert_eq!(
+            value, "a|1|1|a",
+            "backspace removes the whole surrogate pair, not one UTF-16 unit"
+        );
+
+        // A lone pair backspaced empties the field in a single press.
+        for (value_expr, expect) in [
+            ("'\\ud83d\\ude00'", "|0|0"),
+            ("'中b'", "中|1|1"),
+        ] {
+            let park = CdpRequest {
+                id: 5,
+                method: "Runtime.evaluate".to_string(),
+                params: json!({
+                    "expression": format!(
+                        "(function(){{var el=document.getElementById('t');el.value={v};el.focus();el.setSelectionRange(el.value.length,el.value.length);window.seen=[];}})()",
+                        v = value_expr
+                    )
+                }),
+                session_id: Some(session_id.clone()),
+            };
+            assert!(dispatch(&park, &mut ctx).await.error.is_none());
+            let bs = CdpRequest {
+                id: 6,
+                method: "Input.dispatchKeyEvent".to_string(),
+                params: json!({ "type": "keyDown", "key": "Backspace", "code": "Backspace" }),
+                session_id: Some(session_id.clone()),
+            };
+            assert!(dispatch(&bs, &mut ctx).await.error.is_none());
+            let check = CdpRequest {
+                id: 7,
+                method: "Runtime.evaluate".to_string(),
+                params: json!({
+                    "expression": "(function(){var el=document.getElementById('t');return el.value + '|' + el.value.length + '|' + el.selectionStart;})()",
+                    "returnByValue": true,
+                }),
+                session_id: Some(session_id.clone()),
+            };
+            let resp = dispatch(&check, &mut ctx).await;
+            assert!(resp.error.is_none());
+            let result = resp.result.expect("result");
+            let value = result["result"]["value"].as_str().expect("string value");
+            assert_eq!(
+                value, expect,
+                "backspace on {value_expr} must match Chrome's code-point deletion"
+            );
+        }
+    }
+
     // Enter in a textarea (obscura#577 follow-up): the newline must splice
     // at the caret like any other insertion, and the caret must land after
     // it. The old append-at-end left the selection at the pre-insert offset,
