@@ -179,7 +179,7 @@ sha2 = "0.10"
 # CMake/OpenSSL, unify on the digest 0.10 / cipher 0.4 stack already in tree.
 hmac = "0.12"
 aes = "0.8"
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 cbc = { version = "0.1", features = ["alloc"] }
 ctr = "0.9"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
