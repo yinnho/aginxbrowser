@@ -7349,6 +7349,12 @@ pub fn layout_collect(
             let grad = st
                 .and_then(|s| s.background_image.as_deref())
                 .and_then(crate::diting_css::parse_linear_gradient);
+            // (#26): box-shadow layers paint even on a span with no
+            // background, gradient, or border at all — shadow-only spans
+            // previously fell straight through this guard.
+            let shadows = st
+                .and_then(|s| s.box_shadow.clone())
+                .filter(|v| !v.is_empty());
             let border = st.filter(|s| s.border_style.is_some()).and_then(|s| {
                 let widths = [
                     side_px(s.border_width.top),
@@ -7365,7 +7371,7 @@ pub fn layout_collect(
                     (widths, color)
                 })
             });
-            if bg.is_none() && grad.is_none() && border.is_none() {
+            if bg.is_none() && grad.is_none() && border.is_none() && shadows.is_none() {
                 continue;
             }
             // The recorded kids can be leaves directly or run wrappers
@@ -7408,12 +7414,85 @@ pub fn layout_collect(
                 }
             }
             let mut band_items: Vec<PaintItem> = Vec::new();
-            // Layer order mirrors the block walk: bg-color bottom,
-            // bg-image above it, border on top.
+            // (#26) slice corner radii: resolve the span's corner_radii
+            // against each band box, then box-decoration-break: slice — the
+            // FIRST fragment keeps the left corners (TL/BL), the LAST the
+            // right (TR/BR), middles are square (Chrome headless evidence on
+            // the issue). Per-band clamping shrinks oversized radii the way
+            // Chrome's proportional reduction turns a too-tall 16px radius
+            // into the elliptical arc on a short line fragment.
+            let corners = st.and_then(|s| s.corner_radii);
+            let res = |l: &crate::diting_css::Length, basis: f32| match l {
+                crate::diting_css::Length::Px(v) => *v,
+                crate::diting_css::Length::Percent(p) => p * basis / 100.0,
+                crate::diting_css::Length::Calc { percent, .. } => percent * basis / 100.0,
+                crate::diting_css::Length::Auto
+                | crate::diting_css::Length::MinContent
+                | crate::diting_css::Length::MaxContent
+                | crate::diting_css::Length::FitContent => 0.0,
+            };
+            let n_bands = bands.len();
+            let frag_radii = |i: usize, band: &Rect| -> [(f32, f32); 4] {
+                corners
+                    .map(|cs| {
+                        let mut rs = std::array::from_fn(|k| {
+                            (res(&cs[k].0, band.width), res(&cs[k].1, band.height))
+                        });
+                        if n_bands > 1 {
+                            if i == 0 {
+                                rs[1] = (0.0, 0.0);
+                                rs[2] = (0.0, 0.0);
+                            } else if i + 1 == n_bands {
+                                rs[0] = (0.0, 0.0);
+                                rs[3] = (0.0, 0.0);
+                            } else {
+                                rs = [(0.0, 0.0); 4];
+                            }
+                        }
+                        clamp_corner_radii(rs, band.width, band.height)
+                    })
+                    .unwrap_or([(0.0, 0.0); 4])
+            };
+            // Shadow geometry rides the fragment border box: the band grown
+            // outward by the border widths (left edge only on the first
+            // fragment, right only on the last — same slice rule the border
+            // strips below follow).
+            let [bt, br_, bb, bl] = border.as_ref().map(|(w, _)| *w).unwrap_or([0.0; 4]);
+            let frag_rect = |i: usize, band: &Rect| Rect {
+                x: if i == 0 { band.x - bl } else { band.x },
+                y: band.y - bt,
+                width: (if i + 1 == n_bands { band.x + band.width + br_ } else { band.x + band.width })
+                    - (if i == 0 { band.x - bl } else { band.x }),
+                height: band.height + bt + bb,
+            };
+            // Layer order mirrors the block walk: outer shadows below the
+            // background, bg-color, bg-image gradient, inset shadows above
+            // the background, border strips on top.
+            if let Some(ref list) = shadows {
+                for sh in list.iter().rev().filter(|sh| !sh.inset) {
+                    for (i, band) in bands.iter().enumerate() {
+                        band_items.push(PaintItem::BoxShadow {
+                            rect: frag_rect(i, band),
+                            color: [sh.color.0, sh.color.1, sh.color.2, sh.color.3],
+                            radii: frag_radii(i, band),
+                            dx: sh.dx,
+                            dy: sh.dy,
+                            blur: sh.blur,
+                            spread: sh.spread,
+                            inset: false,
+                        });
+                    }
+                }
+            }
             if let Some(color) = bg {
                 let color = [color.0, color.1, color.2, color.3];
-                for rect in &bands {
-                    band_items.push(PaintItem::Bg { rect: *rect, color, radius: 0.0 });
+                for (i, rect) in bands.iter().enumerate() {
+                    let radii = frag_radii(i, rect);
+                    if radii.iter().all(|r| *r == radii[0]) {
+                        band_items.push(PaintItem::Bg { rect: *rect, color, radius: radii[0].0 });
+                    } else {
+                        band_items.push(PaintItem::BgCorner { rect: *rect, color, radii });
+                    }
                 }
             }
             if let Some(g) = grad {
@@ -7429,15 +7508,31 @@ pub fn layout_collect(
                     let union = Rect { x: ux, y: uy, width: ur - ux, height: ub - uy };
                     let stops: Vec<(f32, [u8; 4])> =
                         g.stops.iter().map(|(p, c)| (*p, [c.0, c.1, c.2, c.3])).collect();
-                    for band in &bands {
+                    for (i, band) in bands.iter().enumerate() {
                         band_items.push(PaintItem::Clip { rect: *band });
                         band_items.push(PaintItem::BgGradient {
                             rect: union,
                             stops: stops.clone(),
                             css_deg: g.css_deg,
-                            radii: [(0.0, 0.0); 4],
+                            radii: frag_radii(i, band),
                         });
                         band_items.push(PaintItem::PopClip);
+                    }
+                }
+            }
+            if let Some(ref list) = shadows {
+                for sh in list.iter().rev().filter(|sh| sh.inset) {
+                    for (i, band) in bands.iter().enumerate() {
+                        band_items.push(PaintItem::BoxShadow {
+                            rect: frag_rect(i, band),
+                            color: [sh.color.0, sh.color.1, sh.color.2, sh.color.3],
+                            radii: frag_radii(i, band),
+                            dx: sh.dx,
+                            dy: sh.dy,
+                            blur: sh.blur,
+                            spread: sh.spread,
+                            inset: true,
+                        });
                     }
                 }
             }
@@ -8674,5 +8769,132 @@ mod batch_125_inline_fragment_deco_tests {
                 .any(|r| (r.x + r.width - (last_bottom.x + last_bottom.width)).abs() < 0.01),
             "right edge closes the last fragment: {strips:?}"
         );
+    }
+
+    // #26: a span with ONLY box-shadow used to paint nothing at all — the
+    // band guard checked bg/gradient/border but not shadows.
+    #[test]
+    fn shadow_only_wrapping_span_paints_per_fragment() {
+        let items = items("#p { width: 200px } #s { box-shadow: 6px 6px 0 rgb(255,0,0) }", WRAP_BODY);
+        let shadows: Vec<&PaintItem> = items
+            .iter()
+            .filter(|it| matches!(it, PaintItem::BoxShadow { inset: false, .. }))
+            .collect();
+        assert!(
+            shadows.len() >= 2,
+            "one outer shadow per line fragment (shadow-only span used to paint nothing), got {}",
+            shadows.len()
+        );
+        let rects: Vec<Rect> = shadows
+            .iter()
+            .filter_map(|it| match it {
+                PaintItem::BoxShadow { rect, dx, dy, color, .. } => {
+                    assert_eq!(*color, [255, 0, 0, 255]);
+                    assert!((*dx - 6.0).abs() < 0.01 && (*dy - 6.0).abs() < 0.01);
+                    Some(*rect)
+                }
+                _ => None,
+            })
+            .collect();
+        let ys: Vec<f32> = rects.iter().map(|r| r.y).collect();
+        ys.windows(2).for_each(|w| assert!(w[1] > w[0], "shadow fragments stack line by line: {ys:?}"));
+    }
+
+    // #26: border-radius on a wrapping span — box-decoration-break: slice.
+    // First fragment keeps the LEFT corners, last the RIGHT, middles square
+    // (Chrome headless evidence on the issue).
+    #[test]
+    fn rounded_wrapping_span_slices_corner_radii() {
+        // A single-line span keeps all four corners (uniform → the Bg
+        // shortcut, not BgCorner) — computed before the wrapping `items`
+        // binding shadows the helper.
+        let single_line = items(
+            "#s { background: rgb(250,204,21); border-radius: 8px }",
+            r#"<p id="p"><span id="s">tiny</span></p>"#,
+        );
+        let rounded: Vec<f32> = single_line
+            .iter()
+            .filter_map(|it| match it {
+                PaintItem::Bg { radius, color, .. } if *color == [250, 204, 21, 255] => Some(*radius),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            rounded.iter().any(|r| *r > 0.0),
+            "single-line span rounds all four corners: {rounded:?}"
+        );
+        let items = items(
+            "#p { width: 200px } #s { background: rgb(250,204,21); border-radius: 12px }",
+            WRAP_BODY,
+        );
+        let corners: Vec<[(f32, f32); 4]> = items
+            .iter()
+            .filter_map(|it| match it {
+                PaintItem::BgCorner { radii, .. } => Some(*radii),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            corners.len(),
+            2,
+            "exactly the first and last fragment carry rounded corners: {:?}",
+            corners
+        );
+        // First fragment: TL/BL rounded (left), TR/BR square.
+        assert!(corners[0][0].0 > 0.0 && corners[0][3].0 > 0.0, "first band left corners: {:?}", corners[0]);
+        assert!(corners[0][1].0 == 0.0 && corners[0][2].0 == 0.0, "first band right corners square: {:?}", corners[0]);
+        // Last fragment: TR/BR rounded (right), TL/BL square.
+        let last = corners[corners.len() - 1];
+        assert!(last[1].0 > 0.0 && last[2].0 > 0.0, "last band right corners: {last:?}");
+        assert!(last[0].0 == 0.0 && last[3].0 == 0.0, "last band left corners square: {last:?}");
+        // Oversized radii clamp per fragment (Chrome's proportional
+        // reduction): 12px on a ~18px line never paints as a full 12.
+        assert!(
+            corners[0][0].0 < 12.0,
+            "radius clamped against the fragment box: {:?}",
+            corners[0]
+        );
+        // Middle fragments stay square Bg bands.
+        let middle: Vec<f32> = items
+            .iter()
+            .filter_map(|it| match it {
+                PaintItem::Bg { radius, color, .. } if *color == [250, 204, 21, 255] => Some(*radius),
+                _ => None,
+            })
+            .collect();
+        if !middle.is_empty() {
+            assert!(
+                middle.iter().all(|r| *r == 0.0),
+                "middle fragments are square bands: {middle:?}"
+            );
+        }
+    }
+
+    // #26: shadow + radius together — the shadow rides the fragment box and
+    // the outer shadow layer lands BELOW the span's own background.
+    #[test]
+    fn shadow_and_radius_stack_in_block_layer_order() {
+        let items = items(
+            "#p { width: 200px } #s { background: rgb(165,243,252); border-radius: 10px; box-shadow: 2px 3px 4px rgb(0,0,200) }",
+            WRAP_BODY,
+        );
+        let first_shadow = items.iter().position(|it| matches!(it, PaintItem::BoxShadow { inset: false, .. }));
+        let first_bg = items
+            .iter()
+            .position(|it| matches!(it, PaintItem::BgCorner { color, .. } if *color == [165, 243, 252, 255]));
+        let (Some(s), Some(b)) = (first_shadow, first_bg) else {
+            panic!("expected shadow items and rounded bg items, got {items:?}");
+        };
+        assert!(s < b, "outer shadow paints below the background (block layer order)");
+        let n_shadow = items
+            .iter()
+            .filter(|it| matches!(it, PaintItem::BoxShadow { inset: false, .. }))
+            .count();
+        let n_bg = items
+            .iter()
+            .filter(|it| matches!(it, PaintItem::BgCorner { color, .. } if *color == [165, 243, 252, 255]))
+            .count();
+        assert_eq!(n_shadow, n_bg + items.iter().filter(|it| matches!(it, PaintItem::Bg { color, .. } if *color == [165, 243, 252, 255])).count(),
+            "one shadow per painted fragment");
     }
 }
