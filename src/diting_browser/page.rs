@@ -191,6 +191,16 @@ fn env_init_script_from(path: Option<&str>) -> Option<String> {
     }
 }
 
+/// Emulated media environment from CDP `Emulation.setEmulatedMedia`
+/// (Playwright's `page.emulateMedia`). `features` holds `prefers-*`
+/// (name, value) pairs; `media` is the emulated media type, `Some(None)`
+/// meaning an explicit clear back to `screen` (Chrome's `""`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmulatedMedia {
+    pub features: Vec<(String, String)>,
+    pub media: Option<Option<String>>,
+}
+
 pub struct Page {
     pub id: String,
     /// Upstream frame-realm identifier: one Page can host sub-frame realms
@@ -225,6 +235,12 @@ pub struct Page {
     /// above zero); None keeps the persona's dpr reporting through. Rides
     /// the same replay as `viewport_override`.
     dpr_override: Option<f64>,
+    /// Emulated media environment from CDP `Emulation.setEmulatedMedia`
+    /// (Playwright's `page.emulateMedia`). Lives on the Page for the same
+    /// reason as `viewport_override` — every navigation rebuilds the realm,
+    /// so the emulation has to be replayed or the page silently flips back
+    /// to the persona defaults mid-session (#29).
+    emulated_media: Option<EmulatedMedia>,
     /// 32-bit seed the JS persona draws its hardware identity from
     /// (screen/dpr/GPU/canvas). Lives on the Page because every navigation
     /// rebuilds the realm and `__diting_init` self-deletes after drawing a
@@ -383,6 +399,7 @@ impl Page {
             suspended_console: Vec::new(),
             viewport_override: None,
             dpr_override: None,
+            emulated_media: None,
             fp_seed: u64::from_be_bytes(
                 uuid::Uuid::new_v4().into_bytes()[..8].try_into().unwrap(),
             ),
@@ -526,6 +543,7 @@ impl Page {
         self.js = Some(rt);
         self.restore_session_storage();
         self.apply_viewport_override();
+        self.apply_emulated_media();
     }
 
     /// Capture the live realm's `sessionStorage` into `self.session_storage`
@@ -1871,6 +1889,7 @@ impl Page {
             // set_user_agent republished the persona viewport; put the
             // override back on top of it.
             self.apply_viewport_override();
+            self.apply_emulated_media();
         }
         if let Some(lang) = lang.filter(|l| !l.is_empty()) {
             self.http_client.set_accept_language(lang).await;
@@ -1903,6 +1922,47 @@ impl Page {
     /// derived session reproduces the same device emulation.
     pub fn viewport_override(&self) -> Option<(f32, f32, bool)> {
         self.viewport_override
+    }
+
+    /// Set the emulated media environment (CDP `Emulation.setEmulatedMedia`).
+    /// `None` keeps a param unchanged (Chrome semantics: present replaces,
+    /// absent untouched); both `None` = clear everything back to defaults.
+    pub fn set_emulated_media(
+        &mut self,
+        features: Option<Vec<(String, String)>>,
+        media: Option<Option<String>>,
+    ) {
+        let cur = self.emulated_media.take().unwrap_or(EmulatedMedia {
+            features: Vec::new(),
+            media: None,
+        });
+        self.emulated_media = Some(EmulatedMedia {
+            features: features.unwrap_or(cur.features),
+            media: match media {
+                Some(m) => Some(m),
+                None => cur.media,
+            },
+        });
+        self.apply_emulated_media();
+    }
+
+    /// Replay the emulated media into the current realm: the bootstrap
+    /// recomputes its matchMedia truth tables (firing change events on
+    /// crossing MQLs) and pushes the same pairs to the Rust layout state
+    /// via the `set_media_env` op, so @media arms re-parse in agreement.
+    fn apply_emulated_media(&mut self) {
+        let Some(env) = &self.emulated_media else { return; };
+        let features = serde_json::to_string(&env.features).unwrap_or_else(|_| "[]".into());
+        let media = match &env.media {
+            Some(Some(m)) if m.eq_ignore_ascii_case("print") => "print",
+            _ => "screen",
+        };
+        if let Some(js) = &mut self.js {
+            let _ = js.execute_script(
+                "<emulated-media>",
+                &format!("__diting_setMediaFeatures({features:?}, {media:?})"),
+            );
+        }
     }
 
     /// Browser.setContentsSize path: resize the window *contents* (the

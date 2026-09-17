@@ -120,6 +120,11 @@ const _DOM_MUTATION_COMMANDS = new Set([
   // Not a tree mutation, but it lands a new stylesheet in the cascade —
   // the getComputedStyle snapshot epoch must see it like any style write.
   "ext_sheet_put",
+  // Media emulation and viewport changes re-evaluate @media arms without
+  // touching the tree — same staleness class as a new stylesheet, so the
+  // gCS snapshot epoch must go stale on them too (issue #29).
+  "set_media_env",
+  "set_viewport",
   // The form-control dirty value mirror: paint reads it (Rust side drops
   // the layout cache on the same command), so the snapshot epoch must
   // count it too. set_live_checked is the same posture for the
@@ -6984,6 +6989,31 @@ const _MQ_PERSONA_BOOL = {
   hover: { hover: true, none: false },
   'any-hover': { hover: true, none: false },
 };
+// What a mobile viewport override pins the interaction features to (and the
+// phone-shaped preference defaults). Kept as a table so the mobile override
+// and the emulated-media override can merge per feature in __diting_mqRecompute.
+const _MQ_MOBILE_TABLE = {
+  'prefers-color-scheme': { light: true, dark: false },
+  'prefers-reduced-motion': { 'no-preference': true, reduce: false },
+  'prefers-reduced-transparency': { 'no-preference': true, reduce: false },
+  pointer: { coarse: true, fine: false, none: false },
+  'any-pointer': { coarse: true, fine: false, none: false },
+  hover: { none: true, hover: false },
+  'any-hover': { none: true, hover: false },
+};
+// Fold the mobile table and the emulated-media table (CDP
+// Emulation.setEmulatedMedia / Playwright page.emulateMedia) into the one
+// truth table _mqExpr reads. Emulated entries replace the feature's whole
+// table — Chrome's rule that the emulated value is THE value — so
+// prefers-reduced-motion: reduce survives even under a mobile override.
+globalThis.__diting_mqRecompute = function () {
+  const mobile = globalThis.__diting_mq_mobile, emu = globalThis.__diting_mq_emulated;
+  if (!mobile && !emu) { globalThis.__diting_mq_overrides = null; return; }
+  const t = {};
+  if (mobile) for (const k in mobile) t[k] = mobile[k];
+  if (emu) for (const k in emu) t[k] = emu[k];
+  globalThis.__diting_mq_overrides = t;
+};
 function _mqExpr(inner) {
   const colon = inner.indexOf(':');
   const feature = (colon < 0 ? inner : inner.slice(0, colon)).trim().toLowerCase();
@@ -7031,7 +7061,10 @@ function _mqClause(clause) {
   let i = 0;
   if (parts[0] && parts[0][0] !== '(') {
     const mt = parts[0].toLowerCase();
-    if (mt !== 'all' && mt !== 'screen') return invert;
+    // The media type token follows the emulated type when one is active
+    // (setEmulatedMedia media:'print'), the persona's screen otherwise.
+    const cur = globalThis.__diting_mq_media_type || 'screen';
+    if (mt !== 'all' && mt !== cur) return invert;
     i = 1;
   }
   for (; i < parts.length; i++) {
@@ -13578,15 +13611,8 @@ globalThis.__diting_setViewport = function(w, h, mobile, dpr) {
     width: w, height: h, offsetLeft: 0, offsetTop: 0, scale: 1,
     addEventListener() {}, removeEventListener() {},
   };
-  globalThis.__diting_mq_overrides = mobile ? {
-    'prefers-color-scheme': { light: true, dark: false },
-    'prefers-reduced-motion': { 'no-preference': true, reduce: false },
-    'prefers-reduced-transparency': { 'no-preference': true, reduce: false },
-    pointer: { coarse: true, fine: false, none: false },
-    'any-pointer': { coarse: true, fine: false, none: false },
-    hover: { none: true, hover: false },
-    'any-hover': { none: true, hover: false },
-  } : null;
+  globalThis.__diting_mq_mobile = mobile ? _MQ_MOBILE_TABLE : null;
+  globalThis.__diting_mqRecompute();
   try {
     Object.defineProperty(globalThis.navigator, 'maxTouchPoints', {
       value: mobile ? 5 : 0, configurable: true, enumerable: true, writable: true,
@@ -13602,8 +13628,10 @@ globalThis.__diting_setViewport = function(w, h, mobile, dpr) {
 };
 
 // Drop the override: persona viewport everywhere, desktop pointer answers.
+// Emulated media (setEmulatedMedia) is a separate Chrome knob and survives.
 globalThis.__diting_clearViewport = function() {
-  globalThis.__diting_mq_overrides = null;
+  globalThis.__diting_mq_mobile = null;
+  globalThis.__diting_mqRecompute();
   try {
     Object.defineProperty(globalThis.navigator, 'maxTouchPoints', {
       value: 0, configurable: true, enumerable: true, writable: true,
@@ -13613,6 +13641,32 @@ globalThis.__diting_clearViewport = function() {
   try { globalThis.dispatchEvent(new Event('resize')); } catch (e) {}
   // Media queries re-evaluated after the resize: subscribed MQLs that
   // crossed fire change (issue #25).
+  try { globalThis.__diting_mqFlush(); } catch (e) {}
+};
+
+// Emulated media environment (CDP Emulation.setEmulatedMedia, Playwright's
+// page.emulateMedia): featuresJson is a JSON array of [name, value] pairs
+// REPLACING all emulated preferences (Chrome semantics — an absent feature
+// stops being emulated), mediaType is 'print' or 'screen'. The same pairs
+// go to the Rust layout state so the @media cascade re-parses in agreement
+// (two faces, one truth), then subscribed MQLs flush (issue #29).
+globalThis.__diting_setMediaFeatures = function(featuresJson, mediaType) {
+  let pairs = [];
+  try { pairs = JSON.parse(featuresJson) || []; } catch (e) {}
+  const emu = {};
+  if (Array.isArray(pairs)) {
+    for (const pair of pairs) {
+      if (!Array.isArray(pair) || pair.length < 2) continue;
+      const name = String(pair[0]).toLowerCase(), value = String(pair[1]).toLowerCase();
+      if (!name) continue;
+      emu[name] = {};
+      emu[name][value] = true;
+    }
+  }
+  globalThis.__diting_mq_emulated = Object.keys(emu).length ? emu : null;
+  globalThis.__diting_mq_media_type = mediaType === 'print' ? 'print' : 'screen';
+  try { _domRaw("set_media_env", featuresJson, globalThis.__diting_mq_media_type); } catch (e) {}
+  globalThis.__diting_mqRecompute();
   try { globalThis.__diting_mqFlush(); } catch (e) {}
 };
 

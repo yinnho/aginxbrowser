@@ -191,6 +191,14 @@ pub struct JsState {
     /// Defaults to the bootstrap's pre-persona 1920x1000.
     #[cfg(feature = "screenshot")]
     pub(crate) viewport: (f32, f32),
+    /// Emulated media environment pushed via CDP `Emulation.setEmulatedMedia`
+    /// (Playwright's `page.emulateMedia`): the media type + `prefers-*`
+    /// overrides the @media cascade re-parses against — the Rust face of the
+    /// JS `matchMedia` truth tables (two faces, one truth).
+    #[cfg(feature = "screenshot")]
+    pub(crate) media_type: crate::diting_css::CssMediaType,
+    #[cfg(feature = "screenshot")]
+    pub(crate) media_overrides: crate::diting_css::MediaOverrides,
     /// The root scroller's offset, mirrored from the bootstrap's
     /// scrollTop/scrollLeft setters (viewport roots only) so the CDP frame
     /// pump can paint the viewport band without re-serializing the DOM.
@@ -405,6 +413,10 @@ impl JsState {
             band_paints: std::cell::Cell::new(0),
             #[cfg(feature = "screenshot")]
             viewport: (1920.0, 1000.0),
+            #[cfg(feature = "screenshot")]
+            media_type: crate::diting_css::CssMediaType::Screen,
+            #[cfg(feature = "screenshot")]
+            media_overrides: crate::diting_css::MediaOverrides::default(),
             #[cfg(feature = "screenshot")]
             scroll_offset: (0.0, 0.0),
             #[cfg(feature = "screenshot")]
@@ -744,6 +756,28 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             let mut gs = gs.borrow_mut();
             gs.viewport = (w, h);
             // Any rects memoized under the old ICB are stale now.
+            gs.drop_layout();
+        }
+        return "ok".into();
+    }
+    // Emulated media environment from CDP `Emulation.setEmulatedMedia`
+    // (Playwright's page.emulateMedia). The bootstrap recomputes its
+    // matchMedia tables first and then pushes the same pairs here, so the
+    // cascade face and the script face flip together; @media arms re-parse
+    // on the next layout run.
+    #[cfg(feature = "screenshot")]
+    if cmd == "set_media_env" {
+        let gs = state.borrow::<SharedState>().clone();
+        let features: Vec<(String, String)> = serde_json::from_str(&arg1).unwrap_or_default();
+        let media_type = if arg2.eq_ignore_ascii_case("print") {
+            crate::diting_css::CssMediaType::Print
+        } else {
+            crate::diting_css::CssMediaType::Screen
+        };
+        {
+            let mut gs = gs.borrow_mut();
+            gs.media_type = media_type;
+            gs.media_overrides.features = features;
             gs.drop_layout();
         }
         return "ok".into();
@@ -2045,10 +2079,11 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
         css.push('\n');
     }
     let t_css = t0.elapsed();
-    let (rules, keyframes) = crate::diting_css::parse_stylesheet_timed(
+    let (rules, keyframes) = crate::diting_css::parse_stylesheet_timed_with(
         &css,
         (viewport_width, viewport_height),
-        crate::diting_css::CssMediaType::Screen,
+        gs.media_type,
+        &gs.media_overrides,
     );
     // Refresh the attribute-selector name pool the write path consults for
     // inert-attribute invalidation skips (obscura#983).
@@ -2217,10 +2252,11 @@ fn iframe_layout_run(gs: &JsState, dom: &DomTree, root: NodeId) -> std::rc::Rc<L
     }
     const IFRAME_VW: f32 = 300.0;
     const IFRAME_VH: f32 = 150.0;
-    let (rules, keyframes) = crate::diting_css::parse_stylesheet_timed(
+    let (rules, keyframes) = crate::diting_css::parse_stylesheet_timed_with(
         &css,
         (IFRAME_VW, IFRAME_VH),
-        crate::diting_css::CssMediaType::Screen,
+        gs.media_type,
+        &gs.media_overrides,
     );
     let styles_map = crate::diting_layout::compute_styles_timed_within(
         dom,

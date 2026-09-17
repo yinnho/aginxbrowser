@@ -27,6 +27,29 @@ pub enum CssMediaType {
     Print,
 }
 
+/// Emulated media features pushed via CDP `Emulation.setEmulatedMedia`
+/// (Playwright's `page.emulateMedia`): (name, value) pairs such as
+/// `("prefers-reduced-motion", "reduce")`. A feature present here answers
+/// every query for that name from its emulated value; the rest keep the
+/// persona defaults `media_pref_default` holds — the same table the JS
+/// `matchMedia` publishes, so the cascade and the scripts agree (#29).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MediaOverrides {
+    pub features: Vec<(String, String)>,
+}
+
+/// The un-emulated value a preference feature holds — mirrors the
+/// `_MQ_PERSONA_BOOL` desktop-light persona in the bootstrap. Features not
+/// listed have no default and stay false in both faces until emulated.
+fn media_pref_default(name: &str) -> Option<&'static str> {
+    match name {
+        "prefers-color-scheme" => Some("light"),
+        "prefers-reduced-motion" => Some("no-preference"),
+        "prefers-reduced-transparency" => Some("no-preference"),
+        _ => None,
+    }
+}
+
 /// One flattened stylesheet rule: selector text plus its declaration block.
 /// Selectors are compiled lazily by the cascade via diting_dom.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +132,18 @@ pub fn parse_stylesheet_timed(
     viewport: (f32, f32),
     media_type: CssMediaType,
 ) -> (Vec<ParsedRule>, KeyframesMap) {
+    parse_stylesheet_timed_with(css, viewport, media_type, &MediaOverrides::default())
+}
+
+/// [`parse_stylesheet_timed`] with emulated media in play: the layout run
+/// passes the page's `Emulation.setEmulatedMedia` state so `@media
+/// (prefers-*)` arms follow what `matchMedia` already answers (#29).
+pub fn parse_stylesheet_timed_with(
+    css: &str,
+    viewport: (f32, f32),
+    media_type: CssMediaType,
+    overrides: &MediaOverrides,
+) -> (Vec<ParsedRule>, KeyframesMap) {
     let mut rules = Vec::new();
     let mut keyframes = KeyframesMap::new();
     let mut current_selector = String::new();
@@ -145,7 +180,7 @@ pub fn parse_stylesheet_timed(
                 let sel = current_selector.trim();
                 let decls = current_decls.trim();
                 if let Some(at) = sel.strip_prefix('@') {
-                    flush_at_rule(at, decls, &mut rules, &mut keyframes, viewport, media_type);
+                    flush_at_rule(at, decls, &mut rules, &mut keyframes, viewport, media_type, overrides);
                 } else {
                     rules.push(ParsedRule {
                         selector: sel.to_string(),
@@ -183,16 +218,17 @@ fn flush_at_rule(
     keyframes: &mut KeyframesMap,
     viewport: (f32, f32),
     media_type: CssMediaType,
+    overrides: &MediaOverrides,
 ) {
     let recurse = |rules: &mut Vec<ParsedRule>, keyframes: &mut KeyframesMap| {
-        let (inner_rules, inner_kf) = parse_stylesheet_timed(inner, viewport, media_type);
+        let (inner_rules, inner_kf) = parse_stylesheet_timed_with(inner, viewport, media_type, overrides);
         rules.extend(inner_rules);
         for (k, v) in inner_kf {
             keyframes.entry(k).or_insert(v);
         }
     };
     if let Some(prelude) = at_rule_prelude(at, "media") {
-        if media_query_applies(prelude, viewport, media_type) {
+        if media_query_applies_with(prelude, viewport, media_type, overrides) {
             recurse(rules, keyframes);
         }
     } else if let Some(prelude) = at_rule_prelude(at, "supports") {
@@ -296,9 +332,20 @@ fn at_rule_prelude<'a>(at: &'a str, name: &str) -> Option<&'a str> {
 /// A media-query list is an OR of comma-separated arms (commas inside
 /// functions are not separators). Evaluate each arm independently.
 pub fn media_query_applies(query: &str, viewport: (f32, f32), media_type: CssMediaType) -> bool {
+    media_query_applies_with(query, viewport, media_type, &MediaOverrides::default())
+}
+
+/// Same, with emulated media features (`Emulation.setEmulatedMedia`) consulted
+/// before the persona defaults — the cascade face of `matchMedia`'s truth.
+pub fn media_query_applies_with(
+    query: &str,
+    viewport: (f32, f32),
+    media_type: CssMediaType,
+    overrides: &MediaOverrides,
+) -> bool {
     split_media_query_list(query)
         .into_iter()
-        .any(|q| single_media_query_applies(q, viewport, media_type))
+        .any(|q| single_media_query_applies(q, viewport, media_type, overrides))
 }
 
 /// Split on top-level commas only: `rgb(1,2,3)` keeps its commas inside one arm.
@@ -321,7 +368,12 @@ fn split_media_query_list(query: &str) -> Vec<&str> {
     parts
 }
 
-fn single_media_query_applies(query: &str, viewport: (f32, f32), media_type: CssMediaType) -> bool {
+fn single_media_query_applies(
+    query: &str,
+    viewport: (f32, f32),
+    media_type: CssMediaType,
+    overrides: &MediaOverrides,
+) -> bool {
     let query = query.trim().strip_prefix("@media").unwrap_or(query).trim();
     let compact: String = query.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect();
 
@@ -329,16 +381,23 @@ fn single_media_query_applies(query: &str, viewport: (f32, f32), media_type: Css
     // the media type after it must stay intact (`not print` → evaluate
     // `print`, not an empty string that would wrongly imply `all`).
     if let Some(rest) = compact.strip_prefix("not") {
-        return !single_media_query_applies_compact(rest, viewport, media_type);
+        return !single_media_query_applies_compact(rest, viewport, media_type, overrides);
     }
-    single_media_query_applies_compact(&compact, viewport, media_type)
+    single_media_query_applies_compact(&compact, viewport, media_type, overrides)
 }
 
-fn single_media_query_applies_compact(compact: &str, viewport: (f32, f32), media_type: CssMediaType) -> bool {
+fn single_media_query_applies_compact(
+    compact: &str,
+    viewport: (f32, f32),
+    media_type: CssMediaType,
+    overrides: &MediaOverrides,
+) -> bool {
     // A bare feature list (`(min-width: 768px)`) implies media type `all`;
     // evaluate its features directly instead of walking the type-token path.
     if compact.starts_with('(') || compact.is_empty() {
-        return compact.split("and").all(|feature| media_feature_applies(feature, viewport));
+        return compact
+            .split("and")
+            .all(|feature| media_feature_applies(feature, viewport, overrides));
     }
 
     // Media type check first; features then refine. An unknown type fails the arm.
@@ -347,7 +406,8 @@ fn single_media_query_applies_compact(compact: &str, viewport: (f32, f32), media
     } else if let Some(r) = compact.strip_prefix("screen") {
         (media_type == CssMediaType::Screen, Some(r))
     } else if let Some(r) = compact.strip_prefix("all") {
-        (media_type == CssMediaType::Screen, Some(r))
+        // `all` applies under every media type — including emulated print.
+        (true, Some(r))
     } else if let Some(r) = compact.strip_prefix("onlyscreen") {
         // `only screen` legacy prefix: skip the `only` token.
         (media_type == CssMediaType::Screen, Some(r))
@@ -366,23 +426,32 @@ fn single_media_query_applies_compact(compact: &str, viewport: (f32, f32), media
     let Some(feature_expr) = rest.strip_prefix("and") else {
         return false;
     };
-    feature_expr.split("and").all(|feature| media_feature_applies(feature, viewport))
+    feature_expr
+        .split("and")
+        .all(|feature| media_feature_applies(feature, viewport, overrides))
 }
 
-/// One `(min-width: 768px)`-style expression. Only width/height bounds are
-/// modeled — that covers the responsive breakpoints real sheets use.
-fn media_feature_applies(feature: &str, viewport: (f32, f32)) -> bool {
+/// One `(min-width: 768px)`-style expression. Width/height bounds compare
+/// against the viewport; `prefers-*` preferences answer from the emulated
+/// overrides first, then the persona defaults — evaluated before the px parse
+/// so a non-numeric value like `reduce` isn't discarded as unparseable.
+fn media_feature_applies(feature: &str, viewport: (f32, f32), overrides: &MediaOverrides) -> bool {
     let feature = feature.trim().trim_start_matches('(').trim_end_matches(')').trim();
     let Some((name, value)) = feature.split_once(':') else {
         // Boolean feature without a value: unsupported → conservative false.
         return false;
     };
-    let value_px = parse_px(value.trim());
+    let name = name.trim();
+    let value = value.trim();
+    if let Some(answer) = media_pref_answer(name, value, overrides) {
+        return answer;
+    }
+    let value_px = parse_px(value);
     let value_px = match value_px {
         Some(v) => v,
         None => return false,
     };
-    match name.trim() {
+    match name {
         "min-width" => viewport.0 >= value_px,
         "max-width" => viewport.0 <= value_px,
         "min-height" => viewport.1 >= value_px,
@@ -391,6 +460,22 @@ fn media_feature_applies(feature: &str, viewport: (f32, f32)) -> bool {
         "height" => (viewport.1 - value_px).abs() < f32::EPSILON,
         _ => false,
     }
+}
+
+/// Resolve a `prefers-*` (or any keyword-valued preference) expression:
+/// emulated value wins, persona default second. `None` = not a preference
+/// feature we model — the caller falls through to the numeric path.
+fn media_pref_answer(name: &str, value: &str, overrides: &MediaOverrides) -> Option<bool> {
+    let emulated = overrides
+        .features
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v);
+    let truth = match emulated {
+        Some(v) => Some(v.as_str()),
+        None => media_pref_default(name),
+    }?;
+    Some(truth.eq_ignore_ascii_case(value))
 }
 
 fn parse_px(value: &str) -> Option<f32> {
@@ -5791,6 +5876,60 @@ mod tests {
         assert!(!media_query_applies("(min-width: 99999px)", (1280.0, 720.0), CssMediaType::Screen));
         // Comma inside a function is not a list separator.
         assert!(media_query_applies("(width: 1280px)", (1280.0, 720.0), CssMediaType::Screen));
+    }
+
+    /// Issue #29: `Emulation.setEmulatedMedia` features replace the
+    /// prefers-* truth tables wholesale — matching arms must start (and
+    /// stop) applying through the override path.
+    #[test]
+    fn emulated_media_features_flip_media_arms() {
+        let css = r#"
+            @media (prefers-color-scheme: dark) { .dark { color: blue; } }
+            @media (prefers-reduced-motion: reduce) { .rm { display: none; } }
+        "#;
+        let base = parse_stylesheet_for(css, (1280.0, 720.0), CssMediaType::Screen);
+        assert!(base.is_empty(), "no emulation → persona defaults: {base:?}");
+
+        let emu = MediaOverrides {
+            features: vec![
+                ("prefers-color-scheme".into(), "dark".into()),
+                ("prefers-reduced-motion".into(), "reduce".into()),
+            ],
+        };
+        let rules = parse_stylesheet_timed_with(css, (1280.0, 720.0), CssMediaType::Screen, &emu).0;
+        let sels: Vec<&str> = rules.iter().map(|r| r.selector.as_str()).collect();
+        assert!(sels.contains(&".dark"), "{sels:?}");
+        assert!(sels.contains(&".rm"), "{sels:?}");
+
+        // An emulated value only satisfies the matching value, not any value.
+        let dark = MediaOverrides { features: vec![("prefers-color-scheme".into(), "dark".into())] };
+        let rules = parse_stylesheet_timed_with(
+            "@media (prefers-color-scheme: light) { .light { color: red; } }",
+            (1280.0, 720.0),
+            CssMediaType::Screen,
+            &dark,
+        )
+        .0;
+        assert!(rules.is_empty(), "emulated dark ≠ light: {rules:?}");
+    }
+
+    /// Issue #29: emulating the media TYPE keeps `all` arms and drops
+    /// `screen` arms, while feature overrides still apply under print.
+    #[test]
+    fn emulated_print_media_type_and_all_token() {
+        let css = r#"
+            @media print { .paper { color: black; } }
+            @media screen { .ui { color: blue; } }
+            @media all { .every { color: green; } }
+            @media (prefers-reduced-motion: no-preference) { .anim { color: red; } }
+        "#;
+        let emu = MediaOverrides { features: vec![("prefers-reduced-motion".into(), "reduce".into())] };
+        let rules = parse_stylesheet_timed_with(css, (1280.0, 720.0), CssMediaType::Print, &emu).0;
+        let sels: Vec<&str> = rules.iter().map(|r| r.selector.as_str()).collect();
+        assert!(sels.contains(&".paper"), "{sels:?}");
+        assert!(!sels.contains(&".ui"), "{sels:?}");
+        assert!(sels.contains(&".every"), "`all` applies under print: {sels:?}");
+        assert!(!sels.contains(&".anim"), "emulated reduce ≠ no-preference: {sels:?}");
     }
 
     #[test]

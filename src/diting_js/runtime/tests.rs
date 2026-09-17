@@ -203,6 +203,62 @@
         assert_eq!(out.as_str().unwrap(), "true|legacy:true");
     }
 
+    /// Issue #29: `Emulation.setEmulatedMedia` (Playwright's
+    /// page.emulateMedia) must flip all three faces together — the
+    /// matchMedia script face, its change events, AND the @media cascade
+    /// that getComputedStyle resolves through. The pre-emulation gCS read
+    /// matters: it pins the cascade snapshot at the old epoch, and the
+    /// regression was exactly that ordering serving the stale table after
+    /// the flip.
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn media_emulation_flips_matchmedia_and_cascade() {
+        let mut rt = setup_runtime(
+            "<html><head><style>\
+             @media (prefers-color-scheme: dark) { #t { color: rgb(0, 0, 255); } }\
+             @media (prefers-reduced-motion: reduce) { #m { display: none; } }\
+             </style></head><body><div id='t'>x</div><div id='m'>y</div></body></html>",
+        );
+        assert_eq!(
+            rt.evaluate("getComputedStyle(document.getElementById('t')).color").unwrap(),
+            serde_json::json!("rgb(0, 0, 0)"),
+            "persona default is light — dark arm does not apply before emulation"
+        );
+        let out = rt.evaluate(r#"
+            var hits = [];
+            var q = matchMedia('(prefers-color-scheme: dark)');
+            q.addEventListener('change', function (e) { hits.push(e.matches); });
+            __diting_setMediaFeatures('[["prefers-color-scheme","dark"],["prefers-reduced-motion","reduce"]]', 'screen');
+            return [
+                matchMedia('(prefers-color-scheme: dark)').matches,
+                matchMedia('(prefers-reduced-motion: reduce)').matches,
+                hits.join(';'),
+                getComputedStyle(document.getElementById('t')).color,
+                getComputedStyle(document.getElementById('m')).display,
+            ].join('|');
+        "#).unwrap();
+        assert_eq!(
+            out.as_str().unwrap(),
+            "true|true|true|rgb(0, 0, 255)|none",
+            "script face, change event, and cascade must flip together"
+        );
+        // Chrome semantics on the follow-ups: `features: []` REPLACES the
+        // emulated set (dark arm drops, color falls back) while `media:
+        // 'print'` flips the type; then `media: ''` clears back to screen.
+        let out2 = rt.evaluate(r#"
+            __diting_setMediaFeatures('[]', 'print');
+            var a = [matchMedia('print').matches, matchMedia('screen').matches,
+                     getComputedStyle(document.getElementById('t')).color].join('|');
+            __diting_setMediaFeatures('[]', '');
+            return a + '#' + matchMedia('print').matches;
+        "#).unwrap();
+        assert_eq!(
+            out2.as_str().unwrap(),
+            "true|false|rgb(0, 0, 0)#false",
+            "features replace, media replaces, empty media clears"
+        );
+    }
+
     /// Computed-style property reads must resolve through the lookup chain
     /// (inline → bounding-rect geometry → defaults), not get short-circuited
     /// by element.style's named-property surface: that surface claims every

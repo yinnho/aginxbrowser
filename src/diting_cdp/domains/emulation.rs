@@ -122,7 +122,52 @@ pub async fn handle(
         // Touch emulation does not affect layout; ack for compatibility.
         "setTouchEmulationEnabled" => Ok(json!({})),
         "setFocusEmulationEnabled" => Ok(json!({})),
-        "setEmulatedMedia" => Ok(json!({})),
+        // Media emulation (Playwright's page.emulateMedia / Puppeteer's
+        // emulateMediaType): `features` replaces the prefers-* overrides,
+        // `media` replaces the media type; a param left out keeps its
+        // current value (Chrome semantics). `""` media clears back to
+        // screen. Both absent = no-op ack.
+        "setEmulatedMedia" => {
+            let features = match params.get("features") {
+                Some(Value::Array(items)) => {
+                    let mut pairs = Vec::with_capacity(items.len());
+                    for item in items {
+                        let obj = item.as_object().ok_or(
+                            "Emulation.setEmulatedMedia features entries must be objects",
+                        )?;
+                        let name = obj.get("name").and_then(Value::as_str).ok_or(
+                            "Emulation.setEmulatedMedia features entries require string name",
+                        )?;
+                        let value = obj.get("value").and_then(Value::as_str).ok_or(
+                            "Emulation.setEmulatedMedia features entries require string value",
+                        )?;
+                        pairs.push((name.to_string(), value.to_string()));
+                    }
+                    Some(pairs)
+                }
+                None => None,
+                Some(_) => {
+                    return Err(
+                        "Emulation.setEmulatedMedia features must be an array".to_string()
+                    )
+                }
+            };
+            let media = match params.get("media") {
+                // Chrome: null and "" both clear back to screen.
+                Some(Value::String(s)) if !s.is_empty() => Some(Some(s.clone())),
+                Some(Value::String(_)) | Some(Value::Null) => Some(None),
+                None => None,
+                Some(_) => {
+                    return Err("Emulation.setEmulatedMedia media must be a string".to_string())
+                }
+            };
+            if features.is_some() || media.is_some() {
+                if let Some(page) = ctx.get_session_page_mut(session_id) {
+                    page.set_emulated_media(features, media);
+                }
+            }
+            Ok(json!({}))
+        }
         "setUserAgentOverride" => {
             let ua = params.get("userAgent").and_then(|v| v.as_str()).unwrap_or("");
             let lang = params.get("acceptLanguage").and_then(|v| v.as_str());
