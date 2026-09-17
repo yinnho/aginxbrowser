@@ -7339,13 +7339,35 @@ pub fn layout_collect(
         let wrapper_set: std::collections::HashSet<_> = run_wrappers.iter().copied().collect();
         let mut inserts: Vec<(usize, usize, Vec<PaintItem>)> = Vec::new();
         for (dom, kids) in flattened {
-            let Some(color) = styles
-                .get(dom)
-                .and_then(|s| s.background_color)
-                .filter(|c| c.3 != 0)
-            else {
+            // Paint-contributing decoration on a flattened inline (#21):
+            // the solid per-line bands this pass always had, a
+            // background-image gradient, or a border. The old guard skipped
+            // on missing bg-COLOR, silently dropping gradient-only and
+            // border-only spans entirely.
+            let st = styles.get(dom);
+            let bg = st.and_then(|s| s.background_color).filter(|c| c.3 != 0);
+            let grad = st
+                .and_then(|s| s.background_image.as_deref())
+                .and_then(crate::diting_css::parse_linear_gradient);
+            let border = st.filter(|s| s.border_style.is_some()).and_then(|s| {
+                let widths = [
+                    side_px(s.border_width.top),
+                    side_px(s.border_width.right),
+                    side_px(s.border_width.bottom),
+                    side_px(s.border_width.left),
+                ];
+                widths.iter().any(|w| *w > 0.0).then(|| {
+                    let color = s
+                        .border_color
+                        .or(s.color)
+                        .map(|c| [c.0, c.1, c.2, c.3])
+                        .unwrap_or([0, 0, 0, 255]);
+                    (widths, color)
+                })
+            });
+            if bg.is_none() && grad.is_none() && border.is_none() {
                 continue;
-            };
+            }
             // The recorded kids can be leaves directly or run wrappers
             // holding them at any depth (nested inlines flatten wrapper
             // into wrapper); descend through wrappers so bands measure
@@ -7385,11 +7407,79 @@ pub fn layout_collect(
                     _ => bands.push(r),
                 }
             }
-            let color = [color.0, color.1, color.2, color.3];
-            let mut band_items: Vec<PaintItem> = bands
-                .into_iter()
-                .map(|rect| PaintItem::Bg { rect, color, radius: 0.0 })
-                .collect();
+            let mut band_items: Vec<PaintItem> = Vec::new();
+            // Layer order mirrors the block walk: bg-color bottom,
+            // bg-image above it, border on top.
+            if let Some(color) = bg {
+                let color = [color.0, color.1, color.2, color.3];
+                for rect in &bands {
+                    band_items.push(PaintItem::Bg { rect: *rect, color, radius: 0.0 });
+                }
+            }
+            if let Some(g) = grad {
+                // Continuous strip (Blink PaintRectForImageStrip): every
+                // fragment samples the gradient defined over the UNION of
+                // the bands, clipped to its own band — a to-right gradient
+                // never restarts on later lines.
+                let ux = bands.iter().map(|r| r.x).fold(f32::INFINITY, f32::min);
+                let uy = bands.iter().map(|r| r.y).fold(f32::INFINITY, f32::min);
+                let ur = bands.iter().map(|r| r.x + r.width).fold(f32::NEG_INFINITY, f32::max);
+                let ub = bands.iter().map(|r| r.y + r.height).fold(f32::NEG_INFINITY, f32::max);
+                if ur > ux && ub > uy {
+                    let union = Rect { x: ux, y: uy, width: ur - ux, height: ub - uy };
+                    let stops: Vec<(f32, [u8; 4])> =
+                        g.stops.iter().map(|(p, c)| (*p, [c.0, c.1, c.2, c.3])).collect();
+                    for band in &bands {
+                        band_items.push(PaintItem::Clip { rect: *band });
+                        band_items.push(PaintItem::BgGradient {
+                            rect: union,
+                            stops: stops.clone(),
+                            css_deg: g.css_deg,
+                            radii: [(0.0, 0.0); 4],
+                        });
+                        band_items.push(PaintItem::PopClip);
+                    }
+                }
+            }
+            if let Some((widths, color)) = border {
+                // box-decoration-break: slice — top/bottom edges ride every
+                // fragment; left only the first, right only the last. The
+                // strips sit OUTSIDE the text bands (Chrome grows the
+                // fragment border-box outward), so they never cover glyphs.
+                let [t, r, b, l] = widths;
+                for (i, band) in bands.iter().enumerate() {
+                    let x0 = if i == 0 { band.x - l } else { band.x };
+                    let x1 = if i + 1 == bands.len() { band.x + band.width + r } else { band.x + band.width };
+                    if t > 0.0 {
+                        band_items.push(PaintItem::Bg {
+                            rect: Rect { x: x0, y: band.y - t, width: x1 - x0, height: t },
+                            color,
+                            radius: 0.0,
+                        });
+                    }
+                    if b > 0.0 {
+                        band_items.push(PaintItem::Bg {
+                            rect: Rect { x: x0, y: band.y + band.height, width: x1 - x0, height: b },
+                            color,
+                            radius: 0.0,
+                        });
+                    }
+                    if i == 0 && l > 0.0 {
+                        band_items.push(PaintItem::Bg {
+                            rect: Rect { x: band.x - l, y: band.y - t, width: l, height: band.height + t + b },
+                            color,
+                            radius: 0.0,
+                        });
+                    }
+                    if i + 1 == bands.len() && r > 0.0 {
+                        band_items.push(PaintItem::Bg {
+                            rect: Rect { x: band.x + band.width, y: band.y - t, width: r, height: band.height + t + b },
+                            color,
+                            radius: 0.0,
+                        });
+                    }
+                }
+            }
             if inside {
                 band_items.insert(0, PaintItem::SetXfCanvas);
                 band_items.push(PaintItem::ClearXf);
@@ -8464,5 +8554,125 @@ mod batch_124_leading_ws_tests {
         let base = text_x(r#"<p>abc<br>def</p>"#, "def");
         let spaced = text_x(r#"<p>abc<br> def</p>"#, "def");
         assert_eq!(spaced, base, "space after <br> opens the next line and must be removed");
+    }
+}
+
+/// Batch 125 (#21, takumi#1490 same face, learn-only channel): a wrapping
+/// inline span paints per line FRAGMENT. Solid background-color bands
+/// predate this pass; the new halves are the gradient — every fragment
+/// samples one continuous strip over the union of the bands (Blink
+/// PaintRectForImageStrip: a to-right gradient never restarts per line) —
+/// and border under box-decoration-break: slice: top/bottom edges on every
+/// fragment, left only the first, right only the last, strips outside the
+/// text bands so glyphs stay uncovered.
+#[cfg(test)]
+mod batch_125_inline_fragment_deco_tests {
+    use super::*;
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    fn items(sheet: &str, body: &str) -> Vec<PaintItem> {
+        let html = format!("<html><body>{body}</body></html>");
+        let tree = parse_html(&html);
+        let rules = parse_stylesheet_for(sheet, (800.0, 600.0), CssMediaType::Screen);
+        let styles = compute_styles(&tree, &rules);
+        let (_, items, _, _, _, _) = layout_dom_with_paint_order_and_images(
+            &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
+        );
+        items
+    }
+
+    const WRAP_BODY: &str = r#"<p id="p"><span id="s">alpha beta gamma delta epsilon zeta eta theta</span></p>"#;
+
+    #[test]
+    fn solid_bg_wrapping_span_paints_per_line_bands() {
+        let items = items("#p { width: 200px } #s { background: rgb(255,0,0) }", WRAP_BODY);
+        let bands: Vec<&Rect> = items
+            .iter()
+            .filter_map(|it| match it {
+                PaintItem::Bg { rect, color, .. } if *color == [255, 0, 0, 255] => Some(rect),
+                _ => None,
+            })
+            .collect();
+        assert!(bands.len() >= 2, "one Bg per line fragment, got {}", bands.len());
+        let ys: Vec<f32> = bands.iter().map(|r| r.y).collect();
+        ys.windows(2).for_each(|w| assert!(w[1] > w[0], "bands stack line by line: {ys:?}"));
+    }
+
+    #[test]
+    fn gradient_wrapping_span_samples_continuous_union_strip() {
+        let items = items(
+            "#p { width: 200px } #s { background: linear-gradient(to right, red, blue) }",
+            WRAP_BODY,
+        );
+        let grads: Vec<Rect> = items
+            .iter()
+            .filter_map(|it| match it {
+                PaintItem::BgGradient { rect, .. } => Some(*rect),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            grads.len() >= 2,
+            "one clipped gradient per line fragment, got {} (gradient-only span used to paint nothing)",
+            grads.len()
+        );
+        assert!(
+            grads.windows(2).all(|w| w[0].x == w[1].x && w[0].width == w[1].width),
+            "all fragments sample ONE union rect (continuous strip): {grads:?}"
+        );
+        // Each gradient is bracketed Clip(band) … PopClip, and the clip
+        // rects are the per-line bands — narrower than the union strip.
+        let band_rects: Vec<Rect> = items
+            .windows(3)
+            .filter_map(|w| match (&w[0], &w[1], &w[2]) {
+                (PaintItem::Clip { rect: c }, PaintItem::BgGradient { rect, .. }, PaintItem::PopClip) => {
+                    Some((*c, *rect))
+                }
+                _ => None,
+            })
+            .map(|(c, _)| c)
+            .collect();
+        assert_eq!(band_rects.len(), grads.len(), "every gradient rides a Clip bracket");
+        assert!(
+            band_rects.iter().any(|b| b.width < grads[0].width),
+            "at least one fragment is narrower than the union: {band_rects:?} vs {:?}",
+            grads[0]
+        );
+    }
+
+    #[test]
+    fn border_wrapping_span_slice_edges() {
+        let items = items("#p { width: 200px } #s { border: 4px solid rgb(255,0,0) }", WRAP_BODY);
+        let strips: Vec<Rect> = items
+            .iter()
+            .filter_map(|it| match it {
+                PaintItem::Bg { rect, color, .. } if *color == [255, 0, 0, 255] => Some(*rect),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            strips.len() >= 6,
+            "border-only span used to paint nothing; need >= 2 bands x (top+bottom) + left + right, got {}",
+            strips.len()
+        );
+        let horizontal: Vec<&Rect> = strips.iter().filter(|r| r.width > r.height).collect();
+        let vertical: Vec<&Rect> = strips.iter().filter(|r| r.width <= r.height).collect();
+        // Slice: top+bottom per fragment (so an even count >= 4 = 2 bands),
+        // exactly ONE left and ONE right edge.
+        assert!(horizontal.len() >= 4 && horizontal.len().is_multiple_of(2), "top+bottom per band: {:?}", horizontal);
+        assert_eq!(vertical.len(), 2, "slice = left only on first band, right only on last: {strips:?}");
+        let xs: Vec<f32> = vertical.iter().map(|r| r.x).collect();
+        let min_x = strips.iter().map(|r| r.x).fold(f32::INFINITY, f32::min);
+        assert!(xs.contains(&min_x), "left edge opens the inline: {xs:?} vs min {min_x}");
+        // The inline CLOSES at the LAST fragment's right edge (later lines
+        // are typically shorter — the right edge is not the union's max).
+        let last_bottom = horizontal.iter().max_by(|a, b| a.y.total_cmp(&b.y)).unwrap();
+        assert!(
+            vertical
+                .iter()
+                .any(|r| (r.x + r.width - (last_bottom.x + last_bottom.width)).abs() < 0.01),
+            "right edge closes the last fragment: {strips:?}"
+        );
     }
 }
