@@ -359,7 +359,7 @@ AginxBrowser 定位是**纯外挂基础设施**——像真实浏览器一样作
 
 - **HTTP** — `/fetch`、`/search`、`/screenshot`、`/download`，任何有 HTTP 客户端的语言都能调
 - **MCP** — 一行接进 Claude Code / Cursor / Claude Desktop（见上）
-- **CDP** — 把 Playwright / Puppeteer / browser-use 指到 `ws://your-host:8089/devtools/browser/<id>`；见 [`docs/integrations.md`](docs/integrations.md)
+- **CDP** — 把 Playwright / Puppeteer / browser-use 指到 `ws://your-host:8089/devtools/browser/<id>`；agent-browser 走 `--cdp` 直驱（`--cdp-port N` 绑回环）。Google 的 chrome-devtools-mcp 也能挂：`aginxbrowser --cdp-port 9223` + `chrome-devtools-mcp --browser-url http://127.0.0.1:9223`，全套工具（建页/快照/求值/截图/网络/resize）打谛听引擎全通过。见 [`docs/integrations.md`](docs/integrations.md)
 
 集成方式：读环境变量 `AGINXBROWSER_URL=http://127.0.0.1:8089`。未设 → 行为不变；设了 → 风控站自动调 AginxBrowser 渲染抓取，失败自动回退。
 

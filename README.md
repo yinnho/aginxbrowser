@@ -360,7 +360,7 @@ Three attach points:
 
 - **HTTP** — `/fetch`, `/search`, `/screenshot`, `/download` for any language with an HTTP client
 - **MCP** — one line into Claude Code / Cursor / Claude Desktop (above)
-- **CDP** — point Playwright / Puppeteer / browser-use at `ws://your-host:8089/devtools/browser/<id>`; agent-browser drives it with `--cdp` (`--cdp-port N` binds loopback for that). See [`docs/integrations.md`](docs/integrations.md)
+- **CDP** — point Playwright / Puppeteer / browser-use at `ws://your-host:8089/devtools/browser/<id>`; agent-browser drives it with `--cdp` (`--cdp-port N` binds loopback for that). Google's chrome-devtools-mcp attaches too: `aginxbrowser --cdp-port 9223` + `chrome-devtools-mcp --browser-url http://127.0.0.1:9223` — its full tool battery (pages, snapshot, evaluate, screenshot, network, resize) passes against the diting engine. See [`docs/integrations.md`](docs/integrations.md)
 
 Integration: read the environment variable `AGINXBROWSER_URL=http://127.0.0.1:8089`. Unset → behavior unchanged; set → risk-controlled sites automatically route through AginxBrowser for rendering, falling back gracefully on failure.
 
