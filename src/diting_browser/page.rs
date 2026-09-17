@@ -1124,25 +1124,17 @@ impl Page {
                 "globalThis.__documentReadyState__ = 'interactive';\n\
                  try { document.dispatchEvent(new Event('DOMContentLoaded', {bubbles:false,cancelable:false})); } catch(e) {}\n\
                  try { window.dispatchEvent(new Event('DOMContentLoaded', {bubbles:false,cancelable:false})); } catch(e) {}\n\
-                 if (typeof window.onload === 'function') { try { window.onload(); } catch(e) {} }\n\
-                 // HTML spec: event handler content attributes on <body> for
-                 // window-evented names (onload & friends) are exposed as the
-                 // matching Window handler. `<body onload=\"...\">` therefore
-                 // runs when window's load fires — not only when the load
-                 // event is dispatched on the body itself. Byte-WAF challenge
-                 // pages (juejin.cn class) drive their whole PoW from
-                 // `<body onload=\"readygo()\">`, so without this forwarding
-                 // the challenge never starts and the page hangs on
-                 // \"Please wait...\" forever.
-                 try {\n\
-                     (function() {\n\
-                         var b = document.body;\n\
-                         if (!b) return;\n\
-                         var h = b.onload;\n\
-                         if (typeof h !== 'function' && b._resolveInlineHandler) h = b._resolveInlineHandler('onload');\n\
-                         if (typeof h === 'function' && h !== window.onload) h.call(b, new Event('load'));\n\
-                     })();\n\
-                 } catch(e) {}\n\
+                 // (#37) readyState flips to complete before load fires, like
+                 // Chrome. The load dispatch fires every handler path exactly
+                 // once, with a real Event: the window.onload property via
+                 // __windowOnHandlers, and the `<body onload=\"...\">` content
+                 // attribute via the body-reflecting fallback in the window
+                 // dispatch wrapper. The old form called window.onload()
+                 // directly (no event argument, while readyState was still
+                 // interactive) and the dispatch then fired the property
+                 // handler a second time. Byte-WAF challenge pages
+                 // (juejin.cn class) drive their whole PoW from
+                 // `<body onload=\"readygo()\">`, which this still runs.
                  globalThis.__documentReadyState__ = 'complete';\n\
                  try { window.dispatchEvent(new Event('load', {bubbles:false,cancelable:false})); } catch(e) {}");
             js.disarm_watchdog(load_wd);
@@ -3632,6 +3624,36 @@ ms.addEventListener('sourceopen', function(){ \
         p.navigate(&format!("http://127.0.0.1:{port}/a")).await.unwrap();
         assert_eq!(p.evaluate("window.__viaListener"), serde_json::json!("yes"));
         assert_eq!(p.evaluate("window.__viaProperty"), serde_json::json!("yes"));
+    }
+
+    /// (#37) The load path fires the window.onload property form exactly once
+    /// (the old code called it directly AND the dispatch wrapper fired it
+    /// again), hands it a real Event, and flips readyState to complete first
+    /// like Chrome.
+    #[tokio::test(flavor = "current_thread")]
+    async fn window_onload_property_fires_once_with_event() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![(
+            "/a",
+            200,
+            "<html><head></head><body><script>\
+             window.__n = 0;\
+             window.onload = function(e) {\
+                 window.__n++;\
+                 window.__evt = (e && e.type) || 'none';\
+                 window.__rs = document.readyState;\
+             };\
+             </script></body></html>"
+                .into(),
+        )]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/a")).await.unwrap();
+        assert_eq!(p.evaluate("window.__n").as_f64(), Some(1.0),
+            "the property form fires exactly once, not direct-call + dispatch");
+        assert_eq!(p.evaluate("window.__evt"), serde_json::json!("load"),
+            "the handler receives a real load Event, not a bare argument-less call");
+        assert_eq!(p.evaluate("window.__rs"), serde_json::json!("complete"),
+            "readyState is already complete when load fires, like Chrome");
     }
 
     /// Byte-WAF JS challenge (juejin.cn class) auto-solves end to end:

@@ -43,8 +43,14 @@ globalThis.__diting_reportUncaught = function(msg, src, line, err) {
     }
     globalThis.__diting_reporting = true;
     try {
-      if (typeof globalThis.onerror === 'function') {
-        try { globalThis.onerror(message, source, line | 0, 0, err || null); } catch (_) {}
+      // (#37) window/body.onerror write through the reflecting accessor
+      // into __windowOnHandlers; the pre-install data prop above is the
+      // default capture. Store first, data prop as the default.
+      const _hs = globalThis.__windowOnHandlers;
+      const _onerr = (_hs && Object.prototype.hasOwnProperty.call(_hs, 'onerror'))
+        ? _hs.onerror : globalThis.onerror;
+      if (typeof _onerr === 'function') {
+        try { _onerr(message, source, line | 0, 0, err || null); } catch (_) {}
       }
       try {
         globalThis.dispatchEvent(new ErrorEvent('error', {
@@ -8232,12 +8238,11 @@ globalThis.PromiseRejectionEvent = class extends Event {
   if (!core || typeof core.setUnhandledPromiseRejectionHandler !== 'function') return;
   core.setUnhandledPromiseRejectionHandler(function (promise, reason) {
     const e = new PromiseRejectionEvent('unhandledrejection', { promise: promise, reason: reason, cancelable: true });
-    // The IDL attribute handler (window.onunhandledrejection = fn) runs first
-    // and can preventDefault to swallow the default report, like Chrome.
-    const attr = globalThis['on' + e.type];
-    if (typeof attr === 'function') {
-      try { attr.call(globalThis, e); } catch (err) { console.error(err); }
-    }
+    // (#37) the IDL attribute handler (window/body.onunhandledrejection = fn)
+    // is fired by the window dispatchEvent wrapper — from __windowOnHandlers
+    // or the `<body onunhandledrejection>` attribute — and can
+    // preventDefault to swallow the default report, like Chrome. Firing it
+    // here as well would run every handler twice.
     globalThis.dispatchEvent(e);
     // Chrome's default report is a console line and the page keeps running.
     // deno_core's default (op_dispatch_exception) terminates the runtime —
@@ -14046,6 +14051,9 @@ globalThis.__diting_init = function() {
   // location.href again, including any redirect target.
   globalThis.__virtualUrl = null;
   _installWasmStreamingFallback();
+  // (#37) V8 snapshot creation flattens accessors on the global object to
+  // data:null props, so the window on* family installs here, per context.
+  globalThis.__diting_installWindowOnHandlers();
 
   globalThis.__diting_setPersona();
 
@@ -14708,11 +14716,90 @@ for (const _n of _GLOBAL_EVENT_NAMES) _defineOnHandler(Document.prototype, 'on' 
 // globalThis.onerror / onunhandledrejection are already real data properties;
 // the `hasOwnProperty` guard above skips them, keeping the error capture intact.
 const _WINDOW_EVENT_NAMES = _GLOBAL_EVENT_NAMES.concat([
-  'afterprint', 'beforeprint', 'beforeunload', 'hashchange', 'languagechange',
+  'afterprint', 'beforeprint', 'beforeunload', 'gamepadconnected',
+  'gamepaddisconnected', 'hashchange', 'languagechange',
   'message', 'messageerror', 'offline', 'online', 'pagehide', 'pageshow',
   'popstate', 'rejectionhandled', 'storage', 'unload',
 ]);
 for (const _n of _WINDOW_EVENT_NAMES) _defineOnHandler(globalThis, 'on' + _n, '__windowOnHandlers', false);
+// (#37) The window-reflecting on* family on HTMLBodyElement. Chrome 152:
+// 24 handler names whose body accessors ARE the window's — one shared
+// slot, identity both ways (body.X = f ⇔ window.X === f), non-callables
+// store null, descriptors enumerable+configurable. The `<body onX="...">`
+// content attribute for these names installs as the WINDOW's handler:
+// both getters return the same compiled function and it fires when the
+// event dispatches on window — which is why the Rust load path can stop
+// special-casing `<body onload>` and just dispatch. The six names
+// Element.prototype already carries (blur/error/focus/load/resize/
+// scroll) get shadowed here, exactly like Chrome's prototype chain.
+const _BODY_WINDOW_EVENT_NAMES = [
+  'afterprint', 'beforeprint', 'beforeunload', 'blur', 'error', 'focus',
+  'gamepadconnected', 'gamepaddisconnected', 'hashchange', 'languagechange',
+  'load', 'message', 'messageerror', 'offline', 'online', 'pagehide',
+  'pageshow', 'popstate', 'rejectionhandled', 'resize', 'scroll', 'storage',
+  'unhandledrejection', 'unload',
+];
+const _BODY_WINDOW_EVENT_SET = new Set(_BODY_WINDOW_EVENT_NAMES);
+function _bodyWindowInline(name) {
+  const b = globalThis.document && globalThis.document.body;
+  if (b && b.localName === 'body' && typeof b._resolveInlineHandler === 'function') {
+    return b._resolveInlineHandler(name);
+  }
+  return null;
+}
+function _bodyWindowReflecting(key) {
+  return {
+    configurable: true,
+    enumerable: true,
+    get() {
+      const store = globalThis.__windowOnHandlers;
+      if (store && Object.prototype.hasOwnProperty.call(store, key)) return store[key];
+      return _bodyWindowInline(key);
+    },
+    set(fn) {
+      if (typeof fn !== 'function') fn = null;
+      const store = globalThis.__windowOnHandlers || (globalThis.__windowOnHandlers = {});
+      store[key] = fn;
+    },
+  };
+}
+// V8 snapshots cannot hold JS accessors on the global object: every on*
+// accessor the loop above installed during snapshot creation comes back
+// as a writable data:null property, so at runtime window.on* writes
+// landed in dead data props and only the direct onload call ever read
+// them. __diting_init re-runs this installer per context (idempotent —
+// re-defining the accessors never clears __windowOnHandlers). Data
+// properties that hold a real function are left alone: onerror is the
+// uncaught-error capture. The body-reflecting members of the family get
+// the shared-slot descriptor; the rest get the plain store-backed one.
+globalThis.__diting_installWindowOnHandlers = function() {
+  for (const _n of _WINDOW_EVENT_NAMES) {
+    const _key = 'on' + _n;
+    const _cur = Object.getOwnPropertyDescriptor(globalThis, _key);
+    if (_cur && !('get' in _cur) && typeof _cur.value === 'function') continue;
+    const _d = _BODY_WINDOW_EVENT_SET.has(_n) ? _bodyWindowReflecting(_key) : {
+      configurable: true,
+      get() {
+        const store = globalThis.__windowOnHandlers;
+        if (store && Object.prototype.hasOwnProperty.call(store, _key)) return store[_key];
+        return null;
+      },
+      set(fn) {
+        if (typeof fn !== 'function') fn = null;
+        const store = globalThis.__windowOnHandlers || (globalThis.__windowOnHandlers = {});
+        store[_key] = fn;
+      },
+    };
+    _markNative(_d.get);
+    _markNative(_d.set);
+    Object.defineProperty(globalThis, _key, _d);
+  }
+};
+// Prototype accessors survive the snapshot, so the body side installs at
+// top level — each realm's body wrappers share this prototype.
+for (const _n of _BODY_WINDOW_EVENT_NAMES) {
+  Object.defineProperty(HTMLBodyElement.prototype, 'on' + _n, _bodyWindowReflecting('on' + _n));
+}
 // Fire the on* handler alongside addEventListener listeners for the two
 // dispatch paths that did not consult it before (document and window).
 // window.onerror is deliberately NOT consulted here: it is the uncaught-error
@@ -14732,10 +14819,20 @@ Document.prototype.dispatchEvent = function(event) {
 _markNative(Document.prototype.dispatchEvent);
 const _windowDispatch = globalThis.dispatchEvent;
 globalThis.dispatchEvent = function(event) {
-  if (event) {
+  if (event && event.type !== 'error') {
+    // (#37) 'error' is pipeline-only in Chrome: onerror runs from the
+    // uncaught-error pipeline (__diting_reportUncaught), never from a
+    // synthetic dispatchEvent(new ErrorEvent('error')) — and the pipeline
+    // already calls onerror before dispatching, so firing here too would
+    // double-report.
     const store = globalThis.__windowOnHandlers || {};
     const key = 'on' + event.type;
-    const handler = Object.prototype.hasOwnProperty.call(store, key) ? store[key] : null;
+    const has = Object.prototype.hasOwnProperty.call(store, key);
+    // (#37) fall back to the `<body onX="...">` content attribute only when
+    // nothing was ever assigned through JS — an explicit null (non-callable
+    // assignment) overwrites the attribute handler, per Chrome.
+    const handler = has ? store[key]
+      : (_BODY_WINDOW_EVENT_SET.has(event.type) ? _bodyWindowInline(key) : null);
     if (typeof handler === 'function') {
       try {
         if (handler.call(globalThis, event) === false && event.preventDefault) event.preventDefault();

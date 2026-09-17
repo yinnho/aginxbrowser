@@ -493,8 +493,17 @@
         let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
         assert_eq!(
             v["bodyFace"],
-            serde_json::json!(["aLink", "background", "bgColor", "link", "text", "vLink"]),
-            "body prototype carries the legacy color family"
+            serde_json::json!(["aLink", "background", "bgColor", "link",
+                // (#37) the 24 window-reflecting on* members are enumerable
+                // on the prototype too, exactly like Chrome 152
+                "onafterprint", "onbeforeprint", "onbeforeunload", "onblur",
+                "onerror", "onfocus", "ongamepadconnected", "ongamepaddisconnected",
+                "onhashchange", "onlanguagechange", "onload", "onmessage",
+                "onmessageerror", "onoffline", "ononline", "onpagehide",
+                "onpageshow", "onpopstate", "onrejectionhandled", "onresize",
+                "onscroll", "onstorage", "onunhandledrejection", "onunload",
+                "text", "vLink"]),
+            "body prototype carries the legacy color family + the on* family"
         );
         assert_eq!(
             v["tblFace"],
@@ -811,6 +820,90 @@
             "maxlength='-5' attribute reads back as the -1 default");
         assert_eq!(v["faces"], serde_json::json!([true, true, true]),
             "input face gains size/maxLength/minLength only; textarea gains all five");
+    }
+
+    /// (#37) HTMLBodyElement's window-reflecting on* family: 24 names whose
+    /// body accessors ARE the window's — shared identity both directions,
+    /// `<body onX>` content attributes install as the window's handler and
+    /// fire on window dispatch, non-callables store null (suppressing the
+    /// attribute handler), click stays element-local. Chrome 152 truth,
+    /// probed on headless 152 before writing any of this.
+
+    #[test]
+    fn body_window_reflecting_on_family() {
+        let mut rt = setup_runtime(
+            "<html><body onresize='window.__attrResizeRan=1' onclick='window.__attrClickRan=1'>x</body></html>",
+        );
+        let out = rt.evaluate(r#"
+            var b = document.body;
+            var names = ['afterprint','beforeprint','beforeunload','blur','error','focus',
+                         'gamepadconnected','gamepaddisconnected','hashchange','languagechange',
+                         'load','message','messageerror','offline','online','pagehide',
+                         'pageshow','popstate','rejectionhandled','resize','scroll','storage',
+                         'unhandledrejection','unload'];
+            var protoKeys = Object.keys(HTMLBodyElement.prototype);
+            var face = names.every(function(n){ return protoKeys.indexOf('on'+n) >= 0; });
+            var d = Object.getOwnPropertyDescriptor(HTMLBodyElement.prototype, 'onhashchange');
+            var desc = d ? ['get' in d ? 'acc' : 'data', d.enumerable, d.configurable].join(':') : 'none';
+            // shared slot, identity both directions (dirty hashchange/popstate;
+            // resize keeps its attribute for the exposure checks below)
+            var f1 = function(){}, f2 = function(){};
+            b.onhashchange = f1; var bodyToWin = window.onhashchange === f1;
+            window.onpopstate = f2; var winToBody = b.onpopstate === f2;
+            // <body onresize> is the WINDOW's handler: same function from both
+            // getters, and it runs when the event dispatches on window.
+            var attrBody = typeof b.onresize, attrWin = typeof window.onresize;
+            var attrSame = b.onresize === window.onresize;
+            window.dispatchEvent(new Event('resize'));
+            var attrFired = window.__attrResizeRan || 0;
+            // non-callable assignment stores null AND suppresses the attribute
+            // handler (an explicit null overwrites, it does not fall through)
+            b.onresize = 'garbage';
+            var afterGarbage = window.onresize === null;
+            window.__attrResizeRan = 0;
+            window.dispatchEvent(new Event('resize'));
+            var nullSuppresses = window.__attrResizeRan || 0;
+            // click is NOT in the family: element-local store, no window
+            // forwarding, and its content attribute runs on the element path
+            var f3 = function(){};
+            b.onclick = f3;
+            var clickForwarded = window.onclick === f3;
+            b.onclick = null;
+            b.dispatchEvent(new Event('click'));
+            var clickFired = window.__attrClickRan || 0;
+            var gamepad = ['ongamepadconnected','ongamepaddisconnected'].every(function(k){ return k in window; });
+            return JSON.stringify({
+                face: face, desc: desc, bodyToWin: bodyToWin, winToBody: winToBody,
+                attrBody: attrBody, attrWin: attrWin, attrSame: attrSame, attrFired: attrFired,
+                afterGarbage: afterGarbage, nullSuppresses: nullSuppresses,
+                clickForwarded: clickForwarded, clickFired: clickFired, gamepad: gamepad,
+            });
+        "#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        assert_eq!(v["face"], serde_json::json!(true),
+            "all 24 window-reflecting names are enumerable own members of HTMLBodyElement.prototype");
+        assert_eq!(v["desc"], serde_json::json!("acc:true:true"),
+            "accessor + enumerable + configurable, like Chrome 152");
+        assert_eq!(v["bodyToWin"], serde_json::json!(true), "body.X = f makes window.X === f");
+        assert_eq!(v["winToBody"], serde_json::json!(true), "window.X = f makes body.X === f");
+        assert_eq!(v["attrBody"], serde_json::json!("function"),
+            "<body onresize> reads back as a function from the body getter");
+        assert_eq!(v["attrWin"], serde_json::json!("function"),
+            "...and from the window getter");
+        assert_eq!(v["attrSame"], serde_json::json!(true),
+            "both getters return the SAME compiled function — one handler");
+        assert_eq!(v["attrFired"], serde_json::json!(1),
+            "<body onresize> runs when resize dispatches on window");
+        assert_eq!(v["afterGarbage"], serde_json::json!(true),
+            "non-callable assignment stores null");
+        assert_eq!(v["nullSuppresses"], serde_json::json!(0),
+            "an explicit null overwrites the attribute handler — no fall-through");
+        assert_eq!(v["clickForwarded"], serde_json::json!(false),
+            "click is element-local: no window forwarding");
+        assert_eq!(v["clickFired"], serde_json::json!(1),
+            "<body onclick> still runs on the element dispatch path");
+        assert_eq!(v["gamepad"], serde_json::json!(true),
+            "ongamepadconnected/ongamepaddisconnected exist on window too");
     }
 
 
