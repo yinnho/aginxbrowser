@@ -7018,11 +7018,65 @@ function _mqMatches(q) {
   clauses.push(cur);
   return clauses.some((c) => c.trim() !== '' && _mqClause(c));
 }
+// Live MediaQueryList (issue #25, obscura#1007 same lineage): `matches`
+// is a getter re-evaluating against the current viewport/overrides, and
+// listeners live on the object. __diting_setViewport /
+// __diting_clearViewport flush the registry afterwards and fire `change`
+// (carrying matches/media) on every object that crossed — the half
+// responsive pages need beyond reading matches once at boot.
+function _MediaQueryList(q) {
+  this._q = String(q);
+  this._last = false;
+  try { this._last = _mqMatches(this._q); } catch (e) {}
+  this._change = [];
+  this.onchange = null;
+  const self = this;
+  Object.defineProperties(this, {
+    matches: { get() { try { return _mqMatches(self._q); } catch (e) { return false; } } },
+    media: { value: this._q, enumerable: true },
+  });
+}
+_MediaQueryList.prototype.addListener = function (fn) { this.addEventListener('change', fn); };
+_MediaQueryList.prototype.removeListener = function (fn) { this.removeEventListener('change', fn); };
+_MediaQueryList.prototype.addEventListener = function (type, fn) {
+  if (type === 'change' && typeof fn === 'function' && this._change.indexOf(fn) < 0) this._change.push(fn);
+};
+_MediaQueryList.prototype.removeEventListener = function (type, fn) {
+  if (type !== 'change') return;
+  const i = this._change.indexOf(fn);
+  if (i >= 0) this._change.splice(i, 1);
+};
+_MediaQueryList.prototype.dispatchEvent = function (ev) {
+  const handlers = this._change.slice();
+  if (typeof this.onchange === 'function') handlers.push(this.onchange);
+  for (const h of handlers) { try { h.call(this, ev); } catch (e) {} }
+  return true;
+};
+if (typeof MediaQueryList === 'undefined') globalThis.MediaQueryList = _MediaQueryList;
+const _mqlRegistry = [];
+// Re-evaluate every subscribed MQL against the new environment and fire
+// change on the ones that flipped. Inert objects (no listener, no
+// onchange) are pruned first: their matches is live-computed on read, so
+// only subscribed objects need tracking — matchMedia inside a resize
+// handler cannot grow the registry unbounded.
+globalThis.__diting_mqFlush = function () {
+  for (let i = _mqlRegistry.length - 1; i >= 0; i--) {
+    const mq = _mqlRegistry[i];
+    if (!mq._change.length && mq.onchange == null) _mqlRegistry.splice(i, 1);
+  }
+  for (const mq of _mqlRegistry.slice()) {
+    const now = mq.matches;
+    if (now === mq._last) continue;
+    mq._last = now;
+    const ev = new Event('change');
+    try { ev.matches = now; ev.media = mq._q; } catch (e) {}
+    try { mq.dispatchEvent(ev); } catch (e) {}
+  }
+};
 globalThis.matchMedia = _markNative(function matchMedia(q) {
-  let matches = false;
-  try { matches = _mqMatches(q); } catch (e) {}
-  return { matches, media: String(q), onchange: null,
-           addListener(){}, removeListener(){}, addEventListener(){}, removeEventListener(){}, dispatchEvent(){return true;} };
+  const mq = new _MediaQueryList(q);
+  _mqlRegistry.push(mq);
+  return mq;
 });
 // Chrome's enumerable computed-style property set (kebab-case). Real
 // Chrome 145 exposes ~470 of these on every getComputedStyle() result;
@@ -13042,13 +13096,6 @@ if (typeof BroadcastChannel === 'undefined') {
   };
 }
 
-if (typeof MediaQueryList === 'undefined') {
-  globalThis.MediaQueryList = class MediaQueryList {
-    constructor(q) { this.media = q || ''; this.matches = false; }
-    addListener() {} removeListener() {} addEventListener() {} removeEventListener() {}
-  };
-}
-
 if (typeof ImageData === 'undefined') {
   globalThis.ImageData = class ImageData {
     constructor(w, h) {
@@ -13368,6 +13415,9 @@ globalThis.__diting_setViewport = function(w, h, mobile, dpr) {
   // same width the scripts do.
   try { _domRaw("set_viewport", String(w), String(h)); } catch (e) {}
   try { globalThis.dispatchEvent(new Event('resize')); } catch (e) {}
+  // Media queries re-evaluated after the resize: subscribed MQLs that
+  // crossed fire change (issue #25).
+  try { globalThis.__diting_mqFlush(); } catch (e) {}
 };
 
 // Drop the override: persona viewport everywhere, desktop pointer answers.
@@ -13380,6 +13430,9 @@ globalThis.__diting_clearViewport = function() {
   } catch (e) {}
   __diting_setPersona();
   try { globalThis.dispatchEvent(new Event('resize')); } catch (e) {}
+  // Media queries re-evaluated after the resize: subscribed MQLs that
+  // crossed fire change (issue #25).
+  try { globalThis.__diting_mqFlush(); } catch (e) {}
 };
 
 // The hardware persona (screen/dpr/GPU/canvas) must hold for a whole

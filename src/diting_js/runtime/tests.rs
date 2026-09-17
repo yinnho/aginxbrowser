@@ -151,6 +151,58 @@
         assert_eq!(parts[13], serde_json::json!(false), "unknown features are false");
     }
 
+    /// Issue #25 / obscura#1007: MediaQueryList objects must be live —
+    /// `matches` re-evaluates against the current viewport (not frozen at
+    /// creation), listeners actually register, and a viewport change fires
+    /// `change` (carrying the new matches/media) on every subscribed
+    /// object that crossed. The old face returned a disposable literal
+    /// whose addListener was a no-op, so responsive pages never saw a
+    /// breakpoint flip after session_viewport.
+    #[test]
+    fn matchmedia_live_objects_fire_change_on_viewport_flip() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let out = rt.evaluate(r#"
+            var hits = [];
+            var wide = matchMedia('(min-width: 800px)');
+            wide.addEventListener('change', function (e) { hits.push('ac:' + e.matches + ':' + e.media); });
+            var narrow = matchMedia('(max-width: 500px)');
+            narrow.onchange = function (e) { hits.push('oc:' + e.matches); };
+            var inert = matchMedia('(min-width: 800px)'); // never subscribed
+            var before = wide.matches;
+            __diting_setViewport(400, 800, false, undefined);
+            var out = [before, wide.matches, narrow.matches, inert.matches,
+                       hits.join(';')].join('|');
+            __diting_setViewport(1920, 1000, false, undefined);
+            return out;
+        "#).unwrap();
+        // Default viewport is wide: min-width 800 starts true; after the
+        // 400px viewport it flips (firing change with the query string),
+        // max-width 500 crosses to true (onchange fires), and the
+        // unsubscribed object still reports live matches without events.
+        assert_eq!(
+            out.as_str().unwrap(),
+            "true|false|true|false|ac:false:(min-width: 800px);oc:true"
+        );
+    }
+
+    /// Same object surface, override half: the mobile viewport emulation
+    /// flips pointer/hover answers, and the legacy addListener API must
+    /// observe the crossing too.
+    #[test]
+    fn matchmedia_override_flip_reaches_legacy_listeners() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let out = rt.evaluate(r#"
+            var hits = [];
+            var coarse = matchMedia('(pointer: coarse)');
+            coarse.addListener(function (e) { hits.push('legacy:' + e.matches); });
+            __diting_setViewport(400, 800, true, undefined);
+            var out = coarse.matches + '|' + hits.join(';');
+            __diting_setViewport(1920, 1000, false, undefined);
+            return out;
+        "#).unwrap();
+        assert_eq!(out.as_str().unwrap(), "true|legacy:true");
+    }
+
     /// Computed-style property reads must resolve through the lookup chain
     /// (inline → bounding-rect geometry → defaults), not get short-circuited
     /// by element.style's named-property surface: that surface claims every
