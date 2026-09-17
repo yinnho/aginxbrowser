@@ -32,8 +32,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use swash::proxy::MetricsProxy;
-use swash::scale::image::Content;
-use swash::scale::{Render, ScaleContext, Source, StrikeWith};
+use swash::scale::image::{Content, Image};
+use swash::scale::{Render, ScaleContext, Scaler, Source, StrikeWith};
 use swash::shape::ShapeContext;
 use swash::{FontRef, GlyphId};
 
@@ -119,6 +119,34 @@ thread_local! {
     /// [regular, bold], keyed by book fingerprint — the same identity
     /// contract as the raster cache (#16).
     static NORMAL_LH_RATIOS: RefCell<HashMap<u64, [f32; 2]>> = RefCell::new(HashMap::new());
+}
+
+/// Glyphs whose swash raster panicked and was absorbed by
+/// [`render_guarded`] — observability for the strike-decode panic family
+/// (dfrg/swash#139: a width-0 EBDT bitmap makes `chunks(0)` panic in
+/// release too; #123-126 are the debug-only arithmetic siblings). The
+/// zero-width-strike test flips this to prove the guard actually ran.
+static SWASH_PANIC_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+
+/// Rasterize one glyph behind a panic guard. Malformed embedded bitmap
+/// tables (the SimSun blank-glyph shape: an EBLC/EBDT strike whose small
+/// metrics declare width 0) panic inside swash's `Bitmap::decode` — and
+/// the panic fires at the `Source::Bitmap` step of the fallback source
+/// list, aborting the whole line raster before the outline tail can run.
+/// Catching it here lets the caller retry the same glyph through a pure
+/// outline `Render`, the one source set that cannot touch the strike
+/// decoder. Blank glyphs raster to no ink either way, so the retry is
+/// pixel-identical for the shapes that actually trigger this.
+fn render_guarded(render: &Render, scaler: &mut Scaler, gid: GlyphId) -> Option<Image> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        render.render(scaler, gid)
+    })) {
+        Ok(img) => img,
+        Err(_) => {
+            SWASH_PANIC_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+    }
 }
 
 impl FontBook {
@@ -724,12 +752,20 @@ impl FontBook {
                     FaceSel::Fallback(_) => &fallback_sources[..],
                 };
                 let render = Render::new(sources);
+                // Outline-only retry behind the panic guard: a malformed
+                // embedded strike (zero-width EBDT, dfrg/swash#139) panics
+                // `Bitmap::decode` mid-list — before `fallback_sources`'
+                // own outline tail — so the retry needs a bare outline
+                // `Render` that cannot reach the strike decoder at all.
+                let outline_render = Render::new(&mono_sources[..]);
                 for (pen_x, dy, gid) in glyphs {
                     // swash rasterizes outlines with zeno Origin::BottomLeft,
                     // so `placement.top` is the image's top edge ABOVE the
                     // pen: blit y = pen_y - top (data rows are ordinary
                     // top-down). Bitmap strikes carry the same contract.
-                    let Some(img) = render.render(&mut scaler, gid) else { continue };
+                    let Some(img) = render_guarded(&render, &mut scaler, gid)
+                        .or_else(|| render_guarded(&outline_render, &mut scaler, gid))
+                    else { continue };
                     let ox = pen_x.round() as i64 + img.placement.left as i64;
                     let oy = (baseline + dy).round() as i64 - img.placement.top as i64;
                     let color_px = matches!(img.content, Content::Color)
@@ -1280,6 +1316,39 @@ mod raster_cache_tests {
         assert!(!Arc::ptr_eq(&a1, &b));
         let a2 = book.rasterize("ii", 8.0, false, [0, 0, 0, 255], 10.0, false);
         assert!(!Arc::ptr_eq(&a1, &a2), "clear-all must evict the earlier entry");
+    }
+
+    /// dfrg/swash#139 (own issue #19): a fallback face carrying an EBLC/EBDT
+    /// strike whose glyph declares width 0 (SimSun's blank-bitmap shape)
+    /// makes swash's `Bitmap::decode` call `chunks(0)` — a panic that fires
+    /// in release builds too, at the `Source::Bitmap` step of
+    /// `fallback_sources`, aborting the whole line raster before the
+    /// outline tail can run. [`render_guarded`] must absorb it and re-raster
+    /// the glyph outline-only. The fixture is OURS
+    /// (`scripts/make_zero_width_ebdt_font.py`), no license tail.
+    #[test]
+    fn zero_width_ebdt_strike_does_not_panic_the_raster() {
+        let (reg, bold) = production_pair();
+        let zw = include_bytes!("fixtures/zero-width-ebdt.ttf").to_vec();
+        let book = FontBook::from_pairs(reg, bold).unwrap().with_fallbacks(vec![zw]);
+        let _held = isolated();
+        let before = SWASH_PANIC_FALLBACKS.load(Ordering::Relaxed);
+        // U+E000: outside the bundled pair's coverage (test-fallback-face
+        // precedent), so the char routes to a fallback segment — the only
+        // segment whose source list visits Source::Bitmap. Size 12 hits the
+        // fixture strike's ppem exactly.
+        let tile = book.rasterize("\u{E000}", 12.0, false, [0, 0, 0, 255], 14.4, false);
+        let after = SWASH_PANIC_FALLBACKS.load(Ordering::Relaxed);
+        assert!(
+            after > before,
+            "guard must actually fire (counter {before} -> {after}); \
+             without it this line raster aborts the whole render"
+        );
+        // The glyph's outline is empty (numberOfContours 0), so the outline
+        // retry paints no ink — but the run still yields a well-formed tile
+        // instead of a poisoned/aborted raster.
+        assert_eq!(tile.data.len(), tile.width * tile.height * 4);
+        assert_eq!(tile.ink_bbox(), None, "empty glyph outline paints no ink");
     }
 
     /// The book's face fingerprint is the cache's book identity: two books
