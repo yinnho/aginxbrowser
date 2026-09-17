@@ -965,7 +965,12 @@ fn cdp_port_from_args(args: &[String]) -> Result<Option<u16>, String> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
+    // In --mcp (stdio transport) mode, stdout IS the JSON-RPC channel —
+    // tracing lines there break strict clients on the first non-JSON
+    // output. Route logs to stderr for that mode only; the HTTP server
+    // keeps stdout (container conventions expect logs there).
+    let mcp_stdio_mode = std::env::args().any(|a| a == "--mcp");
+    let subscriber = tracing_subscriber::fmt()
         .with_ansi(false)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -974,8 +979,12 @@ async fn main() -> anyhow::Result<()> {
                         "aginxbrowser=info,diting_browser::page=warn,diting_net::wreq_client=warn,diting::console=error",
                     )
                 }),
-        )
-        .init();
+        );
+    if mcp_stdio_mode {
+        subscriber.with_writer(std::io::stderr).init();
+    } else {
+        subscriber.init();
+    }
 
     // CLI subcommands exit before the server boots — doctor especially must
     // not pay the V8 warmup below (self-hosters run it to debug a box that
