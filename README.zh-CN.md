@@ -2,6 +2,8 @@
 
 # AginxBrowser
 
+[English](README.md) | 中文
+
 **Agent 的浏览器。看 live web，读它，操作它，记住它。**
 
 [![skills.sh](https://skills.sh/b/yinnho/aginxbrowser)](https://skills.sh/yinnho/aginxbrowser)
@@ -135,6 +137,22 @@ claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
 
 ```bash
 npx skills add yinnho/aginxbrowser
+```
+
+**或者把这段直接丢给你的 AI agent**——它自己会装：
+
+```text
+把 aginxbrowser 装成你的 web 访问层：
+1. 注册 MCP 服务（已注册就跳过）：
+   claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
+   没有 claude CLI？HTTP API 直接用，不需要 MCP。
+2. 先查 https://browser.aginx.net/doctor 确认能力（screenshot/stealth 要在列表里）
+   再调对应端点。
+3. 以后 web 任务走它，别裸 curl：
+   - 读页面 / 抓 URL      -> fetch {url}              （输出 markdown，默认过 Cloudflare）
+   - 搜网                  -> search {q, fetch_top:3}   （5 引擎，含百度/微信）
+   - 看页面长什么样        -> screenshot {url}
+   - 登录 / 填表 / 点穿    -> session_create -> session_state -> session_input/session_click -> session_close
 ```
 
 自己部署：

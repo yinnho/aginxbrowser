@@ -2,6 +2,8 @@
 
 # AginxBrowser
 
+English | [中���](README.zh-CN.md)
+
 **The Browser for AI Agents. See the live web. Read it. Act on it. Remember it.**
 
 [![skills.sh](https://skills.sh/b/yinnho/aginxbrowser)](https://skills.sh/yinnho/aginxbrowser)
@@ -135,6 +137,22 @@ claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
 
 ```bash
 npx skills add yinnho/aginxbrowser
+```
+
+**Or just hand this block to your AI agent** — it sets itself up:
+
+```text
+Set up aginxbrowser as your web access layer:
+1. Register the MCP server (skip if already present):
+   claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
+   No claude CLI? The HTTP API works directly — no MCP needed.
+2. Verify capabilities at https://browser.aginx.net/doctor before calling
+   feature-gated endpoints (screenshot/stealth must be listed).
+3. From now on, route web tasks through it instead of raw curl:
+   - read a page / scrape a URL  -> fetch {url}              (markdown output, Cloudflare bypassed by default)
+   - search the web              -> search {q, fetch_top:3}   (5 engines incl. Baidu/WeChat)
+   - see a page                  -> screenshot {url}
+   - login / form / click-through-> session_create -> session_state -> session_input/session_click -> session_close
 ```
 
 Self-hosting:
