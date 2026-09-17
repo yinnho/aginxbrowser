@@ -321,12 +321,85 @@
         );
     }
 
-    /// Computed-style property reads must resolve through the lookup chain
-    /// (inline → bounding-rect geometry → defaults), not get short-circuited
-    /// by element.style's named-property surface: that surface claims every
-    /// CSS property, so the Proxy's `prop in target` branch answered ''
-    /// for width while getBoundingClientRect reported real geometry — the
-    /// exact read react-virtuoso-style libraries branch on.
+    /// Issue #31: public interface members must live on the PROTOTYPE as
+    /// enumerable accessor pairs — instances carry nothing. In Chrome
+    /// `Object.keys(new WebSocket(...))` is `[]` and
+    /// `Object.keys(WebSocket.prototype)` holds the 15 interface members;
+    /// our shims used to put publics (url, readyState, onopen, ...) on the
+    /// instance as plain data props, so both faces fingerprinted wrong.
+    /// The constructors keep their `this.x = ...` writes — those now route
+    /// through the prototype setters into hidden `_x` fields.
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn public_members_live_on_the_prototype() {
+        let mut rt = setup_runtime("<html><body><div id='t'>x</div></body></html>");
+        let out = rt.evaluate(r#"
+            var ws = new WebSocket('ws://127.0.0.1:1/unreachable');
+            var rs = new ReadableStream({ start: function(c){ c.enqueue('a'); } });
+            var wst = new WritableStream();
+            var rLock = [];
+            rLock.push(rs.locked);
+            var rd = rs.getReader(); rLock.push(rs.locked);
+            rd.releaseLock(); rLock.push(rs.locked);
+            var wLock = [];
+            wLock.push(wst.locked);
+            var wr = wst.getWriter(); wLock.push(wst.locked);
+            wr.releaseLock(); wLock.push(wst.locked);
+            var fired = 0;
+            ws.addEventListener('error', function(){ fired++; });
+            ws.dispatchEvent({ type: 'error' });
+            return JSON.stringify({
+                inst: [
+                    Object.keys(new FileReader()),
+                    Object.keys(ws),
+                    Object.keys(new EventSource('/x')),
+                    Object.keys(new BroadcastChannel('t')),
+                    Object.keys(new ReadableStream()),
+                    Object.keys(wst),
+                ],
+                wsProto: Object.keys(WebSocket.prototype),
+                rLock: rLock, wLock: wLock,
+                wsWrite: (function(){ ws.readyState = 3; return ws.readyState; })(),
+                fired: fired,
+                desc: (function(){
+                    var d = Object.getOwnPropertyDescriptor(
+                        WebSocket.prototype, 'readyState');
+                    return !!(d && d.get && d.set && d.enumerable);
+                })(),
+            });
+        "#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        // All six instance faces are empty — the Chrome face.
+        for (i, face) in v["inst"].as_array().unwrap().iter().enumerate() {
+            assert_eq!(
+                face, &serde_json::json!([]),
+                "instance face {i} must be [] (publics belong on the prototype)"
+            );
+        }
+        // WebSocket.prototype carries exactly Chrome's 15 members.
+        assert_eq!(
+            v["wsProto"],
+            serde_json::json!([
+                "send", "close",
+                "url", "readyState", "bufferedAmount", "binaryType",
+                "extensions", "protocol",
+                "onopen", "onmessage", "onerror", "onclose",
+                "addEventListener", "removeEventListener", "dispatchEvent",
+            ]),
+            "WebSocket.prototype member set must match Chrome"
+        );
+        // Lock semantics survive the prototype-getter conversion.
+        assert_eq!(v["rLock"], serde_json::json!([false, true, false]));
+        assert_eq!(v["wLock"], serde_json::json!([false, true, false]));
+        // Ctor-style public writes route through the setter (no throw).
+        assert_eq!(v["wsWrite"], serde_json::json!(3));
+        // Prototype listener methods actually fire.
+        assert_eq!(v["fired"], serde_json::json!(1));
+        // The accessors are enumerable getter/setter pairs on the prototype.
+        assert_eq!(v["desc"], serde_json::json!(true));
+    }
+
+
     #[cfg(feature = "screenshot")]
     #[test]
     fn computed_style_width_resolves_past_the_inline_surface() {

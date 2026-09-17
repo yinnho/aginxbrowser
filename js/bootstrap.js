@@ -220,6 +220,47 @@ function __hideOwn(o) {
   }
   return o;
 }
+// (#31) Web IDL exposes public attributes on the PROTOTYPE as accessor pairs;
+// instances carry nothing (Object.keys(new WebSocket(...)) is [] in Chrome).
+// Constructors keep their plain `this.x = ...` writes — those route through
+// the setters below and land in hidden `_x` fields, so both faces match.
+function __acc(C, names) {
+  for (const k of names) {
+    const priv = '_' + k;
+    Object.defineProperty(C.prototype, k, {
+      get() { return this[priv]; },
+      set(v) { __def(this, priv, v); },
+      configurable: true,
+      enumerable: true,
+    });
+  }
+}
+// Minimal EventTarget surface for socket-like shims: one Map per instance,
+// methods on the prototype (never own instance props — #31). These don't
+// extend the real EventTarget — it sits above Node in the chain and would
+// drag DOM-tree assumptions into a WebSocket.
+function __lboxProto(C) {
+  Object.assign(C.prototype, {
+    addEventListener(type, fn) {
+      if (typeof fn !== 'function') return;
+      let b = this._lbox.get(type);
+      if (!b) { b = []; this._lbox.set(type, b); }
+      b.push(fn);
+    },
+    removeEventListener(type, fn) {
+      const b = this._lbox.get(type);
+      if (!b) return;
+      const i = b.indexOf(fn);
+      if (i >= 0) b.splice(i, 1);
+    },
+    dispatchEvent(event) {
+      const b = this._lbox.get(event && event.type);
+      if (!b) return true;
+      for (const fn of b.slice()) { try { fn.call(this, event); } catch (e) {} }
+      return true;
+    },
+  });
+}
 
 function _markNative(fn) { if (typeof fn === 'function') _nativeFns.add(fn); return fn; }
 // Mark every method AND accessor on a shim prototype as native. Lie
@@ -12529,7 +12570,7 @@ if (typeof ReadableStream === 'undefined') {
   globalThis.ReadableStream = class ReadableStream {
     constructor(source = {}, strategy = {}) {
       this._source = source; this._queue = []; this._closed = false; this._errored = null;
-      this.locked = false; this._pullBusy = false; this._pendingReads = [];
+      this._locked = false; this._pullBusy = false; this._pendingReads = [];
       const stream = this;
       this._controller = {
         enqueue: (chunk) => {
@@ -12561,8 +12602,9 @@ if (typeof ReadableStream === 'undefined') {
       }
       __hideOwn(this);
     }
+    get locked() { return this._locked; }
     getReader() {
-      this.locked = true;
+      this._locked = true;
       const stream = this;
       return {
         read() {
@@ -12596,7 +12638,7 @@ if (typeof ReadableStream === 'undefined') {
             stream._pendingReads.push({ resolve, reject });
           });
         },
-        releaseLock() { stream.locked = false; },
+        releaseLock() { stream._locked = false; },
         cancel() {
           stream._closed = true;
           if (stream._source.cancel) { try { stream._source.cancel(); } catch (e) {} }
@@ -12651,15 +12693,16 @@ if (typeof ReadableStream === 'undefined') {
 }
 if (typeof WritableStream === 'undefined') {
   globalThis.WritableStream = class WritableStream {
-    constructor(sink = {}) { this._sink = sink; this.locked = false;  __hideOwn(this);}
+    constructor(sink = {}) { this._sink = sink; this._locked = false;  __hideOwn(this);}
+    get locked() { return this._locked; }
     getWriter() {
-      this.locked = true;
+      this._locked = true;
       const stream = this;
       return {
         write(chunk) { if (stream._sink.write) stream._sink.write(chunk); return Promise.resolve(); },
         close() { if (stream._sink.close) stream._sink.close(); return Promise.resolve(); },
         abort() { return Promise.resolve(); },
-        releaseLock() { stream.locked = false; },
+        releaseLock() { stream._locked = false; },
         get ready() { return Promise.resolve(); },
         get closed() { return Promise.resolve(); },
         get desiredSize() { return 1; },
@@ -13137,6 +13180,8 @@ if (typeof FileReader === 'undefined') {
   };
   globalThis.FileReader.EMPTY = 0; globalThis.FileReader.LOADING = 1; globalThis.FileReader.DONE = 2;
   Object.assign(globalThis.FileReader.prototype, { EMPTY: 0, LOADING: 1, DONE: 2 });
+  __acc(globalThis.FileReader, ['result', 'error', 'readyState',
+    'onloadstart', 'onprogress', 'onload', 'onabort', 'onerror', 'onloadend']);
 }
 
 // Real network sockets aren't implemented; we don't have a runtime WS / SSE
@@ -13146,34 +13191,6 @@ if (typeof FileReader === 'undefined') {
 // forever otherwise. Fire `open` after a microtask so the consumer at least
 // proceeds; subsequent messages never arrive, which is no worse than the
 // current "no signal whatsoever" behaviour.
-// Minimal EventTarget shared by socket-like classes. Real `EventTarget`
-// sits above Node in the inheritance chain, so extending it would drag
-// DOM-tree assumptions into a `WebSocket`. Defining a private shim avoids
-// that.
-function _makeListenerBox(self) {
-  const map = new Map();
-  self.addEventListener = function (type, fn) {
-    if (typeof fn !== 'function') return;
-    let bucket = map.get(type);
-    if (!bucket) { bucket = []; map.set(type, bucket); }
-    bucket.push(fn);
-  };
-  self.removeEventListener = function (type, fn) {
-    const bucket = map.get(type);
-    if (!bucket) return;
-    const i = bucket.indexOf(fn);
-    if (i >= 0) bucket.splice(i, 1);
-  };
-  self.dispatchEvent = function (event) {
-    const bucket = map.get(event.type);
-    if (!bucket) return true;
-    for (const fn of bucket.slice()) {
-      try { fn.call(self, event); } catch (e) { /* swallow */ }
-    }
-    return true;
-  };
-}
-
 if (typeof EventSource === 'undefined') {
   globalThis.EventSource = class EventSource {
     constructor(url, init) {
@@ -13181,7 +13198,7 @@ if (typeof EventSource === 'undefined') {
       this.readyState = 0; // CONNECTING
       this.withCredentials = !!(init && init.withCredentials);
       this.onopen = null; this.onmessage = null; this.onerror = null;
-      _makeListenerBox(this);
+      this._lbox = new Map();
       Promise.resolve().then(() => {
         if (this.readyState !== 0) return;
         this.readyState = 1; // OPEN
@@ -13189,10 +13206,14 @@ if (typeof EventSource === 'undefined') {
         if (typeof this.onopen === 'function') { try { this.onopen(ev); } catch (e) {} }
         try { this.dispatchEvent(ev); } catch (e) {}
       });
+      __hideOwn(this);
     }
     close() { this.readyState = 2; }
     static CONNECTING = 0; static OPEN = 1; static CLOSED = 2;
   };
+  __acc(globalThis.EventSource, ['url', 'readyState', 'withCredentials',
+    'onopen', 'onmessage', 'onerror']);
+  __lboxProto(globalThis.EventSource);
 }
 
 if (typeof WebSocket === 'undefined') {
@@ -13234,7 +13255,7 @@ if (typeof WebSocket === 'undefined') {
       this.onopen = null; this.onmessage = null; this.onerror = null; this.onclose = null;
       this._id = undefined;
       this._terminal = false; // close event fired; no further events
-      _makeListenerBox(this);
+      this._lbox = new Map();
       const protocolsJson = JSON.stringify(list);
       Promise.resolve().then(() => {
         _OPS.op_ws_open(this.url, protocolsJson).then((raw) => {
@@ -13353,17 +13374,23 @@ if (typeof WebSocket === 'undefined') {
     }
     static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
   };
+  __acc(globalThis.WebSocket, ['url', 'readyState', 'bufferedAmount', 'binaryType',
+    'extensions', 'protocol', 'onopen', 'onmessage', 'onerror', 'onclose']);
+  __lboxProto(globalThis.WebSocket);
 }
 
 if (typeof BroadcastChannel === 'undefined') {
   globalThis.BroadcastChannel = class BroadcastChannel {
     constructor(name) {
       this.name = name; this.onmessage = null; this.onmessageerror = null;
-      _makeListenerBox(this);
+      this._lbox = new Map();
+      __hideOwn(this);
     }
     postMessage(msg) {}
     close() {}
   };
+  __acc(globalThis.BroadcastChannel, ['name', 'onmessage', 'onmessageerror']);
+  __lboxProto(globalThis.BroadcastChannel);
 }
 
 if (typeof ImageData === 'undefined') {
@@ -14523,6 +14550,8 @@ globalThis.dispatchEvent = function(event) {
     globalThis.NodeList, globalThis.HTMLCollection, globalThis.DOMTokenList,
     globalThis.CSSStyleDeclaration, globalThis.Range, globalThis.Selection,
     globalThis.Option, globalThis.FormData, globalThis.Headers, globalThis.URL,
+    globalThis.WebSocket, globalThis.EventSource, globalThis.BroadcastChannel,
+    globalThis.ReadableStream, globalThis.WritableStream,
   ]) add(C);
   for (const n of Object.getOwnPropertyNames(globalThis)) {
     if (/^(HTML|SVG)[A-Za-z]*Element$/.test(n)) add(globalThis[n]);
