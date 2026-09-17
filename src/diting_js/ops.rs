@@ -6134,20 +6134,32 @@ fn url_set_inner(href: &str, part: &str, value: &str) -> Option<serde_json::Valu
             }
         }
         "port" => {
+            // WHATWG port state consumes the leading ASCII digits and stops
+            // at the first non-digit, so "8080abc" sets 8080; no digits or a
+            // number above 65535 leaves the port untouched.
             if value.is_empty() {
                 let _ = u.set_port(None);
-            } else if let Ok(p) = value.parse::<u16>() {
-                let _ = u.set_port(Some(p));
+            } else {
+                let digits: String =
+                    value.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(p) = digits.parse::<u32>() {
+                    if p <= 65535 {
+                        let _ = u.set_port(Some(p as u16));
+                    }
+                }
             }
         }
         "pathname" => u.set_path(value),
         "search" => {
+            // Null only when the ORIGINAL value is the empty string; a bare
+            // "?" sets an empty query that still serializes its delimiter
+            // (href ends in "?").
             let q = value.strip_prefix('?').unwrap_or(value);
-            u.set_query(if q.is_empty() { None } else { Some(q) });
+            u.set_query(if value.is_empty() { None } else { Some(q) });
         }
         "hash" => {
             let f = value.strip_prefix('#').unwrap_or(value);
-            u.set_fragment(if f.is_empty() { None } else { Some(f) });
+            u.set_fragment(if value.is_empty() { None } else { Some(f) });
         }
         _ => {}
     }

@@ -4025,6 +4025,32 @@
         assert_eq!(result.as_str().unwrap(), "http://localhost:8080/dir/api.json");
     }
 
+    #[test]
+    fn url_setter_search_hash_port_edges() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // WHATWG setter semantics, verified against Chrome/ada (obscura#1008
+        // same face): a bare "?" / "#" sets an EMPTY component that still
+        // serializes its delimiter — only the empty string removes it — and
+        // the port state parser consumes the leading ASCII digits
+        // ("8080abc" → 8080) while rejecting no-digit or >65535 inputs.
+        let case = |rt: &mut JsRuntime, expr: &str| -> String {
+            rt.evaluate(expr).unwrap().as_str().unwrap().to_string()
+        };
+        // search: bare "?" keeps the delimiter (with or without a prior query)
+        assert_eq!(case(&mut rt, "(() => { const u = new URL('http://x.com/?a'); u.search = '?'; return u.href; })()"), "http://x.com/?");
+        assert_eq!(case(&mut rt, "(() => { const u = new URL('http://x.com/'); u.search = '?'; return u.href; })()"), "http://x.com/?");
+        // search: empty string removes the query entirely (no bare "?")
+        assert_eq!(case(&mut rt, "(() => { const u = new URL('http://x.com/?a'); u.search = ''; return u.href; })()"), "http://x.com/");
+        // hash mirrors search
+        assert_eq!(case(&mut rt, "(() => { const u = new URL('http://x.com/#f'); u.hash = '#'; return u.href; })()"), "http://x.com/#");
+        assert_eq!(case(&mut rt, "(() => { const u = new URL('http://x.com/#f'); u.hash = ''; return u.href; })()"), "http://x.com/");
+        // port: leading digits win, no-digit / overflow inputs are ignored
+        assert_eq!(case(&mut rt, "(() => { const u = new URL('http://x.com:9/'); u.port = '8080abc'; return u.href; })()"), "http://x.com:8080/");
+        assert_eq!(case(&mut rt, "(() => { const u = new URL('http://x.com:9/'); u.port = '99999'; return u.href; })()"), "http://x.com:9/");
+        assert_eq!(case(&mut rt, "(() => { const u = new URL('http://x.com:9/'); u.port = 'abc'; return u.href; })()"), "http://x.com:9/");
+        assert_eq!(case(&mut rt, "(() => { const u = new URL('http://x.com:9/'); u.port = ''; return u.href; })()"), "http://x.com/");
+    }
+
     // Blob URLs must look like Chrome's: `blob:<document origin>/<uuid>`.
     // The pre-rename engine handed out `blob:obscura/<base36>`, so a page
     // reading back its own blob URL (a Worker's script URL, an anchor href,
