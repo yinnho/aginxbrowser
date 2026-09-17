@@ -9801,18 +9801,31 @@ function _htmlInterface(name, tags, attrs) {
     },
     configurable: true,
   });
-  // (#32/#33) Legacy reflected attributes ([Reflect] DOMString; div/p/h*
-  // align, body color family, table family). Getter: absent content attr
+  // (#32/#33/#34) Legacy reflected attributes ([Reflect] DOMString; div/p/h*
+  // align, body color family, table families). Getter: absent content attr
   // -> "" (className precedent). Setter null handling is the only thing
   // [LegacyNullToEmptyString] changes — entries are either a plain name
-  // (null -> "null") or {name, nullEmpty} for the legacy-color trio style
-  // (null -> ""). undefined -> "undefined" in both modes.
+  // (null -> "null") or an object: {name, nullEmpty} (null -> ""),
+  // {name, attr} when the IDL name differs from the content-attr name
+  // (ch -> "char"), {name, boolean} for reflected booleans (presence is
+  // the bit; setter true -> empty value, false -> removeAttribute).
+  // undefined -> "undefined" for the string modes.
   for (const a of attrs || []) {
     const an = typeof a === 'string' ? a : a.name;
+    const cn = (a !== null && typeof a === 'object' && a.attr) || an;
+    if (a !== null && typeof a === 'object' && a.boolean) {
+      Object.defineProperty(C.prototype, an, {
+        get() { return this.hasAttribute(cn); },
+        set(v) { if (v) this.setAttribute(cn, ''); else this.removeAttribute(cn); },
+        configurable: true,
+        enumerable: true,
+      });
+      continue;
+    }
     const nullEmpty = a !== null && typeof a === 'object' && a.nullEmpty;
     Object.defineProperty(C.prototype, an, {
-      get() { const v = this.getAttribute(an); return v === null ? '' : v; },
-      set(v) { this.setAttribute(an, v === null && nullEmpty ? '' : String(v)); },
+      get() { const v = this.getAttribute(cn); return v === null ? '' : v; },
+      set(v) { this.setAttribute(cn, v === null && nullEmpty ? '' : String(v)); },
       configurable: true,
       enumerable: true,
     });
@@ -9929,9 +9942,19 @@ globalThis.HTMLTableElement = _htmlInterface('HTMLTableElement', ['table'], [
   { name: 'cellPadding', nullEmpty: true },
   { name: 'cellSpacing', nullEmpty: true },
 ]);
-globalThis.HTMLTableRowElement = _htmlInterface('HTMLTableRowElement', ['tr']);
-globalThis.HTMLTableCellElement = _htmlInterface('HTMLTableCellElement', ['td', 'th']);
-globalThis.HTMLTableSectionElement = _htmlInterface('HTMLTableSectionElement', ['thead', 'tbody', 'tfoot']);
+globalThis.HTMLTableRowElement = _htmlInterface('HTMLTableRowElement', ['tr'], [
+  'align', { name: 'ch', attr: 'char' }, { name: 'chOff', attr: 'charoff' },
+  'vAlign', { name: 'bgColor', nullEmpty: true },
+]);
+globalThis.HTMLTableCellElement = _htmlInterface('HTMLTableCellElement', ['td', 'th'], [
+  'align', 'axis', 'height', 'width',
+  { name: 'ch', attr: 'char' }, { name: 'chOff', attr: 'charoff' },
+  { name: 'noWrap', boolean: true }, 'vAlign',
+  { name: 'bgColor', nullEmpty: true },
+]);
+globalThis.HTMLTableSectionElement = _htmlInterface('HTMLTableSectionElement', ['thead', 'tbody', 'tfoot'], [
+  'align', { name: 'ch', attr: 'char' }, { name: 'chOff', attr: 'charoff' }, 'vAlign',
+]);
 globalThis.HTMLTableCaptionElement = _htmlInterface('HTMLTableCaptionElement', ['caption']);
 globalThis.HTMLOptGroupElement = _htmlInterface('HTMLOptGroupElement', ['optgroup']);
 globalThis.HTMLIFrameElement = _htmlInterface('HTMLIFrameElement', ['iframe']);

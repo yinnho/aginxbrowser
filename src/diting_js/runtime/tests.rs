@@ -526,6 +526,82 @@
             "absent attribute -> empty string getter");
     }
 
+    #[test]
+    fn reflected_table_section_row_cell_families() {
+        let mut rt = setup_runtime(
+            "<html><body><table><thead char='.' charoff='2'><tr><th>H</th></tr></thead>\
+             <tbody align='center' valign='top'><tr><td nowrap axis='name'>x</td></tr></tbody>\
+             </table></body></html>",
+        );
+        let out = rt.evaluate(r#"
+            var thead = document.querySelector('thead');
+            var td = document.querySelector('td');
+            var sec = document.createElement('tbody'), row = document.createElement('tr');
+            var cell = document.createElement('td');
+            sec.ch = '.'; sec.chOff = '3'; sec.align = 'left'; sec.vAlign = 'bottom';
+            row.ch = '|'; row.bgColor = '#eee';
+            cell.axis = 'ax'; cell.width = '30';
+            var secNull = (sec.align = null, sec.getAttribute('align'));
+            var rowBgNull = (row.bgColor = null, row.getAttribute('bgcolor'));
+            var nw = document.createElement('td');
+            var nwAbsent = nw.noWrap;
+            nw.noWrap = true;
+            var nwTrueAttr = nw.getAttribute('nowrap');
+            var nwTrueGet = nw.noWrap;
+            nw.noWrap = '0';
+            var nwStringZero = nw.noWrap;
+            nw.noWrap = false;
+            var nwAfterFalse = [nw.hasAttribute('nowrap'), nw.noWrap];
+            return JSON.stringify({
+                faces: [Object.keys(HTMLTableSectionElement.prototype).sort(),
+                        Object.keys(HTMLTableRowElement.prototype).sort(),
+                        Object.keys(HTMLTableCellElement.prototype).sort()],
+                parsed: [thead.ch, thead.chOff, td.noWrap, td.axis,
+                         document.querySelector('tbody').align,
+                         document.querySelector('tbody').vAlign],
+                secAttrs: [sec.getAttribute('char'), sec.getAttribute('charoff'),
+                           sec.getAttribute('valign')],
+                rowAttrs: [row.getAttribute('char')],
+                cellAttrs: [cell.getAttribute('axis'), cell.getAttribute('width')],
+                attrToProp: (sec.setAttribute('char', '!'), sec.ch),
+                nullModes: [secNull, rowBgNull],
+                nw: [nwAbsent, nwTrueAttr, nwTrueGet, nwStringZero, nwAfterFalse],
+            });
+        "#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        let faces = v["faces"].as_array().unwrap();
+        assert_eq!(faces[0], serde_json::json!(["align", "ch", "chOff", "vAlign"]),
+            "section prototype face");
+        assert_eq!(
+            faces[1],
+            serde_json::json!(["align", "bgColor", "cells", "ch", "chOff",
+                               "rowIndex", "sectionRowIndex", "vAlign"]),
+            "row prototype face: legacy five + the DOM members"
+        );
+        assert_eq!(
+            faces[2],
+            serde_json::json!(["align", "axis", "bgColor", "cellIndex", "ch",
+                               "chOff", "height", "noWrap", "vAlign", "width"]),
+            "cell prototype face"
+        );
+        assert_eq!(
+            v["parsed"], serde_json::json!([".", "2", true, "name", "center", "top"]),
+            "parsed-in markup reads through the accessors (char/charoff/nowrap/axis/align/valign)"
+        );
+        assert_eq!(v["secAttrs"], serde_json::json!([".", "3", "bottom"]),
+            "ch/chOff write the char/charoff content attributes");
+        assert_eq!(v["rowAttrs"], serde_json::json!(["|"]));
+        assert_eq!(v["cellAttrs"], serde_json::json!(["ax", "30"]));
+        assert_eq!(v["attrToProp"], serde_json::json!("!"), "char attr write -> ch read");
+        assert_eq!(v["nullModes"], serde_json::json!(["null", ""]),
+            "plain align -> \"null\"; nullEmpty bgColor -> \"\"");
+        assert_eq!(
+            v["nw"],
+            serde_json::json!([false, "", true, true, [false, false]]),
+            "boolean reflect: absent false; true -> empty-valued attribute; '0' -> true; false -> removed"
+        );
+    }
+
 
     #[cfg(feature = "screenshot")]
     #[test]
