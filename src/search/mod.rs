@@ -715,7 +715,7 @@ pub fn build_android_stealth_client(
     let client = crate::diting_net::wreq_client::StealthHttpClient::with_proxy_and_os(
         cookie_jar,
         proxy_url.as_deref(),
-        Some(wreq_util::EmulationOS::Android),
+        Some(wreq_util::Platform::Android),
     );
     Arc::new(client)
 }

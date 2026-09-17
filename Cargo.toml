@@ -130,7 +130,7 @@ schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 
 # --- docgen (render_markdown): markdown event stream + HTML emission ---
 # Parser-only infrastructure (html5ever precedent); diagram vocabulary and
@@ -193,7 +193,7 @@ getrandom = "0.2"
 # between builds; a caret requirement could pull an incompatible rc and break.
 # prefix-symbols renames BoringSSL exports to avoid clashing with system OpenSSL,
 # but the renaming is only correct on Linux/Android (per wreq's README).
-wreq-util = { version = "=3.0.0-rc.10", optional = true }
+wreq-util = { version = "=3.0.0-rc.14", optional = true }
 
 # --- blitz reference pipeline (opt-in via `blitz-reference` feature) ---
 # NOT part of `screenshot`: production/device builds stop at diting and
@@ -231,10 +231,10 @@ image = { version = "0.25", optional = true, default-features = false, features 
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
-wreq = { version = "=6.0.0-rc.28", optional = true, features = ["prefix-symbols", "socks", "gzip", "brotli", "deflate", "zstd"] }
+wreq = { version = "=6.0.0-rc.31", optional = true, features = ["prefix-symbols", "socks", "gzip", "brotli", "deflate", "zstd"] }
 
 [target.'cfg(not(any(target_os = "linux", target_os = "android")))'.dependencies]
-wreq = { version = "=6.0.0-rc.28", optional = true, features = ["socks", "gzip", "brotli", "deflate", "zstd"] }
+wreq = { version = "=6.0.0-rc.31", optional = true, features = ["socks", "gzip", "brotli", "deflate", "zstd"] }
 
 [build-dependencies]
 deno_core = "0.411"

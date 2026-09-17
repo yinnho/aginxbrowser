@@ -27,21 +27,24 @@ pub const STEALTH_USER_AGENT: &str =
 #[cfg(feature = "stealth")]
 pub const DEFAULT_TLS_FINGERPRINT: &str = "chrome145";
 
-/// Map a user-friendly TLS fingerprint name to a wreq `Emulation` variant.
-/// Accepted values (case-insensitive): "chrome145"/"chrome", "chrome131",
-/// "firefox133"/"firefox", "firefox147", "safari17_5"/"safari", "safari18",
-/// "edge145"/"edge". Returns None for unknown names (caller falls back to
-/// Chrome145). Only meaningful when the `stealth` feature is enabled.
+/// Map a user-friendly TLS fingerprint name to a wreq-util `Profile`
+/// variant. Accepted values (case-insensitive): "chrome145"/"chrome",
+/// "chrome131", "firefox133"/"firefox", "firefox147", "safari17_5"/"safari",
+/// "safari18", "edge145"/"edge". Returns None for unknown names (caller falls
+/// back to Chrome145). Only meaningful when the `stealth` feature is enabled.
+/// (rc.28→rc.31: this used to return an `Emulation` variant directly; the
+/// flat enum is now `Profile`, and `Emulation` is the profile+platform
+/// builder passed to `ClientBuilder::emulation`.)
 #[cfg(feature = "stealth")]
-pub fn parse_tls_fingerprint(s: &str) -> Option<wreq_util::Emulation> {
+pub fn parse_tls_fingerprint(s: &str) -> Option<wreq_util::Profile> {
     match s.to_ascii_lowercase().as_str() {
-        "chrome145" | "chrome" => Some(wreq_util::Emulation::Chrome145),
-        "chrome131" => Some(wreq_util::Emulation::Chrome131),
-        "firefox133" | "firefox" => Some(wreq_util::Emulation::Firefox133),
-        "firefox147" => Some(wreq_util::Emulation::Firefox147),
-        "safari17_5" | "safari" => Some(wreq_util::Emulation::Safari17_5),
-        "safari18" => Some(wreq_util::Emulation::Safari18),
-        "edge145" | "edge" => Some(wreq_util::Emulation::Edge145),
+        "chrome145" | "chrome" => Some(wreq_util::Profile::Chrome145),
+        "chrome131" => Some(wreq_util::Profile::Chrome131),
+        "firefox133" | "firefox" => Some(wreq_util::Profile::Firefox133),
+        "firefox147" => Some(wreq_util::Profile::Firefox147),
+        "safari17_5" | "safari" => Some(wreq_util::Profile::Safari17_5),
+        "safari18" => Some(wreq_util::Profile::Safari18),
+        "edge145" | "edge" => Some(wreq_util::Profile::Edge145),
         _ => None,
     }
 }
@@ -50,17 +53,17 @@ pub fn parse_tls_fingerprint(s: &str) -> Option<wreq_util::Emulation> {
 /// fingerprint's platform (JA3 is OS-specific) must match the UA the
 /// transport sends — "shape coherence".
 #[cfg(feature = "stealth")]
-pub fn emulation_os_for_ua(ua: &str) -> wreq_util::EmulationOS {
+pub fn emulation_os_for_ua(ua: &str) -> wreq_util::Platform {
     if ua.contains("Windows") {
-        wreq_util::EmulationOS::Windows
+        wreq_util::Platform::Windows
     } else if ua.contains("Macintosh") || ua.contains("Mac OS X") {
-        wreq_util::EmulationOS::MacOS
+        wreq_util::Platform::MacOS
     } else if ua.contains("Android") {
-        wreq_util::EmulationOS::Android
+        wreq_util::Platform::Android
     } else if ua.contains("iPhone") || ua.contains("iPad") {
-        wreq_util::EmulationOS::IOS
+        wreq_util::Platform::IOS
     } else {
-        wreq_util::EmulationOS::Linux
+        wreq_util::Platform::Linux
     }
 }
 
@@ -213,31 +216,9 @@ impl StealthHttpClient {
     /// to use Android TLS fingerprints for GSA User-Agent requests.
     fn build_stealth_client_with_os(
         proxy_url: Option<&str>,
-        os_override: Option<wreq_util::EmulationOS>,
-        emulation: wreq_util::Emulation,
+        os_override: Option<wreq_util::Platform>,
+        emulation: wreq_util::Profile,
     ) -> wreq::Client {
-        // Honor SSL_CERT_FILE / SSL_CERT_DIR (opt-in only): when set, load
-        // those CA roots instead of the bundled defaults, so hosts behind a
-        // private/national CA verify on the stealth path too. Unset keeps the
-        // previous behavior byte-for-byte.
-        let cert_store = if crate::diting_net::client::custom_cert_store_requested(
-            std::env::var_os("SSL_CERT_FILE").as_deref(),
-            std::env::var_os("SSL_CERT_DIR").as_deref(),
-        ) {
-            match wreq::tls::CertStore::builder().set_default_paths().build() {
-                Ok(store) => store,
-                Err(e) => {
-                    tracing::warn!(
-                        "SSL_CERT_FILE/SSL_CERT_DIR set but cert store failed to build ({}); using default roots",
-                        e
-                    );
-                    wreq::tls::CertStore::default()
-                }
-            }
-        } else {
-            wreq::tls::CertStore::default()
-        };
-
         let os = if let Some(os) = os_override {
             os
         } else {
@@ -249,9 +230,9 @@ impl StealthHttpClient {
             emulation_os_for_ua(&std::env::var("AGINXBROWSER_UA").unwrap_or_default())
         };
 
-        let emulation_opts = wreq_util::EmulationOption::builder()
-            .emulation(emulation)
-            .emulation_os(os)
+        let emulation_opts = wreq_util::Emulation::builder()
+            .profile(emulation)
+            .platform(os)
             .build();
 
         // .no_proxy() disables wreq's implicit env/system proxy matcher
@@ -261,9 +242,29 @@ impl StealthHttpClient {
         let mut builder = wreq::Client::builder()
             .no_proxy()
             .emulation(emulation_opts)
-            .cert_store(cert_store)
             .timeout(Duration::from_secs(30))
             .redirect(wreq::redirect::Policy::none());
+
+        // Honor SSL_CERT_FILE / SSL_CERT_DIR (opt-in only): when set, wire a
+        // cert store loaded from those paths, so hosts behind a private/
+        // national CA verify on the stealth path too. Unset (or a failed
+        // build) keeps wreq's bundled default roots — leaving
+        // `tls_cert_store` unset IS the default, so not calling it is
+        // byte-for-byte the old `CertStore::default()` behavior.
+        if crate::diting_net::client::custom_cert_store_requested(
+            std::env::var_os("SSL_CERT_FILE").as_deref(),
+            std::env::var_os("SSL_CERT_DIR").as_deref(),
+        ) {
+            match wreq::tls::trust::CertStore::builder().set_default_paths().build() {
+                Ok(store) => builder = builder.tls_cert_store(store),
+                Err(e) => {
+                    tracing::warn!(
+                        "SSL_CERT_FILE/SSL_CERT_DIR set but cert store failed to build ({}); using default roots",
+                        e
+                    );
+                }
+            }
+        }
 
         if let Some(proxy) = proxy_url {
             // Proxy::all intercepts both http and https requests. Proxy::http
@@ -291,13 +292,13 @@ impl StealthHttpClient {
     pub fn with_proxy_and_os(
         cookie_jar: Arc<CookieJar>,
         proxy_url: Option<&str>,
-        os_override: Option<wreq_util::EmulationOS>,
+        os_override: Option<wreq_util::Platform>,
     ) -> Self {
         Self::with_proxy_and_emulation(
             cookie_jar,
             proxy_url,
             os_override,
-            parse_tls_fingerprint(DEFAULT_TLS_FINGERPRINT).unwrap_or(wreq_util::Emulation::Chrome145),
+            parse_tls_fingerprint(DEFAULT_TLS_FINGERPRINT).unwrap_or(wreq_util::Profile::Chrome145),
         )
     }
 
@@ -307,8 +308,8 @@ impl StealthHttpClient {
     pub fn with_proxy_and_emulation(
         cookie_jar: Arc<CookieJar>,
         proxy_url: Option<&str>,
-        os_override: Option<wreq_util::EmulationOS>,
-        emulation: wreq_util::Emulation,
+        os_override: Option<wreq_util::Platform>,
+        emulation: wreq_util::Profile,
     ) -> Self {
         let proxied_client = proxy_url.map(|_| Self::build_stealth_client_with_os(proxy_url, os_override, emulation));
         let direct_client = Self::build_stealth_client_with_os(None, os_override, emulation);

@@ -1,0 +1,45 @@
+# Full test suite + feature-combination compile gates on every PR/push.
+# Before this existed, PRs (dependabot included) ran only a 36s scan job —
+# a "green" check carried zero test signal, and a Cargo.toml bump that broke
+# `cargo metadata` resolution would have merged clean (see the wreq dual
+# target-section pin incident, 2026-09).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: cargo test --features screenshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-screenshot
+      - name: Test
+        run: cargo test --features screenshot
+
+  check-stealth:
+    # wreq lives behind `stealth` and is exact-pinned (`=`) in TWO target
+    # sections — the only combination that compiles the BoringSSL/btls path
+    # and the one a single-section dependabot bump silently breaks.
+    name: cargo check --features stealth,screenshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: check-stealth
+      - name: Check
+        run: cargo check --features stealth,screenshot

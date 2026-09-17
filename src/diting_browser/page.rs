@@ -333,7 +333,7 @@ impl Page {
                 .tls_fingerprint
                 .as_deref()
                 .and_then(crate::diting_net::parse_tls_fingerprint)
-                .unwrap_or(wreq_util::Emulation::Chrome145);
+                .unwrap_or(wreq_util::Profile::Chrome145);
             // Single source of truth for the page's identity: the context's
             // resolved UA drives every surface. Left to itself the stealth
             // client falls back to AGINXBROWSER_UA / a Linux default, which
