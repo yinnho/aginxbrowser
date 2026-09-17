@@ -290,6 +290,91 @@
         assert_eq!(gcs("n", "fontVariantCaps"), serde_json::json!("normal"), "unset computes to normal");
     }
 
+    /// moli#282: an @container condition must answer against the nearest
+    /// container ancestor's solved geometry — the arm styles the element when
+    /// the container is wide enough, not when it is narrow or absent. Before
+    /// this batch the arms parsed but never matched, exactly moli's repro.
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn container_query_gates_by_container_geometry() {
+        let mut rt = setup_runtime(
+            "<html><head><style>\
+             #cqbox { container-type: inline-size; width: 300px; }\
+             .inner { color: rgb(0, 0, 255); }\
+             @container (min-width: 200px) { .inner { color: rgb(255, 0, 0); } }\
+             </style></head><body>\
+             <div id='cqbox'><div class='inner' id='i1'>x</div></div>\
+             <div style='width: 100px; container-type: inline-size'><div class='inner' id='i2'>y</div></div>\
+             <div class='inner' id='i3'>z</div>\
+             </body></html>",
+        );
+        let out = rt
+            .evaluate(
+                "['i1','i2','i3'].map(id => getComputedStyle(document.getElementById(id)).color).join('|')",
+            )
+            .unwrap();
+        assert_eq!(
+            out,
+            serde_json::json!("rgb(255, 0, 0)|rgb(0, 0, 255)|rgb(0, 0, 255)"),
+            "300px container passes min-width:200px; the 100px container and the container-less element do not"
+        );
+        // The container properties themselves read back through gCS.
+        let face = rt
+            .evaluate(
+                "[getComputedStyle(document.getElementById('cqbox')).containerType,\
+                  getComputedStyle(document.getElementById('i1')).containerType,\
+                  getComputedStyle(document.getElementById('i1')).containerName].join('|')",
+            )
+            .unwrap();
+        assert_eq!(face, serde_json::json!("inline-size|normal|none"));
+    }
+
+    /// Container-query units bake against the answering container's border
+    /// box: 10cqw of a 300px container is 30px.
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn container_query_units_bake_against_container_size() {
+        let mut rt = setup_runtime(
+            "<html><head><style>\
+             #cqbox { container-type: inline-size; width: 300px; }\
+             @container (min-width: 10px) { #p { padding-left: 10cqw; } }\
+             </style></head><body><div id='cqbox'><div id='p'>x</div></div></body></html>",
+        );
+        assert_eq!(
+            rt.evaluate("getComputedStyle(document.getElementById('p')).paddingLeft").unwrap(),
+            serde_json::json!("30px"),
+        );
+    }
+
+    /// A named @container answers only against containers carrying the name:
+    /// a NEARER anonymous container must not satisfy it — the lookup walks
+    /// up to the named one (here 400px wide, so the 200px condition fires).
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn container_query_named_walks_past_nearer_anonymous() {
+        let mut rt = setup_runtime(
+            "<html><head><style>\
+             .item { color: rgb(0, 0, 255); }\
+             @container side (min-width: 200px) { .item { color: rgb(255, 0, 0); } }\
+             </style></head><body>\
+             <div style='container-type: inline-size; container-name: side; width: 400px'>\
+               <div style='container-type: inline-size; width: 100px'><div class='item' id='a'>x</div></div>\
+             </div>\
+             <div style='container-type: inline-size; width: 400px'><div class='item' id='b'>y</div></div>\
+             </body></html>",
+        );
+        let out = rt
+            .evaluate(
+                "['a','b'].map(id => getComputedStyle(document.getElementById(id)).color).join('|')",
+            )
+            .unwrap();
+        assert_eq!(
+            out,
+            serde_json::json!("rgb(255, 0, 0)|rgb(0, 0, 255)"),
+            "a: named lookup reaches the 400px 'side' container past the nearer 100px one; b has no 'side' ancestor"
+        );
+    }
+
     /// Issue #30: engine-internal `_`-prefixed state must be invisible to
     /// enumerability. Chrome keeps DOM state in native slots —
     /// `Object.keys(div)` is `[]` there — and `for..in` walkers like zone.js's

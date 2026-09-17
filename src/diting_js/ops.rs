@@ -2079,24 +2079,74 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
         css.push('\n');
     }
     let t_css = t0.elapsed();
-    let (rules, keyframes) = crate::diting_css::parse_stylesheet_timed_with(
+    let (mut rules, keyframes, containers) = crate::diting_css::parse_stylesheet_full(
         &css,
         (viewport_width, viewport_height),
         gs.media_type,
         &gs.media_overrides,
     );
-    // Refresh the attribute-selector name pool the write path consults for
-    // inert-attribute invalidation skips (obscura#983).
-    *gs.attr_selector_names.borrow_mut() =
-        Some(crate::diting_css::collect_selector_attr_names(&rules));
     let t_parse = t0.elapsed();
-    let styles_map = crate::diting_layout::compute_styles_timed(
+    let mut styles_map = crate::diting_layout::compute_styles_timed(
         dom,
         &rules,
         &keyframes,
         gs.css_time,
         &gs.css_transitions.borrow(),
     );
+    // @container stage (moli#282): conditions answer against ancestor
+    // container geometry, which only exists after a solve — so the arms
+    // cascade in a second gated pass. Pass 1 styled the base rules; probe
+    // boxes come from the cached solve when it is fresh (any previous run's
+    // final geometry is a fine container-size estimate) and from one extra
+    // solve otherwise. Pages without @container skip all of this.
+    let mut styles_bumped = false;
+    if !containers.is_empty() {
+        let base_len = rules.len();
+        let probe_boxes = match gs.geometry_cache.borrow().as_ref() {
+            Some((e, solved)) if *e == dom.epoch() => solved.dom_boxes(),
+            _ => {
+                let fonts_probe = crate::diting_fonts::font_book();
+                let bytes_map = gs.image_bytes.borrow();
+                let network_bytes: Option<&HashMap<String, std::sync::Arc<Vec<u8>>>> =
+                    if bytes_map.is_empty() { None } else { Some(&bytes_map) };
+                let probe = crate::diting_layout::layout_solve(
+                    dom,
+                    &styles_map,
+                    &fonts_probe,
+                    viewport_width,
+                    viewport_height,
+                    network_bytes,
+                    Some(gs.url.as_str()),
+                );
+                probe.dom_boxes()
+            }
+        };
+        let plan = crate::diting_layout::container_plan(
+            dom,
+            &styles_map,
+            &probe_boxes,
+            &containers,
+            base_len,
+        );
+        if !plan.extra_rules.is_empty() {
+            rules.extend(plan.extra_rules);
+            styles_map = crate::diting_layout::compute_styles_gated(
+                dom,
+                &rules,
+                &keyframes,
+                gs.css_time,
+                &gs.css_transitions.borrow(),
+                base_len,
+                &plan.gates,
+            );
+            styles_bumped = true;
+        }
+    }
+    // Refresh the attribute-selector name pool the write path consults for
+    // inert-attribute invalidation skips (obscura#983). Sits after the
+    // container stage so @container inner rules join the pool too.
+    *gs.attr_selector_names.borrow_mut() =
+        Some(crate::diting_css::collect_selector_attr_names(&rules));
     let t_styles = t0.elapsed();
     // Finite animations span delay + duration * iterations. An endless one
     // can't pin a length on its own, so it contributes nothing unless it is
@@ -2128,11 +2178,15 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
     // structural (tree mutation, class change, image bytes landing,
     // viewport move) drops both caches and re-solves.
     let epoch = dom.epoch();
-    let reuse = gs
-        .geometry_cache
-        .borrow()
-        .as_ref()
-        .is_some_and(|(e, _)| *e == epoch);
+    // A gated container re-cascade changed styles without bumping the epoch:
+    // the cached solve (if any) was built against pass-1 styles, so it must
+    // not be reused — force the fresh solve against the final cascade.
+    let reuse = !styles_bumped
+        && gs
+            .geometry_cache
+            .borrow()
+            .as_ref()
+            .is_some_and(|(e, _)| *e == epoch);
     let solve_src = if reuse { "cached" } else { "full" };
     let (rects, items, paint_order, local_geom, sticky_spans, scroller_spans) = if reuse {
         // Borrow held only across layout_collect, which never touches
@@ -2956,6 +3010,8 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "word-spacing",
     "font-variant-caps",
     "font-variant",
+    "container-type",
+    "container-name",
     "white-space",
     "text-overflow",
     "color",
@@ -3283,6 +3339,15 @@ fn computed_style_value(
                 _ => "normal".into(),
             },
         ),
+        "container-type" => Some(
+            match s.container_type {
+                crate::diting_css::ContainerType::InlineSize => "inline-size",
+                crate::diting_css::ContainerType::Size => "size",
+                _ => "normal",
+            }
+            .into(),
+        ),
+        "container-name" => Some(s.container_name.clone().unwrap_or_else(|| "none".into())),
         "white-space" => Some(
             match s.white_space {
                 Some(crate::diting_css::WhiteSpace::Nowrap) => "nowrap",

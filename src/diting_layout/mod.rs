@@ -5081,6 +5081,22 @@ pub struct SolvedGeometry {
 }
 
 impl SolvedGeometry {
+    /// DOM-side solved border boxes (DOM id → (w, h)): the container-query
+    /// pass reads candidate container widths from here without a full
+    /// collect. Display:none nodes have no taffy box and are absent — a
+    /// missing box means "not queryable", matching the containment contract.
+    pub(crate) fn dom_boxes(&self) -> HashMap<NodeId, (f32, f32)> {
+        self.node_map
+            .iter()
+            .filter_map(|(t, d)| {
+                self.taffy_tree
+                    .layout(*t)
+                    .ok()
+                    .map(|l| (*d, (l.size.width, l.size.height)))
+            })
+            .collect()
+    }
+
     /// The empty solve the early-return paths hand back: nothing walked,
     /// nothing collected.
     fn aborted() -> Self {
@@ -7683,6 +7699,200 @@ pub fn layout_collect(
 /// fine for page-sized inputs, a matching index is future work), chains
 /// inherited properties from the parent's computed style, and applies the
 /// inline `style` attribute last.
+/// Per-element gating for `@container` arms (moli#282): the container
+/// conditions answer against the element's nearest qualifying container
+/// ancestor, which only exists after a layout pass — so the plan is built
+/// between a probe solve and the final cascade. `gates` is keyed by
+/// ABSOLUTE rule index in the extended rule slice (`container arms sit at
+/// index >= base_len`); values are ascending DOM node indexes ready for
+/// the cascade's binary-search membership test.
+pub(crate) struct ContainerPlan {
+    pub extra_rules: Vec<crate::diting_css::ParsedRule>,
+    pub gates: HashMap<usize, Vec<usize>>,
+}
+
+struct ContainerStackEntry {
+    name: Option<String>,
+    w: f32,
+    h: f32,
+}
+
+/// Evaluate every container rule's inner selectors against the tree and
+/// record which elements they reach through a passing container. Rules with
+/// container-query units (cqw/cqh/cqi/cqb) in their declarations are split
+/// per distinct container size so the units bake to concrete px per group.
+pub(crate) fn container_plan(
+    tree: &DomTree,
+    styles: &HashMap<NodeId, crate::diting_css::ComputedStyle>,
+    boxes: &HashMap<NodeId, (f32, f32)>,
+    container_rules: &[crate::diting_css::ContainerRule],
+    base_len: usize,
+) -> ContainerPlan {
+    use crate::diting_css::ContainerType;
+    let mut entries: Vec<(crate::diting_css::ParsedRule, Option<String>, Option<crate::diting_css::ContainerCondition>)> =
+        Vec::new();
+    for cr in container_rules {
+        for r in &cr.rules {
+            entries.push((r.clone(), cr.name.clone(), cr.condition.clone()));
+        }
+    }
+    if entries.is_empty() {
+        return ContainerPlan { extra_rules: Vec::new(), gates: HashMap::new() };
+    }
+    let selectors: Vec<&str> = entries.iter().map(|(r, _, _)| r.selector.as_str()).collect();
+    let sets = tree.rule_match_sets(&selectors);
+    // Per inner rule: (node index, container w, container h) in document order.
+    let mut acc: Vec<Vec<(usize, f32, f32)>> = vec![Vec::new(); entries.len()];
+    #[allow(clippy::too_many_arguments)]
+    fn dfs(
+        tree: &DomTree,
+        styles: &HashMap<NodeId, crate::diting_css::ComputedStyle>,
+        boxes: &HashMap<NodeId, (f32, f32)>,
+        sets: &crate::diting_dom::selector::RuleMatchSets,
+        entries: &[(crate::diting_css::ParsedRule, Option<String>, Option<crate::diting_css::ContainerCondition>)],
+        acc: &mut [Vec<(usize, f32, f32)>],
+        nid: NodeId,
+        stack: &mut Vec<ContainerStackEntry>,
+    ) {
+        let is_element = tree.with_node(nid, |n| n.is_element()).unwrap_or(false);
+        if is_element {
+            // The element's own container-type cannot satisfy its own query:
+            // gate evaluation runs before the self-push below.
+            if !stack.is_empty() {
+                for (ri, (_, name, condition)) in entries.iter().enumerate() {
+                    if sets
+                        .hits
+                        .get(&ri)
+                        .is_none_or(|h| h.binary_search(&nid.index()).is_err())
+                    {
+                        continue;
+                    }
+                    let target = stack.iter().rev().find(|c| {
+                        name.as_ref().is_none_or(|n| c.name.as_deref() == Some(n.as_str()))
+                    });
+                    if let Some(c) = target {
+                        if condition.as_ref().is_none_or(|cond| cond.matches(c.w, c.h)) {
+                            acc[ri].push((nid.index(), c.w, c.h));
+                        }
+                    }
+                }
+            }
+            if let Some(cs) = styles.get(&nid) {
+                if cs.container_type != ContainerType::Normal {
+                    if let Some(&(w, h)) = boxes.get(&nid) {
+                        stack.push(ContainerStackEntry { name: cs.container_name.clone(), w, h });
+                    }
+                }
+            }
+        }
+        for child in tree.children(nid) {
+            dfs(tree, styles, boxes, sets, entries, acc, child, stack);
+        }
+        if is_element {
+            if let Some(cs) = styles.get(&nid) {
+                if cs.container_type != ContainerType::Normal && boxes.contains_key(&nid) {
+                    stack.pop();
+                }
+            }
+        }
+    }
+    let mut stack = Vec::new();
+    dfs(tree, styles, boxes, &sets, &entries, &mut acc, tree.document(), &mut stack);
+
+    let mut extra_rules = Vec::new();
+    let mut gates: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (ri, (rule, _, _)) in entries.iter().enumerate() {
+        let hits = &acc[ri];
+        if hits.is_empty() {
+            continue;
+        }
+        let has_cq_units = ["cqw", "cqh", "cqi", "cqb"]
+            .iter()
+            .any(|u| rule.declarations.contains(u));
+        if !has_cq_units {
+            let idx = base_len + extra_rules.len();
+            let mut nodes: Vec<usize> = hits.iter().map(|(n, _, _)| *n).collect();
+            nodes.sort_unstable();
+            nodes.dedup();
+            extra_rules.push(rule.clone());
+            gates.insert(idx, nodes);
+        } else {
+            // Same selector may answer through different containers → the
+            // unit bake differs per container. Group by container size.
+            let mut groups: std::collections::HashMap<(i64, i64), (f32, f32, Vec<usize>)> =
+                std::collections::HashMap::new();
+            for (n, w, h) in hits {
+                let key = ((w * 100.0) as i64, (h * 100.0) as i64);
+                groups.entry(key).or_insert((*w, *h, Vec::new())).2.push(*n);
+            }
+            for (_, (w, h, mut nodes)) in groups {
+                let idx = base_len + extra_rules.len();
+                nodes.sort_unstable();
+                nodes.dedup();
+                extra_rules.push(crate::diting_css::ParsedRule {
+                    selector: rule.selector.clone(),
+                    declarations: bake_container_units(&rule.declarations, w, h),
+                });
+                gates.insert(idx, nodes);
+            }
+        }
+    }
+    ContainerPlan { extra_rules, gates }
+}
+
+/// Rewrite container-query lengths (`10cqw`, `2.5cqh`, ...) against the
+/// answering container's border box into px, so the ordinary declaration
+/// parser never sees the units. Non-container tokens (including hex colors
+/// and URLs containing digit+letter runs) pass through byte-identical.
+fn bake_container_units(text: &str, w: f32, h: f32) -> String {
+    fn push_px(out: &mut String, px: f32) {
+        if px.fract() == 0.0 && px.abs() < 1e15 {
+            out.push_str(&format!("{}px", px as i64));
+        } else {
+            out.push_str(&format!("{:.3}", px));
+            out.push_str("px");
+        }
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let num_start = c.is_ascii_digit()
+            || (c == '-' && chars.get(i + 1).is_some_and(|n| n.is_ascii_digit()))
+            || (c == '.' && chars.get(i + 1).is_some_and(|n| n.is_ascii_digit()));
+        if !num_start {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        let start = i;
+        if chars[i] == '-' {
+            i += 1;
+        }
+        while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
+            i += 1;
+        }
+        let ustart = i;
+        while i < chars.len() && chars[i].is_ascii_alphabetic() {
+            i += 1;
+        }
+        let unit: String = chars[ustart..i].iter().collect();
+        match unit.as_str() {
+            "cqw" | "cqi" => {
+                let v: f32 = chars[start..ustart].iter().collect::<String>().parse().unwrap_or(0.0);
+                push_px(&mut out, v * w / 100.0);
+            }
+            "cqh" | "cqb" => {
+                let v: f32 = chars[start..ustart].iter().collect::<String>().parse().unwrap_or(0.0);
+                push_px(&mut out, v * h / 100.0);
+            }
+            _ => out.extend(chars[start..i].iter()),
+        }
+    }
+    out
+}
+
 pub fn compute_styles(
     tree: &DomTree,
     rules: &[crate::diting_css::ParsedRule],
@@ -7713,7 +7923,9 @@ fn compute_styles_impl(
     css_time: Option<f64>,
     within_root: Option<NodeId>,
     transitions: &[crate::diting_css::CssTransition],
+    gated: Option<(usize, &HashMap<usize, Vec<usize>>)>,
 ) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
+    #[allow(clippy::too_many_arguments)]
     fn visit(
         tree: &DomTree,
         rules: &[crate::diting_css::ParsedRule],
@@ -7726,6 +7938,7 @@ fn compute_styles_impl(
         out: &mut HashMap<NodeId, crate::diting_css::ComputedStyle>,
         counters: &mut CounterState,
         depth: usize,
+        gated: Option<(usize, &HashMap<usize, Vec<usize>>)>,
     ) {
         let Some(tag) = tree
             .with_node(nid, |n| n.as_element().map(|e| e.local.to_string()))
@@ -7745,6 +7958,17 @@ fn compute_styles_impl(
                 let hits = sets.hits.get(&ri)?;
                 if hits.binary_search(&nid.index()).is_err() {
                     return None;
+                }
+                // @container arms (index >= base) cascade only on elements
+                // the container plan gated through a passing container.
+                if let Some((base, gates)) = gated {
+                    if ri >= base
+                        && gates
+                            .get(&ri)
+                            .is_none_or(|v| v.binary_search(&nid.index()).is_err())
+                    {
+                        return None;
+                    }
                 }
                 // Specificity was parsed once with the match sets above;
                 // the old per-element compile_rule_selector re-parse cost
@@ -7795,6 +8019,7 @@ fn compute_styles_impl(
                 counters,
                 depth,
                 crate::diting_dom::selector::PseudoKind::Before,
+                gated,
             );
         }
         let child_root_fs = if parent.is_none() {
@@ -7855,6 +8080,7 @@ fn compute_styles_impl(
                 out,
                 counters,
                 depth + 1,
+                gated,
             );
         }
         if !sets.pseudo_kinds.is_empty() {
@@ -7868,6 +8094,7 @@ fn compute_styles_impl(
                 counters,
                 depth,
                 crate::diting_dom::selector::PseudoKind::After,
+                gated,
             );
         }
         if pseudo_pair.before.is_some() || pseudo_pair.after.is_some() {
@@ -7892,6 +8119,7 @@ fn compute_styles_impl(
         counters: &mut CounterState,
         depth: usize,
         wanted: crate::diting_dom::selector::PseudoKind,
+        gated: Option<(usize, &HashMap<usize, Vec<usize>>)>,
     ) -> Option<crate::diting_css::ComputedStyle> {
         use crate::diting_css::ContentValue;
         use crate::diting_dom::selector::PseudoKind;
@@ -7911,6 +8139,15 @@ fn compute_styles_impl(
                     let hits = sets.pseudo_hits.get(&ri)?;
                     if hits.binary_search(&nid.index()).is_err() {
                         return None;
+                    }
+                    if let Some((base, gates)) = gated {
+                        if ri >= base
+                            && gates
+                                .get(&ri)
+                                .is_none_or(|v| v.binary_search(&nid.index()).is_err())
+                        {
+                            return None;
+                        }
                     }
                     Some((rule, sets.specificity.get(ri).copied().flatten()?))
                 })
@@ -7990,6 +8227,7 @@ fn compute_styles_impl(
             &mut out,
             &mut counters,
             0,
+            gated,
         ),
         None => {
             for child in tree.children(tree.document()) {
@@ -8005,6 +8243,7 @@ fn compute_styles_impl(
                     &mut out,
                     &mut counters,
                     0,
+                    gated,
                 );
             }
         }
@@ -8025,7 +8264,33 @@ pub fn compute_styles_timed(
     css_time: Option<f64>,
     transitions: &[crate::diting_css::CssTransition],
 ) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
-    compute_styles_impl(tree, rules, keyframes, css_time, None, transitions)
+    compute_styles_impl(tree, rules, keyframes, css_time, None, transitions, None)
+}
+
+/// Second-pass face for `@container` arms (moli#282): `gates` maps ABSOLUTE
+/// rule indexes (>= `base_len`, the container arms appended past the base
+/// rules) to the elements that reached them through a passing container.
+/// Callers build the plan from a probe pass's geometry, extend `rules` with
+/// the plan's extra rules, and re-cascade through here — the gated arms
+/// then match exactly those elements.
+pub fn compute_styles_gated(
+    tree: &DomTree,
+    rules: &[crate::diting_css::ParsedRule],
+    keyframes: &crate::diting_css::KeyframesMap,
+    css_time: Option<f64>,
+    transitions: &[crate::diting_css::CssTransition],
+    base_len: usize,
+    gates: &HashMap<usize, Vec<usize>>,
+) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
+    compute_styles_impl(
+        tree,
+        rules,
+        keyframes,
+        css_time,
+        None,
+        transitions,
+        Some((base_len, gates)),
+    )
 }
 
 /// Subtree variant (fabricated iframe documents, obscura #976 family): the
@@ -8039,7 +8304,7 @@ pub fn compute_styles_timed_within(
     root: NodeId,
     transitions: &[crate::diting_css::CssTransition],
 ) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
-    compute_styles_impl(tree, rules, keyframes, css_time, Some(root), transitions)
+    compute_styles_impl(tree, rules, keyframes, css_time, Some(root), transitions, None)
 }
 
 /// Trace-only element count (a full walk just for the debug knob; keep out of
@@ -8992,5 +9257,137 @@ mod batch_125_inline_fragment_deco_tests {
             .count();
         assert_eq!(n_shadow, n_bg + items.iter().filter(|it| matches!(it, PaintItem::Bg { color, .. } if *color == [165, 243, 252, 255])).count(),
             "one shadow per painted fragment");
+    }
+}
+
+#[cfg(test)]
+mod container_tests {
+    use super::*;
+    use crate::diting_css::{parse_stylesheet_full, CssMediaType, MediaOverrides};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    fn by_id(tree: &DomTree, id: &str) -> NodeId {
+        tree.query_selector_all(&format!("#{id}")).unwrap()[0]
+    }
+
+    /// Pass 1 styles → solve → container plan, mirroring layout_run_all's
+    /// probe stage (no geometry cache here, so the probe always solves).
+    fn plan_for(
+        sheet: &str,
+        body: &str,
+    ) -> (DomTree, Vec<crate::diting_css::ParsedRule>, ContainerPlan) {
+        let html = format!("<html><head><style>{sheet}</style></head><body>{body}</body></html>");
+        let tree = parse_html(&html);
+        let (rules, _kf, containers) = parse_stylesheet_full(
+            sheet,
+            (800.0, 600.0),
+            CssMediaType::Screen,
+            &MediaOverrides::default(),
+        );
+        let styles = compute_styles(&tree, &rules);
+        let solved = layout_solve(
+            &tree,
+            &styles,
+            &crate::diting_fonts::font_book(),
+            800.0,
+            600.0,
+            None,
+            None,
+        );
+        let boxes = solved.dom_boxes();
+        let plan = container_plan(&tree, &styles, &boxes, &containers, rules.len());
+        (tree, rules, plan)
+    }
+
+    #[test]
+    fn container_plan_gates_by_container_width() {
+        // The moli#282 repro shape: one 300px container (passes
+        // min-width:200px), one 100px container (fails), one element with no
+        // container ancestor (no answer at all).
+        let (tree, rules, plan) = plan_for(
+            "#cqbox { container-type: inline-size; width: 300px } \
+             .inner { color: rgb(0, 0, 255) } \
+             @container (min-width: 200px) { .inner { color: rgb(255, 0, 0) } }",
+            "<div id='cqbox'><div class='inner' id='i1'>x</div></div>\
+             <div style='width: 100px; container-type: inline-size'><div class='inner' id='i2'>y</div></div>\
+             <div class='inner' id='i3'>z</div>",
+        );
+        assert_eq!(plan.extra_rules.len(), 1);
+        let gates = &plan.gates[&rules.len()];
+        let (i1, i2, i3) = (by_id(&tree, "i1"), by_id(&tree, "i2"), by_id(&tree, "i3"));
+        assert!(gates.binary_search(&i1.index()).is_ok(), "300px container passes min-width:200px");
+        assert!(gates.binary_search(&i2.index()).is_err(), "100px container fails");
+        assert!(gates.binary_search(&i3.index()).is_err(), "no container ancestor, no gate");
+
+        // The gated cascade is what makes that plan visible in styles.
+        let mut full_rules = rules.clone();
+        full_rules.extend(plan.extra_rules.iter().cloned());
+        let styles = compute_styles_gated(
+            &tree,
+            &full_rules,
+            &crate::diting_css::KeyframesMap::new(),
+            None,
+            &[],
+            rules.len(),
+            &plan.gates,
+        );
+        assert_eq!(styles[&i1].color, Some(crate::diting_css::Color(255, 0, 0, 255)));
+        assert_eq!(styles[&i2].color, Some(crate::diting_css::Color(0, 0, 255, 255)));
+        assert_eq!(styles[&i3].color, Some(crate::diting_css::Color(0, 0, 255, 255)));
+    }
+
+    #[test]
+    fn container_plan_nearest_and_named_wins() {
+        let (tree, rules, plan) = plan_for(
+            ".item { color: rgb(0, 0, 255) } \
+             @container side (min-width: 200px) { .item { color: rgb(255, 0, 0) } }",
+            "<div style='container-type: inline-size; container-name: side; width: 400px'>\
+               <div style='container-type: inline-size; width: 100px'><div class='item' id='a'>x</div></div>\
+             </div>\
+             <div style='container-type: inline-size; width: 400px'><div class='item' id='b'>y</div></div>",
+        );
+        let gates = &plan.gates[&rules.len()];
+        let (a, b) = (by_id(&tree, "a"), by_id(&tree, "b"));
+        assert!(
+            gates.binary_search(&a.index()).is_ok(),
+            "named lookup walks PAST the nearer anonymous 100px container to the 400px 'side' one"
+        );
+        assert!(gates.binary_search(&b.index()).is_err(), "no 'side' ancestor at all");
+    }
+
+    #[test]
+    fn container_plan_element_cannot_query_itself() {
+        // #self is BOTH the container and the only .inner: a query against
+        // its own width must not fire.
+        let (tree, rules, plan) = plan_for(
+            "#self { container-type: inline-size; width: 300px } \
+             @container (min-width: 100px) { .inner { color: rgb(255, 0, 0) } }",
+            "<div id='self' class='inner'>x</div>",
+        );
+        assert!(
+            plan.extra_rules.is_empty(),
+            "the container itself is never inside its own query scope; gates={:?}",
+            plan.gates
+        );
+        let _ = (tree, rules);
+    }
+
+    #[test]
+    fn bake_container_units_exact_strings() {
+        assert_eq!(
+            bake_container_units(".a { width: 10cqw; height: 50cqh }", 300.0, 200.0),
+            ".a { width: 30px; height: 100px }",
+        );
+        assert_eq!(
+            bake_container_units("padding: 2.5cqi", 300.0, 200.0),
+            "padding: 7.500px",
+        );
+        assert_eq!(bake_container_units("margin: -10cqb", 300.0, 200.0), "margin: -20px");
+        // Non-container units and digit+letter runs (hex colors, asset names)
+        // pass through byte-identical.
+        assert_eq!(
+            bake_container_units(".b { width: 30px; color: #a1b2c3; background: url(logo-2x.png) }", 300.0, 200.0),
+            ".b { width: 30px; color: #a1b2c3; background: url(logo-2x.png) }",
+        );
     }
 }
