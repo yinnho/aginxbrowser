@@ -2985,6 +2985,136 @@
         assert_eq!(v["sawLoad"], serde_json::json!("false"));
     }
 
+    /// (#41) `new Image()` must gate `load` on a real fetch: a 2xx response
+    /// fires `load` with complete=true; the old stub fired `load`
+    /// unconditionally without any network attempt.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn image_factory_fires_load_on_2xx_fetch() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        // Minimal PNG-magic body — the load face gates on transport status,
+        // not on decode (no JS-face decoder; documented boundary in #41).
+        let png: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).unwrap();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: image/png\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                png.len()
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+            stream.write_all(png).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const img = new Image();
+                    let sawError = false;
+                    img.addEventListener('error', () => { sawError = true; }, { once: true });
+                    const loaded = new Promise(r => { img.onload = () => r('fired'); });
+                    img.src = '/x.png';
+                    const how = await loaded;
+                    return { how, sawError: String(sawError), complete: String(img.complete) };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let v = result.value.unwrap();
+        assert_eq!(v["how"], serde_json::json!("fired"));
+        assert_eq!(v["sawError"], serde_json::json!("false"));
+        assert_eq!(v["complete"], serde_json::json!("true"));
+    }
+
+    /// (#41) failure side: an unreachable src (connection-refused port) must
+    /// fire `error`, never the phantom `load` the old stub produced.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn image_factory_fires_error_on_refused_port() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        // Bind then drop: the port answers connection-refused.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let p = l.local_addr().unwrap().port();
+            drop(l);
+            p
+        };
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const img = new Image();
+                    let sawLoad = false;
+                    img.addEventListener('load', () => { sawLoad = true; }, { once: true });
+                    const failed = new Promise(r => { img.onerror = () => r('fired'); });
+                    img.src = '/x.png';
+                    const how = await failed;
+                    return { how, sawLoad: String(sawLoad), complete: String(img.complete) };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let v = result.value.unwrap();
+        assert_eq!(v["how"], serde_json::json!("fired"));
+        assert_eq!(v["sawLoad"], serde_json::json!("false"));
+        assert_eq!(v["complete"], serde_json::json!("false"));
+    }
+
+    /// (#41) regression: data: URLs keep resolving locally and still fire
+    /// `load` without any network attempt.
+    #[tokio::test(flavor = "current_thread")]
+    async fn image_factory_data_url_still_fires_load() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const img = new Image();
+                    let sawError = false;
+                    img.addEventListener('error', () => { sawError = true; }, { once: true });
+                    const loaded = new Promise(r => { img.onload = () => r('fired'); });
+                    img.src = 'data:image/gif;base64,R0lGODlhAQABAAAAACw=';
+                    const how = await loaded;
+                    return { how, sawError: String(sawError), complete: String(img.complete) };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let v = result.value.unwrap();
+        assert_eq!(v["how"], serde_json::json!("fired"));
+        assert_eq!(v["sawError"], serde_json::json!("false"));
+        assert_eq!(v["complete"], serde_json::json!("true"));
+    }
+
     #[test]
     fn test_button_click_dispatches_listener() {
         let mut rt = setup_runtime(r#"<button id="go">Go</button>"#);
@@ -9713,9 +9843,10 @@
     #[tokio::test(flavor = "current_thread")]
     async fn test_image_is_real_element_and_emulates_load() {
         // Upstream a5a8de7 + 891d850: new Image() must be a real element
-        // (style/attribute reflection/event dispatch), assigning .src must
-        // emulate a successful decode (complete flips, load fires on both
-        // the onload property and listeners), and a pre-defined
+        // (style/attribute reflection/event dispatch), assigning a src must
+        // fire `load` on both the onload property and listeners (#41: for a
+        // data: URL the load face is local; network srcs now gate on a real
+        // fetch — see image_factory_fires_* tests), and a pre-defined
         // non-configurable own src (Booking.com instrumentation) must not
         // crash the constructor.
         let mut rt = setup_runtime("<html><body></body></html>");
@@ -9729,7 +9860,7 @@
             let viaProp = 0, viaListener = 0;
             img.onload = () => viaProp++;
             img.addEventListener('load', () => viaListener++);
-            img.src = '/pixel.png';
+            img.src = 'data:image/gif;base64,R0lGODlhAQABAAAAACw=';
             const earlyComplete = img.complete;
             await new Promise(r => setTimeout(r, 20));
             // Anti-bot pattern: hijack createElement and pre-define a

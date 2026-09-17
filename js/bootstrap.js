@@ -13372,12 +13372,41 @@ if (typeof Image === 'undefined') {
           _imgSrcDesc.set.call(img, v);
           if (!img.getAttribute('src')) return;
           img.complete = false;
-          setTimeout(function () {
+          // (#41) Real load semantics: the fetch attempt decides load vs
+          // error. The old stub fired `load` unconditionally, so probes
+          // pinning load faces to unroutable hosts read fake success.
+          // Same subresource shape as dynamic <script src> (credentials
+          // include — image loads carry cookies cross-origin in real
+          // browsers); 2xx dispatches `load`, anything else (pre-wire
+          // refusal, network error, HTTP error status) dispatches `error`.
+          const fullUrl = _resolveUrl(img.getAttribute('src'));
+          const succeed = function () {
             img.complete = true;
             img.naturalWidth = img.naturalWidth || img.width || 0;
             img.naturalHeight = img.naturalHeight || img.height || 0;
             try { img.dispatchEvent(new Event('load')); } catch (e) {}
-          }, 0);
+          };
+          const fail = function () {
+            img.complete = false;
+            try { img.dispatchEvent(new Event('error')); } catch (e) {}
+          };
+          if (fullUrl.startsWith('data:')) {
+            setTimeout(succeed, 0);
+          } else if (fullUrl.startsWith('blob:')) {
+            setTimeout(function () {
+              const b = globalThis.__blobObjs && globalThis.__blobObjs[fullUrl];
+              if (b && b._bytes instanceof Uint8Array) { succeed(); } else { fail(); }
+            }, 0);
+          } else {
+            const pageOrigin = (function() { try { const u = new URL(_domParse("document_url") || "about:blank"); return u.origin; } catch(e) { return ""; } })();
+            Promise.resolve().then(function () {
+              return _OPS.op_fetch_url(fullUrl, "GET", "{}", "", pageOrigin, "no-cors", "include", "\u0000about:client");
+            }).then(function (raw) {
+              let ok = false;
+              try { const parsed = JSON.parse(raw); ok = parsed.status >= 200 && parsed.status <= 299; } catch (e) {}
+              if (ok) { succeed(); } else { fail(); }
+            }).catch(fail);
+          }
         },
       });
     }
