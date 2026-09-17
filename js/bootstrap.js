@@ -9425,6 +9425,9 @@ globalThis.sessionStorage = _mkStore(false);
 // counts (two-byte UTF-8 output, silent acceptance of astral chars), which
 // breaks signature-style round-trips against servers that expect the spec.
 globalThis.btoa = globalThis.btoa || ((s) => {
+  // WebIDL DOMString: every argument is ToString-coerced first, so btoa(123)
+  // is "MTIz" and btoa(null) is "bnVsbA==" — matching atob's String(s) below.
+  s = String(s);
   for (let i = 0; i < s.length; i++)
     if (s.charCodeAt(i) > 0xFF)
       throw new DOMException("Failed to execute 'btoa' on 'Window': The string to be encoded contains characters outside of the Latin1 range.", "InvalidCharacterError");

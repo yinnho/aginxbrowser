@@ -2212,6 +2212,24 @@
             rt.evaluate("atob(btoa('AB'))").unwrap(),
             serde_json::json!("AB")
         );
+        // WebIDL DOMString: the argument is ToString-coerced before the
+        // Latin-1 scan, so numbers/arrays encode their string form and the
+        // >0xFF throw still fires on a coerced value (issue #22).
+        assert_eq!(
+            rt.evaluate("btoa(123)").unwrap(),
+            serde_json::json!("MTIz")
+        );
+        assert_eq!(
+            rt.evaluate("btoa([1,2])").unwrap(),
+            serde_json::json!("MSwy")
+        );
+        assert_eq!(
+            rt.evaluate(
+                "try { btoa({toString: () => '\\u4e2d'}) } catch (e) { e.name }"
+            )
+            .unwrap(),
+            serde_json::json!("InvalidCharacterError")
+        );
         // Large payloads must survive: the decoder used to finish with
         // String.fromCharCode(...bytes), whose spread blew the call stack on
         // real upload sizes (file content arrives through this path).
