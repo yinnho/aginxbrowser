@@ -1963,6 +1963,46 @@
         );
     }
 
+    /// #40: navigator.platform under a Windows UA must be "Win32" (real
+    /// Chrome reports Win32 on 64-bit Windows and 64-bit Chrome alike) while
+    /// userAgentData.platform says "Windows" — the two faces must never
+    /// collide. Linux personas (obscura#987 same face) must derive
+    /// "Linux x86_64" so a Linux deployment's JS face agrees with its
+    /// kernel's SYN fingerprint.
+    #[test]
+    fn navigator_platform_matches_ua_os_family() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // The production path: set_user_agent writes __diting_ua and
+        // refreshes the persona; the getters derive from the UA after.
+        rt.set_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36");
+        assert_eq!(
+            rt.evaluate("navigator.platform").unwrap(),
+            serde_json::json!("Win32")
+        );
+        assert_eq!(
+            rt.evaluate("navigator.userAgentData.platform").unwrap(),
+            serde_json::json!("Windows")
+        );
+        rt.set_user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36");
+        assert_eq!(
+            rt.evaluate("navigator.platform").unwrap(),
+            serde_json::json!("Linux x86_64")
+        );
+        assert_eq!(
+            rt.evaluate("navigator.userAgentData.platform").unwrap(),
+            serde_json::json!("Linux")
+        );
+        rt.set_user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36");
+        assert_eq!(
+            rt.evaluate("navigator.platform").unwrap(),
+            serde_json::json!("MacIntel")
+        );
+        assert_eq!(
+            rt.evaluate("navigator.userAgentData.platform").unwrap(),
+            serde_json::json!("macOS")
+        );
+    }
+
     /// #28: SVG elements wrap in their real interfaces (constructor.name,
     /// instanceof, patch isolation) and read the true per-node namespace from
     /// the tree — parsed SVG children inherit theirs, createElementNS keeps

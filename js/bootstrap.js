@@ -5510,7 +5510,11 @@ function _nodeInDocument(node) {
 // "Linux" platform) are a strong anti-bot signal (Baidu Wenku 安全验证).
 function __ditingPlatformFromUA() {
   const ua = globalThis.__diting_ua || "";
-  if (ua.indexOf("Windows") !== -1) return "Windows";
+  // (#40) Real Chrome on Windows reports navigator.platform "Win32" — on
+  // 64-bit Windows and 64-bit Chrome alike. "Windows" is the
+  // userAgentData.platform value (__ditingUADataPlatformFromUA's job) and
+  // no real browser ever produces it here.
+  if (ua.indexOf("Windows") !== -1) return "Win32";
   if (ua.indexOf("Macintosh") !== -1 || ua.indexOf("Mac OS X") !== -1) return "MacIntel";
   if (ua.indexOf("iPhone") !== -1 || ua.indexOf("iPad") !== -1) return "iPhone";
   if (ua.indexOf("Android") !== -1) return "Linux armv8l";
@@ -5535,7 +5539,7 @@ function __ditingUADataPlatformFromUA() {
 // detected set stays coherent with the UA persona.
 const _DITING_FONT_PLATFORM = () => {
   const p = __ditingPlatformFromUA();
-  if (p === "Windows") return "win";
+  if (p === "Win32") return "win";
   if (p === "MacIntel" || p === "iPhone") return "mac";
   return "linux";
 };

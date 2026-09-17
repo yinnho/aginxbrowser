@@ -70,6 +70,35 @@ pub static PROFILES: &[BrowserProfile] = &[
         ua_platform: "macOS",
         ua_platform_version: "14.6.0",
     },
+    // Linux personas (#40, obscura#987 same face): the TCP SYN fingerprint
+    // is kernel-owned — userspace cannot reshape it — so a deployment on a
+    // Linux host can only stay passive-coherent by claiming a Linux UA to
+    // match its kernel's SYN. Chrome on Linux reports platformVersion as
+    // the kernel version; plausible mainline versions per entry.
+    BrowserProfile {
+        user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+        platform: "Linux x86_64",
+        ua_platform: "Linux",
+        ua_platform_version: "5.15.0",
+    },
+    BrowserProfile {
+        user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+        platform: "Linux x86_64",
+        ua_platform: "Linux",
+        ua_platform_version: "6.1.0",
+    },
+    BrowserProfile {
+        user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+        platform: "Linux x86_64",
+        ua_platform: "Linux",
+        ua_platform_version: "6.5.0",
+    },
+    BrowserProfile {
+        user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+        platform: "Linux x86_64",
+        ua_platform: "Linux",
+        ua_platform_version: "6.8.0",
+    },
 ];
 
 /// Product default: the stable macOS Chrome 145 persona this service has
@@ -140,10 +169,35 @@ mod tests {
             } else if p.user_agent.contains("Macintosh") {
                 assert_eq!(p.platform, "MacIntel");
                 assert_eq!(p.ua_platform, "macOS");
+            } else if p.user_agent.contains("X11; Linux x86_64") {
+                // (#40) the Linux family a Linux host's kernel SYN matches.
+                assert_eq!(p.platform, "Linux x86_64");
+                assert_eq!(p.ua_platform, "Linux");
+                // Chrome on Linux reports the kernel version — dotted numeric.
+                assert!(
+                    p.ua_platform_version
+                        .split('.')
+                        .all(|part| part.chars().all(|c| c.is_ascii_digit())),
+                    "{}", p.ua_platform_version
+                );
             } else {
                 panic!("unknown OS token in {}", p.user_agent);
             }
         }
+    }
+
+    #[test]
+    fn linux_personas_exist_and_sit_after_the_mac_block() {
+        // (#40) indices 0-7 are pinned by AGINXBROWSER_PROFILE deployments;
+        // the Linux family must not shift them.
+        let linux: Vec<usize> = PROFILES
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.ua_platform == "Linux")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(linux, vec![8, 9, 10, 11], "four Linux personas appended at the tail");
+        assert_eq!(DEFAULT_PROFILE_INDEX, 6, "un-pinned default must stay the macOS persona");
     }
 
     #[test]
