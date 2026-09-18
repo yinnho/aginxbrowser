@@ -2873,6 +2873,11 @@ pub fn eval_calc(expr: &str, fonts: &FontCtx) -> Option<Length> {
     if p.i != p.s.len() {
         return None;
     }
+    calcval_to_length(v)
+}
+
+/// Fold a fully-evaluated calc intermediate into a [`Length`].
+fn calcval_to_length(v: CalcVal) -> Option<Length> {
     match v {
         // A bare number is not a length; `calc(0)` has no unit context here.
         CalcVal::Number(_) | CalcVal::Len { px: 0.0, percent: 0.0 } => None,
@@ -2880,6 +2885,42 @@ pub fn eval_calc(expr: &str, fonts: &FontCtx) -> Option<Length> {
         CalcVal::Len { px, percent: 0.0 } => Some(Length::Px(px)),
         CalcVal::Len { px, percent } => Some(Length::Calc { percent, px }),
     }
+}
+
+/// Which math function a `min(`/`max(`/`clamp(` call reduces as. clamp keeps
+/// the CSS form `max(MIN, min(VAL, MAX))`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MathFn {
+    Min,
+    Max,
+    Clamp,
+}
+
+/// Evaluate a property-level value that is one math call: `calc(…)`,
+/// `min(…)`, `max(…)` or `clamp(…)`. min/max take one or more
+/// comma-separated sums; clamp takes exactly three. Comparing operands
+/// needs one unit family — all-px or all-percent (percents share the
+/// property's reference). A call mixing px with percent, or a number with
+/// either, is unorderable at parse time and drops (declaration falls out,
+/// same posture as calc's mixed-fold staying symbolic).
+pub fn eval_math_call(v: &str, fonts: &FontCtx) -> Option<Length> {
+    let t = v.trim();
+    if t.len() >= 6 && t[..5].eq_ignore_ascii_case("calc(") && t.ends_with(')') {
+        return eval_calc(&t[5..t.len() - 1], fonts);
+    }
+    for (prefix, f) in [("min(", MathFn::Min), ("max(", MathFn::Max), ("clamp(", MathFn::Clamp)] {
+        let pl = prefix.len();
+        if t.len() > pl && t[..pl].eq_ignore_ascii_case(prefix) && t.ends_with(')') {
+            let mut p = CalcParser { s: &t.as_bytes()[pl..], i: 0, fonts };
+            let v = p.math_args_value(f)?;
+            p.skip_ws();
+            if p.i != p.s.len() {
+                return None;
+            }
+            return calcval_to_length(v);
+        }
+    }
+    None
 }
 
 struct CalcParser<'a> {
@@ -2961,6 +3002,64 @@ impl CalcParser<'_> {
         Some(acc)
     }
 
+    /// Parse and reduce the argument list of a math call (`i` sits just
+    /// past the function name's `(`): sum (`,` sum)* `)`, one or more for
+    /// min/max, exactly three for clamp.
+    fn math_args_value(&mut self, f: MathFn) -> Option<CalcVal> {
+        let mut args = Vec::new();
+        loop {
+            args.push(self.expr_value()?);
+            if !self.eat(b',') {
+                break;
+            }
+        }
+        if !self.eat(b')') {
+            return None;
+        }
+        if args.is_empty() || (f == MathFn::Clamp && args.len() != 3) {
+            return None;
+        }
+        // One unit family only (see eval_math_call): all-px or all-percent.
+        let all_px = args.iter().all(|a| matches!(a, CalcVal::Len { percent: 0.0, .. }));
+        let all_pct = args.iter().all(|a| matches!(a, CalcVal::Len { px: 0.0, .. }));
+        if !(all_px || all_pct) {
+            return None;
+        }
+        let key = |a: &CalcVal| -> f32 {
+            match a {
+                CalcVal::Number(n) => *n,
+                CalcVal::Len { px, percent } => {
+                    if all_px {
+                        *px
+                    } else {
+                        *percent
+                    }
+                }
+            }
+        };
+        let pick = |lo: bool, a: &CalcVal, b: &CalcVal| {
+            let (x, y) = (key(a), key(b));
+            let take_b = if lo { y < x } else { y > x };
+            if take_b { *b } else { *a }
+        };
+        let mut acc = args[0];
+        match f {
+            MathFn::Min | MathFn::Max => {
+                let lo = f == MathFn::Min;
+                for a in &args[1..] {
+                    acc = pick(lo, &acc, a);
+                }
+            }
+            MathFn::Clamp => {
+                let (min, val, max) = (&args[0], &args[1], &args[2]);
+                // max(MIN, min(VAL, MAX))
+                let inner = pick(true, val, max);
+                acc = pick(false, min, &inner);
+            }
+        }
+        Some(acc)
+    }
+
     fn factor_value(&mut self) -> Option<CalcVal> {
         self.skip_ws();
         if self.eat(b'(') {
@@ -2972,13 +3071,19 @@ impl CalcParser<'_> {
             let v = self.expr_value()?;
             return self.eat(b')').then_some(v);
         }
-        // number | length token. '+/-/"/("/")' end a token but may START one
-        // (a signed number), so only delimit when past the first byte.
+        for (prefix, f) in [("min(", MathFn::Min), ("max(", MathFn::Max), ("clamp(", MathFn::Clamp)] {
+            if self.starts_with_ignore_case(prefix) {
+                self.i += prefix.len();
+                return self.math_args_value(f);
+            }
+        }
+        // number | length token. '+/-/"/("/")/',' end a token but may START
+        // one (a signed number), so only delimit when past the first byte.
         let start = self.i;
         while self.i < self.s.len() {
             let c = self.s[self.i];
             if self.i > start
-                && (c.is_ascii_whitespace() || matches!(c, b'+' | b'-' | b'*' | b'/' | b'(' | b')'))
+                && (c.is_ascii_whitespace() || matches!(c, b'+' | b'-' | b'*' | b'/' | b'(' | b')' | b','))
             {
                 break;
             }
@@ -3565,8 +3670,8 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
     // calc() bodies route through the evaluator (same folding per term).
     let len = |val: &str| -> Option<Length> {
         let t = val.trim();
-        if t.len() >= 6 && t[..5].eq_ignore_ascii_case("calc(") && t.ends_with(')') {
-            return eval_calc(&t[5..t.len() - 1], fonts);
+        if let Some(l) = eval_math_call(t, fonts) {
+            return Some(l);
         }
         parse_css_length(t).map(|l| resolve_len(l, fonts))
     };
@@ -4736,10 +4841,8 @@ fn expand_sides(value: &str, fonts: &FontCtx) -> Sides {
         .map(|tok| {
             if tok.eq_ignore_ascii_case("auto") {
                 Some(Length::Auto)
-            } else if tok.len() >= 6 && tok[..5].eq_ignore_ascii_case("calc(") && tok.ends_with(')') {
-                eval_calc(&tok[5..tok.len() - 1], fonts)
             } else {
-                parse_css_length(tok).map(|l| resolve_len(l, fonts))
+                eval_math_call(tok, fonts).or_else(|| parse_css_length(tok).map(|l| resolve_len(l, fonts)))
             }
         })
         .collect();
@@ -4803,12 +4906,8 @@ fn parse_px_f32(v: &str) -> Option<f32> {
 /// (em/rem fold against the font context like any declaration); a
 /// percent-carrying calc has no resolved-value slot here and drops.
 fn parse_px_f32_ctx(v: &str, fonts: &FontCtx) -> Option<f32> {
-    let v = v.trim();
-    if v.len() >= 6 && v[..5].eq_ignore_ascii_case("calc(") && v.ends_with(')') {
-        return match eval_calc(&v[5..v.len() - 1], fonts)? {
-            Length::Px(px) => Some(px),
-            _ => None,
-        };
+    if let Some(Length::Px(px)) = eval_math_call(v, fonts) {
+        return Some(px);
     }
     parse_px_f32(v)
 }
@@ -5124,14 +5223,10 @@ pub fn parse_backdrop_blur(value: &str, fonts: &FontCtx) -> Option<f32> {
 /// Shadow lengths resolve em/rem against the cascade fonts and fold calc();
 /// % is rejected (it would need the shadow receiver's box).
 fn resolve_shadow_len(val: &str, fonts: &FontCtx) -> Option<f32> {
-    let t = val.trim();
-    if t.len() >= 6 && t[..5].eq_ignore_ascii_case("calc(") && t.ends_with(')') {
-        return match eval_calc(&t[5..t.len() - 1], fonts) {
-            Some(Length::Px(px)) => Some(px),
-            _ => None,
-        };
+    if let Some(Length::Px(px)) = eval_math_call(val, fonts) {
+        return Some(px);
     }
-    match parse_css_length(t).map(|l| resolve_len(l, fonts)) {
+    match parse_css_length(val.trim()).map(|l| resolve_len(l, fonts)) {
         Some(Length::Px(px)) => Some(px),
         _ => None,
     }
@@ -7216,6 +7311,70 @@ mod tests {
         let mut s = ComputedStyle::default();
         assert!(apply_inline_declarations(&mut s, "margin-left: calc(2 * 8px)"));
         assert_eq!(s.margin.left, Some(Length::Px(16.0)));
+    }
+
+    // ---- min()/max()/clamp() ----
+
+    #[test]
+    fn math_calls_pick_and_clamp_one_unit_family() {
+        let f = FontCtx::default();
+        // min/max fold to the extreme operand.
+        assert_eq!(eval_math_call("min(100px, 50px)", &f), Some(Length::Px(50.0)));
+        // Arithmetic inside an argument folds before the comparison.
+        assert_eq!(eval_math_call("max(100px, 50px + 60px)", &f), Some(Length::Px(110.0)));
+        // clamp = max(MIN, min(VAL, MAX)); pinned on each edge and in the middle.
+        assert_eq!(eval_math_call("clamp(10px, 5px, 100px)", &f), Some(Length::Px(10.0)));
+        assert_eq!(eval_math_call("clamp(10px, 50px, 100px)", &f), Some(Length::Px(50.0)));
+        assert_eq!(eval_math_call("clamp(10px, 500px, 100px)", &f), Some(Length::Px(100.0)));
+        // Percent-only family folds to Percent.
+        assert_eq!(eval_math_call("min(50%, 80%)", &f), Some(Length::Percent(50.0)));
+        // Mixed px with percent is unorderable at parse time — drop whole call.
+        assert_eq!(eval_math_call("min(50%, 50px)", &f), None);
+        assert_eq!(eval_math_call("clamp(10px, 50%, 100px)", &f), None);
+        // Nesting goes through the same factor path as calc().
+        assert_eq!(
+            eval_math_call("min(100px, max(20px, 3 * 10px))", &f),
+            Some(Length::Px(30.0))
+        );
+        // Function names are ASCII-case-insensitive; whitespace is optional.
+        assert_eq!(eval_math_call("MIN(100px, 50px)", &f), Some(Length::Px(50.0)));
+        assert_eq!(eval_math_call("min( 100px ,50px )", &f), Some(Length::Px(50.0)));
+        // clamp arity is exactly three.
+        assert_eq!(eval_math_call("clamp(10px, 50px)", &f), None);
+        assert_eq!(eval_math_call("clamp(10px, 50px, 100px, 200px)", &f), None);
+        // Not a math call at all.
+        assert_eq!(eval_math_call("auto", &f), None);
+        assert_eq!(eval_math_call("min-content", &f), None);
+    }
+
+    #[test]
+    fn math_calls_flow_through_declarations_and_sides() {
+        let f = FontCtx::default();
+        // calc() prefix keeps working through the shared entry.
+        assert_eq!(eval_math_call("calc(100px + 50px)", &f), Some(Length::Px(150.0)));
+        // Property-level bare call, same posture as calc().
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "width: min(400px, 500px)"));
+        assert_eq!(s.width, Some(Length::Px(400.0)));
+        // Percent-only call keeps the percent.
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "width: min(50%, 80%)"));
+        assert_eq!(s.width, Some(Length::Percent(50.0)));
+        // Mixed px with percent drops the whole declaration.
+        let mut s = ComputedStyle::default();
+        assert!(!apply_declarations(&mut s, "width: min(400px, 90%)"));
+        assert_eq!(s.width, None);
+        // expand_sides keeps call tokens whole across the whitespace split.
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "padding: max(4px, 2px) min(8px, 6px)"));
+        assert_eq!(s.padding.top, Some(Length::Px(4.0)));
+        assert_eq!(s.padding.right, Some(Length::Px(6.0)));
+        assert_eq!(s.padding.bottom, Some(Length::Px(4.0)));
+        assert_eq!(s.padding.left, Some(Length::Px(6.0)));
+        // Shadow lengths go through the px-only view.
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "box-shadow: 2px 2px max(4px, 1px) #000"));
+        assert_eq!(s.box_shadow.as_ref().map(|sh| sh[0].blur), Some(4.0));
     }
 
     #[test]
