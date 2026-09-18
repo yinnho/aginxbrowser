@@ -10918,6 +10918,35 @@
 
     #[tokio::test(flavor = "current_thread")]
     #[cfg(feature = "screenshot")]
+    async fn test_sticky_table_row_z_index_outranks_later_positioned() {
+        // The z≠0 half of the group look-through: a sticky row carrying
+        // z-index:5 inside a STATIC thead must ride the hoisted band at z=5
+        // — a fixed z:2 overlay on top of the viewport must NOT cover the
+        // stuck header. (Group classified z-auto would sit in the middle
+        // band and lose to the overlay's positive band.)
+        let mut rt = setup_runtime(
+            r#"<html><body><div style="height:100px"></div><table style="border-collapse:collapse"><thead><tr id="head" style="position:sticky; top:0; z-index:5; height:30px; background:#ccc"><th id="hc" style="width:100px">H</th></tr></thead><tbody><tr><td><div style="height:4000px">r1</div></td></tr></tbody></table><div id="over" style="position:fixed; top:0; left:0; width:100%; height:100px; z-index:2">over</div></body></html>"#,
+        );
+        let script = r#"async () => {
+            window.scrollTo(0, 300);
+            await new Promise(r => setTimeout(r, 10));
+            const head = document.getElementById('head');
+            const hit = document.elementFromPoint(10, 5);
+            return [
+                Math.round(head.getBoundingClientRect().top),
+                hit ? (hit.id || hit.tagName) : 'null',
+            ];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!([300, "hc"]),
+            "sticky z:5 row in a static thead outranks the fixed z:2 overlay in hit-testing"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(feature = "screenshot")]
     async fn test_nested_element_scrollers_compose_shifts() {
         // Two stacked scrollers: outer=100 shifts the inner BOX (and its
         // subtree) by -100; inner=50 shifts the leaf another -50. The

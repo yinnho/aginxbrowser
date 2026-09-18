@@ -7191,14 +7191,35 @@ pub fn layout_collect(
         // child already paints above it today (pre-existing inaccuracy,
         // out of this slice). The synthetic ICB is not in node_map →
         // always a barrier.
-        let barrier = match node_map.get(&node).and_then(|d| styles.get(d)) {
-            None => true,
-            Some(s) => {
-                establishes_stacking_context(s)
-                    || s.clips_descendants()
-                    || s.position == Some(PositionMode::Sticky)
-            }
-        };
+        // Row-group wrappers hoisted into a z band by their member rows
+        // (look-through below) carry positioned subtrees without being
+        // stacking contexts themselves — they must stop escapes at the
+        // band slot, or their recursion would append back into the
+        // consuming barrier's `below` after it drained.
+        let self_is_group = node_map
+            .get(&node)
+            .and_then(|d| {
+                tree.with_node(*d, |n| {
+                    n.as_element()
+                        .map(|e| {
+                            matches!(
+                                e.local.to_ascii_lowercase().as_ref(),
+                                "thead" | "tbody" | "tfoot"
+                            )
+                        })
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+        let barrier = self_is_group
+            || match node_map.get(&node).and_then(|d| styles.get(d)) {
+                None => true,
+                Some(s) => {
+                    establishes_stacking_context(s)
+                        || s.clips_descendants()
+                        || s.position == Some(PositionMode::Sticky)
+                }
+            };
         let mut neg: Vec<(i32, usize)> = Vec::new();
         let mut mid: Vec<(i32, usize)> = Vec::new();
         let mut pos: Vec<(i32, usize)> = Vec::new();
@@ -7219,6 +7240,7 @@ pub fn layout_collect(
                         | Some(PositionMode::Sticky)
                 )
             });
+            let mut member_z_override: Option<i32> = None;
             // Row-group wrappers (thead/tbody/tfoot stand-ins) establish no
             // box in CSS, so a sticky ROW inside one must still join the
             // table's positioned band — confining it to the group frame lets
@@ -7243,25 +7265,43 @@ pub fn layout_collect(
                     })
                     .unwrap_or(false);
                 if is_group {
-                    positioned = taffy_tree
-                        .children(child)
-                        .unwrap_or_default()
-                        .iter()
-                        .any(|m| {
-                            node_map.get(m).and_then(|d| styles.get(d)).is_some_and(|s| {
-                                matches!(
-                                    s.position,
-                                    Some(PositionMode::Relative)
-                                        | Some(PositionMode::Absolute)
-                                        | Some(PositionMode::Fixed)
-                                        | Some(PositionMode::Sticky)
-                                )
-                            })
-                        });
+                    let mut any_pos = false;
+                    let mut member_max_z: i32 = 0;
+                    let mut member_min_z: i32 = 0;
+                    for m in taffy_tree.children(child).unwrap_or_default() {
+                        if let Some(s) = node_map.get(&m).and_then(|d| styles.get(d)) {
+                            if matches!(
+                                s.position,
+                                Some(PositionMode::Relative)
+                                    | Some(PositionMode::Absolute)
+                                    | Some(PositionMode::Fixed)
+                                    | Some(PositionMode::Sticky)
+                            ) {
+                                any_pos = true;
+                                let mz = s.z_index.unwrap_or(0);
+                                member_max_z = member_max_z.max(mz);
+                                member_min_z = member_min_z.min(mz);
+                            }
+                        }
+                    }
+                    if any_pos {
+                        positioned = true;
+                        // A member carrying a nonzero z drags the whole
+                        // group into its hoisted band (a sticky row with
+                        // z-index must still out-rank a positioned z:2
+                        // sibling of the table); signless members keep the
+                        // plain positioned band below.
+                        if member_max_z > 0 {
+                            member_z_override = Some(member_max_z);
+                        } else if member_min_z < 0 {
+                            member_z_override = Some(member_min_z);
+                        }
+                    }
                 }
             }
             let floated = child_style.is_some_and(|s| s.float_side.is_some());
-            let z = child_style.and_then(|s| s.z_index).unwrap_or(0);
+            let z = member_z_override
+                .unwrap_or_else(|| child_style.and_then(|s| s.z_index).unwrap_or(0));
             if z != 0 && positioned {
                 // Hoisted band: painted before (z<0) / after (z>0) the
                 // middle band, ascending within the band.
