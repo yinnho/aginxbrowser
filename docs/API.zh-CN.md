@@ -1060,7 +1060,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 | `session_console` | 读会话最近的页面 console 输出（`log/info/warn/error/dialog` 环形缓冲 500 条，支持 `level`/`since_ts`/`url_contains`/`limit` 过滤）——页面为什么坏，点一下按钮再读它最快 |
 | `session_click` | 按索引点击元素 |
 | `session_click_xy` | 按页面坐标走真实鼠标链点击（pointerdown→click，逐事件 hit-test）——canvas/地图/自绘控件吃这套；`click_count: 2` 补 `dblclick` |
-| `session_drag` | 从 `from` 按下、插值 `mousemove` 滑到 `to` 松开——地图 marker/canvas 选区跟着每一步走 |
+| `session_drag` | 从 `from` 按下、滑到 `to` 松开——地图 marker/canvas 选区跟着每一步走；轨迹默认拟人化（缓动+抖动+停顿），`humanize: false` 回精确线性 |
 | `session_input` | 按索引输入文本（写值后派发 `input`+`change`；`events:"full"` 逐字符派发键盘事件） |
 | `session_scroll` | 滚动页面 |
 | `session_eval` | 在会话中执行 JavaScript |
@@ -1106,7 +1106,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 
 #### session 操作参数
 
-所有 session 操作都需要 `session_id` 参数。`click`/`input` 需要 `index`（从 `session_state` 获取），`input` 还需要 `text`，`eval` 需要 `script`，`navigate` 需要 `url`，`clone` 只要源会话 id。带可选参数的工具：`click_xy` 要 `x`/`y`（可选 `button`、`click_count`）；`drag` 要 `from`/`to`（可选 `steps`、`delay_ms`）；`viewport` 收 `width`/`height`/`mobile`（都可选，缺省保持当前值）；`screenshot` 收 `width`/`height`/`full_page`/`selector`/`selector_all`；`wait` 的 `selector`/`predicate` 二选一，加 `timeout_ms`（默认 10000，上限 120000）；`export` 收 `format`（`bash` 默认 / `jsonl` / `json` 出 flow 文档）；`flow_run` 的 `flow`/`name` 二选一，可加 `vars` 和 `session_id`；`network` 收 `filter: "media"` 或 `include_bodies: true`（加 `url_contains`/`body_max_chars`）；`dialog` 收 `action`（`list`/`accept`/`dismiss`）加可选 `prompt_text`；`console` 收 `level`/`since_ts`/`url_contains`/`limit`；`storage`/`cookies` 只要 `session_id`。
+所有 session 操作都需要 `session_id` 参数。`click`/`input` 需要 `index`（从 `session_state` 获取），`input` 还需要 `text`，`eval` 需要 `script`，`navigate` 需要 `url`，`clone` 只要源会话 id。带可选参数的工具：`click_xy` 要 `x`/`y`（可选 `button`、`click_count`）；`drag` 要 `from`/`to`（可选 `steps`、`delay_ms`、`humanize`——轨迹默认拟人化：缓动+抖动+停顿，`humanize: false` 回到精确线性插值）；`viewport` 收 `width`/`height`/`mobile`（都可选，缺省保持当前值）；`screenshot` 收 `width`/`height`/`full_page`/`selector`/`selector_all`；`wait` 的 `selector`/`predicate` 二选一，加 `timeout_ms`（默认 10000，上限 120000）；`export` 收 `format`（`bash` 默认 / `jsonl` / `json` 出 flow 文档）；`flow_run` 的 `flow`/`name` 二选一，可加 `vars` 和 `session_id`；`network` 收 `filter: "media"` 或 `include_bodies: true`（加 `url_contains`/`body_max_chars`）；`dialog` 收 `action`（`list`/`accept`/`dismiss`）加可选 `prompt_text`；`console` 收 `level`/`since_ts`/`url_contains`/`limit`；`storage`/`cookies` 只要 `session_id`。
 
 ### 客户端配置
 

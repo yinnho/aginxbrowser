@@ -303,6 +303,9 @@ pub enum SessionCommand {
         to_y: f64,
         steps: u32,
         delay_ms: u64,
+        /// Humanized trajectory (easing + wobble + timing jitter). `false`
+        /// keeps the exact linear interpolation legacy callers/tests assert on.
+        humanize: bool,
         reply: oneshot::Sender<Result<String, String>>,
     },
     /// Acknowledged by the session thread right before it exits. The closer
@@ -1702,14 +1705,14 @@ fn session_thread(
                             let _ = reply.send(result);
                         }
 
-                        SessionCommand::Drag { from_x, from_y, to_x, to_y, steps, delay_ms, reply } => {
+                        SessionCommand::Drag { from_x, from_y, to_x, to_y, steps, delay_ms, humanize, reply } => {
                             let steps = steps.clamp(1, 200);
                             let delay_ms = delay_ms.min(1000);
                             let result = match crate::rate::check_page_budget(pages_loaded) {
                                 Err(reason) => Err(reason),
                                 Ok(()) => {
                                     let before = page.url();
-                                    drag_xy(&mut page, from_x, from_y, to_x, to_y, steps, delay_ms).await;
+                                    drag_xy(&mut page, from_x, from_y, to_x, to_y, steps, delay_ms, humanize).await;
                                     let _ = page.process_pending_navigation().await;
                                     if page.url() != before {
                                         pages_loaded += 1;
@@ -1719,6 +1722,7 @@ fn session_thread(
                                         "from": {"x": from_x, "y": from_y},
                                         "to": {"x": to_x, "y": to_y},
                                         "steps": steps,
+                                        "humanized": humanize,
                                     }).to_string())
                                 }
                             };
@@ -2510,10 +2514,11 @@ async fn click_xy(page: &mut Page, x: f64, y: f64, button: &str, click_count: u3
     eval_interaction(page, &mouse_up_js(x, y, code, click_count as u64, 0));
 }
 
-/// Press → interpolated mousemoves (buttons=1 held, delay between steps so
-/// mousemove-driven widgets can keep up) → release. The intermediate moves
-/// are the whole point: a marker drag only tracks when the page sees the
-/// pointer travel, not a teleporting cursor.
+/// Press → mousemoves → release. Linear path (`humanize: false`) is exact
+/// interpolation for tests/tools that need precise geometry; the humanized
+/// path (default) feeds the moves through [`humanized_drag_plan`] so the
+/// trajectory reads as a real hand (anti-bot heuristics score linear
+/// constant-velocity glides as synthetic).
 async fn drag_xy(
     page: &mut Page,
     from_x: f64,
@@ -2522,20 +2527,157 @@ async fn drag_xy(
     to_y: f64,
     steps: u32,
     delay_ms: u64,
+    humanize: bool,
 ) {
     eval_interaction(page, INPUT_HELPERS);
     eval_interaction(page, &mouse_down_js(from_x, from_y, 0, 1, 1, 0));
-    let n = steps as f64;
-    for i in 1..=steps {
-        if delay_ms > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+    if humanize {
+        let plan = humanized_drag_plan(
+            from_x,
+            from_y,
+            to_x,
+            to_y,
+            steps,
+            delay_ms,
+            &mut XorShift64::from_entropy(),
+        );
+        for pt in &plan.points {
+            if pt.delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(pt.delay_ms)).await;
+            }
+            eval_interaction(page, &mouse_move_js(pt.x, pt.y, 1, 0));
         }
-        let k = i as f64 / n;
-        let x = from_x + (to_x - from_x) * k;
-        let y = from_y + (to_y - from_y) * k;
-        eval_interaction(page, &mouse_move_js(x, y, 1, 0));
+        if plan.settle_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(plan.settle_ms)).await;
+        }
+    } else {
+        let n = steps as f64;
+        for i in 1..=steps {
+            if delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+            let k = i as f64 / n;
+            let x = from_x + (to_x - from_x) * k;
+            let y = from_y + (to_y - from_y) * k;
+            eval_interaction(page, &mouse_move_js(x, y, 1, 0));
+        }
     }
     eval_interaction(page, &mouse_up_js(to_x, to_y, 0, 1, 0));
+}
+
+// ---------------------------------------------------------------------------
+// Humanized drag trajectory
+// ---------------------------------------------------------------------------
+
+struct XorShift64(u64);
+
+impl XorShift64 {
+    fn from_entropy() -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9E37_79B9_7F4A_7C15);
+        let probe = &nanos as *const u64 as u64;
+        let seed = nanos ^ probe.rotate_left(17) ^ 0x9E37_79B9_7F4A_7C15;
+        XorShift64(if seed == 0 { 0x853C_49E6_748F_EA9B } else { seed })
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+
+    fn next_f64(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+struct DragPoint {
+    x: f64,
+    y: f64,
+    delay_ms: u64,
+}
+
+struct DragPlan {
+    points: Vec<DragPoint>,
+    settle_ms: u64,
+}
+
+/// Minimum-jerk glide plus perpendicular wobble, per-step timing jitter, a
+/// grip pause after mousedown, a settle pause before mouseup, occasional
+/// hesitation micro-pauses, and (for long drags) sometimes an overshoot with
+/// a corrective pull-back — the irregularities anti-bot trajectory models
+/// score for. The wobble envelope dies at both ends, so the first point sits
+/// on the start line and the last move lands exactly on `to` either way.
+/// Deterministic given the seed.
+fn humanized_drag_plan(
+    from_x: f64,
+    from_y: f64,
+    to_x: f64,
+    to_y: f64,
+    steps: u32,
+    mean_ms: u64,
+    rng: &mut XorShift64,
+) -> DragPlan {
+    let dx = to_x - from_x;
+    let dy = to_y - from_y;
+    let dist = (dx * dx + dy * dy).sqrt();
+    let (ux, uy) = if dist > f64::EPSILON {
+        (dx / dist, dy / dist)
+    } else {
+        (1.0, 0.0)
+    };
+    let (px, py) = (-uy, ux);
+    let mean = mean_ms as f64;
+    let n = steps.max(2) as usize;
+
+    let amp = 0.8 + rng.next_f64() * 1.7;
+    let freq = 1.0 + rng.next_f64() * 1.5;
+    let phase = rng.next_f64() * std::f64::consts::TAU;
+    let overshoot = if dist > 60.0 && rng.next_f64() < 0.35 {
+        (2.0 + rng.next_f64() * 4.0).min(dist * 0.04)
+    } else {
+        0.0
+    };
+
+    let mut points = Vec::with_capacity(n + 2);
+    for i in 1..=n {
+        let t = i as f64 / n as f64;
+        let s = t * t * t * (10.0 + t * (-15.0 + 6.0 * t));
+        let along = (dist + overshoot) * s;
+        let env = (std::f64::consts::PI * t).sin();
+        let wobble = amp * env * (0.55 + 0.45 * (phase + t * freq * std::f64::consts::TAU).sin());
+        let x = from_x + ux * along + px * wobble;
+        let y = from_y + uy * along + py * wobble;
+        let mut delay = mean * (0.55 + rng.next_f64() * 0.95);
+        if rng.next_f64() < 0.12 {
+            delay += 30.0 + rng.next_f64() * 60.0;
+        }
+        if i == 1 {
+            delay = mean * (3.0 + rng.next_f64() * 3.0);
+        }
+        points.push(DragPoint {
+            x,
+            y,
+            delay_ms: delay.round() as u64,
+        });
+    }
+    if overshoot > 0.0 {
+        for frac in [0.6, 1.0] {
+            let along = dist + overshoot * (1.0 - frac);
+            points.push(DragPoint {
+                x: from_x + ux * along,
+                y: from_y + uy * along,
+                delay_ms: (mean * (1.5 + rng.next_f64() * 1.5)).round() as u64,
+            });
+        }
+    }
+    let settle_ms = (mean * (5.0 + rng.next_f64() * 5.0)).round() as u64;
+    DragPlan { points, settle_ms }
 }
 
 async fn click_by_index(
@@ -4426,7 +4568,8 @@ mod tests {
 
         // Drag across the pad: 1 press, N interpolated moves ending at the
         // release point, 1 release. The moves are what mousemove-driven
-        // widgets (map markers) track.
+        // widgets (map markers) track. humanize:false pins the exact linear
+        // interpolation; the humanized path has its own test below.
         let out = mgr
             .send(&sid, |reply| SessionCommand::Drag {
                 from_x: 60.0,
@@ -4435,12 +4578,14 @@ mod tests {
                 to_y: 90.0,
                 steps: 10,
                 delay_ms: 0,
+                humanize: false,
                 reply,
             })
             .await
             .unwrap();
         let v: Value = serde_json::from_str(&out).expect("drag JSON");
         assert_eq!(v["steps"], 10);
+        assert_eq!(v["humanized"], false);
 
         let log = read_log(&mut mgr, &sid).await;
         let downs = log.iter().filter(|e| e.starts_with("down@60,60")).count();
@@ -4471,6 +4616,189 @@ mod tests {
         assert!(out.contains("\"drag\""), "drag recorded, got {out}");
 
         assert!(mgr.close_and_wait(&sid).await);
+    }
+
+    /// The humanized drag path (the default): eased velocity, perpendicular
+    /// wobble off the straight line, and a landing exactly on the release
+    /// point — one decimal place in the page log so sub-pixel shape is
+    /// visible.
+    #[tokio::test]
+    async fn humanized_drag_lands_exact_and_wobbles() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /mousepad",
+            "<html><body style=\"margin:0\">\
+             <div id=\"pad\" style=\"position:absolute;left:10px;top:10px;width:300px;height:300px;\"></div>\
+             <script>\
+             var log = [];\
+             var pad = document.getElementById('pad');\
+             pad.addEventListener('mousedown', function(e){ log.push('down@'+e.clientX+','+e.clientY+' on '+e.target.id); });\
+             document.addEventListener('mousemove', function(e){ log.push('move@'+Math.round(e.clientX*10)/10+','+Math.round(e.clientY*10)/10); });\
+             document.addEventListener('mouseup', function(e){ log.push('up@'+Math.round(e.clientX*10)/10+','+Math.round(e.clientY*10)/10); });\
+             window.__log = log;\
+             </script>\
+             </body></html>",
+        )]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/mousepad")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+
+        async fn read_log(mgr: &mut SessionManager, sid: &str) -> Vec<String> {
+            let out = mgr
+                .send(sid, |reply| SessionCommand::Eval {
+                    script: "JSON.stringify(window.__log)".to_string(),
+                    timeout_ms: None,
+                    reply,
+                })
+                .await
+                .unwrap();
+            let raw = out.as_str().unwrap_or("[]");
+            serde_json::from_str::<Vec<String>>(raw).expect("log array")
+        }
+
+        let out = mgr
+            .send(&sid, |reply| SessionCommand::Drag {
+                from_x: 60.0,
+                from_y: 60.0,
+                to_x: 150.0,
+                to_y: 90.0,
+                steps: 24,
+                delay_ms: 0,
+                humanize: true,
+                reply,
+            })
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&out).expect("drag JSON");
+        assert_eq!(v["humanized"], true);
+        assert_eq!(v["steps"], 24);
+
+        let log = read_log(&mut mgr, &sid).await;
+        assert!(
+            log.iter().any(|e| e == "down@60,60 on pad"),
+            "press at the start point, got {log:?}"
+        );
+        assert!(
+            log.iter().any(|e| e == "up@150,90"),
+            "release at the destination, got {log:?}"
+        );
+
+        let parse_move = |e: &String| -> Option<(f64, f64)> {
+            let rest = e.strip_prefix("move@")?;
+            let (x, y) = rest.split_once(',')?;
+            Some((x.parse().ok()?, y.parse().ok()?))
+        };
+        let moves: Vec<(f64, f64)> = log.iter().filter_map(parse_move).collect();
+        assert!(
+            (24..=26).contains(&moves.len()),
+            "24 glide moves (+2 when the overshoot correction engages), got {}",
+            moves.len()
+        );
+
+        // Minimum-jerk starts with near-zero velocity: the first move must
+        // hug the start point (linear 1/24 would already be at x≈63.75).
+        assert!(
+            moves[0].0 < 62.0,
+            "eased slow start, first move at {:?}, all: {moves:?}",
+            moves[0]
+        );
+
+        // Wobble: at least one move deviates from the start→to line by more
+        // than 0.3px (the envelope guarantees ≥0.7·amp ≥ 0.56px mid-drag).
+        let dev = |p: (f64, f64)| {
+            (90.0 * (p.1 - 60.0) - 30.0 * (p.0 - 60.0)) / 94.868
+        };
+        let max_dev = moves.iter().map(|p| dev(*p).abs()).fold(0.0, f64::max);
+        assert!(
+            max_dev > 0.3,
+            "perpendicular wobble visible off the straight line, max {max_dev:.3}px"
+        );
+
+        // Landing: the final move sits on the release point (wobble envelope
+        // and easing both die at t=1; overshoot corrects back).
+        let last = *moves.last().unwrap();
+        assert!(
+            (last.0 - 150.0).abs() < 0.05 && (last.1 - 90.0).abs() < 0.05,
+            "final move lands exactly on the release point, got {last:?}"
+        );
+
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
+    /// The generator itself, seeded: count bounds, exact landing, grip pause
+    /// before the first move, settle pause in the plan, jittered timing, and
+    /// the wobble never exceeding its amplitude budget.
+    #[test]
+    fn humanized_drag_plan_is_bounded_and_lands_exact() {
+        let mut rng = XorShift64(42);
+        let (fx, fy, tx, ty) = (60.0f64, 60.0f64, 250.0f64, 60.0f64);
+        let plan = humanized_drag_plan(fx, fy, tx, ty, 24, 18, &mut rng);
+
+        assert!(
+            plan.points.len() == 24 || plan.points.len() == 26,
+            "24 glide points (+2 overshoot correction), got {}",
+            plan.points.len()
+        );
+        let last = plan.points.last().unwrap();
+        assert!(
+            (last.x - tx).abs() < 1e-9 && (last.y - ty).abs() < 1e-9,
+            "final point is exactly the release point"
+        );
+
+        // Grip pause after mousedown, settle pause before mouseup.
+        assert!(
+            plan.points[0].delay_ms >= 3 * 18,
+            "first move waits out the grip pause, got {}",
+            plan.points[0].delay_ms
+        );
+        assert!(
+            plan.settle_ms >= 5 * 18,
+            "settle pause present, got {}",
+            plan.settle_ms
+        );
+
+        // Timing jitter: delays vary, none runs away, none below the
+        // 0.55×mean floor (except the first, which is the grip pause).
+        let delays: std::collections::HashSet<u64> =
+            plan.points.iter().map(|p| p.delay_ms).collect();
+        assert!(delays.len() > 1, "per-step timing jittered, {delays:?}");
+        for p in &plan.points[1..] {
+            assert!(
+                (9..=120).contains(&p.delay_ms),
+                "delay within mean±hesitation budget, got {}",
+                p.delay_ms
+            );
+        }
+
+        // Geometry: progress stays within [start, target+overshoot cap]; the
+        // only backward motion allowed is the small overshoot pull-back
+        // (≤ 6px overshoot ⇒ ≤ 3.6px per corrective step).
+        let dx = tx - fx;
+        let dist = dx.hypot(ty - fy);
+        let mut prev_along = -1.0f64;
+        for p in &plan.points {
+            let along = ((p.x - fx) * dx + (p.y - fy) * (ty - fy)) / dist;
+            assert!(
+                along >= prev_along - dist * 0.05 && along <= dist + 8.0,
+                "progress stays within [start, target+overshoot cap], got {along}"
+            );
+            prev_along = along;
+            let wobble = (90.0 * (p.y - fy) - (ty - fy) * (p.x - fx)) / dist;
+            assert!(
+                wobble.abs() <= 2.6,
+                "wobble within amplitude budget, got {wobble}"
+            );
+        }
     }
 
     /// Page console output lands in the session ring: messages from the

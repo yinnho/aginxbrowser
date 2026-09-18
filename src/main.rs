@@ -2165,14 +2165,19 @@ struct SessionDragRequest {
     steps: Option<u32>,
     #[serde(default)]
     delay_ms: Option<u64>,
+    /// Humanized trajectory (default true); false = exact linear interpolation
+    #[serde(default)]
+    humanize: Option<bool>,
 }
 
-/// Drag the mouse from `from` to `to` through interpolated mousemove events —
-/// drags markers/canvas selections that only track a traveling pointer.
+/// Drag the mouse from `from` to `to` through mousemove events — the
+/// trajectory is humanized by default (eased velocity, wobble, jittered
+/// timing); `humanize:false` keeps exact linear interpolation.
 async fn session_drag_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(req): Json<SessionDragRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    let humanize = req.humanize.unwrap_or(true);
     let mut mgr = session::SESSIONS.lock().await;
     let text = mgr
         .send(&id, |reply| session::SessionCommand::Drag {
@@ -2180,8 +2185,9 @@ async fn session_drag_handler(
             from_y: req.from.y,
             to_x: req.to.x,
             to_y: req.to.y,
-            steps: req.steps.unwrap_or(10),
-            delay_ms: req.delay_ms.unwrap_or(30),
+            steps: req.steps.unwrap_or(if humanize { 24 } else { 10 }),
+            delay_ms: req.delay_ms.unwrap_or(if humanize { 18 } else { 30 }),
+            humanize,
             reply,
         })
         .await

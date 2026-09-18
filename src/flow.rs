@@ -352,14 +352,22 @@ async fn exec_step(
         "drag" => {
             let f = a.get("from").cloned().unwrap_or(json!({}));
             let t = a.get("to").cloned().unwrap_or(json!({}));
+            let humanize = a.get("humanize").and_then(|v| v.as_bool()).unwrap_or(true);
             let r = mgr
                 .send(sid, |reply| C::Drag {
                     from_x: f["x"].as_f64().unwrap_or(0.0),
                     from_y: f["y"].as_f64().unwrap_or(0.0),
                     to_x: t["x"].as_f64().unwrap_or(0.0),
                     to_y: t["y"].as_f64().unwrap_or(0.0),
-                    steps: a.get("steps").and_then(|v| v.as_u64()).unwrap_or(10) as u32,
-                    delay_ms: a.get("delay_ms").and_then(|v| v.as_u64()).unwrap_or(30),
+                    steps: a
+                        .get("steps")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(if humanize { 24 } else { 10 }) as u32,
+                    delay_ms: a
+                        .get("delay_ms")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(if humanize { 18 } else { 30 }),
+                    humanize,
                     reply,
                 })
                 .await

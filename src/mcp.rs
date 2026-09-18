@@ -301,13 +301,20 @@ pub struct SessionDragParams {
     pub from: SessionXy,
     /// Where to release it
     pub to: SessionXy,
-    /// Interpolated mousemove events between from and to (default 10)
+    /// Interpolated mousemove events between from and to. Default: 24 with
+    /// humanize on, 10 without
     #[serde(default)]
     pub steps: Option<u32>,
-    /// Delay between moves in ms (default 30) — gives mousemove-driven
-    /// widgets time to react per step
+    /// Mean delay between moves in ms (default 18 humanized / 30 linear) —
+    /// per-step timing is jittered around this when humanizing
     #[serde(default)]
     pub delay_ms: Option<u64>,
+    /// Humanize the trajectory: minimum-jerk easing, perpendicular wobble,
+    /// timing jitter, grip/settle pauses, occasional hesitation and
+    /// overshoot-and-correct. Set false when a test/tool needs exact linear
+    /// interpolation. Default: true
+    #[serde(default)]
+    pub humanize: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -1435,11 +1442,14 @@ For canvas/map surfaces with no DOM element to index. click_count 2 adds dblclic
 
     #[tool(
         description = "Drag the mouse from one viewport position to another: press at `from`, \
-`steps` interpolated mousemove events (delay_ms apart), release at `to`. Moves AMarker-style \
-drag targets and canvas selections that only track while the pointer travels.",
+`steps` mousemove events, release at `to`. The trajectory is humanized by default (eased \
+velocity, wobble, jittered timing, overshoot) — the shapes anti-bot checks score for; pass \
+humanize:false for exact linear interpolation. Moves AMarker-style drag targets, canvas \
+selections and captcha sliders that only track while the pointer travels.",
         annotations(title = "Session Drag")
     )]
     async fn session_drag(&self, Parameters(params): Parameters<SessionDragParams>) -> String {
+        let humanize = params.humanize.unwrap_or(true);
         let mut mgr = session::SESSIONS.lock().await;
         match mgr
             .send(&params.session_id, |reply| SessionCommand::Drag {
@@ -1447,8 +1457,9 @@ drag targets and canvas selections that only track while the pointer travels.",
                 from_y: params.from.y,
                 to_x: params.to.x,
                 to_y: params.to.y,
-                steps: params.steps.unwrap_or(10),
-                delay_ms: params.delay_ms.unwrap_or(30),
+                steps: params.steps.unwrap_or(if humanize { 24 } else { 10 }),
+                delay_ms: params.delay_ms.unwrap_or(if humanize { 18 } else { 30 }),
+                humanize,
                 reply,
             })
             .await

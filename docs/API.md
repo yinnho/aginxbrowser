@@ -979,16 +979,17 @@ Click at page coordinates via the real mouse chain: `pointerdown`/`mousedown` �
 
 ### POST /session/{id}/drag
 
-Press at `from`, glide through `steps` interpolated `mousemove` events (`delay_ms` apart), release at `to` — drags a marker/canvas selection the way a real pointer would, so move-driven widgets (map markers, drag handles, sliders) track every intermediate position.
+Press at `from`, glide through `steps` `mousemove` events, release at `to` — drags a marker/canvas selection the way a real pointer would, so move-driven widgets (map markers, drag handles, sliders) track every intermediate position. The trajectory is humanized by default: minimum-jerk easing, perpendicular wobble, jittered per-step timing, a grip pause after press and a settle pause before release, occasional hesitation, and sometimes an overshoot-and-correct for long drags — the shapes anti-bot checks score for. Pass `humanize: false` for the exact linear interpolation.
 
 | Field | Type | Default | Description |
 |------|------|------|------|
 | from | object | ✅ | `{"x":…,"y":…}` press point |
 | to | object | ✅ | `{"x":…,"y":…}` release point |
-| steps | u32 | `10` | Interpolated move events (clamped 1..200) |
-| delay_ms | u64 | `30` | Pause between moves (clamped 0..1000) |
+| steps | u32 | `24` humanized / `10` linear | Move events (clamped 1..200) |
+| delay_ms | u64 | `18` humanized / `30` linear | Mean pause between moves (clamped 0..1000; jittered when humanizing) |
+| humanize | bool | `true` | `false` switches back to exact linear interpolation |
 
-**Response:** `{"url": "...", "from": {"x":120,"y":120}, "to": {"x":300,"y":220}, "steps": 10}`
+**Response:** `{"url": "...", "from": {"x":120,"y":120}, "to": {"x":300,"y":220}, "steps": 24, "humanized": true}`
 
 ### POST /session/{id}/input
 
@@ -1576,7 +1577,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `session_console` | Read the session's recent page console output (`log/info/warn/error/dialog` ring buffer of 500, filters: `level`/`since_ts`/`url_contains`/`limit`) — the fastest way to see why a page misbehaves |
 | `session_click` | Click an element by index |
 | `session_click_xy` | Click at viewport coordinates via the real mouse chain (`pointerdown`→`click`, hit-tested) — for canvas/map/custom widgets; `click_count: 2` adds `dblclick` |
-| `session_drag` | Press at `from`, glide through interpolated `mousemove` events, release at `to` — drags map markers/canvas selections the way a real pointer would |
+| `session_drag` | Press at `from`, glide through `mousemove` events, release at `to` — drags map markers/canvas selections; the trajectory is humanized by default (eased velocity, wobble, jittered timing) |
 | `session_input` | Type text by index (`input`+`change` dispatched; `events:"full"` for per-character keyboard cycles) |
 | `session_set_files` | Select files on a file input programmatically (Playwright `setInputFiles` semantics): files arrive as `{name, content_base64, mime_type?, last_modified?}`, get assigned to `input.files`, then `input`+`change` dispatch. Selector-addressed (`input[type=file]`) because file inputs are often hidden — the `session_state` index may not include them |
 | `session_scroll` | Scroll the page |
@@ -1636,7 +1637,7 @@ The output is deterministic — same input, same bytes — and the receipt carri
 
 #### Session Operation Parameters
 
-All session operations require the `session_id` parameter. `click`/`input` also need `index` (from `session_state`); `input` additionally needs `text`; `eval` needs `script` (optional `timeout_ms`, default 5000, clamped 100..120000 — a script that outlives the budget returns `EVAL_TIMEOUT` instead of a silent null); `navigate` needs `url`; `clone` needs nothing but the source id. The acting/rendering tools take optional extras: `click_xy` needs `x`/`y` (optional `button`, `click_count`); `drag` needs `from`/`to` (optional `steps`, `delay_ms`); `viewport` accepts `width`/`height`/`mobile` (all optional — omit to keep current); `screenshot` accepts `width`/`height`/`full_page`/`selector`/`selector_all`; `wait` takes exactly one of `selector` / `predicate` plus `timeout_ms` (default 10000, max 120000); `export` accepts `format` (`bash` default / `jsonl` / `json` for a flow document); `flow_run` takes exactly one of `flow` / `name`, plus optional `vars` and `session_id`; `network` accepts `filter: "media"` or `include_bodies: true` (plus `url_contains`/`body_max_chars`); `dialog` accepts `action` (`list` default / `accept` / `dismiss`) plus optional `prompt_text`; `console` accepts `level`/`since_ts`/`url_contains`/`limit`; `storage`/`cookies` take only `session_id`.
+All session operations require the `session_id` parameter. `click`/`input` also need `index` (from `session_state`); `input` additionally needs `text`; `eval` needs `script` (optional `timeout_ms`, default 5000, clamped 100..120000 — a script that outlives the budget returns `EVAL_TIMEOUT` instead of a silent null); `navigate` needs `url`; `clone` needs nothing but the source id. The acting/rendering tools take optional extras: `click_xy` needs `x`/`y` (optional `button`, `click_count`); `drag` needs `from`/`to` (optional `steps`, `delay_ms`, `humanize` — trajectory is humanized by default; `humanize: false` gives exact linear interpolation); `viewport` accepts `width`/`height`/`mobile` (all optional — omit to keep current); `screenshot` accepts `width`/`height`/`full_page`/`selector`/`selector_all`; `wait` takes exactly one of `selector` / `predicate` plus `timeout_ms` (default 10000, max 120000); `export` accepts `format` (`bash` default / `jsonl` / `json` for a flow document); `flow_run` takes exactly one of `flow` / `name`, plus optional `vars` and `session_id`; `network` accepts `filter: "media"` or `include_bodies: true` (plus `url_contains`/`body_max_chars`); `dialog` accepts `action` (`list` default / `accept` / `dismiss`) plus optional `prompt_text`; `console` accepts `level`/`since_ts`/`url_contains`/`limit`; `storage`/`cookies` take only `session_id`.
 
 ### Client Configuration
 
