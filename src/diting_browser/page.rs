@@ -86,6 +86,36 @@ fn subresource_allowed(page_url: Option<&Url>, resource: &str) -> bool {
     }
 }
 
+/// Chrome renders a response whose MIME says "this is not HTML" as a plain
+/// text document: body is a single `<pre>` holding the source verbatim, so
+/// newlines survive and markup characters stay inert. Feeding the bytes to
+/// the HTML parser instead collapses the formatting and interprets any
+/// `<tag>`-looking text as real elements.
+fn renders_as_text_document(mime: &str) -> bool {
+    if mime == "text/html" || mime == "application/xhtml+xml" || mime.starts_with("image/") {
+        return false;
+    }
+    mime.starts_with("text/")
+        || mime == "application/json"
+        || mime == "application/javascript"
+        || mime.ends_with("+json")
+        || mime == "application/xml"
+        || mime.ends_with("+xml")
+}
+
+fn plain_text_document(body: &str) -> DomTree {
+    let mut escaped = String::with_capacity(body.len());
+    for ch in body.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            _ => escaped.push(ch),
+        }
+    }
+    parse_html(&format!("<pre>{escaped}</pre>"))
+}
+
 /// Escape a value for safe inclusion inside a JavaScript template
 /// literal. The previous implementation only escaped `\`, `` ` `` and
 /// `${`; that left U+2028 / U+2029 (the JS-specific line terminators)
@@ -267,6 +297,10 @@ pub struct Page {
     /// Exposed to JS as `document.characterSet` and used for the URL query
     /// encoding override on `<a>`/`<area>` hrefs in legacy-charset documents.
     pub encoding: String,
+    /// MIME type of the main response (lowercased, parameters stripped).
+    /// Backs `document.contentType`. None = the response carried no
+    /// Content-Type — the JS layer then falls back to URL sniffing.
+    pub content_type: Option<String>,
     /// Navigation history for Page.getNavigationHistory / navigateToHistoryEntry.
     /// Entries are URLs in visit order; `history_index` is the current position.
     /// Pushed on every successful navigation; truncated on goBack -> new nav.
@@ -389,6 +423,7 @@ impl Page {
             referrer: String::new(),
             referrer_policy_header: String::new(),
             encoding: "UTF-8".to_string(),
+            content_type: None,
             history: Vec::new(),
             history_index: 0,
             network_events: Vec::new(),
@@ -486,6 +521,7 @@ impl Page {
         );
         rt.set_url(&self.url_string());
         rt.set_encoding(&self.encoding);
+        rt.set_content_type(self.content_type.as_deref().unwrap_or(""));
         rt.set_title(&self.title);
         rt.set_referrer(&self.referrer);
         rt.set_referrer_policy(&self.referrer_policy_header);
@@ -1573,6 +1609,13 @@ impl Page {
         let (body_text, encoding_name) =
             crate::diting_net::decode_response_with_name(&response.body, response.content_type());
         self.encoding = encoding_name.to_string();
+        // Main-response MIME (lowercased, parameters stripped) backs
+        // `document.contentType`. An absent Content-Type stays None so the
+        // JS layer keeps its URL-sniffing fallback.
+        self.content_type = response
+            .content_type()
+            .map(|ct| ct.split(';').next().unwrap_or("").trim().to_lowercase())
+            .filter(|ct| !ct.is_empty());
         // Referrer Policy §"Determine request's Referrer Policy": a policy
         // delivered via the response header wins outright over <meta>. Keep
         // only the last valid comma token (invalid ones are skipped).
@@ -1611,12 +1654,18 @@ impl Page {
                     });
                 }
                 dom
+            } else if self.content_type.as_deref().is_some_and(renders_as_text_document) {
+                plain_text_document(&body_text)
             } else {
                 parse_html(&body_text)
             }
         };
         #[cfg(not(feature = "screenshot"))]
-        let dom = parse_html(&body_text);
+        let dom = if self.content_type.as_deref().is_some_and(renders_as_text_document) {
+            plain_text_document(&body_text)
+        } else {
+            parse_html(&body_text)
+        };
 
         self.title = dom
             .query_selector("title")
@@ -1836,6 +1885,7 @@ impl Page {
         self.url = Some(Url::parse("about:blank").unwrap());
         self.dom = Some(parse_html("<!DOCTYPE html><html><head></head><body></body></html>"));
         self.title = String::new();
+        self.content_type = None;
         self.lifecycle = LifecycleState::Loaded;
     }
 
@@ -5068,5 +5118,93 @@ ms.addEventListener('sourceopen', function(){ \
             p.evaluate("document.querySelector('svg').getBoundingClientRect().height").as_f64(),
             Some(20.0)
         );
+    }
+
+    // ---- non-HTML document pipeline (moli#514 class) ---------------------
+
+    #[test]
+    fn text_document_classification() {
+        for mime in [
+            "text/plain",
+            "text/csv",
+            "text/css",
+            "text/javascript",
+            "application/json",
+            "application/javascript",
+            "application/xml",
+            "text/xml",
+            "application/rss+xml",
+            "application/atom+xml",
+            "application/ld+json",
+        ] {
+            assert!(renders_as_text_document(mime), "{mime} must render as text");
+        }
+        for mime in ["text/html", "application/xhtml+xml", "image/svg+xml", "image/png", ""] {
+            assert!(!renders_as_text_document(mime), "{mime} must not render as text");
+        }
+    }
+
+    #[test]
+    fn plain_text_document_wraps_pre_verbatim() {
+        let dom = plain_text_document("a < b && c > d\nsecond line");
+        let pre = dom.query_selector("body > pre").unwrap().expect("pre wrapper");
+        assert_eq!(dom.text_content(pre), "a < b && c > d\nsecond line");
+        assert!(
+            dom.query_selector("b").unwrap().is_none(),
+            "markup-looking text must stay inert"
+        );
+    }
+
+    /// moli#514 同洞: a text/plain response must surface as a `<pre>`
+    /// document with `document.contentType` from the response header — not
+    /// the "text/html" the URL sniffing used to invent.
+    #[tokio::test(flavor = "current_thread")]
+    async fn text_plain_navigation_wraps_pre_and_reports_content_type() {
+        let _g = net_test_guard();
+        let port = local_http_server_typed(vec![
+            (
+                "/log",
+                200,
+                "text/plain; charset=utf-8",
+                "first line <notatag>\nsecond & line".to_string(),
+            ),
+            ("/data", 200, "application/json", "{\"a\": 1}\n{\"b\": 2}".to_string()),
+        ]);
+        let mut p = test_page();
+
+        p.navigate(&format!("http://127.0.0.1:{port}/log")).await.unwrap();
+        assert_eq!(p.evaluate("document.contentType").as_str(), Some("text/plain"));
+        assert_eq!(p.evaluate("document.body.firstElementChild.tagName").as_str(), Some("PRE"));
+        assert_eq!(
+            p.evaluate("document.body.textContent").as_str(),
+            Some("first line <notatag>\nsecond & line"),
+            "source must survive verbatim — newlines and markup chars included"
+        );
+        assert_eq!(p.evaluate("document.querySelector('notatag')").as_str(), None);
+
+        p.navigate(&format!("http://127.0.0.1:{port}/data")).await.unwrap();
+        assert_eq!(p.evaluate("document.contentType").as_str(), Some("application/json"));
+        assert_eq!(p.evaluate("document.body.firstElementChild.tagName").as_str(), Some("PRE"));
+        assert_eq!(p.evaluate("document.body.textContent").as_str(), Some("{\"a\": 1}\n{\"b\": 2}"));
+    }
+
+    /// Regression face: text/html keeps the HTML pipeline — no `<pre>`
+    /// wrapper, and contentType comes from the header, not URL sniffing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn html_response_stays_on_html_pipeline() {
+        let _g = net_test_guard();
+        let port = local_http_server_typed(vec![(
+            "/feed.xml",
+            200,
+            "text/html",
+            "<html><body><p>real html</p></body></html>".to_string(),
+        )]);
+        let mut p = test_page();
+        // The .xml extension used to make contentType report
+        // "application/xml"; the response header wins in Chrome.
+        p.navigate(&format!("http://127.0.0.1:{port}/feed.xml")).await.unwrap();
+        assert_eq!(p.evaluate("document.contentType").as_str(), Some("text/html"));
+        assert_eq!(p.evaluate("document.querySelector('p').textContent").as_str(), Some("real html"));
+        assert_eq!(p.evaluate("document.body.firstElementChild.tagName").as_str(), Some("P"));
     }
 }

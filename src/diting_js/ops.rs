@@ -62,6 +62,10 @@ pub struct JsState {
     /// "UTF-8", "EUC-JP"). Backs `document.characterSet` and the URL query
     /// encoding override for `<a>`/`<area>` hrefs in legacy-charset documents.
     pub encoding: String,
+    /// MIME type of the main response (lowercased, parameters stripped), e.g.
+    /// "text/plain". Backs `document.contentType`. Empty = the response
+    /// carried no Content-Type (JS falls back to URL sniffing).
+    pub content_type: String,
     pub title: String,
     /// URL of the document that initiated this document's navigation. Direct
     /// automation navigations leave this empty; document-initiated navigations
@@ -373,6 +377,7 @@ impl JsState {
             dom: None,
             url: "about:blank".to_string(),
             encoding: "UTF-8".to_string(),
+            content_type: String::new(),
             title: String::new(),
             referrer: String::new(),
             referrer_policy_header: String::new(),
@@ -957,6 +962,9 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 .unwrap_or("\"\"".into())
         }
         "document_encoding" => serde_json::to_string(&gs.encoding).unwrap_or("\"UTF-8\"".into()),
+        "document_content_type" => {
+            serde_json::to_string(&gs.content_type).unwrap_or("\"\"".into())
+        }
         "document_element" => {
             for cid in dom.children(dom.document()) {
                 if let Some(n) = dom.get_node(cid) {

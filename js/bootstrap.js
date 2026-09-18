@@ -174,7 +174,7 @@ const _domStrA1 = new Set([
   "create_processing_instruction", "create_doctype",
   "create_document_fragment",
   "query_selector", "query_selector_all", "get_element_by_id",
-  "document_node_id", "document_title", "set_document_title", "document_referrer", "document_url", "document_base_url", "document_encoding", "document_referrer_policy",
+  "document_node_id", "document_title", "set_document_title", "document_referrer", "document_url", "document_base_url", "document_encoding", "document_content_type", "document_referrer_policy",
   "document_element", "document_doctype",
   "document_write", "document_write_reset",
   "add_css_transition",
@@ -2276,6 +2276,17 @@ function _docEncoding() {
   return __docEncoding;
 }
 function _docIsUtf8() { if (__docIsUtf8 === undefined) _docEncoding(); return __docIsUtf8; }
+// Main response's MIME type (lowercased, no parameters), e.g. "text/plain".
+// Empty when the response carried no Content-Type — callers then fall back
+// to URL sniffing. Cached per runtime like the encoding above.
+let __docContentType;
+function _docContentType() {
+  if (__docContentType === undefined) {
+    const ct = _domParse("document_content_type");
+    __docContentType = (typeof ct === 'string') ? ct : '';
+  }
+  return __docContentType;
+}
 // WHATWG "special scheme" check (these get the special-query percent-encode set).
 function _isSpecialScheme(protocol) {
   const s = (protocol || '').replace(/:$/, '').toLowerCase();
@@ -4660,6 +4671,11 @@ class Document extends Node {
     // XML document, so createCDATASection/etc. must not throw. Live documents
     // wrapped from the tree carry a real nid and fall through to URL-derived.
     if (this._nid === undefined || this._nid === null) return "application/xml";
+    // Chrome derives contentType from the response, not the URL: a text/plain
+    // document served from an extension-less URL reports "text/plain". The
+    // response type wins when the server delivered one.
+    const responseType = _docContentType();
+    if (responseType) return responseType;
     const url = this.URL || "";
     // data: URLs carry their MIME type explicitly.
     const dm = /^data:([^,;]+)/i.exec(url);

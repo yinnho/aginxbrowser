@@ -543,6 +543,12 @@ impl JsRuntime {
         self.state.borrow_mut().encoding = encoding.to_string();
     }
 
+    /// Set the main response's MIME type (lowercased, no parameters). Backs
+    /// `document.contentType`. Empty = no Content-Type was delivered.
+    pub fn set_content_type(&self, content_type: &str) {
+        self.state.borrow_mut().content_type = content_type.to_string();
+    }
+
     pub fn set_title(&self, title: &str) {
         self.state.borrow_mut().title = title.to_string();
     }
