@@ -10849,6 +10849,75 @@
 
     #[tokio::test(flavor = "current_thread")]
     #[cfg(feature = "screenshot")]
+    async fn test_sticky_table_row_pins_under_root_scroll() {
+        // blitz#887 收官口子：boxless 表格行 sticky。我们的行 wrapper 在
+        // node_map 里就键在 tr 的 DOM id 上（批57 表格引擎），rects 天然
+        // 有行盒——sticky 全机制（shift map + paint span + 命中）直接继承。
+        // 钉死三面：gBCR 黏住、cell 后代同步黏、client 命中落在黏住的行上。
+        let mut rt = setup_runtime(
+            r#"<html><body><div style="height:100px"></div><table style="border-collapse:collapse"><thead><tr id="head" style="position:sticky; top:0; height:30px; background:#ccc"><th id="hc" style="width:100px">H</th></tr></thead><tbody><tr><td><div style="height:4000px">r1</div></td></tr></tbody></table><div style="height:200px"></div></body></html>"#,
+        );
+        let script = r#"async () => {
+            const head = document.getElementById('head');
+            const cell = document.getElementById('hc');
+            const pos = getComputedStyle(head).position;
+            const rest = head.getBoundingClientRect().top;
+            window.scrollTo(0, 300);
+            await new Promise(r => setTimeout(r, 10));
+            const stuck = head.getBoundingClientRect().top;
+            const cellStuck = cell.getBoundingClientRect().top;
+            const hit = document.elementFromPoint(10, 5);
+            const hitId = hit ? (hit.id || hit.tagName) : 'null';
+            window.scrollTo(0, 0);
+            await new Promise(r => setTimeout(r, 10));
+            const back = head.getBoundingClientRect().top;
+            return [
+                pos,
+                Math.round(rest),
+                Math.round(stuck),
+                Math.round(cellStuck),
+                hitId,
+                Math.round(back),
+            ];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!(["sticky", 108, 300, 300, "hc", 108]),
+            "row sticks at top:0 (doc-space gBCR == scrollY), cell inherits the shift, hit lands on the stuck header, reset restores"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(feature = "screenshot")]
+    async fn test_sticky_table_header_group_and_cell_pin() {
+        // Same boxless family, two more members: sticky on thead (row group,
+        // Chrome sticks the whole group) and sticky on a th cell (frozen
+        // header cell). Both ride the same node_map keying as the row.
+        let mut rt = setup_runtime(
+            r#"<html><body><div style="height:100px"></div><table style="border-collapse:collapse"><thead id="hg" style="position:sticky; top:0"><tr style="height:30px"><th id="c1" style="width:100px">H</th></tr></thead><tbody><tr><td><div style="height:4000px">r1</div></td></tr></tbody></table><div style="height:200px"></div></body></html>"#,
+        );
+        let script = r#"async () => {
+            const group = document.getElementById('hg');
+            const cell = document.getElementById('c1');
+            window.scrollTo(0, 300);
+            await new Promise(r => setTimeout(r, 10));
+            return [
+                Math.round(group.getBoundingClientRect().top),
+                Math.round(cell.getBoundingClientRect().top),
+                (document.elementFromPoint(10, 5) || {}).id || 'null',
+            ];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!([300, 300, "c1"]),
+            "group sticks at top:0, cell inherits the shift, hit lands on the stuck header cell"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(feature = "screenshot")]
     async fn test_nested_element_scrollers_compose_shifts() {
         // Two stacked scrollers: outer=100 shifts the inner BOX (and its
         // subtree) by -100; inner=50 shifts the leaf another -50. The

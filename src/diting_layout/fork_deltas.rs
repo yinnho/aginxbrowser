@@ -1690,11 +1690,11 @@ fn nested_inline_backgrounds_stack_outer_under_inner() {
     );
 }
 
-/// Row-group backgrounds (blitz#346): thead/tbody/tfoot get no box of their
-/// own (build_table flattens them into rows), so a background-color on the
-/// group never painted. The fix climbs one DOM level at paint time when the
-/// row has no background of its own — CSS2.1's cell > row > row-group
-/// order, computed values untouched.
+/// Row-group backgrounds (blitz#346): thead/tbody/tfoot now get their own
+/// wrapper boxes (the sticky-group batch keyed them into node_map), so a
+/// background-color on the group paints on the group's band — under the
+/// rows, which are its taffy children (CSS2.1's cell > row > row-group
+/// order). The earlier paint-time DOM climb is gone with the boxless group.
 #[test]
 fn row_group_background_paints_on_row_band() {
     use crate::diting_css::{parse_stylesheet_for, CssMediaType};
@@ -1747,7 +1747,7 @@ fn row_group_background_paints_on_row_band() {
     );
 }
 
-/// Same climb through thead — the tag match covers all three row-group
+/// Same coverage through thead — the tag match covers all three row-group
 /// elements, thead is the one a typo'd match arm would silently drop.
 #[test]
 fn thead_background_paints_on_row_band() {
@@ -1817,8 +1817,10 @@ fn cell_background_paints_over_row_group_band() {
     );
 }
 
-/// Row's own background wins over the row-group's: no climb happens (and no
-/// tbody red leaks anywhere) when the tr carries its own blue.
+/// Row's own background wins over the row-group's: with both set, the
+/// group's red band paints on the group box UNDER the row's own blue
+/// (CSS2.1 row > row-group) — the red is the group's own box, not a leak
+/// onto the row band.
 #[test]
 fn row_background_beats_row_group_background() {
     use crate::diting_css::{parse_stylesheet_for, CssMediaType};
@@ -1841,16 +1843,24 @@ fn row_background_beats_row_group_background() {
         800.0,
     );
 
-    let reds = items
+    let reds: Vec<_> = items
         .iter()
-        .filter(|it| matches!(it, PaintItem::Bg { color, .. } if *color == [0xff, 0x00, 0x00, 0xff]))
-        .count();
-    let blues = items
+        .enumerate()
+        .filter(|(_, it)| matches!(it, PaintItem::Bg { color, .. } if *color == [0xff, 0x00, 0x00, 0xff]))
+        .map(|(i, _)| i)
+        .collect();
+    let blues: Vec<_> = items
         .iter()
-        .filter(|it| matches!(it, PaintItem::Bg { color, .. } if *color == [0x00, 0x00, 0xff, 0xff]))
-        .count();
-    assert_eq!(reds, 0, "tbody red must not leak under an own-bg row");
-    assert_eq!(blues, 1, "the row's own blue paints once; got {blues}");
+        .enumerate()
+        .filter(|(_, it)| matches!(it, PaintItem::Bg { color, .. } if *color == [0x00, 0x00, 0xff, 0xff]))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(reds.len(), 1, "the group's own red box paints once; got {reds:?}");
+    assert_eq!(blues.len(), 1, "the row's own blue paints once; got {blues:?}");
+    assert!(
+        reds[0] < blues[0],
+        "group red ({reds:?}) must paint under the row's blue ({blues:?})"
+    );
 }
 
 /// Per-side width longhands (blitz#837's repro shape): `border: 1px solid;

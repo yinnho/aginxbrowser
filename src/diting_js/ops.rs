@@ -2559,8 +2559,20 @@ fn sticky_shifts(gs: &JsState, dom: &DomTree) -> std::rc::Rc<HashMap<NodeId, [f3
                 }
             }
             if cb.is_none() {
-                if let Some(&r) = rects.get(&p) {
-                    cb = Some((p, r));
+                // Table-internal stand-in boxes never establish the sticky
+                // containing block: per CSS2.1 the CB of a table row (and
+                // of a cell) is the TABLE, so row groups (thead/tbody/
+                // tfoot — UA-mapped to TableRow, same as tr) and rows are
+                // walked past, not clamped to. Without the skip a sticky
+                // tr clamps to its 30px-tall thead box and never moves.
+                let table_internal = styles
+                    .get(&p)
+                    .and_then(|st| st.display)
+                    == Some(crate::diting_css::Display::TableRow);
+                if !table_internal {
+                    if let Some(&r) = rects.get(&p) {
+                        cb = Some((p, r));
+                    }
                 }
             }
             if port.is_none() && is_element_scroller(dom, rects, styles, p) {

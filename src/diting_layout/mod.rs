@@ -2656,25 +2656,33 @@ fn build_table(
     };
     // Rows in document order, row groups flattened; CSS `display: table-row`
     // children count as rows too (the CSS-authored minimum). The caption and
-    // the colgroup/col width sources ride the same scan.
+    // the colgroup/col width sources ride the same scan. `row_group` keeps
+    // each row's thead/tbody/tfoot ancestor (parallel to `row_ids`) so the
+    // wrapper assembly can re-group what this scan flattens — a group with
+    // a real (stand-in) box gets rects/gBCR/sticky for free, and the box is
+    // what `position: sticky` on a row group keys off in Chrome.
     let mut row_ids: Vec<NodeId> = Vec::new();
+    let mut row_group: Vec<Option<NodeId>> = Vec::new();
     let mut caption_id: Option<NodeId> = None;
     let mut col_nodes: Vec<NodeId> = Vec::new();
     for child in tree.children(id) {
         match tag_of(child).as_str() {
-            "tr" => row_ids.push(child),
+            "tr" => {
+                row_ids.push(child);
+                row_group.push(None);
+            }
             "caption" => caption_id = caption_id.or(Some(child)),
             "colgroup" | "col" => col_nodes.push(child),
             "thead" | "tbody" | "tfoot" => {
-                row_ids.extend(
-                    tree.children(child)
-                        .into_iter()
-                        .filter(|gc| tag_of(*gc) == "tr"),
-                );
+                for gc in tree.children(child).into_iter().filter(|gc| tag_of(*gc) == "tr") {
+                    row_ids.push(gc);
+                    row_group.push(Some(child));
+                }
             }
             _ => {
                 if styles.get(&child).and_then(|s| s.display) == Some(CssDisplay::TableRow) {
                     row_ids.push(child);
+                    row_group.push(None);
                 }
             }
         }
@@ -3063,7 +3071,53 @@ fn build_table(
             table_children.push(cap_node);
         }
     }
-    table_children.extend(row_wrappers.iter().map(|(_, r, _)| *r));
+    // Re-group consecutive rows that share a thead/tbody/tfoot ancestor
+    // into a group wrapper (flex column, same border-spacing gap, keyed to
+    // the group's DOM id). Geometry is unchanged: the table's own gap still
+    // spaces the top-level children, and each group's internal gap spaces
+    // its rows, so the total inter-row gaps are exactly the pre-grouping
+    // N-1. What the wrapper BUYS: the group lands in node_map, so the
+    // harvest gives it a rect — gBCR, backgrounds, and `position: sticky`
+    // on row groups (Chrome sticks the whole group) all inherit the box.
+    {
+        let mut gi = 0usize;
+        while gi < row_wrappers.len() {
+            let (row_idx, row_node, _) = &row_wrappers[gi];
+            match row_group.get(*row_idx).copied().flatten() {
+                None => {
+                    table_children.push(*row_node);
+                    gi += 1;
+                }
+                Some(group_dom) => {
+                    let mut members = vec![*row_node];
+                    gi += 1;
+                    while gi < row_wrappers.len()
+                        && row_group.get(row_wrappers[gi].0).copied().flatten() == Some(group_dom)
+                    {
+                        members.push(row_wrappers[gi].1);
+                        gi += 1;
+                    }
+                    let group_style = Style {
+                        display: Display::Flex,
+                        flex_direction: FlexDirection::Column,
+                        align_items: Some(AlignItems::STRETCH),
+                        flex_wrap: FlexWrap::NoWrap,
+                        gap: taffy::geometry::Size {
+                            width: LengthPercentage::length(0.0),
+                            height: LengthPercentage::length(gap),
+                        },
+                        ..Default::default()
+                    };
+                    if let Ok(group_node) = taffy_tree.new_with_children(group_style, &members) {
+                        node_map.insert(group_node, group_dom);
+                        table_children.push(group_node);
+                    } else {
+                        table_children.extend(members);
+                    }
+                }
+            }
+        }
+    }
     let table_node = if table_children.is_empty() {
         taffy_tree.new_leaf(to_taffy_style(style)).ok()?
     } else {
@@ -6440,35 +6494,14 @@ pub fn layout_collect(
             // Items under a SetXf bracket paint in LOCAL coordinates (raw
             // `rect`); the prebaked path uses the mapped box.
             let bg_rect = if prebake { mrect } else { rect };
-            // CSS2.1 paints cell > row > row-group backgrounds; row-group
-            // elements (thead/tbody/tfoot) get no box of their own here, so a
-            // background set on them is otherwise invisible. Climb one DOM
-            // level at paint time only — computed values stay untouched
-            // (blitz#346 family).
-            let mut bg = styles.get(dom_id).and_then(|s| s.background_color);
-            if bg.is_none() {
-                let is_tr = tree
-                    .with_node(*dom_id, |n| {
-                        n.as_element()
-                            .map(|e| matches!(e.local.to_ascii_lowercase().as_ref(), "tr"))
-                            .unwrap_or(false)
-                    })
-                    .unwrap_or(false);
-                if is_tr {
-                    if let Some(pid) = tree.with_node(*dom_id, |n| n.parent).flatten() {
-                        let group = tree
-                            .with_node(pid, |n| {
-                                n.as_element()
-                                    .map(|e| e.local.to_ascii_lowercase().to_string())
-                            })
-                            .flatten()
-                            .unwrap_or_default();
-                        if matches!(group.as_str(), "thead" | "tbody" | "tfoot") {
-                            bg = styles.get(&pid).and_then(|s| s.background_color);
-                        }
-                    }
-                }
-            }
+            // CSS2.1 paints cell > row > row-group backgrounds. Row groups
+            // have their own wrapper boxes since the sticky-group batch, so
+            // the group's bg paints on its own band (under the rows, which
+            // are its taffy children) — the old paint-time DOM climb that
+            // faked a group band onto the row is gone with the boxless
+            // group. (If the group wrapper fails to build, the group's bg
+            // is dropped — error fallback only.)
+            let bg = styles.get(dom_id).and_then(|s| s.background_color);
             // Radii resolve per-axis against the LOCAL box (rx width, ry
             // height — the elliptical form), then ride the affine. Hoisted
             // above the fills so the color and gradient layers share them.
@@ -7177,7 +7210,7 @@ pub fn layout_collect(
             // overlay must out-paint — and so out-rank in elementFromPoint,
             // which sorts by this order — any later static sibling whose tall
             // box covers the stuck band (uv-docs' .md-header case, #434).
-            let positioned = child_style.is_some_and(|s| {
+            let mut positioned = child_style.is_some_and(|s| {
                 matches!(
                     s.position,
                     Some(PositionMode::Relative)
@@ -7186,6 +7219,47 @@ pub fn layout_collect(
                         | Some(PositionMode::Sticky)
                 )
             });
+            // Row-group wrappers (thead/tbody/tfoot stand-ins) establish no
+            // box in CSS, so a sticky ROW inside one must still join the
+            // table's positioned band — confining it to the group frame lets
+            // a later tbody's tall static box cover the stuck header. The
+            // group's own sticky style already classifies it directly; this
+            // look-through only fires for a static group with positioned
+            // member rows (z≠0 members stay per-parent, pre-existing).
+            if !positioned {
+                let is_group = node_map
+                    .get(&child)
+                    .and_then(|d| {
+                        tree.with_node(*d, |n| {
+                            n.as_element()
+                                .map(|e| {
+                                    matches!(
+                                        e.local.to_ascii_lowercase().as_ref(),
+                                        "thead" | "tbody" | "tfoot"
+                                    )
+                                })
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false);
+                if is_group {
+                    positioned = taffy_tree
+                        .children(child)
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|m| {
+                            node_map.get(m).and_then(|d| styles.get(d)).is_some_and(|s| {
+                                matches!(
+                                    s.position,
+                                    Some(PositionMode::Relative)
+                                        | Some(PositionMode::Absolute)
+                                        | Some(PositionMode::Fixed)
+                                        | Some(PositionMode::Sticky)
+                                )
+                            })
+                        });
+                }
+            }
             let floated = child_style.is_some_and(|s| s.float_side.is_some());
             let z = child_style.and_then(|s| s.z_index).unwrap_or(0);
             if z != 0 && positioned {
