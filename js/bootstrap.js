@@ -1,21 +1,5 @@
 "use strict";
 
-// Eval shim backing Rust-side `evaluate`/`evaluate_for_cdp`. The input is
-// evaluated with CDP Runtime.evaluate semantics first — a *script*, where
-// statements are legal and the completion value of the last statement is the
-// result (indirect eval = global scope, matching Chrome). Scripts written in
-// function-body style with a top-level `return` are illegal as scripts; the
-// SyntaxError is thrown before anything executes, so retrying them as a
-// Function body is side-effect free. Runtime errors rethrow untouched — a
-// retry would re-run side effects like document.write.
-globalThis.__ditingEvalScript = function(src) {
-  try { return (0, eval)(src); }
-  catch (e) {
-    if (e instanceof SyntaxError) { return (new Function(src))(); }
-    throw e;
-  }
-};
-
 globalThis.__diting_errors = [];
 
 globalThis.onerror = function(msg, src, line, col, error) {
@@ -501,6 +485,32 @@ globalThis.console = {
   groupEnd: () => {}, groupCollapsed: () => {}, time: () => {}, timeEnd: () => {},
   timeLog: () => {}, count: () => {}, countReset: () => {}, clear: () => {},
   assert: (c, ...a) => { if (!c) _consoleFn("error", ["Assertion failed:", ...a]); },
+  createTask(name) {
+    // Chrome 130+ Console.createTask: a task carries a stack capture for
+    // async continuation attribution. The shape (object with run()) is what
+    // library detectors probe; the stack metadata is inert here.
+    if (arguments.length === 0) throw new TypeError("Failed to execute 'createTask' on 'Console': 1 argument required, but only 0 present.");
+    return {
+      name: String(name),
+      run(fn, ...args) {
+        if (typeof fn !== "function") throw new TypeError("Failed to execute 'run' on 'ConsoleTask': parameter 1 is not of type 'Function'.");
+        try { return fn.apply(undefined, args); }
+        catch (e) { globalThis.__diting_reportUncaughtError(e); }
+      },
+    };
+  },
+  context(label) {
+    // Chrome-only console.context([label]) → ConsoleContext: an object whose
+    // console methods run under the label. Detectors probe its presence;
+    // label routing is inert here, so methods delegate to plain console.
+    const ctx = { label: label === undefined ? "" : String(label) };
+    for (const m of ["log", "info", "warn", "error", "debug", "dir", "table",
+      "trace", "group", "groupEnd", "groupCollapsed", "time", "timeLog",
+      "timeEnd", "count", "countReset", "clear", "assert"]) {
+      if (typeof this[m] === "function") ctx[m] = this[m].bind(this);
+    }
+    return ctx;
+  },
 };
 
 let _tid = 0;
@@ -564,6 +574,7 @@ globalThis.setInterval = (fn, delay = 0, ...args) => {
 
 globalThis.clearInterval = (id) => { _intervals.delete(id); _clearedTimers.add(id); };
 globalThis.requestAnimationFrame = (fn) => setTimeout(fn, 0);
+globalThis.webkitRequestAnimationFrame = globalThis.requestAnimationFrame;
 globalThis.cancelAnimationFrame = globalThis.clearTimeout;
 globalThis.queueMicrotask = globalThis.queueMicrotask || ((fn) => Promise.resolve().then(fn));
 
@@ -5389,6 +5400,7 @@ globalThis.location = {
   get search() { try { return new URL(this.href).search; } catch { return ""; } },
   get hash() { try { return new URL(this.href).hash; } catch { return ""; } },
   get port() { try { return new URL(this.href).port; } catch { return ""; } },
+  get fragmentDirective() { return __diting_fragmentDirective; },
   toString() { return this.href; },
   assign(url) { var r = _resolveUrl(url); globalThis.__virtualUrl = r; _OPS.op_navigate(r, 'GET', ''); },
   reload() { var r = _resolveUrl(this.href); globalThis.__virtualUrl = r; _OPS.op_navigate(r, 'GET', ''); },
@@ -5444,7 +5456,8 @@ globalThis.length = 0;
 // a legacy IE path that crashes on missing DOM APIs when the check returns
 // false. Initialising them to null makes the check match real browsers.
 for (const _ev of [
-  "abort","beforeprint","beforeunload","blur","cancel","canplay","canplaythrough",
+  "abort","animationcancel","animationend","animationiteration","animationstart",
+  "beforeprint","beforeunload","blur","cancel","canplay","canplaythrough",
   "change","click","close","contextmenu","cuechange","dblclick","drag","dragend",
   "dragenter","dragleave","dragover","dragstart","drop","durationchange","emptied",
   "ended","error","focus","focusin","focusout","formdata","gotpointercapture",
@@ -5455,7 +5468,9 @@ for (const _ev of [
   "pointercancel","pointerdown","pointerenter","pointerleave","pointermove",
   "pointerout","pointerover","pointerup","popstate","progress","ratechange",
   "rejectionhandled","reset","resize","scroll","seeked","seeking","select",
-  "stalled","storage","submit","suspend","timeupdate","toggle","unhandledrejection",
+  "slotchange","stalled","storage","submit","suspend","timeupdate","toggle",
+  "transitioncancel","transitionend","transitionrun","transitionstart",
+  "unhandledrejection",
   "unload","volumechange","waiting","wheel",
 ]) {
   if (!(("on" + _ev) in globalThis)) globalThis["on" + _ev] = null;
@@ -5769,6 +5784,271 @@ class NetworkInformation {
 }
 _markNative(NetworkInformation);
 
+// ---- bchkAPIs global face (batch166, datadome-solver generators.go) ------
+// Interfaces real Chrome exposes that anti-bot probes check with
+// `'X' in window`. Illegal constructors where Chrome forbids `new`; kept
+// standalone (no DOM base classes) so definition order stays independent.
+
+globalThis.FragmentDirective = class FragmentDirective {
+  constructor() { throw new TypeError("Illegal constructor"); }
+};
+const __diting_fragmentDirective = Object.create(globalThis.FragmentDirective.prototype);
+
+globalThis.UserActivation = class UserActivation {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get hasBeenActive() { return this._hasBeenActive === true; }
+  get isActive() { return this._isActive === true; }
+};
+const __diting_userActivation = Object.create(globalThis.UserActivation.prototype);
+
+globalThis.Keyboard = class Keyboard {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  getLayoutMap() { return Promise.resolve(new Map()); }
+  lock() { return Promise.resolve(); }
+  unlock() {}
+};
+const __diting_keyboard = Object.create(globalThis.Keyboard.prototype);
+
+globalThis.LaunchQueue = class LaunchQueue {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  setConsumer(callback) { this._consumer = callback; }
+  setTargetURL() {}
+};
+const __diting_launchQueue = Object.create(globalThis.LaunchQueue.prototype);
+
+globalThis.BatteryManager = class BatteryManager {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get charging() { return this._charging; }
+  get chargingTime() { return this._chargingTime; }
+  get dischargingTime() { return this._dischargingTime; }
+  get level() { return this._level; }
+  addEventListener() {}
+  removeEventListener() {}
+  dispatchEvent() { return false; }
+};
+
+globalThis.AudioSinkInfo = class AudioSinkInfo {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get type() { return "default"; }
+};
+
+globalThis.EyeDropper = class EyeDropper {
+  // Chrome's color picker needs real user activation; a headless page gets
+  // the NotAllowedError branch of the same promise shape.
+  open(options) { return Promise.reject(new DOMException("NotAllowedError")); }
+};
+
+globalThis.GPUSupportedLimits = class GPUSupportedLimits {
+  constructor() { throw new TypeError("Illegal constructor"); }
+};
+
+globalThis.GeolocationCoordinates = class GeolocationCoordinates {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get latitude() { return this._latitude ?? 0; }
+  get longitude() { return this._longitude ?? 0; }
+  get accuracy() { return this._accuracy ?? 0; }
+  get altitude() { return this._altitude ?? null; }
+  get altitudeAccuracy() { return this._altitudeAccuracy ?? null; }
+  get heading() { return this._heading ?? null; }
+  get speed() { return this._speed ?? null; }
+};
+globalThis.GeolocationPosition = class GeolocationPosition {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get coords() { return this._coords; }
+  get timestamp() { return this._timestamp ?? 0; }
+};
+globalThis.__diting_makeGeolocationPosition = function (lat, lon, acc) {
+  const coords = Object.create(globalThis.GeolocationCoordinates.prototype);
+  coords._latitude = lat;
+  coords._longitude = lon;
+  coords._accuracy = acc;
+  const pos = Object.create(globalThis.GeolocationPosition.prototype);
+  pos._coords = coords;
+  pos._timestamp = Date.now();
+  return pos;
+};
+
+globalThis.MediaDeviceInfo = class MediaDeviceInfo {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get deviceId() { return this._deviceId || ""; }
+  get kind() { return this._kind || ""; }
+  get label() { return this._label || ""; }
+  get groupId() { return this._groupId || ""; }
+  toJSON() { return { deviceId: this.deviceId, groupId: this.groupId, kind: this.kind, label: this.label }; }
+};
+
+globalThis.MediaMetadata = class MediaMetadata {
+  constructor(init = {}) {
+    if (init == null) init = {};
+    this._title = init.title === undefined ? "" : String(init.title);
+    this._artist = init.artist === undefined ? "" : String(init.artist);
+    this._album = init.album === undefined ? "" : String(init.album);
+    this._artwork = Array.isArray(init.artwork) ? init.artwork : [];
+  }
+  get title() { return this._title; }
+  set title(v) { this._title = String(v); }
+  get artist() { return this._artist; }
+  set artist(v) { this._artist = String(v); }
+  get album() { return this._album; }
+  set album(v) { this._album = String(v); }
+  get artwork() { return this._artwork; }
+  set artwork(v) { this._artwork = Array.isArray(v) ? v : []; }
+};
+
+globalThis.MediaSourceHandle = class MediaSourceHandle {
+  constructor() { throw new TypeError("Illegal constructor"); }
+};
+
+globalThis.PasswordCredential = class PasswordCredential {
+  constructor(data) {
+    if (arguments.length === 0) throw new TypeError("Failed to construct 'PasswordCredential': 1 argument required, but only 0 present.");
+    if (data == null || typeof data !== "object") throw new TypeError("Failed to construct 'PasswordCredential': The provided value is not of type 'PasswordCredentialData'.");
+    if (data.id === undefined) throw new TypeError("Failed to construct 'PasswordCredential': 'id' cannot be undefined.");
+    if (data.password === undefined) throw new TypeError("Failed to construct 'PasswordCredential': 'password' cannot be undefined.");
+    this._id = String(data.id);
+    this._name = data.name === undefined ? "" : String(data.name);
+    this._password = String(data.password);
+  }
+  get id() { return this._id; }
+  get name() { return this._name; }
+  get password() { return this._password; }
+  get iconURL() { return ""; }
+  get type() { return "password"; }
+};
+
+globalThis.PushSubscriptionOptions = class PushSubscriptionOptions {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get userVisibleOnly() { return this._userVisibleOnly === true; }
+  get applicationServerKey() { return this._applicationServerKey ?? null; }
+};
+
+globalThis.Scheduling = class Scheduling {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  isInputPending() { return false; }
+};
+globalThis.scheduling = Object.create(globalThis.Scheduling.prototype);
+
+globalThis.TextTrackCue = class TextTrackCue {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get track() { return this._track ?? null; }
+  get id() { return this._id || ""; }
+  set id(v) { this._id = String(v); }
+  get startTime() { return this._startTime ?? 0; }
+  set startTime(v) { this._startTime = Number(v); }
+  get endTime() { return this._endTime ?? 0; }
+  set endTime(v) { this._endTime = Number(v); }
+  get pauseOnExit() { return this._pauseOnExit === true; }
+  set pauseOnExit(v) { this._pauseOnExit = Boolean(v); }
+};
+
+globalThis.VideoFrame = class VideoFrame {
+  constructor(image, options) {
+    if (arguments.length === 0) throw new TypeError("Failed to construct 'VideoFrame': 1 argument required, but only 0 present.");
+    this._timestamp = options && options.timestamp !== undefined ? options.timestamp : 0;
+    this._duration = options && options.duration !== undefined ? options.duration : null;
+    this._closed = false;
+  }
+  get timestamp() { return this._timestamp; }
+  get duration() { return this._duration; }
+  get format() { return this._closed ? null : null; }
+  close() { this._closed = true; }
+};
+
+globalThis.VideoPlaybackQuality = class VideoPlaybackQuality {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get creationTime() { return this._creationTime ?? 0; }
+  get totalVideoFrames() { return this._totalVideoFrames ?? 0; }
+  get droppedVideoFrames() { return this._droppedVideoFrames ?? 0; }
+  get corruptedVideoFrames() { return this._corruptedVideoFrames ?? 0; }
+};
+
+globalThis.ViewTransition = class ViewTransition {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get updateCallbackDone() { if (!this._ucd) this._ucd = Promise.resolve(); return this._ucd; }
+  get ready() { if (!this._readyP) this._readyP = Promise.resolve(); return this._readyP; }
+  get finished() { if (!this._fin) this._fin = Promise.resolve(); return this._fin; }
+  skipTransition() {}
+};
+
+globalThis.WebGLObject = class WebGLObject {
+  constructor() { throw new TypeError("Illegal constructor"); }
+};
+
+globalThis.WebTransport = class WebTransport {
+  constructor(url, options) {
+    if (arguments.length === 0) throw new TypeError("Failed to construct 'WebTransport': 1 argument required, but only 0 present.");
+    try { this._url = new URL(url, _docBase()).href; }
+    catch (e) { throw new TypeError("Failed to construct 'WebTransport': The provided value is not a valid URL."); }
+    this._congestionControl = options && options.congestionControl !== undefined ? String(options.congestionControl) : "default";
+  }
+  get congestionControl() { return this._congestionControl; }
+  get ready() { if (!this._ready) this._ready = new Promise(() => {}); return this._ready; }
+  get closed() { if (!this._closedP) this._closedP = new Promise(() => {}); return this._closedP; }
+  get datagrams() {
+    if (!this._datagrams) {
+      this._datagrams = {
+        readable: new ReadableStream(),
+        writable: new WritableStream(),
+      };
+    }
+    return this._datagrams;
+  }
+  close() {}
+  createBidirectionalStream() { return Promise.reject(new DOMException("NotAllowedError")); }
+  createUnidirectionalStream() { return Promise.reject(new DOMException("NotAllowedError")); }
+};
+
+globalThis.WebSocketStream = class WebSocketStream {
+  constructor(url, protocols) {
+    if (arguments.length === 0) throw new TypeError("Failed to construct 'WebSocketStream': 1 argument required, but only 0 present.");
+    this.url = String(url);
+    this.opening = new Promise(() => {});
+    this.closed = new Promise(() => {});
+  }
+  close() {}
+};
+
+globalThis.CSSCounterStyleRule = class CSSCounterStyleRule {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get name() { return this._name || ""; }
+};
+
+globalThis.CSSFontPaletteValuesRule = class CSSFontPaletteValuesRule {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get name() { return this._name || ""; }
+};
+
+globalThis.CropTarget = class CropTarget {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  static fromElement(element) { return Object.create(globalThis.CropTarget.prototype); }
+};
+
+globalThis.CustomStateSet = class CustomStateSet {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get size() { return 0; }
+  add() { return this; }
+  has() { return false; }
+  delete() { return false; }
+  clear() {}
+  forEach() {}
+  *entries() {}
+  *keys() {}
+  *values() {}
+  [Symbol.iterator]() { return [][Symbol.iterator](); }
+};
+
+if (typeof globalThis.AudioNode === "undefined") {
+  globalThis.AudioNode = class AudioNode {
+    constructor() { throw new TypeError("Illegal constructor"); }
+    connect(dest) { return dest; }
+    disconnect() {}
+  };
+}
+globalThis.IIRFilterNode = class IIRFilterNode {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  getFrequencyResponse() {}
+};
+
 globalThis.navigator = {
   get userAgent() { return globalThis.__diting_ua || "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"; },
   get appVersion() { return this.userAgent.replace('Mozilla/', ''); },
@@ -5847,7 +6127,17 @@ globalThis.navigator = {
     if (params?.name === 'notifications') return Promise.resolve({state:"prompt",onchange:null});
     return Promise.resolve({state:"granted"});
   } },
-  getBattery() { return Promise.resolve({ charging: _fp('batteryCharging'), chargingTime: _fp('batteryCharging') ? 0 : Infinity, dischargingTime: _fp('batteryCharging') ? Infinity : Math.floor(3600 + _fpRand(250) * 7200), level: _fp('batteryLevel'), addEventListener(){} }); },
+  get userActivation() { return __diting_userActivation; },
+  get keyboard() { return __diting_keyboard; },
+  get launchQueue() { return __diting_launchQueue; },
+  getBattery() {
+    const bm = Object.create(globalThis.BatteryManager.prototype);
+    bm._charging = _fp('batteryCharging');
+    bm._chargingTime = _fp('batteryCharging') ? 0 : Infinity;
+    bm._dischargingTime = _fp('batteryCharging') ? Infinity : Math.floor(3600 + _fpRand(250) * 7200);
+    bm._level = _fp('batteryLevel');
+    return Promise.resolve(bm);
+  },
   getGamepads() { return []; },
   sendBeacon(url, data) {
     let abs;
@@ -5884,30 +6174,20 @@ globalThis.navigator = {
   javaEnabled() { return false; },
   geolocation: {
     getCurrentPosition(success, error) {
-      const coords = {
-        latitude: 50.1109 + (_fpRand(500) - 0.5) * 0.1,
-        longitude: 8.6821 + (_fpRand(501) - 0.5) * 0.1,
-        accuracy: 10 + _fpRand(502) * 40,
-        altitude: null,
-        altitudeAccuracy: null,
-        heading: null,
-        speed: null,
-      };
-      const pos = { coords, timestamp: Date.now() };
+      const pos = globalThis.__diting_makeGeolocationPosition(
+        50.1109 + (_fpRand(500) - 0.5) * 0.1,
+        8.6821 + (_fpRand(501) - 0.5) * 0.1,
+        10 + _fpRand(502) * 40,
+      );
       if (typeof success === 'function') success(pos);
     },
     watchPosition(success, error) {
       if (typeof success === 'function') {
-        const coords = {
-          latitude: 50.1109 + (_fpRand(503) - 0.5) * 0.1,
-          longitude: 8.6821 + (_fpRand(504) - 0.5) * 0.1,
-          accuracy: 10 + _fpRand(505) * 40,
-          altitude: null,
-          altitudeAccuracy: null,
-          heading: null,
-          speed: null,
-        };
-        success({ coords, timestamp: Date.now() });
+        success(globalThis.__diting_makeGeolocationPosition(
+          50.1109 + (_fpRand(503) - 0.5) * 0.1,
+          8.6821 + (_fpRand(504) - 0.5) * 0.1,
+          10 + _fpRand(505) * 40,
+        ));
       }
       return 0;
     },
@@ -5920,13 +6200,9 @@ globalThis.navigator = {
   },
 };
 
+// Key order matches real Chrome's Object.keys(chrome) = ["loadTimes","csi","app","runtime"]
+// (DataDome-class fingerprints read key order, not just membership).
 globalThis.chrome = {
-  app: { isInstalled: false, InstallState: { DISABLED: "disabled", INSTALLED: "installed", NOT_INSTALLED: "not_installed" }, RunningState: { CANNOT_RUN: "cannot_run", READY_TO_RUN: "ready_to_run", RUNNING: "running" } },
-  runtime: { OnInstalledReason: {}, OnRestartRequiredReason: {}, PlatformArch: {}, PlatformNaclArch: {}, PlatformOs: {}, RequestUpdateCheckStatus: {}, connect() { return {}; }, sendMessage() {} },
-  csi() {
-    const t = Date.now();
-    return { onloadT: t, startE: t - Math.floor(100 + _fpRand(610) * 200), pageT: 0, tran: 5, flashVersion: "" };
-  },
   loadTimes() {
     const t = Date.now() / 1000;
     const request = t - 0.5 - _fpRand(611) * 0.5;
@@ -5946,12 +6222,19 @@ globalThis.chrome = {
       wasAlternateProtocolAvailable: false, connectionInfo: "http/1.1",
     };
   },
+  csi() {
+    const t = Date.now();
+    return { onloadT: t, startE: t - Math.floor(100 + _fpRand(610) * 200), pageT: 0, tran: 5, flashVersion: "" };
+  },
+  app: { isInstalled: false, InstallState: { DISABLED: "disabled", INSTALLED: "installed", NOT_INSTALLED: "not_installed" }, RunningState: { CANNOT_RUN: "cannot_run", READY_TO_RUN: "ready_to_run", RUNNING: "running" } },
+  runtime: { OnInstalledReason: {}, OnRestartRequiredReason: {}, PlatformArch: {}, PlatformNaclArch: {}, PlatformOs: {}, RequestUpdateCheckStatus: {}, connect() { return {}; }, sendMessage() {} },
 };
 
 globalThis.Notification = class Notification {
   static permission = "default";
   static requestPermission() { return Promise.resolve(Notification.permission); }
   constructor() {}
+  get image() { return null; }
 };
 
 globalThis.WebGLRenderingContext = class WebGLRenderingContext {};
@@ -6035,7 +6318,29 @@ for (const _GLC of [globalThis.WebGLRenderingContext, globalThis.WebGL2Rendering
 }
 
 globalThis.screen = { width:1920, height:1080, availWidth:1920, availHeight:1040, colorDepth:24, pixelDepth:24, availTop:0, availLeft:0, orientation:{type:"landscape-primary",angle:0,addEventListener(){},removeEventListener(){},dispatchEvent(){return true;}} };
-globalThis.visualViewport = { width:1920, height:1000, offsetLeft:0, offsetTop:0, scale:1, addEventListener(){}, removeEventListener(){} };
+// visualViewport is a real interface in Chrome — a detector walking
+// Object.getPrototypeOf(visualViewport).constructor.name sees "VisualViewport",
+// and width/height are prototype getters, not own enumerable data props.
+globalThis.VisualViewport = class VisualViewport {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get offsetLeft() { return this._offsetLeft || 0; }
+  get offsetTop() { return this._offsetTop || 0; }
+  get pageLeft() { return globalThis.scrollX || 0; }
+  get pageTop() { return globalThis.scrollY || 0; }
+  get scale() { return this._scale || 1; }
+  get width() { return this._width || 0; }
+  get height() { return this._height || 0; }
+  addEventListener() {}
+  removeEventListener() {}
+};
+globalThis.__diting_makeVisualViewport = function(w, h) {
+  const vv = Object.create(VisualViewport.prototype);
+  for (const [k, v] of Object.entries({ _width: w, _height: h, _offsetLeft: 0, _offsetTop: 0, _scale: 1 })) {
+    Object.defineProperty(vv, k, { value: v, enumerable: false, configurable: true, writable: true });
+  }
+  return vv;
+};
+globalThis.visualViewport = globalThis.__diting_makeVisualViewport(1920, 1000);
 globalThis.devicePixelRatio = 1;
 globalThis.innerWidth = 1920; globalThis.innerHeight = 1000;
 globalThis.outerWidth = 1920; globalThis.outerHeight = 1080;
@@ -7331,6 +7636,9 @@ const _MQ_PERSONA_BOOL = {
   'prefers-color-scheme': { light: true, dark: false },
   'prefers-reduced-motion': { 'no-preference': true, reduce: false },
   'prefers-reduced-transparency': { 'no-preference': true, reduce: false },
+  'color-gamut': { srgb: true, p3: false, rec2020: false },
+  'dynamic-range': { standard: true, high: false },
+  'display-mode': { browser: true, standalone: false, 'minimal-ui': false, fullscreen: false, 'window-controls-overlay': false },
   pointer: { fine: true, coarse: false, none: false },
   'any-pointer': { fine: true, coarse: false, none: false },
   hover: { hover: true, none: false },
@@ -7343,6 +7651,9 @@ const _MQ_MOBILE_TABLE = {
   'prefers-color-scheme': { light: true, dark: false },
   'prefers-reduced-motion': { 'no-preference': true, reduce: false },
   'prefers-reduced-transparency': { 'no-preference': true, reduce: false },
+  'color-gamut': { srgb: true, p3: false, rec2020: false },
+  'dynamic-range': { standard: true, high: false },
+  'display-mode': { browser: true, standalone: false, 'minimal-ui': false, fullscreen: false, 'window-controls-overlay': false },
   pointer: { coarse: true, fine: false, none: false },
   'any-pointer': { coarse: true, fine: false, none: false },
   hover: { none: true, hover: false },
@@ -7801,6 +8112,29 @@ globalThis.getSelection = _markNative(function getSelection() {
   return _selectionFor(globalThis.document);
 });
 
+// StyleSheet is CSSStyleSheet's abstract base (unconstructible). Derive via
+// prototype surgery rather than `extends` so `new StyleSheet()` still throws
+// while `new CSSStyleSheet() instanceof StyleSheet` is true.
+globalThis.StyleSheet = class StyleSheet {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  // Every accessor needs a setter: _sheetFromCssText and friends assign these
+  // as plain properties, and strict mode turns a getter-only write into a throw.
+  get href() { return this._href !== undefined ? this._href : null; }
+  set href(v) { this._href = v; }
+  get media() { return this._media !== undefined ? this._media : null; }
+  set media(v) { this._media = v; }
+  get ownerNode() { return this._ownerNode !== undefined ? this._ownerNode : null; }
+  set ownerNode(v) { this._ownerNode = v; }
+  get parentStyleSheet() { return this._parentStyleSheet !== undefined ? this._parentStyleSheet : null; }
+  set parentStyleSheet(v) { this._parentStyleSheet = v; }
+  get title() { return this._title !== undefined ? this._title : null; }
+  set title(v) { this._title = v; }
+  get type() { return this._type !== undefined ? this._type : "text/css"; }
+  set type(v) { this._type = v; }
+  get disabled() { return !!this._disabled; }
+  set disabled(v) { this._disabled = !!v; }
+};
+
 globalThis.CSSStyleSheet = class CSSStyleSheet {
   constructor(options) {
     this.cssRules = [];
@@ -7833,6 +8167,7 @@ globalThis.CSSStyleSheet = class CSSStyleSheet {
     this.cssRules = this._rules;
   }
 };
+Object.setPrototypeOf(globalThis.CSSStyleSheet.prototype, globalThis.StyleSheet.prototype);
 
 // --- document.styleSheets backing -------------------------------------
 // External sheet bodies fetched at navigation, served by the native side
@@ -8536,6 +8871,15 @@ globalThis.ToggleEvent = class ToggleEvent extends Event {
   }
 };
 _markNative(globalThis.ToggleEvent);
+
+// Fires when an auto content-visibility box skips in/out of rendering.
+globalThis.ContentVisibilityAutoStateChangeEvent = class ContentVisibilityAutoStateChangeEvent extends Event {
+  constructor(type, init = {}) {
+    super(type, init);
+    this._skipped = Boolean(init && init.skipped);
+  }
+  get skipped() { return this._skipped === true; }
+};
 
 // Missing PromiseRejectionEvent made core-js misdetect the environment and
 // override native Promise with a broken polyfill, breaking Vue rendering
@@ -9431,6 +9775,41 @@ class PerformanceEntry {
   }
 }
 _markNativeProto(PerformanceEntry.prototype);
+// Resource/ServerTiming entry classes: unconstructible interfaces a detector
+// probes via prototype membership (`'renderBlockingStatus' in
+// PerformanceResourceTiming.prototype`). getEntriesByType('resource') stays
+// honestly empty — the classes only exist so the surface matches Chrome.
+globalThis.PerformanceEntry = PerformanceEntry;
+globalThis.PerformanceResourceTiming = class PerformanceResourceTiming extends PerformanceEntry {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get initiatorType() { return "other"; }
+  get nextHopProtocol() { return ""; }
+  get renderBlockingStatus() { return "non-blocking"; }
+  get deliveryType() { return ""; }
+  get secureConnectionStart() { return 0; }
+  get transferSize() { return 0; }
+  get encodedBodySize() { return 0; }
+  get decodedBodySize() { return 0; }
+  get responseStatus() { return 0; }
+};
+_markNativeProto(globalThis.PerformanceResourceTiming.prototype);
+globalThis.PerformanceServerTiming = class PerformanceServerTiming extends PerformanceEntry {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get serverTimingName() { return this._peName; }
+  get description() { return ""; }
+};
+_markNativeProto(globalThis.PerformanceServerTiming.prototype);
+globalThis.EventCounts = class EventCounts {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get size() { return 0; }
+  has() { return false; }
+  get() { return 0; }
+  forEach() {}
+  entries() { return (function* () {})(); }
+  keys() { return (function* () {})(); }
+  values() { return (function* () {})(); }
+};
+_markNativeProto(globalThis.EventCounts.prototype);
 class _Performance {
   constructor() {
     this._marks = []; this._measures = [];
@@ -9590,6 +9969,10 @@ class _Performance {
   }
   setResourceTimingBufferSize() {}
   clearResourceTimings() {}
+  get eventCounts() {
+    if (!this._evtCounts) { this._evtCounts = Object.create(EventCounts.prototype); }
+    return this._evtCounts;
+  }
   // Per-navigation cache reset, called from __diting_init after timing lands.
   _resetDerived() { this._navEntry = null; this._paintEntries = null; }
 }
@@ -10537,6 +10920,10 @@ globalThis.SVGTextContentElement = class SVGTextContentElement extends globalThi
   getSubStringLength() { return 0; }
   getComputedTextLength() { return 0; }
 };
+globalThis.SVGTextPositioningElement = class SVGTextPositioningElement extends globalThis.SVGTextContentElement {};
+globalThis.SVGAnimationElement = class SVGAnimationElement extends globalThis.SVGElement {};
+globalThis.SVGDiscardElement = class SVGDiscardElement extends globalThis.SVGElement {};
+globalThis.SVGFEDropShadowElement = class SVGFEDropShadowElement extends globalThis.SVGElement {};
 // (#28) Element interfaces for the common SVG tags, registered by exact
 // local name in _svgTagInterfaces (see _elementClassFor). Computed-name
 // classes keep constructor.name; bases mirror Chrome's chains.
@@ -10558,8 +10945,11 @@ globalThis.SVGTextContentElement = class SVGTextContentElement extends globalThi
     ["SVGLineElement", SVGGeometryElement, ["line"]],
     ["SVGPolylineElement", SVGGeometryElement, ["polyline"]],
     ["SVGPolygonElement", SVGGeometryElement, ["polygon"]],
-    ["SVGTextElement", SVGTextContentElement, ["text"]],
-    ["SVGTSpanElement", SVGTextContentElement, ["tspan"]],
+    ["SVGTextElement", SVGTextPositioningElement, ["text"]],
+    ["SVGTSpanElement", SVGTextPositioningElement, ["tspan"]],
+    ["SVGAnimateElement", SVGAnimationElement, ["animate", "set", "animateMotion", "animateTransform"]],
+    ["SVGDiscardElement", SVGDiscardElement, ["discard"]],
+    ["SVGFEDropShadowElement", SVGFEDropShadowElement, ["feDropShadow"]],
     ["SVGTitleElement", SVGElement, ["title"]],
     ["SVGDescElement", SVGElement, ["desc"]],
     ["SVGStyleElement", SVGElement, ["style"]],
@@ -10629,6 +11019,23 @@ globalThis.DOMStringMap = DOMStringMap;
 // XMLDocument is a subclass of Document (DOMParser of an XML type and
 // implementation.createDocument produce one). The interface must exist globally.
 if (typeof XMLDocument === "undefined") globalThis.XMLDocument = class XMLDocument extends Document {};
+
+// Storage Access API: top-level same-site documents hold storage access by
+// default, so the promise resolves true (Chrome semantics in a first-party
+// context). Lives on Document.prototype, inherited by XMLDocument and any
+// document flavor.
+Document.prototype.hasStorageAccess = function hasStorageAccess() {
+  return Promise.resolve(true);
+};
+Document.prototype.requestStorageAccess = function requestStorageAccess() {
+  return Promise.resolve(undefined);
+};
+
+// MathML elements ride the Element tree like SVG does; the interface itself
+// rejects construction (instances only come from the parser).
+globalThis.MathMLElement = class MathMLElement extends Element {
+  constructor() { throw new TypeError("Illegal constructor"); }
+};
 // ParentNode mixin: Document and DocumentFragment are ParentNodes too, so they
 // share Element's append / prepend / replaceChildren.
 for (const _proto of [Document.prototype, DocumentFragment.prototype]) {
@@ -12234,6 +12641,65 @@ globalThis.RTCPeerConnection = class RTCPeerConnection {
 };
 globalThis.RTCSessionDescription = class RTCSessionDescription { constructor(d){this.type=d?.type;this.sdp=d?.sdp;} };
 globalThis.RTCIceCandidate = class RTCIceCandidate { constructor(d){this.candidate=d?.candidate||'';} };
+// RTC satellite interfaces — DataDome-class audits walk the whole RTCPeerConnection
+// orbit (`'RTCDataChannel' in window`), and a peer with RTCPeerConnection but no
+// RTCDataChannel/RTCTrackEvent is a JS-env tell. All are presence-level stubs:
+// abstract ones throw Illegal constructor like Chrome, the two events derive from
+// Event, RTCRtpTransceiver carries the probed stop() method.
+globalThis.RTCDataChannel = class RTCDataChannel {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get label() { return ""; }
+  get readyState() { return "connecting"; }
+  close() {}
+  send() { throw new TypeError("Failed to execute 'send' on 'RTCDataChannel'"); }
+};
+globalThis.RTCDtlsTransport = class RTCDtlsTransport {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get state() { return "new"; }
+};
+globalThis.RTCSctpTransport = class RTCSctpTransport {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get state() { return "connecting"; }
+  get maxMessageSize() { return 65536; }
+};
+globalThis.RTCStatsReport = class RTCStatsReport {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  forEach() {}
+  get() { return undefined; }
+  has() { return false; }
+  get size() { return 0; }
+};
+globalThis.RTCEncodedAudioFrame = class RTCEncodedAudioFrame {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get timestamp() { return 0; }
+  data() { return new ArrayBuffer(0); }
+};
+globalThis.RTCError = class RTCError extends globalThis.DOMException {
+  constructor(init, message) {
+    super(message !== undefined ? String(message) : "RTCError", "OperationError");
+    this.errorDetail = init?.errorDetail ?? null;
+    this.sdpLineNumber = init?.sdpLineNumber ?? null;
+    this.sctpCauseCode = init?.sctpCauseCode ?? null;
+    this.receivedAlert = init?.receivedAlert ?? null;
+    this.sentAlert = init?.sentAlert ?? null;
+  }
+};
+globalThis.RTCPeerConnectionIceErrorEvent = class RTCPeerConnectionIceErrorEvent extends globalThis.Event {
+  constructor(type, init) { super(type || "icecandidateerror", init); this.errorCode = init?.errorCode ?? 0; this.errorText = init?.errorText ?? ""; }
+  get address() { return null; }
+  get port() { return null; }
+  get url() { return ""; }
+};
+globalThis.RTCTrackEvent = class RTCTrackEvent extends globalThis.Event {
+  constructor(type, init) { super(type || "track", init); this.receiver = init?.receiver ?? null; this.track = init?.track ?? null; this.streams = init?.streams ?? []; this.transceiver = init?.transceiver ?? null; }
+};
+globalThis.RTCRtpTransceiver = class RTCRtpTransceiver {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get mid() { return null; }
+  get direction() { return "sendrecv"; }
+  stop() {}
+};
+globalThis.webkitRTCPeerConnection = globalThis.RTCPeerConnection;
 
 // Minimal but spec-shape-correct IndexedDB shim. We don't persist anything,
 // but authentication libraries (Firebase, Supabase, dexie) hang forever on
@@ -12999,13 +13465,14 @@ if (typeof ReadableStream === 'undefined') {
       if (source.start) {
         try { source.start(this._controller); } catch (e) { this._controller.error(e); }
       }
+      Object.setPrototypeOf(this._controller, ReadableStreamDefaultController.prototype);
       __hideOwn(this);
     }
     get locked() { return this._locked; }
     getReader() {
       this._locked = true;
       const stream = this;
-      return {
+      const reader = {
         read() {
           if (stream._queue.length > 0) return Promise.resolve({ value: stream._queue.shift(), done: false });
           if (stream._closed) {
@@ -13045,6 +13512,8 @@ if (typeof ReadableStream === 'undefined') {
         },
         get closed() { return stream._closed ? Promise.resolve() : new Promise(() => {}); },
       };
+      Object.setPrototypeOf(reader, ReadableStreamDefaultReader.prototype);
+      return reader;
     }
     cancel() { this._closed = true; return Promise.resolve(); }
     async pipeTo(dest) {
@@ -13106,9 +13575,32 @@ if (typeof ReadableStream === 'undefined') {
     writable: true, configurable: true, enumerable: false,
   });
 }
+// Stream controller/reader faces. Abstract in Chrome (Illegal constructor);
+// the live instances created by the shims above get their prototypes attached
+// so getReader().constructor.name and instanceof read like the real thing.
+globalThis.ReadableStreamDefaultController = class ReadableStreamDefaultController {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  get desiredSize() { return 1; }
+  close() {}
+  enqueue() {}
+  error() {}
+};
+_markNativeProto(globalThis.ReadableStreamDefaultController.prototype);
+globalThis.ReadableStreamDefaultReader = class ReadableStreamDefaultReader {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  read() { return Promise.resolve({ value: undefined, done: true }); }
+  releaseLock() {}
+  cancel() { return Promise.resolve(); }
+};
+_markNativeProto(globalThis.ReadableStreamDefaultReader.prototype);
+globalThis.WritableStreamDefaultController = class WritableStreamDefaultController {
+  constructor() { throw new TypeError("Illegal constructor"); }
+  error() {}
+};
+_markNativeProto(globalThis.WritableStreamDefaultController.prototype);
 if (typeof WritableStream === 'undefined') {
   globalThis.WritableStream = class WritableStream {
-    constructor(sink = {}) { this._sink = sink; this._locked = false;  __hideOwn(this);}
+    constructor(sink = {}) { this._sink = sink; this._locked = false; this._controller = Object.create(WritableStreamDefaultController.prototype); __hideOwn(this);}
     get locked() { return this._locked; }
     getWriter() {
       this._locked = true;
@@ -13468,6 +13960,10 @@ if (typeof DOMMatrix === 'undefined') {
     rotate() { return new DOMMatrix(); }
     transformPoint(p) { return new DOMPoint(p?.x||0,p?.y||0); }
   };
+}
+
+if (typeof WebKitCSSMatrix === 'undefined') {
+  globalThis.WebKitCSSMatrix = class WebKitCSSMatrix extends globalThis.DOMMatrix {};
 }
 
 if (typeof Image === 'undefined') {
@@ -14088,7 +14584,7 @@ globalThis.__diting_setPersona = function() {
   const scr = _fp('screen');
   const sw = scr[0], sh = scr[1];
   globalThis.screen = { width:sw, height:sh, availWidth:sw, availHeight:sh-40, colorDepth:24, pixelDepth:24, availTop:0, availLeft:0, orientation:{type:"landscape-primary",angle:0,addEventListener(){},removeEventListener(){},dispatchEvent(){return true;}} };
-  globalThis.visualViewport = { width:sw, height:sh-80, offsetLeft:0, offsetTop:0, scale:1, addEventListener(){}, removeEventListener(){} };
+  globalThis.visualViewport = globalThis.__diting_makeVisualViewport(sw, sh - 80);
   // From the persona pool, so a retina Mac panel reports 2x (the old
   // width-only heuristic gave 1x on 1512x982 — impossible for that panel).
   globalThis.devicePixelRatio = _fp('dpr') || (sw >= 2560 ? 2 : 1);
@@ -14134,10 +14630,7 @@ globalThis.__diting_setViewport = function(w, h, mobile, dpr) {
   globalThis.outerWidth = w; globalThis.outerHeight = h;
   if (typeof dpr === 'number' && dpr > 0) globalThis.devicePixelRatio = dpr;
   else if (dpr === 0) globalThis.devicePixelRatio = _fp('dpr') || (globalThis.screen.width >= 2560 ? 2 : 1);
-  globalThis.visualViewport = {
-    width: w, height: h, offsetLeft: 0, offsetTop: 0, scale: 1,
-    addEventListener() {}, removeEventListener() {},
-  };
+  globalThis.visualViewport = globalThis.__diting_makeVisualViewport(w, h);
   globalThis.__diting_mq_mobile = mobile ? _MQ_MOBILE_TABLE : null;
   globalThis.__diting_mqRecompute();
   try {

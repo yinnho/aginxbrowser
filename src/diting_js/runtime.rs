@@ -20,6 +20,10 @@ static SNAPSHOT: &[u8] = include_bytes!(env!("AGINXBROWSER_SNAPSHOT_PATH"));
 /// larger budget instead of hitting a silent-null (0.4.1 taobao report).
 pub const DEFAULT_AWAIT_BUDGET_MS: u64 = 5000;
 
+// Anonymous Function trampoline around indirect eval: user stacks must never
+// surface our bootstrap source or wrapper names (stack-shape detectors).
+const INLINE_EVAL_JS: &str = "(new Function(\"s\",\"try{return (0,eval)(s)}catch(x){if(x instanceof SyntaxError){return (new Function(s))()}throw x}\"))";
+
 /// CDP `Runtime.RemoteObject` shape returned by evaluate paths. Our HTTP
 /// surface only reads `value`; the rest is the CDP serialization contract
 /// (kept so a CDP consumer can adopt it without reshaping).
@@ -902,7 +906,7 @@ impl JsRuntime {
             format!(
                 "(async function() {{\n\
                     try {{\n\
-                        var __result = await __ditingEvalScript({expr});\n\
+                        var __result = await {INLINE_EVAL_JS}({expr});\n\
                         {slot} = __result;\n\
                         globalThis.__diting_await_meta = {meta_fn};\n\
                         globalThis.__diting_await_rejected = false;\n\
@@ -924,7 +928,7 @@ impl JsRuntime {
                 "(function() {{\n\
                     var __result;\n\
                     try {{\n\
-                        __result = __ditingEvalScript({expr});\n\
+                        __result = {INLINE_EVAL_JS}({expr});\n\
                         {slot} = __result;\n\
                         globalThis.__diting_await_meta = {meta_fn};\n\
                         globalThis.__diting_await_rejected = false;\n\
@@ -1978,7 +1982,7 @@ impl JsRuntime {
         };
         let literal = serde_json::to_string(&body).unwrap_or_else(|_| "\"\"".to_string());
         format!(
-            "(function() {{ try {{ return __ditingEvalScript({}); }} catch(e) {{ return null; }} }})()",
+            "(function() {{ try {{ return {INLINE_EVAL_JS}({}); }} catch(e) {{ return null; }} }})()",
             literal
         )
     }
