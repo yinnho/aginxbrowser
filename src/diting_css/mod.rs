@@ -2750,13 +2750,16 @@ pub(crate) fn parse_transform(v: &str) -> Option<Transform2D> {
 }
 
 /// Declaration-level length: em/rem can't resolve until the font context is
-/// known, so parsing keeps them symbolic for the cascade to fold in.
+/// known, so parsing keeps them symbolic for the cascade to fold in. vw/vh
+/// keep the same treatment against the viewport pair on [`FontCtx`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CssLength {
     Px(f32),
     Em(f32),
     Rem(f32),
     Percent(f32),
+    Vw(f32),
+    Vh(f32),
 }
 
 /// `line-height` computed value. Inherited as-is: the number form keeps its
@@ -2799,17 +2802,31 @@ pub const DEFAULT_ROOT_FONT_SIZE: f32 = 16.0;
 
 /// Font context a length resolves against. `own` is this element's computed
 /// font-size (font-size itself resolves em/% against the PARENT, per spec).
+/// `viewport_w/h` back the viewport units (vw/vh); the default pair is the
+/// 1280×720 ICB convention, and every real cascade threads the page's actual
+/// viewport through [`crate::diting_layout`] seam functions.
 #[derive(Debug, Clone, Copy)]
 pub struct FontCtx {
     pub own: f32,
     pub root: f32,
+    pub viewport_w: f32,
+    pub viewport_h: f32,
 }
 
 impl Default for FontCtx {
     fn default() -> Self {
-        FontCtx { own: DEFAULT_ROOT_FONT_SIZE, root: DEFAULT_ROOT_FONT_SIZE }
+        FontCtx {
+            own: DEFAULT_ROOT_FONT_SIZE,
+            root: DEFAULT_ROOT_FONT_SIZE,
+            viewport_w: DEFAULT_VIEWPORT.0,
+            viewport_h: DEFAULT_VIEWPORT.1,
+        }
     }
 }
+
+/// Standalone parse/apply contexts without a threaded viewport resolve
+/// against this pair (matches the screenshot default width).
+pub const DEFAULT_VIEWPORT: (f32, f32) = (1280.0, 720.0);
 
 fn resolve_len(l: CssLength, fonts: &FontCtx) -> Length {
     match l {
@@ -2817,6 +2834,8 @@ fn resolve_len(l: CssLength, fonts: &FontCtx) -> Length {
         CssLength::Em(n) => Length::Px(n * fonts.own),
         CssLength::Rem(n) => Length::Px(n * fonts.root),
         CssLength::Percent(p) => Length::Percent(p),
+        CssLength::Vw(n) => Length::Px(n * fonts.viewport_w / 100.0),
+        CssLength::Vh(n) => Length::Px(n * fonts.viewport_h / 100.0),
     }
 }
 
@@ -2832,6 +2851,14 @@ fn parse_css_length(v: &str) -> Option<CssLength> {
     }
     if let Some(r) = v.strip_suffix("rem") {
         return r.parse::<f32>().ok().map(CssLength::Rem);
+    }
+    // "vw" before "vh" is arbitrary (no suffix overlap like rem/em), but
+    // both must precede nothing else — no other unit ends in w/h.
+    if let Some(n) = v.strip_suffix("vw") {
+        return n.parse::<f32>().ok().map(CssLength::Vw);
+    }
+    if let Some(n) = v.strip_suffix("vh") {
+        return n.parse::<f32>().ok().map(CssLength::Vh);
     }
     if let Some(e) = v.strip_suffix("em") {
         return e.parse::<f32>().ok().map(CssLength::Em);
@@ -4063,6 +4090,8 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                     LineHeightRaw::Len(CssLength::Em(n)) => LineHeightSpec::Px(n * fonts.own),
                     LineHeightRaw::Len(CssLength::Rem(n)) => LineHeightSpec::Px(n * fonts.root),
                     LineHeightRaw::Len(CssLength::Percent(p)) => LineHeightSpec::Number(p / 100.0),
+                    LineHeightRaw::Len(CssLength::Vw(n)) => LineHeightSpec::Px(n * fonts.viewport_w / 100.0),
+                    LineHeightRaw::Len(CssLength::Vh(n)) => LineHeightSpec::Px(n * fonts.viewport_h / 100.0),
                 })
             })
             .is_some(),
@@ -4622,6 +4651,29 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             style.left = len(v);
             style.left.is_some()
         }
+        // inset shorthand: <length-percentage>{1,4} | auto. Same expansion
+        // family as margin, but auto is the property initial value here
+        // (None slots, not Length::Auto) and `inset: auto` resets all four.
+        "inset" => {
+            if v.eq_ignore_ascii_case("auto") {
+                style.top = None;
+                style.right = None;
+                style.bottom = None;
+                style.left = None;
+                true
+            } else {
+                let sides = expand_sides(v, fonts);
+                let conv = |x: Option<Length>| match x {
+                    Some(Length::Auto) => None,
+                    other => other,
+                };
+                style.top = conv(sides.top);
+                style.right = conv(sides.right);
+                style.bottom = conv(sides.bottom);
+                style.left = conv(sides.left);
+                style.top.is_some() || style.right.is_some() || style.bottom.is_some() || style.left.is_some()
+            }
+        }
         // min/max-width sizing keywords are valid CSS but not resolved by the
         // layout layer yet — they stay unparsed (drop to auto) rather than
         // parse-into-nothing.
@@ -4934,12 +4986,14 @@ fn parse_font_size_len(v: &str) -> Option<CssLength> {
 }
 
 /// Fold a parsed font-size against its resolution bases.
-fn font_size_px(l: CssLength, parent_fs: f32, root_fs: f32) -> f32 {
+fn font_size_px(l: CssLength, parent_fs: f32, root_fs: f32, viewport: (f32, f32)) -> f32 {
     match l {
         CssLength::Px(x) => x,
         CssLength::Em(n) => n * parent_fs,
         CssLength::Rem(n) => n * root_fs,
         CssLength::Percent(p) => p / 100.0 * parent_fs,
+        CssLength::Vw(n) => n * viewport.0 / 100.0,
+        CssLength::Vh(n) => n * viewport.1 / 100.0,
     }
 }
 
@@ -5067,6 +5121,8 @@ fn parse_font_shorthand(v: &str, fonts: &FontCtx) -> Option<FontShorthand> {
         LineHeightRaw::Len(CssLength::Em(n)) => LineHeightSpec::Px(n * size),
         LineHeightRaw::Len(CssLength::Rem(n)) => LineHeightSpec::Px(n * fonts.root),
         LineHeightRaw::Len(CssLength::Percent(p)) => LineHeightSpec::Number(p / 100.0),
+        LineHeightRaw::Len(CssLength::Vw(n)) => LineHeightSpec::Px(n * fonts.viewport_w / 100.0),
+        LineHeightRaw::Len(CssLength::Vh(n)) => LineHeightSpec::Px(n * fonts.viewport_h / 100.0),
     });
     // Mandatory family: the verbatim remainder (quoted names included).
     if idx >= toks.len() {
@@ -5086,7 +5142,7 @@ fn parse_font_shorthand(v: &str, fonts: &FontCtx) -> Option<FontShorthand> {
 /// when the token is not a parseable size (the whole shorthand is invalid
 /// without one).
 fn size_px(size_str: &str, fonts: &FontCtx) -> Option<f32> {
-    parse_font_size_len(size_str).map(|l| font_size_px(l, fonts.own, fonts.root))
+    parse_font_size_len(size_str).map(|l| font_size_px(l, fonts.own, fonts.root, (fonts.viewport_w, fonts.viewport_h)))
 }
 
 fn parse_font_weight(v: &str) -> Option<u16> {
@@ -5523,6 +5579,7 @@ struct CascadeCandidate<'a> {
 /// rules (already filtered by the caller's selector matching), and the parent
 /// style. This keeps the module decoupled from any particular matching
 /// strategy while still locking ordering semantics.
+#[allow(clippy::too_many_arguments)]
 pub fn cascade_element(
     tag: &str,
     tree: &diting_dom::tree::DomTree,
@@ -5531,6 +5588,7 @@ pub fn cascade_element(
     parent: Option<&ComputedStyle>,
     inline_css: Option<&str>,
     root_font_size: f32,
+    viewport: (f32, f32),
 ) -> ComputedStyle {
     let mut style = ComputedStyle {
         display: Some(ua_display(tag)),
@@ -5654,10 +5712,10 @@ pub fn cascade_element(
     }
     let fs_decl = fs_decl.or_else(|| ua_font_size(tag));
     let own_fs = fs_decl
-        .map(|d| font_size_px(d, parent_fs, root_font_size))
+        .map(|d| font_size_px(d, parent_fs, root_font_size, viewport))
         .unwrap_or(parent_fs);
     style.font_size = Some(own_fs);
-    let fonts = FontCtx { own: own_fs, root: root_font_size };
+    let fonts = FontCtx { own: own_fs, root: root_font_size, viewport_w: viewport.0, viewport_h: viewport.1 };
 
     // UA box defaults AFTER the fs pre-pass (em margins resolve against the
     // element's OWN font-size — h1's .67em × its 2em size) and BEFORE author
@@ -6617,7 +6675,7 @@ mod tests {
             .collect();
         assert_eq!(matched.len(), 3);
 
-        let computed = cascade_element("p", &tree, node, &matched, None, Some("background-color: #abcdef"), DEFAULT_ROOT_FONT_SIZE);
+        let computed = cascade_element("p", &tree, node, &matched, None, Some("background-color: #abcdef"), DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(
             computed.color,
             Some(Color(0x33, 0x33, 0x33, 0xff)),
@@ -6644,7 +6702,7 @@ mod tests {
             ..Default::default()
         };
         // No matched author rules for <em>: pure inheritance + UA defaults.
-        let child = cascade_element("em", &tree, em, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
+        let child = cascade_element("em", &tree, em, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(child.color, parent.color, "color inherits");
         assert_eq!(child.font_size, parent.font_size, "font-size inherits");
         assert_eq!(child.text_align, parent.text_align, "text-align inherits");
@@ -6653,12 +6711,12 @@ mod tests {
         // Author rule on the child overrides the inherited color only.
         let rule = ParsedRule { selector: "em".into(), declarations: "color: red".into() };
         let spec = tree.compile_rule_selector("em").unwrap().specificity();
-        let overridden = cascade_element("em", &tree, em, &[(&rule, spec)], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
+        let overridden = cascade_element("em", &tree, em, &[(&rule, spec)], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(overridden.color, Some(Color(255, 0, 0, 255)));
         assert_eq!(overridden.font_size, parent.font_size, "unmentioned props still inherit");
 
         // Section itself: block UA default even with no author CSS.
-        let block = cascade_element("section", &tree, section, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
+        let block = cascade_element("section", &tree, section, &[], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(block.display, Some(Display::Block));
     }
 
@@ -6671,17 +6729,17 @@ mod tests {
         let td = tree.query_selector("td").unwrap().unwrap();
         let em = tree.query_selector("em").unwrap().unwrap();
 
-        let th_cs = cascade_element("th", &tree, th, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
+        let th_cs = cascade_element("th", &tree, th, &[], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(th_cs.text_align, Some(TextAlign::Center), "UA center on th");
-        let td_cs = cascade_element("td", &tree, td, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
+        let td_cs = cascade_element("td", &tree, td, &[], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(td_cs.text_align, None, "td stays start-aligned");
 
         // The element's own UA declaration beats an inherited value: a th
         // stays centered inside a right-aligned ancestor, plain tags inherit.
         let parent = ComputedStyle { text_align: Some(TextAlign::Right), ..Default::default() };
-        let centered = cascade_element("th", &tree, th, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
+        let centered = cascade_element("th", &tree, th, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(centered.text_align, Some(TextAlign::Center));
-        let right = cascade_element("em", &tree, em, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
+        let right = cascade_element("em", &tree, em, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(right.text_align, Some(TextAlign::Right));
     }
 
@@ -6694,15 +6752,15 @@ mod tests {
         let td2 = tree.query_selector("td[style]").unwrap().unwrap();
         let tr = tree.query_selector("tr").unwrap().unwrap();
 
-        let cs = cascade_element("td", &tree, td1, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
+        let cs = cascade_element("td", &tree, td1, &[], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(cs.height, Some(Length::Px(55.0)), "attr height lands as px");
         // Inline style applies after the hint and wins.
-        let authored = cascade_element("td", &tree, td2, &[], None, Some("height:10px"), DEFAULT_ROOT_FONT_SIZE);
+        let authored = cascade_element("td", &tree, td2, &[], None, Some("height:10px"), DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(authored.height, Some(Length::Px(10.0)));
-        let tr_cs = cascade_element("tr", &tree, tr, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
+        let tr_cs = cascade_element("tr", &tree, tr, &[], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(tr_cs.height, Some(Length::Px(30.0)));
         // Non-table tags ignore the attribute entirely.
-        let plain = cascade_element("div", &tree, td1, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
+        let plain = cascade_element("div", &tree, td1, &[], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(plain.height, None, "height attr is table-cell/row only");
     }
 
@@ -6718,18 +6776,18 @@ mod tests {
             declarations: "--main-color: #ff0000; color: var(--main-color)".into(),
         };
         let spec = tree.compile_rule_selector("section").unwrap().specificity();
-        let parent = cascade_element("section", &tree, section, &[(&root_rule, spec)], None, None, DEFAULT_ROOT_FONT_SIZE);
+        let parent = cascade_element("section", &tree, section, &[(&root_rule, spec)], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(parent.color, Some(Color(255, 0, 0, 255)), "var() resolves against same-element custom property");
         assert_eq!(parent.custom.get("--main-color").map(String::as_str), Some("#ff0000"));
 
         // Child with no rules: custom map inherits (and would feed its own var()s).
-        let child = cascade_element("span", &tree, span, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
+        let child = cascade_element("span", &tree, span, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(child.custom.get("--main-color").map(String::as_str), Some("#ff0000"), "custom properties inherit");
 
         // Child rule USING the inherited custom property.
         let use_rule = ParsedRule { selector: "span".into(), declarations: "color: var(--main-color)".into() };
         let use_spec = tree.compile_rule_selector("span").unwrap().specificity();
-        let styled = cascade_element("span", &tree, span, &[(&use_rule, use_spec)], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
+        let styled = cascade_element("span", &tree, span, &[(&use_rule, use_spec)], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(styled.color, Some(Color(255, 0, 0, 255)), "var() resolves against inherited custom property");
     }
 
@@ -6745,7 +6803,7 @@ mod tests {
         let spec = tree.compile_rule_selector("p").unwrap().specificity();
 
         let parent = ComputedStyle { color: Some(Color(1, 2, 3, 255)), ..Default::default() };
-        let cs = cascade_element("p", &tree, p, &[(&rule, spec)], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
+        let cs = cascade_element("p", &tree, p, &[(&rule, spec)], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         // Fallback may contain commas (rgb) — split_top_comma keeps it whole.
         assert_eq!(cs.color, Some(Color(0, 0, 255, 255)), "fallback (with commas) substitutes");
         // Unresolved without fallback: declaration dropped, inherited value survives (IACVT approximation).
@@ -6763,7 +6821,7 @@ mod tests {
                 "--w: 100px; width: var(--w); --a: var(--b); --b: 10px; padding-top: var(--a)".into(),
         };
         let spec = tree.compile_rule_selector("div").unwrap().specificity();
-        let cs = cascade_element("div", &tree, div, &[(&rule, spec)], None, None, DEFAULT_ROOT_FONT_SIZE);
+        let cs = cascade_element("div", &tree, div, &[(&rule, spec)], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(cs.width, Some(Length::Px(100.0)), "var() resolves in dimensions");
         // --a references --b (declared earlier in the list): stored raw and
         // substituted when `padding-top` uses --a, so chains resolve.
@@ -6795,12 +6853,12 @@ mod tests {
             declarations: "line-height: 1.6".into(),
         };
         let spec = tree.compile_rule_selector("#outer").unwrap().specificity();
-        let parent = cascade_element("div", &tree, outer, &[(&rule, spec)], None, None, DEFAULT_ROOT_FONT_SIZE);
+        let parent = cascade_element("div", &tree, outer, &[(&rule, spec)], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(parent.line_height, Some(LineHeightSpec::Number(1.6)));
 
         // The child inherits the NUMBER (spec computed value) — it scales
         // against whichever font-size the text actually uses.
-        let child = cascade_element("div", &tree, inner, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
+        let child = cascade_element("div", &tree, inner, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(child.line_height, Some(LineHeightSpec::Number(1.6)));
 
         // Length forms collapse to absolute px (em against own font-size).
@@ -6809,7 +6867,7 @@ mod tests {
             declarations: "font-size: 20px; line-height: 1.5em".into(),
         };
         let spec2 = tree.compile_rule_selector("#inner").unwrap().specificity();
-        let sized = cascade_element("div", &tree, inner, &[(&px_rule, spec2)], None, None, DEFAULT_ROOT_FONT_SIZE);
+        let sized = cascade_element("div", &tree, inner, &[(&px_rule, spec2)], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(sized.line_height, Some(LineHeightSpec::Px(30.0)));
         assert_eq!(sized.font_size, Some(20.0));
 
@@ -6925,7 +6983,7 @@ mod tests {
         let deco_of = |html: &str, sel: &str, tag: &str| {
             let tree = diting_dom::tree_sink::parse_html(html);
             let id = tree.query_selector(sel).unwrap().unwrap();
-            cascade_element(tag, &tree, id, &[], None, None, DEFAULT_ROOT_FONT_SIZE)
+            cascade_element(tag, &tree, id, &[], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0))
                 .text_decoration_line
         };
         assert_eq!(deco_of("<body><u>x</u></body>", "u", "u"), u);
@@ -6942,7 +7000,7 @@ mod tests {
         let inline: Option<String> =
             tree.with_node(id, |n| n.get_attribute("style").map(str::to_string)).flatten();
         assert_eq!(
-            cascade_element("u", &tree, id, &[], None, inline.as_deref(), DEFAULT_ROOT_FONT_SIZE)
+            cascade_element("u", &tree, id, &[], None, inline.as_deref(), DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0))
                 .text_decoration_line,
             Some(TextDecorations::default())
         );
@@ -6953,7 +7011,7 @@ mod tests {
         let va_of = |html: &str, sel: &str, tag: &str| {
             let tree = diting_dom::tree_sink::parse_html(html);
             let id = tree.query_selector(sel).unwrap().unwrap();
-            cascade_element(tag, &tree, id, &[], None, None, DEFAULT_ROOT_FONT_SIZE)
+            cascade_element(tag, &tree, id, &[], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0))
                 .vertical_align
         };
         assert_eq!(va_of("<body><sup>x</sup></body>", "sup", "sup"), Some(VerticalAlign::Super));
@@ -6968,7 +7026,7 @@ mod tests {
         let inline: Option<String> =
             tree.with_node(id, |n| n.get_attribute("style").map(str::to_string)).flatten();
         assert_eq!(
-            cascade_element("sup", &tree, id, &[], None, inline.as_deref(), DEFAULT_ROOT_FONT_SIZE)
+            cascade_element("sup", &tree, id, &[], None, inline.as_deref(), DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0))
                 .vertical_align,
             Some(VerticalAlign::Baseline)
         );
@@ -7006,8 +7064,111 @@ mod tests {
         assert!(apply_declarations(&mut s, "vertical-align: 50%"));
         assert_eq!(s.vertical_align, Some(VerticalAlign::Percent(50.0)));
         let mut s = ComputedStyle::default();
-        assert!(!apply_declarations(&mut s, "vertical-align: 2vw"));
-        assert_eq!(s.vertical_align, None);
+        assert!(apply_declarations(&mut s, "vertical-align: 2vw"));
+        assert_eq!(
+            s.vertical_align,
+            Some(VerticalAlign::Length(2.0 * DEFAULT_VIEWPORT.0 / 100.0))
+        );
+    }
+
+    // ---- batch 162: viewport units (vw/vh) + inset shorthand ----
+
+    #[test]
+    fn vw_vh_resolve_against_viewport() {
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "width: 50vw; height: 50vh"));
+        assert_eq!(s.width, Some(Length::Px(0.5 * DEFAULT_VIEWPORT.0)));
+        assert_eq!(s.height, Some(Length::Px(0.5 * DEFAULT_VIEWPORT.1)));
+
+        let vp = FontCtx { own: 16.0, root: 16.0, viewport_w: 800.0, viewport_h: 600.0 };
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations_with(&mut s, "width: 50vw; margin: 10vw", &vp));
+        assert_eq!(s.width, Some(Length::Px(400.0)), "50vw of 800");
+        assert_eq!(s.margin.top, Some(Length::Px(80.0)), "10vw of 800");
+    }
+
+    #[test]
+    fn vw_inside_calc_resolves_per_viewport() {
+        let wide = FontCtx { own: 16.0, root: 16.0, viewport_w: 800.0, viewport_h: 600.0 };
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations_with(&mut s, "width: calc(100vw - 20px)", &wide));
+        assert_eq!(s.width, Some(Length::Px(780.0)));
+        // Same declaration re-resolved under a different viewport must differ —
+        // this is what bake-at-parse could never give us.
+        let narrow = FontCtx { own: 16.0, root: 16.0, viewport_w: 400.0, viewport_h: 600.0 };
+        let mut s2 = ComputedStyle::default();
+        assert!(apply_declarations_with(&mut s2, "width: calc(100vw - 20px)", &narrow));
+        assert_eq!(s2.width, Some(Length::Px(380.0)));
+    }
+
+    #[test]
+    fn vw_threads_through_compute_styles_viewport() {
+        let tree =
+            diting_dom::tree_sink::parse_html(r#"<div style="width: 50vw; font-size: 2vh">x</div>"#);
+        let d = tree.query_selector("div").unwrap().unwrap();
+        let at_800 = crate::diting_layout::compute_styles(&tree, &[], (800.0, 600.0));
+        let at_400 = crate::diting_layout::compute_styles(&tree, &[], (400.0, 600.0));
+        assert_eq!(at_800[&d].width, Some(Length::Px(400.0)));
+        assert_eq!(at_400[&d].width, Some(Length::Px(200.0)));
+        // font-size folds in the cascade pre-pass, like em/% before it.
+        assert_eq!(at_800[&d].font_size, Some(12.0), "2vh of 600");
+    }
+
+    #[test]
+    fn inset_shorthand_expansion_and_auto_reset() {
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "inset: 8px"));
+        assert_eq!(
+            (s.top, s.right, s.bottom, s.left),
+            (
+                Some(Length::Px(8.0)),
+                Some(Length::Px(8.0)),
+                Some(Length::Px(8.0)),
+                Some(Length::Px(8.0))
+            )
+        );
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "inset: 1px 2px"));
+        assert_eq!(
+            (s.top, s.right, s.bottom, s.left),
+            (
+                Some(Length::Px(1.0)),
+                Some(Length::Px(2.0)),
+                Some(Length::Px(1.0)),
+                Some(Length::Px(2.0))
+            )
+        );
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "inset: 1px 2px 3px"));
+        assert_eq!(
+            (s.top, s.right, s.bottom, s.left),
+            (
+                Some(Length::Px(1.0)),
+                Some(Length::Px(2.0)),
+                Some(Length::Px(3.0)),
+                Some(Length::Px(2.0))
+            )
+        );
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "inset: 1px 2px 3px 4px"));
+        assert_eq!(
+            (s.top, s.right, s.bottom, s.left),
+            (
+                Some(Length::Px(1.0)),
+                Some(Length::Px(2.0)),
+                Some(Length::Px(3.0)),
+                Some(Length::Px(4.0))
+            )
+        );
+        // auto is the property initial here: None slots, not Length::Auto.
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "inset: 0 auto"));
+        assert_eq!(s.top, Some(Length::Px(0.0)));
+        assert_eq!(s.right, None, "auto folds to the None initial");
+        // inset: auto resets all four, overriding earlier singles.
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "top: 5px; left: 6px; inset: auto"));
+        assert_eq!((s.top, s.right, s.bottom, s.left), (None, None, None, None));
     }
 
     #[test]
@@ -7020,30 +7181,30 @@ mod tests {
         let p = tree.query_selector("p").unwrap().unwrap();
         let ul = tree.query_selector("ul").unwrap().unwrap();
 
-        let body_style = cascade_element("body", &tree, body, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
+        let body_style = cascade_element("body", &tree, body, &[], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         for side in [body_style.margin.top, body_style.margin.right, body_style.margin.bottom, body_style.margin.left] {
             assert_eq!(side, Some(Length::Px(8.0)), "body 8px UA margin");
         }
 
         // h1: 2em font-size + bold + .67em margins AGAINST ITS OWN 2em size.
-        let h1_style = cascade_element("h1", &tree, h1, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
+        let h1_style = cascade_element("h1", &tree, h1, &[], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(h1_style.font_size, Some(32.0), "h1 UA size 2em of 16");
         assert_eq!(h1_style.font_weight, Some(700), "h1 UA bold");
         let em67 = Length::Px((0.67f32 * 32.0 * 100.0).round() / 100.0);
         assert_eq!(h1_style.margin.top, Some(em67), "h1 .67em of its own 2em size");
         assert_eq!(h1_style.margin.bottom, Some(em67));
 
-        let p_style = cascade_element("p", &tree, p, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
+        let p_style = cascade_element("p", &tree, p, &[], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(p_style.margin.top, Some(Length::Px(16.0)), "p 1em block margin");
 
-        let ul_style = cascade_element("ul", &tree, ul, &[], None, None, DEFAULT_ROOT_FONT_SIZE);
+        let ul_style = cascade_element("ul", &tree, ul, &[], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(ul_style.margin.top, Some(Length::Px(16.0)), "ul 1em block margin");
         assert_eq!(ul_style.padding.left, Some(Length::Px(40.0)), "ul 40px inline-start padding");
 
         // Author margin overrides per side.
         let rule = ParsedRule { selector: "p".into(), declarations: "margin-top: 0".into() };
         let spec = tree.compile_rule_selector("p").unwrap().specificity();
-        let authored = cascade_element("p", &tree, p, &[(&rule, spec)], None, None, DEFAULT_ROOT_FONT_SIZE);
+        let authored = cascade_element("p", &tree, p, &[(&rule, spec)], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(authored.margin.top, Some(Length::Px(0.0)), "author margin-top wins");
         assert_eq!(authored.margin.bottom, Some(Length::Px(16.0)), "UA bottom margin survives");
     }
@@ -7053,7 +7214,7 @@ mod tests {
     #[test]
     fn em_rem_and_percent_parse_and_resolve() {
         let mut s = ComputedStyle::default();
-        let fonts = FontCtx { own: 20.0, root: 32.0 };
+        let fonts = FontCtx { own: 20.0, root: 32.0, viewport_w: DEFAULT_VIEWPORT.0, viewport_h: DEFAULT_VIEWPORT.1 };
         apply_declarations_with(&mut s, "width: 10em; height: 2.5rem; margin: 5% 1px", &fonts);
         assert_eq!(s.width, Some(Length::Px(200.0)), "em folds against own fs");
         assert_eq!(s.height, Some(Length::Px(80.0)), "rem folds against root fs");
@@ -7072,7 +7233,7 @@ mod tests {
             cascade_element(
                 "p", &tree, p,
                 &[(&ParsedRule { selector: "p".into(), declarations: decl.into() }, 1)],
-                Some(&parent), None, root,
+                Some(&parent), None, root, (1280.0, 720.0),
             )
         };
         assert_eq!(mk("font-size: 1.5em", 16.0).font_size, Some(30.0), "em against parent");
@@ -7093,7 +7254,7 @@ mod tests {
         let mk = |decl: &str, parent: &ComputedStyle| {
             cascade_element(
                 "p", &tree, p, &[],
-                Some(parent), Some(decl), DEFAULT_ROOT_FONT_SIZE,
+                Some(parent), Some(decl), DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0),
             )
         };
         assert_eq!(
@@ -7121,7 +7282,7 @@ mod tests {
         // the rest of the block.
         let cs = cascade_element(
             "p", &tree, p, &[],
-            Some(&default), Some("color: red; font-size: larger; width: 10em"), DEFAULT_ROOT_FONT_SIZE,
+            Some(&default), Some("color: red; font-size: larger; width: 10em"), DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0),
         );
         assert_eq!(cs.font_size, Some(19.2));
         assert_eq!(cs.width, Some(Length::Px(192.0)), "width em folds against the keyword result");
@@ -7136,7 +7297,7 @@ mod tests {
         let cs = cascade_element(
             "p", &tree, p,
             &[(&ParsedRule { selector: "p".into(), declarations: "width: 10em; font-size: 24px".into() }, 1)],
-            None, None, DEFAULT_ROOT_FONT_SIZE,
+            None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0),
         );
         assert_eq!(cs.font_size, Some(24.0));
         assert_eq!(cs.width, Some(Length::Px(240.0)), "10em of the same block's font-size");
@@ -7157,7 +7318,7 @@ mod tests {
             .iter()
             .filter_map(|r| tree.compile_rule_selector(&r.selector).map(|c| (r, c.specificity())))
             .collect();
-        let cs = cascade_element("p", &tree, p, &matched, None, None, DEFAULT_ROOT_FONT_SIZE);
+        let cs = cascade_element("p", &tree, p, &matched, None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(cs.font_size, Some(30.0), "id specificity wins font-size");
         assert_eq!(cs.width, Some(Length::Px(60.0)), "2em of 30, not of 10");
     }
@@ -7203,7 +7364,7 @@ mod tests {
         // matches the <article> element, not its child .lead.
         assert_eq!(matched.len(), 1, "{matched:?}");
 
-        let computed = cascade_element("p", &tree, lead, &matched, None, None, DEFAULT_ROOT_FONT_SIZE);
+        let computed = cascade_element("p", &tree, lead, &matched, None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(computed.font_weight, Some(700), "author bold applies");
         assert_eq!(computed.text_align, None, ".menu a never touched .lead");
 
@@ -7223,7 +7384,7 @@ mod tests {
             })
             .collect();
         assert_eq!(art_matched.len(), 1, "{art_matched:?}");
-        let art_computed = cascade_element("article", &tree, article, &art_matched, None, None, DEFAULT_ROOT_FONT_SIZE);
+        let art_computed = cascade_element("article", &tree, article, &art_matched, None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(art_computed.padding.top, Some(Length::Px(12.0)), ":where(article) padding applies");
     }
 
@@ -7250,7 +7411,7 @@ mod tests {
             Some(Length::Calc { percent: 50.0, px: 10.0 })
         );
         // em folds against the font context like bare declarations.
-        let big = FontCtx { own: 20.0, root: 16.0 };
+        let big = FontCtx { own: 20.0, root: 16.0, viewport_w: DEFAULT_VIEWPORT.0, viewport_h: DEFAULT_VIEWPORT.1 };
         assert_eq!(eval_calc("1em + 4px", &big), Some(Length::Px(24.0)));
         // Parentheses and nested calc() group.
         assert_eq!(
@@ -7896,7 +8057,7 @@ mod tests {
             text_overflow: Some(TextOverflow::Ellipsis),
             ..Default::default()
         };
-        let child = cascade_element("p", &tree, p, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
+        let child = cascade_element("p", &tree, p, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(child.white_space, Some(WhiteSpace::Nowrap), "white-space inherits");
         assert_eq!(child.text_overflow, None, "text-overflow does not inherit");
     }
@@ -7909,11 +8070,11 @@ mod tests {
     fn ua_pre_default_and_author_override() {
         let tree = diting_dom::tree_sink::parse_html("<pre>x</pre>");
         let pre = tree.query_selector("pre").unwrap().unwrap();
-        let ua = crate::diting_layout::compute_styles(&tree, &[]);
+        let ua = crate::diting_layout::compute_styles(&tree, &[], (1280.0, 720.0));
         assert_eq!(ua[&pre].white_space, Some(WhiteSpace::Pre), "UA default for <pre>");
 
         let rules = parse_stylesheet_for("pre { white-space: normal }", (800.0, 600.0), CssMediaType::Screen);
-        let authored = crate::diting_layout::compute_styles(&tree, &rules);
+        let authored = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
         assert_eq!(authored[&pre].white_space, Some(WhiteSpace::Normal), "author declaration beats the UA default");
     }
 
@@ -8011,7 +8172,7 @@ mod tests {
             backdrop_blur: Some(6.0),
             ..Default::default()
         };
-        let child = cascade_element("p", &tree, p, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
+        let child = cascade_element("p", &tree, p, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(child.backdrop_blur, None, "backdrop-filter is non-inherited");
     }
 
@@ -8076,12 +8237,12 @@ mod tests {
             text_shadow: Some(vec![TextShadow { dx: 1.0, dy: 1.0, blur: 2.0, color: Color(9, 9, 9, 255) }]),
             ..Default::default()
         };
-        let child = cascade_element("p", &tree, p, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE);
+        let child = cascade_element("p", &tree, p, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(child.text_shadow, parent.text_shadow, "text-shadow inherits");
         // An explicit `none` on the child stops the inheritance.
         let tree2 = diting_dom::tree_sink::parse_html(r#"<p>x</p>"#);
         let p2 = tree2.query_selector("p").unwrap().unwrap();
-        let child2 = cascade_element("p", &tree2, p2, &[], Some(&parent), Some("text-shadow: none"), DEFAULT_ROOT_FONT_SIZE);
+        let child2 = cascade_element("p", &tree2, p2, &[], Some(&parent), Some("text-shadow: none"), DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
         assert_eq!(child2.text_shadow, None, "author `none` beats inheritance");
     }
 

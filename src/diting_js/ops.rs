@@ -2100,6 +2100,7 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
         &keyframes,
         gs.css_time,
         &gs.css_transitions.borrow(),
+        (viewport_width, viewport_height),
     );
     // @container stage (moli#282): conditions answer against ancestor
     // container geometry, which only exists after a solve — so the arms
@@ -2146,6 +2147,7 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
                 &gs.css_transitions.borrow(),
                 base_len,
                 &plan.gates,
+                (viewport_width, viewport_height),
             );
             styles_bumped = true;
         }
@@ -2329,6 +2331,7 @@ fn iframe_layout_run(gs: &JsState, dom: &DomTree, root: NodeId) -> std::rc::Rc<L
         // Transitions are registered against main-document node ids; the
         // subtree id space here is separate, so the empty slice stands.
         &[],
+        (IFRAME_VW, IFRAME_VH),
     );
     let fonts = crate::diting_fonts::font_book();
     let solved = crate::diting_layout::layout_solve_rooted(

@@ -319,7 +319,7 @@ pub fn render_html_to_png_diting(
         (width as f32, height as f32),
         crate::diting_css::CssMediaType::Screen,
     );
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (width as f32, height as f32));
     let fonts = crate::diting_fonts::font_book();
 
     // Image bytes: everything non-stylesheet the prefetch pass fetched,
@@ -514,7 +514,7 @@ pub fn element_rects_diting(
         (viewport_width, viewport_height),
         crate::diting_css::CssMediaType::Screen,
     );
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (viewport_width, viewport_height));
 
     let matched = tree
         .query_selector_all(selector)

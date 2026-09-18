@@ -969,6 +969,6 @@ mod cross_check {
                 Some((rule, compiled.specificity()))
             })
             .collect();
-        diting_css::cascade_element(tag, tree, nid, &matched, parent, inline, diting_css::DEFAULT_ROOT_FONT_SIZE)
+        diting_css::cascade_element(tag, tree, nid, &matched, parent, inline, diting_css::DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0))
     }
 }

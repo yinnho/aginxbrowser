@@ -8010,6 +8010,7 @@ fn bake_container_units(text: &str, w: f32, h: f32) -> String {
 pub fn compute_styles(
     tree: &DomTree,
     rules: &[crate::diting_css::ParsedRule],
+    viewport: (f32, f32),
 ) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
     // Static renders (screenshot/svg paths): no registered transitions —
     // the cascade values stand.
@@ -8019,6 +8020,7 @@ pub fn compute_styles(
         &crate::diting_css::KeyframesMap::new(),
         None,
         &[],
+        viewport,
     )
 }
 
@@ -8030,6 +8032,7 @@ pub fn compute_styles(
 /// (opacity/transform/stroke-dashoffset), so this runs inside the
 /// collect-cache (#395) invalidation domain — `set_css_time` drops the
 /// paint-only caches and the next read re-cascades fresh.
+#[allow(clippy::too_many_arguments)]
 fn compute_styles_impl(
     tree: &DomTree,
     rules: &[crate::diting_css::ParsedRule],
@@ -8038,6 +8041,7 @@ fn compute_styles_impl(
     within_root: Option<NodeId>,
     transitions: &[crate::diting_css::CssTransition],
     gated: Option<(usize, &HashMap<usize, Vec<usize>>)>,
+    viewport: (f32, f32),
 ) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
     #[allow(clippy::too_many_arguments)]
     fn visit(
@@ -8053,6 +8057,7 @@ fn compute_styles_impl(
         counters: &mut CounterState,
         depth: usize,
         gated: Option<(usize, &HashMap<usize, Vec<usize>>)>,
+        viewport: (f32, f32),
     ) {
         let Some(tag) = tree
             .with_node(nid, |n| n.as_element().map(|e| e.local.to_string()))
@@ -8101,6 +8106,7 @@ fn compute_styles_impl(
             parent,
             inline.as_deref(),
             root_fs,
+            viewport,
         );
         let mut cs = cs;
         crate::diting_css::sample_css_animation(&mut cs, keyframes, css_time);
@@ -8134,6 +8140,7 @@ fn compute_styles_impl(
                 depth,
                 crate::diting_dom::selector::PseudoKind::Before,
                 gated,
+                viewport,
             );
         }
         let child_root_fs = if parent.is_none() {
@@ -8195,6 +8202,7 @@ fn compute_styles_impl(
                 counters,
                 depth + 1,
                 gated,
+                viewport,
             );
         }
         if !sets.pseudo_kinds.is_empty() {
@@ -8209,6 +8217,7 @@ fn compute_styles_impl(
                 depth,
                 crate::diting_dom::selector::PseudoKind::After,
                 gated,
+                viewport,
             );
         }
         if pseudo_pair.before.is_some() || pseudo_pair.after.is_some() {
@@ -8234,6 +8243,7 @@ fn compute_styles_impl(
         depth: usize,
         wanted: crate::diting_dom::selector::PseudoKind,
         gated: Option<(usize, &HashMap<usize, Vec<usize>>)>,
+        viewport: (f32, f32),
     ) -> Option<crate::diting_css::ComputedStyle> {
         use crate::diting_css::ContentValue;
         use crate::diting_dom::selector::PseudoKind;
@@ -8273,7 +8283,7 @@ fn compute_styles_impl(
             // tag-gated UA branches (their attribute reads fire only on
             // a/td/th/tr hosts).
             let mut p = crate::diting_css::cascade_element(
-                "span", tree, nid, &matched, Some(host), None, root_fs,
+                "span", tree, nid, &matched, Some(host), None, root_fs, viewport,
             );
             // attr() resolves against the HOST's attributes; a missing
             // attribute yields the empty string. Counters and quotes resolve
@@ -8342,6 +8352,7 @@ fn compute_styles_impl(
             &mut counters,
             0,
             gated,
+            viewport,
         ),
         None => {
             for child in tree.children(tree.document()) {
@@ -8358,6 +8369,7 @@ fn compute_styles_impl(
                     &mut counters,
                     0,
                     gated,
+                    viewport,
                 );
             }
         }
@@ -8377,8 +8389,9 @@ pub fn compute_styles_timed(
     keyframes: &crate::diting_css::KeyframesMap,
     css_time: Option<f64>,
     transitions: &[crate::diting_css::CssTransition],
+    viewport: (f32, f32),
 ) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
-    compute_styles_impl(tree, rules, keyframes, css_time, None, transitions, None)
+    compute_styles_impl(tree, rules, keyframes, css_time, None, transitions, None, viewport)
 }
 
 /// Second-pass face for `@container` arms (moli#282): `gates` maps ABSOLUTE
@@ -8387,6 +8400,7 @@ pub fn compute_styles_timed(
 /// Callers build the plan from a probe pass's geometry, extend `rules` with
 /// the plan's extra rules, and re-cascade through here — the gated arms
 /// then match exactly those elements.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_styles_gated(
     tree: &DomTree,
     rules: &[crate::diting_css::ParsedRule],
@@ -8395,6 +8409,7 @@ pub fn compute_styles_gated(
     transitions: &[crate::diting_css::CssTransition],
     base_len: usize,
     gates: &HashMap<usize, Vec<usize>>,
+    viewport: (f32, f32),
 ) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
     compute_styles_impl(
         tree,
@@ -8404,6 +8419,7 @@ pub fn compute_styles_gated(
         None,
         transitions,
         Some((base_len, gates)),
+        viewport,
     )
 }
 
@@ -8417,8 +8433,9 @@ pub fn compute_styles_timed_within(
     css_time: Option<f64>,
     root: NodeId,
     transitions: &[crate::diting_css::CssTransition],
+    viewport: (f32, f32),
 ) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
-    compute_styles_impl(tree, rules, keyframes, css_time, Some(root), transitions, None)
+    compute_styles_impl(tree, rules, keyframes, css_time, Some(root), transitions, None, viewport)
 }
 
 /// Trace-only element count (a full walk just for the debug knob; keep out of
@@ -8480,7 +8497,7 @@ mod reparent_anchoring_tests {
         let html = format!("<html><body>{body}</body></html>");
         let tree = parse_html(&html);
         let rules = parse_stylesheet_for(sheet, (800.0, 600.0), CssMediaType::Screen);
-        let styles = compute_styles(&tree, &rules);
+        let styles = compute_styles(&tree, &rules, (1280.0, 720.0));
         let (rects, _, _, _, _, _) = layout_dom_with_paint_order_and_images(
             &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
         );
@@ -8558,7 +8575,7 @@ mod paint_token_memo_tests {
         let collect_items = |sheet: &str| {
             let tree = parse_html(html);
             let rules = parse_stylesheet_for(sheet, (1280.0, 800.0), CssMediaType::Screen);
-            let styles = compute_styles(&tree, &rules);
+            let styles = compute_styles(&tree, &rules, (1280.0, 720.0));
             let (_, items, _, _, _, _) = layout_dom_with_paint_order_and_images(
                 &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
             );
@@ -8725,7 +8742,7 @@ mod box_shadow_paint_tests {
         let html = format!("<html><body>{body}</body></html>");
         let tree = parse_html(&html);
         let rules = parse_stylesheet_for(sheet, (800.0, 600.0), CssMediaType::Screen);
-        let styles = compute_styles(&tree, &rules);
+        let styles = compute_styles(&tree, &rules, (1280.0, 720.0));
         let (_, items, _, _, _, _) = layout_dom_with_paint_order_and_images(
             &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
         );
@@ -8819,7 +8836,7 @@ mod white_space_pre_family_tests {
         let html = format!("<html><body>{body}</body></html>");
         let tree = parse_html(&html);
         let rules = parse_stylesheet_for("", (800.0, 600.0), CssMediaType::Screen);
-        let styles = compute_styles(&tree, &rules);
+        let styles = compute_styles(&tree, &rules, (1280.0, 720.0));
         let (rects, _, _, _, _, _) = layout_dom_with_paint_order_and_images(
             &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
         );
@@ -9035,7 +9052,7 @@ mod batch_124_leading_ws_tests {
         let html = format!("<html><body>{body}</body></html>");
         let tree = parse_html(&html);
         let rules = parse_stylesheet_for("", (800.0, 600.0), CssMediaType::Screen);
-        let styles = compute_styles(&tree, &rules);
+        let styles = compute_styles(&tree, &rules, (1280.0, 720.0));
         let (_, items, _, _, _, _) = layout_dom_with_paint_order_and_images(
             &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
         );
@@ -9113,7 +9130,7 @@ mod batch_125_inline_fragment_deco_tests {
         let html = format!("<html><body>{body}</body></html>");
         let tree = parse_html(&html);
         let rules = parse_stylesheet_for(sheet, (800.0, 600.0), CssMediaType::Screen);
-        let styles = compute_styles(&tree, &rules);
+        let styles = compute_styles(&tree, &rules, (1280.0, 720.0));
         let (_, items, _, _, _, _) = layout_dom_with_paint_order_and_images(
             &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
         );
@@ -9186,7 +9203,7 @@ mod batch_125_inline_fragment_deco_tests {
     fn small_caps_word_leaves_pre_uppercase_at_ratio() {
         let tree = parse_html("<html><body>x</body></html>");
         let rules = parse_stylesheet_for("", (800.0, 600.0), CssMediaType::Screen);
-        let _styles = compute_styles(&tree, &rules);
+        let _styles = compute_styles(&tree, &rules, (1280.0, 720.0));
         let mut tt = TaffyTree::<TextLeaf>::new();
         let leaves = build_word_leaves(
             "hello AB", 16.0, false, [0, 0, 0, 255], 20.0, TextDecorations::default(),
@@ -9398,7 +9415,7 @@ mod container_tests {
             CssMediaType::Screen,
             &MediaOverrides::default(),
         );
-        let styles = compute_styles(&tree, &rules);
+        let styles = compute_styles(&tree, &rules, (1280.0, 720.0));
         let solved = layout_solve(
             &tree,
             &styles,
@@ -9444,6 +9461,7 @@ mod container_tests {
             &[],
             rules.len(),
             &plan.gates,
+            (1280.0, 720.0),
         );
         assert_eq!(styles[&i1].color, Some(crate::diting_css::Color(255, 0, 0, 255)));
         assert_eq!(styles[&i2].color, Some(crate::diting_css::Color(0, 0, 255, 255)));

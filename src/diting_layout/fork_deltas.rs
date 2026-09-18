@@ -438,7 +438,7 @@ fn flattened_inline_union_carries_strut_height() {
     let html = r#"<html><body><p>before <a style="line-height:32px"><span style="font-size:8px">x</span></a> after</p></body></html>"#;
     let tree = parse_html(html);
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let rects = crate::diting_layout::layout_dom(
         &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0,
     );
@@ -456,7 +456,7 @@ fn flattened_inline_union_carries_strut_height() {
     // needed — its word leaves already carry the line height).
     let html2 = r#"<html><body><p>plain <b>bold word</b> tail</p></body></html>"#;
     let tree2 = parse_html(html2);
-    let styles2 = crate::diting_layout::compute_styles(&tree2, &rules);
+    let styles2 = crate::diting_layout::compute_styles(&tree2, &rules, (1280.0, 720.0));
     let rects2 = crate::diting_layout::layout_dom(
         &tree2, &styles2, &crate::diting_fonts::font_book(), 1280.0, 800.0,
     );
@@ -489,7 +489,7 @@ fn sub_super_grows_line_box_and_strut_keeps_img_honest() {
     </body></html>"#;
     let tree = parse_html(html);
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let fonts = crate::diting_fonts::font_book();
     let rects = crate::diting_layout::layout_dom(
         &tree, &styles, &fonts, 1280.0, 800.0,
@@ -581,7 +581,7 @@ fn inline_block_is_atomic_shrink_to_fit_and_wraps() {
     );
     let tree = parse_html(&html);
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let rects = crate::diting_layout::layout_dom(
         &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0,
     );
@@ -639,7 +639,7 @@ fn unstyled_form_controls_get_default_boxes() {
         </body></html>"#;
     let tree = parse_html(html);
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let rects = crate::diting_layout::layout_dom(
         &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0,
     );
@@ -723,7 +723,7 @@ fn form_controls_paint_their_value_run() {
     tree.with_node_mut(ta, |n| n.set_live_value("typed ta".into()));
 
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let (_, items, _, _, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
         &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
     );
@@ -794,7 +794,7 @@ fn select_paints_one_option_label_not_the_option_list() {
     let sel = |id: &str| tree.query_selector_all(id).unwrap()[0];
 
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let (_, items, _, _, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
         &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
     );
@@ -824,7 +824,7 @@ fn select_paints_one_option_label_not_the_option_list() {
     // beats the attributes — the test drives the Rust side directly, same
     // as the value-run test above.
     tree.with_node_mut(sel("#plain"), |n| n.set_live_value("Typed".into()));
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let (_, items, _, _, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
         &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
     );
@@ -870,7 +870,7 @@ fn checkable_inputs_paint_native_widgets() {
     // widget states: 4 checkables total — 3 checked (attr ×2 + dirty ×1),
     // 1 unchecked — and the text input must carry NO widget.
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let (_, items, _, _, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
         &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
     );
@@ -907,7 +907,7 @@ fn checkable_inputs_paint_native_widgets() {
     // precedence in the same re-layout (el.checked = false).
     tree.with_node_mut(sel("#cb-dirty"), |n| n.set_live_checked(false));
     tree.with_node_mut(sel("#cb-attr"), |n| n.set_live_checked(false));
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let (_, items, _, _, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
         &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
     );
@@ -948,7 +948,7 @@ fn form_runs_resolve_layout_kind() {
     let tree = parse_html(html);
 
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let (_, items, _, _, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
         &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
     );
@@ -999,7 +999,7 @@ fn box_sizing_picks_the_measured_edge() {
         </body></html>"#;
     let tree = parse_html(html);
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let rects = crate::diting_layout::layout_dom(
         &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0,
     );
@@ -1046,7 +1046,7 @@ fn background_clip_text_moves_gradient_into_glyphs() {
         </body></html>"#;
     let tree = parse_html(html);
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let (rects, items) = crate::diting_layout::layout_dom_with_paint(
         &tree,
         &styles,
@@ -1164,7 +1164,7 @@ fn mixed_font_run_aligns_baselines() {
     let html = r#"<html><body><p><span id="a" style="font-size:16px">A</span> <span id="b" style="font-size:24px">B</span></p></body></html>"#;
     let tree = parse_html(html);
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let fonts = crate::diting_fonts::font_book();
     let rects = crate::diting_layout::layout_dom(&tree, &styles, &fonts, 1280.0, 800.0);
 
@@ -1200,7 +1200,7 @@ fn mixed_font_run_aligns_baselines_per_wrapped_line() {
     let html = r#"<html><body><div style="width:140px"><span id="a" style="font-size:16px">AAAA</span> <span id="b" style="font-size:24px">BBBB</span> <span id="c" style="font-size:16px">CCCC CCCC CCCC</span></div></body></html>"#;
     let tree = parse_html(html);
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let fonts = crate::diting_fonts::font_book();
     let rects = crate::diting_layout::layout_dom(&tree, &styles, &fonts, 1280.0, 800.0);
 
@@ -1243,7 +1243,7 @@ fn inline_block_baseline_is_its_last_line() {
     let html = r#"<html><body><p><span id="t">text</span> <span id="box" style="display:inline-block;width:36px">AA BB CC</span></p></body></html>"#;
     let tree = parse_html(html);
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let fonts = crate::diting_fonts::font_book();
     let rects = crate::diting_layout::layout_dom(&tree, &styles, &fonts, 1280.0, 800.0);
 
@@ -1285,7 +1285,7 @@ fn empty_inline_block_aligns_bottom_edge() {
     let html = r#"<html><body><p><span id="t">text</span> <span id="box" style="display:inline-block;width:30px;height:40px"></span></p></body></html>"#;
     let tree = parse_html(html);
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let fonts = crate::diting_fonts::font_book();
     let rects = crate::diting_layout::layout_dom(&tree, &styles, &fonts, 1280.0, 800.0);
 
@@ -1469,7 +1469,7 @@ fn width_sizing_keywords_resolve_to_intrinsic() {
     </body></html>"#;
     let tree = parse_html(html);
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let rects = crate::diting_layout::layout_dom(
         &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0,
     );
@@ -1540,7 +1540,7 @@ fn inline_background_paints_band_under_own_ink() {
         (1280.0, 800.0),
         CssMediaType::Screen,
     );
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let (_, items) = crate::diting_layout::layout_dom_with_paint(
         &tree,
         &styles,
@@ -1618,7 +1618,7 @@ fn inline_background_splits_bands_per_wrapped_line() {
         (1280.0, 800.0),
         CssMediaType::Screen,
     );
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let (_, items) = crate::diting_layout::layout_dom_with_paint(
         &tree,
         &styles,
@@ -1665,7 +1665,7 @@ fn nested_inline_backgrounds_stack_outer_under_inner() {
         (1280.0, 800.0),
         CssMediaType::Screen,
     );
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let (_, items) = crate::diting_layout::layout_dom_with_paint(
         &tree,
         &styles,
@@ -1708,7 +1708,7 @@ fn row_group_background_paints_on_row_band() {
         (1280.0, 800.0),
         CssMediaType::Screen,
     );
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let (_, items) = crate::diting_layout::layout_dom_with_paint(
         &tree,
         &styles,
@@ -1762,7 +1762,7 @@ fn thead_background_paints_on_row_band() {
         (1280.0, 800.0),
         CssMediaType::Screen,
     );
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let (_, items) = crate::diting_layout::layout_dom_with_paint(
         &tree,
         &styles,
@@ -1794,7 +1794,7 @@ fn cell_background_paints_over_row_group_band() {
         (1280.0, 800.0),
         CssMediaType::Screen,
     );
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let (_, items) = crate::diting_layout::layout_dom_with_paint(
         &tree,
         &styles,
@@ -1834,7 +1834,7 @@ fn row_background_beats_row_group_background() {
         (1280.0, 800.0),
         CssMediaType::Screen,
     );
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let (_, items) = crate::diting_layout::layout_dom_with_paint(
         &tree,
         &styles,
@@ -1876,7 +1876,7 @@ fn per_side_border_width_longhand_zeroes_one_side() {
     let border_widths = |html: &str| -> [f32; 4] {
         let tree = parse_html(html);
         let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
-        let styles = crate::diting_layout::compute_styles(&tree, &rules);
+        let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
         let (_, items) = crate::diting_layout::layout_dom_with_paint(
             &tree,
             &styles,
@@ -1980,7 +1980,7 @@ fn relative_img_src_hits_absolute_keyed_byte_table() {
     let html = r#"<html><body><img src="dot.png"></body></html>"#;
     let tree = parse_html(html);
     let rules = parse_stylesheet_for("", (800.0, 600.0), CssMediaType::Screen);
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
 
     let mut net: std::collections::HashMap<String, std::sync::Arc<Vec<u8>>> =
         std::collections::HashMap::new();
@@ -2039,7 +2039,7 @@ fn emoji_text_paints_colored_ink_e2e() {
     let html = r#"<html><body style="margin:0"><p id="t" style="font-size:40px">🚀汉字</p></body></html>"#;
     let tree = parse_html(html);
     let rules = parse_stylesheet_for("", (400.0, 200.0), CssMediaType::Screen);
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let (rects, items) = crate::diting_layout::layout_dom_with_paint(
         &tree,
         &styles,
@@ -2172,7 +2172,7 @@ fn oversized_border_radius_clamps_to_half_box() {
         </body></html>"#;
     let tree = parse_html(html);
     let rules = parse_stylesheet_for("", (400.0, 300.0), CssMediaType::Screen);
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let (rects, items) = crate::diting_layout::layout_dom_with_paint(
         &tree,
         &styles,
@@ -2269,7 +2269,7 @@ fn word_spacing_widens_word_gaps_in_mixed_runs() {
         </body></html>"#;
     let tree = parse_html(html);
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let (_, items, _, _, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
         &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
     );
@@ -2312,7 +2312,7 @@ fn phrasing_content_uas_share_one_text_line() {
     let html = r#"<html><body><p>a<mark>m</mark><ins>i</ins><del>d</del><big>g</big><u>u</u><s>s</s><strike>k</strike><tt>tt</tt><samp>sa</samp><kbd>kb</kbd><dfn>df</dfn><var>v</var><cite>ci</cite><bdi>b1</bdi><bdo>b2</bdo></p></body></html>"#;
     let tree = parse_html(html);
     let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let (_, items, _, _, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
         &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
     );
@@ -2346,7 +2346,7 @@ fn nowrap_ellipsis_marks_paint_truncation_and_keeps_full_text() {
         );
         let tree = parse_html(&html);
         let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
-        let styles = crate::diting_layout::compute_styles(&tree, &rules);
+        let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
         let div = tree.query_selector_all("div").unwrap()[0];
         let (rects, items, _, _, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
             &tree,
@@ -2432,7 +2432,7 @@ fn absolute_containing_block_is_padding_box_of_positioned_ancestor() {
     "#;
     let tree = parse_html(html);
     let rules = parse_stylesheet_for(sheet, (1280.0, 800.0), CssMediaType::Screen);
-    let styles = crate::diting_layout::compute_styles(&tree, &rules);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
     let fonts = crate::diting_fonts::font_book();
     let rects = crate::diting_layout::layout_dom(&tree, &styles, &fonts, 1280.0, 800.0);
 

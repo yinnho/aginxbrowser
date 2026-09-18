@@ -1274,7 +1274,7 @@ mod tests {
     fn compile_of(html: &str) -> SvgRender {
         let tree = parse_html(html);
         let svg_id = tree.query_selector("svg").expect("parse ok").expect("an svg element");
-        let styles = super::super::compute_styles(&tree, &[]);
+        let styles = super::super::compute_styles(&tree, &[], (1280.0, 720.0));
         compile_svg(&tree, &styles, svg_id)
     }
 
@@ -1383,7 +1383,7 @@ mod tests {
         );
         let svg_id = tree.query_selector("svg").unwrap().unwrap();
         let rules = crate::diting_css::parse_stylesheet("rect { fill: #00ff00; }");
-        let styles = super::super::compute_styles(&tree, &rules);
+        let styles = super::super::compute_styles(&tree, &rules, (1280.0, 720.0));
         let r = compile_svg(&tree, &styles, svg_id);
         match r.ops.as_slice() {
             [SvgOp::Fill { color, .. }] => assert_eq!(*color, [0, 255, 0, 255]),
@@ -1696,7 +1696,7 @@ mod tests {
         let rules = crate::diting_css::parse_stylesheet(
             "path { stroke-dashoffset: 0.5; opacity: 0.5 }",
         );
-        let styles = super::super::compute_styles(&tree, &rules);
+        let styles = super::super::compute_styles(&tree, &rules, (1280.0, 720.0));
         let r = compile_svg(&tree, &styles, svg_id);
         match r.ops.as_slice() {
             [SvgOp::Stroke { dash, dash_offset, color, .. }] => {
