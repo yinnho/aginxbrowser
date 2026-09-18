@@ -1994,12 +1994,13 @@ fn border_style_kw(v: &str) -> BorderStyleKw {
     }
 }
 
-/// One grid track sizing. `1fr` / `100px` / `auto` / `minmax(a, b)` —
-/// repeat() expands away at parse time, so it never reaches this enum.
+/// One grid track sizing. `1fr` / `100px` / `25%` / `auto` / `minmax(a, b)`
+/// — repeat() expands away at parse time, so it never reaches this enum.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GridTrack {
     Fr(f32),
     Px(f32),
+    Percent(f32),
     Auto,
     /// minmax(min, max); the two arguments are shallow (nested minmax is
     /// invalid CSS), which also keeps the enum non-recursive.
@@ -2007,10 +2008,13 @@ pub enum GridTrack {
 }
 
 /// A minmax() argument — one of the simple sizings, never another minmax.
+/// Percent resolves against the grid container's content box at layout
+/// time, so the cascade stores the raw number.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TrackSize {
     Fr(f32),
     Px(f32),
+    Percent(f32),
     Auto,
 }
 
@@ -4806,7 +4810,8 @@ fn next_track_token(v: &str) -> Option<(&str, &str)> {
 
 /// One sizing token: `auto`, `<len>` (px; rem resolves against the 16px
 /// browser root — grid tracks live at the top of the page where the root
-/// size is what authors mean), `Nfr`, `0`, or a `minmax(a, b)` pair.
+/// size is what authors mean), `<percent>` (of the grid container's content
+/// box, resolved at layout time), `Nfr`, `0`, or a `minmax(a, b)` pair.
 /// `min-content`/`max-content` approximate to `auto` until the track
 /// machinery learns them.
 fn parse_grid_track_token(tok: &str) -> Option<GridTrack> {
@@ -4820,6 +4825,7 @@ fn parse_grid_track_token(tok: &str) -> Option<GridTrack> {
     parse_track_size(tok).map(|sz| match sz {
         TrackSize::Fr(f) => GridTrack::Fr(f),
         TrackSize::Px(px) => GridTrack::Px(px),
+        TrackSize::Percent(p) => GridTrack::Percent(p),
         TrackSize::Auto => GridTrack::Auto,
     })
 }
@@ -4841,6 +4847,9 @@ fn parse_track_size(tok: &str) -> Option<TrackSize> {
     }
     if let Some(r) = tok.strip_suffix("rem") {
         return r.parse::<f32>().ok().map(|n| TrackSize::Px(n * 16.0));
+    }
+    if let Some(p) = tok.strip_suffix('%') {
+        return p.parse::<f32>().ok().map(TrackSize::Percent);
     }
     if tok == "0" {
         return Some(TrackSize::Px(0.0));
@@ -5994,6 +6003,39 @@ mod tests {
         // reject the declaration rather than half-parse.
         let mut s = ComputedStyle::default();
         apply_declarations(&mut s, "grid-template-columns: repeat(auto-fill, 100px)");
+        assert_eq!(s.grid_template_columns, None);
+    }
+
+    #[test]
+    fn grid_percent_tracks_parse() {
+        // The dashboard idiom: `grid-template-columns: 25% 1fr`. Before this
+        // batch the % token was rejected, the whole declaration dropped, and
+        // the grid collapsed to one auto column.
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "grid-template-columns: 25% 1fr");
+        assert_eq!(
+            s.grid_template_columns,
+            Some(vec![GridTrack::Percent(25.0), GridTrack::Fr(1.0)]),
+        );
+
+        // Percent rides through repeat and minmax like any other sizing.
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "grid-template-columns: repeat(2, 50%)");
+        assert_eq!(s.grid_template_columns, Some(vec![GridTrack::Percent(50.0); 2]));
+
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "grid-template-columns: minmax(10%, 1fr) 200px");
+        assert_eq!(
+            s.grid_template_columns,
+            Some(vec![
+                GridTrack::MinMax { min: TrackSize::Percent(10.0), max: TrackSize::Fr(1.0) },
+                GridTrack::Px(200.0),
+            ]),
+        );
+
+        // A malformed token still aborts the whole declaration — no half-parse.
+        let mut s = ComputedStyle::default();
+        apply_declarations(&mut s, "grid-template-columns: 25% nonsense");
         assert_eq!(s.grid_template_columns, None);
     }
 

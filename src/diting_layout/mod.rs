@@ -530,7 +530,8 @@ fn resolve_sizing_keywords(
 }
 
 /// diting_css track → taffy track: `1fr` maps to minmax(auto, 1fr), a px
-/// track is fixed, `auto` sizes to content.
+/// track is fixed, a % track is fixed percent (taffy resolves it against
+/// the grid container's content box), `auto` sizes to content.
 fn to_grid_track(track: GridTrack) -> taffy::style::GridTemplateComponent<String> {
     use taffy::style::{MaxTrackSizingFunction, MinTrackSizingFunction, TrackSizingFunction};
     match track {
@@ -542,16 +543,22 @@ fn to_grid_track(track: GridTrack) -> taffy::style::GridTemplateComponent<String
             let tsf: TrackSizingFunction = length(px);
             tsf.into()
         }
+        GridTrack::Percent(p) => {
+            let tsf: TrackSizingFunction = percent(p / 100.0);
+            tsf.into()
+        }
         GridTrack::Auto => TrackSizingFunction::AUTO.into(),
         GridTrack::MinMax { min, max } => {
             // min-side fr is invalid CSS; treat it as auto like the spec's
             // clamping does for the min track sizing function.
             let t_min: MinTrackSizingFunction = match min {
                 crate::diting_css::TrackSize::Px(px) => length(px),
+                crate::diting_css::TrackSize::Percent(p) => percent(p / 100.0),
                 _ => MinTrackSizingFunction::AUTO,
             };
             let t_max: MaxTrackSizingFunction = match max {
                 crate::diting_css::TrackSize::Px(px) => length(px),
+                crate::diting_css::TrackSize::Percent(p) => percent(p / 100.0),
                 crate::diting_css::TrackSize::Fr(f) => fr(f),
                 _ => MaxTrackSizingFunction::AUTO,
             };
@@ -8478,6 +8485,53 @@ mod q_quote_tests {
         assert_eq!(outer, ("\u{201C}", "\u{201D}"));
         assert_eq!(inner, ("\u{2018}", "\u{2019}"));
         assert_eq!(deep, outer);
+    }
+}
+
+#[cfg(test)]
+mod grid_percent_track_tests {
+    // `grid-template-columns: 25% 1fr` used to lose its % token at parse
+    // time, which dropped the whole declaration and collapsed the grid to
+    // one auto column. Pin the resolved geometry: a % track sizes against
+    // the grid container's content box, and 1fr eats the remainder.
+    use super::*;
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    fn layout(sheet: &str, body: &str) -> HashMap<NodeId, Rect> {
+        let html = format!("<html><body>{body}</body></html>");
+        let tree = parse_html(&html);
+        let rules = parse_stylesheet_for(sheet, (800.0, 600.0), CssMediaType::Screen);
+        let styles = compute_styles(&tree, &rules, (1280.0, 720.0));
+        let (rects, _, _, _, _, _) = layout_dom_with_paint_order_and_images(
+            &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
+        );
+        rects
+    }
+
+    #[test]
+    fn percent_track_and_fr_split_the_container() {
+        let sheet = "body { margin: 0 } #g { display: grid; width: 400px; grid-template-columns: 25% 1fr }";
+        let body = r#"<div id="g"><div>aaa</div><div>bbbb</div></div>"#;
+        let rects = layout(sheet, body);
+        let x_at_width = |w: f32| -> f32 {
+            let hits: Vec<f32> = rects.values().filter(|r| r.width == w).map(|r| r.x).collect();
+            assert_eq!(hits.len(), 1, "width {w} matched {hits:?}");
+            hits[0]
+        };
+        // 25% of the 400px content box; the fr track takes the remainder.
+        assert_eq!(x_at_width(100.0), 0.0);
+        assert_eq!(x_at_width(300.0), 100.0);
+    }
+
+    #[test]
+    fn repeat_percent_tracks() {
+        let sheet = "body { margin: 0 } #g { display: grid; width: 400px; grid-template-columns: repeat(2, 50%) }";
+        let body = r#"<div id="g"><div>aaa</div><div>bbbb</div></div>"#;
+        let rects = layout(sheet, body);
+        let mut xs: Vec<f32> = rects.values().filter(|r| r.width == 200.0).map(|r| r.x).collect();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(xs, vec![0.0, 200.0]);
     }
 }
 
