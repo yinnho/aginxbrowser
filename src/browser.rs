@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::diting_browser::BrowserContext;
-use crate::diting_net::CookieJar;
+use diting::diting_browser::BrowserContext;
+use diting::diting_net::CookieJar;
 
 use crate::config::BrowserConfig;
 use crate::cookie::CookieStore;
@@ -52,7 +52,7 @@ impl Browser {
 
     pub async fn new_page(&self) -> Result<Page, Error> {
         let id = NEXT_PAGE_ID.fetch_add(1, Ordering::Relaxed);
-        let page = crate::diting_browser::Page::new(
+        let page = diting::diting_browser::Page::new(
             format!("page-{}", id),
             self.context.clone(),
         );

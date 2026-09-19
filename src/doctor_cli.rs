@@ -77,7 +77,7 @@ fn robots_check() -> Check {
 /// stays empty, so the ink check is the one that bites).
 #[cfg(feature = "screenshot")]
 fn fonts_check() -> Check {
-    let book = crate::diting_fonts::font_book();
+    let book = diting::diting_fonts::font_book();
     let raster = book.rasterize("汉字Abc", 24.0, false, [0, 0, 0, 255], 24.0 * 1.2, false);
     if raster.ink_bbox().is_some() {
         check(Status::Ok, "fonts", "bundled CJK bundle inks 汉字 (GB2312 + symbols)")
@@ -124,7 +124,7 @@ fn env_checks() -> Vec<Check> {
             "AGINXBROWSER_ALLOW_PRIVATE_NETWORK is set: private/loopback URLs become fetchable — dev only",
         ));
     }
-    if crate::diting_net::client::allow_file_access() {
+    if diting::diting_net::client::allow_file_access() {
         out.push(check(
             Status::Warn,
             "file-access",
@@ -142,7 +142,7 @@ async fn egress_check() -> Check {
     // Same client policy as the engine (no implicit env proxy) so the check
     // answers the question that matters: can the ENGINE reach the web as
     // configured — not "does this shell have a working proxy".
-    let client = match crate::diting_net::client::reqwest_builder_no_env_proxy()
+    let client = match diting::diting_net::client::reqwest_builder_no_env_proxy()
         .timeout(Duration::from_secs(10))
         .user_agent(format!("aginxbrowser-doctor/{}", env!("CARGO_PKG_VERSION")))
         .build()

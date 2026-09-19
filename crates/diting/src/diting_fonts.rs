@@ -1,0 +1,403 @@
+//! Bundled CJK font supply (render claim batch 3c).
+//!
+//! `/screenshot` used to depend on the server having `fonts-noto-cjk`
+//! installed — same environment dependency that leaves upstream
+//! obscura-render unable to draw Chinese at all. This module embeds a
+//! Noto Sans SC subset (OFL — see diting_fonts/OFL.txt) at wght 400/700
+//! covering full GB2312 (6763 Han) + ASCII + the common non-GB2312 symbol
+//! blocks (Latin-1, General Punctuation, Arrows, Geometric/Misc Symbols,
+//! Dingbats — the ·/—/✓ tail GB2312's codec omits), and feeds BOTH engines:
+//!
+//! - the blitz pipeline via [`font_ctx`] — registered under the real family
+//!   name, hoisted to the head of fontique's Han script fallback so CJK text
+//!   resolves to these bytes on every machine, with system fonts kept as a
+//!   tail for chars outside GB2312 (and other scripts);
+//! - the diting layout/paint stack via [`font_book`].
+//!
+//! The mono batch adds a third bundled face: Noto Sans Mono (OFL), instanced
+//! at wght 400 and subset to ASCII/Latin-1/punctuation/arrows/box-drawing —
+//! the face behind `font-family: monospace` runs (UA: code/kbd/samp/tt/pre).
+//! Its every advance is a fixed 600/1000 = 0.6em, exactly Chrome's default
+//! monospace, where the proportional CJK pair measured ~0.5em. Regenerate
+//! with `scripts/make_font_bundle.py` (CJK pair) and `scripts/make_mono_bundle.py`
+//! (mono face).
+
+use std::sync::Arc;
+
+use crate::diting_layout::text::FontBook;
+
+/// Real family name, on purpose: pages that style `font-family: "Noto Sans
+/// SC"` (common on Chinese sites) hit the bundled bytes directly, and the
+/// name truthfully reflects the OFL-licensed source.
+#[cfg(feature = "blitz-reference")]
+pub const FAMILY: &str = "Noto Sans SC";
+
+const REGULAR: &[u8] = include_bytes!("diting_fonts/diting-cjk-regular.ttf");
+const BOLD: &[u8] = include_bytes!("diting_fonts/diting-cjk-bold.ttf");
+
+/// Directory font supply (obscura#992 absorption): `--font-dir <PATH>` or
+/// `AGINXBROWSER_FONT_DIR` appends every .ttf/.otf/.ttc in a directory as
+/// tail fallback faces. Chars outside the bundled pair — Korean, Thai,
+/// Arabic, vendor Han variants — resolve through them via the normal
+/// per-char cascade; chars the bundle already covers keep bundle rendering,
+/// because appended faces are coverage tails, not named-family overrides
+/// (the diting stack doesn't route families). Dir faces precede the
+/// platform emoji: user intent beats auto-detection, and the emoji strike
+/// carries no text-script glyphs. Absent dir, unreadable files and
+/// unparseable faces all drop silently — the exact pre-knob posture.
+static FONT_DIR: std::sync::RwLock<Option<std::path::PathBuf>> = std::sync::RwLock::new(None);
+
+/// Wire the `--font-dir` CLI flag (main.rs, parsed before server boot; the
+/// book is built lazily on first render, after this).
+pub fn set_font_dir(dir: Option<&str>) {
+    if let Ok(mut slot) = FONT_DIR.write() {
+        *slot = dir.map(std::path::PathBuf::from);
+    }
+}
+
+fn font_dir() -> Option<std::path::PathBuf> {
+    FONT_DIR
+        .read()
+        .ok()
+        .and_then(|slot| slot.clone())
+        .or_else(|| std::env::var("AGINXBROWSER_FONT_DIR").ok().map(Into::into))
+}
+
+/// Every loadable font file in `dir`, sorted by path so the same directory
+/// always yields the same face order — and therefore the same book
+/// fingerprint, which is the raster cache's identity.
+fn faces_in_dir(dir: &std::path::Path) -> Vec<Vec<u8>> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<std::path::PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            matches!(
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|s| s.to_ascii_lowercase())
+                    .as_deref(),
+                Some("ttf" | "otf" | "ttc")
+            )
+        })
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .filter_map(|p| std::fs::read(p).ok())
+        .collect()
+}
+
+/// The monospace face (mono batch) — see the module docs. Single-weight:
+/// bold mono runs shape the same face, and CJK in a mono run falls through
+/// to the pair above per-character.
+const MONO: &[u8] = include_bytes!("diting_fonts/diting-mono-regular.ttf");
+
+/// Build the parley FontContext for a blitz render: bundled faces registered,
+/// then hoisted to the head of the Han fallback chain ahead of whatever the
+/// built-in registry would pick, and appended to the generic sans/serif
+/// families so even a completely font-less machine resolves unstyled text.
+/// `system_fonts` stays on — the tail fallback for non-GB2312 codepoints.
+///
+/// Only the blitz reference pipeline consumes a parley FontContext (the
+/// diting stack goes through [`font_book`]), hence the feature gate.
+#[cfg(feature = "blitz-reference")]
+pub fn font_ctx() -> parley::FontContext {
+    build_ctx(true)
+}
+
+/// The production wiring with the system tail turned OFF — the render can
+/// only be carrying the bundled bytes. Entry point for the product crate's
+/// bundled-CJK claim test (`cjk_renders_without_system_fonts` in
+/// screenshot_reference.rs, home of the blitz pipeline since the workspace
+/// split; the engine itself must not depend on blitz).
+#[cfg(feature = "blitz-reference")]
+pub fn font_ctx_bundled_only() -> parley::FontContext {
+    build_ctx(false)
+}
+
+#[cfg(feature = "blitz-reference")]
+fn build_ctx(system_fonts: bool) -> parley::FontContext {
+    use parley::fontique::{
+        Collection, CollectionOptions, FontInfoOverride, FontStyle, FallbackKey, GenericFamily,
+        Script, SourceCache,
+    };
+
+    let mut ctx = parley::FontContext {
+        source_cache: SourceCache::new_shared(),
+        collection: Collection::new(CollectionOptions { shared: false, system_fonts }),
+    };
+    let mut families = Vec::new();
+    for (bytes, weight) in [(REGULAR, 400.0), (BOLD, 700.0)] {
+        let blob = parley::fontique::Blob::new(std::sync::Arc::new(bytes.to_vec()));
+        let info = FontInfoOverride {
+            family_name: Some(FAMILY),
+            weight: Some(parley::fontique::FontWeight::new(weight)),
+            style: Some(FontStyle::Normal),
+            ..Default::default()
+        };
+        for (family, _) in ctx.collection.register_fonts(blob, Some(info)) {
+            families.push(family);
+        }
+    }
+    if !families.is_empty() {
+        // Ours first, then whatever the built-in chain had (system Noto etc.)
+        // — `set_fallbacks` replaces, so chain the previous list back on.
+        let key = FallbackKey::new(Script::from_bytes(*b"Hani"), None);
+        let existing: Vec<_> = ctx.collection.fallback_families(key).collect();
+        let _ = ctx.collection.set_fallbacks(key, families.iter().copied().chain(existing));
+        // A machine with no fonts at all must still resolve generic text.
+        for generic in [GenericFamily::SansSerif, GenericFamily::Serif, GenericFamily::Monospace] {
+            ctx.collection.append_generic_families(generic, families.iter().copied());
+        }
+    }
+    ctx
+}
+
+/// The same bundle as a [`FontBook`] for the diting layout/paint stack,
+/// with the monospace face installed (mono batch) and the platform's
+/// color-emoji face (when present) appended as a single-weight fallback —
+/// the same posture browsers take: the emoji font has no bold variant, and
+/// chars the primary pair lacks resolve through it.
+///
+/// Cached in a `OnceLock`: the book used to be re-parsed per call (the
+/// video pump carried its own copy for exactly that reason), and since the
+/// raster cache (#399) keys on the book's face fingerprint, constructing
+/// the book once per process also computes that hash once.
+pub fn font_book() -> Arc<FontBook> {
+    static BOOK: std::sync::OnceLock<Arc<FontBook>> = std::sync::OnceLock::new();
+    BOOK.get_or_init(|| {
+        let dir_faces = font_dir().map(|d| faces_in_dir(&d)).unwrap_or_default();
+        build_book(dir_faces)
+    })
+    .clone()
+}
+
+/// The production construction, parameterized over the dir faces so the
+/// font-dir tests can drive it without touching process-global state.
+fn build_book(dir_faces: Vec<Vec<u8>>) -> Arc<FontBook> {
+    let book = FontBook::from_pairs(REGULAR.to_vec(), BOLD.to_vec())
+        .expect("bundled CJK fonts parse (regenerate via scripts/make_font_bundle.py)")
+        .with_mono(MONO.to_vec());
+    let mut fallbacks = dir_faces;
+    if let Some(emoji) = platform_emoji_font() {
+        fallbacks.push(emoji);
+    }
+    if fallbacks.is_empty() {
+        Arc::new(book)
+    } else {
+        Arc::new(book.with_fallbacks(fallbacks))
+    }
+}
+
+/// Best-effort read of the host's color-emoji font (emoji batch): the
+/// bundled pair carries no emoji glyphs, and shipping Apple/Noto emoji
+/// bytes in-binary is both a size and a licensing question we don't need
+/// to answer — every platform a screenshot server runs on already ships
+/// one. `None` (file absent / unreadable) is the graceful pre-emoji
+/// behavior: runs stay .notdef exactly as before, no feature regression.
+///
+/// `pub(crate)` for the gated raster tests, which skip when it returns
+/// `None` (a font-less CI container must stay green).
+pub(crate) fn platform_emoji_font() -> Option<Vec<u8>> {
+    #[cfg(target_os = "macos")]
+    const CANDIDATES: &[&str] = &["/System/Library/Fonts/Apple Color Emoji.ttc"];
+    #[cfg(all(unix, not(target_os = "macos")))]
+    const CANDIDATES: &[&str] = &[
+        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+        "/usr/share/fonts/noto-color-emoji/NotoColorEmoji.ttf",
+        "/usr/share/fonts/truetype/google-noto-color-emoji/NotoColorEmoji.ttf",
+        "/usr/share/fonts/google-noto-color-emoji/NotoColorEmoji.ttf",
+    ];
+    #[cfg(target_os = "windows")]
+    const CANDIDATES: &[&str] = &[
+        r"C:\Windows\Fonts\seguiemj.ttf",
+    ];
+
+    for path in CANDIDATES {
+        if let Ok(bytes) = std::fs::read(path) {
+            return Some(bytes);
+        }
+    }
+    None
+}
+
+/// The bundled pair as owned bytes — the raster-cache tests in
+/// `diting_layout::text` build sibling `FontBook`s from them (fingerprint
+/// isolation: same bytes = another instance, swapped = a different set).
+#[cfg(test)]
+pub(crate) fn bundled_pair_for_tests() -> (Vec<u8>, Vec<u8>) {
+    (REGULAR.to_vec(), BOLD.to_vec())
+}
+
+/// The bundled mono face as owned bytes — the raster-cache tests in
+/// `diting_layout::text` build a mono-carrying sibling `FontBook` from it
+/// (key separation + the fixed-advance contract).
+#[cfg(test)]
+pub(crate) fn bundled_mono_for_tests() -> Vec<u8> {
+    MONO.to_vec()
+}
+
+/// Test fixture for the font-dir supply: the mono face subset to one glyph
+/// with its cmap remapped to U+E000 (private use — outside every bundled
+/// subset's coverage), so a dir face demonstrably carrying a char the
+/// bundled pair lacks is deterministic on every host. Regenerate with
+/// fontTools: subset diting-mono-regular.ttf to U+0041, then replace the
+/// cmap entry with {U+E000: "A"}.
+#[cfg(test)]
+const TEST_FALLBACK_FACE: &[u8] = include_bytes!("diting_fonts/test-fallback-face.ttf");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// GB2312 coverage spot check through the REAL consumption path
+    /// (advance + raster, not a cmap table dump): every full-width Han
+    /// glyph must advance exactly one em and actually paint ink. A char
+    /// missing from the subset would .notdef — whose 1em advance passes
+    /// width asserts while the raster stays empty (the batch-3b lesson),
+    /// so the ink check is the one that bites.
+    #[test]
+    fn bundle_cjk_coverage_paints() {
+        let book = font_book();
+        let sample = "国庆节快乐浏览器引擎字体渲染简体汉字上海北京深圳杭州";
+        for ch in sample.chars() {
+            let w = book.advance_width(&ch.to_string(), 20.0, false, false);
+            assert!((w - 20.0).abs() < 0.05, "{ch}: advance {w} (want one em)");
+        }
+        let raster = book.rasterize("汉字渲染", 24.0, false, [0, 0, 0, 255], 24.0 * 1.2, false);
+        assert!(raster.ink_bbox().is_some(), "bundle raster must have ink");
+    }
+
+    /// Symbol-coverage counterpart of [`bundle_cjk_coverage_paints`]: the
+    /// non-GB2312 punctuation/symbol tail (·/—/✓/→/●/★/…) that GB2312's codec
+    /// omits — the diting-font-fallback-gap. Each must paint real ink, not
+    /// .notdef (whose empty raster is what a coverage miss would produce; the
+    /// 1em-advance check is blind to it, so ink is the test that bites).
+    #[test]
+    fn bundle_symbol_coverage_paints() {
+        let book = font_book();
+        let sample = "·—–…✓→←↑↓●○◆◇■□▲△▼▽★☆";
+        for ch in sample.chars() {
+            let raster = book.rasterize(&ch.to_string(), 24.0, false, [0, 0, 0, 255], 24.0 * 1.2, false);
+            assert!(
+                raster.ink_bbox().is_some(),
+                "{ch} (U+{:04X}) must have ink",
+                ch as u32
+            );
+        }
+    }
+
+    /// Emoji fallback (emoji batch): with a platform emoji font present, a
+    /// char the primary pair lacks must resolve through the fallback face —
+    /// colored RGBA ink from the embedded bitmap strike, not a mono .notdef
+    /// box — and measure/paint must agree on the mixed run's advance (the
+    /// segmentation is shared by construction). Skipped when the host ships
+    /// no emoji font: a font-less CI container keeps the graceful posture.
+    #[test]
+    fn emoji_fallback_paints_color_ink() {
+        if platform_emoji_font().is_none() {
+            eprintln!("skipping: no platform emoji font on this host");
+            return;
+        }
+        let book = font_book();
+        assert!(book.has_fallbacks(), "the emoji face must load as a fallback");
+
+        let adv_cjk = book.advance_width("字字", 24.0, false, false);
+        let adv_mixed = book.advance_width("字🚀字", 24.0, false, false);
+        assert!(
+            adv_mixed > adv_cjk + 4.0,
+            "the emoji must contribute its own advance: {adv_mixed} vs {adv_cjk}"
+        );
+
+        let raster = book.rasterize("🚀", 24.0, false, [0, 0, 0, 255], 24.0 * 1.2, false);
+        assert!(raster.ink_bbox().is_some(), "the emoji must have ink");
+        let colored = raster
+            .data
+            .chunks_exact(4)
+            .filter(|p| {
+                p[3] > 128
+                    && (p[0] as i32 - p[1] as i32).abs().max((p[1] as i32 - p[2] as i32).abs()) > 32
+            })
+            .count();
+        assert!(
+            colored > 20,
+            "emoji ink must come from the colored bitmap strike, not a mono glyph ({colored} px)"
+        );
+
+        // The wrapped painter shares the segmentation: a mixed line wraps and
+        // both the CJK and the emoji halves paint.
+        let wrapped = book.rasterize_wrapped(
+            "文字🚀文字",
+            24.0,
+            false,
+            [0, 0, 0, 255],
+            60.0,
+            24.0 * 1.2,
+            false,
+            0.0,
+            None,
+            crate::diting_css::WhiteSpace::Normal,
+            false,
+        );
+        assert!(wrapped.ink_bbox().is_some(), "wrapped mixed run must have ink");
+    }
+
+    /// The production wiring (mono batch): the real book carries the mono
+    /// face, so ASCII in a mono run shapes at Noto Sans Mono's fixed 0.6em
+    /// advance — Chrome's Courier parity, the gap the vertical-align batch
+    /// measured at ~0.5em on the proportional pair — while the same run with
+    /// mono=false keeps the proportional pair.
+    #[test]
+    fn bundled_mono_face_routes_ascii() {
+        let book = font_book();
+        let mono = book.advance_width("0000000000", 20.0, false, true);
+        assert!((mono - 120.0).abs() < 0.01, "10 × 0.6em = 120px, got {mono}");
+        let sans = book.advance_width("0000000000", 20.0, false, false);
+        assert!(
+            (sans - mono).abs() > 1.0,
+            "proportional digits differ from mono ({sans} vs {mono})"
+        );
+        let mono_raster = book.rasterize("code()", 20.0, false, [0, 0, 0, 255], 24.0, true);
+        assert!(mono_raster.ink_bbox().is_some(), "a mono run must paint");
+    }
+
+    /// The font-dir supply (obscura#992 absorption): .ttf entries load in
+    /// sorted path order, non-font extensions and unreadable entries (the
+    /// "c.ttf" directory) drop, and a loaded face demonstrably carries a
+    /// char the bundled pair lacks — the fixture face maps U+E000 (private
+    /// use, outside every bundled subset) to a 0.6em glyph, so the advance
+    /// flips from the primary .notdef to the fallback's fixed 0.6em once
+    /// the dir face is in the book.
+    #[test]
+    fn font_dir_faces_load_sorted_and_route() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fixture = TEST_FALLBACK_FACE.to_vec();
+        std::fs::write(dir.path().join("a.ttf"), &fixture).unwrap();
+        std::fs::write(dir.path().join("b.ttf"), bundled_mono_for_tests()).unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"not a font").unwrap();
+        std::fs::create_dir(dir.path().join("c.ttf")).unwrap();
+
+        let faces = faces_in_dir(dir.path());
+        assert_eq!(faces.len(), 2, "only loadable font files join");
+        assert_eq!(faces[0], fixture, "sorted by path: a.ttf first");
+
+        let with_dir = build_book(faces);
+        assert!(with_dir.has_fallbacks(), "dir faces joined as fallbacks");
+        let routed = with_dir.advance_width("\u{E000}", 20.0, false, false);
+        assert!(
+            (routed - 12.0).abs() < 0.05,
+            "U+E000 routes to the dir face (0.6em of 20px = 12, got {routed})"
+        );
+
+        // Without the dir face the same char rides the primary .notdef —
+        // the routing above is the dir face's doing, not a coverage change.
+        let base = build_book(Vec::new());
+        let notdef = base.advance_width("\u{E000}", 20.0, false, false);
+        assert!(
+            (notdef - routed).abs() > 0.5,
+            "base book must not cover U+E000 ({notdef} vs {routed})"
+        );
+    }
+}

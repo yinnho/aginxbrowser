@@ -19,8 +19,8 @@ use tokio::time::timeout;
 use url::Url;
 
 use crate::config::proxy_from_env;
-use crate::diting_net::client::validate_url;
-use crate::diting_net::{CookieJar, HttpClient};
+use diting::diting_net::client::validate_url;
+use diting::diting_net::{CookieJar, HttpClient};
 use crate::config::should_auto_proxy;
 
 /// Per-chunk stall budget: if no bytes arrive for this long, give up instead
@@ -552,7 +552,7 @@ mod tests {
     where
         F: std::future::Future<Output = T>,
     {
-        let _g = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        let _g = crate::test_support::PRIVATE_NET_ENV_LOCK.lock().unwrap();
         std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
         let out = f.await;
         std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");

@@ -26,7 +26,10 @@ jobs:
         with:
           key: test-screenshot
       - name: Test
-        run: cargo test --features screenshot
+        # --workspace is load-bearing: the repo is a root-package workspace
+        # (crates/diting), and without it cargo tests only the root package,
+        # silently dropping the engine crate's unit tests.
+        run: cargo test --workspace --features screenshot
 
   check-stealth:
     # wreq lives behind `stealth` and is exact-pinned (`=`) in TWO target
@@ -42,4 +45,6 @@ jobs:
         with:
           key: check-stealth
       - name: Check
-        run: cargo check --features stealth,screenshot
+        # --workspace: same reason as the test job — the engine crate must
+        # compile under the feature combination too, not just the product.
+        run: cargo check --workspace --features stealth,screenshot

@@ -186,7 +186,7 @@ fn honor_env() -> bool {
 /// under the honest product UA: what the stealth client lends is its cipher
 /// shelf, never its name.
 async fn fetch_policy(origin: &str) -> Policy {
-    let mut builder = crate::diting_net::client::reqwest_builder_no_env_proxy()
+    let mut builder = diting::diting_net::client::reqwest_builder_no_env_proxy()
         .timeout(Duration::from_secs(5))
         .user_agent(format!(
             "{PRODUCT_TOKEN}/{} (+https://browser.aginx.net)",
@@ -302,8 +302,8 @@ fn policy_from_robots_response(status: u16, body: &[u8]) -> Policy {
 /// matching keys on) stays the honest product token.
 #[cfg(feature = "stealth")]
 async fn fetch_policy_via_legacy_tls(origin: &str) -> Result<Policy, String> {
-    let client = crate::diting_net::StealthHttpClient::with_proxy(
-        std::sync::Arc::new(crate::diting_net::CookieJar::new()),
+    let client = diting::diting_net::StealthHttpClient::with_proxy(
+        std::sync::Arc::new(diting::diting_net::CookieJar::new()),
         None,
     );
     client

@@ -2493,7 +2493,7 @@ fn extract_indexed_state(
 // Click / Input by index
 // ---------------------------------------------------------------------------
 
-use crate::diting_cdp::domains::input::{
+use crate::cdp::domains::input::{
     mouse_button_code, mouse_button_mask, mouse_down_js, mouse_move_js, mouse_up_js, INPUT_HELPERS,
 };
 

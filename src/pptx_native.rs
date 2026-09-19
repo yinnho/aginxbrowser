@@ -27,8 +27,8 @@ use std::collections::{BTreeSet, HashMap};
 
 use serde::Deserialize;
 
-use crate::diting_browser::Page;
-use crate::diting_css::{parse_color, parse_linear_gradient, Color};
+use diting::diting_browser::Page;
+use diting::diting_css::{parse_color, parse_linear_gradient, Color};
 use crate::ooxml::{pptx_package, PPTX_SP_TREE_HEAD, A_NS, P_NS, R_NS, XML_DECL};
 use crate::pages::PageError;
 
@@ -228,7 +228,7 @@ async fn fetch_image(page: &Page, url: &str) -> Option<Vec<u8>> {
     match parsed.scheme() {
         "data" => decode_data_uri(url),
         "http" | "https" => {
-            if crate::diting_js::ops::validate_fetch_url(&parsed).is_err() {
+            if diting::diting_js::ops::validate_fetch_url(&parsed).is_err() {
                 return None;
             }
             // `Network.setBlockedURLs` holds for render-path fetches too
@@ -675,8 +675,8 @@ fn pack(slides: &[WalkedSlide], media: &Media) -> Vec<u8> {
 #[cfg(all(test, feature = "screenshot"))]
 mod tests {
     use super::*;
-    use crate::diting_browser::lifecycle::WaitUntil;
-    use crate::diting_browser::{BrowserContext, Page as EnginePage};
+    use diting::diting_browser::lifecycle::WaitUntil;
+    use diting::diting_browser::{BrowserContext, Page as EnginePage};
     use crate::ooxml::entries_of;
     use std::io::{Read, Write};
     use std::net::TcpListener;

@@ -16,9 +16,9 @@ use super::{SearchParams, RawSearchResult, SearchEngine, SearchEngineError};
 /// the plain reqwest path.
 pub struct DuckDuckGoEngine {
     #[cfg(feature = "stealth")]
-    stealth: std::sync::Arc<crate::diting_net::wreq_client::StealthHttpClient>,
+    stealth: std::sync::Arc<diting::diting_net::wreq_client::StealthHttpClient>,
     #[cfg(feature = "stealth")]
-    stealth_proxied: Option<std::sync::Arc<crate::diting_net::wreq_client::StealthHttpClient>>,
+    stealth_proxied: Option<std::sync::Arc<diting::diting_net::wreq_client::StealthHttpClient>>,
 }
 
 impl DuckDuckGoEngine {
@@ -42,7 +42,7 @@ impl DuckDuckGoEngine {
             } else {
                 proxy
             };
-            let mut builder = crate::diting_net::client::reqwest_builder_no_env_proxy()
+            let mut builder = diting::diting_net::client::reqwest_builder_no_env_proxy()
                 .timeout(std::time::Duration::from_secs(12))
                 .redirect(reqwest::redirect::Policy::none());
             match reqwest::Proxy::all(&proxy_str) {

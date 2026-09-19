@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use crate::diting_net::CookieJar;
+use diting::diting_net::CookieJar;
 use serde::{Deserialize, Serialize};
 
 /// A cookie as exposed to the Rust API. Bin-dead by itself; the round-trip

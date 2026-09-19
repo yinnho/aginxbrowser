@@ -666,7 +666,7 @@ pub(crate) fn strip_tags(s: &str) -> String {
 }
 
 pub fn build_plain_client(timeout_secs: u64) -> reqwest::Client {
-    crate::diting_net::client::reqwest_builder_no_env_proxy()
+    diting::diting_net::client::reqwest_builder_no_env_proxy()
         .timeout(Duration::from_secs(timeout_secs))
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -679,15 +679,15 @@ pub fn build_plain_client(timeout_secs: u64) -> reqwest::Client {
 #[cfg(feature = "stealth")]
 pub fn build_stealth_client(
     use_proxy: bool,
-) -> Arc<crate::diting_net::wreq_client::StealthHttpClient> {
+) -> Arc<diting::diting_net::wreq_client::StealthHttpClient> {
     let proxy_url = if use_proxy {
         crate::config::proxy_from_env()
     } else {
         None
     };
-    let cookie_jar = Arc::new(crate::diting_net::cookies::CookieJar::new());
+    let cookie_jar = Arc::new(diting::diting_net::cookies::CookieJar::new());
     let client =
-        crate::diting_net::wreq_client::StealthHttpClient::with_proxy(cookie_jar, proxy_url.as_deref());
+        diting::diting_net::wreq_client::StealthHttpClient::with_proxy(cookie_jar, proxy_url.as_deref());
     Arc::new(client)
 }
 
@@ -705,14 +705,14 @@ pub fn build_stealth_client(_use_proxy: bool) -> Option<()> {
 #[allow(dead_code)] // public helper for engines needing an Android TLS fingerprint
 pub fn build_android_stealth_client(
     use_proxy: bool,
-) -> Arc<crate::diting_net::wreq_client::StealthHttpClient> {
+) -> Arc<diting::diting_net::wreq_client::StealthHttpClient> {
     let proxy_url = if use_proxy {
         crate::config::proxy_from_env()
     } else {
         None
     };
-    let cookie_jar = Arc::new(crate::diting_net::cookies::CookieJar::new());
-    let client = crate::diting_net::wreq_client::StealthHttpClient::with_proxy_and_os(
+    let cookie_jar = Arc::new(diting::diting_net::cookies::CookieJar::new());
+    let client = diting::diting_net::wreq_client::StealthHttpClient::with_proxy_and_os(
         cookie_jar,
         proxy_url.as_deref(),
         Some(wreq_util::Platform::Android),
@@ -730,7 +730,7 @@ pub fn build_android_stealth_client(_use_proxy: bool) -> Option<()> {
 /// final URL. Handles CAPTCHA detection via 302 redirects.
 #[cfg(feature = "stealth")]
 pub async fn stealth_fetch(
-    client: &crate::diting_net::wreq_client::StealthHttpClient,
+    client: &diting::diting_net::wreq_client::StealthHttpClient,
     url: &str,
 ) -> Result<(String, String), SearchEngineError> {
     let parsed = Url::parse(url).map_err(|e| SearchEngineError::Transient(format!("bad url: {e}")))?;
@@ -842,7 +842,7 @@ pub async fn plain_fetch_with(
             .map_err(|e| SearchEngineError::Transient(format!("read body error: {e}")))?;
 
         // Decode with charset detection (handles GBK/GB2312 from Baidu/Sogou).
-        let text = crate::diting_net::encoding::decode_non_html(&bytes, None);
+        let text = diting::diting_net::encoding::decode_non_html(&bytes, None);
         return Ok(text);
     }
 

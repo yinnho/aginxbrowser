@@ -13,6 +13,11 @@ use std::collections::HashMap;
 
 mod account;
 mod browser;
+// CDP bridge (faces layer): /json discovery, the /devtools WebSocket face
+// and the domain dispatch. Rides the engine's Page API; a product concern
+// since the workspace split (ARCHITECTURE.md §4 — "CDP is a face riding
+// core/engine").
+mod cdp;
 mod captcha;
 mod config;
 mod cookie;
@@ -56,24 +61,15 @@ mod pptx_native;
 // `blitz-reference`. Not compiled in production/device builds.
 #[cfg(feature = "blitz-reference")]
 mod screenshot_reference;
-
-// Inlined Diting engine (formerly external crates).
-mod diting_browser;
-mod diting_cdp;
-mod diting_dom;
-mod diting_js;
-mod diting_net;
-// Cascade layer absorbed from upstream obscura-render (read-only slice,
-// not yet wired to the product pipeline — see docs/engine/render.md).
-mod diting_css;
-// Taffy fork-delta classification tests (obscura's vendored taffy vs the
-// stock 0.13.0 our blitz pipeline pins) — docs/engine/render.md §11.
-#[cfg(feature = "screenshot")]
-mod diting_layout;
-// Bundled CJK font supply for /screenshot determinism (batch 3c) —
-// docs/engine/render.md §18.
-#[cfg(feature = "screenshot")]
-mod diting_fonts;
+// Dual-engine cross-check tests (diting vs blitz). Lives in the product crate
+// so the diting engine carries zero product/blitz references (ARCHITECTURE.md
+// §2 rule R2; moved with the workspace split).
+#[cfg(all(test, feature = "blitz-reference"))]
+mod bridge_cross_check;
+// Env-knob test guards shared by this crate's single test binary (see the
+// module docs for why the engine's own guards can't be reused).
+#[cfg(test)]
+mod test_support;
 
 use render::smart_fetch;
 use server::{do_click, do_eval, do_fetch, do_search, SearchError};
@@ -976,7 +972,7 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| {
                     tracing_subscriber::EnvFilter::new(
-                        "aginxbrowser=info,diting_browser::page=warn,diting_net::wreq_client=warn,diting::console=error",
+                        "aginxbrowser=info,diting::diting_browser::page=warn,diting::diting_net::wreq_client=warn,diting::console=error",
                     )
                 }),
         );
@@ -999,14 +995,14 @@ async fn main() -> anyhow::Result<()> {
     // handshake — say so loudly instead of shipping a WAF tell silently.
     #[cfg(feature = "stealth")]
     if let Ok(ua) = std::env::var("AGINXBROWSER_UA") {
-        crate::diting_net::warn_on_ua_tls_mismatch(&ua, None);
+        diting::diting_net::warn_on_ua_tls_mismatch(&ua, None);
     }
 
     // Warm up V8 on the main thread before any session/blocking thread creates
     // an isolate: the first isolate's JSDispatchTable init is not safe to race
     // from several threads (upstream obscura #430; construction itself is
     // serialized inside the runtime).
-    std::mem::drop(diting_js::runtime::JsRuntime::new());
+    std::mem::drop(diting::diting_js::runtime::JsRuntime::new());
 
     // Opt-in relaxations, parsed before any mode branches so the HTTP server
     // and MCP stdio both see them. Both were previously documented as CLI
@@ -1014,19 +1010,19 @@ async fn main() -> anyhow::Result<()> {
     // requirements-aginxos P2.
     let cdp_port = cdp_port_from_args(&args).map_err(|e| anyhow::anyhow!(e))?;
     if args.contains(&"--allow-file-access".to_string()) {
-        diting_net::client::set_allow_file_access(true);
+        diting::diting_net::client::set_allow_file_access(true);
         tracing::info!("file:// access enabled (--allow-file-access)");
     }
     if args.contains(&"--allow-private-network".to_string()) {
-        diting_net::client::set_allow_private_network(true);
+        diting::diting_net::client::set_allow_private_network(true);
         tracing::info!("private-network fetch enabled (--allow-private-network)");
     }
     if let Some(pos) = args.iter().position(|a| a == "--allow-network") {
         let spec = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("");
-        diting_net::client::set_allow_network(Some(spec));
+        diting::diting_net::client::set_allow_network(Some(spec));
         tracing::info!(
             "scoped allow-network list set (--allow-network): {} parsed entries",
-            diting_net::client::parse_scoped_cidrs(spec).len()
+            diting::diting_net::client::parse_scoped_cidrs(spec).len()
         );
     }
     // The font supply itself is screenshot-gated (diting_layout renders with
@@ -1034,7 +1030,7 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "screenshot")]
     if let Some(pos) = args.iter().position(|a| a == "--font-dir") {
         let dir = args.get(pos + 1).map(|s| s.as_str());
-        diting_fonts::set_font_dir(dir);
+        diting::diting_fonts::set_font_dir(dir);
         tracing::info!("font dir fallbacks (--font-dir): {:?}", dir.unwrap_or("(none)"));
     }
 
@@ -1100,13 +1096,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/account/verify", post(account_verify_handler))
         .route("/mcp", get(mcp_handler).post(mcp_handler))
         // CDP bridge — Playwright connectOverCDP / Puppeteer connect surface.
-        .route("/json/version", get(diting_cdp::http::json_version))
-        .route("/json/version/", get(diting_cdp::http::json_version))
-        .route("/json", get(diting_cdp::http::json_list))
-        .route("/json/", get(diting_cdp::http::json_list))
-        .route("/json/list", get(diting_cdp::http::json_list))
-        .route("/json/list/", get(diting_cdp::http::json_list))
-        .route("/devtools/:kind/:id", get(diting_cdp::http::devtools_ws));
+        .route("/json/version", get(crate::cdp::http::json_version))
+        .route("/json/version/", get(crate::cdp::http::json_version))
+        .route("/json", get(crate::cdp::http::json_list))
+        .route("/json/", get(crate::cdp::http::json_list))
+        .route("/json/list", get(crate::cdp::http::json_list))
+        .route("/json/list/", get(crate::cdp::http::json_list))
+        .route("/devtools/:kind/:id", get(crate::cdp::http::devtools_ws));
 
     #[cfg(feature = "screenshot")]
     let app = app
@@ -1182,12 +1178,12 @@ fn health_body() -> serde_json::Value {
     // pinned persona (see BrowserContext's resolution chain — search-engine
     // transports keep their own defaults).
     let ua = std::env::var("AGINXBROWSER_UA").unwrap_or_else(|_| {
-        crate::diting_browser::profiles::select_profile()
+        diting::diting_browser::profiles::select_profile()
             .user_agent
             .to_string()
     });
     #[cfg(feature = "stealth")]
-    let tls = crate::diting_net::DEFAULT_TLS_FINGERPRINT;
+    let tls = diting::diting_net::DEFAULT_TLS_FINGERPRINT;
     #[cfg(not(feature = "stealth"))]
     let tls = "off";
     serde_json::json!({
@@ -2487,7 +2483,7 @@ mod tests {
         let ua = body["ua"].as_str().expect("ua present");
         assert!(ua.contains("Chrome/"), "persona UA expected, got: {ua}");
         #[cfg(feature = "stealth")]
-        assert_eq!(body["tls"], crate::diting_net::DEFAULT_TLS_FINGERPRINT);
+        assert_eq!(body["tls"], diting::diting_net::DEFAULT_TLS_FINGERPRINT);
         #[cfg(not(feature = "stealth"))]
         assert_eq!(body["tls"], "off");
     }

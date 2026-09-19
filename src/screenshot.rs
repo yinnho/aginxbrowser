@@ -115,7 +115,7 @@ fn collect_resource_urls(html: &str, base: &url::Url, viewport_width: f32) -> Ve
             // gate doesn't even queue reads that would be refused.
             let scheme_ok = match u.scheme() {
                 "http" | "https" => true,
-                "file" => base.scheme() == "file" && crate::diting_net::client::allow_file_access(),
+                "file" => base.scheme() == "file" && diting::diting_net::client::allow_file_access(),
                 _ => false,
             };
             if scheme_ok && !out.contains(&u) {
@@ -139,13 +139,13 @@ fn collect_resource_urls(html: &str, base: &url::Url, viewport_width: f32) -> Ve
                 if sib.value().name() != "source" {
                     continue;
                 }
-                if !crate::diting_layout::media_matches_width(sib.value().attr("media"), vw) {
+                if !diting::diting_layout::media_matches_width(sib.value().attr("media"), vw) {
                     continue;
                 }
                 if let Some(srcset) = sib.value().attr("srcset") {
-                    let cands = crate::diting_layout::image::parse_srcset(srcset);
+                    let cands = diting::diting_layout::image::parse_srcset(srcset);
                     if let Some(c) =
-                        crate::diting_layout::image::select_srcset_candidate(&cands, vw)
+                        diting::diting_layout::image::select_srcset_candidate(&cands, vw)
                     {
                         return Some(c.url.clone());
                     }
@@ -153,8 +153,8 @@ fn collect_resource_urls(html: &str, base: &url::Url, viewport_width: f32) -> Ve
             }
         }
         let srcset = el.value().attr("srcset")?;
-        let cands = crate::diting_layout::image::parse_srcset(srcset);
-        crate::diting_layout::image::select_srcset_candidate(&cands, vw).map(|c| c.url.clone())
+        let cands = diting::diting_layout::image::parse_srcset(srcset);
+        diting::diting_layout::image::select_srcset_candidate(&cands, vw).map(|c| c.url.clone())
     }
 
     let mut urls: Vec<url::Url> = Vec::new();
@@ -216,7 +216,7 @@ pub async fn prefetch_render_resources(
         page: &crate::page::Page,
         u: &url::Url,
         doc: Option<&str>,
-    ) -> Option<crate::diting_net::Response> {
+    ) -> Option<diting::diting_net::Response> {
         // `Network.setBlockedURLs` holds for render-path fetches too (same
         // hard block as the static loaders): a match is never prefetched.
         if page.inner.url_blocked(u.as_str()) {
@@ -285,13 +285,13 @@ pub fn render_html_to_png_diting(
     selector_all: bool,
     resources: Option<&PrefetchedResources>,
 ) -> Result<RenderedScreenshot> {
-    use crate::diting_layout::{paint, Rect as DitingRect};
+    use diting::diting_layout::{paint, Rect as DitingRect};
 
     if html.is_empty() {
         anyhow::bail!("render_html_to_png_diting: empty HTML (page content() returned nothing - navigation may have failed)");
     }
 
-    let tree = crate::diting_dom::tree_sink::parse_html(html);
+    let tree = diting::diting_dom::tree_sink::parse_html(html);
 
     // Cascade input: inline <style> blocks, then the external sheet bodies
     // the prefetch pass already fetched (same join order as
@@ -314,13 +314,13 @@ pub fn render_html_to_png_diting(
             }
         }
     }
-    let rules = crate::diting_css::parse_stylesheet_for(
+    let rules = diting::diting_css::parse_stylesheet_for(
         &css,
         (width as f32, height as f32),
-        crate::diting_css::CssMediaType::Screen,
+        diting::diting_css::CssMediaType::Screen,
     );
-    let styles = crate::diting_layout::compute_styles(&tree, &rules, (width as f32, height as f32));
-    let fonts = crate::diting_fonts::font_book();
+    let styles = diting::diting_layout::compute_styles(&tree, &rules, (width as f32, height as f32));
+    let fonts = diting::diting_fonts::font_book();
 
     // Image bytes: everything non-stylesheet the prefetch pass fetched,
     // keyed by absolute URL — the same key `resolve_img_source` produces by
@@ -334,7 +334,7 @@ pub fn render_html_to_png_diting(
         })
         .unwrap_or_default();
     let net_ref = (!network_bytes.is_empty()).then_some(&network_bytes);
-    let (rects, items) = crate::diting_layout::layout_dom_with_paint_and_images(
+    let (rects, items) = diting::diting_layout::layout_dom_with_paint_and_images(
         &tree,
         &styles,
         &fonts,
@@ -351,17 +351,17 @@ pub fn render_html_to_png_diting(
     // content belongs to the host block's inline layout) — fall back to the
     // union of descendant boxes, mirroring the Blitz path's element_rect.
     fn diting_rect(
-        tree: &crate::diting_dom::DomTree,
-        rects: &HashMap<crate::diting_dom::NodeId, DitingRect>,
-        id: crate::diting_dom::NodeId,
+        tree: &diting::diting_dom::DomTree,
+        rects: &HashMap<diting::diting_dom::NodeId, DitingRect>,
+        id: diting::diting_dom::NodeId,
     ) -> Option<ElementRect> {
         if let Some(r) = rects.get(&id) {
             return Some(ElementRect { x: r.x as f64, y: r.y as f64, width: r.width as f64, height: r.height as f64 });
         }
         fn union_into(
-            tree: &crate::diting_dom::DomTree,
-            rects: &HashMap<crate::diting_dom::NodeId, DitingRect>,
-            id: crate::diting_dom::NodeId,
+            tree: &diting::diting_dom::DomTree,
+            rects: &HashMap<diting::diting_dom::NodeId, DitingRect>,
+            id: diting::diting_dom::NodeId,
             acc: &mut Option<ElementRect>,
         ) {
             if let Some(r) = rects.get(&id) {
@@ -493,7 +493,7 @@ pub fn element_rects_diting(
     viewport_height: f32,
     extra_css: Option<&str>,
 ) -> Result<Vec<ElementRect>> {
-    use crate::diting_dom::tree_sink::parse_html;
+    use diting::diting_dom::tree_sink::parse_html;
 
     // Concatenate every <style> block's text in document order.
     let tree = parse_html(html);
@@ -509,12 +509,12 @@ pub fn element_rects_diting(
         css.push_str(extra);
     }
 
-    let rules = crate::diting_css::parse_stylesheet_for(
+    let rules = diting::diting_css::parse_stylesheet_for(
         &css,
         (viewport_width, viewport_height),
-        crate::diting_css::CssMediaType::Screen,
+        diting::diting_css::CssMediaType::Screen,
     );
-    let styles = crate::diting_layout::compute_styles(&tree, &rules, (viewport_width, viewport_height));
+    let styles = diting::diting_layout::compute_styles(&tree, &rules, (viewport_width, viewport_height));
 
     let matched = tree
         .query_selector_all(selector)
@@ -525,7 +525,7 @@ pub fn element_rects_diting(
         matched.into_iter().take(1).collect()
     };
 
-    let rects = crate::diting_layout::layout_dom(&tree, &styles, &crate::diting_fonts::font_book(), viewport_width, viewport_height);
+    let rects = diting::diting_layout::layout_dom(&tree, &styles, &diting::diting_fonts::font_book(), viewport_width, viewport_height);
     Ok(ids
         .iter()
         .filter_map(|id| rects.get(id).map(|r| ElementRect {
@@ -587,7 +587,7 @@ mod tests {
     /// matrix), and not queued at all while the gate is closed.
     #[test]
     fn collect_resource_urls_admits_file_subresources_for_file_pages() {
-        use crate::diting_net::client::file_access_test::file_access_guard;
+        use crate::test_support::file_access_guard;
         let html = concat!(
             r#"<html><head><link rel="stylesheet" href="style.css"></head>"#,
             r#"<body><img src="dot.png" width="16" height="16"></body></html>"#,

@@ -1,0 +1,2399 @@
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, USER_AGENT};
+use reqwest::redirect::Policy;
+use reqwest::{Client, Method};
+use tokio::sync::RwLock;
+use url::Url;
+
+use crate::diting_net::cookies::CookieJar;
+
+/// A reqwest builder with reqwest's implicit system/env proxy matcher turned
+/// off. Every HTTP client the engine builds goes through here.
+///
+/// reqwest reads `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` from the
+/// environment by default (loopback destinations are exempt, like Chrome's
+/// implicit localhost bypass), which silently routes engine traffic through
+/// a proxy the operator never configured in the engine — `use_proxy:false`
+/// fetches, search's direct-first tier, robots checks, downloads, all of
+/// it. When that env proxy dies, every public fetch fails with an error
+/// that never mentions a proxy (obscura#491). The engine's proxy decision
+/// is explicit instead: `AGINXBROWSER_PROXY` / the context `proxy_url`,
+/// attached with `.proxy()` at the call sites — and `.no_proxy()` must come
+/// BEFORE that attach, since it also clears any already-pushed proxy.
+pub fn reqwest_builder_no_env_proxy() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().no_proxy()
+}
+
+#[derive(Debug, Clone)]
+pub struct Response {
+    pub url: Url,
+    pub status: u16,
+    pub headers: HashMap<String, String>,
+    pub body: Vec<u8>,
+    pub redirected_from: Vec<Url>,
+}
+
+impl Response {
+    /// Decode the body as text, honoring the response charset.
+    ///
+    /// Uses the HTTP `Content-Type` header's `charset=` parameter, then for
+    /// HTML responses falls back to sniffing `<meta charset>` in the first
+    /// 1KB, then UTF-8. Mirrors browser behaviour per the HTML5 spec.
+    pub fn text(&self) -> String {
+        if self.is_html() {
+            crate::diting_net::encoding::decode_response(&self.body, self.content_type())
+        } else {
+            crate::diting_net::encoding::decode_non_html(&self.body, self.content_type())
+        }
+    }
+
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.get(&name.to_lowercase()).map(|s| s.as_str())
+    }
+
+    pub fn content_type(&self) -> Option<&str> {
+        self.header("content-type")
+    }
+
+    pub fn is_html(&self) -> bool {
+        self.content_type()
+            .map(|ct| ct.contains("text/html"))
+            .unwrap_or(false)
+    }
+}
+
+/// CDP `Network.ResourceType`-shaped label for a request. Drives
+/// `RequestInfo.resource_type` and the page's NetworkEvent kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceType {
+    Document,
+    Script,
+    Stylesheet,
+    Image,
+    Fetch,
+}
+
+impl ResourceType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Document => "Document",
+            Self::Script => "Script",
+            Self::Stylesheet => "Stylesheet",
+            Self::Image => "Image",
+            Self::Fetch => "Fetch",
+        }
+    }
+}
+
+/// A request about to be sent (or just answered), as seen by an
+/// on_request / on_response observer. Headers are the fully-built set the
+/// transport sent, lowercased like `Response.headers`.
+#[derive(Debug, Clone)]
+pub struct RequestInfo {
+    pub url: Url,
+    pub method: String,
+    pub headers: HashMap<String, String>,
+    pub resource_type: ResourceType,
+}
+
+pub type RequestCallback = Arc<dyn Fn(&RequestInfo) + Send + Sync>;
+pub type ResponseCallback = Arc<dyn Fn(&RequestInfo, &Response) + Send + Sync>;
+
+/// Page-scoped store for the passive on_request/on_response callbacks (upstream
+/// issue #408). Each `Page` owns one, so a callback never fires for another
+/// page's requests and dies with its page. The HTTP client itself stays
+/// callback-free; page-driven fetches pass the page's registry in. Ids keep
+/// the `u64` shape upstream established on `Page::on_request`/`on_response`.
+pub struct CallbackRegistry {
+    on_request: RwLock<Vec<(u64, RequestCallback)>>,
+    on_response: RwLock<Vec<(u64, ResponseCallback)>>,
+    id_counter: std::sync::atomic::AtomicU64,
+}
+
+impl CallbackRegistry {
+    pub fn new() -> Self {
+        CallbackRegistry {
+            on_request: RwLock::new(Vec::new()),
+            on_response: RwLock::new(Vec::new()),
+            id_counter: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+
+    fn next_id(&self) -> u64 {
+        self.id_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Register a request callback; the returned id detaches it via
+    /// `remove_request`. Sync like the pre-registry push path: registration
+    /// happens from `Page` setup where no reader holds the lock, so
+    /// `try_write` cannot fail there.
+    pub fn add_request(&self, cb: RequestCallback) -> u64 {
+        let id = self.next_id();
+        if let Ok(mut v) = self.on_request.try_write() {
+            v.push((id, cb));
+        }
+        id
+    }
+
+    /// Register a response callback; see `add_request`.
+    pub fn add_response(&self, cb: ResponseCallback) -> u64 {
+        let id = self.next_id();
+        if let Ok(mut v) = self.on_response.try_write() {
+            v.push((id, cb));
+        }
+        id
+    }
+
+    /// Detach a request callback. Returns true when the id was found and
+    /// removed, so a double detach is a visible no-op.
+    pub fn remove_request(&self, id: u64) -> bool {
+        match self.on_request.try_write() {
+            Ok(mut v) => {
+                let before = v.len();
+                v.retain(|(cid, _)| *cid != id);
+                v.len() != before
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Detach a response callback; see `remove_request`.
+    pub fn remove_response(&self, id: u64) -> bool {
+        match self.on_response.try_write() {
+            Ok(mut v) => {
+                let before = v.len();
+                v.retain(|(cid, _)| *cid != id);
+                v.len() != before
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// True when at least one request callback is registered. Lets fire sites
+    /// skip building a `RequestInfo` when nobody listens.
+    pub async fn has_request_callbacks(&self) -> bool {
+        !self.on_request.read().await.is_empty()
+    }
+
+    /// True when at least one response callback is registered.
+    pub async fn has_response_callbacks(&self) -> bool {
+        !self.on_response.read().await.is_empty()
+    }
+
+    pub async fn fire_request(&self, info: &RequestInfo) {
+        for (_, cb) in self.on_request.read().await.iter() {
+            cb(info);
+        }
+    }
+
+    pub async fn fire_response(&self, info: &RequestInfo, resp: &Response) {
+        for (_, cb) in self.on_response.read().await.iter() {
+            cb(info, resp);
+        }
+    }
+}
+
+impl Default for CallbackRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Process-wide opt-in via env var. Older flow that issue #4 introduced. The
+/// new `--allow-private-network` CLI flag (issue #33) sets a per-client field
+/// that is OR'd with this so existing scripts and Docker setups that pin the
+/// env var keep working unchanged.
+/// True when SSL_CERT_FILE / SSL_CERT_DIR point at a custom CA bundle.
+/// Empty strings count as unset — some environments export them empty.
+#[cfg(feature = "stealth")]
+pub(crate) fn custom_cert_store_requested(
+    cert_file: Option<&std::ffi::OsStr>,
+    cert_dir: Option<&std::ffi::OsStr>,
+) -> bool {
+    fn present(v: Option<&std::ffi::OsStr>) -> bool {
+        v.is_some_and(|s| !s.is_empty())
+    }
+    present(cert_file) || present(cert_dir)
+}
+
+/// Truthy set shared by the engine's opt-in env knobs: "1"/"true"/"yes"/"on"
+/// (case-insensitive, trimmed) all count.
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name)
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
+}
+
+/// The CLI-flag half of the private-network opt-in, OR'd with the env var.
+static PRIVATE_NETWORK_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// `--allow-private-network` (issue #33): five call-site comments promised
+/// this flag while only the env var was wired. Startup sets this instead of
+/// mutating the environment mid-process.
+pub fn set_allow_private_network(enabled: bool) {
+    PRIVATE_NETWORK_FLAG.store(enabled, Ordering::Relaxed);
+}
+
+pub fn env_allows_private_network() -> bool {
+    PRIVATE_NETWORK_FLAG.load(Ordering::Relaxed) || env_flag("AGINXBROWSER_ALLOW_PRIVATE_NETWORK")
+}
+
+/// One parsed entry of the scoped allow-network list: network address and
+/// prefix length in the entry's own family.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScopedCidr {
+    net: IpAddr,
+    prefix: u8,
+}
+
+/// Parse a comma/space-separated CIDR list — `10.20.0.0/16,192.168.1.0/24` or
+/// bare addresses (`127.0.0.1` → /32, `::1` → /128). Tokens that don't parse
+/// are skipped, never widened: an unparsable entry means the engine keeps
+/// blocking that range (fail closed), it does not fall back to
+/// allow-everything.
+pub fn parse_scoped_cidrs(spec: &str) -> Vec<ScopedCidr> {
+    let mut out = Vec::new();
+    for token in spec.split([',', ' ', '\t']) {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let (addr_part, default_prefix) = match token.split_once('/') {
+            Some((a, p)) => (a, Some(p)),
+            None => (token, None),
+        };
+        let ip: IpAddr = match addr_part.parse() {
+            Ok(ip) => ip,
+            Err(_) => continue,
+        };
+        let max = match ip {
+            IpAddr::V4(_) => 32u8,
+            IpAddr::V6(_) => 128u8,
+        };
+        let prefix = match default_prefix {
+            Some(p) => match p.parse::<u8>() {
+                Ok(p) if p <= max => p,
+                _ => continue,
+            },
+            None => max,
+        };
+        out.push(ScopedCidr { net: ip, prefix });
+    }
+    out
+}
+
+fn ip_in_scoped_cidr(ip: IpAddr, c: ScopedCidr) -> bool {
+    // Mask-compare in the entry's own family; a v6 entry never matches a v4
+    // target (embedded-v4 targets are reached through the recursive leaf
+    // check inside `is_forbidden_ip`, which re-enters this function with the
+    // extracted v4 address).
+    let (ip_bits, net_bits, max) = match (ip, c.net) {
+        (IpAddr::V4(ip), IpAddr::V4(net)) => (
+            u32::from(ip) as u128,
+            u32::from(net) as u128,
+            32u8,
+        ),
+        (IpAddr::V6(ip), IpAddr::V6(net)) => (u128::from(ip), u128::from(net), 128u8),
+        _ => return false,
+    };
+    if c.prefix == 0 {
+        return true;
+    }
+    let shift = max - c.prefix;
+    (ip_bits >> shift) == (net_bits >> shift)
+}
+
+/// The CLI-flag half of the scoped allow-network opt-in
+/// (`--allow-network <cidr,cidr,...>`). Parsed once at startup because the
+/// value is a list, not a boolean.
+static ALLOW_NETWORK_FLAG: std::sync::RwLock<Vec<ScopedCidr>> = std::sync::RwLock::new(Vec::new());
+
+/// Set the scoped allow-network list from the CLI flag. Pass an empty spec
+/// to clear.
+pub fn set_allow_network(spec: Option<&str>) {
+    let parsed = spec.map(parse_scoped_cidrs).unwrap_or_default();
+    if let Ok(mut slot) = ALLOW_NETWORK_FLAG.write() {
+        *slot = parsed;
+    }
+}
+
+/// The scoped half of the SSRF escape hatch — obscura#856. An address in
+/// this list is allowed THROUGH the deny-set without flipping
+/// `--allow-private-network`'s allow-everything switch: point the engine at
+/// an internal app on 10.20.x.y while the cloud-metadata endpoints
+/// (169.254.169.254, 100.100.100.200) and every other forbidden range stay
+/// closed. Reads both the CLI list and `AGINXBROWSER_ALLOW_NETWORK` (same
+/// syntax) so Docker setups that only speak env keep working.
+fn scoped_allow_network(ip: IpAddr) -> bool {
+    if let Ok(list) = ALLOW_NETWORK_FLAG.read() {
+        if list.iter().any(|c| ip_in_scoped_cidr(ip, *c)) {
+            return true;
+        }
+    }
+    match std::env::var("AGINXBROWSER_ALLOW_NETWORK") {
+        Ok(spec) => parse_scoped_cidrs(&spec)
+            .iter()
+            .any(|c| ip_in_scoped_cidr(ip, *c)),
+        Err(_) => false,
+    }
+}
+
+/// The CLI-flag half of the file:// opt-in (requirements-aginxos P2).
+static FILE_ACCESS_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// True when the engine may read `file://` URLs — navigation documents,
+/// subresources, /fetch. Off by default: the server binds 0.0.0.0 out of
+/// the box, so an unguarded local-file read would hand the operator's
+/// filesystem to any client that can reach the port. Flipped by
+/// `--allow-file-access` or `AGINXBROWSER_ALLOW_FILE_ACCESS`. The gate
+/// itself lives in [`fetch_file_url`], the single choke point both
+/// transports (the reqwest funnel and the stealth client, redirect hops
+/// included) already delegate to; the CDP-layer gates read this too.
+pub fn allow_file_access() -> bool {
+    FILE_ACCESS_FLAG.load(Ordering::Relaxed) || env_flag("AGINXBROWSER_ALLOW_FILE_ACCESS")
+}
+
+/// Tests flip the gate through this instead of touching the environment.
+pub fn set_allow_file_access(enabled: bool) {
+    FILE_ACCESS_FLAG.store(enabled, Ordering::Relaxed);
+}
+
+/// Shared test fixture for the process-global file-access switch. The
+/// switch is one AtomicBool for the whole process, so ANY test that flips
+/// it — here or in another module reading it through `allow_file_access()`
+/// (screenshot.rs's subresource collector, ...) — must hold this lock while
+/// asserting, or the two run concurrently and race (1f7486c pattern). The
+/// drop-guard restores both halves (flag + env) even on panic so the
+/// off-by-default contract can't leak across tests.
+#[cfg(test)]
+pub(crate) mod file_access_test {
+    use std::sync::atomic::Ordering;
+    static FILE_ACCESS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    struct FileAccessGuard(std::sync::MutexGuard<'static, ()>, bool);
+    impl Drop for FileAccessGuard {
+        fn drop(&mut self) {
+            super::FILE_ACCESS_FLAG.store(self.1, Ordering::Relaxed);
+            std::env::remove_var("AGINXBROWSER_ALLOW_FILE_ACCESS");
+        }
+    }
+    pub(crate) fn file_access_guard(enabled: bool) -> impl Drop {
+        let guard = FILE_ACCESS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = super::FILE_ACCESS_FLAG.load(Ordering::Relaxed);
+        super::FILE_ACCESS_FLAG.store(enabled, Ordering::Relaxed);
+        std::env::remove_var("AGINXBROWSER_ALLOW_FILE_ACCESS");
+        FileAccessGuard(guard, prev)
+    }
+}
+
+/// True when `ip` must never be the target of an outbound request from the
+/// engine, UNLESS a scoped allow-network entry (`--allow-network` /
+/// `AGINXBROWSER_ALLOW_NETWORK`, obscura#856) explicitly covers it. The pure
+/// deny-set lives in [`is_forbidden_base`]; this wrapper subtracts the
+/// scoped allowlist so the literal-host check, the DNS-resolution check
+/// (`SsrfGuardResolver`) and every embedded-IPv4 recursion site can never
+/// disagree about what is allowed.
+pub fn is_forbidden_ip(ip: IpAddr) -> bool {
+    is_forbidden_base(ip) && !scoped_allow_network(ip)
+}
+
+/// The pure SSRF deny-set — see [`is_forbidden_ip`] for the public entry.
+/// Loopback, RFC1918 private, link-local (incl. the 169.254.169.254
+/// cloud-metadata endpoint), broadcast, documentation, the unspecified address
+/// (0.0.0.0 / ::, which the OS routes to localhost), IPv6 unique-local
+/// (fc00::/7), CGNAT (100.64.0.0/10 — where Alibaba's 100.100.100.200
+/// metadata endpoint lives), benchmarking (198.18.0.0/15), multicast and the
+/// reserved/future ranges, and ANY IPv6 form with an embedded IPv4
+/// (IPv4-mapped, IPv4-compatible, 6to4 2002::/16, NAT64 64:ff9b::/96)
+/// whose embedded IPv4 lands in the deny-set — an allow-listed embedded v4
+/// stays reachable through those wrappers. Teredo (2001:0000::/32) is the
+/// exception: all three attacker-writable slots (server, client, XOR-
+/// obfuscated client) must individually clear the deny-set + allowlist, so
+/// a CIDR that opens the client obfuscates to a public address and the
+/// whole form stays blocked (deliberate — fail closed).
+fn is_forbidden_base(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_unspecified()
+                // 0.0.0.0/8: "this network" — some stacks treat it as
+                // loopback-adjacent; block the whole /8, not just 0.0.0.0.
+                || o[0] == 0
+                // 100.64.0.0/10 CGNAT (cloud metadata endpoints live here,
+                // e.g. Alibaba 100.100.100.200).
+                || (o[0] == 100 && o[1] & 0xc0 == 64)
+                // 192.0.0.0/24 (Oracle 192.0.0.192 et al), 192.31.196.0/24
+                // and 192.52.193.0/24 (AS112), 192.88.99.0/24 (6to4 relay),
+                // 192.175.48.0/24 (Portmap).
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0)
+                || (o[0] == 192 && o[1] == 31 && o[2] == 196)
+                || (o[0] == 192 && o[1] == 52 && o[2] == 193)
+                || (o[0] == 192 && o[1] == 88 && o[2] == 99)
+                || (o[0] == 192 && o[1] == 175 && o[2] == 48)
+                // 198.18.0.0/15 benchmarking.
+                || (o[0] == 198 && o[1] & 0xfe == 18)
+                || v4.is_multicast() // 224.0.0.0/4
+                || (o[0] & 0xf0) == 0xf0 // 240.0.0.0/4 reserved/future
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+                || v6.is_multicast() // ff00::/8
+            {
+                return true;
+            }
+            let seg = v6.segments();
+            // 2001:db8::/32 documentation, ::/96-adjacent discard (100::/64).
+            if seg[0] == 0x2001 && seg[1] == 0x0db8 {
+                return true;
+            }
+            if seg[0] == 0x0100 && seg[1] == 0 && seg[2] == 0 && seg[3] == 0 {
+                return true;
+            }
+            // Teredo 2001:0000::/32 (RFC 4380): the server IPv4 sits in bits
+            // 32-63 and the client IPv4 in bits 96-127, XOR-obfuscated with
+            // 0xffff. A crafted literal puts attacker bytes in every slot, so
+            // check server, raw client, and de-obfuscated client alike.
+            if seg[0] == 0x2001 && seg[1] == 0 {
+                for (hi, lo) in [
+                    (seg[2], seg[3]),
+                    (seg[6], seg[7]),
+                    (seg[6] ^ 0xffff, seg[7] ^ 0xffff),
+                ] {
+                    if is_forbidden_ip(IpAddr::V4(std::net::Ipv4Addr::new(
+                        (hi >> 8) as u8,
+                        hi as u8,
+                        (lo >> 8) as u8,
+                        lo as u8,
+                    ))) {
+                        return true;
+                    }
+                }
+            }
+            if let Some(v4) = embedded_ipv4(v6) {
+                return is_forbidden_ip(IpAddr::V4(v4));
+            }
+            false
+        }
+    }
+}
+
+/// Extract the IPv4 address carried inside an IPv6 address, for the
+/// single-embedded-address formats: IPv4-mapped (::ffff:a.b.c.d),
+/// IPv4-compatible (::a.b.c.d), 6to4 (2002:a.b.c.d::, the public v4 sits in
+/// bits 16-47), and NAT64 (64:ff9b::a.b.c.d, well-known prefix). Without the
+/// last two, a literal host like [2002:a9fe:a9fe::] (6to4-wrapped
+/// 169.254.169.254) or [64:ff9b::7f00:1] (NAT64-wrapped 127.0.0.1) bypasses
+/// the v6 arm and dials a forbidden v4 target. Teredo carries two
+/// attacker-writable slots (server + XOR-obfuscated client) and is checked
+/// directly in `is_forbidden_ip`.
+fn embedded_ipv4(v6: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+    if let Some(v4) = v6.to_ipv4_mapped() {
+        return Some(v4);
+    }
+    let seg = v6.segments();
+    // 6to4: 2002:<high16>:<low16>::/48 — embedded v4 is bits 16..48.
+    if seg[0] == 0x2002 {
+        return Some(std::net::Ipv4Addr::new(
+            (seg[1] >> 8) as u8,
+            seg[1] as u8,
+            (seg[2] >> 8) as u8,
+            seg[2] as u8,
+        ));
+    }
+    // NAT64 prefixes 64:ff9b::/96 (well-known, RFC 6052) and 64:ff9b:1::/48
+    // (local-use, RFC 8215) — in both the embedded v4 is the low 32 bits, so
+    // one prefix pair check covers both forms.
+    if seg[0] == 0x0064 && seg[1] == 0xff9b {
+        return Some(std::net::Ipv4Addr::new(
+            (seg[6] >> 8) as u8,
+            seg[6] as u8,
+            (seg[7] >> 8) as u8,
+            seg[7] as u8,
+        ));
+    }
+    // IPv4-compatible ::a.b.c.d (all zero except the low 32 bits).
+    v6.to_ipv4()
+}
+
+/// reqwest DNS resolver that performs the lookup and then rejects the whole
+/// request if ANY resolved address is in the SSRF deny-set. This closes the
+/// DNS-rebinding bypass a host-string check alone cannot: a public name that
+/// resolves to 127.0.0.1 / 169.254.169.254 / an RFC1918 address is blocked at
+/// connect time, using the very addresses reqwest will dial. When private
+/// access is permitted (`--allow-private-network` or
+/// `AGINXBROWSER_ALLOW_PRIVATE_NETWORK`) the lookup passes through unfiltered.
+pub struct SsrfGuardResolver {
+    allow_private: bool,
+}
+
+impl SsrfGuardResolver {
+    pub fn new(allow_private: bool) -> Self {
+        Self { allow_private }
+    }
+}
+
+impl Resolve for SsrfGuardResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let allow = self.allow_private || env_allows_private_network();
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
+                .collect();
+            if !allow {
+                if let Some(bad) = addrs.iter().find(|sa| is_forbidden_ip(sa.ip())) {
+                    return Err(format!(
+                        "SSRF blocked: '{}' resolves to forbidden address {}",
+                        host,
+                        bad.ip()
+                    )
+                    .into());
+                }
+            }
+            let iter: Addrs = Box::new(addrs.into_iter());
+            Ok(iter)
+        })
+    }
+}
+
+pub fn validate_url(url: &Url, allow_private_network: bool) -> Result<(), NetError> {
+    let allow_private_network = allow_private_network || env_allows_private_network();
+    let scheme = url.scheme();
+    if scheme != "http" && scheme != "https" && scheme != "file" {
+        return Err(NetError::Network(format!(
+            "Forbidden URL scheme '{}' - only http, https, and file are allowed",
+            scheme
+        )));
+    }
+
+    if scheme == "file" || allow_private_network {
+        return Ok(());
+    }
+
+    if let Some(host) = url.host() {
+        match host {
+            url::Host::Ipv4(ip) => {
+                if is_forbidden_ip(IpAddr::V4(ip)) {
+                    return Err(NetError::Network(format!(
+                        "Access to private/internal IP address {} is not allowed",
+                        ip
+                    )));
+                }
+            }
+            url::Host::Ipv6(ip) => {
+                if is_forbidden_ip(IpAddr::V6(ip)) {
+                    return Err(NetError::Network(format!(
+                        "Access to private/internal IPv6 address {} is not allowed",
+                        ip
+                    )));
+                }
+            }
+            url::Host::Domain(domain) => {
+                let lower_domain = domain.to_lowercase();
+                if lower_domain == "localhost"
+                    || lower_domain.ends_with(".localhost")
+                    || lower_domain == "127.0.0.1"
+                    || lower_domain == "::1"
+                {
+                    return Err(NetError::Network(format!(
+                        "Access to localhost domain '{}' is not allowed",
+                        domain
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn fetch_file_url(url: &Url) -> Result<Response, NetError> {
+    if !allow_file_access() {
+        return Err(NetError::Network(
+            "file:// access is disabled. Restart with --allow-file-access or set \
+             AGINXBROWSER_ALLOW_FILE_ACCESS=1 to enable."
+                .to_string(),
+        ));
+    }
+    let path = url
+        .to_file_path()
+        .map_err(|_| NetError::Network("Invalid file URL".to_string()))?;
+    let body = tokio::fs::read(&path)
+        .await
+        .map_err(|e| NetError::Network(format!("Failed to read file: {}", e)))?;
+
+    let mut headers = HashMap::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        let ct = match ext.to_lowercase().as_str() {
+            "html" | "htm" => "text/html",
+            "css" => "text/css",
+            "js" | "mjs" => "application/javascript",
+            "json" => "application/json",
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "svg" => "image/svg+xml",
+            "webp" => "image/webp",
+            "ico" => "image/x-icon",
+            _ => "application/octet-stream",
+        };
+        headers.insert("content-type".to_string(), ct.to_string());
+    }
+
+    Ok(Response {
+        url: url.clone(),
+        status: 200,
+        headers,
+        body,
+        redirected_from: Vec::new(),
+    })
+}
+
+pub struct HttpClient {
+    client: tokio::sync::OnceCell<Client>,
+    /// Direct-connect client (no proxy). Built once on first use.
+    direct_client: tokio::sync::OnceCell<Client>,
+    /// Proxy client for known-blocked domains when no explicit proxy was
+    /// configured. Built once on first auto-proxy hit from `AGINXBROWSER_PROXY`;
+    /// `None` inside means the env var is unset (every later check falls
+    /// through to the direct client without rebuilding).
+    auto_proxy_client: tokio::sync::OnceCell<Option<Client>>,
+    proxy_url: Option<String>,
+    pub cookie_jar: Arc<CookieJar>,
+    pub user_agent: RwLock<String>,
+    /// Same default and env knob as the stealth transport (`diting_net::wreq_client`),
+    /// so both transports advertise one Accept-Language (obscura #777 class).
+    pub accept_language: RwLock<String>,
+    pub extra_headers: RwLock<HashMap<String, String>>,
+    pub in_flight: Arc<std::sync::atomic::AtomicU32>,
+    pub block_trackers: bool,
+    /// When true, `validate_url` lets localhost / RFC1918 / link-local addresses
+    /// through in addition to the `AGINXBROWSER_ALLOW_PRIVATE_NETWORK` env var.
+    /// Set via `--allow-private-network` on the CLI (issue #33).
+    pub allow_private_network: bool,
+    /// Lazy legacy-TLS escape hatch (obscura#769 navigation layer): rustls
+    /// carries no TLS 1.2 CBC cipher suites, so CBC-only servers die in the
+    /// ClientHello while every browser connects. Built once on first
+    /// fallback need, sharing this client's cookie jar and proxy posture;
+    /// `None` means unavailable (non-stealth build, or a SOCKS proxy that
+    /// wreq cannot speak).
+    #[cfg(feature = "stealth")]
+    legacy_tls: tokio::sync::OnceCell<Option<Arc<crate::diting_net::StealthHttpClient>>>,
+}
+
+impl HttpClient {
+    pub fn new() -> Self {
+        Self::with_cookie_jar(Arc::new(CookieJar::new()))
+    }
+
+    pub fn with_cookie_jar(cookie_jar: Arc<CookieJar>) -> Self {
+        Self::with_options(cookie_jar, None)
+    }
+
+    pub fn with_options(cookie_jar: Arc<CookieJar>, proxy_url: Option<&str>) -> Self {
+        Self::with_full_options(cookie_jar, proxy_url, false)
+    }
+
+    pub fn with_full_options(
+        cookie_jar: Arc<CookieJar>,
+        proxy_url: Option<&str>,
+        allow_private_network: bool,
+    ) -> Self {
+        HttpClient {
+            client: tokio::sync::OnceCell::new(),
+            direct_client: tokio::sync::OnceCell::new(),
+            auto_proxy_client: tokio::sync::OnceCell::new(),
+            proxy_url: proxy_url.map(|s| s.to_string()),
+            cookie_jar,
+            user_agent: RwLock::new(
+                std::env::var("AGINXBROWSER_UA").unwrap_or_else(|_| {
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36".to_string()
+                }),
+            ),
+            accept_language: RwLock::new(
+                std::env::var("AGINXBROWSER_ACCEPT_LANGUAGE")
+                    .unwrap_or_else(|_| "zh-CN,zh;q=0.9,en;q=0.8".to_string()),
+            ),
+            extra_headers: RwLock::new(HashMap::new()),
+            in_flight: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            block_trackers: false,
+            allow_private_network,
+            #[cfg(feature = "stealth")]
+            legacy_tls: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    async fn get_client(&self) -> &Client {
+        self.client.get_or_init(|| async {
+            let mut builder = reqwest_builder_no_env_proxy()
+                .redirect(Policy::none())
+                .timeout(Duration::from_secs(30))
+                .connect_timeout(Duration::from_secs(10))
+                // Bug #24 (long-run degradation): a pooled connection that went
+                // half-dead while idle (NAT drop, proxy reset) used to be handed
+                // back out and stall every subsequent request until the process
+                // was restarted. Keep the idle window short and send TCP
+                // keepalive so the pool reaps stale connections instead.
+                .pool_idle_timeout(Duration::from_secs(60))
+                .tcp_keepalive(Duration::from_secs(30))
+                .danger_accept_invalid_certs(false);
+                // No manual Accept-Encoding header: reqwest 0.12 with the
+                // gzip/brotli/deflate cargo features decodes by the RESPONSE's
+                // Content-Encoding header regardless of what we advertised
+                // (pinned by render.rs's unconditional-gzip fixture test), so
+                // Aliyun Tengine fronts that compress unrequested still
+                // decode. Advertising nothing keeps the request fingerprint
+                // plain; advertising would also be fine, but never set the
+                // header by hand — a manual Accept-Encoding disables reqwest's
+                // auto-decode and raw gzip then reaches the HTML parser.
+
+            if let Some(ref proxy) = self.proxy_url {
+                if let Ok(p) = reqwest::Proxy::all(proxy.as_str()) {
+                    builder = builder.proxy(p);
+                }
+            }
+
+            builder.build().expect("failed to build HTTP client")
+        }).await
+    }
+
+    /// Build (once) a direct-connect client with no upstream proxy.
+    async fn get_direct_client(&self) -> &Client {
+        self.direct_client.get_or_init(|| async {
+            reqwest_builder_no_env_proxy()
+                .redirect(Policy::none())
+                .timeout(Duration::from_secs(30))
+                .connect_timeout(Duration::from_secs(10))
+                // See get_client: short idle window + keepalive against
+                // half-dead pooled connections (bug #24).
+                .pool_idle_timeout(Duration::from_secs(60))
+                .tcp_keepalive(Duration::from_secs(30))
+                .danger_accept_invalid_certs(false)
+                // SSRF guard: reject hostnames that resolve to a
+                // private/loopback IP at connect time (replaces the old
+                // TOCTOU pre-resolution check). Only on the direct client —
+                // with a proxy, the proxy resolves target DNS and the only
+                // local lookup is the proxy host itself, which is often
+                // deliberately a loopback address (e.g. socks5://127.0.0.1).
+                .dns_resolver(Arc::new(SsrfGuardResolver::new(self.allow_private_network)))
+                .build()
+                .expect("failed to build direct HTTP client")
+        }).await
+    }
+
+    /// Pick the client for this request. An explicitly configured proxy
+    /// (`context proxy_url`) routes ALL traffic — that is the operator's
+    /// opt-in. Without one, requests go direct except known-blocked domains
+    /// (the same list /fetch and download honor), which ride
+    /// `AGINXBROWSER_PROXY` when set. That per-request fallback is what keeps
+    /// page/session/CDP navigations working on the CN boundary: a session
+    /// created without use_proxy used to hard-fail on wikipedia while /fetch
+    /// succeeded for the same origin.
+    async fn get_client_for(&self, url: &Url) -> &Client {
+        if self.proxy_url.is_some() {
+            return self.get_client().await;
+        }
+        if let Some(c) = self.get_auto_proxy_client(url).await {
+            return c;
+        }
+        self.get_direct_client().await
+    }
+
+    /// Proxied client for known-blocked domains, built once from
+    /// `AGINXBROWSER_PROXY`. `None` when the domain isn't listed or no proxy
+    /// is configured — callers fall through to the direct client.
+    ///
+    /// Like `get_client`, no SSRF DNS resolver here: with a proxy the target
+    /// resolves at the proxy, and the proxy host itself is often loopback.
+    async fn get_auto_proxy_client(&self, url: &Url) -> Option<&Client> {
+        if !crate::env_knobs::should_auto_proxy(url.as_str()) {
+            return None;
+        }
+        let proxy = match crate::env_knobs::proxy_from_env() {
+            Some(p) => p,
+            None => return None,
+        };
+        self.auto_proxy_client
+            .get_or_init(|| async move {
+                let mut builder = reqwest_builder_no_env_proxy()
+                    .redirect(Policy::none())
+                    .timeout(Duration::from_secs(30))
+                    .connect_timeout(Duration::from_secs(10))
+                    .pool_idle_timeout(Duration::from_secs(60))
+                    .tcp_keepalive(Duration::from_secs(30))
+                    .danger_accept_invalid_certs(false);
+                if let Ok(p) = reqwest::Proxy::all(&proxy) {
+                    builder = builder.proxy(p);
+                }
+                Some(builder.build().expect("failed to build auto-proxy HTTP client"))
+            })
+            .await
+            .as_ref()
+    }
+
+    /// Read-only accessor for the proxy URL the client was configured with
+    /// (if any). Exposed so callers outside the net module — notably
+    /// `op_fetch_url` in `diting-js` (#139) — can route their own reqwest
+    /// requests through the same upstream proxy.
+    pub fn proxy_url(&self) -> Option<&str> {
+        self.proxy_url.as_deref()
+    }
+
+    /// The reqwest client this request should use (context-scoped, tied to
+    /// this browser context). Cloning a `reqwest::Client` is cheap — it shares
+    /// the underlying connection pool — so callers that need an owned handle
+    /// (e.g. `op_fetch_url`, which builds a request and follows redirects
+    /// itself) can take one without copying the pool.
+    pub async fn request_client(&self, url: &str) -> Client {
+        match url::Url::parse(url) {
+            Ok(u) => self.get_client_for(&u).await.clone(),
+            Err(_) => self.get_direct_client().await.clone(),
+        }
+    }
+
+    pub async fn fetch(&self, url: &Url) -> Result<Response, NetError> {
+        self.fetch_with_method(Method::GET, url, None).await
+    }
+
+    /// Compute the default `strict-origin-when-cross-origin` referrer for a
+    /// document-initiated request (upstream edb1785). Same-origin sends the
+    /// full source URL minus fragment/credentials; cross-origin sends only
+    /// the origin; downgrades (https -> http) and non-HTTP(S) schemes send
+    /// nothing. Referrer-Policy overrides are not yet plumbed through.
+    pub(crate) fn navigation_referrer(source: &Url, target: &Url) -> String {
+        if !matches!(source.scheme(), "http" | "https")
+            || !matches!(target.scheme(), "http" | "https")
+            || (source.scheme() == "https" && target.scheme() == "http")
+        {
+            return String::new();
+        }
+
+        if source.origin() == target.origin() {
+            let mut sanitized = source.clone();
+            sanitized.set_fragment(None);
+            let _ = sanitized.set_username("");
+            let _ = sanitized.set_password(None);
+            return sanitized.to_string();
+        }
+
+        let mut origin = source.origin().ascii_serialization();
+        origin.push('/');
+        origin
+    }
+
+    /// Page-subresource fetch (render-time img/media prefetch): a plain GET
+    /// that carries the initiating document's Referer. `referrer` is the raw
+    /// document URL; the policy trim happens per hop in the traced path.
+    pub async fn fetch_subresource(
+        &self,
+        url: &Url,
+        referrer: Option<&str>,
+    ) -> Result<Response, NetError> {
+        self.fetch_with_method_traced(Method::GET, url, None, None, ResourceType::Image, referrer)
+            .await
+    }
+
+    /// Passive-observer variants (upstream issue #408): fire the registry's
+    /// on_request callbacks with the fully-built request just before each hop
+    /// is sent, and on_response with the completed response. `None` behaves
+    /// exactly like the untraced entry points. `referrer` is the initiating
+    /// document URL for page-driven loads; top-level tool fetches pass None.
+    pub async fn fetch_with_callbacks(
+        &self,
+        url: &Url,
+        callbacks: Option<&CallbackRegistry>,
+        resource_type: ResourceType,
+        referrer: Option<&str>,
+    ) -> Result<Response, NetError> {
+        self.fetch_with_method_traced(Method::GET, url, None, callbacks, resource_type, referrer)
+            .await
+    }
+
+    /// See `fetch_with_callbacks`.
+    pub async fn post_form_with_callbacks(
+        &self,
+        url: &Url,
+        body: &str,
+        callbacks: Option<&CallbackRegistry>,
+        resource_type: ResourceType,
+        referrer: Option<&str>,
+    ) -> Result<Response, NetError> {
+        self.fetch_with_method_traced(
+            Method::POST,
+            url,
+            Some(body.as_bytes().to_vec()),
+            callbacks,
+            resource_type,
+            referrer,
+        )
+        .await
+    }
+
+    pub async fn fetch_with_method(
+        &self,
+        initial_method: Method,
+        url: &Url,
+        initial_body: Option<Vec<u8>>,
+    ) -> Result<Response, NetError> {
+        self.fetch_with_method_traced(initial_method, url, initial_body, None, ResourceType::Document, None)
+            .await
+    }
+
+    async fn fetch_with_method_traced(
+        &self,
+        initial_method: Method,
+        url: &Url,
+        initial_body: Option<Vec<u8>>,
+        callbacks: Option<&CallbackRegistry>,
+        resource_type: ResourceType,
+        referrer: Option<&str>,
+    ) -> Result<Response, NetError> {
+        // The primary attempt borrows the body; ownership stays here so a
+        // retry can re-send it. `connect_failed` is the send-stage
+        // classification (DNS/TCP/TLS — the request never left the machine),
+        // the only regime where a non-idempotent retry cannot double-submit.
+        let mut connect_failed = false;
+        match self
+            .fetch_with_method_traced_inner(
+                initial_method.clone(),
+                url,
+                initial_body.as_deref(),
+                &mut connect_failed,
+                callbacks,
+                resource_type,
+                referrer,
+            )
+            .await
+        {
+            Ok(resp) => Ok(resp),
+            Err(e) => {
+                // Mirror what the primary attempt would have sent: the plain
+                // client hardcodes form-urlencoded on a POST with a body.
+                let fallback_body = initial_body.as_deref();
+                let fallback_ctype = if fallback_body.is_some() && initial_method == Method::POST {
+                    Some("application/x-www-form-urlencoded")
+                } else {
+                    None
+                };
+                self.retry_via_legacy_tls(
+                    initial_method,
+                    url,
+                    e,
+                    fallback_body,
+                    fallback_ctype,
+                    connect_failed,
+                    None,
+                    true,
+                )
+                .await
+            }
+        }
+    }
+
+    /// One legacy-TLS retry for transport failures (obscura#769 navigation
+    /// layer): rustls carries no TLS 1.2 CBC cipher suites, so a CBC-only
+    /// server dies in the ClientHello while every browser connects; the
+    /// stealth transport's BoringSSL stack still speaks CBC. Guards, in
+    /// order:
+    /// - GET/HEAD always retry (idempotent). Any other method retries only
+    ///   when `connect_stage` says the failure was connect-phase (DNS/TCP/
+    ///   TLS) — the request provably never left the machine, so a second
+    ///   attempt cannot double-submit. A failure after the bytes went out
+    ///   (body read, response-wait reset) keeps the original error. This is
+    ///   what lets a scripted form POST ride the escape hatch without
+    ///   re-submitting anything (taobao seller-backend shape);
+    /// - the URL must pass `validate_url` again. Gate rejections travel as
+    ///   `NetError::Network` just like transport failures, so the error
+    ///   type cannot fence them — the re-check can, and the legacy
+    ///   transport re-validates every hop it walks on top of that;
+    /// - redirect loops and an unavailable transport (non-stealth build,
+    ///   SOCKS proxy) pass the original error through unchanged.
+    ///
+    /// The legacy client shares the cookie jar and re-syncs identity at
+    /// attempt time. `request_headers` (the scripted fetch()/XHR path)
+    /// additionally mirrors the hop's browser-default headers — Origin,
+    /// Referer, Fetch-Metadata, client hints — so the retry is the same
+    /// request on another stack, not a bare one; the navigation path passes
+    /// None and rides transport defaults. `include_cookies` carries the
+    /// fetch credentials policy (navigation requests are always
+    /// credentialed).
+    #[cfg(feature = "stealth")]
+    #[allow(clippy::too_many_arguments)]
+    async fn retry_via_legacy_tls(
+        &self,
+        method: Method,
+        url: &Url,
+        err: NetError,
+        body: Option<&[u8]>,
+        content_type: Option<&str>,
+        connect_stage: bool,
+        request_headers: Option<&HashMap<String, String>>,
+        include_cookies: bool,
+    ) -> Result<Response, NetError> {
+        if matches!(err, NetError::TooManyRedirects(_)) {
+            return Err(err);
+        }
+        if !matches!(method, Method::GET | Method::HEAD) && !connect_stage {
+            return Err(err);
+        }
+        if validate_url(url, self.allow_private_network).is_err() {
+            return Err(err);
+        }
+        let Some(legacy) = self.legacy_transport().await else {
+            return Err(err);
+        };
+        legacy
+            .set_user_agent(&self.user_agent.read().await.clone())
+            .await;
+        legacy
+            .set_accept_language(&self.accept_language.read().await.clone())
+            .await;
+        legacy.set_extra_headers(self.extra_headers.read().await.clone()).await;
+        tracing::warn!("rustls transport failed for {url}; retrying once via legacy TLS transport");
+        match legacy
+            .fetch_with_body(
+                url,
+                None,
+                method.as_str(),
+                body,
+                content_type,
+                request_headers,
+                include_cookies,
+            )
+            .await
+        {
+            Ok(resp) => Ok(resp),
+            Err(legacy_err) => Err(NetError::Network(format!(
+                "{err}; legacy TLS transport also failed: {legacy_err}"
+            ))),
+        }
+    }
+
+    #[cfg(not(feature = "stealth"))]
+    #[allow(clippy::too_many_arguments)]
+    async fn retry_via_legacy_tls(
+        &self,
+        _method: Method,
+        _url: &Url,
+        err: NetError,
+        _body: Option<&[u8]>,
+        _content_type: Option<&str>,
+        _connect_stage: bool,
+        _request_headers: Option<&HashMap<String, String>>,
+        _include_cookies: bool,
+    ) -> Result<Response, NetError> {
+        Err(err)
+    }
+
+    /// Legacy-TLS fallback for scripted fetch()/XHR (`op_fetch_url`): the op
+    /// walks redirects on a raw reqwest client it obtained via
+    /// `request_client()` and has no retry of its own, so a transport
+    /// failure there hands the error string here and gets the same
+    /// one-attempt BoringSSL escape hatch the subresource loaders use —
+    /// same guards (GET/HEAD always; other methods only when
+    /// `connect_stage` says the request never left the machine,
+    /// `validate_url` re-check, per-hop re-validation inside the stealth
+    /// redirect walk), same shared cookie jar and identity sync.
+    /// `request_headers` is the hop's rebuilt scripted header set (Origin,
+    /// Referer, Fetch-Metadata, client hints) — Referer-checking WAFs
+    /// 403 the bare shape even after the handshake succeeds (the taobao
+    /// seller-backend receipts proved the headered variant end to end).
+    /// `include_cookies` carries the fetch credentials policy.
+    /// `Err` carries the original transport error, or the combined message
+    /// when the legacy attempt fired and failed too (the `legacy TLS
+    /// transport` marker is how tests prove the fallback actually ran).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn scripted_fetch_fallback(
+        &self,
+        method: &Method,
+        url: &Url,
+        transport_err: &str,
+        body: Option<&[u8]>,
+        content_type: Option<&str>,
+        connect_stage: bool,
+        request_headers: Option<&HashMap<String, String>>,
+        include_cookies: bool,
+    ) -> Result<Response, NetError> {
+        self.retry_via_legacy_tls(
+            method.clone(),
+            url,
+            NetError::Network(transport_err.to_string()),
+            body,
+            content_type,
+            connect_stage,
+            request_headers,
+            include_cookies,
+        )
+        .await
+    }
+
+    /// Build the legacy transport on first fallback need, mirroring this
+    /// client's cookie jar, proxy and private-network posture. wreq does
+    /// not speak SOCKS5 (the #160 shape), so a SOCKS proxy leaves the
+    /// client rustls-only rather than silently rewriting the scheme.
+    #[cfg(feature = "stealth")]
+    async fn legacy_transport(
+        &self,
+    ) -> Option<&Arc<crate::diting_net::StealthHttpClient>> {
+        self.legacy_tls
+            .get_or_init(|| async {
+                if self
+                    .proxy_url
+                    .as_deref()
+                    .is_some_and(|p| p.starts_with("socks"))
+                {
+                    return None;
+                }
+                let mut client = crate::diting_net::StealthHttpClient::with_proxy(
+                    self.cookie_jar.clone(),
+                    self.proxy_url.as_deref(),
+                );
+                client.allow_private_network = self.allow_private_network;
+                Some(Arc::new(client))
+            })
+            .await
+            .as_ref()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_with_method_traced_inner(
+        &self,
+        initial_method: Method,
+        url: &Url,
+        initial_body: Option<&[u8]>,
+        connect_failed: &mut bool,
+        callbacks: Option<&CallbackRegistry>,
+        resource_type: ResourceType,
+        referrer: Option<&str>,
+    ) -> Result<Response, NetError> {
+        validate_url(url, self.allow_private_network)?;
+
+        if url.scheme() == "file" {
+            return fetch_file_url(url).await;
+        }
+
+        let mut method = initial_method;
+        let mut body = initial_body;
+        if self.block_trackers {
+            if let Some(host) = url.host_str() {
+                if crate::diting_net::blocklist::is_blocked(host) {
+                    tracing::debug!("Blocked tracker: {}", url);
+                    return Ok(Response {
+                        status: 0,
+                        url: url.clone(),
+                        headers: HashMap::new(),
+                        body: Vec::new(),
+                        redirected_from: Vec::new(),
+                    });
+                }
+            }
+        }
+
+        let mut current_url = url.clone();
+        let mut redirects = Vec::new();
+        let max_redirects = 20;
+
+        for _redirect_count in 0..max_redirects {
+            let ua = self.user_agent.read().await.clone();
+            let (sec_ch_ua, platform) = derive_client_hints(&ua);
+            let mut headers = HeaderMap::new();
+            headers.insert(USER_AGENT, HeaderValue::from_str(&ua).unwrap_or_else(|_| {
+                HeaderValue::from_static("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36")
+            }));
+            headers.insert(
+                reqwest::header::ACCEPT,
+                HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"),
+            );
+            headers.insert(
+                reqwest::header::ACCEPT_LANGUAGE,
+                HeaderValue::from_str(&self.accept_language.read().await.clone())
+                    .unwrap_or_else(|_| HeaderValue::from_static("zh-CN,zh;q=0.9,en;q=0.8")),
+            );
+            headers.insert(
+                HeaderName::from_static("sec-ch-ua"),
+                HeaderValue::from_str(&sec_ch_ua).unwrap(),
+            );
+            headers.insert(
+                HeaderName::from_static("sec-ch-ua-mobile"),
+                HeaderValue::from_static("?0"),
+            );
+            headers.insert(
+                HeaderName::from_static("sec-ch-ua-platform"),
+                HeaderValue::from_str(&platform).unwrap(),
+            );
+            headers.insert(
+                HeaderName::from_static("sec-fetch-dest"),
+                HeaderValue::from_static("document"),
+            );
+            headers.insert(
+                HeaderName::from_static("sec-fetch-mode"),
+                HeaderValue::from_static("navigate"),
+            );
+            headers.insert(
+                HeaderName::from_static("sec-fetch-site"),
+                HeaderValue::from_static("none"),
+            );
+            headers.insert(
+                HeaderName::from_static("sec-fetch-user"),
+                HeaderValue::from_static("?1"),
+            );
+            headers.insert(
+                HeaderName::from_static("upgrade-insecure-requests"),
+                HeaderValue::from_static("1"),
+            );
+            // Document-initiated requests carry the initiator's Referer —
+            // whitelist-checked service APIs (map vendors, CDN anti-leech)
+            // reject bare requests — trimmed per hop by the navigation
+            // policy, since a redirect can change the same/cross-origin
+            // answer. Non-GET/HEAD also carries Origin (same-origin POSTs
+            // included, matching the fetch() op's b744b9b semantics).
+            // extra_headers below can override both.
+            if let Some(src) = referrer {
+                if let Ok(source) = Url::parse(src) {
+                    let ref_value = Self::navigation_referrer(&source, &current_url);
+                    if !ref_value.is_empty() {
+                        if let Ok(v) = HeaderValue::from_str(&ref_value) {
+                            headers.insert(reqwest::header::REFERER, v);
+                        }
+                    }
+                    if method != Method::GET
+                        && method != Method::HEAD
+                        && !headers.contains_key(reqwest::header::ORIGIN)
+                    {
+                        let origin_value = source.origin().ascii_serialization();
+                        if let Ok(v) = HeaderValue::from_str(&origin_value) {
+                            headers.insert(reqwest::header::ORIGIN, v);
+                        }
+                    }
+                }
+            }
+
+            let cookie_header = self.cookie_jar.get_cookie_header(&current_url);
+            tracing::debug!(
+                "Cookie header for {}: {} cookies ({} bytes)",
+                current_url.host_str().unwrap_or("?"),
+                cookie_header.split("; ").filter(|s| !s.is_empty()).count(),
+                cookie_header.len(),
+            );
+            if !cookie_header.is_empty() {
+                match HeaderValue::from_str(&cookie_header) {
+                    Ok(val) => {
+                        headers.insert(reqwest::header::COOKIE, val);
+                    }
+                    Err(_) => {
+                        let filtered: String = cookie_header
+                            .split("; ")
+                            .filter(|pair| HeaderValue::from_str(pair).is_ok())
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        if !filtered.is_empty() {
+                            if let Ok(val) = HeaderValue::from_str(&filtered) {
+                                headers.insert(reqwest::header::COOKIE, val);
+                            }
+                        }
+                        tracing::debug!(
+                            "Cookie header invalid chars, filtered {} -> {} bytes",
+                            cookie_header.len(), filtered.len(),
+                        );
+                    }
+                }
+            }
+
+            for (k, v) in self.extra_headers.read().await.iter() {
+                if let (Ok(name), Ok(val)) = (
+                    HeaderName::from_bytes(k.as_bytes()),
+                    HeaderValue::from_str(v),
+                ) {
+                    headers.insert(name, val);
+                }
+            }
+
+            // Passive on_request observers (upstream #408): capture the
+            // fully-built header set (it is moved into the request below)
+            // and fire per hop just before the request goes out. Skipped
+            // entirely when nobody listens.
+            let sent_headers = match callbacks {
+                Some(cbs) if cbs.has_request_callbacks().await => Some((
+                    cbs,
+                    headers
+                        .iter()
+                        .map(|(k, v)| {
+                            (k.as_str().to_lowercase(), v.to_str().unwrap_or("").to_string())
+                        })
+                        .collect::<HashMap<String, String>>(),
+                )),
+                _ => None,
+            };
+
+            let mut req_builder = self.get_client_for(&current_url).await.request(method.clone(), current_url.as_str())
+                .headers(headers);
+
+            if let Some(b) = body {
+                if method == Method::POST {
+                    req_builder = req_builder.header(
+                        reqwest::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    );
+                }
+                req_builder = req_builder.body(b.to_vec());
+            }
+
+            if let Some((cbs, sent_headers)) = sent_headers.as_ref() {
+                let info = RequestInfo {
+                    url: current_url.clone(),
+                    method: method.as_str().to_string(),
+                    headers: sent_headers.clone(),
+                    resource_type,
+                };
+                cbs.fire_request(&info).await;
+            }
+
+            self.in_flight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let resp = match req_builder.send().await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    // Connect-phase (DNS/TCP/TLS) is the only failure regime
+                    // where a non-idempotent retry is safe — the request
+                    // never left the machine. Classify before the error is
+                    // stringified; the legacy-TLS fallback reads the flag.
+                    *connect_failed = e.is_connect();
+                    // Name the culprit when the configured upstream proxy is
+                    // the part that cannot be reached: the target URL alone
+                    // reads as "site down" and sends the operator debugging
+                    // the wrong layer (obscura#491's debugging cost).
+                    return Err(match (&self.proxy_url, e.is_connect()) {
+                        (Some(proxy), true) => NetError::Network(format!(
+                            "upstream proxy {} unreachable while fetching {}: {} — unset AGINXBROWSER_PROXY to connect directly",
+                            proxy, current_url, e
+                        )),
+                        _ => NetError::Network(format!("{}: {}", current_url, e)),
+                    });
+                }
+            };
+            self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+
+            let status = resp.status();
+
+            for val in resp.headers().get_all(reqwest::header::SET_COOKIE) {
+                if let Ok(s) = val.to_str() {
+                    self.cookie_jar.set_cookie(s, &current_url);
+                }
+            }
+
+            let response_headers = crate::diting_net::collect_response_headers(resp.headers());
+
+            if status.is_redirection() {
+                if let Some(location) = resp.headers().get(reqwest::header::LOCATION) {
+                    let location_str = location.to_str().map_err(|_| {
+                        NetError::Network("Invalid redirect Location header".into())
+                    })?;
+                    let next_url = current_url.join(location_str).map_err(|e| {
+                        NetError::Network(format!("Invalid redirect URL: {}", e))
+                    })?;
+                    validate_url(&next_url, self.allow_private_network)?;
+                    redirects.push(current_url.clone());
+                    current_url = next_url;
+                    if status == reqwest::StatusCode::MOVED_PERMANENTLY
+                        || status == reqwest::StatusCode::FOUND
+                        || status == reqwest::StatusCode::SEE_OTHER
+                    {
+                        method = Method::GET;
+                        body = None;
+                    }
+                    continue;
+                }
+            }
+
+            let body_bytes = resp.bytes().await.map_err(|e| {
+                tracing::warn!("body read failed for {}: {} (status={}, ctype={:?})", current_url, e, status, response_headers.get("content-type"));
+                NetError::Network(format!("Failed to read body: {}", e))
+            })?.to_vec();
+
+            let response = Response {
+                url: current_url,
+                status: status.as_u16(),
+                headers: response_headers,
+                body: body_bytes,
+                redirected_from: redirects,
+            };
+
+            // Passive on_response observers: fired with the completed final
+            // response (post-redirect, body read).
+            if let Some(cbs) = callbacks {
+                if cbs.has_response_callbacks().await {
+                    let info = RequestInfo {
+                        url: response.url.clone(),
+                        method: method.as_str().to_string(),
+                        headers: response.headers.clone(),
+                        resource_type,
+                    };
+                    cbs.fire_response(&info, &response).await;
+                }
+            }
+
+            return Ok(response);
+        }
+
+        Err(NetError::TooManyRedirects(current_url.to_string()))
+    }
+
+    pub async fn set_user_agent(&self, ua: &str) {
+        *self.user_agent.write().await = ua.to_string();
+    }
+
+    pub async fn set_accept_language(&self, lang: &str) {
+        *self.accept_language.write().await = lang.to_string();
+    }
+
+    pub async fn set_extra_headers(&self, headers: HashMap<String, String>) {
+        *self.extra_headers.write().await = headers;
+    }
+
+    pub fn active_requests(&self) -> u32 {
+        self.in_flight.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Default for HttpClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Derive `sec-ch-ua` and `sec-ch-ua-platform` from the User-Agent string so
+/// the client hints stay consistent with the advertised UA. Anti-bot systems
+/// (WeChat, etc.) flag mismatches like a macOS UA paired with a "Linux"
+/// sec-ch-ua-platform or a version drift between UA and sec-ch-ua.
+///
+/// Returns `(sec_ch_ua_header, sec_ch_ua_platform_header)`.
+pub fn derive_client_hints(ua: &str) -> (String, String) {
+    // Major version: first \d+ after "Chrome/".
+    let version = ua
+        .split("Chrome/")
+        .nth(1)
+        .and_then(|s| s.split('.').next())
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(145);
+
+    let platform = if ua.contains("Macintosh") || ua.contains("Mac OS X") {
+        "\"macOS\""
+    } else if ua.contains("Windows") {
+        "\"Windows\""
+    } else if ua.contains("iPhone") || ua.contains("Android") {
+        "\"Android\""
+    } else {
+        "\"Linux\""
+    };
+
+    let sec_ch_ua = format!(
+        "\"Chromium\";v=\"{}\", \"Not;A=Brand\";v=\"24\", \"Google Chrome\";v=\"{}\"",
+        version, version
+    );
+    (sec_ch_ua, platform.to_string())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum NetError {
+    #[error("Network error: {0}")]
+    Network(String),
+
+    #[error("Too many redirects: {0}")]
+    TooManyRedirects(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derive_client_hints_chrome_version() {
+        let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
+        let (ch_ua, platform) = derive_client_hints(ua);
+        assert!(ch_ua.contains(r#""Chromium";v="145""#));
+        assert!(ch_ua.contains(r#""Google Chrome";v="145""#));
+        assert_eq!(platform, r#""macOS""#);
+    }
+
+    #[test]
+    fn derive_client_hints_windows() {
+        let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+        let (ch_ua, platform) = derive_client_hints(ua);
+        assert!(ch_ua.contains(r#""Chromium";v="131""#));
+        assert_eq!(platform, r#""Windows""#);
+    }
+
+    #[test]
+    fn derive_client_hints_linux() {
+        let ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
+        let (_, platform) = derive_client_hints(ua);
+        assert_eq!(platform, r#""Linux""#);
+    }
+
+    #[test]
+    fn derive_client_hints_android() {
+        let ua = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36";
+        let (_, platform) = derive_client_hints(ua);
+        assert_eq!(platform, r#""Android""#);
+    }
+
+    #[test]
+    fn derive_client_hints_defaults_when_no_version() {
+        // No Chrome/ token → falls back to 145.
+        let ua = "Mozilla/5.0 (Macintosh) Gecko Firefox/120.0";
+        let (ch_ua, _) = derive_client_hints(ua);
+        assert!(ch_ua.contains(r#""Chromium";v="145""#));
+    }
+
+    // Env- and flag-sensitive (1f7486c pattern): the lock serializes tests
+    // that touch the file-access switch; the drop-guard restores both halves
+    // even on panic so the off-by-default contract can't leak across tests.
+    use super::file_access_test::file_access_guard;
+
+    fn temp_file(name: &str, body: &[u8]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("agx-file-url-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    fn file_url_for(path: &std::path::Path) -> Url {
+        Url::from_file_path(path).unwrap()
+    }
+
+    #[tokio::test]
+    async fn file_url_gate_is_off_by_default_and_names_the_switch() {
+        let _guard = file_access_guard(false);
+        let url = Url::parse("file:///definitely/not/here.html").unwrap();
+        let NetError::Network(msg) = fetch_file_url(&url).await.unwrap_err() else {
+            panic!("expected a Network error for a gated file:// read");
+        };
+        assert!(msg.contains("--allow-file-access"), "msg: {msg}");
+        assert!(msg.contains("AGINXBROWSER_ALLOW_FILE_ACCESS"), "msg: {msg}");
+    }
+
+    #[tokio::test]
+    async fn file_url_read_with_gate_open_sets_content_type() {
+        let _guard = file_access_guard(true);
+        let path = temp_file("page.html", b"<html><title>local</title></html>");
+        let resp = fetch_file_url(&file_url_for(&path)).await.unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.headers.get("content-type").unwrap(), "text/html");
+        assert_eq!(resp.body, b"<html><title>local</title></html>");
+
+        let blob = temp_file("blob.bin", b"\x00\x01");
+        let resp = fetch_file_url(&file_url_for(&blob)).await.unwrap();
+        assert_eq!(resp.headers.get("content-type").unwrap(), "application/octet-stream");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&blob);
+    }
+
+    #[tokio::test]
+    async fn file_url_missing_file_is_a_read_error() {
+        let _guard = file_access_guard(true);
+        let url = Url::parse("file:///definitely/not/here.html").unwrap();
+        let NetError::Network(msg) = fetch_file_url(&url).await.unwrap_err() else {
+            panic!("expected a Network error for a missing file");
+        };
+        assert!(msg.contains("Failed to read file"), "msg: {msg}");
+    }
+
+    #[tokio::test]
+    async fn file_url_percent_decoding_survives_spaces_and_cjk() {
+        let _guard = file_access_guard(true);
+        let path = temp_file("a b 世界.html", b"<h1>ok</h1>");
+        // Url::from_file_path percent-encodes; the loader must decode back.
+        let url = file_url_for(&path);
+        assert!(url.as_str().contains("%"), "expected encoding: {url}");
+        let resp = fetch_file_url(&url).await.unwrap();
+        assert_eq!(resp.body, b"<h1>ok</h1>");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn file_url_rejects_remote_hosts() {
+        let _guard = file_access_guard(true);
+        // A file URL with a non-local host must not fall through to a local
+        // path read; to_file_path refuses it and so do we.
+        let url = Url::parse("file://example.com/etc/passwd").unwrap();
+        let NetError::Network(msg) = fetch_file_url(&url).await.unwrap_err() else {
+            panic!("expected a Network error for a remote-host file URL");
+        };
+        assert!(msg.contains("Invalid file URL"), "msg: {msg}");
+    }
+
+    // Env-sensitive: AGINXBROWSER_ALLOW_PRIVATE_NETWORK overrides rejection, so this
+    // runs under the crate-wide env lock with the variable cleared.
+    #[tokio::test]
+    async fn validate_url_ssrf_rules() {
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        for bad in [
+            "http://127.0.0.1/",
+            "http://127.1.2.3:8080/admin",
+            "http://10.0.0.5/",
+            "http://192.168.1.1/",
+            "http://172.16.0.1/",
+            "http://169.254.169.254/latest/meta-data",
+            "http://[::1]/",
+            "http://localhost:3000/",
+        ] {
+            let url = Url::parse(bad).unwrap();
+            assert!(validate_url(&url, false).is_err(), "{bad} must be rejected");
+        }
+
+        for good in ["http://example.com/", "https://example.com:8443/a?b=c", "file:///tmp/x.html"] {
+            let url = Url::parse(good).unwrap();
+            assert!(validate_url(&url, false).is_ok(), "{good} must be allowed");
+        }
+        let url = Url::parse("ftp://example.com/").unwrap();
+        assert!(validate_url(&url, false).is_err(), "ftp must be rejected");
+    }
+
+    /// Drop-guard fixture for the scoped allow-network knob: clears
+    /// `AGINXBROWSER_ALLOW_NETWORK` and the CLI list even on panic, so the
+    /// deny-set-by-default contract can't leak across tests (1f7486c
+    /// pattern). Hold `PRIVATE_NET_ENV_LOCK` while asserting.
+    struct AllowNetworkGuard;
+    impl Drop for AllowNetworkGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("AGINXBROWSER_ALLOW_NETWORK");
+            set_allow_network(None);
+        }
+    }
+
+    #[test]
+    fn parse_scoped_cidrs_bare_ip_and_bounds() {
+        use std::str::FromStr;
+        let list = parse_scoped_cidrs("10.20.0.0/16, 127.0.0.1, ::1/128, banana, 10.0.0.0/33");
+        // "banana" and the /33 are skipped (fail closed), never widened.
+        assert_eq!(list.len(), 3, "parsed: {list:?}");
+        assert_eq!(list[0], ScopedCidr { net: IpAddr::from_str("10.20.0.0").unwrap(), prefix: 16 });
+        assert_eq!(list[1], ScopedCidr { net: IpAddr::from_str("127.0.0.1").unwrap(), prefix: 32 });
+        assert_eq!(list[2], ScopedCidr { net: IpAddr::from_str("::1").unwrap(), prefix: 128 });
+    }
+
+    #[test]
+    fn scoped_allow_network_opens_only_listed_cidrs() {
+        use std::str::FromStr;
+        let _lock = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        let _guard = AllowNetworkGuard;
+        std::env::set_var(
+            "AGINXBROWSER_ALLOW_NETWORK",
+            "10.20.0.0/16, 127.0.0.1, ::1",
+        );
+
+        let f = |s: &str| is_forbidden_ip(IpAddr::from_str(s).unwrap());
+        // Listed ranges open...
+        assert!(!f("10.20.3.4"), "10.20.3.4 must pass the /16 entry");
+        assert!(!f("127.0.0.1"), "bare-IP entry opens loopback");
+        assert!(!f("::1"), "v6 entry opens ::1");
+        // ...everything else stays shut, metadata endpoints included...
+        assert!(f("10.21.0.1"), "outside the /16 stays forbidden");
+        assert!(f("192.168.1.1"), "unlisted RFC1918 stays forbidden");
+        assert!(f("169.254.169.254"), "cloud metadata stays closed");
+        assert!(f("100.100.100.200"), "CGNAT metadata stays closed");
+        // ...and the embedded-IPv4 recursions respect the list at the leaf.
+        assert!(!f("::ffff:10.20.3.4"), "mapped allow-listed v4 passes");
+        assert!(f("::ffff:169.254.169.254"), "mapped metadata stays closed");
+        assert!(!f("2002:0a14:0304::"), "6to4-wrapped allow-listed v4 passes");
+        assert!(f("2002:a9fe:a9fe::"), "6to4-wrapped metadata stays closed");
+        assert!(!f("64:ff9b::a14:304"), "NAT64-wrapped allow-listed v4 passes");
+        // Teredo is the deliberate exception: the three-slot check (server,
+        // client, XOR-obfuscated client) needs every slot individually
+        // allowed, and a 10.20.0.0/16 client obfuscates to a public
+        // 245.235.x.y — so the whole form stays blocked. Fail closed.
+        assert!(f("2001:0:a14:304::"), "Teredo stays closed even with the server slot allow-listed");
+    }
+
+    #[test]
+    fn validate_url_honors_scoped_allow_network() {
+        let _lock = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        let _guard = AllowNetworkGuard;
+        std::env::set_var("AGINXBROWSER_ALLOW_NETWORK", "10.20.0.0/16");
+
+        let url = Url::parse("http://10.20.3.4:3000/admin").unwrap();
+        assert!(
+            validate_url(&url, false).is_ok(),
+            "listed /16 must pass validate_url without allow-private-network"
+        );
+        let url = Url::parse("http://169.254.169.254/latest/meta-data").unwrap();
+        assert!(
+            validate_url(&url, false).is_err(),
+            "metadata endpoint stays rejected under a scoped list"
+        );
+    }
+
+    #[test]
+    fn cli_allow_network_flag_and_clear_restore_gate() {
+        use std::str::FromStr;
+        let _lock = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        let _guard = AllowNetworkGuard;
+        std::env::remove_var("AGINXBROWSER_ALLOW_NETWORK");
+
+        set_allow_network(Some("10.0.0.0/8"));
+        assert!(!is_forbidden_ip(IpAddr::from_str("10.20.3.4").unwrap()));
+        set_allow_network(None);
+        assert!(is_forbidden_ip(IpAddr::from_str("10.20.3.4").unwrap()));
+    }
+
+    #[test]
+    fn is_forbidden_ip_covers_mapped_and_unspecified() {
+        use std::str::FromStr;
+        for bad in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "192.168.0.1",
+            "172.16.5.4",
+            "169.254.169.254",
+            "0.0.0.0",
+            "255.255.255.255",
+            "192.0.2.1", // documentation
+            "::1",
+            "::",
+            "fc00::1",
+            "fe80::1",
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1", // IPv4-mapped
+        ] {
+            assert!(
+                is_forbidden_ip(IpAddr::from_str(bad).unwrap()),
+                "{bad} must be forbidden"
+            );
+        }
+        for good in ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"] {
+            assert!(
+                !is_forbidden_ip(IpAddr::from_str(good).unwrap()),
+                "{good} must be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn is_forbidden_ip_covers_iana_special_purposes() {
+        use std::str::FromStr;
+        for bad in [
+            "0.0.0.0", "0.1.2.3",                  // 0.0.0.0/8 "this network"
+            "100.64.0.1", "100.100.100.200",       // 100.64.0.0/10 CGNAT (Alibaba metadata)
+            "100.127.255.254",                     // CGNAT upper edge
+            "192.0.0.192",                         // 192.0.0.0/24 (Oracle)
+            "192.31.196.1", "192.52.193.1",        // AS112
+            "192.88.99.1",                         // 6to4 relay
+            "192.175.48.1",                        // Portmap
+            "198.18.0.1", "198.19.255.254",        // 198.18.0.0/15 benchmarking
+            "224.0.0.1", "239.1.1.1",              // multicast
+            "240.0.0.1", "250.1.2.3",              // reserved/future
+            "2001:db8::1",                         // documentation v6
+            "100::1",                              // discard-only 100::/64
+            "ff02::1", "ff0e::1",                  // ff00::/8
+        ] {
+            assert!(is_forbidden_ip(IpAddr::from_str(bad).unwrap()), "{bad} must be forbidden");
+        }
+        // CGNAT lower/upper neighbors stay reachable.
+        for good in ["100.63.255.254", "100.128.0.1", "198.17.255.254", "198.20.0.1", "223.255.255.254"] {
+            assert!(!is_forbidden_ip(IpAddr::from_str(good).unwrap()), "{good} must be allowed");
+        }
+    }
+
+    #[test]
+    fn is_forbidden_ip_unwraps_embedded_ipv4_from_6to4_and_nat64() {
+        use std::str::FromStr;
+        for bad in [
+            // 6to4 2002::/16 wrapping forbidden v4 targets.
+            "2002:a9fe:a9fe::",   // 169.254.169.254 cloud metadata
+            "2002:7f00:1::",      // 127.0.0.1 loopback
+            "2002:a00:1::",       // 10.0.0.1 RFC1918
+            "2002:6464:64c8::",   // 100.100.100.200 Alibaba metadata
+            "2002:c0a8:101::",    // 192.168.1.1
+            // NAT64 well-known prefix 64:ff9b::/96.
+            "64:ff9b::7f00:1",    // 127.0.0.1
+            "64:ff9b::a9fe:a9fe", // 169.254.169.254
+            "64:ff9b:1::7f00:1",  // local-use 64:ff9b:1::/48 (RFC 8215) → 127.0.0.1
+            // IPv4-compatible and mapped re-checked through the v4 deny-set.
+            "::127.0.0.1", "::ffff:169.254.169.254",
+        ] {
+            assert!(is_forbidden_ip(IpAddr::from_str(bad).unwrap()), "{bad} must be forbidden");
+        }
+        // A 6to4/NAT64 wrapper around a PUBLIC v4 stays allowed — the guard
+        // re-checks the embedded address, it does not blanket-ban the prefix.
+        for good in ["2002:0808:0808::", /* 8.8.8.8 */ "64:ff9b::808:808"] {
+            assert!(!is_forbidden_ip(IpAddr::from_str(good).unwrap()), "{good} must be allowed");
+        }
+    }
+
+    #[test]
+    fn is_forbidden_ip_unwraps_teredo_embedded_ipv4() {
+        use std::str::FromStr;
+        for bad in [
+            // Client slot XOR-obfuscated with 0xffff (RFC 4380 wire format):
+            // 80fe:fefe ^ ffff:ffff = 7f01:0101 = 127.1.1.1.
+            "2001:0:4136:e378:8000:63bf:80fe:fefe",
+            // Server slot (bits 32-63) is raw attacker bytes too.
+            "2001:0:a9fe:a9fe::", // 169.254.169.254 cloud metadata
+            "2001:0:7f00:1::",    // 127.0.0.1
+            "2001:0:6464:64c8::", // 100.100.100.200 Alibaba metadata
+            // Client slot written raw (unobfuscated).
+            "2001:0:cf2e:d242::7f00:1",
+            // Client slot obfuscated metadata: 5601:5601 ^ ffff = a9fe:a9fe.
+            "2001:0:cf2e:d242:eb00:1234:5601:5601",
+        ] {
+            assert!(is_forbidden_ip(IpAddr::from_str(bad).unwrap()), "{bad} must be forbidden");
+        }
+        // A Teredo wrapper with a public v4 in every slot stays allowed —
+        // server 65.54.227.120 (real Teredo server), raw client 176.16.33.80,
+        // de-obfuscated client 79.239.222.175.
+        for good in ["2001:0:4136:e378:8000:63bf:b010:2150"] {
+            assert!(!is_forbidden_ip(IpAddr::from_str(good).unwrap()), "{good} must be allowed");
+        }
+    }
+
+    #[test]
+    fn validate_url_rejects_embedded_ipv6_literal_hosts() {
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        for bad in [
+            "http://[2002:7f00:1::]/",         // 6to4-wrapped loopback
+            "http://[64:ff9b::7f00:1]/",       // NAT64-wrapped loopback
+            "http://[2002:a9fe:a9fe::]/latest/meta-data", // 6to4-wrapped metadata
+            "http://[2001:0:4136:e378:8000:63bf:80fe:fefe]/", // Teredo-obfuscated loopback
+        ] {
+            let url = Url::parse(bad).unwrap();
+            assert!(validate_url(&url, false).is_err(), "{bad} must be rejected");
+        }
+    }
+
+    #[tokio::test]
+    async fn ssrf_guard_resolver_blocks_loopback_resolution() {
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let guarded = SsrfGuardResolver::new(false);
+        assert!(
+            guarded.resolve(Name::from_str("localhost").unwrap()).await.is_err(),
+            "localhost must be rejected by the guarded resolver"
+        );
+
+        let permissive = SsrfGuardResolver::new(true);
+        assert!(
+            permissive.resolve(Name::from_str("localhost").unwrap()).await.is_ok(),
+            "allow_private must pass localhost through"
+        );
+    }
+
+    use std::str::FromStr;
+
+    /// Serve a canned 200 response on a NON-loopback local address.
+    ///
+    /// reqwest exempts loopback destinations from env-proxy matching (like
+    /// Chrome's implicit localhost bypass), so a 127.0.0.1 fixture is blind
+    /// to exactly the failure these tests pin — the first probe round here
+    /// reported "env ignored" purely because of that exemption. The LAN
+    /// address is discovered via a UDP connect (no packet leaves; it only
+    /// makes the routing table pick an interface).
+    async fn lan_http_origin(body: &'static str) -> Option<(Url, tokio::task::JoinHandle<()>)> {
+        let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+        probe.connect("8.8.8.8:80").ok()?;
+        let ip = probe.local_addr().ok()?.ip();
+        if ip.is_loopback() {
+            return None;
+        }
+        let listener = tokio::net::TcpListener::bind((ip, 0)).await.ok()?;
+        let addr = listener.local_addr().ok()?;
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else { break };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 1024];
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        stream.read(&mut buf),
+                    )
+                    .await;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        Some((Url::parse(&format!("http://{addr}/")).unwrap(), handle))
+    }
+
+    fn set_dead_standard_proxy_env() {
+        for (k, v) in [
+            ("HTTP_PROXY", "http://127.0.0.1:1"),
+            ("HTTPS_PROXY", "http://127.0.0.1:1"),
+            ("ALL_PROXY", "http://127.0.0.1:1"),
+            ("http_proxy", "http://127.0.0.1:1"),
+            ("https_proxy", "http://127.0.0.1:1"),
+            ("all_proxy", "http://127.0.0.1:1"),
+        ] {
+            unsafe { std::env::set_var(k, v) };
+        }
+    }
+
+    fn clear_standard_proxy_env() {
+        for k in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            unsafe { std::env::remove_var(k) };
+        }
+    }
+
+    /// obscura#491 class: standard proxy env vars must not silently route
+    /// engine traffic through a proxy the operator never configured in the
+    /// engine. If they do, a dead HTTP_PROXY takes down every public fetch
+    /// with an error that never mentions a proxy. Runs under the crate env
+    /// lock because the env mutation is process-global.
+    #[allow(clippy::await_holding_lock)] // env guard must span the fixture fetch — that's the serialization
+    #[tokio::test]
+    async fn standard_proxy_env_cannot_hijack_engine_clients() {
+        let Some((url, origin)) = lan_http_origin("env-proxy-hijack").await else {
+            eprintln!("skip: no non-loopback local address to serve on");
+            return;
+        };
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        set_dead_standard_proxy_env();
+
+        // proxy_url None + private-network allowed (the LAN fixture address is
+        // RFC1918): the operator asked for a direct fetch.
+        let client = HttpClient::with_full_options(
+            std::sync::Arc::new(CookieJar::new()),
+            None,
+            true,
+        );
+        let fetched = client.fetch(&url).await;
+
+        clear_standard_proxy_env();
+        origin.abort();
+
+        match fetched {
+            Ok(resp) => assert_eq!(resp.status, 200, "direct fetch must succeed"),
+            Err(e) => panic!("standard proxy env hijacked a proxy-less client: {e:?}"),
+        }
+    }
+
+    /// #664 lesson applied to the proxy path: when the configured upstream
+    /// proxy is unreachable, the error must name the proxy and its knob —
+    /// the reader should not have to go verbose-logging to learn a proxy is
+    /// involved at all (the original #491 debugging cost).
+    #[allow(clippy::await_holding_lock)] // env guard must span the fixture fetch — that's the serialization
+    #[tokio::test]
+    async fn dead_upstream_proxy_error_names_the_proxy() {
+        let Some((url, origin)) = lan_http_origin("proxy-naming").await else {
+            eprintln!("skip: no non-loopback local address to serve on");
+            return;
+        };
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        clear_standard_proxy_env();
+
+        let client = HttpClient::with_options(
+            std::sync::Arc::new(CookieJar::new()),
+            Some("http://127.0.0.1:1"),
+        );
+        // The engine's own proxy gate: RFC1918 target needs the opt-in even
+        // though the dial actually goes to the dead proxy.
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+        let fetched = client.fetch(&url).await;
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+        origin.abort();
+
+        let err = fetched.expect_err("dialing a dead proxy must fail");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("upstream proxy") && msg.contains("http://127.0.0.1:1"),
+            "error must name the unreachable proxy, got: {msg}"
+        );
+        assert!(
+            msg.contains("AGINXBROWSER_PROXY"),
+            "error must name the knob, got: {msg}"
+        );
+    }
+
+    /// Same LAN placement as [`lan_http_origin`], but the response body is
+    /// the received request head (one `name: value` line per header). Let's
+    /// the tests assert exactly what went out on the wire.
+    async fn header_echo_origin() -> Option<(Url, tokio::task::JoinHandle<()>)> {
+        let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+        probe.connect("8.8.8.8:80").ok()?;
+        let ip = probe.local_addr().ok()?.ip();
+        if ip.is_loopback() {
+            return None;
+        }
+        let listener = tokio::net::TcpListener::bind((ip, 0)).await.ok()?;
+        let addr = listener.local_addr().ok()?;
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else { break };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = Vec::new();
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        async {
+                            let mut chunk = [0u8; 2048];
+                            // Consume the body too, so small POSTs never hit a
+                            // reset mid-write on the client side.
+                            loop {
+                                let n = stream.read(&mut chunk).await?;
+                                buf.extend_from_slice(&chunk[..n]);
+                                let head_end = buf
+                                    .windows(4)
+                                    .position(|w| w == b"\r\n\r\n")
+                                    .map(|p| p + 4);
+                                if let Some(end) = head_end {
+                                    let head = String::from_utf8_lossy(&buf[..end]).to_string();
+                                    let claimed: usize = head
+                                        .lines()
+                                        .find_map(|l| {
+                                            l.to_ascii_lowercase()
+                                                .strip_prefix("content-length:")
+                                                .and_then(|v| v.trim().parse().ok())
+                                        })
+                                        .unwrap_or(0);
+                                    if buf.len() >= end + claimed {
+                                        break;
+                                    }
+                                }
+                                if buf.len() > 64 * 1024 {
+                                    break;
+                                }
+                            }
+                            Ok::<(), std::io::Error>(())
+                        },
+                    )
+                    .await;
+                    let head = String::from_utf8_lossy(&buf).to_string();
+                    let echo: Vec<String> = head
+                        .lines()
+                        .skip(1)
+                        .take_while(|l| !l.is_empty())
+                        .map(|l| l.to_ascii_lowercase())
+                        .collect();
+                    let body = echo.join("\n");
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        Some((Url::parse(&format!("http://{addr}/")).unwrap(), handle))
+    }
+
+    fn echoed<'a>(echo: &'a str, name: &str) -> Vec<&'a str> {
+        echo.lines()
+            .filter_map(|l| l.strip_prefix(&format!("{name}:")).map(|v| v.trim()))
+            .collect()
+    }
+
+    fn referrer_client() -> HttpClient {
+        HttpClient::with_full_options(std::sync::Arc::new(CookieJar::new()), None, true)
+    }
+
+    /// Page-subresource GETs carry the initiating document as Referer
+    /// (strict-origin-when-cross-origin: same-origin keeps the full URL
+    /// minus the fragment). Domain-whitelist service APIs reject bare
+    /// requests — this is the #268 wire contract.
+    #[tokio::test]
+    async fn subresource_get_carries_document_referer() {
+        let Some((base, server)) = header_echo_origin().await else {
+            eprintln!("skip: no non-loopback local address to serve on");
+            return;
+        };
+        let doc = format!("{}doc/page.html?a=1#frag", base);
+        let target = format!("{}img/pin.png", base);
+        let fetched = referrer_client()
+            .fetch_subresource(&Url::parse(&target).unwrap(), Some(&doc))
+            .await;
+        server.abort();
+
+        let resp = fetched.expect("echo fetch must succeed");
+        let echo = String::from_utf8_lossy(&resp.body).to_string();
+        let want = doc.split('#').next().unwrap().to_string();
+        let refs = echoed(&echo, "referer");
+        assert_eq!(refs.len(), 1, "exactly one Referer, echo: {echo}");
+        assert_eq!(refs[0], want, "fragment must be trimmed, echo: {echo}");
+    }
+
+    /// Non-GET subresource loads carry Origin alongside Referer — same-origin
+    /// POSTs included (b744b9b fetch()-op semantics).
+    #[tokio::test]
+    async fn post_form_carries_origin_and_referer() {
+        let Some((base, server)) = header_echo_origin().await else {
+            eprintln!("skip: no non-loopback local address to serve on");
+            return;
+        };
+        let doc = format!("{}doc/form.html", base);
+        let fetched = referrer_client()
+            .post_form_with_callbacks(&base, "a=1", None, ResourceType::Fetch, Some(&doc))
+            .await;
+        server.abort();
+
+        let resp = fetched.expect("echo post must succeed");
+        let echo = String::from_utf8_lossy(&resp.body).to_string();
+        let origins = echoed(&echo, "origin");
+        assert_eq!(origins.len(), 1, "exactly one Origin, echo: {echo}");
+        assert_eq!(origins[0], base.as_str().trim_end_matches('/'), "echo: {echo}");
+        assert!(!echoed(&echo, "referer").is_empty(), "echo: {echo}");
+    }
+
+    /// setExtraHTTPHeaders-style overrides win over the computed Referer —
+    /// a tool that pins a header must not be silently re-prefixed.
+    #[tokio::test]
+    async fn extra_headers_override_computed_referer() {
+        let Some((base, server)) = header_echo_origin().await else {
+            eprintln!("skip: no non-loopback local address to serve on");
+            return;
+        };
+        let client = referrer_client();
+        client
+            .set_extra_headers(HashMap::from([(
+                "Referer".to_string(),
+                "https://override.example/page".to_string(),
+            )]))
+            .await;
+        let doc = format!("{}doc/page.html", base);
+        let fetched = client
+            .fetch_subresource(&base.clone(), Some(&doc))
+            .await;
+        server.abort();
+
+        let resp = fetched.expect("echo fetch must succeed");
+        let echo = String::from_utf8_lossy(&resp.body).to_string();
+        let refs = echoed(&echo, "referer");
+        assert_eq!(refs.len(), 1, "echo: {echo}");
+        assert_eq!(refs[0], "https://override.example/page", "echo: {echo}");
+    }
+
+    /// Direct automation navs (tool-initiated fetch() with no referrer)
+    /// stay bare — edb1785 semantics preserved by the same code path.
+    #[tokio::test]
+    async fn untraced_fetch_stays_bare() {
+        let Some((base, server)) = header_echo_origin().await else {
+            eprintln!("skip: no non-loopback local address to serve on");
+            return;
+        };
+        let fetched = referrer_client().fetch(&base.clone()).await;
+        server.abort();
+
+        let resp = fetched.expect("echo fetch must succeed");
+        let echo = String::from_utf8_lossy(&resp.body).to_string();
+        assert!(
+            echoed(&echo, "referer").is_empty(),
+            "tool fetch must not invent a Referer, echo: {echo}"
+        );
+    }
+
+    /// 127.0.0.1:1 is a closed port: both transports fail fast with
+    /// connection refused, but the GET error must carry the legacy-attempt
+    /// marker proving the fallback actually fired.
+    #[cfg(feature = "stealth")]
+    #[tokio::test]
+    async fn legacy_tls_retries_get_transport_failures() {
+        let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+        let url = Url::parse("http://127.0.0.1:1/dead").unwrap();
+        let err = client.fetch(&url).await.expect_err("closed port must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("legacy TLS transport"),
+            "GET must reach the legacy retry, got: {msg}"
+        );
+    }
+
+    /// 127.0.0.1:1 is a closed port: connection refused is connect-stage by
+    /// definition, so a POST (with its body) rides the legacy retry just
+    /// like a GET — the request provably never left the machine.
+    #[cfg(feature = "stealth")]
+    #[tokio::test]
+    async fn legacy_tls_retries_connect_stage_post() {
+        let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+        let url = Url::parse("http://127.0.0.1:1/submit").unwrap();
+        let err = client
+            .fetch_with_method(Method::POST, &url, Some(b"a=1".to_vec()))
+            .await
+            .expect_err("closed port must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("legacy TLS transport"),
+            "connect-stage POST must reach the legacy retry, got: {msg}"
+        );
+    }
+
+    /// A POST that failed AFTER the bytes went out must keep its original
+    /// error — that is the double-submit guard. The fixture accepts the
+    /// request, then closes mid-body (Content-Length promises more than it
+    /// delivers), which reqwest classifies as a body-read failure, not a
+    /// connect failure.
+    #[cfg(feature = "stealth")]
+    #[tokio::test]
+    async fn legacy_tls_keeps_post_error_after_the_request_left() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _env = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = stream.read(&mut buf).await;
+                    // Promise 100 bytes, deliver 3, close.
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\nconnection: close\r\n\r\nabc",
+                        )
+                        .await;
+                });
+            }
+        });
+
+        let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/submit")).unwrap();
+        let err = client
+            .fetch_with_method(Method::POST, &url, Some(b"a=1".to_vec()))
+            .await
+            .expect_err("truncated body must fail");
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("legacy TLS transport"),
+            "post-send POST failure must not be retried (double-submit), got: {msg}"
+        );
+        assert!(
+            msg.contains("Failed to read body"),
+            "the original transport error must surface, got: {msg}"
+        );
+    }
+
+    /// The op_fetch_url entry point takes a raw reqwest error string, not a
+    /// NetError — same closed-port probe, same markers, proving the helper
+    /// forwards into the guarded retry.
+    #[cfg(feature = "stealth")]
+    #[tokio::test]
+    async fn scripted_fetch_fallback_fires_for_get() {
+        let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+        let url = Url::parse("http://127.0.0.1:1/dead").unwrap();
+        let err = client
+            .scripted_fetch_fallback(&Method::GET, &url, "error sending request", None, None, false, None, true)
+            .await
+            .expect_err("closed port must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("legacy TLS transport"),
+            "scripted GET must reach the legacy retry, got: {msg}"
+        );
+    }
+
+    /// A scripted POST flagged connect-stage rides the fallback with its
+    /// body — the caller's classification is trusted only for this hop.
+    #[cfg(feature = "stealth")]
+    #[tokio::test]
+    async fn scripted_fetch_fallback_retries_connect_stage_post() {
+        let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+        let url = Url::parse("http://127.0.0.1:1/submit").unwrap();
+        let err = client
+            .scripted_fetch_fallback(
+                &Method::POST,
+                &url,
+                "error sending request",
+                Some(b"a=1".as_slice()),
+                Some("application/x-www-form-urlencoded"),
+                true,
+                None,
+                true,
+            )
+            .await
+            .expect_err("closed port must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("legacy TLS transport"),
+            "connect-stage POST must reach the legacy retry, got: {msg}"
+        );
+    }
+
+    /// A scripted POST that already left the machine (post-send failure)
+    /// keeps its original error — the double-submit guard.
+    #[cfg(feature = "stealth")]
+    #[tokio::test]
+    async fn scripted_fetch_fallback_keeps_post_error_after_send() {
+        let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+        let url = Url::parse("http://127.0.0.1:1/submit").unwrap();
+        let err = client
+            .scripted_fetch_fallback(
+                &Method::POST,
+                &url,
+                "error reading a body from connection",
+                Some(b"a=1".as_slice()),
+                Some("application/x-www-form-urlencoded"),
+                false,
+                None,
+                true,
+            )
+            .await
+            .expect_err("must fail");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("legacy TLS transport"),
+            "scripted POST must not be retried, got: {msg}"
+        );
+        assert!(
+            msg.contains("error reading a body from connection"),
+            "guard skip must surface the original transport error, got: {msg}"
+        );
+    }
+
+    /// A gate rejection travels as NetError::Network just like a transport
+    /// failure — the re-validation inside the fallback is what keeps SSRF
+    /// denials from ever reaching the legacy stack.
+    #[cfg(feature = "stealth")]
+    #[tokio::test]
+    async fn legacy_tls_never_retries_ssrf_gate_rejections() {
+        let _env = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+        let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, false);
+        let url = Url::parse("http://127.0.0.1:1/dead").unwrap();
+        let err = client.fetch(&url).await.expect_err("gate must reject");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("legacy TLS transport"),
+            "SSRF denial must not fall through to the legacy stack, got: {msg}"
+        );
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+    }
+}

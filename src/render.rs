@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::{FetchResponse, OutputFormat, RenderTier};
 
-use crate::diting_net::{CookieJar, HttpClient};
+use diting::diting_net::{CookieJar, HttpClient};
 
 /// Does the URL point at a known antispider/CAPTCHA redirect target?
 /// Shared by the render tier and the search module.

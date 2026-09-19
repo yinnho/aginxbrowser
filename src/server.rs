@@ -1,5 +1,5 @@
 use crate::browser::Browser;
-use crate::diting_net::CookieJar;
+use diting::diting_net::CookieJar;
 use crate::{
     ClickRequest, ClickResponse, EvalRequest, EvalResponse, FetchRequest, FetchResponse,
     OutputFormat, SearchRequest, SearchResponse,
@@ -1115,7 +1115,7 @@ pub fn do_pdf(req: crate::PdfRequest) -> Result<crate::PdfResponse> {
                 .iter()
                 .map(|(w, h, j)| (*w, *h, j.as_slice()))
                 .collect();
-            let pdf_refs: Vec<(u32, u32, &[u8], &[crate::diting_layout::paint::PdfOp])> = jpegs
+            let pdf_refs: Vec<(u32, u32, &[u8], &[diting::diting_layout::paint::PdfOp])> = jpegs
                 .iter()
                 .zip(set.text_ops.iter())
                 .map(|((w, h, j), ops)| (*w, *h, j.as_slice(), ops.as_slice()))
@@ -1504,7 +1504,7 @@ pub(crate) mod test_util {
         }
     }
     pub(crate) fn net_env_guard() -> NetEnvGuard {
-        let guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        let guard = crate::test_support::PRIVATE_NET_ENV_LOCK.lock().unwrap();
         std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
         NetEnvGuard(guard)
     }
@@ -1952,7 +1952,7 @@ mod cookie_injection_tests {
 
     #[test]
     fn cross_domain_cookies_survive_injection_into_the_jar() {
-        let jar = crate::diting_net::CookieJar::new();
+        let jar = diting::diting_net::CookieJar::new();
         let target = "https://shop.miceal.taobao.com/";
         for entry in [
             "cookie1=t; Domain=.taobao.com; Path=/",

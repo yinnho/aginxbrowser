@@ -11,47 +11,20 @@ homepage = "https://browser.aginx.net"
 keywords = ["browser", "mcp", "web-scraping", "headless", "automation"]
 categories = ["web-programming", "network-programming", "command-line-utilities", "development-tools"]
 
+[workspace]
+members = ["crates/diting"]
+resolver = "2"
+
 [features]
 default = []
-# Stealth HTTP client with TLS/JA3 fingerprint spoofing via wreq (BoringSSL).
-# Disable for plain reqwest-only builds.
-stealth = ["dep:wreq", "dep:wreq-util"]
-# Screenshot rendering via the inlined diting engine (own CSS+layout+paint
-# stack on the taffy/parley/swash/vello_cpu foundation). Opt-in; renders the
-# JS-rendered DOM (captured by the diting V8 path) to a PNG — no Chromium
-# required, no blitz.
-screenshot = [
-    "dep:anyrender",
-    "dep:anyrender_vello_cpu",
-    "dep:peniko",
-    "dep:png",
-    # JPEG/WebP/GIF decode for diting_layout's ImageCache (batches 6d/7b/7e).
-    # Same `image` crate version blitz-dom decodes with, so RGBA output is
-    # identical (only relevant when blitz-reference is also on). Animated
-    # GIFs take the first frame. `png` is needed by the CDP legacy path,
-    # which re-encodes JPEG captures from the rendered PNG bytes.
-    "dep:image",
-    "image/jpeg",
-    "image/png",
-    "image/webp",
-    "image/gif",
-    # Taffy does diting's box layout. The direct handle also feeds the
-    # fork-delta tests (see below).
-    "dep:taffy",
-    # Real glyph measurement + rasterization for diting_layout text leaves
-    # (render claim batches 3a/3b). Same stack upstream obscura-render builds
-    # on. scale/render are the outline raster features (3b paint).
-    "dep:swash",
-    # parley is consumed ONLY behind `blitz-reference` (diting_fonts'
-    # FontContext + the cross-check fixtures); diting's own text stack is
-    # swash + its own greedy_wrap (batch 72). Kept under `screenshot` for
-    # historical layering — blitz-reference gates on screenshot.
-    "dep:parley",
-    # musl cross builds cannot link fontconfig at build time (no pkg-config
-    # sysroot). dlopen defers libfontconfig to runtime; fontique degrades
-    # gracefully when it is absent (bundled CJK fonts carry the render).
-    "fontique/fontconfig-dlopen",
-]
+# Stealth HTTP client with TLS/JA3 fingerprint spoofing via wreq (BoringSSL),
+# in the diting engine (crates/diting). Disable for plain reqwest-only builds.
+stealth = ["diting/stealth", "dep:wreq-util"]
+# Screenshot rendering via the diting engine (crates/diting) — own
+# CSS+layout+paint stack, no Chromium required, no blitz. The engine's
+# render deps live in diting; the product face only needs encode/decode
+# (PNG/JPEG re-encode of the engine's rendered bytes).
+screenshot = ["diting/screenshot", "dep:image", "dep:png"]
 # The Blitz reference pipeline (DioxusLabs/blitz, rev-pinned) — the engine
 # diting grew up against and still cross-checks. Purely opt-in: adds the
 # blitz-* crates plus Stylo (~30-40MB and a large compile-time chunk) and
@@ -60,6 +33,7 @@ screenshot = [
 # `screenshot` and contain zero blitz code.
 blitz-reference = [
     "screenshot",
+    "diting/blitz-reference",
     "dep:blitz-dom",
     "dep:blitz-html",
     "dep:blitz-paint",
@@ -67,48 +41,20 @@ blitz-reference = [
     # Direct stylo handle for the dual-engine computed-style cross-check
     # tests (diting_css vs Stylo) — must match the version blitz pins.
     "dep:stylo_alias",
+    # Cross-check fixtures (bridge_cross_check.rs / screenshot_reference.rs)
+    # shape via parley/fontique and raster via anyrender/vello_cpu/peniko
+    # directly.
+    "dep:parley",
+    "dep:fontique",
+    "dep:anyrender",
+    "dep:anyrender_vello_cpu",
+    "dep:peniko",
 ]
 
 [dependencies]
+diting = { path = "crates/diting" }
 # The alias is how blitz-dom names upstream stylo; same crate, same version.
 stylo_alias = { version = "0.21", package = "stylo", optional = true }
-# Taffy git pin, mirroring blitz's workspace declaration (their tree tracks
-# taffy main; c17b313 is the rev blitz 916fa89 pins).
-# When blitz-reference is also enabled, features must EXACTLY mirror blitz's
-# workspace declaration (default-features = false, no float_layout): cargo
-# unifies features across the graph, so any extra feature would silently
-# change the product pipeline's layout behavior (float_layout alters block
-# layout). In a screenshot-only build there is no unification partner, but
-# keep the mirror anyway so toggling blitz-reference can't shift diting.
-# taffy_tree is additionally listed because the unified graph already enables
-# it (Cargo.lock shows taffy pulling slotmap) — an explicit no-op.
-# Used by diting_layout box layout and the fork-delta tests (docs/engine/render.md).
-taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "c17b313cd1be5a4def91522cf3ea5995e664ebf7", optional = true, default-features = false, features = [
-    "std",
-    "taffy_tree",
-    "flexbox",
-    "grid",
-    "block_layout",
-    "content_size",
-    "calc",
-    "detailed_layout_info",
-] }
-# Shaped advances + font metrics (batch 3a) and glyph rasterization (3b) for
-# diting_layout text leaves. Same stack upstream obscura-render builds on.
-# default-features=false + explicit std/scale/render: no variations/simd knob
-# we don't use (default set is std+scale+render anyway — pin it explicitly).
-swash = { version = "0.2", optional = true, default-features = false, features = [
-    "std",
-    "scale",
-    "render",
-] }
-# parley provides the FontContext the blitz-reference cross-check fixtures
-# build (diting itself shapes via swash). Mirrors blitz's own declaration
-# (default-features false, std) so the unified graph can't drift blitz's
-# parley behavior when blitz-reference is on.
-parley = { version = "0.11.1", optional = true, default-features = false, features = ["std"] }
-# Runtime-dlopen fontconfig for musl cross builds (see `screenshot` feature).
-fontique = { version = "0.11", optional = true }
 # --- async runtime ---
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
@@ -141,58 +87,25 @@ pulldown-cmark = { version = "0.13", default-features = false, features = ["html
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# --- http client (non-stealth path) ---
+# --- http client (non-stealth path; stealth lives in diting) ---
 reqwest = { version = "0.12", features = ["cookies", "gzip", "brotli", "deflate", "rustls-tls", "socks", "json", "stream"], default-features = false }
-# Page-facing WebSocket transport: handshake runs over our own TcpStream/TLS
-# stack (client_async validates the 101 upgrade itself); tokio-tungstenite is
-# already in the tree via axum's ws feature.
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect"] }
 http = "1"
-# Same versions the tree already carries (reqwest rustls-tls path) — pinning
-# the same lines keeps the lockfile free of duplicate major versions.
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
-webpki-roots = "0.26"
-tokio-socks = "0.5"
-encoding_rs = "0.8"
-tempfile = "3"
 url = "2"
 urlencoding = "2"
 http-body-util = "0.1"
 
-# --- html / dom parsing ---
-html5ever = "0.29"
-markup5ever = "0.14"
-selectors = "0.26"
-servo_arc = "0.4"
-cssparser = "0.34"
-precomputed-hash = "0.1"
+# --- html / dom parsing (product-side convenience wrappers) ---
 scraper = "0.21"
 html2md = "0.2"
 
-# --- V8 / JS runtime (inlined obscura-js) ---
-deno_core = "0.411"
-deno_error = "0.7"
 base64 = "0.22"
-sha1 = "0.10"
 sha2 = "0.10"
-# WebCrypto (crypto.subtle) secret-key primitives. RustCrypto, pure Rust, no
-# CMake/OpenSSL, unify on the digest 0.10 / cipher 0.4 stack already in tree.
-hmac = "0.12"
-aes = "0.8"
-aes-gcm = "0.10"
-cbc = { version = "0.1", features = ["alloc"] }
-ctr = "0.9"
-pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
-hkdf = "0.12"
-# CSPRNG for getRandomValues / randomUUID (replaces Math.random).
-getrandom = "0.2"
 
 # --- stealth client (TLS fingerprint spoofing) ---
+# wreq itself lives in diting; the product keeps wreq-util (platform
+# emulation presets used by search personas).
 # Pin exact versions: wreq/wreq-util are pre-release rc crates whose API shifts
 # between builds; a caret requirement could pull an incompatible rc and break.
-# prefix-symbols renames BoringSSL exports to avoid clashing with system OpenSSL,
-# but the renaming is only correct on Linux/Android (per wreq's README).
 wreq-util = { version = "=3.0.0-rc.14", optional = true }
 
 # --- blitz reference pipeline (opt-in via `blitz-reference` feature) ---
@@ -222,6 +135,12 @@ blitz-dom = { git = "https://github.com/DioxusLabs/blitz", rev = "916fa89", opti
 blitz-html = { git = "https://github.com/DioxusLabs/blitz", rev = "916fa89", optional = true }
 blitz-paint = { git = "https://github.com/DioxusLabs/blitz", rev = "916fa89", optional = true }
 blitz-traits = { git = "https://github.com/DioxusLabs/blitz", rev = "916fa89", optional = true }
+# parley/fontique/anyrender/peniko: cross-check fixture stack — same
+# declarations diting carries under `screenshot` (see crates/diting/Cargo.toml
+# for the full rationale comments); listed here for bridge_cross_check.rs and
+# screenshot_reference.rs, gated on `blitz-reference`.
+parley = { version = "0.11.1", optional = true, default-features = false, features = ["std"] }
+fontique = { version = "0.11", optional = true }
 anyrender = { version = "0.13", optional = true }
 anyrender_vello_cpu = { version = "0.17", optional = true, features = ["multithreading"] }
 peniko = { version = "0.6", optional = true }
@@ -230,21 +149,17 @@ png = { version = "0.18", optional = true }
 image = { version = "0.25", optional = true, default-features = false, features = ["jpeg", "webp", "gif"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 
-[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
-wreq = { version = "=6.0.0-rc.31", optional = true, features = ["prefix-symbols", "socks", "gzip", "brotli", "deflate", "zstd"] }
-
-[target.'cfg(not(any(target_os = "linux", target_os = "android")))'.dependencies]
-wreq = { version = "=6.0.0-rc.31", optional = true, features = ["socks", "gzip", "brotli", "deflate", "zstd"] }
-
-[build-dependencies]
-deno_core = "0.411"
-
 [dev-dependencies]
 ureq = { version = "2", features = ["json"] }
+# CDP accessibility-domain tests build QualName'd element fixtures by hand
+# (moved with diting_cdp into the product crate; the engine still carries
+# its own copy for its parser tests).
+html5ever = "0.29"
 
 # Unwinding is REQUIRED: ops wrap their bodies in std::panic::catch_unwind so a
 # panic degrades to an error return instead of unwinding into V8's FFI frame and
 # aborting the process. panic="abort" turns every catchable op panic into a crash.
+# Workspace-wide: applies to every member crate (diting included).
 [profile.release]
 panic = "unwind"
 strip = true

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::diting_browser::{BrowserContext, Page as InnerPage};
+use diting::diting_browser::{BrowserContext, Page as InnerPage};
 use serde_json::Value;
 
 use crate::error::Error;
@@ -85,7 +85,7 @@ impl Page {
         timeout_ms: Option<u64>,
     ) -> Result<Value, String> {
         let budget = timeout_ms
-            .unwrap_or(crate::diting_js::runtime::DEFAULT_AWAIT_BUDGET_MS)
+            .unwrap_or(diting::diting_js::runtime::DEFAULT_AWAIT_BUDGET_MS)
             .clamp(100, 120_000);
         let outcome = self
             .inner
@@ -174,13 +174,13 @@ impl Page {
     }
 
     /// Drive the JS event loop until quiescent, capped at `max_ms`. See
-    /// [`crate::diting_browser::Page::settle_until_idle`].
+    /// [`diting::diting_browser::Page::settle_until_idle`].
     pub async fn settle_until_idle(&mut self, max_ms: u64) -> bool {
         self.inner.settle_until_idle(max_ms).await
     }
 
     /// One background event-loop slice (pump, then park when quiescent).
-    /// See [`crate::diting_browser::Page::pump_event_loop_slice`].
+    /// See [`diting::diting_browser::Page::pump_event_loop_slice`].
     pub async fn pump_event_loop_slice(&mut self, ms: u64) {
         self.inner.pump_event_loop_slice(ms).await
     }

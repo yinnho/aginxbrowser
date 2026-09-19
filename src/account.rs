@@ -17,7 +17,7 @@
 //! collapse to one owner, hosted multi-caller deployments keep callers
 //! separate (same scoping the cache store uses).
 
-use crate::diting_net::cookies::CookieJar;
+use diting::diting_net::cookies::CookieJar;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -145,7 +145,7 @@ pub struct Persona {
 /// fp_seed. Drawn from the profiles pool (not hardcoded) so a pool refresh
 /// follows along.
 fn persona_ua_pool() -> Vec<&'static str> {
-    crate::diting_browser::profiles::PROFILES
+    diting::diting_browser::profiles::PROFILES
         .iter()
         .filter(|p| p.user_agent.contains("Chrome/145.0.0.0"))
         .map(|p| p.user_agent)

@@ -14,7 +14,7 @@ pub struct SogouEngine {
 
 impl SogouEngine {
     pub fn new() -> Self {
-        let client = crate::diting_net::client::reqwest_builder_no_env_proxy()
+        let client = diting::diting_net::client::reqwest_builder_no_env_proxy()
             .timeout(std::time::Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -71,7 +71,7 @@ impl SearchEngine for SogouEngine {
             .map_err(|e| SearchEngineError::Transient(format!("read body: {e}")))?;
 
         // Decode with charset detection (Sogou may return GBK).
-        let html = crate::diting_net::encoding::decode_non_html(&bytes.to_vec(), None);
+        let html = diting::diting_net::encoding::decode_non_html(&bytes.to_vec(), None);
 
         // Check for CAPTCHA indicators in the HTML body.
         if looks_walled(&html) {

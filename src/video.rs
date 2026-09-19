@@ -25,8 +25,8 @@ use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::diting_browser::Page;
-use crate::diting_layout::text::FontBook;
+use diting::diting_browser::Page;
+use diting::diting_layout::text::FontBook;
 
 /// One rendered timeline video.
 #[derive(Debug)]
@@ -318,8 +318,8 @@ fn rasterize_cue_tile(text: &str, w: u32, h: u32, fonts: &FontBook) -> CueTile {
     let wrap_at = w as f32 * 0.9;
     let stroke = ((font_size / 12.0).round() as i32).max(1);
     let pad = stroke as usize;
-    let white = fonts.rasterize_wrapped(text, font_size, true, [255, 255, 255, 255], wrap_at, line_height, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, false);
-    let black = fonts.rasterize_wrapped(text, font_size, true, [12, 12, 12, 255], wrap_at, line_height, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, false);
+    let white = fonts.rasterize_wrapped(text, font_size, true, [255, 255, 255, 255], wrap_at, line_height, false, 0.0, None, diting::diting_css::WhiteSpace::Normal, false);
+    let black = fonts.rasterize_wrapped(text, font_size, true, [12, 12, 12, 255], wrap_at, line_height, false, 0.0, None, diting::diting_css::WhiteSpace::Normal, false);
     let width = white.width + pad * 2;
     let height = white.height + pad * 2;
     let mut data = vec![0u8; width * height * 4];
@@ -351,16 +351,16 @@ impl<'a> From<&'a CueTile> for TileRef<'a> {
     }
 }
 
-impl<'a> From<&'a crate::diting_layout::text::TextRaster> for TileRef<'a> {
-    fn from(r: &'a crate::diting_layout::text::TextRaster) -> Self {
+impl<'a> From<&'a diting::diting_layout::text::TextRaster> for TileRef<'a> {
+    fn from(r: &'a diting::diting_layout::text::TextRaster) -> Self {
         Self { width: r.width, height: r.height, data: &r.data }
     }
 }
 
 /// The raster cache hands out `Arc<TextRaster>` (#399); burning borrows
 /// through the Arc without claiming a clone.
-impl<'a> From<&'a std::sync::Arc<crate::diting_layout::text::TextRaster>> for TileRef<'a> {
-    fn from(r: &'a std::sync::Arc<crate::diting_layout::text::TextRaster>) -> Self {
+impl<'a> From<&'a std::sync::Arc<diting::diting_layout::text::TextRaster>> for TileRef<'a> {
+    fn from(r: &'a std::sync::Arc<diting::diting_layout::text::TextRaster>) -> Self {
         Self { width: r.width, height: r.height, data: &r.data }
     }
 }
@@ -541,7 +541,7 @@ pub async fn render_timeline_video(
     // font_book() re-parses its faces per call, so the burn path takes it
     // once per render and hands the book around — cues rasterize lazily
     // against it.
-    let hardsub_fonts = (!hardsub.is_empty()).then(crate::diting_fonts::font_book);
+    let hardsub_fonts = (!hardsub.is_empty()).then(diting::diting_fonts::font_book);
     if let Some(fonts) = &hardsub_fonts {
         hardsub.burn(&mut first, w, h, 0.0, fonts);
     }
@@ -888,8 +888,8 @@ async fn paint_band(
 #[cfg(all(test, feature = "screenshot"))]
 mod tests {
     use super::*;
-    use crate::diting_browser::lifecycle::WaitUntil;
-    use crate::diting_browser::{BrowserContext, Page as EnginePage};
+    use diting::diting_browser::lifecycle::WaitUntil;
+    use diting::diting_browser::{BrowserContext, Page as EnginePage};
     use std::net::TcpListener;
     use std::sync::Arc;
 
@@ -1496,7 +1496,7 @@ html,body{margin:0;padding:0;width:800px;height:450px;background:#ffffff}
     /// the rest of the frame byte-identical.
     #[test]
     fn hardsub_paints_white_text_bottom_center() {
-        let fonts = crate::diting_fonts::font_book();
+        let fonts = diting::diting_fonts::font_book();
         let (w, h) = (400u32, 240u32);
         let mut frame = vec![40u8; (w * h * 4) as usize];
         for px in frame.chunks_exact_mut(4) {

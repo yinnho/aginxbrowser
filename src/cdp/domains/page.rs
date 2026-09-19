@@ -1,0 +1,1527 @@
+//! CDP Page domain — claimed from upstream obscura-cdp page.rs, adapted to
+//! the diting engine. This is the largest domain: it owns navigation and the
+//! post-navigation event sequence (`emit_navigation_events`) that Playwright's
+//! `wait_for_load_state` and Puppeteer's `waitForNavigation` both key off.
+//!
+//! Adaptation notes vs upstream:
+//! - single main frame per page (no child-frame bookkeeping — see dispatch.rs)
+//! - `captureScreenshot` routes through the diting renderer, gated on the
+//!   `screenshot` feature (production builds omit it, matching the HTTP API)
+
+#[cfg(feature = "screenshot")]
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use serde_json::{json, Value};
+
+use diting::diting_browser::lifecycle::LifecycleState;
+use diting::diting_browser::page::NetworkEvent;
+use crate::cdp::dispatch::{CdpContext, LoadDone, PendingNav};
+#[cfg(feature = "screenshot")]
+use crate::cdp::dispatch::ScreencastState;
+use crate::cdp::types::CdpEvent;
+use crate::cdp::util::url_is_file_scheme;
+
+/// Default viewport reported by `getLayoutMetrics` and used for full-page
+/// screenshots. The single-realm engine has no compositor viewport, so this is
+/// a stable constant rather than a mutable per-page value.
+const DEFAULT_VIEWPORT_WIDTH: u32 = 1280;
+const DEFAULT_VIEWPORT_HEIGHT: u32 = 720;
+
+fn now_epoch_seconds() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// The CDP `Frame` wire shape for the single main frame of a page.
+pub(crate) fn frame_json(frame_id: &str, loader_id: &str, url: &str) -> Value {
+    json!({
+        "id": frame_id,
+        "loaderId": loader_id,
+        "url": url,
+        "domainAndRegistry": "",
+        "securityOrigin": "",
+        "mimeType": "text/html",
+        "secureContextType": "Secure",
+        "crossOriginIsolatedContextType": "NotIsolated",
+        "gatedAPIFeatures": [],
+        "adFrameStatus": { "adFrameType": "none" },
+    })
+}
+
+/// Push an event, honouring the browser-level (no session) vs session-level
+/// distinction: `with_session` would otherwise stamp a bogus `sessionId: ""`
+/// onto browser-connection events.
+fn emit(ctx: &mut CdpContext, method: &str, params: Value, session_id: &Option<String>) {
+    let ev = match session_id {
+        Some(sid) => CdpEvent::with_session(method, params, sid.clone()),
+        None => CdpEvent::new(method, params),
+    };
+    ctx.pending_events.push(ev);
+}
+
+/// Emit the full post-navigation CDP event sequence navigation-waiters key off:
+/// frameStartedLoading, frameNavigated, per-request Network events,
+/// domContentEventFired, loadEventFired, lifecycle events, and fresh execution
+/// contexts (default + any isolated worlds).
+///
+/// Shared by `Page.navigate` and the post-eval drain in the Runtime domain
+/// (`emit_post_eval_nav`), so a `location.href = ...` in an evaluated script
+/// produces the same sequence a direct navigation does.
+/// Emit the requestWillBeSent / responseReceived / loadingFinished triple
+/// for one recorded network event. Shared by the post-navigation batch and
+/// by the outgoing document's carried events, which must ride under the
+/// loader they actually belonged to.
+///
+/// `extra` carries the page's other Network-enabled sessions (Chrome
+/// delivers a target's events to every session that enabled the domain,
+/// #13); the navigating session always receives the trio regardless, so
+/// clients that never call Network.enable keep the old behavior.
+fn emit_network_event(
+    ctx: &mut CdpContext,
+    session_id: &Option<String>,
+    extra: &[String],
+    frame_id: &str,
+    loader_id: &str,
+    document_url: &str,
+    ev: &NetworkEvent,
+) {
+    let ts = now_epoch_seconds();
+    let request_id = ev.request_id.clone();
+    let will_be_sent = json!({
+        "requestId": request_id,
+        "loaderId": loader_id,
+        "documentURL": document_url,
+        "request": {
+            "url": ev.url,
+            "method": ev.method,
+            "headers": ev.headers,
+            "initialPriority": "High",
+            "referrerPolicy": "no-referrer-when-downgrade",
+        },
+        "timestamp": ev.timestamp,
+        "wallTime": ts,
+        "initiator": { "type": "other" },
+        "type": ev.resource_type,
+        "frameId": frame_id,
+        "hasUserGesture": false,
+    });
+    let response_received = json!({
+        "requestId": request_id,
+        "loaderId": loader_id,
+        "timestamp": ev.timestamp,
+        "type": ev.resource_type,
+        "response": {
+            "url": ev.url,
+            "status": ev.status,
+            "statusText": "",
+            "headers": ev.response_headers.as_ref(),
+            "mimeType": "text/html",
+            "connectionReused": false,
+            "connectionId": 0,
+            "encodedDataLength": ev.body_size,
+            "securityState": "secure",
+            "protocol": "http/1.1",
+            "fromDiskCache": false,
+            "fromServiceWorker": false,
+        },
+        "frameId": frame_id,
+    });
+    let loading_finished = json!({
+        "requestId": request_id,
+        "timestamp": ev.timestamp,
+        "encodedDataLength": ev.body_size,
+    });
+    let mut targets: Vec<Option<String>> = vec![session_id.clone()];
+    targets.extend(extra.iter().map(|sid| Some(sid.clone())));
+    for target in targets {
+        emit(
+            ctx,
+            "Network.requestWillBeSent",
+            will_be_sent.clone(),
+            &target,
+        );
+        emit(
+            ctx,
+            "Network.responseReceived",
+            response_received.clone(),
+            &target,
+        );
+        emit(
+            ctx,
+            "Network.loadingFinished",
+            loading_finished.clone(),
+            &target,
+        );
+    }
+}
+
+/// Commit-phase announcement for a CDP navigation: the outgoing document's
+/// carried network events stream under the loader they belonged to, the
+/// fresh loaderId is minted, and the frame + execution contexts are
+/// announced for the target URL. Chrome resolves `Page.navigate` here —
+/// before the document has loaded — which is what lets a spawned
+/// navigation hand the socket back to the connection loop while its
+/// fetches run.
+///
+/// `target_url` is the URL being navigated to (the frame announces it at
+/// commit; a redirect chain that lands elsewhere is re-announced by the
+/// tail). Returns `(frame_id, loader_id, old_loader)`.
+pub(crate) fn emit_navigation_prefix(
+    ctx: &mut CdpContext,
+    session_id: &Option<String>,
+    extra_network: &[String],
+    page_id: &str,
+    target_url: &str,
+) -> (String, String, String) {
+    let (frame_id, carried, carried_url) = {
+        let Some(page) = ctx.get_page_mut(page_id) else {
+            return (String::new(), String::new(), String::new());
+        };
+        (
+            page.frame_id.clone(),
+            std::mem::take(&mut page.carried_network_events),
+            page.carried_network_url.clone(),
+        )
+    };
+    // The outgoing document's network events — including its script-initiated
+    // fetch/XHR, which only ever sat in the JS runtime's queue — were carried
+    // across this navigation by the page layer. Emit them first, under the
+    // loader they belonged to (still the current one here), so a client sees
+    // them before the new document's frameNavigated (obscura #920 shape).
+    let old_loader = ctx
+        .current_loader_ids
+        .get(page_id)
+        .cloned()
+        .unwrap_or_default();
+    for ev in &carried {
+        emit_network_event(
+            ctx,
+            session_id,
+            extra_network,
+            &frame_id,
+            &old_loader,
+            &carried_url,
+            ev,
+        );
+    }
+    let loader_id = format!("loader-{}", uuid::Uuid::new_v4());
+    ctx.current_loader_ids
+        .insert(page_id.to_string(), loader_id.clone());
+    // Child frames belong to the outgoing document: detach all of them
+    // before the new document's frame/context announcements.
+    for frame in ctx.clear_child_frames(page_id) {
+        emit(
+            ctx,
+            "Page.frameDetached",
+            json!({ "frameId": frame.frame_id, "reason": "remove" }),
+            session_id,
+        );
+    }
+    emit_context_events(ctx, session_id, &frame_id, &loader_id, target_url, page_id);
+    (frame_id, loader_id, old_loader)
+}
+
+/// Frame + execution-context announcement for a navigation. Chrome tears
+/// down and re-creates the execution context at commit, so these stream
+/// with the prefix — before the new document's resources — rather than
+/// after its lifecycle events.
+fn emit_context_events(
+    ctx: &mut CdpContext,
+    session_id: &Option<String>,
+    frame_id: &str,
+    loader_id: &str,
+    page_url: &str,
+    page_id: &str,
+) {
+    emit(
+        ctx,
+        "Page.frameStartedLoading",
+        json!({ "frameId": frame_id }),
+        session_id,
+    );
+    emit(
+        ctx,
+        "Page.frameNavigated",
+        json!({
+            "frame": frame_json(frame_id, loader_id, page_url),
+            "type": "Navigation",
+        }),
+        session_id,
+    );
+    emit(ctx, "Runtime.executionContextsCleared", json!({}), session_id);
+    emit(
+        ctx,
+        "Runtime.executionContextCreated",
+        json!({
+            "context": {
+                "id": 1,
+                "origin": page_url,
+                "name": "",
+                "uniqueId": format!("ctx-{page_id}"),
+                "auxData": {
+                    "isDefault": true,
+                    "type": "default",
+                    "frameId": frame_id,
+                }
+            }
+        }),
+        session_id,
+    );
+
+    // Re-emit isolated-world contexts after every navigation (Playwright's
+    // utility world lives in one); a fresh id each time mirrors real Chrome.
+    for world in ctx.isolated_worlds.clone() {
+        let context_id = ctx.next_isolated_context();
+        emit(
+            ctx,
+            "Runtime.executionContextCreated",
+            json!({
+                "context": {
+                    "id": context_id,
+                    "origin": page_url,
+                    "name": world,
+                    "uniqueId": format!("ctx-{page_id}-{world}"),
+                    "auxData": {
+                        "isDefault": false,
+                        "type": "isolated",
+                        "frameId": frame_id,
+                    }
+                }
+            }),
+            session_id,
+        );
+    }
+}
+
+/// Reconcile the CDP child-frame registry with the page DOM's iframe
+/// elements. Diff key is the iframe's arena node id: attribute changes
+/// (src navigation) keep the frame, element removal detaches it.
+///
+/// `eventful` callers (navigation tail, describeNode on an iframe) emit the
+/// attach/navigate/context sequence Playwright's frame discovery waits on;
+/// `getFrameTree` calls it silently since the answer rides in the response.
+///
+/// The engine is single-realm: a child frame's "contexts" are minted ids
+/// over one shared JS realm, and frame-scoped evals run with the frame's
+/// document swapped onto the global (see diting_js::runtime). That split is
+/// invisible to clients.
+pub(crate) fn sync_child_frames(
+    ctx: &mut CdpContext,
+    session_id: &Option<String>,
+    page_id: &str,
+    eventful: bool,
+) {
+    let (main_frame_id, page_url, iframes) = {
+        let Some(page) = ctx.get_page(page_id) else {
+            return;
+        };
+        let collected = page.with_dom(|dom| {
+            dom.descendants(dom.document())
+                .into_iter()
+                .filter_map(|nid| {
+                    let node = dom.get_node(nid)?;
+                    let (name, attrs) = match &node.data {
+                        diting::diting_dom::NodeData::Element { name, attrs, .. } => (name, attrs),
+                        _ => return None,
+                    };
+                    if !name.local.as_ref().eq_ignore_ascii_case("iframe") {
+                        return None;
+                    }
+                    let attr = |key: &str| {
+                        attrs
+                            .iter()
+                            .find(|a| a.name.local.as_ref().eq_ignore_ascii_case(key))
+                            .map(|a| a.value.clone())
+                    };
+                    Some((
+                        nid.index() as u32,
+                        attr("src").unwrap_or_default(),
+                        attr("name").unwrap_or_default(),
+                    ))
+                })
+                .collect::<Vec<_>>()
+        });
+        (
+            page.frame_id.clone(),
+            page.url_string(),
+            collected.unwrap_or_default(),
+        )
+    };
+
+    let base = url::Url::parse(&page_url).ok();
+    let absolutize = |src: &str| -> String {
+        if src.is_empty() {
+            return "about:blank".to_string();
+        }
+        if src.starts_with("http://")
+            || src.starts_with("https://")
+            || src.starts_with("about:")
+            || src.starts_with("data:")
+        {
+            return src.to_string();
+        }
+        base.as_ref()
+            .and_then(|b| b.join(src).ok())
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| src.to_string())
+    };
+
+    // Detach frames whose iframe element is gone.
+    let live: std::collections::HashSet<u32> = iframes.iter().map(|(nid, _, _)| *nid).collect();
+    let detached: Vec<crate::cdp::dispatch::ChildFrame> = match ctx.child_frames.get_mut(page_id) {
+        Some(frames) => {
+            let (gone, kept): (Vec<_>, Vec<_>) = frames.drain(..).partition(|f| !live.contains(&f.nid));
+            *frames = kept;
+            gone
+        }
+        None => Vec::new(),
+    };
+    for frame in detached {
+        for cid in &frame.contexts {
+            ctx.frame_contexts.remove(cid);
+            ctx.valid_context_ids.remove(cid);
+        }
+        ctx.frame_object_ids.retain(|_, nid| *nid != frame.nid);
+        if eventful {
+            emit(
+                ctx,
+                "Page.frameDetached",
+                json!({ "frameId": frame.frame_id, "reason": "remove" }),
+                session_id,
+            );
+        }
+    }
+
+    // Attach frames for new iframe elements (existing nids keep their ids).
+    for (nid, src, name) in iframes {
+        if ctx.child_frame_by_nid(page_id, nid).is_some() {
+            continue;
+        }
+        let frame_id = ctx.next_child_frame_id();
+        let loader_id = format!("loader-{}", uuid::Uuid::new_v4());
+        let url = absolutize(&src);
+        let mut contexts = Vec::new();
+        let default_cid = ctx.next_isolated_context();
+        contexts.push(default_cid);
+        ctx.valid_context_ids.insert(default_cid);
+        ctx.frame_contexts
+            .insert(default_cid, (page_id.to_string(), frame_id.clone()));
+        let worlds: Vec<(String, i64)> = ctx
+            .isolated_worlds
+            .clone()
+            .into_iter()
+            .map(|w| {
+                let cid = ctx.next_isolated_context();
+                ctx.valid_context_ids.insert(cid);
+                ctx.frame_contexts
+                    .insert(cid, (page_id.to_string(), frame_id.clone()));
+                (w, cid)
+            })
+            .collect();
+        contexts.extend(worlds.iter().map(|(_, cid)| *cid));
+        if eventful {
+            emit(
+                ctx,
+                "Page.frameAttached",
+                json!({ "frameId": frame_id, "parentFrameId": main_frame_id }),
+                session_id,
+            );
+            let mut frame = frame_json(&frame_id, &loader_id, &url);
+            frame["parentId"] = json!(main_frame_id);
+            frame["name"] = json!(name);
+            emit(
+                ctx,
+                "Page.frameNavigated",
+                json!({ "frame": frame, "type": "Navigation" }),
+                session_id,
+            );
+            emit(
+                ctx,
+                "Runtime.executionContextCreated",
+                json!({
+                    "context": {
+                        "id": default_cid,
+                        "origin": url,
+                        "name": "",
+                        "uniqueId": format!("ctx-{frame_id}"),
+                        "auxData": { "isDefault": true, "type": "default", "frameId": frame_id }
+                    }
+                }),
+                session_id,
+            );
+            for (world, cid) in &worlds {
+                emit(
+                    ctx,
+                    "Runtime.executionContextCreated",
+                    json!({
+                        "context": {
+                            "id": cid,
+                            "origin": url,
+                            "name": world,
+                            "uniqueId": format!("ctx-{frame_id}-{world}"),
+                            "auxData": { "isDefault": false, "type": "isolated", "frameId": frame_id }
+                        }
+                    }),
+                    session_id,
+                );
+            }
+            emit(
+                ctx,
+                "Page.frameStoppedLoading",
+                json!({ "frameId": frame_id }),
+                session_id,
+            );
+        }
+        ctx.child_frames
+            .entry(page_id.to_string())
+            .or_default()
+            .push(crate::cdp::dispatch::ChildFrame {
+                frame_id,
+                nid,
+                url,
+                name,
+                loader_id,
+                contexts,
+            });
+    }
+}
+
+/// The load-side half: carried events that surfaced after the prefix
+/// drained (a spawned navigation moves the outgoing document's JS-queued
+/// fetch/XHR events into `carried` when its load task starts), then the new
+/// document's network events under its loader, then the lifecycle sequence.
+/// `error` short-circuits into Chrome's failed-navigation shape instead —
+/// frameNavigated carrying `errorText`, then frameStoppedLoading — because
+/// the navigate response already resolved at commit.
+pub(crate) fn emit_navigation_lifecycle(
+    ctx: &mut CdpContext,
+    session_id: &Option<String>,
+    extra_network: &[String],
+    page_id: &str,
+    loader_id: &str,
+    old_loader: &str,
+    error: Option<&str>,
+) {
+    let ts = now_epoch_seconds();
+    let (frame_id, url_str, carried, carried_url, network_events, reached_idle) = {
+        let Some(page) = ctx.get_page_mut(page_id) else {
+            return;
+        };
+        (
+            page.frame_id.clone(),
+            page.url_string(),
+            std::mem::take(&mut page.carried_network_events),
+            page.carried_network_url.clone(),
+            page.network_events.drain(..).collect::<Vec<_>>(),
+            page.lifecycle == LifecycleState::NetworkIdle,
+        )
+    };
+    for ev in &carried {
+        emit_network_event(
+            ctx,
+            session_id,
+            extra_network,
+            &frame_id,
+            old_loader,
+            &carried_url,
+            ev,
+        );
+    }
+
+    if let Some(err) = error {
+        let mut frame = frame_json(&frame_id, loader_id, &url_str);
+        frame["errorText"] = json!(err);
+        emit(
+            ctx,
+            "Page.frameNavigated",
+            json!({ "frame": frame, "type": "Navigation" }),
+            session_id,
+        );
+        emit(
+            ctx,
+            "Page.frameStoppedLoading",
+            json!({ "frameId": frame_id }),
+            session_id,
+        );
+        return;
+    }
+
+    for ev in &network_events {
+        emit_network_event(
+            ctx,
+            session_id,
+            extra_network,
+            &frame_id,
+            loader_id,
+            &url_str,
+            ev,
+        );
+    }
+
+    emit(
+        ctx,
+        "Page.domContentEventFired",
+        json!({ "timestamp": ts }),
+        session_id,
+    );
+    emit(ctx, "Page.loadEventFired", json!({ "timestamp": ts }), session_id);
+    emit(
+        ctx,
+        "Page.lifecycleEvent",
+        json!({ "frameId": frame_id, "loaderId": loader_id, "name": "init", "timestamp": ts }),
+        session_id,
+    );
+    emit(
+        ctx,
+        "Page.lifecycleEvent",
+        json!({ "frameId": frame_id, "loaderId": loader_id, "name": "DOMContentLoaded", "timestamp": ts }),
+        session_id,
+    );
+    emit(
+        ctx,
+        "Page.lifecycleEvent",
+        json!({ "frameId": frame_id, "loaderId": loader_id, "name": "load", "timestamp": ts }),
+        session_id,
+    );
+    if reached_idle {
+        emit(
+            ctx,
+            "Page.lifecycleEvent",
+            json!({ "frameId": frame_id, "loaderId": loader_id, "name": "networkIdle", "timestamp": ts }),
+            session_id,
+        );
+    }
+    // Parser-seen iframes become child frames now that the document is
+    // loaded; script-inserted ones surface via describeNode's lazy sync.
+    sync_child_frames(ctx, session_id, page_id, true);
+}
+
+/// Drain a page's recorded navigation state and emit the full
+/// post-navigation event sequence. The shared tail of every "a navigation
+/// just happened" site: `Page.navigate`/`reload`, the post-eval drain for
+/// JS-initiated navigations, and `Target.createTarget`'s inline `url`
+/// navigation. Without the last one, a page created with a URL never
+/// announces itself to Page-domain waiters — frameNavigated /
+/// domContentEventFired / loadEventFired never fire and chromiumoxide-style
+/// clients hang waiting for the initial load (obscura#833 shape).
+///
+/// Returns `(frame_id, loader_id)` for callers that echo them in a command
+/// response.
+pub(crate) fn emit_navigation_for_page(
+    ctx: &mut CdpContext,
+    session_id: &Option<String>,
+    extra_network: &[String],
+    page_id: &str,
+) -> (String, String) {
+    // The load has already finished at every call site here, so the frame
+    // announces its final URL (post-redirect) — matching the old
+    // respond-after-load contract this preserves.
+    let target_url = match ctx.get_page(page_id) {
+        Some(page) => page.url_string(),
+        None => return (String::new(), String::new()),
+    };
+    let (frame_id, loader_id, old_loader) =
+        emit_navigation_prefix(ctx, session_id, extra_network, page_id, &target_url);
+    if frame_id.is_empty() {
+        return (frame_id, loader_id);
+    }
+    emit_navigation_lifecycle(
+        ctx,
+        session_id,
+        extra_network,
+        page_id,
+        &loader_id,
+        &old_loader,
+        None,
+    );
+    (frame_id, loader_id)
+}
+
+/// Drive a full navigation of the session page, then emit the navigation event
+/// sequence. Both `Page.navigate` and `Page.reload` route through here so the
+/// `allow_file_access` gate and preload-script sync cannot diverge.
+///
+/// When the connection loop installed a load channel (`ctx.load_tx`), the
+/// load itself is spawned instead: the command resolves at commit — Chrome's
+/// contract — and the loop keeps serving commands while the fetches run
+/// (`begin_spawned_navigate`). Every other face keeps the inline
+/// respond-after-load contract.
+async fn navigate_page(
+    ctx: &mut CdpContext,
+    session_id: &Option<String>,
+    url: &str,
+) -> Result<Value, String> {
+    // Sync context-level preload scripts (Runtime.addBinding shims +
+    // Page.addScriptToEvaluateOnNewDocument sources) into the page so they run
+    // before the next document's own scripts. Clone first: the mutable page
+    // borrow below conflicts with an immutable ctx borrow.
+    let preload_sources: Vec<String> = ctx
+        .preload_scripts
+        .iter()
+        .map(|(_, source)| source.clone())
+        .collect();
+
+    if ctx.load_tx.is_some() {
+        {
+            let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
+            if url_is_file_scheme(url) && !diting::diting_net::client::allow_file_access() {
+                return Err(
+                    "file:// navigation is disabled. Restart with `--allow-file-access` to enable."
+                        .to_string(),
+                );
+            }
+            page.set_preload_scripts(preload_sources);
+        }
+        let tx = ctx.load_tx.clone().expect("load_tx checked above");
+        return begin_spawned_navigate(ctx, session_id, url, tx, url);
+    }
+
+    let (frame_id, page_id) = {
+        let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
+        if url_is_file_scheme(url) && !diting::diting_net::client::allow_file_access() {
+            return Err(
+                "file:// navigation is disabled. Restart with `--allow-file-access` to enable."
+                    .to_string(),
+            );
+        }
+        page.set_preload_scripts(preload_sources);
+        page.navigate(url).await.map_err(|e| e.to_string())?;
+        (page.frame_id.clone(), page.id.clone())
+    };
+
+    let extra_network = ctx.other_network_sessions(session_id, &page_id);
+    let (_frame_id, loader_id) =
+        emit_navigation_for_page(ctx, session_id, &extra_network, &page_id);
+    Ok(json!({ "frameId": frame_id, "loaderId": loader_id }))
+}
+
+/// Spawned-navigation path: announce the commit events, leave the tail's
+/// bookkeeping, hand the page to a task that owns it through the load, and
+/// resolve the command immediately. The task reports back through the loop's
+/// `load_rx`; the page is re-inserted and the lifecycle events fire there
+/// (`emit_navigation_tail`).
+fn begin_spawned_navigate(
+    ctx: &mut CdpContext,
+    session_id: &Option<String>,
+    url: &str,
+    tx: futures::channel::mpsc::UnboundedSender<LoadDone>,
+    announced_url: &str,
+) -> Result<Value, String> {
+    let page_id = ctx
+        .session_page_id(session_id)
+        .ok_or("No page")?
+        .to_string();
+    let extra_network = ctx.other_network_sessions(session_id, &page_id);
+    let (frame_id, loader_id, old_loader) =
+        emit_navigation_prefix(ctx, session_id, &extra_network, &page_id, announced_url);
+    if frame_id.is_empty() {
+        return Err("No page".to_string());
+    }
+    ctx.pending_loads.insert(
+        page_id.clone(),
+        PendingNav {
+            session_id: session_id.clone(),
+            old_loader,
+            announced_url: announced_url.to_string(),
+        },
+    );
+    let Some(mut page) = ctx.take_page(&page_id) else {
+        ctx.pending_loads.remove(&page_id);
+        return Err("No page".to_string());
+    };
+    let pid = page_id;
+    let url = url.to_string();
+    tokio::task::spawn_local(async move {
+        let result = page.navigate(&url).await.map_err(|e| e.to_string());
+        let _ = tx.unbounded_send(LoadDone {
+            page_id: pid,
+            page,
+            result,
+        });
+    });
+    Ok(json!({ "frameId": frame_id, "loaderId": loader_id }))
+}
+
+/// Spawned-navigation completion (runs in the connection loop's third
+/// select! arm): re-announce the frame if the load followed redirects — the
+/// prefix announced the requested URL at commit — then emit the lifecycle
+/// half, or Chrome's failed-navigation shape, under the bookkeeping the
+/// dispatch recorded at commit time.
+pub(crate) fn emit_navigation_tail(
+    ctx: &mut CdpContext,
+    pending: &PendingNav,
+    page_id: &str,
+    error: Option<&str>,
+) {
+    let loader_id = ctx
+        .current_loader_ids
+        .get(page_id)
+        .cloned()
+        .unwrap_or_default();
+    if error.is_none() {
+        if let Some(page) = ctx.get_page(page_id) {
+            let final_url = page.url_string();
+            if final_url != pending.announced_url {
+                emit(
+                    ctx,
+                    "Page.frameNavigated",
+                    json!({
+                        "frame": frame_json(&page.frame_id, &loader_id, &final_url),
+                        "type": "Navigation",
+                    }),
+                    &pending.session_id,
+                );
+            }
+        }
+    }
+    let extra_network = ctx.other_network_sessions(&pending.session_id, page_id);
+    emit_navigation_lifecycle(
+        ctx,
+        &pending.session_id,
+        &extra_network,
+        page_id,
+        &loader_id,
+        &pending.old_loader,
+        error,
+    );
+}
+
+pub async fn handle(
+    method: &str,
+    params: &Value,
+    ctx: &mut CdpContext,
+    session_id: &Option<String>,
+) -> Result<Value, String> {
+    match method {
+        "enable" => {
+            // Report the current main frame if a page already exists, so a
+            // client attaching to an existing target can register it without
+            // waiting for the next navigation (getFrameTree remains
+            // authoritative; this just lets frame-tracked events flow).
+            let frame = ctx.get_session_page(session_id).map(|page| {
+                let loader_id = ctx
+                    .current_loader_ids
+                    .get(&page.id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("loader-{}", page.id));
+                (page.frame_id.clone(), loader_id, page.url_string())
+            });
+            if let Some((frame_id, loader_id, url)) = frame {
+                emit(
+                    ctx,
+                    "Page.frameNavigated",
+                    json!({ "frame": frame_json(&frame_id, &loader_id, &url), "type": "Navigation" }),
+                    session_id,
+                );
+            }
+            Ok(json!({}))
+        }
+        "disable" => Ok(json!({})),
+        "navigate" => {
+            let url = params
+                .get("url")
+                .and_then(|v| v.as_str())
+                .ok_or("url required")?;
+            navigate_page(ctx, session_id, url).await
+        }
+        "reload" => {
+            let url = ctx
+                .get_session_page(session_id)
+                .map(|p| p.url_string())
+                .unwrap_or_else(|| "about:blank".to_string());
+            navigate_page(ctx, session_id, &url).await
+        }
+        "getFrameTree" => {
+            let page_id = ctx
+                .session_page_id(session_id)
+                .ok_or("No page")?
+                .clone();
+            sync_child_frames(ctx, session_id, &page_id, false);
+            let page = ctx.get_page(&page_id).ok_or("No page")?;
+            let loader_id = ctx
+                .current_loader_ids
+                .get(&page.id)
+                .cloned()
+                .unwrap_or_else(|| format!("loader-{}", page.id));
+            let frame_id = page.frame_id.clone();
+            let url = page.url_string();
+            let children: Vec<Value> = ctx
+                .child_frames
+                .get(&page_id)
+                .map(|frames| {
+                    frames
+                        .iter()
+                        .map(|f| {
+                            let mut frame = frame_json(&f.frame_id, &f.loader_id, &f.url);
+                            frame["parentId"] = json!(frame_id);
+                            if !f.name.is_empty() {
+                                frame["name"] = json!(f.name);
+                            }
+                            json!({ "frame": frame, "childFrames": [] })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(json!({
+                "frameTree": {
+                    "frame": frame_json(&frame_id, &loader_id, &url),
+                    "childFrames": children,
+                }
+            }))
+        }
+        "getNavigationHistory" => {
+            let page = ctx.get_session_page(session_id).ok_or("No page")?;
+            let entries: Vec<Value> = page
+                .history
+                .iter()
+                .enumerate()
+                .map(|(i, url)| {
+                    json!({ "id": i, "url": url, "title": page.title, "userTypedURL": url })
+                })
+                .collect();
+            Ok(json!({ "currentIndex": page.history_index, "entries": entries }))
+        }
+        "resetNavigationHistory" => Ok(json!({})),
+        "navigateToHistoryEntry" => {
+            let entry_id = params.get("entryId").and_then(|v| v.as_i64()).unwrap_or(0) as usize;
+            // Snapshot the stack first. The navigate below runs the normal
+            // pipeline, which pushes the loaded URL into history — but a
+            // history jump must neither grow nor truncate the back/forward
+            // list (Chrome only moves currentIndex), and a FAILED navigation
+            // must leave the index pointing at the page still shown instead
+            // of an entry that never loaded (obscura #920).
+            let (url, snapshot) = {
+                let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
+                let Some(url) = page.history.get(entry_id).cloned() else {
+                    return Err(format!("History entry {entry_id} not found"));
+                };
+                (url, (page.history.clone(), page.history_index))
+            };
+            let result = navigate_page(ctx, session_id, &url).await;
+            if let Some(page) = ctx.get_session_page_mut(session_id) {
+                page.history = snapshot.0;
+                page.history_index = snapshot.1;
+                if result.is_ok() {
+                    page.set_history_index(entry_id);
+                }
+            }
+            result
+        }
+        "addScriptToEvaluateOnNewDocument" => {
+            let source = params
+                .get("source")
+                .and_then(|v| v.as_str())
+                .ok_or("source required")?;
+            ctx.preload_counter += 1;
+            let identifier = format!("__diting_preload_{}", ctx.preload_counter);
+            ctx.preload_scripts
+                .push((identifier.clone(), source.to_string()));
+            Ok(json!({ "identifier": identifier }))
+        }
+        "removeScriptToEvaluateOnNewDocument" => {
+            let identifier = params
+                .get("identifier")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            ctx.preload_scripts.retain(|(k, _)| k != identifier);
+            Ok(json!({}))
+        }
+        "createIsolatedWorld" => {
+            let world_name = params
+                .get("worldName")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let (frame_id, page_url, page_id) = {
+                let page = ctx.get_session_page(session_id).ok_or("No page")?;
+                let frame_id = params
+                    .get("frameId")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| page.frame_id.clone());
+                (frame_id, page.url_string(), page.id.clone())
+            };
+            let context_id = ctx.next_isolated_context();
+            ctx.isolated_worlds.push(world_name.to_string());
+            // A world created on a child frame binds that frame: the context
+            // id joins the frame's list so a later src change / detach drops
+            // it, and evaluate(contextId) resolves to the frame's document.
+            let is_child = frame_id
+                != ctx
+                    .get_page(&page_id)
+                    .map(|p| p.frame_id.as_str())
+                    .unwrap_or("");
+            if is_child {
+                ctx.frame_contexts
+                    .insert(context_id, (page_id.clone(), frame_id.clone()));
+                if let Some(frames) = ctx.child_frames.get_mut(&page_id) {
+                    if let Some(frame) = frames.iter_mut().find(|f| f.frame_id == frame_id) {
+                        frame.contexts.push(context_id);
+                    }
+                }
+            }
+            emit(
+                ctx,
+                "Runtime.executionContextCreated",
+                json!({
+                    "context": {
+                        "id": context_id,
+                        "origin": page_url,
+                        "name": world_name,
+                        "uniqueId": format!("ctx-{page_id}-{world_name}"),
+                        "auxData": {
+                            "isDefault": false,
+                            "type": "isolated",
+                            "frameId": frame_id,
+                        }
+                    }
+                }),
+                session_id,
+            );
+            Ok(json!({ "executionContextId": context_id }))
+        }
+        "getLayoutMetrics" => {
+            // Real values (AginxOS P1): the page's effective viewport — the
+            // pinned emulation override, else the persona viewport, else the
+            // 1280x720 default — and the document's scrollable content size
+            // from the same layout the band paint uses (a 1x1 band paints
+            // nothing but walks the content extent; the layout is the cached
+            // run every rect consumer shares).
+            #[cfg(feature = "screenshot")]
+            {
+                let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
+                let (w, h) = page.effective_viewport();
+                let content = page
+                    .viewport_band_frame(0.0, 0.0, (1.0, 1.0))
+                    .map(|(f, _)| f.content_size)
+                    .unwrap_or((w, h));
+                let (cw, ch) = (content.0.max(1.0) as i64, content.1.max(1.0) as i64);
+                let viewport = json!({
+                    "pageX": 0, "pageY": 0,
+                    "clientWidth": w as i64, "clientHeight": h as i64,
+                });
+                let visual = json!({
+                    "offsetX": 0, "offsetY": 0,
+                    "pageX": 0, "pageY": 0,
+                    "clientWidth": w as i64, "clientHeight": h as i64,
+                    "scale": 1, "zoom": 1,
+                });
+                let content = json!({ "x": 0, "y": 0, "width": cw, "height": ch });
+                Ok(json!({
+                    "layoutViewport": viewport,
+                    "visualViewport": visual,
+                    "contentSize": content,
+                    "cssLayoutViewport": viewport,
+                    "cssVisualViewport": visual,
+                    "cssContentSize": content,
+                }))
+            }
+            #[cfg(not(feature = "screenshot"))]
+            {
+                let (w, h) = (DEFAULT_VIEWPORT_WIDTH, DEFAULT_VIEWPORT_HEIGHT);
+                let viewport = json!({
+                    "pageX": 0, "pageY": 0,
+                    "clientWidth": w, "clientHeight": h,
+                });
+                let visual = json!({
+                    "offsetX": 0, "offsetY": 0,
+                    "pageX": 0, "pageY": 0,
+                    "clientWidth": w, "clientHeight": h,
+                    "scale": 1, "zoom": 1,
+                });
+                let content = json!({ "x": 0, "y": 0, "width": w, "height": h });
+                Ok(json!({
+                    "layoutViewport": viewport,
+                    "visualViewport": visual,
+                    "contentSize": content,
+                    "cssLayoutViewport": viewport,
+                    "cssVisualViewport": visual,
+                    "cssContentSize": content,
+                }))
+            }
+        }
+        "captureScreenshot" => {
+            #[cfg(feature = "screenshot")]
+            {
+                let params = params.clone();
+                let beyond = params
+                    .get("captureBeyondViewport")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                let format = params
+                    .get("format")
+                    .and_then(Value::as_str)
+                    .map(|f| f.to_ascii_lowercase())
+                    .unwrap_or_else(|| "png".to_string());
+                if let Some(clip) = params.get("clip") {
+                    let scale = clip.get("scale").and_then(Value::as_f64).unwrap_or(1.0);
+                    if (scale - 1.0).abs() > f64::EPSILON {
+                        return Err(
+                            "Page.captureScreenshot: clip.scale != 1 is not supported".to_string()
+                        );
+                    }
+                }
+                let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
+                if beyond && params.get("clip").is_none() {
+                    // Legacy full-page path, byte-identical behavior for
+                    // every client that doesn't opt into viewport capture
+                    // (Puppeteer/Playwright defaults, the HTTP /screenshot
+                    // surface).
+                    let (html, url) = {
+                        let v = page.evaluate("document.documentElement.outerHTML");
+                        let html = match v.as_str() {
+                            Some(s) if !s.is_empty() => s.to_string(),
+                            _ => "<!DOCTYPE html><html><head></head><body></body></html>".to_string(),
+                        };
+                        (html, page.url_string())
+                    };
+                    let rendered = crate::screenshot::render_html_to_png_diting(
+                        &html,
+                        &url,
+                        DEFAULT_VIEWPORT_WIDTH,
+                        DEFAULT_VIEWPORT_HEIGHT,
+                        1.0,
+                        true,
+                        None,
+                        false,
+                        None,
+                    )
+                    .map_err(|e| format!("screenshot failed: {e}"))?;
+                    // The legacy path renders to an encoded PNG, so a jpeg
+                    // request decodes before re-encoding — handing the PNG
+                    // bytes to `RgbaImage::from_raw` as raw pixels is the
+                    // "frame buffer size mismatch" crash (any no-clip jpeg
+                    // capture died 3/3 on the AginxOS real-device report).
+                    let data = if format == "jpeg" || format == "jpg" {
+                        encode_legacy_jpeg(&rendered.png, quality_param(&params))?
+                    } else {
+                        rendered.png
+                    };
+                    return Ok(json!({ "data": BASE64.encode(&data) }));
+                }
+                // Band paths. `clip` coordinate semantics follow Chrome: with
+                // `captureBeyondViewport:false` the clip is viewport-relative
+                // (Playwright pins it to the current view and scrolls the
+                // page — treating it as page-absolute paints the top band
+                // forever, stale pixels at any scroll); with `true` it is
+                // page-absolute (Puppeteer's fullPage/region shape). No clip
+                // at all: the scrolled viewport band itself. band_frame
+                // clamps the origin into the document exactly like Chrome
+                // clamps scroll.
+                let (sx, sy, vw, vh) = match params.get("clip") {
+                    Some(clip) => {
+                        let f = |k: &str| {
+                            clip.get(k).and_then(Value::as_f64).unwrap_or(0.0) as f32
+                        };
+                        let (cx, cy, cw, ch) =
+                            (f("x"), f("y"), f("width").max(1.0), f("height").max(1.0));
+                        if beyond {
+                            (cx, cy, cw, ch)
+                        } else {
+                            let (ox, oy) = page.scroll_offset();
+                            (ox + cx, oy + cy, cw, ch)
+                        }
+                    }
+                    None => {
+                        let (w, h) = page.effective_viewport();
+                        let (ox, oy) = page.scroll_offset();
+                        (ox, oy, w, h)
+                    }
+                };
+                let (frame, missing) = page
+                    .viewport_band_frame(sx, sy, (vw, vh))
+                    .ok_or_else(|| "band paint failed: no live document".to_string())?;
+                if !missing.is_empty() {
+                    // Fill the image table (page identity + Referer, SSRF
+                    // gate, 2 MiB / 3 s caps), then re-blit with real rasters.
+                    page.fetch_band_images(missing).await;
+                    let (frame, _) = page
+                        .viewport_band_frame(sx, sy, (vw, vh))
+                        .ok_or_else(|| "band paint failed: no live document".to_string())?;
+                    let data = encode_frame(&format, quality_param(&params), frame.width, frame.height, frame.rgba)?;
+                    return Ok(json!({ "data": BASE64.encode(&data) }));
+                }
+                let data = encode_frame(&format, quality_param(&params), frame.width, frame.height, frame.rgba)?;
+                Ok(json!({ "data": BASE64.encode(&data) }))
+            }
+            #[cfg(not(feature = "screenshot"))]
+            {
+                Err("captureScreenshot requires the `screenshot` feature".to_string())
+            }
+        }
+        // Accepted but no-op: no dialogs, no downloads in the single-realm
+        // engine. Ack so Chrome-shaped clients don't error out.
+        "setLifecycleEventsEnabled" => Ok(json!({})),
+        "setDownloadBehavior" => Ok(json!({})),
+        "setInterceptFileChooserDialog" => Ok(json!({})),
+        "handleJavaScriptDialog" => Ok(json!({})),
+        "close" => Ok(json!({})),
+        "bringToFront" => Ok(json!({})),
+        "setWebLifecycleState" => Ok(json!({})),
+        "getAppManifest" => Ok(json!({ "errors": [] })),
+        "getInstallabilityErrors" => Ok(json!({ "installabilityErrors": [] })),
+        // Viewport frame streaming (AginxOS P0): the pump lives on the
+        // connection loop's tick; start/stop manage the per-page state.
+        "startScreencast" => {
+            #[cfg(feature = "screenshot")]
+            {
+                let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
+                let page_id = page.id.clone();
+                let p = params.clone();
+                let format = p
+                    .get("format")
+                    .and_then(Value::as_str)
+                    .map(|f| f.to_ascii_lowercase())
+                    .unwrap_or_else(|| "png".to_string());
+                let max_width = p.get("maxWidth").and_then(Value::as_u64).unwrap_or(0) as u32;
+                let max_height = p.get("maxHeight").and_then(Value::as_u64).unwrap_or(0) as u32;
+                let every_nth_frame = p
+                    .get("everyNthFrame")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1)
+                    .max(1) as u32;
+                ctx.screencast.insert(
+                    page_id,
+                    ScreencastState {
+                        session_id: session_id.clone(),
+                        format,
+                        quality: quality_param(&p),
+                        max_width,
+                        max_height,
+                        every_nth_frame,
+                        frame_seq: 0,
+                        outstanding_ack: false,
+                        last_damage: None,
+                    },
+                );
+                // Chrome emits the first frame immediately, not on the next
+                // client message — the pump only ticks between messages.
+                pump_screencast_frames(ctx).await;
+                Ok(json!({}))
+            }
+            #[cfg(not(feature = "screenshot"))]
+            {
+                Ok(json!({}))
+            }
+        }
+        "stopScreencast" => {
+            #[cfg(feature = "screenshot")]
+            {
+                let page_id = ctx.get_session_page(session_id).map(|p| p.id.clone());
+                if let Some(pid) = page_id {
+                    ctx.screencast.remove(&pid);
+                }
+                Ok(json!({}))
+            }
+            #[cfg(not(feature = "screenshot"))]
+            {
+                Ok(json!({}))
+            }
+        }
+        "screencastFrameAck" => {
+            #[cfg(feature = "screenshot")]
+            {
+                // The ack carries the frame's numeric sessionId; at most one
+                // frame is ever in flight per page, so clearing unblocks the
+                // pump unambiguously.
+                let page_id = ctx.get_session_page(session_id).map(|p| p.id.clone());
+                if let Some(pid) = page_id {
+                    if let Some(st) = ctx.screencast.get_mut(&pid) {
+                        st.outstanding_ack = false;
+                    }
+                }
+                Ok(json!({}))
+            }
+            #[cfg(not(feature = "screenshot"))]
+            {
+                Ok(json!({}))
+            }
+        }
+        // Chrome re-lays the page out at paper size for print; the page
+        // pump cuts bands at `page_size`, so pin the viewport to the paper
+        // for the render and restore the session's emulation after — the
+        // same transient Chrome's print pipeline makes. Agent-browser's
+        // `pdf` command is this method's caller.
+        "printToPDF" => {
+            #[cfg(feature = "screenshot")]
+            {
+                let landscape = params.get("landscape").and_then(Value::as_bool).unwrap_or(false);
+                let pw = params
+                    .get("paperWidth")
+                    .and_then(Value::as_f64)
+                    .filter(|v| *v > 0.0)
+                    .unwrap_or(8.5);
+                let ph = params
+                    .get("paperHeight")
+                    .and_then(Value::as_f64)
+                    .filter(|v| *v > 0.0)
+                    .unwrap_or(11.0);
+                // CSS px per inch, the print pipeline's shared unit: paper
+                // dims are inches, the page pump eats CSS px.
+                let (w, h) = if landscape {
+                    (ph * 96.0, pw * 96.0)
+                } else {
+                    (pw * 96.0, ph * 96.0)
+                };
+                let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
+                let prior_viewport = page.viewport_override();
+                let prior_dpr = page.dpr_override();
+                page.set_viewport_override(w as f32, h as f32, false, prior_dpr);
+                let set = crate::pages::render_page_set(
+                    page,
+                    &crate::pages::PagePumpOptions {
+                        mode: crate::pages::PageMode::Print,
+                        page_size: (w as f32, h as f32),
+                        max_pages: 50,
+                        collect_text: true,
+                    },
+                )
+                .await;
+                // Restore the client's emulation regardless of render outcome.
+                match prior_viewport {
+                    Some((vw, vh, mobile)) => {
+                        page.set_viewport_override(vw, vh, mobile, prior_dpr)
+                    }
+                    None => page.clear_viewport_override(),
+                }
+                let set = set.map_err(|e| format!("printToPDF failed: {e}"))?;
+                let mut jpegs = Vec::with_capacity(set.pages.len());
+                for p in &set.pages {
+                    let j = crate::pages::jpeg_of(p.width, p.height, &p.rgba, 90)
+                        .map_err(|e| format!("printToPDF failed: {e}"))?;
+                    jpegs.push(j);
+                }
+                let refs: Vec<(u32, u32, &[u8], &[diting::diting_layout::paint::PdfOp])> = set
+                    .pages
+                    .iter()
+                    .zip(jpegs.iter())
+                    .zip(set.text_ops.iter())
+                    .map(|((p, j), ops)| (p.width, p.height, j.as_slice(), ops.as_slice()))
+                    .collect();
+                let pdf = crate::pages::pdf_of_pages(&refs);
+                Ok(json!({ "data": BASE64.encode(&pdf) }))
+            }
+            #[cfg(not(feature = "screenshot"))]
+            {
+                Err("printToPDF requires the `screenshot` feature".to_string())
+            }
+        }
+        _ => Err(format!("Unknown Page method: {}", method)),
+    }
+}
+
+/// `quality` param: JPEG quality 0-100 (Chrome default 100).
+#[cfg(feature = "screenshot")]
+fn quality_param(params: &Value) -> u8 {
+    params
+        .get("quality")
+        .and_then(Value::as_u64)
+        .unwrap_or(100)
+        .clamp(0, 100) as u8
+}
+
+/// Re-encode an already-encoded PNG as jpeg for the legacy full-page path,
+/// whose renderer hands back `RenderedScreenshot::png` (compressed bytes, not
+/// a raw frame buffer — that distinction is the whole point of this helper).
+#[cfg(feature = "screenshot")]
+fn encode_legacy_jpeg(png: &[u8], quality: u8) -> Result<Vec<u8>, String> {
+    let img = image::load_from_memory(png).map_err(|e| format!("jpeg decode: {e}"))?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality);
+    img.to_rgb8()
+        .write_with_encoder(encoder)
+        .map_err(|e| format!("jpeg encode: {e}"))?;
+    Ok(out.into_inner())
+}
+
+/// Encode a band frame as png (default) or jpeg (`quality`), mirroring the
+/// render path's encoder settings.
+#[cfg(feature = "screenshot")]
+fn encode_frame(
+    format: &str,
+    quality: u8,
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    if format == "jpeg" || format == "jpg" {
+        let img = image::RgbaImage::from_raw(width, height, rgba)
+            .ok_or_else(|| "frame buffer size mismatch".to_string())?;
+        let rgb = image::DynamicImage::ImageRgba8(img).to_rgb8();
+        let mut out = std::io::Cursor::new(Vec::new());
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality);
+        rgb.write_with_encoder(encoder)
+            .map_err(|e| format!("jpeg encode: {e}"))?;
+        Ok(out.into_inner())
+    } else {
+        let mut png_bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(
+                std::io::Cursor::new(&mut png_bytes),
+                width.max(1),
+                height.max(1),
+            );
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder
+                .write_header()
+                .map_err(|e| format!("png encode header: {e}"))?;
+            writer
+                .write_image_data(&rgba)
+                .map_err(|e| format!("png encode: {e}"))?;
+        }
+        Ok(png_bytes)
+    }
+}
+
+/// Downscale a frame into `max_width`/`max_height` (0 = unconstrained),
+/// keeping aspect via `imageops::thumbnail` (area-average, like Chrome's
+/// screencast downscale).
+#[cfg(feature = "screenshot")]
+fn maybe_downscale(
+    max_width: u32,
+    max_height: u32,
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+) -> (u32, u32, Vec<u8>) {
+    let mut scale = 1.0f32;
+    if max_width > 0 {
+        scale = scale.min(max_width as f32 / width.max(1) as f32);
+    }
+    if max_height > 0 {
+        scale = scale.min(max_height as f32 / height.max(1) as f32);
+    }
+    if scale >= 1.0 {
+        return (width, height, rgba);
+    }
+    let Some(img) = image::RgbaImage::from_raw(width, height, rgba) else {
+        return (width, height, Vec::new());
+    };
+    let nw = ((width as f32 * scale).floor() as u32).max(1);
+    let nh = ((height as f32 * scale).floor() as u32).max(1);
+    let thumb = image::imageops::thumbnail(&img, nw, nh);
+    (nw, nh, thumb.into_raw())
+}
+
+/// Produce one screencast frame per armed, unacked, damaged page. Called on
+/// the connection loop's 33 ms tick and once immediately from
+/// `startScreencast` (Chrome emits the first frame right away). Damage =
+/// (dom epoch, scroll, viewport): a static page costs zero frames, a scroll
+/// or mutation re-blits — frame cost is independent of page height.
+#[cfg(feature = "screenshot")]
+/// Per-tick JS settle budget for armed screencast pages: long enough for a
+/// due timer to fire inside the poll, short enough that several armed pages
+/// still fit inside the 33 ms pump cadence.
+const SCREENCEAST_SETTLE_MS: u64 = 5;
+
+#[cfg(feature = "screenshot")]
+pub(crate) async fn pump_screencast_frames(ctx: &mut CdpContext) {
+    if ctx.screencast.is_empty() {
+        return;
+    }
+    let entries: Vec<(String, ScreencastState)> = ctx
+        .screencast
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    for (page_id, mut st) in entries {
+        // Drive the page's JS event loop a notch so page-driven damage
+        // (timers, animations) progresses without a client message: dispatch
+        // is otherwise the loop's only poller, and a silent connection
+        // freezes a self-updating page — frames flowed only after a
+        // heartbeat evaluate on the AginxOS real-device report. Runs before
+        // the ack gate on purpose: a slow-acking client must not freeze the
+        // page's own time. Idle pages return from settle immediately.
+        if let Some(page) = ctx.get_page_mut(&page_id) {
+            page.settle(SCREENCEAST_SETTLE_MS).await;
+        }
+        if st.outstanding_ack {
+            continue;
+        }
+        // Damage signature first (immutable page access — cheap skip before
+        // any layout/paint work). A page id with no page behind it (closed
+        // while the cast was armed) drops its state here, or the pump would
+        // keep waking every tick for a dead id.
+        let (epoch, rev, ox, oy) = {
+            let Some(page) = ctx.get_page(&page_id) else {
+                ctx.screencast.remove(&page_id);
+                continue;
+            };
+            (
+                page.dom_epoch(),
+                page.layout_rev(),
+                page.scroll_offset().0,
+                page.scroll_offset().1,
+            )
+        };
+        let (vw, vh) = {
+            let Some(page) = ctx.get_page(&page_id) else { continue };
+            page.effective_viewport()
+        };
+        let sig = (epoch, rev, ox, oy, vw, vh);
+        if st.last_damage == Some(sig) {
+            continue;
+        }
+        // everyNthFrame: count *changed* frames; the first changed frame
+        // always emits, then every Nth after that.
+        st.frame_seq += 1;
+        let nth_hit = (st.frame_seq - 1) % st.every_nth_frame.max(1) as u64 == 0;
+        st.last_damage = Some(sig);
+        if !nth_hit {
+            ctx.screencast.insert(page_id, st);
+            continue;
+        }
+        let produced = {
+            let Some(page) = ctx.get_page(&page_id) else { continue };
+            match page.viewport_band_frame(ox, oy, (vw, vh)) {
+                None => None,
+                Some((frame, missing)) => {
+                    if !missing.is_empty() {
+                        page.fetch_band_images(missing).await;
+                        page.viewport_band_frame(ox, oy, (vw, vh)).map(|(f, _)| f)
+                    } else {
+                        Some(frame)
+                    }
+                }
+            }
+        };
+        let Some(frame) = produced else {
+            // No live document yet (pre-navigation): persist the signature
+            // so the pump doesn't retry a doomed produce every tick — the
+            // next epoch/scroll change re-arms it.
+            ctx.screencast.insert(page_id, st);
+            continue;
+        };
+        let (w, h, rgba) = maybe_downscale(
+            st.max_width,
+            st.max_height,
+            frame.width,
+            frame.height,
+            frame.rgba,
+        );
+        let data = match encode_frame(&st.format, st.quality, w, h, rgba) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::debug!("screencast frame encode failed: {e}");
+                continue;
+            }
+        };
+        st.outstanding_ack = true;
+        let params = json!({
+            "data": BASE64.encode(&data),
+            "metadata": {
+                "offsetTop": 0,
+                "pageScaleFactor": 1,
+                "deviceWidth": vw as i64,
+                "deviceHeight": vh as i64,
+                "scrollOffsetX": frame.dx as i64,
+                "scrollOffsetY": frame.dy as i64,
+                "timestamp": now_epoch_seconds(),
+            },
+            "sessionId": st.frame_seq as i64,
+        });
+        emit(ctx, "Page.screencastFrame", params, &st.session_id);
+        ctx.screencast.insert(page_id, st);
+    }
+}

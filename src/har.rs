@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use serde_json::{json, Map, Value};
 
-use crate::diting_browser::page::{NetworkEvent, StoredResponseBody};
+use diting::diting_browser::page::{NetworkEvent, StoredResponseBody};
 
 /// ISO 8601 UTC timestamp (HAR `startedDateTime` shape) from unix seconds.
 /// Civil-from-days is Howard Hinnant's algorithm; avoids a chrono dependency

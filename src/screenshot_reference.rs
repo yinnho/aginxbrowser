@@ -124,7 +124,7 @@ pub fn render_html_to_png(
             // Bundled CJK fonts (batch 3c): hoisted to the head of the Han
             // fallback chain, system fonts kept as tail — CJK renders the
             // same on every machine, no fonts-noto-cjk dependency.
-            font_ctx: Some(crate::diting_fonts::font_ctx()),
+            font_ctx: Some(diting::diting_fonts::font_ctx()),
             viewport: Some(Viewport::new(
                 width * (scale as u32),
                 height * (scale as u32),
@@ -367,6 +367,62 @@ fn absolute_origin(doc: &BaseDocument, node_id: NodeId) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The product claim: CJK text renders with the bundled collection and
+    /// system fonts DISABLED — no fonts-noto-cjk, no PingFang, nothing.
+    /// Uses the engine's real production wiring (diting's font_ctx), only
+    /// with the system tail turned off. Renders through the Blitz pipeline
+    /// (the heavier engine-level variant of diting's swash coverage tests);
+    /// in a screenshot-only build the bundle claim is carried by the
+    /// engine-side bundle_cjk_coverage_paints /
+    /// bundle_symbol_coverage_paints. Lived in diting_fonts before the
+    /// workspace split — moved here because the engine must not depend on
+    /// blitz (ARCHITECTURE.md §2 R2).
+    #[cfg(feature = "blitz-reference")]
+    #[test]
+    fn cjk_renders_without_system_fonts() {
+        let ctx = diting::diting_fonts::font_ctx_bundled_only();
+
+        let html = r#"<style>body { margin: 0; font-family: serif; }</style>
+            <body><div id="t">谛听引擎汉字渲染</div></body>"#;
+        let mut doc = blitz_html::HtmlDocument::from_html(
+            html,
+            blitz_dom::DocumentConfig {
+                base_url: Some("https://example.com/".to_string()),
+                net_provider: None,
+                font_ctx: Some(ctx),
+                viewport: Some(Viewport::new(400, 80, 1.0, Default::default())),
+                ..Default::default()
+            },
+        );
+        for _ in 0..4 {
+            doc.resolve(0.0);
+        }
+        let mut doc = doc;
+        let (w, h) = (400u32, 80u32);
+        let buffer = anyrender::render_to_buffer::<anyrender_vello_cpu::VelloCpuImageRenderer, _>(
+            |scene| {
+                use anyrender::PaintScene as _;
+                use peniko::kurbo::Rect;
+                scene.fill(
+                    peniko::Fill::NonZero,
+                    Default::default(),
+                    peniko::Color::WHITE,
+                    Default::default(),
+                    &Rect::new(0.0, 0.0, w as f64, h as f64),
+                );
+                blitz_paint::paint_scene(scene, &mut doc, 1.0, w, h, 0, 0);
+            },
+            w,
+            h,
+        );
+        // Black ink on the white fill = the bundle carried the glyphs.
+        let ink = buffer
+            .chunks(4)
+            .filter(|p| p[0] < 128 && p[1] < 128 && p[2] < 128)
+            .count();
+        assert!(ink > 100, "CJK must paint from the bundle alone (ink px={ink})");
+    }
 
     /// Deterministic layout check: an absolutely-positioned element must report
     /// its CSS rect, and a selector crop must contain (only) that element.
@@ -699,7 +755,7 @@ mod tests {
 #[cfg(test)]
 mod cross_check {
     use super::*;
-    use crate::diting_css::{self, ComputedStyle, Display, TextAlign};
+    use diting::diting_css::{self, ComputedStyle, Display, TextAlign};
     use stylo_alias::values::computed::LengthPercentage;
     use stylo_alias::values::specified::box_::{DisplayInside, DisplayOutside};
     use stylo_alias::values::specified::text::TextAlignKeyword;
@@ -812,7 +868,7 @@ mod cross_check {
         stylesheet: &str,
     ) -> (
         BaseDocument,
-        crate::diting_dom::tree::DomTree,
+        diting::diting_dom::tree::DomTree,
         Vec<diting_css::ParsedRule>,
     ) {
         // Blitz side.
@@ -831,7 +887,7 @@ mod cross_check {
         }
 
         // diting side: same HTML + sheet through our engine.
-        let tree = crate::diting_dom::tree_sink::parse_html(html);
+        let tree = diting::diting_dom::tree_sink::parse_html(html);
         let rules = diting_css::parse_stylesheet(stylesheet);
 
         (doc.into_inner(), tree, rules)
@@ -940,8 +996,8 @@ mod cross_check {
     // -- helpers shared by the cross-check tests --
 
     fn cascade_simple(
-        tree: &crate::diting_dom::tree::DomTree,
-        nid: crate::diting_dom::tree::NodeId,
+        tree: &diting::diting_dom::tree::DomTree,
+        nid: diting::diting_dom::tree::NodeId,
         tag: &str,
         rules: &[diting_css::ParsedRule],
     ) -> ComputedStyle {
@@ -951,8 +1007,8 @@ mod cross_check {
     /// Full-fidelity entry into diting_css's cascade: match rules against the
     /// element, chain parent styles up the ancestor list, apply inline last.
     fn diting_css_cascade_full(
-        tree: &crate::diting_dom::tree::DomTree,
-        nid: crate::diting_dom::tree::NodeId,
+        tree: &diting::diting_dom::tree::DomTree,
+        nid: diting::diting_dom::tree::NodeId,
         tag: &str,
         rules: &[diting_css::ParsedRule],
         parent: Option<&ComputedStyle>,

@@ -13,7 +13,7 @@
 //! short last viewport makes the clamp land exactly on the page's start
 //! offset instead of pulling it back into the previous page's content.
 
-use crate::diting_browser::Page;
+use diting::diting_browser::Page;
 
 /// How the page set is cut.
 #[derive(Debug, Clone)]
@@ -64,7 +64,7 @@ pub struct PageSet {
     pub pages: Vec<PageImage>,
     /// Per-page PDF text ops (band-local), parallel to `pages`; empty vecs
     /// when the pump ran without `collect_text`.
-    pub text_ops: Vec<Vec<crate::diting_layout::paint::PdfOp>>,
+    pub text_ops: Vec<Vec<diting::diting_layout::paint::PdfOp>>,
     /// Document content extent the set was cut from (CSS px).
     pub content_size: (f32, f32),
 }
@@ -288,7 +288,7 @@ fn paint(
     scroll_x: f32,
     scroll_y: f32,
     viewport: (f32, f32),
-) -> Option<(crate::diting_js::ops::BandFrame, Vec<String>)> {
+) -> Option<(diting::diting_js::ops::BandFrame, Vec<String>)> {
     page.viewport_band_frame(scroll_x, scroll_y, viewport)
 }
 
@@ -300,7 +300,7 @@ fn paint_with_text(
     scroll_x: f32,
     scroll_y: f32,
     viewport: (f32, f32),
-) -> Option<(crate::diting_js::ops::BandFrame, Vec<String>)> {
+) -> Option<(diting::diting_js::ops::BandFrame, Vec<String>)> {
     page.viewport_band_frame_with_text(scroll_x, scroll_y, viewport)
 }
 
@@ -345,13 +345,13 @@ const PX_TO_PT: f64 = 72.0 / 96.0;
 /// writer flips y to the PDF bottom-up point space itself. Hand-rolled
 /// writer — zero new dependencies.
 pub fn pdf_of_pages(
-    pages: &[(u32, u32, &[u8], &[crate::diting_layout::paint::PdfOp])],
+    pages: &[(u32, u32, &[u8], &[diting::diting_layout::paint::PdfOp])],
 ) -> Vec<u8> {
-    use crate::diting_layout::paint::PdfOp;
-    use crate::diting_layout::text::PdfFace;
+    use diting::diting_layout::paint::PdfOp;
+    use diting::diting_layout::text::PdfFace;
     use std::collections::BTreeMap;
 
-    let fonts = crate::diting_fonts::font_book();
+    let fonts = diting::diting_fonts::font_book();
 
     // Face usage scan: widths stored as px/em ratio (scaled to font units
     // once the face's upem is known) and first-text-per-gid for ToUnicode.
@@ -662,8 +662,8 @@ pub fn pdf_of_pages(
 #[cfg(all(test, feature = "screenshot"))]
 mod tests {
     use super::*;
-    use crate::diting_browser::lifecycle::WaitUntil;
-    use crate::diting_browser::{BrowserContext, Page as EnginePage};
+    use diting::diting_browser::lifecycle::WaitUntil;
+    use diting::diting_browser::{BrowserContext, Page as EnginePage};
     use std::io::Write;
     use std::net::TcpListener;
     use std::sync::Arc;
@@ -764,7 +764,7 @@ html,body{{margin:0;padding:0;width:400px;font-size:16px;line-height:20px;color:
 
     /// Every page must carry real content — a blank (all-white) band means
     /// the break logic walked past the content.
-    fn has_ink(frame: &crate::diting_js::ops::BandFrame) -> bool {
+    fn has_ink(frame: &diting::diting_js::ops::BandFrame) -> bool {
         frame
             .rgba
             .chunks_exact(4)
@@ -791,8 +791,8 @@ html,body{{margin:0;padding:0;width:400px;font-size:16px;line-height:20px;color:
 
     // Helper: build a BandFrame view of a PageImage for has_ink (origin_y
     // and content size don't matter for the ink check).
-    fn p_rgba_frame(p: &PageImage) -> crate::diting_js::ops::BandFrame {
-        crate::diting_js::ops::BandFrame {
+    fn p_rgba_frame(p: &PageImage) -> diting::diting_js::ops::BandFrame {
+        diting::diting_js::ops::BandFrame {
             rgba: p.rgba.clone(),
             width: p.width,
             height: p.height,
@@ -931,8 +931,8 @@ html,body{{margin:0;padding:0;width:400px;font-size:16px;line-height:20px;color:
     /// points at every object once the 5-per-face block is appended.
     #[test]
     fn pdf_text_layer_embeds_fonts_and_glyph_ops() {
-        use crate::diting_layout::paint::{PdfLine, PdfOp};
-        use crate::diting_layout::text::{PdfFace, PdfGlyph};
+        use diting::diting_layout::paint::{PdfLine, PdfOp};
+        use diting::diting_layout::text::{PdfFace, PdfGlyph};
 
         let j1 = vec![0xFF, 0xD8, 0xFF, 0xE0, 0xFF, 0xD9];
         let ops = vec![
@@ -1004,7 +1004,7 @@ html,body{{margin:0;padding:0;width:400px;font-size:16px;line-height:20px;color:
         assert!(!text.contains("DitingMono-Regular"), "unused mono face not embedded");
 
         // The FontFile2 stream is the shaper's own bytes, verbatim.
-        let fonts = crate::diting_fonts::font_book();
+        let fonts = diting::diting_fonts::font_book();
         let regular = fonts.pdf_face_bytes(PdfFace::Regular);
         assert!(
             text.contains(&format!("/Length1 {}", regular.len())),
@@ -1084,7 +1084,7 @@ html,body{{margin:0;padding:0;width:400px;font-size:16px;line-height:20px;color:
     /// text layer (it would paint twice).
     #[tokio::test(flavor = "current_thread")]
     async fn collect_text_vectors_plain_and_skips_shadow() {
-        use crate::diting_layout::paint::PdfOp;
+        use diting::diting_layout::paint::PdfOp;
 
         const HTML: &str = r#"<!doctype html><html><head><style>
 html,body{margin:0;padding:0}
@@ -1114,7 +1114,7 @@ html,body{margin:0;padding:0}
     /// them to an embedded face, so an emoji-only page yields no glyph lines.
     #[tokio::test(flavor = "current_thread")]
     async fn emoji_only_page_stays_raster() {
-        use crate::diting_layout::paint::PdfOp;
+        use diting::diting_layout::paint::PdfOp;
 
         const HTML: &str = r#"<!doctype html><html><head><style>
 html,body{margin:0;padding:0}
