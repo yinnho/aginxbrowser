@@ -24,6 +24,11 @@ use crate::diting_cdp::types::{CdpEvent, CdpRequest, CdpResponse};
 /// the `Fetch.requestPaused` event.
 pub struct PendingPause {
     pub bridge_request_id: String,
+    /// Request URL / resource type, echoed on the Network-domain events the
+    /// bridge emits when the pause resolves (fulfill → responseReceived,
+    /// fail → loadingFailed).
+    pub url: String,
+    pub resource_type: String,
     pub resolver: Option<tokio::sync::oneshot::Sender<InterceptResolution>>,
 }
 
@@ -71,9 +76,24 @@ pub struct CdpContext {
     /// script-initiated Network events must share this id; inventing a loader
     /// for each fetch breaks DevTools request grouping.
     pub current_loader_ids: HashMap<String, String>,
-    /// Child frame ids already reported to the client, per page (single-realm
-    /// engine: currently always empty, kept for the drain structure).
-    pub announced_frames: HashMap<String, Vec<String>>,
+    /// Child (iframe) frames of each page, in document order. Single-realm
+    /// engine: a child frame has no real JS context of its own — evals
+    /// targeting it run in the main realm with the frame's document swapped
+    /// into the global — but the CDP frame surface (frameAttached /
+    /// frameNavigated / per-frame executionContextCreated / getFrameTree)
+    /// must exist for clients that model iframes (Playwright frameLocator).
+    pub child_frames: HashMap<String, Vec<ChildFrame>>,
+    /// executionContextId -> (page_id, frame_id) for contexts minted for
+    /// child frames (default + isolated worlds). Main-frame contexts are not
+    /// in this map; lookup falls back to the session's page.
+    pub frame_contexts: HashMap<i64, (String, String)>,
+    /// objectId ("injected-script-id") -> iframe arena node id, for
+    /// callFunctionOn scope recovery: Playwright's evaluateWithArguments sends
+    /// only the utility-script objectId, so the target frame is inferred
+    /// from which frame minted that object.
+    pub frame_object_ids: HashMap<String, u32>,
+    /// Minting counter for child frame ids ("frame-N").
+    pub next_child_frame_seq: u64,
     pub pending_events: Vec<CdpEvent>,
     pub default_context: Arc<BrowserContext>,
     pub browser_contexts: HashMap<String, Arc<BrowserContext>>,
@@ -159,6 +179,19 @@ pub struct PendingNav {
     pub announced_url: String,
 }
 
+/// One live child frame: the iframe element's arena node id is the identity
+/// (it survives attribute mutations; removal detaches the frame). `contexts`
+/// lists every executionContextId minted for this frame — default world
+/// first, then one per registered isolated world.
+pub struct ChildFrame {
+    pub frame_id: String,
+    pub nid: u32,
+    pub url: String,
+    pub name: String,
+    pub loader_id: String,
+    pub contexts: Vec<i64>,
+}
+
 impl CdpContext {
     /// Build a CDP context around an already-constructed default browser
     /// context. The server passes an isolated context per WebSocket connection;
@@ -171,7 +204,10 @@ impl CdpContext {
             pages: Vec::new(),
             sessions: HashMap::new(),
             current_loader_ids: HashMap::new(),
-            announced_frames: HashMap::new(),
+            child_frames: HashMap::new(),
+            frame_contexts: HashMap::new(),
+            frame_object_ids: HashMap::new(),
+            next_child_frame_seq: 0,
             pending_events: Vec::new(),
             default_context,
             browser_contexts: HashMap::new(),
@@ -318,7 +354,8 @@ impl CdpContext {
         }
         self.pages.retain(|p| p.id != id);
         self.current_loader_ids.remove(id);
-        self.announced_frames.remove(id);
+        self.child_frames.remove(id);
+        self.frame_contexts.retain(|_, (pid, _)| pid != id);
         self.sessions.retain(|_, v| v != id);
         // Sessions of the closed page are gone from `sessions`; their
         // Network-enable state must not outlive them.
@@ -372,6 +409,37 @@ impl CdpContext {
         self.resolve_page_id(session_id)
     }
 
+    pub fn next_child_frame_id(&mut self) -> String {
+        self.next_child_frame_seq += 1;
+        format!("frame-{}", self.next_child_frame_seq)
+    }
+
+    /// Drop a page's child frames, returning the removed entries so the
+    /// caller can emit frameDetached / clean context ids. Also clears the
+    /// context and object-id side tables.
+    pub fn clear_child_frames(&mut self, page_id: &str) -> Vec<ChildFrame> {
+        let removed = self.child_frames.remove(page_id).unwrap_or_default();
+        for frame in &removed {
+            for cid in &frame.contexts {
+                self.frame_contexts.remove(cid);
+                self.valid_context_ids.remove(cid);
+            }
+        }
+        if !removed.is_empty() {
+            let nids: HashSet<u32> = removed.iter().map(|f| f.nid).collect();
+            self.frame_object_ids.retain(|_, nid| !nids.contains(nid));
+        }
+        removed
+    }
+
+    /// Find a page's child frame by its iframe element's arena node id.
+    pub fn child_frame_by_nid(&self, page_id: &str, nid: u32) -> Option<&ChildFrame> {
+        self.child_frames
+            .get(page_id)?
+            .iter()
+            .find(|f| f.nid == nid)
+    }
+
     pub fn get_session_page_mut(&mut self, session_id: &Option<String>) -> Option<&mut Page> {
         let page_id = self
             .resolve_page_id(session_id)
@@ -416,6 +484,16 @@ impl CdpContext {
         // (Runtime.enable, Fetch.enable) around navigations and must not
         // stall behind the load.
         if req.method.ends_with(".enable") || req.method.ends_with(".disable") {
+            return false;
+        }
+        // Fetch resolutions answer parked requests — including a navigation
+        // document parked mid-load (page.route over Page.navigate). They only
+        // touch the intercept state, never the checked-out page, so parking
+        // them would deadlock the load until the resolution timeout.
+        if matches!(
+            req.method.as_str(),
+            "Fetch.continueRequest" | "Fetch.fulfillRequest" | "Fetch.failRequest"
+        ) {
             return false;
         }
         self.session_page_id(&req.session_id)
@@ -757,26 +835,55 @@ pub(crate) fn drain_intercept_calls(ctx: &mut CdpContext) -> Vec<String> {
                 .filter(|(k, _)| !k.starts_with("__diting_"))
                 .map(|(k, v)| (k.clone(), Value::String(v.clone())))
                 .collect();
+            let request_obj = json!({
+                "url": req.url.clone(),
+                "method": req.method.clone(),
+                "headers": headers,
+                "initialPriority": "High",
+                "referrer": "",
+            });
+            // Chrome pairs every pause with a Network.requestWillBeSent under
+            // one request id, and clients route on that pairing: Playwright
+            // auto-continues pauses without `networkId` and never surfaces a
+            // request that has no willBeSent to pair with. The bridge id
+            // stands in for both halves.
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64();
+            let will_be_sent = json!({
+                "requestId": bridge_request_id,
+                "request": request_obj.clone(),
+                "timestamp": ts,
+                "wallTime": ts,
+                "initiator": { "type": "other" },
+                "type": req.resource_type.clone(),
+                "frameId": page_id.clone(),
+                "hasUserGesture": false,
+            });
+            let paused = json!({
+                "requestId": bridge_request_id,
+                "networkId": bridge_request_id,
+                "request": request_obj,
+                "resourceType": req.resource_type.clone(),
+                "frameId": page_id.clone(),
+            });
             for session_id in page_sessions {
                 events.push(CdpEvent {
+                    method: "Network.requestWillBeSent".into(),
+                    params: will_be_sent.clone(),
+                    session_id: Some(session_id.to_string()),
+                });
+                events.push(CdpEvent {
                     method: "Fetch.requestPaused".into(),
-                    params: json!({
-                        "requestId": bridge_request_id,
-                        "request": {
-                            "url": req.url,
-                            "method": req.method,
-                            "headers": headers,
-                            "initialPriority": "High",
-                            "referrer": "",
-                        },
-                        "resourceType": req.resource_type,
-                        "frameId": page_id,
-                    }),
+                    params: paused.clone(),
                     session_id: Some(session_id.to_string()),
                 });
             }
             state.pending.push(PendingPause {
                 bridge_request_id,
+                url: req.url.clone(),
+                resource_type: req.resource_type.clone(),
                 resolver: Some(req.resolver),
             });
         }
@@ -4976,6 +5083,159 @@ r.addEventListener('change',function(){globalThis.__ev.push('change:'+r.value)})
         });
     }
 
+    // Playwright page.route / Puppeteer setRequestInterception over a
+    // spawned navigation: the document request parks mid-load, the client
+    // fulfills it, and the fulfilled body — not the network body — is what
+    // the page ends up with.
+    #[test]
+    fn spawned_navigation_pauses_and_fulfills_document() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(&rt, async {
+            use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+            let _net = crate::server::test_util::net_env_guard();
+            let port = static_subresource_fixture().await;
+            let mut ctx = CdpContext::new_with_options(None, false);
+            let (page_id, session, mut load_rx) = spawned_harness(&mut ctx);
+
+            assert!(dispatch(
+                &fetch_enable(1, &session, json!([{ "urlPattern": "**/*" }])),
+                &mut ctx
+            )
+            .await
+            .error
+            .is_none());
+
+            let nav = CdpRequest {
+                id: 2,
+                method: "Page.navigate".to_string(),
+                params: json!({ "url": format!("http://127.0.0.1:{port}/doc") }),
+                session_id: Some(session.clone()),
+            };
+            let resp = dispatch(&nav, &mut ctx).await;
+            assert!(resp.error.is_none(), "navigate: {:?}", resp.error);
+
+            // The load task parks the document request; the loop drains
+            // pauses between commands (idle pump / post-dispatch), so mirror
+            // that: yield to the spawned task, drain, look for the pause.
+            let mut request_id = None;
+            for _ in 0..500 {
+                tokio::task::yield_now().await;
+                ctx.pending_events.clear();
+                drain_intercept_calls(&mut ctx);
+                if let Some(ev) = ctx
+                    .pending_events
+                    .iter()
+                    .find(|e| e.method == "Fetch.requestPaused")
+                {
+                    assert_eq!(ev.params["resourceType"], "Document");
+                    assert!(
+                        ev.params["request"]["url"]
+                            .as_str()
+                            .unwrap()
+                            .ends_with("/doc")
+                    );
+                    let rid =
+                        ev.params["requestId"].as_str().expect("requestId").to_string();
+                    // Playwright pairing contract: a pause without networkId
+                    // is auto-continued by the client and its route handler
+                    // never runs, so the bridge id must ride on networkId —
+                    // behind a same-id requestWillBeSent in the same batch.
+                    assert_eq!(ev.params["networkId"].as_str(), Some(rid.as_str()));
+                    let same_id = |e: &crate::diting_cdp::types::CdpEvent| {
+                        e.params["requestId"].as_str() == Some(rid.as_str())
+                    };
+                    let will_pos = ctx
+                        .pending_events
+                        .iter()
+                        .position(|e| e.method == "Network.requestWillBeSent" && same_id(e))
+                        .unwrap_or_else(|| panic!("no willBeSent for bridge id {rid}"));
+                    let pause_pos = ctx
+                        .pending_events
+                        .iter()
+                        .position(|e| e.method == "Fetch.requestPaused" && same_id(e))
+                        .expect("pause just found");
+                    assert!(will_pos < pause_pos, "willBeSent must precede its pause");
+                    request_id = Some(rid);
+                    break;
+                }
+            }
+            let request_id =
+                request_id.expect("navigation document must pause under armed interception");
+
+            let body = B64.encode("<html><body><h1 id=\"ok\">ROUTED-OK</h1></body></html>");
+            let fulfill = CdpRequest {
+                id: 3,
+                method: "Fetch.fulfillRequest".to_string(),
+                params: json!({
+                    "requestId": request_id,
+                    "responseCode": 200,
+                    "responseHeaders": [
+                        { "name": "Content-Type", "value": "text/html; charset=utf-8" }
+                    ],
+                    "body": body,
+                }),
+                session_id: Some(session.clone()),
+            };
+            assert!(
+                !ctx.should_park(&fulfill),
+                "resolution commands must pass through while the load waits"
+            );
+            assert!(dispatch(&fulfill, &mut ctx).await.error.is_none());
+
+            // The resolution must complete the bridge id's Network lifecycle
+            // (page.goto's Response object is created from responseReceived).
+            for method in ["Network.responseReceived", "Network.loadingFinished"] {
+                assert!(
+                    ctx.pending_events.iter().any(|e| e.method == method
+                        && e.params["requestId"].as_str() == Some(request_id.as_str())),
+                    "fulfill echo missing {method} under {request_id}: {methods:?}",
+                    methods = ctx
+                        .pending_events
+                        .iter()
+                        .map(|e| e.method.as_str())
+                        .collect::<Vec<_>>()
+                );
+            }
+
+            let done = load_rx.next().await.expect("load task reports back");
+            assert_eq!(done.page_id, page_id);
+            assert!(
+                done.result.is_ok(),
+                "fulfilled document must complete the load: {:?}",
+                done.result.as_ref().err()
+            );
+            ctx.pages.push(done.page);
+            let pending = ctx.pending_loads.remove(&page_id).unwrap();
+            crate::diting_cdp::domains::page::emit_navigation_tail(
+                &mut ctx,
+                &pending,
+                &page_id,
+                None,
+            );
+            ctx.pending_events.clear();
+
+            let value = eval_value(
+                &mut ctx,
+                &session,
+                4,
+                "document.getElementById('ok') ? document.getElementById('ok').textContent : 'missing'",
+            )
+            .await;
+            assert_eq!(value, "ROUTED-OK", "the fulfilled body must be the loaded document");
+            let value = eval_value(
+                &mut ctx,
+                &session,
+                5,
+                "document.body.textContent.includes('marker-before') ? 'leaked' : 'clean'",
+            )
+            .await;
+            assert_eq!(value, "clean", "the network body must not leak past the fulfillment");
+        });
+    }
+
     #[test]
     fn failed_spawned_navigation_emits_error_text_shape() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -5070,6 +5330,11 @@ r.addEventListener('change',function(){globalThis.__ev.push('change:'+r.value)})
         assert!(!ctx.should_park(&req("Page.enable")));
         assert!(!ctx.should_park(&req("Runtime.enable")));
         assert!(!ctx.should_park(&req("Page.disable")));
+        // Fetch resolutions answer parked requests mid-load (page.route over
+        // Page.navigate): parking them would deadlock the load.
+        assert!(!ctx.should_park(&req("Fetch.continueRequest")));
+        assert!(!ctx.should_park(&req("Fetch.fulfillRequest")));
+        assert!(!ctx.should_park(&req("Fetch.failRequest")));
         // Unknown session: no page to resolve to, nothing to park on.
         let unknown = CdpRequest {
             id: 2,

@@ -89,7 +89,7 @@ impl Page {
             .clamp(100, 120_000);
         let outcome = self
             .inner
-            .evaluate_for_cdp_outcome(expression, true, true, budget)
+            .evaluate_for_cdp_outcome(expression, true, true, budget, None)
             .await;
         if let Some(exc) = outcome.exception {
             let mut msg = exc.description;

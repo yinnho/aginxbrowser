@@ -114,6 +114,20 @@ Not demos — real jobs agent browsers are doing today:
 - **On-the-spot scripting** — agent reads the page, writes JS, evals it: highlighted comparison tables, reflowed content, product filters on hidden parameters. GreaseMonkey-on-steroids.
 - **Multimodal vision** — screenshots as visual input for look-and-judge flows: picking seats, recognizing layouts, verifying rendering.
 
+## Where It Sits in the Computer-Use Stack
+
+Computer-use agents come in two layers. **GUI-layer** stacks (Cua, desktop CUA agents) drive a whole machine: screenshots of a display in, X11 mouse/keyboard events out, a VM or container per session. **Engine-layer** browsers skip the desktop — the page itself is the machine. AginxBrowser is the engine layer:
+
+| | GUI layer (desktop CUA) | AginxBrowser (engine layer) |
+|---|---|---|
+| Action space | screen pixels → OS input events | DOM/CDP: click by coordinates or selector, real event dispatch |
+| State readout | screenshot of a display | structured DOM / accessibility tree, screenshot optional |
+| Per-session cost | Xvfb + VM/container | one process, no display server |
+| Frames | flattened into pixels | first-class: hit-testing descends into iframes, frame-scoped evaluate |
+| Replay | best-effort (compositor timing) | action logs export as runnable curl / flow JSON |
+
+Validated against the GUI layer's own harness: the [cua-bench](https://github.com/trycua/cua) webtop gym — a window manager where every "window" is an iframe — runs on AginxBrowser through the CDP bridge (click task: PASS end-to-end). That's the path that exercises iframe hit-testing, frame-scoped script state, and coordinate translation, which is exactly where engine-layer substitutes usually break. browser-use attaches the same way Playwright does: point `cdp_url` at the bridge.
+
 ## Quick Start
 
 Try the hosted instance first: **https://browser.aginx.net/**

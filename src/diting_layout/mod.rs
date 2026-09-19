@@ -1608,6 +1608,35 @@ pub fn object_paint_rect(
     }
 }
 
+/// CSS 2.1 §10.5: a percentage height resolves only when the containing
+/// block's height is specified EXPLICITLY; against a content-sized
+/// (indefinite) ancestor the percentage behaves as `auto`. Walk the DOM
+/// ancestors of `id`: Px (or a viewport unit already folded to px at
+/// cascade) is definite; Percent/Calc defers the question one level up;
+/// auto/keywords/nothing stops the walk as indefinite. The document root
+/// counts as definite — its percentage resolves against the viewport.
+fn cb_height_definite(
+    tree: &DomTree,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    id: NodeId,
+) -> bool {
+    let mut cur = tree.with_node(id, |n| n.parent).flatten();
+    while let Some(nid) = cur {
+        if tree.with_node(nid, |n| n.parent).flatten().is_none() {
+            return true;
+        }
+        match styles.get(&nid).and_then(|s| s.height) {
+            Some(crate::diting_css::Length::Px(_)) => return true,
+            Some(crate::diting_css::Length::Percent(_))
+            | Some(crate::diting_css::Length::Calc { .. }) => {
+                cur = tree.with_node(nid, |n| n.parent).flatten();
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// Build the taffy leaf for a replaced element. Per-tag natural-size
 /// semantics (batch 7a), mirroring blitz-dom layout/mod.rs:
 ///
@@ -1872,11 +1901,22 @@ fn build_replaced_leaf(
             Some(crate::diting_css::Length::Px(h)) => {
                 Dimension::length((if border_box { h } else { h + if bline { bt + bb } else { 0.0 } }) + strut_descent)
             }
-            Some(crate::diting_css::Length::Percent(p)) => Dimension::percent(p / 100.0),
-            Some(crate::diting_css::Length::Calc { percent, .. }) => {
+            Some(crate::diting_css::Length::Percent(p))
+                if cb_height_definite(tree, styles, id) =>
+            {
+                Dimension::percent(p / 100.0)
+            }
+            Some(crate::diting_css::Length::Calc { percent, .. })
+                if cb_height_definite(tree, styles, id) =>
+            {
                 Dimension::percent(percent / 100.0)
             }
-            Some(crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent) | None => Dimension::length(derived_h.unwrap_or(nat_h) + if bline { bt + bb } else { 0.0 } + strut_descent),
+            // Percent (or calc with a percent part) against a content-sized
+            // ancestor behaves as `auto` (§10.5) — for a replaced box its
+            // natural height. Taffy would resolve the percent against an
+            // indefinite CB to 0, collapsing `height:100%` iframes inside
+            // auto-height wrappers (the webtop .window-body case) to zero.
+            Some(crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent | crate::diting_css::Length::Percent(_) | crate::diting_css::Length::Calc { .. }) | None => Dimension::length(derived_h.unwrap_or(nat_h) + if bline { bt + bb } else { 0.0 } + strut_descent),
         },
     };
 

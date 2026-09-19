@@ -479,6 +479,62 @@ impl Page {
     /// pages are exactly the ones whose observers should not double-fire on
     /// a side channel); observers still see scripts/stylesheets/fetches.
     async fn fetch_document(&self, url: &Url) -> Result<Response, NetError> {
+        // CDP Fetch interception covers navigation documents too (Playwright
+        // `page.route` / Puppeteer `setRequestInterception`). The document
+        // request parks on the same resolution channel as a script-initiated
+        // fetch; the load task runs spawned off the CDP loop, so the bridge
+        // can answer it from a later command or the idle pump. No answer
+        // inside the shared resolution timeout → fall through to the real
+        // request (Continue semantics). Intercept resolution `Continue`
+        // overrides (url/method/headers rewrites) are not applied to
+        // documents — clients rewrite the bare `route.continue_()` case in
+        // practice, and honored rewrites would need re-running the SSRF gate
+        // on the substituted URL before commit.
+        if let Some(tx) = &self.intercept_tx {
+            let (resolver, rx) = tokio::sync::oneshot::channel();
+            let mut headers = std::collections::HashMap::new();
+            if let Ok(ua) = self.http_client.user_agent.try_read() {
+                headers.insert("User-Agent".to_string(), ua.clone());
+            }
+            let request = crate::diting_js::ops::InterceptedRequest {
+                url: url.to_string(),
+                method: "GET".to_string(),
+                headers,
+                resource_type: "Document".to_string(),
+                resolver,
+            };
+            if tx.send(request).is_ok() {
+                let timeout_ms = crate::diting_js::ops::INTERCEPT_RESOLUTION_TIMEOUT_MS
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(timeout_ms),
+                    rx,
+                )
+                .await
+                {
+                    Ok(Ok(crate::diting_js::ops::InterceptResolution::Fulfill {
+                        status,
+                        headers,
+                        body,
+                    })) => {
+                        return Ok(Response {
+                            url: url.clone(),
+                            status,
+                            headers,
+                            body,
+                            redirected_from: Vec::new(),
+                        });
+                    }
+                    Ok(Ok(crate::diting_js::ops::InterceptResolution::Fail { reason })) => {
+                        return Err(NetError::Network(format!(
+                            "request blocked by client, reason: {reason}"
+                        )));
+                    }
+                    // Continue / dropped resolver / timeout: real request below.
+                    Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {}
+                }
+            }
+        }
         #[cfg(feature = "stealth")]
         if let Some(ref stealth) = self.stealth_client {
             return stealth.fetch(url).await;
@@ -2443,10 +2499,17 @@ impl Page {
         return_by_value: bool,
         await_promise: bool,
         await_budget_ms: u64,
+        frame_nid: Option<u32>,
     ) -> crate::diting_js::runtime::EvalOutcome {
         if let Some(js) = &mut self.js {
             match js
-                .evaluate_for_cdp_outcome(expression, return_by_value, await_promise, await_budget_ms)
+                .evaluate_for_cdp_outcome(
+                    expression,
+                    return_by_value,
+                    await_promise,
+                    await_budget_ms,
+                    frame_nid,
+                )
                 .await
             {
                 Ok(outcome) => outcome,
@@ -2508,6 +2571,7 @@ impl Page {
         args: &[serde_json::Value],
         return_by_value: bool,
         await_promise: bool,
+        frame_nid: Option<u32>,
     ) -> crate::diting_js::runtime::EvalOutcome {
         if let Some(js) = &mut self.js {
             match js
@@ -2517,6 +2581,7 @@ impl Page {
                     args,
                     return_by_value,
                     await_promise,
+                    frame_nid,
                 )
                 .await
             {

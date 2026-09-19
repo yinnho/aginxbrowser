@@ -208,6 +208,16 @@ pub(crate) fn emit_navigation_prefix(
     let loader_id = format!("loader-{}", uuid::Uuid::new_v4());
     ctx.current_loader_ids
         .insert(page_id.to_string(), loader_id.clone());
+    // Child frames belong to the outgoing document: detach all of them
+    // before the new document's frame/context announcements.
+    for frame in ctx.clear_child_frames(page_id) {
+        emit(
+            ctx,
+            "Page.frameDetached",
+            json!({ "frameId": frame.frame_id, "reason": "remove" }),
+            session_id,
+        );
+    }
     emit_context_events(ctx, session_id, &frame_id, &loader_id, target_url, page_id);
     (frame_id, loader_id, old_loader)
 }
@@ -281,6 +291,199 @@ fn emit_context_events(
             }),
             session_id,
         );
+    }
+}
+
+/// Reconcile the CDP child-frame registry with the page DOM's iframe
+/// elements. Diff key is the iframe's arena node id: attribute changes
+/// (src navigation) keep the frame, element removal detaches it.
+///
+/// `eventful` callers (navigation tail, describeNode on an iframe) emit the
+/// attach/navigate/context sequence Playwright's frame discovery waits on;
+/// `getFrameTree` calls it silently since the answer rides in the response.
+///
+/// The engine is single-realm: a child frame's "contexts" are minted ids
+/// over one shared JS realm, and frame-scoped evals run with the frame's
+/// document swapped onto the global (see diting_js::runtime). That split is
+/// invisible to clients.
+pub(crate) fn sync_child_frames(
+    ctx: &mut CdpContext,
+    session_id: &Option<String>,
+    page_id: &str,
+    eventful: bool,
+) {
+    let (main_frame_id, page_url, iframes) = {
+        let Some(page) = ctx.get_page(page_id) else {
+            return;
+        };
+        let collected = page.with_dom(|dom| {
+            dom.descendants(dom.document())
+                .into_iter()
+                .filter_map(|nid| {
+                    let node = dom.get_node(nid)?;
+                    let (name, attrs) = match &node.data {
+                        crate::diting_dom::NodeData::Element { name, attrs, .. } => (name, attrs),
+                        _ => return None,
+                    };
+                    if !name.local.as_ref().eq_ignore_ascii_case("iframe") {
+                        return None;
+                    }
+                    let attr = |key: &str| {
+                        attrs
+                            .iter()
+                            .find(|a| a.name.local.as_ref().eq_ignore_ascii_case(key))
+                            .map(|a| a.value.clone())
+                    };
+                    Some((
+                        nid.index() as u32,
+                        attr("src").unwrap_or_default(),
+                        attr("name").unwrap_or_default(),
+                    ))
+                })
+                .collect::<Vec<_>>()
+        });
+        (
+            page.frame_id.clone(),
+            page.url_string(),
+            collected.unwrap_or_default(),
+        )
+    };
+
+    let base = url::Url::parse(&page_url).ok();
+    let absolutize = |src: &str| -> String {
+        if src.is_empty() {
+            return "about:blank".to_string();
+        }
+        if src.starts_with("http://")
+            || src.starts_with("https://")
+            || src.starts_with("about:")
+            || src.starts_with("data:")
+        {
+            return src.to_string();
+        }
+        base.as_ref()
+            .and_then(|b| b.join(src).ok())
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| src.to_string())
+    };
+
+    // Detach frames whose iframe element is gone.
+    let live: std::collections::HashSet<u32> = iframes.iter().map(|(nid, _, _)| *nid).collect();
+    let detached: Vec<crate::diting_cdp::dispatch::ChildFrame> = match ctx.child_frames.get_mut(page_id) {
+        Some(frames) => {
+            let (gone, kept): (Vec<_>, Vec<_>) = frames.drain(..).partition(|f| !live.contains(&f.nid));
+            *frames = kept;
+            gone
+        }
+        None => Vec::new(),
+    };
+    for frame in detached {
+        for cid in &frame.contexts {
+            ctx.frame_contexts.remove(cid);
+            ctx.valid_context_ids.remove(cid);
+        }
+        ctx.frame_object_ids.retain(|_, nid| *nid != frame.nid);
+        if eventful {
+            emit(
+                ctx,
+                "Page.frameDetached",
+                json!({ "frameId": frame.frame_id, "reason": "remove" }),
+                session_id,
+            );
+        }
+    }
+
+    // Attach frames for new iframe elements (existing nids keep their ids).
+    for (nid, src, name) in iframes {
+        if ctx.child_frame_by_nid(page_id, nid).is_some() {
+            continue;
+        }
+        let frame_id = ctx.next_child_frame_id();
+        let loader_id = format!("loader-{}", uuid::Uuid::new_v4());
+        let url = absolutize(&src);
+        let mut contexts = Vec::new();
+        let default_cid = ctx.next_isolated_context();
+        contexts.push(default_cid);
+        ctx.valid_context_ids.insert(default_cid);
+        ctx.frame_contexts
+            .insert(default_cid, (page_id.to_string(), frame_id.clone()));
+        let worlds: Vec<(String, i64)> = ctx
+            .isolated_worlds
+            .clone()
+            .into_iter()
+            .map(|w| {
+                let cid = ctx.next_isolated_context();
+                ctx.valid_context_ids.insert(cid);
+                ctx.frame_contexts
+                    .insert(cid, (page_id.to_string(), frame_id.clone()));
+                (w, cid)
+            })
+            .collect();
+        contexts.extend(worlds.iter().map(|(_, cid)| *cid));
+        if eventful {
+            emit(
+                ctx,
+                "Page.frameAttached",
+                json!({ "frameId": frame_id, "parentFrameId": main_frame_id }),
+                session_id,
+            );
+            let mut frame = frame_json(&frame_id, &loader_id, &url);
+            frame["parentId"] = json!(main_frame_id);
+            frame["name"] = json!(name);
+            emit(
+                ctx,
+                "Page.frameNavigated",
+                json!({ "frame": frame, "type": "Navigation" }),
+                session_id,
+            );
+            emit(
+                ctx,
+                "Runtime.executionContextCreated",
+                json!({
+                    "context": {
+                        "id": default_cid,
+                        "origin": url,
+                        "name": "",
+                        "uniqueId": format!("ctx-{frame_id}"),
+                        "auxData": { "isDefault": true, "type": "default", "frameId": frame_id }
+                    }
+                }),
+                session_id,
+            );
+            for (world, cid) in &worlds {
+                emit(
+                    ctx,
+                    "Runtime.executionContextCreated",
+                    json!({
+                        "context": {
+                            "id": cid,
+                            "origin": url,
+                            "name": world,
+                            "uniqueId": format!("ctx-{frame_id}-{world}"),
+                            "auxData": { "isDefault": false, "type": "isolated", "frameId": frame_id }
+                        }
+                    }),
+                    session_id,
+                );
+            }
+            emit(
+                ctx,
+                "Page.frameStoppedLoading",
+                json!({ "frameId": frame_id }),
+                session_id,
+            );
+        }
+        ctx.child_frames
+            .entry(page_id.to_string())
+            .or_default()
+            .push(crate::diting_cdp::dispatch::ChildFrame {
+                frame_id,
+                nid,
+                url,
+                name,
+                loader_id,
+                contexts,
+            });
     }
 }
 
@@ -389,6 +592,9 @@ pub(crate) fn emit_navigation_lifecycle(
             session_id,
         );
     }
+    // Parser-seen iframes become child frames now that the document is
+    // loaded; script-inserted ones surface via describeNode's lazy sync.
+    sync_child_frames(ctx, session_id, page_id, true);
 }
 
 /// Drain a page's recorded navigation state and emit the full
@@ -627,7 +833,12 @@ pub async fn handle(
             navigate_page(ctx, session_id, &url).await
         }
         "getFrameTree" => {
-            let page = ctx.get_session_page(session_id).ok_or("No page")?;
+            let page_id = ctx
+                .session_page_id(session_id)
+                .ok_or("No page")?
+                .clone();
+            sync_child_frames(ctx, session_id, &page_id, false);
+            let page = ctx.get_page(&page_id).ok_or("No page")?;
             let loader_id = ctx
                 .current_loader_ids
                 .get(&page.id)
@@ -635,10 +846,27 @@ pub async fn handle(
                 .unwrap_or_else(|| format!("loader-{}", page.id));
             let frame_id = page.frame_id.clone();
             let url = page.url_string();
+            let children: Vec<Value> = ctx
+                .child_frames
+                .get(&page_id)
+                .map(|frames| {
+                    frames
+                        .iter()
+                        .map(|f| {
+                            let mut frame = frame_json(&f.frame_id, &f.loader_id, &f.url);
+                            frame["parentId"] = json!(frame_id);
+                            if !f.name.is_empty() {
+                                frame["name"] = json!(f.name);
+                            }
+                            json!({ "frame": frame, "childFrames": [] })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             Ok(json!({
                 "frameTree": {
                     "frame": frame_json(&frame_id, &loader_id, &url),
-                    "childFrames": [],
+                    "childFrames": children,
                 }
             }))
         }
@@ -715,6 +943,23 @@ pub async fn handle(
             };
             let context_id = ctx.next_isolated_context();
             ctx.isolated_worlds.push(world_name.to_string());
+            // A world created on a child frame binds that frame: the context
+            // id joins the frame's list so a later src change / detach drops
+            // it, and evaluate(contextId) resolves to the frame's document.
+            let is_child = frame_id
+                != ctx
+                    .get_page(&page_id)
+                    .map(|p| p.frame_id.as_str())
+                    .unwrap_or("");
+            if is_child {
+                ctx.frame_contexts
+                    .insert(context_id, (page_id.clone(), frame_id.clone()));
+                if let Some(frames) = ctx.child_frames.get_mut(&page_id) {
+                    if let Some(frame) = frames.iter_mut().find(|f| f.frame_id == frame_id) {
+                        frame.contexts.push(context_id);
+                    }
+                }
+            }
             emit(
                 ctx,
                 "Runtime.executionContextCreated",

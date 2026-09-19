@@ -114,6 +114,20 @@ AginxBrowser 干的是**实时获取信息**：agent 带着问题来，读几页
 - **现场写脚本** — 让 agent 看页面、写一段 JS、`eval` 执行——高亮对比表、重排内容、按隐藏参数过滤商品。GreaseMonkey-on-steroids。
 - **多模态视觉** — 截图当视觉输入，做「看图判断」的流程：找好座位、辨认页面布局、确认渲染对不对。
 
+## 在 Computer-Use 栈里的位置
+
+computer-use agent 分两层。**GUI 层**（Cua、桌面 CUA 一类）驱动整台机器：截图进、X11 鼠标键盘事件出，每个会话一台 VM 或容器。**引擎层**直接不要桌面——页面本身就是机器。AginxBrowser 在引擎层：
+
+| | GUI 层（桌面 CUA） | AginxBrowser（引擎层） |
+|---|---|---|
+| 动作空间 | 屏幕像素 → 系统输入事件 | DOM/CDP：按坐标或选择器点击，真事件派发 |
+| 状态读取 | 显示器截图 | 结构化 DOM / 无障碍树，截图可选 |
+| 单会话成本 | Xvfb + VM/容器 | 一个进程，不要显示服务器 |
+| iframe | 压平成像素 | 一等公民：命中测试下钻 iframe，evaluate 按 frame 隔离 |
+| 回放 | 尽量（合成器时序看运气） | 操作日志导出成可跑的 curl / flow JSON |
+
+拿 GUI 层自己的考卷验过：[cua-bench](https://github.com/trycua/cua) 的 webtop gym——一个每个「窗口」都是 iframe 的窗口管理器——通过 CDP 桥跑在 AginxBrowser 上，点击任务端到端 PASS。这条路恰好踩遍 iframe 命中测试、frame 隔离的脚本状态、坐标换算——引擎层替代品最常翻车的地方。browser-use 的接法和 Playwright 一样：`cdp_url` 指过来就行。
+
 ## 快速开始
 
 想先体验？直接用托管实例 **https://browser.aginx.net/**。

@@ -832,6 +832,7 @@ impl JsRuntime {
                 return_by_value,
                 await_promise,
                 DEFAULT_AWAIT_BUDGET_MS,
+                None,
             )
             .await?
         {
@@ -867,7 +868,85 @@ impl JsRuntime {
     /// into `Err("Promise rejected: …")` (await) or `undefined` (sync). The
     /// CDP Runtime domain consumes this to emit `Runtime.exceptionThrown` +
     /// `exceptionDetails`.
+    ///
+    /// `Some(frame_nid)` scopes the eval to that iframe: the single-realm
+    /// engine shares one isolate across frames, so the main realm's global
+    /// bindings (document/window/self/frames/location) are swapped for the
+    /// iframe's content window for the duration of the call and restored on
+    /// every return path. Timers firing mid-await observe the frame's
+    /// globals (accepted v1 edge); globalThis/navigator/screen stay main.
     pub async fn evaluate_for_cdp_outcome(
+        &mut self,
+        expression: &str,
+        return_by_value: bool,
+        await_promise: bool,
+        await_budget_ms: u64,
+        frame_nid: Option<u32>,
+    ) -> Result<EvalOutcome, String> {
+        let swapped = match frame_nid {
+            None => false,
+            Some(nid) => {
+                if !self.frame_swap(nid)? {
+                    return Err(format!(
+                        "frame eval: iframe nid={} content not ready (detached or cross-origin)",
+                        nid
+                    ));
+                }
+                true
+            }
+        };
+        let result = self
+            .evaluate_for_cdp_outcome_inner(
+                expression,
+                return_by_value,
+                await_promise,
+                await_budget_ms,
+            )
+            .await;
+        if swapped {
+            self.frame_restore();
+        }
+        result
+    }
+
+    /// Swap the main realm's global bindings for iframe `nid`'s content
+    /// window, returning false when the iframe has no reachable document
+    /// (nothing swapped in that case). `document` is an accessor whose
+    /// setter switches the active document instance; self/window/frames are
+    /// plain data props — assignment is the swap and restore mechanism for
+    /// those four. `location` is a non-configurable accessor whose setter
+    /// navigates, so it swaps through the `__diting_frame_location` slot its
+    /// getter honors (bootstrap.js). The iframe's doc/window are read from
+    /// the internal `_iframeDoc`/`_iframeWin` slots, not the public
+    /// `contentDocument`/`contentWindow` getters: those apply the web-facing
+    /// same-origin gate, while CDP clients are privileged and automate
+    /// cross-origin frames as a matter of course (Chrome does the same from
+    /// the inspector side).
+    fn frame_swap(&mut self, nid: u32) -> Result<bool, String> {
+        let code = format!(
+            "(function() {{ var el = globalThis._wrap && globalThis._wrap({nid}); var doc = el && (el._iframeDoc || el.contentDocument); var win = el && (el._iframeWin || el.contentWindow); if (!doc || !win) return 'not-ready'; globalThis.__diting_frame_saved = [document, window, self, frames]; document = doc; window = win; self = win; frames = win; Object.defineProperty(globalThis, '__diting_frame_location', {{ value: win.location, configurable: true, writable: true, enumerable: false }}); return 'ok'; }})()",
+        );
+        let v = self
+            .runtime
+            .execute_script("<frame-swap>", code)
+            .map_err(|e| format!("JS error: {}", e))?;
+        Ok(self.v8_to_json(v)?.as_str() == Some("ok"))
+    }
+
+    /// Restore the globals stashed by [`frame_swap`]. A restore failure is
+    /// logged rather than propagated: the eval result matters more, and the
+    /// next navigation's fresh realm clears a stale swap anyway.
+    fn frame_restore(&mut self) {
+        const RESTORE: &str = "(function() { var s = globalThis.__diting_frame_saved; if (!s) return; document = s[0]; window = s[1]; self = s[2]; frames = s[3]; delete globalThis.__diting_frame_saved; delete globalThis.__diting_frame_location; })()";
+        if let Err(e) = self
+            .runtime
+            .execute_script("<frame-restore>", RESTORE.to_string())
+        {
+            tracing::warn!("frame restore failed: {}", e);
+        }
+    }
+
+    async fn evaluate_for_cdp_outcome_inner(
         &mut self,
         expression: &str,
         return_by_value: bool,
@@ -1067,6 +1146,7 @@ impl JsRuntime {
                 arguments,
                 return_by_value,
                 await_promise,
+                None,
             )
             .await?
         {
@@ -1158,7 +1238,45 @@ impl JsRuntime {
     /// Like [`call_function_on_for_cdp`], but a throwing/rejecting function is
     /// reported as an `EvalOutcome` exception instead of being collapsed into
     /// `Err("Promise rejected: …")` or a bare `undefined`.
+    /// `frame_nid` scopes the call to an iframe via the same global-binding
+    /// swap as [`evaluate_for_cdp_outcome`].
     pub async fn call_function_on_for_cdp_outcome(
+        &mut self,
+        function_declaration: &str,
+        object_id: Option<&str>,
+        arguments: &[serde_json::Value],
+        return_by_value: bool,
+        await_promise: bool,
+        frame_nid: Option<u32>,
+    ) -> Result<EvalOutcome, String> {
+        let swapped = match frame_nid {
+            None => false,
+            Some(nid) => {
+                if !self.frame_swap(nid)? {
+                    return Err(format!(
+                        "frame callFunctionOn: iframe nid={} content not ready (detached or cross-origin)",
+                        nid
+                    ));
+                }
+                true
+            }
+        };
+        let result = self
+            .call_function_on_for_cdp_outcome_inner(
+                function_declaration,
+                object_id,
+                arguments,
+                return_by_value,
+                await_promise,
+            )
+            .await;
+        if swapped {
+            self.frame_restore();
+        }
+        result
+    }
+
+    async fn call_function_on_for_cdp_outcome_inner(
         &mut self,
         function_declaration: &str,
         object_id: Option<&str>,

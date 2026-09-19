@@ -55,6 +55,11 @@ pub struct InterceptedRequest {
 pub static INTERCEPT_RESOLUTION_TIMEOUT_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(10_000);
 
+/// (epoch, subtree root, viewport w bits, viewport h bits, run) — the
+/// iframe sub-run memo key, see `JsState::iframe_layout_cache`.
+#[cfg(feature = "screenshot")]
+type IframeLayoutCache = std::cell::RefCell<Option<(u64, NodeId, u32, u32, std::rc::Rc<LayoutRun>)>>;
+
 pub struct JsState {
     pub dom: Option<DomTree>,
     pub url: String,
@@ -168,13 +173,13 @@ pub struct JsState {
     geometry_cache:
         std::cell::RefCell<Option<(u64, crate::diting_layout::SolvedGeometry)>>,
     /// Memoized layout run for an orphan subtree (a fabricated iframe
-    /// document, obscura #976 family), keyed (epoch, subtree root). Kept
-    /// apart from `layout_cache` on purpose: a sub-run's rects answer in
-    /// the iframe's OWN viewport (the 300x150 default box the fabricated
-    /// windows publish), never the main page's.
+    /// document, obscura #976 family), keyed (epoch, subtree root, viewport
+    /// w/h bits). Kept apart from `layout_cache` on purpose: a sub-run's
+    /// rects answer in the iframe's OWN viewport (the iframe element's
+    /// laid-out size on the host page, defaulting to the 300x150 box the
+    /// fabricated windows publish), never the main page's.
     #[cfg(feature = "screenshot")]
-    iframe_layout_cache:
-        std::cell::RefCell<Option<(u64, NodeId, std::rc::Rc<LayoutRun>)>>,
+    iframe_layout_cache: IframeLayoutCache,
     /// Full taffy solves this state has run — a test probe, so the
     /// paint-only path can assert it stays flat across seeks.
     #[cfg(feature = "screenshot")]
@@ -1630,7 +1635,8 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             if root == dom.document() {
                 return "null".into();
             }
-            let run = iframe_layout_run(&gs, dom, root);
+            let (vw, vh) = parse_iframe_viewport(&arg2);
+            let run = iframe_layout_run(&gs, dom, root, vw, vh);
             match run.0.get(&nid) {
                 Some(&[x, y, w, h]) => format!("[{},{},{},{}]", x, y, w, h),
                 // A fresh run without the nid = boxless element in the iframe
@@ -1652,7 +1658,8 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             if root == dom.document() {
                 return "null".into();
             }
-            let run = iframe_layout_run(&gs, dom, root);
+            let (vw, vh) = parse_iframe_viewport(&arg2);
+            let run = iframe_layout_run(&gs, dom, root, vw, vh);
             match run.4.get(&nid) {
                 Some(&([x, y, w, h], [a, b, c, d, e, f])) => {
                     format!("[{},{},{},{},{},{},{},{},{},{}]", x, y, w, h, a, b, c, d, e, f)
@@ -2283,20 +2290,46 @@ fn ensure_layout_run(gs: &JsState, dom: &DomTree, epoch: u64) {
     }
 }
 
-/// One style+layout run over an ORPHAN SUBTREE — a fabricated iframe
-/// document (obscura #976 family), memoized per (epoch, root) in
-/// [`JsState::iframe_layout_cache`]. The sub-run anchors to the 300x150
-/// default box the fabricated `_IframeWindow` publishes (the iframe's own
-/// viewport, per Chrome's gBCR semantics) and never touches the main page's
-/// layout caches. Inline <style> sheets only (v1 boundary): external <link>
-/// sheets inside a fabricated iframe doc would need the navigation-time
-/// fetch cascade the main document owns.
+/// Parse the "w,h" viewport the JS side measured for the iframe element on
+/// the host page (arg2 of the iframe layout ops). Anything unparseable or
+/// non-positive falls back to the CSS default replaced box 300x150 — the
+/// same box the fabricated `_IframeWindow` publishes before layout exists.
 #[cfg(feature = "screenshot")]
-fn iframe_layout_run(gs: &JsState, dom: &DomTree, root: NodeId) -> std::rc::Rc<LayoutRun> {
+fn parse_iframe_viewport(arg2: &str) -> (f32, f32) {
+    let mut it = arg2.split(',');
+    let w = it.next().and_then(|s| s.parse::<f32>().ok());
+    let h = it.next().and_then(|s| s.parse::<f32>().ok());
+    match (w, h) {
+        (Some(w), Some(h)) if w > 0.0 && h > 0.0 => (w, h),
+        _ => (300.0, 150.0),
+    }
+}
+
+/// One style+layout run over an ORPHAN SUBTREE — a fabricated iframe
+/// document (obscura #976 family), memoized per (epoch, root, viewport) in
+/// [`JsState::iframe_layout_cache`]. The sub-run anchors to the iframe
+/// element's laid-out size on the host page (the iframe's own viewport, per
+/// Chrome's gBCR semantics — the JS side passes it through arg2; the 300x150
+/// default box stands when the host layout has no box for the element) and
+/// never touches the main page's layout caches. Inline <style> sheets only
+/// (v1 boundary): external <link> sheets inside a fabricated iframe doc
+/// would need the navigation-time fetch cascade the main document owns.
+#[cfg(feature = "screenshot")]
+fn iframe_layout_run(
+    gs: &JsState,
+    dom: &DomTree,
+    root: NodeId,
+    vw: f32,
+    vh: f32,
+) -> std::rc::Rc<LayoutRun> {
     let epoch = dom.epoch();
-    if let Some(hit) = gs.iframe_layout_cache.borrow().as_ref().and_then(|(e, r, run)| {
-        (*e == epoch && *r == root).then(|| std::rc::Rc::clone(run))
-    }) {
+    let (vwb, vhb) = (vw.to_bits(), vh.to_bits());
+    if let Some(hit) = gs.iframe_layout_cache.borrow().as_ref().and_then(
+        |(e, r, cw, ch, run)| {
+            (*e == epoch && *r == root && *cw == vwb && *ch == vhb)
+                .then(|| std::rc::Rc::clone(run))
+        },
+    ) {
         return hit;
     }
     let mut css = String::new();
@@ -2314,11 +2347,9 @@ fn iframe_layout_run(gs: &JsState, dom: &DomTree, root: NodeId) -> std::rc::Rc<L
             css.push('\n');
         }
     }
-    const IFRAME_VW: f32 = 300.0;
-    const IFRAME_VH: f32 = 150.0;
     let (rules, keyframes) = crate::diting_css::parse_stylesheet_timed_with(
         &css,
-        (IFRAME_VW, IFRAME_VH),
+        (vw, vh),
         gs.media_type,
         &gs.media_overrides,
     );
@@ -2331,21 +2362,21 @@ fn iframe_layout_run(gs: &JsState, dom: &DomTree, root: NodeId) -> std::rc::Rc<L
         // Transitions are registered against main-document node ids; the
         // subtree id space here is separate, so the empty slice stands.
         &[],
-        (IFRAME_VW, IFRAME_VH),
+        (vw, vh),
     );
     let fonts = crate::diting_fonts::font_book();
     let solved = crate::diting_layout::layout_solve_rooted(
         dom,
         &styles_map,
         &fonts,
-        IFRAME_VW,
-        IFRAME_VH,
+        vw,
+        vh,
         None,
         None,
         Some(root),
     );
     let (rects, items, paint_order, local_geom, sticky_spans, scroller_spans) =
-        crate::diting_layout::layout_collect(dom, &styles_map, &fonts, &solved, IFRAME_VW);
+        crate::diting_layout::layout_collect(dom, &styles_map, &fonts, &solved, vw);
     let run = std::rc::Rc::new((
         rects
             .into_iter()
@@ -2361,7 +2392,8 @@ fn iframe_layout_run(gs: &JsState, dom: &DomTree, root: NodeId) -> std::rc::Rc<L
         sticky_spans,
         scroller_spans,
     ));
-    *gs.iframe_layout_cache.borrow_mut() = Some((epoch, root, std::rc::Rc::clone(&run)));
+    *gs.iframe_layout_cache.borrow_mut() =
+        Some((epoch, root, vwb, vhb, std::rc::Rc::clone(&run)));
     run
 }
 
@@ -3048,6 +3080,10 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "padding-right",
     "padding-bottom",
     "padding-left",
+    "border-top-width",
+    "border-right-width",
+    "border-bottom-width",
+    "border-left-width",
     "margin-top",
     "margin-right",
     "margin-bottom",
@@ -3406,6 +3442,15 @@ fn computed_style_value(
         "padding-right" => Some(side_css(&s.padding.right)),
         "padding-bottom" => Some(side_css(&s.padding.bottom)),
         "padding-left" => Some(side_css(&s.padding.left)),
+        // Border widths ride the same path so the iframe viewport math in
+        // bootstrap can peel the UA 2px border off the measured border box.
+        // Chrome answers 0px whenever the style is none/hidden — the width
+        // keyword stays declared but the used border is gone (`border: none`
+        // on a webtop iframe must not shrink its document's viewport).
+        "border-top-width" => Some(if s.border_style.is_some() { side_css(&s.border_width.top) } else { "0px".into() }),
+        "border-right-width" => Some(if s.border_style.is_some() { side_css(&s.border_width.right) } else { "0px".into() }),
+        "border-bottom-width" => Some(if s.border_style.is_some() { side_css(&s.border_width.bottom) } else { "0px".into() }),
+        "border-left-width" => Some(if s.border_style.is_some() { side_css(&s.border_width.left) } else { "0px".into() }),
         "margin-top" => Some(side_css(&s.margin.top)),
         "margin-right" => Some(side_css(&s.margin.right)),
         "margin-bottom" => Some(side_css(&s.margin.bottom)),

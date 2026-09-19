@@ -109,6 +109,7 @@ pub enum PseudoClass {
     Checked,
     Link,
     Visited,
+    Root,
 }
 
 impl parser::NonTSPseudoClass for PseudoClass {
@@ -150,6 +151,7 @@ impl ToCss for PseudoClass {
             PseudoClass::Checked => dest.write_str(":checked"),
             PseudoClass::Link => dest.write_str(":link"),
             PseudoClass::Visited => dest.write_str(":visited"),
+            PseudoClass::Root => dest.write_str(":root"),
         }
     }
 }
@@ -211,6 +213,7 @@ impl<'i> parser::Parser<'i> for DitingSelectorParser {
             "checked" => Ok(PseudoClass::Checked),
             "link" | "any-link" => Ok(PseudoClass::Link),
             "visited" => Ok(PseudoClass::Visited),
+            "root" => Ok(PseudoClass::Root),
             _ => Err(cssparser::ParseError {
                 kind: cssparser::ParseErrorKind::Custom(
                     SelectorParseErrorKind::UnsupportedPseudoClassOrElement(name),
@@ -532,6 +535,11 @@ impl<'a> Element for DomElement<'a> {
             // Hover/active stay snapshot-false: nothing in the engine holds
             // a live hover/active target.
             PseudoClass::Hover | PseudoClass::Active => false,
+            // :root = the document element — the one element with no element
+            // parent. Automation frameworks probe `:root` as an
+            // is-this-document-alive sentinel (Playwright's waitForSelector
+            // in a frame), so parse-fail here reads as a dead document.
+            PseudoClass::Root => self.parent_element().is_none(),
         }
     }
 
@@ -1291,6 +1299,17 @@ mod tests {
         // Scoped to #s: skip the outside paragraph; return the first inside.
         let first_in_s = tree.query_selector_from(s, "p").unwrap().expect("a p inside");
         assert_eq!(tree.text_content(first_in_s), "first");
+    }
+
+    #[test]
+    fn test_root_pseudo_class_matches_document_element() {
+        let tree = parse_html(r#"<html><body><div id="not-root"></div></body></html>"#);
+        let hits = tree.query_selector_all(":root").unwrap();
+        assert_eq!(hits.len(), 1, ":root matches exactly the document element");
+        let html = hits[0];
+        let node = tree.get_node(html).unwrap();
+        assert_eq!(node.as_element().map(|q| q.local.as_ref()), Some("html"));
+        assert!(tree.query_selector_all("div:root").unwrap().is_empty());
     }
 
     #[test]

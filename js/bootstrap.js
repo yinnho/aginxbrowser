@@ -3535,6 +3535,12 @@ class Element extends Node {
     }
   }
   _loadIframeSrc(url) {
+    // Loads can be kicked off from three places — the src property setter,
+    // the post-navigation scan, and the document.write insertion scan — and
+    // more than one can see the same element. The flag collapses them to
+    // one fetch.
+    if (this._iframeLoading) return;
+    this._iframeLoading = true;
     let fullUrl = url;
     if (!url.includes('://')) {
       try { fullUrl = new URL(url, _docBase()).href; } catch(e) {}
@@ -4165,8 +4171,12 @@ class Element extends Node {
   _ditingExtent(axis, fallback) {
     if (this._isViewportRoot()) {
       // A fabricated iframe document's html/body span the IFRAME's viewport
-      // (obscura #976), never the host page's.
-      if (_ditingIframeDoc(this)) return axis === "w" ? 300 : 150;
+      // (obscura #976), never the host page's — the element's laid-out box,
+      // not the 300x150 stub, once host layout exists.
+      if (_ditingIframeDoc(this)) {
+        const ivp = _ditingIframeViewport(this);
+        return axis === "w" ? ivp.w : ivp.h;
+      }
       return axis === "w" ? (globalThis.innerWidth || 1280) : (globalThis.innerHeight || 720);
     }
     if (_ditingDisplayNone(this)) return 0;
@@ -4302,18 +4312,20 @@ class Element extends Node {
     // the iframe doc's own html/body span the iframe's 300x150, not the
     // host page's viewport.
     if (this._nid != null && _ditingIframeDoc(this)) {
-      // The iframe doc's own html/body span the IFRAME's viewport (the
-      // 300x150 default box its fabricated window publishes) — the same
-      // contract the host page's viewport roots serve, one world down.
+      // The iframe doc's own html/body span the IFRAME's viewport — the
+      // iframe element's laid-out box on the host page (the 300x150 default
+      // stands until the host has laid it out) — the same contract the host
+      // page's viewport roots serve, one world down.
+      const ivp = _ditingIframeViewport(this);
       if (this._isViewportRoot()) {
         return {
-          x: 0, y: 0, width: 300, height: 150,
-          top: 0, right: 300, bottom: 150, left: 0,
+          x: 0, y: 0, width: ivp.w, height: ivp.h,
+          top: 0, right: ivp.w, bottom: ivp.h, left: 0,
           toJSON() { return this; },
         };
       }
       try {
-        const raw = _domRaw("iframe_layout_rect", String(this._nid | 0), "");
+        const raw = _domRaw("iframe_layout_rect", String(this._nid | 0), ivp.arg);
         const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
         if (Array.isArray(arr) && arr.length === 4 && Number.isFinite(arr[0])) {
           const [x, y, w, h] = arr;
@@ -5204,6 +5216,16 @@ class Document extends Node {
       __def(this, '_writeAnchorScript', scriptNid);
       __def(this, '_writeAnchorNid', after._nid);
     }
+    // An iframe inserted with a src attribute loads on insertion — the src
+    // property setter only covers JS assignment, and the post-navigation
+    // scan only covers the initial parse. Written markup (which is how
+    // Playwright's setContent delivers the page) needs its own scan.
+    var iframes = this.querySelectorAll('iframe[src]');
+    for (var j = 0; j < iframes.length; j++) {
+      var f = iframes[j];
+      var s = f.getAttribute('src');
+      if (s && s !== 'about:blank') f._loadIframeSrc(s);
+    }
   }
   writeln(...args) {
     this.write(args.join('') + '\n');
@@ -5408,7 +5430,12 @@ globalThis.location = {
 };
 const _locationObj = globalThis.location;
 Object.defineProperty(globalThis, 'location', {
-  get() { return _locationObj; },
+  // __diting_frame_location is the frame-eval swap slot: while the engine
+  // brackets an evaluation into an iframe's globals, reads of `location`
+  // must see the frame's location. The property itself is non-configurable
+  // (matching Chrome's unforgeable Location), so the swap goes through this
+  // data slot instead of redefining the accessor.
+  get() { return globalThis.__diting_frame_location || _locationObj; },
   set(url) { var r = _resolveUrl(String(url)); globalThis.__virtualUrl = r; _OPS.op_navigate(r, 'GET', ''); },
   configurable: false,
   enumerable: true,
@@ -5676,11 +5703,42 @@ function _ditingIframeDoc(el) {
   return null;
 }
 
+// The viewport a fabricated iframe document lays out against: the iframe
+// ELEMENT's laid-out content box on the host page (Chrome semantics — a
+// 400px-wide iframe gives its document a 400px viewport, and 100vh inside
+// means that height). Measured through the main run's layout_rect (never
+// the sub-run, so no recursion); the 300x150 replaced-box default stands
+// until the host page has laid the iframe out. layout_rect is the border
+// box, so the UA 2px border (and any padding) comes back off — a default
+// iframe frames a 300x150 document, not 304x154.
+function _ditingIframeViewport(el) {
+  const doc = _ditingIframeDoc(el);
+  const ifr = doc && doc._iframeEl;
+  if (ifr && ifr._nid != null) {
+    try {
+      const raw = _domRaw("layout_rect", String(ifr._nid | 0), "");
+      const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
+      if (Array.isArray(arr) && arr.length === 4 && arr[2] > 0 && arr[3] > 0) {
+        const cs = getComputedStyle(ifr);
+        const px = (v) => parseFloat(v) || 0;
+        const w = arr[2] - px(cs.borderLeftWidth) - px(cs.borderRightWidth)
+                        - px(cs.paddingLeft) - px(cs.paddingRight);
+        const h = arr[3] - px(cs.borderTopWidth) - px(cs.borderBottomWidth)
+                        - px(cs.paddingTop) - px(cs.paddingBottom);
+        if (w > 0 && h > 0) return { w, h, arg: w + "," + h };
+      }
+    } catch (e) { /* host layout unavailable */ }
+  }
+  return { w: 300, h: 150, arg: "300,150" };
+}
+
 function _ditingLayoutBox(el) {
   try {
     if (el._nid == null) return null;
-    const op = _ditingIframeDoc(el) ? "iframe_layout_rect" : "layout_rect";
-    const raw = _domRaw(op, String(el._nid | 0), "");
+    const idoc = _ditingIframeDoc(el);
+    const raw = idoc
+      ? _domRaw("iframe_layout_rect", String(el._nid | 0), _ditingIframeViewport(el).arg)
+      : _domRaw("layout_rect", String(el._nid | 0), "");
     const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
     if (Array.isArray(arr) && arr.length === 4 && Number.isFinite(arr[0])) {
       return { x: arr[0], y: arr[1], w: arr[2], h: arr[3] };
@@ -5697,8 +5755,10 @@ function _ditingLayoutBox(el) {
 function _ditingLocalBox(el) {
   try {
     if (el._nid == null) return null;
-    const op = _ditingIframeDoc(el) ? "iframe_local_geom" : "local_geom";
-    const raw = _domRaw(op, String(el._nid | 0), "");
+    const idoc = _ditingIframeDoc(el);
+    const raw = idoc
+      ? _domRaw("iframe_local_geom", String(el._nid | 0), _ditingIframeViewport(el).arg)
+      : _domRaw("local_geom", String(el._nid | 0), "");
     const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
     if (Array.isArray(arr) && arr.length === 10 && Number.isFinite(arr[0])) {
       return { x: arr[0], y: arr[1], w: arr[2], h: arr[3] };
@@ -11457,10 +11517,25 @@ class _IframeDocument {
     return this._root.querySelector('#' + id);
   }
   querySelector(sel) {
+    // Scoped queries can never return the scope element itself, so the
+    // delegated `_root.querySelector(':root')` misses the document element.
+    if (typeof sel === 'string' && sel.trim() === ':root') return this._root;
     return this._root.querySelector(sel);
   }
   querySelectorAll(sel) {
+    if (typeof sel === 'string' && sel.trim() === ':root') return _nodeList([this._root]);
     return this._root.querySelectorAll(sel);
+  }
+  // Hit testing inside the frame: real input pipelines descend into child
+  // frames, so the CDP input path calls these through __diting_hitTarget.
+  // The shared Document walk works unchanged here — querySelectorAll, body,
+  // documentElement all delegate, and gBCR on frame elements already answers
+  // in the iframe's own viewport (obscura #976 sub-run).
+  elementFromPoint(x, y) {
+    return Document.prototype.elementFromPoint.call(this, x, y);
+  }
+  elementsFromPoint(x, y) {
+    return Document.prototype.elementsFromPoint.call(this, x, y);
   }
   getElementsByTagName(tag) {
     return this._root.querySelectorAll(tag);
@@ -11536,10 +11611,18 @@ class _IframeWindow {
     this.closed = false;
     this.navigator = globalThis.navigator;
     this.screen = globalThis.screen;
-    this.innerWidth = 300;
-    this.innerHeight = 150;
-    this.outerWidth = 300;
-    this.outerHeight = 150;
+    // The frame's viewport IS the iframe element's laid-out box on the host
+    // page (Chrome semantics; the CSS 300x150 replaced-box default stands
+    // until host layout has measured it). Lazy getters: instances are
+    // created per iframe at runtime, and the host box can change.
+    const _vpSize = (axis) => {
+      const ivp = _ditingIframeViewport(doc.documentElement);
+      return axis === "w" ? ivp.w : ivp.h;
+    };
+    Object.defineProperty(this, 'innerWidth', { get: () => _vpSize("w"), configurable: true });
+    Object.defineProperty(this, 'innerHeight', { get: () => _vpSize("h"), configurable: true });
+    Object.defineProperty(this, 'outerWidth', { get: () => _vpSize("w"), configurable: true });
+    Object.defineProperty(this, 'outerHeight', { get: () => _vpSize("h"), configurable: true });
     this.devicePixelRatio = globalThis.devicePixelRatio;
     this.localStorage = globalThis.localStorage;
     this.sessionStorage = globalThis.sessionStorage;
@@ -14514,8 +14597,12 @@ if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
     // shift included). The client-space query must ride the root scroll or
     // every hit test on a scrolled page answers the wrong band (#434: a
     // stuck header is exactly the case where client y and doc y differ).
-    var qx = x + (globalThis.scrollX || 0);
-    var qy = y + (globalThis.scrollY || 0);
+    // Frame documents get zero: their rects live in the iframe's own
+    // viewport and frame content scroll is not mirrored yet — borrowing the
+    // MAIN page's scroll would poison every in-frame hit test.
+    var mainDoc = (typeof document !== 'undefined' && this === document);
+    var qx = x + (mainDoc ? (globalThis.scrollX || 0) : 0);
+    var qy = y + (mainDoc ? (globalThis.scrollY || 0) : 0);
     var all = this.querySelectorAll('*');
     var rank = __ditingPaintRanks();
     var cands = [];

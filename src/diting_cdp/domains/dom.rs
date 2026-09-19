@@ -93,19 +93,49 @@ pub async fn handle(
             Ok(json!({ "outerHTML": html }))
         }
         "describeNode" => {
-            let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
-            let depth = params.get("depth").and_then(|v| v.as_i64()).unwrap_or(0);
+            let page_id = ctx.session_page_id(session_id).ok_or("No page")?.clone();
 
             // resolve_node_id honors nodeId/backendNodeId/objectId and
             // errors on a handle that no longer resolves — the inline
             // version this replaced converted the JS probe's -1 to u64 0
             // (`unwrap_or(0)`), so a stale handle silently described node
             // 0, the document (obscura#723 chain).
-            let node_id = resolve_node_id(page, params)?;
+            let (node_id, is_iframe, mut node) = {
+                let page = ctx.get_page_mut(&page_id).ok_or("No page")?;
+                let depth = params.get("depth").and_then(|v| v.as_i64()).unwrap_or(0);
+                let node_id = resolve_node_id(page, params)?;
+                let is_iframe = page
+                    .with_dom(|dom| {
+                        dom.get_node(NodeId::new(node_id as u32))
+                            .and_then(|n| n.as_element().map(|q| q.local.as_ref().eq_ignore_ascii_case("iframe")))
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                let node = page
+                    .with_dom(|dom| serialize_node(dom, NodeId::new(node_id as u32), depth as u32, 0))
+                    .unwrap_or(json!(null));
+                (node_id, is_iframe, node)
+            };
 
-            let node = page
-                .with_dom(|dom| serialize_node(dom, NodeId::new(node_id as u32), depth as u32, 0))
-                .unwrap_or(json!(null));
+            // An iframe element maps to its child frame (Chrome's answer
+            // Playwright's frame discovery reads). Dynamic insertions after
+            // load only surface here, so this sync is eventful.
+            let child = if is_iframe {
+                crate::diting_cdp::domains::page::sync_child_frames(
+                    ctx, session_id, &page_id, true,
+                );
+                ctx.child_frame_by_nid(&page_id, node_id as u32)
+                    .map(|f| f.frame_id.clone())
+            } else {
+                None
+            };
+            let main = ctx
+                .get_page(&page_id)
+                .map(|p| p.frame_id.clone())
+                .unwrap_or_default();
+            if node.is_object() {
+                node["frameId"] = json!(child.unwrap_or(main));
+            }
             Ok(json!({ "node": node }))
         }
         "resolveNode" => {

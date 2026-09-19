@@ -38,6 +38,25 @@ async fn emit_post_eval_nav(
     Ok(())
 }
 
+/// Map an executionContextId to the iframe arena node whose document the
+/// eval must scope to. `None` for main-frame contexts and unknown ids (the
+/// validity check upstream already rejected truly unknown ids).
+fn frame_nid_for_context(
+    ctx: &CdpContext,
+    session_id: &Option<String>,
+    context_id: Option<i64>,
+) -> Option<u32> {
+    let (page_id, frame_id) = ctx.frame_contexts.get(&context_id?)?;
+    if ctx.session_page_id(session_id).map(String::as_str) != Some(page_id.as_str()) {
+        return None;
+    }
+    ctx.child_frames
+        .get(page_id)?
+        .iter()
+        .find(|f| &f.frame_id == frame_id)
+        .map(|f| f.nid)
+}
+
 fn exception_details_json(exc: &ExceptionInfo) -> Value {
     let mut exception = json!({
         "type": "object",
@@ -144,6 +163,11 @@ pub async fn handle(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(30_000);
 
+            let frame_nid = frame_nid_for_context(
+                ctx,
+                session_id,
+                params.get("contextId").and_then(|v| v.as_i64()),
+            );
             let outcome = {
                 let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
                 match tokio::time::timeout(
@@ -153,6 +177,7 @@ pub async fn handle(
                         return_by_value,
                         await_promise,
                         crate::diting_js::runtime::DEFAULT_AWAIT_BUDGET_MS,
+                        frame_nid,
                     ),
                 )
                 .await
@@ -163,6 +188,13 @@ pub async fn handle(
                     }
                 }
             };
+            // A handle minted inside a frame scope is only meaningful under
+            // that scope — record it so callFunctionOn can recover the frame
+            // from the bare objectId (Playwright's evaluateWithArguments
+            // carries no contextId).
+            if let (Some(oid), Some(nid)) = (&outcome.info.object_id, frame_nid) {
+                ctx.frame_object_ids.insert(oid.clone(), nid);
+            }
             emit_post_eval_nav(ctx, session_id).await?;
 
             Ok(evaluate_response(outcome, ctx, session_id))
@@ -194,6 +226,15 @@ pub async fn handle(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(30_000);
 
+            let frame_nid = object_id
+                .and_then(|oid| ctx.frame_object_ids.get(oid).copied())
+                .or_else(|| {
+                    frame_nid_for_context(
+                        ctx,
+                        session_id,
+                        params.get("executionContextId").and_then(|v| v.as_i64()),
+                    )
+                });
             let outcome = {
                 let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
                 match tokio::time::timeout(
@@ -204,6 +245,7 @@ pub async fn handle(
                         &arguments,
                         return_by_value,
                         await_promise,
+                        frame_nid,
                     ),
                 )
                 .await
@@ -216,6 +258,9 @@ pub async fn handle(
                     }
                 }
             };
+            if let (Some(oid), Some(nid)) = (&outcome.info.object_id, frame_nid) {
+                ctx.frame_object_ids.insert(oid.clone(), nid);
+            }
             emit_post_eval_nav(ctx, session_id).await?;
 
             Ok(evaluate_response(outcome, ctx, session_id))
@@ -334,6 +379,7 @@ pub async fn handle(
         }
         "releaseObject" => {
             if let Some(oid) = params.get("objectId").and_then(|v| v.as_str()) {
+                ctx.frame_object_ids.remove(oid);
                 if let Some(page) = ctx.get_session_page_mut(session_id) {
                     page.release_object(oid);
                 }

@@ -9,20 +9,22 @@
 //! client answers with `continueRequest` / `fulfillRequest` / `failRequest`,
 //! which resolve the parked op.
 //!
-//! Boundaries: Request stage only (no Response-stage pauses). Parser-time
-//! static subresources (`<script src>`, `<link rel=stylesheet>` discovered
-//! during navigation) are also not parked — they load inside the
-//! `Page.navigate` dispatch, and this bridge processes commands strictly
-//! sequentially, so a pause created there could not be answered before the
-//! dispatch that created it returns; parking one would either deadlock the
-//! navigation or ride out the resolution timeout into an unobserved
-//! pass-through. Hard-blocking those is `Network.setBlockedURLs` territory
-//! (no client round trip, no timing dependency).
+//! Boundaries: Request stage only (no Response-stage pauses). Navigation
+//! documents ARE parked: the `Page.navigate` load runs on a spawned task
+//! off the dispatch loop, the connection loop's idle pump drains pauses
+//! while the load waits, and the resolution commands bypass `should_park`
+//! (they never touch the checked-out page). Iframe documents load through
+//! the JS fetch kernel, so they pause as well. Parser-time static
+//! subresources (`<script src>`, `<link rel=stylesheet>` fetched by the
+//! resource loader) are still not parked — they bypass the intercept
+//! kernel entirely; hard-blocking those is `Network.setBlockedURLs`
+//! territory (no client round trip, no timing dependency).
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::{json, Value};
 
 use crate::diting_cdp::dispatch::{CdpContext, FetchInterceptState};
+use crate::diting_cdp::types::CdpEvent;
 use crate::diting_js::ops::InterceptResolution;
 
 pub async fn handle(
@@ -133,12 +135,91 @@ async fn resolve(
         .position(|p| p.bridge_request_id == request_id)
         .ok_or(format!("Unknown requestId: {}", request_id))?;
     let pause = state.pending.remove(pause);
+    // Network-domain echo: the pause was announced alongside a willBeSent
+    // under this bridge id, so the resolution completes that request's
+    // lifecycle — fulfill → responseReceived + loadingFinished (page.goto's
+    // Response rides on these), fail → loadingFailed (route abort). Continue
+    // rides on the real request's own events.
+    let echo: Vec<(&str, Value)> = match &resolution {
+        InterceptResolution::Fulfill { status, headers, body } => {
+            let ts = now_epoch_seconds();
+            let header_obj: serde_json::Map<String, Value> = headers
+                .iter()
+                .map(|(k, v)| (k.to_lowercase(), Value::String(v.clone())))
+                .collect();
+            let mime = headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| "text/html".to_string());
+            vec![
+                (
+                    "Network.responseReceived",
+                    json!({
+                        "requestId": request_id,
+                        "timestamp": ts,
+                        "type": pause.resource_type,
+                        "response": {
+                            "url": pause.url,
+                            "status": status,
+                            "statusText": status_text(*status),
+                            "headers": header_obj,
+                            "mimeType": mime,
+                            "connectionReused": false,
+                            "connectionId": 0,
+                            "encodedDataLength": body.len(),
+                            "securityState": "unknown",
+                            "protocol": "http/1.1",
+                            "fromDiskCache": false,
+                        },
+                        "frameId": page_id.clone(),
+                    }),
+                ),
+                (
+                    "Network.loadingFinished",
+                    json!({
+                        "requestId": request_id,
+                        "timestamp": ts,
+                        "encodedDataLength": body.len(),
+                    }),
+                ),
+            ]
+        }
+        InterceptResolution::Fail { reason } => vec![(
+            "Network.loadingFailed",
+            json!({
+                "requestId": request_id,
+                "timestamp": now_epoch_seconds(),
+                "type": pause.resource_type,
+                "errorText": reason,
+                "canceled": false,
+            }),
+        )],
+        InterceptResolution::Continue { .. } => Vec::new(),
+    };
     // Resolver gone (timeout expiry already fell through to the real
     // request): the resolution is a no-op, but not an error.
     if let Some(resolver) = pause.resolver {
         resolver
             .send(resolution)
             .map_err(|_| "Intercepted request is already gone".to_string())?;
+    }
+    if !echo.is_empty() {
+        let sessions: Vec<String> = ctx
+            .sessions
+            .iter()
+            .filter(|(_, pid)| *pid == &page_id)
+            .map(|(sid, _)| sid.clone())
+            .collect();
+        for (method, payload) in echo {
+            for sid in &sessions {
+                ctx.pending_events.push(CdpEvent::with_session(
+                    method,
+                    payload.clone(),
+                    sid.clone(),
+                ));
+            }
+        }
     }
     // Run the parked fetch's continuation now — the JS promise resolves only
     // when the event loop next polls, and without this the client would wait
@@ -234,6 +315,37 @@ fn header_map(value: Option<&Value>) -> Option<std::collections::HashMap<String,
         _ => return None,
     }
     Some(map)
+}
+
+fn now_epoch_seconds() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// Common status phrases for synthesized responses; unknown codes fall back
+/// to an empty phrase (clients re-derive text from the code).
+fn status_text(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        _ => "",
+    }
 }
 
 /// DevTools `Fetch.enable` urlPattern glob: `*` matches zero or more

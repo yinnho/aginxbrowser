@@ -4888,7 +4888,7 @@
     async fn test_evaluate_outcome_reports_sync_throw() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let outcome = rt
-            .evaluate_for_cdp_outcome("(() => { throw new Error('sync-boom') })()", false, false, DEFAULT_AWAIT_BUDGET_MS)
+            .evaluate_for_cdp_outcome("(() => { throw new Error('sync-boom') })()", false, false, DEFAULT_AWAIT_BUDGET_MS, None)
             .await
             .unwrap();
         let exc = outcome.exception.expect("expected exception");
@@ -4903,7 +4903,7 @@
     async fn test_evaluate_outcome_reports_sync_throw_by_value() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let outcome = rt
-            .evaluate_for_cdp_outcome("(() => { throw new Error('bv-boom') })()", true, false, DEFAULT_AWAIT_BUDGET_MS)
+            .evaluate_for_cdp_outcome("(() => { throw new Error('bv-boom') })()", true, false, DEFAULT_AWAIT_BUDGET_MS, None)
             .await
             .unwrap();
         let exc = outcome.exception.expect("expected exception");
@@ -4915,7 +4915,7 @@
     async fn test_evaluate_outcome_reports_await_rejection() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let outcome = rt
-            .evaluate_for_cdp_outcome("Promise.reject(new Error('boom'))", true, true, DEFAULT_AWAIT_BUDGET_MS)
+            .evaluate_for_cdp_outcome("Promise.reject(new Error('boom'))", true, true, DEFAULT_AWAIT_BUDGET_MS, None)
             .await
             .unwrap();
         let exc = outcome.exception.expect("expected exception");
@@ -4933,7 +4933,7 @@
     async fn test_evaluate_outcome_times_out_on_never_settling_promise() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let err = rt
-            .evaluate_for_cdp_outcome("new Promise(() => {})", true, true, 150)
+            .evaluate_for_cdp_outcome("new Promise(() => {})", true, true, 150, None)
             .await
             .unwrap_err();
         assert!(err.contains("EVAL_TIMEOUT"), "got: {err}");
@@ -4953,6 +4953,7 @@
                 true,
                 true,
                 DEFAULT_AWAIT_BUDGET_MS,
+                None,
             )
             .await
             .unwrap();
@@ -4969,6 +4970,7 @@
                 &[],
                 false,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -4988,12 +4990,128 @@
                 &[],
                 true,
                 true,
+                None,
             )
             .await
             .unwrap();
         let exc = outcome.exception.expect("expected exception");
         assert_eq!(exc.text, "Uncaught (in promise)");
         assert_eq!(exc.description, "Error: async-fn-boom");
+    }
+
+    // Frame-scoped eval (batch 167): the single-realm engine emulates a child
+    // frame's execution context by swapping the main realm's global bindings
+    // (document/window/self/frames/location) for the iframe's content window
+    // for the duration of the call, then restoring them — including when the
+    // eval throws and across an awaited promise's pump.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_evaluate_frame_nid_scopes_to_iframe_and_restores() {
+        let mut rt = setup_runtime(
+            r#"<html><body><iframe id="f"></iframe><div id="main-marker"></div></body></html>"#,
+        );
+        let nid = rt
+            .with_dom(|dom| dom.query_selector_all("#f").unwrap()[0].index() as u32)
+            .unwrap();
+        rt.evaluate("globalThis.__probeIframe = document.getElementById('f')")
+            .unwrap();
+
+        // Sync path: document/window/self/frames/location all resolve to the
+        // iframe's.
+        let outcome = rt
+            .evaluate_for_cdp_outcome(
+                "document === __probeIframe.contentDocument && window === __probeIframe.contentWindow && self === window && frames === window && location === __probeIframe.contentWindow.location",
+                true,
+                false,
+                DEFAULT_AWAIT_BUDGET_MS,
+                Some(nid),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.info.value, Some(serde_json::json!(true)));
+
+        // Awaited path: the swap must survive the promise pump.
+        let outcome = rt
+            .evaluate_for_cdp_outcome(
+                "Promise.resolve(document === __probeIframe.contentDocument && location === __probeIframe.contentWindow.location)",
+                true,
+                true,
+                DEFAULT_AWAIT_BUDGET_MS,
+                Some(nid),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.info.value, Some(serde_json::json!(true)));
+
+        // Restore happened on the success path: main document is back and the
+        // stash slots are gone.
+        let restored = rt
+            .evaluate(
+                "document.getElementById('main-marker') !== null && !('__diting_frame_saved' in globalThis) && !('__diting_frame_location' in globalThis)",
+            )
+            .unwrap();
+        assert_eq!(restored, serde_json::json!(true));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_evaluate_frame_nid_restores_on_throw() {
+        let mut rt = setup_runtime(r#"<html><body><iframe id="f"></iframe></body></html>"#);
+        let nid = rt
+            .with_dom(|dom| dom.query_selector_all("#f").unwrap()[0].index() as u32)
+            .unwrap();
+        let outcome = rt
+            .evaluate_for_cdp_outcome(
+                "(() => { throw new Error('frame-boom') })()",
+                false,
+                false,
+                DEFAULT_AWAIT_BUDGET_MS,
+                Some(nid),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome.exception.expect("expected exception").description,
+            "Error: frame-boom"
+        );
+        let restored = rt
+            .evaluate("document.getElementById('f') !== null && !('__diting_frame_saved' in globalThis)")
+            .unwrap();
+        assert_eq!(restored, serde_json::json!(true), "restore ran on the exception path");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_evaluate_frame_nid_unknown_iframe_errors() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let err = rt
+            .evaluate_for_cdp_outcome("1 + 1", true, false, DEFAULT_AWAIT_BUDGET_MS, Some(999_999))
+            .await
+            .unwrap_err();
+        assert!(err.contains("content not ready"), "got: {err}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_call_function_frame_nid_scopes_this_arg() {
+        let mut rt = setup_runtime(r#"<html><body><iframe id="f"></iframe></body></html>"#);
+        let nid = rt
+            .with_dom(|dom| dom.query_selector_all("#f").unwrap()[0].index() as u32)
+            .unwrap();
+        rt.evaluate("globalThis.__probeIframe = document.getElementById('f')")
+            .unwrap();
+        let outcome = rt
+            .call_function_on_for_cdp_outcome(
+                "() => document === __probeIframe.contentDocument",
+                None,
+                &[],
+                true,
+                false,
+                Some(nid),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.info.value, Some(serde_json::json!(true)));
+        let restored = rt
+            .evaluate("!('__diting_frame_saved' in globalThis)")
+            .unwrap();
+        assert_eq!(restored, serde_json::json!(true));
     }
 
     #[tokio::test(flavor = "current_thread")]
