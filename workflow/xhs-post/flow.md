@@ -20,7 +20,12 @@
 | 发布按钮 | 新版自定义元素 `xhs-publish-btn`（attr `is-publish`/`submit-disabled`）；旧版 `.publish-page-publish-btn button.bg-red` | |
 | 成功判据 | URL 跳离 `/publish/publish`（15s） | 消除「点了按钮就算成功」的假阳性 |
 
-## 步骤（9 步）
+## 步骤（10 步）
+
+> 失败语义总则（2026-09-20 mock 全链实测教训）：**eval 的返回值只是遥测，
+> `ok:false` 不会停流**——flow 会一路绿到 verify 才死在错的地方。要停在
+> 正确的步、带回正确的原因，失败路径必须 `throw`（eval 异常 → 该步
+> error → fail_receipt）。
 
 1. **wait 双终态** — 等上传壳或 /login 二者先到。401→/login 是客户端
    跳转（水合后才发生），不先等会查到中间态。
@@ -30,7 +35,8 @@
    expect 时已弹回 publish、最终又回 /login）。
 3. **wait `div.upload-content`（硬门）** — 正向信号：壳渲染=已登录；
    超时回执带 URL（redirectReason=401）+ wall 遥测=登录墙的完整形状。
-4. **tab** — 摘浮层 + 点「上传图文」，expect `input[type=file]`。
+4. **tab** — 摘浮层 + 点「上传图文」，expect `input[type=file]`；
+   找不到 tab → throw（回执 `tabs` 字段=诊断入口）。
 5. **upload** — `const ARGS = {{args_json}}` 解包；逐张 data: URL fetch →
    blob → File（**不用 atob**——大 base64 展开爆栈，2026-09 实测教训），
    `input.files = File[]` + 手动派发 input/change（JS 赋值不自动派发，
@@ -41,12 +47,19 @@
 7. **form** — 标题走 native setter + input/change（React value-tracker 绕过）；
    正文走 innerHTML 段落法：`<p>` 包裹 + 段间 `<p><br></p>` + input 事件
    （TipTap/ProseMirror 亲测法）；tags 以纯文本 `#tag` 追加末段；随后读
-   超长信号（max_suffix/length-error），超长 → `ok:false` 回执停 flow；
-   末尾回点标题（上游稳定性怪癖）。
-8. **publish** — 新版 widget 优先（跳过 `is-publish="false"` 的装饰克隆，
-   `submit-disabled="true"` → fail-loudly），旧版 bg-red 兜底；`el.click()`。
-9. **verify** — wait predicate URL 离开 `/publish/publish`，15s。成功跳转
-   = 已发布；超时=校验未过或被拦，回执带截图。
+   超长信号（max_suffix/length-error），超长 → **throw**（回执点名真因，
+   而不是死在下游的 submit-disabled）；末尾回点标题（上游稳定性怪癖）。
+8. **wait 可点击发布按钮** — 表单填完后按钮解锁**有去抖**（上传/正文
+   触发的校验重跑完才摘 submit-disabled）。predicate 同时扫新版
+   `xhs-publish-btn`（跳过 `is-publish="false"` 克隆与 `submit-disabled="true"`）
+   和旧版 `button.bg-red`（跳过 disabled/aria-disabled），10s——这是上游
+   `waitForPublishButtonClickable` 轮询 15s 的等价物。选 Rust 侧 wait 而
+   非 eval 内 setTimeout 循环：eval 挂起期间 timer 推进无把握，Rust 轮询
+   每次 eval 驱动事件循环、天然推进 timer。
+9. **publish** — 与上一步同一判据找可点击按钮（wait 过了却又锁上 →
+   throw），scrollIntoView + click；回执带 `face`（widget/legacy）。
+10. **verify** — wait predicate URL 离开 `/publish/publish`，15s。成功跳转
+    = 已发布；超时=校验未过或被拦，回执带截图。
 
 ## 为什么上传不走 set_files step
 
@@ -91,6 +104,9 @@ args_json 键（缺一跑前拒绝）：
   盲重跑可能双发。
 - 选择器面随小红书前端更新会烂：回执 `tab`/`publish` 步的 `tabs`/`face`
   字段是诊断入口，按 publish.go 的维护法重抓选择器。
+- 无登录态也能回归大半：mock 页（data: URL 复刻选择器契约 + 假按钮
+  去抖/发布行为）跑全链验证执行器逻辑——2026-09-20 就是这法子暴露了
+  ok:false 不停流和按钮去抖两个洞。mock 目录用完即删，不入库。
 - 频率克制：新号连发是风控信号，间隔分钟级起步。
 
 ## v1 边界（不做）
