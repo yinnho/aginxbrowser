@@ -27,6 +27,7 @@ http step 契约（详见 API.md）：
 | token | `POST /cgi-bin/stable_token` | appid+secret；stable_token 不互踩 |
 | 封面 | `POST /cgi-bin/material/add_material?type=image` | multipart；freepublish **无封面必拒** |
 | 草稿 | `POST /cgi-bin/draft/add` | articles[0] 带 thumb_media_id |
+| 删草稿 | `POST /cgi-bin/draft/delete` | 端点是 **delete 不是 del**——`draft/del` 一律 40066 invalid url（2026-09-20 实测 json body/query 参/form 三种姿势全拒，换 delete 立即成功） |
 | 发布 | `POST /cgi-bin/freepublish/submit` | media_id → publish_id，异步 |
 | 验证 | `POST /cgi-bin/freepublish/get` | publish_state 0 成功 2/3/4 失败 |
 
@@ -68,6 +69,26 @@ POST /flow/run {"name": "wechat-oa-post",
   微信自动截）、`cover_b64`（封面 PNG base64，**必填**——无封面兜底是调用方
   的事：先 batchget_material 拿素材库最新图再传 thumb，v1 未自动化）。
 - `creds`：对象形式直传（见上）。
+
+## 模板库（templates/）
+
+正文 HTML 不手写，`md_to_args.py` 按模板拼装出 `args_json`：
+
+```
+python3 md_to_args.py article.md --title "标题" --digest 摘要 \
+    --cover cover.png > args.json
+# 再: jq -c '{args_json}' --rawfile args_json args.json 裹一层喂 vars
+```
+
+- 模板 = `templates/default.html`：`<template id="...">` 切块
+  （container/header/h2/p/strong/link），槽位 `{{text}}`/`{{blocks}}`/`{{header}}`。
+  改样式只动模板，converter 零改动；新模板 `--template` 指过去。
+- md 支持面刻���小：`# 标题` 跳过、`## 小节`→h2、段落→p、`**粗体**`→strong、
+  裸 URL/域名→上色 span。
+- 生存规则见模板头注释：只信 inline style；外链不上 `<a>`（订阅号被剥），
+  用 `<span style="color:#2563eb">` 上色。
+- 2026-09-20 全链实测：模板草稿 draft/get 回读，h2 蓝条/链接色/字体栈全存活，
+  `<a href` 为零（按设计）。
 
 ## 规矩（对齐 x/zhihu 台账）
 

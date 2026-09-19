@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<!-- wechat-oa article template "default" (2026-09-20)
+
+公众号正文 HTML 的生存规则（微信会剥的）:
+- 只信 inline style;<style>、class、id 全不可靠。
+- 外链 <a href> 被剥成纯文本(订阅号),所以 URL 用 <span> 上色,不加 <a>。
+- 图片只能引用微信域内的(mmbiz.qpic.cn 或 API 传上去的)——正文插图得另走
+  material/uploadimg,本模板不含。
+
+用法:md_to_args.py 按 <template id="..."> 切块拼装,槽位 {{text}} / {{blocks}} /
+{{header}}。改样式直接改这里,converter 零改动。
+-->
+<template id="container"><section style="max-width:100%;box-sizing:border-box;padding:0 12px;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;font-size:16px;line-height:1.8;letter-spacing:0.4px;color:#3f3f3f;text-align:justify;">
+{{header}}
+{{blocks}}
+</section></template>
+
+<template id="header"><p style="margin:0 0 28px;font-size:13px;font-weight:600;color:#2563eb;letter-spacing:2px;">AGINXBROWSER · 谛听引擎</p></template>
+
+<template id="h2"><h2 style="margin:38px 0 18px;padding:0 0 0 12px;border-left:4px solid #2563eb;font-size:19px;line-height:1.4;font-weight:700;color:#111827;text-align:left;">{{text}}</h2></template>
+
+<template id="p"><p style="margin:18px 0;">{{text}}</p></template>
+
+<template id="strong"><strong style="font-weight:700;color:#111827;">{{text}}</strong></template>
+
+<template id="link"><span style="color:#2563eb;word-break:break-all;">{{text}}</span></template>
+</html>
