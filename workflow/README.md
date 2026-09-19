@@ -31,6 +31,7 @@ rejected before it touches the filesystem.
 | `x-search` | x.com | runs green logged-in | SearchTimeline, results sorted by views — campaign target discovery |
 | `x-follow` | x.com | runs green logged-in | friendships create/destroy; response `following` echoes pre-action state |
 | `x-notifs` | x.com | runs green logged-in | v2 URT notifications feed, read-only triage — the inbox half of the loop |
+| `xhs-post` | xiaohongshu.com | login wall logged-out | creator-platform page automation (no API for personal accounts) — login via `import_curl` + `account`, see flow.md |
 
 The `x-*` family shares one self-healing prefix (p256 / bearer / ctx+bind)
 and composes: `x-search` finds a target → `x-read` resolves ids and follow
