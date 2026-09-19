@@ -48,3 +48,17 @@ jobs:
         # --workspace: same reason as the test job — the engine crate must
         # compile under the feature combination too, not just the product.
         run: cargo check --workspace --features stealth,screenshot
+
+  layers:
+    # ARCHITECTURE.md §2 R1-R3 as greppable tripwires plus the god-file
+    # ratchet (§6 P2). The compile-time guarantee is the workspace dep
+    # graph; this catches what compiles fine but legislates wrong — core
+    # importing a face, the engine growing a faces dep, a new 2k-line
+    # file. Deliberately dependency-free python so it runs in seconds.
+    name: layering audit (R1-R3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Audit
+        run: python3 scripts/audit_layers.py

@@ -47,7 +47,8 @@ The dependency direction is fixed and one-way:
         └─────────────────────────────────────────────────────────┘
 ```
 
-Rules (enforced in review, checked by the P2 audit script):
+Rules (enforced in review, checked in CI by `scripts/audit_layers.py` — the
+P2 layering audit; its exception table carries one live deviation, issue #47):
 
 - **R1 — Downward only.** `faces → core → diting`, `authoring → core → diting`.
   Nothing imports faces. Nothing in diting imports core/authoring/faces.
