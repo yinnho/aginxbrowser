@@ -3294,6 +3294,89 @@
         assert_eq!(v["complete"], serde_json::json!("true"));
     }
 
+    /// createImageBitmap must resolve a bitmap with header-parsed dims. The
+    /// old stub resolved 0×0 for everything and the xhs publish page's
+    /// upload pipeline gated on it silently — files landed in input.files,
+    /// no preview mounted, no upload request ever fired. Un-decodable input
+    /// rejects with InvalidStateError so sites' catch branches still run.
+    #[tokio::test(flavor = "current_thread")]
+    async fn create_image_bitmap_resolves_header_dims() {
+        // Sig + chunk len + "IHDR" + w=62 + h=33 — offsets 16..24, same
+        // pin as the Image-shim test above, but carried by a Blob this time.
+        let mut png: Vec<u8> = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(&[0, 0, 0, 0x0D]);
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&62u32.to_be_bytes());
+        png.extend_from_slice(&33u32.to_be_bytes());
+
+        let b64 = {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(&png)
+        };
+        let garbage_b64 = "aGVsbG8gd29ybGQ="; // "hello world" — no image header
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .call_function_on_for_cdp(
+                &format!(
+                    r#"async () => {{
+                        const mk = async (b64, type) => {{
+                            const blob = await (await fetch('data:' + type + ';base64,' + b64)).blob();
+                            try {{
+                                const bmp = await createImageBitmap(blob);
+                                return {{ok: 'yes', w: String(bmp.width), h: String(bmp.height)}};
+                            }} catch (e) {{
+                                return {{ok: 'no', name: e && e.name, msg: String(e && e.message).slice(0, 60)}};
+                            }}
+                        }};
+                        return {{
+                            png: await mk("{}", 'image/png'),
+                            garbage: await mk("{}", 'text/plain'),
+                            notBlob: await mk2(),
+                            canvas: await mk3(),
+                        }};
+                        async function mk2() {{
+                            try {{ await createImageBitmap(null); return {{ok: 'no2'}}; }}
+                            catch (e) {{ return {{ok: 'no', name: e && e.name}}; }}
+                        }}
+                        // Live canvas source: capability probes pass a canvas
+                        // (no arrayBuffer method) — rejecting it as TypeError
+                        // made the xhs publish page refuse to mount its
+                        // upload UI; Chrome resolves the canvas's own dims.
+                        async function mk3() {{
+                            const c = document.createElement('canvas');
+                            c.width = 320; c.height = 200;
+                            try {{
+                                const b = await createImageBitmap(c);
+                                return {{ok: 'yes', w: String(b.width), h: String(b.height)}};
+                            }} catch (e) {{ return {{ok: 'no', name: e && e.name}}; }}
+                        }}
+                    }}"#,
+                    b64, garbage_b64
+                ),
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let v = result.value.unwrap();
+        // Real header → real dims (the load-bearing change).
+        assert_eq!(v["png"]["ok"], serde_json::json!("yes"));
+        assert_eq!(v["png"]["w"], serde_json::json!("62"));
+        assert_eq!(v["png"]["h"], serde_json::json!("33"));
+        // Garbage bytes → Chrome-shaped rejection, not a 0×0 resolve.
+        assert_eq!(v["garbage"]["ok"], serde_json::json!("no"));
+        assert_eq!(v["garbage"]["name"], serde_json::json!("InvalidStateError"));
+        // Non-blob source → TypeError before any read.
+        assert_eq!(v["notBlob"]["name"], serde_json::json!("TypeError"));
+        // Canvas source → its own dimensions (capability-probe shape).
+        assert_eq!(v["canvas"]["ok"], serde_json::json!("yes"));
+        assert_eq!(v["canvas"]["w"], serde_json::json!("320"));
+        assert_eq!(v["canvas"]["h"], serde_json::json!("200"));
+    }
+
     /// (#41) failure side: an unreachable src (connection-refused port) must
     /// fire `error`, never the phantom `load` the old stub produced.
     #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization

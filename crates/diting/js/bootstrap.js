@@ -14496,8 +14496,85 @@ if (typeof Path2D === 'undefined') {
 }
 
 if (typeof ImageBitmap === 'undefined') {
-  globalThis.ImageBitmap = class ImageBitmap { constructor(){this.width=0;this.height=0;} close(){} };
-  globalThis.createImageBitmap = function() { return Promise.resolve(new ImageBitmap()); };
+  // Header-parsed dims on the bitmap (#41's op_image_info parser, shared
+  // with the Image shim). Sites gate upload pipelines on bitmap.width — the
+  // xhs publish page feeds File objects through createImageBitmap and
+  // dead-ends silently on a 0×0 bitmap, never firing the upload request.
+  // Pixel data stays unavailable (drawImage of a bitmap paints nothing);
+  // dims are the decision surface. Blob sources reject like Chrome when
+  // undecodable (InvalidStateError); live sources (canvas/ImageData/Image/
+  // ImageBitmap) carry their readable dimensions — an earlier blob-only
+  // draft rejected those with TypeError and page capability probes read it
+  // as "environment unsupported" and refused to mount the upload UI at all.
+  globalThis.ImageBitmap = class ImageBitmap {
+    constructor() { this.width = 0; this.height = 0; }
+    close() {}
+  };
+  globalThis.createImageBitmap = function (source) {
+    return new Promise(function (resolve, reject) {
+      const fail = function (name, msg) {
+        try { reject(new DOMException(msg, name)); }
+        catch (e) { reject(new Error(msg)); }
+      };
+      const fromDims = function (w, h) {
+        if (!(w > 0) || !(h > 0)) {
+          fail('InvalidStateError', 'The source image could not be decoded');
+          return;
+        }
+        const bmp = new ImageBitmap();
+        bmp.width = w;
+        bmp.height = h;
+        resolve(bmp);
+      };
+      if (source && typeof source.arrayBuffer === 'function') {
+        source.arrayBuffer().then(function (buf) {
+          // bytes → base64 in 32k chunks — the spread-on-full-array form
+          // blows the stack on real photos (same constraint as the upload
+          // JS face).
+          const bytes = new Uint8Array(buf);
+          let bin = '';
+          const CHUNK = 0x8000;
+          for (let i = 0; i < bytes.length; i += CHUNK) {
+            bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+          }
+          let dimsJson = '{}';
+          try { dimsJson = _OPS.op_image_info(btoa(bin)); } catch (e) {}
+          let d = null;
+          try { d = JSON.parse(dimsJson); } catch (e) {}
+          if (!d || !(d.width > 0)) {
+            fail('InvalidStateError', 'The source image could not be decoded');
+            return;
+          }
+          fromDims(d.width, d.height);
+        }, function () {
+          fail('InvalidStateError', 'The source image could not be decoded');
+        });
+        return;
+      }
+      // Live image-data sources: canvas (incl. OffscreenCanvas via getContext),
+      // ImageBitmap passthrough, ImageData, and HTMLImageElement. These carry
+      // readable dimensions; Chrome resolves them synchronously-shaped.
+      if (source && typeof source === 'object') {
+        if (typeof source.getContext === 'function') {
+          fromDims(source.width, source.height);
+          return;
+        }
+        if (typeof source.close === 'function' && typeof source.width === 'number') {
+          fromDims(source.width, source.height);
+          return;
+        }
+        if (source.data && typeof source.width === 'number') {
+          fromDims(source.width, source.height);
+          return;
+        }
+        if (typeof source.complete === 'boolean' && typeof source.naturalWidth === 'number') {
+          fromDims(source.naturalWidth || source.width, source.naturalHeight || source.height);
+          return;
+        }
+      }
+      fail('TypeError', 'The provided value is not of type (Blob or image data)');
+    });
+  };
 }
 
 if (typeof Selection === 'undefined') {
