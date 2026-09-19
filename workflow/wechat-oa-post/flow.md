@@ -74,6 +74,16 @@ POST /flow/run {"name": "wechat-oa-post",
 - 发布异步：必须等 verify 的 publish_state 落定才算发出。
 - errcode 40001（invalid credential）停手别重试——secret 错或被改。
 - **errcode 40164（invalid ip）**：公众号后台「基本配置→IP 白名单」加上本机
-  出口 IP 后重跑。无白名单的号首次调用大概率撞这条。
+  出口 IP 后重跑。无白名单的号首次调用大概率撞这条。白名单改动可能要管理员
+  扫码确认才真生效；改完仍 40164 先去「查看」里核对名单里实际有哪几条。
+  出口不固定（家庭宽带）时退路=走已有白名单 IP 的自有服务器做出口：
+  `ssh -D <port> -N <server>` + 实例起时带 `AGINXBROWSER_PROXY=socks5h://
+  127.0.0.1:<port>`（http step 骑 env 代理，2026-09-20 实测全链路通）。
+- **errcode 48001（api unauthorized）**：freepublish 只给**已认证**号。未认证
+  订阅号永远撞这条——flow 前 3 步（token/封面/草稿）照样有价值：草稿进后台
+  草稿箱，最后一步人去 mp.weixin.qq.com 手动点发布（AginxOS 号 2026-09-20
+  实测即此路径）。
+- 正文里的外链 `<a href>` 会被微信剥掉（订阅号规则），链接文字保留为纯文本；
+  建草稿前不用自己剥，但别指望读者能点。
 - token 限签发：flow 每跑一遍签一个新 stable_token，v1 接受；7200s 有效期
   的跨跑复用留到真有额度压力再做。
