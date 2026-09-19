@@ -9289,10 +9289,9 @@
     // add tests near the start of `mod tests`).
 
     /// Playwright >= 1.25 calls `element.checkVisibility(...)` before every
-    /// input event. If the method isn't defined Playwright retries until its
-    /// action timeout fires. Without a layout engine we can't compute it
-    /// properly, so the stub always returns true — still strictly better
-    /// than the undefined path.
+    /// input event; agent snapshot layers (browser-use style) filter on it.
+    /// Real implementation walks the ancestor chain over computed style —
+    /// see the contract tests below (issue #45).
     #[test]
     fn element_check_visibility_is_callable() {
         let mut rt = setup_runtime(r#"<div id="x">x</div>"#);
@@ -9305,6 +9304,96 @@
             .evaluate("typeof document.getElementById('x').checkVisibility")
             .unwrap();
         assert_eq!(typeof_method, serde_json::json!("function"));
+    }
+
+    /// #45: display:none kills visibility by default (no flags needed) —
+    /// on the element itself and on any ancestor (no box).
+    #[test]
+    fn check_visibility_display_none_self_and_ancestor() {
+        let mut rt = setup_runtime(
+            r#"<div id="hidden" style="display:none">h</div>
+               <div style="display:none"><span id="in-hidden">x</span></div>
+               <div id="shown">s</div>"#,
+        );
+        let self_none = rt
+            .evaluate("document.getElementById('hidden').checkVisibility()")
+            .unwrap();
+        assert_eq!(self_none, serde_json::json!(false));
+
+        let ancestor_none = rt
+            .evaluate("document.getElementById('in-hidden').checkVisibility({checkOpacity:true,checkVisibilityCSS:true})")
+            .unwrap();
+        assert_eq!(ancestor_none, serde_json::json!(false));
+
+        let plain = rt
+            .evaluate("document.getElementById('shown').checkVisibility()")
+            .unwrap();
+        assert_eq!(plain, serde_json::json!(true));
+    }
+
+    /// #45: visibility:hidden only fails with checkVisibilityCSS — Chrome
+    /// parity says the default answer is true (the box still exists).
+    #[test]
+    fn check_visibility_css_flag_gates_visibility_chain() {
+        let mut rt = setup_runtime(
+            r#"<div id="v" style="visibility:hidden">v</div>
+               <div style="visibility:hidden"><span id="in-v">x</span></div>"#,
+        );
+        let default_answer = rt
+            .evaluate("document.getElementById('v').checkVisibility()")
+            .unwrap();
+        assert_eq!(default_answer, serde_json::json!(true));
+
+        let flagged = rt
+            .evaluate("document.getElementById('v').checkVisibility({checkVisibilityCSS:true})")
+            .unwrap();
+        assert_eq!(flagged, serde_json::json!(false));
+
+        // Inherited through the ancestor chain, not just the element.
+        let ancestor_hidden = rt
+            .evaluate("document.getElementById('in-v').checkVisibility({checkVisibilityCSS:true})")
+            .unwrap();
+        assert_eq!(ancestor_hidden, serde_json::json!(false));
+    }
+
+    /// #45: the opacity check composes multiplicatively down the ancestor
+    /// chain — 0.5 × 0.5 stays visible, anything × 0 does not.
+    #[test]
+    fn check_visibility_opacity_flag_composes_ancestors() {
+        let mut rt = setup_runtime(
+            r#"<div style="opacity:0"><span id="in-zero">x</span></div>
+               <div style="opacity:0.5"><div style="opacity:0.5"><span id="quarter">x</span></div></div>
+               <div style="opacity:0"><span id="in-zero-plain">x</span></div>"#,
+        );
+        let zero_chain = rt
+            .evaluate("document.getElementById('in-zero').checkVisibility({checkOpacity:true})")
+            .unwrap();
+        assert_eq!(zero_chain, serde_json::json!(false));
+
+        let quarter = rt
+            .evaluate("document.getElementById('quarter').checkVisibility({checkOpacity:true})")
+            .unwrap();
+        assert_eq!(quarter, serde_json::json!(true));
+
+        // Without the flag an opacity:0 ancestor changes nothing.
+        let plain = rt
+            .evaluate("document.getElementById('in-zero-plain').checkVisibility()")
+            .unwrap();
+        assert_eq!(plain, serde_json::json!(true));
+    }
+
+    /// #45: a detached element has no box — Chrome answers false regardless
+    /// of flags.
+    #[test]
+    fn check_visibility_detached_element_is_false() {
+        let mut rt = setup_runtime(r#"<div id="x">x</div>"#);
+        let result = rt
+            .evaluate(
+                "var d = document.createElement('div'); d.style.color='red'; \
+                 d.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})",
+            )
+            .unwrap();
+        assert_eq!(result, serde_json::json!(false));
     }
 
     /// Playwright's `getByRole` / `getByLabel` locators resolve via ARIA

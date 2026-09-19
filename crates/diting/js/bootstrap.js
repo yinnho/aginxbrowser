@@ -4386,10 +4386,39 @@ class Element extends Node {
     };
   }
   getClientRects() { return [this.getBoundingClientRect()]; }
-  // No layout engine: a stub that always returns true unblocks Playwright's
-  // actionability polling. With a real layout we'd check display, visibility,
-  // opacity and rect dimensions per spec.
-  checkVisibility(opts) { return true; }
+  // cssom-view checkVisibility (spec): an element with no box is not
+  // visible — detached, or display:none on itself or any ancestor. The
+  // visibility and opacity checks are opt-in flags (Chrome answers true for
+  // visibility:hidden unless checkVisibilityCSS is set; same for opacity:0
+  // without checkOpacity, and the opacity check multiplies down the ancestor
+  // chain). Geometry (rect > 0) is deliberately NOT part of the answer —
+  // Chrome's return value carries no geometry, and snapshot layers that need
+  // it filter on rects themselves (issue #45).
+  checkVisibility(opts) {
+    opts = opts || {};
+    if (!this.isConnected) return false;
+    var opacity = 1;
+    for (var node = this; node && node.nodeType === 1; node = node.parentElement) {
+      var cs;
+      try { cs = getComputedStyle(node); } catch (e) { return false; }
+      if (!cs) return false;
+      var display = String(cs.getPropertyValue('display'));
+      if (display === 'none') return false;
+      if (opts.checkVisibilityCSS) {
+        var vis = String(cs.getPropertyValue('visibility'));
+        if (vis !== 'visible') return false;
+      }
+      // contentVisibilityAuto: the closest analog our cascade supports is
+      // content-visibility: hidden (contents skipped outright). 'auto'
+      // skip-tracking is a layout-feature we don't have; it reads as visible.
+      if (opts.contentVisibilityAuto &&
+          String(cs.getPropertyValue('content-visibility')) === 'hidden') return false;
+      var op = parseFloat(String(cs.getPropertyValue('opacity')));
+      if (Number.isFinite(op)) opacity *= op;
+    }
+    if (opts.checkOpacity && opacity === 0) return false;
+    return true;
+  }
   // ARIA reflection properties. Without an accessibility tree we expose the
   // raw aria-* attributes so Playwright's getByRole / getByLabel locators can
   // at least find elements that author them explicitly.
