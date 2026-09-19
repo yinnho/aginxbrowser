@@ -110,10 +110,29 @@ pub fn recorded_to_flow(jsonl: &str) -> Value {
 // {{var}} substitution
 // ---------------------------------------------------------------------------
 
+/// Dotted-path lookup into the vars map: `{{resp.json.access_token}}` walks
+/// object keys (and array indices) so a step can read one field off an
+/// earlier step's saved response. Any miss is `None` — the caller reports it
+/// as an unknown var, keeping the fail-loudly contract.
+fn lookup_path<'a>(vars: &'a Map<String, Value>, path: &str) -> Option<&'a Value> {
+    let mut segments = path.split('.');
+    let root = segments.next()?;
+    let mut v = vars.get(root)?;
+    for seg in segments {
+        v = match v {
+            Value::Object(m) => m.get(seg)?,
+            Value::Array(a) => a.get(seg.parse::<usize>().ok()?)?,
+            _ => return None,
+        };
+    }
+    Some(v)
+}
+
 /// Replace `{{name}}` placeholders in string values, recursively through
 /// objects and arrays. A placeholder may be the whole string or sit inside
-/// surrounding text. Unknown names are an error, not empty output — a flow
-/// referencing a missing var must fail loudly, at the step that needs it.
+/// surrounding text, and the name may be a dotted path into saved results
+/// (see [`lookup_path`]). Unknown names are an error, not empty output — a
+/// flow referencing a missing var must fail loudly, at the step that needs it.
 pub fn substitute(v: &Value, vars: &Map<String, Value>) -> Result<Value, String> {
     match v {
         Value::String(s) => {
@@ -130,7 +149,7 @@ pub fn substitute(v: &Value, vars: &Map<String, Value>) -> Result<Value, String>
                     return Err(format!("unterminated placeholder in {s:?}"));
                 };
                 let name = after[..end].trim();
-                let Some(val) = vars.get(name) else {
+                let Some(val) = lookup_path(vars, name) else {
                     return Err(format!("unknown var '{name}' — pass it via vars"));
                 };
                 match val {
@@ -151,6 +170,49 @@ pub fn substitute(v: &Value, vars: &Map<String, Value>) -> Result<Value, String>
         Value::Array(a) => a
             .iter()
             .map(|x| substitute(x, vars))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        other => Ok(other.clone()),
+    }
+}
+
+/// Whole-leaf interpolation for the http step's `json` arg: a string that is
+/// EXACTLY `{{path}}` is replaced by the referenced value — objects and
+/// arrays embed structurally, strings re-serialize with proper JSON escaping
+/// (an HTML article body full of quotes splices in as a legal string
+/// literal, where text substitution would corrupt the document). Partial
+/// placeholders inside longer strings are deliberately NOT expanded here —
+/// compose those in `body`, where plain text semantics are what you want.
+/// A whole-leaf placeholder whose path misses is an error, keeping the
+/// fail-loudly contract (sending the literal `{{...}}` text instead would
+/// be a silent-corruption bug).
+fn json_interpolate(v: &Value, vars: &Map<String, Value>) -> Result<Value, String> {
+    match v {
+        Value::String(s) => {
+            if let Some(path) = s.strip_prefix("{{").and_then(|r| r.strip_suffix("}}")) {
+                let path = path.trim();
+                if let Some(val) = lookup_path(vars, path) {
+                    return Ok(val.clone());
+                }
+                // A string like "{{a}} and {{b}}" is not a whole-leaf
+                // placeholder (strip leaves "{{" debris inside the path) —
+                // leave it alone; only a clean single path errors.
+                if !path.is_empty() && !path.contains("{{") && !path.contains("}}") {
+                    return Err(format!("unknown var '{path}' in json arg"));
+                }
+            }
+            Ok(v.clone())
+        }
+        Value::Object(m) => {
+            let mut out = Map::with_capacity(m.len());
+            for (k, x) in m {
+                out.insert(k.clone(), json_interpolate(x, vars)?);
+            }
+            Ok(Value::Object(out))
+        }
+        Value::Array(a) => a
+            .iter()
+            .map(|x| json_interpolate(x, vars))
             .collect::<Result<Vec<_>, _>>()
             .map(Value::Array),
         other => Ok(other.clone()),
@@ -494,9 +556,161 @@ async fn exec_step(
             Ok(json!({ "closed": true }))
         }
         other => Err(format!(
-            "unknown op {other:?} (navigate set_content click click_xy drag input set_files scroll eval wait viewport screenshot state cookies close)"
+            "unknown op {other:?} (navigate set_content click click_xy drag input set_files scroll eval wait viewport screenshot state cookies close http)"
         )),
     }
+}
+
+/// Engine-side HTTP request step — the CORS-free escape hatch for
+/// API-driven flows (WeChat OA publish, any server-to-server endpoint). The
+/// request never runs in a page, so credentials never touch page context or
+/// a session network log. It rides the same posture as `/fetch`: the
+/// per-domain quota gate, the shared SSRF deny-set, env proxy, and a fresh
+/// cookie-less client per step — no ambient session state leaks in, none
+/// accumulates across steps. Redirects are NOT followed (Policy::none, like
+/// every engine client): a 3xx surfaces as its status for the flow author
+/// to handle. The step takes RAW (pre-substitution) args: everything except
+/// `json` goes through text substitution, while `json` gets whole-leaf
+/// value interpolation (see [`json_interpolate`]).
+async fn exec_http_step(a: &Value, vars: &Map<String, Value>) -> Result<Value, String> {
+    use base64::Engine as _;
+    use diting::diting_net::client::validate_url;
+    use diting::diting_net::{self, CookieJar, HttpClient};
+    use std::str::FromStr;
+
+    let mut raw = a.clone();
+    let json_arg = raw
+        .as_object_mut()
+        .and_then(|m| m.remove("json"));
+    let text = substitute(&raw, vars).map_err(|e| format!("http: {e}"))?;
+
+    let url_str = str_arg(&text, "url", "http")?;
+    let method_str = text
+        .get("method")
+        .and_then(|v| v.as_str())
+        .unwrap_or("GET")
+        .to_ascii_uppercase();
+    let method = reqwest::Method::from_str(&method_str)
+        .map_err(|_| format!("http: unsupported method {method_str:?}"))?;
+    crate::rate::check_domain(&url_str).map_err(|e| format!("http: {e}"))?;
+    let url: url::Url = url_str
+        .parse()
+        .map_err(|e| format!("http: bad url {url_str:?}: {e}"))?;
+    validate_url(&url, diting_net::env_allows_private_network())
+        .map_err(|e| format!("http: {e}"))?;
+
+    let client = HttpClient::with_full_options(
+        std::sync::Arc::new(CookieJar::new()),
+        crate::config::proxy_from_env().as_deref(),
+        false,
+    );
+    let rc = client.request_client(&url_str).await;
+    let mut req = rc.request(method, url);
+    if let Some(ms) = a.get("timeout_ms").and_then(|v| v.as_u64()) {
+        req = req.timeout(std::time::Duration::from_millis(ms.clamp(1_000, 120_000)));
+    }
+
+    let mut content_type: Option<String> = None;
+    if let Some(jv) = json_arg {
+        let body_val = json_interpolate(&jv, vars).map_err(|e| format!("http: {e}"))?;
+        let body_text =
+            serde_json::to_string(&body_val).map_err(|e| format!("http: json body: {e}"))?;
+        content_type = Some("application/json".into());
+        req = req.body(body_text);
+    } else if let Some(parts) = text.get("multipart").and_then(|v| v.as_array()) {
+        if parts.is_empty() {
+            return Err("http: multipart must be a non-empty array".into());
+        }
+        let boundary = format!(
+            "aginxbrowser-flow-{:x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let mut body: Vec<u8> = Vec::new();
+        for (i, p) in parts.iter().enumerate() {
+            let name = p
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("http: multipart part {i} has no name"))?;
+            let bytes: Vec<u8> = if let Some(b64) = p.get("content_base64").and_then(|v| v.as_str())
+            {
+                base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .map_err(|e| format!("http: multipart part {i} ({name:?}): bad base64: {e}"))?
+            } else if let Some(t) = p.get("text").and_then(|v| v.as_str()) {
+                t.as_bytes().to_vec()
+            } else {
+                return Err(format!(
+                    "http: multipart part {i} ({name:?}) has neither content_base64 nor text"
+                ));
+            };
+            let part_ct = p
+                .get("content_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("application/octet-stream");
+            let mut head = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"");
+            if let Some(f) = p.get("filename").and_then(|v| v.as_str()) {
+                head.push_str(&format!("; filename=\"{f}\""));
+            }
+            head.push_str(&format!("\r\nContent-Type: {part_ct}\r\n\r\n"));
+            body.extend_from_slice(head.as_bytes());
+            body.extend_from_slice(&bytes);
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        content_type = Some(format!("multipart/form-data; boundary={boundary}"));
+        req = req.body(body);
+    } else if let Some(b) = text.get("body").and_then(|v| v.as_str()) {
+        req = req.body(b.to_string());
+    }
+    if let Some(ct) = content_type {
+        req = req.header(reqwest::header::CONTENT_TYPE, ct);
+    }
+    if let Some(hs) = text.get("headers").and_then(|v| v.as_object()) {
+        for (k, v) in hs {
+            let val = v.as_str().unwrap_or_default();
+            req = req.header(k, val);
+        }
+    }
+
+    let resp = req.send().await.map_err(|e| format!("http: send: {e}"))?;
+    let status = resp.status().as_u16();
+    // Multi-value headers fold with ", " (the same folding rule the CDP face
+    // picked up for obscura#913); keys lowercase as HTTP/2 sends them.
+    let mut headers = Map::new();
+    for (k, v) in resp.headers() {
+        let key = k.as_str().to_string();
+        let val = v.to_str().unwrap_or("").to_string();
+        if let Some(Value::String(prev)) = headers.get_mut(&key) {
+            prev.push_str(", ");
+            prev.push_str(&val);
+        } else {
+            headers.insert(key, json!(val));
+        }
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("http: read body: {e}"))?;
+    // Response cap (obscura#581 family discipline): an API step must not
+    // OOM the engine on a runaway body.
+    const HTTP_STEP_MAX_BODY: usize = 8 * 1024 * 1024;
+    if bytes.len() > HTTP_STEP_MAX_BODY {
+        return Err(format!(
+            "http: response body {} bytes exceeds the 8MB step cap",
+            bytes.len()
+        ));
+    }
+    let body = String::from_utf8_lossy(&bytes).into_owned();
+    let json = serde_json::from_str::<Value>(&body).ok();
+    Ok(json!({
+        "status": status,
+        "headers": Value::Object(headers),
+        "body": body,
+        "json": json,
+    }))
 }
 
 /// One expect check = one eval driving the page's event loop. All declared
@@ -604,7 +818,7 @@ pub async fn run_flow(
     call_vars: &Map<String, Value>,
     session_id: Option<String>,
 ) -> Value {
-    let vars = effective_vars(flow, call_vars);
+    let mut vars = effective_vars(flow, call_vars);
     if let Some(err) = validate_flow_args(flow, &vars) {
         // Same shape as a pre-session create-block failure: no session was
         // touched, so there is nothing to take over.
@@ -617,6 +831,21 @@ pub async fn run_flow(
             "saved": {},
             "hint": "fix the args_json keys — see the flow's args declaration",
         });
+    }
+    // args_json is also exposed as an `args` OBJECT (validated above, so the
+    // parse can't fail here in the declared case): steps then reference
+    // {{args.title}} in text or — the http step's whole-leaf json form —
+    // "{{args.content_html}}" embedding a quote-heavy body as a legal JSON
+    // string. An explicit `args` var from the caller wins.
+    if !vars.contains_key("args") {
+        let parsed = match vars.get("args_json") {
+            Some(Value::String(s)) => serde_json::from_str::<Value>(s).ok(),
+            Some(obj @ Value::Object(_)) => Some(obj.clone()),
+            _ => None,
+        };
+        if let Some(Value::Object(m)) = parsed {
+            vars.insert("args".into(), Value::Object(m));
+        }
     }
     let steps = flow
         .get("steps")
@@ -692,22 +921,30 @@ pub async fn run_flow(
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-        let args = match substitute(raw.get("args").unwrap_or(&json!({})), &vars) {
-            Ok(a) => a,
-            Err(e) => {
-                return fail_receipt(
-                    mgr,
-                    &sid,
-                    i,
-                    raw,
-                    format!("var substitution: {e}"),
-                    saved,
-                    &last_url,
-                )
-                .await
-            }
+        // http is engine-side (no page, no session command) and takes RAW
+        // args — its `json` body must bypass text substitution so whole-leaf
+        // values embed structurally. Every page-bound op substitutes first.
+        let result = if op == "http" {
+            exec_http_step(raw.get("args").unwrap_or(&json!({})), &vars).await
+        } else {
+            let args = match substitute(raw.get("args").unwrap_or(&json!({})), &vars) {
+                Ok(a) => a,
+                Err(e) => {
+                    return fail_receipt(
+                        mgr,
+                        &sid,
+                        i,
+                        raw,
+                        format!("var substitution: {e}"),
+                        saved,
+                        &last_url,
+                    )
+                    .await
+                }
+            };
+            exec_step(mgr, &sid, &op, &args).await
         };
-        let result = match exec_step(mgr, &sid, &op, &args).await {
+        let result = match result {
             Ok(v) => v,
             Err(e) => return fail_receipt(mgr, &sid, i, raw, e, saved, &last_url).await,
         };
@@ -733,6 +970,12 @@ pub async fn run_flow(
             }
         }
         if let Some(name) = raw.get("save").and_then(|v| v.as_str()) {
+            // Saved results are also substitutable — the API-chain shape
+            // (token -> upload -> draft -> publish) is exactly "step N reads
+            // one field off step N-1's response" via {{name.json.field}}.
+            // A save may shadow a declared var of the same name: the flow
+            // author owns both namespaces and the later write wins.
+            vars.insert(name.to_string(), result.clone());
             saved.insert(name.to_string(), result);
         }
     }
@@ -857,6 +1100,175 @@ mod tests {
         assert!(js_truthy(&json!("0")));
         assert!(js_truthy(&json!([0])));
         assert!(js_truthy(&json!({})));
+    }
+
+    /// Dotted paths walk objects and array indices; a miss anywhere along
+    /// the path is the same loud unknown-var error as a missing root.
+    #[test]
+    fn substitute_walks_dotted_paths() {
+        let mut vars = Map::new();
+        vars.insert(
+            "resp".into(),
+            json!({ "json": { "access_token": "abc123", "scopes": ["snsapi", "base"] } }),
+        );
+        assert_eq!(
+            substitute(&json!("t={{resp.json.access_token}}"), &vars).unwrap(),
+            json!("t=abc123")
+        );
+        // Array index leg.
+        assert_eq!(
+            substitute(&json!("{{resp.json.scopes.1}}"), &vars).unwrap(),
+            json!("base")
+        );
+        // Non-index into an array, deep miss, and missing root all error.
+        assert!(substitute(&json!("{{resp.json.scopes.x}}"), &vars).is_err());
+        assert!(substitute(&json!("{{resp.json.nope}}"), &vars).is_err());
+        assert!(substitute(&json!("{{root.nope}}"), &vars).is_err());
+    }
+
+    /// json arg interpolation: a whole-leaf placeholder embeds the VALUE
+    /// (strings with quotes re-serialize legally, objects embed
+    /// structurally), partial placeholders stay literal, and a clean
+    /// whole-leaf miss is a loud error.
+    #[test]
+    fn json_interpolate_replaces_whole_leaves_only() {
+        let mut vars = Map::new();
+        vars.insert("html".into(), json!("He said \"hi\" <b>&</b>"));
+        vars.insert("meta".into(), json!({ "n": 3, "tags": ["a"] }));
+        let out = json_interpolate(
+            &json!({ "title": "{{html}}", "meta": "{{meta}}", "mixed": "x {{html}} y" }),
+            &vars,
+        )
+        .unwrap();
+        assert_eq!(out["title"], json!("He said \"hi\" <b>&</b>"));
+        assert_eq!(out["meta"]["n"], json!(3));
+        assert_eq!(out["meta"]["tags"], json!(["a"]));
+        // Partial placeholder untouched (compose those in `body` instead).
+        assert_eq!(out["mixed"], json!("x {{html}} y"));
+        // Clean whole-leaf miss errors loudly.
+        assert!(json_interpolate(&json!("{{missing}}"), &vars).is_err());
+        // A multi-placeholder string is not a whole leaf — no error.
+        assert_eq!(
+            json_interpolate(&json!("{{html}} {{html}}"), &vars).unwrap(),
+            json!("{{html}} {{html}}")
+        );
+    }
+
+    /// End-to-end for the engine-side http step against the recording
+    /// server: JSON body interpolation (quotes survive), URL chaining off a
+    /// saved response's field, and the receipt carrying parsed json.
+    #[tokio::test]
+    async fn run_flow_http_step_posts_json_and_chains_saved_fields() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, hits) = crate::server::test_util::recording_server(&[
+            ("POST /token", r#"{"access_token":"abc123","expires_in":7200}"#),
+            ("POST /draft", r#"{"media_id":"M1"}"#),
+        ]);
+        let mut mgr = SessionManager::new();
+        let flow = json!({
+            "steps": [
+                { "op": "http", "args": {
+                    "url": format!("http://127.0.0.1:{port}/token"),
+                    "method": "POST",
+                    "json": { "grant_type": "{{g}}" }
+                }, "save": "t" },
+                { "op": "http", "args": {
+                    "url": "http://127.0.0.1:{{port}}/draft?access_token={{t.json.access_token}}",
+                    "method": "POST",
+                    "json": { "title": "{{args.title}}" }
+                }, "save": "d" },
+            ]
+        });
+        let mut vars = Map::new();
+        vars.insert("g".into(), json!("client_credential"));
+        vars.insert("port".into(), json!(port.to_string()));
+        // args as the JSON-string form — run_flow exposes it as an `args`
+        // object, the same shape the wechat-oa-post flow consumes.
+        vars.insert(
+            "args_json".into(),
+            json!("{\"title\": \"He said \\\"hi\\\" <b>&</b>\"}"),
+        );
+        let receipt = run_flow(&mut mgr, &flow, &vars, None).await;
+        assert_eq!(receipt["status"], "ok", "receipt: {receipt}");
+        assert_eq!(receipt["saved"]["t"]["json"]["access_token"], "abc123");
+        assert_eq!(receipt["saved"]["d"]["json"]["media_id"], "M1");
+
+        let hits = hits.lock().unwrap();
+        let second = hits.iter().find(|h| h.contains("/draft")).expect("second request recorded");
+        // URL carries the token spliced from step 1's saved response.
+        assert!(second.contains(&format!("access_token=abc123")), "hit: {second}");
+        // Hit format is "METHOD path PROTO body" (the recording server
+        // extracts the body past the first header blank line) — the JSON
+        // body stayed legal through interpolation, quotes and all.
+        let body = second.splitn(4, ' ').nth(3).unwrap_or("");
+        let parsed: Value = serde_json::from_str(body).unwrap_or_else(|e| panic!("body {body:?}: {e}"));
+        assert_eq!(parsed["title"], "He said \"hi\" <b>&</b>");
+        let sid = receipt["session_id"].as_str().unwrap().to_string();
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
+    /// The multipart variant: base64 content lands as a well-formed
+    /// multipart/form-data body (boundary markers, disposition, filename).
+    #[tokio::test]
+    async fn run_flow_http_step_multipart_uploads() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, hits) = crate::server::test_util::recording_server(&[(
+            "POST /upload",
+            r#"{"media_id":"THUMB"}"#,
+        )]);
+        let mut mgr = SessionManager::new();
+        let flow = json!({
+            "steps": [
+                { "op": "http", "args": {
+                    "url": format!("http://127.0.0.1:{port}/upload"),
+                    "method": "POST",
+                    "multipart": [
+                        { "name": "media", "filename": "cover.png",
+                          "content_type": "image/png", "content_base64": "aGVsbG8=" }
+                    ]
+                }, "save": "up" },
+            ]
+        });
+        let receipt = run_flow(&mut mgr, &flow, &Map::new(), None).await;
+        assert_eq!(receipt["status"], "ok", "receipt: {receipt}");
+        assert_eq!(receipt["saved"]["up"]["json"]["media_id"], "THUMB");
+
+        let hits = hits.lock().unwrap();
+        let hit = hits.iter().find(|h| h.contains("/upload")).expect("upload recorded");
+        // The recording server logs "METHOD path PROTO body" — header lines
+        // (the multipart content-type) aren't captured, so the contract is
+        // pinned on the body itself: boundary markers wrap a well-formed part.
+        let body = hit.splitn(4, ' ').nth(3).unwrap_or("");
+        assert!(body.starts_with("--aginxbrowser-flow-"), "body: {body:?}");
+        assert!(body.contains("Content-Disposition: form-data; name=\"media\"; filename=\"cover.png\""));
+        assert!(body.contains("Content-Type: image/png"));
+        // Decoded part content ("aGVsbG8=" = "hello") and the closing
+        // boundary marker (hex suffix is time-derived).
+        assert!(body.contains("hello"));
+        assert!(body.trim_end().ends_with("--"));
+        let sid = receipt["session_id"].as_str().unwrap().to_string();
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
+    /// An http step referencing a path that no earlier step saved fails at
+    /// THAT step with the unknown var named — not a silent literal splice.
+    #[tokio::test]
+    async fn run_flow_http_step_unknown_json_var_fails_loudly() {
+        let mut mgr = SessionManager::new();
+        let flow = json!({
+            "steps": [
+                { "op": "http", "args": {
+                    "url": "https://api.example.invalid/x",
+                    "json": { "t": "{{never_saved.field}}" }
+                } },
+            ]
+        });
+        let receipt = run_flow(&mut mgr, &flow, &Map::new(), None).await;
+        assert_eq!(receipt["status"], "failed");
+        let reason = receipt["reason"].as_str().unwrap();
+        assert!(reason.contains("never_saved.field"), "reason: {reason}");
+        let sid = receipt["session_id"].as_str().unwrap().to_string();
+        assert!(mgr.close_and_wait(&sid).await);
     }
 
     /// End-to-end on the no-network path: set_content loads a local page,

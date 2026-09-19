@@ -971,7 +971,9 @@ curl -sS -X POST http://127.0.0.1:8089/session/$SID/close
 }
 ```
 
-- `steps[].op` 就是会话动词：`navigate` / `set_content` / `click` / `click_xy` / `drag` / `input` / `scroll` / `viewport` / `wait` / `eval`。
+- `steps[].op` 就是会话动词：`navigate` / `set_content` / `click` / `click_xy` / `drag` / `input` / `set_files` / `scroll` / `viewport` / `wait` / `eval` / `screenshot` / `state` / `cookies` / `close`，外加引擎侧的 `http`。
+- `http` 步骤——引擎侧直接发 HTTP 请求（API 型 flow 用：公众号发文这类服务端对服务端调用）：不进页面，CORS 天然不适用，凭据不落页面上下文和会话 network log。参数：`url`（必填）、`method`（默认 GET）、`timeout_ms`（钳 1s..120s）、`headers`；body 三选一——`json`（**整叶插值**：恰好是 `{{path}}` 的字符串嵌入引用的原值，满是引号的 HTML 正文也能拼成合法 JSON 字符串；部分插值留给 `body` 文本语义）、`multipart`（`{name, filename?, content_type?, content_base64 | text}` 数组）、裸 `body` 文本。骑 `/fetch` 同款姿态：域名配额门、SSRF deny-set、env 代理、每步全新无 cookie client、不跟重定向。结果形如 `{status, headers, body, json}`。
+- 占位符名字可以是 dotted 路径——`{{token.json.access_token}}` 沿对象键（含数组下标）走；`args_json` 额外以 `args` 对象暴露，步骤里直接 `{{args.title}}`。`save` 的结果同时进 vars，后续步骤 `{{name.json.field}}` 取字段。
 - `expect`（可选）给步骤设门：`url_contains` / `selector` / `text_contains` / `eval_truthy`，全过才算过。
 - 失败即中止，回执带 `status:"failed"`、`failed_step`、`reason`、页面 `url`、视口 `screenshot`（base64）、已 `save` 的产出——**会话保持存活**（回执里有 `session_id`），可手动接管排查。
 - `vars` 里没声明的占位符替换直接快速失败（会话都还没建）。

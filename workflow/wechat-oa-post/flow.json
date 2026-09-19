@@ -1,0 +1,92 @@
+{
+  "args": [
+    "title",
+    "content_html",
+    "digest",
+    "cover_b64"
+  ],
+  "vars": {
+    "args_json": "{\"title\": \"CHANGE_ME\", \"content_html\": \"<p>CHANGE_ME</p>\", \"digest\": \"\", \"cover_b64\": \"CHANGE_ME\"}"
+  },
+  "steps": [
+    {
+      "op": "http",
+      "args": {
+        "url": "https://api.weixin.qq.com/cgi-bin/stable_token",
+        "method": "POST",
+        "timeout_ms": 15000,
+        "json": {
+          "grant_type": "client_credential",
+          "appid": "{{creds.app_id}}",
+          "secret": "{{creds.app_secret}}"
+        }
+      },
+      "save": "token"
+    },
+    {
+      "op": "http",
+      "args": {
+        "url": "https://api.weixin.qq.com/cgi-bin/material/add_material?type=image&access_token={{token.json.access_token}}",
+        "method": "POST",
+        "timeout_ms": 30000,
+        "multipart": [
+          {
+            "name": "media",
+            "filename": "cover.png",
+            "content_type": "image/png",
+            "content_base64": "{{args.cover_b64}}"
+          }
+        ]
+      },
+      "save": "cover"
+    },
+    {
+      "op": "http",
+      "args": {
+        "url": "https://api.weixin.qq.com/cgi-bin/draft/add?access_token={{token.json.access_token}}",
+        "method": "POST",
+        "timeout_ms": 30000,
+        "json": {
+          "articles": [
+            {
+              "article_type": "news",
+              "title": "{{args.title}}",
+              "content": "{{args.content_html}}",
+              "author": "",
+              "content_source_url": "",
+              "digest": "{{args.digest}}",
+              "need_open_comment": 0,
+              "only_fans_can_comment": 0,
+              "thumb_media_id": "{{cover.json.media_id}}"
+            }
+          ]
+        }
+      },
+      "save": "draft"
+    },
+    {
+      "op": "http",
+      "args": {
+        "url": "https://api.weixin.qq.com/cgi-bin/freepublish/submit?access_token={{token.json.access_token}}",
+        "method": "POST",
+        "timeout_ms": 15000,
+        "json": {
+          "media_id": "{{draft.json.media_id}}"
+        }
+      },
+      "save": "submit"
+    },
+    {
+      "op": "http",
+      "args": {
+        "url": "https://api.weixin.qq.com/cgi-bin/freepublish/get?access_token={{token.json.access_token}}",
+        "method": "POST",
+        "timeout_ms": 15000,
+        "json": {
+          "publish_id": "{{submit.json.publish_id}}"
+        }
+      },
+      "save": "verify"
+    }
+  ]
+}

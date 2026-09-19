@@ -1533,13 +1533,30 @@ pub(crate) mod test_util {
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]).to_string();
                 let head = req.lines().next().unwrap_or("").to_string();
-                let body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+                let body = req
+                    .split_once("\r\n\r\n")
+                    .map(|(_, b)| b.to_string())
+                    .unwrap_or_default();
                 hits2.lock().unwrap().push(format!("{} {}", head, body));
-                // Route keys are "METHOD path"; an unmatched request 404s.
+                // Route keys are "METHOD path", matched with the query string
+                // ignored on BOTH sides — a request's ?access_token=... hits
+                // a bare-path route (the API-chain norm), and a route that
+                // pins a query (?token=1) still matches its own URL. An
+                // unmatched request 404s.
                 let method = head.split_whitespace().next().unwrap_or("");
-                let path = head.split_whitespace().nth(1).unwrap_or("");
-                let key = format!("{} {}", method, path);
-                let (code, body_out) = match routes.iter().find(|(k, _)| *k == key) {
+                let path = head
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("")
+                    .split('?')
+                    .next()
+                    .unwrap_or("");
+                let (code, body_out) = match routes.iter().find(|(k, _)| {
+                    let mut it = k.split_whitespace();
+                    let rk_method = it.next().unwrap_or("");
+                    let rk_path = it.next().unwrap_or("").split('?').next().unwrap_or("");
+                    rk_method == method && rk_path == path
+                }) {
                     Some((_, b)) => ("200 OK", *b),
                     None => ("404 Not Found", ""),
                 };
