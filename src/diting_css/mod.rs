@@ -1153,10 +1153,10 @@ pub struct ComputedStyle {
     pub align_items: Option<AlignMode>,
     pub flex_grow: Option<f32>,
     pub flex_shrink: Option<f32>,
-    /// px only (`auto` stays None — the initial value).
-    pub flex_basis: Option<f32>,
-    pub column_gap: Option<f32>,
-    pub row_gap: Option<f32>,
+    /// Length-percentage (`auto` stays None — the initial value).
+    pub flex_basis: Option<Length>,
+    pub column_gap: Option<Length>,
+    pub row_gap: Option<Length>,
     /// Track list (px / rem / fr / auto / minmax). `None` = not declared.
     pub grid_template_columns: Option<Vec<GridTrack>>,
     pub grid_template_rows: Option<Vec<GridTrack>>,
@@ -4514,12 +4514,12 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             style.flex_shrink.is_some()
         }
         "flex-basis" => {
-            // px (calc pure-px folds); `auto` (the initial value) stays None.
-            style.flex_basis = parse_px_f32_ctx(v, fonts);
+            // <length-percentage> | auto (the initial value, stays None).
+            style.flex_basis = len(v);
             style.flex_basis.is_some()
         }
         "gap" => {
-            let vals: Vec<Option<f32>> = split_sides(v).into_iter().map(|t| parse_px_f32_ctx(t, fonts)).collect();
+            let vals: Vec<Option<Length>> = split_sides(v).into_iter().map(&len).collect();
             match vals.as_slice() {
                 [Some(one)] => {
                     style.column_gap = Some(*one);
@@ -4532,16 +4532,17 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                     true
                 }
                 // One invalid component invalidates the whole declaration
-                // (CSS syntax) — no partial application.
+                // (CSS syntax) — no partial application. `auto` is not in
+                // gap's grammar: len() rejects it, same outcome.
                 _ => false,
             }
         }
         "column-gap" => {
-            style.column_gap = parse_px_f32_ctx(v, fonts);
+            style.column_gap = len(v);
             style.column_gap.is_some()
         }
         "row-gap" => {
-            style.row_gap = parse_px_f32_ctx(v, fonts);
+            style.row_gap = len(v);
             style.row_gap.is_some()
         }
         "grid-template-columns" => {
@@ -7581,26 +7582,40 @@ mod tests {
     }
 
     #[test]
-    fn calc_flex_basis_and_gap_px_only() {
-        // Resolved-value slots (flex-basis, gap) accept pure-px calc and drop
-        // percent-carrying calc — the percent part has no slot to ride in.
+    fn flex_basis_and_gap_length_percentage() {
+        // Resolved-value slots (flex-basis, gap) carry lengths and percents
+        // (taffy resolves them at layout time); `auto` is flex-basis's
+        // initial and stays None, gap has no auto and drops the declaration.
         let mut s = ComputedStyle::default();
         assert!(apply_declarations(&mut s, "flex-basis: calc(60px + 40px)"));
-        assert_eq!(s.flex_basis, Some(100.0));
+        assert_eq!(s.flex_basis, Some(Length::Px(100.0)));
         let mut s = ComputedStyle::default();
-        assert!(!apply_declarations(&mut s, "flex-basis: calc(50% + 10px)"));
+        assert_eq!(apply_declarations(&mut s, "flex-basis: auto"), false);
         assert_eq!(s.flex_basis, None);
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "flex-basis: 50%"));
+        assert_eq!(s.flex_basis, Some(Length::Percent(50.0)));
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "flex-basis: calc(50% + 10px)"));
+        assert_eq!(s.flex_basis, Some(Length::Calc { percent: 50.0, px: 10.0 }));
 
         let mut s = ComputedStyle::default();
         assert!(apply_declarations(&mut s, "gap: calc(8px + 4px)"));
-        assert_eq!(s.column_gap, Some(12.0));
-        assert_eq!(s.row_gap, Some(12.0));
+        assert_eq!(s.column_gap, Some(Length::Px(12.0)));
+        assert_eq!(s.row_gap, Some(Length::Px(12.0)));
         let mut s = ComputedStyle::default();
         assert!(apply_declarations(&mut s, "column-gap: calc(24px - 4px)"));
-        assert_eq!(s.column_gap, Some(20.0));
+        assert_eq!(s.column_gap, Some(Length::Px(20.0)));
         let mut s = ComputedStyle::default();
-        assert!(!apply_declarations(&mut s, "gap: calc(50% + 4px) 8px"));
+        assert!(apply_declarations(&mut s, "gap: 50% 8px"));
+        assert_eq!(s.column_gap, Some(Length::Percent(50.0)));
+        assert_eq!(s.row_gap, Some(Length::Px(8.0)));
+        let mut s = ComputedStyle::default();
+        // Gap grammar has no auto: the whole declaration drops, no partial
+        // application.
+        assert!(!apply_declarations(&mut s, "gap: auto 8px"));
         assert_eq!(s.column_gap, None);
+        assert_eq!(s.row_gap, None);
     }
 
     #[test]

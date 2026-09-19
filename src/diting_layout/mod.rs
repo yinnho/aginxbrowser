@@ -348,12 +348,40 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
     if let Some(fs) = style.flex_shrink {
         s.flex_shrink = fs;
     }
+    // flex-basis/gap carry %: taffy's percent matches CSS —
+    // flex-basis resolves against the container main-axis inner size, gap
+    // against the per-axis container size — so it passes through and
+    // resolves at layout time, same posture as the slots above.
     if let Some(fb) = style.flex_basis {
-        s.flex_basis = Dimension::length(fb);
+        s.flex_basis = match fb {
+            crate::diting_css::Length::Px(px) => Dimension::length(px),
+            crate::diting_css::Length::Percent(p) => Dimension::percent(p / 100.0),
+            crate::diting_css::Length::Calc { percent, .. } => Dimension::percent(percent / 100.0),
+            // Gap's grammar never stores auto/sizing keywords here; auto is
+            // flex-basis's initial anyway.
+            crate::diting_css::Length::Auto
+            | crate::diting_css::Length::MinContent
+            | crate::diting_css::Length::MaxContent
+            | crate::diting_css::Length::FitContent => Dimension::auto(),
+        };
     }
+    let gap_len = |v: Option<crate::diting_css::Length>| match v {
+        None => LengthPercentage::length(0.0),
+        Some(crate::diting_css::Length::Px(px)) => LengthPercentage::length(px),
+        Some(crate::diting_css::Length::Percent(p)) => LengthPercentage::percent(p / 100.0),
+        Some(crate::diting_css::Length::Calc { percent, .. }) => {
+            LengthPercentage::percent(percent / 100.0)
+        }
+        Some(
+            crate::diting_css::Length::Auto
+            | crate::diting_css::Length::MinContent
+            | crate::diting_css::Length::MaxContent
+            | crate::diting_css::Length::FitContent,
+        ) => LengthPercentage::length(0.0),
+    };
     s.gap = Size {
-        width: LengthPercentage::length(style.column_gap.unwrap_or(0.0)),
-        height: LengthPercentage::length(style.row_gap.unwrap_or(0.0)),
+        width: gap_len(style.column_gap),
+        height: gap_len(style.row_gap),
     };
     if display == CssDisplay::Table {
         // `border-collapse: collapse` means shared borders — realized as
