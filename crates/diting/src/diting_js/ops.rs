@@ -3876,13 +3876,19 @@ fn build_request_client(proxy_url: Option<&str>) -> Result<reqwest::Client, Stri
     // send().await errors, which op_fetch_url propagates and the fetch shim turns
     // into an XHR `error`/`loadend`. 30s matches the other clients in the
     // workspace; AGINXBROWSER_FETCH_TIMEOUT_MS overrides it for tighter cloud limits.
+    // The knob is a READ-stall timeout (#49), not a total-duration cap: in
+    // reqwest `.read_timeout` gives the header phase 30s from request start
+    // (the never-responding server above still times out) and then resets the
+    // clock on every body chunk, so a large-but-flowing body (32MB wasm over a
+    // slow CDN) completes instead of dying mid-stream with a DecodeError —
+    // which used to strand the page's bootstrap promise forever.
     let timeout_ms: u64 = std::env::var("AGINXBROWSER_FETCH_TIMEOUT_MS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(30_000);
     let mut builder = crate::diting_net::client::reqwest_builder_no_env_proxy()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .read_timeout(std::time::Duration::from_millis(timeout_ms))
         .connect_timeout(std::time::Duration::from_secs(10))
         // Be explicit about pool hygiene: these clients are cached
         // process-wide (FETCH_CLIENT_CACHE), and a half-dead idle connection
@@ -5649,6 +5655,107 @@ fn op_fetch_url_sync(
     Ok(outcome.json)
 }
 
+/// Natural dimensions from an image header alone — PNG IHDR, GIF logical
+/// screen descriptor, JPEG SOFn, WebP canvas (VP8X / VP8 / VP8L). Sites
+/// gate on `naturalWidth != 0` to decide whether an artifact decoded (the
+/// xhs zeus AB SDK retries its PNG artifact 25× and dead-ends when it
+/// reads 0), so the Image shim needs real numbers — but a full software
+/// decoder lives behind the `screenshot` feature, and bootstrap.js must
+/// work in every feature combination. Header parsing is dependency-free.
+/// Truncated/garbage input is `None`, never a panic.
+fn image_header_dimensions(b: &[u8]) -> Option<(u32, u32)> {
+    // PNG: 8-byte signature, then chunk length + "IHDR", then BE u32 w/h.
+    if b.len() >= 24
+        && b[..8] == [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n']
+    {
+        let w = u32::from_be_bytes([b[16], b[17], b[18], b[19]]);
+        let h = u32::from_be_bytes([b[20], b[21], b[22], b[23]]);
+        return Some((w, h));
+    }
+    // GIF: LE u16 logical screen size right after the 6-byte version.
+    if b.len() >= 10 && (b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a")) {
+        return Some((
+            u16::from_le_bytes([b[6], b[7]]) as u32,
+            u16::from_le_bytes([b[8], b[9]]) as u32,
+        ));
+    }
+    // JPEG: walk the marker segments (EXIF/AppN sit before SOF). Standalone
+    // markers carry no length; fill bytes (extra 0xFFs) are skipped.
+    if b.len() >= 2 && b[0] == 0xFF && b[1] == 0xD8 {
+        let mut i = 2usize;
+        while i + 1 < b.len() {
+            if b[i] != 0xFF {
+                return None; // desynced — not a marker boundary
+            }
+            let marker = b[i + 1];
+            if marker == 0xFF {
+                i += 1; // fill byte before a real marker
+                continue;
+            }
+            if marker == 0xD8 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
+                i += 2; // standalone, no length payload
+                continue;
+            }
+            if i + 4 > b.len() {
+                return None;
+            }
+            let seg_len = u16::from_be_bytes([b[i + 2], b[i + 3]]) as usize;
+            let is_sof = (0xC0..=0xCF).contains(&marker)
+                && marker != 0xC4 // DHT
+                && marker != 0xC8 // JPG (reserved)
+                && marker != 0xCC; // DAC
+            if is_sof {
+                if i + 9 > b.len() {
+                    return None;
+                }
+                // Segment: len(2) precision(1) height(2) width(2).
+                let h = u16::from_be_bytes([b[i + 5], b[i + 6]]) as u32;
+                let w = u16::from_be_bytes([b[i + 7], b[i + 8]]) as u32;
+                return Some((w, h));
+            }
+            i += 2 + seg_len;
+        }
+        return None;
+    }
+    // WebP: RIFF container, first chunk fourcc at 12. VP8X carries the
+    // canvas size as two 24-bit LE minus-one values; VP8 (lossy) hides it
+    // behind the 3-byte frame tag + start code; VP8L packs two 14-bit
+    // minus-one values into the bits after the 0x2F signature.
+    if b.len() >= 16 && b[..4] == *b"RIFF" && b[8..12] == *b"WEBP" {
+        let fourcc = &b[12..16];
+        if fourcc == b"VP8X" && b.len() >= 30 {
+            let w = 1 + (b[24] as u32 | (b[25] as u32) << 8 | (b[26] as u32) << 16);
+            let h = 1 + (b[27] as u32 | (b[28] as u32) << 8 | (b[29] as u32) << 16);
+            return Some((w, h));
+        }
+        if fourcc == b"VP8 " && b.len() >= 30 && b[23..26] == [0x9D, 0x01, 0x2A] {
+            let w = u16::from_le_bytes([b[26], b[27]]) as u32 & 0x3FFF;
+            let h = u16::from_le_bytes([b[28], b[29]]) as u32 & 0x3FFF;
+            return Some((w, h));
+        }
+        if fourcc == b"VP8L" && b.len() >= 25 && b[20] == 0x2F {
+            let w = 1 + (b[21] as u32 | ((b[22] as u32) & 0x3F) << 8);
+            let h = 1 + ((b[22] as u32) >> 6 | (b[23] as u32) << 2 | ((b[24] as u32) & 0x0F) << 10);
+            return Some((w, h));
+        }
+        return None;
+    }
+    None
+}
+
+/// `op_image_info(body_base64)` — the dimensions op backing the Image
+/// shim's `naturalWidth/naturalHeight`. Returns `{"width":w,"height":h}`;
+/// unparsable input yields 0×0 and the JS side keeps its old fallback, so
+/// the load/error contract (#41: transport status decides) is untouched —
+/// this only fills in real numbers when they're available.
+#[op2]
+#[string]
+fn op_image_info(#[string] body_base64: String) -> String {
+    let bytes = BASE64.decode(body_base64.as_bytes()).unwrap_or_default();
+    let (w, h) = image_header_dimensions(&bytes).unwrap_or((0, 0));
+    serde_json::json!({ "width": w, "height": h }).to_string()
+}
+
 /// Also applied by the ES module loader (obscura #849): dynamic import() is
 /// as page-reachable as fetch(), so it answers to the same scheme and
 /// private-network policy. The cached client these paths share never
@@ -6502,6 +6609,7 @@ pub fn build_extension() -> Extension {
             op_blob_revoke(),
             op_fetch_url(),
             op_fetch_url_sync(),
+            op_image_info(),
             op_get_cookies(),
             op_set_cookie(),
             op_storage_read(),
@@ -6540,7 +6648,67 @@ mod tests {
         is_cors_safelisted_request_header, parse_cors_header_list, preflight_allows_header,
         preflight_allows_method, validate_fetch_url, FetchCredentials,
     };
-    use super::{pbkdf2_derive, PBKDF2_MAX_ITERATIONS, PBKDF2_MAX_OUTPUT_BYTES};
+    use super::{image_header_dimensions, pbkdf2_derive, PBKDF2_MAX_ITERATIONS, PBKDF2_MAX_OUTPUT_BYTES};
+
+    /// Header-only dimension parsing for the four formats op_image_info
+    /// serves. Byte layouts pinned against the spec tables: PNG IHDR (BE
+    /// u32s at fixed offsets), GIF LSD (LE u16s), JPEG SOFn behind EXIF
+    /// segments, and all three WebP chunk faces. Distinctive non-1×1
+    /// numbers throughout — a 1 here could pass via some other fallback.
+    #[test]
+    fn image_header_dimensions_all_formats() {
+        // PNG: sig + chunk len + "IHDR" + w(62) + h(33).
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(&[0, 0, 0, 0x0D]);
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&62u32.to_be_bytes());
+        png.extend_from_slice(&33u32.to_be_bytes());
+        assert_eq!(image_header_dimensions(&png), Some((62, 33)));
+
+        // GIF89a: logical screen 100×7 (LE u16s at 6/8).
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend_from_slice(&100u16.to_le_bytes());
+        gif.extend_from_slice(&7u16.to_le_bytes());
+        assert_eq!(image_header_dimensions(&gif), Some((100, 7)));
+
+        // JPEG: SOI, a 16-byte EXIF APP1 segment ahead of SOF0 carrying
+        // 400×300, then payload padding (the walker must hop the segment).
+        let mut jpg = vec![0xFF, 0xD8];
+        jpg.extend_from_slice(&[0xFF, 0xE1]); // APP1
+        jpg.extend_from_slice(&16u16.to_be_bytes()); // seg len (includes itself)
+        jpg.extend_from_slice(&[0u8; 14]);
+        jpg.extend_from_slice(&[0xFF, 0xC0]); // SOF0
+        jpg.extend_from_slice(&11u16.to_be_bytes());
+        jpg.extend_from_slice(&[8]); // precision
+        jpg.extend_from_slice(&300u16.to_be_bytes()); // h first per spec
+        jpg.extend_from_slice(&400u16.to_be_bytes()); // w
+        jpg.extend_from_slice(&[0x03, 0x01, 0x11, 0x00]); // component count + sampling
+        assert_eq!(image_header_dimensions(&jpg), Some((400, 300)));
+
+        // WebP VP8X: RIFF/WEBP + chunk header + flags(4) + w-1, h-1 as 24-bit LE.
+        let mut vp8x = b"RIFF".to_vec();
+        vp8x.extend_from_slice(&[0, 0, 0, 0]); // riff size
+        vp8x.extend_from_slice(b"WEBPVP8X");
+        vp8x.extend_from_slice(&10u32.to_le_bytes()); // chunk size
+        vp8x.extend_from_slice(&[0, 0, 0, 0]); // reserved+flags
+        vp8x.extend_from_slice(&[61, 0, 0]); // w-1 = 61
+        vp8x.extend_from_slice(&[44, 0, 0]); // h-1 = 44
+        assert_eq!(image_header_dimensions(&vp8x), Some((62, 45)));
+
+        // WebP VP8L: 0x2F signature, then two packed 14-bit minus-one values:
+        // w-1 = 61 fills byte 1; h-1 = 44 = 11<<2 starts at bit 14 (byte 2).
+        let mut vp8l = b"RIFF".to_vec();
+        vp8l.extend_from_slice(&[0, 0, 0, 0]);
+        vp8l.extend_from_slice(b"WEBPVP8L");
+        vp8l.extend_from_slice(&5u32.to_le_bytes());
+        vp8l.extend_from_slice(&[0x2F, 61, 0x00, 0x0B, 0x00]); // w-1=61, h-1=44
+        assert_eq!(image_header_dimensions(&vp8l), Some((62, 45)));
+
+        // Garbage, empty, and a PNG signature cut before IHDR all miss.
+        assert_eq!(image_header_dimensions(b"not an image"), None);
+        assert_eq!(image_header_dimensions(&[]), None);
+        assert_eq!(image_header_dimensions(&png[..16]), None);
+    }
 
     /// The #395 paint-only predicate: only a name diff inside
     /// {transform, opacity} may keep the solve cache. Value changes,

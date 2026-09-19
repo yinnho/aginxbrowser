@@ -14116,22 +14116,45 @@ if (typeof Image === 'undefined') {
           // browsers); 2xx dispatches `load`, anything else (pre-wire
           // refusal, network error, HTTP error status) dispatches `error`.
           const fullUrl = _resolveUrl(img.getAttribute('src'));
-          const succeed = function () {
+          // dimsJson (from op_image_info): header-parsed natural size, or
+          // '{}' when unparsable. Real numbers matter because sites gate on
+          // naturalWidth != 0 to decide whether an artifact decoded (the xhs
+          // zeus AB SDK retries its PNG artifact 25x and dead-ends on 0).
+          // Missing/garbage input keeps the old width/height fallback — the
+          // load/error decision (#41: transport status) stays with the
+          // caller, this only fills in numbers.
+          const succeed = function (dimsJson) {
             img.complete = true;
+            try {
+              const d = JSON.parse(dimsJson || '{}');
+              if (d && d.width > 0) {
+                img.naturalWidth = d.width;
+                img.naturalHeight = d.height;
+              }
+            } catch (e) {}
             img.naturalWidth = img.naturalWidth || img.width || 0;
             img.naturalHeight = img.naturalHeight || img.height || 0;
             try { img.dispatchEvent(new Event('load')); } catch (e) {}
+          };
+          const dimsFromBase64 = function (b64) {
+            try { return _OPS.op_image_info(String(b64 || '')); } catch (e) { return '{}'; }
           };
           const fail = function () {
             img.complete = false;
             try { img.dispatchEvent(new Event('error')); } catch (e) {}
           };
           if (fullUrl.startsWith('data:')) {
-            setTimeout(succeed, 0);
+            // Header-parse the embedded payload — comma may be absent on a
+            // malformed data: URL; slice(empty) then fails to parse and the
+            // fallback keeps the old behavior.
+            const comma = fullUrl.indexOf(',');
+            setTimeout(function () {
+              succeed(dimsFromBase64(comma < 0 ? '' : fullUrl.slice(comma + 1)));
+            }, 0);
           } else if (fullUrl.startsWith('blob:')) {
             setTimeout(function () {
               const b = globalThis.__blobObjs && globalThis.__blobObjs[fullUrl];
-              if (b && b._bytes instanceof Uint8Array) { succeed(); } else { fail(); }
+              if (b && b._bytes instanceof Uint8Array) { succeed('{}'); } else { fail(); }
             }, 0);
           } else {
             const pageOrigin = (function() { try { const u = new URL(_domParse("document_url") || "about:blank"); return u.origin; } catch(e) { return ""; } })();
@@ -14139,8 +14162,9 @@ if (typeof Image === 'undefined') {
               return _OPS.op_fetch_url(fullUrl, "GET", "{}", "", pageOrigin, "no-cors", "include", "\u0000about:client");
             }).then(function (raw) {
               let ok = false;
-              try { const parsed = JSON.parse(raw); ok = parsed.status >= 200 && parsed.status <= 299; } catch (e) {}
-              if (ok) { succeed(); } else { fail(); }
+              let bodyB64 = '';
+              try { const parsed = JSON.parse(raw); ok = parsed.status >= 200 && parsed.status <= 299; bodyB64 = parsed.bodyBase64 || ''; } catch (e) {}
+              if (ok) { succeed(dimsFromBase64(bodyB64)); } else { fail(); }
             }).catch(fail);
           }
         },

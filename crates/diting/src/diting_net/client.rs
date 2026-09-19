@@ -748,7 +748,15 @@ impl HttpClient {
         self.client.get_or_init(|| async {
             let mut builder = reqwest_builder_no_env_proxy()
                 .redirect(Policy::none())
-                .timeout(Duration::from_secs(30))
+                // Browser timeout semantics (#49), not scraper semantics:
+                // `.timeout()` caps the WHOLE request — connect through body
+                // read — so a large-but-live body (the xhs publish page's
+                // 32MB ffmpeg-core.wasm at real CDN speed, ~40s) is killed
+                // mid-stream at 30s with "error decoding response body" while
+                // every browser streams it to completion. `read_timeout` is
+                // the browser shape: headers get 30s from request start, then
+                // every body chunk resets the stall clock — no total cap.
+                .read_timeout(Duration::from_secs(30))
                 .connect_timeout(Duration::from_secs(10))
                 // Bug #24 (long-run degradation): a pooled connection that went
                 // half-dead while idle (NAT drop, proxy reset) used to be handed
@@ -783,7 +791,9 @@ impl HttpClient {
         self.direct_client.get_or_init(|| async {
             reqwest_builder_no_env_proxy()
                 .redirect(Policy::none())
-                .timeout(Duration::from_secs(30))
+                // read_timeout (per-chunk stall, #49), not a total-duration
+                // cap — see get_client.
+                .read_timeout(Duration::from_secs(30))
                 .connect_timeout(Duration::from_secs(10))
                 // See get_client: short idle window + keepalive against
                 // half-dead pooled connections (bug #24).
@@ -838,7 +848,9 @@ impl HttpClient {
             .get_or_init(|| async move {
                 let mut builder = reqwest_builder_no_env_proxy()
                     .redirect(Policy::none())
-                    .timeout(Duration::from_secs(30))
+                    // read_timeout (per-chunk stall, #49), not a total-duration
+                    // cap — see get_client.
+                    .read_timeout(Duration::from_secs(30))
                     .connect_timeout(Duration::from_secs(10))
                     .pool_idle_timeout(Duration::from_secs(60))
                     .tcp_keepalive(Duration::from_secs(30))

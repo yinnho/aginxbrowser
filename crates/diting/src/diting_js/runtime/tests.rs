@@ -2559,6 +2559,76 @@
         );
     }
 
+    /// Issue #50 regression: a watchdog that fires while the isolate is parked
+    /// (between commands — disarm starved on a busy session task) leaves V8
+    /// execution-termination PENDING. The next V8 entry is then the op-driver
+    /// tick delivering the just-finished fetch op, so the pending termination
+    /// materializes there: tick_fn.call throws, the op batch (the fetch
+    /// promise's args) is destroyed, and the page-side promise never settles —
+    /// the xhs upload-content hang. run_event_loop now heals the stale flag at
+    /// the top of every poll, so delivery must survive a parked fire.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_promise_survives_parked_watchdog_fire() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).unwrap();
+            // The response lands well after the 100ms watchdog budget (fire
+            // while parked) and well before we poll again — deterministic
+            // parked-fire shape, no starvation race required.
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let body = "x".repeat(4096);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port));
+        rt.evaluate(
+            "globalThis.__r = -1;
+             fetch('/hold').then(r => r.text())
+             .then(t => { globalThis.__r = t.length; },
+                   e => { globalThis.__r = 'err:' + e; });",
+        )
+        .unwrap();
+
+        // Arm a watchdog whose budget expires while nothing polls the isolate.
+        let wd = rt.arm_watchdog(std::time::Duration::from_millis(100));
+        // Parked window: the fire lands (~100ms, termination goes pending) and
+        // the op completes into the driver queue (~400ms) — nobody enters V8
+        // in between.
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+        // The heal must clear the pending termination before the op-driver
+        // tick delivers the fetch result; the promise settles instead of
+        // hanging forever.
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_secs(2), rt.run_event_loop()).await;
+        let fired = rt.disarm_watchdog(wd);
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        assert!(
+            fired,
+            "precondition: the watchdog must have fired while parked"
+        );
+        assert_eq!(
+            rt.evaluate("globalThis.__r").unwrap().as_f64().unwrap(),
+            4096.0
+        );
+    }
+
     /// The document's own Referrer Policy (batch-84 leftover): a policy from
     /// the navigation response's Referrer-Policy header beats every <meta
     /// name=referrer>; among metas the FIRST whose content yields a valid
@@ -3157,6 +3227,73 @@
         assert_eq!(v["complete"], serde_json::json!("true"));
     }
 
+    /// (#41 follow-up) A 2xx body carrying a real image header must
+    /// backfill naturalWidth/naturalHeight via op_image_info. Sites gate on
+    /// `naturalWidth != 0` to decide whether an artifact decoded (the xhs
+    /// zeus AB SDK retries its PNG artifact 25× and dead-ends on 0), so
+    /// header-parsed numbers are load-bearing — the load/error face itself
+    /// still gates on transport status only.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn image_factory_backfills_natural_dimensions_from_2xx_body() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        // Sig + chunk len + "IHDR" + w=62 + h=33 — the parser reads offsets
+        // 16..24, so a header-only body pins the parse without a decoder.
+        let mut png: Vec<u8> = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(&[0, 0, 0, 0x0D]);
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&62u32.to_be_bytes());
+        png.extend_from_slice(&33u32.to_be_bytes());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).unwrap();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: image/png\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                png.len()
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+            stream.write_all(&png).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const img = new Image(); // no width/height args: fallback would be 0
+                    const loaded = new Promise(r => { img.onload = () => r('fired'); });
+                    img.src = '/x.png';
+                    const how = await loaded;
+                    return {
+                        how,
+                        nw: String(img.naturalWidth),
+                        nh: String(img.naturalHeight),
+                        complete: String(img.complete),
+                    };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let v = result.value.unwrap();
+        assert_eq!(v["how"], serde_json::json!("fired"));
+        assert_eq!(v["nw"], serde_json::json!("62"));
+        assert_eq!(v["nh"], serde_json::json!("33"));
+        assert_eq!(v["complete"], serde_json::json!("true"));
+    }
+
     /// (#41) failure side: an unreachable src (connection-refused port) must
     /// fire `error`, never the phantom `load` the old stub produced.
     #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
@@ -3215,7 +3352,7 @@
                     const loaded = new Promise(r => { img.onload = () => r('fired'); });
                     img.src = 'data:image/gif;base64,R0lGODlhAQABAAAAACw=';
                     const how = await loaded;
-                    return { how, sawError: String(sawError), complete: String(img.complete) };
+                    return { how, sawError: String(sawError), complete: String(img.complete), nw: String(img.naturalWidth), nh: String(img.naturalHeight) };
                 }"#,
                 None,
                 &[],
@@ -3229,6 +3366,10 @@
         assert_eq!(v["how"], serde_json::json!("fired"));
         assert_eq!(v["sawError"], serde_json::json!("false"));
         assert_eq!(v["complete"], serde_json::json!("true"));
+        // The embedded GIF87a header carries a 1×1 logical screen — the
+        // data: branch goes through the same header parse as the fetch one.
+        assert_eq!(v["nw"], serde_json::json!("1"));
+        assert_eq!(v["nh"], serde_json::json!("1"));
     }
 
     /// (#42) Sync XHR resolves data: URLs locally — status 200, decoded
@@ -10494,8 +10635,10 @@
         let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
         assert_eq!(
             result.value.unwrap(),
-            serde_json::json!([true, true, true, false, true, 10, 1, 1, true, 7])
+            serde_json::json!([true, true, true, false, true, 1, 1, 1, true, 7])
         );
+        // naturalWidth=1: the parsed GIF intrinsic size, not the width-attr
+        // fallback (Chrome reads intrinsic dims here; img.width stays 10).
     }
 
     #[test]

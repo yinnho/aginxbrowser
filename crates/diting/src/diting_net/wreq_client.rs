@@ -242,7 +242,10 @@ impl StealthHttpClient {
         let mut builder = wreq::Client::builder()
             .no_proxy()
             .emulation(emulation_opts)
-            .timeout(Duration::from_secs(30))
+            // read_timeout (per-chunk stall, #49), not a total-duration cap:
+            // `.timeout()` kills a large-but-live body (32MB wasm over a slow
+            // CDN) mid-stream at 30s while browsers stream it to completion.
+            .read_timeout(Duration::from_secs(30))
             .redirect(wreq::redirect::Policy::none());
 
         // Honor SSL_CERT_FILE / SSL_CERT_DIR (opt-in only): when set, wire a

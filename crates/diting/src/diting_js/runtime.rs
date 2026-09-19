@@ -100,6 +100,17 @@ fn install_heap_limit_guard(
             std::sync::atomic::Ordering::SeqCst,
         );
         state.tripped.store(true, std::sync::atomic::Ordering::SeqCst);
+        // #50 probe: the second captured repro showed tick_fn terminating
+        // with NO watchdog fire anywhere near it — this guard is the only
+        // other silent terminate_execution() call site. Make it visible.
+        let t_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        eprintln!(
+            "[heapguard] near-heap-limit tripped at {} bytes (initial {}) — terminating t={t_ms}",
+            current_limit, _initial_limit
+        );
         isolate_handle.terminate_execution();
         current_limit.saturating_add(HEAP_LIMIT_RECOVERY_HEADROOM_BYTES)
     });
@@ -122,6 +133,14 @@ pub struct JsRuntime {
     /// microtask loop re-queues itself on the next pump, so pumping it again
     /// just re-feeds the storm).
     watchdog_fired_total: std::cell::Cell<u64>,
+    /// #50: set by the watchdog thread at the moment it calls
+    /// `terminate_execution()`. `IsolateHandle::is_execution_terminating()`
+    /// only reports an *active* termination (one propagating on the stack);
+    /// a fire that lands while the session task is parked leaves the flag
+    /// pending and invisible until the next V8 entry — by then it kills the
+    /// op-delivery tick and drops the batch. `run_event_loop` consults THIS
+    /// flag at every poll boundary and cancels the stale termination.
+    stale_termination: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Per-module evaluation outcome cache (upstream 4f6d256): browsers
     /// evaluate a module script exactly once per document. deno_core 0.350
     /// asserts on a second mod_evaluate of the same ModuleId instead of
@@ -265,7 +284,15 @@ fn watchdog_terminate(handle: &IsolateHandle) {
 /// hung page cannot hold the process-wide V8 lock forever. Pair with
 /// [`WatchdogToken::stop`]; if `stop` returns true, clear the termination flag
 /// via [`JsRuntime::cancel_termination`] before reusing the isolate.
-pub fn spawn_watchdog(handle: IsolateHandle, budget: std::time::Duration) -> WatchdogToken {
+///
+/// `stale` (the runtime's `stale_termination` flag) is set at the instant of
+/// firing — BEFORE `terminate_execution()` — so `run_event_loop`'s poll-boundary
+/// heal can tell a pending termination from V8 internals it cannot observe.
+pub fn spawn_watchdog(
+    handle: IsolateHandle,
+    budget: std::time::Duration,
+    stale: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> WatchdogToken {
     let pair = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Debug sampler (AGINXBROWSER_WATCHDOG_STACK_DUMP=1): while this watchdog
@@ -307,6 +334,9 @@ pub fn spawn_watchdog(handle: IsolateHandle, budget: std::time::Duration) -> Wat
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 fired_c.store(true, std::sync::atomic::Ordering::SeqCst);
+                if let Some(stale) = stale.as_ref() {
+                    stale.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 watchdog_terminate(&handle);
                 return;
             }
@@ -490,6 +520,9 @@ impl JsRuntime {
             isolate_handle,
             heap_limit_state,
             watchdog_fired_total: std::cell::Cell::new(0),
+            stale_termination: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
             module_evaluations: HashMap::new(),
             module_loader: module_loader.clone(),
         }
@@ -1668,15 +1701,18 @@ impl JsRuntime {
 
         // The event-loop arm is polled first (biased): a ready loop error
         // must surface instead of being discarded while awaiting the result.
+        // #50: Self::run_event_loop clears a stale watchdog termination at
+        // every poll; both arms map to String so the match below is unchanged.
         let outcome = tokio::time::timeout(budget, async {
-            let event_loop = self
-                .runtime
-                .run_event_loop(deno_core::PollEventLoopOptions::default());
+            let event_loop = self.run_event_loop();
             tokio::pin!(event_loop);
             tokio::select! {
                 biased;
-                e = &mut event_loop => { e?; (&mut result).await }
-                r = &mut result => r,
+                e = &mut event_loop => {
+                    e?;
+                    (&mut result).await.map_err(|err| err.to_string())
+                }
+                r = &mut result => r.map_err(|err| err.to_string()),
             }
         })
         .await;
@@ -1843,10 +1879,44 @@ impl JsRuntime {
 
     pub async fn run_event_loop(&mut self) -> Result<(), String> {
         self.recover_heap_limit();
-        self.runtime
-            .run_event_loop(deno_core::PollEventLoopOptions::default())
-            .await
-            .map_err(|e| format!("Event loop error: {}", e))
+        // #50: the watchdog armed around an await window can fire while the
+        // session task is parked with no JS on the stack (in the captured
+        // repro the task was starved 14.65s past the wall-clock deadline).
+        // The terminate flag then sits stale on the isolate, and the first
+        // V8 entry after wake — usually deno_core's op-delivery tick — dies
+        // with "execution terminated", dropping the whole batch of
+        // already-popped op results: fetch promises never settle. Detection
+        // cannot ask V8: `is_execution_terminating()` only reports an
+        // ACTIVE termination (one propagating on the stack) — a fire that
+        // landed on a parked isolate leaves the flag pending and reads
+        // false. So the watchdog sets our own `stale_termination` flag at
+        // the instant of firing; a flag set at a poll boundary is
+        // necessarily stale (a genuine synchronous overrun unwinds with Err
+        // inside the poll that ran the JS — this heal already ran at the
+        // top of that poll). Clear both.
+        let isolate = self.isolate_handle.clone();
+        let stale = self.stale_termination.clone();
+        let mut inner = std::pin::pin!(self
+            .runtime
+            .run_event_loop(deno_core::PollEventLoopOptions::default()));
+        let result = std::future::poll_fn(|cx| {
+            if stale.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                isolate.cancel_terminate_execution();
+                tracing::warn!("#50: cleared stale V8 termination before event-loop poll");
+            }
+            std::future::Future::poll(inner.as_mut(), cx)
+        })
+        .await;
+        if let Err(e) = &result {
+            // An event-loop error (e.g. an exception inside deno_core's
+            // __eventLoopTick while resolving op promises) is the silent-loss
+            // surface of #50: results already popped from the completed-ops
+            // deque are dropped when the tick aborts, and every pump wrapper
+            // (run_event_loop_until_idle / _bounded / `let _ =`) discards the
+            // Err. Log it here so the loss leaves a signature.
+            tracing::warn!("event loop error (op results may be lost): {}", e);
+        }
+        result.map_err(|e| format!("Event loop error: {}", e))
     }
 
     /// Arm a hard wall-clock backstop on synchronous V8 work. A page stuck in a
@@ -1856,7 +1926,11 @@ impl JsRuntime {
     /// `budget` elapses, forcing V8 to throw an uncatchable error and hand
     /// control back. Always balance with [`Self::disarm_watchdog`].
     pub fn arm_watchdog(&mut self, budget: std::time::Duration) -> WatchdogToken {
-        spawn_watchdog(self.runtime.v8_isolate().thread_safe_handle(), budget)
+        spawn_watchdog(
+            self.runtime.v8_isolate().thread_safe_handle(),
+            budget,
+            Some(self.stale_termination.clone()),
+        )
     }
 
     /// Stop a watchdog armed by [`Self::arm_watchdog`]. If it had already fired
@@ -1865,6 +1939,11 @@ impl JsRuntime {
     pub fn disarm_watchdog(&mut self, token: WatchdogToken) -> bool {
         let fired = token.stop();
         if fired {
+            // The heal in run_event_loop owns stale-clearing at poll
+            // boundaries; this swap only covers the flag the watchdog set
+            // between the last poll and this disarm.
+            self.stale_termination
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             self.runtime.v8_isolate().cancel_terminate_execution();
             self.watchdog_fired_total
                 .set(self.watchdog_fired_total.get() + 1);
@@ -2007,9 +2086,11 @@ impl JsRuntime {
             }
             // Pump for a short slice. If the loop returns idle in <tick_ms,
             // run_event_loop returns Ok and we check the predicate again.
+            // #50: routed through Self::run_event_loop so each poll first
+            // clears a terminate flag the watchdog left on a parked isolate.
             let _ = tokio::time::timeout(
                 tokio::time::Duration::from_millis(tick_ms),
-                self.runtime.run_event_loop(deno_core::PollEventLoopOptions::default()),
+                self.run_event_loop(),
             ).await;
             if wd.fired() {
                 break;
