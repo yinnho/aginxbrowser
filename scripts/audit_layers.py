@@ -88,7 +88,7 @@ GOD_FILE_GRANDFATHER = {
     "crates/diting/src/diting_net/client.rs": 2399,
     "src/server.rs": 2194,
     "crates/diting/src/diting_dom/tree.rs": 2160,
-    "src/mcp.rs": 2125,
+    "src/mcp/mod.rs": 2109,
     "crates/diting/src/diting_layout/text.rs": 1826,
     "crates/diting/src/diting_layout/svg.rs": 1736,
     "src/store.rs": 1734,
