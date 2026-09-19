@@ -745,6 +745,51 @@ pub(super) fn humanized_drag_plan(
     DragPlan { points, settle_ms }
 }
 
+/// Act-side re-check script (ARCHITECTURE.md §5, issue #46): verify
+/// identity/enabled/visible/occlusion in the same frame as the click and
+/// answer with a structured verdict instead of dispatching into a dead
+/// target. The observe half (session_state rects) goes stale the moment the
+/// page re-renders between the state call and the click; this closes that
+/// gap. Failures are named — `gone`/`detached`/`disabled`/`not_visible`/
+/// `covered_by` — and `covered_by` describes the element that would eat the
+/// real click, so the agent can dismiss it or click it instead of guessing.
+const CLICK_RECHECK_SCRIPT: &str = r#"(function() {
+    var el = globalThis._wrap && globalThis._wrap(NID);
+    if (!el || !el.tagName) return JSON.stringify({clicked: false, reason: 'gone'});
+    if (!el.isConnected) return JSON.stringify({clicked: false, reason: 'detached'});
+    // :disabled matches form controls only; ARIA-disabled and inert gate the
+    // rest (a div-button the page marks unclickable mid-session).
+    if (el.matches(':disabled') || el.closest('[aria-disabled="true"],[inert]'))
+        return JSON.stringify({clicked: false, reason: 'disabled'});
+    if (typeof el.checkVisibility === 'function' &&
+        !el.checkVisibility({checkOpacity: true, checkVisibilityCSS: true}))
+        return JSON.stringify({clicked: false, reason: 'not_visible'});
+    el.scrollIntoView({block: 'center'});
+    // Post-scroll geometry, then hit-test the center point. elementFromPoint
+    // is z-index aware, so a hit that is neither the target nor its
+    // descendant nor an ancestor wrapping it means something is covering the
+    // target. (An ancestor counts as a pass: a label wrapping its input
+    // forwards activation, so a real click through it still lands.)
+    var r = el.getBoundingClientRect();
+    if (r.width <= 0 && r.height <= 0)
+        return JSON.stringify({clicked: false, reason: 'not_visible'});
+    var hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    if (!hit || (hit !== el && !el.contains(hit) && !hit.contains(el))) {
+        function desc(e) {
+            if (!e || !e.tagName) return 'unknown';
+            var s = '<' + String(e.tagName).toLowerCase();
+            if (e.id) s += ' id="' + e.id + '"';
+            var cls = String(e.className || '');
+            if (cls) s += ' class="' + cls.substring(0, 60) + '"';
+            return s + '>';
+        }
+        return JSON.stringify({clicked: false, reason: 'covered_by',
+            covered_by: hit ? desc(hit) : 'nothing (center point outside the viewport)'});
+    }
+    el.click();
+    return JSON.stringify({clicked: true});
+})()"#;
+
 pub(super) async fn click_by_index(
     page: &mut Page,
     element_map: &HashMap<usize, u64>,
@@ -753,12 +798,18 @@ pub(super) async fn click_by_index(
     let nid = *element_map
         .get(&index)
         .ok_or_else(|| format!("invalid index: {}", index))?;
-    let js = format!(
-        "(function() {{ var el = globalThis._wrap && globalThis._wrap({}); if (el) {{ el.scrollIntoView({{block:'center'}}); el.click(); return true; }} return false; }})()",
-        nid
-    );
+    let js = CLICK_RECHECK_SCRIPT.replacen("NID", &nid.to_string(), 1);
     let result = page.evaluate_with_timeout(&js, crate::page::INTERACTION_EVAL_TIMEOUT);
-    let clicked = result.as_bool().unwrap_or(false);
+    // A non-string/non-JSON result is an engine hiccup, not a click — read
+    // it as unclicked with a raw reason rather than guessing success.
+    let verdict = result
+        .as_str()
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .unwrap_or_else(|| serde_json::json!({"clicked": false, "reason": "no verdict"}));
+    let clicked = verdict
+        .get("clicked")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     // Drain any JS-initiated navigation the click started (location.href /
     // form.submit) so the returned URL reflects the post-click page — matches
     // the firecrawl /v1/scrape click handling.
@@ -778,6 +829,14 @@ pub(super) async fn click_by_index(
     Ok(SessionClickResponse {
         url,
         clicked,
+        reason: verdict
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        covered_by: verdict
+            .get("covered_by")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         text_after,
     })
 }
@@ -794,6 +853,12 @@ pub(super) fn input_by_index(
         .ok_or_else(|| format!("invalid index: {}", index))?;
     // Escape single quotes in text.
     let escaped = text.replace('\\', "\\\\").replace('\'', "\\'");
+    // Act-side re-check (issue #46), same frame as the fill: a detached,
+    // disabled, or readonly control answers `filled:false` with a named
+    // reason instead of silently writing a value nobody will read back.
+    // No visibility gate here on purpose: hidden inputs (display:none plus a
+    // custom-drawn widget) are legitimate fill targets, and Chrome accepts
+    // script value assignment on them too.
     // React/Vue controlled inputs: assigning `el.value` directly goes through
     // React's _valueTracker own-property setter, which records the new value -
     // the following `input` event then compares equal and React swallows it
@@ -802,6 +867,7 @@ pub(super) fn input_by_index(
     // the filled element's identity + value readback so a stale element_map
     // (page re-rendered between state and input) is visible in the reply
     // instead of silently typing into the wrong field.
+    let guard = "if (!el.isConnected) return '{\"filled\":false,\"reason\":\"detached\"}'; if (el.disabled) return '{\"filled\":false,\"reason\":\"disabled\"}'; if (el.readOnly || el.closest('[aria-readonly=\"true\"]')) return '{\"filled\":false,\"reason\":\"readonly\"}';";
     let set_value = "if (el._valueTracker) el._valueTracker.setValue(''); var p = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value') || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');";
     let js_body: String = if full_events {
         // Strict listeners key on keyboard events (keypress-to-submit login
@@ -809,15 +875,17 @@ pub(super) fn input_by_index(
         // the full keydown/keypress/input/keyup cycle per character, then a
         // single trailing change.
         format!(
-            r#"(function() {{ var el = globalThis._wrap && globalThis._wrap({nid}); if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {{ el.focus(); {set_value} var text = '{text}'; var cur = ''; for (var i = 0; i < text.length; i++) {{ var ch = text[i]; var kc = ch.charCodeAt(0); var kev = function(t) {{ return new KeyboardEvent(t, {{key: ch, keyCode: kc, which: kc, bubbles: true}}); }}; el.dispatchEvent(kev('keydown')); if (p && p.set) p.set.call(el, cur + ch); else el.value = cur + ch; cur = cur + ch; el.dispatchEvent(new Event('input', {{bubbles: true}})); el.dispatchEvent(kev('keypress')); el.dispatchEvent(kev('keyup')); }} el.dispatchEvent(new Event('change', {{bubbles: true}})); return JSON.stringify({{filled: true, tag: el.tagName.toLowerCase(), id: el.id || '', name: el.getAttribute('name') || '', value: el.value}}); }} return '{{"filled":false}}'; }})()"#,
+            r#"(function() {{ var el = globalThis._wrap && globalThis._wrap({nid}); if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {{ {guard} el.focus(); {set_value} var text = '{text}'; var cur = ''; for (var i = 0; i < text.length; i++) {{ var ch = text[i]; var kc = ch.charCodeAt(0); var kev = function(t) {{ return new KeyboardEvent(t, {{key: ch, keyCode: kc, which: kc, bubbles: true}}); }}; el.dispatchEvent(kev('keydown')); if (p && p.set) p.set.call(el, cur + ch); else el.value = cur + ch; cur = cur + ch; el.dispatchEvent(new Event('input', {{bubbles: true}})); el.dispatchEvent(kev('keypress')); el.dispatchEvent(kev('keyup')); }} el.dispatchEvent(new Event('change', {{bubbles: true}})); return JSON.stringify({{filled: true, tag: el.tagName.toLowerCase(), id: el.id || '', name: el.getAttribute('name') || '', value: el.value}}); }} return '{{"filled":false}}'; }})()"#,
             nid = nid,
+            guard = guard,
             set_value = set_value,
             text = escaped,
         )
     } else {
         format!(
-            r#"(function() {{ var el = globalThis._wrap && globalThis._wrap({nid}); if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {{ el.focus(); {set_value} if (p && p.set) p.set.call(el, '{text}'); else el.value = '{text}'; el.dispatchEvent(new Event('input', {{bubbles: true}})); el.dispatchEvent(new Event('change', {{bubbles: true}})); return JSON.stringify({{filled: true, tag: el.tagName.toLowerCase(), id: el.id || '', name: el.getAttribute('name') || '', value: el.value}}); }} return '{{"filled":false}}'; }})()"#,
+            r#"(function() {{ var el = globalThis._wrap && globalThis._wrap({nid}); if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {{ {guard} el.focus(); {set_value} if (p && p.set) p.set.call(el, '{text}'); else el.value = '{text}'; el.dispatchEvent(new Event('input', {{bubbles: true}})); el.dispatchEvent(new Event('change', {{bubbles: true}})); return JSON.stringify({{filled: true, tag: el.tagName.toLowerCase(), id: el.id || '', name: el.getAttribute('name') || '', value: el.value}}); }} return '{{"filled":false}}'; }})()"#,
             nid = nid,
+            guard = guard,
             set_value = set_value,
             text = escaped,
         )

@@ -365,6 +365,270 @@
         );
     }
 
+    /// Index of the element carrying `id="…"` in a session_state listing —
+    /// the observe half of the interaction contract hands back formatted
+    /// text, so the act-side tests parse their target's index from it.
+    fn state_index_of(state: &str, id: &str) -> usize {
+        let needle = format!("id=\"{}\"", id);
+        for line in state.lines() {
+            if line.contains(&needle) {
+                if let Some(n) = line
+                    .trim_start_matches('[')
+                    .split(']')
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                {
+                    return n;
+                }
+            }
+        }
+        panic!("no indexed element with {} in state:\n{}", needle, state);
+    }
+
+    /// Act-side re-check contract (issue #46): between session_state and
+    /// session_click the page can re-render — the click must re-verify
+    /// visibility/occlusion in the same frame and fail with a structured
+    /// reason instead of dispatching into a dead target. A full-cover overlay
+    /// answers `covered_by` naming the veil; once the veil is gone the same
+    /// click succeeds.
+    #[tokio::test]
+    async fn click_refuses_covered_button_with_structured_reason() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /p",
+            "<html><body><button id='go' onclick=\"window.__hit = 1\">Go</button>\
+             </body></html>",
+        )]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/p")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+
+        let state = mgr
+            .send(&sid, |reply| SessionCommand::State { reply })
+            .await
+            .unwrap();
+        let idx = state_index_of(&state, "go");
+
+        // Drop a z-index overlay over the whole viewport after the snapshot.
+        mgr.send(&sid, |reply| SessionCommand::Eval {
+            script: "(function(){ var d = document.createElement('div');\
+                     d.id = 'veil';\
+                     d.style.cssText = 'position:absolute;left:0;top:0;width:1600px;height:900px;z-index:9999';\
+                     document.body.appendChild(d); return 'veiled'; })()"
+                .to_string(),
+            timeout_ms: None,
+            reply,
+        })
+        .await
+        .unwrap();
+
+        let resp = mgr
+            .send(&sid, |reply| SessionCommand::Click { index: idx, reply })
+            .await
+            .unwrap();
+        assert!(!resp.clicked, "a covered button must not report clicked");
+        assert_eq!(resp.reason.as_deref(), Some("covered_by"));
+        let covered = resp.covered_by.unwrap_or_default();
+        assert!(
+            covered.contains("veil"),
+            "covered_by must name the element eating the click, got {}",
+            covered
+        );
+
+        // Remove the veil: the identical click now dispatches.
+        mgr.send(&sid, |reply| SessionCommand::Eval {
+            script: "document.getElementById('veil').remove(); 'gone'".to_string(),
+            timeout_ms: None,
+            reply,
+        })
+        .await
+        .unwrap();
+        let resp = mgr
+            .send(&sid, |reply| SessionCommand::Click { index: idx, reply })
+            .await
+            .unwrap();
+        assert!(resp.clicked, "uncovered button must click");
+        assert!(resp.reason.is_none(), "success carries no reason");
+        let hit = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "window.__hit === 1 ? 'hit' : 'miss'".to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(hit.as_str().unwrap_or(""), "hit");
+
+        assert!(
+            mgr.close_and_wait(&sid).await,
+            "session thread must ack close"
+        );
+    }
+
+    /// Same contract, disabled/hidden half: a control the page disabled or
+    /// hid after the snapshot answers `disabled` / `not_visible` — never a
+    /// silent success.
+    #[tokio::test]
+    async fn click_refuses_disabled_and_hidden_buttons() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /p",
+            "<html><body><button id='b1'>One</button><button id='b2'>Two</button>\
+             </body></html>",
+        )]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/p")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+
+        let state = mgr
+            .send(&sid, |reply| SessionCommand::State { reply })
+            .await
+            .unwrap();
+        let b1 = state_index_of(&state, "b1");
+        let b2 = state_index_of(&state, "b2");
+
+        mgr.send(&sid, |reply| SessionCommand::Eval {
+            script: "document.getElementById('b1').disabled = true;\
+                     document.getElementById('b2').style.display = 'none';\
+                     'set'"
+                .to_string(),
+            timeout_ms: None,
+            reply,
+        })
+        .await
+        .unwrap();
+
+        let resp = mgr
+            .send(&sid, |reply| SessionCommand::Click { index: b1, reply })
+            .await
+            .unwrap();
+        assert!(!resp.clicked);
+        assert_eq!(resp.reason.as_deref(), Some("disabled"));
+
+        let resp = mgr
+            .send(&sid, |reply| SessionCommand::Click { index: b2, reply })
+            .await
+            .unwrap();
+        assert!(!resp.clicked);
+        assert_eq!(resp.reason.as_deref(), Some("not_visible"));
+
+        assert!(
+            mgr.close_and_wait(&sid).await,
+            "session thread must ack close"
+        );
+    }
+
+    /// Input half of the contract: readonly and disabled controls answer
+    /// `filled:false` with a named reason. Hidden inputs are deliberately
+    /// NOT refused — a display:none input paired with a custom widget is a
+    /// legitimate fill target (documented on the guard).
+    #[tokio::test]
+    async fn input_refuses_readonly_and_disabled_fields() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /p",
+            "<html><body><input id='ok' name='q'><input id='dis' name='d' disabled>\
+             </body></html>",
+        )]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/p")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+
+        let state = mgr
+            .send(&sid, |reply| SessionCommand::State { reply })
+            .await
+            .unwrap();
+        let ok = state_index_of(&state, "ok");
+        let dis = state_index_of(&state, "dis");
+
+        mgr.send(&sid, |reply| SessionCommand::Eval {
+            script: "document.getElementById('ok').readOnly = true; 'set'".to_string(),
+            timeout_ms: None,
+            reply,
+        })
+        .await
+        .unwrap();
+
+        let resp = mgr
+            .send(&sid, |reply| SessionCommand::Input {
+                index: ok,
+                text: "hello".to_string(),
+                full_events: false,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp["filled"], false, "readonly field must refuse");
+        assert_eq!(resp["reason"], "readonly");
+
+        let resp = mgr
+            .send(&sid, |reply| SessionCommand::Input {
+                index: dis,
+                text: "hello".to_string(),
+                full_events: false,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp["filled"], false, "disabled field must refuse");
+        assert_eq!(resp["reason"], "disabled");
+
+        // Lift the readonly flag: the same fill goes through with a readback.
+        mgr.send(&sid, |reply| SessionCommand::Eval {
+            script: "document.getElementById('ok').readOnly = false; 'ok'".to_string(),
+            timeout_ms: None,
+            reply,
+        })
+        .await
+        .unwrap();
+        let resp = mgr
+            .send(&sid, |reply| SessionCommand::Input {
+                index: ok,
+                text: "hello".to_string(),
+                full_events: false,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp["filled"], true);
+        assert_eq!(resp["value"], "hello");
+
+        assert!(
+            mgr.close_and_wait(&sid).await,
+            "session thread must ack close"
+        );
+    }
+
     #[tokio::test]
     async fn viewport_command_pins_viewport_across_navigation() {
         let _net = crate::server::test_util::net_env_guard();

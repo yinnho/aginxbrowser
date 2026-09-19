@@ -1391,6 +1391,10 @@ default argument); \"dismiss\" restores the default.",
     #[tool(
         description = "Click an interactive element by its index (from session_state output) inside \
 a live browser session: scrolls it into view and fires a DOM click on the session's current page. \
+Before clicking it re-verifies the element in the same frame — if the page changed since \
+session_state (element detached, disabled, hidden, or covered by an overlay), it returns \
+`clicked:false` with a `reason` (\"detached\"/\"disabled\"/\"not_visible\"/\"covered_by\") and, when \
+covered, a `covered_by` description of the element that would eat the click — never a silent no-op. \
 A submit click may navigate the session — the returned `url`/`text_after` reflect the page after \
 the action, and session state (cookies, localStorage, globals) persists for follow-up calls. \
 Indexes come from the most recent session_state; re-list after navigation.",
@@ -1470,7 +1474,10 @@ selections and captcha sliders that only track while the pointer travels.",
     }
 
     #[tool(
-        description = "Type text into an input/textarea element by its index (from session_state output).",
+        description = "Type text into an input/textarea element by its index (from session_state \
+output), dispatching input/change events (full keyboard cycle per character with events:\"full\"). \
+A disabled, readonly, or detached field answers `filled:false` with a `reason` instead of a silent \
+write. Hidden inputs are legitimate targets and are filled normally.",
         annotations(title = "Session Input")
     )]
     async fn session_input(&self, Parameters(params): Parameters<SessionInputParams>) -> String {

@@ -231,6 +231,16 @@ pub struct SessionNavResponse {
 pub struct SessionClickResponse {
     pub url: String,
     pub clicked: bool,
+    /// Why a click refused to fire (issue #46): one of `gone`/`detached`/
+    /// `disabled`/`not_visible`/`covered_by`. Absent on success — a click
+    /// that dispatched never lies about it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Present with `reason: "covered_by"`: the element that would eat the
+    /// real click (`<div id=… class=…>`), so the agent can dismiss it or
+    /// click it instead of guessing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub covered_by: Option<String>,
     /// Post-click landed page text (body.innerText, capped), so the client
     /// can diff before/after in one response — same evidence contract as the
     /// stateless /click.
