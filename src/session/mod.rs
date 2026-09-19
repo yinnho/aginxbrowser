@@ -10,10 +10,12 @@
 //! interaction executors, [`record`] recording/replay. The re-exports
 //! below are exactly the externally consumed face (`main.rs`, `mcp.rs`,
 //! `flow.rs`); the response types stay reachable inside the module via
-//! their defining submodules.
+//! their defining submodules. `interact` is `pub(crate)` (not re-exported)
+//! because the CDP Input face imports its mouse-event JS builders downward
+//! — the R1-allowed direction (issue #47).
 
 mod commands;
-mod interact;
+pub(crate) mod interact;
 mod manager;
 mod record;
 mod state;

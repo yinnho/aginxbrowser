@@ -47,12 +47,10 @@ FACE_PATHS = (
 
 # R1b documented exceptions: (repo-relative file, imported face) -> reason.
 # Every entry must carry an open issue; the fix batch deletes the entry.
-R1B_EXCEPTIONS = {
-    ("src/session/interact.rs", "cdp"): (
-        "issue #47: click_xy/drag reuse the CDP Input face's mouse-event JS "
-        "builders; fix moves the builders down into core"
-    ),
-}
+# (The table's first and so far only entry — session/interact reaching up
+# into the CDP Input face, issue #47 — was deleted when the mouse-event
+# builders moved down into core.)
+R1B_EXCEPTIONS: dict[tuple[str, str], str] = {}
 
 # Faces/product crates the engine must never depend on (R2a). Anything the
 # engine legitimately needs (wreq, tokio, html5ever, ...) is absent here.
