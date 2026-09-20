@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "aginxbrowser"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "anyrender",
@@ -1292,7 +1292,7 @@ dependencies = [
 
 [[package]]
 name = "diting"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "aes",
  "aes-gcm",
