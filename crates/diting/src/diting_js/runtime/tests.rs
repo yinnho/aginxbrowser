@@ -14059,3 +14059,161 @@ fn custom_elements_reconnect_refires_connected_callback() {
     let v = rt.evaluate(js).unwrap();
     assert_eq!(v, serde_json::json!("cdc"));
 }
+
+/// #53: `indexedDB.open` used to resolve success immediately and never
+/// dispatch `onupgradeneeded`, so schema-installing openers (Dexie,
+/// localForage, Firebase) never settled their open promise and the app
+/// dead-ended at its skeleton. The open contract: fresh DB at a higher
+/// version dispatches upgradeneeded (with a versionchange tx whose
+/// createObjectStore lands on the database), then success carrying the new
+/// version and visible store names; a re-open at the same version skips the
+/// upgrade entirely.
+#[tokio::test(flavor = "current_thread")]
+async fn idb_open_dispatches_upgrade_then_success_and_skips_on_reopen() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    // Disk-backed localStorage outlives the process; a meta row a previous
+    // run persisted would make open() skip the upgrade path under test.
+    rt.evaluate("localStorage.removeItem('__diting_idb__probe-db')").unwrap();
+    rt.evaluate(r#"
+        globalThis.__log = [];
+        function openDb(v) {
+          return new Promise(function (resolve, reject) {
+            const req = indexedDB.open('probe-db', v);
+            req.onupgradeneeded = function (e) {
+              __log.push(['upgrade', e.oldVersion, e.newVersion, e.transaction && e.transaction.mode]);
+              if (!e.target.result.objectStoreNames.contains('drafts')) {
+                e.target.result.createObjectStore('drafts', { keyPath: 'id' });
+                e.target.result.createObjectStore('markers');
+              }
+            };
+            req.onsuccess = function (e) {
+              const db = e.target.result;
+              __log.push(['success', db.version, db.objectStoreNames.contains('drafts'),
+                          db.objectStoreNames.length]);
+              resolve(db);
+            };
+            req.onerror = function () { reject(req.error); };
+          });
+        }
+        globalThis.__p = openDb(2).then(function (db) {
+          db.close();
+          return openDb(2); // same version: must NOT upgrade again
+        });
+    "#).unwrap();
+    let _ = rt.run_event_loop_bounded(300).await;
+    let log = rt.evaluate("globalThis.__log").unwrap();
+    assert_eq!(
+        log,
+        serde_json::json!([
+            ["upgrade", 0, 2, "versionchange"],
+            ["success", 2, true, 2],
+            ["success", 2, true, 2], // reopen: no upgrade row between
+        ]),
+        "fresh open upgrades then succeeds; re-open at the same version goes straight to success"
+    );
+}
+
+/// #53 second face: stores used to live on the transaction, so a put in one
+/// transaction and a getAll in a second never agreed (count=1 vs getAll=0).
+/// Store data belongs to the database record; transactions are just windows
+/// onto it. This is exactly the Dexie shape the xhs creator page runs.
+#[tokio::test(flavor = "current_thread")]
+async fn idb_store_data_survives_across_transactions() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    // localStorage outlives the process (disk-backed), so a meta row a
+    // previous run left behind would make open() skip the upgrade path.
+    rt.evaluate("localStorage.removeItem('__diting_idb__tx-db')").unwrap();
+    // Phase 1: open + upgrade + put in a readwrite tx, resolve when written.
+    rt.evaluate(r#"
+        globalThis.__phase1 = new Promise(function (resolve) {
+          const req = indexedDB.open('tx-db', 1);
+          req.onupgradeneeded = function (e) {
+            e.target.result.createObjectStore('chapters', { keyPath: 'cid' });
+          };
+          req.onsuccess = function (e) {
+            const db = e.target.result;
+            const wtx = db.transaction('chapters', 'readwrite');
+            wtx.objectStore('chapters').put({ cid: 'c1', text: 'hello' });
+            wtx.oncomplete = function () { resolve('written'); };
+          };
+        });
+    "#).unwrap();
+    let _ = rt.run_event_loop_bounded(300).await;
+    // Phase 2: a *fresh* transaction on the same db must see the row.
+    rt.evaluate(r#"
+        globalThis.__out = null;
+        const req = indexedDB.open('tx-db', 1);
+        req.onsuccess = function (e) {
+          const db = e.target.result;
+          const rtx = db.transaction('chapters', 'readonly');
+          const st = rtx.objectStore('chapters');
+          const c = st.count();
+          const g = st.getAll();
+          const k = st.get('c1');
+          rtx.oncomplete = function () {
+            globalThis.__out = JSON.stringify([c.result, g.result.length, g.result[0] && g.result[0].text, k.result && k.result.cid]);
+          };
+        };
+    "#).unwrap();
+    rt.run_event_loop_bounded(300).await.unwrap();
+    let out = rt.evaluate("globalThis.__out").unwrap();
+    assert_eq!(
+        out,
+        serde_json::json!("[1,1,\"hello\",\"c1\"]"),
+        "put in tx1 must be visible to count/getAll/get in a second tx"
+    );
+}
+
+/// #53 third face: version errors and duplicate-add semantics. A lower
+/// version must reject with VersionError; `add` of an existing key must
+/// reject with ConstraintError while `put` overwrites; a value missing its
+/// keyPath must reject with DataError — apps branch on these names.
+#[tokio::test(flavor = "current_thread")]
+async fn idb_error_contracts_version_constraint_and_keypath() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    rt.evaluate("localStorage.removeItem('__diting_idb__err-db')").unwrap();
+    rt.evaluate(r#"
+        globalThis.__out = null;
+        globalThis.__phase1 = new Promise(function (resolve) {
+          const req = indexedDB.open('err-db', 3);
+          req.onupgradeneeded = function (e) {
+            e.target.result.createObjectStore('kv', { keyPath: 'k' });
+          };
+          req.onsuccess = function (e) { resolve(e.target.result); };
+        });
+    "#).unwrap();
+    let _ = rt.run_event_loop_bounded(300).await;
+    rt.evaluate(r#"
+        globalThis.__phase1.then(function (db) {
+          const out = { version: null, downgrade: null, dupAdd: null, missingKeyPath: null, putOverwrite: null };
+          const lower = indexedDB.open('err-db', 2);
+          lower.onerror = function () { out.downgrade = lower.error && lower.error.name; };
+          lower.onupgradeneeded = function () { out.downgrade = 'UPGRADED (wrong)'; };
+          lower.onsuccess = function () { out.downgrade = 'SUCCESS (wrong)'; };
+          const wtx = db.transaction('kv', 'readwrite');
+          const st = wtx.objectStore('kv');
+          const p1 = st.put({ k: 'a', v: 1 });
+          const dup = st.add({ k: 'a', v: 2 });
+          dup.onerror = function (e) { out.dupAdd = dup.error && dup.error.name; e.preventDefault && e.preventDefault(); };
+          const bad = st.put({ nope: 'x' });
+          bad.onerror = function (e) { out.missingKeyPath = bad.error && bad.error.name; e.preventDefault && e.preventDefault(); };
+          wtx.oncomplete = function () {
+            const rtx = db.transaction('kv', 'readonly');
+            const g = rtx.objectStore('kv').getAll();
+            g.onsuccess = function () {
+              out.putOverwrite = g.result.length === 1 && g.result[0].v === 1;
+              out.version = db.version;
+              globalThis.__out = JSON.stringify(out);
+            };
+          };
+        });
+    "#).unwrap();
+    let _ = rt.run_event_loop_bounded(300).await;
+    let out = rt.evaluate("globalThis.__out").unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+    assert_eq!(parsed["version"], serde_json::json!(3));
+    assert_eq!(parsed["downgrade"], serde_json::json!("VersionError"));
+    assert_eq!(parsed["dupAdd"], serde_json::json!("ConstraintError"));
+    assert_eq!(parsed["missingKeyPath"], serde_json::json!("DataError"));
+    assert_eq!(parsed["putOverwrite"], serde_json::json!(true));
+}
