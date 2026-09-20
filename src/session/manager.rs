@@ -1489,14 +1489,12 @@ fn session_thread(
                                 // auto-bypass. A person opens the live view
                                 // (served by the binary at /live), solves the
                                 // slider in this session, and the retry below
-                                // rides the x5sec cookie that solving sets —
-                                // same cookies, same persona, session continues.
+                                // rides the x5sec cookie that solving sets.
                                 payload["handoff"] = json!(format!(
-                                    "anti-bot wall detected — hand this session to a human: \
-                                     open /live?session={session_id} in a browser (this engine's \
-                                     HTTP port; clicks, drags and typing land on the real page), \
-                                     solve the challenge there, then retry the same request \
-                                     in this session"
+                                    "anti-bot wall detected — hand this session to a human: open \
+                                     /live?session={session_id} in a browser (this engine's HTTP \
+                                     port; clicks, drags and typing land on the real page), solve \
+                                     the challenge there, then retry the same request in this session"
                                 ));
                             }
                             let _ = reply.send(Ok(payload.to_string()));
