@@ -28,12 +28,7 @@ static SNAPSHOT: &[u8] = include_bytes!(env!("AGINXBROWSER_SNAPSHOT_PATH"));
 pub const DEFAULT_AWAIT_BUDGET_MS: u64 = 5000;
 
 // Anonymous Function trampoline around indirect eval: user stacks must never
-// surface our bootstrap source or wrapper names (stack-shape detectors). The
-// leading `_namedBoot` call installs window named access (issue #48) before
-// the script runs — Chrome exposes id/name elements before ANY script, so an
-// expression whose first token is a bare identifier (`hero.tagName`) must not
-// depend on `document` having been touched first. It is a one-flag no-op
-// after the first successful scan, and a null-DOM realm simply retries.
+// surface our bootstrap source or wrapper names (stack-shape detectors). The leading `_namedBoot` (#48) installs window named access before the script runs — a one-flag no-op after the first successful scan; build_args carries the same call for the callFunctionOn wrappers (no INLINE_EVAL_JS there).
 const INLINE_EVAL_JS: &str = "(new Function(\"s\",\"globalThis._namedBoot&&globalThis._namedBoot();try{return (0,eval)(s)}catch(x){if(x instanceof SyntaxError){return (new Function(s))()}throw x}\"))";
 
 /// CDP `Runtime.RemoteObject` shape returned by evaluate paths. Our HTTP
@@ -1090,7 +1085,6 @@ impl JsRuntime {
             let done_counter = self.object_counter;
             let code = format!(
                 "(async function() {{\n\
-                    globalThis._namedBoot&&globalThis._namedBoot();\n\
                     {setup}\n\
                     var __fn = ({fn_decl});\n\
                     var __this = ({this_expr});\n\
@@ -1182,7 +1176,6 @@ impl JsRuntime {
         if return_by_value {
             let code = format!(
                 "(function() {{\n\
-                    globalThis._namedBoot&&globalThis._namedBoot();\n\
                     {setup}\n\
                     var __fn = ({fn_decl});\n\
                     var __this = ({this_expr});\n\
@@ -1230,7 +1223,6 @@ impl JsRuntime {
 
         let code = format!(
             "(function() {{\n\
-                globalThis._namedBoot&&globalThis._namedBoot();\n\
                 {setup}\n\
                 var __fn = ({fn_decl});\n\
                 var __this = ({this_expr});\n\
@@ -2058,7 +2050,7 @@ impl JsRuntime {
 
     #[cfg_attr(not(test), allow(dead_code))] // helper of call_function_on (test-exercised)
     fn build_args(&self, arguments: &[serde_json::Value]) -> (String, String) {
-        let mut setup_lines = Vec::new();
+        let mut setup_lines = vec!["globalThis._namedBoot&&globalThis._namedBoot();".to_string()];
         let mut arg_names = Vec::new();
 
         for (i, arg) in arguments.iter().enumerate() {
