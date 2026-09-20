@@ -1021,6 +1021,14 @@ pub fn do_pdf(req: crate::PdfRequest) -> Result<crate::PdfResponse> {
             // Pin the viewport so JS-time layout and the band paints agree
             // on the requested page width.
             page.set_viewport_override(req.width as f32, req.height as f32, false, None);
+            // Print-media export semantics (what Chrome's save-as-PDF runs
+            // under): decks that park their page-per-slide layout in an
+            // `@media print` block un-stack here — the flex-row +
+            // translateX carousel renders one slide per page instead of the
+            // overflow-clipped screen frame. No-op for pages without a
+            // print block. Realm replay carries it past the navigation.
+            page.inner
+                .set_emulated_media(None, Some(Some("print".into())));
             page.goto(&req.url).await?;
 
             // Native PPTX branches BEFORE the page-set render: its walker

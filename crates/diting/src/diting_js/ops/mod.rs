@@ -2793,7 +2793,7 @@ pub(crate) fn band_frame(
     scroll_y: f32,
     viewport: (f32, f32),
 ) -> Option<(BandFrame, Vec<String>)> {
-    band_frame_inner(gs, scroll_x, scroll_y, viewport, false)
+    band_frame_inner(gs, scroll_x, scroll_y, viewport, false, false)
 }
 
 /// Same band paint but ALSO collects the PDF text layer (vector-text batch):
@@ -2807,7 +2807,37 @@ pub(crate) fn band_frame_with_text(
     scroll_y: f32,
     viewport: (f32, f32),
 ) -> Option<(BandFrame, Vec<String>)> {
-    band_frame_inner(gs, scroll_x, scroll_y, viewport, true)
+    band_frame_inner(gs, scroll_x, scroll_y, viewport, true, false)
+}
+
+/// Page-cut variant for the print/slides pumps (#60): `(x, y)` is a
+/// document-space band ORIGIN, not a scroll offset. The only behavioral
+/// difference from [`band_frame`] is that the blitz#880 root-overflow
+/// collapse must not apply — it exists so `window.scrollY` and the scroll
+/// pump agree on the scrollable range, but a page cut is not a scroll.
+/// Without this, a slide deck with the standard `html { overflow: hidden }`
+/// (translateX carousels all carry it) collapses the extent to the viewport
+/// and every emitted page renders the first viewport's frame.
+#[cfg(feature = "screenshot")]
+pub(crate) fn band_frame_cut(
+    gs: &JsState,
+    x: f32,
+    y: f32,
+    viewport: (f32, f32),
+) -> Option<(BandFrame, Vec<String>)> {
+    band_frame_inner(gs, x, y, viewport, false, true)
+}
+
+/// [`band_frame_cut`] with the PDF text layer collected (see
+/// [`band_frame_with_text`]).
+#[cfg(feature = "screenshot")]
+pub(crate) fn band_frame_cut_with_text(
+    gs: &JsState,
+    x: f32,
+    y: f32,
+    viewport: (f32, f32),
+) -> Option<(BandFrame, Vec<String>)> {
+    band_frame_inner(gs, x, y, viewport, true, true)
 }
 
 #[cfg(feature = "screenshot")]
@@ -2817,6 +2847,7 @@ fn band_frame_inner(
     scroll_y: f32,
     viewport: (f32, f32),
     collect_text: bool,
+    cut: bool,
 ) -> Option<(BandFrame, Vec<String>)> {
     gs.band_paints.set(gs.band_paints.get() + 1);
     let dom = gs.dom.as_ref()?;
@@ -2880,20 +2911,24 @@ fn band_frame_inner(
     // scrolling area collapses to exactly the viewport, overriding the
     // unions above. Same clamp the `scroll_extent` op serves the JS side:
     // the two walks must agree or window.scrollY and the pump's clamp
-    // disagree on the scroll range.
-    if let Some(root) = root.filter(|r| rects.contains_key(r)) {
-        let eff = crate::diting_layout::effective_viewport_overflow(
-            dom,
-            styles,
-            root,
-            |id| rects.contains_key(&id),
-        );
-        if matches!(
-            eff,
-            crate::diting_css::Overflow::Hidden | crate::diting_css::Overflow::Clip
-        ) {
-            content_w = vw;
-            content_h = vh;
+    // disagree on the scroll range. Page cuts (`cut`, #60) skip this: their
+    // origin is not a scroll position, and slide decks carry
+    // `html { overflow: hidden }` as a matter of course.
+    if !cut {
+        if let Some(root) = root.filter(|r| rects.contains_key(r)) {
+            let eff = crate::diting_layout::effective_viewport_overflow(
+                dom,
+                styles,
+                root,
+                |id| rects.contains_key(&id),
+            );
+            if matches!(
+                eff,
+                crate::diting_css::Overflow::Hidden | crate::diting_css::Overflow::Clip
+            ) {
+                content_w = vw;
+                content_h = vh;
+            }
         }
     }
     let dx = (if scroll_x.is_finite() { scroll_x.max(0.0) } else { 0.0 })

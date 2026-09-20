@@ -2576,7 +2576,16 @@ fn mul_len(a: Length, s: f32) -> Length {
 /// invalidates the whole declaration, so the element renders untransformed.
 /// component keeps symbolic lengths; the transition register op reuses this
 /// so a before/after snapshot matches the sampler's affine.
+/// Standalone callers (svg presentation attributes, @supports probes, the
+/// transition register) parse without a viewport — they fold against the
+/// default pair. The cascade threads the page's real viewport through
+/// `parse_transform_with_vp` so `translateX(100vw)` — the deck/carousel
+/// idiom — resolves to actual pixels.
 pub(crate) fn parse_transform(v: &str) -> Option<Transform2D> {
+    parse_transform_with_vp(v, DEFAULT_VIEWPORT.0, DEFAULT_VIEWPORT.1)
+}
+
+pub(crate) fn parse_transform_with_vp(v: &str, vw: f32, vh: f32) -> Option<Transform2D> {
     let v = v.trim();
     if v.is_empty() || v.eq_ignore_ascii_case("none") {
         return None; // `none` is the initial value → no transform
@@ -2587,6 +2596,12 @@ pub(crate) fn parse_transform(v: &str) -> Option<Transform2D> {
             num.trim().parse::<f32>().ok().map(Length::Percent)
         } else if let Some(num) = s.strip_suffix("px") {
             num.trim().parse::<f32>().ok().map(Length::Px)
+        } else if let Some(num) = s.strip_suffix("vw") {
+            // Viewport units fold to px at parse time (batch 162 resolve_len
+            // posture) — the translate slots are px/percent only.
+            num.trim().parse::<f32>().ok().map(|n| Length::Px(n * vw / 100.0))
+        } else if let Some(num) = s.strip_suffix("vh") {
+            num.trim().parse::<f32>().ok().map(|n| Length::Px(n * vh / 100.0))
         } else {
             // `0` is a legal bare length; other unitless values are not.
             (s == "0").then_some(Length::Px(0.0))
@@ -3574,19 +3589,49 @@ pub fn apply_declarations_with(
     declarations: &str,
     fonts: &FontCtx,
 ) -> bool {
+    apply_declarations_importance(style, declarations, fonts, Importance::Any)
+}
+
+/// Which declarations an apply pass admits. The cascade runs the normal
+/// pass (stylesheet rules in specificity+order sequence, then inline at the
+/// top of normal) before the !important pass — author important beats every
+/// author-normal declaration, inline style included (CSS 2.1 §6.4.1). That
+/// ordering is what lets a stylesheet's `@media print { transform: none
+/// !important }` override the inline `translateX(...)` a carousel script
+/// parks on each slide.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Importance {
+    /// Only declarations WITHOUT `!important`.
+    Normal,
+    /// Only declarations WITH `!important` (suffix stripped).
+    Important,
+    /// Everything — the single-pass posture for standalone callers
+    /// (@supports probes, tests) where importance never reorders anything.
+    Any,
+}
+
+pub(crate) fn apply_declarations_importance(
+    style: &mut ComputedStyle,
+    declarations: &str,
+    fonts: &FontCtx,
+    imp: Importance,
+) -> bool {
     let mut applied = false;
     for (name, value) in split_declarations(declarations) {
-        // !important wins later during cascade merge; here both streams apply
-        // with important taking precedence per-property at the call site.
+        // Strip a trailing !important before anything sees the value: the
+        // flag reorders the cascade passes, and the suffix would otherwise
+        // poison every parser (`none !important` != `none`).
+        let (value, important) = strip_important(&value);
+        match imp {
+            Importance::Normal if important => continue,
+            Importance::Important if !important => continue,
+            _ => {}
+        }
         if name.starts_with("--") {
             // Custom property: store the token stream raw. Values may hold
-            // anything (including semicolon-free junk), so we only strip a
-            // trailing !important. Empty value = guaranteed-invalid → unset.
+            // anything (including semicolon-free junk). Empty value =
+            // guaranteed-invalid → unset.
             let v = value.trim();
-            let v = match v.to_ascii_lowercase().strip_suffix("!important") {
-                Some(_) => v[..v.len() - "!important".len()].trim(),
-                None => v,
-            };
             if v.is_empty() {
                 style.custom.remove(&name);
             } else {
@@ -3606,13 +3651,25 @@ pub fn apply_declarations_with(
                 None => continue,
             }
         } else {
-            value.clone()
+            value.to_string()
         };
         if apply_one(style, &name, &value, fonts) {
             applied = true;
         }
     }
     applied
+}
+
+/// Split a trailing `!important` off a declaration value (case-insensitive,
+/// whitespace-tolerant). Returns the stripped value plus whether the flag
+/// was present.
+fn strip_important(value: &str) -> (String, bool) {
+    let v = value.trim_end();
+    if v.to_ascii_lowercase().ends_with("!important") {
+        (v[..v.len() - "!important".len()].trim_end().to_string(), true)
+    } else {
+        (value.to_string(), false)
+    }
 }
 
 /// Replace every `var(--name[, fallback])` in `value` using `custom`.
@@ -4077,7 +4134,20 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             style.width = len_sizing(v);
             style.width.is_some()
         }
-        "height" => len(v).map(|l| style.height = Some(l)).is_some(),
+        // `height: auto` must APPLY as Length::Auto, not drop: `auto` is a
+        // legal value, and dropping the declaration leaves an earlier
+        // `height: 100%` standing — a print block's `html,body{height:auto}`
+        // then never clears the screen value, so the §10.5 fold (#65) has
+        // nothing to fold (the computed height stays a viewport percent and
+        // the deck stays pinned at one screen tall).
+        "height" => {
+            let l = if v.eq_ignore_ascii_case("auto") {
+                Some(Length::Auto)
+            } else {
+                len(v)
+            };
+            l.map(|l| style.height = Some(l)).is_some()
+        }
         "font-weight" => {
             let weight = parse_font_weight(v);
             style.font_weight = weight;
@@ -4288,8 +4358,9 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             // translate/scale/rotate/skew/matrix compose into one affine.
             // One unknown function still invalidates the whole declaration
             // (spec) — parse_transform returns None and the element paints
-            // where layout put it.
-            style.transform = parse_transform(v);
+            // where layout put it. Viewport-threaded so translateX(100vw)
+            // — the deck/carousel idiom — folds against the page viewport.
+            style.transform = parse_transform_with_vp(v, fonts.viewport_w, fonts.viewport_h);
             style.transform.is_some()
         }
         "opacity" => {
@@ -4512,6 +4583,70 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
         "flex-shrink" => {
             style.flex_shrink = parse_num_f32(v);
             style.flex_shrink.is_some()
+        }
+        // `flex` shorthand (css-flexbox-1 §7.1.1):
+        // `none | [ <'flex-grow'> <'flex-shrink'>? || <'flex-basis'> ]`.
+        // The gotcha: omitted components take the SHORTHAND's initial values
+        // (1 / 1 / 0%), not the longhands' (0 / 1 / auto) — `flex: 1` is
+        // `1 1 0%`, so equal-grow cards align even with unequal content,
+        // and `flex: 0 0 100vw` (the deck/carousel idiom, #61) sizes empty
+        // items. Tokens classify positionally: numbers fill grow then
+        // shrink, a length/percent/`auto` fills basis, either order (`||`
+        // admits `flex: 100px 0`). Like every shorthand it sets all three
+        // sub-longhands, so it resets earlier longhand writes.
+        "flex" => {
+            if v.eq_ignore_ascii_case("none") {
+                style.flex_grow = Some(0.0);
+                style.flex_shrink = Some(0.0);
+                style.flex_basis = None; // auto
+                true
+            } else {
+                let mut grow: Option<f32> = None;
+                let mut shrink: Option<f32> = None;
+                // Some(None) = explicit `auto`; bare None = omitted → 0%.
+                let mut basis: Option<Option<Length>> = None;
+                for tok in split_sides(v) {
+                    let t = tok.trim();
+                    if t.eq_ignore_ascii_case("auto") {
+                        if basis.is_some() {
+                            return false;
+                        }
+                        basis = Some(None);
+                    } else if let Some(n) = parse_num_f32(t) {
+                        if grow.is_none() {
+                            grow = Some(n);
+                        } else if shrink.is_none() {
+                            shrink = Some(n);
+                        } else {
+                            return false;
+                        }
+                    } else if let Some(l) = len(t) {
+                        if basis.is_some() {
+                            return false;
+                        }
+                        basis = Some(Some(l));
+                    } else {
+                        return false;
+                    }
+                }
+                match grow {
+                    Some(g) => {
+                        style.flex_grow = Some(g);
+                        style.flex_shrink = Some(shrink.unwrap_or(1.0));
+                        // Explicit `auto` (Some(None)) must survive — only an
+                        // omitted basis becomes the shorthand's 0% initial.
+                        style.flex_basis =
+                            match basis {
+                                Some(b) => b,
+                                None => Some(Length::Percent(0.0)),
+                            };
+                        true
+                    }
+                    // No number anywhere (`flex: auto`-less forms like
+                    // `flex: 10px`) are invalid — drop the declaration.
+                    None => false,
+                }
+            }
         }
         "flex-basis" => {
             // <length-percentage> | auto (the initial value, stays None).
@@ -5787,14 +5922,37 @@ pub fn cascade_element(
             style.vertical_align = attr_va;
         }
     }
+    // Author declarations in two passes (CSS 2.1 §6.4.1). Normal pass:
+    // stylesheet rules in (specificity, source order) sequence — inline
+    // style last, the top of normal. Important pass on top of everything:
+    // author !important beats every author-normal declaration INCLUDING
+    // inline style, and inline !important beats stylesheet !important
+    // (Chrome order). Without the second pass a print override like
+    // `transform: none !important` would lose to the inline
+    // translateX(...) a carousel script parks on every slide.
     for candidate in &candidates {
-        apply_declarations_with(&mut style, candidate.declarations, &fonts);
+        apply_declarations_importance(
+            &mut style,
+            candidate.declarations,
+            &fonts,
+            Importance::Normal,
+        );
     }
-
-    // Inline style always last (same font context: inline em resolves
-    // against the element's own font-size too).
+    // Inline style (same font context: inline em resolves against the
+    // element's own font-size too).
     if let Some(inline) = inline_css {
-        apply_declarations_with(&mut style, inline, &fonts);
+        apply_declarations_importance(&mut style, inline, &fonts, Importance::Normal);
+    }
+    for candidate in &candidates {
+        apply_declarations_importance(
+            &mut style,
+            candidate.declarations,
+            &fonts,
+            Importance::Important,
+        );
+    }
+    if let Some(inline) = inline_css {
+        apply_declarations_importance(&mut style, inline, &fonts, Importance::Important);
     }
 
     style
@@ -6721,6 +6879,74 @@ mod tests {
         );
     }
 
+    /// transform viewport units (the deck/carousel idiom): `translateX(100vw)`
+    /// at an 800px viewport is 800px — before this the whole declaration was
+    /// dropped and every slide of such a deck rendered un-transformed. The
+    /// unitless entry point keeps folding against DEFAULT_VIEWPORT.
+    #[test]
+    fn parse_transform_folds_vw_vh_against_viewport() {
+        let t = parse_transform_with_vp("translateX(100vw)", 800.0, 600.0).expect("vw parses");
+        assert_eq!(t.tx, Length::Px(800.0));
+        let t = parse_transform_with_vp("translateY(50vh)", 800.0, 600.0).expect("vh parses");
+        assert_eq!(t.ty, Length::Px(300.0));
+        let t = parse_transform_with_vp("translate(25vw, 10px)", 800.0, 600.0).expect("two-arg translate");
+        assert_eq!((t.tx, t.ty), (Length::Px(200.0), Length::Px(10.0)));
+        let t = parse_transform("translateX(100vw)").expect("default-viewport path parses");
+        assert_eq!(t.tx, Length::Px(DEFAULT_VIEWPORT.0));
+    }
+
+    /// CSS 2.1 §6.4.1: author `!important` beats inline *normal*, and inline
+    /// `!important` beats author `!important` back. The deck case is the
+    /// first half — a stylesheet `transform: none !important` (in an
+    /// `@media print` un-stack block) must clear the inline
+    /// `translateX(100vw)` the carousel script wrote; without importance
+    /// handling the raw value reached the parser with the suffix attached
+    /// and the declaration was silently dropped.
+    #[test]
+    fn cascade_important_beats_inline_and_important_inline_wins() {
+        let tree = diting_dom::tree_sink::parse_html(
+            r#"<p id="main" class="slide">x</p>"#,
+        );
+        let node = tree.get_element_by_id("main").unwrap();
+        let rules = vec![ParsedRule {
+            selector: ".slide".into(),
+            declarations: "margin-top: 1px !important; transform: none !important".into(),
+        }];
+        let matched: Vec<(&ParsedRule, u32)> = rules
+            .iter()
+            .filter_map(|rule| {
+                tree.compile_rule_selector(&rule.selector)
+                    .map(|compiled| (rule, compiled.specificity()))
+            })
+            .collect();
+
+        let computed = cascade_element(
+            "p", &tree, node, &matched, None,
+            Some("margin-top: 9px; transform: translateY(100vh)"),
+            DEFAULT_ROOT_FONT_SIZE, (800.0, 600.0),
+        );
+        assert_eq!(
+            computed.margin.top, Some(Length::Px(1.0)),
+            "author !important beats inline normal"
+        );
+        assert_eq!(
+            computed.transform, None,
+            "transform:none !important clears the inline transform"
+        );
+
+        // And the top tier: inline !important flips it back (case-insensitive
+        // suffix — strip_important matches lowercased).
+        let computed = cascade_element(
+            "p", &tree, node, &matched, None,
+            Some("margin-top: 4px !IMPORTANT"),
+            DEFAULT_ROOT_FONT_SIZE, (800.0, 600.0),
+        );
+        assert_eq!(
+            computed.margin.top, Some(Length::Px(4.0)),
+            "inline !important beats author !important"
+        );
+    }
+
     #[test]
     fn inheritance_flows_from_parent_and_author_overrides() {
         let tree =
@@ -7606,6 +7832,77 @@ mod tests {
         assert!(!apply_declarations(&mut s, "gap: auto 8px"));
         assert_eq!(s.column_gap, None);
         assert_eq!(s.row_gap, None);
+    }
+
+    #[test]
+    fn flex_shorthand_expands_with_shorthand_initials() {
+        // css-flexbox-1 §7.1.1: omitted components take the SHORTHAND's
+        // initials (1 / 1 / 0%), not the longhands' (0 / 1 / auto) — the
+        // deck idiom `flex: 0 0 100vw` needs the third slot (#61).
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "flex: 0 0 400px"));
+        assert_eq!(s.flex_grow, Some(0.0));
+        assert_eq!(s.flex_shrink, Some(0.0));
+        assert_eq!(s.flex_basis, Some(Length::Px(400.0)));
+
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "flex: 1"));
+        assert_eq!(s.flex_grow, Some(1.0));
+        assert_eq!(s.flex_shrink, Some(1.0));
+        // 0% — NOT auto: equal-grow cards align regardless of content.
+        assert_eq!(s.flex_basis, Some(Length::Percent(0.0)));
+
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "flex: 2 3"));
+        assert_eq!(s.flex_grow, Some(2.0));
+        assert_eq!(s.flex_shrink, Some(3.0));
+        assert_eq!(s.flex_basis, Some(Length::Percent(0.0)));
+
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "flex: 0 0 100vw"));
+        // vw folds against the default 1280px ICB at parse time (batch 162).
+        assert_eq!(s.flex_grow, Some(0.0));
+        assert_eq!(s.flex_shrink, Some(0.0));
+        assert_eq!(s.flex_basis, Some(Length::Px(1280.0)));
+
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "flex: 1 1 auto"));
+        assert_eq!(s.flex_grow, Some(1.0));
+        assert_eq!(s.flex_shrink, Some(1.0));
+        // Explicit auto survives — never swapped for the 0% initial.
+        assert_eq!(s.flex_basis, None);
+
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "flex: 0 auto"));
+        assert_eq!(s.flex_grow, Some(0.0));
+        assert_eq!(s.flex_shrink, Some(1.0));
+        assert_eq!(s.flex_basis, None);
+
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "flex: none"));
+        assert_eq!(s.flex_grow, Some(0.0));
+        assert_eq!(s.flex_shrink, Some(0.0));
+        assert_eq!(s.flex_basis, None);
+
+        // `||` order freedom: basis before the numbers is valid CSS.
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "flex: 100px 2"));
+        assert_eq!(s.flex_grow, Some(2.0));
+        assert_eq!(s.flex_basis, Some(Length::Px(100.0)));
+
+        // The shorthand RESETS earlier longhand writes (all three slots).
+        let mut s = ComputedStyle::default();
+        assert!(apply_declarations(&mut s, "flex-basis: 200px"));
+        assert!(apply_declarations(&mut s, "flex-grow: 5"));
+        assert!(apply_declarations(&mut s, "flex: 1"));
+        assert_eq!(s.flex_grow, Some(1.0));
+        assert_eq!(s.flex_basis, Some(Length::Percent(0.0)));
+
+        // Junk drops the whole declaration: no partial application.
+        let mut s = ComputedStyle::default();
+        assert!(!apply_declarations(&mut s, "flex: 1 2 3"));
+        assert_eq!(s.flex_grow, None);
+        assert!(!apply_declarations(&mut s, "flex: 10px"));
     }
 
     #[test]

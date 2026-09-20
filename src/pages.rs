@@ -102,9 +102,14 @@ impl std::error::Error for PageError {}
 /// than emitting a near-blank tail page.
 const MIN_TAIL: f32 = 64.0;
 
-/// A page break's start offset and height.
+/// A page break's document-space origin and size. Print bands always start
+/// at `x = 0` (documents flow down); slide bands carry the element's own
+/// origin — which for the standard horizontal flex-row deck means every
+/// band shares `y = 0` and differs only in `x` (#60).
 struct Band {
+    x: f32,
     y: f32,
+    vw: f32,
     vh: f32,
 }
 
@@ -126,7 +131,7 @@ pub async fn render_page_set(
     let content_size = probe.content_size;
 
     let bands = match &opts.mode {
-        PageMode::Print => print_bands(page, page_h)?,
+        PageMode::Print => print_bands(page, w, page_h)?,
         PageMode::Slides(selector) => slide_bands(page, selector)?,
     };
     if bands.len() > opts.max_pages {
@@ -137,16 +142,17 @@ pub async fn render_page_set(
     let mut text_ops = Vec::with_capacity(bands.len());
     for band in bands {
         // Missing images that surface per-page (fetch failures stay missing;
-        // a painted placeholder beats a stall).
-        let (_, missing) = paint(page, 0.0, band.y, (w, band.vh))
+        // a painted placeholder beats a stall). Cut semantics: (x, y) is a
+        // document-space origin, not a scroll offset (#60).
+        let (_, missing) = paint(page, band.x, band.y, (band.vw, band.vh))
             .ok_or(PageError::NoLiveDocument)?;
         if !missing.is_empty() {
             page.fetch_band_images(missing).await;
         }
         let (frame, _) = if opts.collect_text {
-            paint_with_text(page, 0.0, band.y, (w, band.vh))
+            paint_with_text(page, band.x, band.y, (band.vw, band.vh))
         } else {
-            paint(page, 0.0, band.y, (w, band.vh))
+            paint(page, band.x, band.y, (band.vw, band.vh))
         }
         .ok_or(PageError::NoLiveDocument)?;
         text_ops.push(frame.text_ops);
@@ -165,7 +171,7 @@ pub async fn render_page_set(
 /// `(y + 0.55·page_h, y + page_h]` — blocks taller than a page guillotine at
 /// the nominal boundary (v1 accepts cutting nested content inside an
 /// oversized top-level block).
-fn print_bands(page: &mut Page, page_h: f32) -> Result<Vec<Band>, PageError> {
+fn print_bands(page: &mut Page, page_w: f32, page_h: f32) -> Result<Vec<Band>, PageError> {
     // Bottoms of body's direct children (document coords — gBCR reads the
     // same Rust layout cache the band paint uses), plus the scroll extent
     // and viewport height in one probe. Script/style and friends have no
@@ -222,7 +228,7 @@ fn print_bands(page: &mut Page, page_h: f32) -> Result<Vec<Band>, PageError> {
         let remaining = content_h - y;
         if remaining <= page_h {
             // Last page: short viewport makes the dy clamp land exactly on y.
-            bands.push(Band { y, vh: remaining.max(1.0) });
+            bands.push(Band { x: 0.0, y, vw: page_w, vh: remaining.max(1.0) });
             break;
         }
         let floor = y + page_h * 0.55;
@@ -234,7 +240,7 @@ fn print_bands(page: &mut Page, page_h: f32) -> Result<Vec<Band>, PageError> {
             .find(|b| **b > floor && **b <= ceiling)
             .copied()
             .unwrap_or(ceiling);
-        bands.push(Band { y, vh: (next - y).max(1.0) });
+        bands.push(Band { x: 0.0, y, vw: page_w, vh: (next - y).max(1.0) });
         y = next;
     }
     // Merge a sub-MIN_TAIL remainder into the previous page instead of a
@@ -250,24 +256,28 @@ fn print_bands(page: &mut Page, page_h: f32) -> Result<Vec<Band>, PageError> {
 }
 
 /// Slides pagination: every selector match becomes one band at the element's
-/// own origin and height.
+/// own origin and size. Horizontal decks (the flex-row + translateX layout)
+/// share `y = 0` and differ only in `x` — the band must carry both axes or
+/// every match renders the first viewport's frame (#60).
 fn slide_bands(page: &mut Page, selector: &str) -> Result<Vec<Band>, PageError> {
     // The selector rides in as a JSON-encoded string literal — it is page
     // input, never trusted JS source.
     let lit = serde_json::to_string(selector).unwrap_or_else(|_| "''".to_string());
     let rects_json = page.evaluate(&format!(
         "(() => {{ return Array.from(document.querySelectorAll({lit})) \
-         .map(e => {{ const r = e.getBoundingClientRect(); return [r.y, r.height]; }}); }})()"
+         .map(e => {{ const r = e.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; }}); }})()"
     ));
-    let rects: Vec<(f32, f32)> = rects_json
+    let rects: Vec<(f32, f32, f32, f32)> = rects_json
         .as_array()
         .map(|a| {
             a.iter()
                 .filter_map(|v| {
-                    let pair = v.as_array()?;
-                    let y = pair.first()?.as_f64()? as f32;
-                    let h = pair.get(1)?.as_f64()? as f32;
-                    Some((y, h))
+                    let quad = v.as_array()?;
+                    let x = quad.first()?.as_f64()? as f32;
+                    let y = quad.get(1)?.as_f64()? as f32;
+                    let w = quad.get(2)?.as_f64()? as f32;
+                    let h = quad.get(3)?.as_f64()? as f32;
+                    Some((x, y, w, h))
                 })
                 .collect()
         })
@@ -277,19 +287,21 @@ fn slide_bands(page: &mut Page, selector: &str) -> Result<Vec<Band>, PageError> 
     }
     Ok(rects
         .into_iter()
-        .filter(|(_, h)| *h >= 1.0)
-        .map(|(y, h)| Band { y, vh: h })
+        .filter(|(_, _, w, h)| *w >= 1.0 && *h >= 1.0)
+        .map(|(x, y, w, h)| Band { x, y, vw: w, vh: h })
         .collect())
 }
 
-/// One band paint, the shared primitive.
+/// One band paint, the shared primitive. Cut semantics (#60): `(x, y)` is
+/// the page's document-space origin, not a scroll offset — the root-overflow
+/// extent collapse must not eat it.
 fn paint(
     page: &Page,
-    scroll_x: f32,
-    scroll_y: f32,
+    x: f32,
+    y: f32,
     viewport: (f32, f32),
 ) -> Option<(diting::diting_js::ops::BandFrame, Vec<String>)> {
-    page.viewport_band_frame(scroll_x, scroll_y, viewport)
+    page.viewport_band_cut(x, y, viewport)
 }
 
 /// One band paint with the vector text layer collected (the PDF path): the
@@ -297,11 +309,11 @@ fn paint(
 /// the glyph lines to re-emit as font objects.
 fn paint_with_text(
     page: &Page,
-    scroll_x: f32,
-    scroll_y: f32,
+    x: f32,
+    y: f32,
     viewport: (f32, f32),
 ) -> Option<(diting::diting_js::ops::BandFrame, Vec<String>)> {
-    page.viewport_band_frame_with_text(scroll_x, scroll_y, viewport)
+    page.viewport_band_cut_with_text(x, y, viewport)
 }
 
 // ---------------------------------------------------------------------------
@@ -696,6 +708,57 @@ html,body{margin:0;padding:0}
 <div class="slide" id="s3"></div>
 </body></html>"#;
 
+    /// The standard horizontal deck: flex row, every slide 100% of the row,
+    /// `overflow: hidden` on the root (translateX carousels all carry it).
+    /// Every match shares y=0 and differs only in x — pins both layers of
+    /// #60: the y-only band collection AND the root-overflow extent collapse
+    /// that would clamp a naive scroll_x back to 0.
+    const HSLIDES_HTML: &str = r#"<!doctype html><html><head><style>
+html,body{margin:0;padding:0;overflow:hidden}
+.deck{display:flex;width:800px;height:300px}
+.slide{flex:0 0 400px;height:300px}
+#h1{background:#c0392b}
+#h2{background:#2980b9}
+</style></head><body>
+<div class="deck"><div class="slide" id="h1"></div><div class="slide" id="h2"></div></div>
+</body></html>"#;
+
+    /// The export idiom the 智能体手机 deck rides: screen layout is the flex
+    /// carousel (script writes inline viewport-unit transforms), and the
+    /// author parks the one-slide-per-page layout in `@media print` —
+    /// `display:block` un-stack plus `transform:none !important` to cancel
+    /// the inline offsets, with the deck's `height:100%` folding to auto
+    /// against the now-auto body (§10.5) so it grows to stack every slide —
+    /// the fixed-height deck would keep clipping slides 2+ via its own
+    /// `overflow:hidden` (#65). Print slides are 1500px so the stacked
+    /// content (3000) exceeds every persona viewport (≤2452): the deck
+    /// height probe below is then deterministic — folded it's 3000, unfixed
+    /// it sticks at the viewport. Chrome's save-as-PDF runs under print
+    /// media, and `/pdf` now does the same. Discriminators: block-stretched
+    /// slide width (800, not the flex 400) catches a dead print arm; the
+    /// stacked y origins (0/1500) catch a surviving inline transform; the
+    /// deck height catches the §10.5 fold; distinct inked pages catch the
+    /// rest.
+    const DECK_PRINT_HTML: &str = r#"<!doctype html><html><head><style>
+html,body{margin:0;padding:0;overflow:hidden;height:100%}
+.deck{display:flex;width:800px;height:100%;overflow:hidden}
+.slide{flex:0 0 400px;height:300px}
+#h1{background:#c0392b}
+#h2{background:#2980b9}
+@media print {
+  html,body{overflow:visible;height:auto}
+  .deck{display:block}
+  .slide{page-break-after:always;height:1500px;transform:none !important}
+}
+</style></head><body>
+<div class="deck"><div class="slide" id="h1"></div><div class="slide" id="h2"></div></div>
+<script>
+document.querySelectorAll('.slide').forEach(function(el, i) {
+  el.style.transform = 'translateY(' + (100 * i) + 'vh)';
+});
+</script>
+</body></html>"#;
+
     /// Text nodes only — body has no element children, so the probe's child
     /// bottoms list is empty and body's own box stretches to the viewport:
     /// the extent must come from the Text paint items. ~24 wrapped lines at
@@ -826,6 +889,78 @@ html,body{{margin:0;padding:0;width:400px;font-size:16px;line-height:20px;color:
         for (i, p) in set.pages.iter().enumerate() {
             assert!(has_ink(&p_rgba_frame(p)), "slide {i} is not blank");
         }
+    }
+
+    /// #60: a horizontal flex-row deck with the root `overflow: hidden` —
+    /// every match shares y=0, so the y-only band collection used to emit
+    /// the first viewport's frame for every slide (and the scroll-semantics
+    /// extent collapse would have eaten a naive scroll_x too). The two pages
+    /// must be distinct pixels, each sized to its element.
+    #[tokio::test(flavor = "current_thread")]
+    async fn slides_horizontal_deck_pages_differ() {
+        let mut page = navigated(HSLIDES_HTML, "hslides.html").await;
+        let opts = PagePumpOptions {
+            mode: PageMode::Slides(".slide".to_string()),
+            page_size: (400.0, 300.0),
+            max_pages: 10,
+            collect_text: false,
+        };
+        let set = render_page_set(&mut page, &opts).await.expect("horizontal slides render");
+        assert_eq!(set.pages.len(), 2);
+        for (i, p) in set.pages.iter().enumerate() {
+            assert_eq!((p.width, p.height), (400, 300), "slide {i} sized to its element");
+            assert!(has_ink(&p_rgba_frame(p)), "slide {i} is not blank");
+        }
+        assert_ne!(
+            set.pages[0].rgba, set.pages[1].rgba,
+            "horizontal deck must not emit the same frame for every match (#60)"
+        );
+    }
+
+    /// The `/pdf` export contract for deck pages (the 智能体手机 PPT incident):
+    /// print-media emulation must activate the `@media print` un-stack (block
+    /// layout, slides stacked vertically), the block's
+    /// `transform:none !important` must cancel the inline viewport-unit
+    /// transforms the carousel script wrote, and the deck's `height:100%`
+    /// must fold to auto against the auto-height body (§10.5, #65) so the
+    /// deck grows to its stacked content instead of sticking at one viewport
+    /// and clipping slides 2+ through its own `overflow:hidden`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn slides_print_media_unstacks_deck_over_inline_transform() {
+        let mut page = navigated(DECK_PRINT_HTML, "deckprint.html").await;
+        // What do_pdf pins before navigation: print media (Chrome's
+        // save-as-PDF semantics).
+        page.set_emulated_media(None, Some(Some("print".into())));
+        let opts = PagePumpOptions {
+            mode: PageMode::Slides(".slide".to_string()),
+            page_size: (800.0, 300.0),
+            max_pages: 10,
+            collect_text: false,
+        };
+        // The §10.5 fold, directly: the deck's own box must span the stacked
+        // slides (2 × 1500). Unfolded it sticks at the persona viewport
+        // (902..2452 observed) — 3000 clears every persona, so the assert is
+        // deterministic both ways.
+        let deck_h = page
+            .evaluate("document.querySelector('.deck').getBoundingClientRect().height")
+            .as_f64()
+            .unwrap_or(0.0);
+        assert!(
+            deck_h >= 2999.0,
+            "deck height:100% must fold to auto against the auto body and span the stacked slides (#65); got {deck_h}"
+        );
+        let set = render_page_set(&mut page, &opts).await.expect("print deck renders");
+        assert_eq!(set.pages.len(), 2);
+        for (i, p) in set.pages.iter().enumerate() {
+            assert_eq!((p.width, p.height), (800, 1500), "slide {i} block-stretched, print height honored");
+            assert!(has_ink(&p_rgba_frame(p)), "slide {i} is not blank");
+        }
+        assert_eq!(set.pages[0].origin_y, 0.0, "slide 1 at the top");
+        assert_eq!(
+            set.pages[1].origin_y, 1500.0,
+            "slide 2 stacked below slide 1 — the print un-stack with the inline transform canceled"
+        );
+        assert_ne!(set.pages[0].rgba, set.pages[1].rgba, "the two slides carry distinct backgrounds");
     }
 
     #[tokio::test(flavor = "current_thread")]

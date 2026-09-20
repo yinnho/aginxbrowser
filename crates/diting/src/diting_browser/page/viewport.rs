@@ -125,6 +125,37 @@ impl Page {
         })
     }
 
+    /// Page-cut band frame (print/slides pumps, #60): `(x, y)` is a
+    /// document-space band origin, not a scroll offset — root
+    /// `overflow: hidden` must not collapse the paintable extent, or every
+    /// page of such a deck renders the first viewport's frame. Scroll
+    /// semantics (the collapse, so `window.scrollY` and the scroll pump
+    /// agree) stay on [`Self::viewport_band_frame`].
+    #[cfg(feature = "screenshot")]
+    pub fn viewport_band_cut(
+        &self,
+        x: f32,
+        y: f32,
+        viewport: (f32, f32),
+    ) -> Option<(crate::diting_js::ops::BandFrame, Vec<String>)> {
+        let js = self.js.as_ref()?;
+        js.with_state(|st| crate::diting_js::ops::band_frame_cut(st, x, y, viewport))
+    }
+
+    /// [`Self::viewport_band_cut`] with the PDF text layer collected.
+    #[cfg(feature = "screenshot")]
+    pub fn viewport_band_cut_with_text(
+        &self,
+        x: f32,
+        y: f32,
+        viewport: (f32, f32),
+    ) -> Option<(crate::diting_js::ops::BandFrame, Vec<String>)> {
+        let js = self.js.as_ref()?;
+        js.with_state(|st| {
+            crate::diting_js::ops::band_frame_cut_with_text(st, x, y, viewport)
+        })
+    }
+
     /// The document's text-ink extent (CSS px) from the same cached layout
     /// run band paint rides — the true content height of a bare-text body,
     /// whose only element boxes (html/body) stretch to the viewport.

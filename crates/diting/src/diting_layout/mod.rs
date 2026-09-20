@@ -142,7 +142,11 @@ fn effective_line_height(
 /// Map a computed style onto a taffy style. Mirrors upstream `to_taffy_style`
 /// for the modeled subset, including the block→flex-column promotion that
 /// stands in for text alignment in a block formatting context.
-fn to_taffy_style(style: &ComputedStyle) -> Style {
+/// `pct_h_resolves` is whether a percent/calc height on this element may
+/// resolve (computed by the caller via [`pct_height_resolves`] — this fn has
+/// no DOM access). Percent heights are folded to auto per §10.5 when the
+/// containing block is content-sized.
+fn to_taffy_style(style: &ComputedStyle, pct_h_resolves: bool) -> Style {
     let mut s = Style::default();
     let display = style.display.unwrap_or(CssDisplay::Block);
     // A block box (or table cell) with centered/right inline content needs a
@@ -296,11 +300,21 @@ fn to_taffy_style(style: &ComputedStyle) -> Style {
             Some(crate::diting_css::Length::Px(h)) => Dimension::length(
                 if border_box { h } else { h + side_px(style.padding.top) + side_px(style.padding.bottom) + bt + bb },
             ),
-            Some(crate::diting_css::Length::Percent(p)) => Dimension::percent(p / 100.0),
-            Some(crate::diting_css::Length::Calc { percent, .. }) => {
+            Some(crate::diting_css::Length::Percent(p)) if pct_h_resolves => {
+                Dimension::percent(p / 100.0)
+            }
+            Some(crate::diting_css::Length::Calc { percent, .. }) if pct_h_resolves => {
                 Dimension::percent(percent / 100.0)
             }
-            Some(crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent) | None => auto(),
+            // §10.5 fold: a percent height against a content-sized
+            // containing block computes to auto. taffy would otherwise
+            // resolve it against the viewport-derived available space,
+            // pinning e.g. a print deck's `height:100%` at one viewport
+            // tall while its un-stacked slides run past it — the deck's own
+            // overflow clip then blanks every slide but the first (#65).
+            Some(crate::diting_css::Length::Percent(_)) | Some(crate::diting_css::Length::Calc { .. })
+                | Some(crate::diting_css::Length::Auto | crate::diting_css::Length::MinContent | crate::diting_css::Length::MaxContent | crate::diting_css::Length::FitContent)
+                | None => auto(),
         },
     };
 
@@ -1665,6 +1679,24 @@ fn cb_height_definite(
     false
 }
 
+/// Whether `height: <percent>` on element `id` resolves, or folds to `auto`
+/// per CSS 2.1 §10.5: it resolves when the containing-block chain is definite
+/// (see [`cb_height_definite`]) OR the element is absolutely positioned (the
+/// §10.5 exception — its containing block is the nearest positioned
+/// ancestor's padding box, definite by construction once that ancestor has
+/// laid out).
+fn pct_height_resolves(
+    tree: &DomTree,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    id: NodeId,
+) -> bool {
+    let abspos = matches!(
+        styles.get(&id).and_then(|s| s.position),
+        Some(PositionMode::Absolute) | Some(PositionMode::Fixed)
+    );
+    abspos || cb_height_definite(tree, styles, id)
+}
+
 /// Build the taffy leaf for a replaced element. Per-tag natural-size
 /// semantics (batch 7a), mirroring blitz-dom layout/mod.rs:
 ///
@@ -1930,12 +1962,12 @@ fn build_replaced_leaf(
                 Dimension::length((if border_box { h } else { h + if bline { bt + bb } else { 0.0 } }) + strut_descent)
             }
             Some(crate::diting_css::Length::Percent(p))
-                if cb_height_definite(tree, styles, id) =>
+                if pct_height_resolves(tree, styles, id) =>
             {
                 Dimension::percent(p / 100.0)
             }
             Some(crate::diting_css::Length::Calc { percent, .. })
-                if cb_height_definite(tree, styles, id) =>
+                if pct_height_resolves(tree, styles, id) =>
             {
                 Dimension::percent(percent / 100.0)
             }
@@ -3194,10 +3226,15 @@ fn build_table(
         }
     }
     let table_node = if table_children.is_empty() {
-        taffy_tree.new_leaf(to_taffy_style(style)).ok()?
+        taffy_tree
+            .new_leaf(to_taffy_style(style, pct_height_resolves(tree, styles, id)))
+            .ok()?
     } else {
         taffy_tree
-            .new_with_children(to_taffy_style(style), &table_children)
+            .new_with_children(
+                to_taffy_style(style, pct_height_resolves(tree, styles, id)),
+                &table_children,
+            )
             .ok()?
     };
     node_map.insert(table_node, id);
@@ -3738,7 +3775,10 @@ fn pseudo_leaf(
             }
         }
         _ => {
-            let taffy_style = to_taffy_style(p);
+            // Pseudo-element content leaf: no DOM id to walk a containing-
+            // block chain from, and content strings aren't height-sized —
+            // keep percent passthrough (the pre-fold behavior).
+            let taffy_style = to_taffy_style(p, true);
             let leaf = if content.trim().is_empty() {
                 taffy_tree.new_leaf(taffy_style).ok()
             } else {
@@ -4081,7 +4121,7 @@ fn build_element_inner(
                 }
             }
             collapse_adjacent_sibling_margins(taffy_tree, styles, node_map, &direct);
-            let taffy_style = to_taffy_style(&style);
+            let taffy_style = to_taffy_style(&style, pct_height_resolves(tree, styles, id));
             let node = if direct.is_empty() {
                 taffy_tree.new_leaf(taffy_style).ok()?
             } else {
@@ -4535,7 +4575,7 @@ fn build_element_inner(
     // and supplies collapsing for flex stand-in parents).
     collapse_adjacent_sibling_margins(taffy_tree, styles, node_map, &direct);
 
-    let taffy_style = to_taffy_style(&style);
+    let taffy_style = to_taffy_style(&style, pct_height_resolves(tree, styles, id));
     let node = if direct.is_empty() {
         taffy_tree.new_leaf(taffy_style).ok()?
     } else {
