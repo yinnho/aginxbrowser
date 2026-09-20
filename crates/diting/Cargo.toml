@@ -1,6 +1,6 @@
 [package]
 name = "diting"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
 description = "The Diting (谛听) browser engine: network → DOM → CSS → layout → paint, V8 runtime, the Page API. Foundation of AginxBrowser."
 license = "Apache-2.0"
