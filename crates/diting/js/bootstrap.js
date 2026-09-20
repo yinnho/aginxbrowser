@@ -13121,7 +13121,10 @@ function _idbTransaction(rec, db, storeNames, mode) {
     get objectStoreNames() { return _idbStrList(() => Array.from(scope)); },
     objectStore(name) {
       const n = String(name);
-      if (!scope.has(n)) throw _idbErr('NotFoundError', n + ' is not in this transaction\'s scope');
+      // versionchange scope is every store in the db, live: stores created
+      // via db.createObjectStore() during the upgrade window must be
+      // reachable through tx.objectStore() (Dexie's exact access shape).
+      if (mode !== 'versionchange' && !scope.has(n)) throw _idbErr('NotFoundError', n + ' is not in this transaction\'s scope');
       const st = rec.stores.get(n);
       if (!st) throw _idbErr('NotFoundError', 'no such object store: ' + n);
       return _idbStoreFacade(tx, st);
@@ -13209,6 +13212,7 @@ globalThis.indexedDB = {
       const db = _idbDatabase(rec);
       const finish = () => {
         req.result = db;
+        req.transaction = null;
         req.readyState = 'done';
         if (typeof req.onsuccess === 'function') { try { req.onsuccess({ target: req, type: 'success' }); } catch (e) {} }
       };
@@ -13216,8 +13220,11 @@ globalThis.indexedDB = {
         const vtx = _idbVersionTx(rec, db);
         // The db is exposed as the request's result already during the
         // upgrade event — handlers install their schema through
-        // e.target.result.createObjectStore.
+        // e.target.result.createObjectStore. The versionchange tx rides the
+        // REQUEST too (e.target.transaction — what Dexie reads), not just the
+        // event object, and detaches again once the request settles (#54).
         req.result = db;
+        req.transaction = vtx;
         try {
           rec.version = target;
           if (typeof req.onupgradeneeded === 'function') {
@@ -13226,6 +13233,7 @@ globalThis.indexedDB = {
         } catch (e) {
           rec.version = current;
           req.result = undefined;
+          req.transaction = null;
           req.error = e;
           req.readyState = 'done';
           if (typeof req.onerror === 'function') { try { req.onerror({ target: req, type: 'error' }); } catch (e2) {} }

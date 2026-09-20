@@ -14113,6 +14113,47 @@ async fn idb_open_dispatches_upgrade_then_success_and_skips_on_reopen() {
     );
 }
 
+/// #54: the open request's `.transaction` stayed null through the upgrade
+/// window — the event object carried the versionchange tx, but IDB libraries
+/// (Dexie) read `e.target.transaction`, then dereferenced it inside their
+/// upgrade callback ("Cannot set properties of null"). Chromium semantics:
+/// the open request exposes the versionchange tx during upgradeneeded and
+/// detaches it once the request settles.
+#[tokio::test(flavor = "current_thread")]
+async fn idb_open_request_exposes_versionchange_tx_during_upgrade() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    rt.evaluate("localStorage.removeItem('__diting_idb__reqtx-db')").unwrap();
+    rt.evaluate(r#"
+        globalThis.__log = [];
+        globalThis.__p = new Promise(function (resolve) {
+          const req = indexedDB.open('reqtx-db', 1);
+          req.onupgradeneeded = function (e) {
+            const tx = e.target.transaction;
+            __log.push(['upgrade-tx', !!tx, tx && tx.mode]);
+            e.target.result.createObjectStore('items', { keyPath: 'id' });
+            // Dexie's exact shape: reach the fresh store THROUGH the tx.
+            const st = e.target.transaction.objectStore('items');
+            __log.push(['tx-store', st && st.name]);
+          };
+          req.onsuccess = function (e) {
+            __log.push(['success-tx', e.target.transaction === null]);
+            resolve(1);
+          };
+        });
+    "#).unwrap();
+    let _ = rt.run_event_loop_bounded(300).await;
+    let log = rt.evaluate("globalThis.__log").unwrap();
+    assert_eq!(
+        log,
+        serde_json::json!([
+            ["upgrade-tx", true, "versionchange"],
+            ["tx-store", "items"],
+            ["success-tx", true],
+        ]),
+        "request.transaction is the versionchange tx during upgrade, null after settle"
+    );
+}
+
 /// #53 second face: stores used to live on the transaction, so a put in one
 /// transaction and a getAll in a second never agreed (count=1 vs getAll=0).
 /// Store data belongs to the database record; transactions are just windows

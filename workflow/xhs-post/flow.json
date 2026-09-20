@@ -10,6 +10,13 @@
   },
   "steps": [
     {
+      "op": "navigate",
+      "args": {
+        "url": "https://creator.xiaohongshu.com/publish/publish?source=official"
+      },
+      "note": "session_id reuse skips the whole create block (including its navigation) — without this the flow would run on whatever page the session was left on"
+    },
+    {
       "op": "wait",
       "args": {
         "predicate": "!!document.querySelector('div.upload-content') || location.href.includes('/login')",
