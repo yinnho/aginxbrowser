@@ -659,7 +659,7 @@ impl SessionManager {
 // ---------------------------------------------------------------------------
 
 fn session_thread(
-    _session_id: String,
+    session_id: String,
     start_url: Option<String>,
     use_proxy: bool,
     cookies: Vec<String>,
@@ -1486,16 +1486,18 @@ fn session_thread(
                                 }
                                 // Human handoff (taobao 0.4.1 report P1-6):
                                 // the engine detects and surfaces, it does not
-                                // auto-bypass. A person opens the live view,
-                                // solves the slider in this session, and the
-                                // retry below rides the x5sec cookie that
-                                // solving sets — same cookies, same persona,
-                                // session continues.
-                                payload["handoff"] = json!(
+                                // auto-bypass. A person opens the live view
+                                // (served by the binary at /live), solves the
+                                // slider in this session, and the retry below
+                                // rides the x5sec cookie that solving sets —
+                                // same cookies, same persona, session continues.
+                                payload["handoff"] = json!(format!(
                                     "anti-bot wall detected — hand this session to a human: \
-                                     open the live view (web/live.html), solve the challenge there, \
-                                     then retry the same request in this session"
-                                );
+                                     open /live?session={session_id} in a browser (this engine's \
+                                     HTTP port; clicks, drags and typing land on the real page), \
+                                     solve the challenge there, then retry the same request \
+                                     in this session"
+                                ));
                             }
                             let _ = reply.send(Ok(payload.to_string()));
                         }

@@ -146,6 +146,7 @@
 //   POST /session/:id/state      {}         → text: url=/title=/viewport=WxH + indexed elements
 //   POST /session/:id/screenshot {}         → {url,width,height,image_base64,format}
 //   POST /session/:id/click_xy   {x,y,button?,click_count?}
+//   POST /session/:id/drag       {from:{x,y}, to:{x,y}}
 //   POST /session/:id/scroll     {direction,amount}
 //   POST /session/:id/input      {index,text,events}
 // ---------------------------------------------------------------------------
@@ -162,6 +163,7 @@ const state = {
   natW: 0, natH: 0,
   elements: [],          // [{index,tag,rect:[x,y,w,h]}] viewport-relative
   targetIndex: null,
+  suppressClick: false,  // set by a finished drag; the click handler eats it
   pollTimer: 0, stateTimer: 0,
 };
 
@@ -339,6 +341,9 @@ async function act(path, body) {
 }
 
 state.img.addEventListener("click", async (ev) => {
+  // A finished drag also fires a click at the release point — swallow it so
+  // the page sees drag, not drag+stray-click.
+  if (state.suppressClick) { state.suppressClick = false; return; }
   const p = toNatural(ev); ripple(ev);
   const hit = elementAt(p.x, p.y);
   if (hit) { state.targetIndex = hit.index; $("target").textContent = `[${hit.index}] ${hit.tag}`; }
@@ -369,6 +374,59 @@ state.img.addEventListener("pointerdown", (ev) => {
   const hit = elementAt(p.x, p.y);
   if (hit) { state.targetIndex = hit.index; $("target").textContent = `[${hit.index}] ${hit.tag}`; }
   act("click_xy", { x: Math.round(p.x), y: Math.round(p.y) }).then((ok) => { if (ok) grabFrame(); });
+});
+
+// Mouse drag → /session/:id/drag. The slider-captcha takeover (taobao x5
+// punish) needs a real drag; from/to are in the frame's natural CSS-pixel
+// space — the same space click_xy and rect= use — and the engine humanizes
+// the trajectory between the endpoints. Movement under DRAG_MIN_PX is left
+// to the click handler; a finished drag arms suppressClick so the synthetic
+// click at the release point doesn't land as a stray click_xy.
+const DRAG_MIN_PX = 4;
+let drag = null; // {sx, sy, ex, ey, line}
+state.img.addEventListener("pointerdown", (ev) => {
+  if (ev.pointerType !== "mouse" || ev.button !== 0) return;
+  const p = toNatural(ev);
+  drag = { sx: p.x, sy: p.y, ex: p.x, ey: p.y, line: null };
+  try { state.img.setPointerCapture(ev.pointerId); } catch { /* capture is a nicety */ }
+});
+state.img.addEventListener("pointermove", (ev) => {
+  if (!drag) return;
+  const p = toNatural(ev);
+  drag.ex = p.x; drag.ey = p.y;
+  if (Math.hypot(drag.ex - drag.sx, drag.ey - drag.sy) < DRAG_MIN_PX) return;
+  if (!drag.line) {
+    drag.line = document.createElement("div");
+    drag.line.style.cssText =
+      "position:absolute;height:2px;background:var(--accent);transform-origin:0 0;" +
+      "pointer-events:none;z-index:5";
+    $("stagewrap").appendChild(drag.line);
+  }
+  // Natural→display mapping, then position inside the scrollable stage.
+  const r = state.img.getBoundingClientRect();
+  const wr = $("stagewrap").getBoundingClientRect();
+  const sx = (drag.sx / (state.natW || r.width)) * r.width;
+  const sy = (drag.sy / (state.natH || r.height)) * r.height;
+  const ex = (drag.ex / (state.natW || r.width)) * r.width;
+  const ey = (drag.ey / (state.natH || r.height)) * r.height;
+  drag.line.style.left = (r.left - wr.left + $("stagewrap").scrollLeft + sx) + "px";
+  drag.line.style.top = (r.top - wr.top + $("stagewrap").scrollTop + sy) + "px";
+  drag.line.style.width = Math.hypot(ex - sx, ey - sy) + "px";
+  drag.line.style.transform = "rotate(" + Math.atan2(ey - sy, ex - sx) + "rad)";
+});
+state.img.addEventListener("pointerup", async (ev) => {
+  if (!drag) return;
+  const d = drag; drag = null;
+  if (d.line) d.line.remove();
+  if (Math.hypot(d.ex - d.sx, d.ey - d.sy) < DRAG_MIN_PX) return; // plain click
+  state.suppressClick = true;
+  ripple(ev);
+  if (await act("drag", { from: { x: Math.round(d.sx), y: Math.round(d.sy) },
+                          to: { x: Math.round(d.ex), y: Math.round(d.ey) } })) grabFrame();
+});
+state.img.addEventListener("pointercancel", () => {
+  if (drag && drag.line) drag.line.remove();
+  drag = null;
 });
 
 // --- header controls -------------------------------------------------------

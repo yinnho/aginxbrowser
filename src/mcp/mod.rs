@@ -1692,7 +1692,8 @@ FAIL_SYS_USER_VALIDATE / RGV587 / x5secdata. Returns {total, events:[{url,method
 where via says whether the wall was navigated into (\"url\") or swallowed by an API response \
 (\"body\"). When there are hits, the response also carries the account name (which identity got \
 walled) and a `handoff` instruction: the engine detects and surfaces but does not auto-bypass — \
-a human opens the live view (web/live.html), solves the challenge in this session, and the \
+a human opens the live view (/live?session=<id> on the engine's HTTP port), solves the \
+challenge in this session, and the \
 retry rides the cookie that solving sets. Detection only; no automated solving or bypass.",
         annotations(title = "Session Challenges", read_only_hint = true)
     )]

@@ -119,6 +119,42 @@ fn status_page_serves_html_at_root() {
     assert!(alias.contains("<!doctype html>"), "alias body: {alias}");
 }
 
+/// The human-takeover live view must be served by a bare local binary — the
+/// punish/challenge handoff points a human at /live?session=<id>, and a
+/// self-hosted instance has no nginx fronting web/ (taobao 09-20 report:
+/// "本机访问 web/live.html 返回 404" — the takeover loop died right there).
+/// Also pins the drag takeover wiring: no mouse drag means a slider wall
+/// can't be solved by hand even with the page up.
+#[test]
+fn live_view_served_locally_with_drag_takeover() {
+    let server = match ServerGuard::spawn() {
+        Some(s) => s,
+        None => {
+            eprintln!("smoke: could not spawn server, skipping");
+            return;
+        }
+    };
+    for path in ["/live", "/live.html"] {
+        let resp = ureq::get(&server.url(path))
+            .timeout(Duration::from_secs(15))
+            .call()
+            .unwrap_or_else(|_| panic!("GET {path}"));
+        assert!(
+            resp.content_type().starts_with("text/html"),
+            "{path} content-type: {}",
+            resp.content_type()
+        );
+        let body = resp.into_string().unwrap_or_else(|_| panic!("read {path}"));
+        assert!(body.contains("live session view"), "{path} title");
+        // the drag takeover: pointer handlers mapped onto /session/:id/drag
+        assert!(
+            body.contains(r#"act("drag""#),
+            "{path} missing drag takeover wiring"
+        );
+        assert!(body.contains("DRAG_MIN_PX"), "{path} missing drag gate");
+    }
+}
+
 #[test]
 #[ignore] // requires network to example.com
 fn fetch_tier_http_example_com() {

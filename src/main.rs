@@ -273,6 +273,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/status", get(status_handler))
         .route("/health", get(health_handler))
         .route("/doctor", get(doctor_handler))
+        // Human-takeover live view — embedded so a bare local binary serves it
+        // (the hosted deployment also fronts it via nginx; same file). The
+        // challenge handoff in session punish detection points here.
+        .route("/live", get(live_handler))
+        .route("/live.html", get(live_handler))
         .route("/fetch", post(fetch_handler))
         .route("/click", post(click_handler))
         .route("/eval", post(eval_handler))
@@ -439,6 +444,15 @@ fn fmt_uptime(d: std::time::Duration) -> String {
         (0, _) => format!("{hours}h {mins}m"),
         _ => format!("{days}d {hours}h {mins}m"),
     }
+}
+
+/// Human-takeover live view, embedded at compile time — a bare local binary
+/// serves it without nginx (the hosted deployment fronts the same file).
+/// `/session/:id/challenges` punish detection points a human here: clicks,
+/// drags and typing land on the real session page, so a wall (taobao slider
+/// etc.) can be solved in the very session the agent owns.
+async fn live_handler() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("../web/live.html"))
 }
 
 /// Human-facing status page at `/`. Umbrel (and any self-hoster poking the
