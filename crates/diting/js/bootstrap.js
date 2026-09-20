@@ -2736,8 +2736,13 @@ class Element extends Node {
   }
   removeAttribute(n) { n = _htmlAttrName(this, n); const popoverPrev = (n === "popover") ? this.popover : undefined; _dom("remove_attribute", this._nid, n); if (popoverPrev !== undefined) this._popoverTypeMaybeChanged(popoverPrev); if (n === "class" || n === "style") { _scheduleAnimationCheck(this); _scheduleTransitionCheck(this); } }
   removeAttributeNS(ns, n) { _dom("remove_attribute", this._nid, String(n)); const ln = String(n).toLowerCase(); if (ln === "class" || ln === "style") { _scheduleAnimationCheck(this); _scheduleTransitionCheck(this); } }
+  getAttributeNames() {
+    // Chrome 61+ API; the xhs creator publish page's mount path calls it
+    // unguarded, so its absence rejects the whole component tree (#51).
+    return _domParse("attribute_names", this._nid) || [];
+  }
   hasAttribute(n) { return this.getAttribute(n) !== null; }
-  hasAttributes() { return true; } // Simplified
+  hasAttributes() { return (_domParse("attribute_names", this._nid) || []).length > 0; }
   get attributes() {
     const el = this;
     const names = _domParse("attribute_names", el._nid) || [];
@@ -14154,7 +14159,21 @@ if (typeof Image === 'undefined') {
           } else if (fullUrl.startsWith('blob:')) {
             setTimeout(function () {
               const b = globalThis.__blobObjs && globalThis.__blobObjs[fullUrl];
-              if (b && b._bytes instanceof Uint8Array) { succeed('{}'); } else { fail(); }
+              if (!(b && b._bytes instanceof Uint8Array)) { fail(); return; }
+              // #52: identical bytes parse fine through a data: URL, but the
+              // blob: branch used to dispatch `load` with 0×0 dims — upload
+              // pipelines that probe dimensions via createObjectURL (the xhs
+              // publish page) dead-end silently on width=0/ratio=NaN and
+              // never fire the upload request. Bytes → base64 in 32k chunks
+              // (same as createImageBitmap) and reuse the shared parser.
+              let bin = '';
+              const CHUNK = 0x8000;
+              for (let i = 0; i < b._bytes.length; i += CHUNK) {
+                bin += String.fromCharCode.apply(null, b._bytes.subarray(i, i + CHUNK));
+              }
+              let dimsJson = '{}';
+              try { dimsJson = _OPS.op_image_info(btoa(bin)); } catch (e) {}
+              succeed(dimsJson);
             }, 0);
           } else {
             const pageOrigin = (function() { try { const u = new URL(_domParse("document_url") || "about:blank"); return u.origin; } catch(e) { return ""; } })();

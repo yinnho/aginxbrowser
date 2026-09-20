@@ -572,6 +572,59 @@
         assert_eq!(v["itSelf"], serde_json::json!(true), "iterator is self-async-iterable");
     }
 
+    /// Issue #51: `Element.getAttributeNames` was missing outright — the xhs
+    /// creator publish page's mount path calls it unguarded and the whole
+    /// component tree dies with `TypeError: B.getAttributeNames is not a
+    /// function` (`div.upload-content` never renders). `hasAttributes` was
+    /// hard-coded `true` in the same family; the cloneNode collateral (the
+    /// `_shallowCloneNode` names fallback returned `[]` forever, so element
+    /// clones lost all attributes) is pinned too.
+    #[test]
+    fn element_get_attribute_names() {
+        let mut rt = setup_runtime("<html><body><div id='t'>x</div></body></html>");
+        let out = rt.evaluate(r#"
+            var bare = document.createElement('div');
+            var d = document.createElement('div');
+            d.setAttribute('class', 'a');
+            d.setAttribute('data-x', '1');
+            var clone = d.cloneNode(false);
+            return JSON.stringify({
+                fn: typeof bare.getAttributeNames,
+                bareNames: bare.getAttributeNames(),
+                bareHas: [bare.hasAttributes(), d.hasAttributes()],
+                names: d.getAttributeNames(),
+                proto: 'getAttributeNames' in Element.prototype
+                        && Element.prototype.getAttributeNames === bare.getAttributeNames,
+                cloneKeepsAttrs: clone.getAttributeNames(),
+                cloneReads: [clone.getAttribute('class'), clone.getAttribute('data-x')],
+                attrsIndexing: d.attributes.length,
+                liveUpdate: (function () {
+                    d.setAttribute('role', 'banner');
+                    return d.getAttributeNames();
+                })(),
+            });
+        "#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        assert_eq!(v["fn"], serde_json::json!("function"));
+        assert_eq!(v["bareNames"], serde_json::json!([]), "no attributes -> empty array");
+        assert_eq!(v["bareHas"], serde_json::json!([false, true]), "hasAttributes tracks reality");
+        assert_eq!(
+            v["names"], serde_json::json!(["class", "data-x"]),
+            "names come back in set order"
+        );
+        assert_eq!(v["proto"], serde_json::json!(true), "lives on Element.prototype");
+        assert_eq!(
+            v["cloneKeepsAttrs"], serde_json::json!(["class", "data-x"]),
+            "cloneNode shallow path no longer drops attributes (#51 collateral)"
+        );
+        assert_eq!(v["cloneReads"], serde_json::json!(["a", "1"]));
+        assert_eq!(v["attrsIndexing"], serde_json::json!(2), "attributes list agrees");
+        assert_eq!(
+            v["liveUpdate"], serde_json::json!(["class", "data-x", "role"]),
+            "set of names reflects later setAttribute calls"
+        );
+    }
+
     #[test]
     fn reflected_body_color_and_table_family() {
         let mut rt = setup_runtime(
@@ -3292,6 +3345,52 @@
         assert_eq!(v["nw"], serde_json::json!("62"));
         assert_eq!(v["nh"], serde_json::json!("33"));
         assert_eq!(v["complete"], serde_json::json!("true"));
+    }
+
+    /// (#52) Identical image bytes must yield the same intrinsic size whether
+    /// they arrive via a data: URL (header-parsed) or a blob: URL minted by
+    /// createObjectURL. The blob: branch used to dispatch `load` with 0×0 —
+    /// the xhs publish page probes every uploaded file through
+    /// `URL.createObjectURL(file)` + `new Image()` to compute width/height/
+    /// ratio, got width=0/ratio=NaN, and the upload chain died silently (no
+    /// request, no rejection, page stuck in the upload state). Unparsable
+    /// bytes keep the old load-with-0×0 face; an unregistered blob: URL
+    /// still errors.
+    #[tokio::test(flavor = "current_thread")]
+    async fn image_blob_url_backfills_natural_dimensions() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url("https://example.com/page");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    // Sig + chunk len + "IHDR" + w=62 + h=33 — offsets 16..24
+                    // pin the header parse without a real decoder.
+                    const png = new Uint8Array([137,80,78,71,13,10,26,10, 0,0,0,13, 73,72,68,82, 0,0,0,62, 0,0,0,33]);
+                    const probe = (img, src) => new Promise(r => {
+                        img.onload = () => r('load:' + img.naturalWidth + 'x' + img.naturalHeight);
+                        img.onerror = () => r('error');
+                        img.src = src;
+                    });
+                    const img = new Image();
+                    const pngRes = await probe(img, URL.createObjectURL(new Blob([png], {type: 'image/png'})));
+                    const garbage = new Image();
+                    const garbageRes = await probe(garbage, URL.createObjectURL(new Blob([new Uint8Array([1,2,3])], {type: 'image/png'})));
+                    const missing = new Image();
+                    const missingRes = await probe(missing, 'blob:https://example.com/never-registered');
+                    return { pngRes, garbageRes, missingRes };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let v = result.value.unwrap();
+        assert_eq!(v["pngRes"], serde_json::json!("load:62x33"));
+        assert_eq!(v["garbageRes"], serde_json::json!("load:0x0"));
+        assert_eq!(v["missingRes"], serde_json::json!("error"));
     }
 
     /// createImageBitmap must resolve a bitmap with header-parsed dims. The
