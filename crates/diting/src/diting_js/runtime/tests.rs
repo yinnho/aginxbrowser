@@ -14060,6 +14060,187 @@ fn custom_elements_reconnect_refires_connected_callback() {
     assert_eq!(v, serde_json::json!("cdc"));
 }
 
+/// #55: upgrades never ran the author's constructor. The old code called
+/// `cls.call(el)`, which throws for any real class — ES classes refuse a
+/// plain .call, Babel's _classCallCheck refuses a foreign `this` — and the
+/// registry's inner catch swallowed the throw, so constructor field
+/// initialization (shadow roots, reactive stores) never landed and every
+/// custom element stayed a dead shell. Upgrade must drive the real
+/// [[Construct]] path with `this` rebound to the live element, on all three
+/// upgrade routes: define-sweep of pre-existing markup, createElement
+/// born-upgrade, and innerHTML insertion.
+#[test]
+fn custom_elements_upgrade_runs_constructor_field_init() {
+    let mut rt = setup_runtime("<html><body><ce-field></ce-field></body></html>");
+    let js = r#"
+        globalThis.__ran = 0;
+        class FieldEl extends HTMLElement {
+          constructor() {
+            super();
+            globalThis.__ran++;
+            this._store = { n: 7 };
+            this.attachShadow({ mode: 'open' });
+          }
+          get storeN() { return this._store.n; }
+        }
+        customElements.define('ce-field', FieldEl);
+        const swept = document.querySelector('ce-field');
+        const made = document.createElement('ce-field');
+        document.body.appendChild(made);
+        const host = document.createElement('div');
+        host.innerHTML = '<ce-field></ce-field>';
+        document.body.appendChild(host);
+        const markup = host.querySelector('ce-field');
+        ({
+          sweepFields: swept._store !== undefined && swept._store.n === 7,
+          sweepShadow: !!swept.shadowRoot,
+          sweepInstanceOf: swept instanceof FieldEl,
+          sweepMethod: swept.storeN === 7,
+          madeFields: made._store !== undefined && made._store.n === 7,
+          madeShadow: !!made.shadowRoot,
+          markupFields: markup._store !== undefined,
+          ctorRanOnAllRoutes: globalThis.__ran === 3,
+          identityHoldsAfterUpgrade: document.querySelector('ce-field') === swept
+        })
+    "#;
+    let v = rt.evaluate(js).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "sweepFields": true,
+            "sweepShadow": true,
+            "sweepInstanceOf": true,
+            "sweepMethod": true,
+            "madeFields": true,
+            "madeShadow": true,
+            "markupFields": true,
+            "ctorRanOnAllRoutes": true,
+            "identityHoldsAfterUpgrade": true
+        })
+    );
+}
+
+/// #55's dogfood shape: xhs's <xhs-publish-btn> is a Babel-compiled
+/// function-class (not native class syntax) whose super-call goes through
+/// Reflect.construct(HTMLElement, [], Derived) — Babel's _callSuper. The
+/// upgrade path must land its field initialization exactly like a native
+/// class: _possibleConstructorReturn adopts the object the base constructor
+/// returned (the live element) and every `_classCallCheck`/field write that
+/// follows targets it.
+#[test]
+fn custom_elements_babel_style_class_upgrades_with_fields() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    let js = r#"
+        globalThis.__log = [];
+        function _check(self, t) {
+          if (!(self instanceof t)) throw new TypeError('Cannot call a class as a function');
+        }
+        function _possible(self, call) {
+          if (call && (typeof call === 'object' || typeof call === 'function')) return call;
+          throw new TypeError('Super expression must either be null or a function');
+        }
+        // Babel ES5 shape: function class, prototype chain wired by hand,
+        // super via Reflect.construct(HTMLElement, [], Derived).
+        function BabelCE() {
+          _check(this, BabelCE);
+          var e = _possible(this, Reflect.construct(HTMLElement, [], BabelCE));
+          e._sr = e.attachShadow({ mode: 'open' });
+          e._props = { isPublish: 'yes' };
+          e._listener = function (ev) { globalThis.__log.push('pub'); };
+          e.addEventListener('publish', e._listener);
+          return e;
+        }
+        Object.setPrototypeOf(BabelCE, HTMLElement);
+        BabelCE.prototype = Object.create(HTMLElement.prototype);
+        BabelCE.prototype.constructor = BabelCE;
+        BabelCE.prototype.readBack = function () { return this._props.isPublish; };
+        customElements.define('ce-babel', BabelCE);
+        const el = document.createElement('ce-babel');
+        document.body.appendChild(el);
+        el.dispatchEvent(new CustomEvent('publish'));
+        ({
+          fieldsLanded: el._props !== undefined && el._props.isPublish === 'yes',
+          shadowLanded: !!el.shadowRoot,
+          instanceof: el instanceof BabelCE,
+          methodWorks: el.readBack() === 'yes',
+          listenerWired: globalThis.__log.join('') === 'pub'
+        })
+    "#;
+    let v = rt.evaluate(js).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "fieldsLanded": true,
+            "shadowLanded": true,
+            "instanceof": true,
+            "methodWorks": true,
+            "listenerWired": true
+        })
+    );
+}
+
+/// #55 second face: Chrome lets page code mint an element with
+/// new (customElements.get(name))() — detached, constructor run,
+/// connectedCallback waiting for insertion, identity equal to every later
+/// lookup. Unregistered construction (new HTMLElement(), or a subclass
+/// never passed to define) keeps throwing the Illegal constructor.
+#[test]
+fn custom_elements_construct_via_registry_new_is_authorized() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    let js = r#"
+        globalThis.__log = [];
+        const cls = class MintedEl extends HTMLElement {
+          constructor() { super(); this._made = true; }
+          connectedCallback() { globalThis.__log.push('c'); }
+        };
+        customElements.define('ce-mint', cls);
+        const el = new (customElements.get('ce-mint'))();
+        const detachedQuiet = globalThis.__log.join('') === '';
+        const wasDetached = el.isConnected === false; // read before insertion
+        el.id = 'minted';
+        document.body.appendChild(el);
+        ({
+          tagName: el.tagName,
+          detached: wasDetached && detachedQuiet,
+          fieldsRan: el._made === true,
+          instanceof: el instanceof cls,
+          firedOnInsert: globalThis.__log.join('') === 'c',
+          identityAfterInsert: document.getElementById('minted') === el
+        })
+    "#;
+    let v = rt.evaluate(js).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "tagName": "CE-MINT",
+            "detached": true,
+            "fieldsRan": true,
+            "instanceof": true,
+            "firedOnInsert": true,
+            "identityAfterInsert": true
+        })
+    );
+}
+
+/// The authorization gate's negative space (#55): direct construction of
+/// the engine's interface classes stays illegal — `new HTMLElement()` and
+/// unregistered subclasses throw the same Illegal constructor Chrome does,
+/// so the nid gate can't be bypassed by page code that merely looks like a
+/// registered definition.
+#[test]
+fn custom_elements_unregistered_construction_still_throws() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    let js = r#"
+        let direct = '', sub = '';
+        try { new HTMLElement(); } catch (e) { direct = e.name; }
+        const Unregistered = class extends HTMLElement {};
+        try { new Unregistered(); } catch (e) { sub = e.name; }
+        ({ direct: direct, sub: sub })
+    "#;
+    let v = rt.evaluate(js).unwrap();
+    assert_eq!(v, serde_json::json!({ "direct": "TypeError", "sub": "TypeError" }));
+}
+
 /// #53: `indexedDB.open` used to resolve success immediately and never
 /// dispatch `onupgradeneeded`, so schema-installing openers (Dexie,
 /// localForage, Firebase) never settled their open promise and the app

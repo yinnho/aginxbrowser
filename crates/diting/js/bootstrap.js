@@ -1616,6 +1616,16 @@ function _scheduleTransitionCheck(el) {
 function __customRegistry() {
   return (typeof customElements !== 'undefined' && customElements._registry) ? customElements._registry : null;
 }
+// The element a registry upgrade is currently running a constructor against.
+// HTMLElement's constructor reads it (bootstrap tail): returning that element
+// from the base constructor makes it the `this` of every derived constructor
+// up the chain — native classes and Babel's _callSuper both honor a base
+// constructor returning an object — so author field initializers land on the
+// live element instead of dying on the old `cls.call(el)` (which throws for
+// any real class: ES classes refuse .call, Babel's _classCallCheck refuses a
+// foreign this). Save/restore, not clear: a constructor that appends another
+// custom element triggers a nested upgrade that must restore ours.
+let __ceUpgradeTarget = null;
 function __upgradeCustomElementsIn(root, includeRoot) {
   const reg = __customRegistry();
   if (!reg || !reg.size || !root) return;
@@ -8503,21 +8513,23 @@ class CustomElementRegistry {
     if (el.__customUpgraded) return;
     el.__customUpgraded = true;
     try {
-      // Web Components spec: copy own props from the prototype onto the
-      // element. JS-side classes define behavior via methods on the
-      // prototype; we don't truly swap prototypes (Element is shared),
-      // so attach the prototype methods directly to the instance.
-      const proto = cls.prototype;
-      for (const key of Object.getOwnPropertyNames(proto)) {
-        if (key === 'constructor') continue;
-        const desc = Object.getOwnPropertyDescriptor(proto, key);
-        if (desc) Object.defineProperty(el, key, desc);
-      }
-      // Run constructor-side init on the element. Real custom elements
-      // run the class constructor, but Element instances aren't a `cls`
-      // subclass here; calling `.call(el)` runs whatever init logic the
-      // class defines without needing a new allocation.
-      try { cls.call(el); } catch (e) {}
+      // Swap the prototype instead of copying prototype methods onto the
+      // instance: the wrapper is per-nid cached (same node, same instance
+      // forever), so one swap upgrades every later lookup too, and methods
+      // stay on the prototype where author code (and instanceof) expects
+      // them. cls.prototype chains to HTMLElement.prototype, so the engine
+      // levels below stay reachable.
+      Object.setPrototypeOf(el, cls.prototype);
+      // Run the author's constructor against the live element. Reflect
+      // construct drives the real [[Construct]] path (cls.call is dead for
+      // classes), and the base HTMLElement constructor sees
+      // __ceUpgradeTarget and returns this element, which rebinds `this`
+      // for the rest of the chain — constructor field initializers
+      // (attachShadow, reactive stores, event wiring) land on the element.
+      const prev = __ceUpgradeTarget;
+      __ceUpgradeTarget = el;
+      try { Reflect.construct(cls, []); } catch (e) {}
+      finally { __ceUpgradeTarget = prev; }
       if (typeof el.connectedCallback === 'function' && globalThis.document?.contains?.(el)) {
         // Mark the connection so the insertion/removal walks can cycle it
         // (Chrome fires connectedCallback again on every re-insertion).
@@ -10514,17 +10526,48 @@ globalThis.CSS = { supports(){return false;}, escape(s){return s;} };
 // tests and unknown tags (x-foo) report constructor.name "HTMLElement", so
 // the alias `= Element` that used to live here was wrong twice: no
 // HTMLElement level in the chain, and no per-interface prototype at all.
-// Constructing from page code is illegal (only the engine passes a nid).
+// The engine passes a numeric node id when it wraps a node; a non-number
+// nid means page-side construction, which has exactly two legal faces
+// (#55): a registry upgrade running a constructor (rebind to the live
+// element) and `new (customElements.get(name))()` (construct a fresh node,
+// born upgraded). Everything else stays the Illegal constructor Chrome
+// throws for `new HTMLElement()` / `new HTMLDivElement()`.
 globalThis.HTMLElement = {
   HTMLElement: class HTMLElement extends Element {
     constructor(nid) {
-      if (typeof nid !== "number") {
-        throw new DOMException(
-          "Failed to construct 'HTMLElement': Illegal constructor.",
-          "TypeError",
-        );
+      if (typeof nid === "number") {
+        super(nid);
+        return;
       }
-      super(nid);
+      // Registry upgrade: return the live element. A derived constructor
+      // returning an object skips the this-binding check entirely, and the
+      // object becomes `this` for every constructor above us in the chain —
+      // native class fields and Babel's _possibleConstructorReturn both
+      // initialize onto it. No super() needed (and none possible: there is
+      // no fresh element to initialize).
+      if (__ceUpgradeTarget) return __ceUpgradeTarget;
+      // Page code constructing a defined custom element. Chrome's registry
+      // lets new (customElements.get(name))() mint a detached element that
+      // fires connectedCallback when inserted; the constructor returning
+      // the cached wrapper keeps identity equal to every later lookup
+      // (querySelector would otherwise hand back a different instance).
+      const nt = new.target;
+      const name = nt && globalThis.customElements && globalThis.customElements._byCtor
+        ? globalThis.customElements._byCtor.get(nt)
+        : null;
+      if (name) {
+        const fresh = _wrapEl(+_dom("create_element", String(name).toLowerCase(), "http://www.w3.org/1999/xhtml"));
+        if (fresh) {
+          Object.setPrototypeOf(fresh, nt.prototype);
+          fresh.__customUpgraded = true;
+          fresh.__customConnected = false;
+          return fresh;
+        }
+      }
+      throw new DOMException(
+        "Failed to construct 'HTMLElement': Illegal constructor.",
+        "TypeError",
+      );
     }
   },
 }.HTMLElement;
