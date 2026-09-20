@@ -416,6 +416,15 @@ const _formValues = globalThis._formValues;
 const _formChecked = globalThis._formChecked;
 const _formIndeterminate = globalThis._formIndeterminate;
 const _fileInputs = globalThis._fileInputs;
+// FileList-shaped face (length/item/indexed/iterator/toStringTag), shared by
+// the input.files getter (#408 lineage) and DataTransfer.files (#58).
+function _makeFileList(fs) {
+  const list = { length: fs.length, item: (i) => (i >= 0 && i < fs.length ? fs[i] : null) };
+  for (let i = 0; i < fs.length; i++) list[i] = fs[i];
+  list[Symbol.iterator] = function* () { for (let i = 0; i < this.length; i++) yield this[i]; };
+  Object.defineProperty(list, Symbol.toStringTag, { value: 'FileList' });
+  return list;
+}
 const _domParse = (cmd, a1, a2) => { try { return JSON.parse(_dom(cmd, a1, a2)); } catch { return null; } };
 
 // HTML "ASCII whitespace": U+0009 TAB, U+000A LF, U+000C FF, U+000D CR, U+0020 SPACE.
@@ -1676,6 +1685,130 @@ function __disconnectCustomElementsIn(root) {
     }
   }
 }
+// ---- (#48) Window named access: window[id] / bare `id` identifier ----
+// HTML5 named access on the Window object: elements with an id (any tag) or
+// a name attribute (form/iframe/embed/object/img — the spec's shortlist)
+// are reachable as window properties. Lives as accessor get-traps so reads
+// reflect the tree at read time. Shadowing per spec: real own globals win —
+// an explicit var/function declaration or assignment redefines our
+// configurable slot into a data property, which is Chrome's resolution
+// order (declaration > named access). Names in array-index form never
+// become named properties.
+const _namedEls = new Map();     // name -> Set<nid>, insertion order
+const _namedGetters = new Map(); // name -> installed get fn (identity check)
+let _namedScanned = false;       // one lazy full scan for the parser-built tree
+function _namedNames(el) {
+  if (!el || el.nodeType !== 1) return [];
+  const out = [];
+  const id = el.id;
+  if (id) out.push(id);
+  const t = el.tagName;
+  if (t === 'FORM' || t === 'IFRAME' || t === 'EMBED' || t === 'OBJECT' || t === 'IMG') {
+    const n = el.getAttribute('name');
+    if (n) out.push(n);
+  }
+  return out;
+}
+function _namedInstall(name) {
+  if (name in globalThis) {
+    // Real globals win over named access. Our own installed getter (the
+    // element was untracked and re-tracked) renews fine; anything else — a
+    // page var/assignment that took the slot — keeps the slot.
+    const d = Object.getOwnPropertyDescriptor(globalThis, name);
+    if (!d || !d.get || d.get !== _namedGetters.get(name)) return;
+  }
+  const get = () => _namedLookup(name);
+  const set = (v) => {
+    // An explicit assignment shadows the named property from now on
+    // (Chrome: window[id] = x creates an own data prop that wins).
+    _namedGetters.delete(name);
+    try {
+      Object.defineProperty(globalThis, name, { value: v, writable: true, configurable: true, enumerable: true });
+    } catch (e) {}
+  };
+  _namedGetters.set(name, get);
+  try {
+    Object.defineProperty(globalThis, name, { get, set, configurable: true, enumerable: true });
+  } catch (e) { _namedGetters.delete(name); }
+}
+function _namedTrack(el) {
+  if (!el || el.nodeType !== 1) return;
+  for (const n of _namedNames(el)) {
+    // Array-index names never become named properties (spec).
+    if (!n || /^\d+$/.test(n)) continue;
+    let s = _namedEls.get(n);
+    if (!s) { s = new Set(); _namedEls.set(n, s); }
+    s.add(el._nid);
+    _namedInstall(n);
+  }
+}
+function _namedUntrackBy(nid, names) {
+  for (const n of names) {
+    const s = _namedEls.get(n);
+    if (s) { s.delete(nid); if (!s.size) _namedEls.delete(n); }
+  }
+}
+function _namedUntrack(el) {
+  if (!el || el.nodeType !== 1) return;
+  _namedUntrackBy(el._nid, _namedNames(el));
+}
+function _namedLookup(name) {
+  const pick = () => {
+    const s = _namedEls.get(name);
+    if (!s) return undefined;
+    for (const nid of s) {
+      const el = _wrapEl(+nid);
+      if (el && el.nodeType === 1 && el.isConnected) return el;
+      s.delete(nid); // dead nid (innerHTML rebuilt the subtree)
+    }
+    if (!s.size) _namedEls.delete(name);
+    return undefined;
+  };
+  let el = pick();
+  if (el) return el;
+  if (!_namedScanned) {
+    // Parser-built trees never pass through the mutation hooks, so the
+    // first named miss pays one full scan. Later inserts/removals/attr
+    // writes all go through the hooks, which keep the registry current.
+    _namedScanned = true;
+    try { _namedScanIn(globalThis.document); } catch (e) {}
+    el = pick();
+  }
+  return el;
+}
+// #48: Chrome resolves bare identifiers and window[id] to id/name elements
+// BEFORE any script runs — there is no "first touch" moment. The scan above
+// piggybacks on lazy paths (first named miss, first `document` touch), but a
+// script whose FIRST statement is a bare identifier (`hero.focus()`) reaches
+// for the name before either lazy path can fire. So every Rust entry point
+// that runs foreign code — the eval wrapper (runtime.rs INLINE_EVAL_JS, agent
+// evaluate + CDP evaluate), callFunctionOn's wrapper, and the page script
+// loop (page/scripts.rs) — calls this first. Touching `document` runs the
+// getter above, which materializes the tree and pays the scan; if no DOM is
+// attached yet the getter returns null WITHOUT setting the flag, so later
+// calls retry. After the first success this is a one-flag no-op.
+function _namedBoot() {
+  if (!_namedScanned) globalThis.document;
+}
+function _namedScanIn(root) {
+  if (!root) return;
+  _namedTrack(root);
+  // The document (nodeType 9) scans globally; an element scans its subtree.
+  if ((root.nodeType === 1 || root.nodeType === 9) && typeof root.querySelectorAll === 'function') {
+    const els = root.querySelectorAll('[id], form[name], iframe[name], embed[name], object[name], img[name]');
+    for (let i = 0; i < els.length; i++) _namedTrack(els[i]);
+  }
+}
+function _namedUnscanIn(root) { // removal: walk live children (root may be detached)
+  if (!root) return;
+  _namedUntrack(root);
+  if (root.nodeType === 1) {
+    const kids = root.childNodes || [];
+    for (let i = 0; i < kids.length; i++) {
+      if (kids[i] && kids[i].nodeType === 1) _namedUnscanIn(kids[i]);
+    }
+  }
+}
 function __prepareInsertedSubtree(root) {
   if (!root || !root.isConnected) return;
   __upgradeCustomElementsIn(root, true);
@@ -1925,6 +2058,8 @@ class Node {
         globalThis.__notifyMutation('childList', this._nid, kids.map(k => k._nid), []);
       }
       if (_nodeInDocument(this)) for (const k of kids) _registerIframesIn(k);
+      // (#48) fragment children entering the document become window-named.
+      if (_nodeInDocument(this)) for (const k of kids) _namedScanIn(k);
       return c;
     }
     _dom("append_child", this._nid, c._nid);
@@ -1932,6 +2067,7 @@ class Node {
     // Insertion into the document instantiates browsing contexts for any
     // iframes in the inserted subtree (window[N] / window.length).
     if (_nodeInDocument(this)) _registerIframesIn(c);
+    _namedScanIn(c);
     __prepareInsertedSubtree(c);
     return c;
   }
@@ -1939,6 +2075,8 @@ class Node {
     if (!c) return c;
     _dom("remove_child", c._nid);
     __disconnectCustomElementsIn(c);
+    // (#48) the removed subtree loses its window-named properties.
+    _namedUnscanIn(c);
     // A tracked animation on a removed element must fire animationcancel.
     _cancelAnimationsInSubtree(c);
     _cancelTransitionsInSubtree(c);
@@ -1959,9 +2097,11 @@ class Node {
     _dom("insert_before", newChild._nid, oldChild._nid);
     _dom("remove_child", oldChild._nid);
     __disconnectCustomElementsIn(oldChild);
+    _namedUnscanIn(oldChild);
     // A replacement is an insertion and a removal; an observer saw neither so far.
     if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('childList', this._nid, [newChild._nid], [oldChild._nid]);
     if (_nodeInDocument(this)) _registerIframesIn(newChild);
+    _namedScanIn(newChild);
     __prepareInsertedSubtree(newChild);
     return oldChild;
   }
@@ -1978,6 +2118,7 @@ class Node {
     // whether an observer sees it.
     if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('childList', this._nid, [n._nid], []);
     if (_nodeInDocument(this)) _registerIframesIn(n);
+    _namedScanIn(n);
     __prepareInsertedSubtree(n);
     return n;
   }
@@ -2558,7 +2699,23 @@ class Element extends Node {
     if (globalThis.__mutationObservers?.length) {
       oldChildren = _domParse("child_nodes", this._nid) || [];
     }
+    // (#48) The replaced subtree's nids die at set_inner_html and may be
+    // recycled; collect their named ids BEFORE the op so the registry can
+    // drop them (a stale nid would alias a future element).
+    let oldNamed = null;
+    if (_namedEls.size) {
+      const kids0 = _domParse("child_nodes", this._nid) || [];
+      for (const nid of kids0) {
+        const el = _wrapEl(+nid);
+        if (el && el.nodeType === 1) {
+          const ns = _namedNames(el);
+          if (ns.length) { (oldNamed = oldNamed || []).push([el._nid, ns]); }
+        }
+      }
+    }
     _dom("set_inner_html", this._nid, String(v ?? ""));
+    if (oldNamed) for (const pair of oldNamed) _namedUntrackBy(pair[0], pair[1]);
+    if (_nodeInDocument(this)) _namedScanIn(this);
     if (_nodeInDocument(this)) {
       _registerIframesIn(this);
       // Custom elements instanced by the markup upgrade as it enters the
@@ -2724,7 +2881,16 @@ class Element extends Node {
   setAttribute(n, v) {
     n = _htmlAttrName(this, n);
     const popoverPrev = (n === "popover") ? this.popover : undefined;
+    // (#48) id/name writes re-key the window-named property; snapshot the
+    // old names before the op drops them.
+    let oldNamed = null;
+    if ((n === "id" || n === "name") && _namedEls.size && this.nodeType === 1) {
+      const ns = _namedNames(this);
+      if (ns.length) oldNamed = [this._nid, ns];
+    }
     _dom("set_attribute", this._nid, n + "\0" + String(v));
+    if (oldNamed) _namedUntrackBy(oldNamed[0], oldNamed[1]);
+    if ((n === "id" || n === "name") && this.isConnected) _namedTrack(this);
     if (popoverPrev !== undefined) this._popoverTypeMaybeChanged(popoverPrev);
     // A stylesheet link's href/rel changing while connected restarts its
     // fetch in a browser (HTML §the-link-element: "whenever an href is
@@ -2744,7 +2910,7 @@ class Element extends Node {
     const ln = String(n).toLowerCase();
     if (ln === "class" || ln === "style") { _scheduleAnimationCheck(this); _scheduleTransitionCheck(this); }
   }
-  removeAttribute(n) { n = _htmlAttrName(this, n); const popoverPrev = (n === "popover") ? this.popover : undefined; _dom("remove_attribute", this._nid, n); if (popoverPrev !== undefined) this._popoverTypeMaybeChanged(popoverPrev); if (n === "class" || n === "style") { _scheduleAnimationCheck(this); _scheduleTransitionCheck(this); } }
+  removeAttribute(n) { n = _htmlAttrName(this, n); const popoverPrev = (n === "popover") ? this.popover : undefined; if ((n === "id" || n === "name") && _namedEls.size && this.nodeType === 1) _namedUntrack(this); _dom("remove_attribute", this._nid, n); if (popoverPrev !== undefined) this._popoverTypeMaybeChanged(popoverPrev); if (n === "class" || n === "style") { _scheduleAnimationCheck(this); _scheduleTransitionCheck(this); } }
   removeAttributeNS(ns, n) { _dom("remove_attribute", this._nid, String(n)); const ln = String(n).toLowerCase(); if (ln === "class" || ln === "style") { _scheduleAnimationCheck(this); _scheduleTransitionCheck(this); } }
   getAttributeNames() {
     // Chrome 61+ API; the xhs creator publish page's mount path calls it
@@ -3329,12 +3495,7 @@ class Element extends Node {
   // file inputs.
   get files() {
     if (this.localName !== 'input' || this._inputType() !== 'file') return null;
-    const fs = _fileInputs[this._nid] || [];
-    const list = { length: fs.length, item: (i) => (i >= 0 && i < fs.length ? fs[i] : null) };
-    for (let i = 0; i < fs.length; i++) list[i] = fs[i];
-    list[Symbol.iterator] = function* () { for (let i = 0; i < this.length; i++) yield this[i]; };
-    Object.defineProperty(list, Symbol.toStringTag, { value: 'FileList' });
-    return list;
+    return _makeFileList(_fileInputs[this._nid] || []);
   }
   set files(v) {
     if (this.localName !== 'input' || this._inputType() !== 'file') return;
@@ -3342,6 +3503,10 @@ class Element extends Node {
     // silently ignores anything else (polyfills that reassign a DataTransfer
     // fileList must not explode). null/undefined clears the selection.
     if (v == null) { delete _fileInputs[this._nid]; return; }
+    // (#57) A bare File is the most common page-level injection typo
+    // (`input.files = file`) — accept it as a one-entry selection instead
+    // of a silent no-op, which cost the xhs send batch a debug cycle.
+    if (typeof File === 'function' && v instanceof File) { _fileInputs[this._nid] = [v]; return; }
     if (typeof v !== 'object' || typeof v.length !== 'number') return;
     const out = [];
     for (let i = 0; i < v.length; i++) {
@@ -4663,6 +4828,267 @@ function _convertNodes(nodes) {
   for (const prop in ARIA) reflectNullable(prop, ARIA[prop]);
 })();
 
+// ---- (#59) document.evaluate + XPathResult ----
+// A compact XPath 1.0 subset — the shapes page scripts (and the page-level
+// polyfills that only half-load) actually call: absolute and relative
+// paths, '/' and '//' steps, name | * | text() node tests, @attr (as a
+// result step and inside predicates), positional/[last()] predicates, and
+// comparisons on @attr / text() / . / position() against string or number
+// literals, wrapped in contains() and not(). Unsupported syntax throws the
+// same SyntaxError DOMException Chrome would (unions |, other axes,
+// top-level functions). Found via the xhs real-send batch: pages that ship
+// their own evaluate polyfill still read XPathResult.FIRST_ORDERED_NODE_TYPE
+// off the global, and on pages with no polyfill document.evaluate itself
+// was undefined.
+function _xpErr(msg) {
+  throw new DOMException(msg, 'SyntaxError');
+}
+function _xpTokenize(src) {
+  const out = [];
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { i++; continue; }
+    if (c === '/' && src[i + 1] === '/') { out.push({ t: 'op', v: '//' }); i += 2; continue; }
+    if (c === '.' && src[i + 1] === '.') { out.push({ t: 'op', v: '..' }); i += 2; continue; }
+    if (c === '!' && src[i + 1] === '=') { out.push({ t: 'op', v: '!=' }); i += 2; continue; }
+    if ('/.*@[](),=!'.includes(c)) { out.push({ t: 'op', v: c }); i++; continue; }
+    if (c === "'" || c === '"') {
+      const j = src.indexOf(c, i + 1);
+      if (j < 0) _xpErr('The string contains an unterminated literal.');
+      out.push({ t: 'str', v: src.slice(i + 1, j) });
+      i = j + 1;
+      continue;
+    }
+    let m = /^\d+(?:\.\d+)?/.exec(src.slice(i));
+    if (m) { out.push({ t: 'num', v: +m[0] }); i += m[0].length; continue; }
+    m = /^[A-Za-z_][A-Za-z0-9_\-.]*/.exec(src.slice(i));
+    if (!m) _xpErr('Invalid XPath expression: ' + src);
+    out.push({ t: 'name', v: m[0] });
+    i += m[0].length;
+  }
+  return out;
+}
+// Predicate grammar (small recursive descent):
+//   pred    := primary (('=' | '!=') (str | num))?
+//   primary := num | last() | position() | @name | text() | '.'
+//            | contains '(' primary ',' str ')' | not '(' pred ')'
+function _xpPrimaryAt(toks, p) {
+  const t = toks[p];
+  if (!t) _xpErr('Empty XPath predicate.');
+  const isOp = (q, v) => toks[q] && toks[q].t === 'op' && toks[q].v === v;
+  if (t.t === 'num') return [{ form: 'pos', n: t.v }, p + 1];
+  if (t.t === 'name' && (t.v === 'last' || t.v === 'position') && isOp(p + 1, '(') && isOp(p + 2, ')')) {
+    return [{ form: t.v }, p + 3];
+  }
+  if (isOp(p, '@') && toks[p + 1] && toks[p + 1].t === 'name') {
+    return [{ form: 'attr', name: toks[p + 1].v }, p + 2];
+  }
+  if (t.t === 'name' && t.v === 'text' && isOp(p + 1, '(') && isOp(p + 2, ')')) {
+    return [{ form: 'text' }, p + 3];
+  }
+  if (isOp(p, '.')) return [{ form: 'dot' }, p + 1];
+  if (t.t === 'name' && t.v === 'contains' && isOp(p + 1, '(')) {
+    const [what, q] = _xpPrimaryAt(toks, p + 2);
+    if (!isOp(q, ',') || !toks[q + 1] || toks[q + 1].t !== 'str' || !isOp(q + 2, ')')) _xpErr('Unsupported contains() form.');
+    return [{ form: 'contains', what, str: toks[q + 1].v }, q + 3];
+  }
+  if (t.t === 'name' && t.v === 'not' && isOp(p + 1, '(')) {
+    // The body is a full predicate, not a bare primary — not(@a="x") has the
+    // equality inside the parens.
+    const [inner, q] = _xpParsePredAt(toks, p + 2);
+    if (!isOp(q, ')')) _xpErr('Unsupported not() form.');
+    return [{ form: 'not', inner }, q + 1];
+  }
+  _xpErr('Unsupported XPath predicate.');
+}
+// primary (= | !=) (str | num), positioned — not() re-enters this mid-token-stream.
+function _xpParsePredAt(toks, p) {
+  const [prim, q] = _xpPrimaryAt(toks, p);
+  const t = toks[q];
+  if (t && t.t === 'op' && (t.v === '=' || t.v === '!=') && toks[q + 1] &&
+      (toks[q + 1].t === 'str' || toks[q + 1].t === 'num')) {
+    return [{ form: t.v === '=' ? 'eq' : 'ne', lhs: prim, rhs: String(toks[q + 1].v) }, q + 2];
+  }
+  return [prim, q];
+}
+function _xpParsePred(toks) {
+  const [pred, q] = _xpParsePredAt(toks, 0);
+  if (q < toks.length) _xpErr('Unsupported XPath predicate.');
+  return pred;
+}
+// Predicate value semantics: attr/text/dot produce strings, position a
+// number, pos/last booleans; contains/eq/ne coerce per XPath 1.0.
+function _xpPredValue(pred, node, pos, len) {
+  switch (pred.form) {
+    case 'pos': return pos === pred.n;
+    case 'last': return pos === len;
+    case 'position': return pos;
+    case 'attr': return node.nodeType === 1 ? (node.getAttribute(pred.name) ?? undefined) : undefined;
+    case 'text': {
+      let s = '';
+      for (const c of node.childNodes || []) if (c.nodeType === 3) s += (c.data ?? c.nodeValue ?? '');
+      return s;
+    }
+    case 'dot': return node.textContent || '';
+    case 'contains': {
+      const v = _xpPredValue(pred.what, node, pos, len);
+      return typeof v === 'string' ? v.includes(pred.str) : false;
+    }
+    case 'not': {
+      const v = _xpPredValue(pred.inner, node, pos, len);
+      return !(typeof v === 'boolean' ? v : v !== undefined && v !== '');
+    }
+    case 'eq': case 'ne': {
+      const v = _xpPredValue(pred.lhs, node, pos, len);
+      const hit = v !== undefined && String(v) === pred.rhs;
+      return pred.form === 'eq' ? hit : !hit;
+    }
+  }
+  return false;
+}
+function _xpPredOk(pred, node, pos, len) {
+  const v = _xpPredValue(pred, node, pos, len);
+  return typeof v === 'boolean' ? v : v !== undefined && v !== '';
+}
+// Steps: {desc, axis: child|self|parent, test: null|{kind: name|star|text|attr}, preds[]}
+function _xpParse(toks) {
+  let p = 0;
+  let nextDesc = false;
+  const steps = [];
+  const isOp = (q, v) => toks[q] && toks[q].t === 'op' && toks[q].v === v;
+  if (isOp(0, '/') || isOp(0, '//')) {
+    if (isOp(0, '//')) nextDesc = true;
+    p = 1;
+  }
+  while (p < toks.length) {
+    const t = toks[p];
+    const st = { desc: nextDesc, axis: 'child', test: null, preds: [] };
+    nextDesc = false;
+    if (isOp(p, '.')) { st.axis = 'self'; p++; }
+    else if (isOp(p, '..')) { st.axis = 'parent'; p++; }
+    else if (isOp(p, '@')) {
+      if (!toks[p + 1] || toks[p + 1].t !== 'name') _xpErr('Unsupported XPath expression.');
+      st.test = { kind: 'attr', name: toks[p + 1].v };
+      p += 2;
+    } else if (isOp(p, '*')) { st.test = { kind: 'star' }; p++; }
+    else if (t.t === 'name') {
+      if (isOp(p + 1, '(')) {
+        if (t.v !== 'text' || !isOp(p + 2, ')')) _xpErr('Unsupported XPath expression.');
+        st.test = { kind: 'text' };
+        p += 3;
+      } else { st.test = { kind: 'name', name: t.v }; p++; }
+    } else _xpErr('Unsupported XPath expression.');
+    while (isOp(p, '[')) {
+      let depth = 1, q = p + 1;
+      while (q < toks.length && depth > 0) {
+        if (isOp(q, '[')) depth++;
+        else if (isOp(q, ']')) depth--;
+        if (depth === 0) break;
+        q++;
+      }
+      if (depth !== 0) _xpErr('Unterminated XPath predicate.');
+      st.preds.push(_xpParsePred(toks.slice(p + 1, q)));
+      p = q + 1;
+    }
+    steps.push(st);
+    if (p >= toks.length) break;
+    if (isOp(p, '/')) { p++; continue; }
+    if (isOp(p, '//')) { nextDesc = true; p++; continue; }
+    _xpErr('Unsupported XPath expression.');
+  }
+  if (!steps.length) _xpErr('Empty XPath expression.');
+  return steps;
+}
+function _xpDescSelf(nodes) {
+  const out = [];
+  const walk = (n) => {
+    out.push(n);
+    for (const c of n.childNodes || []) if (c.nodeType === 1 || c.nodeType === 3) walk(c);
+  };
+  for (const n of nodes) walk(n);
+  return out;
+}
+function _xpRun(expr, contextNode) {
+  const steps = _xpParse(_xpTokenize(expr));
+  // An absolute path starts at the document root regardless of the caller's
+  // context node (relative paths use the context as-is).
+  let ctx = [contextNode];
+  if (expr[0] === '/' && contextNode.nodeType !== 9) {
+    ctx = [contextNode.ownerDocument || globalThis.document];
+  }
+  for (const st of steps) {
+    const input = st.desc ? _xpDescSelf(ctx) : ctx;
+    const next = [];
+    for (const n of input) {
+      let got = [];
+      if (st.axis === 'self') got = [n];
+      else if (st.axis === 'parent') { const par = n.parentNode; if (par) got = [par]; }
+      else if (st.test && st.test.kind === 'attr') {
+        if (n.nodeType === 1) {
+          const v = n.getAttribute(st.test.name);
+          if (v !== null) {
+            const a = new globalThis.Attr(st.test.name, v);
+            a.ownerElement = n;
+            got = [a];
+          }
+        }
+      } else if (st.test && st.test.kind === 'text') {
+        // childNodes is a NodeList (no .filter — same as Chrome); go through
+        // the iterator like every other array-coercion site in this file.
+        got = Array.from(n.childNodes || []).filter((c) => c.nodeType === 3);
+      } else if (st.test) {
+        const kids = Array.from(n.childNodes || []).filter((c) => c.nodeType === 1);
+        if (st.test.kind === 'star') got = kids;
+        else got = kids.filter((k) => String(k.localName || k.tagName || '').toLowerCase() === st.test.name.toLowerCase());
+      }
+      // Predicates apply per step with position context = the step's output.
+      let pass = got;
+      for (const pred of st.preds) {
+        pass = pass.filter((node, i) => _xpPredOk(pred, node, i + 1, pass.length));
+      }
+      for (const node of pass) next.push(node);
+    }
+    ctx = next;
+  }
+  return ctx;
+}
+const _XP_CONSTS = {
+  ANY_TYPE: 0, NUMBER_TYPE: 1, STRING_TYPE: 2, BOOLEAN_TYPE: 3,
+  UNORDERED_NODE_ITERATOR_TYPE: 4, ORDERED_NODE_ITERATOR_TYPE: 5,
+  UNORDERED_NODE_SNAPSHOT_TYPE: 6, ORDERED_NODE_SNAPSHOT_TYPE: 7,
+  ANY_UNORDERED_NODE_TYPE: 8, FIRST_ORDERED_NODE_TYPE: 9,
+};
+if (typeof XPathResult === "undefined") globalThis.XPathResult = class XPathResult {
+  // v1: a single node-set result; numberValue/stringValue/booleanValue
+  // coerce per XPath 1.0 (string-of-first-node, number-of-that, non-empty).
+  // invalidIteratorState stays false — no DOM mutation tracking yet.
+  constructor(nodes, requestedType) {
+    this._nodes = nodes;
+    this._requested = requestedType | 0;
+    this._idx = 0;
+  }
+  get resultType() { return this._requested === 0 ? 4 : this._requested; }
+  get invalidIteratorState() { return false; }
+  get singleNodeValue() { return this._nodes[0] ?? null; }
+  get snapshotLength() { return this._nodes.length; }
+  snapshotItem(i) { return (i >= 0 && i < this._nodes.length) ? this._nodes[i] : null; }
+  iterateNext() { return this._idx < this._nodes.length ? this._nodes[this._idx++] : null; }
+  get stringValue() {
+    const n = this._nodes[0];
+    if (!n) return '';
+    if (n.nodeType === 2) return n.value;
+    if (n.nodeType === 3) return n.data ?? n.nodeValue ?? '';
+    return n.textContent || '';
+  }
+  get numberValue() { const n = Number(this.stringValue); return isNaN(n) ? 0 : n; }
+  get booleanValue() { return this._nodes.length > 0; }
+};
+for (const [k, v] of Object.entries(_XP_CONSTS)) {
+  Object.defineProperty(globalThis.XPathResult, k, { value: v, enumerable: true });
+  Object.defineProperty(globalThis.XPathResult.prototype, k, { value: v, enumerable: true });
+}
+
 class Document extends Node {
   get documentElement() { return _wrapEl(+_dom("document_element")); }
   get head() { return this.querySelector("head"); }
@@ -4780,6 +5206,23 @@ class Document extends Node {
   getElementsByTagName(t) { return HTMLCollection._from(this.querySelectorAll(t)); }
   getElementsByClassName(c) { return _getElementsByClassName(this, c); }
   getElementsByName(name) { return this.querySelectorAll('[name="' + String(name).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]'); }
+  evaluate(expression, contextNode, nsResolver, type, result) {
+    // (#59) The XPath subset lives at the top of this file (see the
+    // "(#59)" block comment). contextNode defaults to `this` (the
+    // document); nsResolver accepted and ignored (subset has no
+    // namespace axis); type 0/undefined reports as ANY ordered-iterator
+    // per the "requests 0 → gets 4" note in the block comment.
+    const ctx = contextNode || this;
+    const req = type == null ? 0 : (type | 0);
+    const nodes = _xpRun(String(expression), ctx);
+    if (result instanceof globalThis.XPathResult) {
+      result._nodes = nodes;
+      result._requested = req;
+      result._idx = 0;
+      return result;
+    }
+    return new globalThis.XPathResult(nodes, req);
+  }
   createElement(t) {
     // The namespace is passed explicitly: create_element maps an empty
     // second arg to the null namespace (correct for XML elements with no
@@ -5430,6 +5873,14 @@ Object.defineProperty(globalThis, 'document', {
       const nid = +_dom("document_node_id"); // NaN while no DOM is attached
       if (isNaN(nid) || nid < 0) return null;
       _documentInstance = _wrap(nid);
+      // First touch of `document` is also the moment the parser-built tree
+      // becomes reachable (#48): mutation hooks never saw it, so pay the
+      // one-time named-property scan here. Later changes all flow through
+      // the hooks and keep the registry current.
+      if (!_namedScanned) {
+        _namedScanned = true;
+        try { _namedScanIn(_documentInstance); } catch (e) {}
+      }
     } catch (e) {
       return null; // ops unavailable during snapshot construction
     }
@@ -9148,6 +9599,77 @@ if (typeof File === "undefined") globalThis.File = class File extends Blob {
     this.lastModified = opts.lastModified != null ? Number(opts.lastModified) : Date.now();
   }
   get [Symbol.toStringTag]() { return "File"; }
+};
+// (#58) DataTransfer: the standard file-upload injection pattern is
+// `const dt = new DataTransfer(); dt.items.add(file); input.files = dt.files;`
+// (Puppeteer's setInputFiles lineage). Zero-arg constructible since Chrome
+// 60; drag-only surfaces (setDragImage, dropEffect outside a real drag)
+// are inert but present.
+if (typeof DataTransfer === "undefined") globalThis.DataTransfer = class DataTransfer {
+  constructor() { this._dtItems = []; this._dropEffect = 'none'; this._effectAllowed = 'none'; }
+  get dropEffect() { return this._dropEffect; }
+  set dropEffect(v) { v = String(v); if (v === 'none' || v === 'copy' || v === 'link' || v === 'move') this._dropEffect = v; }
+  get effectAllowed() { return this._effectAllowed; }
+  set effectAllowed(v) { v = String(v); if (/^(none|copy|copyLink|copyMove|link|linkMove|move|all|uninitialized)$/.test(v)) this._effectAllowed = v; }
+  get types() {
+    // Spec: the string items' types in order, then "Files" once if any file
+    // item is present — order does not follow insertion.
+    const t = [];
+    for (const it of this._dtItems) if (it.kind === 'string' && !t.includes(it.type)) t.push(it.type);
+    if (this._dtItems.some((i) => i.kind === 'file') && !t.includes('Files')) t.push('Files');
+    return t;
+  }
+  get files() { return _makeFileList(this._dtItems.filter((i) => i.kind === 'file').map((i) => i.file)); }
+  get items() {
+    const dt = this;
+    if (!dt._dtItemsView) {
+      const view = {
+        get length() { return dt._dtItems.length; },
+        add(a, b) {
+          if (b === undefined && a instanceof File) {
+            const it = { kind: 'file', type: a.type || '', file: a };
+            dt._dtItems.push(it);
+          } else if (typeof a === 'string') {
+            // Single-argument string adds throw per spec; accept as text/plain —
+            // the common page-level usage never checks the return value.
+            dt._dtItems.push({ kind: 'string', type: b === undefined ? 'text/plain' : String(b), data: a });
+          } else {
+            return null; // file+format pair (spec: throw) — inert no-op
+          }
+          const item = dt._dtItems[dt._dtItems.length - 1];
+          return {
+            get kind() { return item.kind; },
+            get type() { return item.type; },
+            getAsFile() { return item.kind === 'file' ? item.file : null; },
+            getAsString(cb) { if (item.kind === 'string' && typeof cb === 'function') queueMicrotask(() => cb(item.data)); },
+          };
+        },
+        clear() { dt._dtItems.length = 0; },
+        remove(i) { if (i >= 0 && i < dt._dtItems.length) dt._dtItems.splice(i, 1); },
+      };
+      Object.defineProperty(view, Symbol.toStringTag, { value: 'DataTransferItemList' });
+      // Indexed access reads through to the live backing array (the view
+      // outlives add/remove calls), each index returning a fresh item face.
+      dt._dtItemsView = new Proxy(view, {
+        get(t, k) {
+          if (typeof k === 'string' && /^\d+$/.test(k)) {
+            const it = dt._dtItems[+k];
+            if (!it) return undefined;
+            return {
+              get kind() { return it.kind; },
+              get type() { return it.type; },
+              getAsFile() { return it.kind === 'file' ? it.file : null; },
+              getAsString(cb) { if (it.kind === 'string' && typeof cb === 'function') queueMicrotask(() => cb(it.data)); },
+            };
+          }
+          return t[k];
+        },
+      });
+    }
+    return dt._dtItemsView;
+  }
+  setDragImage() {}
+  get [Symbol.toStringTag]() { return 'DataTransfer'; }
 };
 if (typeof FormData === "undefined") globalThis.FormData = class FormData {
   // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#constructing-form-data-set

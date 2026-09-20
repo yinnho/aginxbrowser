@@ -304,6 +304,16 @@ impl Page {
         // listeners instead of calling their callback immediately.
         if let Some(js) = &mut self.js {
             let _ = js.execute_script("<ready-state>", "globalThis.__documentReadyState__ = 'loading';");
+            // #48: window named access must be live before ANY page script
+            // runs — Chrome resolves id/name elements onto the global before
+            // the first script, and a script's first statement may be a bare
+            // identifier (`hero.focus()`), which never touches `document`.
+            // The JS side is idempotent (_namedScanned), so this is a no-op
+            // after the first navigation script phase.
+            let _ = js.execute_script(
+                "<named-boot>",
+                "globalThis._namedBoot&&globalThis._namedBoot();",
+            );
             // Parser-built stylesheets never pass through the JS insertion
             // hooks (js/bootstrap.js), so their load events only fire if we
             // enumerate them here — before the script loop, so inline scripts

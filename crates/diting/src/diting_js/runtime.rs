@@ -28,8 +28,13 @@ static SNAPSHOT: &[u8] = include_bytes!(env!("AGINXBROWSER_SNAPSHOT_PATH"));
 pub const DEFAULT_AWAIT_BUDGET_MS: u64 = 5000;
 
 // Anonymous Function trampoline around indirect eval: user stacks must never
-// surface our bootstrap source or wrapper names (stack-shape detectors).
-const INLINE_EVAL_JS: &str = "(new Function(\"s\",\"try{return (0,eval)(s)}catch(x){if(x instanceof SyntaxError){return (new Function(s))()}throw x}\"))";
+// surface our bootstrap source or wrapper names (stack-shape detectors). The
+// leading `_namedBoot` call installs window named access (issue #48) before
+// the script runs — Chrome exposes id/name elements before ANY script, so an
+// expression whose first token is a bare identifier (`hero.tagName`) must not
+// depend on `document` having been touched first. It is a one-flag no-op
+// after the first successful scan, and a null-DOM realm simply retries.
+const INLINE_EVAL_JS: &str = "(new Function(\"s\",\"globalThis._namedBoot&&globalThis._namedBoot();try{return (0,eval)(s)}catch(x){if(x instanceof SyntaxError){return (new Function(s))()}throw x}\"))";
 
 /// CDP `Runtime.RemoteObject` shape returned by evaluate paths. Our HTTP
 /// surface only reads `value`; the rest is the CDP serialization contract
@@ -1085,6 +1090,7 @@ impl JsRuntime {
             let done_counter = self.object_counter;
             let code = format!(
                 "(async function() {{\n\
+                    globalThis._namedBoot&&globalThis._namedBoot();\n\
                     {setup}\n\
                     var __fn = ({fn_decl});\n\
                     var __this = ({this_expr});\n\
@@ -1176,6 +1182,7 @@ impl JsRuntime {
         if return_by_value {
             let code = format!(
                 "(function() {{\n\
+                    globalThis._namedBoot&&globalThis._namedBoot();\n\
                     {setup}\n\
                     var __fn = ({fn_decl});\n\
                     var __this = ({this_expr});\n\
@@ -1223,6 +1230,7 @@ impl JsRuntime {
 
         let code = format!(
             "(function() {{\n\
+                globalThis._namedBoot&&globalThis._namedBoot();\n\
                 {setup}\n\
                 var __fn = ({fn_decl});\n\
                 var __this = ({this_expr});\n\

@@ -14439,3 +14439,184 @@ async fn idb_error_contracts_version_constraint_and_keypath() {
     assert_eq!(parsed["missingKeyPath"], serde_json::json!("DataError"));
     assert_eq!(parsed["putOverwrite"], serde_json::json!(true));
 }
+
+/// #48: window named access. Elements with an id (and form/iframe/embed/
+/// object/img with a name) are reachable as bare identifiers and window
+/// properties, live at read time, shadowed by real globals, and ceded on
+/// explicit assignment — the resolution order Chrome implements.
+#[test]
+fn window_named_access_live_and_shadowing() {
+    let mut rt = setup_runtime(
+        "<html><body><div id=\"hero\">H</div><form name=\"login\"></form>\
+         <div id=\"location\">L</div><div id=\"123\">N</div></body></html>",
+    );
+    let out = rt.evaluate(r#"
+        (function () { try {
+        globalThis.__out = JSON.stringify([
+            typeof hero, hero && hero.tagName,                       // parser tree: bare id resolves
+            window.hero === document.getElementById('hero'),          // identity through the same wrap cache
+            typeof login, login.tagName,                              // form name access
+            window['hero'] === document.getElementById('hero'),       // bracket form
+            typeof location === 'object' && location.href !== undefined, // real global wins over id="location"
+            typeof window['123'],                                     // array-index names never become named props
+            (function () { try { return window.nope.tagName; } catch (e) { return 'unresolved'; } })(),
+        ]);
+        return globalThis.__out;
+        } catch (e) { return 'ERR ' + e.name + ': ' + e.message; } })()
+    "#).unwrap();
+    let s = out.as_str().unwrap();
+    assert!(!s.starts_with("ERR"), "named access probe threw: {}", s);
+    let v: serde_json::Value = serde_json::from_str(s).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!(["object", "DIV", true, "object", "FORM", true, true, "undefined", "unresolved"]),
+        "named access must resolve parser-built ids/names, keep real globals, skip index-like names"
+    );
+}
+
+/// #48 second face: the registry tracks mutations (appendChild/removeChild/
+/// innerHTML) so named access reflects the live tree, and an explicit
+/// assignment converts the slot to a data property that wins from then on.
+#[test]
+fn window_named_access_tracks_mutations_and_assignment() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    let out = rt.evaluate(r#"
+        const mk = function (id) { const d = document.createElement('div'); d.id = id; return d; };
+        const a = mk('zed'); document.body.appendChild(a);
+        const afterAppend = typeof zed !== 'undefined' && zed === a;
+        document.body.removeChild(a);
+        const afterRemove = typeof zed;
+        document.body.appendChild(mk('zed2'));
+        window.zed2 = 5;
+        const afterAssign = zed2;
+        document.body.innerHTML = '<div id="rebuilt">R</div>';
+        const afterInner = typeof rebuilt !== 'undefined' && rebuilt.textContent;
+        globalThis.__out = JSON.stringify([afterAppend, afterRemove, afterAssign, afterInner]);
+    "#).unwrap();
+    let v: serde_json::Value = serde_json::from_str(rt.evaluate("globalThis.__out").unwrap().as_str().unwrap()).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!([true, "undefined", 5, "R"]),
+        "named access must follow appends/removals/innerHTML and cede to explicit assignment"
+    );
+}
+
+/// #57: `input.files = singleFile` — Chrome accepts a bare File as a
+/// one-entry selection; the silent no-op cost the xhs send batch a debug
+/// cycle. The wrapped FileList keeps length/item/index/iteration shape.
+#[test]
+fn input_files_accepts_bare_file() {
+    let mut rt = setup_runtime("<html><body><input id=\"f\" type=\"file\"></body></html>");
+    let out = rt.evaluate(r#"
+        const inp = document.getElementById('f');
+        const before = inp.files.length;
+        const file = new File(['abc'], 'a.txt', { type: 'text/plain' });
+        inp.files = file;
+        let iterated = [];
+        for (const f of inp.files) iterated.push(f.name);
+        globalThis.__out = JSON.stringify([
+            before, inp.files.length, inp.files[0] === file,
+            inp.files.item(0).name, inp.files.item(9), iterated,
+        ]);
+    "#).unwrap();
+    let v: serde_json::Value = serde_json::from_str(rt.evaluate("globalThis.__out").unwrap().as_str().unwrap()).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!([0, 1, true, "a.txt", null, ["a.txt"]]),
+        "a bare File must land as a one-entry FileList with full list shape"
+    );
+}
+
+/// #58: DataTransfer is zero-arg constructible (since Chrome 60) and the
+/// standard injection pattern `dt.items.add(file); input.files = dt.files`
+/// must carry the file through. Indexed item access reads the live list.
+#[test]
+fn data_transfer_items_and_files_feed_input() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    let out = rt.evaluate(r#"
+        const dt = new DataTransfer();
+        const empty = dt.files.length;
+        const file = new File(['x'], 'x.txt');
+        const added = dt.items.add(file);
+        const oneFile = dt.files.length;
+        dt.items.add('hello');
+        const types = Array.from(dt.types);
+        const itemsIdentity = dt.items === dt.items;
+        const idx = dt.items[0];
+        const inp = document.createElement('input');
+        inp.type = 'file';
+        document.body.appendChild(inp);
+        inp.files = dt.files;
+        globalThis.__out = JSON.stringify([
+            empty, oneFile, types, itemsIdentity,
+            idx && idx.kind, idx && idx.getAsFile() === file,
+            inp.files.length, inp.files[0] === file,
+            added && added.kind,
+        ]);
+    "#).unwrap();
+    let v: serde_json::Value = serde_json::from_str(rt.evaluate("globalThis.__out").unwrap().as_str().unwrap()).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!([0, 1, ["text/plain", "Files"], true, "file", true, 1, true, "file"]),
+        "DataTransfer must support add(file)/add(str), live indexed items, and feed input.files"
+    );
+}
+
+/// #59: document.evaluate + a global XPathResult. Covers the node-test
+/// shapes, positional/[last()] predicates, attribute results, contains/not,
+/// the constant surface (static + prototype), and honest SyntaxError for
+/// unsupported syntax (unions) instead of a silently-wrong node set.
+#[test]
+fn document_evaluate_xpath_subset() {
+    let mut rt = setup_runtime(
+        "<html><body><div id=\"list\"><p class=\"a\">one</p><p class=\"b\">two</p>\
+         <p class=\"a\">three</p></div><a href=\"/x\">link</a></body></html>",
+    );
+    let out = rt.evaluate(r#"
+        try {
+        const snap = document.evaluate('//p', document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+        const count = snap.snapshotLength;
+        const second = snap.snapshotItem(1).textContent;
+        const first = document.evaluate('//p[@class="a"]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue.textContent;
+        const contains = document.evaluate('//p[contains(text(),"tw")]', document, null, 9, null).singleNodeValue.textContent;
+        const notA = document.evaluate('//p[not(@class="a")]', document, null, 7, null);
+        const attr = document.evaluate('//a/@href', document, null, 0, null);
+        const attrVal = attr.stringValue;
+        const pos2 = document.evaluate('//p[2]', document, null, 9, null).singleNodeValue.textContent;
+        const lastP = document.evaluate('//p[last()]', document, null, 9, null).singleNodeValue.textContent;
+        const dotEq = document.evaluate('//p[.="three"]', document, null, 9, null).singleNodeValue.textContent;
+        const iter = document.evaluate('//p', document, null, 5, null);
+        const iterFirst = iter.iterateNext().textContent;
+        // Drain the remaining two nodes, then the next call must be null —
+        // iterateNext yields one node per call, exhaustion comes after the last.
+        iter.iterateNext();
+        iter.iterateNext();
+        const iterFourth = iter.iterateNext();
+        const consts = [XPathResult.ANY_TYPE, XPathResult.FIRST_ORDERED_NODE_TYPE,
+                        XPathResult.prototype.ORDERED_NODE_SNAPSHOT_TYPE, typeof XPathResult];
+        let threw = null;
+        try { document.evaluate('//p | //a', document, null, 9, null); } catch (e) { threw = e.name; }
+        globalThis.__out = JSON.stringify([
+            count, second, first, contains, notA.snapshotLength,
+            attr.resultType, attrVal, pos2, lastP, dotEq,
+            iterFirst, iterFourth === null, consts, threw,
+        ]);
+        } catch (e) { globalThis.__out = 'ERR ' + e.name + ': ' + e.message; }
+    "#).unwrap();
+    let raw = rt.evaluate("globalThis.__out").unwrap().as_str().unwrap().to_string();
+    assert!(
+        raw.starts_with('['),
+        "xpath probe failed: {}",
+        raw
+    );
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!([
+            3, "two", "one", "two", 1,
+            4, "/x", "two", "three", "three",
+            "one", true, [0, 9, 7, "function"], "SyntaxError"
+        ]),
+        "evaluate subset: snapshots, predicates, attr results, iterator exhaustion, constants, honest errors"
+    );
+}
