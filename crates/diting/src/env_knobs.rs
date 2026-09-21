@@ -97,6 +97,28 @@ pub fn js_stack_mb() -> usize {
         .unwrap_or(32)
 }
 
+/// #66 busy-storm freeze window (seconds; 0 disables). The watchdog family
+/// only sees single-entry overruns: a burner whose every callback stays
+/// under each budget (settle +500ms, script phase +1s, eval timeout) never
+/// fires one, and an interval/promise driver keeps the loop from ever
+/// reporting idle — so the pump re-enters V8 flat out for the session's
+/// life (measured: 45-48% of a core on a synthetic interval burner, zero
+/// watchdog fires, no RangeError since the recursion is depth-bounded).
+/// The idle pump accounts trailing wall time actually spent inside
+/// `poll_event_loop` (parked-waiting time doesn't count); when a window of
+/// this length shows ≥40% busy, the realm freezes until the next
+/// Navigate/SetContent swaps the document. 40%, not 80: an interval
+/// burner's in-engine duty tops out around 46-60% once per-tick timer
+/// dispatch latency is paid (measured), so a peak-shaped threshold never
+/// fires on the storm it exists for — the honest signal is sustained duty.
+pub fn js_busy_limit_secs() -> u64 {
+    std::env::var("AGINXBROWSER_JS_BUSY_LIMIT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&s| s <= 3600)
+        .unwrap_or(30)
+}
+
 /// Test lock for env-var mutations (see the 1f7486c precedent): tests that
 /// flip `AGINXBROWSER_EPHEMERAL` hold this mutex so parallel test threads
 /// don't observe each other's env writes.

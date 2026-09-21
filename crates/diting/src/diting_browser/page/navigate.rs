@@ -210,6 +210,16 @@ impl Page {
             return;
         }
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(ms);
+        if self.busy_frozen {
+            // #66: the busy window already tripped for this realm. Park the
+            // full slice without re-entering V8 — the storm's callbacks are
+            // what's burning the core, and each one stays under every
+            // watchdog budget, so termination-based defenses never see it.
+            // Commands still preempt via the session select!; a Navigate or
+            // SetContent rebuilds the realm and unfreezes.
+            tokio::time::sleep_until(deadline).await;
+            return;
+        }
         if let Some(hot_until) = self.storm_hot_until {
             if hot_until > tokio::time::Instant::now() {
                 // Storming page (watchdog-terminated earlier): park instead
@@ -226,6 +236,10 @@ impl Page {
             }
             let remaining = (deadline - now).as_millis() as u64;
             let idle = self.settle_until_idle(remaining).await;
+            if self.track_busy_window() {
+                // Frozen mid-slice: stop feeding the loop for this slice.
+                return;
+            }
             if idle {
                 // Quiescent: park for the rest of the slice. The session
                 // command loop races this against command arrival, so a
@@ -234,6 +248,65 @@ impl Page {
                 return;
             }
         }
+    }
+
+    /// #66 busy accounting for the idle pump: diff the runtime's cumulative
+    /// `v8_active_ns` over a trailing window of `js_busy_limit_secs()`
+    /// (default 30s, 0 disables). Freeze when ≥40% of the window's wall
+    /// time was spent inside `poll_event_loop` — that is a realm whose JS
+    /// never yields and never overruns, i.e. a burner tuned to sit under
+    /// every watchdog budget. Returns `true` when this call tripped the
+    /// freeze. Parked-waiting time (a page polling on a slow timer) doesn't
+    /// count toward the budget, so ordinary self-refreshing pages stay up.
+    fn track_busy_window(&mut self) -> bool {
+        let limit_secs = crate::env_knobs::js_busy_limit_secs();
+        if limit_secs == 0 {
+            return false;
+        }
+        let Some(js) = &self.js else { return false };
+        let now = tokio::time::Instant::now();
+        let active = js.v8_active_ns();
+        let Some((t0, a0)) = self.busy_mark else {
+            self.busy_mark = Some((now, active));
+            return false;
+        };
+        let elapsed = now - t0;
+        if elapsed < tokio::time::Duration::from_secs(limit_secs) {
+            return false;
+        }
+        let gained = active.saturating_sub(a0);
+        // 40%, not 80: an interval burner's in-engine duty tops out around
+        // 46-60% (measured — each 40ms tick lands ~78ms apart once timer
+        // dispatch latency is paid), so a peak-shaped threshold never fires
+        // on the very storm it exists for. The signal is SUSTAINED duty:
+        // two-fifths of a 30s window inside poll_event_loop is half a core
+        // burned for half a minute, which no legitimate idle page does.
+        let hot = gained as u128 >= elapsed.as_nanos() * 2 / 5;
+        self.busy_mark = Some((now, active));
+        if hot {
+            self.busy_frozen = true;
+            let secs = elapsed.as_secs();
+            tracing::error!(
+                "#66: freezing realm after {secs}s at ≥40% V8 busy \
+                 (AGINXBROWSER_JS_BUSY_LIMIT_SECS={limit_secs}); \
+                 navigate/setContent to unfreeze"
+            );
+            if let Some(js) = &self.js {
+                js.push_console_entry(
+                    "error",
+                    "aginxbrowser: JS frozen after sustained busy loop \
+                     (see AGINXBROWSER_JS_BUSY_LIMIT_SECS); navigate or \
+                     setContent to restart the page",
+                );
+            }
+        }
+        hot
+    }
+
+    /// Whether the busy window (#66) froze this realm's idle pump. Frozen
+    /// realms park instead of re-entering V8; a document swap unfreezes.
+    pub fn js_busy_frozen(&self) -> bool {
+        self.busy_frozen
     }
 
     /// Append the current URL to the history stack, truncating any forward

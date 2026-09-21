@@ -140,6 +140,14 @@ pub struct JsRuntime {
     /// microtask loop re-queues itself on the next pump, so pumping it again
     /// just re-feeds the storm).
     watchdog_fired_total: std::cell::Cell<u64>,
+    /// #66: cumulative wall time actually spent inside `poll_event_loop`
+    /// across this realm's life (nanoseconds). Pure execution time — a poll
+    /// that finds nothing ready registers the reactor bookkeeping only, so
+    /// pages parked waiting on timers barely move it. The idle pump diffs
+    /// this over a trailing window to catch burners whose every callback
+    /// stays under each watchdog budget (they never fire one, so
+    /// `watchdog_fired_total` alone cannot see them).
+    v8_active_ns: std::cell::Cell<u64>,
     /// #50: set by the watchdog thread at the moment it calls
     /// `terminate_execution()`. `IsolateHandle::is_execution_terminating()`
     /// only reports an *active* termination (one propagating on the stack);
@@ -277,6 +285,7 @@ impl JsRuntime {
             isolate_handle,
             heap_limit_state,
             watchdog_fired_total: std::cell::Cell::new(0),
+            v8_active_ns: std::cell::Cell::new(0),
             stale_termination: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                 false,
             )),
@@ -1653,6 +1662,7 @@ impl JsRuntime {
         // top of that poll). Clear both.
         let isolate = self.isolate_handle.clone();
         let stale = self.stale_termination.clone();
+        let active_ns = &self.v8_active_ns;
         let mut inner = std::pin::pin!(self
             .runtime
             .run_event_loop(deno_core::PollEventLoopOptions::default()));
@@ -1661,7 +1671,17 @@ impl JsRuntime {
                 isolate.cancel_terminate_execution();
                 tracing::warn!("#50: cleared stale V8 termination before event-loop poll");
             }
-            std::future::Future::poll(inner.as_mut(), cx)
+            // #66: time the poll itself. Ready tasks (timers, promise
+            // continuations, message handlers) execute INSIDE this call;
+            // a poll that finds nothing ready costs only reactor
+            // bookkeeping. Cumulative delta over a trailing window is the
+            // honest "how hot is this realm" signal — parked-waiting time
+            // doesn't count, so a page polling on a slow timer never trips
+            // the busy freeze while an under-budget interval burner does.
+            let poll_t0 = std::time::Instant::now();
+            let poll_result = std::future::Future::poll(inner.as_mut(), cx);
+            active_ns.set(active_ns.get() + poll_t0.elapsed().as_nanos() as u64);
+            poll_result
         })
         .await;
         if let Err(e) = &result {
@@ -1712,6 +1732,24 @@ impl JsRuntime {
     /// Total isolate terminations so far (see `watchdog_fired_total`).
     pub fn watchdog_fired_total(&self) -> u64 {
         self.watchdog_fired_total.get()
+    }
+
+    /// Cumulative wall time spent inside `poll_event_loop` over this realm's
+    /// life (#66 busy accounting — see the field doc). Monotonic; callers
+    /// diff it across a window.
+    pub fn v8_active_ns(&self) -> u64 {
+        self.v8_active_ns.get()
+    }
+
+    /// Queue a console entry from the Rust side (level, message), tagged
+    /// with the current page URL like op_console does. The busy freeze uses
+    /// this so session_console shows why a realm stopped pumping.
+    pub fn push_console_entry(&self, level: &str, msg: &str) {
+        let log_url = self.state.borrow().url.clone();
+        self.state
+            .borrow_mut()
+            .pending_console_calls
+            .push((level.to_string(), msg.to_string(), log_url));
     }
 
     /// This runtime's V8 isolate handle (captured at construction, stable for

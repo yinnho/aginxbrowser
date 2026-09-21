@@ -374,6 +374,20 @@ pub struct Page {
     /// first clean idle settle.
     storm_backoff_ms: u64,
     storm_hot_until: Option<tokio::time::Instant>,
+    /// #66 busy-storm accounting: (window start, `v8_active_ns` at window
+    /// start). Every idle-pump iteration diffs the runtime's cumulative
+    /// poll-execution time against this mark; when a trailing window of
+    /// `js_busy_limit_secs()` (default 30s) shows ≥40% of wall time spent
+    /// inside `poll_event_loop`, the realm froze. Such a burner never fires
+    /// a watchdog (every callback stays under budget) and never reports
+    /// idle (self-rescheduling driver), so the storm backoff above can't
+    /// see it — measured 45-48% of a core for as long as the session lives.
+    busy_mark: Option<(tokio::time::Instant, u64)>,
+    /// Set when the busy window tripped: the idle pump parks instead of
+    /// re-entering V8. Commands still run (eval stays useful for
+    /// inspection); the next document swap (Navigate/SetContent) rebuilds
+    /// the realm and clears this.
+    busy_frozen: bool,
     #[cfg(feature = "stealth")]
     pub stealth_client: Option<Arc<StealthHttpClient>>,
 }
@@ -463,6 +477,8 @@ impl Page {
             navigation_timeout_ms: None,
             storm_backoff_ms: 0,
             storm_hot_until: None,
+            busy_mark: None,
+            busy_frozen: false,
             #[cfg(feature = "stealth")]
             stealth_client,
         }
@@ -649,6 +665,11 @@ impl Page {
         }
 
         self.js = Some(rt);
+        // Fresh document ⇒ fresh JS accounting: a busy-freeze from the
+        // previous realm must not follow the operator into the new page
+        // (#66 — Navigate/SetContent is the documented unfreeze path).
+        self.busy_frozen = false;
+        self.busy_mark = None;
         self.restore_session_storage();
         self.apply_viewport_override();
         self.apply_emulated_media();

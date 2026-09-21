@@ -34,6 +34,23 @@
         NavChainGuard(guard)
     }
 
+    /// #66 busy-limit knob: the freeze test shrinks the window to 2s and
+    /// must restore the unset ambient state so no other test's pump
+    /// accounts against a 2s window.
+    #[allow(dead_code)] // holding the guard is the effect
+    struct BusyLimitGuard(std::sync::MutexGuard<'static, ()>);
+    impl Drop for BusyLimitGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("AGINXBROWSER_JS_BUSY_LIMIT_SECS");
+        }
+    }
+    static BUSY_LIMIT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn busy_limit_guard(secs: &str) -> BusyLimitGuard {
+        let guard = BUSY_LIMIT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("AGINXBROWSER_JS_BUSY_LIMIT_SECS", secs);
+        BusyLimitGuard(guard)
+    }
+
     /// Multi-path local HTTP server on 127.0.0.1. Bodies are owned Strings so
     /// a route can embed the port of another server (cross-origin tests).
     /// Answers up to 64 requests: one navigation may pull the document plus
@@ -2230,4 +2247,86 @@ ms.addEventListener('sourceopen', function(){ \
         assert_eq!(p.evaluate("document.contentType").as_str(), Some("text/html"));
         assert_eq!(p.evaluate("document.querySelector('p').textContent").as_str(), Some("real html"));
         assert_eq!(p.evaluate("document.body.firstElementChild.tagName").as_str(), Some("P"));
+    }
+
+    // ---- #66 busy-storm freeze -------------------------------------------
+
+    /// The under-budget burner (issue #66's shape): depth-bounded mutual
+    /// recursion inside an interval callback whose busy time stays below
+    /// every watchdog budget — settle never fires, no RangeError (bounded
+    /// depth), the loop never idles. Before the fix this pinned the session
+    /// thread for its whole life (measured 45-48% of a core, zero watchdog
+    /// fires). After: the trailing busy window freezes the realm, the pump
+    /// parks without re-entering V8, and a navigation unfreezes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn busy_storm_freezes_park_and_navigation_unfreezes() {
+        let _g = busy_limit_guard("2");
+        let mut p = test_page();
+        // 46ms busy per 50ms tick: nominal 92% duty, but in-engine timer
+        // dispatch adds ~30-40ms per tick (measured: a 36/40 burner lands
+        // at ~46% real duty), so this sits ~55-60% actual — safely over the
+        // 40% freeze line with margin on both sides.
+        p.navigate(
+            "data:text/html,%3Cscript%3Evar%20mark%3D0%3Bfunction%20a%28n%29%7Bmark%2B%2B%3Bif%28n%3C%3D0%29return%200%3Breturn%20b%28n-1%29%7Dfunction%20b%28n%29%7Bmark%2B%2B%3Bif%28n%3C%3D0%29return%200%3Breturn%20a%28n-1%29%7DsetInterval%28function%28%29%7Bvar%20t%3DDate.now%28%29%3Bwhile%28Date.now%28%29-t%3C46%29%7Ba%28250%29%7D%7D%2C50%29%3C%2Fscript%3E",
+        )
+        .await
+        .unwrap();
+
+        // Drive the idle pump like the session loop does until the 2s busy
+        // window closes. The burner keeps the loop non-idle, and its real
+        // in-engine duty (~55%) is what the window must catch — nominal
+        // duty is a lie once timer dispatch latency is paid.
+        let t0 = std::time::Instant::now();
+        while !p.js_busy_frozen() && t0.elapsed() < std::time::Duration::from_secs(6) {
+            p.pump_event_loop_slice(200).await;
+        }
+        assert!(p.js_busy_frozen(), "burner must trip the busy freeze");
+        // The freeze is accounting-driven, not termination-driven: no
+        // watchdog ever fired on this realm.
+        assert_eq!(p.js.as_ref().unwrap().watchdog_fired_total(), 0);
+
+        // Frozen realm parks instead of re-entering V8: cumulative active
+        // time stops moving.
+        let active = p.js.as_ref().unwrap().v8_active_ns();
+        p.pump_event_loop_slice(300).await;
+        assert_eq!(p.js.as_ref().unwrap().v8_active_ns(), active);
+
+        // session_console face: the freeze left an error entry.
+        let entries = p.take_pending_console_calls();
+        assert!(
+            entries
+                .iter()
+                .any(|(level, msg, _)| level == "error" && msg.contains("frozen")),
+            "freeze must explain itself in the console ring, got {:?}",
+            entries
+        );
+
+        // Unfreeze: a document swap rebuilds the realm and clears the flag;
+        // fresh JS runs again.
+        p.navigate("data:text/html,%3Cscript%3Ewindow.__revived%3D1%3C/script%3E")
+            .await
+            .unwrap();
+        assert!(!p.js_busy_frozen());
+        assert_eq!(p.evaluate("window.__revived").as_f64(), Some(1.0));
+    }
+
+    /// False-positive guard: a page parked on a long timer is never idle,
+    /// but its poll-execution time is ~zero — the busy window must not
+    /// freeze it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn parked_timer_page_never_freezes() {
+        let _g = busy_limit_guard("2");
+        let mut p = test_page();
+        p.navigate(
+            "data:text/html,%3Cscript%3Ewindow.__ticked%3D0%3BsetTimeout(function()%7Bwindow.__ticked%3D1%7D%2C10000)%3C/script%3E",
+        )
+        .await
+        .unwrap();
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < std::time::Duration::from_secs(3) {
+            p.pump_event_loop_slice(200).await;
+            assert!(!p.js_busy_frozen(), "a parked 10s timer must never trip the freeze");
+        }
+        // The timer is still pending (not yet fired) and the realm is alive.
+        assert_eq!(p.evaluate("window.__ticked").as_f64(), Some(0.0));
     }
