@@ -1,9 +1,11 @@
 //! V8 execution watchdogs: the armed-token family behind
 //! [`JsRuntime::arm_watchdog`](super::JsRuntime::arm_watchdog) — the cancel
 //! channel + join handle, the debug stack-dump sampler
-//! (AGINXBROWSER_WATCHDOG_STACK_DUMP=1), and `spawn_watchdog` for callers
-//! holding a bare isolate handle. Split from the module root (god-file
-//! ratchet).
+//! (AGINXBROWSER_WATCHDOG_STACK_DUMP=1), the arm/disarm accessors on
+//! JsRuntime, and `spawn_watchdog` for callers holding a bare isolate
+//! handle. Split from the module root (god-file ratchet); #66's
+//! sustained-duty busy accounting lives here too — same family, the
+//! defenses against a realm burning a core.
 use deno_core::v8::{self, IsolateHandle};
 
 /// Handle to an armed V8 execution watchdog (see [`JsRuntime::arm_watchdog`]).
@@ -253,5 +255,63 @@ impl WatchdogToken {
     /// while keeping the token alive for the final `stop()`.
     pub fn fired(&self) -> bool {
         self.fired.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl super::JsRuntime {
+    /// Arm a hard wall-clock backstop on synchronous V8 work. A page stuck in a
+    /// synchronous loop or a microtask storm pins the OS thread inside V8, so
+    /// `tokio::time::timeout` (which can only cancel at await points) never
+    /// fires. This spawns a watchdog thread that terminates the isolate once
+    /// `budget` elapses, forcing V8 to throw an uncatchable error and hand
+    /// control back. Always balance with [`Self::disarm_watchdog`].
+    pub fn arm_watchdog(&mut self, budget: std::time::Duration) -> WatchdogToken {
+        spawn_watchdog(
+            self.runtime.v8_isolate().thread_safe_handle(),
+            budget,
+            Some(self.stale_termination.clone()),
+        )
+    }
+
+    /// Stop a watchdog armed by [`Self::arm_watchdog`]. If it had already fired
+    /// (terminated the isolate), clear V8's termination flag so the isolate is
+    /// usable again, and return `true`.
+    pub fn disarm_watchdog(&mut self, token: WatchdogToken) -> bool {
+        let fired = token.stop();
+        if fired {
+            // The heal in run_event_loop owns stale-clearing at poll
+            // boundaries; this swap only covers the flag the watchdog set
+            // between the last poll and this disarm.
+            self.stale_termination
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            self.runtime.v8_isolate().cancel_terminate_execution();
+            self.watchdog_fired_total
+                .set(self.watchdog_fired_total.get() + 1);
+            tracing::warn!("V8 watchdog fired: terminated a synchronous overrun");
+        }
+        fired
+    }
+
+    /// Total isolate terminations so far (see `watchdog_fired_total`).
+    pub fn watchdog_fired_total(&self) -> u64 {
+        self.watchdog_fired_total.get()
+    }
+
+    /// Cumulative wall time spent inside `poll_event_loop` over this realm's
+    /// life (#66 busy accounting — see the field doc). Monotonic; callers
+    /// diff it across a window.
+    pub fn v8_active_ns(&self) -> u64 {
+        self.v8_active_ns.get()
+    }
+
+    /// Queue a console entry from the Rust side (level, message), tagged
+    /// with the current page URL like op_console does. The busy freeze uses
+    /// this so session_console shows why a realm stopped pumping.
+    pub fn push_console_entry(&self, level: &str, msg: &str) {
+        let log_url = self.state.borrow().url.clone();
+        self.state
+            .borrow_mut()
+            .pending_console_calls
+            .push((level.to_string(), msg.to_string(), log_url));
     }
 }
