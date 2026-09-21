@@ -12,13 +12,15 @@
 [![Hosted](https://img.shields.io/badge/hosted-browser.aginx.net-4dd0ff)](https://browser.aginx.net/)
 [![X](https://img.shields.io/badge/X-%40aginxbrowser-black?logo=x)](https://x.com/aginxbrowser)
 
-[English](README.md) | **中文文档**
-
 不是给人用的浏览器改吧改吧给 Agent 用。是从第一行代码就为 AI Agent 设计的——看世界、读世界、搜世界、操作世界，还要记得住读过的东西：一个 Rust 二进制，内置 V8，不依赖 Chromium。
 
 > 人有 Chrome，Agent 有 AginxBrowser。
 
 一个二进制，零依赖，启动即服务。HTTP API + MCP + CDP 三种协议——Agent 拿来就能用，已有的 Playwright / Puppeteer / browser-use 代码一行直连。
+
+<video src="https://github.com/yinnho/aginxbrowser/releases/download/v0.5.3/aginxbrowser-vs-competitors-2026-09.mp4" controls muted width="720"></video>
+
+*与同类产品的实测对比（2026-09）：出文本快 7.6 倍、内存省约 10 倍，现场翻页验证。*
 
 *下面这些真实页面，都是 AginxBrowser 的 diting 引擎渲染的（无 Chromium）——Wikipedia、本仓库、Rust 官网。想亲自截图？[看这里](docs/API.md#screenshot)*
 

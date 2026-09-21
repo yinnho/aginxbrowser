@@ -2,7 +2,7 @@
 
 # AginxBrowser
 
-English | [中���](README.zh-CN.md)
+English | [中文](README.zh-CN.md)
 
 **The Browser for AI Agents. See the live web. Read it. Act on it. Remember it.**
 
@@ -12,13 +12,15 @@ English | [中���](README.zh-CN.md)
 [![Hosted](https://img.shields.io/badge/hosted-browser.aginx.net-4dd0ff)](https://browser.aginx.net/)
 [![X](https://img.shields.io/badge/X-%40aginxbrowser-black?logo=x)](https://x.com/aginxbrowser)
 
-**[English](README.md)** | [中文文档](README.zh-CN.md)
-
 A browser built for agents from the first line of code — not a human browser bolted onto automation. See the world, read it, search it, act on it, and keep what you read: one Rust binary with built-in V8, **no Chromium required**.
 
 > Humans have Chrome. Agents have AginxBrowser.
 
 One binary, zero dependencies, instant service. HTTP API + native MCP + CDP — agents plug in and go, and existing Playwright / Puppeteer / browser-use code attaches directly.
+
+<video src="https://github.com/yinnho/aginxbrowser/releases/download/v0.5.3/lightpanda-star-story.mp4" controls muted width="720"></video>
+
+*The star that got our attention: Pierre Tachoire, co-founder of [Lightpanda](https://lightpanda.com) — the headless browser our [bench](bench/README.md) measures against — starred the repo. 90 seconds on why that mattered to us.*
 
 *Real pages rendered by AginxBrowser's diting engine (no Chromium) — Wikipedia, this repo, Rust. [Screenshot it yourself →](docs/API.md#screenshot)*
 
