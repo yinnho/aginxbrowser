@@ -4211,24 +4211,40 @@ async fn op_fetch_url(
     // A Continue rewrite of the URL must pass the same SSRF / private-network
     // gate as the original request (checked above) and as redirects (checked
     // below). Without this re-validation a rewrite to an internal address would
-    // bypass validate_fetch_url entirely.
-    let url = if let Some(new_url) = override_url {
-        if let Ok(parsed) = url::Url::parse(&new_url) {
-            if let Err(reason) = validate_fetch_url(&parsed) {
-                let error = format!("Intercept rewrite to forbidden URL blocked: {}", reason);
-                record_failed_fetch(&state.borrow(), &new_url, &method, error.clone());
-                return Ok(serde_json::json!({
-                    "status": 0,
-                    "body": "",
-                    "url": new_url,
-                    "blocked": true,
-                    "error": error,
-                }).to_string());
+    // bypass validate_fetch_url entirely — and an *unparseable* rewrite must
+    // fail closed (#70): passing the raw string through would hand the request
+    // to the network layer with no validation at all.
+    let url = match override_url {
+        Some(new_url) => {
+            match url::Url::parse(&new_url) {
+                Ok(parsed) => {
+                    if let Err(reason) = validate_fetch_url(&parsed) {
+                        let error = format!("Intercept rewrite to forbidden URL blocked: {}", reason);
+                        record_failed_fetch(&state.borrow(), &new_url, &method, error.clone());
+                        return Ok(serde_json::json!({
+                            "status": 0,
+                            "body": "",
+                            "url": new_url,
+                            "blocked": true,
+                            "error": error,
+                        }).to_string());
+                    }
+                }
+                Err(_) => {
+                    let error = "Intercept rewrite to unparseable URL blocked".to_string();
+                    record_failed_fetch(&state.borrow(), &new_url, &method, error.clone());
+                    return Ok(serde_json::json!({
+                        "status": 0,
+                        "body": "",
+                        "url": new_url,
+                        "blocked": true,
+                        "error": error,
+                    }).to_string());
+                }
             }
+            new_url
         }
-        new_url
-    } else {
-        url
+        None => url,
     };
     let method = override_method.unwrap_or(method);
     // A Continue rewrite supplies raw request bytes (the CDP layer already

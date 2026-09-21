@@ -10971,12 +10971,32 @@ globalThis.atob = globalThis.atob || ((s) => {
 (() => {
   const stack = [{state: null, url: undefined}]; // initial entry; url=undefined means "use document URL"
   let idx = 0;
-  const resolveOrFallback = (url) => {
+  // Shared history push/replace state steps (HTML spec): resolve the URL
+  // against the document, then throw SecurityError if it fails to parse or
+  // parses to a different origin. The old raw-string fallback let a page pin
+  // a cross-origin or fake URL into location.href — which the host then
+  // adopts as the page's own record of itself (#71).
+  const resolveStateUrl = (url) => {
     // A missing url (pushState/replaceState called with < 3 args) keeps the
     // current document URL per the HTML spec — capture it so the entry does
     // not reset location back to the original document URL (upstream #496).
     if (url === null || url === undefined) return __currentUrl();
-    try { return new URL(String(url), __currentUrl()).href; } catch (e) { return String(url); }
+    const cur = __currentUrl();
+    let curOrigin = "null";
+    try { curOrigin = new URL(cur).origin; } catch {}
+    let resolved;
+    try { resolved = new URL(String(url), cur); }
+    catch (e) {
+      throw new DOMException(
+        "A history state object with URL '" + String(url) + "' cannot be created in a document with origin '" + curOrigin + "'",
+        "SecurityError");
+    }
+    if (resolved.origin !== curOrigin) {
+      throw new DOMException(
+        "A history state object with URL '" + resolved.href + "' cannot be created in a document with origin '" + curOrigin + "'",
+        "SecurityError");
+    }
+    return resolved.href;
   };
   const applyVirtual = () => {
     const entry = stack[idx];
@@ -11000,7 +11020,7 @@ globalThis.atob = globalThis.atob || ((s) => {
     scrollRestoration: "auto",
     pushState(state, _title, url) {
       const prevUrl = __currentUrl();
-      const resolved = resolveOrFallback(url);
+      const resolved = resolveStateUrl(url);
       // Truncate forward entries (real Chrome drops the forward stack on a
       // new push) then append + advance.
       stack.length = idx + 1;
@@ -11011,7 +11031,7 @@ globalThis.atob = globalThis.atob || ((s) => {
     },
     replaceState(state, _title, url) {
       const prevUrl = __currentUrl();
-      const resolved = resolveOrFallback(url);
+      const resolved = resolveStateUrl(url);
       stack[idx] = {state: state ?? null, url: resolved};
       applyVirtual();
       fireHashChangeIfNeeded(prevUrl);

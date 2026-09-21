@@ -99,6 +99,13 @@ impl CookieJar {
             None => return,
         };
 
+        // Reject before storage AND before the expiry-delete branch below —
+        // a prefix-violating cookie is ignored entirely, so it must not even
+        // serve as a deletion of a previously-valid same-name cookie.
+        if !cookie_prefix_ok(&name, secure, host_only, &path) {
+            return;
+        }
+
         if let Some(exp) = expires {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -331,6 +338,12 @@ impl CookieJar {
             None => return,
         };
 
+        // Same prefix rules on the document.cookie write path (#67) —
+        // otherwise page JS could just mint a __Host- cookie itself.
+        if !cookie_prefix_ok(&name, secure, host_only, &path) {
+            return;
+        }
+
         // RFC 6265 §5.3 storage model, non-HTTP API write (obscura #915): a
         // document.cookie write targeting an existing cookie with the same
         // (domain, name, path) whose http_only flag is set must be silently
@@ -523,6 +536,22 @@ fn parse_http_date(s: &str) -> Result<u64, ()> {
     let minute: u64 = time_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
     let second: u64 = time_parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
 
+    // Range-check before any arithmetic (#69): Expires is untrusted header
+    // input. An unbounded year turned the accumulation loop below into a
+    // single-header CPU burn (~10^11 iterations for year 99999999999),
+    // day=0 underflowed `day - 1` into a far-future "permanent" cookie,
+    // and an out-of-range hour could overflow the final seconds product.
+    // Out-of-range rejects like any unparsable date — session-cookie
+    // semantics. Second allows 60 for the HTTP-date leap second.
+    if !(1..=31).contains(&day)
+        || !(1601..=9999).contains(&year)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return Err(());
+    }
+
     let mut days_total: u64 = 0;
     for y in 1970..year {
         days_total += if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
@@ -546,6 +575,34 @@ fn normalize_same_site(value: &str) -> String {
     .to_string()
 }
 
+// RFC 6265bis §4.1.3 cookie name prefixes (#67): __Secure- demands the
+// Secure attribute; __Host- demands Secure, host-only scope (no effective
+// Domain attribute), and Path=/. Prefix matching is case-insensitive. A
+// violating cookie is dropped like any other invalid Set-Cookie — on both
+// the HTTP and the document.cookie write path.
+fn cookie_prefix_ok(name: &str, secure: bool, host_only: bool, path: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower.starts_with("__secure-") {
+        return secure;
+    }
+    if lower.starts_with("__host-") {
+        return secure && host_only && path == "/";
+    }
+    true
+}
+
+// RFC 6265 §5.1.3: the domain-match algorithm's suffix case applies only
+// when "the string is a host name (i.e., not an IP address)". IPv6 hosts
+// arrive bracketed from Url::host_str serialization, so strip the brackets
+// before asking std.
+fn is_ip_literal(host: &str) -> bool {
+    let h = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    h.parse::<std::net::IpAddr>().is_ok()
+}
+
 // Resolve the effective cookie domain per RFC 6265 5.3: a Domain attribute
 // that is not a parent domain of the request host is ignored and the cookie
 // falls back to host-only on the origin. Returns (domain, host_only).
@@ -559,6 +616,14 @@ fn resolve_cookie_domain(origin_host: &str, domain_attr: Option<&str>) -> Option
         Some(raw) => raw.trim().trim_start_matches('.').to_lowercase(),
     };
     if dom.is_empty() {
+        return Some((origin, true));
+    }
+    // An IP-literal origin never widens (#68): suffix matching on the
+    // string "192.168.1.100" would let Domain=168.1.100 scope a cookie
+    // that domain_matches then sends to unrelated IPs like 10.168.1.100.
+    // Browsers ignore a Domain attribute on IP hosts entirely — the
+    // cookie stays host-only.
+    if is_ip_literal(&origin) {
         return Some((origin, true));
     }
     // RFC 6265 §5.3: an explicit Domain attribute that domain-matches the
@@ -606,6 +671,13 @@ fn domain_matches(host: &str, domain: &str) -> bool {
     // Previously this allocated 2 lowercase Strings + a "." prefix
     // per (host, domain) pair.
     let domain = domain.trim_start_matches('.');
+    // IP literals never suffix-match (#68): a cookie stored for
+    // 192.0.2.1 must not leak to a host whose string merely ends in
+    // that suffix (10.192.0.2.1). RFC 6265 §5.1.3 domain-match for an
+    // IP host is exact string identity.
+    if is_ip_literal(host) || is_ip_literal(domain) {
+        return host.eq_ignore_ascii_case(domain);
+    }
     if host.len() < domain.len() {
         return false;
     }
@@ -1137,5 +1209,100 @@ mod tests {
         let header = jar.get_cookie_header(&url);
         assert!(header.contains("a1=testval"), "Missing a1 in: '{}'", header);
         assert!(header.contains("web_session=sess123"), "Missing web_session in: '{}'", header);
+    }
+
+    // #69: Expires is untrusted header input — range-check before arithmetic.
+
+    #[test]
+    fn test_parse_http_date_rejects_out_of_range_fields() {
+        // An unbounded year turned the accumulation loop into a single-header
+        // CPU burn (~10^11 iterations for year 99999999999).
+        assert!(parse_http_date("Sat, 01 Jan 99999999999 00:00:00 GMT").is_err());
+        // day=0 underflowed `day - 1` into a far-future "permanent" cookie.
+        assert!(parse_http_date("Sat, 00 Jan 2030 00:00:00 GMT").is_err());
+        assert!(parse_http_date("Sat, 32 Jan 2030 00:00:00 GMT").is_err());
+        assert!(parse_http_date("Sat, 01 Jan 2030 99:00:00 GMT").is_err());
+        assert!(parse_http_date("Sat, 01 Jan 2030 00:99:00 GMT").is_err());
+        assert!(parse_http_date("Sat, 01 Jan 2030 00:00:99 GMT").is_err());
+        // Boundaries still parse: the HTTP-date leap second and max year.
+        assert!(parse_http_date("Sat, 01 Jan 9999 23:59:60 GMT").is_ok());
+        assert!(parse_http_date("Sat, 01 Jan 1601 00:00:00 GMT").is_ok());
+    }
+
+    // #68: IP-literal origins never domain-widen (RFC 6265 §5.1.3).
+
+    #[test]
+    fn test_ip_literal_origin_never_widens_domain() {
+        let (domain, host_only) =
+            resolve_cookie_domain("192.168.1.100", Some("168.1.100")).unwrap();
+        assert_eq!(domain, "192.168.1.100");
+        assert!(host_only, "a Domain attribute on an IP host is ignored entirely");
+
+        // Suffix strings must not match across unrelated IPs.
+        assert!(!domain_matches("10.168.1.100", "168.1.100"));
+        assert!(domain_matches("192.168.1.100", "192.168.1.100"));
+        // Regular host suffix matching is unchanged.
+        assert!(domain_matches("sub.example.com", "example.com"));
+    }
+
+    #[test]
+    fn test_cookie_set_on_ip_host_stays_on_that_ip() {
+        let jar = CookieJar::new();
+        let url = Url::parse("http://192.168.1.100/").unwrap();
+        jar.set_cookie("s=1; Domain=168.1.100", &url);
+        assert!(jar.get_cookie_header(&url).contains("s=1"));
+
+        let other = Url::parse("http://10.168.1.100/").unwrap();
+        assert!(
+            jar.get_cookie_header(&other).is_empty(),
+            "a host whose string merely ends in the suffix must not receive the cookie"
+        );
+    }
+
+    // #67: RFC 6265bis §4.1.3 cookie name prefixes, on both write paths.
+
+    #[test]
+    fn test_secure_prefix_requires_secure_attribute() {
+        let jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        jar.set_cookie("__Secure-sid=1", &url);
+        jar.set_cookie("__secure-sid=1", &url); // prefix match is case-insensitive
+        assert!(
+            jar.get_all_cookies().is_empty(),
+            "__Secure- without the Secure attribute must be rejected"
+        );
+        jar.set_cookie("__Secure-sid=1; Secure", &url);
+        assert!(jar.get_cookie_header(&url).contains("__Secure-sid=1"));
+    }
+
+    #[test]
+    fn test_host_prefix_requires_secure_hostonly_root_path() {
+        let jar = CookieJar::new();
+        let https = Url::parse("https://example.com/").unwrap();
+        jar.set_cookie("__Host-sid=1", &https); // missing Secure
+        jar.set_cookie("__Host-sid=1; Secure; Domain=example.com", &https); // not host-only
+        jar.set_cookie("__Host-sid=1; Secure; Path=/app", &https); // not root path
+        assert!(
+            jar.get_all_cookies().is_empty(),
+            "all three __Host- violations must be rejected"
+        );
+        jar.set_cookie("__Host-sid=1; Secure; Path=/", &https);
+        assert!(jar.get_cookie_header(&https).contains("__Host-sid=1"));
+    }
+
+    #[test]
+    fn test_cookie_prefixes_enforced_on_document_cookie_writes() {
+        let jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        jar.set_cookie_from_js("__Host-sid=1; Path=/", &url);
+        assert!(
+            jar.get_cookie_header(&url).is_empty(),
+            "page JS must not be able to mint a __Host- cookie itself"
+        );
+        jar.set_cookie_from_js("__Secure-sid=1; Secure", &url);
+        assert!(
+            jar.get_cookie_header(&url).contains("__Secure-sid=1"),
+            "a valid __Secure- cookie still stores from document.cookie"
+        );
     }
 }

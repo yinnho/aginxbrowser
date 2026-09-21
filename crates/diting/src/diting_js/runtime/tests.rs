@@ -11878,6 +11878,35 @@
         assert_eq!(result, serde_json::json!(["/dashboard", "/a"]));
     }
 
+    #[test]
+    fn test_push_state_cross_origin_or_invalid_url_throws_security_error() {
+        // #71: shared history push/replace state steps — a URL that fails to
+        // parse, or parses to a different origin than the document, throws
+        // SecurityError. The old raw-string fallback stored the URL as-is,
+        // pinning a cross-origin or fake URL into location.href which the
+        // host-side virtual-URL sync then adopted as the page's own URL.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt.evaluate(r#"
+            const names = [];
+            for (const u of ["file:///etc/passwd", "http://other.example/x", "http://"]) {
+                try { history.pushState(null, "", u); names.push("no-throw"); }
+                catch (e) { names.push(e.name + ":" + (e instanceof DOMException)); }
+            }
+            history.pushState(null, "", "/app/settings");
+            names.push(location.pathname);
+            return names;
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                "SecurityError:true",
+                "SecurityError:true",
+                "SecurityError:true",
+                "/app/settings"
+            ])
+        );
+    }
+
     #[cfg(feature = "screenshot")]
     #[test]
     fn test_layout_rect_returns_real_geometry_through_get_bounding_client_rect() {
