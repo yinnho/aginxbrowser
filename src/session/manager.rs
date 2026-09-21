@@ -1500,6 +1500,55 @@ fn session_thread(
                             let _ = reply.send(Ok(payload.to_string()));
                         }
 
+                        SessionCommand::Verdict { reply } => {
+                            // The fact sheet's inputs, all eval-free: the
+                            // risk-control rows, the main document's
+                            // status/size, console errors, and the current
+                            // URL. The classification itself is pure code
+                            // (verdict.rs) — no model, no page scripts.
+                            let started = std::time::Instant::now();
+                            drain_console(&mut page, &mut console_ring);
+                            page.inner.sync_js_network_events();
+                            let events = &page.inner.network_events;
+                            let body_of = |rid: &str| page.inner.get_response_body(rid);
+                            let rows = crate::har::challenge_rows(events, &body_of);
+                            let doc = events
+                                .iter()
+                                .rev()
+                                .find(|e| e.resource_type == "Document" && e.status != 0);
+                            let console_errors: Vec<&Value> = console_ring
+                                .iter()
+                                .filter(|e| e["level"] == "error")
+                                .collect();
+                            let console_last: Vec<String> = console_errors
+                                .iter()
+                                .rev()
+                                .take(3)
+                                .rev()
+                                .filter_map(|e| {
+                                    e["text"].as_str().map(|s| {
+                                        s.chars().take(160).collect::<String>()
+                                    })
+                                })
+                                .collect();
+                            let input = crate::verdict::VerdictInput {
+                                url: &page.url(),
+                                session_id: &session_id,
+                                account: account.as_ref().map(|(_, name)| name.as_str()),
+                                challenge_events: rows.len(),
+                                doc_status: doc.map(|e| e.status),
+                                doc_bytes: doc.map(|e| e.body_size),
+                                requests: events.len(),
+                                console_errors: console_errors.len(),
+                                console_last,
+                            };
+                            let payload = crate::verdict::fact_sheet(
+                                &input,
+                                started.elapsed().as_millis() as u64,
+                            );
+                            let _ = reply.send(Ok(payload.to_string()));
+                        }
+
                         SessionCommand::Close { reply } => {
                             let _ = reply.send(());
                             break;

@@ -18,6 +18,7 @@
 //! deployed instance gains a workflow by dropping a file, no rebuild.
 
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::session::{ScrollDirection, SessionCommand, SessionManager};
@@ -133,9 +134,24 @@ fn lookup_path<'a>(vars: &'a Map<String, Value>, path: &str) -> Option<&'a Value
 /// surrounding text, and the name may be a dotted path into saved results
 /// (see [`lookup_path`]). Unknown names are an error, not empty output — a
 /// flow referencing a missing var must fail loudly, at the step that needs it.
+///
+/// A placeholder that IS the whole string keeps the referenced value's type:
+/// `"value": "{{max_tries}}"` splices the number 3, not the string "3" —
+/// branch conditions compare values, and a text-forced "3" makes `at_most`
+/// error while `equals` silently reads false. Placeholders with text around
+/// them stay text semantics (same rule as [`json_interpolate`]).
 pub fn substitute(v: &Value, vars: &Map<String, Value>) -> Result<Value, String> {
     match v {
         Value::String(s) => {
+            if let Some(path) = s.strip_prefix("{{").and_then(|r| r.strip_suffix("}}")) {
+                let path = path.trim();
+                if !path.is_empty() && !path.contains("{{") && !path.contains("}}") {
+                    return match lookup_path(vars, path) {
+                        Some(val) => Ok(val.clone()),
+                        None => Err(format!("unknown var '{path}' — pass it via vars")),
+                    };
+                }
+            }
             let mut out = String::with_capacity(s.len());
             let mut rest: &str = s;
             loop {
@@ -318,6 +334,151 @@ fn js_truthy(v: &Value) -> bool {
         Value::String(s) => !s.is_empty(),
         _ => true,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Branch steps (issue #72)
+// ---------------------------------------------------------------------------
+
+/// The condition operators a `when` may use.
+const CONDITION_OPS: &[&str] = &[
+    "equals", "not_equals", "in", "not_in", "contains", "at_least", "at_most", "truthy",
+    "falsy",
+];
+
+/// JSON equality with number looseness: 200 == 200.0 (serde_json's Value
+/// PartialEq is representation-sensitive; a flow author comparing an
+/// integer fact against a float literal shouldn't care).
+fn loose_eq(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
+        _ => a == b,
+    }
+}
+
+/// The branch step's condition — structured JSON, deliberately no
+/// expression parser: `{"var": "v.verdict", "is": "equals", "value":
+/// "landed"}`. `var` is a dotted path resolved by the same
+/// [`lookup_path`] `{{placeholders}}` use, so a branch reads one field
+/// off an earlier step's saved result. Unknown var and unknown `is` are
+/// loud step errors — the same fail-loudly contract as substitution; a
+/// condition that silently evaluated false on a typo would be a flow
+/// that skips its own retry loop.
+fn eval_condition(when: &Value, vars: &Map<String, Value>) -> Result<bool, String> {
+    let path = when
+        .get("var")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "when.var (a dotted var path) is required".to_string())?;
+    let is = when
+        .get("is")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("when.is is required (one of {})", CONDITION_OPS.join(" | ")))?;
+    let value = when.get("value");
+    let val = lookup_path(vars, path).ok_or_else(|| {
+        format!("unknown var '{path}' — no step saved it and no var declared it")
+    })?;
+    match is {
+        "equals" => Ok(loose_eq(val, value.ok_or("equals needs a value")?)),
+        "not_equals" => Ok(!loose_eq(val, value.ok_or("not_equals needs a value")?)),
+        "in" => match value.ok_or("`in` needs a value")? {
+            Value::Array(a) => Ok(a.iter().any(|x| loose_eq(val, x))),
+            _ => Err("`in` requires an array value".into()),
+        },
+        "not_in" => match value.ok_or("`not_in` needs a value")? {
+            Value::Array(a) => Ok(!a.iter().any(|x| loose_eq(val, x))),
+            _ => Err("`not_in` requires an array value".into()),
+        },
+        "contains" => match val {
+            Value::String(hay) => {
+                let needle = value
+                    .and_then(Value::as_str)
+                    .ok_or("contains on a string var needs a string value")?;
+                Ok(hay.contains(needle))
+            }
+            Value::Array(a) => Ok(value.is_some_and(|v| a.iter().any(|x| loose_eq(x, v)))),
+            _ => Err("contains applies to string and array vars".into()),
+        },
+        "at_least" | "at_most" => {
+            let x = val
+                .as_f64()
+                .ok_or("at_least/at_most need a numeric var")?;
+            let y = value
+                .and_then(Value::as_f64)
+                .ok_or("at_least/at_most need a numeric value")?;
+            Ok(if is == "at_least" { x >= y } else { x <= y })
+        }
+        "truthy" => Ok(js_truthy(val)),
+        "falsy" => Ok(!js_truthy(val)),
+        other => Err(format!(
+            "unknown when.is {other:?} (one of {})",
+            CONDITION_OPS.join(" | ")
+        )),
+    }
+}
+
+/// Pre-flight for branch steps: collect step ids, then check every
+/// branch's goto target and condition shape BEFORE any step runs — an
+/// unknown goto must fail the run at the door, not halfway through with
+/// a half-executed session behind it. Duplicate ids are rejected for the
+/// same reason: a goto must mean exactly one step.
+fn validate_control_flow(steps: &[Value]) -> Result<HashMap<String, usize>, String> {
+    let mut ids: HashMap<String, usize> = HashMap::new();
+    for (i, s) in steps.iter().enumerate() {
+        let Some(id) = s.get("id").and_then(Value::as_str) else { continue };
+        if id.is_empty() {
+            return Err(format!("step {i}: id must be a non-empty string"));
+        }
+        if ids.insert(id.to_string(), i).is_some() {
+            return Err(format!(
+                "duplicate step id {id:?} (step {i}) — a goto must mean exactly one step"
+            ));
+        }
+    }
+    for (i, s) in steps.iter().enumerate() {
+        if s.get("op").and_then(Value::as_str) != Some("branch") {
+            continue;
+        }
+        let args = s.get("args").cloned().unwrap_or(json!({}));
+        let goto = args
+            .get("goto")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("branch step {i}: missing args.goto (a step id)"))?;
+        if !ids.contains_key(goto) {
+            let known: Vec<&str> = steps
+                .iter()
+                .filter_map(|s| s.get("id").and_then(Value::as_str))
+                .collect();
+            return Err(format!(
+                "branch step {i}: goto {goto:?} matches no step id (ids: {})",
+                known.join(", ")
+            ));
+        }
+        let when = args
+            .get("when")
+            .ok_or_else(|| format!("branch step {i}: missing args.when"))?;
+        // Shape-check only — the var resolves at runtime, after earlier
+        // steps have saved it. This catches the typos a flow author can
+        // make before any session exists.
+        if when
+            .get("var")
+            .and_then(Value::as_str)
+            .is_none_or(|s| s.is_empty())
+        {
+            return Err(format!("branch step {i}: when.var (a dotted var path) is required"));
+        }
+        let is = when
+            .get("is")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("branch step {i}: when.is is required"))?;
+        if !CONDITION_OPS.contains(&is) {
+            return Err(format!(
+                "branch step {i}: unknown when.is {is:?} (one of {})",
+                CONDITION_OPS.join(" | ")
+            ));
+        }
+    }
+    Ok(ids)
 }
 
 /// Defaults a flow declares for its vars; caller-passed vars win.
@@ -551,12 +712,23 @@ async fn exec_step(
                 .map_err(|e| e.to_string())?;
             serde_json::from_str(&text).map_err(|e| e.to_string())
         }
+        // The decision-layer fact sheet (issue #73) as a step: pair it
+        // with `save` and the next branch can test {{v.verdict}} /
+        // {{v.facts.doc_status}} — the verdict-then-branch shape every
+        // wall-aware flow wants. Read-only, eval-free.
+        "verdict" => {
+            let text = mgr
+                .send(sid, |reply| C::Verdict { reply })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::from_str(&text).map_err(|e| e.to_string())
+        }
         "close" => {
             mgr.close(sid);
             Ok(json!({ "closed": true }))
         }
         other => Err(format!(
-            "unknown op {other:?} (navigate set_content click click_xy drag input set_files scroll eval wait viewport screenshot state cookies close http)"
+            "unknown op {other:?} (navigate set_content click click_xy drag input set_files scroll eval wait viewport screenshot state cookies verdict close http — plus executor-level branch, see run_flow)"
         )),
     }
 }
@@ -761,6 +933,7 @@ async fn run_expect(
 /// flow or take the session over — failing step, reason, current URL, a
 /// best-effort viewport screenshot, and everything saved so far. The session
 /// is left alive on purpose (manual takeover beats forced cleanup).
+#[allow(clippy::too_many_arguments)]
 async fn fail_receipt(
     mgr: &mut SessionManager,
     sid: &str,
@@ -769,6 +942,7 @@ async fn fail_receipt(
     reason: String,
     mut saved: Map<String, Value>,
     last_url: &Value,
+    executed: u64,
 ) -> Value {
     let url = if last_url.is_null() {
         mgr.send(sid, |reply| SessionCommand::Eval {
@@ -802,7 +976,7 @@ async fn fail_receipt(
         "reason": reason,
         "url": url,
         "screenshot": screenshot,
-        "steps_done": step_index,
+        "steps_done": executed,
         "saved": Value::Object(std::mem::take(&mut saved)),
         "hint": "fix the flow and re-run, or take the session over manually (session_state / session_click / ...) — it stays alive",
     })
@@ -852,6 +1026,33 @@ pub async fn run_flow(
         .and_then(|s| s.as_array())
         .cloned()
         .unwrap_or_default();
+
+    // Control-flow preflight (issue #72): every branch's goto must name a
+    // real step id and every when must be well-shaped BEFORE any session
+    // exists — an unknown goto failing at step 40 leaves 39 half-executed
+    // steps and a session behind it; failing at the door leaves neither.
+    let ids = match validate_control_flow(&steps) {
+        Ok(ids) => ids,
+        Err(e) => {
+            return json!({
+                "status": "failed",
+                "session_id": Value::Null,
+                "failed_step": 0,
+                "reason": e,
+                "steps_done": 0,
+                "saved": {},
+                "hint": "fix the control flow (step ids / branch gotos / when shapes) — no step ran",
+            })
+        }
+    };
+    // Execution budget: a branch loop re-runs steps, so steps.len() no longer
+    // bounds the work. Default 1000 — a linear flow never notices, a runaway
+    // loop fails with a receipt instead of spinning forever.
+    let max_steps = flow
+        .get("max_steps")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1000)
+        .clamp(1, 100_000);
 
     // Session: reuse the given one — that's how login state (import_curl, a
     // persistent session, a prior run) and flows compose — or create a fresh
@@ -915,12 +1116,109 @@ pub async fn run_flow(
     let mut saved = Map::new();
     let mut last_url = Value::Null;
 
-    for (i, raw) in steps.iter().enumerate() {
+    // The pc walk: a linear flow still runs 0..len in order; a branch step
+    // moves the pc (forward or back). `executed` counts actual step
+    // executions — a loop body re-runs, so this is not "steps visited" — and
+    // enforces the max_steps budget.
+    let mut pc: usize = 0;
+    let mut executed: u64 = 0;
+    while pc < steps.len() {
+        if executed >= max_steps {
+            let raw = &steps[pc];
+            return fail_receipt(
+                mgr,
+                &sid,
+                pc,
+                raw,
+                format!(
+                    "step budget exhausted: {executed} executions reached max_steps {max_steps} — a branch loop that never converges?"
+                ),
+                saved,
+                &last_url,
+                executed,
+            )
+            .await;
+        }
+        executed += 1;
+        // Reserved var: the execution counter, maintained by the EXECUTOR —
+        // a loop budget that survives page-context resets (a wall-page
+        // navigation can wipe window.* state, but the executor keeps
+        // counting). Branch on `steps_done` for context-free retry limits.
+        vars.insert("steps_done".into(), json!(executed));
+        let raw = &steps[pc];
         let op = raw
             .get("op")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
+        // branch is executor-level — it redirects the pc without touching
+        // the session. Args substitute first ({{var}} inside `when.value` is
+        // legitimate); a taken branch jumps to the goto id, a false one falls
+        // through. No result, no expect, no save: the branch observes, the
+        // steps it guards do the asserting (the candidate never rewrites the
+        // reward — JevHarness discipline, applied to control flow).
+        if op == "branch" {
+            let args = match substitute(raw.get("args").unwrap_or(&json!({})), &vars) {
+                Ok(a) => a,
+                Err(e) => {
+                    return fail_receipt(
+                        mgr,
+                        &sid,
+                        pc,
+                        raw,
+                        format!("var substitution: {e}"),
+                        saved,
+                        &last_url,
+                        executed,
+                    )
+                    .await
+                }
+            };
+            let goto = args
+                .get("goto")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_default();
+            match eval_condition(args.get("when").unwrap_or(&Value::Null), &vars) {
+                Ok(true) => {
+                    let Some(&target) = ids.get(&goto) else {
+                        // Unreachable via preflight (goto must be a literal
+                        // id, and every literal was checked) — kept as a
+                        // loud failure rather than a panicking executor.
+                        return fail_receipt(
+                            mgr,
+                            &sid,
+                            pc,
+                            raw,
+                            format!("branch: goto {goto:?} matches no step id"),
+                            saved,
+                            &last_url,
+                            executed,
+                        )
+                        .await;
+                    };
+                    pc = target;
+                    continue;
+                }
+                Ok(false) => {
+                    pc += 1;
+                    continue;
+                }
+                Err(e) => {
+                    return fail_receipt(
+                        mgr,
+                        &sid,
+                        pc,
+                        raw,
+                        format!("branch: {e}"),
+                        saved,
+                        &last_url,
+                        executed,
+                    )
+                    .await
+                }
+            }
+        }
         // http is engine-side (no page, no session command) and takes RAW
         // args — its `json` body must bypass text substitution so whole-leaf
         // values embed structurally. Every page-bound op substitutes first.
@@ -933,11 +1231,12 @@ pub async fn run_flow(
                     return fail_receipt(
                         mgr,
                         &sid,
-                        i,
+                        pc,
                         raw,
                         format!("var substitution: {e}"),
                         saved,
                         &last_url,
+                        executed,
                     )
                     .await
                 }
@@ -946,7 +1245,9 @@ pub async fn run_flow(
         };
         let result = match result {
             Ok(v) => v,
-            Err(e) => return fail_receipt(mgr, &sid, i, raw, e, saved, &last_url).await,
+            Err(e) => {
+                return fail_receipt(mgr, &sid, pc, raw, e, saved, &last_url, executed).await
+            }
         };
         if let Some(u) = result.get("url").and_then(|v| v.as_str()) {
             if !u.is_empty() {
@@ -959,11 +1260,12 @@ pub async fn run_flow(
                     return fail_receipt(
                         mgr,
                         &sid,
-                        i,
+                        pc,
                         raw,
                         format!("expect {check}: {e}"),
                         saved,
                         &last_url,
+                        executed,
                     )
                     .await;
                 }
@@ -978,12 +1280,13 @@ pub async fn run_flow(
             vars.insert(name.to_string(), result.clone());
             saved.insert(name.to_string(), result);
         }
+        pc += 1;
     }
 
     json!({
         "status": "ok",
         "session_id": sid,
-        "steps_done": steps.len(),
+        "steps_done": executed,
         "url": last_url,
         "saved": saved,
     })

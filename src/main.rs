@@ -46,6 +46,10 @@ mod search;
 mod server;
 mod session;
 mod store;
+// Session verdict (决策层 v1): the code-only fact sheet that answers
+// "where did this session land" — challenge/captcha/login/empty/landed/
+// unknown from signals the engine already holds. No evals, no model.
+mod verdict;
 // Timeline video pump (切片层): seek `window.__timelines` frame by frame,
 // paint viewport bands, pipe raw RGBA into ffmpeg — MP4 bytes out.
 #[cfg(feature = "screenshot")]
@@ -102,7 +106,7 @@ use routers::sessions::{
     session_har_handler, session_input_handler, session_list_handler, session_navigate_handler,
     session_network_handler, session_screenshot_handler, session_scroll_handler,
     session_set_files_handler, session_state_handler, session_storage_handler,
-    session_viewport_handler, session_wait_handler, sessions_handler,
+    session_verdict_handler, session_viewport_handler, session_wait_handler, sessions_handler,
 };
 
 
@@ -299,6 +303,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/session/:id/export", get(session_export_handler))
         .route("/session/:id/network", get(session_network_handler))
         .route("/session/:id/challenges", get(session_challenges_handler))
+        .route("/session/:id/verdict", get(session_verdict_handler))
         .route("/session/:id/har", get(session_har_handler))
         .route("/session/:id/click", post(session_click_handler))
         .route("/session/:id/click_xy", post(session_click_xy_handler))

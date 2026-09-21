@@ -508,6 +508,11 @@ pub struct FlowRunParams {
     /// fresh one — that's how login state and flows compose.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Override the run's step-execution budget (branch loops re-run steps,
+    /// so every revisit counts). Default 1000, clamped 1..=100000. A flow
+    /// document may also declare its own max_steps; this wins.
+    #[serde(default)]
+    pub max_steps: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -538,6 +543,12 @@ pub struct SessionCloseParams {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SessionChallengesParams {
+    /// Session ID
+    pub session_id: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionVerdictParams {
     /// Session ID
     pub session_id: String,
 }
@@ -1713,6 +1724,33 @@ challenge in this session, and the retry rides the cookie that solving sets. Det
     }
 
     #[tool(
+        description = "One call answers \"where did this session land\": verdict is one of \
+challenge (risk control engaged — punish page or a 200-status API body that swallowed the wall; \
+the response carries a handoff instruction for a human to solve it in the live view), \
+captcha (explicit CAPTCHA interstitial), login (bounced to a login form — auth expired), \
+empty, landed (normal 2xx content page), or unknown (couldn't classify — read facts; a \
+non-2xx main document lands here with facts.doc_status carrying the number, so a zhihu-style \
+burst 403 is branchable). The facts sheet also carries challenge_events, requests, \
+console_errors and the fired signals. Pure code over signals the engine already holds \
+(current URL, risk-control rows, main document status/size, console errors) — no screenshots, \
+no page evals, single-digit milliseconds. Verdict observes, it never bypasses.",
+        annotations(title = "Session Verdict", read_only_hint = true)
+    )]
+    async fn session_verdict(
+        &self,
+        Parameters(params): Parameters<SessionVerdictParams>,
+    ) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        match mgr
+            .send(&params.session_id, |reply| SessionCommand::Verdict { reply })
+            .await
+        {
+            Ok(text) => text,
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
         description = "Import login state from a real browser in one paste. The human logs into a \
 site in their own Chrome (solving the CAPTCHA/SMS once), opens DevTools → Network, right-clicks \
 any authenticated request → \"Copy as cURL\", and passes the command here. Returns a live \
@@ -1840,10 +1878,16 @@ it does not exist.",
         annotations(title = "Run Flow")
     )]
     async fn flow_run(&self, Parameters(params): Parameters<FlowRunParams>) -> String {
-        let doc = match crate::flow::resolve_flow_doc(params.flow, params.name.as_deref()) {
+        let mut doc = match crate::flow::resolve_flow_doc(params.flow, params.name.as_deref()) {
             Ok(d) => d,
             Err(e) => return json!({ "error": e }).to_string(),
         };
+        // Caller budget wins over any max_steps the document declares —
+        // injected as a doc field so run_flow's single read path stays the
+        // only one.
+        if let (Some(ms), Some(obj)) = (params.max_steps, doc.as_object_mut()) {
+            obj.insert("max_steps".into(), json!(ms));
+        }
         let vars = params
             .vars
             .and_then(|v| v.as_object().cloned())

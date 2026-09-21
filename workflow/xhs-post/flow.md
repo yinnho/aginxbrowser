@@ -1,5 +1,16 @@
 # xhs-post — 小红书图文笔记发布 flow
 
+> 2026-09-22 批175：加 verdict 门 + branch（issue #72/#73）。步 1.5 签名补丁后
+> 插 verdict 步存 `v`，branch `v.verdict ∈ [login, challenge, captcha, empty]`
+> 直接跳末尾 takeover throw——死 cookie 时的行为从「20s upload-content 空超时、
+> 回执啥也不说」变成 6 步执行出带截图的接管回执：verdict=login（URL 规则表
+> 命中 `/login`，facts 里 58 个请求、10 条 console 错误全带出），reason 直接
+> 写着 cookie 死了走 import_curl。真机 receipts：旧行为无回执可言（超时即
+> 全部证据），新回执 `/tmp/b175-xhs.json`（34.4s 里 20s 是步 3 的 ping-pong
+> wait——那是分类前必要的双终态等待，verdict 之后一路秒断）。
+> 步骤表里的「10 步」现在多了 verdict/branch/补集 branch/takeover/end 标记，
+> 线性叙事不变，verdict 门插在步 3 之后。
+
 创作平台页面自动化路线（与 15.9k★ 的 xpzouying/xiaohongshu-mcp 同路线：
 个人号无官方 API，页面自身 JS 负责签名，驱动页面=零签名逆向）。选择器与
 流程全部提炼自该项目 publish.go/publish-workflow.md（2026-09-14 调研，

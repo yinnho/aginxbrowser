@@ -2,16 +2,80 @@
   "vars": {
     "question_id": "603518666"
   },
+  "max_steps": 40,
   "create": {
     "url": "https://www.zhihu.com/question/{{question_id}}"
   },
   "steps": [
     {
+      "id": "load",
+      "op": "navigate",
+      "args": {
+        "url": "https://www.zhihu.com/question/{{question_id}}"
+      },
+      "note": "loop head: burst 403s (zhihu rate wall, self-heals in ~15 min) used to die as a bare 15s wait timeout that named nothing"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "new Promise(r => setTimeout(r, 1200))"
+      },
+      "note": "time-based settle, NOT a DOM wait: a burst-403 response never parses into a DOM in this engine (document.documentElement is undefined), so a readyState predicate burns its full timeout on exactly the wall this flow exists to classify. The DOM wait lives on the landed path (read), where a DOM exists"
+    },
+    {
+      "op": "verdict",
+      "save": "v",
+      "note": "issue #73: a 403 document reads verdict unknown with facts.doc_status=403; content question page reads landed. Network facts, no DOM dependency — this classifies a wall a DOM wait cannot even see"
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": { "var": "v.verdict", "is": "equals", "value": "landed" },
+        "goto": "read"
+      },
+      "note": "issue #72: content page → jump straight to the read path"
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": { "var": "steps_done", "is": "at_least", "value": 30 },
+        "goto": "giveup"
+      },
+      "note": "budget on the reserved steps_done counter, NOT a window counter: a wall-page navigation resets the JS context, so window.* retry counters silently restart at 1 every round and the loop never converges (dogfood 2026-09-22). steps_done is executor-maintained — 30 executions ≈ 5 wall retries"
+    },
+    {
+      "id": "space",
+      "op": "eval",
+      "args": {
+        "script": "new Promise(r => setTimeout(r, 2500))"
+      },
+      "note": "short spacing between in-flow retries (eval await budget caps this at seconds; long waits are the caller's job)"
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": { "var": "steps_done", "is": "truthy" },
+        "goto": "load"
+      },
+      "note": "back-jump to the loop head (truthy on the executor counter is always true — the jump itself)"
+    },
+    {
+      "id": "giveup",
+      "op": "eval",
+      "args": {
+        "script": "throw new Error('zhihu wall persists after ' + {{steps_done}} + ' step executions — verdict=' + JSON.stringify({{v}}) + '. Burst 403 self-heals in ~15 min: park, then rerun this flow with the same session_id (cookies stay warm).')"
+      },
+      "save": "giveup",
+      "note": "the 15-minute backoff belongs to the CALLER (cron rerun), not to a flow holding a session — the receipt says exactly that"
+    },
+    {
+      "id": "read",
       "op": "wait",
       "args": {
         "predicate": "document.querySelectorAll('.List-item, .AnswerItem').length >= 1",
         "timeout_ms": 15000
-      }
+      },
+      "note": "the only DOM wait in the flow, reachable only on verdict landed — a DOM is guaranteed to exist there"
     },
     {
       "op": "eval",

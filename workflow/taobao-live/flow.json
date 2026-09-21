@@ -1,0 +1,59 @@
+{
+  "vars": {
+    "front_url": "https://live.taobao.com/"
+  },
+  "create": {
+    "url": "{{front_url}}",
+    "width": 1440,
+    "height": 900
+  },
+  "steps": [
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "document.readyState === 'complete' || !!document.title",
+        "timeout_ms": 15000
+      },
+      "note": "taobao live front is JS-heavy; readyState may stall on blocked subresources, title is the fallback signal"
+    },
+    {
+      "op": "verdict",
+      "save": "v",
+      "note": "issue #73: punish.taobao.com / _____tmd_____ landings read challenge (the fact sheet carries the /live handoff); clean front reads landed"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "JSON.stringify({url: location.href, title: document.title, rooms: [...document.querySelectorAll('a[href*=\"live.taobao.com\"]')].slice(0, 8).map(a => ({href: a.href, text: (a.textContent || '').trim().slice(0, 60)}))})"
+      },
+      "save": "front",
+      "note": "telemetry on both paths — on a punish page it reads rooms:0, which the fail receipt preserves as evidence"
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": { "var": "v.verdict", "is": "not_in", "value": ["challenge", "captcha", "login", "empty"] },
+        "goto": "read"
+      },
+      "note": "issue #72: clean verdict → skip the takeover throw"
+    },
+    {
+      "id": "takeover",
+      "op": "eval",
+      "args": {
+        "script": "throw new Error('taobao wall — verdict=' + JSON.stringify({{v}}))"
+      },
+      "save": "takeover",
+      "note": "challenge verdicts carry handoff inside the fact sheet: a human opens /live?session=<id>, solves the slider there, and the retry rides the cookie (the engine detects, it never auto-bypasses)"
+    },
+    {
+      "id": "read",
+      "op": "eval",
+      "args": {
+        "script": "JSON.stringify({ok: true, url: location.href, title: document.title, rooms: [...document.querySelectorAll('a[href*=\"live.taobao.com\"]')].slice(0, 8).map(a => a.href)})"
+      },
+      "save": "rooms",
+      "note": "next hop (manual or a future flow): navigate a room, then GET /session/:id/network?filter=media — the player's real stream URLs appear only after the room page runs"
+    }
+  ]
+}

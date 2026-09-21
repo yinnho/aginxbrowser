@@ -60,14 +60,16 @@ fn substitute_handles_whole_embedded_nested_and_errors() {
         substitute(&json!("search {{q}} page={{n}}!"), &vars).unwrap(),
         json!("search rust engine page=3!")
     );
-    // Nested objects and arrays are walked.
+    // Nested objects and arrays are walked. An array element that IS a
+    // whole-leaf placeholder keeps type — [3], not ["3"] — so numeric
+    // args (click index, branch when.value) survive as numbers.
     assert_eq!(
         substitute(
             &json!({ "url": "https://s/?q={{q}}", "meta": ["{{n}}"] }),
             &vars
         )
         .unwrap(),
-        json!({ "url": "https://s/?q=rust engine", "meta": ["3"] })
+        json!({ "url": "https://s/?q=rust engine", "meta": [3] })
     );
     // Missing var and unterminated placeholder fail loudly.
     assert!(substitute(&json!("{{missing}}"), &vars).is_err());
@@ -105,6 +107,30 @@ fn js_truthy_matches_js_semantics() {
     assert!(js_truthy(&json!("0")));
     assert!(js_truthy(&json!([0])));
     assert!(js_truthy(&json!({})));
+}
+
+/// Whole-leaf type preservation feeding a branch condition (the zhihu
+/// retry shape): `"value": "{{max_tries}}"` must splice the NUMBER, or
+/// at_most errors ("need a numeric value") and equals reads silently
+/// false against an integer counter.
+#[test]
+fn whole_leaf_placeholder_keeps_type_for_conditions() {
+    let mut vars = Map::new();
+    vars.insert("tries".into(), json!(1));
+    vars.insert("max_tries".into(), json!(3));
+    let when = json!({ "var": "tries", "is": "at_most", "value": "{{max_tries}}" });
+    let substituted = substitute(&when, &vars).unwrap();
+    assert_eq!(substituted["value"], json!(3));
+    assert!(eval_condition(&substituted, &vars).unwrap());
+    // equals against a substituted numeric literal holds too.
+    let eq = substitute(
+        &json!({ "var": "tries", "is": "equals", "value": "{{max_tries}}" }),
+        &vars,
+    )
+    .unwrap();
+    assert!(!eval_condition(&eq, &vars).unwrap()); // 1 != 3
+    vars.insert("tries".into(), json!(3));
+    assert!(eval_condition(&eq, &vars).unwrap());
 }
 
 /// Dotted paths walk objects and array indices; a miss anywhere along
@@ -510,6 +536,224 @@ async fn run_flow_args_validation_skips_undeclared_flows() {
     vars.insert("args_json".into(), json!({ "whatever": 1 }));
     let receipt = run_flow(&mut mgr, &flow, &vars, None).await;
     assert_eq!(receipt["status"], "ok", "receipt: {receipt}");
+    let sid = receipt["session_id"].as_str().unwrap().to_string();
+    assert!(mgr.close_and_wait(&sid).await);
+}
+
+// ---------------------------------------------------------------------------
+// Branch steps (issue #72) + the verdict step (issue #73)
+// ---------------------------------------------------------------------------
+
+/// All nine operators, the numeric looseness (200 == 200.0 — serde_json's
+/// Value equality is representation-sensitive), dotted var paths, and the
+/// loud errors: unknown var, unknown is, missing/mis-typed value.
+#[test]
+fn eval_condition_operators() {
+    let mut vars = Map::new();
+    vars.insert(
+        "v".into(),
+        json!({ "verdict": "challenge", "status": 403, "console": ["a", "b"], "url": "https://x.com/login" }),
+    );
+    let c = |when: Value| eval_condition(&when, &vars);
+    assert!(c(json!({ "var": "v.verdict", "is": "equals", "value": "challenge" })).unwrap());
+    assert!(!c(json!({ "var": "v.verdict", "is": "not_equals", "value": "challenge" })).unwrap());
+    assert!(c(json!({ "var": "v.verdict", "is": "in", "value": ["landed", "challenge"] })).unwrap());
+    assert!(!c(json!({ "var": "v.verdict", "is": "not_in", "value": ["landed", "challenge"] })).unwrap());
+    assert!(c(json!({ "var": "v.url", "is": "contains", "value": "/login" })).unwrap());
+    assert!(c(json!({ "var": "v.console", "is": "contains", "value": "b" })).unwrap());
+    // Integer fact vs float literal and vice versa — loose numeric equality.
+    assert!(c(json!({ "var": "v.status", "is": "equals", "value": 403.0 })).unwrap());
+    assert!(c(json!({ "var": "v.status", "is": "at_least", "value": 400.0 })).unwrap());
+    assert!(!c(json!({ "var": "v.status", "is": "at_most", "value": 402.5 })).unwrap());
+    assert!(c(json!({ "var": "v.console", "is": "truthy" })).unwrap());
+    assert!(!c(json!({ "var": "v.console", "is": "falsy" })).unwrap());
+    // Loud errors — the flow that silently evaluated false on a typo would
+    // skip its own retry loop.
+    assert!(c(json!({ "var": "v.nope", "is": "truthy" })).is_err());
+    assert!(c(json!({ "var": "v.verdict", "is": "wat" })).is_err());
+    assert!(c(json!({ "var": "v.verdict", "is": "equals" })).is_err());
+    assert!(c(json!({ "var": "v.verdict", "is": "in", "value": "challenge" })).is_err());
+    // string contains needs a string value; array contains with a
+    // non-member is a legitimate false, not an error.
+    assert!(c(json!({ "var": "v.verdict", "is": "contains", "value": 1 })).is_err());
+    assert!(!c(json!({ "var": "v.console", "is": "contains", "value": "z" })).unwrap());
+}
+
+/// Static preflight: id collection, unknown goto, duplicate ids, malformed
+/// when — all caught before any step runs.
+#[test]
+fn validate_control_flow_catches_bad_shapes() {
+    let ok = json!([
+        { "id": "loop", "op": "eval", "args": { "script": "1" } },
+        { "op": "branch", "args": { "when": { "var": "n", "is": "at_most", "value": 2 }, "goto": "loop" } },
+    ]);
+    let ids = validate_control_flow(ok.as_array().unwrap()).unwrap();
+    assert_eq!(ids.get("loop"), Some(&0));
+
+    let bad = json!([ { "op": "branch", "args": { "when": { "var": "n", "is": "truthy" }, "goto": "nowhere" } } ]);
+    let err = validate_control_flow(bad.as_array().unwrap()).unwrap_err();
+    assert!(err.contains("nowhere"), "{err}");
+
+    let dup = json!([
+        { "id": "a", "op": "eval", "args": { "script": "1" } },
+        { "id": "a", "op": "eval", "args": { "script": "1" } },
+    ]);
+    assert!(validate_control_flow(dup.as_array().unwrap())
+        .unwrap_err()
+        .contains("duplicate"));
+
+    let badis = json!([
+        { "id": "a", "op": "eval", "args": { "script": "1" } },
+        { "op": "branch", "args": { "when": { "var": "n", "is": "mystery" }, "goto": "a" } },
+    ]);
+    assert!(validate_control_flow(badis.as_array().unwrap())
+        .unwrap_err()
+        .contains("when.is"));
+
+    let nogoto = json!([ { "op": "branch", "args": { "when": { "var": "n", "is": "truthy" } } } ]);
+    assert!(validate_control_flow(nogoto.as_array().unwrap())
+        .unwrap_err()
+        .contains("goto"));
+}
+
+/// A backward branch loop that converges: eval bumps a counter, branch
+/// re-runs it while n <= 2, falls through at 3. steps_done counts
+/// executions (7), not steps visited (3).
+#[tokio::test]
+async fn run_flow_branch_backward_loop_converges() {
+    let mut mgr = SessionManager::new();
+    let flow = json!({
+        "steps": [
+            { "id": "loop", "op": "eval", "args": { "script": "(window.__n = (window.__n || 0) + 1)" }, "save": "n" },
+            { "op": "branch", "args": { "when": { "var": "n", "is": "at_most", "value": 2 }, "goto": "loop" } },
+            { "op": "eval", "args": { "script": "'done:' + window.__n" }, "save": "final" },
+        ]
+    });
+    let receipt = run_flow(&mut mgr, &flow, &Map::new(), None).await;
+    assert_eq!(receipt["status"], "ok", "receipt: {receipt}");
+    assert_eq!(receipt["steps_done"], 7);
+    assert_eq!(receipt["saved"]["n"].as_f64(), Some(3.0));
+    assert_eq!(receipt["saved"]["final"], "done:3");
+    let sid = receipt["session_id"].as_str().unwrap().to_string();
+    assert!(mgr.close_and_wait(&sid).await);
+}
+
+/// The reserved `steps_done` var bounds loops without page state: a
+/// wall-page navigation resets the JS context (window counters die),
+/// but the executor's counter survives — the zhihu retry-loop shape.
+#[tokio::test]
+async fn run_flow_steps_done_reserved_var_bounds_loops() {
+    let mut mgr = SessionManager::new();
+    let flow = json!({
+        "max_steps": 50,
+        "steps": [
+            { "id": "loop", "op": "eval", "args": { "script": "(window.__n = (window.__n || 0) + 1)" }, "save": "n" },
+            { "op": "branch", "args": { "when": { "var": "steps_done", "is": "at_most", "value": 4 }, "goto": "loop" } },
+            { "op": "eval", "args": { "script": "'ok'" }, "save": "out" },
+        ]
+    });
+    let receipt = run_flow(&mut mgr, &flow, &Map::new(), None).await;
+    assert_eq!(receipt["status"], "ok", "receipt: {receipt}");
+    // Loop evals ran 3 times (n=3); the branch went false on the 6th
+    // execution (steps_done=5 > 4); the tail eval is the 7th.
+    assert_eq!(receipt["steps_done"], 7);
+    assert_eq!(receipt["saved"]["n"].as_f64(), Some(3.0));
+    let sid = receipt["session_id"].as_str().unwrap().to_string();
+    assert!(mgr.close_and_wait(&sid).await);
+}
+
+/// A never-converging loop dies at the budget with a receipt naming the
+/// budget — not an infinite spin.
+#[tokio::test]
+async fn run_flow_branch_budget_exhaustion_fails_with_receipt() {
+    let mut mgr = SessionManager::new();
+    let flow = json!({
+        "max_steps": 4,
+        "steps": [
+            { "id": "loop", "op": "eval", "args": { "script": "1" }, "save": "n" },
+            { "op": "branch", "args": { "when": { "var": "n", "is": "truthy" }, "goto": "loop" } },
+        ]
+    });
+    let receipt = run_flow(&mut mgr, &flow, &Map::new(), None).await;
+    assert_eq!(receipt["status"], "failed");
+    let reason = receipt["reason"].as_str().unwrap();
+    assert!(reason.contains("budget"), "reason: {reason}");
+    assert_eq!(receipt["steps_done"], 4);
+    let sid = receipt["session_id"].as_str().unwrap().to_string();
+    assert!(mgr.close_and_wait(&sid).await);
+}
+
+/// Preflight failures reject before any session exists: unknown goto,
+/// duplicate id, unknown when.is — same no-session shape as create-block
+/// and args validation failures.
+#[tokio::test]
+async fn run_flow_branch_preflight_rejects_before_session() {
+    let mut mgr = SessionManager::new();
+    let before = mgr.list().len();
+    for bad in [
+        json!([ { "op": "branch", "args": { "when": { "var": "n", "is": "truthy" }, "goto": "nowhere" } } ]),
+        json!([
+            { "id": "a", "op": "eval", "args": { "script": "1" } },
+            { "id": "a", "op": "eval", "args": { "script": "1" } },
+        ]),
+        json!([
+            { "id": "a", "op": "eval", "args": { "script": "1" } },
+            { "op": "branch", "args": { "when": { "var": "n", "is": "mystery" }, "goto": "a" } },
+        ]),
+    ] {
+        let flow = json!({ "steps": bad });
+        let receipt = run_flow(&mut mgr, &flow, &Map::new(), None).await;
+        assert_eq!(receipt["status"], "failed", "receipt: {receipt}");
+        assert!(receipt["session_id"].is_null());
+        assert_eq!(receipt["steps_done"], 0);
+    }
+    assert_eq!(mgr.list().len(), before);
+}
+
+/// A typo'd condition var fails AT the branch step, loudly — not a silent
+/// false that skips the guarded steps.
+#[tokio::test]
+async fn run_flow_branch_unknown_var_fails_at_the_branch() {
+    let mut mgr = SessionManager::new();
+    let flow = json!({
+        "steps": [
+            { "op": "branch", "args": { "when": { "var": "never_saved", "is": "truthy" }, "goto": "x" } },
+            { "id": "x", "op": "eval", "args": { "script": "1" } },
+        ]
+    });
+    let receipt = run_flow(&mut mgr, &flow, &Map::new(), None).await;
+    assert_eq!(receipt["status"], "failed");
+    assert_eq!(receipt["failed_step"], 0);
+    let reason = receipt["reason"].as_str().unwrap();
+    assert!(reason.contains("never_saved"), "reason: {reason}");
+    let sid = receipt["session_id"].as_str().unwrap().to_string();
+    assert!(mgr.close_and_wait(&sid).await);
+}
+
+/// The verdict-then-branch shape (issues #72 + #73 composing): verdict
+/// saves its fact sheet, a forward branch skips the retry steps when the
+/// page is clean. A fresh about:blank session with zero traffic reads
+/// verdict "empty".
+#[tokio::test]
+async fn run_flow_verdict_step_branches_on_the_fact_sheet() {
+    let mut mgr = SessionManager::new();
+    let flow = json!({
+        "create": { "url": "about:blank" },
+        "steps": [
+            { "op": "verdict", "save": "v" },
+            { "op": "branch", "args": {
+                "when": { "var": "v.verdict", "is": "equals", "value": "empty" },
+                "goto": "done"
+            } },
+            { "op": "eval", "args": { "script": "'retry-was-run'" }, "save": "wrong" },
+            { "id": "done", "op": "eval", "args": { "script": "'verified'" }, "save": "tail" },
+        ]
+    });
+    let receipt = run_flow(&mut mgr, &flow, &Map::new(), None).await;
+    assert_eq!(receipt["status"], "ok", "receipt: {receipt}");
+    assert_eq!(receipt["saved"]["v"]["verdict"], "empty");
+    assert!(receipt["saved"].get("wrong").is_none(), "branch skipped the retry step");
+    assert_eq!(receipt["saved"]["tail"], "verified");
     let sid = receipt["session_id"].as_str().unwrap().to_string();
     assert!(mgr.close_and_wait(&sid).await);
 }

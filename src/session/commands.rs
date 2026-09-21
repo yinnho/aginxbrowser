@@ -203,6 +203,15 @@ pub enum SessionCommand {
     Challenges {
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// The decision-layer fact sheet (issue #73): classify where the
+    /// session landed — challenge/captcha/login/empty/landed/unknown —
+    /// from signals the engine already holds (current URL, risk-control
+    /// rows, main-document status/size, console errors). Read-only, no
+    /// page evals. Reply is the verdict.rs fact sheet:
+    /// `{verdict, url, facts, signals, elapsed_ms[, account][, handoff]}`.
+    Verdict {
+        reply: oneshot::Sender<Result<String, String>>,
+    },
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]

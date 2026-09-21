@@ -31,9 +31,22 @@
       }
     },
     {
+      "op": "verdict",
+      "save": "v",
+      "note": "decision layer: classify where the ping-pong wait landed (issue #73) — the xiaohongshu.com/login rule reads the 401 bounce as login; upload-content reads landed"
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": { "var": "v.verdict", "is": "in", "value": ["login", "challenge", "captcha", "empty"] },
+        "goto": "takeover"
+      },
+      "note": "walled/dead-login → jump to the takeover throw instead of grinding the 20s upload-content wait into a timeout that names nothing (issue #72)"
+    },
+    {
       "op": "eval",
       "args": {
-        "script": "// xhs-post step 2: login-wall telemetry — no expect here: the 401 redirect ping-pongs (login bounces back via lastUrl, then 401 again), so a point-in-time URL check can pass mid-pong; the hard gate is the next wait's positive signal\nJSON.stringify({url: location.href, need_login: location.href.includes('/login'), title: document.title})"
+        "script": "// xhs-post step 2: login-wall telemetry — no expect here: the 401 redirect ping-pongs (login bounces back via lastUrl, then 401 again), so a point-in-time URL check can pass mid-pong; the hard gate was the verdict branch above\nJSON.stringify({url: location.href, need_login: location.href.includes('/login'), title: document.title})"
       },
       "save": "wall"
     },
@@ -97,6 +110,29 @@
       },
       "save": "verify",
       "note": "positive assertion: the success page, explicitly excluding /login — the old negative form (!includes('/publish/publish')) counted the 401 login bounce as success (false green, real-send 2026-09-19)"
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": { "var": "v.verdict", "is": "not_in", "value": ["login", "challenge", "captcha", "empty"] },
+        "goto": "end"
+      },
+      "note": "complement of the verdict gate: clean run → jump past the takeover throw to the end marker (fall-through would otherwise execute it)"
+    },
+    {
+      "id": "takeover",
+      "op": "eval",
+      "args": {
+        "script": "throw new Error('xhs verdict gate: verdict=' + JSON.stringify({{v}}) + ' — cookie expired or risk wall. Re-import login via import_curl (cookies are short-lived here), then rerun this flow with the revived session_id')"
+      },
+      "save": "takeover",
+      "note": "fail receipt carries the diagnostic screenshot + saved fact sheet; the human takes over from /live?session=<id>"
+    },
+    {
+      "id": "end",
+      "op": "eval",
+      "args": { "script": "'posted'" },
+      "save": "end"
     }
   ]
 }

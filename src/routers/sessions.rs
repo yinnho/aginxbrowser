@@ -539,6 +539,11 @@ pub(crate) struct FlowRunBody {
     /// fresh one — how login state and flows compose.
     #[serde(default)]
     session_id: Option<String>,
+    /// Override the run's step-execution budget (branch loops re-run steps,
+    /// so every revisit counts). Default 1000, clamped 1..=100000; wins over
+    /// any max_steps the flow document declares.
+    #[serde(default)]
+    max_steps: Option<u64>,
 }
 
 /// Run a flow — a recorded/edited JSON session script — to completion with
@@ -546,8 +551,13 @@ pub(crate) struct FlowRunBody {
 /// `status:failed` + the failing step, reason, and a diagnostic screenshot
 /// (the session stays alive for manual takeover).
 pub(crate) async fn flow_run_handler(Json(body): Json<FlowRunBody>) -> Result<impl IntoResponse, AppError> {
-    let doc =
+    let mut doc =
         flow::resolve_flow_doc(body.flow, body.name.as_deref()).map_err(AppError::BadRequest)?;
+    // Caller budget wins over the document's own max_steps — one read path
+    // inside run_flow.
+    if let (Some(ms), Some(obj)) = (body.max_steps, doc.as_object_mut()) {
+        obj.insert("max_steps".into(), serde_json::json!(ms));
+    }
     let vars = body
         .vars
         .and_then(|v| v.as_object().cloned())
@@ -629,6 +639,25 @@ pub(crate) async fn session_challenges_handler(
         .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| AppError::Internal(format!("challenges parse error: {}", e)))?;
+    Ok((StatusCode::OK, Json(val)))
+}
+
+/// The decision-layer fact sheet (issue #73): one call classifies where
+/// the session landed — `challenge` (risk control engaged, human
+/// handoff), `captcha`, `login`, `empty`, `landed`, or `unknown` (a
+/// non-2xx document lands here with its status in `facts`). Pure code
+/// over signals the engine already holds; no screenshots, no page
+/// evals, no model.
+pub(crate) async fn session_verdict_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    let text = mgr
+        .send(&id, |reply| session::SessionCommand::Verdict { reply })
+        .await
+        .map_err(session_err)?;
+    let val: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| AppError::Internal(format!("verdict parse error: {}", e)))?;
     Ok((StatusCode::OK, Json(val)))
 }
 
