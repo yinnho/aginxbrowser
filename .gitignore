@@ -31,5 +31,8 @@ cache.db-wal
 # Local vendored source trees pulled for reference (e.g. deno_core during musl port)
 vendor/
 
+# Reports/notes stay local — docs under docs/ are never committed (user rule, 2026-09-22)
+docs/**/*.md
+
 # localStorage persistence test artifact (runtime state, must never rsync to hosted instance)
 /localStorage/
