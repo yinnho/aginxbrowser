@@ -6374,11 +6374,27 @@ fn op_url_encode_query(#[string] query: &str, #[string] label: &str, special: bo
     crate::diting_net::url_encode_query(query, label, special).unwrap_or_else(|| query.to_string())
 }
 
+/// (#78) Sub-ms wall clock for performance.now(). Chrome coarsens the timer
+/// to 100µs (non-crossOriginIsolated) and reports floats; an integral
+/// Date.now()-based value is a timing-entropy tell on the jsvmp environment
+/// scan path. Quantized to 0.1ms steps — epoch-ms times ten stays well under
+/// 2^53, so the f64 rounding is exact (finer quantization would not be).
+#[op2(fast)]
+fn op_clock_ms() -> f64 {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+        * 1000.0;
+    (ms * 10.0).round() / 10.0
+}
+
 pub fn build_extension() -> Extension {
     Extension {
         name: "diting_dom",
         ops: std::borrow::Cow::Owned(vec![
             op_dom(),
+            op_clock_ms(),
             op_shadow_attach(),
             op_console_msg(),
             op_dialog(),

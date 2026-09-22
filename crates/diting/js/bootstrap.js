@@ -210,6 +210,19 @@ function __hideOwn(o) {
   }
   return o;
 }
+// (#78) Event-listener registries must be invisible to page JS: the XHS
+// jsvmp environment scan reads `document._listeners` directly, and a Symbol
+// key doesn't help (getOwnPropertySymbols still enumerates it). Element
+// already keeps its registry in the module-level _eventRegistry; these
+// classes (Document, NetworkInformation, XHR family, iframes, MSE, Worker,
+// FileReader) store theirs in this WeakMap instead — invisible to every
+// form of property enumeration, exactly like Chrome's native slots.
+const __evtStore = new WeakMap();
+function __lmap(t) {
+  let m = __evtStore.get(t);
+  if (!m) { m = {}; __evtStore.set(t, m); }
+  return m;
+}
 // (#31) Web IDL exposes public attributes on the PROTOTYPE as accessor pairs;
 // instances carry nothing (Object.keys(new WebSocket(...)) is [] in Chrome).
 // Constructors keep their plain `this.x = ...` writes — those route through
@@ -5341,18 +5354,20 @@ class Document extends Node {
   createRange() { return new Range(); }
   addEventListener(type, fn, opts) {
     if (typeof fn !== 'function') return;
-    if (!this._listeners) __def(this, '_listeners', {});
-    if (!this._listeners[type]) this._listeners[type] = [];
-    if (!this._listeners[type].includes(fn)) this._listeners[type].push(fn);
+    const L = __lmap(this);
+    if (!L[type]) L[type] = [];
+    if (!L[type].includes(fn)) L[type].push(fn);
   }
   removeEventListener(type, fn) {
-    if (this._listeners?.[type]) {
-      this._listeners[type] = this._listeners[type].filter(h => h !== fn);
+    const L = __evtStore.get(this);
+    if (L && L[type]) {
+      L[type] = L[type].filter(h => h !== fn);
     }
   }
   dispatchEvent(event) {
     if (!event) return true;
-    const handlers = (this._listeners?.[event.type] || []).slice();
+    const L = __evtStore.get(this);
+    const handlers = ((L && L[event.type]) || []).slice();
     for (const h of handlers) { try { h.call(this, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); } }
     return !event.defaultPrevented;
   }
@@ -6306,7 +6321,7 @@ let _pluginsInst = null, _mimeTypesInst = null;
 // `navigator.connection.addEventListener` threw). dispatchEvent also runs
 // the matching on* property handler, like a real EventTarget.
 class NetworkInformation {
-  constructor() { this._listeners = Object.create(null);  __hideOwn(this);}
+  constructor() { __lmap(this); }
   get downlink() { return 10; }
   get downlinkMax() { return Infinity; }
   get effectiveType() { return '4g'; }
@@ -6319,15 +6334,18 @@ class NetworkInformation {
   set ontypechange(v) { this._ontypechange = typeof v === "function" ? v : null; }
   addEventListener(type, listener) {
     if (typeof listener !== "function") return;
-    (this._listeners[type] || (this._listeners[type] = [])).push(listener);
+    const L = __lmap(this);
+    (L[type] || (L[type] = [])).push(listener);
   }
   removeEventListener(type, listener) {
-    const listeners = this._listeners[type];
-    if (listeners) this._listeners[type] = listeners.filter((item) => item !== listener);
+    const L = __evtStore.get(this);
+    const listeners = L && L[type];
+    if (listeners) L[type] = listeners.filter((item) => item !== listener);
   }
   dispatchEvent(event) {
     if (!event || !event.type) return true;
-    for (const listener of this._listeners[event.type] || []) {
+    const L = __evtStore.get(this);
+    for (const listener of (L && L[event.type]) || []) {
       try { listener.call(this, event); } catch (error) { console.error(error); }
     }
     const handler = this["on" + event.type];
@@ -6616,7 +6634,10 @@ globalThis.navigator = {
   doNotTrack: null,
   deviceMemory: 8,
   connection: new NetworkInformation(),
-  get webdriver() { return undefined; },
+  // (#78) Chrome's NavigatorAutomationInformation always defines webdriver
+  // and reads false on a normal session — `undefined` is the odd one out and
+  // a jsvmp scan tell.
+  get webdriver() { return false; },
   pdfViewerEnabled: true,
   get plugins() {
     if (!_pluginsInst) {
@@ -6754,6 +6775,11 @@ globalThis.navigator = {
     persisted() { return Promise.resolve(false); },
   },
 };
+// (#78) Interface tags: Chrome reports "[object Navigator]" /
+// "[object Window]" — a plain "[object Object]" is a jsvmp environment-scan
+// tell. Data props defined here survive the V8 snapshot (#37).
+__def(navigator, Symbol.toStringTag, 'Navigator');
+__def(globalThis, Symbol.toStringTag, 'Window');
 
 // Key order matches real Chrome's Object.keys(chrome) = ["loadTimes","csi","app","runtime"]
 // (DataDome-class fingerprints read key order, not just membership).
@@ -7252,13 +7278,14 @@ if (typeof Headers === "undefined") {
 // removeEventListener/dispatchEvent descriptors before falling back to XHR.prototype.
 class XMLHttpRequestEventTarget {
   addEventListener(type, handler) {
-    if (!this._listeners) __def(this, '_listeners', {});
-    if (!this._listeners[type]) this._listeners[type] = [];
-    this._listeners[type].push(handler);
+    const L = __lmap(this);
+    if (!L[type]) L[type] = [];
+    L[type].push(handler);
   }
   removeEventListener(type, handler) {
-    if (this._listeners && this._listeners[type]) {
-      this._listeners[type] = this._listeners[type].filter(h => h !== handler);
+    const L = __evtStore.get(this);
+    if (L && L[type]) {
+      L[type] = L[type].filter(h => h !== handler);
     }
   }
   dispatchEvent(event) {
@@ -7267,7 +7294,8 @@ class XMLHttpRequestEventTarget {
     ev.target = ev.target || this;
     ev.currentTarget = ev.currentTarget || this;
     const type = ev.type;
-    const handlers = (this._listeners && this._listeners[type]) || [];
+    const L = __evtStore.get(this);
+    const handlers = (L && L[type]) || [];
     for (const h of handlers) { try { h.call(this, ev); } catch (e) {} }
     const prop = 'on' + type;
     if (typeof this[prop] === 'function') {
@@ -7308,7 +7336,7 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     this._headers = {};
     this._responseHeaders = {};
     this._aborted = false;
-    this._listeners = {};
+    __lmap(this);
     this.onreadystatechange = null;
     this.onload = null;
     this.onerror = null;
@@ -7633,13 +7661,15 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
   }
 
   addEventListener(type, handler) {
-    if (!this._listeners[type]) this._listeners[type] = [];
-    this._listeners[type].push(handler);
+    const L = __lmap(this);
+    if (!L[type]) L[type] = [];
+    L[type].push(handler);
   }
 
   removeEventListener(type, handler) {
-    if (this._listeners[type]) {
-      this._listeners[type] = this._listeners[type].filter(h => h !== handler);
+    const L = __evtStore.get(this);
+    if (L && L[type]) {
+      L[type] = L[type].filter(h => h !== handler);
     }
   }
 
@@ -7651,7 +7681,8 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     ev.target = ev.target || this;
     ev.currentTarget = ev.currentTarget || this;
     const type = ev.type;
-    const handlers = (this._listeners && this._listeners[type]) || [];
+    const L = __evtStore.get(this);
+    const handlers = (L && L[type]) || [];
     for (const h of handlers) { try { h.call(this, ev); } catch (e) {} }
     const prop = 'on' + type;
     if (typeof this[prop] === 'function') {
@@ -7670,7 +7701,8 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
 
   _fireEvent(type) {
     const event = { type, target: this, currentTarget: this, bubbles: false };
-    const handlers = this._listeners[type] || [];
+    const L = __evtStore.get(this);
+    const handlers = (L && L[type]) || [];
     for (const h of handlers) { try { h.call(this, event); } catch(e) {} }
     const prop = 'on' + type;
     if (type !== 'readystatechange' && typeof this[prop] === 'function') {
@@ -10453,7 +10485,11 @@ class _Performance {
     __hideOwn(this);
   }
   now() {
-    var ms = Date.now() - (this.timeOrigin || 0);
+    // (#78) Chrome reports sub-ms floats (100µs coarsening); an integral
+    // Date.now() delta is a timing-entropy tell on the jsvmp scan path.
+    // The monotonic contract in the comment above still holds — _perfLast
+    // floors any regression.
+    var ms = _OPS.op_clock_ms() - (this.timeOrigin || 0);
     if (ms < _perfLast) return _perfLast;
     _perfLast = ms;
     return _perfLast;
@@ -12181,12 +12217,13 @@ class _IframeDocument {
   // like silently did nothing (upstream #478).
   addEventListener(type, listener) {
     if (typeof listener !== 'function') return;
-    if (!this._listeners) __def(this, '_listeners', Object.create(null));
-    const list = this._listeners[type] || (this._listeners[type] = []);
+    const L = __lmap(this);
+    const list = L[type] || (L[type] = []);
     if (!list.includes(listener)) list.push(listener);
   }
   removeEventListener(type, listener) {
-    const list = this._listeners && this._listeners[type];
+    const L = __evtStore.get(this);
+    const list = L && L[type];
     if (!list) return;
     const index = list.indexOf(listener);
     if (index !== -1) list.splice(index, 1);
@@ -12194,7 +12231,8 @@ class _IframeDocument {
   dispatchEvent(event) {
     const type = event && event.type;
     if (!type) return true;
-    const list = this._listeners && this._listeners[type];
+    const L = __evtStore.get(this);
+    const list = L && L[type];
     if (list) {
       for (const listener of list.slice()) {
         try { listener.call(this, event); } catch (error) { console.error(error); }
@@ -12302,17 +12340,19 @@ class _IframeWindow {
   requestAnimationFrame(fn) { return globalThis.requestAnimationFrame(fn); }
 
   addEventListener(type, fn) {
-    if (!this._listeners) __def(this, '_listeners', {});
-    if (!this._listeners[type]) this._listeners[type] = [];
-    this._listeners[type].push(fn);
+    const L = __lmap(this);
+    if (!L[type]) L[type] = [];
+    L[type].push(fn);
   }
   removeEventListener(type, fn) {
-    if (this._listeners?.[type]) {
-      this._listeners[type] = this._listeners[type].filter(h => h !== fn);
+    const L = __evtStore.get(this);
+    if (L && L[type]) {
+      L[type] = L[type].filter(h => h !== fn);
     }
   }
   dispatchEvent(event) {
-    const handlers = this._listeners?.[event?.type] || [];
+    const L = __evtStore.get(this);
+    const handlers = (L && L[event?.type]) || [];
     for (const h of handlers) { try { h.call(this, event); } catch(e) {} }
     return true;
   }
@@ -12786,12 +12826,13 @@ class _SourceBufferList extends Array {
 // onupdate/onupdateend/onerror/onabort are standard IDL attributes.
 class _MseEventTarget {
   addEventListener(type, handler) {
-    if (!this._listeners) this._listeners = {};
-    (this._listeners[type] || (this._listeners[type] = [])).push(handler);
+    const L = __lmap(this);
+    (L[type] || (L[type] = [])).push(handler);
   }
   removeEventListener(type, handler) {
-    if (this._listeners && this._listeners[type]) {
-      this._listeners[type] = this._listeners[type].filter(h => h !== handler);
+    const L = __evtStore.get(this);
+    if (L && L[type]) {
+      L[type] = L[type].filter(h => h !== handler);
     }
   }
   dispatchEvent(event) {
@@ -12799,7 +12840,8 @@ class _MseEventTarget {
     const ev = (typeof event === 'object') ? event : { type: event };
     ev.target = ev.target || this;
     ev.currentTarget = ev.currentTarget || this;
-    const handlers = (this._listeners && this._listeners[ev.type]) || [];
+    const L = __evtStore.get(this);
+    const handlers = (L && L[ev.type]) || [];
     for (const h of handlers) { try { h.call(this, ev); } catch (e) {} }
     const prop = 'on' + ev.type;
     if (typeof this[prop] === 'function') {
@@ -14042,7 +14084,7 @@ globalThis.Worker = class Worker {
     this.onmessage = null;
     this.onerror = null;
     this._terminated = false;
-    this._listeners = {};
+    __lmap(this);
     this._code = null;
     this._codeReady = false;
     this._pending = null;
@@ -14086,7 +14128,7 @@ globalThis.Worker = class Worker {
       try { bootWorker(worker); }
       catch (e) {
         console.error('Worker error:', e.message);
-        fireWorkerError(worker, e, worker._listeners);
+        fireWorkerError(worker, e, __evtStore.get(worker));
       }
       // Drain messages that queued while the source loaded. Delivery here
       // runs as a microtask at the next JS yield - immune to macro-task
@@ -14099,7 +14141,7 @@ globalThis.Worker = class Worker {
         if (m && !m.delivered) {
           m.delivered = true;
           if (code) runWorkerMessage(worker, m.data);
-          else fireWorkerError(worker, worker._fetchError || new Error('Worker script failed to load or execute (no message from browser)'), worker._listeners);
+          else fireWorkerError(worker, worker._fetchError || new Error('Worker script failed to load or execute (no message from browser)'), __evtStore.get(worker));
         }
       }
     });
@@ -14125,7 +14167,7 @@ globalThis.Worker = class Worker {
       msg.delivered = true;
       if (!worker._code) {
         const err = worker._fetchError || new Error('Worker script failed to load or execute (no message from browser)');
-        fireWorkerError(worker, err, worker._listeners);
+        fireWorkerError(worker, err, __evtStore.get(worker));
         return;
       }
       runWorkerMessage(worker, data);
@@ -14134,11 +14176,13 @@ globalThis.Worker = class Worker {
   }
   terminate() { this._terminated = true; }
   addEventListener(type, fn) {
-    if (!this._listeners[type]) this._listeners[type] = [];
-    this._listeners[type].push(fn);
+    const L = __lmap(this);
+    if (!L[type]) L[type] = [];
+    L[type].push(fn);
   }
   removeEventListener(type, fn) {
-    if (this._listeners[type]) this._listeners[type] = this._listeners[type].filter(h => h !== fn);
+    const L = __evtStore.get(this);
+    if (L && L[type]) L[type] = L[type].filter(h => h !== fn);
   }
 };
 // importScripts() is synchronous per spec, but the only I/O this realm can
@@ -14214,7 +14258,8 @@ function bootWorker(worker) {
           postMessage: (msg) => {
             const evt = { data: msg };
             if (worker.onmessage) worker.onmessage(evt);
-            const handlers = worker._listeners['message'] || [];
+            const wl = __evtStore.get(worker);
+            const handlers = (wl && wl['message']) || [];
             for (const h of handlers) h(evt);
           },
           addEventListener: (type, fn) => { workerSelf['on' + type] = fn; },
@@ -14231,11 +14276,13 @@ function bootWorker(worker) {
           clearInterval: globalThis.clearInterval,
           fetch: globalThis.fetch,
           console: globalThis.console,
-          performance: { now: () => Date.now(), timeOrigin: globalThis.performance?.timeOrigin || 0 },
+          performance: { now: () => globalThis.performance.now(), timeOrigin: globalThis.performance?.timeOrigin || 0 },
           location: { href: (globalThis.location && globalThis.location.href) || 'https://example.com/', origin: (globalThis.location && globalThis.location.origin) || 'https://example.com', protocol: 'https:', host: (globalThis.location && globalThis.location.host) || 'example.com', hostname: (globalThis.location && globalThis.location.hostname) || 'example.com', port: '', pathname: '/', search: '', hash: '', toString() { return this.href; } },
           // Worker Navigator must mirror the page persona: collectors
           // cross-check platform/userAgent against the main-thread values.
-          navigator: { hardwareConcurrency: globalThis.navigator.hardwareConcurrency, userAgent: globalThis.navigator.userAgent, appVersion: globalThis.navigator.appVersion, platform: globalThis.navigator.platform, language: globalThis.navigator.language, languages: globalThis.navigator.languages, deviceMemory: globalThis.navigator.deviceMemory, onLine: true },
+          // WorkerNavigator includes NavigatorAutomationInformation too:
+          // webdriver is defined and false there, same as the main thread (#78).
+          navigator: { hardwareConcurrency: globalThis.navigator.hardwareConcurrency, userAgent: globalThis.navigator.userAgent, appVersion: globalThis.navigator.appVersion, platform: globalThis.navigator.platform, language: globalThis.navigator.language, languages: globalThis.navigator.languages, deviceMemory: globalThis.navigator.deviceMemory, webdriver: false, onLine: true },
           Request: globalThis.Request, Response: globalThis.Response,
           Headers: globalThis.Headers, Blob: globalThis.Blob,
           FormData: globalThis.FormData, URL: globalThis.URL,
@@ -14285,7 +14332,7 @@ function runWorkerMessage(worker, data) {
     if (worker._workerSelf.onmessage) worker._workerSelf.onmessage({ data });
   } catch(e) {
     console.error('Worker error:', e.message);
-    fireWorkerError(worker, e, worker._listeners);
+    fireWorkerError(worker, e, __evtStore.get(worker));
   }
 }
 
@@ -15164,7 +15211,7 @@ if (typeof FileReader === 'undefined') {
       this.result = null; this.error = null; this.readyState = 0; // EMPTY
       this.onloadstart = null; this.onprogress = null; this.onload = null;
       this.onabort = null; this.onerror = null; this.onloadend = null;
-      this._listeners = {};
+      __lmap(this);
       __hideOwn(this);
     }
     get [Symbol.toStringTag]() { return "FileReader"; }
@@ -15200,10 +15247,10 @@ if (typeof FileReader === 'undefined') {
     _fire(type) {
       const ev = { type: type, target: this, currentTarget: this, lengthComputable: false, loaded: 0, total: 0 };
       const h = this["on" + type]; if (typeof h === "function") { try { h.call(this, ev); } catch (e) {} }
-      const ls = this._listeners[type]; if (ls) for (const fn of ls.slice()) { try { fn.call(this, ev); } catch (e) {} }
+      const ls = __evtStore.get(this)?.[type]; if (ls) for (const fn of ls.slice()) { try { fn.call(this, ev); } catch (e) {} }
     }
-    addEventListener(t, fn) { if (typeof fn === "function") (this._listeners[t] = this._listeners[t] || []).push(fn); }
-    removeEventListener(t, fn) { const ls = this._listeners[t]; if (ls) { const i = ls.indexOf(fn); if (i >= 0) ls.splice(i, 1); } }
+    addEventListener(t, fn) { if (typeof fn === "function") { const L = __lmap(this); (L[t] = L[t] || []).push(fn); } }
+    removeEventListener(t, fn) { const ls = __evtStore.get(this)?.[t]; if (ls) { const i = ls.indexOf(fn); if (i >= 0) ls.splice(i, 1); } }
     dispatchEvent() { return true; }
   };
   globalThis.FileReader.EMPTY = 0; globalThis.FileReader.LOADING = 1; globalThis.FileReader.DONE = 2;
@@ -15900,7 +15947,8 @@ globalThis.__diting_init = function() {
   // got a zero-duration page, which is its own automation tell.
   const dcl = 60 + Math.floor(_fpRand(642) * 540);
   const load = dcl + 40 + Math.floor(_fpRand(643) * 760);
-  globalThis.performance.timeOrigin = t0;
+  // (#78) Chrome's timeOrigin is a float; navigationStart stays integral.
+  globalThis.performance.timeOrigin = t0 + _fpRand(644) * 0.9;
   globalThis.performance.timing = {
     navigationStart: t0,
     fetchStart: t0 + 1, domainLookupStart: t0 + 2, domainLookupEnd: t0 + 12,

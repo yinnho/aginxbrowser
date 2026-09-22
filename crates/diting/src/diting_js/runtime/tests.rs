@@ -5128,11 +5128,63 @@
         let ua = rt.evaluate("navigator.userAgent").unwrap();
         assert!(ua.as_str().unwrap().contains("Chrome"), "UA should contain Chrome: {}", ua);
         let wd = rt.evaluate("navigator.webdriver").unwrap();
-        assert_eq!(wd, serde_json::Value::Null);
+        // (#78) Chrome defines webdriver (NavigatorAutomationInformation) and
+        // it reads false on a normal session — `undefined` was the outlier.
+        assert_eq!(wd, serde_json::json!(false));
         let plugins = rt.evaluate("navigator.plugins.length").unwrap();
         assert!(plugins.as_f64().unwrap() > 0.0, "Should have plugins");
         let chrome = rt.evaluate("typeof window.chrome").unwrap();
         assert_eq!(chrome, serde_json::json!("object"));
+    }
+
+    #[test]
+    fn test_issue_78_jsvmp_env_scan_face() {
+        // The XHS jsvmp environment scan reads these four faces directly; all
+        // must match Chrome (issue #78): listener registries invisible
+        // (WeakMap storage — a Symbol key would still be enumerable),
+        // webdriver defined-and-false, sub-ms floats from a 100µs-quantized
+        // clock, and interface toStringTags on navigator/window.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt.evaluate(r#"
+            document.addEventListener('x', function () {});
+            navigator.connection.addEventListener('change', function () {});
+            const xhr = new XMLHttpRequest();
+            xhr.addEventListener('load', function () {});
+            const fr = new FileReader();
+            fr.addEventListener('load', function () {});
+            // A ~3ms busy-wait window spans >=30 100µs ticks, so a sub-ms
+            // fraction must show up. Sampling a fixed count instead can land
+            // every read on one integral tick and flake ~10% of runs.
+            const start = performance.now();
+            let sawFraction = false, guard = 0;
+            while (performance.now() - start < 3 && guard < 2000000) {
+                if (performance.now() % 1 !== 0) { sawFraction = true; break; }
+                guard++;
+            }
+            const to = performance.timeOrigin;
+            const ns = performance.timing.navigationStart;
+            const originSane = to >= ns && to < ns + 1;
+            return [
+                typeof document._listeners,
+                typeof navigator.connection._listeners,
+                typeof xhr._listeners,
+                typeof fr._listeners,
+                typeof navigator.webdriver,
+                Object.prototype.toString.call(navigator),
+                Object.prototype.toString.call(window),
+                sawFraction,
+                originSane,
+                Number.isInteger(ns),
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                "undefined", "undefined", "undefined", "undefined",
+                "boolean", "[object Navigator]", "[object Window]",
+                true, true, true,
+            ])
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
