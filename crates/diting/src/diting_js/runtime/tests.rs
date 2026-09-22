@@ -1610,6 +1610,51 @@
         assert_eq!(parts[5], serde_json::json!(true), "host height tracks shadow content");
     }
 
+    /// obscura#1050 class: nested flex containers sized only by intrinsic
+    /// content (no explicit heights, `min-height:auto` items) must not
+    /// collapse to 0 height, and an open `<dialog>` must box its content
+    /// instead of a hairline. Pins taffy's intrinsic auto-sizing through two
+    /// nested flex levels plus dialog layout.
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn nested_flex_autosize_and_open_dialog_do_not_collapse() {
+        let mut rt = setup_runtime(r#"
+            <div id="outer" style="display:flex">
+              <div id="mid" style="display:flex;flex-direction:column">
+                <div id="leaf" style="height:40px;width:120px"></div>
+              </div>
+            </div>
+            <dialog id="d" open><span id="dspan" style="display:block;height:30px;width:100px">x</span></dialog>
+        "#);
+        let result = rt.evaluate(r#"
+            const q = (id) => document.getElementById(id).getBoundingClientRect();
+            const mid = q('mid'), outer = q('outer'), leaf = q('leaf'), d = q('d');
+            return [leaf.height, mid.height, outer.height, d.height, d.width];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        assert_eq!(parts[0], serde_json::json!(40), "leaf keeps its explicit height");
+        assert_eq!(
+            parts[1],
+            serde_json::json!(40),
+            "column flex item wraps its content — no 0px collapse"
+        );
+        assert_eq!(
+            parts[2],
+            serde_json::json!(40),
+            "outer flex row height tracks the column"
+        );
+        assert!(
+            parts[3].as_f64().unwrap() >= 30.0,
+            "open dialog boxes its content, got {}",
+            parts[3]
+        );
+        assert!(
+            parts[4].as_f64().unwrap() >= 100.0,
+            "dialog width tracks content, got {}",
+            parts[4]
+        );
+    }
+
     /// Slot composition: slotted light children render AT their slot's
     /// position inside the shadow tree, and a slot with no assignment serves
     /// its fallback children in place.

@@ -603,6 +603,57 @@ ms.addEventListener('sourceopen', function(){ \
         );
     }
 
+    /// obscura#1049 class: a subresource server answering `<script src>`
+    /// with `Content-Disposition: attachment` still serves the bytes as the
+    /// script body — real CDN assets do this (LinkedIn's static.licdn.com),
+    /// and a loader that routes disposition-attachment responses to a
+    /// "download" branch hands the script engine 0 bytes instead. Our
+    /// subresource path never inspects the header (only /download and
+    /// multipart FormData parsing do); this live probe pins that.
+    #[tokio::test(flavor = "current_thread")]
+    async fn subresource_script_with_attachment_disposition_executes() {
+        let _g = net_test_guard();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for _ in 0..8 {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let path = String::from_utf8_lossy(&buf[..n])
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_string();
+                let (extra_headers, body) = if path == "/app.js" {
+                    (
+                        "content-type: application/javascript\r\ncontent-disposition: attachment; filename=\"app.js\"\r\n",
+                        "window.__cd = 41;".as_bytes().to_vec(),
+                    )
+                } else {
+                    (
+                        "content-type: text/html\r\n",
+                        r#"<html><body><script src="/app.js"></script></body></html>"#.as_bytes().to_vec(),
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\n{extra_headers}content-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
+        });
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/")).await.unwrap();
+        // If the disposition header ever routed the subresource away from the
+        // script engine, this reads null (0-byte body) instead of 41.
+        assert_eq!(p.evaluate("window.__cd"), serde_json::json!(41.0));
+    }
+
     /// obscura#664 class: the navigation-chain cap counts documents, not
     /// HTTP redirects, and an operator with a legitimate long chain (SSO
     /// handover across several providers) must be able to raise it. Env
