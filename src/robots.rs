@@ -62,6 +62,12 @@ const NEGATIVE_TTL: Duration = Duration::from_secs(300);
 const MAX_ROBOTS_BYTES: usize = 512 * 1024;
 const MAX_LINE_BYTES: usize = 1000;
 
+/// Cap on cached origins. A long-lived process (the hosted instance fetches
+/// arbitrary origins per request) must not pin every parsed robots.txt
+/// forever — entries evict least-recently-used past this point (#75,
+/// same-hole as obscura #1061). 512 origins covers any real workload.
+const MAX_CACHE_ORIGINS: usize = 512;
+
 #[derive(Clone, Debug)]
 struct Rule {
     allow: bool,
@@ -82,10 +88,52 @@ enum Policy {
 struct Cached {
     policy: Policy,
     fetched: Instant,
+    /// LRU clock, assigned on insert and refreshed on hit — eviction picks
+    /// the min. Kept per-entry so the scan stays over a bounded map instead
+    /// of dragging in an ordered structure.
+    used: u64,
 }
 
-static CACHE: LazyLock<tokio::sync::Mutex<HashMap<String, Cached>>> =
-    LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
+/// The map plus its LRU clock. Eviction lives here as plain methods so the
+/// tests can drive it directly without touching the global static.
+#[derive(Default)]
+struct CacheState {
+    map: HashMap<String, Cached>,
+    next_used: u64,
+}
+
+impl CacheState {
+    fn insert(&mut self, key: String, policy: Policy) {
+        self.next_used += 1;
+        let used = self.next_used;
+        self.map.insert(
+            key,
+            Cached { policy, fetched: Instant::now(), used },
+        );
+        // Evict down to the cap. The min-scan only runs on the insert that
+        // crosses it; steady state pays one HashMap lookup per call.
+        while self.map.len() > MAX_CACHE_ORIGINS {
+            let victim = match self.map.iter().min_by_key(|(_, c)| c.used) {
+                Some((k, _)) => k.clone(),
+                None => break,
+            };
+            self.map.remove(&victim);
+        }
+    }
+
+    /// LRU touch on a live hit — without it a hot origin sitting between
+    /// insert waves looks cold by insertion age and gets evicted, sending
+    /// the next request back to refetch (and throttle) the host.
+    fn touch(&mut self, key: &str) {
+        if let Some(c) = self.map.get_mut(key) {
+            self.next_used += 1;
+            c.used = self.next_used;
+        }
+    }
+}
+
+static CACHE: LazyLock<tokio::sync::Mutex<CacheState>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(CacheState::default()));
 
 /// Err(reason) when robots.txt disallows fetching `url`. Only runs at all
 /// when the operator opted in (see [`honor_env`]).
@@ -120,16 +168,18 @@ pub async fn assert_allowed(url: &str) -> Result<(), String> {
         // every request refetch (and hammering hosts into throttling us).
         let cached = {
             let mut cache = CACHE.lock().await;
-            match cache.get(&key) {
+            match cache.map.get(&key) {
                 Some(hit) => {
                     let ttl = match &hit.policy {
                         Policy::DenyAll(_) => NEGATIVE_TTL,
                         _ => positive_ttl(),
                     };
                     if hit.fetched.elapsed() < ttl {
-                        Some(hit.policy.clone())
+                        let policy = hit.policy.clone();
+                        cache.touch(&key);
+                        Some(policy)
                     } else {
-                        cache.remove(&key);
+                        cache.map.remove(&key);
                         None
                     }
                 }
@@ -141,7 +191,7 @@ pub async fn assert_allowed(url: &str) -> Result<(), String> {
             None => {
                 let fetched = fetch_policy(&key).await;
                 let mut cache = CACHE.lock().await;
-                cache.insert(key.clone(), Cached { policy: fetched.clone(), fetched: Instant::now() });
+                cache.insert(key.clone(), fetched.clone());
                 fetched
             }
         }
@@ -671,5 +721,34 @@ mod tests {
             matches!(policy, Policy::Rules(_)),
             "robots fetch must skip the configured proxy for direct origins, got {policy:?}"
         );
+    }
+
+    #[test]
+    fn cache_state_evicts_lru_at_cap() {
+        let mut s = CacheState::default();
+        for i in 0..MAX_CACHE_ORIGINS {
+            s.insert(format!("https://host{i}.example"), Policy::AllowAll);
+        }
+        assert_eq!(s.map.len(), MAX_CACHE_ORIGINS);
+
+        // Touch the first insert — it becomes hot, the second becomes the
+        // eviction victim.
+        s.touch("https://host0.example");
+        s.insert("https://overflow.example".to_string(), Policy::AllowAll);
+
+        assert_eq!(s.map.len(), MAX_CACHE_ORIGINS, "cap holds after overflow insert");
+        assert!(s.map.contains_key("https://host0.example"), "touched (hot) entry survives");
+        assert!(!s.map.contains_key("https://host1.example"), "least-recently-used entry evicted");
+        assert!(s.map.contains_key("https://overflow.example"), "new entry present");
+        assert!(s.map.contains_key(&format!("https://host{}.example", MAX_CACHE_ORIGINS - 1)));
+    }
+
+    #[test]
+    fn cache_state_reinsert_refreshes_not_duplicates() {
+        let mut s = CacheState::default();
+        s.insert("https://a.example".to_string(), Policy::AllowAll);
+        s.insert("https://a.example".to_string(), Policy::DenyAll("refused".into()));
+        assert_eq!(s.map.len(), 1, "same key re-inserts, never duplicates");
+        assert!(matches!(s.map["https://a.example"].policy, Policy::DenyAll(_)));
     }
 }

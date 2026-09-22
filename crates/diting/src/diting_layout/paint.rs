@@ -2585,12 +2585,30 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
     }
 }
 
+/// Effective text-shadow blur ceiling. Past this a shadow is visually
+/// indistinguishable wash — the clamp bounds the scratch tile without
+/// costing any real rendering (#76).
+const MAX_SHADOW_BLUR: f32 = 256.0;
+/// Padded-tile ceiling in pixels (~16 MP: a 4000×4000 tile; an 8000-px
+/// text line at the clamped 256-px radius still fits). Alpha plane + RGBA
+/// copy at this size stay under ~80 MB; anything bigger paints the
+/// unfeathered shadow instead of allocating.
+const MAX_SHADOW_SCRATCH_PX: usize = 16 * 1024 * 1024;
+
 /// One text-shadow layer stamped UNDER the glyphs (blitz#271 family):
 /// re-rasterize the run in the layer color (the RasterCache keys on color,
 /// so shadow layers memo independently), box-blur its alpha when the layer
 /// asks for a blur, and blit at the offset. `affine` selects the
 /// transformed blit (page space; the open bracket folds dx/dy) vs the
 /// band-space rounded blit.
+///
+/// The blur radius feeds the padded scratch tile's size straight from CSS —
+/// `text-shadow: 0 0 100000px` on a short run asks for tens of GB (#76,
+/// obscura #1059 family). Two guards below: clamp the effective radius
+/// (past 256 px a shadow is visually indistinguishable wash) and cap the
+/// padded tile at a scratch budget; an oversized tile paints the
+/// unfeathered shadow instead of allocating. Small-blur rendering is
+/// byte-identical to before (blur well under budget ⇒ same path).
 #[allow(clippy::too_many_arguments)]
 fn stamp_text_shadow(
     out: &mut Canvas,
@@ -2637,10 +2655,22 @@ fn stamp_text_shadow(
     // blur filter (upstream blitz#271 blocks blur on renderer support; the
     // per-pixel path here just does it). The padded buffer gives the
     // feather room so the run tile's edge can't clip it.
-    let pad = sh.blur.ceil() as usize;
-    let radius = ((sh.blur * 0.5).round() as usize).max(1);
-    let pw = r.width + pad * 2;
-    let ph = r.height + pad * 2;
+    let blur = sh.blur.min(MAX_SHADOW_BLUR);
+    let pad = blur.ceil() as usize;
+    let radius = ((blur * 0.5).round() as usize).max(1);
+    let pw = r.width.saturating_add(pad).saturating_add(pad);
+    let ph = r.height.saturating_add(pad).saturating_add(pad);
+    if pw.checked_mul(ph).is_none_or(|px| px > MAX_SHADOW_SCRATCH_PX) {
+        // Even clamped, the tile overshoots the scratch budget (enormous
+        // run + full-radius blur): paint the unfeathered shadow — same
+        // shape the `blur <= 0` path draws — instead of a giant allocation.
+        if affine {
+            out.blit_rgba_affine(&r.data, r.width, r.height, ox, oy + r.top as f64);
+        } else {
+            out.blit_text(&r, ox.round() as i64, (oy + r.top as f64).round() as i64);
+        }
+        return;
+    }
     let mut alpha = vec![0u8; pw * ph];
     for (row, src_row) in r.data.chunks_exact(r.width * 4).enumerate() {
         for (col, p) in src_row.chunks_exact(4).enumerate() {
@@ -4165,6 +4195,59 @@ small_caps: false }]
             }
         }
         assert_eq!(blue, 0, "second-declared blue never surfaces under an identical red");
+    }
+
+    /// #76: the CSS blur radius sizes the padded scratch tile directly, so
+    /// an absurd radius used to mean an absurd allocation
+    /// (`text-shadow: 0 0 100000px` ≈ tens of GB). Two guards, pinned
+    /// behaviorally: the effective radius is clamped (100000 px renders
+    /// pixel-identically to 256 px — same clamped value, same code path),
+    /// and a padded tile past the scratch budget paints the unfeathered
+    /// copy — byte-identical to what blur 0 paints.
+    #[test]
+    fn text_shadow_blur_clamped_and_budgeted() {
+        let fonts = crate::diting_fonts::font_book();
+        let render = |blur: f32| {
+            let mut c = Canvas::new_filled(200, 80, [255, 255, 255, 255]);
+            execute(
+                &shadow_item(vec![TextShadow { dx: 0.0, dy: 14.0, blur, color: crate::diting_css::Color(255, 0, 0, 255) }]),
+                &fonts,
+                &mut c,
+            );
+            reds(&c)
+        };
+        assert_eq!(render(100_000.0), render(MAX_SHADOW_BLUR), "absurd blur clamps to the same effective radius");
+
+        // Budget: a 3000-glyph single-line run (wrap_at beyond the line) at
+        // the clamped radius overshoots the scratch tile budget — the
+        // fallback paints the unfeathered copy, exactly what blur 0 paints.
+        let wide = |blur: f32| {
+            let items = vec![PaintItem::Text {
+                text: "m".repeat(3000),
+                font_size: 16.0,
+                bold: false,
+                color: [0, 0, 0, 255],
+                line_height: 20.0,
+                x: 10.0,
+                y: 20.0,
+                wrap_at: 100_000.0,
+                gradient: None,
+                decorations: TextDecorations::default(),
+                mono: false,
+                word_spacing: 0.0,
+                truncate_at: None,
+                tokens: None,
+                ws: WhiteSpace::Normal,
+                text_shadow: Some(vec![TextShadow { dx: 0.0, dy: 0.0, blur, color: crate::diting_css::Color(255, 0, 0, 255) }]),
+                small_caps: false,
+            }];
+            let mut c = Canvas::new_filled(256, 64, [255, 255, 255, 255]);
+            execute(&items, &fonts, &mut c);
+            reds(&c)
+        };
+        let budgeted = wide(MAX_SHADOW_BLUR);
+        assert_eq!(budgeted, wide(0.0), "budget-overshooting tile paints the unfeathered copy");
+        assert!(!budgeted.is_empty(), "fallback still draws shadow ink");
     }
 
     /// The separable box blur preserves the plane's total mass up to edge
