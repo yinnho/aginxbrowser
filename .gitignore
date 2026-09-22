@@ -23,5 +23,13 @@ skills-lock.json
 # Local publisher tooling binary
 mcp-publisher
 
+# Local fetch/search SQLite cache (runtime state, must never rsync to hosted instance)
+cache.db
+cache.db-shm
+cache.db-wal
+
+# Local vendored source trees pulled for reference (e.g. deno_core during musl port)
+vendor/
+
 # localStorage persistence test artifact (runtime state, must never rsync to hosted instance)
 /localStorage/
