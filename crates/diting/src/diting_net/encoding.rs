@@ -42,7 +42,15 @@ pub fn decode_with_label(label: &str, bytes: &[u8], fatal: bool, ignore_bom: boo
             _ => None,
         }
     } else {
-        let mut out = String::with_capacity(bytes.len() * 2 + 1);
+        // Non-fatal still needs the guaranteed-sufficient bound: legacy
+        // single-byte encodings expand one byte to three UTF-8 bytes
+        // (windows-1252 0x80 = U+20AC) and each malformed sequence becomes a
+        // 3-byte U+FFFD. 2×input+1 runs out and decode_to_string reports
+        // OutputFull — which this path discarded, silently truncating the
+        // result. None (capacity overflow on an absurd size) reports
+        // undecodable instead of truncating.
+        let capacity = dec.max_utf8_buffer_length(bytes.len())?;
+        let mut out = String::with_capacity(capacity);
         let _ = dec.decode_to_string(bytes, &mut out, true);
         Some(out)
     }
@@ -485,6 +493,27 @@ mod tests {
             decode_with_label("gbk", &[0xD6, 0xD0, 0xCE, 0xC4], true, false),
             Some("中文".to_string())
         );
+    }
+
+    #[test]
+    fn nonfatal_decode_capacity_handles_multibyte_output() {
+        // Regression (#77): the non-fatal path sized its buffer at 2×input+1,
+        // which fits only 8 of twelve U+20AC — page JS reading
+        // `new TextDecoder("windows-1252").decode(Uint8Array(12).fill(0x80))`
+        // got back a silently truncated string.
+        let euros = "\u{20AC}".repeat(12);
+        let input = [0x80u8; 12];
+        assert_eq!(
+            decode_with_label("windows-1252", &input, false, false),
+            Some(euros)
+        );
+        // Out-of-range GBK lead bytes each map to U+FFFD — the same 1→3
+        // growth through the replacement path, not just valid mappings.
+        // (A lone 0x80 in GBK is NOT malformed — the WHATWG decoder maps it
+        // straight to U+20AC, cp936 style.)
+        let replaced = "\u{FFFD}".repeat(12);
+        let bad = [0xFFu8; 12];
+        assert_eq!(decode_with_label("gbk", &bad, false, false), Some(replaced));
     }
 
     #[test]
