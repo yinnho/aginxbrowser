@@ -274,8 +274,20 @@ impl Page {
         // 16 is well above the per-host pool ceiling most browsers use
         // and matches what real Chrome does for a given origin.
         use futures::StreamExt as _;
+        let external_total = fetch_futures.len();
+        // #79: count arrivals so a fetch-phase overrun can say how much of
+        // the page's script surface actually landed before the budget
+        // expired — collect() is all-or-nothing, so this count is the only
+        // thing that survives the timeout.
+        let arrivals = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let arrivals_counter = arrivals.clone();
         let fetch_stream = futures::stream::iter(fetch_futures)
-            .buffer_unordered(16);
+            .buffer_unordered(16)
+            .inspect(move |result| {
+                if result.is_some() {
+                    arrivals_counter.set(arrivals_counter.get() + 1);
+                }
+            });
         let fetch_results = match tokio::time::timeout_at(
             script_deadline,
             fetch_stream.collect::<Vec<_>>(),
@@ -283,7 +295,11 @@ impl Page {
             Ok(results) => results,
             Err(_) => {
                 tracing::warn!(
-                    "execute_scripts: fetch deadline reached, some scripts may not have loaded"
+                    "execute_scripts: fetch deadline reached after {}/{} script bodies \
+                     arrived; all classic-phase scripts (incl. inline) will be skipped — \
+                     the budget covers fetch+exec, raise via AGINXBROWSER_SCRIPT_DEADLINE_MS",
+                    arrivals.get(),
+                    external_total
                 );
                 Vec::new()
             }
@@ -355,8 +371,26 @@ impl Page {
             if tokio::time::Instant::now() >= script_deadline
                 || exec_wd.as_ref().is_some_and(|t| t.fired())
             {
+                // #79: name the script that consumed the budget — it is the
+                // one just before the first skipped index. "skipping N" alone
+                // left a xiaohongshu jsvmp-scan overrun unattributed for an
+                // evening of manual bisecting.
+                let burner = if i > 0 {
+                    all_to_execute
+                        .get(i - 1)
+                        .map(|s| match s.src.as_deref() {
+                            Some(url) => format!("external {url}"),
+                            None => format!("inline [nid {}, {} bytes]", s.nid, s.inline.len()),
+                        })
+                        .unwrap_or_else(|| "unknown".to_string())
+                } else {
+                    "the fetch phase alone (network)".to_string()
+                };
                 tracing::warn!(
-                    "execute_scripts: deadline reached, skipping {} remaining scripts",
+                    "execute_scripts: classic budget ({}ms, AGINXBROWSER_SCRIPT_DEADLINE_MS) \
+                     exhausted after {}; skipping {} remaining scripts",
+                    script_deadline_ms,
+                    burner,
                     all_to_execute.len() - i,
                 );
                 break;
