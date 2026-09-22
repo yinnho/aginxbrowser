@@ -2,6 +2,8 @@
 
 # AginxBrowser
 
+[![MCP Queen operational grade](https://mcpqueen.com/badge/net.aginx/aginxbrowser.svg)](https://mcpqueen.com/s/net.aginx/aginxbrowser)
+
 English | [中文](README.zh-CN.md)
 
 **The Browser for AI Agents. See the live web. Read it. Act on it. Remember it.**
