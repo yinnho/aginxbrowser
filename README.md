@@ -2,13 +2,11 @@
 
 # AginxBrowser
 
-[![MCP Queen operational grade](https://mcpqueen.com/badge/net.aginx/aginxbrowser.svg)](https://mcpqueen.com/s/net.aginx/aginxbrowser)
-
 English | [中文](README.zh-CN.md)
 
 **The Browser for AI Agents. See the live web. Read it. Act on it. Remember it.**
 
-[![skills.sh](https://skills.sh/b/yinnho/aginxbrowser)](https://skills.sh/yinnho/aginxbrowser)
+[![skills.sh](https://skills.sh/b/yinnho/aginxbrowser)](https://skills.sh/yinnho/aginxbrowser) [![MCP Queen operational grade](https://mcpqueen.com/badge/net.aginx/aginxbrowser.svg)](https://mcpqueen.com/s/net.aginx/aginxbrowser)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-brightgreen)](https://browser.aginx.net/mcp)
 [![Hosted](https://img.shields.io/badge/hosted-browser.aginx.net-4dd0ff)](https://browser.aginx.net/)
