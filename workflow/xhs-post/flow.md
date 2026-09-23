@@ -47,7 +47,7 @@
 | 标题 | `div.d-input input` | 超长信号 `div.title-container div.max_suffix` |
 | 正文 | `div[role="textbox"][contenteditable="true"]` → `div.tiptap[contenteditable="true"]` → `div.ql-editor` | TipTap 富文本 |
 | 超长正文 | `div.edit-container div.length-error` | |
-| 发布按钮 | 新版自定义元素 `xhs-publish-btn`（attr `is-publish`/`submit-disabled`）；旧版 `.publish-page-publish-btn button.bg-red` | |
+| 发布按钮 | 新版自定义元素 `xhs-publish-btn`（attr `is-publish`/`submit-disabled`）；旧版 `.publish-page-publish-btn button.bg-red` | 1.30.0 实测：内层按钮在 **closed shadow root**（宿主 100×20、light 零子节点、`shadowRoot` 读 null）——`querySelector`/坐标点击都够不着（引擎缺口 #95），只有宿主上的 `publish` CustomEvent 契约可用 | |
 | 成功判据 | URL 跳离 `/publish/publish`（15s） | 消除「点了按钮就算成功」的假阳性 |
 
 ## 步骤（10 步）
@@ -90,7 +90,9 @@
    非 eval 内 setTimeout 循环：eval 挂起期间 timer 推进无把握，Rust 轮询
    每次 eval 驱动事件循环、天然推进 timer。
 9. **publish** — 与上一步同一判据找可点击按钮（wait 过了却又锁上 →
-   throw），scrollIntoView + click；回执带 `face`（widget/legacy）。
+   throw），**宿主上 dispatch `publish` CustomEvent**（唯一可用面，见上表
+   closed shadow root 注）；坐标点击/`querySelector('button')` 都打空。
+   回执带 `face`（widget-event/legacy-click）。
 10. **verify** — wait predicate URL 离开 `/publish/publish`，15s。成功跳转
     = 已发布；超时=校验未过或被拦，回执带截图。
 
