@@ -5138,6 +5138,42 @@
     }
 
     #[test]
+    fn test_issue_81_service_worker_event_target() {
+        // X's bootstrap does `navigator.serviceWorker?.addEventListener(...)`.
+        // `?.` only guards null/undefined — a truthy container without the
+        // EventTarget methods throws TypeError and the page renders its
+        // failure branch ("Something went wrong") while the network face is
+        // fine. The container must be a functioning EventTarget (issue #81).
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt.evaluate(r#"
+            var sw = navigator.serviceWorker;
+            var booted = true;
+            try { sw?.addEventListener('message', function () {}); } catch (e) { booted = false; }
+            return [
+                typeof sw,
+                typeof sw.addEventListener,
+                typeof sw.removeEventListener,
+                typeof sw.dispatchEvent,
+                typeof sw.register,
+                typeof sw.getRegistration,
+                typeof sw.getRegistrations,
+                booted,
+                sw.dispatchEvent(new Event('x')),
+                sw.addEventListener.toString().indexOf('[native code]') !== -1,
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                "object", "function", "function", "function",
+                "function", "function", "function",
+                true, false, true,
+            ]),
+            "serviceWorker container must survive X's optional-chained addEventListener"
+        );
+    }
+
+    #[test]
     fn test_issue_78_jsvmp_env_scan_face() {
         // The XHS jsvmp environment scan reads these four faces directly; all
         // must match Chrome (issue #78): listener registries invisible

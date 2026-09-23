@@ -750,10 +750,18 @@ fn session_thread(
                 // navigation included). Bounds bulk walking; working one page
                 // (state/scroll/eval/typing) stays free. See rate.rs.
                 let mut pages_loaded: u32 = 0;
+                // The last navigation error, kept until the next navigation
+                // succeeds (issue #80): eval/state on a page whose navigation
+                // never completed used to answer `result: null` /
+                // "non-string" — reading as a broken page instead of a
+                // broken navigation. Eval/state now carry this error back so
+                // the caller sees the same failure navigate itself reports.
+                let mut last_nav_error: Option<String> = None;
                 if let Some(url) = start_url {
                     match page.goto(&url).await {
                         Ok(()) => pages_loaded += 1,
                         Err(e) => {
+                            last_nav_error = Some(format!("navigation failed: {}", e));
                             // session_create is fire-and-forget by design (the
                             // id returns before the thread starts navigating),
                             // so a failed initial navigation must not be
@@ -867,9 +875,14 @@ fn session_thread(
                                             crate::har::challenge_kind(&final_url).map(|s| s.to_string());
                                         element_map.clear();
                                         pages_loaded += 1;
+                                        last_nav_error = None;
                                         Ok(SessionNavResponse { url: final_url, title, challenge })
                                     }
-                                    Err(e) => Err(format!("navigation failed: {}", e)),
+                                    Err(e) => {
+                                        let msg = format!("navigation failed: {}", e);
+                                        last_nav_error = Some(msg.clone());
+                                        Err(msg)
+                                    }
                                 },
                             };
                             recorder.push(RecordedAction::Navigate {
@@ -899,12 +912,17 @@ fn session_thread(
                                         .filter(|s| !s.is_empty())
                                         .map(|s| s.to_string());
                                     element_map.clear();
+                                    last_nav_error = None;
                                     Ok(serde_json::json!({
                                         "bytes": html.len(),
                                         "title": title,
                                     }))
                                 }
-                                Err(e) => Err(format!("setContent failed: {}", e)),
+                                Err(e) => {
+                                    let msg = format!("setContent failed: {}", e);
+                                    last_nav_error = Some(msg.clone());
+                                    Err(msg)
+                                }
                             };
                             recorder.push(RecordedAction::SetContent {
                                 ok: result.is_ok(),
@@ -915,7 +933,21 @@ fn session_thread(
 
                         SessionCommand::State { reply } => {
                             element_map.clear();
-                            let result = extract_indexed_state(&mut page, &mut element_map);
+                            let result = extract_indexed_state(&mut page, &mut element_map)
+                                .map_err(|e| match &last_nav_error {
+                                    // #80: a failed navigation is the likely
+                                    // cause of a non-string extraction (no JS
+                                    // runtime on the fallback page) — say the
+                                    // navigation error instead of a stringness
+                                    // complaint the caller can't act on.
+                                    Some(nav) => format!(
+                                        "{} — the last navigation did not complete, \
+                                         the session is on the fallback page \
+                                         (state extraction: {})",
+                                        nav, e
+                                    ),
+                                    None => e,
+                                });
                             let _ = reply.send(result);
                         }
 
@@ -1061,7 +1093,37 @@ fn session_thread(
                         }
 
                         SessionCommand::Eval { script, timeout_ms, reply } => {
-                            let outcome = page.evaluate_async_checked(&script, timeout_ms).await;
+                            let outcome = if !page.inner.has_js() {
+                                // #80: without a JS runtime every eval would
+                                // silently answer null (only document.title /
+                                // URL are stub-served) — a navigation that
+                                // "succeeded" into an error page leaves the
+                                // page runtime-less. Say it instead of null.
+                                Err(format!(
+                                    "page has no JS runtime — the last navigation did not \
+                                     complete{}; navigate again",
+                                    last_nav_error
+                                        .as_deref()
+                                        .map(|nav| format!(" ({})", nav))
+                                        .unwrap_or_default()
+                                ))
+                            } else {
+                                page.evaluate_async_checked(&script, timeout_ms).await
+                            };
+                            // A null result on the post-failure fallback page
+                            // (about:blank after a failed goto) reads as
+                            // "page is broken"; the navigation error is the
+                            // actionable truth, so surface it (#80). Real
+                            // values pass through untouched — the fallback
+                            // page is alive and the script genuinely ran.
+                            let outcome = match outcome {
+                                Ok(v) if v.is_null() && last_nav_error.is_some() => Err(format!(
+                                    "{} — the last navigation did not complete, \
+                                     the session is on the fallback page; navigate again",
+                                    last_nav_error.as_deref().unwrap_or_default()
+                                )),
+                                other => other,
+                            };
                             recorder.push(RecordedAction::Eval { script });
                             // Drain any JS-initiated navigation the script
                             // started (location.href / form submit) so the

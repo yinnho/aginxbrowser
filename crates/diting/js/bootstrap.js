@@ -6684,7 +6684,14 @@ globalThis.navigator = {
     },
     toJSON() { return {brands:this.brands,mobile:this.mobile,platform:this.platform}; },
   },
-  serviceWorker: { ready: Promise.resolve(), register(){return Promise.resolve();}, getRegistrations(){return Promise.resolve([]);}, controller: null },
+  serviceWorker: {
+    ready: Promise.resolve(),
+    register(){ return Promise.resolve(); },
+    getRegistrations(){ return Promise.resolve([]); },
+    getRegistration(){ return Promise.resolve(undefined); },
+    controller: null,
+    addEventListener(){}, removeEventListener(){}, dispatchEvent(){ return false; },
+  },
   mediaDevices: {
     enumerateDevices() {
       return Promise.resolve([
@@ -12064,6 +12071,10 @@ _markNative(globalThis.Selection);
   navigator.javaEnabled, navigator.geolocation?.getCurrentPosition,
   navigator.geolocation?.watchPosition,
   navigator.serviceWorker?.register,
+  navigator.serviceWorker?.addEventListener,
+  navigator.serviceWorker?.removeEventListener,
+  navigator.serviceWorker?.dispatchEvent,
+  navigator.serviceWorker?.getRegistration,
   navigator.permissions?.query, navigator.credentials?.get,
   navigator.storage?.estimate, navigator.storage?.persist, navigator.storage?.persisted,
   globalThis.fetch, globalThis.matchMedia, globalThis.getComputedStyle,

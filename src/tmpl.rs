@@ -163,8 +163,12 @@ mod tests {
     use super::*;
 
     /// 一个最小注册表目录，供 load_at 系测试用（不碰 env，可并行）。
+    /// 目录名带单调计数：两个测试用了等长 registry，按 (pid, len) 命名会
+    /// 共享目录，并行跑起来互相 remove_dir_all。
     fn fixture(registry: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("aginxbrowser-tmpl-{}-{}", std::process::id(), registry.len()));
+        static FIXTURE_N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = FIXTURE_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("aginxbrowser-tmpl-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("registry.json"), registry).unwrap();

@@ -920,6 +920,90 @@
         assert!(mgr.close_and_wait(&sid).await);
     }
 
+    // #80: a failed navigation must surface through eval/state — a null eval
+    // result answers with the navigation error, real values pass through,
+    // state never degrades to a bare non-string complaint, and the overlay
+    // clears once a later navigation succeeds.
+    #[tokio::test]
+    async fn eval_and_state_report_the_failed_navigation() {
+        let _net = crate::server::test_util::net_env_guard();
+        let mut mgr = SessionManager::new();
+        // Port 1 on loopback: nothing listens, connection refused immediately.
+        let sid = mgr.create(
+            Some("http://127.0.0.1:1/"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+
+        // A null result on the fallback page reads as "page broken"; the
+        // navigation failure is the actionable truth.
+        let probed = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "document.querySelector('#missing')".to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await;
+        let err = probed.unwrap_err().to_string();
+        assert!(
+            err.contains("navigation failed") && err.contains("did not complete"),
+            "null eval must name the failed navigation, got: {err}"
+        );
+
+        // Real values pass through — the fallback page is alive.
+        let href = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "location.href".to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(href.as_str(), Some("about:blank"));
+
+        // State may legitimately succeed on the live fallback page, but an
+        // error must name the navigation, not just the stringness complaint.
+        let state = mgr.send(&sid, |reply| SessionCommand::State { reply }).await;
+        match state {
+            Ok(text) => assert!(
+                !text.contains("non-string"),
+                "state must not leak the bare extraction complaint: {text}"
+            ),
+            Err(e) => assert!(
+                e.to_string().contains("navigation failed"),
+                "state error must name the failed navigation, got: {e}"
+            ),
+        }
+
+        // A later successful navigation clears the overlay: null is null again.
+        mgr.send(&sid, |reply| SessionCommand::SetContent {
+            html: "<html><body></body></html>".to_string(),
+            reply,
+        })
+        .await
+        .unwrap();
+        let probed = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "document.querySelector('#missing')".to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert!(
+            probed.is_null(),
+            "cleared overlay must pass null through, got: {probed}"
+        );
+
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
     #[tokio::test]
     async fn clone_carries_login_state_to_a_new_session() {
         let _net = crate::server::test_util::net_env_guard();
