@@ -75,6 +75,7 @@ dependencies = [
  "http",
  "http-body-util",
  "image",
+ "libc",
  "parley",
  "peniko",
  "png",

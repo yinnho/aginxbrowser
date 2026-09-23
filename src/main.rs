@@ -30,6 +30,8 @@ mod flow;
 mod har;
 mod mcp;
 mod page;
+mod panel;
+mod panel_drm;
 mod rate;
 // HTTP route handlers split by surface (ARCHITECTURE.md P2 batch 2):
 // acquisition (fetch/search/click/eval/download), sessions (the stateful
@@ -79,6 +81,7 @@ mod bridge_cross_check;
 // module docs for why the engine's own guards can't be reused).
 #[cfg(test)]
 mod test_support;
+mod tmpl;
 
 pub use routers::acquisition::{
     ClickRequest, ClickResponse, EvalRequest, EvalResponse, FetchRequest, FetchResponse,
@@ -263,6 +266,16 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("font dir fallbacks (--font-dir): {:?}", dir.unwrap_or("(none)"));
     }
 
+    // The phone's glass is this browser's viewport. --panel, or the
+    // marker file the device drops, paints straight to DRM instead of
+    // handing JPEG frames to another process to paste.
+    #[cfg(feature = "screenshot")]
+    if args.iter().any(|a| a == "--panel")
+        || std::path::Path::new("/etc/aginx/panel.on").exists()
+    {
+        panel::start();
+    }
+
     // Check if running in MCP mode
     if args.contains(&"--mcp".to_string()) {
         tracing::info!("Starting in MCP mode");
@@ -282,6 +295,7 @@ async fn main() -> anyhow::Result<()> {
         // challenge handoff in session punish detection points here.
         .route("/live", get(live_handler))
         .route("/live.html", get(live_handler))
+        .route("/open", post(open_handler))
         .route("/fetch", post(fetch_handler))
         .route("/click", post(click_handler))
         .route("/eval", post(eval_handler))
@@ -393,6 +407,51 @@ async fn main() -> anyhow::Result<()> {
 
     axum::serve(listener, app.with_state(mcp::mcp_http_service())).await?;
     Ok(())
+}
+
+/// 调用方交 JSON 和模板名。浏览器用自己文件夹里的模板生成 HTML，并交给面板显示。
+/// 失败是结构化的：unknown_template 返 404 并带 known 清单——母体据此走
+/// 「安排模型写一次模板并登记」，不用解析自由文本猜原因。
+async fn open_handler(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    let template = body
+        .get("template")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if template.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"ok": false, "error": "missing_template"})),
+        );
+    }
+    let data = body.get("data").cloned().unwrap_or(serde_json::json!({}));
+    match tmpl::open(&template, &data) {
+        Ok(n) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true,
+                "template": template,
+                "bytes": n,
+            })),
+        ),
+        Err(e) => {
+            let status = match &e {
+                tmpl::OpenError::UnknownTemplate { .. } => StatusCode::NOT_FOUND,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            let mut body = serde_json::json!({
+                "ok": false,
+                "error": e.code(),
+                "why": e.to_string(),
+            });
+            if let tmpl::OpenError::UnknownTemplate { id, known } = &e {
+                body["template"] = serde_json::json!(id);
+                body["known"] = serde_json::json!(known);
+            }
+            (status, Json(body))
+        }
+    }
 }
 
 async fn health_handler() -> impl IntoResponse {

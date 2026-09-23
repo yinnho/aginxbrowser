@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "place": "/var/lib/aginxbrowser/templates",
+  "rule": "模板在浏览器自己的目录里。调用方只交 JSON 和模板名。HTML 在点开、调起浏览器时才生成。",
+  "templates": [
+    {
+      "id": "weather",
+      "file": "weather.html",
+      "title": "天气预报",
+      "matches": ["天气", "气温", "weather", "预报"],
+      "slots": ["city", "temp", "condition", "low", "high", "humidity", "uv", "source_url"],
+      "panel": "1080x2340"
+    },
+    {
+      "id": "listen",
+      "file": "listen.html",
+      "title": "听话",
+      "matches": [],
+      "slots": ["status", "line", "marks"],
+      "panel": "1080x2340",
+      "note": "按住说话时的对话框。不按问句选用。"
+    },
+    {
+      "id": "reply",
+      "file": "reply.html",
+      "title": "回复",
+      "matches": [],
+      "slots": ["question", "body"],
+      "panel": "1080x2340",
+      "note": "没有专用结果模板时的正文页。"
+    }
+  ]
+}

@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<!--
+  id: listen
+  按住说话时的对话框。调用方交 JSON：status、line、marks。
+  浏览器填这页并显示。结果出来后改用结果模板，这页就被换掉。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1080">
+<title>{{status}}</title>
+<style>
+html, body { background-color: #0c100e; }
+body {
+  min-height: 2340px;
+  margin: 0;
+  background-image: linear-gradient(180deg, #24302b 0%, #0c100e 42%, #0c100e 100%);
+  color: #f6f1e8;
+  font-size: 36px;
+  line-height: 1.45;
+  font-family: sans-serif;
+  padding: 96px 72px 0;
+}
+.sheet {
+  background-color: #18211d;
+  background-image: linear-gradient(180deg, #2a3832 0%, #141c19 100%);
+  border-radius: 0 0 36px 36px;
+  padding: 72px 56px 64px;
+}
+.s {
+  margin: 0;
+  color: #c4a574;
+  font-size: 28px;
+  line-height: 1.2;
+  font-family: sans-serif;
+  letter-spacing: 8px;
+}
+.rule {
+  width: 72px;
+  height: 6px;
+  margin: 28px 0 0;
+  background-color: #c4a574;
+  border-radius: 3px;
+}
+.t {
+  margin: 40px 0 0;
+  color: #f6f1e8;
+  font-size: 48px;
+  line-height: 1.35;
+  font-weight: 700;
+  font-family: sans-serif;
+}
+.m {
+  margin: 48px 0 0;
+  color: #c4a574;
+  font-size: 36px;
+  line-height: 1;
+  font-family: sans-serif;
+  letter-spacing: 10px;
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<p class="s">{{status}}</p>
+<div class="rule"></div>
+<p class="t">{{line}}</p>
+<p class="m">{{marks}}</p>
+</div>
+</body>
+</html>
