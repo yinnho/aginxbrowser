@@ -12,15 +12,6 @@
       "panel": "1080x2340"
     },
     {
-      "id": "listen",
-      "file": "listen.html",
-      "title": "听话",
-      "matches": [],
-      "slots": ["status", "line", "marks"],
-      "panel": "1080x2340",
-      "note": "按住说话时的对话框。不按问句选用。"
-    },
-    {
       "id": "reply",
       "file": "reply.html",
       "title": "回复",
