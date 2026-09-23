@@ -1,5 +1,11 @@
 # xhs-post — 小红书图文笔记发布 flow
 
+> 2026-09-23：步 3 硬门选择器 `div.upload-content` → `input.upload-input`。
+> 401 弹跳后的登录页上也有一个装饰性 upload-content div（实测），verdict 若在
+> ping-pong 中间态采到干净 URL，旧选择器会假绿放行、把失败推给上传步报
+> 「no file input」——正是「找不到图片上传」这个误导性报错的形状。真上传
+> input 只在已登录的发布页存在，天然免疫。
+
 > 2026-09-22 批175：加 verdict 门 + branch（issue #72/#73）。步 1.5 签名补丁后
 > 插 verdict 步存 `v`，branch `v.verdict ∈ [login, challenge, captcha, empty]`
 > 直接跳末尾 takeover throw——死 cookie 时的行为从「20s upload-content 空超时、
@@ -21,7 +27,7 @@
 | 元素 | 选择器 | 说明 |
 |---|---|---|
 | 发布页 | `https://creator.xiaohongshu.com/publish/publish?source=official` | 401 未登录会规范跳 `/login` |
-| Tab | `div.creator-tab`（文本=「上传图文」） | `div.upload-content` 可见为前置 |
+| Tab | `div.creator-tab`（文本=「上传图文」） | `.upload-input` 出现为前置（步 3 硬门改判过的真标记） |
 | 挡路浮层 | `div.d-popover` | 上游阶梯 Esc→点空白→摘节点；flow 直接摘节点（必定生效） |
 | 上传输入 | 首张 `.upload-input`，后续 `input[type=file]`（accept 含 image/） | 隐藏 input，JS 赋 files |
 | 预览计数 | `.img-preview-area .pr` | ≥N 即上传完成（60s 窗） |
@@ -44,7 +50,7 @@
    登录页会按 lastUrl 弹回 publish 再被 401 弹回（乒乓），单点时刻的
    URL 检查恰好在弹回瞬间跑就假绿（2026-09-20 实测：op 时 URL=/login、
    expect 时已弹回 publish、最终又回 /login）。
-3. **wait `div.upload-content`（硬门）** — 正向信号：壳渲染=已登录；
+3. **wait `input.upload-input`（硬门）** — 正向信号：真上传 input 渲染=已登录（登录页的装饰性 upload-content 骗不过它）；
    超时回执带 URL（redirectReason=401）+ wall 遥测=登录墙的完整形状。
 4. **tab** — 摘浮层 + 点「上传图文」，expect `input[type=file]`；
    找不到 tab → throw（回执 `tabs` 字段=诊断入口）。
