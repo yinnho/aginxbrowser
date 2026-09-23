@@ -36,6 +36,7 @@ use crate::diting_css::{
 };
 use crate::diting_dom::tree::{DomTree, NodeId};
 
+mod forms;
 pub mod image;
 pub mod paint;
 pub mod svg;

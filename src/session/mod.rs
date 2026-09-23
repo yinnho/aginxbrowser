@@ -18,6 +18,8 @@ mod commands;
 pub(crate) mod interact;
 mod manager;
 mod record;
+#[cfg(feature = "screenshot")]
+mod screenshot;
 mod state;
 #[cfg(test)]
 mod tests;

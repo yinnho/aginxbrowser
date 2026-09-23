@@ -953,3 +953,76 @@ pub(super) fn set_files_by_selector(page: &mut Page, selector: &str, files: &[Va
         .ok_or_else(|| "files assignment did not return a JSON string".to_string())?;
     Ok(parsed)
 }
+
+/// The Wait command's poll loop: exactly one of `selector`/`predicate`
+/// (the arm rejects anything else). Clamp keeps a stray request from
+/// pinning the session thread (Close included) for long. While waiting
+/// the page's loop keeps running — fetches/timers only advance when
+/// pumped, and the slice parks when quiescent so idle pages don't spin
+/// hot.
+pub(super) async fn wait(
+    page: &mut Page,
+    selector: Option<&str>,
+    predicate: Option<&str>,
+    timeout_ms: u64,
+) -> Result<String, String> {
+    let timeout_ms = timeout_ms.clamp(1, 120_000);
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_millis(timeout_ms);
+    let mut last_error: Option<String> = None;
+    loop {
+        let detail = if let Some(sel) = selector {
+            let escaped = sel.replace('\\', "\\\\").replace('\'', "\\'");
+            let js = format!(
+                "(function(){{ var el = document.querySelector('{}'); \
+                 if (!el) return null; \
+                 return {{tag: el.tagName, \
+                 text: (el.textContent || '').trim().slice(0, 200)}}; }})()",
+                escaped
+            );
+            let v = page.evaluate_with_timeout(&js, crate::page::INTERACTION_EVAL_TIMEOUT);
+            if v.is_null() { None } else { Some(v) }
+        } else {
+            let pred = predicate.unwrap_or("false");
+            let js = format!(
+                "(function(){{ try {{ var v = ({pred}); \
+                 if (!v) return {{truthy: false}}; \
+                 return {{truthy: true, value: \
+                 (typeof v === 'object' && v !== null \
+                 ? JSON.stringify(v) : String(v)).slice(0, 200)}}; \
+                 }} catch (e) {{ return {{truthy: false, \
+                 error: String(e).slice(0, 200)}}; }} }})()"
+            );
+            let v = page.evaluate_with_timeout(&js, crate::page::INTERACTION_EVAL_TIMEOUT);
+            if v.get("truthy").and_then(|t| t.as_bool()) == Some(true) {
+                v.get("value").cloned()
+            } else {
+                last_error = v
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .map(str::to_string)
+                    .or(last_error);
+                None
+            }
+        };
+        if let Some(detail) = detail {
+            return Ok(serde_json::json!({
+                "matched": true,
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+                "detail": detail,
+            })
+            .to_string());
+        }
+        if std::time::Instant::now() >= deadline {
+            let what = selector
+                .map(|s| format!("selector \"{s}\""))
+                .unwrap_or_else(|| format!("predicate \"{}\"", predicate.unwrap_or("")));
+            let mut msg = format!("timeout after {timeout_ms}ms waiting for {what}");
+            if let Some(e) = last_error {
+                msg.push_str(&format!(" (last error: {e})"));
+            }
+            return Err(msg);
+        }
+        page.pump_event_loop_slice(150).await;
+    }
+}

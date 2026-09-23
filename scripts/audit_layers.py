@@ -81,14 +81,13 @@ GOD_FILE_GRANDFATHER = {
     "crates/diting/src/diting_css/mod.rs": 8511,
     "crates/diting/src/diting_js/ops/mod.rs": 6645,
     "src/cdp/dispatch.rs": 5408,
-    "crates/diting/src/diting_layout/paint.rs": 4198,
+    "crates/diting/src/diting_layout/paint.rs": 4030,
     "src/bridge_cross_check.rs": 3766,
     "crates/diting/src/diting_js/runtime.rs": 2289,
     "crates/diting/src/diting_layout/fork_deltas.rs": 2445,
     "crates/diting/src/diting_net/client/mod.rs": 1539,
     "src/server/mod.rs": 2128,
     "crates/diting/src/diting_dom/tree.rs": 2160,
-    "src/mcp/mod.rs": 2109,
     "crates/diting/src/diting_layout/text.rs": 1826,
     "crates/diting/src/diting_layout/svg.rs": 1736,
     "src/store.rs": 1734,
@@ -97,7 +96,6 @@ GOD_FILE_GRANDFATHER = {
     "src/docgen/workflow.rs": 1615,
     "src/docgen/graph.rs": 1584,
     "src/cdp/domains/page.rs": 1527,
-    "src/session/manager.rs": 1518,
 }
 
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
