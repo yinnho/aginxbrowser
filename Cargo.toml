@@ -151,7 +151,7 @@ image = { version = "0.25", optional = true, default-features = false, features 
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 [dev-dependencies]
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "3", features = ["json"] }
 # CDP accessibility-domain tests build QualName'd element fixtures by hand
 # (moved with diting_cdp into the product crate; the engine still carries
 # its own copy for its parser tests).
