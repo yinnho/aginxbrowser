@@ -3,8 +3,17 @@
 //! before the first SETCRTC, then PAGE_FLIP.
 #![allow(non_camel_case_types)]
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+
+// The runtime below is unix-family libc (ioctl/mmap/poll); the consts/structs
+// above (and the ioctl-encoding pin test) compile everywhere so the encoding
+// stays tested on every dev box. Windows libc has none of these symbols
+// (v0.5.4 msvc CI red).
+#[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 
 const DRM_IOCTL_BASE: u32 = b'd' as u32;
@@ -204,6 +213,7 @@ pub struct Drm {
 /// vm_file keeps a struct file reference, drm_release never runs, and the
 /// master dangles on the (long-lived) engine process — every later
 /// SET_MASTER fails with nothing visible in /proc/*/fd (#85).
+#[cfg(unix)]
 fn release_buffers(fd: i32, fb: &[u32; 2], handles: &[u32; 2], maps: &[*mut u32; 2], map_len: usize) {
     for m in maps.iter() {
         if !m.is_null() {
@@ -227,6 +237,7 @@ fn release_buffers(fd: i32, fb: &[u32; 2], handles: &[u32; 2], maps: &[*mut u32;
     }
 }
 
+#[cfg(unix)]
 impl Drm {
     /// One try. "master busy" means another process still owns the panel.
     pub fn open() -> Result<Drm, String> {
@@ -488,6 +499,7 @@ impl Drm {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Drm {
     fn drop(&mut self) {
         release_buffers(

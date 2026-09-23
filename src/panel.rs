@@ -8,7 +8,9 @@
 //! 浏览器自己不画对话框、不画待机字标——那是 term 的事；这里只渲染
 //! 被调起时交给我们的那一页。
 
-#[cfg(feature = "screenshot")]
+// Unix-family only: DRM + /dev/input touch (v0.5.4 Windows CI red — the
+// unix libc symbols don't exist under msvc).
+#[cfg(all(feature = "screenshot", unix))]
 mod on {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
@@ -512,10 +514,10 @@ mod on {
     }
 }
 
-#[cfg(feature = "screenshot")]
+#[cfg(all(feature = "screenshot", unix))]
 pub use on::start;
 
-#[cfg(not(feature = "screenshot"))]
+#[cfg(not(all(feature = "screenshot", unix)))]
 pub fn start() {
-    tracing::warn!("panel: this build has no paint path (rebuild with --features screenshot)");
+    tracing::warn!("panel: no paint path on this platform (unix + --features screenshot build required)");
 }
