@@ -900,6 +900,29 @@ curl -sS -X POST http://127.0.0.1:8089/account/verify \
 
 The first call teaches the spec — `url` (a page that shows login state) and `predicate` (a JS expression truthy when logged in). It's remembered on the account; later calls can be bare (`{"name": "taobao-scraper"}`) and rerun the spec. The probe runs in a scratch session *as the account* — private jar, same egress — so a verify doubles as a cookie refresh. A probe failure (network, predicate throw) returns an error and is not a logout verdict; the last successful verdict rides in `verify_last`.
 
+**Log an account in (login wizard):**
+
+```bash
+curl -sS -X POST http://127.0.0.1:8089/account/login \
+  -H 'content-type: application/json' \
+  -d '{"name": "xhs-main", "url": "https://www.xiaohongshu.com/login"}'
+```
+
+```json
+{"name": "xhs-main", "status": "waiting", "needs": ["qr"], "markers": ["qr:login-qrcode-img"],
+ "verdict": "login", "url": "https://www.xiaohongshu.com/login", "session_id": "s_42",
+ "expires_in_secs": 1793,
+ "handoff": "human step (qr) — open /live?session=s_42 ...; when done, re-call account_login with the same arguments (the account's shared jar already holds the finished login)"}
+```
+
+One call opens the login page *as the account* (implicitly created on first use; private jar + persona + recorded egress from the start) and probes the generic gates the page shows — `password` / `sms` / `qr` / `slider` — with `markers` carrying the evidence strings. The three statuses:
+
+- **`logged_in`** — no gate detected and the passed `predicate` fired: the automatic bounce happened, and the verify spec (`url` = the post-login landing URL, `predicate` as given) is stamped. Cookies are already written back (every successful action captures the account jar).
+- **`waiting`** — a human step is outstanding (`needs` non-empty). The session stays open (30 min ttl) for the `/live?session=<id>` handoff or scripted `session_wait`/`session_input`. When the human finishes, **re-call with the same arguments** — the account's shared jar already holds the login, so the second call probes clean, the predicate fires, and verify is stamped. Idempotent by jar semantics, no state machine.
+- **`opened`** — no `predicate` given: page is open, gates reported; drive it with `session_input`/`session_wait` on `session_id` and finish with `account_verify` to stamp the spec.
+
+`use_proxy` seeds a fresh account's egress; an account with an existing record always reuses its recorded egress (one identity, one exit — changing it is a risk-control linkage signal). `timeout_ms` (default 60000, clamped 1000..120000) is the wait budget for the automatic bounce only — it is never spent while a human step is outstanding. The wizard never fills credentials or beats risk control; when a site rejects the environment, `needs`/verdict say so and `import_curl` (human logs in their own Chrome) remains the fallback.
+
 **Delete an account:**
 
 ```bash
@@ -1568,6 +1591,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `import_curl` | Paste a DevTools "Copy as cURL" command → a live session already carrying that site's cookies, anchored at the copied request's URL — the human logs in (CAPTCHA/SMS once) in their own Chrome, the agent continues from there; bash/PowerShell/cmd flavors all parse; `account` attaches the login to a named identity |
 | `account_list` | List named login identities (the multi-account layer) — metadata only: name, cookie domains, cookie count, updated_at, last verify verdict, persona UA. Each account is one stable device (own UA + hardware fingerprint). See which identities exist before `session_create {account}` picks one |
 | `account_verify` | Check whether a named account is still logged in. Teach-once: first call passes `url` + `predicate` (a JS expression truthy on a logged-in page); the spec is remembered, later calls can be bare. Runs in a scratch session as the account — the probe doubles as a cookie refresh |
+| `account_login` | Open a site's login page AS a named account and close the login loop: probes the generic gates (password/sms/qr/slider), waits for the automatic bounce when a `predicate` is given and no gate blocks, stamps the verify spec on success. `waiting` = human step outstanding — drive `session_wait`/`session_input` on the returned `session_id` (or `/live`), then re-call with the same arguments; the account's shared jar already holds the finished login |
 | `account_delete` | Delete a named login identity: stored record AND live jar (delete means gone) |
 | `session_clone` | Derive a new session carrying the full login state (cookies + storage + viewport + dialog policy); the source stays untouched — snapshot before risky actions, or run one login in parallel |
 | `session_list` | List live sessions with idle age and time left before auto-eviction (discover one to reuse) |

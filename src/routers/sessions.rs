@@ -317,6 +317,53 @@ pub(crate) async fn account_verify_handler(
     Ok((StatusCode::OK, Json(v)))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AccountLoginRequest {
+    /// The account to log in as (created implicitly on first use; 1-64
+    /// chars of [a-zA-Z0-9_-]).
+    pub name: String,
+    /// The login page URL to open as this account.
+    pub url: String,
+    /// A JS expression truthy on the page the site lands on AFTER login.
+    /// With it and no human step detected, the call waits for the automatic
+    /// bounce and stamps the verify spec on success.
+    pub predicate: Option<String>,
+    /// Route through the engine proxy. Seeds a fresh account; an account
+    /// with an existing record reuses its recorded egress.
+    #[serde(default)]
+    pub use_proxy: bool,
+    /// Wait budget in ms for the automatic-login bounce (default 60000,
+    /// clamped 1000..120000). Never spent while a human step is outstanding.
+    #[serde(default = "default_login_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_login_timeout_ms() -> u64 {
+    60_000
+}
+
+/// Open a site's login page AS a named account: probes the generic login
+/// gates the page shows (password/sms/qr/slider), and with a predicate and
+/// no gates, waits once for the automatic bounce then stamps the verify
+/// spec. Human steps return immediately with session_id + /live handoff;
+/// cookies write back after every action, so re-calling with the same
+/// arguments after the human finishes closes the loop (shared jar).
+pub(crate) async fn account_login_handler(
+    Json(req): Json<AccountLoginRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let v = account::login(
+        crate::store::REST_OWNER,
+        &req.name,
+        &req.url,
+        req.predicate.as_deref(),
+        req.use_proxy,
+        req.timeout_ms,
+    )
+    .await
+    .map_err(AppError::BadRequest)?;
+    Ok((StatusCode::OK, Json(v)))
+}
+
 /// Derive a session carrying the source's login state (cookies + storage +
 /// viewport + dialog policy); the source stays untouched.
 pub(crate) async fn session_clone_handler(

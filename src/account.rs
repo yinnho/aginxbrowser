@@ -368,6 +368,299 @@ async fn run_verify_probe(
     }))
 }
 
+/// Generic login-gate probe: one eval, selector-driven, site-agnostic —
+/// counts password inputs, OTP/SMS-code inputs (name/id/placeholder/
+/// autocomplete; bare "code" excluded: postal/discount/carousel noise),
+/// QR surfaces (img/canvas/iframe with qr-shaped class/id/src, 二维码 alt),
+/// and slider/geetest containers. Returns markers (evidence, capped) so the
+/// agent can judge loose hits.
+const GATE_PROBE: &str = r#"(function(){
+  var markers = [];
+  function mark(tag, m) {
+    if (markers.length < 8) markers.push(tag + ':' + String(m).trim().slice(0, 120));
+  }
+  function hits(sel, tag) {
+    var els = document.querySelectorAll(sel);
+    for (var i = 0; i < els.length && i < 3; i++) {
+      var el = els[i];
+      mark(tag, (el.getAttribute('class') || '') + ' ' + (el.id || '') + ' ' +
+               (el.getAttribute('src') || ''));
+    }
+    return els.length;
+  }
+  var password = document.querySelectorAll('input[type=password]').length;
+  var smsRe = /(one[-_ ]?time|otp|sms|验证码)/;
+  var sms = 0;
+  var inputs = document.querySelectorAll('input');
+  for (var i = 0; i < inputs.length && i < 200; i++) {
+    var el = inputs[i];
+    var hay = [el.name, el.id, el.placeholder, el.getAttribute('autocomplete')]
+      .filter(function (v) { return typeof v === 'string' && v; })
+      .join(' ').toLowerCase();
+    if (smsRe.test(hay)) { sms++; mark('sms', hay); }
+  }
+  var qr = hits('img[src*="qr"],img[class*="qr"],img[id*="qr"],img[alt*="二维码"],' +
+                'img[title*="二维码"],canvas[class*="qr"],canvas[id*="qr"],' +
+                'iframe[src*="qr"],iframe[class*="qr"],iframe[id*="qr"],' +
+                '[class*="qrcode"],[id*="qrcode"],[class*="二维码"],[id*="二维码"]', 'qr');
+  var slider = hits('[class*="geetest"],[id*="geetest"],[class*="slider"],[id*="slider"],' +
+                    '[class*="nc_"],[id*="nc_"],[class*="slideverify"],[id*="slideverify"],' +
+                    '[class*="滑块"],[id*="滑块"]', 'slider');
+  return JSON.stringify({ url: location.href, password: password, sms: sms,
+                          qr: qr, slider: slider, markers: markers });
+})()"#;
+
+/// Egress rule for the wizard: a recorded account keeps its route (one
+/// identity, one egress); the param only seeds a fresh or persona-only
+/// record. Same stance verify takes reading `record["use_proxy"]`.
+fn resolve_use_proxy(record: &serde_json::Value, param: bool) -> bool {
+    record["use_proxy"].as_bool().unwrap_or(param)
+}
+
+/// Probe counts → the human/agent step labels. Advisory: loose selectors
+/// (a carousel's "slider" class) cost one extra hint string; nothing gates
+/// on `needs` except whether the wizard waits.
+fn classify_gates(probe: &serde_json::Value) -> Vec<&'static str> {
+    let mut needs = Vec::new();
+    for (key, label) in [
+        ("password", "password"),
+        ("sms", "sms"),
+        ("qr", "qr"),
+        ("slider", "slider"),
+    ] {
+        if probe[key].as_u64().unwrap_or(0) > 0 {
+            needs.push(label);
+        }
+    }
+    needs
+}
+
+/// One call to start (or finish) a named account's login: opens the login
+/// page as the account (private jar, device persona), probes which generic
+/// login gates the page shows (password / sms / qr / slider), classifies
+/// where it landed, and — when a `predicate` is given and no human step is
+/// detected — waits once for the automatic bounce, then teaches + stamps
+/// the account's verify spec. The browser stays generic: it detects and
+/// describes, it never fills credentials or solves challenges.
+///
+/// No server-side wait loop: every session command holds the engine-wide
+/// SESSIONS guard for its duration, and the human finishing a QR scan in
+/// /live drives the same routes — a long wait would freeze them. When
+/// gates are present the call returns immediately with the session and a
+/// handoff; the human finishes there (cookies write back after every
+/// action), and re-calling with the same arguments closes the loop — the
+/// account's shared jar already holds the login, so the second call finds
+/// no gates and the predicate matches.
+pub async fn login(
+    owner: &str,
+    name: &str,
+    url: &str,
+    predicate: Option<&str>,
+    use_proxy_param: bool,
+    timeout_ms: u64,
+) -> Result<serde_json::Value, String> {
+    validate_name(name)?;
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(format!("URL must be http(s): {url}"));
+    }
+    let record = match load(owner, name) {
+        Some((text, _)) => serde_json::from_str::<serde_json::Value>(&text)
+            .unwrap_or(serde_json::json!({"version": 1})),
+        None => serde_json::json!({"version": 1}),
+    };
+    let use_proxy = resolve_use_proxy(&record, use_proxy_param);
+
+    enum Outcome {
+        LoggedIn { success_url: String, elapsed_ms: u64 },
+        Open {
+            session_id: String,
+            page_url: String,
+            needs: Vec<&'static str>,
+            markers: Vec<serde_json::Value>,
+            verdict: String,
+            expires_in_secs: Option<u64>,
+        },
+    }
+
+    let outcome = {
+        let mut mgr = crate::session::SESSIONS.lock().await;
+        mgr.evict_expired();
+        // TTL 1800: a slow human QR scan must not get evicted mid-handoff
+        // (default idle TTL would). No start_url: the Navigate below is the
+        // awaited initial load, so the probe never races an in-flight goto
+        // (same stance as verify).
+        let sid = mgr.create(
+            None,
+            use_proxy,
+            vec![],
+            None,
+            Some(1800),
+            None,
+            false,
+            false,
+            Some((owner.to_string(), name.to_string())),
+        );
+        if let Err(e) = mgr
+            .send(&sid, |reply| crate::session::SessionCommand::Navigate {
+                url: url.to_string(),
+                reply,
+            })
+            .await
+        {
+            mgr.close(&sid);
+            return Err(format!("navigation failed: {e}"));
+        }
+        let probe: serde_json::Value = match mgr
+            .send(&sid, |reply| crate::session::SessionCommand::Eval {
+                script: GATE_PROBE.to_string(),
+                timeout_ms: Some(10_000),
+                reply,
+            })
+            .await
+        {
+            Ok(v) => {
+                let text = v.as_str().ok_or("gate probe returned a non-string")?;
+                match serde_json::from_str(text) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        mgr.close(&sid);
+                        return Err(format!("gate probe result parse: {e}"));
+                    }
+                }
+            }
+            Err(e) => {
+                mgr.close(&sid);
+                return Err(format!("gate probe eval: {e}"));
+            }
+        };
+        let needs = classify_gates(&probe);
+        let verdict = match mgr
+            .send(&sid, |reply| crate::session::SessionCommand::Verdict { reply })
+            .await
+        {
+            Ok(sheet) => serde_json::from_str::<serde_json::Value>(&sheet)
+                .map(|s| {
+                    s["verdict"].as_str().unwrap_or("unknown").to_string()
+                })
+                .unwrap_or_else(|_| "unknown".to_string()),
+            Err(e) => {
+                mgr.close(&sid);
+                return Err(format!("verdict: {e}"));
+            }
+        };
+        let expires_in_secs = mgr.expires_in_secs(&sid);
+
+        let mut logged_in = None;
+        if let Some(pred) = predicate {
+            if needs.is_empty() {
+                let timeout = timeout_ms.clamp(1_000, 120_000);
+                let pred = pred.to_string();
+                if let Ok(payload) = mgr
+                    .send(&sid, |reply| crate::session::SessionCommand::Wait {
+                        selector: None,
+                        predicate: Some(pred),
+                        timeout_ms: timeout,
+                        reply,
+                    })
+                    .await
+                {
+                    let elapsed_ms = serde_json::from_str::<serde_json::Value>(&payload)
+                        .ok()
+                        .and_then(|v| v["elapsed_ms"].as_u64())
+                        .unwrap_or(0);
+                    let success_url = mgr
+                        .send(&sid, |reply| crate::session::SessionCommand::Url { reply })
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    mgr.close(&sid);
+                    logged_in = Some((success_url, elapsed_ms));
+                }
+                // Wait Err (timeout): fall through with the session open.
+            }
+        }
+
+        match logged_in {
+            Some((success_url, elapsed_ms)) => Outcome::LoggedIn {
+                success_url,
+                elapsed_ms,
+            },
+            None => Outcome::Open {
+                session_id: sid,
+                page_url: probe["url"].as_str().unwrap_or(url).to_string(),
+                needs,
+                markers: probe["markers"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default(),
+                verdict,
+                expires_in_secs,
+            },
+        }
+    };
+
+    // Phase 2, guard released: verify locks SESSIONS itself, so it must run
+    // outside the block above. The success-time URL teaches the spec — the
+    // login page itself usually keeps the predicate false on a revisit.
+    match outcome {
+        Outcome::LoggedIn {
+            success_url,
+            elapsed_ms,
+        } => {
+            let verify = match verify(owner, name, Some(&success_url), predicate).await {
+                Ok(v) => v,
+                // The login itself succeeded and the cookies persisted; a
+                // probe failure is not a login failure.
+                Err(e) => serde_json::json!({"error": e}),
+            };
+            Ok(serde_json::json!({
+                "name": name,
+                "status": "logged_in",
+                "url": success_url,
+                "elapsed_ms": elapsed_ms,
+                "verify": verify,
+            }))
+        }
+        Outcome::Open {
+            session_id,
+            page_url,
+            needs,
+            markers,
+            verdict,
+            expires_in_secs,
+        } => {
+            let mut reply = serde_json::json!({
+                "name": name,
+                "status": if predicate.is_some() { "waiting" } else { "opened" },
+                "needs": needs,
+                "markers": markers,
+                "verdict": verdict,
+                "url": page_url,
+                "session_id": session_id,
+                "expires_in_secs": expires_in_secs,
+            });
+            if needs.is_empty() {
+                reply["next"] = serde_json::json!(format!(
+                    "poll session_wait {{session_id, predicate}} (the automatic bounce may \
+                     just be slow), or drive the login with session_input/session_click on \
+                     {session_id}; afterwards stamp with account_verify {{name, url, \
+                     predicate}} — cookies write back after every action"
+                ));
+            } else {
+                reply["handoff"] = serde_json::json!(format!(
+                    "human step ({}) — open /live?session={} on this engine's HTTP port and \
+                     finish it there; cookies write back after every action, so afterwards \
+                     re-call account_login with the same arguments (the account's shared jar \
+                     already holds the finished login), or poll session_wait {{session_id, \
+                     predicate}} and stamp with account_verify {{name, url, predicate}}",
+                    needs.join(", "),
+                    session_id
+                ));
+            }
+            Ok(reply)
+        }
+    }
+}
+
 /// JS truthiness over a JSON value — the predicate's contract is "truthy when
 /// logged in", and the round-trip flattens JS values to JSON, so the same
 /// falsy set applies: false, 0, "", null, missing.
@@ -466,6 +759,40 @@ mod tests {
         );
         let other = url::Url::parse("https://example.com/").unwrap();
         assert!(!jar.get_cookie_header(&other).contains("cookie2"));
+    }
+
+    #[test]
+    fn classify_gates_maps_probe_counts_to_needs() {
+        let probe = |pw, sms, qr, sl| {
+            serde_json::json!({
+                "url": "https://x.com/login", "password": pw, "sms": sms, "qr": qr,
+                "slider": sl, "markers": []
+            })
+        };
+        assert_eq!(classify_gates(&probe(1, 0, 0, 0)), ["password"]);
+        assert_eq!(classify_gates(&probe(0, 2, 0, 0)), ["sms"]);
+        // The xiaohongshu shape: a QR surface and nothing else.
+        assert_eq!(classify_gates(&probe(0, 0, 1, 0)), ["qr"]);
+        assert_eq!(classify_gates(&probe(0, 0, 0, 3)), ["slider"]);
+        assert_eq!(
+            classify_gates(&probe(1, 1, 1, 1)),
+            ["password", "sms", "qr", "slider"]
+        );
+        // No gates → empty → the wizard takes the wait path.
+        assert!(classify_gates(&probe(0, 0, 0, 0)).is_empty());
+        // Missing fields read as zero, never a panic.
+        assert!(classify_gates(&serde_json::json!({"url": "https://a.io/"})).is_empty());
+    }
+
+    #[test]
+    fn use_proxy_record_wins_over_param() {
+        // One identity, one egress: the recorded route survives a later
+        // call's default-false param; the param only seeds a record without
+        // one.
+        assert!(resolve_use_proxy(&serde_json::json!({"use_proxy": true}), false));
+        assert!(resolve_use_proxy(&serde_json::json!({"use_proxy": true}), true));
+        assert!(resolve_use_proxy(&serde_json::json!({}), true));
+        assert!(!resolve_use_proxy(&serde_json::json!({}), false));
     }
 
     // The pool is the persona's TLS-coherence contract: Chrome 145 only

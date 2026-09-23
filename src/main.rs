@@ -101,8 +101,8 @@ use routers::acquisition::{
 #[cfg(feature = "screenshot")]
 use routers::outputs::{pdf_handler, screenshot_handler, video_handler};
 use routers::sessions::{
-    account_delete_handler, account_verify_handler, accounts_handler, flow_run_handler,
-    import_curl_handler, max_body_bytes, session_challenges_handler, session_click_handler,
+    account_delete_handler, account_login_handler, account_verify_handler, accounts_handler,
+    flow_run_handler, import_curl_handler, max_body_bytes, session_challenges_handler, session_click_handler,
     session_click_xy_handler, session_clone_handler, session_close_handler,
     session_console_handler, session_cookies_handler, session_create_handler,
     session_dialog_handler, session_drag_handler, session_eval_handler, session_export_handler,
@@ -343,6 +343,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/accounts", get(accounts_handler))
         .route("/accounts/:name", delete(account_delete_handler))
         .route("/account/verify", post(account_verify_handler))
+        .route("/account/login", post(account_login_handler))
         .route("/mcp", get(mcp_handler).post(mcp_handler))
         // CDP bridge — Playwright connectOverCDP / Puppeteer connect surface.
         .route("/json/version", get(crate::cdp::http::json_version))

@@ -592,6 +592,36 @@ pub struct AccountDeleteParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct AccountLoginParams {
+    /// The account to log in as (created implicitly on first use; 1-64
+    /// chars of [a-zA-Z0-9_-]).
+    pub name: String,
+    /// The login page URL to open as this account.
+    pub url: String,
+    /// A JS expression truthy on the page the site lands on AFTER login,
+    /// e.g. `!!document.querySelector('.user-nick')`. With it and no human
+    /// step detected, the call waits for the automatic login bounce and
+    /// stamps the account's verify spec on success. Without it, the call
+    /// just opens the page and reports what kind of login it sees.
+    #[serde(default)]
+    pub predicate: Option<String>,
+    /// Route through the engine proxy. Seeds a fresh account; an account
+    /// with an existing record reuses its recorded egress.
+    #[serde(default)]
+    pub use_proxy: bool,
+    /// Wait budget in ms for the automatic-login bounce (default 60000,
+    /// clamped 1000..120000). Never spent while a human step
+    /// (QR/SMS/password/slider) is outstanding — those return immediately
+    /// with a session handoff.
+    #[serde(default = "default_login_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_login_timeout_ms() -> u64 {
+    60_000
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct CacheParams {
     /// Full-text search over cached page contents, titles, URLs and past search queries. Omit to list the latest rows.
     #[serde(default)]
@@ -1801,6 +1831,26 @@ Returns {name, logged_in, url, checked_at}.",
             &params.name,
             params.url.as_deref(),
             params.predicate.as_deref(),
+        )
+        .await
+        {
+            Ok(v) => v.to_string(),
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Open a site's login page AS a named account and close the login loop. Creates the session as the account (private jar, device persona), navigates to `url`, and reports which generic login gates the page shows — needs: password | sms | qr | slider (QR scan like xiaohongshu, SMS code, password form, slider/captcha) — plus a session_verdict classification and, when a human step is needed, the session_id and a /live handoff so a person can finish it in the live view (the engine detects and describes; it never fills credentials or solves challenges). With `predicate` and no human gates detected, waits for the automatic bounce, then teaches + stamps the account's verify spec — later account_verify calls re-check it bare. Cookies write back after every action, so a login finished in /live is already persisted. status is \"logged_in\" (verify stamped), \"waiting\" (drive session_wait/session_input on session_id, or re-call account_login after the human finishes — the account's shared jar already holds it), or \"opened\" (no predicate given).",
+        annotations(title = "Account Login Wizard")
+    )]
+    async fn account_login(&self, Parameters(params): Parameters<AccountLoginParams>) -> String {
+        match crate::account::login(
+            &self.owner,
+            &params.name,
+            &params.url,
+            params.predicate.as_deref(),
+            params.use_proxy,
+            params.timeout_ms,
         )
         .await
         {
