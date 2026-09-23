@@ -106,7 +106,7 @@ jobs:
         run: |
           curl -fsSL https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz | sudo tar -xJ -C /opt
           echo "/opt/zig-aarch64-linux-0.16.0" >> "$GITHUB_PATH"
-      - uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2
+      - uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2
         with:
           tool: cargo-zigbuild
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -173,7 +173,7 @@ jobs:
         run: |
           curl -fsSL https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz | sudo tar -xJ -C /opt
           echo "/opt/zig-aarch64-linux-0.16.0" >> "$GITHUB_PATH"
-      - uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2
+      - uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2
         with:
           tool: cargo-zigbuild
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
