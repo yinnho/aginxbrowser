@@ -16,6 +16,12 @@ const fn iowr<T>(nr: u32) -> u32 {
         | (DRM_IOCTL_BASE << 8)
         | nr
 }
+const fn iow<T>(nr: u32) -> u32 {
+    (_IOC_WRITE << 30)
+        | ((std::mem::size_of::<T>() as u32) << 16)
+        | (DRM_IOCTL_BASE << 8)
+        | nr
+}
 const fn io(nr: u32) -> u32 {
     (DRM_IOCTL_BASE << 8) | nr
 }
@@ -120,6 +126,13 @@ struct drm_mode_map_dumb {
 
 #[repr(C)]
 #[derive(Default)]
+struct drm_mode_destroy_dumb {
+    handle: u32,
+    pad: u32,
+}
+
+#[repr(C)]
+#[derive(Default)]
 struct drm_mode_fb_cmd2 {
     fb_id: u32,
     width: u32,
@@ -162,6 +175,8 @@ const DRM_IOCTL_MODE_PAGE_FLIP: u32 = iowr::<drm_mode_crtc_page_flip>(0xB0);
 const DRM_IOCTL_MODE_CREATE_DUMB: u32 = iowr::<drm_mode_create_dumb>(0xB2);
 const DRM_IOCTL_MODE_MAP_DUMB: u32 = iowr::<drm_mode_map_dumb>(0xB3);
 const DRM_IOCTL_MODE_ADDFB2: u32 = iowr::<drm_mode_fb_cmd2>(0xB8);
+const DRM_IOCTL_MODE_RMFB: u32 = iow::<u32>(0xAF);
+const DRM_IOCTL_MODE_DESTROY_DUMB: u32 = iowr::<drm_mode_destroy_dumb>(0xB4);
 const DRM_IOCTL_SET_MASTER: u32 = io(0x1e);
 const DRM_FORMAT_XRGB8888: u32 = 0x34325258;
 const DRM_MODE_PAGE_FLIP_EVENT: u32 = 0x01;
@@ -174,12 +189,42 @@ pub struct Drm {
     pub height: u32,
     pitch_px: usize,
     fb: [u32; 2],
+    handles: [u32; 2],
     maps: [*mut u32; 2],
+    map_len: usize,
     cur: usize,
     flip_ok: bool,
     crtc_id: u32,
     conn_id: u32,
     mode: drm_mode_modeinfo,
+}
+
+/// munmap → RMFB → DESTROY_DUMB. The order is load-bearing: the mapping
+/// pins the buffer, the fb references the handle. Without munmap the vma's
+/// vm_file keeps a struct file reference, drm_release never runs, and the
+/// master dangles on the (long-lived) engine process — every later
+/// SET_MASTER fails with nothing visible in /proc/*/fd (#85).
+fn release_buffers(fd: i32, fb: &[u32; 2], handles: &[u32; 2], maps: &[*mut u32; 2], map_len: usize) {
+    for m in maps.iter() {
+        if !m.is_null() {
+            unsafe { libc::munmap(*m as *mut libc::c_void, map_len) };
+        }
+    }
+    for id in fb.iter() {
+        if *id != 0 {
+            let mut id = *id;
+            unsafe { libc::ioctl(fd, DRM_IOCTL_MODE_RMFB as _, &mut id) };
+        }
+    }
+    for h in handles.iter() {
+        if *h != 0 {
+            let mut dd = drm_mode_destroy_dumb {
+                handle: *h,
+                ..Default::default()
+            };
+            unsafe { libc::ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB as _, &mut dd) };
+        }
+    }
 }
 
 impl Drm {
@@ -270,7 +315,9 @@ impl Drm {
         }
         let mut fb = [0u32; 2];
         let mut maps = [std::ptr::null_mut::<u32>(); 2];
+        let mut handles = [0u32; 2];
         let mut pitch_px = 0usize;
+        let mut map_len = 0usize;
         for _b in 0..2 {
             let mut dumb = drm_mode_create_dumb {
                 width: mode.hdisplay as u32,
@@ -279,8 +326,10 @@ impl Drm {
                 ..Default::default()
             };
             if unsafe { libc::ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB as _, &mut dumb) } != 0 {
+                release_buffers(fd, &fb, &handles, &maps, map_len);
                 return Err("CREATE_DUMB failed".into());
             }
+            handles[_b] = dumb.handle;
             let mut fb2 = drm_mode_fb_cmd2::default();
             fb2.width = mode.hdisplay as u32;
             fb2.height = mode.vdisplay as u32;
@@ -288,6 +337,7 @@ impl Drm {
             fb2.handles[0] = dumb.handle;
             fb2.pitches[0] = dumb.pitch;
             if unsafe { libc::ioctl(fd, DRM_IOCTL_MODE_ADDFB2 as _, &mut fb2) } != 0 {
+                release_buffers(fd, &fb, &handles, &maps, map_len);
                 return Err("ADDFB2 failed".into());
             }
             let mut map = drm_mode_map_dumb {
@@ -295,6 +345,7 @@ impl Drm {
                 ..Default::default()
             };
             if unsafe { libc::ioctl(fd, DRM_IOCTL_MODE_MAP_DUMB as _, &mut map) } != 0 {
+                release_buffers(fd, &fb, &handles, &maps, map_len);
                 return Err("MAP_DUMB failed".into());
             }
             let m = unsafe {
@@ -308,11 +359,13 @@ impl Drm {
                 )
             };
             if m == libc::MAP_FAILED {
+                release_buffers(fd, &fb, &handles, &maps, map_len);
                 return Err("mmap dumb failed".into());
             }
             fb[_b] = fb2.fb_id;
             maps[_b] = m as *mut u32;
             pitch_px = dumb.pitch as usize / 4;
+            map_len = dumb.size as usize;
         }
         Ok(Drm {
             file,
@@ -320,7 +373,9 @@ impl Drm {
             height: mode.vdisplay as u32,
             pitch_px,
             fb,
+            handles,
             maps,
+            map_len,
             cur: 0,
             flip_ok: true,
             crtc_id,
@@ -430,5 +485,40 @@ impl Drm {
         if self.modeset(self.fb[next]).is_ok() {
             self.cur = next;
         }
+    }
+}
+
+impl Drop for Drm {
+    fn drop(&mut self) {
+        release_buffers(
+            self.file.as_raw_fd(),
+            &self.fb,
+            &self.handles,
+            &self.maps,
+            self.map_len,
+        );
+        // The File's own Drop (close) lands after this; with the mappings
+        // gone the last file reference falls, drm_release releases the
+        // master, and the next SET_MASTER (term's re-grab) succeeds.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The kernel dispatches ioctls on the full encoded command, so a wrong
+    /// struct size turns RMFB/DESTROY_DUMB into a different ioctl entirely.
+    /// These pin the encodings (and the 8-byte destroy_dumb) against Linux
+    /// drm_ioctls.h (#85).
+    #[test]
+    fn drm_ioctl_numbers_match_kernel_encoding() {
+        assert_eq!(std::mem::size_of::<drm_mode_destroy_dumb>(), 8);
+        assert_eq!(DRM_IOCTL_MODE_RMFB, 0x4004_64af);
+        assert_eq!(DRM_IOCTL_MODE_DESTROY_DUMB, 0xc008_64b4);
+        // Existing encodings stay put alongside the new ones.
+        assert_eq!(DRM_IOCTL_MODE_CREATE_DUMB, 0xc020_64b2);
+        assert_eq!(DRM_IOCTL_MODE_PAGE_FLIP, 0xc018_64b0);
+        assert_eq!(DRM_IOCTL_SET_MASTER, 0x641e);
     }
 }
