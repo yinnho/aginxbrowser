@@ -5173,6 +5173,56 @@
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_issue_83_sw_register_resolves_registration() {
+        // Pages chain off register(): `register('/sw.js').then(reg => reg.scope)`.
+        // The old stub resolved undefined, so the .scope read threw — xhs logs
+        // it as "Service Worker registration failed: Cannot read properties of
+        // undefined (reading 'scope')" (issue #83). register/ready must resolve
+        // a registration-shaped object; getRegistration keeps resolving
+        // undefined — nothing ever registered, and a lie there pushes pages
+        // into the has-registration branch.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url("https://www.xiaohongshu.com/explore");
+        rt.evaluate(
+            "globalThis.__out = {};
+             navigator.serviceWorker.register('/sw.js').then(function (reg) {
+               __out.scope = reg.scope;
+               __out.viaCache = reg.updateViaCache;
+               __out.activeNull = reg.active === null;
+               __out.methods = typeof reg.update === 'function'
+                 && typeof reg.unregister === 'function'
+                 && typeof reg.addEventListener === 'function';
+               return reg.unregister();
+             }).then(function (v) { __out.unreg = v; });
+             navigator.serviceWorker.register('sw.js', { scope: '/im/' })
+               .then(function (reg) { __out.optScope = reg.scope; });
+             navigator.serviceWorker.ready
+               .then(function (reg) { __out.readyScope = reg.scope; });
+             navigator.serviceWorker.getRegistration()
+               .then(function (r) { __out.getReg = (r === undefined); });",
+        )
+        .unwrap();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), rt.run_event_loop()).await;
+        let out = rt.evaluate("globalThis.__out").unwrap();
+        assert_eq!(
+            out,
+            serde_json::json!({
+                "scope": "https://www.xiaohongshu.com/",
+                "viaCache": "imports",
+                "activeNull": true,
+                "methods": true,
+                "unreg": true,
+                // register('sw.js', {scope:'/im/'}) on /explore: script
+                // resolves against the page dir, scope against the option.
+                "optScope": "https://www.xiaohongshu.com/im/",
+                "readyScope": "https://www.xiaohongshu.com/",
+                "getReg": true,
+            }),
+            "register/ready resolve registration-shaped objects; getRegistration stays undefined"
+        );
+    }
+
     #[test]
     fn test_issue_78_jsvmp_env_scan_face() {
         // The XHS jsvmp environment scan reads these four faces directly; all

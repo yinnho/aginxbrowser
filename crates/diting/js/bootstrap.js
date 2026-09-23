@@ -6684,14 +6684,45 @@ globalThis.navigator = {
     },
     toJSON() { return {brands:this.brands,mobile:this.mobile,platform:this.platform}; },
   },
-  serviceWorker: {
-    ready: Promise.resolve(),
-    register(){ return Promise.resolve(); },
-    getRegistrations(){ return Promise.resolve([]); },
-    getRegistration(){ return Promise.resolve(undefined); },
-    controller: null,
-    addEventListener(){}, removeEventListener(){}, dispatchEvent(){ return false; },
-  },
+  serviceWorker: (function () {
+    // Chrome's register() resolves a ServiceWorkerRegistration; pages chain
+    // reg.scope / reg.unregister() straight off the promise (#83) — the
+    // previous stub resolved undefined and the .scope read threw. ready
+    // carries the same shape. No worker ever runs; controller stays null,
+    // getRegistration keeps resolving undefined so "is one registered?"
+    // checks still take the no-SW branch.
+    function registration(scope) {
+      return {
+        scope: scope,
+        updateViaCache: 'imports',
+        active: null, installing: null, waiting: null,
+        update: function () { return Promise.resolve(undefined); },
+        unregister: function () { return Promise.resolve(true); },
+        addEventListener: function () {}, removeEventListener: function () {},
+        dispatchEvent: function () { return false; },
+      };
+    }
+    function dirScope(url) {
+      return url.slice(0, url.lastIndexOf('/') + 1);
+    }
+    return {
+      get ready() { return Promise.resolve(registration(dirScope(location.href))); },
+      register: function (scriptUrl, options) {
+        var scope;
+        try {
+          var su = new URL(scriptUrl, location.href);
+          scope = (options && options.scope)
+            ? new URL(options.scope, location.href).href
+            : dirScope(su.href);
+        } catch (e) { scope = dirScope(location.href); }
+        return Promise.resolve(registration(scope));
+      },
+      getRegistrations(){ return Promise.resolve([]); },
+      getRegistration(){ return Promise.resolve(undefined); },
+      controller: null,
+      addEventListener(){}, removeEventListener(){}, dispatchEvent(){ return false; },
+    };
+  })(),
   mediaDevices: {
     enumerateDevices() {
       return Promise.resolve([
