@@ -444,7 +444,7 @@ impl DomTree {
 
     /// Attach an existing detached fragment node as a shadow root. The node
     /// must be an unregistered Document-data node with no ordinary links.
-    fn attach_shadow_root_node(
+    pub(crate) fn attach_shadow_root_node(
         &self,
         host: NodeId,
         root: NodeId,

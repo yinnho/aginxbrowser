@@ -6,7 +6,7 @@ use html5ever::tendril::StrTendril;
 use html5ever::tree_builder::{ElemName, ElementFlags, NodeOrText, QuirksMode, TreeSink};
 use html5ever::{local_name, namespace_url, ns, Attribute as HtmlAttribute, LocalName, Namespace, QualName};
 
-use crate::diting_dom::tree::{Attribute, DomTree, NodeData, NodeId};
+use crate::diting_dom::tree::{Attribute, DomTree, NodeData, NodeId, ShadowRootMode};
 
 pub struct DitingElemName<'a> {
     _ref: Ref<'a, ()>,
@@ -216,6 +216,17 @@ impl TreeSink for DomTree {
         .expect("get_template_contents called on non-template element")
     }
 
+    fn allow_declarative_shadow_roots(&self, _intended_parent: &NodeId) -> bool {
+        // html5ever 0.29.1's declarative-shadow path is a skeleton that
+        // cannot be completed sink-side: on success nothing routes the
+        // template's children into the shadow root, and closed mode is
+        // never even detected (a "close" typo in its tree builder). Refuse
+        // here so the template parses normally — content properly
+        // contained in `template_contents` — and the post-parse walk
+        // (`upgrade_declarative_shadow_roots`) performs the upgrade.
+        false
+    }
+
     fn same_node(&self, x: &NodeId, y: &NodeId) -> bool {
         x == y
     }
@@ -242,9 +253,11 @@ pub fn parse_html(html: &str) -> DomTree {
     use html5ever::{parse_document, ParseOpts};
 
     let tree = DomTree::new();
-    parse_document(tree, ParseOpts::default())
+    let tree = parse_document(tree, ParseOpts::default())
         .from_utf8()
-        .one(html.as_bytes())
+        .one(html.as_bytes());
+    upgrade_declarative_shadow_roots(&tree, tree.document());
+    tree
 }
 
 pub fn parse_fragment(html: &str) -> DomTree {
@@ -262,9 +275,69 @@ pub fn parse_fragment_with_context(html: &str, context_name: QualName) -> DomTre
     use html5ever::{parse_fragment, ParseOpts};
 
     let tree = DomTree::new();
-    parse_fragment(tree, ParseOpts::default(), context_name, vec![])
+    let tree = parse_fragment(tree, ParseOpts::default(), context_name, vec![])
         .from_utf8()
-        .one(html.as_bytes())
+        .one(html.as_bytes());
+    upgrade_declarative_shadow_roots(&tree, tree.document());
+    tree
+}
+
+/// Upgrade `<template shadowrootmode>` declarations into native shadow
+/// roots (#87, the blitz#923 class). Runs after every parse: for each
+/// template whose `shadowrootmode` names a real mode, attach its
+/// `template_contents` fragment to the parent element as a shadow root
+/// and drop the now-empty template shell — the template never exists in
+/// the finished tree, exactly like the platform's parse-time behavior.
+/// Failure cases mirror the spec: an invalid mode value or a host that
+/// already has a shadow root leaves the template inert, and inert
+/// template content is never itself walked.
+fn upgrade_declarative_shadow_roots(tree: &DomTree, scope: NodeId) {
+    // Iterative on purpose: a recursive walk overflows on the 20k-deep
+    // nesting the parser accepts — the same trap text_content/outer_html
+    // once hit (see tree's test_deep_nesting_does_not_overflow).
+    let mut stack = vec![scope];
+    while let Some(node) = stack.pop() {
+        for child in tree.children(node) {
+            let declarative = tree.with_node(child, |n| {
+                let NodeData::Element { name, attrs, template_contents, .. } = &n.data else {
+                    return None;
+                };
+                if name.local != local_name!("template") {
+                    return None;
+                }
+                let mode = attrs
+                    .iter()
+                    .find(|a| a.name.local == local_name!("shadowrootmode"))?
+                    .value
+                    .trim();
+                if mode.eq_ignore_ascii_case("open") {
+                    Some((ShadowRootMode::Open, n.parent, *template_contents))
+                } else if mode.eq_ignore_ascii_case("closed") {
+                    Some((ShadowRootMode::Closed, n.parent, *template_contents))
+                } else {
+                    None
+                }
+            });
+            if let Some((mode, Some(host), Some(contents))) = declarative.flatten() {
+                let host_is_element =
+                    tree.with_node(host, |n| n.is_element()).unwrap_or(false);
+                if host_is_element
+                    && tree.attach_shadow_root_node(host, contents, mode).is_ok()
+                {
+                    // The contents fragment is now a registered shadow root,
+                    // so removing the shell cannot free it
+                    // (inclusive_owned_subtrees only follows light children
+                    // and registered host edges).
+                    tree.remove(child);
+                    // Shadow content can carry its own declarative
+                    // templates.
+                    stack.push(contents);
+                    continue;
+                }
+            }
+            stack.push(child);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -333,5 +406,81 @@ mod tests {
         let text = tree.text_content(tree.document());
         assert!(text.contains("Hello"));
         assert!(text.contains("World"));
+    }
+
+    fn tag_of(tree: &DomTree, id: NodeId) -> String {
+        tree.with_node(id, |n| match &n.data {
+            NodeData::Element { name, .. } => name.local.to_string(),
+            _ => String::new(),
+        })
+        .unwrap_or_default()
+    }
+
+    #[test]
+    fn declarative_shadow_open_moves_content_into_shadow_root() {
+        let tree = parse_html(
+            r#"<body><div id="host"><template shadowrootmode="open"><span>inner</span></template></div></body>"#,
+        );
+        let host = tree.get_element_by_id("host").unwrap();
+        // The shell is gone: the host's light tree is empty.
+        assert!(tree.children(host).is_empty());
+        let root = tree.shadow_root(host).expect("shadow root attached");
+        assert_eq!(tree.shadow_root_info(root).unwrap().mode, ShadowRootMode::Open);
+        let kids = tree.children(root);
+        assert_eq!(kids.len(), 1);
+        assert_eq!(tag_of(&tree, kids[0]), "span");
+        assert_eq!(tree.text_content(kids[0]), "inner");
+    }
+
+    #[test]
+    fn declarative_shadow_closed_mode() {
+        // Closed mode is the one html5ever's own detector cannot see (its
+        // "close" typo) — the fixup must catch it regardless.
+        let tree = parse_html(
+            r#"<body><div id="h"><template shadowrootmode="closed"><p>x</p></template></div></body>"#,
+        );
+        let host = tree.get_element_by_id("h").unwrap();
+        assert!(tree.children(host).is_empty());
+        let root = tree.shadow_root(host).expect("closed root attached");
+        assert_eq!(tree.shadow_root_info(root).unwrap().mode, ShadowRootMode::Closed);
+        assert_eq!(tree.text_content(root), "x");
+    }
+
+    #[test]
+    fn declarative_shadow_invalid_mode_stays_inert() {
+        let tree = parse_html(
+            r#"<body><div id="h"><template shadowrootmode="oopen"><span>no</span></template></div></body>"#,
+        );
+        let host = tree.get_element_by_id("h").unwrap();
+        assert!(tree.shadow_root(host).is_none());
+        let kids = tree.children(host);
+        assert_eq!(kids.len(), 1);
+        assert_eq!(tag_of(&tree, kids[0]), "template");
+        // Inert means invisible: the text stays in the contents fragment,
+        // out of the light DOM a render walk (or textContent) would see.
+        assert_eq!(tree.text_content(host), "");
+    }
+
+    #[test]
+    fn declarative_shadow_nested_inside_shadow_content() {
+        let tree = parse_html(
+            r#"<body><div id="outer"><template shadowrootmode="open"><section><template shadowrootmode="closed"><b>deep</b></template></section></template></div></body>"#,
+        );
+        let outer = tree.get_element_by_id("outer").unwrap();
+        let outer_root = tree.shadow_root(outer).expect("outer root");
+        let kids = tree.children(outer_root);
+        assert_eq!(tag_of(&tree, kids[0]), "section");
+        let inner_root = tree.shadow_root(kids[0]).expect("nested root");
+        assert_eq!(tree.shadow_root_info(inner_root).unwrap().mode, ShadowRootMode::Closed);
+        assert_eq!(tree.text_content(inner_root), "deep");
+    }
+
+    #[test]
+    fn declarative_shadow_fragment_parse() {
+        let tree = parse_fragment(r#"<div id="f"><template shadowrootmode="open"><span>frag</span></template></div>"#);
+        let host = tree.get_element_by_id("f").unwrap();
+        assert!(tree.children(host).is_empty());
+        let root = tree.shadow_root(host).expect("fragment shadow root");
+        assert_eq!(tree.text_content(root), "frag");
     }
 }

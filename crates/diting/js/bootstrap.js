@@ -13213,14 +13213,24 @@ Object.defineProperty(Element.prototype, 'shadowRoot', {
   enumerable: true,
   get: function () {
     var sr = this._shadowRoot;
+    if (!sr) {
+      // A root the parser attached (declarative shadow DOM) never ran
+      // attachShadow, so the wrapper cache is cold — ask the tree once and
+      // memoize, so later reads behave exactly like attachShadow's.
+      var got = _OPS.op_dom('shadow_root_of', String(this._nid), '');
+      if (got === '-1') return null;
+      var parts = got.split('|');
+      sr = new ShadowRoot(+parts[0], this, { mode: parts[1] });
+      _cache.set(+parts[0], sr);
+      __def(this, '_shadowRoot', sr);
+    }
     return sr && sr.mode === 'open' ? sr : null;
   },
 });
 
 // setHTMLUnsafe / getHTML: shims over innerHTML. setHTMLUnsafe parses markup
-// like innerHTML (declarative shadow roots inside are not expanded yet, but the
-// call no longer throws so the rest of a test file can run); getHTML serializes
-// like innerHTML.
+// like innerHTML (the parse fixup expands declarative shadow roots the same
+// way document parsing does); getHTML serializes like innerHTML.
 Element.prototype.setHTMLUnsafe = function setHTMLUnsafe(html) { this.innerHTML = String(html == null ? "" : html); };
 Element.prototype.getHTML = function getHTML() { return this.innerHTML; };
 _markNative(Element.prototype.setHTMLUnsafe);

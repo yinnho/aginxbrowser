@@ -1089,6 +1089,23 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 .map(|id| id.index().to_string())
                 .unwrap_or("-1".into())
         }
+        // The shadow root a host carries, as "root_index|mode" (or "-1").
+        // The JS shadowRoot getter consults this for roots the parser
+        // attached (declarative shadow DOM) — those never ran attachShadow,
+        // so the wrapper-side cache is cold.
+        "shadow_root_of" => {
+            let nid = arg1.parse::<u32>().unwrap_or(0);
+            match dom.shadow_root(NodeId::new(nid)) {
+                Some(root) => {
+                    let mode = match dom.shadow_root_info(root).map(|i| i.mode) {
+                        Some(ShadowRootMode::Closed) => "closed",
+                        _ => "open",
+                    };
+                    format!("{}|{}", root.index(), mode).into()
+                }
+                None => "-1".into(),
+            }
+        }
         "assigned_slot" => {
             let nid = arg1.parse::<u32>().unwrap_or(0);
             dom.assigned_slot(NodeId::new(nid))

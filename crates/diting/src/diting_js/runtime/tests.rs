@@ -1479,6 +1479,34 @@
         );
     }
 
+    /// The declarative face of the same contract (#87): a
+    /// `<template shadowrootmode>` parsed straight from HTML upgrades into
+    /// the native shadow root the platform builds at parse time — the
+    /// shell is gone, the host's light tree keeps only real children, and
+    /// JS sees the root exactly as if attachShadow had run.
+    #[test]
+    fn declarative_shadow_template_upgrades_at_parse() {
+        let mut rt = setup_runtime(
+            r#"<div id="host"><template shadowrootmode="open"><p id="shadow-p">S</p></template><span id="light">L</span></div>"#,
+        );
+        let out = rt
+            .evaluate(
+                "const host = document.getElementById('host'); \
+                 const sr = host.shadowRoot; \
+                 [ \
+                   sr instanceof ShadowRoot, \
+                   sr.host === host, \
+                   sr.querySelector('#shadow-p').textContent, \
+                   document.querySelector('#shadow-p') === null, \
+                   host.querySelector('#light') !== null, \
+                   host.children.length, \
+                   document.querySelector('template') === null \
+                 ].join('|')",
+            )
+            .unwrap();
+        assert_eq!(out, serde_json::json!("true|true|S|true|true|1|true"));
+    }
+
     /// Shadow-root identity contract: closed mode hides the root from the
     /// host property, getRootNode answers per scope (default stops at the
     /// ShadowRoot, composed crosses the host edge), connectivity follows the
