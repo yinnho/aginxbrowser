@@ -1,5 +1,10 @@
 {
-  "args": ["title", "content", "tags", "images"],
+  "args": [
+    "title",
+    "content",
+    "tags",
+    "images"
+  ],
   "vars": {
     "args_json": "{\"title\": \"测试标题（请换成真的）\", \"content\": \"第一段\\n\\n第二段\", \"tags\": [\"aginxbrowser\"], \"images\": [{\"name\": \"1.png\", \"content_type\": \"image/png\", \"content_base64\": \"CHANGE_ME\"}]}"
   },
@@ -19,9 +24,16 @@
     {
       "op": "eval",
       "args": {
-        "script": "// xhs-post step 1.5: XHR auto-signing patch — the page bundles its signer as window._webmsxyw but never wires it up in this engine (mnsv2 installer chain gap), so every signed API call goes out bare and 406s, which the page misreads as session death and bounces to /login. Signer presence is checked at send time, so installing early is safe\n(() => {\n  if (window.__xs_installed) return 'already';\n  window.__xs_installed = true;\n  const O = XMLHttpRequest.prototype.open, S = XMLHttpRequest.prototype.setRequestHeader, D = XMLHttpRequest.prototype.send;\n  XMLHttpRequest.prototype.open = function(m, u) {\n    this.__xs_u = String(u); this.__xs_m = String(m || 'GET').toUpperCase();\n    return O.apply(this, arguments);\n  };\n  XMLHttpRequest.prototype.setRequestHeader = function(k, v) {\n    if (String(k).toLowerCase() === 'x-s') this.__xs_has = true;\n    return S.apply(this, arguments);\n  };\n  XMLHttpRequest.prototype.send = function(b) {\n    try {\n      if (typeof window._webmsxyw === 'function' && !this.__xs_has && this.__xs_u &&\n          this.__xs_u.indexOf('xiaohongshu.com') !== -1 && !(b instanceof FormData)) {\n        const path = this.__xs_u.replace(/^https?:\\/\\/[^\\/]+/, '');\n        let data = b;\n        if (this.__xs_m === 'POST' && typeof b === 'string') { try { data = JSON.parse(b); } catch (e) {} }\n        const sg = window._webmsxyw(path, data);\n        if (sg && sg['X-s']) {\n          S.call(this, 'X-s', String(sg['X-s']));\n          S.call(this, 'X-t', String(sg['X-t']));\n          S.call(this, 'X-Mns', 'unload');\n          window.__xs_signed = (window.__xs_signed || 0) + 1;\n        }\n      }\n    } catch (e) {}\n    return D.apply(this, arguments);\n  };\n  return 'patched';\n})()"
+        "script": "// xhs-post step 1.5: dual-face auto-signing + logout-fuse block.\n// 2026-09-24 root cause: the publish page misreads unsigned-API 406s\n// (upload/creator/permit et al.) as session death and calls\n// /sso/logout + /api/galaxy/user/logout ITSELF — the session is killed\n// server-side by the page's own logout, then it bounces to /login\n// (webBuild 1.30.0 fuse, live-captured via a localStorage request recorder).\n// Signing alone is not enough at flow timing: the boot burst fires some\n// unsigned calls before this patch lands, so the logout endpoints are also\n// answered with a synthetic 200 to defuse the fuse. XHR face unchanged in\n// behavior (send-time signer check, __xs_signed counter); fetch face added\n// because half the burst goes out via the page's jsvmp fetch wrapper.\n(() => {\n  if (window.__xs_installed) return 'already';\n  window.__xs_installed = true;\n  const sign = (u, b) => {\n    try {\n      if (typeof window._webmsxyw !== 'function') return null;\n      const s = String(u);\n      if (s.indexOf('xiaohongshu.com') === -1) return null;\n      const path = s.replace(/^https?:\\/\\/[^\\/]+/, '');\n      let data = b;\n      if (typeof b === 'string') { try { data = JSON.parse(b); } catch (e) {} }\n      if (b == null || b instanceof FormData || b instanceof ArrayBuffer || b instanceof Blob) data = undefined;\n      const sg = window._webmsxyw(path, data);\n      return sg && sg['X-s'] ? sg : null;\n    } catch (e) { return null; }\n  };\n  const FUSE = /\\/sso\\/logout|\\/api\\/galaxy\\/user\\/logout/;\n  const O = XMLHttpRequest.prototype.open, S = XMLHttpRequest.prototype.setRequestHeader, D = XMLHttpRequest.prototype.send;\n  XMLHttpRequest.prototype.open = function(m, u) {\n    this.__xs_u = String(u); this.__xs_m = String(m || 'GET').toUpperCase();\n    return O.apply(this, arguments);\n  };\n  XMLHttpRequest.prototype.setRequestHeader = function(k, v) {\n    if (String(k).toLowerCase() === 'x-s') this.__xs_has = true;\n    return S.apply(this, arguments);\n  };\n  XMLHttpRequest.prototype.send = function(b) {\n    try {\n      if (FUSE.test(this.__xs_u || '')) {\n        window.__xs_fuse = (window.__xs_fuse || 0) + 1;\n        try {\n          Object.defineProperty(this, 'readyState', { value: 4 });\n          Object.defineProperty(this, 'status', { value: 200 });\n          Object.defineProperty(this, 'responseText', { value: '{\"code\":0,\"success\":true}' });\n          setTimeout(() => { try {\n            this.dispatchEvent(new Event('readystatechange'));\n            this.dispatchEvent(new Event('load'));\n            this.dispatchEvent(new Event('loadend'));\n          } catch (e) {} }, 0);\n          return;\n        } catch (e) { /* polyfill shape differs: fall through to the wire */ }\n      }\n      if (!this.__xs_has && this.__xs_u && !(b instanceof FormData)) {\n        const sg = sign(this.__xs_u, b);\n        if (sg) {\n          S.call(this, 'X-s', String(sg['X-s']));\n          S.call(this, 'X-t', String(sg['X-t']));\n          S.call(this, 'X-Mns', 'unload');\n          window.__xs_signed = (window.__xs_signed || 0) + 1;\n        }\n      }\n    } catch (e) {}\n    return D.apply(this, arguments);\n  };\n  const F = window.fetch;\n  window.fetch = function(u, o) {\n    o = o || {};\n    const us = String(typeof u === 'object' && u ? u.url : u);\n    if (FUSE.test(us)) {\n      window.__xs_fuse = (window.__xs_fuse || 0) + 1;\n      return Promise.resolve(new Response(JSON.stringify({ code: 0, success: true }),\n        { status: 200, headers: { 'content-type': 'application/json' } }));\n    }\n    const h = (o.headers || {});\n    if (!h['x-s'] && !h['X-s']) {\n      const body = (o.body != null && typeof o.body !== 'string') ? undefined : o.body;\n      const sg = sign(us, body);\n      if (sg) {\n        const nh = Object.assign({}, h);\n        nh['x-s'] = String(sg['X-s']); nh['x-t'] = String(sg['X-t']);\n        o = Object.assign({}, o, { headers: nh });\n        window.__xs_signed = (window.__xs_signed || 0) + 1;\n      }\n    }\n    return F.call(this, u, o);\n  };\n  return 'patched';\n})()"
       },
       "save": "sign_patch"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "// xhs-post step 1.6: engine-side AT renewal (TGC -> service-ticket -> AT).\n// 2026-09-24: galaxy sessions (access-token-creator / galaxy_creator_session_id)\n// die within minutes-to-days, but the CAS TGC (customer-sso-sid) outlives\n// them. The page's own autoLogin fires the same exchange UNSIGNED at boot\n// (406, start-up race), so we do it signed. Telemetry only — the verdict gate\n// downstream decides the outcome honestly. If {was:401, mint:200, now:200},\n// the CURRENT document still holds dirty boot state: re-run the flow once.\n(async () => {\n  const probe = () => fetch('/api/galaxy/user/info', { credentials: 'include' })\n    .then(r => r.status).catch(() => 0);\n  const first = await probe();\n  if (first === 200) return JSON.stringify({ was: 'alive', mint: null, now: 200 });\n  const p = '/api/cas/customer/web/service-ticket';\n  const body = { service: 'https://creator.xiaohongshu.com', type: 'tgt' };\n  const sg = (typeof window._webmsxyw === 'function') ? window._webmsxyw(p, body) : null;\n  let mint = 0;\n  try {\n    const r = await fetch('https://customer.xiaohongshu.com' + p, {\n      method: 'POST', credentials: 'include',\n      headers: { 'content-type': 'application/json',\n                 'x-s': (sg && sg['X-s']) || '', 'x-t': String((sg && sg['X-t']) || '') },\n      body: JSON.stringify(body)\n    });\n    mint = r.status;\n  } catch (e) { mint = 0; }\n  const now = await probe();\n  return JSON.stringify({ was: first, mint, now, hint: (mint === 200 && now === 200)\n    ? 'renewed mid-run; page boot state may be dirty — re-run the flow'\n    : 'renewal failed (TGC dead?) — import_curl from a logged-in Chrome' });\n})()",
+        "note": "galaxy expired -> signed TGC exchange mints a fresh AT in-place; telemetry only, verdict gate stays the decider (re-run the flow if renewed mid-run; import_curl if TGC is dead)"
+      }
     },
     {
       "op": "wait",
@@ -38,7 +50,16 @@
     {
       "op": "branch",
       "args": {
-        "when": { "var": "v.verdict", "is": "in", "value": ["login", "challenge", "captcha", "empty"] },
+        "when": {
+          "var": "v.verdict",
+          "is": "in",
+          "value": [
+            "login",
+            "challenge",
+            "captcha",
+            "empty"
+          ]
+        },
         "goto": "takeover"
       },
       "note": "walled/dead-login → jump to the takeover throw instead of grinding the 20s upload-content wait into a timeout that names nothing (issue #72)"
@@ -115,7 +136,16 @@
     {
       "op": "branch",
       "args": {
-        "when": { "var": "v.verdict", "is": "not_in", "value": ["login", "challenge", "captcha", "empty"] },
+        "when": {
+          "var": "v.verdict",
+          "is": "not_in",
+          "value": [
+            "login",
+            "challenge",
+            "captcha",
+            "empty"
+          ]
+        },
         "goto": "end"
       },
       "note": "complement of the verdict gate: clean run → jump past the takeover throw to the end marker (fall-through would otherwise execute it)"
@@ -132,7 +162,9 @@
     {
       "id": "end",
       "op": "eval",
-      "args": { "script": "'posted'" },
+      "args": {
+        "script": "'posted'"
+      },
       "save": "end"
     }
   ]

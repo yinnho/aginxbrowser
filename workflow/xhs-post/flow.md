@@ -1,5 +1,18 @@
 # xhs-post — 小红书图文笔记发布 flow
 
+> 2026-09-24：签名补丁升双面 + 封死页面自杀保险丝 + 新增引擎侧续票步。全链根因（live 抓包）：
+> publish 页挂载时一批要签名的 API（`upload/creator/permit` 等）裸奔 → 406 →
+> **页面自己调 `/sso/logout` + `/api/galaxy/user/logout`（真 200）把服务端会话杀掉**再弹
+> /login——不是服务端踢、不是多端互踢。旧补丁只包 XHR，页面一半 burst 走 jsvmp 的
+> fetch wrapper，照样裸奔。修法三层：①补丁双面（XHR+fetch，send 时查 `x-s` 缺才签）
+> ②logout 两端点直接合成 200 应答（保险丝拆掉，boot 期裸奔的 406 不再致死）
+> ③新步 1.6 续票：galaxy 探 401 时用 `_webmsxyw` 签名调 CAS service-ticket
+> （TGC=customer-sso-sid 比 AT 长寿），换新 AT 落 Set-Cookie——页面自己的 autoLogin
+> 同调用因启动竞速不签名恒 406。续票成功时当前文档 boot 态已脏，**重跑一次 flow**；
+> TGC 也死了回 import_curl。实操：galaxy 判死快路=`sed 换 URL 成 /api/galaxy/user/info`
+> 裸 curl 打，401「登录已过期」=cookie 死透。另注意 publish 页重 boot（onnx/ffmpeg
+> WASM/dexie）会撞 30s busy 看门狗，引擎起时带 `AGINXBROWSER_JS_BUSY_LIMIT_SECS=600`。
+
 > 2026-09-23：步 3 硬门选择器 `div.upload-content` → `input.upload-input`。
 > 401 弹跳后的登录页上也有一个装饰性 upload-content div（实测），verdict 若在
 > ping-pong 中间态采到干净 URL，旧选择器会假绿放行、把失败推给上传步报
@@ -52,6 +65,9 @@
    expect 时已弹回 publish、最终又回 /login）。
 3. **wait `input.upload-input`（硬门）** — 正向信号：真上传 input 渲染=已登录（登录页的装饰性 upload-content 骗不过它）；
    超时回执带 URL（redirectReason=401）+ wall 遥测=登录墙的完整形状。
+   注：步 1（补丁）与步 1.6（续票）插在 navigate 与本 wait 之间——补丁越早
+   落地，boot burst 裸奔的 406 越少（保险丝已封死兜底）；无 document-start
+   注入面时可用赛车法（navigate 后台线程 + 250ms eval 紧循环，~250ms 落地）。
 4. **tab** — 摘浮层 + 点「上传图文」，expect `input[type=file]`；
    找不到 tab → throw（回执 `tabs` 字段=诊断入口）。
 5. **upload** — `const ARGS = {{args_json}}` 解包；逐张 data: URL fetch →
@@ -86,17 +102,26 @@ set_files 的 `files` 数组无法从 vars 结构化喂入；单张可用（`{{i
 张数，与 Rust 面同语义。——这是引擎面一个真实缺口（数组 var 无法整叶
 进非 http step 的结构化参数），flow.md 记录在此，暂不改引擎。
 
-## 登录配方（import_curl）
+## 登录配方（引擎侧续票 → import_curl 兜底）
 
-个人号无 API、无账密登录（扫码）→ 登录态一次性人工导入：
+个人号无 API、无账密登录（扫码）→ 登录态三级路线：
 
-1. 本机 Chrome 开 `https://creator.xiaohongshu.com`，扫码登录。
-2. DevTools → Network → 任一 creator.xiaohongshu.com 请求 → 右键
-   **Copy as cURL**。
-3. `POST /import/curl`，body 带 `account`（如 `xhs`）——会话落私有 cookie
+1. **首选：引擎侧续票**（flow 步 1.6 已内置，手动配合同理）。前提=TGC
+   （`customer-sso-sid`）还活着（它比 galaxy AT 长寿得多）：
+   任意 xiaohongshu.com 页面上 `_webmsxyw('/api/cas/customer/web/service-ticket',
+   {service:'https://creator.xiaohongshu.com',type:'tgt'})` 签名 POST
+   customer.xiaohongshu.com 同路径、credentials:include → 200
+   `{data:{type:"at"}}`，Set-Cookie 直接更新 AT/galaxy/beaker 三件。
+   续完重跑 flow（当前文档 boot 态可能已脏）。
+2. **TGC 死了：import_curl**。本机 Chrome 开 `https://creator.xiaohongshu.com`
+   扫码登录（真浏览器风控不拦；Chrome 里 autoLogin 也会自己续票）。
+   DevTools → Network → 任一 creator 请求 → 右键 **Copy as cURL**。
+3. `POST /import/curl`，body 带 `account`（如 `xhs2`）——会话落私有 cookie
    jar + persona 从真实 UA 播种（小红书风控绑指纹，别裸建会话）。
 4. 之后每次 `POST /flow/run` 带 `session_id`（或先 `account_verify`
-   验活）。
+   验活）。**验活快路**：curl 直接打 `creator.xiaohongshu.com/api/galaxy/user/info`，
+   401「登录已过期」=死透，别浪费引擎排查时间（09-24 教训：先分清
+   cookie 死 vs 引擎侧问题再动引擎）。
 
 ## 调用
 
