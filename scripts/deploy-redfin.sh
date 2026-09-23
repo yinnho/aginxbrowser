@@ -16,6 +16,12 @@ BIN=/var/bin/aginxbrowser
 TPL=/var/lib/aginxbrowser/templates
 
 echo "==> zigbuild aarch64-unknown-linux-musl (features screenshot)"
+# /health 的 commit 字段是编译期盖章（option_env!），不设就恒 "unknown"——
+# 设备上没法分辨烧的是哪个版本（2026-09-23 aginxos 线验证门踩过）。
+export AGINXBROWSER_BUILD_COMMIT="$(git rev-parse --short HEAD)"
+# option_env! 只在 bin crate 重编时才重读——cargo 不跟踪 env 变化，同树
+# 重复部署会带着旧 stamp（86quan runbook 2026-09-11 同款坑），touch 强制重烘。
+touch src/main.rs
 CARGO_INCREMENTAL=0 cargo zigbuild --release --features screenshot \
   --target aarch64-unknown-linux-musl
 OUT="target/aarch64-unknown-linux-musl/release/aginxbrowser"
