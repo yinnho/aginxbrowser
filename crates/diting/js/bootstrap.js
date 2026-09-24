@@ -474,19 +474,87 @@ function _getElementsByClassName(root, classNames) {
   }
   return HTMLCollection._from(matched);
 }
-const _consoleFn = (level, args) => {
-  try { _OPS.op_console_msg(level, args.map(a => {
-    if (a === null) return "null";
-    if (a === undefined) return "undefined";
-    if (a instanceof Error) return a.stack || a.message || String(a);
-    if (typeof a === "object") {
-      try {
-        const s = JSON.stringify(a);
-        return s === "{}" && a.message ? a.message : s;
-      } catch { return String(a); }
+// Console argument formatter: DevTools-shaped previews instead of
+// "[object Object]". Depth/width clamped, cycles marked, getters that
+// throw degrade per-property — a log line must never cost the page its
+// console call (issue #99: tmall's fileLoader.loadTimeout logged its
+// options object, which collapsed to "[object Object]" and hid which
+// resource timed out).
+const _FMT_DEPTH = 3, _FMT_WIDTH = 20, _FMT_KEYS = 15, _FMT_MAX = 8192;
+const _fmtVal = (v, depth, seen) => {
+  if (v === null) return "null";
+  if (v === undefined) return "undefined";
+  const t = typeof v;
+  if (t === "string") return depth === 0 ? v : JSON.stringify(v);
+  if (t === "number" || t === "boolean" || t === "bigint" || t === "symbol") return String(v);
+  if (t === "function") return "[Function" + (v.name ? ": " + v.name : "") + "]";
+  try {
+    if (v instanceof Error) return v.stack || v.message || String(v);
+    if (typeof Element !== "undefined" && v instanceof Element) {
+      let s = "<" + String(v.tagName).toLowerCase();
+      if (v.id) s += "#" + v.id;
+      const cl = typeof v.className === "string" ? v.className.trim() : "";
+      if (cl) s += "." + cl.split(/\s+/).join(".");
+      return s + ">";
     }
-    return String(a);
-  }).join(" ")); } catch {}
+    if (typeof Map !== "undefined" && v instanceof Map) {
+      if (seen.has(v)) return "[Circular]";
+      if (depth >= _FMT_DEPTH) return "Map(" + v.size + ")";
+      seen.add(v);
+      const items = [];
+      let n = 0;
+      for (const [k, val] of v) {
+        if (n++ >= _FMT_WIDTH) { items.push("… +" + (v.size - _FMT_WIDTH) + " more"); break; }
+        items.push(_fmtVal(k, depth + 1, seen) + " => " + _fmtVal(val, depth + 1, seen));
+      }
+      seen.delete(v);
+      return "Map(" + v.size + ") {" + items.join(", ") + "}";
+    }
+    if (typeof Set !== "undefined" && v instanceof Set) {
+      if (seen.has(v)) return "[Circular]";
+      if (depth >= _FMT_DEPTH) return "Set(" + v.size + ")";
+      seen.add(v);
+      const items = [];
+      let n = 0;
+      for (const val of v) {
+        if (n++ >= _FMT_WIDTH) { items.push("… +" + (v.size - _FMT_WIDTH) + " more"); break; }
+        items.push(_fmtVal(val, depth + 1, seen));
+      }
+      seen.delete(v);
+      return "Set(" + v.size + ") {" + items.join(", ") + "}";
+    }
+    if (Array.isArray(v)) {
+      if (seen.has(v)) return "[Circular]";
+      if (depth >= _FMT_DEPTH) return "Array(" + v.length + ")";
+      seen.add(v);
+      const items = v.slice(0, _FMT_WIDTH).map(x => _fmtVal(x, depth + 1, seen));
+      if (v.length > _FMT_WIDTH) items.push("… +" + (v.length - _FMT_WIDTH) + " more");
+      seen.delete(v);
+      return "[" + items.join(", ") + "]";
+    }
+    if (seen.has(v)) return "[Circular]";
+    if (depth >= _FMT_DEPTH) {
+      let n = 0; try { n = Object.keys(v).length; } catch {}
+      return "Object(" + n + " keys)";
+    }
+    seen.add(v);
+    let keys; try { keys = Object.keys(v); } catch { seen.delete(v); return String(v); }
+    const parts = [];
+    for (const k of keys.slice(0, _FMT_KEYS)) {
+      let val; try { val = _fmtVal(v[k], depth + 1, seen); } catch { val = "[Getter threw]"; }
+      parts.push(k + ": " + val);
+    }
+    if (keys.length > _FMT_KEYS) parts.push("… +" + (keys.length - _FMT_KEYS) + " more");
+    seen.delete(v);
+    return "{" + parts.join(", ") + "}";
+  } catch { return String(v); }
+};
+const _consoleFn = (level, args) => {
+  try {
+    let joined = args.map(a => _fmtVal(a, 0, new WeakSet())).join(" ");
+    if (joined.length > _FMT_MAX) joined = joined.slice(0, _FMT_MAX) + "… (truncated " + (joined.length - _FMT_MAX) + " chars)";
+    _OPS.op_console_msg(level, joined);
+  } catch {}
   if (level === "error") {
     try {
       globalThis.__diting_errors = globalThis.__diting_errors || [];

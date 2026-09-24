@@ -1129,6 +1129,43 @@ ms.addEventListener('sourceopen', function(){ \
         );
     }
 
+    // #99: console arguments render as DevTools-shaped previews, never
+    // "[object Object]" — the tmall report's fileLoader.loadTimeout logged
+    // its options object and collapsed to a useless string, hiding which
+    // resource timed out.
+    #[tokio::test(flavor = "current_thread")]
+    async fn console_objects_render_structured_previews() {
+        let mut p = test_page();
+        p.navigate("data:text/html,<html><body><div id='x' class='a b'></div></body></html>")
+            .await
+            .unwrap();
+        p.evaluate(
+            r#"(() => {
+              const o = {url: 'https://g.alicdn.com/x.js', timeout: 5000, self: null};
+              o.self = o;
+              console.log('loader', o);
+              console.log(document.getElementById('x'));
+              console.log(new Map([[1, 'a']]));
+              console.log(new Array(25).fill(7));
+              console.log(new Error('boom'));
+            })()"#,
+        );
+        let calls = p.take_pending_console_calls();
+        let msgs: Vec<&str> = calls.iter().map(|(_, m, _)| m.as_str()).collect();
+        assert_eq!(msgs.len(), 5, "{msgs:?}");
+        assert!(
+            msgs[0].contains("url: \"https://g.alicdn.com/x.js\""),
+            "{}", msgs[0]
+        );
+        assert!(msgs[0].contains("timeout: 5000"), "{}", msgs[0]);
+        assert!(msgs[0].contains("self: [Circular]"), "{}", msgs[0]);
+        assert!(!msgs[0].contains("[object"), "{}", msgs[0]);
+        assert_eq!(msgs[1], "<div#x.a.b>");
+        assert!(msgs[2].starts_with("Map(1) {1 => \"a\"}"), "{}", msgs[2]);
+        assert!(msgs[3].contains("… +5 more"), "{}", msgs[3]);
+        assert!(msgs[4].contains("boom"), "{}", msgs[4]);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn session_storage_survives_data_url_navigation() {
         let mut p = test_page();
