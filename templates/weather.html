@@ -1,125 +1,112 @@
 <!DOCTYPE html>
-<!--
-  id: weather
-  注册表: templates/registry.json（浏览器目录）
-  槽位: {{city}} {{temp}} {{condition}} {{low}} {{high}} {{humidity}} {{uv}} {{source_url}}
-  面板 1080×2340。font-size / line-height / font-family 分开写。不要 font 简写，不要 vh。
--->
+<!-- id: weather  磷光读数页 v2（frontend-design 分身生成 2026-09-24）。
+     槽位 {{city}} {{temp}} {{condition}} {{low}} {{high}} {{humidity}} {{uv}} {{source_url}}
+     与 reply v2 同家族：同色板同 CRT 底；版式=仪表读数（巨型数字+点线引导行）。
+     离线设备：等宽字体栈，无外部资源，零圆角零卡片。 -->
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=1080">
 <title>{{city}}天气</title>
 <style>
-html, body { background-color: #0c100e; }
+:root {
+  --bg: #060a07;            /* 带绿调的深黑，非纯黑 */
+  --bg-glow: #0d1811;       /* 顶部磷光余辉 */
+  --fg: #d8e6d8;            /* 磷光白绿 */
+  --accent: #3dfd8f;        /* 磷光绿，唯一强调色 */
+  --muted: #7d9484;         /* 次级文字 */
+  --dim: #23352a;           /* 分隔线 */
+  --scan: rgba(63, 221, 143, 0.03);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { background: var(--bg); }
 body {
-  min-height: 2340px;
-  margin: 0;
-  background-image: linear-gradient(180deg, #5c4d3e 0%, #24302b 36%, #0c100e 100%);
-  color: #f6f1e8;
-  font-size: 32px;
-  line-height: 1.4;
-  font-family: sans-serif;
-  padding: 160px 72px 120px;
+  min-height: 2620px;  /* 面板缓存 1080x2620：全页截图无白尾 */
+  color: var(--fg);
+  font: 400 38px/1.7 ui-monospace, "Droid Sans Mono", "Noto Sans Mono", monospace;
+  padding: 104px 88px 160px;
+  position: relative;
 }
-.where {
-  margin: 0;
-  color: #ead9b8;
+/* CRT 背景：扫描线 + 顶部磷光辉光 + 下缘暗角 —— 背景不是纯色填充 */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(to bottom, var(--scan) 0 1px, transparent 1px 6px),
+    radial-gradient(120% 46% at 50% 0%, var(--bg-glow), transparent 70%),
+    linear-gradient(to bottom, transparent 76%, rgba(0,0,0,0.55));
+}
+/* 查询命令回显：与 reply 的 > 问句同一语言 */
+.cmd {
+  color: var(--muted);
   font-size: 30px;
-  line-height: 1.2;
-  font-family: sans-serif;
-  letter-spacing: 10px;
+  letter-spacing: 0.02em;
+  padding-bottom: 30px;
+  border-bottom: 1px solid var(--dim);
 }
-.rule {
-  width: 72px;
-  height: 6px;
-  margin: 28px 0 0;
-  background-color: #c4a574;
-  border-radius: 3px;
-}
+.cmd::before { content: "> "; color: var(--accent); }
+/* 巨型温度读数：仪表主角，等宽数字 */
 .temp {
-  margin: 36px 0 0;
-  color: #f7f3ea;
-  font-size: 220px;
-  line-height: 0.88;
-  font-weight: 700;
-  font-family: sans-serif;
+  margin-top: 72px;
+  color: var(--accent);
+  font-size: 300px;
+  line-height: 0.92;
+  font-weight: 600;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
 }
-.unit {
-  color: #ead9b8;
-  font-size: 72px;
-  line-height: 1;
-  font-weight: 500;
-  font-family: sans-serif;
-}
+.temp .unit { color: var(--muted); font-size: 100px; font-weight: 400; }
+/* 状态行：● 前缀 + 城市 */
 .cond {
-  display: inline-block;
-  margin: 36px 0 0;
-  padding: 14px 32px;
-  background-color: #2c2822;
-  color: #ead9b8;
-  font-size: 34px;
-  line-height: 1.2;
-  font-family: sans-serif;
-  border-radius: 999px;
+  margin-top: 48px;
+  font-size: 44px;
+  color: var(--fg);
 }
-.row {
+.cond::before { content: "● "; color: var(--accent); font-size: 34px; }
+.cond .where { color: var(--muted); }
+/* 规格行：man-page 式点线引导 —— 不用卡片，不用三等分 */
+.spec {
+  margin-top: 96px;
+  max-width: 820px;
+}
+.spec .row {
   display: flex;
-  margin-top: 88px;
+  align-items: baseline;
+  padding: 30px 0;
+  border-bottom: 1px solid var(--dim);
 }
-.card {
-  width: 286px;
-  margin-right: 22px;
-  padding: 32px 28px 36px;
-  background-color: #1a211e;
-  background-image: linear-gradient(180deg, #2a3832 0%, #151c19 100%);
-  border-radius: 32px;
+.spec .row:first-child { border-top: 1px solid var(--dim); }
+.spec .k { color: var(--muted); font-size: 34px; white-space: nowrap; }
+.spec .fill {
+  flex: 1;
+  margin: 0 24px;
+  border-bottom: 3px dotted var(--dim);
+  transform: translateY(-10px);  /* 点线落在文字基线略下 */
 }
-.card-last { margin-right: 0; }
-.k {
-  margin: 0;
-  color: #a8b2a8;
-  font-size: 24px;
-  line-height: 1.2;
-  font-family: sans-serif;
-  letter-spacing: 4px;
-}
-.v {
-  margin: 16px 0 0;
-  color: #f7f3ea;
-  font-size: 56px;
-  line-height: 1;
-  font-weight: 700;
-  font-family: sans-serif;
-}
-.uv {
-  margin: 56px 0 0;
-  color: #c9c2b4;
-  font-size: 30px;
-  line-height: 1.4;
-  font-family: sans-serif;
-}
+.spec .v { color: var(--fg); font-size: 44px; font-weight: 600; white-space: nowrap; }
+.spec .v em { font-style: normal; color: var(--accent); }
+/* 数据源尾注 */
 .src {
-  margin: 28px 0 0;
-  color: #8e978e;
-  font-size: 24px;
-  line-height: 1.4;
-  font-family: sans-serif;
+  margin-top: 72px;
+  color: var(--muted);
+  font-size: 26px;
+  overflow-wrap: break-word;
 }
-a { color: #d7c4a2; text-decoration: none; }
+.src::before { content: "src: "; color: var(--dim); }
+a { color: var(--muted); text-decoration-color: var(--dim); }
 </style>
 </head>
 <body>
-<p class="where">{{city}}</p>
-<div class="rule"></div>
-<p class="temp">{{temp}}<span class="unit">°</span></p>
-<p class="cond">{{condition}}</p>
-<div class="row">
-  <div class="card"><p class="k">最低</p><p class="v">{{low}}°</p></div>
-  <div class="card"><p class="k">最高</p><p class="v">{{high}}°</p></div>
-  <div class="card card-last"><p class="k">湿度</p><p class="v">{{humidity}}</p></div>
+<p class="cmd">weather --now {{city}}</p>
+<p class="temp">{{temp}}<span class="unit">°C</span></p>
+<p class="cond">{{condition}}<span class="where"> · {{city}}</span></p>
+<div class="spec">
+  <div class="row"><span class="k">今日区间</span><span class="fill"></span><span class="v"><em>{{low}}°</em> — {{high}}°</span></div>
+  <div class="row"><span class="k">湿度</span><span class="fill"></span><span class="v">{{humidity}}</span></div>
+  <div class="row"><span class="k">紫外线</span><span class="fill"></span><span class="v">{{uv}}</span></div>
 </div>
-<p class="uv">紫外线 {{uv}}</p>
 <p class="src"><a href="{{source_url}}">{{source_url}}</a></p>
 </body>
 </html>
