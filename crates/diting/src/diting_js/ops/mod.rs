@@ -1935,7 +1935,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                     // Custom properties ride the same snapshot (case-sensitive
                     // keys — the JS lookup skips its kebab-lowercase step for
                     // `--` names): getComputedStyle(el).getPropertyValue('--x').
-                    for (k, v) in &target.custom {
+                    for (k, v) in target.custom.iter() {
                         obj.insert(k.clone(), serde_json::Value::String(v.clone()));
                     }
                     serde_json::Value::Object(obj).to_string()

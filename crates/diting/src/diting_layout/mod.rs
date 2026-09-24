@@ -8159,11 +8159,23 @@ fn compute_styles_impl(
     gated: Option<(usize, &HashMap<usize, Vec<usize>>)>,
     viewport: (f32, f32),
 ) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
+    // styles-trace phase accumulators (#109 walk breakdown): nanoseconds in
+    // cascade_element, pseudo_styles, and children() enumeration.
+    thread_local! {
+        static T_CASCADE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static T_PSEUDO: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static T_CHILDREN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+    T_CASCADE.with(|c| c.set(0));
+    T_PSEUDO.with(|c| c.set(0));
+    T_CHILDREN.with(|c| c.set(0));
     #[allow(clippy::too_many_arguments)]
     fn visit(
         tree: &DomTree,
         rules: &[crate::diting_css::ParsedRule],
-        sets: &crate::diting_dom::selector::RuleMatchSets,
+        node_rules: &[Vec<(usize, u32)>],
+        node_pseudo: &[[Vec<(usize, u32)>; 2]],
+        has_pseudo: bool,
         keyframes: &crate::diting_css::KeyframesMap,
         css_time: Option<f64>,
         nid: NodeId,
@@ -8181,19 +8193,16 @@ fn compute_styles_impl(
         else {
             return;
         };
-        let matched: Vec<(&crate::diting_css::ParsedRule, u32)> = rules
+        let matched: Vec<(&crate::diting_css::ParsedRule, u32)> = node_rules[nid.index()]
             .iter()
-            .enumerate()
-            .filter_map(|(ri, rule)| {
-                // Per-rule document match sets are precomputed once (below);
-                // matching here PER ELEMENT made one compute_styles pass
-                // O(elements x rules x docsize) — the baidu SERP hang: a page
-                // script's first geometry read re-resolved every rule against
-                // every element for minutes.
-                let hits = sets.hits.get(&ri)?;
-                if hits.binary_search(&nid.index()).is_err() {
-                    return None;
-                }
+            .filter_map(|&(ri, spec)| {
+                // The per-rule match sets were precomputed once (below); this
+                // used to scan the ENTIRE rule table per element — with real
+                // sheet sizes (tmall publish: 17,300 rules × 7,678 elements
+                // ≈ 133M hash probes, 9.9s of an 11.2s layout) the membership
+                // test alone was the cost (#109). The buckets below hand each
+                // element its matched rules in ascending rule order, so
+                // cascade order matches the old scan exactly.
                 // @container arms (index >= base) cascade only on elements
                 // the container plan gated through a passing container.
                 if let Some((base, gates)) = gated {
@@ -8205,15 +8214,13 @@ fn compute_styles_impl(
                         return None;
                     }
                 }
-                // Specificity was parsed once with the match sets above;
-                // the old per-element compile_rule_selector re-parse cost
-                // one selector parse per (element x matched rule).
-                Some((rule, sets.specificity.get(ri).copied().flatten()?))
+                Some((&rules[ri], spec))
             })
             .collect();
         let inline = tree
             .with_node(nid, |n| n.get_attribute("style").map(|s| s.to_string()))
             .flatten();
+        let t_c = std::time::Instant::now();
         let cs = crate::diting_css::cascade_element(
             &tag,
             tree,
@@ -8224,6 +8231,7 @@ fn compute_styles_impl(
             root_fs,
             viewport,
         );
+        T_CASCADE.with(|c| c.set(c.get() + t_c.elapsed().as_nanos() as u64));
         let mut cs = cs;
         crate::diting_css::sample_css_animation(&mut cs, keyframes, css_time);
         // CSS counters: apply this element's own reset/increment before its
@@ -8244,20 +8252,21 @@ fn compute_styles_impl(
         // box order), so one-shot resolution would close quotes opened
         // before the children ever ran.
         let mut pseudo_pair = crate::diting_css::PseudoPair::default();
-        if !sets.pseudo_kinds.is_empty() {
+        if has_pseudo {
+            let t_p = std::time::Instant::now();
             pseudo_pair.before = pseudo_styles(
                 tree,
                 rules,
-                sets,
+                &node_pseudo[nid.index()][0],
                 nid,
                 &cs,
                 root_fs,
                 counters,
                 depth,
-                crate::diting_dom::selector::PseudoKind::Before,
                 gated,
                 viewport,
             );
+            T_PSEUDO.with(|c| c.set(c.get() + t_p.elapsed().as_nanos() as u64));
         }
         let child_root_fs = if parent.is_none() {
             cs.font_size.unwrap_or(crate::diting_css::DEFAULT_ROOT_FONT_SIZE)
@@ -8277,6 +8286,7 @@ fn compute_styles_impl(
         // no computed style either.
         let slot_consumed = tree.is_html_slot_element(nid)
             && tree.assigned_nodes(nid).is_some_and(|a| !a.is_empty());
+        let t_ch = std::time::Instant::now();
         let walk: Vec<(NodeId, NodeId)> = if slot_consumed {
             Vec::new()
         } else {
@@ -8297,44 +8307,70 @@ fn compute_styles_impl(
             }
             w
         };
+        T_CHILDREN.with(|c| c.set(c.get() + t_ch.elapsed().as_nanos() as u64));
+        // The common branch hands each child a borrow of THIS element's
+        // style — a full ComputedStyle clone per child (7678 per pass on the
+        // publish page) was pure overhead when cs outlives the whole loop
+        // (#109). Only slot-assigned nodes need a parent outside this frame,
+        // and those clone out of `out` as before.
         for (child, inherit_from) in walk {
-            let parent = if inherit_from == nid {
-                cs.clone()
+            if inherit_from == nid {
+                visit(
+                    tree,
+                    rules,
+                    node_rules,
+                    node_pseudo,
+                    has_pseudo,
+                    keyframes,
+                    css_time,
+                    child,
+                    Some(&cs),
+                    child_root_fs,
+                    out,
+                    counters,
+                    depth + 1,
+                    gated,
+                    viewport,
+                );
             } else {
-                out.get(&inherit_from)
+                let parent = out
+                    .get(&inherit_from)
                     .cloned()
-                    .unwrap_or_else(|| cs.clone())
-            };
-            visit(
-                tree,
-                rules,
-                sets,
-                keyframes,
-                css_time,
-                child,
-                Some(&parent),
-                child_root_fs,
-                out,
-                counters,
-                depth + 1,
-                gated,
-                viewport,
-            );
+                    .unwrap_or_else(|| cs.clone());
+                visit(
+                    tree,
+                    rules,
+                    node_rules,
+                    node_pseudo,
+                    has_pseudo,
+                    keyframes,
+                    css_time,
+                    child,
+                    Some(&parent),
+                    child_root_fs,
+                    out,
+                    counters,
+                    depth + 1,
+                    gated,
+                    viewport,
+                );
+            }
         }
-        if !sets.pseudo_kinds.is_empty() {
+        if has_pseudo {
+            let t_p = std::time::Instant::now();
             pseudo_pair.after = pseudo_styles(
                 tree,
                 rules,
-                sets,
+                &node_pseudo[nid.index()][1],
                 nid,
                 &cs,
                 root_fs,
                 counters,
                 depth,
-                crate::diting_dom::selector::PseudoKind::After,
                 gated,
                 viewport,
             );
+            T_PSEUDO.with(|c| c.set(c.get() + t_p.elapsed().as_nanos() as u64));
         }
         if pseudo_pair.before.is_some() || pseudo_pair.after.is_some() {
             cs.pseudos = Some(Box::new(pseudo_pair));
@@ -8342,56 +8378,40 @@ fn compute_styles_impl(
         pop_out_of_scope(counters, depth);
         out.insert(nid, cs);
     }
-    // Pseudo-element rules (::before/::after) for one host: their matched
-    // sets live in pseudo_hits (the selector layer kept them OUT of hits so
-    // the normal cascade above never sees them), and each kind cascades a
-    // synthetic span whose parent is the host — undeclared properties
-    // inherit exactly like a real child's would.
+    // Pseudo-element rules (::before/::after) for one host: the caller hands
+    // in the host's pre-bucketed pseudo matches (slot 0 = before, 1 = after;
+    // the selector layer kept pseudo rules OUT of the normal buckets), and
+    // each kind cascades a synthetic span whose parent is the host —
+    // undeclared properties inherit exactly like a real child's would.
     #[allow(clippy::too_many_arguments)]
     fn pseudo_styles(
         tree: &DomTree,
         rules: &[crate::diting_css::ParsedRule],
-        sets: &crate::diting_dom::selector::RuleMatchSets,
+        bucket: &[(usize, u32)],
         nid: NodeId,
         host: &crate::diting_css::ComputedStyle,
         root_fs: f32,
         counters: &mut CounterState,
         depth: usize,
-        wanted: crate::diting_dom::selector::PseudoKind,
         gated: Option<(usize, &HashMap<usize, Vec<usize>>)>,
         viewport: (f32, f32),
     ) -> Option<crate::diting_css::ComputedStyle> {
         use crate::diting_css::ContentValue;
-        use crate::diting_dom::selector::PseudoKind;
-        let mut pair = crate::diting_css::PseudoPair::default();
-        let slot = match wanted {
-            PseudoKind::Before => &mut pair.before,
-            _ => &mut pair.after,
-        };
-        {
-            let matched: Vec<(&crate::diting_css::ParsedRule, u32)> = rules
-                .iter()
-                .enumerate()
-                .filter_map(|(ri, rule)| {
-                    if sets.pseudo_kinds.get(&ri) != Some(&wanted) {
+        let matched: Vec<(&crate::diting_css::ParsedRule, u32)> = bucket
+            .iter()
+            .filter_map(|&(ri, spec)| {
+                if let Some((base, gates)) = gated {
+                    if ri >= base
+                        && gates
+                            .get(&ri)
+                            .is_none_or(|v| v.binary_search(&nid.index()).is_err())
+                    {
                         return None;
                     }
-                    let hits = sets.pseudo_hits.get(&ri)?;
-                    if hits.binary_search(&nid.index()).is_err() {
-                        return None;
-                    }
-                    if let Some((base, gates)) = gated {
-                        if ri >= base
-                            && gates
-                                .get(&ri)
-                                .is_none_or(|v| v.binary_search(&nid.index()).is_err())
-                        {
-                            return None;
-                        }
-                    }
-                    Some((rule, sets.specificity.get(ri).copied().flatten()?))
-                })
-                .collect();
+                }
+                Some((&rules[ri], spec))
+            })
+            .collect();
             if matched.is_empty() {
                 return None;
             }
@@ -8423,9 +8443,7 @@ fn compute_styles_impl(
             if p.display == Some(crate::diting_css::Display::Table) {
                 p.display = Some(crate::diting_css::Display::Block);
             }
-            *slot = Some(p);
-        }
-        slot.clone()
+            Some(p)
     }
     // One querySelectorAll per RULE over the whole document, sorted for the
     // binary search in visit. This replaces the per-element-per-rule full-doc
@@ -8435,6 +8453,8 @@ fn compute_styles_impl(
     // the WeChat numbers behind this) builds every rule's document match
     // set AND each selector's specificity in a single pass, both sorted
     // once for the binary searches in visit.
+    let styles_trace = std::env::var("AGINXBROWSER_LAYOUT_TRACE").is_ok();
+    let t_styles = std::time::Instant::now();
     let rule_selectors: Vec<&str> = rules.iter().map(|r| r.selector.as_str()).collect();
     // The document run probes document(+shadow) descendants; a within-run
     // probes only the orphan root's subtree (rule_match_sets_within).
@@ -8442,23 +8462,49 @@ fn compute_styles_impl(
         Some(root) => tree.rule_match_sets_within(&rule_selectors, &[root]),
         None => tree.rule_match_sets(&rule_selectors),
     };
+    let t_match = t_styles.elapsed();
+
+    // Inverted match index (#109): visit used to walk the ENTIRE rule table
+    // per element (a `hits` hash probe per rule per element, twice more for
+    // the pseudo scans) — the membership test itself, not the cascade, was
+    // the cost on real sheets. One pass over the rule→hits maps builds
+    // node→matched-rule buckets; filling in ascending rule order preserves
+    // cascade order exactly. Rules without a parsed specificity drop here,
+    // the same None the old per-element filter_map returned for them.
+    let node_slots = tree.node_slot_count();
+    let mut node_rules: Vec<Vec<(usize, u32)>> = vec![Vec::new(); node_slots];
+    let mut node_pseudo: Vec<[Vec<(usize, u32)>; 2]> = vec![[Vec::new(), Vec::new()]; node_slots];
+    for (ri, _) in rules.iter().enumerate() {
+        let spec = sets.specificity.get(ri).copied().flatten();
+        if let (Some(spec), Some(hits)) = (spec, sets.hits.get(&ri)) {
+            for &hi in hits {
+                node_rules[hi].push((ri, spec));
+            }
+        }
+        if let Some(kind) = sets.pseudo_kinds.get(&ri) {
+            if let (Some(spec), Some(hits)) = (spec, sets.pseudo_hits.get(&ri)) {
+                let slot = match kind {
+                    crate::diting_dom::selector::PseudoKind::Before => 0,
+                    crate::diting_dom::selector::PseudoKind::After => 1,
+                };
+                for &hi in hits {
+                    node_pseudo[hi][slot].push((ri, spec));
+                }
+            }
+        }
+    }
+    let has_pseudo = !sets.pseudo_kinds.is_empty();
+    let t_buckets = t_styles.elapsed();
 
     let mut out = HashMap::new();
-    if std::env::var("AGINXBROWSER_LAYOUT_TRACE").is_ok() {
-        let elements = out_capacity_hint(tree);
-        eprintln!(
-            "[styles-trace] rules={} elements={} rule_match_sets={}",
-            rules.len(),
-            elements,
-            sets.hits.len()
-        );
-    }
     let mut counters = CounterState::default();
     match within_root {
         Some(root) => visit(
             tree,
             rules,
-            &sets,
+            &node_rules,
+            &node_pseudo,
+            has_pseudo,
             keyframes,
             css_time,
             root,
@@ -8475,7 +8521,9 @@ fn compute_styles_impl(
                 visit(
                     tree,
                     rules,
-                    &sets,
+                    &node_rules,
+                    &node_pseudo,
+                    has_pseudo,
                     keyframes,
                     css_time,
                     child,
@@ -8494,6 +8542,28 @@ fn compute_styles_impl(
     // entries override cascade values once per pass, after the visit.
     if !transitions.is_empty() {
         crate::diting_css::sample_css_transitions(transitions, css_time, &mut out);
+    }
+    if styles_trace {
+        let total_matched: usize = node_rules.iter().map(|v| v.len()).sum();
+        let (a_cascade, a_pseudo, a_children) = (
+            T_CASCADE.with(|c| c.get()),
+            T_PSEUDO.with(|c| c.get()),
+            T_CHILDREN.with(|c| c.get()),
+        );
+        eprintln!(
+            "[styles-trace] rules={} elements={} rule_match_sets={} matched={} match={:?} buckets={:?} walk={:?} cascade={:?} pseudo={:?} children={:?} total={:?}",
+            rules.len(),
+            out.len(),
+            sets.hits.len(),
+            total_matched,
+            t_match,
+            t_buckets - t_match,
+            t_styles.elapsed() - t_buckets,
+            std::time::Duration::from_nanos(a_cascade),
+            std::time::Duration::from_nanos(a_pseudo),
+            std::time::Duration::from_nanos(a_children),
+            t_styles.elapsed(),
+        );
     }
     out
 }
@@ -8552,22 +8622,6 @@ pub fn compute_styles_timed_within(
     viewport: (f32, f32),
 ) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
     compute_styles_impl(tree, rules, keyframes, css_time, Some(root), transitions, None, viewport)
-}
-
-/// Trace-only element count (a full walk just for the debug knob; keep out of
-/// the hot path when the knob is off).
-fn out_capacity_hint(tree: &DomTree) -> usize {
-    fn count(tree: &DomTree, nid: NodeId, acc: &mut usize) {
-        if tree.with_node(nid, |n| n.as_element().is_some()) == Some(true) {
-            *acc += 1;
-        }
-        for child in tree.children(nid) {
-            count(tree, child, acc);
-        }
-    }
-    let mut acc = 0;
-    count(tree, tree.document(), &mut acc);
-    acc
 }
 
 #[cfg(test)]

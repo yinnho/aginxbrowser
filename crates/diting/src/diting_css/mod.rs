@@ -1259,8 +1259,12 @@ pub struct ComputedStyle {
     pub text_decoration_line: Option<TextDecorations>,
     /// Custom properties (`--*`), which DO inherit: the var() substitution
     /// source. Values are stored raw (author tokens) — !important stripped at
-    /// insertion; resolution to colors/lengths happens at use sites.
-    pub custom: std::collections::HashMap<String, String>,
+    /// insertion; resolution to colors/lengths happens at use sites. The map
+    /// is Arc-shared: inheritance bumps the refcount instead of deep-copying
+    /// (a 500-var design system made that copy the dominant cost of a
+    /// whole-document style pass), and a re-declaring element clones-on-write
+    /// via `Arc::make_mut` at the declaration site.
+    pub custom: std::sync::Arc<std::collections::HashMap<String, String>>,
     /// `content` (generated content batch): only pseudo boxes read it.
     /// `attr()` stays unresolved here — the host's attributes live outside
     /// this module — and resolves at the cascade's visit site.
@@ -3630,12 +3634,17 @@ pub(crate) fn apply_declarations_importance(
         if name.starts_with("--") {
             // Custom property: store the token stream raw. Values may hold
             // anything (including semicolon-free junk). Empty value =
-            // guaranteed-invalid → unset.
+            // guaranteed-invalid → unset. The map is Arc-shared down the
+            // inheritance chain (custom props inherit computed wholesale);
+            // make_mut clones only when THIS element re-declares (#109: a
+            // 500-var design system made the per-element inheritance clone
+            // the dominant cost of a whole-document style pass).
             let v = value.trim();
             if v.is_empty() {
-                style.custom.remove(&name);
+                std::sync::Arc::make_mut(&mut style.custom).remove(&name);
             } else {
-                style.custom.insert(name.clone(), v.to_string());
+                std::sync::Arc::make_mut(&mut style.custom)
+                    .insert(name.clone(), v.to_string());
             }
             applied = true;
             continue;
