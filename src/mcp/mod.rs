@@ -495,6 +495,27 @@ the same login in parallel tabs. Returns {session_id (new), cloned_from, url, vi
     }
 
     #[tool(
+        description = "Replace the session's document-start preload group (empty array clears). Sources run before each new document's own scripts — including inline <script> tags — which is the only hook that beats pages whose signing layer captures window.fetch/XHR natives at parse time (xhs's inline jsvmp). Set before the first navigate; applies to every navigation from then on.",
+        annotations(title = "Session Preload")
+    )]
+    async fn session_preload(
+        &self,
+        Parameters(params): Parameters<SessionPreloadParams>,
+    ) -> String {
+        let mut mgr = session::SESSIONS.lock().await;
+        match mgr
+            .send(&params.session_id, |reply| SessionCommand::SetPreload {
+                scripts: params.scripts,
+                reply,
+            })
+            .await
+        {
+            Ok(resp) => stamped_json(resp, &mgr, &params.session_id),
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
         description = "Get the current page state as an indexed list of interactive elements. Returns compact text with [N] indexes for use with click/input tools.",
         annotations(title = "Session State", read_only_hint = true)
     )]

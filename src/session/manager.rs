@@ -757,6 +757,11 @@ fn session_thread(
                 // broken navigation. Eval/state now carry this error back so
                 // the caller sees the same failure navigate itself reports.
                 let mut last_nav_error: Option<String> = None;
+                // Document-start preload group (issue #96). Kept session-side
+                // so every navigation re-applies it — the page object survives
+                // navigations, but re-applying mirrors the CDP face's sync and
+                // keeps the group authoritative here.
+                let mut preload_scripts: Vec<String> = Vec::new();
                 if let Some(url) = start_url {
                     match page.goto(&url).await {
                         Ok(()) => pages_loaded += 1,
@@ -863,33 +868,44 @@ fn session_thread(
                                 .and_then(|_| crate::rate::check_domain(&url))
                             {
                                 Err(reason) => Err(reason),
-                                Ok(()) => match page.goto(&url).await {
-                                    Ok(()) => {
-                                        let final_url = page.url();
-                                        let title = page
-                                            .evaluate("document.title")
-                                            .as_str()
-                                            .filter(|s| !s.is_empty())
-                                            .map(|s| s.to_string());
-                                        let challenge =
-                                            crate::har::challenge_kind(&final_url).map(|s| s.to_string());
-                                        element_map.clear();
-                                        pages_loaded += 1;
-                                        last_nav_error = None;
-                                        Ok(SessionNavResponse { url: final_url, title, challenge })
+                                Ok(()) => {
+                                    page.inner.set_preload_scripts(preload_scripts.clone());
+                                    match page.goto(&url).await {
+                                        Ok(()) => {
+                                            let final_url = page.url();
+                                            let title = page
+                                                .evaluate("document.title")
+                                                .as_str()
+                                                .filter(|s| !s.is_empty())
+                                                .map(|s| s.to_string());
+                                            let challenge = crate::har::challenge_kind(&final_url)
+                                                .map(|s| s.to_string());
+                                            element_map.clear();
+                                            pages_loaded += 1;
+                                            last_nav_error = None;
+                                            Ok(SessionNavResponse { url: final_url, title, challenge })
+                                        }
+                                        Err(e) => {
+                                            let msg = format!("navigation failed: {}", e);
+                                            last_nav_error = Some(msg.clone());
+                                            Err(msg)
+                                        }
                                     }
-                                    Err(e) => {
-                                        let msg = format!("navigation failed: {}", e);
-                                        last_nav_error = Some(msg.clone());
-                                        Err(msg)
-                                    }
-                                },
+                                }
                             };
                             recorder.push(RecordedAction::Navigate {
                                 ok: result.is_ok(),
                                 url,
                             });
                             let _ = reply.send(result);
+                        }
+
+                        SessionCommand::SetPreload { scripts, reply } => {
+                            preload_scripts = scripts;
+                            page.inner.set_preload_scripts(preload_scripts.clone());
+                            let _ = reply.send(Ok(serde_json::json!({
+                                "count": preload_scripts.len(),
+                            })));
                         }
 
                         SessionCommand::SetContent { html, reply } => {
@@ -904,6 +920,7 @@ fn session_thread(
                                 "data:text/html;base64,{}",
                                 STANDARD.encode(html.as_bytes())
                             );
+                            page.inner.set_preload_scripts(preload_scripts.clone());
                             let result = match page.goto(&url).await {
                                 Ok(()) => {
                                     let title = page

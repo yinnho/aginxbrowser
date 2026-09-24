@@ -245,6 +245,19 @@ pub struct SessionNavigateParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionPreloadParams {
+    /// Session ID
+    pub session_id: String,
+    /// Full JS sources, in order. Sources run before each new document's own
+    /// scripts (including inline ones) — the only hook that beats pages whose
+    /// signing layer captures window.fetch/XHR natives at parse time. `[]`
+    /// clears the group. Set before the session's first navigate and it
+    /// applies to every navigation from then on.
+    #[serde(default)]
+    pub scripts: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SessionStateParams {
     /// Session ID
     pub session_id: String,

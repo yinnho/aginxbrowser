@@ -61,6 +61,16 @@ pub enum SessionCommand {
         timeout_ms: Option<u64>,
         reply: oneshot::Sender<Result<Value, SessionError>>,
     },
+    /// Replace the session's document-start preload group (empty = clear).
+    /// Sources run before each new document's own scripts — including inline
+    /// `<script>` tags — which is the only hook that beats pages whose
+    /// signing layer captures `window.fetch`/XHR natives at parse time
+    /// (issue #96: xhs's inline jsvmp). Applied immediately and re-applied
+    /// before every navigation. Reply: `{"count": N}`.
+    SetPreload {
+        scripts: Vec<String>,
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
     /// The session's current page URL — the cheap identity probe behind
     /// GET /sessions (State is a full indexed page walk, too heavy to
     /// fan out per listing entry).

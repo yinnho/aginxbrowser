@@ -734,6 +734,115 @@
     }
 
     #[tokio::test]
+    async fn preload_runs_before_inline_scripts_and_persists_across_navigations() {
+        let _net = crate::server::test_util::net_env_guard();
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+
+        // The document-start contract (#96): the preload wraps window.fetch
+        // and plants a marker BEFORE the document's own scripts run — the
+        // inline script below records what it saw. Eval-based patching can
+        // never win this race; only preload can.
+        let r = mgr
+            .send(&sid, |reply| SessionCommand::SetPreload {
+                scripts: vec![
+                    "window.__pre = 'ran'; window.__pre_fetch = window.fetch;".to_string(),
+                ],
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(r["count"].as_u64(), Some(1));
+
+        let html = "<html><body><script>\
+             window.__inline_saw = window.__pre || 'none';\
+             window.__inline_fetch_wrapped = window.__pre_fetch === window.fetch;\
+             </script></body></html>"
+            .to_string();
+        mgr.send(&sid, |reply| SessionCommand::SetContent {
+            html,
+            reply,
+        })
+        .await
+        .unwrap();
+        let saw = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "window.__inline_saw".to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(saw.as_str(), Some("ran"));
+        let wrapped = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "window.__inline_fetch_wrapped".to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            wrapped.as_bool(),
+            Some(true),
+            "inline script must see the SAME fetch the preload captured"
+        );
+
+        // The group survives a navigation: a second document without any
+        // inline reader still gets the preload (marker present).
+        mgr.send(&sid, |reply| SessionCommand::SetContent {
+            html: "<html><body><p>two</p></body></html>".to_string(),
+            reply,
+        })
+        .await
+        .unwrap();
+        let persisted = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "window.__pre || 'gone'".to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(persisted.as_str(), Some("ran"));
+
+        // Clearing works: an empty group leaves the next document untouched.
+        mgr.send(&sid, |reply| SessionCommand::SetPreload {
+            scripts: vec![],
+            reply,
+        })
+        .await
+        .unwrap();
+        mgr.send(&sid, |reply| SessionCommand::SetContent {
+            html: "<html><body><p>three</p></body></html>".to_string(),
+            reply,
+        })
+        .await
+        .unwrap();
+        let cleared = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "window.__pre || 'gone'".to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(cleared.as_str(), Some("gone"));
+
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
+    #[tokio::test]
     async fn set_content_loads_local_html_as_a_real_page() {
         let _net = crate::server::test_util::net_env_guard();
         let mut mgr = SessionManager::new();

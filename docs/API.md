@@ -947,7 +947,29 @@ Navigate to a new URL.
 {"url": "https://example.com/page2", "title": "Page 2"}
 ```
 
-When the navigation lands on an anti-bot wall (punish page / `_____tmd_____/punish`), a `challenge` field joins the response — risk-control pages answer like ordinary pages, the flag is the machine-readable verdict: `{"url": "https://punish.taobao.com/...", "title": "...", "challenge": "punish"}`.
+When the navigation lands on an anti-bot wall (punish page / `_____tmd_____/punish`), a `challenge` field joins the response — risk-control pages answer like ordinary pages, the flag is the machine-readable verdict: `{"url": "https://punish.taobao.com/", "title": "...", "challenge": "punish"}`.
+
+### POST /session/{id}/preload
+
+Replace the session's document-start preload group (issue #96). Sources run before each new document's own scripts — **including inline `<script>` tags** — which is the only hook that beats pages whose signing layer captures `window.fetch`/XHR natives at HTML-parse time (xhs's inline jsvmp: its API calls go out through references saved at parse time, so any eval-based patch lands too late and the calls fire unsigned/invalid-signed → 406).
+
+**Request fields:**
+
+| Field | Type | Required | Description |
+|------|------|------|------|
+| scripts | string[] | ✅ | Full JS sources, in order. `[]` clears the group |
+
+Set the group before the session's first navigate (create without `url` → preload → navigate) and it applies to every navigation from then on, `set_content` included.
+
+```bash
+curl -sS -X POST http://127.0.0.1:8089/session/s_42/preload \
+-H "Content-Type: application/json" \
+-d '{"scripts":["window.__patched = true; const F = window.fetch; window.fetch = function(u,o){ /* sign/re-record */ return F.call(this,u,o); };"]}'
+
+# → {"count": 1}
+```
+
+**Response:** `{"count": N}`
 
 ### POST /session/{id}/state
 
@@ -1596,6 +1618,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `session_clone` | Derive a new session carrying the full login state (cookies + storage + viewport + dialog policy); the source stays untouched — snapshot before risky actions, or run one login in parallel |
 | `session_list` | List live sessions with idle age and time left before auto-eviction (discover one to reuse) |
 | `session_navigate` | Navigate to a new URL within a session |
+| `session_preload` | Replace the session's document-start preload group (empty array clears). Sources run before each new document's own scripts — including inline `<script>` tags — the only hook that beats pages whose signing layer captures `window.fetch`/XHR natives at parse time |
 | `session_state` | Get the indexed page state |
 | `session_cookies` | Export the session's current cookies as full Set-Cookie strings (`name=value; Domain=…; Path=/`, for login-state reuse — cross-subdomain state survives the round-trip) |
 | `session_storage` | Snapshot the session's `localStorage`/`sessionStorage` for the current origin — the half of login state cookies can't carry; restore it in a new session via `session_create`'s `storage` field |

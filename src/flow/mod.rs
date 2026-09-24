@@ -684,6 +684,20 @@ async fn exec_step(
             .await
             .map_err(|e| e.to_string())
         }
+        "preload" => {
+            let scripts = a
+                .get("scripts")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            mgr.send(sid, |reply| C::SetPreload { scripts, reply })
+                .await
+                .map_err(|e| e.to_string())
+        }
         "screenshot" => {
             let text = mgr
                 .send(sid, |reply| C::Screenshot {
@@ -728,7 +742,7 @@ async fn exec_step(
             Ok(json!({ "closed": true }))
         }
         other => Err(format!(
-            "unknown op {other:?} (navigate set_content click click_xy drag input set_files scroll eval wait viewport screenshot state cookies verdict close http — plus executor-level branch, see run_flow)"
+            "unknown op {other:?} (navigate set_content preload click click_xy drag input set_files scroll eval wait viewport screenshot state cookies verdict close http — plus executor-level branch, see run_flow)"
         )),
     }
 }

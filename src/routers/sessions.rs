@@ -384,6 +384,33 @@ pub(crate) async fn session_list_handler() -> impl IntoResponse {
     axum::Json(serde_json::json!({ "count": sessions.len(), "sessions": sessions }))
 }
 
+/// Replace the session's document-start preload group (empty array clears).
+/// Sources run before each new document's own scripts — including inline
+/// `<script>` tags — the only hook that beats pages whose signing layer
+/// captures `window.fetch`/XHR natives at parse time (issue #96, xhs's
+/// inline jsvmp). Set before the first navigate of a fresh session and it
+/// applies to every navigation from then on.
+#[derive(Deserialize)]
+pub(crate) struct SessionPreloadBody {
+    /// Full JS sources, in order. `[]` clears the group.
+    scripts: Vec<String>,
+}
+
+pub(crate) async fn session_preload_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<SessionPreloadBody>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut mgr = session::SESSIONS.lock().await;
+    let resp = mgr
+        .send(&id, |reply| session::SessionCommand::SetPreload {
+            scripts: body.scripts,
+            reply,
+        })
+        .await
+        .map_err(session_err)?;
+    Ok((StatusCode::OK, Json(resp)))
+}
+
 pub(crate) async fn session_navigate_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(req): Json<SessionNavigateRequest>,
