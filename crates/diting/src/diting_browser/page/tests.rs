@@ -2418,3 +2418,42 @@ ms.addEventListener('sourceopen', function(){ \
         // The timer is still pending (not yet fired) and the realm is alive.
         assert_eq!(p.evaluate("window.__ticked").as_f64(), Some(0.0));
     }
+
+    /// #100's kill mechanism: the idle pump drives 200ms slices, and the old
+    /// +500ms watchdog headroom terminated any synchronous task running
+    /// longer than ~700ms mid-flight. react-dom 16 sets its executionContext
+    /// bits around render/commit with no finally, so a mid-commit terminate
+    /// poisoned the realm permanently (#327 storm, every setState dead, input
+    /// write-back gone on the Tmall publish page). A legitimate multi-second
+    /// task inside one pump slice must now run to completion — no watchdog
+    /// fire, mark intact. The busy loop is counted, not Date.now()-driven: a
+    /// ~1.2e9-iteration loop runs ~1.2s — well past the old 700ms kill line,
+    /// well under the 5.2s arm, with zero clock reads. Date.now() inside
+    /// timer callbacks has its own intermittent failure (#108) that would
+    /// make this test flake for unrelated reasons.
+    #[tokio::test(flavor = "current_thread")]
+    async fn pump_slice_spares_multi_second_task() {
+        let mut p = test_page();
+        p.navigate(
+            "data:text/html,%3Cscript%3Ewindow.__mark%3D0%3BsetTimeout%28function%28%29%7Bvar%20n%3D0%3Bfor%28var%20i%3D0%3Bi%3C1.2e9%3Bi%2B%2B%29%7Bn%2B%3Di%7Dwindow.__mark%3D1%7D%2C1500%29%3C%2Fscript%3E",
+        )
+        .await
+        .unwrap();
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < std::time::Duration::from_secs(8) {
+            p.pump_event_loop_slice(200).await;
+            if p.evaluate("window.__mark").as_f64() == Some(1.0) {
+                break;
+            }
+        }
+        assert_eq!(
+            p.evaluate("window.__mark").as_f64(),
+            Some(1.0),
+            "a multi-second synchronous task must survive 200ms pump slices"
+        );
+        assert_eq!(
+            p.js.as_ref().unwrap().watchdog_fired_total(),
+            0,
+            "the pump watchdog must not terminate legitimate long tasks (#100)"
+        );
+    }

@@ -3775,12 +3775,18 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
     };
     match name {
         "display" => {
+            // inline-flex/inline-grid (#107): Fusion's .next-input family sizes
+            // its bare <input> children purely from flex layout — dropping the
+            // declaration (the pre-#107 behavior) left 32 inputs at width 0 on
+            // the Tmall publish page. taffy only needs the container mode, so
+            // they map onto plain Flex/Grid; the outer inline participation is
+            // a refinement, not a correctness requirement.
             style.display = match v {
                 "block" => Some(Display::Block),
                 "inline" => Some(Display::Inline),
                 "inline-block" => Some(Display::InlineBlock),
-                "flex" => Some(Display::Flex),
-                "grid" => Some(Display::Grid),
+                "flex" | "inline-flex" => Some(Display::Flex),
+                "grid" | "inline-grid" => Some(Display::Grid),
                 "table" => Some(Display::Table),
                 "table-row" => Some(Display::TableRow),
                 "table-cell" => Some(Display::TableCell),

@@ -220,6 +220,24 @@ fn display_inline_block_parses_and_serializes() {
     assert!(supports_declaration("display", "inline-block"));
 }
 
+/// #107: Fusion's .next-input is `display: inline-flex` and sizes its bare
+/// input children purely from flex layout. The declaration used to be
+/// dropped wholesale, zeroing 32 inputs on the Tmall publish page.
+#[test]
+fn display_inline_flex_and_grid_parse() {
+    let mut s = ComputedStyle::default();
+    assert!(
+        apply_declarations(&mut s, "display: inline-flex"),
+        "inline-flex must not be dropped by the cascade (#107)"
+    );
+    assert_eq!(s.display, Some(Display::Flex));
+    assert!(
+        apply_declarations(&mut s, "display: inline-grid"),
+        "inline-grid must not be dropped by the cascade (#107)"
+    );
+    assert_eq!(s.display, Some(Display::Grid));
+}
+
 // ---- animation batch A/B: opacity + transform ----
 
 /// The exact inline strings GSAP's tween engine writes on a diting-driven

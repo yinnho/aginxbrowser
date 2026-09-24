@@ -1712,16 +1712,33 @@ impl JsRuntime {
         self.runtime.v8_isolate().cancel_terminate_execution();
     }
 
+    /// Headroom added on top of the caller's budget before the V8 watchdog
+    /// may terminate execution. Termination is a scalpel for infinite spins —
+    /// but react-dom 16's `performWorkOnRoot` sets its `executionContext`
+    /// bits with no `finally` to clear them, so a terminate that lands
+    /// mid-render or mid-commit poisons the realm permanently: every later
+    /// scheduler tick throws minified #327 ("Should not already be working")
+    /// and every `setState` dies silently — the Tmall publish page (#100)
+    /// lost all input write-back and button clicks to exactly this. A heavy
+    /// SPA commit legitimately runs for seconds (style + layout per commit
+    /// is engine-side cost Chrome amortizes), so the old +500ms razor killed
+    /// real work on the idle pump's 200ms slices. Five seconds of patience
+    /// still catches any true spin (a spin never finishes regardless of
+    /// budget), and the #66 duty-cycle freeze remains the backstop for
+    /// under-budget burners.
+    const WATCHDOG_HEADROOM_MS: u64 = 5_000;
+
     /// Drive the event loop for at most `budget_ms`, bounded against BOTH async
     /// idle (tokio timeout) and synchronous hangs (V8 watchdog). A microtask
-    /// storm that pins the thread is terminated ~500ms past the budget; a
-    /// well-behaved page returns as soon as the loop goes idle.
+    /// storm that pins the thread is terminated WATCHDOG_HEADROOM_MS past the
+    /// budget; a well-behaved page returns as soon as the loop goes idle.
     pub async fn run_event_loop_bounded(&mut self, budget_ms: u64) -> Result<(), String> {
         if budget_ms == 0 {
             return self.run_event_loop().await;
         }
         let budget = std::time::Duration::from_millis(budget_ms);
-        let token = self.arm_watchdog(budget + std::time::Duration::from_millis(500));
+        let token =
+            self.arm_watchdog(budget + std::time::Duration::from_millis(Self::WATCHDOG_HEADROOM_MS));
         let result = tokio::time::timeout(budget, self.run_event_loop()).await;
         self.disarm_watchdog(token);
         match result {
@@ -1743,7 +1760,12 @@ impl JsRuntime {
     /// parse, render, and pushState have all drained.
     pub async fn run_event_loop_until_idle(&mut self, max_ms: u64) -> bool {
         let budget = std::time::Duration::from_millis(max_ms);
-        let token = self.arm_watchdog(budget + std::time::Duration::from_millis(500));
+        // Same headroom rationale as run_event_loop_bounded: the idle pump
+        // calls this with 200ms slices, and +500ms terminated legitimate
+        // multi-second React commits mid-flight (#100). See
+        // WATCHDOG_HEADROOM_MS.
+        let token =
+            self.arm_watchdog(budget + std::time::Duration::from_millis(Self::WATCHDOG_HEADROOM_MS));
         let result = tokio::time::timeout(budget, self.run_event_loop()).await;
         let fired = self.disarm_watchdog(token);
         matches!(result, Ok(Ok(()))) && !fired
