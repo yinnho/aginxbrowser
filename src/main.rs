@@ -191,6 +191,68 @@ fn cdp_port_from_args(args: &[String]) -> Result<Option<u16>, String> {
     Ok(Some(port))
 }
 
+/// Flags that consume the following token as their value — the token after
+/// one of these is never a flag position.
+const VALUE_FLAGS: &[&str] = &["--cdp-port", "--allow-network", "--font-dir"];
+
+/// First unrecognized flag-shaped argument, if any. `--port` and friends
+/// must refuse instead of silently starting a misconfigured server.
+fn first_unknown_flag(args: &[String]) -> Option<String> {
+    const KNOWN: &[&str] = &[
+        "--mcp",
+        "--allow-file-access",
+        "--allow-private-network",
+        "--panel",
+        "--version",
+        "-V",
+        "--help",
+        "-h",
+    ];
+    let mut skip_next = false;
+    for a in args.iter().skip(1) {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if VALUE_FLAGS.contains(&a.as_str()) {
+            skip_next = true;
+            continue;
+        }
+        if KNOWN.contains(&a.as_str()) {
+            continue;
+        }
+        if a.starts_with('-') && a.len() > 1 {
+            return Some(a.clone());
+        }
+    }
+    None
+}
+
+const CLI_HELP: &str = "\
+aginxbrowser — agent-owned browser face (HTTP + MCP stdio)
+
+USAGE:
+    aginxbrowser [FLAGS]
+    aginxbrowser doctor
+
+SUBCOMMAND:
+    doctor                    diagnose this box (env knobs, net, fonts), then exit
+
+FLAGS:
+    --mcp                     serve MCP over stdio instead of HTTP
+    --cdp-port <PORT>         bind the whole surface on loopback at PORT
+    --allow-private-network   permit fetches to private/loopback ranges
+    --allow-file-access       permit file:// fetches
+    --allow-network <CIDRS>   comma-separated allowed network ranges
+    --font-dir <DIR>          extra font fallback directory (screenshot builds)
+    --panel                   paint straight to the phone's DRM glass (screenshot builds)
+    --version, -V             print version and exit
+    --help, -h                print this help and exit
+
+Bind address comes from AGINXBROWSER_BIND (default 0.0.0.0:8089); --cdp-port
+pins loopback:PORT and wins over the env. Run `aginxbrowser doctor` for the
+full environment-knob report.";
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // In --mcp (stdio transport) mode, stdout IS the JSON-RPC channel —
@@ -218,8 +280,28 @@ async fn main() -> anyhow::Result<()> {
     // not pay the V8 warmup below (self-hosters run it to debug a box that
     // may not even reach the network).
     let args: Vec<String> = std::env::args().collect();
+
+    // Metadata flags exit before anything boots — before #98 these were
+    // silently ignored and `aginxbrowser --version` left a listening engine
+    // behind (found live on port 8089).
+    if args.iter().skip(1).any(|a| a == "--version" || a == "-V") {
+        println!("aginxbrowser {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if args.iter().skip(1).any(|a| a == "--help" || a == "-h") {
+        println!("{CLI_HELP}");
+        return Ok(());
+    }
+
     if args.get(1).map(String::as_str) == Some("doctor") {
         std::process::exit(doctor_cli::run().await);
+    }
+
+    // A typo'd or stale recipe (the historical `--port` never bound anything)
+    // must not start a silently-misconfigured server.
+    if let Some(bad) = first_unknown_flag(&args) {
+        eprintln!("aginxbrowser: unrecognized argument {bad:?} (see --help)");
+        std::process::exit(2);
     }
 
     // UA/TLS coherence (taobao compat report ⑤): AGINXBROWSER_UA overrides
@@ -772,6 +854,29 @@ mod tests {
         assert!(cdp_port_from_args(&a(&["aginxbrowser", "--cdp-port", "abc"])).is_err());
         assert!(cdp_port_from_args(&a(&["aginxbrowser", "--cdp-port", "0"])).is_err());
         assert!(cdp_port_from_args(&a(&["aginxbrowser", "--cdp-port", "99999"])).is_err());
+    }
+
+    // #98: unknown flags are named, value flags shield their argument, and
+    // bare "-" (stdin convention) passes through. --version/--help exit
+    // paths are too trivial to pin; the guard logic is where bugs would live.
+    #[test]
+    fn unknown_flag_guard_names_offenders_and_shields_values() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(first_unknown_flag(&a(&["aginxbrowser"])), None);
+        assert_eq!(first_unknown_flag(&a(&["aginxbrowser", "--mcp", "--panel"])), None);
+        assert_eq!(
+            first_unknown_flag(&a(&["aginxbrowser", "--cdp-port", "9223"])),
+            None
+        );
+        assert_eq!(
+            first_unknown_flag(&a(&["aginxbrowser", "--port", "8089"])),
+            Some("--port".to_string())
+        );
+        assert_eq!(
+            first_unknown_flag(&a(&["aginxbrowser", "--allow-network", "10.0.0.0/8", "-x"])),
+            Some("-x".to_string())
+        );
+        assert_eq!(first_unknown_flag(&a(&["aginxbrowser", "-"])), None);
     }
 
     // 0.3.0 tmall report P2: /health must answer "which build am I talking
