@@ -14981,7 +14981,7 @@ fn window_named_access_live_and_shadowing() {
 #[test]
 fn window_named_access_tracks_mutations_and_assignment() {
     let mut rt = setup_runtime("<html><body></body></html>");
-    let out = rt.evaluate(r#"
+    let _out = rt.evaluate(r#"
         const mk = function (id) { const d = document.createElement('div'); d.id = id; return d; };
         const a = mk('zed'); document.body.appendChild(a);
         const afterAppend = typeof zed !== 'undefined' && zed === a;
@@ -15008,7 +15008,7 @@ fn window_named_access_tracks_mutations_and_assignment() {
 #[test]
 fn input_files_accepts_bare_file() {
     let mut rt = setup_runtime("<html><body><input id=\"f\" type=\"file\"></body></html>");
-    let out = rt.evaluate(r#"
+    let _out = rt.evaluate(r#"
         const inp = document.getElementById('f');
         const before = inp.files.length;
         const file = new File(['abc'], 'a.txt', { type: 'text/plain' });
@@ -15034,7 +15034,7 @@ fn input_files_accepts_bare_file() {
 #[test]
 fn data_transfer_items_and_files_feed_input() {
     let mut rt = setup_runtime("<html><body></body></html>");
-    let out = rt.evaluate(r#"
+    let _out = rt.evaluate(r#"
         const dt = new DataTransfer();
         const empty = dt.files.length;
         const file = new File(['x'], 'x.txt');
@@ -15073,7 +15073,7 @@ fn document_evaluate_xpath_subset() {
         "<html><body><div id=\"list\"><p class=\"a\">one</p><p class=\"b\">two</p>\
          <p class=\"a\">three</p></div><a href=\"/x\">link</a></body></html>",
     );
-    let out = rt.evaluate(r#"
+    let _out = rt.evaluate(r#"
         try {
         const snap = document.evaluate('//p', document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
         const count = snap.snapshotLength;

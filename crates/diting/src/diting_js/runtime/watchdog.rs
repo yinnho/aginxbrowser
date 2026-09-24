@@ -259,6 +259,30 @@ impl WatchdogToken {
 }
 
 impl super::JsRuntime {
+    /// Headroom added on top of the caller's budget before the V8 watchdog
+    /// may terminate execution. Termination is a scalpel for infinite spins —
+    /// but react-dom 16's `performWorkOnRoot` sets its `executionContext`
+    /// bits with no `finally` to clear them, so a terminate that lands
+    /// mid-render or mid-commit poisons the realm permanently: every later
+    /// scheduler tick throws minified #327 ("Should not already be working")
+    /// and every `setState` dies silently — the Tmall publish page (#100)
+    /// lost all input write-back and button clicks to exactly this. A heavy
+    /// SPA commit legitimately runs for seconds (style + layout per commit
+    /// is engine-side cost Chrome amortizes), so the old +500ms razor killed
+    /// real work on the idle pump's 200ms slices. Five seconds of patience
+    /// still catches any true spin (a spin never finishes regardless of
+    /// budget), and the #66 duty-cycle freeze remains the backstop for
+    /// under-budget burners.
+    pub(crate) const WATCHDOG_HEADROOM_MS: u64 = 5_000;
+
+    /// Watchdog duration for the meta_code half of an eval (#110): 10s floor,
+    /// else the caller's own await budget — the settle half of the same eval
+    /// already waits that long, so a legitimate long synchronous script must
+    /// not be killed earlier than the budget its caller explicitly set.
+    pub(crate) fn eval_watchdog_duration(await_budget_ms: u64) -> std::time::Duration {
+        std::time::Duration::from_millis(await_budget_ms).max(std::time::Duration::from_secs(10))
+    }
+
     /// Arm a hard wall-clock backstop on synchronous V8 work. A page stuck in a
     /// synchronous loop or a microtask storm pins the OS thread inside V8, so
     /// `tokio::time::timeout` (which can only cancel at await points) never
