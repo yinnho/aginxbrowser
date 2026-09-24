@@ -145,6 +145,14 @@ cbc = { version = "0.1", features = ["alloc"] }
 ctr = "0.9"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 hkdf = "0.12"
+# ECDSA (P-256/P-384) for crypto.subtle — same RustCrypto family as the
+# secret-key ops. `ecdsa` is a direct dep for the hazmat prehash traits;
+# p256/p384 with arithmetic+pkcs8 for key encode/decode. rand_core's OsRng
+# (over the getrandom 0.2 already in tree) drives key generation.
+ecdsa = { version = "0.16", default-features = false, features = ["signing", "verifying", "hazmat", "pkcs8", "pem"] }
+p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa", "ecdh", "pkcs8", "std"] }
+p384 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa", "ecdh", "pkcs8", "std"] }
+rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
 # CSPRNG for getRandomValues / randomUUID (replaces Math.random).
 getrandom = "0.2"
 

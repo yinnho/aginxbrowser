@@ -67,6 +67,42 @@ fn image_header_dimensions_all_formats() {
     assert_eq!(image_header_dimensions(&png[..16]), None);
 }
 
+/// (#103) ECDSA flat key payload: four u16-BE length-prefixed sections
+/// [pkcs8, sec1, scalar, spki]; absent sections are a bare 0x0000. The JS
+/// shim's ecdsaUnflat mirrors this walk, so the byte layout is the wire
+/// contract between the two halves.
+#[test]
+fn ecdsa_flat_layout() {
+    let flat = super::ecdsa_flat([b"PK", b"POINT", b"", b"SPKI-DER"]);
+    let expect: Vec<u8> = [
+        &[0u8, 2][..], b"PK",
+        &[0, 5], b"POINT",
+        &[0, 0],
+        &[0, 8], b"SPKI-DER",
+    ]
+    .concat();
+    assert_eq!(flat, expect);
+}
+
+/// (#103) The ECDSA prehash digests pin FIPS 180-4 vectors ("abc"); an
+/// unknown hash name must be an error, not a silent fallback digest.
+#[test]
+fn ecdsa_digest_vectors_and_reject() {
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let d = super::ecdsa_digest("SHA-256", b"abc").unwrap();
+    assert_eq!(
+        hex(&d),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    let d = super::ecdsa_digest("SHA-384", b"abc").unwrap();
+    assert_eq!(
+        hex(&d),
+        "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7"
+    );
+    assert!(super::ecdsa_digest("MD5", b"abc").is_err());
+    assert!(super::ecdsa_digest("SHA-256", &[]).is_ok());
+}
+
 /// The #395 paint-only predicate: only a name diff inside
 /// {transform, opacity} may keep the solve cache. Value changes,
 /// whitelist additions/removals, prefixed properties and missing

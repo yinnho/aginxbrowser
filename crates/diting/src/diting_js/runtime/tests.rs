@@ -3663,6 +3663,119 @@
         assert_eq!(v["ct"], serde_json::json!("text/plain"));
     }
 
+    /// (#106) send() on an XHR whose URL slot is not a string must throw
+    /// Chrome's InvalidStateError, not die on the internal .startsWith crash
+    /// (the Douyin SDK hit exactly that). open() also coerces undefined via
+    /// WebIDL USVString to "undefined", so the stored slot is always a string.
+    #[tokio::test(flavor = "current_thread")]
+    async fn xhr_send_guard_non_string_url() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const x = new XMLHttpRequest();
+                    x.open('GET', 'data:text/plain,hi', false);
+                    x._url = undefined;
+                    let guard = 'no-throw';
+                    try { x.send(); } catch (e) { guard = e.name; }
+                    const x2 = new XMLHttpRequest();
+                    x2.open('GET', undefined, false);
+                    const coerced = typeof x2._url === 'string' ? x2._url : 'NOT-A-STRING';
+                    return [guard, coerced];
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let v = result.value.unwrap();
+        assert_eq!(
+            v[0],
+            serde_json::json!("InvalidStateError"),
+            "cleared URL slot must throw like Chrome, not TypeError"
+        );
+        assert_eq!(v[1], serde_json::json!("undefined"), "open() USVString coercion");
+    }
+
+    /// (#104) The Navigator interface object exists on window (the Douyin
+    /// SDK subclasses it), `new Navigator()` is an illegal constructor, the
+    /// navigator instance sits on Navigator.prototype (instanceof and
+    /// getPrototypeOf both Chrome-shaped), and subclass linkage works.
+    #[tokio::test(flavor = "current_thread")]
+    async fn navigator_interface_object_face() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const isFn = typeof Navigator === 'function';
+                    const inst = navigator instanceof Navigator;
+                    const proto = Object.getPrototypeOf(navigator) === Navigator.prototype;
+                    let ctorThrew = false;
+                    try { new Navigator(); } catch (e) { ctorThrew = e.name === 'TypeError'; }
+                    let subLinked = false;
+                    try {
+                        class t extends Navigator {}
+                        subLinked = Object.create(t.prototype) instanceof Navigator;
+                    } catch (e) {}
+                    const tag = navigator[Symbol.toStringTag];
+                    return [isFn, inst, proto, ctorThrew, subLinked, tag];
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let v = result.value.unwrap();
+        assert_eq!(v[0], serde_json::json!(true));
+        assert_eq!(v[1], serde_json::json!(true), "navigator instanceof Navigator");
+        assert_eq!(v[2], serde_json::json!(true), "prototype chain");
+        assert_eq!(v[3], serde_json::json!(true), "new Navigator() is illegal");
+        assert_eq!(v[4], serde_json::json!(true), "subclass linkage");
+        assert_eq!(v[5], serde_json::json!("Navigator"), "toStringTag survives");
+    }
+
+    /// (#105) innerWidth/innerHeight/outer* are getter-only accessors like
+    /// Chrome's — a page's plain assignment must be ignored (a resize
+    /// polyfill on douyin overwrote them with document extents and skewed
+    /// every coordinate by a viewport), while __diting_setViewport still
+    /// moves them.
+    #[tokio::test(flavor = "current_thread")]
+    async fn window_size_props_ignore_page_writes() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const d = Object.getOwnPropertyDescriptor(window, 'innerWidth');
+                    const before = window.innerWidth;
+                    window.innerWidth = 5;
+                    window.innerHeight = 5;
+                    window.outerWidth = 5;
+                    const after = [window.innerWidth, window.innerHeight, window.outerWidth];
+                    const unchanged = after[0] === before && after[1] > 0 && after[2] === before;
+                    globalThis.__diting_setViewport(400, 800, false, 0);
+                    const moved = window.innerWidth === 400 && window.innerHeight === 800;
+                    return [!!d.get, unchanged, moved];
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let v = result.value.unwrap();
+        assert_eq!(v[0], serde_json::json!(true), "innerWidth is an accessor");
+        assert_eq!(v[1], serde_json::json!(true), "page writes are ignored");
+        assert_eq!(v[2], serde_json::json!(true), "setViewport still moves them");
+    }
+
     /// (#42) base64 payloads decode through the same RFC 2397 walk, and an
     /// unparseable data: URL lands on status 0 (Chrome: network error face).
     #[tokio::test(flavor = "current_thread")]
@@ -4203,6 +4316,154 @@
                 "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"
             ])
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_webcrypto_ecdsa_roundtrips() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // #103: ECDSA P-256/P-384 through the real face — generate → export
+        // (spki/pkcs8/jwk) → sign → verify, tamper rejection, and re-import
+        // from every format the Douyin security SDK uses (jwk with a private
+        // scalar, spki, raw point).
+        let script = r#"async () => {
+            const enc = new TextEncoder();
+
+            // P-256 generate + shape.
+            const { publicKey, privateKey } = await crypto.subtle.generateKey(
+                { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+            const shape = [
+                publicKey.type, publicKey.algorithm.name, publicKey.algorithm.namedCurve,
+                publicKey.usages.join(','), publicKey.extractable,
+                privateKey.type, privateKey.usages.join(','),
+            ];
+
+            // Sign → 64-byte P1363 (r||s).
+            const data = enc.encode('diting ecdsa p256');
+            const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privateKey, data);
+            const sigLen = new Uint8Array(sig).length;
+
+            // Verify with the generated public key, and with a re-imported
+            // spki copy — both true; tampered data false.
+            const ok = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, sig, data);
+            const spki = await crypto.subtle.exportKey('spki', publicKey);
+            const spkiKey = await crypto.subtle.importKey('spki', spki, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
+            const okSpki = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, spkiKey, sig, data);
+            const bad = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, sig, enc.encode('tampered'));
+
+            // pkcs8 re-import signs; raw point import verifies.
+            const pkcs8 = await crypto.subtle.exportKey('pkcs8', privateKey);
+            const pkcs8Key = await crypto.subtle.importKey('pkcs8', pkcs8, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']);
+            const sig2 = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, pkcs8Key, data);
+            const okSig2 = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, sig2, data);
+
+            // jwk export/import roundtrip — the shape the Douyin SDK feeds us.
+            const privJwk = await crypto.subtle.exportKey('jwk', privateKey);
+            const pubJwk = await crypto.subtle.exportKey('jwk', publicKey);
+            const jwkShape = [privJwk.kty, privJwk.crv, privJwk.d !== undefined, pubJwk.d !== undefined, privJwk.x === pubJwk.x, privJwk.y === pubJwk.y];
+            const jwkPriv = await crypto.subtle.importKey('jwk', privJwk, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']);
+            const jwkPub = await crypto.subtle.importKey('jwk', pubJwk, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
+            const sig3 = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, jwkPriv, data);
+            const okSig3 = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, jwkPub, sig3, data);
+
+            // P-384: 96-byte signature, full roundtrip.
+            const k384 = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-384' }, true, ['sign', 'verify']);
+            const sig384 = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-384' }, k384.privateKey, data);
+            const ok384 = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-384' }, k384.publicKey, sig384, data);
+
+            // A raw-point import (SEC1 uncompressed) of the P-256 public key
+            // verifies too — some SDKs pass raw points.
+            const raw = await crypto.subtle.exportKey('raw', publicKey);
+            const rawKey = await crypto.subtle.importKey('raw', raw, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
+            const okRaw = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, rawKey, sig, data);
+
+            return [shape, sigLen, ok, okSpki, !bad, okSig2, jwkShape, okSig3, new Uint8Array(sig384).length, ok384, okRaw];
+        }"#;
+        let mut result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        let value = result.value.take().unwrap();
+        assert_eq!(
+            value[0],
+            serde_json::json!(["public", "ECDSA", "P-256", "verify", true, "private", "sign"])
+        );
+        assert_eq!(value[1], 64, "P-256 P1363 signature must be 64 bytes");
+        assert_eq!(value[2], true, "generated key verifies its own signature");
+        assert_eq!(value[3], true, "spki re-import verifies");
+        assert_eq!(value[4], true, "tampered data must fail verification");
+        assert_eq!(value[5], true, "pkcs8 re-import signature verifies");
+        assert_eq!(
+            value[6],
+            serde_json::json!(["EC", "P-256", true, false, true, true]),
+            "jwk export shape: private has d, public does not, x/y match"
+        );
+        assert_eq!(value[7], true, "jwk roundtrip signs and verifies");
+        assert_eq!(value[8], 96, "P-384 P1363 signature must be 96 bytes");
+        assert_eq!(value[9], true, "P-384 roundtrip verifies");
+        assert_eq!(value[10], true, "raw SEC1 point re-import verifies");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_webcrypto_ecdh_derivation() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // ECDH P-256/P-384 key agreement — the Douyin login chain's
+        // deriveEcdhKey step: generate two pairs, both directions of the
+        // exchange must land on the same secret; deriveKey must yield a
+        // working AES-GCM key; curve mismatch rejects; usage faces follow
+        // Chrome (public ECDH keys carry no usages).
+        let script = r#"async () => {
+            const enc = new TextEncoder();
+            const dec = new TextDecoder();
+            const a = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey', 'deriveBits']);
+            const b = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+            const shape = [
+                a.publicKey.type, a.publicKey.usages.length,
+                a.privateKey.usages.slice().sort().join(','),
+            ];
+
+            const s1 = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: b.publicKey }, a.privateKey, null));
+            const s2 = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: a.publicKey }, b.privateKey, 256));
+            const symmetric = s1.length === 32 && s2.length === 32 && s1.every((v, i) => v === s2[i]);
+
+            // deriveKey → AES-GCM roundtrip through the shared secret.
+            const aes = await crypto.subtle.deriveKey(
+                { name: 'ECDH', public: b.publicKey }, a.privateKey,
+                { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+            const iv = crypto.getRandomValues(new Uint8Array(12));
+            const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aes, enc.encode('ecdh secret message'));
+            const pt = dec.decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, aes, ct));
+
+            // jwk export/import roundtrip of an ECDH public key.
+            const pubJwk = await crypto.subtle.exportKey('jwk', a.publicKey);
+            const rePub = await crypto.subtle.importKey('jwk', pubJwk, { name: 'ECDH', namedCurve: 'P-256' }, true, []);
+            const s3 = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: rePub }, b.privateKey, null));
+            const jwkOk = s3.length === 32 && s3.every((v, i) => v === s1[i]);
+
+            // P-384 agreement works; cross-curve mix rejects.
+            const p384a = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-384' }, false, ['deriveBits']);
+            const p384b = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-384' }, false, ['deriveBits']);
+            const s384 = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: p384b.publicKey }, p384a.privateKey, null));
+            let mixedThrew = false;
+            try { await crypto.subtle.deriveBits({ name: 'ECDH', public: b.publicKey }, p384a.privateKey, null); }
+            catch (e) { mixedThrew = e.name === 'InvalidAccessError'; }
+
+            return [shape, symmetric, pt, jwkOk, s384.length, mixedThrew];
+        }"#;
+        let result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        let v = result.value.unwrap();
+        assert_eq!(
+            v[0],
+            serde_json::json!(["public", 0, "deriveBits,deriveKey"]),
+            "ECDH key shape: public carries no usages, private carries both derive usages"
+        );
+        assert_eq!(v[1], true, "both directions of the exchange agree");
+        assert_eq!(v[2], serde_json::json!("ecdh secret message"));
+        assert_eq!(v[3], true, "jwk roundtrip preserves the public point");
+        assert_eq!(v[4], 48, "P-384 shared secret is 48 bytes");
+        assert_eq!(v[5], true, "cross-curve derivation rejects");
     }
 
     #[tokio::test(flavor = "current_thread")]

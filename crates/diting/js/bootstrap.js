@@ -6886,6 +6886,15 @@ globalThis.navigator = {
 // tell. Data props defined here survive the V8 snapshot (#37).
 __def(navigator, Symbol.toStringTag, 'Navigator');
 __def(globalThis, Symbol.toStringTag, 'Window');
+// (#104) Chrome exposes the Navigator interface object on window — the
+// Douyin security SDK subclasses it (`class t extends Navigator`) and died
+// with ReferenceError. Illegal constructor like every Chrome interface
+// without [Constructor]; the instance keeps its data props, now sitting on
+// Navigator.prototype so instanceof/getPrototypeOf match Chrome too.
+globalThis.Navigator = class Navigator {
+  constructor() { throw new TypeError("Illegal constructor"); }
+};
+Object.setPrototypeOf(navigator, globalThis.Navigator.prototype);
 
 // Key order matches real Chrome's Object.keys(chrome) = ["loadTimes","csi","app","runtime"]
 // (DataDome-class fingerprints read key order, not just membership).
@@ -7029,8 +7038,24 @@ globalThis.__diting_makeVisualViewport = function(w, h) {
 };
 globalThis.visualViewport = globalThis.__diting_makeVisualViewport(1920, 1000);
 globalThis.devicePixelRatio = 1;
-globalThis.innerWidth = 1920; globalThis.innerHeight = 1000;
-globalThis.outerWidth = 1920; globalThis.outerHeight = 1080;
+// (#105) innerWidth/innerHeight/outer* are prototype accessors in Chrome —
+// a page write is silently ignored. As plain writable data props a resize
+// polyfill on douyin overwrote them with document extents, skewing every
+// rect and click coordinate by a viewport. The snapshot cannot bake the
+// accessors (#37 flattening), so defaults live in backing vars here and
+// __diting_init installs the getters per context.
+var __vpW = 1920, __vpH = 1000, __vpOW = 1920, __vpOH = 1080;
+globalThis.__diting_installViewportAccessors = function() {
+  const defs = {
+    innerWidth: () => __vpW, innerHeight: () => __vpH,
+    outerWidth: () => __vpOW, outerHeight: () => __vpOH,
+  };
+  for (const k in defs) {
+    try {
+      Object.defineProperty(globalThis, k, { get: defs[k], configurable: true, enumerable: true });
+    } catch (e) {}
+  }
+};
 globalThis.scrollX = 0; globalThis.scrollY = 0;
 globalThis.pageXOffset = 0; globalThis.pageYOffset = 0;
 
@@ -7462,7 +7487,9 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     // safelist matching and Allow-Methods checks (taobao report ⑤).
     const up = String(method).toUpperCase();
     this._method = /^(CONNECT|DELETE|GET|HEAD|OPTIONS|POST|PUT|TRACE)$/.test(up) ? up : String(method);
-    this._url = url;
+    // WebIDL USVString coercion: open(undefined) stores "undefined" in Chrome,
+    // never a non-string — send() used to crash on .startsWith (#106).
+    this._url = String(url);
     // obscura#908: open()'s third argument decides whether send() blocks for
     // the response or resolves it through the event loop.
     this._async = async_ === undefined ? true : !!async_;
@@ -7503,6 +7530,12 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     const xhr = this;
 
     let url = this._url;
+    // (#106) guard the crash site: an open()'d XHR whose _url got cleared or
+    // never set must fail like Chrome (InvalidStateError), not die on
+    // url.startsWith below.
+    if (typeof url !== 'string' || url === '') {
+      throw new DOMException("Failed to execute 'send' on 'XMLHttpRequest': The object may not be sent yet.", "InvalidStateError");
+    }
     if (url && !url.includes('://')) {
       try {
         const base = _docBase();
@@ -14869,12 +14902,12 @@ if (typeof TransformStream === 'undefined') {
 
 if (!globalThis.crypto) globalThis.crypto = {};
 if (!globalThis.crypto.subtle) {
-  // Real WebCrypto for the secret-key algorithms sites actually use: HMAC,
-  // AES-GCM/CBC/CTR, PBKDF2 and HKDF, plus raw/JWK-oct key handling. The crypto
+  // Real WebCrypto for the algorithms sites actually use: HMAC, AES-GCM/CBC/CTR,
+  // PBKDF2, HKDF, ECDSA P-256/P-384 sign/verify, and ECDH key agreement
+  // (deriveBits/deriveKey), plus raw/JWK key handling. The crypto
   // itself runs in Rust ops (RustCrypto); this shim only marshals bytes and
-  // normalizes algorithm parameters. Public-key algorithms (RSA*, ECDSA, ECDH)
-  // and non-symmetric key formats (pkcs8/spki) are not implemented and throw
-  // NotSupportedError rather than returning fake data.
+  // normalizes algorithm parameters. Other public-key algorithms (RSA*)
+  // throw NotSupportedError rather than returning fake data.
   const keyMaterial = new WeakMap();
 
   class CryptoKey {
@@ -14903,6 +14936,41 @@ if (!globalThis.crypto.subtle) {
     return new Uint8Array(data || []);
   };
   const bufferOf = (u8) => new Uint8Array(u8).buffer;
+
+  // ECDSA (P-256/P-384). The Rust ops return/accept a flat payload of four
+  // u16-BE length-prefixed sections in this order: [pkcs8, sec1 point,
+  // scalar, spki]. A key's keyMaterial entry is {curve, pkcs8, sec1, scalar,
+  // spki} with the private-only sections null on public keys and vice versa.
+  const ECDSA_CURVES = { "P-256": 32, "P-384": 48 };
+  function ecdsaUnflat(buf) {
+    const parts = [];
+    let off = 0;
+    for (let i = 0; i < 4; i++) {
+      const len = (buf[off] << 8) | buf[off + 1];
+      off += 2;
+      parts.push(buf.subarray(off, off + len));
+      off += len;
+    }
+    return parts;
+  }
+  function ecMaterial(key) {
+    if (!(key instanceof CryptoKey) || !keyMaterial.has(key) || !keyMaterial.get(key) || !keyMaterial.get(key).curve) {
+      throw new DOMException("Argument is not a valid CryptoKey", "InvalidAccessError");
+    }
+    return keyMaterial.get(key);
+  }
+  function requireEcdsaUsages(usages, allowed) {
+    for (const u of usages) {
+      if (!allowed.includes(u)) {
+        throw new DOMException("The key usages must contain '" + allowed[0] + "'", "SyntaxError");
+      }
+    }
+  }
+  // Usage sets per EC algorithm face: ECDH derives, ECDSA signs.
+  function ecUsagesFor(name, type) {
+    if (name === "ECDH") return type === "private" ? ["deriveKey", "deriveBits"] : [];
+    return type === "private" ? ["sign"] : ["verify"];
+  }
 
   const ALGO_CANON = {
     "AES-CTR": "AES-CTR", "AES-CBC": "AES-CBC", "AES-GCM": "AES-GCM", "AES-KW": "AES-KW",
@@ -14977,6 +15045,72 @@ if (!globalThis.crypto.subtle) {
 
     async importKey(format, keyData, algorithm, extractable, keyUsages) {
       const alg = normalizeAlgo(algorithm);
+      if (alg.name === "ECDSA" || alg.name === "ECDH") {
+        const crv = String(alg.namedCurve || "");
+        if (!(crv in ECDSA_CURVES)) {
+          throw new DOMException("Unrecognized namedCurve '" + crv + "'", "NotSupportedError");
+        }
+        const usages = keyUsages || [];
+        const coordLen = ECDSA_CURVES[crv];
+        let type, m;
+        if (format === "raw") {
+          const point = toBytes(keyData);
+          if (point.length !== coordLen * 2 + 1 || point[0] !== 4) {
+            throw new DOMException("Key data is not an uncompressed point on the named curve", "DataError");
+          }
+          const parts = ecdsaUnflat(_OPS.op_subtle_ecdsa_import_public(crv, point));
+          m = { curve: crv, pkcs8: null, sec1: parts[1], scalar: null, spki: parts[3] };
+          type = "public";
+          requireEcdsaUsages(usages, ecUsagesFor(alg.name, "public"));
+        } else if (format === "spki") {
+          const parts = ecdsaUnflat(_OPS.op_subtle_ecdsa_import_public(crv, toBytes(keyData)));
+          m = { curve: crv, pkcs8: null, sec1: parts[1], scalar: null, spki: parts[3] };
+          type = "public";
+          requireEcdsaUsages(usages, ecUsagesFor(alg.name, "public"));
+        } else if (format === "pkcs8") {
+          const parts = ecdsaUnflat(_OPS.op_subtle_ecdsa_import_private(crv, false, toBytes(keyData)));
+          m = { curve: crv, pkcs8: parts[0], sec1: parts[1], scalar: parts[2], spki: parts[3] };
+          type = "private";
+          requireEcdsaUsages(usages, ecUsagesFor(alg.name, "private"));
+        } else if (format === "jwk") {
+          const jwk = keyData;
+          if (!jwk || jwk.kty !== "EC") {
+            throw new DOMException("Not an 'EC' JWK key", "DataError");
+          }
+          if (jwk.crv && jwk.crv !== crv) {
+            throw new DOMException("The JWK 'crv' member does not match the algorithm's namedCurve", "DataError");
+          }
+          if (typeof jwk.x !== "string" || typeof jwk.y !== "string") {
+            throw new DOMException("The JWK 'x' and 'y' members are required for EC keys", "DataError");
+          }
+          const x = b64urlToBytes(jwk.x), y = b64urlToBytes(jwk.y);
+          if (x.length !== coordLen || y.length !== coordLen) {
+            throw new DOMException("The JWK 'x'/'y' coordinate length does not match the named curve", "DataError");
+          }
+          const point = new Uint8Array(coordLen * 2 + 1);
+          point[0] = 4;
+          point.set(x, 1);
+          point.set(y, coordLen + 1);
+          if (typeof jwk.d === "string") {
+            const d = b64urlToBytes(jwk.d);
+            if (d.length !== coordLen) {
+              throw new DOMException("The JWK 'd' member length does not match the named curve", "DataError");
+            }
+            const parts = ecdsaUnflat(_OPS.op_subtle_ecdsa_import_private(crv, true, d));
+            m = { curve: crv, pkcs8: parts[0], sec1: parts[1], scalar: parts[2], spki: parts[3] };
+            type = "private";
+            requireEcdsaUsages(usages, ecUsagesFor(alg.name, "private"));
+          } else {
+            const parts = ecdsaUnflat(_OPS.op_subtle_ecdsa_import_public(crv, point));
+            m = { curve: crv, pkcs8: null, sec1: parts[1], scalar: null, spki: parts[3] };
+            type = "public";
+            requireEcdsaUsages(usages, ecUsagesFor(alg.name, "public"));
+          }
+        } else {
+          throw new DOMException("Unsupported key format for EC keys: " + format, "NotSupportedError");
+        }
+        return makeKey(type, extractable, { name: alg.name, namedCurve: crv }, usages, m);
+      }
       let bytes;
       if (format === "raw") {
         bytes = toBytes(keyData);
@@ -14994,6 +15128,29 @@ if (!globalThis.crypto.subtle) {
     async exportKey(format, key) {
       const bytes = keyBytes(key);
       if (!key.extractable) throw new DOMException("Key is not extractable", "InvalidAccessError");
+      if (key.algorithm && (key.algorithm.name === "ECDSA" || key.algorithm.name === "ECDH")) {
+        const m = ecMaterial(key);
+        if (format === "raw" || format === "spki") {
+          if (key.type !== "public") throw new DOMException("Key is not of type 'public'", "InvalidAccessError");
+          return bufferOf(format === "raw" ? m.sec1 : m.spki);
+        }
+        if (format === "pkcs8") {
+          if (key.type !== "private") throw new DOMException("Key is not of type 'private'", "InvalidAccessError");
+          return bufferOf(m.pkcs8);
+        }
+        if (format === "jwk") {
+          const coordLen = ECDSA_CURVES[m.curve];
+          const jwk = {
+            kty: "EC", crv: m.curve,
+            x: bytesToB64url(m.sec1.subarray(1, 1 + coordLen)),
+            y: bytesToB64url(m.sec1.subarray(1 + coordLen)),
+            ext: key.extractable, key_ops: key.usages.slice(),
+          };
+          if (key.type === "private") jwk.d = bytesToB64url(m.scalar);
+          return jwk;
+        }
+        throw new DOMException("Unsupported key format for EC keys export: " + format, "NotSupportedError");
+      }
       if (format === "raw") return bufferOf(bytes);
       if (format === "jwk") {
         const jwk = { kty: "oct", k: bytesToB64url(bytes), ext: key.extractable, key_ops: key.usages.slice() };
@@ -15022,11 +15179,38 @@ if (!globalThis.crypto.subtle) {
         const bytes = _OPS.op_random_bytes(alg.length / 8);
         return makeKey("secret", extractable, { name: alg.name, length: alg.length }, keyUsages, bytes);
       }
+      if (alg.name === "ECDSA" || alg.name === "ECDH") {
+        const crv = String(alg.namedCurve || "");
+        if (!(crv in ECDSA_CURVES)) {
+          throw new DOMException("Unrecognized namedCurve '" + crv + "'", "NotSupportedError");
+        }
+        const usages = keyUsages || [];
+        if (alg.name === "ECDSA") {
+          if (usages.some((u) => u !== "sign" && u !== "verify") || (!usages.includes("sign") && !usages.includes("verify"))) {
+            throw new DOMException("The key usages must contain 'sign' or 'verify'", "SyntaxError");
+          }
+        } else if (usages.some((u) => u !== "deriveKey" && u !== "deriveBits") || usages.length === 0) {
+          throw new DOMException("The key usages must contain 'deriveKey' or 'deriveBits'", "SyntaxError");
+        }
+        const parts = ecdsaUnflat(_OPS.op_subtle_ecdsa_generate(crv));
+        const m = { curve: crv, pkcs8: parts[0], sec1: parts[1], scalar: parts[2], spki: parts[3] };
+        const privUsages = usages.filter((u) => ecUsagesFor(alg.name, "private").includes(u));
+        const pub = makeKey("public", true, { name: alg.name, namedCurve: crv }, ecUsagesFor(alg.name, "public"), m);
+        const priv = makeKey("private", extractable, { name: alg.name, namedCurve: crv }, privUsages, m);
+        return { publicKey: pub, privateKey: priv };
+      }
       throw new DOMException("generateKey does not support " + alg.name, "NotSupportedError");
     },
 
     async sign(algorithm, key, data) {
       const alg = normalizeAlgo(algorithm);
+      if (alg.name === "ECDSA") {
+        const m = ecMaterial(key);
+        if (key.type !== "private") throw new DOMException("Key is not of type 'private'", "InvalidAccessError");
+        if (!key.usages.includes("sign")) throw new DOMException("This CryptoKey cannot be used for signing", "InvalidAccessError");
+        const hash = normalizeHash(alg.hash || (key.algorithm.hash && key.algorithm.hash.name));
+        return bufferOf(runOp(() => _OPS.op_subtle_ecdsa_sign(m.curve, hash, m.pkcs8, toBytes(data))));
+      }
       const bytes = keyBytes(key);
       if (alg.name === "HMAC") {
         const hash = key.algorithm && key.algorithm.hash ? key.algorithm.hash.name : normalizeHash(alg.hash);
@@ -15037,6 +15221,13 @@ if (!globalThis.crypto.subtle) {
 
     async verify(algorithm, key, signature, data) {
       const alg = normalizeAlgo(algorithm);
+      if (alg.name === "ECDSA") {
+        const m = ecMaterial(key);
+        if (key.type !== "public") throw new DOMException("Key is not of type 'public'", "InvalidAccessError");
+        if (!key.usages.includes("verify")) throw new DOMException("This CryptoKey cannot be used for verifying", "InvalidAccessError");
+        const hash = normalizeHash(alg.hash || (key.algorithm.hash && key.algorithm.hash.name));
+        return runOp(() => _OPS.op_subtle_ecdsa_verify(m.curve, hash, m.sec1, toBytes(signature), toBytes(data)));
+      }
       const bytes = keyBytes(key);
       if (alg.name === "HMAC") {
         const hash = key.algorithm && key.algorithm.hash ? key.algorithm.hash.name : normalizeHash(alg.hash);
@@ -15055,6 +15246,24 @@ if (!globalThis.crypto.subtle) {
 
     async deriveBits(algorithm, baseKey, length) {
       const alg = normalizeAlgo(algorithm);
+      if (alg.name === "ECDH") {
+        const m = ecMaterial(baseKey);
+        if (baseKey.type !== "private") throw new DOMException("Key is not of type 'private'", "InvalidAccessError");
+        if (!baseKey.usages.includes("deriveBits") && !baseKey.usages.includes("deriveKey")) {
+          throw new DOMException("This CryptoKey cannot be used for derivation", "InvalidAccessError");
+        }
+        const pub = alg.public;
+        const pm = ecMaterial(pub);
+        if (pub.type !== "public" || pm.curve !== m.curve) {
+          throw new DOMException("The ECDH 'public' key is of the wrong type or curve", "InvalidAccessError");
+        }
+        const secret = runOp(() => _OPS.op_subtle_ecdh_derive_bits(m.curve, m.scalar, pm.sec1));
+        if (length == null) return bufferOf(secret);
+        if (length <= 0 || length % 8 !== 0 || length / 8 > secret.length) {
+          throw new DOMException("Invalid ECDH deriveBits length", "OperationError");
+        }
+        return bufferOf(secret.subarray(0, length / 8));
+      }
       const bytes = keyBytes(baseKey);
       const lenBytes = Math.ceil((length || 0) / 8);
       if (alg.name === "PBKDF2") {
@@ -15924,8 +16133,7 @@ globalThis.__diting_setPersona = function() {
   // From the persona pool, so a retina Mac panel reports 2x (the old
   // width-only heuristic gave 1x on 1512x982 — impossible for that panel).
   globalThis.devicePixelRatio = _fp('dpr') || (sw >= 2560 ? 2 : 1);
-  globalThis.innerWidth = sw; globalThis.innerHeight = sh - 80;
-  globalThis.outerWidth = sw; globalThis.outerHeight = sh;
+  __vpW = sw; __vpH = sh - 80; __vpOW = sw; __vpOH = sh;
   // Publish the persona viewport to the Rust layout layer so
   // getBoundingClientRect / element rects anchor the initial containing
   // block to the same window scripts see (not the pre-persona default).
@@ -15962,8 +16170,7 @@ globalThis.__diting_setPersona = function() {
 // > 0, 0 restores the persona's (Chromium's "0 = default"), undefined
 // leaves it untouched.
 globalThis.__diting_setViewport = function(w, h, mobile, dpr) {
-  globalThis.innerWidth = w; globalThis.innerHeight = h;
-  globalThis.outerWidth = w; globalThis.outerHeight = h;
+  __vpW = w; __vpH = h; __vpOW = w; __vpOH = h;
   if (typeof dpr === 'number' && dpr > 0) globalThis.devicePixelRatio = dpr;
   else if (dpr === 0) globalThis.devicePixelRatio = _fp('dpr') || (globalThis.screen.width >= 2560 ? 2 : 1);
   globalThis.visualViewport = globalThis.__diting_makeVisualViewport(w, h);
@@ -16056,6 +16263,9 @@ globalThis.__diting_init = function() {
   // (#37) V8 snapshot creation flattens accessors on the global object to
   // data:null props, so the window on* family installs here, per context.
   globalThis.__diting_installWindowOnHandlers();
+  // (#105) Same flattening: the window size accessors install here too,
+  // so page writes to innerWidth/innerHeight are ignored like Chrome's.
+  globalThis.__diting_installViewportAccessors();
 
   globalThis.__diting_setPersona();
 
