@@ -15121,3 +15121,24 @@ fn document_evaluate_xpath_subset() {
         "evaluate subset: snapshots, predicates, attr results, iterator exhaustion, constants, honest errors"
     );
 }
+
+    /// #110: the meta_code watchdog used to be a hard-coded 10s while the
+    /// settle half of the same eval waits the caller's budget — a legitimate
+    /// >10s synchronous script (e.g. one forcing the #109 layout pass) was
+    /// beheaded at 10s even with timeout_ms=90000. The watchdog must track
+    /// the caller's budget, with the 10s floor preserved for default calls.
+    #[test]
+    fn eval_watchdog_tracks_caller_budget_with_10s_floor() {
+        assert_eq!(
+            JsRuntime::eval_watchdog_duration(0),
+            std::time::Duration::from_secs(10)
+        );
+        assert_eq!(
+            JsRuntime::eval_watchdog_duration(5_000),
+            std::time::Duration::from_secs(10)
+        );
+        assert_eq!(
+            JsRuntime::eval_watchdog_duration(90_000),
+            std::time::Duration::from_secs(90)
+        );
+    }

@@ -745,6 +745,14 @@ impl JsRuntime {
         }
     }
 
+    /// Watchdog duration for the meta_code half of an eval (#110): 10s floor,
+    /// else the caller's own await budget — the settle half of the same eval
+    /// already waits that long, so a legitimate long synchronous script must
+    /// not be killed earlier than the budget its caller explicitly set.
+    fn eval_watchdog_duration(await_budget_ms: u64) -> std::time::Duration {
+        std::time::Duration::from_millis(await_budget_ms).max(std::time::Duration::from_secs(10))
+    }
+
     async fn evaluate_for_cdp_outcome_inner(
         &mut self,
         expression: &str,
@@ -824,24 +832,28 @@ impl JsRuntime {
         };
 
         // Watchdog-bound: a runaway expression (`while(1){}`) pins the thread
-        // inside V8 where the caller's tokio timeouts cannot reach. 10s is far
-        // beyond any legitimate synchronous eval; on fire, the termination is
-        // cancelled (isolate reusable) and surfaces as an eval error.
+        // inside V8 where the caller's tokio timeouts cannot reach. The floor
+        // is 10s, but when the caller asked for a longer budget (#110: page JS
+        // legitimately synchronous longer than 10s — e.g. a gBCR that forces
+        // the 13s layout of #109) the script must not be beheaded at 10s while
+        // its settle half would have waited. A true spin is still terminated:
+        // at the caller's own budget, which they chose.
         //
         // NOT execute_script_retry_terminated: that helper clears the flag and
         // retries once, which would just re-enter the spin - the watchdog
         // becomes useless. Pre-clear any stray flag from an earlier watchdog
         // instead, then run the plain one-shot execute.
         self.runtime.v8_isolate().cancel_terminate_execution();
-        let eval_wd = self.arm_watchdog(std::time::Duration::from_secs(10));
+        let eval_wd = self.arm_watchdog(Self::eval_watchdog_duration(await_budget_ms));
         let result = self
             .runtime
             .execute_script("<eval-remote>", meta_code);
         let eval_fired = self.disarm_watchdog(eval_wd);
         if eval_fired {
+            let secs = Self::eval_watchdog_duration(await_budget_ms).as_secs();
             let preview: String = expression.chars().take(80).collect();
-            tracing::warn!("eval terminated by watchdog (ran >10s): '{}'", preview);
-            return Err("eval timed out: script ran longer than 10s".to_string());
+            tracing::warn!("eval terminated by watchdog (ran >{}s): '{}'", secs, preview);
+            return Err(format!("eval timed out: script ran longer than {}s", secs));
         }
         result.map_err(|e| format!("JS error: {}", e))?;
 
