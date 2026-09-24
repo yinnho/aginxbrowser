@@ -8,6 +8,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+use super::selector::{MatchCacheBox, MatchDirty};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NodeId(pub(crate) u32);
 
@@ -294,6 +296,15 @@ pub(crate) struct DomTreeInner {
     /// offset), so consumers fingerprint their caches with this instead of
     /// the tree epoch.
     scroll_gen: u64,
+    /// Structural/attribute mutations since the last incremental selector
+    /// match sync — see [`super::selector::MatchDirty`]. Stamped by the
+    /// mutation methods themselves so no caller can forget.
+    match_dirty: MatchDirty,
+    /// The persisted rule-match state for
+    /// [`super::selector::MatchCacheBox`]-keyed incremental syncs (#111):
+    /// compiled buckets + live hit sets, valid while the css bytes are
+    /// unchanged and every mutation carried a stamp.
+    match_cache: Option<MatchCacheBox>,
 }
 
 impl DomTree {
@@ -319,6 +330,8 @@ impl DomTree {
                 selection: None,
                 scroll_offsets: HashMap::new(),
                 scroll_gen: 0,
+                match_dirty: MatchDirty::default(),
+                match_cache: None,
             }),
         }
     }
@@ -332,7 +345,19 @@ impl DomTree {
     }
 
     pub fn set_focused_node(&self, id: Option<NodeId>) {
-        self.inner.borrow_mut().focused_node = id;
+        let prev = {
+            let mut inner = self.inner.borrow_mut();
+            let prev = inner.focused_node;
+            inner.focused_node = id;
+            prev
+        };
+        // :focus/:focus-visible on the node and :focus-within up its
+        // ancestor chain re-match when focus moves — stamp both ends so
+        // the incremental matcher stays live (the old always-full match
+        // picked this up implicitly).
+        for node in prev.into_iter().chain(id.into_iter()) {
+            self.note_restyle(node);
+        }
     }
 
     /// The recorded text-entry selection as (node, start, end), if a
@@ -392,7 +417,55 @@ impl DomTree {
     }
 
     pub fn set_quirks(&self, quirks: bool) {
-        self.inner.borrow_mut().quirks = quirks;
+        let mut inner = self.inner.borrow_mut();
+        inner.quirks = quirks;
+        // The match buckets were (or will be) compiled under one quirks
+        // spelling; a flip needs a rebuild.
+        inner.match_dirty.full = true;
+    }
+
+    /// Mark one element's selector matches stale (attribute/class/id write
+    /// from the ops layer — `Node::set_attribute` has no tree handle).
+    /// The element's whole subtree re-probes (descendant combinators
+    /// anchored at the changed attribute, `:has()` below it) and its
+    /// parent's child list re-probes (`[foo] + b`). The parent chain's
+    /// `:has()` re-probe derives from the sibling scope at sync time.
+    pub fn note_restyle(&self, id: NodeId) {
+        let mut inner = self.inner.borrow_mut();
+        let Some(node) = inner.nodes.get(id.index()).and_then(|n| n.as_ref()) else {
+            return;
+        };
+        let parent = node.parent;
+        inner.match_dirty.roots.push(id);
+        if let Some(p) = parent {
+            inner.match_dirty.sibling_scopes.push(p);
+        }
+    }
+
+    /// Escape hatch for mutation paths the dirty registry cannot describe:
+    /// the next incremental match sync rebuilds from scratch.
+    pub(crate) fn note_match_full(&self) {
+        self.inner.borrow_mut().match_dirty.full = true;
+    }
+
+    pub(crate) fn take_match_dirty(&self) -> MatchDirty {
+        std::mem::take(&mut self.inner.borrow_mut().match_dirty)
+    }
+
+    /// Take the persisted match state when the css bytes behind `key` are
+    /// unchanged; drop it otherwise (stale buckets must never be probed).
+    pub(crate) fn take_match_cache(&self, key: u64) -> Option<MatchCacheBox> {
+        let mut inner = self.inner.borrow_mut();
+        if inner.match_cache.as_ref().is_some_and(|c| c.key == key) {
+            inner.match_cache.take()
+        } else {
+            inner.match_cache = None;
+            None
+        }
+    }
+
+    pub(crate) fn set_match_cache(&self, cache: MatchCacheBox) {
+        self.inner.borrow_mut().match_cache = Some(cache);
     }
 
     pub fn is_quirks(&self) -> bool {
@@ -696,6 +769,14 @@ impl DomTree {
             }
             parent.last_child = Some(child_id);
         }
+
+        // Incremental match stamp (#111): the moved subtree re-probes, and
+        // the new parent's child list re-probes (sibling combinators
+        // shift). The detach above already stamped the removal side; the
+        // parent chain's :has() re-probe derives from the scope at sync
+        // time.
+        inner.match_dirty.roots.push(child_id);
+        inner.match_dirty.sibling_scopes.push(parent_id);
     }
 
     pub fn insert_before(&self, existing_id: NodeId, new_sibling_id: NodeId) {
@@ -766,6 +847,10 @@ impl DomTree {
         } else if let Some(Some(parent)) = inner.nodes.get_mut(parent_id.index()) {
             parent.first_child = Some(new_sibling_id);
         }
+
+        // Incremental match stamp, mirroring append_child's.
+        inner.match_dirty.roots.push(new_sibling_id);
+        inner.match_dirty.sibling_scopes.push(parent_id);
     }
 
     pub fn detach(&self, node_id: NodeId) {
@@ -806,6 +891,15 @@ impl DomTree {
             node.parent = None;
             node.prev_sibling = None;
             node.next_sibling = None;
+        }
+
+        // Incremental match stamp: the detached subtree's hits must purge
+        // (it may be re-inserted later, which carries its own insert
+        // stamp), and the old parent's remaining children re-probe —
+        // sibling combinators close the gap.
+        if let Some(pid) = parent_id {
+            inner.match_dirty.purge_roots.push(node_id);
+            inner.match_dirty.sibling_scopes.push(pid);
         }
     }
 

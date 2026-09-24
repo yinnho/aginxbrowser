@@ -8137,6 +8137,7 @@ pub fn compute_styles(
         None,
         &[],
         viewport,
+        None,
     )
 }
 
@@ -8158,6 +8159,7 @@ fn compute_styles_impl(
     transitions: &[crate::diting_css::CssTransition],
     gated: Option<(usize, &HashMap<usize, Vec<usize>>)>,
     viewport: (f32, f32),
+    css_key: Option<u64>,
 ) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
     // styles-trace phase accumulators (#109 walk breakdown): nanoseconds in
     // cascade_element, pseudo_styles, and children() enumeration.
@@ -8457,10 +8459,15 @@ fn compute_styles_impl(
     let t_styles = std::time::Instant::now();
     let rule_selectors: Vec<&str> = rules.iter().map(|r| r.selector.as_str()).collect();
     // The document run probes document(+shadow) descendants; a within-run
-    // probes only the orphan root's subtree (rule_match_sets_within).
-    let sets = match within_root {
-        Some(root) => tree.rule_match_sets_within(&rule_selectors, &[root]),
-        None => tree.rule_match_sets(&rule_selectors),
+    // probes only the orphan root's subtree (rule_match_sets_within). A
+    // css-keyed run syncs the tree's persisted hit sets incrementally
+    // instead of re-matching the whole sheet (#111) — the gated and within
+    // faces pass None and leave the cache untouched (the gated pass matches
+    // an extended rule table; a within pass matches an orphan subtree).
+    let sets = match (within_root, css_key) {
+        (Some(root), _) => tree.rule_match_sets_within(&rule_selectors, &[root]),
+        (None, Some(key)) => tree.rule_match_sets_incremental(&rule_selectors, key),
+        (None, None) => tree.rule_match_sets(&rule_selectors),
     };
     let t_match = t_styles.elapsed();
 
@@ -8568,7 +8575,11 @@ fn compute_styles_impl(
     out
 }
 
-/// Document-rooted style resolution (main path).
+/// Document-rooted style resolution (main path). `css_key` identifies the
+/// collected css bytes the rules were parsed from: when supplied (and
+/// unchanged since the last run) the rule match sets sync incrementally
+/// against the tree's dirty registry instead of re-matching the sheet.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_styles_timed(
     tree: &DomTree,
     rules: &[crate::diting_css::ParsedRule],
@@ -8576,8 +8587,9 @@ pub fn compute_styles_timed(
     css_time: Option<f64>,
     transitions: &[crate::diting_css::CssTransition],
     viewport: (f32, f32),
+    css_key: Option<u64>,
 ) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
-    compute_styles_impl(tree, rules, keyframes, css_time, None, transitions, None, viewport)
+    compute_styles_impl(tree, rules, keyframes, css_time, None, transitions, None, viewport, css_key)
 }
 
 /// Second-pass face for `@container` arms (moli#282): `gates` maps ABSOLUTE
@@ -8606,6 +8618,7 @@ pub fn compute_styles_gated(
         transitions,
         Some((base_len, gates)),
         viewport,
+        None,
     )
 }
 
@@ -8621,7 +8634,7 @@ pub fn compute_styles_timed_within(
     transitions: &[crate::diting_css::CssTransition],
     viewport: (f32, f32),
 ) -> HashMap<NodeId, crate::diting_css::ComputedStyle> {
-    compute_styles_impl(tree, rules, keyframes, css_time, Some(root), transitions, None, viewport)
+    compute_styles_impl(tree, rules, keyframes, css_time, Some(root), transitions, None, viewport, None)
 }
 
 #[cfg(test)]

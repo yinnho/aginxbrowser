@@ -18,7 +18,15 @@ impl Page {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(3_000)
             .max(500);
-        let settle_wd = js.arm_watchdog(std::time::Duration::from_millis(dynamic_settle_ms + 250));
+        // Watchdog follows the 批187 standard (budget + WATCHDOG_HEADROOM_MS):
+        // a legitimate SPA commit synchronously mounting editors blocks the
+        // loop for seconds past the settle budget (#100/#111 family), and the
+        // old +250ms razor terminated it mid-commit, poisoning React's
+        // executionContext. A true spin still trips at +5s; the #66
+        // duty-cycle freeze remains the sustained-burn backstop.
+        let settle_wd = js.arm_watchdog(std::time::Duration::from_millis(
+            dynamic_settle_ms + JsRuntime::WATCHDOG_HEADROOM_MS,
+        ));
         let started = tokio::time::Instant::now();
         let deadline = started + tokio::time::Duration::from_millis(500);
         let dynamic_deadline = started + tokio::time::Duration::from_millis(dynamic_settle_ms);
@@ -699,13 +707,16 @@ impl Page {
                 _ => 0,
             };
 
-            // Same hazard as the post-script settle: a synchronous poll can pin
-            // the thread past the 5s network-idle deadline, so arm a watchdog
-            // that terminates the isolate ~500ms past it.
-            let netidle_wd = self
-                .js
-                .as_mut()
-                .map(|js| js.arm_watchdog(std::time::Duration::from_millis(5500)));
+            // Same hazard as the post-script settle, same 批187 standard: a
+            // synchronous commit can pin the thread past the 5s network-idle
+            // deadline, so the watchdog arms WATCHDOG_HEADROOM_MS past it
+            // instead of the old +500ms razor that killed real commits
+            // mid-flight (#100/#111 family).
+            let netidle_wd = self.js.as_mut().map(|js| {
+                js.arm_watchdog(std::time::Duration::from_millis(
+                    5_000 + JsRuntime::WATCHDOG_HEADROOM_MS,
+                ))
+            });
             let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
             let mut idle_since: Option<tokio::time::Instant> = None;
 

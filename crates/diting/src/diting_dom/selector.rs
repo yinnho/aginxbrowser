@@ -907,6 +907,24 @@ impl DomTree {
         rule_selectors: &[&str],
         probe_ids: Vec<NodeId>,
     ) -> RuleMatchSets {
+        let index = self.compile_rule_index(rule_selectors);
+        let mut hits = HashMap::new();
+        let mut pseudo_hits = HashMap::new();
+        self.probe_elements_into(&index, probe_ids, &mut hits, &mut pseudo_hits);
+        RuleMatchSets {
+            hits,
+            specificity: index.specificity,
+            pseudo_kinds: index.pseudo_kinds,
+            pseudo_hits,
+        }
+    }
+
+    /// Selector-side compilation shared by the full and incremental faces:
+    /// parsed selector lists, specificities, pseudo routing, and the
+    /// rightmost-compound buckets. Cheap to rebuild (one parse per rule) but
+    /// far from free on real sheets (~7ms for 1.7MB), so the incremental
+    /// path parks it in [`MatchCacheBox`] keyed by the css bytes.
+    fn compile_rule_index(&self, rule_selectors: &[&str]) -> RuleIndex {
         let mut entries: Vec<Option<SelectorList<DitingSelector>>> =
             Vec::with_capacity(rule_selectors.len());
         let mut specificity: Vec<Option<u32>> = Vec::with_capacity(rule_selectors.len());
@@ -1002,9 +1020,28 @@ impl DomTree {
             }
             entries.push(Some(list));
         }
+        RuleIndex {
+            entries,
+            specificity,
+            by_id,
+            by_class,
+            by_tag,
+            unkeyed,
+            pseudo_kinds,
+            quirks,
+        }
+    }
 
-        let mut hits: HashMap<usize, Vec<usize>> = HashMap::new();
-        let mut pseudo_hits: HashMap<usize, Vec<usize>> = HashMap::new();
+    /// Probe elements against the compiled index, appending matches to the
+    /// (possibly pre-populated, possibly purge-filtered) hit maps. Shared by
+    /// the full build and the incremental sync so the two cannot drift.
+    fn probe_elements_into(
+        &self,
+        index: &RuleIndex,
+        probe_ids: impl IntoIterator<Item = NodeId>,
+        hits: &mut HashMap<usize, Vec<usize>>,
+        pseudo_hits: &mut HashMap<usize, Vec<usize>>,
+    ) {
         let mut caches = selectors::context::SelectorCaches::default();
         let mut context = MatchingContext::new(
             MatchingMode::Normal,
@@ -1030,7 +1067,7 @@ impl DomTree {
                 continue;
             };
             candidates.clear();
-            candidates.extend_from_slice(&unkeyed);
+            candidates.extend_from_slice(&index.unkeyed);
             let mut probe = |bucket: &HashMap<String, Vec<usize>>, key: &str| {
                 if let Some(rules) = bucket.get(key) {
                     candidates.extend_from_slice(rules);
@@ -1041,18 +1078,18 @@ impl DomTree {
             // Foreign-element tags keep camelCase local names in the DOM
             // (SVG clipPath and friends), and lowercasing the probe covers
             // them too.
-            probe(&by_tag, &local.to_ascii_lowercase());
+            probe(&index.by_tag, &local.to_ascii_lowercase());
             if let Some(id) = &id {
-                probe(&by_id, id);
-                if quirks {
-                    probe(&by_id, &id.to_ascii_lowercase());
+                probe(&index.by_id, id);
+                if index.quirks {
+                    probe(&index.by_id, &id.to_ascii_lowercase());
                 }
             }
             if let Some(class) = &class {
                 for c in class.split_whitespace() {
-                    probe(&by_class, c);
-                    if quirks {
-                        probe(&by_class, &c.to_ascii_lowercase());
+                    probe(&index.by_class, c);
+                    if index.quirks {
+                        probe(&index.by_class, &c.to_ascii_lowercase());
                     }
                 }
             }
@@ -1060,9 +1097,9 @@ impl DomTree {
             candidates.dedup();
             let element = DomElement::new(self, desc_id);
             for ri in candidates.drain(..) {
-                let Some(list) = entries[ri].as_ref() else { continue };
+                let Some(list) = index.entries[ri].as_ref() else { continue };
                 if selectors::matching::matches_selector_list(list, &element, &mut context) {
-                    if pseudo_kinds.contains_key(&ri) {
+                    if index.pseudo_kinds.contains_key(&ri) {
                         pseudo_hits.entry(ri).or_default().push(desc_id.index());
                     } else {
                         hits.entry(ri).or_default().push(desc_id.index());
@@ -1075,12 +1112,189 @@ impl DomTree {
         for rule_hits in hits.values_mut().chain(pseudo_hits.values_mut()) {
             rule_hits.sort_unstable();
         }
-        RuleMatchSets {
-            hits,
-            specificity,
-            pseudo_kinds,
-            pseudo_hits,
+    }
+
+    /// The full probe set: document descendants plus every shadow tree's,
+    /// the same population `rule_match_sets` covers.
+    fn match_probe_all_ids(&self) -> Vec<NodeId> {
+        let mut probe_ids: Vec<NodeId> = self.descendants(self.document());
+        for root in self.shadow_roots() {
+            probe_ids.extend(self.descendants(root));
         }
+        probe_ids
+    }
+
+    /// Whether `nid` is reachable from the document or a shadow root — the
+    /// population a fresh full match would probe. Detached subtrees (removed
+    /// but not freed, or awaiting re-insertion) must not contribute hits a
+    /// full rebuild would not produce.
+    fn match_probe_attached(&self, nid: NodeId) -> bool {
+        let inner = self.borrow_inner();
+        let mut current = Some(nid);
+        for _ in 0..=inner.nodes.len() {
+            let Some(c) = current else { return false };
+            if c == inner.document || inner.shadow_roots.contains_key(&c) {
+                return true;
+            }
+            current = inner
+                .nodes
+                .get(c.index())
+                .and_then(|n| n.as_ref())
+                .and_then(|n| n.parent);
+        }
+        false
+    }
+
+    /// Incremental face for repeated layout runs against the same stylesheet
+    /// (#111): the hit sets persist in the tree's [`MatchCacheBox`] keyed by
+    /// the css bytes, and DOM mutations recorded in [`MatchDirty`] since the
+    /// last sync only re-probe the elements they could have affected. The
+    /// result is bit-for-bit what a fresh full match produces — the
+    /// correctness argument is stamp completeness: an insert/re-parent only
+    /// changes matches inside the moved subtree (ancestor chains) plus the
+    /// two child lists it touches (sibling combinators, :nth-child) plus the
+    /// parent chain (:has anchoring); an attribute write only changes the
+    /// element, its subtree, its siblings, and its ancestor chain. Anything
+    /// the registry cannot express falls back to a full rebuild.
+    pub fn rule_match_sets_incremental(&self, rule_selectors: &[&str], css_key: u64) -> RuleMatchSets {
+        let dirty = self.take_match_dirty();
+        let mut cache = match self.take_match_cache(css_key) {
+            Some(cache) => cache,
+            None => {
+                // First run, or the css changed: full build against fresh
+                // buckets, then park the result for the next sync.
+                let index = self.compile_rule_index(rule_selectors);
+                let mut hits = HashMap::new();
+                let mut pseudo_hits = HashMap::new();
+                self.probe_elements_into(
+                    &index,
+                    self.match_probe_all_ids(),
+                    &mut hits,
+                    &mut pseudo_hits,
+                );
+                let sets = RuleMatchSets {
+                    hits,
+                    specificity: index.specificity.clone(),
+                    pseudo_kinds: index.pseudo_kinds.clone(),
+                    pseudo_hits,
+                };
+                self.set_match_cache(MatchCacheBox {
+                    key: css_key,
+                    index,
+                    sets: sets.clone(),
+                });
+                return sets;
+            }
+        };
+
+        let rebuild = |tree: &Self, cache: MatchCacheBox| -> RuleMatchSets {
+            let mut hits = HashMap::new();
+            let mut pseudo_hits = HashMap::new();
+            tree.probe_elements_into(
+                &cache.index,
+                tree.match_probe_all_ids(),
+                &mut hits,
+                &mut pseudo_hits,
+            );
+            let sets = RuleMatchSets {
+                hits,
+                specificity: cache.index.specificity.clone(),
+                pseudo_kinds: cache.index.pseudo_kinds.clone(),
+                pseudo_hits,
+            };
+            tree.set_match_cache(MatchCacheBox { sets: sets.clone(), ..cache });
+            sets
+        };
+
+        if dirty.full {
+            return rebuild(self, cache);
+        }
+
+        let slots = self.node_slot_count();
+        let mut seen = vec![false; slots];
+        let mut mark = |nid: NodeId| {
+            let i = nid.index();
+            if i < slots && !seen[i] {
+                seen[i] = true;
+                true
+            } else {
+                false
+            }
+        };
+        // Fast gate: the stamp count is a lower bound on the candidate
+        // count (every root contributes at least itself), so a mass
+        // mutation (initial parse, big innerHTML) skips candidate
+        // resolution entirely and rebuilds — the pre-incremental cost.
+        let stamp_count = dirty.roots.len()
+            + dirty.purge_roots.len()
+            + dirty.sibling_scopes.len();
+        if stamp_count.saturating_mul(4) > slots {
+            return rebuild(self, cache);
+        }
+
+        // Resolve the dirty stamps into a deduped candidate set. Slots is a
+        // safe index ceiling: the arena never shrinks, and freed slots that
+        // come back carry their own insert stamps.
+        let mut candidates: Vec<NodeId> = Vec::new();
+        for root in dirty.roots.iter().copied().chain(dirty.purge_roots.iter().copied()) {
+            if mark(root) {
+                candidates.push(root);
+            }
+            for d in self.descendants(root) {
+                if mark(d) {
+                    candidates.push(d);
+                }
+            }
+        }
+        for parent in &dirty.sibling_scopes {
+            // The children re-probe wholesale; the parent chain re-probes
+            // one element at a time (:has() anchoring).
+            let mut chain = Some(*parent);
+            for _ in 0..=slots {
+                let Some(c) = chain else { break };
+                if mark(c) {
+                    candidates.push(c);
+                }
+                chain = self
+                    .with_node(c, |n| n.parent)
+                    .flatten();
+            }
+            for c in self.children(*parent) {
+                if mark(c) {
+                    candidates.push(c);
+                }
+            }
+        }
+        // A mass mutation (initial parse, big innerHTML) costs more to
+        // resolve than a full rebuild — same as the pre-incremental world.
+        if candidates.len() * 4 > slots {
+            return rebuild(self, cache);
+        }
+
+        // Purge every candidate index from the hit sets, then re-probe the
+        // attached ones. Detached subtree members stay purged (a full
+        // rebuild probes only document+shadow descendants), and a freed
+        // slot's stale hits die here too.
+        for rule_hits in cache.sets.hits.values_mut().chain(cache.sets.pseudo_hits.values_mut()) {
+            rule_hits.retain(|&i| !(i < slots && seen[i]));
+        }
+        // A fresh build only keys rules that matched at least one element;
+        // drop the vectors the purge emptied so the shapes stay identical.
+        cache.sets.hits.retain(|_, v| !v.is_empty());
+        cache.sets.pseudo_hits.retain(|_, v| !v.is_empty());
+        let attached: Vec<NodeId> = candidates
+            .into_iter()
+            .filter(|&c| self.match_probe_attached(c))
+            .collect();
+        self.probe_elements_into(
+            &cache.index,
+            attached,
+            &mut cache.sets.hits,
+            &mut cache.sets.pseudo_hits,
+        );
+        let sets = cache.sets.clone();
+        self.set_match_cache(cache);
+        sets
     }
 }
 
@@ -1155,6 +1369,7 @@ fn rightmost_key(selector: &parser::Selector<DitingSelector>) -> Option<RuleKey>
 /// navigation, the engine-side root cause behind the appmsg.js
 /// synchronous "dead spin" that blew the nav deadline (a V8 terminate
 /// cannot land inside a long Rust phase).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuleMatchSets {
     /// Rule index to matching element node indices, ascending: ready for
     /// the cascade's per-element binary-search membership test (which the
@@ -1172,6 +1387,58 @@ pub struct RuleMatchSets {
     /// Pseudo-element rule hit sets, same shape as `hits` but keyed by the
     /// rule indexes present in `pseudo_kinds`.
     pub pseudo_hits: HashMap<usize, Vec<usize>>,
+}
+
+/// The compiled selector-side state a match run probes against: parsed
+/// lists, specificities, pseudo routing, and the rightmost-compound
+/// buckets (see [`DomTree::rule_match_sets`]). Lives in
+/// [`MatchCacheBox`] across incremental runs keyed by the css bytes.
+pub(crate) struct RuleIndex {
+    entries: Vec<Option<SelectorList<DitingSelector>>>,
+    specificity: Vec<Option<u32>>,
+    by_id: HashMap<String, Vec<usize>>,
+    by_class: HashMap<String, Vec<usize>>,
+    by_tag: HashMap<String, Vec<usize>>,
+    unkeyed: Vec<usize>,
+    pseudo_kinds: HashMap<usize, PseudoKind>,
+    quirks: bool,
+}
+
+/// The persisted match state for [`DomTree::rule_match_sets_incremental`]:
+/// the compiled index and the live hit sets, valid as long as the css bytes
+/// behind `key` are unchanged and every tree mutation since the last sync
+/// carried a [`MatchDirty`] stamp.
+pub(crate) struct MatchCacheBox {
+    pub(crate) key: u64,
+    index: RuleIndex,
+    sets: RuleMatchSets,
+}
+
+/// Mutations the incremental matcher needs to know about, stamped by the
+/// tree at every structural change and by `note_restyle` at attribute
+/// writes. Consumed (emptied) by the next
+/// [`DomTree::rule_match_sets_incremental`] sync.
+#[derive(Default)]
+pub(crate) struct MatchDirty {
+    /// Roots of inserted, re-parented, or restyled subtrees: every element
+    /// at and below re-probes.
+    pub(crate) roots: Vec<NodeId>,
+    /// Parents whose child list changed: their element children re-probe
+    /// (sibling combinators and :nth-child shift), and each parent's
+    /// ancestor chain re-probes individually (`:has()` anchoring — a
+    /// subtree entering or leaving these descendants can flip a `:has()`
+    /// compound up the chain). The chain walk happens at sync time, deduped
+    /// across stamps, so a mutation stays O(1).
+    pub(crate) sibling_scopes: Vec<NodeId>,
+    /// Roots of detached subtrees: same treatment as `roots` — if the
+    /// subtree was re-inserted elsewhere it also carries a `roots` stamp
+    /// and re-probes; if it stayed detached the purge drops its hits; if
+    /// the slot was freed and reused the new occupant carries its own
+    /// insert stamp, so the purge never outlives its meaning.
+    pub(crate) purge_roots: Vec<NodeId>,
+    /// Set when a mutation path the registry cannot describe ran — the
+    /// next sync rebuilds from scratch.
+    pub(crate) full: bool,
 }
 
 /// The pseudo-element suffix a rule selector may end with. Single-colon
@@ -1643,6 +1910,128 @@ mod tests {
                 "specificity diverged for rule {ri} `{sel}`"
             );
         }
+    }
+
+    /// The incremental face must be indistinguishable from a fresh full
+    /// match after every mutation shape the dirty registry stamps:
+    /// re-parenting, attribute writes, detach-without-free, re-insertion,
+    /// remove-with-free, and insert_before. The fixture parses quirks-mode
+    /// (no doctype) so the case-folded bucket spellings ride along, and it
+    /// is big enough that small mutations stay under the mass-mutation
+    /// threshold — exercising the true incremental path, not the fallback.
+    #[test]
+    fn incremental_match_sets_equal_full_rebuild() {
+        let mut lis = String::new();
+        for i in 0..24 {
+            let class = if i % 3 == 0 { format!("odd3 item{i}") } else { format!("item{i}") };
+            lis.push_str(&format!("<li class='{class}'>{i}</li>"));
+        }
+        let html = format!(
+            r#"<div id="wrap" class="container">
+                <h1 class="title main">T</h1>
+                <p data-kind="lead">L</p>
+                <ul id="list">{lis}</ul>
+                <section class="sink"><span class="ghost" data-k="g">g</span></section>
+            </div>"#
+        );
+        let tree = parse_html(&html);
+        let selectors = [
+            "div",
+            ".container",
+            "#wrap",
+            "p",
+            ".title.main",
+            "div .item",
+            "ul li",
+            "li.odd3 + li",
+            "li ~ li",
+            "li:first-child",
+            "li:last-child",
+            "li:nth-child(2n)",
+            "[data-kind]",
+            "p[data-kind='lead']",
+            ".sink .ghost",
+            "h1, .item",
+            "*",
+            "#nope",
+            ".ITEM",
+            "#WRAP",
+            "div >",
+            "span[data-k]",
+            "ul:has(.odd3)",
+            "div:not(.sink) > section",
+            ".sinkitem",
+        ];
+        let key = 7u64;
+        let check = |stage: &str| {
+            let inc = tree.rule_match_sets_incremental(&selectors, key);
+            let full = tree.rule_match_sets(&selectors);
+            assert_eq!(inc, full, "incremental diverged at `{stage}`");
+        };
+
+        // First run: parse-time stamps cross the threshold, so this lands
+        // on the full-rebuild path and populates the cache.
+        check("initial");
+
+        // 1. Re-parent: the ul moves into the section (roots + both child
+        // lists + :has chains).
+        let ul = tree.get_element_by_id("list").unwrap();
+        let section = tree.query_selector_all(".sink").unwrap()[0];
+        tree.append_child(section, ul);
+        check("reparent ul");
+
+        // 2. Attribute write through the ops-path shape: the h1 gains the
+        // attr an unkeyed selector reads.
+        let h1 = tree.query_selector_all("h1").unwrap()[0];
+        let before = tree.rule_match_sets_incremental(&selectors, key);
+        let unkeyed_ri = selectors.iter().position(|s| *s == "[data-kind]").unwrap();
+        let before_hits = before.hits.get(&unkeyed_ri).cloned().unwrap_or_default().len();
+        tree.with_node_mut(h1, |n| n.set_attribute("data-kind", "lead".into()));
+        tree.note_restyle(h1);
+        check("attr write");
+        let after = tree.rule_match_sets_incremental(&selectors, key);
+        let after_hits = after.hits.get(&unkeyed_ri).cloned().unwrap_or_default().len();
+        assert_eq!(after_hits, before_hits + 1, "attr write must add the h1 hit");
+
+        // 3. Class flip on one li.
+        let li5 = tree.query_selector_all("li").unwrap()[5];
+        tree.with_node_mut(li5, |n| n.set_attribute("class", "sinkitem".into()));
+        tree.note_restyle(li5);
+        check("class flip");
+        let got = tree.rule_match_sets_incremental(&selectors, key);
+        let sink_ri = selectors.iter().position(|s| *s == ".sinkitem").unwrap();
+        assert_eq!(got.hits.get(&sink_ri).map(|v| v.len()), Some(1));
+
+        // 4. Detach without free (remove_child), then re-insert elsewhere.
+        let ghost = tree.query_selector_all(".ghost").unwrap()[0];
+        tree.remove_child(ghost);
+        check("detach ghost");
+        tree.append_child(ul, ghost);
+        check("reinsert ghost");
+
+        // 5. Remove with free (slot recycling — stale indices must purge).
+        let victim = tree.query_selector_all("li").unwrap()[1];
+        tree.remove(victim);
+        check("remove li");
+
+        // 6. insert_before: the last li moves to the front.
+        let lis_now = tree.query_selector_all("li").unwrap();
+        tree.insert_before(lis_now[0], lis_now[lis_now.len() - 1]);
+        check("insert_before li");
+
+        // 7. Mass mutation: re-append every li — crosses the stamp-count
+        // threshold and lands on the fallback rebuild.
+        for li in tree.query_selector_all("li").unwrap() {
+            tree.append_child(ul, li);
+        }
+        check("mass re-append");
+
+        // 8. No mutations: the sync is a pure cache read.
+        check("idle");
+
+        // 9. A different css key drops the cache and rebuilds.
+        let fresh = tree.rule_match_sets(&selectors);
+        assert_eq!(tree.rule_match_sets_incremental(&selectors, key + 1), fresh);
     }
 
     /// Rules whose rightmost compound has no id/class/tag key (universal,

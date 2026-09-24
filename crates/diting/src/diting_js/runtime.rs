@@ -1738,7 +1738,7 @@ impl JsRuntime {
     /// still catches any true spin (a spin never finishes regardless of
     /// budget), and the #66 duty-cycle freeze remains the backstop for
     /// under-budget burners.
-    const WATCHDOG_HEADROOM_MS: u64 = 5_000;
+    pub(crate) const WATCHDOG_HEADROOM_MS: u64 = 5_000;
 
     /// Drive the event loop for at most `budget_ms`, bounded against BOTH async
     /// idle (tokio timeout) and synchronous hangs (V8 watchdog). A microtask

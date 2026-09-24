@@ -15,6 +15,88 @@ mod q_quote_tests {
 }
 
 #[cfg(test)]
+mod incremental_match_tests {
+    // #111 wiring: repeated css-keyed compute_styles_timed runs sync the
+    // rule match sets incrementally against the tree's dirty registry. The
+    // selector-layer differential test pins the hit sets; this pins the
+    // observable cascade — a class flip and a structural insert must both
+    // land in the returned ComputedStyles when the key is unchanged.
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::compute_styles_timed;
+    use html5ever::{namespace_url, ns};
+
+    #[test]
+    fn css_keyed_rerun_reflects_mutations() {
+        let sheet = ".hot { color: rgb(1, 2, 3) } .warm { color: rgb(4, 5, 6) }";
+        let tree = parse_html(
+            r#"<html><body><div id="wrap"><p class="hot" id="t">a</p></div></body></html>"#,
+        );
+        let rules = parse_stylesheet_for(sheet, (800.0, 600.0), CssMediaType::Screen);
+        let keyframes = Default::default();
+        let key = 11u64;
+
+        let run = || {
+            compute_styles_timed(&tree, &rules, &keyframes, None, &[], (800.0, 600.0), Some(key))
+        };
+        let t = tree.get_element_by_id("t").unwrap();
+        assert_eq!(
+            run().get(&t).unwrap().color,
+            Some(crate::diting_css::Color(1, 2, 3, 255))
+        );
+
+        // Class flip through the ops-path shape (attr write + stamp).
+        tree.with_node_mut(t, |n| n.set_attribute("class", "warm".into()));
+        tree.note_restyle(t);
+        assert_eq!(
+            run().get(&t).unwrap().color,
+            Some(crate::diting_css::Color(4, 5, 6, 255))
+        );
+
+        // Structural insert: a fresh element picks up a rule it was not
+        // present for.
+        let p = tree.new_node(crate::diting_dom::tree::NodeData::Text { contents: "b".into() });
+        let hot2 = tree.new_node(parse_element("p", "hot"));
+        tree.append_child(hot2, p);
+        let wrap = tree.get_element_by_id("wrap").unwrap();
+        tree.append_child(wrap, hot2);
+        let styles = run();
+        assert_eq!(
+            styles.get(&t).unwrap().color,
+            Some(crate::diting_css::Color(4, 5, 6, 255))
+        );
+        assert_eq!(
+            styles.get(&hot2).unwrap().color,
+            Some(crate::diting_css::Color(1, 2, 3, 255))
+        );
+    }
+
+    fn parse_element(tag: &str, class: &str) -> crate::diting_dom::tree::NodeData {
+        use crate::diting_dom::tree::{Attribute, NodeData};
+        let name = html5ever::QualName {
+            prefix: None,
+            ns: ns!(html),
+            local: html5ever::LocalName::from(tag),
+        };
+        NodeData::Element {
+            name,
+            attrs: vec![Attribute {
+                name: html5ever::QualName {
+                    prefix: None,
+                    ns: ns!(),
+                    local: html5ever::LocalName::from("class"),
+                },
+                value: class.into(),
+            }],
+            live_value: None,
+            live_checked: Some(false),
+            mathml_annotation_xml_integration_point: false,
+            template_contents: None,
+        }
+    }
+}
+
+#[cfg(test)]
 mod grid_percent_track_tests {
     // `grid-template-columns: 25% 1fr` used to lose its % token at parse
     // time, which dropped the whole declaration and collapsed the grid to

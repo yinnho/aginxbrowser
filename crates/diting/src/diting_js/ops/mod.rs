@@ -1179,6 +1179,10 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 } else {
                     dom.with_node_mut(node_id, |n| n.set_attribute(name, value.to_string()));
                 }
+                // Any attribute write (id/class/style/attr selectors) can
+                // change this node's subtree, siblings, and ancestor
+                // matches — the incremental matcher re-probes exactly those.
+                dom.note_restyle(node_id);
             }
             "true".into()
         }
@@ -1275,6 +1279,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                     attrs.retain(|a| a.name.local.as_ref() != arg2.as_str());
                 }
             });
+            dom.note_restyle(nid);
             "true".into()
         }
         "set_inner_html" => {
@@ -2111,6 +2116,19 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
         css.push('\n');
     }
     let t_css = t0.elapsed();
+    // Identity of the collected css bytes PLUS everything else that shapes
+    // the parsed rules (media emulation re-filters @media arms with the
+    // bytes unchanged, viewport re-folds vw/vh): unchanged key + tracked
+    // DOM mutations lets the rule match sets sync incrementally instead of
+    // re-matching the whole sheet (#111 — kissy's mount loop re-ran the
+    // 17k-rule match six times in one React commit).
+    let css_key = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        css.hash(&mut hasher);
+        format!("{:?}|{:?}|{:?}", gs.viewport, gs.media_type, gs.media_overrides).hash(&mut hasher);
+        hasher.finish()
+    };
     let (mut rules, keyframes, containers) = crate::diting_css::parse_stylesheet_full(
         &css,
         (viewport_width, viewport_height),
@@ -2125,6 +2143,7 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
         gs.css_time,
         &gs.css_transitions.borrow(),
         (viewport_width, viewport_height),
+        Some(css_key),
     );
     // @container stage (moli#282): conditions answer against ancestor
     // container geometry, which only exists after a solve — so the arms
