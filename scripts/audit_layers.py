@@ -83,7 +83,7 @@ GOD_FILE_GRANDFATHER = {
     "src/cdp/dispatch.rs": 5408,
     "crates/diting/src/diting_layout/paint.rs": 4030,
     "src/bridge_cross_check.rs": 3766,
-    "crates/diting/src/diting_js/runtime.rs": 2281,
+    "crates/diting/src/diting_js/runtime.rs": 2075,
     "crates/diting/src/diting_layout/fork_deltas.rs": 2445,
     "crates/diting/src/diting_net/client/mod.rs": 1539,
     "src/server/mod.rs": 2128,

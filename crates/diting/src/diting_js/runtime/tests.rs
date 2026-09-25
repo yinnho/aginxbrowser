@@ -5755,6 +5755,36 @@
         assert_eq!(outcome.info.value.unwrap().as_str().unwrap(), "late-ok");
     }
 
+    // #114: deno_core's execute_script runs no microtask checkpoint, so under
+    // the old unconditional-`await` wrapper even a sync-completing expression
+    // had its done-sentinel parked in a microtask — one that only runs on an
+    // event-loop turn. On a revived persistent session that first turn gets
+    // swallowed by multi-second page scripts and the eval burns its whole
+    // budget into EVAL_TIMEOUT for an expression that had already finished.
+    // Deterministic repro of the starvation half: poison the microtask queue
+    // with a self-sustaining promise chain (never empties, so any event-loop
+    // drain spins until the watchdog), then eval `1+1` under awaitPromise —
+    // it must settle during execute_script without ever entering the loop.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_await_promise_sync_result_settles_without_event_loop_turn() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.evaluate(
+            "(function poison(){ var f = function(){ Promise.resolve().then(f); }; Promise.resolve().then(f); })()",
+        )
+        .unwrap();
+        let t0 = std::time::Instant::now();
+        let outcome = rt
+            .evaluate_for_cdp_outcome("1 + 1", false, true, 5000, None)
+            .await
+            .unwrap();
+        assert_eq!(outcome.info.value.unwrap(), serde_json::json!(2));
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(3),
+            "sync result waited {}ms — sentinel must be set during execute_script, not an event-loop turn",
+            t0.elapsed().as_millis()
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn test_call_function_outcome_reports_throw() {
         let mut rt = setup_runtime("<html><body></body></html>");

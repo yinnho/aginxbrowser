@@ -19,6 +19,10 @@ mod watchdog;
 pub use watchdog::{spawn_watchdog, WatchdogToken};
 use watchdog::watchdog_terminate;
 
+// The eval/callFunctionOn wrapper-source builders (INLINE_EVAL_JS trampoline,
+// object slots, meta extraction, the #114 await-settle wrappers).
+mod eval_code;
+
 static SNAPSHOT: &[u8] = include_bytes!(env!("AGINXBROWSER_SNAPSHOT_PATH"));
 
 /// Budget for awaiting a script's promise before declaring an eval timeout.
@@ -26,10 +30,6 @@ static SNAPSHOT: &[u8] = include_bytes!(env!("AGINXBROWSER_SNAPSHOT_PATH"));
 /// do slow page-side work (uploads through the page's own fetch) pass a
 /// larger budget instead of hitting a silent-null (0.4.1 taobao report).
 pub const DEFAULT_AWAIT_BUDGET_MS: u64 = 5000;
-
-// Anonymous Function trampoline around indirect eval: user stacks must never
-// surface our bootstrap source or wrapper names (stack-shape detectors). The leading `_namedBoot` (#48) installs window named access before the script runs — a one-flag no-op after the first successful scan; build_args carries the same call for the callFunctionOn wrappers (no INLINE_EVAL_JS there).
-const INLINE_EVAL_JS: &str = "(new Function(\"s\",\"globalThis._namedBoot&&globalThis._namedBoot();try{return (0,eval)(s)}catch(x){if(x instanceof SyntaxError){return (new Function(s))()}throw x}\"))";
 
 /// CDP `Runtime.RemoteObject` shape returned by evaluate paths. Our HTTP
 /// surface only reads `value`; the rest is the CDP serialization contract
@@ -754,74 +754,10 @@ impl JsRuntime {
     ) -> Result<EvalOutcome, String> {
         self.object_counter += 1;
         let oid = self.make_oid(self.object_counter);
-
-        // Evaluate with Runtime.evaluate semantics: the input is a script,
-        // statements are legal, and the completion value of the last
-        // statement is the result. Indirect eval (`(0,eval)(literal)`) runs
-        // it at global scope — matching Chrome, where
-        // `Runtime.evaluate("var x=1; x*2")` returns 2. The old
-        // `await (\n{expr}\n)` / `(\n{expr}\n)` expression wrap turned any
-        // statement syntax into an uncatchable parse-time SyntaxError
-        // (`Unexpected token ';'`), so statement-style probes and client
-        // bundles died silently. serde_json::to_string gives a JS-safe
-        // string literal, so trailing `//# sourceURL=...` comments stay
-        // inside the string instead of eating a paren. A bare `{...}` body
-        // is parenthesized so pasted JSON evaluates as an object literal
-        // rather than a valueless block.
-        let trimmed = expression.trim();
-        let body = if trimmed.starts_with('{') && trimmed.ends_with('}') {
-            format!("({})", trimmed)
-        } else {
-            trimmed.to_string()
-        };
-        let expr_literal = serde_json::to_string(&body).unwrap_or_else(|_| "\"\"".to_string());
         let done_counter = self.object_counter;
-        let exc_meta_fn = Self::exception_meta_extract_js("e");
-        // Both paths set __diting_await_meta + __diting_await_rejected so the
-        // read-back after the IIFE is uniform whether the expression was
-        // awaited or run synchronously.
-        let meta_code = if await_promise {
-            format!(
-                "(async function() {{\n\
-                    try {{\n\
-                        var __result = await {INLINE_EVAL_JS}({expr});\n\
-                        {slot} = __result;\n\
-                        globalThis.__diting_await_meta = {meta_fn};\n\
-                        globalThis.__diting_await_rejected = false;\n\
-                    }} catch(e) {{\n\
-                        {slot} = e;\n\
-                        globalThis.__diting_await_meta = {exc_meta_fn};\n\
-                        globalThis.__diting_await_rejected = true;\n\
-                    }}\n\
-                    globalThis.__diting_done_{done_counter} = true;\n\
-                }})()",
-                expr = expr_literal,
-                slot = Self::object_slot(&oid),
-                meta_fn = Self::meta_extract_js("__result"),
-                exc_meta_fn = exc_meta_fn,
-                done_counter = done_counter,
-            )
-        } else {
-            format!(
-                "(function() {{\n\
-                    var __result;\n\
-                    try {{\n\
-                        __result = {INLINE_EVAL_JS}({expr});\n\
-                        {slot} = __result;\n\
-                        globalThis.__diting_await_meta = {meta_fn};\n\
-                        globalThis.__diting_await_rejected = false;\n\
-                    }} catch(e) {{\n\
-                        {slot} = e;\n\
-                        globalThis.__diting_await_meta = {exc_meta_fn};\n\
-                        globalThis.__diting_await_rejected = true;\n\
-                    }}\n\
-                }})()",
-                expr = expr_literal,
-                slot = Self::object_slot(&oid),
-                meta_fn = Self::meta_extract_js("__result"),
-                exc_meta_fn = exc_meta_fn,
-            )
-        };
+        // Wrapper semantics (script-not-expression, sentinel protocol, the
+        // #114 sync-first await shape) live in eval_code::eval_meta_code.
+        let meta_code = Self::eval_meta_code(expression, &oid, done_counter, await_promise);
 
         // Watchdog-bound: a runaway expression (`while(1){}`) pins the thread
         // inside V8 where the caller's tokio timeouts cannot reach. The floor
@@ -1096,33 +1032,13 @@ impl JsRuntime {
 
         if await_promise {
             let done_counter = self.object_counter;
-            let code = format!(
-                "(async function() {{\n\
-                    {setup}\n\
-                    var __fn = ({fn_decl});\n\
-                    var __this = ({this_expr});\n\
-                    var __result;\n\
-                    try {{\n\
-                        __result = await __fn.call(__this, {args});\n\
-                        {slot} = __result;\n\
-                        globalThis.__diting_await_meta = {meta_fn};\n\
-                        globalThis.__diting_await_rejected = false;\n\
-                    }} catch(e) {{\n\
-                        {slot} = e;\n\
-                        globalThis.__diting_await_meta = {exc_meta_fn};\n\
-                        globalThis.__diting_await_rejected = true;\n\
-                    }} finally {{\n\
-                        globalThis.__diting_done_{done_counter} = true;\n\
-                    }}\n\
-                }})()",
-                setup = setup,
-                fn_decl = function_declaration,
-                this_expr = this_expr,
-                args = args_list,
-                slot = Self::object_slot(&oid),
-                meta_fn = Self::meta_extract_js("__result"),
-                exc_meta_fn = exc_meta_fn,
-                done_counter = done_counter,
+            let code = Self::call_fn_meta_code(
+                &setup,
+                function_declaration,
+                &this_expr,
+                &args_list,
+                &oid,
+                done_counter,
             );
 
             self.runtime
@@ -1892,128 +1808,6 @@ impl JsRuntime {
     }
     fn make_oid(&self, counter: u64) -> String {
         format!("{{\"injectedScriptId\":1,\"id\":{}}}", counter)
-    }
-
-    /// Object-store slot expression with the id embedded as a JSON string
-    /// literal, so an objectId — minted or inbound — can never splice itself
-    /// into the surrounding script (obscura#843 class).
-    fn object_slot(oid: &str) -> String {
-        let lit = serde_json::to_string(oid).unwrap_or_else(|_| "\"\"".to_string());
-        format!("globalThis.__diting_objects[{lit}]")
-    }
-
-    fn wrap_expression(expression: &str) -> String {
-        // CDP Runtime.evaluate semantics: the input is a *script*, not an
-        // expression — statements are legal and the completion value of the
-        // last statement is the result. Indirect eval (`(0,eval)(...)`) runs
-        // it at global scope and hands back the completion value, so
-        // `var x=1; x*2` returns 2 exactly like Chrome. The previous
-        // `return (...);` expression wrap turned any statement syntax into
-        // `Unexpected token ';'` (unless the script happened to start with
-        // one of six hard-coded statement keywords), which silently broke
-        // clients that evaluate statement scripts — e.g. probing a
-        // WAF challenge page with `try { readygo(); } catch(e) {...}`.
-        // serde_json::to_string emits a JS-safe string literal (quotes,
-        // newlines, U+2028/2029 all escaped), and a trailing
-        // `//# sourceURL=...` line comment lives inside the literal instead
-        // of eating the closing paren.
-        //
-        // One convenience divergence from raw script semantics: a bare
-        // `{...}` input is parenthesized so pasted JSON evaluates as an
-        // object literal (like DevTools console), not as a block whose
-        // completion value is undefined.
-        let trimmed = expression.trim();
-        let body = if trimmed.starts_with('{') && trimmed.ends_with('}') {
-            format!("({})", trimmed)
-        } else {
-            trimmed.to_string()
-        };
-        let literal = serde_json::to_string(&body).unwrap_or_else(|_| "\"\"".to_string());
-        format!(
-            "(function() {{ try {{ return {INLINE_EVAL_JS}({}); }} catch(e) {{ return null; }} }})()",
-            literal
-        )
-    }
-
-    fn meta_extract_js(var_name: &str) -> String {
-        format!(
-            r#"(function(v) {{
-                var t = typeof v;
-                var st = null, cn = '', desc = '', val;
-                if (v === null) {{ t = 'object'; st = 'null'; desc = 'null'; }}
-                else if (v === undefined) {{ t = 'undefined'; }}
-                else if (Array.isArray(v)) {{
-                    st = 'array'; cn = 'Array';
-                    desc = 'Array(' + v.length + ')';
-                }}
-                else if (t === 'object' && typeof v._nid === 'number') {{
-                    st = 'node';
-                    cn = v.constructor ? v.constructor.name : 'Node';
-                    if (v.nodeType === 9) cn = 'HTMLDocument';
-                    else if (v.nodeType === 1) cn = 'HTML' + (v.tagName || 'Element').charAt(0) + (v.tagName || 'Element').slice(1).toLowerCase() + 'Element';
-                    desc = v.tagName ? v.tagName.toLowerCase() : (v.nodeName || 'node');
-                }}
-                else if (t === 'function') {{
-                    cn = 'Function';
-                    desc = v.name ? 'function ' + v.name + '()' : 'function()';
-                }}
-                else if (t === 'object') {{
-                    cn = (v.constructor && v.constructor.name) || 'Object';
-                    desc = cn;
-                }}
-                else if (t === 'number' || t === 'boolean' || t === 'string') {{
-                    // Chrome puts the real value (JSON number/bool/string, not
-                    // a description-string copy) on the RemoteObject — and
-                    // only for these three; JSON.stringify drops the key when
-                    // `val` stayed undefined, and serializing a bigint/symbol
-                    // would throw.
-                    val = v; desc = String(v);
-                }}
-                else {{ desc = String(v); }}
-                return JSON.stringify({{type:t,subtype:st,className:cn,description:desc,value:val}});
-            }})({var_name})"#,
-            var_name = var_name,
-        )
-    }
-
-    /// Extract an exception's constructor name + message as a JSON blob, the
-    /// same shape `info_from_meta` reads. `meta_extract_js` stops at the
-    /// constructor name ("Error") — it never pulls the message, so a thrown
-    /// `new Error('boom')` would otherwise surface as description "Error"
-    /// instead of "Error: boom", which is what Chrome's `exceptionDetails`
-    /// reports.
-    fn exception_meta_extract_js(var_name: &str) -> String {
-        format!(
-            r#"(function(e) {{
-                var name = '', msg = '', desc = '', frame = '', line = 0, col = 0;
-                if (e !== null && e !== undefined) {{
-                    if (typeof e === 'object' || typeof e === 'function') {{
-                        name = e.name || (e.constructor && e.constructor.name) || '';
-                        if (typeof e.message === 'string') msg = e.message;
-                    }} else {{
-                        try {{ msg = String(e); }} catch (_) {{}}
-                    }}
-                    // Prefer the <anonymous>:L:C frame — that's the caller's
-                    // eval'd script; the outermost "at" frame here is the
-                    // bootstrap eval wrapper, whose position points into
-                    // bootstrap.js and would mislead.
-                    if (typeof e.stack === 'string') {{
-                        var lines = e.stack.split('\n');
-                        for (var i = 0; i < lines.length; i++) {{
-                            var ln = lines[i].trim();
-                            if (ln.indexOf('at ') !== 0) continue;
-                            var m = ln.match(/<anonymous>:(\d+):(\d+)/);
-                            if (m) {{ frame = ln; line = +m[1]; col = +m[2]; break; }}
-                            if (!frame) frame = ln;
-                        }}
-                    }}
-                }}
-                if (msg) {{ desc = name ? (name + ': ' + msg) : msg; }}
-                else {{ desc = name || msg || 'Uncaught exception'; }}
-                return JSON.stringify({{className:name, description:desc, stack_first:frame, line:line, col:col}});
-            }})({var_name})"#,
-            var_name = var_name,
-        )
     }
 
     #[cfg_attr(not(test), allow(dead_code))] // helper of call_function_on (test-exercised)
