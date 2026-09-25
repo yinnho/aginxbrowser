@@ -1286,21 +1286,27 @@ html,body{margin:0;padding:0;width:800px;height:450px;background:#ffffff}
         .await
         .expect("navigate transition fixture");
         page.settle_until_idle(5000).await;
-        // The sync evaluate path doesn't pump microtasks, so the trigger
-        // drain would never run — go through the CDP path (await_promise)
-        // for the style writes.
+        // Style writes go through the CDP await path; #114 made sync-settling
+        // expressions return without an event-loop turn, and the transition
+        // drain is a microtask that DIFFS against the previous check — so a
+        // real loop turn (a thenable settling on a timer) must follow each
+        // write: the first records the baseline, the second sees the diff.
         page.evaluate_for_cdp(
             "document.querySelector('#box').style.opacity = '0'",
             true,
             true,
         )
         .await;
+        page.evaluate_for_cdp("new Promise(r => setTimeout(r, 0))", true, true)
+            .await;
         page.evaluate_for_cdp(
             "document.querySelector('#box').style.opacity = '1'",
             true,
             true,
         )
         .await;
+        page.evaluate_for_cdp("new Promise(r => setTimeout(r, 0))", true, true)
+            .await;
         let _ = page.evaluate("document.querySelector('#box').getBoundingClientRect().width");
         let got = page.css_animation_extent();
         assert!(
