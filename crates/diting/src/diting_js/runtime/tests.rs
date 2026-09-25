@@ -11980,14 +11980,16 @@
     #[tokio::test(flavor = "current_thread")]
     #[cfg(feature = "screenshot")]
     async fn test_sticky_header_pins_gbcr_and_hit_test_under_root_scroll() {
-        // #434 sticky v1: sticky vs the ROOT scroller. gBCR serves doc-space
-        // boxes with the sticky shift folded in, so a top:0 header that has
-        // stuck reads top === scrollY; elementFromPoint is a CLIENT-space
-        // query, so the same stuck header must win at client y=5 once the
-        // hit-test rides the root scroll. The tall later static sibling is
-        // the load-bearing part of the hit assertion: its box covers the
-        // stuck band, so the header only wins because sticky is a POSITIONED
-        // paint level (App. E step 8), not document order.
+        // #434 sticky v1: sticky vs the ROOT scroller. gBCR serves
+        // CLIENT-space boxes (doc-space layout rects minus the root
+        // scroll, sticky shift folded in), so a top:0 header that has
+        // stuck reads top ≈ 0 however deep the page scrolls;
+        // elementFromPoint is a client-space query over those same
+        // rects, so the stuck header must win at client y=5. The tall
+        // later static sibling is the load-bearing part of the hit
+        // assertion: its box covers the stuck band, so the header only
+        // wins because sticky is a POSITIONED paint level (App. E step
+        // 8), not document order.
         let mut rt = setup_runtime(
             r#"<html><body><div id="head" style="position:sticky; top:0; height:40px; background:#ccc">H</div><div id="tall" style="height:4000px; background:#eee">filler</div></body></html>"#,
         );
@@ -12005,7 +12007,7 @@
             return [
                 pos,
                 inFlow < 50,
-                Math.abs(stuck - 300) < 0.5,
+                Math.abs(stuck) < 0.5,
                 hitId,
                 Math.abs(back - inFlow) < 0.5,
             ];
@@ -12014,7 +12016,7 @@
         assert_eq!(
             result.value.unwrap(),
             serde_json::json!(["sticky", true, true, "head", true]),
-            "computed face, in-flow rest, stuck top == scrollY, client hit lands on the stuck header, back to in-flow"
+            "computed face, in-flow rest, stuck client top == 0, client hit lands on the stuck header, back to in-flow"
         );
     }
 
@@ -12268,8 +12270,8 @@
         let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
         assert_eq!(
             result.value.unwrap(),
-            serde_json::json!(["sticky", 108, 300, 300, "hc", 108]),
-            "row sticks at top:0 (doc-space gBCR == scrollY), cell inherits the shift, hit lands on the stuck header, reset restores"
+            serde_json::json!(["sticky", 108, 0, 0, "hc", 108]),
+            "row sticks at top:0 (client-space gBCR == 0), cell inherits the shift, hit lands on the stuck header, reset restores"
         );
     }
 
@@ -12296,8 +12298,8 @@
         let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
         assert_eq!(
             result.value.unwrap(),
-            serde_json::json!([300, 300, "c1"]),
-            "group sticks at top:0, cell inherits the shift, hit lands on the stuck header cell"
+            serde_json::json!([0, 0, "c1"]),
+            "group sticks at top:0 (client-space gBCR), cell inherits the shift, hit lands on the stuck header cell"
         );
     }
 
@@ -12325,8 +12327,8 @@
         let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
         assert_eq!(
             result.value.unwrap(),
-            serde_json::json!([300, "hc"]),
-            "sticky z:5 row in a static thead outranks the fixed z:2 overlay in hit-testing"
+            serde_json::json!([0, "hc"]),
+            "sticky z:5 row in a static thead outranks the fixed z:2 overlay in hit-testing (client-space stuck top == 0)"
         );
     }
 

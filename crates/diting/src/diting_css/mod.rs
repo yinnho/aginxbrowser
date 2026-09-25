@@ -932,7 +932,8 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
     match name.to_ascii_lowercase().as_str() {
         "display" => matches!(
             value,
-            "block" | "inline" | "flex" | "grid" | "none" | "inline-block" | "contents"
+            "block" | "inline" | "flex" | "grid" | "none" | "inline-block" | "inline-flex"
+                | "inline-grid" | "table" | "inline-table" | "table-row" | "table-cell"
         ),
         "color" | "background-color" => parse_color(value).is_some() || value.starts_with("rgb") || value.starts_with("hsl"),
         "background" => parse_color(value.split_whitespace().next().unwrap_or("")).is_some()
@@ -3784,19 +3785,21 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
     };
     match name {
         "display" => {
-            // inline-flex/inline-grid (#107): Fusion's .next-input family sizes
-            // its bare <input> children purely from flex layout — dropping the
-            // declaration (the pre-#107 behavior) left 32 inputs at width 0 on
-            // the Tmall publish page. taffy only needs the container mode, so
-            // they map onto plain Flex/Grid; the outer inline participation is
-            // a refinement, not a correctness requirement.
+            // inline-flex/inline-grid (#107) and inline-table (its follow-up):
+            // Fusion's .next-input family is `display: inline-table;
+            // width: 200px` with `width: 100%` inputs inside — dropping the
+            // declaration (the pre-#107 behavior for each missing value)
+            // left 32 inputs at width 0 on the Tmall publish page. taffy
+            // only needs the container mode, so they map onto plain
+            // Flex/Grid/Table; the outer inline participation is a
+            // refinement, not a correctness requirement.
             style.display = match v {
                 "block" => Some(Display::Block),
                 "inline" => Some(Display::Inline),
                 "inline-block" => Some(Display::InlineBlock),
                 "flex" | "inline-flex" => Some(Display::Flex),
                 "grid" | "inline-grid" => Some(Display::Grid),
-                "table" => Some(Display::Table),
+                "table" | "inline-table" => Some(Display::Table),
                 "table-row" => Some(Display::TableRow),
                 "table-cell" => Some(Display::TableCell),
                 "none" => Some(Display::None),

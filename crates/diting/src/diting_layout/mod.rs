@@ -2765,36 +2765,75 @@ fn build_table(
     // Rows in document order, row groups flattened; CSS `display: table-row`
     // children count as rows too (the CSS-authored minimum). The caption and
     // the colgroup/col width sources ride the same scan. `row_group` keeps
-    // each row's thead/tbody/tfoot ancestor (parallel to `row_ids`) so the
+    // each row's thead/tbody/tfoot ancestor (parallel to `rows`) so the
     // wrapper assembly can re-group what this scan flattens — a group with
     // a real (stand-in) box gets rects/gBCR/sticky for free, and the box is
     // what `position: sticky` on a row group keys off in Chrome.
-    let mut row_ids: Vec<NodeId> = Vec::new();
+    //
+    // CSS2.2 §17.2.1's anonymous-ROW half: a run of consecutive table
+    // children that are not rows — table-cells most of all (Fusion's
+    // `.next-input` puts `display: table-cell` spans directly inside its
+    // `display: inline-table` root), stray elements, or non-blank text —
+    // wraps into ONE anonymous row. Previously those children matched no
+    // arm and vanished, so an inline-table laid out empty.
+    enum RowSrc {
+        Tr(NodeId),
+        Anon(Vec<NodeId>),
+    }
+    fn flush_anon(
+        pending: &mut Vec<NodeId>,
+        rows: &mut Vec<RowSrc>,
+        row_group: &mut Vec<Option<NodeId>>,
+    ) {
+        if !pending.is_empty() {
+            rows.push(RowSrc::Anon(std::mem::take(pending)));
+            row_group.push(None);
+        }
+    }
+    let mut rows: Vec<RowSrc> = Vec::new();
     let mut row_group: Vec<Option<NodeId>> = Vec::new();
     let mut caption_id: Option<NodeId> = None;
     let mut col_nodes: Vec<NodeId> = Vec::new();
+    let mut anon_pending: Vec<NodeId> = Vec::new();
     for child in tree.children(id) {
+        // Box-less children never open an anonymous row: blank text and
+        // display:none (same skips as the per-row cell scan below).
+        let generates_box = if tree.with_node(child, |n| n.is_text()).unwrap_or(false) {
+            tree.with_node(child, |n| {
+                n.text_content_of_text_node().map(|t| !t.trim().is_empty())
+            })
+            .flatten()
+            .unwrap_or(false)
+        } else {
+            styles.get(&child).and_then(|s| s.display) != Some(CssDisplay::None)
+        };
         match tag_of(child).as_str() {
             "tr" => {
-                row_ids.push(child);
+                flush_anon(&mut anon_pending, &mut rows, &mut row_group);
+                rows.push(RowSrc::Tr(child));
                 row_group.push(None);
             }
             "caption" => caption_id = caption_id.or(Some(child)),
             "colgroup" | "col" => col_nodes.push(child),
             "thead" | "tbody" | "tfoot" => {
+                flush_anon(&mut anon_pending, &mut rows, &mut row_group);
                 for gc in tree.children(child).into_iter().filter(|gc| tag_of(*gc) == "tr") {
-                    row_ids.push(gc);
+                    rows.push(RowSrc::Tr(gc));
                     row_group.push(Some(child));
                 }
             }
             _ => {
                 if styles.get(&child).and_then(|s| s.display) == Some(CssDisplay::TableRow) {
-                    row_ids.push(child);
+                    flush_anon(&mut anon_pending, &mut rows, &mut row_group);
+                    rows.push(RowSrc::Tr(child));
                     row_group.push(None);
+                } else if generates_box {
+                    anon_pending.push(child);
                 }
             }
         }
     }
+    flush_anon(&mut anon_pending, &mut rows, &mut row_group);
 
     // `collapse` = shared borders → zero gaps; separate (the UA initial)
     // gets Chrome's default 2px border-spacing. Same value on both axes:
@@ -2825,7 +2864,7 @@ fn build_table(
         /// column from a member's style.
         anon: bool,
     }
-    let n_rows = row_ids.len();
+    let n_rows = rows.len();
     let mut occupied: Vec<Vec<bool>> = vec![Vec::new(); n_rows];
     let span_attr = |cid: NodeId, name: &str| -> usize {
         tree.with_node(cid, |n| n.get_attribute(name).map(|v| v.to_string()))
@@ -2904,9 +2943,15 @@ fn build_table(
         Cell(NodeId),
         Anon(Vec<NodeId>),
     }
-    for (row_idx, rid) in row_ids.iter().enumerate() {
+    for (row_idx, row_src) in rows.iter().enumerate() {
+        // An anonymous row has no DOM node: its members are the table's own
+        // children, and font context inherits from the table itself.
+        let (row_dom, members): (NodeId, Vec<NodeId>) = match row_src {
+            RowSrc::Tr(rid) => (*rid, tree.children(*rid)),
+            RowSrc::Anon(members) => (id, members.clone()),
+        };
         let mut items: Vec<RowItem> = Vec::new();
-        for cid in tree.children(*rid) {
+        for cid in members {
             if styles.get(&cid).and_then(|s| s.display) == Some(CssDisplay::TableCell) {
                 items.push(RowItem::Cell(cid));
                 continue;
@@ -2930,7 +2975,7 @@ fn build_table(
                 _ => items.push(RowItem::Anon(vec![cid])),
             }
         }
-        let (row_fs, _, row_lh) = font_context(tree, *rid, styles, fonts);
+        let (row_fs, _, row_lh) = font_context(tree, row_dom, styles, fonts);
         let mut cells: Vec<CellSlot> = Vec::new();
         for item in items {
             let (cell_dom, col_span, anon) = match &item {
@@ -3138,13 +3183,16 @@ fn build_table(
         // computed style as a px presentational hint; the wrapper is
         // synthetic, so carry it across here. Spec: it's a MINIMUM row
         // height — the row still grows for taller cells (STRETCH below).
-        let row_height = styles
-            .get(rid)
-            .and_then(|s| s.height)
-            .and_then(|l| match l {
-                crate::diting_css::Length::Px(px) => Some(px),
-                _ => None,
-            });
+        // An anonymous row has no tr: no authored height to carry.
+        let row_height = match row_src {
+            RowSrc::Tr(rid) => styles.get(rid).and_then(|s| s.height).and_then(|l| {
+                match l {
+                    crate::diting_css::Length::Px(px) => Some(px),
+                    _ => None,
+                }
+            }),
+            RowSrc::Anon(_) => None,
+        };
         let row_style = Style {
             display: Display::Flex,
             flex_direction: FlexDirection::Row,
@@ -3162,7 +3210,11 @@ fn build_table(
         };
         let cell_nodes: Vec<taffy::tree::NodeId> = cells.iter().map(|c| c.taffy).collect();
         if let Ok(row_node) = taffy_tree.new_with_children(row_style, &cell_nodes) {
-            node_map.insert(row_node, *rid);
+            // Only a real tr owns a DOM node to attribute the wrapper to;
+            // an anonymous row's wrapper stays a pure layout stand-in.
+            if let RowSrc::Tr(rid) = row_src {
+                node_map.insert(row_node, *rid);
+            }
             row_wrappers.push((row_idx, row_node, cells));
         }
     }

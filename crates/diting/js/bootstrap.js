@@ -4616,7 +4616,18 @@ class Element extends Node {
         const raw = _domRaw("layout_rect", String(this._nid | 0), "");
         const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
         if (Array.isArray(arr) && arr.length === 4 && Number.isFinite(arr[0])) {
-          const [x, y, w, h] = arr;
+          // layout_rect is document-space; CSSOM View getBoundingClientRect
+          // is viewport-relative. Subtract the root scroll so gBCR and
+          // elementFromPoint (client coords) share one world after any
+          // scroll — the click recheck feeds gBCR straight into
+          // elementFromPoint and mis-verdicts "outside the viewport" the
+          // moment scrollY != 0 (tmall publish: SKU button below the fold).
+          // Viewport roots above already answer client-space; iframe
+          // sub-worlds return before this shift.
+          let [x, y, w, h] = arr;
+          const root = globalThis.document && globalThis.document.documentElement;
+          x -= (root && root._scrollLeft) || 0;
+          y -= (root && root._scrollTop) || 0;
           return {
             x, y, width: w, height: h,
             top: y, right: x + w, bottom: y + h, left: x,
@@ -4696,7 +4707,61 @@ class Element extends Node {
   set ariaHidden(v) { if (v == null) this.removeAttribute('aria-hidden'); else this.setAttribute('aria-hidden', String(v)); }
   get ariaSelected() { return this.getAttribute('aria-selected'); }
   set ariaSelected(v) { if (v == null) this.removeAttribute('aria-selected'); else this.setAttribute('aria-selected', String(v)); }
-  scrollIntoView() { globalThis.__diting_click_target = this; }
+  // scrollIntoView (CSSOM View §): scroll the element's scroll containers —
+  // each real element scroller up the ancestor chain, then the viewport
+  // root — so the element lands at the block/inline alignment. Used to be a
+  // click-target-only stub, which left anything below the fold permanently
+  // unclickable: the click recheck hit-tested a client point outside the
+  // viewport and verdicted "covered_by: nothing" (tmall publish SKU button).
+  // Options default per spec: block 'start', inline 'nearest'.
+  scrollIntoView(arg) {
+    globalThis.__diting_click_target = this;
+    var opts = (arg && typeof arg === 'object') ? arg : {};
+    var block = opts.block || 'start';
+    var inline = opts.inline || 'nearest';
+    var doc = globalThis.document;
+    var root = doc && doc.documentElement;
+    if (!root) return;
+    // Alignment delta for one axis: where the element's edge should sit
+    // inside the container's client box. 'nearest' scrolls the smaller
+    // amount that reveals it (0 when already visible).
+    var delta = function (eStart, eSize, cStart, cSize, align) {
+      var eEnd = eStart + eSize, cEnd = cStart + cSize;
+      if (align === 'center') return eStart + eSize / 2 - (cStart + cSize / 2);
+      if (align === 'end') return eEnd - cEnd;
+      if (align === 'nearest') {
+        if (eStart < cStart) return eStart - cStart;
+        if (eEnd > cEnd) return eEnd - cEnd;
+        return 0;
+      }
+      return eStart - cStart; // 'start'
+    };
+    // Element scrollers, innermost first. Both rects are client-space, so a
+    // container's client box is its own gBCR (its border box is fixed in
+    // the viewport; scrolling moves the content inside it, not the box).
+    var node = this.parentElement;
+    while (node && node !== root) {
+      if (node._isNativeScrollContainer && node._isNativeScrollContainer()) {
+        var cr = node.getBoundingClientRect();
+        if (cr.width > 0 || cr.height > 0) {
+          var er = this.getBoundingClientRect();
+          var dt = delta(er.top, er.height, cr.top, cr.height, block);
+          if (dt) node.scrollTop = (node.scrollTop || 0) + dt;
+          var dl = delta(er.left, er.width, cr.left, cr.width, inline);
+          if (dl) node.scrollLeft = (node.scrollLeft || 0) + dl;
+        }
+      }
+      node = node.parentElement;
+    }
+    // Viewport root: the container box is [0, 0, innerWidth, innerHeight].
+    var er2 = this.getBoundingClientRect();
+    if (er2.width <= 0 && er2.height <= 0) return;
+    var vw = globalThis.innerWidth || 0, vh = globalThis.innerHeight || 0;
+    var dt2 = delta(er2.top, er2.height, 0, vh, block);
+    if (dt2) root.scrollTop = (root.scrollTop || 0) + dt2;
+    var dl2 = delta(er2.left, er2.width, 0, vw, inline);
+    if (dl2) root.scrollLeft = (root.scrollLeft || 0) + dl2;
+  }
   // scrollTo/scrollBy/scroll accept either (x, y) or a ScrollToOptions
   // object. They write through the scrollTop/scrollLeft setters, so the
   // viewport root inherits the real-extent clamp and element scrollers keep
@@ -16302,17 +16367,19 @@ if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
     var w = (typeof window !== 'undefined' && window.innerWidth) || 1280;
     var h = (typeof window !== 'undefined' && window.innerHeight) || 720;
     if (x < 0 || y < 0 || x > w || y > h) return null;
-    // Containment compares in the RECT space — document coordinates (the
-    // layout is scroll-blind and gBCR serves doc-space boxes, the sticky
-    // shift included). The client-space query must ride the root scroll or
-    // every hit test on a scrolled page answers the wrong band (#434: a
-    // stuck header is exactly the case where client y and doc y differ).
-    // Frame documents get zero: their rects live in the iframe's own
-    // viewport and frame content scroll is not mirrored yet — borrowing the
-    // MAIN page's scroll would poison every in-frame hit test.
+    // Containment compares client-to-client: gBCR serves client-space
+    // boxes (doc-space layout rects minus the root scroll, sticky shift
+    // included), so the raw query point is already in the right space —
+    // no scroll ride. The local_geom inverse-map below still needs the
+    // DOC-space point (layout geometry is scroll-blind), and only the
+    // main document rides the root scroll — frame content scroll is not
+    // mirrored yet, so borrowing the MAIN page's scroll would poison
+    // every in-frame hit test.
     var mainDoc = (typeof document !== 'undefined' && this === document);
-    var qx = x + (mainDoc ? (globalThis.scrollX || 0) : 0);
-    var qy = y + (mainDoc ? (globalThis.scrollY || 0) : 0);
+    var qx = x;
+    var qy = y;
+    var gx = mainDoc ? x + (globalThis.scrollX || 0) : x;
+    var gy = mainDoc ? y + (globalThis.scrollY || 0) : y;
     var all = this.querySelectorAll('*');
     var rank = __ditingPaintRanks();
     var cands = [];
@@ -16340,8 +16407,8 @@ if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
               if (g.length === 10 && (g[5] !== 0 || g[6] !== 0)) {
                 var det = g[4] * g[7] - g[5] * g[6];
                 if (det !== 0) {
-                  var lx = (g[7] * (qx - g[8]) - g[6] * (qy - g[9])) / det;
-                  var ly = (g[4] * (qy - g[9]) - g[5] * (qx - g[8])) / det;
+                  var lx = (g[7] * (gx - g[8]) - g[6] * (gy - g[9])) / det;
+                  var ly = (g[4] * (gy - g[9]) - g[5] * (gx - g[8])) / det;
                   if (lx < g[0] || lx > g[0] + g[2] || ly < g[1] || ly > g[1] + g[3]) {
                     outside = true;
                   }

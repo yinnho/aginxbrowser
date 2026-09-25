@@ -238,6 +238,30 @@ fn display_inline_flex_and_grid_parse() {
     assert_eq!(s.display, Some(Display::Grid));
 }
 
+/// inline-table is the value Fusion's `.next-input` actually declares
+/// (`display: inline-table; width: 200px`): it used to hit the drop arm, the
+/// span collapsed to plain inline, and `.next-input input { width: 100% }`
+/// resolved against nothing — 32 zero-width inputs on the Tmall publish
+/// page. It maps onto the table container mode like inline-flex rides Flex.
+#[test]
+fn display_inline_table_parses() {
+    let mut s = ComputedStyle::default();
+    assert!(
+        apply_declarations(&mut s, "display: inline-table"),
+        "inline-table must not be dropped by the cascade (tmall .next-input)"
+    );
+    assert_eq!(s.display, Some(Display::Table));
+    // The probe table must claim exactly what apply_one accepts — and must
+    // NOT claim `contents`, which has no box-skipping implementation
+    // behind it (claiming support while dropping the declaration is the
+    // worse lie for an @supports feature branch).
+    assert!(supports_declaration("display", "inline-table"));
+    assert!(supports_declaration("display", "inline-flex"));
+    assert!(supports_declaration("display", "table-cell"));
+    assert!(!supports_declaration("display", "contents"));
+    assert!(!supports_declaration("display", "inline-tablee"));
+}
+
 // ---- animation batch A/B: opacity + transform ----
 
 /// The exact inline strings GSAP's tween engine writes on a diting-driven
