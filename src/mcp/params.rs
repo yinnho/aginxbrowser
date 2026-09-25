@@ -140,8 +140,9 @@ pub struct DownloadParams {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SessionCreateParams {
-    /// Initial URL to navigate to (optional)
-    #[serde(default)]
+    /// Initial URL to navigate to (optional). `start_url` is honored as an
+    /// alias (#115) — callers guessing that name must not land on about:blank.
+    #[serde(default, alias = "start_url")]
     pub url: Option<String>,
     /// Route through proxy (default: false)
     #[serde(default)]
@@ -840,4 +841,22 @@ fn default_true() -> bool {
 }
 fn default_js_timeout() -> u64 {
     5000
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // #115: MCP callers guess `start_url` exactly like HTTP callers (the
+    // account_login wizard navigates at creation, so the name is natural).
+    // serde must land the alias in `url`, not silently drop it and leave the
+    // session on about:blank. HTTP twin: server/tests.rs.
+    #[test]
+    fn session_create_params_accept_start_url_alias() {
+        let p: SessionCreateParams = serde_json::from_str(
+            r#"{"start_url":"https://example.com/"}"#,
+        )
+        .expect("start_url must deserialize into url, not be dropped");
+        assert_eq!(p.url.as_deref(), Some("https://example.com/"));
+    }
 }

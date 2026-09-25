@@ -15,6 +15,10 @@ use crate::{account, curl_import, flow, AppError};
 
 #[derive(Debug, Deserialize)]
 pub struct SessionCreateRequest {
+    /// Initial URL: creation navigates here before the session id is usable
+    /// (the wizard pattern). `start_url` is honored as an alias (#115) — a
+    /// caller guessing that name must not land on about:blank in silence.
+    #[serde(default, alias = "start_url")]
     pub url: Option<String>,
     #[serde(default)]
     pub use_proxy: bool,

@@ -465,6 +465,20 @@ mod cookie_injection_tests {
             "compat_test=not-a-credential; Domain=.tmall.com; Path=/; Secure"
         );
     }
+
+    // #115: an agent guessing the field name `start_url` (natural after
+    // account_login's wizard pattern) got it silently dropped by serde and a
+    // session parked on about:blank. The alias must land it in `url`.
+    // (MCP-side twin pin lives in mcp/params.rs — R1b bars this file from
+    // referencing the face directly.)
+    #[test]
+    fn session_create_request_accepts_start_url_alias() {
+        let req: crate::SessionCreateRequest = serde_json::from_str(
+            r#"{"start_url":"https://example.com/","persistent":false}"#,
+        )
+        .expect("start_url must deserialize into url, not be dropped");
+        assert_eq!(req.url.as_deref(), Some("https://example.com/"));
+    }
 }
 
 /// #355 / v0.3.2 Windows report #9: the fallback round's contract. An

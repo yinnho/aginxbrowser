@@ -773,7 +773,7 @@ Create an interactive browser session.
 
 | Field | Type | Required | Default | Description |
 |------|------|------|------|------|
-| url | string | | `null` | Initial URL (optional) |
+| url | string | | `null` | Initial URL (optional); `start_url` is accepted as an alias — creation navigates there before the session id is handed back |
 | use_proxy | bool | | `false` | Route through a proxy |
 | cookies | string[] \| object[] | | `[]` | Cookies injected before navigation (`"name=value",...` or CDP-style objects) so the session starts already logged in |
 | persistent | bool | | `false` | Persist login state to the server-side store: if the session idles out or the server restarts, the same `session_id` revives logged-in on the next call (`session/{id}/close` drops the snapshot; idle expiry keeps it) |
