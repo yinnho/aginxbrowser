@@ -3979,6 +3979,7 @@ struct FetchWalkDeps {
     credentials: FetchCredentials,
     cookie_jar: Option<Arc<CookieJar>>,
     in_flight: Option<Arc<std::sync::atomic::AtomicU32>>,
+    in_flight_list: Option<std::sync::Arc<std::sync::Mutex<Vec<crate::diting_net::InFlightScripted>>>>,
     http_client: Option<Arc<HttpClient>>,
     proxy_url: Option<String>,
     document_url: String,
@@ -3988,11 +3989,36 @@ struct FetchWalkDeps {
     failures: Vec<(String, String, String)>,
 }
 
+/// Drop-remove a pushed in-flight entry — the walk returns from a dozen
+/// paths (redirect hops, fallback escapes, errors); Drop is the only
+/// discipline that keeps the registry honest across all of them (#116).
+struct InFlightEntryGuard {
+    list: std::sync::Arc<
+        std::sync::Mutex<Vec<crate::diting_net::InFlightScripted>>,
+    >,
+    url: String,
+    method: String,
+}
+
+impl Drop for InFlightEntryGuard {
+    fn drop(&mut self) {
+        if let Ok(mut l) = self.list.lock() {
+            if let Some(pos) = l
+                .iter()
+                .position(|f| f.url == self.url && f.method == self.method)
+            {
+                l.remove(pos);
+            }
+        }
+    }
+}
+
 /// OpState-cloned inputs the fetch front half gathers before any network
 /// I/O, shared by both drivers.
 struct FetchRequestInit {
     cookie_jar: Option<Arc<CookieJar>>,
     in_flight: Option<Arc<std::sync::atomic::AtomicU32>>,
+    in_flight_list: Option<std::sync::Arc<std::sync::Mutex<Vec<crate::diting_net::InFlightScripted>>>>,
     proxy_url: Option<String>,
     http_client: Option<Arc<HttpClient>>,
     callbacks: Option<std::sync::Arc<crate::diting_net::CallbackRegistry>>,
@@ -4050,6 +4076,7 @@ fn gather_fetch_parts(
         let init = FetchRequestInit {
             cookie_jar: gs.cookie_jar.clone(),
             in_flight: gs.http_client.as_ref().map(|c| c.in_flight.clone()),
+            in_flight_list: gs.http_client.as_ref().map(|c| c.in_flight_list.clone()),
             // #139: thread the configured proxy through to the per-request
             // reqwest::Client. Without this, op_fetch_url silently bypasses
             // BrowserContext.proxy_url for every JS fetch() / XHR call.
@@ -4182,6 +4209,7 @@ async fn op_fetch_url(
     let FetchRequestInit {
         cookie_jar,
         in_flight,
+        in_flight_list,
         proxy_url,
         http_client,
         callbacks,
@@ -4327,6 +4355,7 @@ async fn op_fetch_url(
         credentials: FetchCredentials::parse(&credentials),
         cookie_jar,
         in_flight,
+        in_flight_list,
         http_client,
         proxy_url,
         document_url,
@@ -4511,6 +4540,7 @@ async fn fetch_url_walk(
     let credentials = deps.credentials;
     let cookie_jar = deps.cookie_jar.clone();
     let in_flight = deps.in_flight.clone();
+    let in_flight_list = deps.in_flight_list.clone();
     let http_client = deps.http_client.clone();
     let callbacks = deps.callbacks.clone();
     let proxy_url = deps.proxy_url.clone();
@@ -4874,6 +4904,25 @@ async fn fetch_url_walk(
         if let Some(ref counter) = in_flight {
             counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+        // #116: register the hop so a hung scripted request is observable
+        // while it hangs (fetch/XHR promises that never settle read on the
+        // surface as a silent EVAL_TIMEOUT). Dropped — i.e. removed — on
+        // every exit path of this hop.
+        let _in_flight_guard = in_flight_list.as_ref().map(|list| {
+            let entry = crate::diting_net::InFlightScripted {
+                url: current_url.clone(),
+                method: current_method.as_str().to_string(),
+                dispatched_at_ms: crate::diting_net::client::epoch_ms(),
+            };
+            if let Ok(mut l) = list.lock() {
+                l.push(entry);
+            }
+            InFlightEntryGuard {
+                list: list.clone(),
+                url: current_url.clone(),
+                method: current_method.as_str().to_string(),
+            }
+        });
 
         let resp = match req.send().await {
             Ok(r) => r,
@@ -5401,6 +5450,7 @@ fn op_fetch_url_sync(
     let FetchRequestInit {
         cookie_jar,
         in_flight,
+        in_flight_list,
         proxy_url,
         http_client,
         callbacks,
@@ -5430,6 +5480,7 @@ fn op_fetch_url_sync(
         credentials: FetchCredentials::parse(&credentials),
         cookie_jar,
         in_flight,
+        in_flight_list,
         http_client,
         proxy_url,
         document_url,

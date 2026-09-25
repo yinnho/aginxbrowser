@@ -3000,6 +3000,112 @@
         );
     }
 
+    /// (#116) xhr.timeout must race the async send→done span. A transport
+    /// that accepts and never answers used to fire no event at all — the
+    /// on-surface symptom was a silent EVAL_TIMEOUT with zero callbacks
+    /// (tmall publish report: xhr.timeout=5000, nothing fired in 8000ms).
+    /// Chrome: deadline hit → `timeout` event → DONE → status 0 → loadend;
+    /// a late settlement of the underlying fetch is ignored.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_xhr_timeout_fires_events_on_hung_transport() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        // Accept the TCP connection but never write a byte — the request
+        // hangs until the engine's 30s read timeout, which the 400ms
+        // xhr.timeout must beat by orders of magnitude.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut parked = Vec::new();
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(s) => parked.push(s), // hold open, never respond
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const events = [];
+                    const xhr = new XMLHttpRequest();
+                    xhr.open('GET', '/hang');
+                    xhr.timeout = 400;
+                    for (const t of ['timeout', 'loadend', 'load', 'error', 'abort']) {
+                        xhr.addEventListener(t, () => events.push(t));
+                    }
+                    const done = new Promise(r => { xhr.onloadend = () => r(); });
+                    const t0 = Date.now();
+                    xhr.send();
+                    await done;
+                    return {
+                        events,
+                        readyState: xhr.readyState,
+                        status: xhr.status,
+                        text: xhr.responseText,
+                        ms: Date.now() - t0,
+                    };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let v = result.value.unwrap();
+        assert_eq!(
+            v["events"],
+            serde_json::json!(["timeout", "loadend"]),
+            "a hung transport must fire timeout then loadend — nothing else"
+        );
+        assert_eq!(v["readyState"], serde_json::json!(4));
+        assert_eq!(v["status"], serde_json::json!(0));
+        assert_eq!(v["text"], serde_json::json!(""));
+        let ms = v["ms"].as_f64().unwrap();
+        assert!(
+            ms < 5000.0,
+            "deadline must fire near the 400ms budget, got {ms}ms"
+        );
+    }
+
+    /// (#116) Chrome parity: sync XHR with a non-zero timeout throws
+    /// InvalidAccessError on send() — there is no event-loop turn to fire
+    /// the deadline on.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn sync_xhr_with_timeout_throws_invalid_access() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"() => {
+                    const xhr = new XMLHttpRequest();
+                    xhr.open('GET', '/x', false);
+                    xhr.timeout = 1;
+                    try { xhr.send(); return { threw: false }; }
+                    catch (e) { return { threw: true, name: e.name }; }
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!({ "threw": true, "name": "InvalidAccessError" })
+        );
+    }
+
     /// Sync POST round-trips the body; the server must have received the
     /// exact bytes send() was handed (form-POST legacy flows).
     #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization

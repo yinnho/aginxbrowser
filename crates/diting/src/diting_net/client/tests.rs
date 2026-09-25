@@ -1,6 +1,7 @@
 //! The client module's tests, split from the module root (ARCHITECTURE.md
 //! P2 god-file ratchet).
 use super::*;
+use reqwest::dns::{Name, Resolve};
 
 #[test]
 fn derive_client_hints_chrome_version() {

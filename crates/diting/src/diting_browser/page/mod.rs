@@ -579,6 +579,14 @@ impl Page {
             .fetch_with_callbacks(url, Some(&self.callbacks), crate::diting_net::ResourceType::Document, referrer)
             .await
     }
+
+    /// Script-initiated fetch()/XHR hops currently flying (#116): url,
+    /// method, dispatch epoch-ms. The answer to "my eval timed out — is
+    /// the save still executing?" — a hung request stays listed until its
+    /// transport actually ends, instead of being invisible until then.
+    pub fn scripted_in_flight(&self) -> Vec<crate::diting_net::InFlightScripted> {
+        self.http_client.scripted_in_flight()
+    }
     fn init_js(&mut self) {
         // Drop any existing runtime so the JS realm starts clean on
         // every navigation. The old code reused the V8 isolate and

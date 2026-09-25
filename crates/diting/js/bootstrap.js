@@ -7466,6 +7466,8 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     this._url = "";
     this._headers = {};
     this._responseHeaders = {};
+    this._timeoutTimer = null;
+    this._timedOut = false;
     this._aborted = false;
     __lmap(this);
     this.onreadystatechange = null;
@@ -7632,6 +7634,11 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
       // worker thread and blocks. Spec: no events fire in the sync path
       // (not even loadstart); the caller reads status/response inline.
       // CDP Fetch interception has no sync story for the same reason.
+      // #116: a non-zero timeout on sync XHR throws, like Chrome — there is
+      // no event loop turn to fire it on.
+      if (this.timeout > 0) {
+        throw new DOMException("Failed to execute 'send' on 'XMLHttpRequest': Synchronous requests should not set a timeout.", "InvalidAccessError");
+      }
       try {
         const hdrs = {};
         let bodyStr = '';
@@ -7717,6 +7724,30 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     }
 
     this._fireEvent('loadstart');
+
+    // #116: xhr.timeout must race the whole send→done span (headers AND body).
+    // Chrome: deadline hit → `timeout` event, DONE, status 0, then loadend;
+    // a late settlement of the underlying fetch is ignored. A hung transport
+    // used to fire nothing at all, which read on the surface as a silent
+    // EVAL_TIMEOUT with zero events (tmall publish report).
+    if (this.timeout > 0) {
+      const xhr = this;
+      this._timeoutTimer = setTimeout(function () {
+        if (xhr._aborted || xhr.readyState === 4) return;
+        xhr._timedOut = true;
+        xhr._aborted = true; // then/catch heads ignore the late settlement
+        xhr.status = 0;
+        xhr.statusText = '';
+        xhr._responseHeaders = {};
+        xhr.responseText = '';
+        xhr.response = '';
+        xhr.readyState = 4;
+        xhr._fireEvent('readystatechange');
+        xhr._fireEvent('timeout');
+        xhr._fireEvent('loadend');
+      }, this.timeout);
+    }
+
     fetch(url, {
       method: this._method,
       headers: this._headers,
@@ -7769,9 +7800,11 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
       }
 
       xhr._setReadyState(4); // DONE
+      if (xhr._timeoutTimer) { clearTimeout(xhr._timeoutTimer); xhr._timeoutTimer = null; }
       xhr._fireEvent('load');
       xhr._fireEvent('loadend');
     }).catch((err) => {
+      if (xhr._timeoutTimer) { clearTimeout(xhr._timeoutTimer); xhr._timeoutTimer = null; }
       if (xhr._aborted) return;
       xhr.status = 0;
       xhr.readyState = 4;
@@ -7791,6 +7824,7 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
 
   abort() {
     this._aborted = true;
+    if (this._timeoutTimer) { clearTimeout(this._timeoutTimer); this._timeoutTimer = null; }
     if (this.readyState > 0 && this.readyState < 4) {
       this._setReadyState(4);
       this._fireEvent('abort');

@@ -2905,6 +2905,91 @@
         assert!(script.contains(r#"POST "session/$SID/eval""#));
     }
 
+    /// (#116) A hung script-initiated fetch is invisible in the request log
+    /// (entries land at completion) — the tmall publish report's "still
+    /// executing?" question. The Network command must surface it as
+    /// `in_flight` while the transport hangs, with url/method/age.
+    #[tokio::test]
+    async fn network_lists_hung_scripted_fetch_in_flight() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /watch",
+            "<html><body></body></html>",
+        )]);
+
+        // Accept the TCP connection, never answer — the fetch hangs until
+        // its 30s read timeout, far beyond this test.
+        let hang = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let hang_port = hang.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut parked = Vec::new();
+            for s in hang.incoming() {
+                match s {
+                    Ok(s) => parked.push(s),
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/watch")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+
+        // Fire-and-forget: the expression's completion value must be a
+        // non-thenable so the eval returns synchronously (#114 wrapper).
+        mgr.send(&sid, |reply| SessionCommand::Eval {
+            script: format!(
+                "(function(){{ fetch('http://127.0.0.1:{hang_port}/hang').catch(function(){{}}); return 'fired'; }})()"
+            ),
+            timeout_ms: None,
+            reply,
+        })
+        .await
+        .unwrap();
+
+        // The async op dispatches on the first loop turn after the eval —
+        // poll the Network command briefly rather than assuming ordering.
+        let mut listed = None;
+        for _ in 0..40 {
+            let text = mgr
+                .send(&sid, |reply| SessionCommand::Network {
+                    media_only: false,
+                    include_bodies: false,
+                    url_contains: None,
+                    body_max_chars: 0,
+                    reply,
+                })
+                .await
+                .unwrap();
+            let val: Value = serde_json::from_str(&text).unwrap();
+            if let Some(rows) = val["in_flight"].as_array() {
+                if let Some(row) = rows
+                    .iter()
+                    .find(|r| r["url"].as_str().unwrap_or("").contains("/hang"))
+                {
+                    listed = Some(row.clone());
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let row = listed.expect("hung fetch must surface in in_flight within ~2s");
+        assert_eq!(row["method"], "GET");
+        assert!(
+            row["age_ms"].as_u64().unwrap_or(u64::MAX) < 10_000,
+            "age must be wall-clock sane: {row}"
+        );
+    }
+
     /// The session sniffer: a page-side fetch() of a media URL surfaces in
     /// the Network command (media filter extracts the playback link), and
     /// Har returns a parseable HAR 1.2 document whose document entry carries
