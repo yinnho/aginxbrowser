@@ -104,10 +104,17 @@ set_files 的 `files` 数组无法从 vars 结构化喂入；单张可用（`{{i
 张数，与 Rust 面同语义。——这是引擎面一个真实缺口（数组 var 无法整叶
 进非 http step 的结构化参数），flow.md 记录在此，暂不改引擎。
 
-## 登录配方（引擎侧续票 → import_curl 兜底）
+## 登录配方（引擎侧续票 → 引擎内 QR → import_curl 兜底）
 
 个人号无 API、无账密登录（扫码）→ 登录态三级路线：
 
+0. **www 小号/重登首选：引擎内 QR**——`python3 scripts/xhs-qr-login.py
+   --account <名>`（09-25 手动链固化）：建带 account 会话 → preload
+   mega+QR 钩子 → 登录页自己的 `qrcode/create` → 本地渲染 `data.url`
+   → 手动签名 status 轮询（页面轮询在引擎不跑，visibility quirk，这步
+   是承重墙别"简化"掉）→ `code_status:2` 的 Set-Cookie 自动落 jar 并
+   写回账户位。**别重复 create**——09-22 风控触发面就是同会话多 QR+狂轮询。
+   `--render-only` 可干跑到出码。
 1. **首选：引擎侧续票**（flow 步 1.6 已内置，手动配合同理）。前提=TGC
    （`customer-sso-sid`）还活着（它比 galaxy AT 长寿得多）：
    任意 xiaohongshu.com 页面上 `_webmsxyw('/api/cas/customer/web/service-ticket',
