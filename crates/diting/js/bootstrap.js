@@ -311,9 +311,6 @@ function _fpRand(salt) {
   h = Math.imul(h ^ (h >>> 13), 0x45d9f3b);
   return ((h ^ (h >>> 16)) >>> 0) / 0xFFFFFFFF;
 }
-function _fpNoise(x, y, channel) {
-  return (_fpRand(x * 7919 + y * 6271 + channel * 8923) - 0.5) * 4;
-}
 
 var _fpCache = null;
 // The persona must cohere with the UA the HTTP layer sends. A Windows
@@ -6690,23 +6687,63 @@ globalThis.IIRFilterNode = class IIRFilterNode {
   getFrequencyResponse() {}
 };
 
-globalThis.navigator = {
-  get userAgent() { return globalThis.__diting_ua || "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"; },
+// (#117) Chrome's navigator carries ZERO own enumerable props — all 83 keys
+// are getters/methods on Navigator.prototype (probe ground truth from a real
+// Chrome 145: Object.keys(navigator) === []). The store below is laid out in
+// Chrome's exact own-property order, because detectors diff prototype key
+// ORDER, not just membership. Internal writes (persona refresh, viewport
+// emulation) go through __diting_navSet on the store; page writes hit
+// getter-only prototype accessors and no-op, like Chrome's readonly
+// attributes. Values that were previously instance getters stay store
+// getters — the hoist calls them against the store, so UA-dependent answers
+// keep refreshing without re-hoisting.
+const __navStore = {
+  vendorSub: "",
+  productSub: "20030107",
+  vendor: "Google Inc.",
+  maxTouchPoints: 0,
+  scheduling: { isInputPending() { return false; } },
+  get userActivation() { return __diting_userActivation; },
+  geolocation: {
+    getCurrentPosition(success, error) {
+      const pos = globalThis.__diting_makeGeolocationPosition(
+        50.1109 + (_fpRand(500) - 0.5) * 0.1,
+        8.6821 + (_fpRand(501) - 0.5) * 0.1,
+        10 + _fpRand(502) * 40,
+      );
+      if (typeof success === 'function') success(pos);
+    },
+    watchPosition(success, error) {
+      if (typeof success === 'function') {
+        success(globalThis.__diting_makeGeolocationPosition(
+          50.1109 + (_fpRand(503) - 0.5) * 0.1,
+          8.6821 + (_fpRand(504) - 0.5) * 0.1,
+          10 + _fpRand(505) * 40,
+        ));
+      }
+      return 0;
+    },
+    clearWatch() {},
+  },
+  doNotTrack: null,
+  webkitTemporaryStorage: { queryUsageAndQuota(cb) { if (cb) cb(0, 5000000000); }, requestQuota() {} },
+  webkitPersistentStorage: { queryUsageAndQuota(cb) { if (cb) cb(0, 500000000); }, requestQuota() {} },
+  windowControlsOverlay: { visible: false, ontitlebarchange: null, addEventListener(){}, removeEventListener(){}, dispatchEvent(){ return false; } },
+  hardwareConcurrency: 8,
+  cookieEnabled: true,
+  appCodeName: "Mozilla",
+  appName: "Netscape",
   get appVersion() { return this.userAgent.replace('Mozilla/', ''); },
   get platform() { return globalThis.__diting_platform_override || __ditingPlatformFromUA(); },
+  product: "Gecko",
+  get userAgent() { return globalThis.__diting_ua || "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"; },
   get language() { return __ditingLangList()[0]; },
   get languages() { return __ditingLangList().slice(); },
-  onLine: true, cookieEnabled: true, hardwareConcurrency: 8,
-  maxTouchPoints: 0,
-  vendor: "Google Inc.", product: "Gecko", productSub: "20030107",
-  doNotTrack: null,
-  deviceMemory: 8,
-  connection: new NetworkInformation(),
+  onLine: true,
   // (#78) Chrome's NavigatorAutomationInformation always defines webdriver
   // and reads false on a normal session — `undefined` is the odd one out and
   // a jsvmp scan tell.
   get webdriver() { return false; },
-  pdfViewerEnabled: true,
   get plugins() {
     if (!_pluginsInst) {
       _pluginsInst = new PluginArray(
@@ -6728,29 +6765,66 @@ globalThis.navigator = {
     }
     return _mimeTypesInst;
   },
-  userAgentData: {
-    brands: [
-      {brand: "Google Chrome", version: "145"},
-      {brand: "Chromium", version: "145"},
-      {brand: "Not=A?Brand", version: "24"},
-    ],
-    mobile: false,
-    get platform() { return __ditingUADataPlatformFromUA(); },
-    getHighEntropyValues(hints) {
-      const plat = __ditingUADataPlatformFromUA();
-      return Promise.resolve({
-        architecture: "x86",
-        bitness: "64",
-        brands: [{brand:"Google Chrome",version:"145"},{brand:"Chromium",version:"145"},{brand:"Not=A?Brand",version:"24"}],
-        fullVersionList: [{brand:"Google Chrome",version:"145.0.0.0"},{brand:"Chromium",version:"145.0.0.0"},{brand:"Not=A?Brand",version:"24.0.0.0"}],
-        mobile: false,
-        model: "",
-        platform: plat,
-        platformVersion: "15.2.0",
-        uaFullVersion: "145.0.0.0",
-      });
+  pdfViewerEnabled: true,
+  connection: new NetworkInformation(),
+  getGamepads() { return []; },
+  javaEnabled() { return false; },
+  sendBeacon(url, data) {
+    let abs;
+    try {
+      abs = new URL(String(url), _docBase()).href;
+    } catch (e) {
+      return false;
+    }
+    let body = data == null ? "" : data;
+    let hdrs;
+    if (typeof data === "string") {
+      hdrs = { "content-type": "text/plain;charset=UTF-8" };
+    } else if (typeof Blob === "function" && data instanceof Blob) {
+      // fetch already rides blob.type as the content-type.
+    } else if (typeof URLSearchParams === "function" && data instanceof URLSearchParams) {
+      // fetch already applies the urlencoded content-type.
+    } else if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+      hdrs = { "content-type": "application/octet-stream" };
+    } else if (typeof FormData === "function" && data instanceof FormData) {
+      // fetch serializes multipart with a generated boundary.
+    } else {
+      body = String(data);
+      hdrs = { "content-type": "text/plain;charset=UTF-8" };
+    }
+    // Fire-and-forget: a beacon outlives the page that queued it, so the
+    // response is never observed — the promise is discarded and its rejection
+    // swallowed (a failing endpoint must not surface as an unhandled
+    // rejection). true means the transfer was queued, not delivered.
+    const init = { method: "POST", body, mode: "no-cors", credentials: "include", keepalive: true };
+    if (hdrs) init.headers = hdrs;
+    Promise.resolve(globalThis.fetch(abs, init)).catch(() => {});
+    return true;
+  },
+  vibrate() { return false; },
+  cpuPerformance: "high",
+  deprecatedRunAdAuctionEnforcesKAnonymity: false,
+  protectedAudience: {},
+  bluetooth: {
+    getAvailability() { return Promise.resolve(false); },
+    requestDevice() { return Promise.reject(new DOMException("Permission denied.", "NotAllowedError")); },
+  },
+  clipboard: { writeText(){return Promise.resolve();}, readText(){return Promise.resolve("");} },
+  credentials: { get(){return Promise.resolve(null);}, create(){return Promise.resolve(null);}, store(){return Promise.resolve();}, preventSilentAccess(){return Promise.resolve();} },
+  get keyboard() { return __diting_keyboard; },
+  managed: { getManagedConfiguration() { return Promise.resolve({}); } },
+  mediaDevices: {
+    enumerateDevices() {
+      return Promise.resolve([
+        {deviceId:"default",kind:"audioinput",label:"",groupId:"default"},
+        {deviceId:"comms",kind:"audioinput",label:"",groupId:"comms"},
+        {deviceId:"default",kind:"audiooutput",label:"",groupId:"default"},
+        {deviceId:"",kind:"videoinput",label:"",groupId:""},
+      ]);
     },
-    toJSON() { return {brands:this.brands,mobile:this.mobile,platform:this.platform}; },
+    getUserMedia() { return Promise.reject(new DOMException("NotAllowedError")); },
+    getDisplayMedia() { return Promise.reject(new DOMException("NotAllowedError")); },
+    addEventListener(){}, removeEventListener(){},
   },
   serviceWorker: (function () {
     // Chrome's register() resolves a ServiceWorkerRegistration; pages chain
@@ -6791,27 +6865,76 @@ globalThis.navigator = {
       addEventListener(){}, removeEventListener(){}, dispatchEvent(){ return false; },
     };
   })(),
-  mediaDevices: {
-    enumerateDevices() {
-      return Promise.resolve([
-        {deviceId:"default",kind:"audioinput",label:"",groupId:"default"},
-        {deviceId:"comms",kind:"audioinput",label:"",groupId:"comms"},
-        {deviceId:"default",kind:"audiooutput",label:"",groupId:"default"},
-        {deviceId:"",kind:"videoinput",label:"",groupId:""},
-      ]);
-    },
-    getUserMedia() { return Promise.reject(new DOMException("NotAllowedError")); },
-    getDisplayMedia() { return Promise.reject(new DOMException("NotAllowedError")); },
+  virtualKeyboard: {
+    boundingRect: { x: 0, y: 0, width: 0, height: 0 },
+    overlaysContent: false,
+    show(){}, hide(){}, setBoundingRect(){},
     addEventListener(){}, removeEventListener(){},
   },
-  clipboard: { writeText(){return Promise.resolve();}, readText(){return Promise.resolve("");} },
+  wakeLock: { request() { return Promise.reject(new DOMException("Permission denied.", "NotAllowedError")); } },
+  deviceMemory: 8,
+  userAgentData: {
+    brands: [
+      {brand: "Google Chrome", version: "145"},
+      {brand: "Chromium", version: "145"},
+      {brand: "Not=A?Brand", version: "24"},
+    ],
+    mobile: false,
+    get platform() { return __ditingUADataPlatformFromUA(); },
+    getHighEntropyValues(hints) {
+      const plat = __ditingUADataPlatformFromUA();
+      return Promise.resolve({
+        architecture: "x86",
+        bitness: "64",
+        brands: [{brand:"Google Chrome",version:"145"},{brand:"Chromium",version:"145"},{brand:"Not=A?Brand",version:"24"}],
+        fullVersionList: [{brand:"Google Chrome",version:"145.0.0.0"},{brand:"Chromium",version:"145.0.0.0"},{brand:"Not=A?Brand",version:"24.0.0.0"}],
+        mobile: false,
+        model: "",
+        platform: plat,
+        platformVersion: "15.2.0",
+        uaFullVersion: "145.0.0.0",
+      });
+    },
+    toJSON() { return {brands:this.brands,mobile:this.mobile,platform:this.platform}; },
+  },
+  locks: { request() { return Promise.resolve(); }, query() { return Promise.resolve([]); } },
+  storage: {
+    estimate() { return Promise.resolve({ quota: 5000000000, usage: Math.floor(_fpRand(640) * 100000000) }); },
+    persist() { return Promise.resolve(false); },
+    persisted() { return Promise.resolve(false); },
+  },
+  gpu: {
+    requestAdapter() { return Promise.resolve(null); },
+    getPreferredCanvasFormat() { return 'bgra8unorm'; },
+    wgslLanguageFeatures: { has() { return false; }, size: 0 },
+  },
+  login: { status: "logged-out", setStatus() { return Promise.resolve(); } },
+  ink: { requestPresenter() { return Promise.resolve(null); }, debouncePresenter() { return Promise.resolve(null); } },
+  mediaCapabilities: {
+    decodingInfo() { return Promise.resolve({ supported: true, smooth: true, powerEfficient: true }); },
+    encodingInfo() { return Promise.resolve({ supported: true, smooth: true, powerEfficient: true }); },
+  },
   permissions: { query(params){
     if (params?.name === 'notifications') return Promise.resolve({state:"prompt",onchange:null});
     return Promise.resolve({state:"granted"});
   } },
-  get userActivation() { return __diting_userActivation; },
-  get keyboard() { return __diting_keyboard; },
-  get launchQueue() { return __diting_launchQueue; },
+  devicePosture: { type: "continuous" },
+  hid: { getDevices() { return Promise.resolve([]); }, requestDevice() { return Promise.reject(new DOMException("Permission denied.", "NotAllowedError")); } },
+  mediaSession: {
+    metadata: null, playbackState: "none",
+    setActionHandler(){}, setPositionState(){}, setCameraActive(){}, setMicrophoneActive(){},
+  },
+  presentation: { defaultRequest: null, receiver: null },
+  serial: { getPorts() { return Promise.resolve([]); }, requestPort() { return Promise.reject(new DOMException("Permission denied.", "NotAllowedError")); } },
+  usb: { getDevices() { return Promise.resolve([]); }, requestDevice() { return Promise.reject(new DOMException("Permission denied.", "NotAllowedError")); } },
+  xr: { isSessionSupported() { return Promise.resolve(false); }, ondevicechange: null, addEventListener(){}, removeEventListener(){} },
+  storageBuckets: { keys() { return Promise.resolve([]); }, open() { return Promise.resolve(null); }, delete() { return Promise.resolve(false); }, persist() { return Promise.resolve(false); } },
+  adAuctionComponents() { return Promise.resolve([]); },
+  runAuction() { return Promise.resolve(null); },
+  canLoadAdAuctionFencedFrame() { return false; },
+  canShare() { return false; },
+  share() { return Promise.reject(new DOMException("Permission denied.", "NotAllowedError")); },
+  clearAppBadge() { return Promise.resolve(); },
   getBattery() {
     const bm = Object.create(globalThis.BatteryManager.prototype);
     bm._charging = _fp('batteryCharging');
@@ -6820,81 +6943,49 @@ globalThis.navigator = {
     bm._level = _fp('batteryLevel');
     return Promise.resolve(bm);
   },
-  getGamepads() { return []; },
-  sendBeacon(url, data) {
-    let abs;
-    try {
-      abs = new URL(String(url), _docBase()).href;
-    } catch (e) {
-      return false;
-    }
-    let body = data == null ? "" : data;
-    let hdrs;
-    if (typeof data === "string") {
-      hdrs = { "content-type": "text/plain;charset=UTF-8" };
-    } else if (typeof Blob === "function" && data instanceof Blob) {
-      // fetch already rides blob.type as the content-type.
-    } else if (typeof URLSearchParams === "function" && data instanceof URLSearchParams) {
-      // fetch already applies the urlencoded content-type.
-    } else if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
-      hdrs = { "content-type": "application/octet-stream" };
-    } else if (typeof FormData === "function" && data instanceof FormData) {
-      // fetch serializes multipart with a generated boundary.
-    } else {
-      body = String(data);
-      hdrs = { "content-type": "text/plain;charset=UTF-8" };
-    }
-    // Fire-and-forget: a beacon outlives the page that queued it, so the
-    // response is never observed — the promise is discarded and its rejection
-    // swallowed (a failing endpoint must not surface as an unhandled
-    // rejection). true means the transfer was queued, not delivered.
-    const init = { method: "POST", body, mode: "no-cors", credentials: "include", keepalive: true };
-    if (hdrs) init.headers = hdrs;
-    Promise.resolve(globalThis.fetch(abs, init)).catch(() => {});
-    return true;
-  },
-  javaEnabled() { return false; },
-  geolocation: {
-    getCurrentPosition(success, error) {
-      const pos = globalThis.__diting_makeGeolocationPosition(
-        50.1109 + (_fpRand(500) - 0.5) * 0.1,
-        8.6821 + (_fpRand(501) - 0.5) * 0.1,
-        10 + _fpRand(502) * 40,
-      );
-      if (typeof success === 'function') success(pos);
-    },
-    watchPosition(success, error) {
-      if (typeof success === 'function') {
-        success(globalThis.__diting_makeGeolocationPosition(
-          50.1109 + (_fpRand(503) - 0.5) * 0.1,
-          8.6821 + (_fpRand(504) - 0.5) * 0.1,
-          10 + _fpRand(505) * 40,
-        ));
-      }
-      return 0;
-    },
-    clearWatch() {},
-  },
-  storage: {
-    estimate() { return Promise.resolve({ quota: 5000000000, usage: Math.floor(_fpRand(640) * 100000000) }); },
-    persist() { return Promise.resolve(false); },
-    persisted() { return Promise.resolve(false); },
-  },
+  getUserMedia() { return Promise.reject(new DOMException("Permission denied.", "NotAllowedError")); },
+  requestMIDIAccess() { return Promise.reject(new DOMException("Permission denied.", "NotAllowedError")); },
+  requestMediaKeySystemAccess() { return Promise.reject(new DOMException("Unsupported key system", "NotSupportedError")); },
+  setAppBadge() { return Promise.resolve(); },
+  webkitGetUserMedia(cb, err) { if (err) err(new DOMException("Permission denied.", "NotAllowedError")); },
+  clearOriginJoinedAdInterestGroups() {},
+  createAuctionNonce() { return (globalThis.crypto && globalThis.crypto.randomUUID) ? globalThis.crypto.randomUUID() : ""; },
+  joinAdInterestGroup() { return Promise.resolve(); },
+  leaveAdInterestGroup() { return Promise.resolve(); },
+  updateAdInterestGroups() {},
+  deprecatedReplaceInURN() { return Promise.resolve(null); },
+  deprecatedURNToURL() { return Promise.resolve(null); },
+  getInstalledRelatedApps() { return Promise.resolve([]); },
+  getInterestGroupAdAuctionData() { return Promise.resolve(null); },
+  registerProtocolHandler() {},
+  unregisterProtocolHandler() {},
 };
-// (#78) Interface tags: Chrome reports "[object Navigator]" /
-// "[object Window]" — a plain "[object Object]" is a jsvmp environment-scan
-// tell. Data props defined here survive the V8 snapshot (#37).
-__def(navigator, Symbol.toStringTag, 'Navigator');
-__def(globalThis, Symbol.toStringTag, 'Window');
 // (#104) Chrome exposes the Navigator interface object on window — the
 // Douyin security SDK subclasses it (`class t extends Navigator`) and died
 // with ReferenceError. Illegal constructor like every Chrome interface
-// without [Constructor]; the instance keeps its data props, now sitting on
-// Navigator.prototype so instanceof/getPrototypeOf match Chrome too.
+// without [Constructor]. (#117) all attributes live on the prototype now, so
+// instanceof/getPrototypeOf/key-parity all match Chrome. Prototype accessors
+// survive the V8 snapshot (#37).
 globalThis.Navigator = class Navigator {
   constructor() { throw new TypeError("Illegal constructor"); }
 };
-Object.setPrototypeOf(navigator, globalThis.Navigator.prototype);
+for (const _nk of Object.getOwnPropertyNames(__navStore)) {
+  const _d = Object.getOwnPropertyDescriptor(__navStore, _nk);
+  const _k = _nk;
+  Object.defineProperty(globalThis.Navigator.prototype, _k, {
+    configurable: true, enumerable: true,
+    get: _d.get ? function () { return _d.get.call(__navStore); } : function () { return __navStore[_k]; },
+  });
+}
+__def(globalThis.Navigator.prototype, Symbol.toStringTag, 'Navigator');
+__def(globalThis, Symbol.toStringTag, 'Window');
+globalThis.navigator = Object.create(globalThis.Navigator.prototype);
+// The single sanctioned write path for navigator state (persona refresh,
+// viewport emulation). Pages writing navigator.* directly hit the
+// getter-only prototype accessors and silently no-op — Chrome parity.
+globalThis.__diting_navSet = function(k, v) {
+  Object.defineProperty(__navStore, k, { value: v, writable: true, configurable: true, enumerable: true });
+};
 
 // Key order matches real Chrome's Object.keys(chrome) = ["loadTimes","csi","app","runtime"]
 // (DataDome-class fingerprints read key order, not just membership).
@@ -6942,14 +7033,18 @@ globalThis.WebGL2RenderingContext = class WebGL2RenderingContext {};
 // called with a fake receiver.
 // Shared getParameter implementation with realistic ANGLE values. Array-valued
 // pnames must return iterables — detectors spread them (`[...gl.getParameter(gl.MAX_VIEWPORT_DIMS)]`).
-function _glParam(pname) {
+// (#117) Masked GL strings captured from a real Chrome 145 (macOS, ANGLE
+// Metal). VENDOR/RENDERER are constant across machines; VERSION/SHADING
+// differ per context class — the old returns ("OpenGL ES 3.0 (ANGLE)")
+// match no Chrome. The unmasked 0x9245/0x9246 stay persona-driven.
+function _glParam(pname, isGL2) {
   switch (pname) {
     case 0x9245: return _fp('gpuVendor');
     case 0x9246: return _fp('gpu');
-    case 0x1F01: return 'WebKit WebGL';
     case 0x1F00: return 'WebKit';
-    case 0x1F02: return 'OpenGL ES 3.0 (ANGLE)';
-    case 0x8B8C: return 'WebGL GLSL ES 3.00 (ANGLE)';
+    case 0x1F01: return 'WebKit WebGL';
+    case 0x1F02: return isGL2 ? 'WebGL 2.0 (OpenGL ES 3.0 Chromium)' : 'WebGL 1.0 (OpenGL ES 2.0 Chromium)';
+    case 0x8B8C: return isGL2 ? 'WebGL GLSL ES 3.00 (OpenGL ES 3.0 Chromium)' : 'WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)';
     case 0x0D3A: return new Int32Array([32767, 32767]);   // MAX_VIEWPORT_DIMS
     case 0x846E: return new Float32Array([1, 10]);        // ALIASED_LINE_WIDTH_RANGE
     case 0x846D: return new Float32Array([1, 1024]);      // ALIASED_POINT_SIZE_RANGE
@@ -6982,6 +7077,7 @@ function _glParam(pname) {
 // our Proxy-backed contexts via `prop in target`. Without them, `gl.MAX_VIEWPORT_DIMS`
 // returned our numNoop sentinel instead of 0x0D3A and getParameter got garbage.
 const _GL_CONSTS = {
+  VENDOR: 0x1F00, RENDERER: 0x1F01, VERSION: 0x1F02, SHADING_LANGUAGE_VERSION: 0x8B8C,
   MAX_VIEWPORT_DIMS: 0x0D3A, ALIASED_LINE_WIDTH_RANGE: 0x846E, ALIASED_POINT_SIZE_RANGE: 0x846D,
   DEPTH_RANGE: 0x0B70, COLOR_CLEAR_VALUE: 0x0C22, BLEND_COLOR: 0x0C2D, COMPRESSED_TEXTURE_FORMATS: 0x86A3,
   MAX_TEXTURE_SIZE: 0x0D33, MAX_CUBE_MAP_TEXTURE_SIZE: 0x0D38, MAX_RENDERBUFFER_SIZE: 0x84E8,
@@ -6995,25 +7091,86 @@ const _GL_CONSTS = {
 const _GL_EXT_ANISO = { MAX_TEXTURE_MAX_ANISOTROPY_EXT: 0x84FF };
 const _GL_EXT_DEBUG = { UNMASKED_VENDOR_WEBGL: 0x9245, UNMASKED_RENDERER_WEBGL: 0x9246 };
 const _GL_EXT_LOSE = { loseContext() {}, restoreContext() {} };
-for (const _GLC of [globalThis.WebGLRenderingContext, globalThis.WebGL2RenderingContext]) {
+// (#117) getSupportedExtension lists captured verbatim from a real Chrome 145
+// on macOS (ANGLE/Metal — hence the ASTC/ETC/PVRTC compressed formats). The
+// old 4-item list was a bot tell on its own. Per-platform pools are a
+// follow-up; a captured list beats a guessed one everywhere else.
+const _GL_EXTS1 = [
+  'ANGLE_instanced_arrays', 'EXT_blend_minmax', 'EXT_clip_control', 'EXT_color_buffer_half_float',
+  'EXT_depth_clamp', 'EXT_disjoint_timer_query', 'EXT_float_blend', 'EXT_frag_depth',
+  'EXT_polygon_offset_clamp', 'EXT_shader_texture_lod', 'EXT_texture_compression_bptc',
+  'EXT_texture_compression_rgtc', 'EXT_texture_filter_anisotropic', 'EXT_texture_mirror_clamp_to_edge',
+  'EXT_sRGB', 'KHR_parallel_shader_compile', 'OES_element_index_uint', 'OES_fbo_render_mipmap',
+  'OES_standard_derivatives', 'OES_texture_float', 'OES_texture_float_linear', 'OES_texture_half_float',
+  'OES_texture_half_float_linear', 'OES_vertex_array_object', 'WEBGL_blend_func_extended',
+  'WEBGL_color_buffer_float', 'WEBGL_compressed_texture_astc', 'WEBGL_compressed_texture_etc',
+  'WEBGL_compressed_texture_etc1', 'WEBGL_compressed_texture_pvrtc', 'WEBGL_compressed_texture_s3tc',
+  'WEBGL_compressed_texture_s3tc_srgb', 'WEBGL_debug_renderer_info', 'WEBGL_debug_shaders',
+  'WEBGL_depth_texture', 'WEBGL_draw_buffers', 'WEBGL_lose_context', 'WEBGL_multi_draw',
+  'WEBGL_polygon_mode',
+];
+const _GL_EXTS2 = [
+  'EXT_clip_control', 'EXT_color_buffer_float', 'EXT_color_buffer_half_float',
+  'EXT_conservative_depth', 'EXT_depth_clamp', 'EXT_disjoint_timer_query_webgl2', 'EXT_float_blend',
+  'EXT_polygon_offset_clamp', 'EXT_render_snorm', 'EXT_texture_compression_bptc',
+  'EXT_texture_compression_rgtc', 'EXT_texture_filter_anisotropic', 'EXT_texture_mirror_clamp_to_edge',
+  'EXT_texture_norm16', 'KHR_parallel_shader_compile', 'NV_shader_noperspective_interpolation',
+  'OES_draw_buffers_indexed', 'OES_sample_variables', 'OES_shader_multisample_interpolation',
+  'OES_texture_float_linear', 'WEBGL_blend_func_extended', 'WEBGL_clip_cull_distance',
+  'WEBGL_compressed_texture_astc', 'WEBGL_compressed_texture_etc', 'WEBGL_compressed_texture_etc1',
+  'WEBGL_compressed_texture_pvrtc', 'WEBGL_compressed_texture_s3tc', 'WEBGL_compressed_texture_s3tc_srgb',
+  'WEBGL_debug_renderer_info', 'WEBGL_debug_shaders', 'WEBGL_lose_context', 'WEBGL_multi_draw',
+  'WEBGL_polygon_mode', 'WEBGL_provoking_vertex', 'WEBGL_render_shared_exponent',
+  'WEBGL_stencil_texturing',
+];
+for (const [_GLC, _isGL2] of [[globalThis.WebGLRenderingContext, false], [globalThis.WebGL2RenderingContext, true]]) {
   Object.assign(_GLC.prototype, _GL_CONSTS);
-  _GLC.prototype.getParameter = function(pname) { return _glParam(pname); };
+  const isGL2 = _isGL2;
+  const exts = isGL2 ? _GL_EXTS2 : _GL_EXTS1;
+  _GLC.prototype.getParameter = function(pname) { return _glParam(pname, isGL2); };
   // getExtension must return live objects for the extensions we advertise —
   // detectors chain-read constants off the result
   // (`gl.getExtension('EXT_texture_filter_anisotropic').MAX_TEXTURE_MAX_ANISOTROPY_EXT`).
+  // Constant-bearing extensions get real constant carriers; every other
+  // ADVERTISED name gets a plain object (matching Chrome, where most
+  // extension objects expose no constants); unlisted names get null.
   _GLC.prototype.getExtension = function(name) {
     if (name === 'WEBGL_debug_renderer_info') return _GL_EXT_DEBUG;
     if (name === 'EXT_texture_filter_anisotropic') return _GL_EXT_ANISO;
     if (name === 'WEBGL_lose_context') return _GL_EXT_LOSE;
-    return null;
+    return exts.includes(name) ? {} : null;
   };
-  _GLC.prototype.getSupportedExtensions = function() { return ['WEBGL_debug_renderer_info','EXT_texture_filter_anisotropic','WEBGL_compressed_texture_s3tc','WEBGL_lose_context']; };
+  _GLC.prototype.getSupportedExtensions = function() { return exts.slice(); };
   _GLC.prototype.getShaderPrecisionFormat = function() { return { rangeMin: 127, rangeMax: 127, precision: 23 }; };
   _GLC.prototype.bufferData = function() {};
   _GLC.prototype.readPixels = function(x,y,w,h,f,t,d) { if(d) for(let i=0;i<d.length;i++) d[i]=0; };
 }
 
-globalThis.screen = { width:1920, height:1080, availWidth:1920, availHeight:1040, colorDepth:24, pixelDepth:24, availTop:0, availLeft:0, orientation:{type:"landscape-primary",angle:0,addEventListener(){},removeEventListener(){},dispatchEvent(){return true;}} };
+// (#117) Chrome's screen carries ZERO own enumerable props — every field is
+// a getter on Screen.prototype (probe ground truth: Object.keys(screen) ===
+// []). The persona refresh writes the hidden store via
+// __diting_screenApply, so `screen` (and its orientation object) keeps one
+// identity for the context's whole life, like Chrome's.
+globalThis.Screen = class Screen { constructor() { throw new TypeError("Illegal constructor"); } };
+const __scrStore = {
+  width: 1920, height: 1080, availWidth: 1920, availHeight: 1040,
+  colorDepth: 24, pixelDepth: 24, availTop: 0, availLeft: 0, isExtended: false,
+  orientation: { type: "landscape-primary", angle: 0, addEventListener(){}, removeEventListener(){}, dispatchEvent(){ return true; } },
+};
+for (const _sk of Object.keys(__scrStore)) {
+  const _k = _sk;
+  Object.defineProperty(globalThis.Screen.prototype, _k, {
+    configurable: true, enumerable: true,
+    get() { return __scrStore[_k]; },
+  });
+}
+__def(globalThis.Screen.prototype, Symbol.toStringTag, 'Screen');
+globalThis.screen = Object.create(globalThis.Screen.prototype);
+globalThis.__diting_screenApply = function(sw, sh) {
+  __scrStore.width = sw; __scrStore.height = sh;
+  __scrStore.availWidth = sw; __scrStore.availHeight = sh - 40;
+  __scrStore.availTop = 0; __scrStore.availLeft = 0;
+};
 // visualViewport is a real interface in Chrome — a detector walking
 // Object.getPrototypeOf(visualViewport).constructor.name sees "VisualViewport",
 // and width/height are prototype getters, not own enumerable data props.
@@ -12269,7 +12426,7 @@ _markNative(globalThis.Selection);
   Element.prototype.append, Element.prototype.prepend, Element.prototype.remove,
   Element.prototype.before, Element.prototype.after, Element.prototype.replaceWith,
   HTMLFormElement.prototype.reset,
-  Element.prototype.getContext, Element.prototype.toDataURL, Element.prototype.toBlob,
+  HTMLCanvasElement.prototype.getContext, HTMLCanvasElement.prototype.toDataURL, HTMLCanvasElement.prototype.toBlob,
   Node.prototype.appendChild, Node.prototype.removeChild,
   Node.prototype.replaceChild, Node.prototype.insertBefore,
   Node.prototype.contains, Node.prototype.hasChildNodes, Node.prototype.cloneNode,
@@ -12550,13 +12707,11 @@ class _Canvas2D {
     this.canvas = canvas;
     this._w = canvas.width || 300;
     this._h = canvas.height || 150;
+    // (#117) Pristine canvas = fully transparent black, like Chrome — the
+    // old noise-textured init made every "blank canvas" hash unique, which
+    // no real browser does. What gets hashed now is only what the page
+    // actually drew (fillRect/fillText), deterministic per persona.
     this._buf = new Uint8ClampedArray(this._w * this._h * 4);
-    for (let i = 0; i < this._w * this._h; i++) {
-      this._buf[i*4+0] = 255 + Math.floor(_fpNoise(i % this._w, Math.floor(i / this._w), 0));
-      this._buf[i*4+1] = 255 + Math.floor(_fpNoise(i % this._w, Math.floor(i / this._w), 1));
-      this._buf[i*4+2] = 255 + Math.floor(_fpNoise(i % this._w, Math.floor(i / this._w), 2));
-      this._buf[i*4+3] = 255;
-    }
     this.fillStyle = '#000000';
     this.strokeStyle = '#000000';
     this.lineWidth = 1;
@@ -12620,11 +12775,56 @@ class _Canvas2D {
       for (let l = 0; l < lw; l++) { this._setPixel(Math.round(x)+l, py, r,g,b,a); this._setPixel(Math.round(x+w)-1-l, py, r,g,b,a); }
     }
   }
+  // (#117) Anchor math for blitting a rasterized text tile (width/height/
+  // baseline, RGBA8). alphabetic is the canvas default; the other baselines
+  // map off the tile's baseline. Align shifts x only.
+  _blitText(tile, x, y) {
+    let top;
+    switch (this.textBaseline) {
+      case 'top': case 'hanging': top = y; break;
+      case 'middle': top = y - tile.height / 2; break;
+      case 'bottom': case 'ideographic': top = y - tile.height; break;
+      default: top = y - tile.baseline;
+    }
+    let left = x;
+    if (this.textAlign === 'center') left = x - tile.width / 2;
+    else if (this.textAlign === 'right' || this.textAlign === 'end') left = x - tile.width;
+    const x0 = Math.round(left), y0 = Math.round(top);
+    const d = tile.data;
+    for (let ty = 0; ty < tile.height; ty++) {
+      const py = y0 + ty;
+      if (py < 0 || py >= this._h) continue;
+      for (let tx = 0; tx < tile.width; tx++) {
+        const px = x0 + tx;
+        if (px < 0 || px >= this._w) continue;
+        const i = (ty * tile.width + tx) * 4;
+        if (d[i + 3] === 0) continue;
+        this._setPixel(px, py, d[i], d[i + 1], d[i + 2], d[i + 3]);
+      }
+    }
+  }
   fillText(text, x, y) {
-    const [r,g,b,a] = this._parseColor(this.fillStyle);
-    const fontSize = parseInt(this.font) || 10;
-    const scale = Math.max(1, Math.round(fontSize / 10));
     const str = String(text);
+    const [r, g, b, a] = this._parseColor(this.fillStyle);
+    const fm = String(this.font || '').match(/(\d+(?:\.\d+)?)px/);
+    const fontSize = fm ? Math.round(parseFloat(fm[1])) : 10;
+    // (#117) Real glyph raster (swash, same font book as the page painter)
+    // via the screenshot-gated op; the noise-glyph fallback stays for
+    // builds without the font stack. Deterministic per persona — Chrome's
+    // canvas hash is stable on a machine too.
+    if (_OPS.op_canvas_text) {
+      try {
+        const tile = _OPS.op_canvas_text(
+          str, fontSize,
+          /bold|[6-9]00/.test(String(this.font || '')),
+          /mono|courier|consol/i.test(String(this.font || '')),
+          new Uint8Array([r, g, b, a]),
+        );
+        if (tile && tile.width) this._blitText(tile, x, y);
+        return;
+      } catch (e) { /* fall through to the glyph fallback */ }
+    }
+    const scale = Math.max(1, Math.round(fontSize / 10));
     let cx = Math.round(x);
     for (let i = 0; i < str.length; i++) {
       const code = str.charCodeAt(i);
@@ -12737,7 +12937,11 @@ class _Canvas2D {
   isPointInStroke() { return false; }
 }
 
-Element.prototype.getContext = function getContext(type) {
+// (#117) Canvas-only methods live on HTMLCanvasElement.prototype in Chrome —
+// they used to sit on Element.prototype, so `'toDataURL' in document.body`
+// was true and every non-canvas element answered getContext. Both are bot
+// tells; canvas elements still resolve them through the prototype chain.
+HTMLCanvasElement.prototype.getContext = function getContext(type) {
   if (type === '2d') {
     if (!this._ctx) {
       __def(this, '_ctx', new _Canvas2D(this));
@@ -12804,25 +13008,39 @@ Element.prototype.getContext = function getContext(type) {
   }
   return null;
 };
-Element.prototype.toDataURL = function(type) {
-  if (this._ctx && this._ctx._buf) {
-    const ctx = this._ctx;
-    const w = ctx._w, h = ctx._h, buf = ctx._buf;
-    let hash = _fpSeed;
-    for (let i = 0; i < buf.length; i += 37) {
-      hash = ((hash << 5) - hash + buf[i]) | 0;
-    }
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-    let b64 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg';
-    for (let i = 0; i < 60; i++) {
-      hash = ((hash << 5) - hash + i) | 0;
-      b64 += chars[(hash >>> 0) % 64];
-    }
-    return b64 + '==';
+HTMLCanvasElement.prototype.toDataURL = function(type) {
+  const ctx = this._ctx;
+  if (ctx && ctx._buf && _OPS.op_canvas_png) {
+    try {
+      // (#117) A REAL PNG of the 2D buffer — decodable and dimension-correct
+      // server-side. The old fixed-shape fake base64 failed any PNG decode.
+      // The buffer is Uint8ClampedArray, which op2's #[buffer] arg rejects
+      // ("expected typed ArrayBufferView") — re-view it as Uint8Array over
+      // the same memory, zero-copy.
+      const px = new Uint8Array(ctx._buf.buffer, ctx._buf.byteOffset, ctx._buf.byteLength);
+      const png = new Uint8Array(_OPS.op_canvas_png(ctx._w, ctx._h, px));
+      let s = '';
+      // Chunked: one fromCharCode(...) over the whole buffer blows the arg
+      // limit on real canvas sizes.
+      for (let i = 0; i < png.length; i += 0x8000) {
+        s += String.fromCharCode.apply(null, png.subarray(i, i + 0x8000));
+      }
+      return 'data:image/png;base64,' + btoa(s);
+    } catch (e) { /* fall through to the seeded stub */ }
   }
   return _fp('canvasFingerprint');
 };
-Element.prototype.toBlob = function(cb, type, q) { cb(new Blob([''])); };
+HTMLCanvasElement.prototype.toBlob = function(cb, type, q) {
+  const ctx = this._ctx;
+  if (ctx && ctx._buf && _OPS.op_canvas_png) {
+    try {
+      const px = new Uint8Array(ctx._buf.buffer, ctx._buf.byteOffset, ctx._buf.byteLength);
+      cb(new Blob([new Uint8Array(_OPS.op_canvas_png(ctx._w, ctx._h, px))], { type: 'image/png' }));
+      return;
+    } catch (e) {}
+  }
+  cb(new Blob(['']));
+};
 // Chrome desktop media support matrix — WorkOS Radar's mediaMime collector
 // probes audio/video elements with canPlayType over a fixed codec list and
 // hashes the non-empty answers (real Chrome: 8 of 9).
@@ -13304,9 +13522,9 @@ _markNative(Element.prototype.play);
 _markNative(Element.prototype.pause);
 _markNative(Element.prototype.load);
 
-_markNative(Element.prototype.getContext);
-_markNative(Element.prototype.toDataURL);
-_markNative(Element.prototype.toBlob);
+_markNative(HTMLCanvasElement.prototype.getContext);
+_markNative(HTMLCanvasElement.prototype.toDataURL);
+_markNative(HTMLCanvasElement.prototype.toBlob);
 
 Element.prototype.attachShadow = function attachShadow(opts) {
   var _mode = opts == null ? undefined : opts.mode;
@@ -16162,7 +16380,7 @@ if (typeof ShadowRoot !== 'undefined' && !ShadowRoot.prototype.elementFromPoint)
 globalThis.__diting_setPersona = function() {
   const scr = _fp('screen');
   const sw = scr[0], sh = scr[1];
-  globalThis.screen = { width:sw, height:sh, availWidth:sw, availHeight:sh-40, colorDepth:24, pixelDepth:24, availTop:0, availLeft:0, orientation:{type:"landscape-primary",angle:0,addEventListener(){},removeEventListener(){},dispatchEvent(){return true;}} };
+  globalThis.__diting_screenApply(sw, sh);
   globalThis.visualViewport = globalThis.__diting_makeVisualViewport(sw, sh - 80);
   // From the persona pool, so a retina Mac panel reports 2x (the old
   // width-only heuristic gave 1x on 1512x982 — impossible for that panel).
@@ -16187,8 +16405,8 @@ globalThis.__diting_setPersona = function() {
     globalThis.__diting_mem = mems[Math.floor(_fpRand(401) * mems.length)];
     globalThis.__diting_hw_plat = plat;
   }
-  globalThis.navigator.hardwareConcurrency = globalThis.__diting_hw;
-  globalThis.navigator.deviceMemory = globalThis.__diting_mem;
+  globalThis.__diting_navSet('hardwareConcurrency', globalThis.__diting_hw);
+  globalThis.__diting_navSet('deviceMemory', globalThis.__diting_mem);
 };
 
 // Viewport override for session_viewport / CDP setDeviceMetricsOverride.
@@ -16210,11 +16428,9 @@ globalThis.__diting_setViewport = function(w, h, mobile, dpr) {
   globalThis.visualViewport = globalThis.__diting_makeVisualViewport(w, h);
   globalThis.__diting_mq_mobile = mobile ? _MQ_MOBILE_TABLE : null;
   globalThis.__diting_mqRecompute();
-  try {
-    Object.defineProperty(globalThis.navigator, 'maxTouchPoints', {
-      value: mobile ? 5 : 0, configurable: true, enumerable: true, writable: true,
-    });
-  } catch (e) {}
+  // (#117) through the store: defineProperty on the hoisted instance would
+  // materialize an OWN prop and break Object.keys(navigator) === [].
+  globalThis.__diting_navSet('maxTouchPoints', mobile ? 5 : 0);
   // Feed the Rust layout ICB so element rects and @media cascade see the
   // same width the scripts do.
   try { _domRaw("set_viewport", String(w), String(h)); } catch (e) {}
@@ -16229,11 +16445,7 @@ globalThis.__diting_setViewport = function(w, h, mobile, dpr) {
 globalThis.__diting_clearViewport = function() {
   globalThis.__diting_mq_mobile = null;
   globalThis.__diting_mqRecompute();
-  try {
-    Object.defineProperty(globalThis.navigator, 'maxTouchPoints', {
-      value: 0, configurable: true, enumerable: true, writable: true,
-    });
-  } catch (e) {}
+  globalThis.__diting_navSet('maxTouchPoints', 0);
   __diting_setPersona();
   try { globalThis.dispatchEvent(new Event('resize')); } catch (e) {}
   // Media queries re-evaluated after the resize: subscribed MQLs that

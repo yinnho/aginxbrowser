@@ -179,3 +179,8 @@ wreq = { version = "=6.0.0-rc.31", optional = true, features = ["socks", "gzip",
 
 [build-dependencies]
 deno_core = "0.411"
+
+[dev-dependencies]
+# Test-only decode oracle for the hand-rolled canvas PNG encoder (#117):
+# the product never links it in default builds (it stays behind `screenshot`).
+png = "0.18"

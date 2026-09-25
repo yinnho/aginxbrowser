@@ -2793,6 +2793,7 @@ fn sticky_shifts(gs: &JsState, dom: &DomTree) -> std::rc::Rc<HashMap<NodeId, [f3
 
 #[cfg(feature = "screenshot")]
 mod band;
+mod canvas;
 mod ecdsa;
 #[cfg(feature = "screenshot")]
 pub use band::BandFrame;
@@ -2800,6 +2801,9 @@ pub use band::BandFrame;
 pub(crate) use band::{
     band_frame, band_frame_cut, band_frame_cut_with_text, band_frame_with_text,
 };
+pub(crate) use canvas::op_canvas_png;
+#[cfg(feature = "screenshot")]
+pub(crate) use canvas::op_canvas_text;
 pub(crate) use ecdsa::{
     op_subtle_ecdh_derive_bits, op_subtle_ecdsa_generate, op_subtle_ecdsa_import_private,
     op_subtle_ecdsa_import_public, op_subtle_ecdsa_sign, op_subtle_ecdsa_verify,
@@ -6498,6 +6502,9 @@ pub fn build_extension() -> Extension {
             op_fetch_url(),
             op_fetch_url_sync(),
             op_image_info(),
+            op_canvas_png(),
+            #[cfg(feature = "screenshot")]
+            op_canvas_text(),
             op_get_cookies(),
             op_set_cookie(),
             op_storage_read(),

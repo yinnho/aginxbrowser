@@ -3846,6 +3846,251 @@
         assert_eq!(v[5], serde_json::json!("Navigator"), "toStringTag survives");
     }
 
+    /// (#117/F1) The masked GL strings carry the Chrome 145 constants and
+    /// VENDOR/RENDERER/VERSION/SHADING_LANGUAGE_VERSION resolve through the
+    /// context (they were missing from _GL_CONSTS, so fp.js read
+    /// `gl.VERSION` as undefined and got the default:0 branch — the server
+    /// saw a number where every browser sends a string). VERSION/SHADING
+    /// differ per context class.
+    #[tokio::test(flavor = "current_thread")]
+    async fn webgl_masked_strings_match_chrome() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    // Two canvases: our getContext caches the first context
+                    // per canvas, and fp probes always burn a fresh canvas.
+                    const g1 = document.createElement('canvas').getContext('webgl');
+                    const g2 = document.createElement('canvas').getContext('webgl2');
+                    const consts = [g1.VENDOR, g1.RENDERER, g1.VERSION, g1.SHADING_LANGUAGE_VERSION];
+                    const v1 = [g1.getParameter(g1.VENDOR), g1.getParameter(g1.RENDERER),
+                                g1.getParameter(g1.VERSION), g1.getParameter(g1.SHADING_LANGUAGE_VERSION)];
+                    const v2 = [g2.getParameter(g2.VERSION), g2.getParameter(g2.SHADING_LANGUAGE_VERSION)];
+                    return [consts, v1, v2];
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let v = result.value.unwrap();
+        assert_eq!(
+            v[0],
+            serde_json::json!([0x1F00, 0x1F01, 0x1F02, 0x8B8C]),
+            "the four pname constants resolve on the context"
+        );
+        assert_eq!(
+            v[1],
+            serde_json::json!([
+                "WebKit",
+                "WebKit WebGL",
+                "WebGL 1.0 (OpenGL ES 2.0 Chromium)",
+                "WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)"
+            ]),
+            "webgl1 masked strings (Chrome 145 capture)"
+        );
+        assert_eq!(
+            v[2],
+            serde_json::json!([
+                "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+                "WebGL GLSL ES 3.00 (OpenGL ES 3.0 Chromium)"
+            ]),
+            "webgl2 masked strings"
+        );
+    }
+
+    /// (#117/F2) getSupportedExtensions serves the captured Chrome 145 lists
+    /// (39 webgl1 / 36 webgl2) — the old hardcoded 4-item list was a bot
+    /// tell on its own — and getExtension answers every advertised name.
+    #[tokio::test(flavor = "current_thread")]
+    async fn webgl_extension_lists_match_chrome_capture() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const g1 = document.createElement('canvas').getContext('webgl');
+                    const g2 = document.createElement('canvas').getContext('webgl2');
+                    const e1 = g1.getSupportedExtensions(), e2 = g2.getSupportedExtensions();
+                    return [
+                        e1.length, e2.length,
+                        e1.includes('WEBGL_debug_renderer_info'),
+                        e1.includes('EXT_sRGB'),
+                        e2.includes('EXT_conservative_depth'),
+                        !e2.includes('EXT_sRGB'),
+                        typeof g1.getExtension('WEBGL_lose_context').loseContext,
+                        g1.getExtension('no_such_extension_xyz') === null,
+                        typeof g1.getExtension('EXT_sRGB'),
+                    ];
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let v = result.value.unwrap();
+        assert_eq!(v[0], serde_json::json!(39), "webgl1 extension count");
+        assert_eq!(v[1], serde_json::json!(36), "webgl2 extension count");
+        assert_eq!(v[2], serde_json::json!(true));
+        assert_eq!(v[3], serde_json::json!(true), "EXT_sRGB is webgl1-only");
+        assert_eq!(v[4], serde_json::json!(true), "EXT_conservative_depth is webgl2-only");
+        assert_eq!(v[5], serde_json::json!(true));
+        assert_eq!(v[6], serde_json::json!("function"), "loseContext live object");
+        assert_eq!(v[7], serde_json::json!(true), "unlisted name -> null");
+        assert_eq!(v[8], serde_json::json!("object"), "advertised name -> object");
+    }
+
+    /// (#117/F3) toDataURL returns a REAL PNG — magic bytes, IHDR width/
+    /// height matching the canvas, stable across calls, and content-
+    /// dependent (fillRect+fillText change it). The old stub returned a
+    /// fixed-shape fake base64 that fails any server-side decode.
+    #[tokio::test(flavor = "current_thread")]
+    async fn canvas_toDataURL_is_a_real_png() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const c = document.createElement('canvas');
+                    c.width = 220; c.height = 30;
+                    const pristine = c.toDataURL();
+                    const pristine2 = c.toDataURL();
+                    const x = c.getContext('2d');
+                    x.textBaseline = 'top';
+                    x.font = "14px 'Arial'";
+                    x.fillStyle = '#f60';
+                    x.fillRect(0, 0, 110, 30);
+                    x.fillStyle = '#069';
+                    x.fillText('mmmmmmmmlli ~@#', 2, 2);
+                    const drawn = c.toDataURL();
+                    const b64 = drawn.slice(drawn.indexOf(',') + 1);
+                    const bin = atob(b64);
+                    const sig = [bin.charCodeAt(0), bin.charCodeAt(1), bin.charCodeAt(2), bin.charCodeAt(3)];
+                    const ihdrW = (bin.charCodeAt(16) << 24 | bin.charCodeAt(17) << 16 |
+                                   bin.charCodeAt(18) << 8 | bin.charCodeAt(19)) >>> 0;
+                    const ihdrH = (bin.charCodeAt(20) << 24 | bin.charCodeAt(21) << 16 |
+                                   bin.charCodeAt(22) << 8 | bin.charCodeAt(23)) >>> 0;
+                    const blob = await new Promise((res) => {
+                        const cc = document.createElement('canvas');
+                        cc.width = 10; cc.height = 10;
+                        cc.getContext('2d');
+                        cc.toBlob(res);
+                    });
+                    return [sig, ihdrW, ihdrH, pristine === pristine2, pristine !== drawn,
+                            drawn.length > 300, blob.size > 50, blob.type];
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let v = result.value.unwrap();
+        assert_eq!(v[0], serde_json::json!([137, 80, 78, 71]), "PNG magic bytes");
+        assert_eq!(v[1], serde_json::json!(220), "IHDR width");
+        assert_eq!(v[2], serde_json::json!(30), "IHDR height");
+        assert_eq!(v[3], serde_json::json!(true), "stable across reads");
+        assert_eq!(v[4], serde_json::json!(true), "drawing changes the PNG");
+        assert_eq!(v[5], serde_json::json!(true), "fingerprint-size payload");
+        assert_eq!(v[6], serde_json::json!(true), "toBlob carries real bytes");
+        assert_eq!(v[7], serde_json::json!("image/png"), "toBlob MIME");
+    }
+
+    /// (#117/F4) navigator/screen carry ZERO own enumerable props (Chrome
+    /// ground truth: Object.keys(navigator) === []), the Chrome 145
+    /// prototype key set is present, page writes against the getter-only
+    /// prototype accessors no-op, and the sanctioned internal write path
+    /// (__diting_navSet) still moves values.
+    #[tokio::test(flavor = "current_thread")]
+    async fn navigator_screen_own_props_hoisted_to_prototype() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const navKeys = Object.keys(navigator).length;
+                    const protoKeys = Object.keys(Object.getPrototypeOf(navigator));
+                    const chromeOnlyKeys = ['vendorSub', 'appCodeName', 'appName', 'vibrate',
+                                            'getInstalledRelatedApps', 'credentials', 'gpu'].every(
+                        (k) => protoKeys.includes(k));
+                    const scrKeys = Object.keys(screen).length;
+                    const scrW = screen.width > 0;
+                    const uaGetter = !!Object.getOwnPropertyDescriptor(Navigator.prototype, 'userAgent').get;
+                    navigator.hardwareConcurrency = 2;
+                    const pageWriteIgnored = navigator.hardwareConcurrency !== 2;
+                    globalThis.__diting_navSet('hardwareConcurrency', 3);
+                    const navSetMoves = navigator.hardwareConcurrency === 3;
+                    const tag = Object.prototype.toString.call(navigator);
+                    return [navKeys, protoKeys.length, chromeOnlyKeys, scrKeys, scrW,
+                            uaGetter, pageWriteIgnored, navSetMoves, tag];
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let v = result.value.unwrap();
+        assert_eq!(v[0], serde_json::json!(0), "Object.keys(navigator) is empty");
+        assert_eq!(v[1], serde_json::json!(83), "Chrome 145's exact 83-key prototype face");
+        assert_eq!(v[2], serde_json::json!(true), "previously missing keys present");
+        assert_eq!(v[3], serde_json::json!(0), "Object.keys(screen) is empty");
+        assert_eq!(v[4], serde_json::json!(true), "screen.width still reads");
+        assert_eq!(v[5], serde_json::json!(true), "prototype accessor (not data prop)");
+        assert_eq!(v[6], serde_json::json!(true), "page write no-ops like Chrome");
+        assert_eq!(v[7], serde_json::json!(true), "__diting_navSet moves the value");
+        assert_eq!(v[8], serde_json::json!("[object Navigator]"), "toStringTag survives the hoist");
+    }
+
+    /// (#117/F5) Canvas-only methods live on HTMLCanvasElement.prototype —
+    /// `'toDataURL' in document.body` and `'getContext' in <div>` are both
+    /// false (they were true when the methods sat on Element.prototype),
+    /// while canvas elements keep working through the prototype chain.
+    #[tokio::test(flavor = "current_thread")]
+    async fn canvas_methods_left_element_prototype() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const bodyHas = 'toDataURL' in document.body;
+                    const divHasCtx = 'getContext' in document.createElement('div');
+                    const canvasHasAll = ['getContext', 'toDataURL', 'toBlob'].every(
+                        (m) => typeof document.createElement('canvas')[m] === 'function');
+                    let draws = false;
+                    try {
+                        const c = document.createElement('canvas');
+                        const x = c.getContext('2d');
+                        x.font = '14px Arial';
+                        x.fillText('hi', 2, 2);
+                        x.fillRect(0, 0, 5, 5);
+                        draws = c.toDataURL().indexOf('data:image/png;base64,') === 0;
+                    } catch (e) {}
+                    const onCanvasProto = Object.getPrototypeOf(document.createElement('canvas')) === HTMLCanvasElement.prototype;
+                    return [!bodyHas, !divHasCtx, canvasHasAll, draws, onCanvasProto];
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let v = result.value.unwrap();
+        assert_eq!(v[0], serde_json::json!(true), "body no longer answers toDataURL");
+        assert_eq!(v[1], serde_json::json!(true), "div no longer answers getContext");
+        assert_eq!(v[2], serde_json::json!(true), "canvas keeps all three");
+        assert_eq!(v[3], serde_json::json!(true), "2d draw + encode still works");
+        assert_eq!(v[4], serde_json::json!(true), "canvas prototype chain intact");
+    }
+
     /// (#105) innerWidth/innerHeight/outer* are getter-only accessors like
     /// Chrome's — a page's plain assignment must be ignored (a resize
     /// polyfill on douyin overwrote them with document extents and skewed
