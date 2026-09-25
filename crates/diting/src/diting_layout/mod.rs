@@ -8691,6 +8691,8 @@ pub fn compute_styles_timed_within(
 
 #[cfg(test)]
 mod fork_deltas;
+#[cfg(test)]
+mod fork_table_deltas;
 
 // (The dual-engine bridge_cross_check tests moved to the product crate with
 // the workspace split — src/bridge_cross_check.rs — so diting carries zero
