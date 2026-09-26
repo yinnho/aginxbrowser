@@ -84,7 +84,7 @@ curl http://127.0.0.1:8089/health
 |----|------|
 | `auto` | HTTP 直取优先，内容不足时自动回退浏览器（**推荐**，默认） |
 | `http` | 纯 HTTP，不走浏览器。最快但拿不到 JS 渲染内容 |
-| `obscura` | 强制走 obscura 浏览器渲染。最慢但最可靠 |
+| `browser` | 强制走 JS 浏览器。最慢但最可靠。`obscura` 仍能解析，不要再写进调用 |
 
 **tls_fingerprint 选项（需 `--features stealth`）：**
 
@@ -422,7 +422,7 @@ curl -sS -X POST http://127.0.0.1:8089/download \
 
 把页面 JS 渲染后的 DOM 渲染成 PNG 截图（base64 返回）。**需 `--features screenshot` 构建**（默认不含，见构建章节）。
 
-不走 `/fetch` 的分层渲染——始终驱动 obscura 浏览器跑完 JS，再喂给内置 Blitz 渲染栈（Stylo + Taffy + vello_cpu，纯 CPU，无 Chromium）。
+不走 `/fetch` 的分层渲染——始终驱动 JS 浏览器跑完脚本，再交给内置 diting 绘制（CSS 级联 + Taffy 布局 + CPU 绘制，无 Chromium）。对照用的 Blitz 管线要 `--features blitz-reference`，默认构建不包含。
 
 **请求字段：**
 
@@ -1086,7 +1086,7 @@ HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支
 | use_proxy | bool | | `false` | 走代理 |
 | max_chars | usize | | `50000` | 截断字符数 |
 | auto_bypass_challenge | bool | | `true` | 自动绕过 Cloudflare Turnstile |
-| render_tier | string | | `"auto"` | 渲染策略：`auto` / `http` / `obscura` |
+| render_tier | string | | `"auto"` | 渲染策略：`auto` / `http` / `browser` |
 | tls_fingerprint | string | | `null` | TLS 指纹 |
 | js_extract | object | | `null` | JS 数据提取：`{expression, timeout_ms}` |
 | sanitize | bool | | `true` | 从 text/markdown 输出剥 prompt injection 载体（零宽字符、隐藏 span 文本、指令形状的行）；有动作时响应带 `sanitize_report` |

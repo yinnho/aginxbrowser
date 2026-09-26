@@ -333,7 +333,7 @@ fn tier1_eligible(req: &crate::FetchRequest) -> bool {
         return false;
     }
     match req.render_tier {
-        RenderTier::Obscura => false,
+        RenderTier::Browser => false,
         RenderTier::Auto => !tier1_host_blocklisted(&req.url),
         RenderTier::Http => true,
     }
@@ -483,7 +483,7 @@ mod tests {
         let wx = "https://mp.weixin.qq.com/s?src=11&timestamp=1&signature=x";
         assert!(!tier1_eligible(&tier_req(wx, RenderTier::Auto)));
         assert!(tier1_eligible(&tier_req(wx, RenderTier::Http)), "explicit http is the caller's call");
-        assert!(!tier1_eligible(&tier_req(wx, RenderTier::Obscura)));
+        assert!(!tier1_eligible(&tier_req(wx, RenderTier::Browser)));
         assert!(tier1_eligible(&tier_req("https://example.com/a", RenderTier::Auto)));
     }
 

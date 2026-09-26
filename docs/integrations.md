@@ -43,6 +43,26 @@ page.route("**/slow.json", lambda route: route.continue_(url=url.replace("/slow"
 
 Boundaries: document/subresource loads take the navigation transport and are not intercepted (route page-initiated `fetch()` calls instead); Response-stage interception and `takeResponseBodyAsStream` are not implemented. A pause that outlives the command which created it (e.g. `evaluate` awaiting its own intercepted fetch) falls through to the real request after a bounded resolution timeout rather than hanging the connection.
 
+`GET /json/unimplemented` returns those two holes as JSON, next to `/json/version`, so a client can read them before it connects:
+
+```json
+{"unimplemented":[
+  {"surface":"Fetch.requestPaused","gap":"document and subresource loads use the navigation transport and are not interceptable","works":"script-initiated fetch() and XHR pause at the Request stage"},
+  {"surface":"Fetch.takeResponseBodyAsStream","gap":"Response-stage interception is not implemented"}
+]}
+```
+
+### Hermes
+
+Hermes already attaches to any CDP endpoint. There is no `engine: aginxbrowser` name in Hermes; point the existing key at this server:
+
+```yaml
+browser:
+  cdp_url: http://127.0.0.1:8089
+```
+
+`BROWSER_CDP_URL=http://127.0.0.1:8089` is the same attachment. Default listen port is 8089.
+
 ### Screenshots & screencast (`Page.captureScreenshot` / `startScreencast`)
 
 `captureScreenshot` honors the CDP params, and the `clip` coordinate world flips with `captureBeyondViewport` exactly as in Chrome:

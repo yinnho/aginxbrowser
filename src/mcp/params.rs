@@ -31,7 +31,7 @@ pub struct FetchParams {
     /// Auto-detect and bypass Cloudflare Turnstile challenges (default: true)
     #[serde(default = "default_true")]
     pub auto_bypass_challenge: bool,
-    /// Rendering strategy: "auto" (default), "http", or "obscura"
+    /// Rendering strategy: "auto" (default), "http", or "browser"
     #[serde(default)]
     pub render_tier: crate::RenderTier,
     /// TLS fingerprint override (stealth mode only): "chrome145", "firefox133", etc.

@@ -96,9 +96,9 @@ pub enum RenderTier {
     /// Pure HTTP, no V8/JS. Fastest; misses JS-rendered content.
     Http,
     /// Always use the diting browser (current behaviour pre-tiering).
-    /// "browser" is accepted as an alias — agents guess it before "obscura".
-    #[serde(alias = "browser")]
-    Obscura,
+    /// Wire name is "browser". "obscura" is still accepted and not advertised.
+    #[serde(alias = "obscura")]
+    Browser,
 }
 
 fn default_max_chars() -> usize {
@@ -653,11 +653,18 @@ mod tests {
         assert_eq!(r.time_range.as_deref(), Some("day"));
     }
 
-    // "browser" is what agents guess before "obscura" — accept both.
+    // "browser" is the name callers should send. "obscura" stays accepted.
     #[test]
-    fn render_tier_accepts_browser_alias_for_obscura() {
-        let r: FetchRequest =
+    fn render_tier_browser_is_canonical_and_obscura_still_parses() {
+        let browser: FetchRequest =
             serde_json::from_str(r#"{"url":"https://e.com","render_tier":"browser"}"#).unwrap();
-        assert_eq!(r.render_tier, RenderTier::Obscura);
+        let legacy: FetchRequest =
+            serde_json::from_str(r#"{"url":"https://e.com","render_tier":"obscura"}"#).unwrap();
+        assert_eq!(browser.render_tier, RenderTier::Browser);
+        assert_eq!(legacy.render_tier, RenderTier::Browser);
+        assert_eq!(
+            serde_json::to_value(RenderTier::Browser).unwrap(),
+            serde_json::json!("browser")
+        );
     }
 }

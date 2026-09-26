@@ -84,7 +84,7 @@ Fetch a page and return its content. Supports tiered rendering, automatic Cloudf
 |----|------|
 | `auto` | Direct HTTP fetch first; automatically fall back to the browser when content is insufficient (**recommended**, default) |
 | `http` | Pure HTTP, no browser. Fastest but cannot capture JS-rendered content |
-| `obscura` / `browser` | Force the full JS browser. Slowest but most reliable |
+| `browser` | Force the full JS browser. Slowest but most reliable. `obscura` is still accepted and is not the name to send |
 
 > **JS-heavy SPA sites** (cls.cn, juejin-class feeds, WeChat articles) render their content client-side: with `auto` the HTTP pass returns a small skeleton and the sufficiency gate usually catches it, but a site that returns a *plausible-looking* stub defeats the heuristic. When you know the target is an SPA, pass `"render_tier":"browser"` explicitly — you skip a wasted HTTP round-trip and get the rendered page directly. The `tier` field in the response tells you which path served a given fetch.
 >
@@ -486,7 +486,7 @@ curl -sS -X POST http://127.0.0.1:8089/download \
 
 Render the page's post-JS DOM into a PNG screenshot (returned as base64). **Requires building with `--features screenshot`** (not included by default; see the build section).
 
-Does not use `/fetch`'s tiered rendering — it always drives the obscura browser through full JS execution, then renders the result with the built-in diting engine (our own CSS cascade + Taffy box layout + CPU paint, no Chromium). Pass `"engine": "blitz"` to opt into the Blitz reference pipeline for comparison renders — that requires building with `--features blitz-reference` (blitz is not compiled in by default).
+Does not use `/fetch`'s tiered rendering — it always drives the JS browser through full execution, then renders the result with the built-in diting engine (CSS cascade + Taffy box layout + CPU paint, no Chromium). Pass `"engine": "blitz"` to opt into the Blitz reference pipeline for comparison renders — that requires building with `--features blitz-reference` (blitz is not compiled in by default).
 
 **Request fields:**
 
@@ -1653,7 +1653,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | use_proxy | bool | | `false` | Route through a proxy |
 | max_chars | usize | | `50000` | Character truncation limit |
 | auto_bypass_challenge | bool | | `true` | Automatically bypass Cloudflare Turnstile |
-| render_tier | string | | `"auto"` | Rendering strategy: `auto` / `http` / `obscura` |
+| render_tier | string | | `"auto"` | Rendering strategy: `auto` / `http` / `browser` |
 | tls_fingerprint | string | | `null` | TLS fingerprint |
 | js_extract | object | | `null` | JS data extraction: `{expression, timeout_ms}` |
 | sanitize | bool | | `true` | Strip prompt-injection carriers (zero-width chars, hidden-span text, instruction-shaped lines) from text/markdown output; response carries a `sanitize_report` when anything fired |

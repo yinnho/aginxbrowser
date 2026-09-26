@@ -40,7 +40,7 @@ pub struct AginxBrowserMcp {
 #[tool_router]
 impl AginxBrowserMcp {
     #[tool(
-        description = "Fetch a webpage and return clean markdown/html/text. Use whenever the agent needs to READ any web page - blogs, docs, articles, JS-rendered SPAs, Cloudflare-protected sites. Static pages are served over plain HTTP (~100ms tier:\"http\"); pages that need JS get the full browser (tier:\"browser\"). render_tier selects auto (default) / http (pure HTTP, refuses the upgrade) / obscura (always browser).",
+        description = "Fetch a webpage and return clean markdown/html/text. Use whenever the agent needs to READ any web page - blogs, docs, articles, JS-rendered SPAs, Cloudflare-protected sites. Static pages are served over plain HTTP (~100ms tier:\"http\"); pages that need JS get the full browser (tier:\"browser\"). render_tier selects auto (default) / http (pure HTTP, refuses the upgrade) / browser (always the JS browser).",
         annotations(title = "Fetch Webpage", read_only_hint = true)
     )]
     async fn fetch(&self, Parameters(params): Parameters<FetchParams>) -> String {

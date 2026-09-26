@@ -105,7 +105,7 @@ mod sanitize_fetch_tests {
             cookies: vec![],
             max_chars: 0,
             auto_bypass_challenge: false,
-            render_tier: RenderTier::Obscura,
+            render_tier: RenderTier::Browser,
             tls_fingerprint: None,
             js_extract: None,
             sanitize,
