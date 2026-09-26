@@ -1289,3 +1289,66 @@ mod float_continuation_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod anon_cell_stale_key_tests {
+    // #119: an anonymous table cell whose members are all inline-level used
+    // to unwrap-and-free EVERY kid as if it were a run-wrapper shell. But an
+    // out-of-flow replaced atom (the tmall publish page's absolute-positioned
+    // textarea) is pushed to `direct` BARE — it owns its node_map entry, so
+    // freeing it stranded a stale SlotMap key that panicked the reparent
+    // pass's parent() on every layout rebuild. The merge must only unwrap
+    // kids that are actually registered run wrappers.
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_layout::compute_styles;
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::layout_dom_with_paint_order_and_images;
+
+    fn layout(sheet: &str, body: &str) -> std::collections::HashMap<crate::diting_dom::tree::NodeId, (f32, f32, f32, f32)> {
+        let html = format!("<html><body>{body}</body></html>");
+        let tree = parse_html(&html);
+        let rules = parse_stylesheet_for(sheet, (800.0, 600.0), CssMediaType::Screen);
+        let styles = compute_styles(&tree, &rules, (1280.0, 720.0));
+        let (rects, _, _, _, _, _) = layout_dom_with_paint_order_and_images(
+            &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
+        );
+        rects
+            .into_iter()
+            .map(|(k, r)| (k, (r.x, r.y, r.width, r.height)))
+            .collect()
+    }
+
+    // The fixture table is authored with `display:table`/`display:table-row`
+    // DIVS on purpose: html5ever foster-parents stray content out of a real
+    // `<tr>`, so an HTML-source `<tr>hello<textarea/></tr>` never forms the
+    // anonymous cell at all (that is why an earlier draft of these tests
+    // stayed green on the buggy code). The tmall tree is built by JS
+    // appendChild — no parser rescue — and the div shape reproduces it.
+    #[test]
+    fn abs_textarea_in_anon_cell_survives_wrapper_merge() {
+        // Before the fix this PANICKED in taffy parent() via the reparent
+        // pass (invalid SlotMap key). Now the bare atom rides the merged
+        // wrapper and the solve completes with the textarea's box present.
+        let rects = layout(
+            "body { margin: 0 }",
+            r#"<div style="display: table"><div style="display: table-row">hello<textarea style="position: absolute; top: 5px; left: 7px; width: 40px; height: 20px"></textarea></div></div>"#,
+        );
+        let ta: Vec<_> = rects.values().filter(|(_, _, w, h)| *w == 40.0 && *h == 20.0).collect();
+        assert_eq!(ta.len(), 1, "textarea box missing from layout: {rects:?}");
+        let (x, y, _, _) = ta[0];
+        assert!((x - 7.0).abs() <= 1.0 && (y - 5.0).abs() <= 1.0, "abs insets not honored: {x},{y}");
+    }
+
+    #[test]
+    fn abs_inline_box_in_anon_cell_survives_wrapper_merge() {
+        // Same hole for a non-replaced out-of-flow inline: its element box
+        // also lands bare in `direct` (the inline-flatten path excludes
+        // out-of-flow members).
+        let rects = layout(
+            "body { margin: 0 }",
+            r#"<div style="display: table"><div style="display: table-row">hi<span style="position: absolute; top: 3px; left: 4px; width: 30px; height: 12px"></span></div></div>"#,
+        );
+        let sp: Vec<_> = rects.values().filter(|(_, _, w, h)| *w == 30.0 && *h == 12.0).collect();
+        assert_eq!(sp.len(), 1, "abs inline box missing from layout: {rects:?}");
+    }
+}

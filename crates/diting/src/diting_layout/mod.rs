@@ -3055,11 +3055,24 @@ fn build_table(
                             // wrap container wrap at exact-fit widths. Kids
                             // are reparented before the empty shells drop
                             // (the span-flatten order at the sibling path).
+                            // ONLY true run wrappers are shells: a bare
+                            // member in `kids` — an out-of-flow replaced
+                            // atom leaf or abs-positioned inline box pushed
+                            // straight to `direct` — owns its node_map
+                            // entry; unwrapping-and-freeing it would strand
+                            // a stale SlotMap key and panic the reparent
+                            // pass on every rebuild (#119).
                             let mut leaves: Vec<taffy::tree::NodeId> = Vec::new();
+                            let mut shells: Vec<taffy::tree::NodeId> = Vec::new();
                             for w in &kids {
-                                leaves.extend(taffy_tree.children(*w).unwrap_or_default().to_vec());
+                                if run_wrappers.contains(w) {
+                                    shells.push(*w);
+                                    leaves.extend(taffy_tree.children(*w).unwrap_or_default().to_vec());
+                                } else {
+                                    leaves.push(*w);
+                                }
                             }
-                            for w in kids {
+                            for w in shells {
                                 run_wrappers.retain(|r| r != &w);
                                 let _ = taffy_tree.remove(w);
                             }
