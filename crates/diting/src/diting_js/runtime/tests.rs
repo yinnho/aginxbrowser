@@ -5728,6 +5728,22 @@
             out.mimeIdentity = navigator.mimeTypes === navigator.mimeTypes;
             out.pluginLength = navigator.plugins[0] && navigator.plugins[0].length;
             out.mimeIsInstance = navigator.mimeTypes instanceof MimeTypeArray;
+            // (#125) Chrome's PDF persona is a linked graph, verified against
+            // a real headless Chrome 145 dump: each plugin carries both mime
+            // types as members (length 2), item()/namedItem() resolve them,
+            // every mime's enabledPlugin IS navigator.plugins[0] by identity,
+            // and the member MimeType objects are the SAME instances
+            // navigator.mimeTypes exposes.
+            out.p00 = navigator.plugins[0][0] && navigator.plugins[0][0].type;
+            out.p01 = navigator.plugins[0][1] && navigator.plugins[0][1].type;
+            out.p4len = navigator.plugins[4] && navigator.plugins[4].length;
+            out.pItem = navigator.plugins[0].item(0) && navigator.plugins[0].item(0).type;
+            out.pNamed = navigator.plugins[0].namedItem("text/pdf") && navigator.plugins[0].namedItem("text/pdf").type;
+            out.mt0Owner = navigator.mimeTypes[0].enabledPlugin && navigator.mimeTypes[0].enabledPlugin.name;
+            out.mt1Owner = navigator.mimeTypes[1] && navigator.mimeTypes[1].enabledPlugin && navigator.mimeTypes[1].enabledPlugin.name;
+            out.mt0OwnerIsP0 = navigator.mimeTypes[0].enabledPlugin === navigator.plugins[0];
+            out.p00IsMt0 = navigator.plugins[0][0] === navigator.mimeTypes[0];
+            out.p0keys = Object.keys(navigator.plugins[0]);
             const c = document.getElementById('c');
             const gl = c.getContext('webgl');
             out.gl = !!gl;
@@ -5748,8 +5764,21 @@
         assert_eq!(v["pluginsLength"].as_i64().unwrap(), 5);
         assert_eq!(v["pluginsIdentity"], true, "plugins must be a cached singleton (identity is fingerprintable)");
         assert_eq!(v["mimeIdentity"], true, "mimeTypes must be a cached singleton");
-        assert_eq!(v["pluginLength"].as_i64().unwrap(), 1, "PDF plugins report one supported mime type");
+        assert_eq!(v["pluginLength"].as_i64().unwrap(), 2, "Chrome PDF plugins carry both mime types");
         assert_eq!(v["mimeIsInstance"], true);
+        assert_eq!(v["p00"], "application/pdf", "plugins[0][0] must expose the member MimeType");
+        assert_eq!(v["p01"], "text/pdf", "plugins[0][1] must expose the second member MimeType");
+        assert_eq!(v["p4len"].as_i64().unwrap(), 2, "every PDF plugin carries both members");
+        assert_eq!(v["pItem"], "application/pdf", "Plugin.item(0) must resolve the member");
+        assert_eq!(v["pNamed"], "text/pdf", "Plugin.namedItem must resolve by mime type");
+        assert_eq!(v["mt0Owner"], "PDF Viewer", "mimeTypes[0].enabledPlugin must name the owning plugin");
+        assert_eq!(v["mt1Owner"], "PDF Viewer", "text/pdf is also owned by the first plugin");
+        assert_eq!(v["mt0OwnerIsP0"], true, "enabledPlugin must be navigator.plugins[0] by identity");
+        assert_eq!(v["p00IsMt0"], true, "plugin members and navigator.mimeTypes share MimeType instances");
+        assert_eq!(
+            v["p0keys"], serde_json::json!(["0", "1"]),
+            "Object.keys(plugin) shows member indices only (Chrome puts name/length on the prototype)"
+        );
         assert_eq!(v["gl"], true);
         assert_eq!(v["glIdentity"], true, "getContext must return the same context on repeat calls");
         assert_eq!(v["glInstanceof"], true, "gl must be instanceof WebGLRenderingContext");

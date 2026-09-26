@@ -6470,8 +6470,36 @@ function _ditingDisplayNone(el) {
 // constructors globally, and bot detectors reference them directly (absent →
 // ReferenceError) or check `navigator.plugins instanceof PluginArray`.
 // Making them real classes (not plain arrays) keeps instanceof working.
+// (#125) Chrome's Plugin is array-like over its member MimeType objects with
+// name/filename/description/length on the PROTOTYPE (Object.keys shows only
+// the member indices), and both directions of the plugin↔mime graph are
+// walkable: plugins[0][0].type, plugins[0].namedItem(...), and
+// mimeTypes[0].enabledPlugin === navigator.plugins[0]. enabledPlugin=null is
+// a shape Chrome never produces on the PDF persona.
 globalThis.Plugin = class Plugin {
-  constructor(name, filename, description) { this.name = name; this.filename = filename; this.description = description; this.length = 1; }
+  constructor(name, filename, description, mimes) {
+    Object.defineProperty(this, "__pluginName", { value: name });
+    Object.defineProperty(this, "__pluginFilename", { value: filename });
+    Object.defineProperty(this, "__pluginDescription", { value: description });
+    let n = 0;
+    if (mimes) {
+      for (const m of mimes) {
+        Object.defineProperty(this, String(n++), { value: m, enumerable: true });
+      }
+    }
+    Object.defineProperty(this, "__pluginLength", { value: n });
+  }
+  get name() { return this.__pluginName; }
+  get filename() { return this.__pluginFilename; }
+  get description() { return this.__pluginDescription; }
+  get length() { return this.__pluginLength; }
+  item(i) { return this[i] || null; }
+  namedItem(type) {
+    for (let i = 0; i < this.length; i++) {
+      if (this[i] && this[i].type === type) return this[i];
+    }
+    return null;
+  }
 };
 globalThis.MimeType = class MimeType {
   constructor(type, description, suffixes, enabledPlugin) { this.type = type; this.description = description; this.suffixes = suffixes; this.enabledPlugin = enabledPlugin; }
@@ -6487,8 +6515,26 @@ globalThis.MimeTypeArray = class MimeTypeArray extends Array {
 };
 // Cached singletons: real browsers return the same instance on every access
 // (`navigator.plugins === navigator.plugins`); fresh instances would be a
-// fingerprint anomaly.
+// fingerprint anomaly. The plugin↔mime graph is built once so the member
+// MimeType objects are shared by identity with navigator.mimeTypes (Chrome:
+// plugins[0][0] === mimeTypes[0]).
 let _pluginsInst = null, _mimeTypesInst = null;
+function __ditingBuildPdfPersona() {
+  if (_pluginsInst) return;
+  const mtApp = new MimeType("application/pdf", "Portable Document Format", "pdf", null);
+  const mtText = new MimeType("text/pdf", "Portable Document Format", "pdf", null);
+  _mimeTypesInst = new MimeTypeArray(mtApp, mtText);
+  const members = [mtApp, mtText];
+  _pluginsInst = new PluginArray(
+    new Plugin("PDF Viewer", "internal-pdf-viewer", "Portable Document Format", members),
+    new Plugin("Chrome PDF Viewer", "internal-pdf-viewer", "Portable Document Format", members),
+    new Plugin("Chromium PDF Viewer", "internal-pdf-viewer", "Portable Document Format", members),
+    new Plugin("Microsoft Edge PDF Viewer", "internal-pdf-viewer", "Portable Document Format", members),
+    new Plugin("WebKit built-in PDF", "internal-pdf-viewer", "Portable Document Format", members),
+  );
+  mtApp.enabledPlugin = _pluginsInst[0];
+  mtText.enabledPlugin = _pluginsInst[0];
+}
 
 // navigator.connection must be an EventTarget-shaped object: analytics and
 // adaptive-streaming libraries register 'change' listeners on it (upstream
@@ -6855,24 +6901,11 @@ const __navStore = {
   // a jsvmp scan tell.
   get webdriver() { return false; },
   get plugins() {
-    if (!_pluginsInst) {
-      _pluginsInst = new PluginArray(
-        new Plugin("PDF Viewer", "internal-pdf-viewer", "Portable Document Format"),
-        new Plugin("Chrome PDF Viewer", "internal-pdf-viewer", "Portable Document Format"),
-        new Plugin("Chromium PDF Viewer", "internal-pdf-viewer", "Portable Document Format"),
-        new Plugin("Microsoft Edge PDF Viewer", "internal-pdf-viewer", "Portable Document Format"),
-        new Plugin("WebKit built-in PDF", "internal-pdf-viewer", "Portable Document Format"),
-      );
-    }
+    __ditingBuildPdfPersona();
     return _pluginsInst;
   },
   get mimeTypes() {
-    if (!_mimeTypesInst) {
-      _mimeTypesInst = new MimeTypeArray(
-        new MimeType("application/pdf", "Portable Document Format", "pdf", null),
-        new MimeType("text/pdf", "Portable Document Format", "pdf", null),
-      );
-    }
+    __ditingBuildPdfPersona();
     return _mimeTypesInst;
   },
   pdfViewerEnabled: true,
