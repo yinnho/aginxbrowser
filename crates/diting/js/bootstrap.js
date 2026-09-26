@@ -9323,7 +9323,16 @@ globalThis.getComputedStyle = (el, pseudoElt) => {
   const target = style;
   return new Proxy(style, {
     get(_, prop) {
-      if (prop === Symbol.toPrimitive || prop === Symbol.toStringTag) return undefined;
+      if (prop === Symbol.toPrimitive) return undefined;
+      // The computed object's brand is CSSStyleDeclaration (Chrome answers
+      // '[object CSSStyleDeclaration]' from Object.prototype.toString and
+      // `cs.constructor === CSSStyleDeclaration`). A tagless proxy reads as
+      // '[object Object]' with constructor Object — i.e. isPlainObject() —
+      // which @alifd/next's getStyle treats as "no computed style" and
+      // returns null for; place() then parseFloat(null)s it into
+      // left/top: NaNpx (tmall publish SKU drawer, #120).
+      if (prop === Symbol.toStringTag) return "CSSStyleDeclaration";
+      if (prop === "constructor") return CSSStyleDeclaration;
       // Interface members first — `prop in target` would otherwise answer
       // with the inline style object's own (length: 0, cssText: '') values.
       if (prop === 'getPropertyValue') return (name) => lookup(name);

@@ -259,6 +259,49 @@
         );
     }
 
+    /// #120: the computed-style object must brand as CSSStyleDeclaration.
+    /// @alifd/next's getStyle gates reads on isPlainObject(holder) —
+    /// toString tag 'Object' + constructor === Object — and answers null
+    /// when it passes; place() then parseFloat(null)s the offsetParent's
+    /// border widths into `left/top: NaNpx` (tmall publish SKU drawer,
+    /// pinned stuck off-viewport because the drawer never remounts to
+    /// re-run place()). The tag and the constructor are exactly the two
+    /// identity hooks isPlainObject reads; both must answer like Chrome.
+    #[test]
+    fn computed_style_brands_as_cssstyledeclaration() {
+        let mut rt = setup_runtime("<html><body><div id='d'>x</div></body></html>");
+        let out = rt.evaluate(r#"
+            var cs = getComputedStyle(document.getElementById('d'));
+            var isPlainObject = function (e) {
+                var T = Object.prototype.toString.call(e).slice(8, -1);
+                if (T !== 'Object') return false;
+                var c = e.constructor;
+                if (typeof c !== 'function') return false;
+                var p = c.prototype;
+                return Object.prototype.toString.call(p).slice(8, -1) === 'Object'
+                    && !!Object.prototype.hasOwnProperty.call(p, 'isPrototypeOf');
+            };
+            // The consumption shape straight out of the bundle's getStyle:
+            // null when isPlainObject, else the property read.
+            var getStyle = function (el, prop) {
+                var n = el && 1 === el.nodeType ? getComputedStyle(el, null) : {};
+                return isPlainObject(n) ? null : n.getPropertyValue(prop);
+            };
+            return [
+                Object.prototype.toString.call(cs),
+                cs[Symbol.toStringTag],
+                cs.constructor === CSSStyleDeclaration,
+                isPlainObject(cs),
+                String(getStyle(document.getElementById('d'), 'border-top-width')),
+            ].join('|');
+        "#).unwrap();
+        assert_eq!(
+            out.as_str().unwrap(),
+            "[object CSSStyleDeclaration]|CSSStyleDeclaration|true|false|0px",
+            "tag + constructor must brand the computed face as CSSStyleDeclaration"
+        );
+    }
+
     /// Small-caps batch: `font-variant-caps` parses, inherits, rides both
     /// shorthands (`font: small-caps …` / `font-variant: small-caps`) and
     /// reads back through getComputedStyle as "small-caps"/"normal".
