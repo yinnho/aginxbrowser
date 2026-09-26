@@ -2276,6 +2276,63 @@ ms.addEventListener('sourceopen', function(){ \
         assert_eq!(p.evaluate("window.__after_spin__"), serde_json::Value::Null);
     }
 
+    /// #79's other half: one HANGING fetch must not kill the classic phase.
+    /// The fetch loop used to collect() all-or-nothing, so the bodies that
+    /// already arrived were discarded, and the exec loop's deadline check
+    /// (shared with fetch) insta-tripped — 15/16 landed bodies plus every
+    /// inline script died with the hanging 16th URL. Now the fetch phase
+    /// keeps what arrived and execution runs on a fresh budget.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_overrun_keeps_arrived_bodies_and_inline_scripts() {
+        let _net = net_test_guard();
+        let _deadline = script_deadline_guard("1000");
+        // Hanging endpoint: accept, read the request, never answer.
+        let hang = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let hang_port = hang.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::Read as _;
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = hang.accept() else { return };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            }
+        });
+        let port = local_http_server_typed(vec![
+            (
+                "/doc.html",
+                200,
+                "text/html",
+                format!(
+                    r#"<html><head>
+                        <script src="http://127.0.0.1:{hang_port}/hang.js"></script>
+                        <script src="/fast.js"></script>
+                        <script>window.__inline = 41;</script>
+                    </head><body>ok</body></html>"#
+                ),
+            ),
+            (
+                "/fast.js",
+                200,
+                "application/javascript",
+                "window.__fast = 'ran';".to_string(),
+            ),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/doc.html")).await.unwrap();
+        assert_eq!(
+            p.evaluate("window.__fast"),
+            serde_json::json!("ran"),
+            "the arrived fast body must execute, not die with the hanging URL"
+        );
+        assert_eq!(
+            p.evaluate("window.__inline"),
+            serde_json::json!(41.0),
+            "inline scripts need no fetch — they must survive a fetch overrun"
+        );
+        assert_eq!(p.evaluate("document.readyState"), serde_json::json!("complete"));
+    }
+
     /// The per-script 5s guard's other half: a script killed by ITS OWN
     /// watchdog (not the phase deadline's) used to leave V8's termination
     /// flag pending, so every later script on the page died instantly —

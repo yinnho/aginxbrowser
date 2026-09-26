@@ -7,27 +7,19 @@ impl Page {
         tracing::info!("execute_scripts called, js runtime exists: {}", self.js.is_some());
         // Compute document base URL, respecting <base href>.
         let document_base = self.resolve_base_url();
-        // Soft deadline on the entire script-execution phase. Heavy SPAs
+        // Soft deadline on the fetch phase of script execution. Heavy SPAs
         // (GitHub, Linear, CodeSandbox) ship 50+ scripts and our serial
         // fetch + execute loop can blow past a 25s Puppeteer goto timeout.
         // Override via AGINXBROWSER_SCRIPT_DEADLINE_MS for slow networks.
+        // The execution phase gets the same budget AGAIN, armed after the
+        // fetch phase (#79) — a network stall that eats the whole fetch
+        // deadline must not also behead the CPU phase.
         let script_deadline_ms: u64 = std::env::var("AGINXBROWSER_SCRIPT_DEADLINE_MS")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(10_000);
         let script_deadline = tokio::time::Instant::now()
             + tokio::time::Duration::from_millis(script_deadline_ms);
-
-        // Hard backstop over the WHOLE script-execution phase. Inline scripts
-        // run back-to-back with no await between them, so neither the soft
-        // deadline above (only checked between scripts) nor the per-script guard
-        // can interrupt a page that burns the budget across many synchronous
-        // scripts (the real-world SPA / anti-bot busy-loop hang). This watchdog
-        // terminates the isolate if cumulative synchronous script work overruns.
-        let mut exec_wd = self
-            .js
-            .as_mut()
-            .map(|js| js.arm_watchdog(std::time::Duration::from_millis(script_deadline_ms + 1000)));
 
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         enum ScriptKind {
@@ -317,9 +309,8 @@ impl Page {
         use futures::StreamExt as _;
         let external_total = fetch_futures.len();
         // #79: count arrivals so a fetch-phase overrun can say how much of
-        // the page's script surface actually landed before the budget
-        // expired — collect() is all-or-nothing, so this count is the only
-        // thing that survives the timeout.
+        // the page's script surface landed before the deadline — the item-
+        // wise loop below keeps those bodies, and the warn names the count.
         let arrivals = std::rc::Rc::new(std::cell::Cell::new(0usize));
         let arrivals_counter = arrivals.clone();
         let fetch_stream = futures::stream::iter(fetch_futures)
@@ -329,22 +320,36 @@ impl Page {
                     arrivals_counter.set(arrivals_counter.get() + 1);
                 }
             });
-        let fetch_results = match tokio::time::timeout_at(
-            script_deadline,
-            fetch_stream.collect::<Vec<_>>(),
-        ).await {
-            Ok(results) => results,
-            Err(_) => {
-                tracing::warn!(
-                    "execute_scripts: fetch deadline reached after {}/{} script bodies \
-                     arrived; all classic-phase scripts (incl. inline) will be skipped — \
-                     the budget covers fetch+exec, raise via AGINXBROWSER_SCRIPT_DEADLINE_MS",
-                    arrivals.get(),
-                    external_total
-                );
-                Vec::new()
+        // #79: drive the stream item-wise instead of collect() — collect is
+        // all-or-nothing, so one hanging URL used to discard the bodies that
+        // had already landed. On deadline we keep whatever arrived; the
+        // execution phase below runs those bodies plus every inline script
+        // on a fresh budget.
+        let mut fetch_stream = std::pin::pin!(fetch_stream);
+        let mut fetch_results: Vec<_> = Vec::with_capacity(external_total);
+        while tokio::time::Instant::now() < script_deadline {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(50),
+                fetch_stream.next(),
+            ).await {
+                Ok(Some(item)) => fetch_results.push(item),
+                // Stream drained: every fetch future settled or errored out.
+                Ok(None) => break,
+                // Slice elapsed with work still in flight — re-check the
+                // deadline at the top of the loop.
+                Err(_) => {}
             }
-        };
+        }
+        if tokio::time::Instant::now() >= script_deadline {
+            tracing::warn!(
+                "execute_scripts: fetch deadline reached after {}/{} script bodies \
+                 arrived; the {} arrived bodies and all inline scripts still execute \
+                 on a fresh budget — raise via AGINXBROWSER_SCRIPT_DEADLINE_MS",
+                arrivals.get(),
+                external_total,
+                arrivals.get(),
+            );
+        }
 
         let mut fetched: std::collections::HashMap<usize, (String, String, crate::diting_net::Response)> = std::collections::HashMap::new();
         let mut script_timings: Vec<crate::diting_js::ops::ResourceTimingRecord> = Vec::new();
@@ -436,13 +441,28 @@ impl Page {
             }
         }
 
+        // #79: execution gets its own budget, armed AFTER the fetch phase.
+        // The soft deadline bounds the serial classic loop; the watchdog is
+        // the hard backstop for inline scripts, which run back-to-back with
+        // no await between them, so neither the soft deadline (only checked
+        // between scripts) nor the per-script guard can interrupt a page
+        // burning the budget across many synchronous scripts (the real-world
+        // SPA / anti-bot busy-loop hang — the xiaohongshu jsvmp-scan shape
+        // that filed this issue).
+        let exec_deadline =
+            tokio::time::Instant::now() + tokio::time::Duration::from_millis(script_deadline_ms);
+        let mut exec_wd = self
+            .js
+            .as_mut()
+            .map(|js| js.arm_watchdog(std::time::Duration::from_millis(script_deadline_ms + 1000)));
+
         for (i, script) in all_to_execute.iter().enumerate() {
             // Both exit conditions matter: the wall-clock deadline stops the
             // serial classic phase from eating the whole navigation budget,
             // and a watchdog that already fired means the isolate carries a
             // pending termination — every further guarded execution in this
             // loop would instantly fail, so stop burning scripts on it.
-            if tokio::time::Instant::now() >= script_deadline
+            if tokio::time::Instant::now() >= exec_deadline
                 || exec_wd.as_ref().is_some_and(|t| t.fired())
             {
                 // #79: name the script that consumed the budget — it is the
