@@ -5,7 +5,7 @@
 //! `tree.rs` in batch 202 to ride under the layering audit's god-file
 //! cap — read-only queries; the structural mutations stay in the parent.
 
-use super::{DomTree, DomTreeInner, NodeId};
+use super::{DomTree, DomTreeInner, NodeId, ShadowRootMode};
 
 impl DomTree {
     /// Whether `node` is an HTML `<slot>` element. Slot assignment is defined
@@ -181,5 +181,27 @@ impl DomTree {
         // Parent cycles are prevented by the mutation APIs. Keep a hard bound
         // here as defense in depth for a malformed tree.
         None
+    }
+    /// Every shadow root as (host, root, mode), host order. #95's hit-test
+    /// pierce consumes the whole table in one op call — closed roots and
+    /// both attach paths (the attachShadow op and declarative parse)
+    /// included, unlike the wrapper-side `_shadowRoot` cache which
+    /// declarative roots enter lazily.
+    pub fn shadow_hosts(&self) -> Vec<(NodeId, NodeId, ShadowRootMode)> {
+        let inner = self.inner.borrow();
+        let mut hosts: Vec<_> = inner
+            .shadow_roots_by_host
+            .iter()
+            .map(|(host, root)| {
+                let mode = inner
+                    .shadow_roots
+                    .get(root)
+                    .map(|info| info.mode)
+                    .unwrap_or(ShadowRootMode::Open);
+                (*host, *root, mode)
+            })
+            .collect();
+        hosts.sort_by_key(|(host, _, _)| host.index());
+        hosts
     }
 }

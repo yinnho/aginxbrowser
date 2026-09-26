@@ -1137,6 +1137,26 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 None => "-1".into(),
             }
         }
+        // Every shadow root in the tree as JSON [[host, root, mode], ...].
+        // #95's hit-test pierce consumes the whole table in one call — the
+        // engine's own registry, so closed roots are indistinguishable from
+        // open ones here and page JS cannot forge entries.
+        "shadow_hosts" => {
+            let mut hosts: Vec<(usize, usize, &str)> = dom
+                .shadow_hosts()
+                .into_iter()
+                .map(|(host, root, mode)| {
+                    let m = if matches!(mode, ShadowRootMode::Closed) {
+                        "closed"
+                    } else {
+                        "open"
+                    };
+                    (host.index(), root.index(), m)
+                })
+                .collect();
+            hosts.sort();
+            serde_json::to_string(&hosts).unwrap_or_else(|_| "[]".to_string())
+        }
         "assigned_slot" => {
             let nid = arg1.parse::<u32>().unwrap_or(0);
             dom.assigned_slot(NodeId::new(nid))

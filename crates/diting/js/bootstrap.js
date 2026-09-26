@@ -16631,6 +16631,44 @@ if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
     }
     return -1;
   }
+  // #95: Chrome's hit test pierces shadow trees — closed roots included
+  // (elementFromPoint returns shadow-internal elements, which is why a
+  // human can press xhs's closed publish button in a real browser). One
+  // arena scan (`shadow_hosts`) hands back every host→root pair for BOTH
+  // attach paths (the attachShadow op and declarative parse), and each
+  // root's subtree joins the flat candidate set below. Shadow ink paints
+  // above its host, so paint order ranks the inner element first; without
+  // a paint table the nid tiebreak does (a root's subtree is numbered
+  // after its host). Root wrappers are minted exactly the way the
+  // shadowRoot getter does, so identity never forks.
+  function __ditingHitUniverse(all) {
+    var table = null;
+    try {
+      var raw = _domRaw("shadow_hosts", "", "");
+      if (raw && raw !== 'null') table = JSON.parse(raw);
+    } catch (e) { return all; }
+    if (!table || !table.length) return all;
+    var byHost = {};
+    for (var i = 0; i < table.length; i++) byHost[table[i][0]] = table[i];
+    var out = Array.prototype.slice.call(all);
+    // Pushing while iterating: a shadow subtree that hosts another root
+    // gets expanded when the walk reaches its elements.
+    for (var oi = 0; oi < out.length; oi++) {
+      var entry = byHost[out[oi]._nid | 0];
+      if (!entry) continue;
+      var root = _cache.get(entry[1]);
+      if (!root) {
+        root = new ShadowRoot(entry[1], out[oi], { mode: entry[2] });
+        _cache.set(entry[1], root);
+        __def(out[oi], '_shadowRoot', root);
+      }
+      try {
+        var sub = root.querySelectorAll('*');
+        for (var k = 0; k < sub.length; k++) out.push(sub[k]);
+      } catch (e) {}
+    }
+    return out;
+  }
   Document.prototype.elementFromPoint = function(x, y) {
     var cands = __ditingHitCandidates.call(this, x, y);
     if (cands === null) return null;
@@ -16679,7 +16717,7 @@ if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
     var qy = y;
     var gx = mainDoc ? x + (globalThis.scrollX || 0) : x;
     var gy = mainDoc ? y + (globalThis.scrollY || 0) : y;
-    var all = this.querySelectorAll('*');
+    var all = __ditingHitUniverse(this.querySelectorAll('*'));
     var rank = __ditingPaintRanks();
     var cands = [];
     for (var i = 0; i < all.length; i++) {

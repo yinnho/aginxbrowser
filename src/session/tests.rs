@@ -2263,6 +2263,90 @@
         assert!(mgr.close_and_wait(&sid).await);
     }
 
+    /// #95: a coordinate click must reach the button inside a CLOSED shadow
+    /// root — the xhs publish-button shape. Chrome's hit test pierces closed
+    /// roots (elementFromPoint returns the composed target, which is why a
+    /// human can press it in a real browser), so the engine's walk must too
+    /// — while `host.shadowRoot` keeps reading null from page JS.
+    #[tokio::test]
+    async fn click_xy_pierces_closed_shadow_dom() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /closed",
+            "<html><body style=\"margin:0\">\
+             <xhs-btn id=\"host\" style=\"position:absolute;left:10px;top:10px;width:100px;height:20px;\"></xhs-btn>\
+             <script>\
+             var host = document.getElementById('host');\
+             var root = host.attachShadow({mode:'closed'});\
+             root.innerHTML = '<button id=\"inner\" style=\"width:100px;height:20px\">publish</button>';\
+             root.getElementById('inner').addEventListener('click', function(e){\
+                 window.__hit = e.target.id;\
+             });\
+             window.__hit = 'none';\
+             </script>\
+             </body></html>",
+        )]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/closed")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+
+        // elementFromPoint at the host's center names the shadow-inner
+        // button; the closed root stays invisible to page JS and the light
+        // DOM stays empty.
+        let out = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "JSON.stringify({\
+                    hit: document.elementFromPoint(60, 20).id,\
+                    closed: document.getElementById('host').shadowRoot === null,\
+                    light: document.getElementById('host').querySelector('button') === null\
+                 })"
+                .to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        assert_eq!(v["hit"], "inner", "elementFromPoint must pierce the closed root");
+        assert_eq!(v["closed"], true, "shadowRoot must stay null for a closed root");
+        assert_eq!(v["light"], true, "the button must live in shadow, not light DOM");
+
+        // The coordinate click path delivers the whole chain to the button.
+        mgr.send(&sid, |reply| SessionCommand::ClickXY {
+            x: 60.0,
+            y: 20.0,
+            button: "left".to_string(),
+            click_count: 1,
+            reply,
+        })
+        .await
+        .unwrap();
+        let out = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "window.__hit".to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            out, serde_json::json!("inner"),
+            "the closed-shadow button must receive the click"
+        );
+
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
     /// The humanized drag path (the default): eased velocity, perpendicular
     /// wobble off the straight line, and a landing exactly on the release
     /// point — one decimal place in the page log so sub-pixel shape is
