@@ -1165,6 +1165,361 @@ mod selector_tests {
         assert_eq!(tree.rule_match_sets_incremental(&selectors, key + 1), fresh);
     }
 
+    /// #123's root cause, handwritten from the fuzzer's seed-3/step-81 hit:
+    /// a `:has()`-bearing selector with a combinator to the RIGHT of the
+    /// :has subject (`section:has(.leaf) .ghost`). Moving the .leaf
+    /// subtree in/out flips the section's :has(), and that flip changes
+    /// the match of every .ghost DESCENDANT of the section — nodes that
+    /// are attached, outside the mutated subtree, and (pre-fix) never in
+    /// the incremental candidate set. The chain walk covers the section
+    /// itself; the section's other descendants are the hole. The padding
+    /// keeps the stamp/candidate counts under the mass-mutation gates so
+    /// the true incremental path (not the rebuild fallback) is exercised.
+    #[test]
+    fn transitive_has_rules_reprobe_descendants_of_flipped_ancestors() {
+        let pad = (0..80)
+            .map(|i| format!("<span class='p{i}'>p</span>"))
+            .collect::<String>();
+        let tree = parse_html(&format!(
+            r#"<div id="wrap">
+                <section class="sink"><div class="mid"><span class="ghost">g</span></div></section>
+                <section class="sink2"><div class="deep"><span class="leaf">d</span></div></section>
+                <div id="pad">{pad}</div>
+            </div>"#
+        ));
+        let selectors = ["section:has(.leaf) .ghost"];
+        let key = 0xfeed_face_u64;
+        let ghost_hits = |tree: &crate::diting_dom::tree::DomTree| {
+            tree.rule_match_sets_incremental(&selectors, key)
+                .hits
+                .get(&0)
+                .map(|v| v.len())
+                .unwrap_or(0)
+        };
+        // Prime: the .leaf lives under .sink2, so the ghost under .sink
+        // must not match.
+        assert_eq!(ghost_hits(&tree), 0, "ghost must not match before the operand arrives");
+
+        // Move the .leaf subtree under .sink: the ghost must GAIN the hit.
+        let sink = tree.query_selector_all(".sink").unwrap()[0];
+        let deep = tree.query_selector_all(".deep").unwrap()[0];
+        tree.append_child(sink, deep);
+        assert_eq!(
+            ghost_hits(&tree),
+            1,
+            "inserting the :has operand must reach the subject descendant"
+        );
+
+        // Move it back out: the ghost must LOSE the hit again.
+        let sink2 = tree.query_selector_all(".sink2").unwrap()[0];
+        tree.append_child(sink2, deep);
+        assert_eq!(
+            ghost_hits(&tree),
+            0,
+            "removing the :has operand must purge the subject descendant's stale hit"
+        );
+    }
+
+    /// #123: the tmall publish page parks a poisoned match box — pre-existing
+    /// elements lose late-sheet hits while fresh clones match them — and no
+    /// hand-picked mutation shape in the differential above reproduces it.
+    /// This fuzzes RANDOM mutation sequences against the same invariant
+    /// (incremental sync == fresh full match after every step), weighted
+    /// toward the shapes a React/KISSY commit storm actually produces:
+    /// detach-with-sync-then-reinsert (a layout run between the two halves of
+    /// a re-parent, which is what pump slice boundaries do mid-commit),
+    /// slot-recycling churn (free N, allocate N back), attribute writes on
+    /// detached nodes, mass re-appends straddling the stamp gate, and
+    /// cross-key drops. Deterministic LCG: a failure names its seed.
+    #[test]
+    fn incremental_match_survives_random_mutation_storms() {
+        use crate::diting_dom::NodeId;
+        use crate::diting_dom::tree::{Attribute, DomTree, NodeData};
+        use html5ever::{ns, namespace_url, LocalName, Namespace, QualName};
+
+        struct Rng(u64);
+        impl Rng {
+            fn next(&mut self) -> u64 {
+                self.0 = self
+                    .0
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                self.0
+            }
+            fn below(&mut self, n: usize) -> usize {
+                (self.next() >> 33) as usize % n.max(1)
+            }
+        }
+
+        let lis = (0..48)
+            .map(|i| {
+                let class = if i % 3 == 0 {
+                    format!("odd3 item{i}")
+                } else if i % 5 == 0 {
+                    format!("sinkitem item{i}")
+                } else {
+                    format!("item{i}")
+                };
+                format!("<li class='{class}' data-kind='k{i}'>{i}</li>")
+            })
+            .collect::<String>();
+        let html = format!(
+            r#"<div id="wrap" class="container">
+                <h1 class="title main" data-kind="lead">T</h1>
+                <p data-kind="lead">L</p>
+                <ul id="list">{lis}</ul>
+                <section class="sink"><span class="ghost" data-k="g">g</span></section>
+                <section class="sink2"><div class="deep"><span class="leaf">d</span></div></section>
+            </div>"#
+        );
+
+        let selectors = [
+            "div",
+            ".container",
+            "#wrap",
+            "p",
+            ".title.main",
+            "div .item",
+            "ul li",
+            "li.odd3 + li",
+            "li ~ li",
+            "li:first-child",
+            "li:nth-child(2n)",
+            "[data-kind]",
+            "p[data-kind='lead']",
+            ".sink .ghost",
+            ".sink2 .deep .leaf",
+            "section:has(.leaf)",
+            "section:has(> .ghost)",
+            "h1, .item",
+            "*",
+            "#nope",
+            ".sinkitem",
+            "li:not(.item)",
+            "[data-k]",
+        ];
+
+        let key_a = 0x1234_5678_9abc_def0u64;
+        let key_b = key_a.wrapping_add(1);
+
+        // The late-sheet face: when a stylesheet lands the css bytes grow,
+        // so the selector list GROWS with the key (same prefix, extra rules
+        // appended — document order keeps existing rule indexes stable).
+        let mut selectors_late: Vec<&str> = selectors.to_vec();
+        selectors_late.extend_from_slice(&[".leaf", "span.ghost", "section:has(.leaf) .ghost"]);
+
+        for seed in 0..48u64 {
+            let tree = parse_html(&html);
+            let mut rng = Rng(seed.wrapping_mul(0x9e3779b97f4a7c15) | 1);
+            let mut key = if seed % 2 == 0 { key_a } else { key_b };
+            // Prime the box under `key` (parse-time stamps force the
+            // full-build parking path). The comparison filters each rule's
+            // hit set down to ATTACHED element indices: the cascade only
+            // consults node_rules for nodes the visit walk reaches, so stale
+            // hits on freed/detached slots are unobservable — what must never
+            // happen is an ATTACHED node whose hits diverge (the #123 poison:
+            // attached originals missing late-sheet hits while fresh nodes
+            // match them).
+            let attached_filter = |tree: &DomTree| -> Vec<bool> {
+                let slots = tree.node_slot_count();
+                let mut at = vec![false; slots];
+                for d in tree.descendants(tree.document()) {
+                    let i = d.index();
+                    if i < slots {
+                        at[i] = true;
+                    }
+                }
+                at
+            };
+            let check = |stage: &str, key: u64, selectors: &[&str]| {
+                let inc = tree.rule_match_sets_incremental(selectors, key);
+                let full = tree.rule_match_sets(selectors);
+                let at = attached_filter(&tree);
+                let mask = |v: &[usize]| v.iter().copied().filter(|i| at.get(*i).copied().unwrap_or(false)).collect::<Vec<usize>>();
+                for (ri, sel) in selectors.iter().enumerate() {
+                    let a = mask(inc.hits.get(&ri).map(|v| v.as_slice()).unwrap_or(&[]));
+                    let b = mask(full.hits.get(&ri).map(|v| v.as_slice()).unwrap_or(&[]));
+                    if a != b {
+                        let only_inc: Vec<usize> = a.iter().copied().filter(|i| !b.contains(i)).collect();
+                        let only_full: Vec<usize> = b.iter().copied().filter(|i| !a.contains(i)).collect();
+                        panic!(
+                            "seed {seed} diverged at `{stage}` rule {ri} `{sel}`: \
+                             incremental-missing(attached)={only_full:?} incremental-extra(attached)={only_inc:?}"
+                        );
+                    }
+                }
+            };
+            let base_sel: &[&str] = &selectors;
+            let late_sel: &[&str] = &selectors_late;
+            check("prime", key, if key == key_b { late_sel } else { base_sel });
+
+            // Attached-element pool: everything at or below #wrap except the
+            // structural roots themselves, refreshed lazily.
+            let pool = |tree: &DomTree| -> Vec<NodeId> {
+                let wrap = tree.get_element_by_id("wrap").unwrap();
+                tree.descendants(wrap)
+            };
+            let pick = |tree: &DomTree, rng: &mut Rng| -> Option<NodeId> {
+                let p = pool(tree);
+                (!p.is_empty()).then(|| p[rng.below(p.len())])
+            };
+
+            let new_element = |tree: &DomTree, rng: &mut Rng| -> NodeId {
+                let tag = ["span", "div", "li", "em", "section"][rng.below(5)];
+                let class = [
+                    "item9",
+                    "odd3",
+                    "sinkitem",
+                    "ghost deep",
+                    "",
+                    "leaf",
+                ][rng.below(6)];
+                let data = if rng.below(2) == 0 {
+                    format!("k{}", rng.below(50))
+                } else {
+                    String::new()
+                };
+                let mut attrs = vec![Attribute {
+                    name: QualName::new(None, Namespace::default(), LocalName::from("class")),
+                    value: class.into(),
+                }];
+                if !data.is_empty() {
+                    attrs.push(Attribute {
+                        name: QualName::new(None, Namespace::default(), LocalName::from("data-kind")),
+                        value: data,
+                    });
+                }
+                let id = tree.new_node(NodeData::Element {
+                    name: QualName::new(None, ns!(html), LocalName::from(tag)),
+                    attrs,
+                    template_contents: None,
+                    mathml_annotation_xml_integration_point: false,
+                    live_value: None,
+                    live_checked: None,
+                });
+                id
+            };
+
+            for step in 0..160 {
+                let stage = format!("seed {seed} step {step}");
+                match rng.below(12) {
+                    // 0-1: insert a fresh node (allocation may recycle slots).
+                    0 | 1 => {
+                        let node = new_element(&tree, &mut rng);
+                        if let Some(parent) = pick(&tree, &mut rng) {
+                            tree.append_child(parent, node);
+                        }
+                        if rng.below(3) == 0 {
+                            let kid = new_element(&tree, &mut rng);
+                            tree.append_child(node, kid);
+                        }
+                    }
+                    // 2: re-parent an existing node.
+                    2 => {
+                        if let (Some(node), Some(parent)) = (pick(&tree, &mut rng), pick(&tree, &mut rng)) {
+                            tree.append_child(parent, node);
+                        }
+                    }
+                    // 3: detach without free, sync runs mid-commit (the pump
+                    // slice shape), then re-insert elsewhere.
+                    3 => {
+                        if let (Some(node), Some(parent)) = (pick(&tree, &mut rng), pick(&tree, &mut rng)) {
+                            tree.remove_child(node);
+                            check(&format!("{stage}: mid-commit detach"), key, if key == key_b { late_sel } else { base_sel });
+                            tree.append_child(parent, node);
+                        }
+                    }
+                    // 4: remove with free (slot recycling).
+                    4 => {
+                        if let Some(node) = pick(&tree, &mut rng) {
+                            tree.remove(node);
+                        }
+                    }
+                    // 5: slot-recycling churn — free a batch, allocate a batch.
+                    5 => {
+                        let victims: Vec<NodeId> = (0..3)
+                            .filter_map(|_| pick(&tree, &mut rng))
+                            .collect();
+                        for v in victims {
+                            tree.remove(v);
+                        }
+                        if let Some(parent) = pick(&tree, &mut rng) {
+                            for _ in 0..3 {
+                                let n = new_element(&tree, &mut rng);
+                                tree.append_child(parent, n);
+                            }
+                        }
+                    }
+                    // 6: insert_before.
+                    6 => {
+                        if let (Some(existing), Some(node)) = (pick(&tree, &mut rng), pick(&tree, &mut rng)) {
+                            tree.insert_before(existing, node);
+                        }
+                    }
+                    // 7: attribute write + the ops-layer restyle stamp.
+                    7 => {
+                        if let Some(node) = pick(&tree, &mut rng) {
+                            let (name, value) = [
+                                ("class", "sinkitem"),
+                                ("class", "odd3 leaf"),
+                                ("data-kind", "lead"),
+                                ("data-kind", ""),
+                                ("id", "zz9"),
+                            ][rng.below(5)];
+                            tree.with_node_mut(node, |n| n.set_attribute(name.into(), value.into()));
+                            tree.note_restyle(node);
+                        }
+                    }
+                    // 8: attr write on a DETACHED node, then re-attach (the
+                    // stamps fire while detached; the sync purges without
+                    // re-probing; the re-attach must restore).
+                    8 => {
+                        if let (Some(node), Some(parent)) = (pick(&tree, &mut rng), pick(&tree, &mut rng)) {
+                            tree.remove_child(node);
+                            tree.with_node_mut(node, |n| n.set_attribute("class".into(), "sinkitem".into()));
+                            tree.note_restyle(node);
+                            check(&format!("{stage}: detached restyle"), key, if key == key_b { late_sel } else { base_sel });
+                            tree.append_child(parent, node);
+                        }
+                    }
+                    // 9: mass re-append — straddles the stamp-count gate.
+                    9 => {
+                        if let Some(ul) = tree.get_element_by_id("list") {
+                            for li in tree.query_selector_all("li").unwrap_or_default() {
+                                tree.append_child(ul, li);
+                            }
+                        }
+                    }
+                    // 10: the escape hatch.
+                    10 => {
+                        tree.note_match_full();
+                    }
+                    // 11: idle sync.
+                    _ => {}
+                }
+                // A stylesheet lands mid-storm every ~40 steps: the css
+                // bytes grow (selectors_late) and the css_key flips, then
+                // churn continues under the new sheet — the #123 shape
+                // (originals that predate the sheet must not lose its hits).
+                if step % 40 == 19 {
+                    if key == key_a {
+                        key = key_b;
+                    } else {
+                        key = key_a;
+                    }
+                }
+                check(&stage, key, if key == key_b { late_sel } else { base_sel });
+            }
+
+            // Cross-key round trip at the end: K -> other -> K must equal a
+            // fresh full match each time.
+            let other = if key == key_a { key_b } else { key_a };
+            let fresh = tree.rule_match_sets(&selectors_late);
+            assert_eq!(tree.rule_match_sets_incremental(&selectors_late, other), fresh, "seed {seed} cross-key");
+            assert_eq!(tree.rule_match_sets_incremental(&selectors_late, key), fresh, "seed {seed} key-back");
+        }
+    }
+
     /// Rules whose rightmost compound has no id/class/tag key (universal,
     /// attr-only, pseudo-only) fall into the always-tested bucket — the
     /// one place the hash could silently drop matches if the fallback

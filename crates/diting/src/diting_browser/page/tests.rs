@@ -409,6 +409,91 @@
         assert!(w("s16") > 4.0);
     }
 
+    /// #123: a stylesheet that lands AFTER the first layout runs (KISSY
+    /// appends its `<link>` from script and the body arrives a beat later)
+    /// must reach elements that already existed when the poisoned-era run
+    /// measured them — and must survive DOM churn after landing. The tmall
+    /// publish page's whole form collapses to min-content when the
+    /// incremental match cache carries pre-sheet hits forward forever.
+    #[cfg(feature = "screenshot")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn late_stylesheet_applies_to_existing_elements_and_survives_churn() {
+        let _g = net_test_guard();
+        // ~600 nodes so single-subtree churn stamps stay under the mass
+        // gates (4x slots) and the incremental path is the one exercised.
+        let rows = (0..150)
+            .map(|i| format!("<span class=\"late\" id=\"s{i}\">w</span>"))
+            .collect::<Vec<_>>()
+            .join("");
+        let port = local_http_server(vec![
+            (
+                "/p",
+                200,
+                format!(
+                    "<html><head><style>.late{{color:red}}</style></head><body>\
+                     <div id=\"w\">{rows}</div>\
+                     <script>\
+                     var l=document.createElement('link');\
+                     l.rel='stylesheet';l.href='/late.css';\
+                     document.head.appendChild(l);\
+                     </script></body></html>"
+                ),
+            ),
+            // The late sheet: rules that change BOTH cascade and geometry.
+            ("/late.css", 200, ".late{display:inline-block;width:50px}#w{display:flex;flex-direction:column}".into()),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/p")).await.unwrap();
+        // Wait until the sheet's rules are in CSSOM (fetch + parse done).
+        for _ in 0..20 {
+            if p.evaluate("document.styleSheets.length").as_f64() == Some(2.0) {
+                break;
+            }
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                p.js.as_mut().unwrap().run_event_loop(),
+            )
+            .await;
+        }
+        assert_eq!(
+            p.evaluate("document.styleSheets.length").as_f64(),
+            Some(2.0),
+            "late sheet must be fetched and parsed into CSSOM"
+        );
+        // The late rules must now apply to elements that predate the sheet.
+        assert_eq!(
+            p.evaluate("getComputedStyle(document.getElementById('s0')).display"),
+            serde_json::json!("inline-block"),
+            "late-sheet cascade must reach pre-existing elements"
+        );
+        assert_eq!(
+            p.evaluate("document.getElementById('s0').getBoundingClientRect().width").as_f64(),
+            Some(50.0),
+            "late-sheet geometry must reach pre-existing elements"
+        );
+        // Churn after landing: move the wrapper out and back (React-style
+        // re-parent). The re-inserted subtree must keep matching the sheet.
+        p.evaluate("var w=document.getElementById('w');var par=w.parentNode;par.removeChild(w);par.appendChild(w)");
+        assert_eq!(
+            p.evaluate("getComputedStyle(document.getElementById('s7')).display"),
+            serde_json::json!("inline-block"),
+            "re-inserted subtree must still match the late sheet"
+        );
+        assert_eq!(
+            p.evaluate("document.getElementById('s7').getBoundingClientRect().width").as_f64(),
+            Some(50.0),
+        );
+        // And a full re-render shape: replace the wrapper's children.
+        p.evaluate(
+            "var w=document.getElementById('w');w.innerHTML=w.innerHTML;",
+        );
+        assert_eq!(
+            p.evaluate("getComputedStyle(document.getElementById('s3')).display"),
+            serde_json::json!("inline-block"),
+            "innerHTML-rebuilt children must match the late sheet"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn navigate_blank_resets_state() {
         let mut p = test_page();

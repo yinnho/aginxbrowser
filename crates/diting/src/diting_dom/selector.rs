@@ -10,7 +10,7 @@ use selectors::matching::{
 use selectors::parser::{self, ParseRelative, SelectorParseErrorKind};
 use selectors::{Element, OpaqueElement, SelectorList};
 use selectors::visitor::SelectorVisitor;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::diting_dom::tree::{DomTree, NodeData, NodeId};
 
@@ -941,6 +941,11 @@ impl DomTree {
         // has the final word); a bucket the probe cannot reach never is.
         let quirks = self.selector_quirks_mode() == QuirksMode::Quirks;
         let mut pseudo_kinds: HashMap<usize, PseudoKind> = HashMap::new();
+        let mut bears_has = false;
+        let mut has_subject_ids: HashSet<String> = HashSet::new();
+        let mut has_subject_classes: HashSet<String> = HashSet::new();
+        let mut has_subject_tags: HashSet<String> = HashSet::new();
+        let mut has_subject_unkeyed = false;
 
         for (ri, selector) in rule_selectors.iter().enumerate() {
             // A trailing pseudo-element suffix routes the rule to the
@@ -1018,6 +1023,34 @@ impl DomTree {
             if !bucketed {
                 unkeyed.push(ri);
             }
+            if list.slice().iter().any(selector_bears_has) {
+                bears_has = true;
+                // Subject keys for the transitive re-probe: every
+                // sub-selector's rightmost compound, because a comma list
+                // matches when any sub-selector does. A keyless subject
+                // compound (`:has(a) *`) leaves every element a candidate,
+                // which the candidate gate converts to a full rebuild.
+                for sel in list.slice() {
+                    match rightmost_key(sel) {
+                        Some(RuleKey::Id(id)) => {
+                            has_subject_ids.insert(id.clone());
+                            if quirks {
+                                has_subject_ids.insert(id.to_ascii_lowercase());
+                            }
+                        }
+                        Some(RuleKey::Class(class)) => {
+                            has_subject_classes.insert(class.clone());
+                            if quirks {
+                                has_subject_classes.insert(class.to_ascii_lowercase());
+                            }
+                        }
+                        Some(RuleKey::Tag(tag)) => {
+                            has_subject_tags.insert(tag);
+                        }
+                        None => has_subject_unkeyed = true,
+                    }
+                }
+            }
             entries.push(Some(list));
         }
         RuleIndex {
@@ -1029,6 +1062,11 @@ impl DomTree {
             unkeyed,
             pseudo_kinds,
             quirks,
+            bears_has,
+            has_subject_ids,
+            has_subject_classes,
+            has_subject_tags,
+            has_subject_unkeyed,
         }
     }
 
@@ -1157,6 +1195,7 @@ impl DomTree {
     /// element, its subtree, its siblings, and its ancestor chain. Anything
     /// the registry cannot express falls back to a full rebuild.
     pub fn rule_match_sets_incremental(&self, rule_selectors: &[&str], css_key: u64) -> RuleMatchSets {
+        let trace = std::env::var("AGINXBROWSER_MATCH_TRACE").is_ok();
         let dirty = self.take_match_dirty();
         let mut cache = match self.take_match_cache(css_key) {
             Some(cache) => cache,
@@ -1183,6 +1222,13 @@ impl DomTree {
                     index,
                     sets: sets.clone(),
                 });
+                if trace {
+                    eprintln!(
+                        "[match-trace] FULL-BUILD key={css_key:#x} rules={} elements={}",
+                        rule_selectors.len(),
+                        sets.hits.values().map(Vec::len).sum::<usize>(),
+                    );
+                }
                 return sets;
             }
         };
@@ -1207,6 +1253,9 @@ impl DomTree {
         };
 
         if dirty.full {
+            if trace {
+                eprintln!("[match-trace] REBUILD(dirty.full) key={css_key:#x}");
+            }
             return rebuild(self, cache);
         }
 
@@ -1229,6 +1278,11 @@ impl DomTree {
             + dirty.purge_roots.len()
             + dirty.sibling_scopes.len();
         if stamp_count.saturating_mul(4) > slots {
+            if trace {
+                eprintln!(
+                    "[match-trace] REBUILD(stamp-gate) key={css_key:#x} stamps={stamp_count} slots={slots}"
+                );
+            }
             return rebuild(self, cache);
         }
 
@@ -1255,6 +1309,33 @@ impl DomTree {
                 if mark(c) {
                     candidates.push(c);
                 }
+                // #123: a :has()-bearing rule matches transitive to the
+                // subject's attached descendants — flipping the chain
+                // node's :has() state flips them, and they are nowhere
+                // near the mutation. Only elements carrying a :has rule's
+                // rightmost key can be such subjects, so the subtree walk
+                // marks those alone (an unkeyed :has rule degenerates to
+                // marking the whole subtree, and the candidate gate turns
+                // that into a full rebuild).
+                if cache.index.bears_has {
+                    for d in self.descendants(c) {
+                        let meta = self.with_node(d, |n| {
+                            n.as_element().map(|e| {
+                                (
+                                    e.local.as_ref().to_ascii_lowercase(),
+                                    n.get_attribute("id").map(|s| s.to_string()),
+                                    n.get_attribute("class").map(|s| s.to_string()),
+                                )
+                            })
+                        });
+                        if !subtree_node_is_has_subject(meta.flatten(), &cache.index) {
+                            continue;
+                        }
+                        if mark(d) {
+                            candidates.push(d);
+                        }
+                    }
+                }
                 chain = self
                     .with_node(c, |n| n.parent)
                     .flatten();
@@ -1268,6 +1349,12 @@ impl DomTree {
         // A mass mutation (initial parse, big innerHTML) costs more to
         // resolve than a full rebuild — same as the pre-incremental world.
         if candidates.len() * 4 > slots {
+            if trace {
+                eprintln!(
+                    "[match-trace] REBUILD(candidate-gate) key={css_key:#x} candidates={} slots={slots}",
+                    candidates.len()
+                );
+            }
             return rebuild(self, cache);
         }
 
@@ -1275,6 +1362,7 @@ impl DomTree {
         // attached ones. Detached subtree members stay purged (a full
         // rebuild probes only document+shadow descendants), and a freed
         // slot's stale hits die here too.
+        let candidates_len = candidates.len();
         for rule_hits in cache.sets.hits.values_mut().chain(cache.sets.pseudo_hits.values_mut()) {
             rule_hits.retain(|&i| !(i < slots && seen[i]));
         }
@@ -1286,6 +1374,16 @@ impl DomTree {
             .into_iter()
             .filter(|&c| self.match_probe_attached(c))
             .collect();
+        if trace {
+            eprintln!(
+                "[match-trace] INCREMENTAL key={css_key:#x} roots={} purge={} sib={} candidates={} attached={}",
+                dirty.roots.len(),
+                dirty.purge_roots.len(),
+                dirty.sibling_scopes.len(),
+                candidates_len,
+                attached.len()
+            );
+        }
         self.probe_elements_into(
             &cache.index,
             attached,
@@ -1308,6 +1406,78 @@ impl CompiledSelector {
     pub fn specificity(&self) -> u32 {
         self.specificity
     }
+}
+
+/// True when any component of the selector tree contains a `:has()`
+/// functional pseudo — including nested inside `:is`/`:where`/`:not`,
+/// another `:has`'s relative selectors, `:nth-child(of …)`, `::slotted`,
+/// or `:host` arguments. A `:has`-bearing rule matches TRANSITIVELY:
+/// mutating a node inside the `:has` subject flips the subject's own
+/// match, and a combinator to the subject's right
+/// (`section:has(.leaf) .ghost`) flips subjects that are attached
+/// descendants of it — nowhere near the mutation (#123). The incremental
+/// sync reacts by extending the ancestor-chain re-probe to each chain
+/// node's subtree when (and only when) some rule bears `:has`; sheets
+/// without it keep the tight candidate set.
+fn selector_bears_has(sel: &parser::Selector<DitingSelector>) -> bool {
+    use parser::Component;
+    fn list_bears(list: &SelectorList<DitingSelector>) -> bool {
+        list.slice().iter().any(selector_bears_has)
+    }
+    fn component_bears(c: &Component<DitingSelector>) -> bool {
+        match c {
+            Component::Has(_) => true,
+            Component::Is(list) | Component::Where(list) | Component::Negation(list) => {
+                list_bears(list)
+            }
+            Component::NthOf(nth) => nth.selectors().iter().any(selector_bears_has),
+            Component::Slotted(sel) => selector_bears_has(sel),
+            Component::Host(Some(sel)) => selector_bears_has(sel),
+            _ => false,
+        }
+    }
+    // iter_raw_match_order, not iter: `iter()` stops at the rightmost
+    // compound boundary, so a `:has` left of a combinator
+    // (`section:has(.leaf) .ghost`) would be invisible to it.
+    sel.iter_raw_match_order().any(component_bears)
+}
+
+/// Whether an element carrying these keys (lowercased tag, id, class
+/// attribute) can be the subject of a `:has`-bearing rule in `index` —
+/// the filter the subtree walk under a flipped chain node applies. Set
+/// spellings mirror the compile side (both author cases in quirks mode),
+/// so over-inclusion is the only failure mode the filter can have.
+fn subtree_node_is_has_subject(
+    meta: Option<(String, Option<String>, Option<String>)>,
+    index: &RuleIndex,
+) -> bool {
+    let Some((tag, id, class)) = meta else {
+        return false;
+    };
+    if index.has_subject_unkeyed {
+        return true;
+    }
+    if index.has_subject_tags.contains(tag.as_str()) {
+        return true;
+    }
+    if let Some(id) = id {
+        if index.has_subject_ids.contains(id.as_str())
+            || (index.quirks && index.has_subject_ids.contains(id.to_ascii_lowercase().as_str()))
+        {
+            return true;
+        }
+    }
+    if let Some(class) = class {
+        for tok in class.split_ascii_whitespace() {
+            if index.has_subject_classes.contains(tok)
+                || (index.quirks
+                    && index.has_subject_classes.contains(tok.to_ascii_lowercase().as_str()))
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// The rightmost-compound key a rule selector's subject element must
@@ -1402,6 +1572,23 @@ pub(crate) struct RuleIndex {
     unkeyed: Vec<usize>,
     pseudo_kinds: HashMap<usize, PseudoKind>,
     quirks: bool,
+    /// Some rule bears `:has()` (see [`selector_bears_has`]): matching is
+    /// transitive, so the incremental sync widens its ancestor-chain
+    /// re-probe to whole subtrees. False for `:has`-free sheets — the
+    /// common case pays nothing.
+    bears_has: bool,
+    /// Rightmost-compound keys of the `:has`-bearing rules' sub-selectors
+    /// (`section:has(.leaf) .ghost` contributes class "ghost"): the only
+    /// elements the subtree walk under a flipped chain node re-probes.
+    /// Both author-case spellings land in the sets in quirks mode, mirroring
+    /// the bucket tables.
+    has_subject_ids: HashSet<String>,
+    has_subject_classes: HashSet<String>,
+    has_subject_tags: HashSet<String>,
+    /// A `:has`-bearing rule has a keyless subject compound (`:has(a) *`):
+    /// every element is a candidate, so the walk marks whole subtrees and
+    /// the candidate gate turns that into a full rebuild.
+    has_subject_unkeyed: bool,
 }
 
 /// The persisted match state for [`DomTree::rule_match_sets_incremental`]:
