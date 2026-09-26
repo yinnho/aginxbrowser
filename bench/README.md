@@ -46,7 +46,7 @@ lib.rs and StackOverflow were dropped because their robots.txt disallows bots):
 | Scenario | What runs |
 |---|---|
 | `tier1` | `POST /fetch {"render_tier":"http"}` — plain HTTP + built-in HTML→markdown. Falls back to the browser tier when HTTP content is insufficient (the `tier` column records what actually served). |
-| `tier2` | `POST /fetch {"render_tier":"obscura"}` — full V8 browser render + markdown |
+| `tier2` | `POST /fetch {"render_tier":"browser"}` — full V8 browser render + markdown. `obscura` is still accepted and is not the name to send |
 | `auto` | default `/fetch` — the shipped behavior; records the tier hit-rate |
 | `chrome` | `headless Chrome --headless=new --dump-dom --virtual-time-budget=8000`, cold profile per page (what a launch-per-fetch Puppeteer pipeline pays), DOM tag-stripped with the Python stdlib — the minimal real-world conversion step |
 

@@ -47,6 +47,16 @@ Existing "browser automation" was built for humans or for one-shot scraping — 
 | CAPTCHA | ✅ detect + auto-wait + optional 2captcha | DIY | ❌ | ❌ |
 | Interactive sessions | ✅ persistent | ✅ | ❌ | ✅ |
 
+Same-tier engines, not the tools in the table above. Cells are capabilities, not speed.
+
+| | AginxBrowser | Obscura | Blitz | Lightpanda |
+|---|---|---|---|---|
+| What it is | Rust browser, V8, diting CSS paint | Rust headless browser, V8 | HTML/CSS engine (Stylo). Not an agent browser | Zig headless browser, V8 |
+| Playwright / CDP | `connectOverCDP` | Puppeteer and Playwright over CDP | no | Puppeteer and Playwright over CDP |
+| Screenshot | built-in paint, opt-in build | screenshots, screencast, PDF | paints a window | Hermes integration falls back to Chrome for screenshots |
+| Public CSS suite | none in CI | not published as WPT | WPT in CI, including SVG | not published as WPT |
+| License | Apache-2.0 | Apache-2.0 | Apache-2.0 and MIT | AGPL-3.0 |
+
 An agent needs five things from a browser: **see, read, find, act, remember.** One binary covers them all — systemd-friendly, MCP-native for Claude/Cursor, zero dependencies.
 
 **Core advantage: no Chromium.** AginxBrowser inlines a full browser engine (V8 + Rust HTTP stack + the diting CSS/layout/paint rendering engine, with the Blitz/Stylo/Taffy lineage as its reference implementation). No Puppeteer, no Chrome, no Docker. One Rust binary under systemd is your agent browsing infrastructure.

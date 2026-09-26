@@ -47,6 +47,16 @@
 | CAPTCHA | ✅ 识别 + 自动等待 + 可选 2captcha | 要自己接 | ❌ | ❌ |
 | 交互式 Session | ✅ 持久化 | ✅ | ❌ | ✅ |
 
+上面那张表是旧工具。下面是同一档正在写的引擎，格子里是能力，不是速度。
+
+| | AginxBrowser | Obscura | Blitz | Lightpanda |
+|---|---|---|---|---|
+| 是什么 | Rust 浏览器，V8，diting 绘制 | Rust 无头浏览器，V8 | HTML/CSS 引擎（Stylo），不是给智能体用的浏览器 | Zig 无头浏览器，V8 |
+| Playwright / CDP | `connectOverCDP` | Puppeteer 和 Playwright 走 CDP | 没有 | Puppeteer 和 Playwright 走 CDP |
+| 截图 | 自带绘制，编译时打开 | 截图、screencast、PDF | 画窗口 | Hermes 集成里截图退回 Chrome |
+| 公开的 CSS 套件 | CI 里没有 | 没有公开的 WPT | CI 里跑 WPT，含 SVG | 没有公开的 WPT |
+| 许可证 | Apache-2.0 | Apache-2.0 | Apache-2.0 和 MIT | AGPL-3.0 |
+
 Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操得了、记得住。** 一个二进制全包，systemd 守护，MCP 直连 Claude/Cursor，零依赖启动即服务。
 
 **核心优势：不依赖 Chromium。** AginxBrowser 内联了完整的浏览器引擎（V8 + Rust HTTP 栈 + 自有的 diting CSS/布局/绘制渲染引擎，以 Blitz/Stylo/Taffy 谱系为参照实现），不需要 Puppeteer、不需要 Chrome、不需要 Docker。一个 Rust 二进制挂 systemd，就是 agent 的浏览器基础设施。
