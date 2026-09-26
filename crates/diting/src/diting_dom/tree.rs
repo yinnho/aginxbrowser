@@ -291,6 +291,10 @@ pub(crate) struct DomTreeInner {
     /// offset), so consumers fingerprint their caches with this instead of
     /// the tree epoch.
     scroll_gen: u64,
+    /// Bumped on every allocation/free. Layout caches fingerprint the tree
+    /// with it ("tree shape changed"), so it must never repeat a value —
+    /// see [`DomTree::epoch`].
+    epoch_gen: u64,
     /// Structural/attribute mutations since the last incremental selector
     /// match sync — see [`super::selector::MatchDirty`]. Stamped by the
     /// mutation methods themselves so no caller can forget.
@@ -325,6 +329,7 @@ impl DomTree {
                 selection: None,
                 scroll_offsets: HashMap::new(),
                 scroll_gen: 0,
+                epoch_gen: 0,
                 match_dirty: MatchDirty::default(),
                 match_cache: None,
             }),
@@ -404,11 +409,14 @@ impl DomTree {
 
     // Document generation stamp: bumps on every allocation/free, so a layout
     // cache keyed to it invalidates whenever the tree mutates. Cheap (one
-    // usize read); not a mutation counter (attribute writes don't bump), which
+    // u64 read); not a mutation counter (attribute writes don't bump), which
     // is fine for consumers whose cache only needs "tree shape changed".
+    // A monotonic counter, never a packing of (len, free): the packed form
+    // collided whenever free_list crossed a 256 boundary without an
+    // allocation (nodes.len() is unchanged by pure removals), handing
+    // epoch-keyed caches the same stamp for a mutated tree (#124).
     pub fn epoch(&self) -> u64 {
-        let inner = self.inner.borrow();
-        (inner.nodes.len() as u64) << 8 | ((inner.free_list.len() as u64) & 0xFF)
+        self.inner.borrow().epoch_gen
     }
 
     pub fn set_quirks(&self, quirks: bool) {
@@ -685,6 +693,7 @@ impl DomTree {
             next_sibling: None,
             data,
         });
+        inner.epoch_gen = inner.epoch_gen.wrapping_add(1);
         id
     }
 
@@ -990,6 +999,9 @@ impl DomTree {
         }
         self.detach(node_id);
         let mut inner = self.inner.borrow_mut();
+        // Every removal frees at least the root's slot (the guard above
+        // returned for dead nodes), so the epoch always moves (#124).
+        inner.epoch_gen = inner.epoch_gen.wrapping_add(1);
 
         let mut ids_to_remove = Vec::new();
         for &id in &nodes_to_remove {

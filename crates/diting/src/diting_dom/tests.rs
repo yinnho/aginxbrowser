@@ -271,6 +271,33 @@ mod tree_tests {
     }
 
     #[test]
+    fn epoch_moves_across_bulk_pure_removals() {
+        // #124: the epoch used to pack (nodes.len() << 8) | (free_list.len()
+        // & 0xFF), and pure removals never shrink the node Vec — so exactly
+        // 256 removals with no allocation between them returned the SAME
+        // stamp, letting epoch-keyed layout caches serve stale geometry for
+        // a mutated tree.
+        let tree = DomTree::new();
+        let doc = tree.document();
+        let kids: Vec<_> = (0..300)
+            .map(|_| tree.new_node(NodeData::Text { contents: "x".into() }))
+            .collect();
+        for k in &kids {
+            tree.append_child(doc, *k);
+        }
+        let before = tree.epoch();
+        for k in &kids[..256] {
+            tree.remove(*k);
+        }
+        let after = tree.epoch();
+        assert_ne!(before, after, "256 pure removals must move the epoch");
+        // And monotonicity is not just non-equality: fresh slots move it too.
+        let mid = tree.epoch();
+        tree.new_node(NodeData::Text { contents: "y".into() });
+        assert!(tree.epoch() > mid, "allocation must move the epoch forward");
+    }
+
+    #[test]
     fn test_children_and_ancestors_survive_forced_cycles() {
         // The tree guards make cycles unreachable via the public API, so force
         // corrupt pointers directly: children()/ancestors() must terminate with
