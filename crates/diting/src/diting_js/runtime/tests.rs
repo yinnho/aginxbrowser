@@ -12980,6 +12980,58 @@
 
     #[cfg(feature = "screenshot")]
     #[test]
+    fn test_offset_parent_is_null_terminated_cssom_chain() {
+        // #128: Fusion-style accumulators walk `e = e.offsetParent;
+        // while (null !== e && e !== anchor)` — the exit test only accepts
+        // null, so an undefined return (the property simply not being
+        // reflected) spins into `.offsetTop` of undefined and kills the
+        // component mid-mount. Chrome semantics pinned: nearest positioned
+        // or table ancestor, body fallback, null for html/body/fixed/
+        // display:none chains/detached — never undefined.
+        let mut rt = setup_runtime(
+            "<html><head><style>#fixed { position: fixed; top: 0; left: 0; width: 50px; height: 20px; }\
+             .rel { position: relative; }</style></head>\
+             <body><div class=\"rel\" id=\"rel\"><div id=\"plain\"></div></div><div id=\"top\"></div>\
+             <div id=\"fixed\"></div><div id=\"hider\" style=\"display:none\"><div id=\"hiddenchild\"></div></div>\
+             <table><tr><td id=\"cell\"><span id=\"incell\"></span></td></tr></table></body></html>",
+        );
+        let result = rt.evaluate(r#"
+            const byId = (id) => document.getElementById(id);
+            // The exact Fusion loop shape: undefined would never exit.
+            const walk = (el) => {
+                let e = el, hops = 0;
+                do { e = e.offsetParent; hops++; } while (null !== e && hops < 50);
+                return [e === null, hops];
+            };
+            const detached = document.createElement("div");
+            return [
+                walk(byId("plain")),
+                byId("plain").offsetParent === byId("rel"),
+                byId("top").offsetParent === document.body,
+                byId("incell").offsetParent === byId("cell"),
+                byId("fixed").offsetParent === null,
+                byId("hiddenchild").offsetParent === null,
+                document.body.offsetParent === null,
+                document.documentElement.offsetParent === null,
+                detached.offsetParent === null,
+                typeof byId("top").offsetParent,
+            ];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        assert_eq!(parts[0], serde_json::json!([true, 3]), "walk exits at null in ≤3 hops (el→rel→body)");
+        assert_eq!(parts[1], serde_json::json!(true), "nearest positioned ancestor wins");
+        assert_eq!(parts[2], serde_json::json!(true), "static top-level falls back to body");
+        assert_eq!(parts[3], serde_json::json!(true), "table cell is an offset parent");
+        assert_eq!(parts[4], serde_json::json!(true), "position:fixed has none");
+        assert_eq!(parts[5], serde_json::json!(true), "display:none chain has none");
+        assert_eq!(parts[6], serde_json::json!(true), "body has none");
+        assert_eq!(parts[7], serde_json::json!(true), "html has none");
+        assert_eq!(parts[8], serde_json::json!(true), "detached element has none");
+        assert_eq!(parts[9], serde_json::json!("object"), "never undefined: Element or null only");
+    }
+
+    #[cfg(feature = "screenshot")]
+    #[test]
     fn test_offset_geometry_zero_while_hidden_real_after_show() {
         // CSSOM: offset*/client*/scroll* of a display:none element are 0 —
         // the init-in-hidden-container pattern (map libs size while hidden,

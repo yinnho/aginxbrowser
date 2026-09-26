@@ -4435,6 +4435,7 @@ class Element extends Node {
   // element's offset* stay layout-true instead of tracking its mapped gBCR.
   get offsetTop() { const b = _ditingLocalBox(this); return b ? Math.round(b.y) : 0; }
   get offsetLeft() { const b = _ditingLocalBox(this); return b ? Math.round(b.x) : 0; }
+  get offsetParent() { return _ditingOffsetParent(this); }
   // documentElement / body / window expose VIEWPORT geometry, not their own content box.
   // Puppeteer's #clickableBox clips boxes to document.documentElement.clientWidth/Height;
   // returning 100x20 there made every element appear off-screen and broke .click().
@@ -6470,6 +6471,48 @@ function _ditingDisplayNone(el) {
     const s = typeof raw === "string" ? JSON.parse(raw) : raw;
     return !!(s && s.display === "none");
   } catch { return false; }
+}
+
+// CSSOM View offsetParent (#128). The walk MUST terminate in null, never
+// undefined: Fusion-style accumulators do `e = e.offsetParent;
+// while (null !== e && e !== anchor)` — an undefined return passes the
+// null test and the next iteration reads .offsetTop of undefined, killing
+// the component mid-mount (tmall publish editor / upload selector).
+// Chrome semantics mirrored: html/body, an unrendered chain (display:none),
+// or position:fixed → null; otherwise the nearest ancestor that is a
+// table cell/table or positioned, falling back to body. Detached subtrees
+// and shadow-root boundaries fall out of the walk → null. Position/display
+// come from the computed_style op (the _ditingDisplayNone precedent); with
+// no layout data (blind build) every ancestor reads position undefined,
+// degrading to "parent chain up to body" — still a null-terminated chain.
+function _ditingOffsetParent(el) {
+  try {
+    if (el._nid == null) return null;
+    const doc = el.ownerDocument;
+    if (!doc) return null;
+    if (el === doc.documentElement || el === doc.body) return null;
+    const tagOf = (e) => (e.tagName || "").toUpperCase();
+    if (tagOf(el) === "HTML" || tagOf(el) === "BODY") return null;
+    const styleOf = (e) => {
+      const raw = _domRaw("computed_style", String(e._nid | 0), "");
+      const s = typeof raw === "string" ? JSON.parse(raw) : raw;
+      return s || {};
+    };
+    const self = styleOf(el);
+    if (self.display === "none" || self.position === "fixed") return null;
+    let p = el.parentNode;
+    while (p) {
+      if (p.nodeType !== 1) return null; // Document/ShadowRoot: off-tree or shadow boundary
+      if (p === doc.body) return p;
+      const s = styleOf(p);
+      if (s.display === "none") return null;
+      const t = tagOf(p);
+      if (t === "TD" || t === "TH" || t === "TABLE") return p;
+      if (s.position && s.position !== "static") return p;
+      p = p.parentNode;
+    }
+    return null; // ran off the top without hitting body: detached subtree
+  } catch { return null; }
 }
 
 // PluginArray / MimeTypeArray / Plugin / MimeType — real browsers expose these
