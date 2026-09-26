@@ -566,7 +566,7 @@ fn parse_keyframes_body(inner: &str) -> Option<Keyframes> {
         let offset = match sel.trim() {
             "from" => Some(0.0),
             "to" => Some(1.0),
-            s => s.strip_suffix('%').and_then(|n| n.trim().parse::<f32>().ok().map(|p| p / 100.0)),
+            s => s.strip_suffix('%').and_then(|n| n.trim().css_f32().map(|p| p / 100.0)),
         };
         if let Some(offset) = offset.filter(|o| o.is_finite() && (0.0..=1.0).contains(o)) {
             let decls = split_declarations(body);
@@ -782,7 +782,7 @@ fn media_pref_answer(name: &str, value: &str, overrides: &MediaOverrides) -> Opt
 
 fn parse_px(value: &str) -> Option<f32> {
     let v = value.trim().strip_suffix("px").unwrap_or(value.trim());
-    v.parse::<f32>().ok()
+    v.css_f32()
 }
 
 // ---------------------------------------------------------------------------
@@ -952,8 +952,8 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         ),
         "object-position" => {
             let part = |s: &str| {
-                s.ends_with('%') && s[..s.len() - 1].parse::<f32>().is_ok()
-                    || s.ends_with("px") && s[..s.len() - 2].parse::<f32>().is_ok()
+                s.ends_with('%') && s[..s.len() - 1].css_f32().is_some()
+                    || s.ends_with("px") && s[..s.len() - 2].css_f32().is_some()
             };
             value
                 .split_whitespace()
@@ -2239,7 +2239,7 @@ pub(crate) fn parse_easing_token(tok: &str) -> Option<Easing> {
             let args: Vec<Option<f32>> = rest
                 .strip_suffix(')')?
                 .split(',')
-                .map(|a| a.trim().parse::<f32>().ok())
+                .map(|a| a.trim().css_f32())
                 .collect();
             let pts: Option<Vec<f32>> = args.into_iter().collect();
             let pts = pts?;
@@ -2264,8 +2264,8 @@ fn parse_transition_shorthand(v: &str) -> Option<TransitionSpec> {
     for tok in paren_aware_tokens(v) {
         let secs = tok
             .strip_suffix("ms")
-            .and_then(|n| n.parse::<f32>().ok().map(|n| n / 1000.0))
-            .or_else(|| tok.strip_suffix('s').and_then(|n| n.parse::<f32>().ok()));
+            .and_then(|n| n.css_f32().map(|n| n / 1000.0))
+            .or_else(|| tok.strip_suffix('s').and_then(|n| n.css_f32()));
         if let Some(s) = secs.filter(|s| s.is_finite() && *s >= 0.0) {
             if duration.is_none() {
                 duration = Some(s);
@@ -2464,8 +2464,8 @@ fn parse_animation_shorthand(v: &str) -> Option<AnimationSpec> {
     for tok in paren_aware_tokens(v) {
         let secs = tok
             .strip_suffix("ms")
-            .and_then(|n| n.parse::<f32>().ok().map(|n| n / 1000.0))
-            .or_else(|| tok.strip_suffix('s').and_then(|n| n.parse::<f32>().ok()));
+            .and_then(|n| n.css_f32().map(|n| n / 1000.0))
+            .or_else(|| tok.strip_suffix('s').and_then(|n| n.css_f32()));
         if let Some(s) = secs.filter(|s| s.is_finite() && *s >= 0.0) {
             if duration.is_none() {
                 duration = Some(s);
@@ -2489,7 +2489,7 @@ fn parse_animation_shorthand(v: &str) -> Option<AnimationSpec> {
                     let args: Vec<Option<f32>> = rest
                         .strip_suffix(')')?
                         .split(',')
-                        .map(|a| a.trim().parse::<f32>().ok())
+                        .map(|a| a.trim().css_f32())
                         .collect();
                     let pts: Option<Vec<f32>> = args.into_iter().collect();
                     let pts = pts?;
@@ -2617,15 +2617,15 @@ pub(crate) fn parse_transform_with_vp(v: &str, vw: f32, vh: f32) -> Option<Trans
     let one = |s: &str| -> Option<Length> {
         let s = s.trim();
         if let Some(num) = s.strip_suffix('%') {
-            num.trim().parse::<f32>().ok().map(Length::Percent)
+            num.trim().css_f32().map(Length::Percent)
         } else if let Some(num) = s.strip_suffix("px") {
-            num.trim().parse::<f32>().ok().map(Length::Px)
+            num.trim().css_f32().map(Length::Px)
         } else if let Some(num) = s.strip_suffix("vw") {
             // Viewport units fold to px at parse time (batch 162 resolve_len
             // posture) — the translate slots are px/percent only.
-            num.trim().parse::<f32>().ok().map(|n| Length::Px(n * vw / 100.0))
+            num.trim().css_f32().map(|n| Length::Px(n * vw / 100.0))
         } else if let Some(num) = s.strip_suffix("vh") {
-            num.trim().parse::<f32>().ok().map(|n| Length::Px(n * vh / 100.0))
+            num.trim().css_f32().map(|n| Length::Px(n * vh / 100.0))
         } else {
             // `0` is a legal bare length; other unitless values are not.
             (s == "0").then_some(Length::Px(0.0))
@@ -2638,7 +2638,7 @@ pub(crate) fn parse_transform_with_vp(v: &str, vw: f32, vh: f32) -> Option<Trans
         _ => None,
     };
     let num = |s: &str| -> Option<f32> {
-        let n = s.trim().parse::<f32>().ok()?;
+        let n = s.trim().css_f32()?;
         n.is_finite().then_some(n)
     };
     // Angle in CSS units: deg (the default suffix real sheets write), rad,
@@ -2658,7 +2658,7 @@ pub(crate) fn parse_transform_with_vp(v: &str, vw: f32, vh: f32) -> Option<Trans
         } else {
             return None;
         };
-        let deg = n.trim().parse::<f32>().ok()? * scale;
+        let deg = n.trim().css_f32()? * scale;
         deg.is_finite().then_some(deg)
     };
     let mut t = Transform2D {
@@ -2890,24 +2890,24 @@ fn parse_css_length(v: &str) -> Option<CssLength> {
         return Some(CssLength::Px(0.0));
     }
     if let Some(p) = v.strip_suffix('%') {
-        return p.parse::<f32>().ok().map(CssLength::Percent);
+        return p.css_f32().map(CssLength::Percent);
     }
     if let Some(r) = v.strip_suffix("rem") {
-        return r.parse::<f32>().ok().map(CssLength::Rem);
+        return r.css_f32().map(CssLength::Rem);
     }
     // "vw" before "vh" is arbitrary (no suffix overlap like rem/em), but
     // both must precede nothing else — no other unit ends in w/h.
     if let Some(n) = v.strip_suffix("vw") {
-        return n.parse::<f32>().ok().map(CssLength::Vw);
+        return n.css_f32().map(CssLength::Vw);
     }
     if let Some(n) = v.strip_suffix("vh") {
-        return n.parse::<f32>().ok().map(CssLength::Vh);
+        return n.css_f32().map(CssLength::Vh);
     }
     if let Some(e) = v.strip_suffix("em") {
-        return e.parse::<f32>().ok().map(CssLength::Em);
+        return e.css_f32().map(CssLength::Em);
     }
     if let Some(px) = v.strip_suffix("px") {
-        return px.parse::<f32>().ok().map(CssLength::Px);
+        return px.css_f32().map(CssLength::Px);
     }
     None
 }
@@ -3456,7 +3456,7 @@ fn stop_transform(
 fn stop_num(stop: &KeyframeStop, prop: &str, custom: &std::collections::HashMap<String, String>) -> Option<f32> {
     let (_, raw) = stop.decls.iter().rev().find(|(k, _)| k == prop)?;
     let sub = substitute_vars(raw, custom, 0).unwrap_or_else(|| raw.clone());
-    sub.trim().parse::<f32>().ok().filter(|n| n.is_finite())
+    sub.trim().css_f32().filter(|n| n.is_finite())
 }
 
 fn lerp_len(a: Length, b: Length, l: f32) -> Length {
@@ -3880,6 +3880,23 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             _ => len(val),
         }
     };
+    // Box-offset slot (#129 family): `auto` is a legal value that resets the
+    // slot to the initial value; anything else unparseable is a declaration
+    // Chrome drops at parse time — the already-cascaded slot must survive
+    // untouched (a reset would yank a positioned box to its static spot).
+    let box_offset = |slot: &mut Option<Length>| -> bool {
+        if v.eq_ignore_ascii_case("auto") {
+            *slot = None;
+            return true;
+        }
+        match len(v) {
+            Some(l) => {
+                *slot = Some(l);
+                true
+            }
+            None => false,
+        }
+    };
     match name {
         "display" => {
             // inline-flex/inline-grid (#107) and inline-table (its follow-up):
@@ -3992,7 +4009,7 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             let list: Option<Vec<f32>> = v
                 .split(|c: char| c == ',' || c.is_whitespace())
                 .filter(|t| !t.is_empty())
-                .map(|t| t.parse::<f32>().ok().filter(|n| n.is_finite() && *n >= 0.0))
+                .map(|t| t.css_f32().filter(|n| n.is_finite() && *n >= 0.0))
                 .collect();
             match list {
                 Some(l) if !l.is_empty() => {
@@ -4499,9 +4516,9 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             let z = if t.eq_ignore_ascii_case("normal") {
                 Some(1.0)
             } else if let Some(pct) = t.strip_suffix('%') {
-                pct.trim().parse::<f32>().ok().map(|n| n / 100.0)
+                pct.trim().css_f32().map(|n| n / 100.0)
             } else {
-                t.parse::<f32>().ok()
+                t.css_f32()
             };
             match z {
                 Some(n) if n.is_finite() && n > 0.0 => {
@@ -4557,8 +4574,8 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             let t = v.split(',').next().unwrap_or("").trim();
             let secs = t
                 .strip_suffix("ms")
-                .and_then(|n| n.parse::<f32>().ok().map(|n| n / 1000.0))
-                .or_else(|| t.strip_suffix('s').and_then(|n| n.parse::<f32>().ok()));
+                .and_then(|n| n.css_f32().map(|n| n / 1000.0))
+                .or_else(|| t.strip_suffix('s').and_then(|n| n.css_f32()));
             match secs {
                 Some(s) if s.is_finite() && s >= 0.0 => {
                     let spec = style.transition.get_or_insert(TransitionSpec {
@@ -4653,7 +4670,7 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                     "center" => Some(ObjectPositionPart::Percent(50.0)),
                     "right" | "bottom" => Some(ObjectPositionPart::Percent(100.0)),
                     _ => {
-                        let num = s.strip_suffix('%').map(|n| n.parse::<f32>().ok()).flatten();
+                        let num = s.strip_suffix('%').map(|n| n.css_f32()).flatten();
                         if let Some(p) = num {
                             return Some(ObjectPositionPart::Percent(p));
                         }
@@ -4912,22 +4929,12 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             }
             None => false,
         },
-        "top" => {
-            style.top = len(v);
-            style.top.is_some()
-        }
-        "right" => {
-            style.right = len(v);
-            style.right.is_some()
-        }
-        "bottom" => {
-            style.bottom = len(v);
-            style.bottom.is_some()
-        }
-        "left" => {
-            style.left = len(v);
-            style.left.is_some()
-        }
+        // Box offsets route through `box_offset` (#129 family): `auto`
+        // resets, unparseable values drop without touching the cascade.
+        "top" => box_offset(&mut style.top),
+        "right" => box_offset(&mut style.right),
+        "bottom" => box_offset(&mut style.bottom),
+        "left" => box_offset(&mut style.left),
         // inset shorthand: <length-percentage>{1,4} | auto. Same expansion
         // family as margin, but auto is the property initial value here
         // (None slots, not Length::Auto) and `inset: auto` resets all four.
@@ -5002,8 +5009,8 @@ fn parse_aspect_ratio(v: &str) -> Option<f32> {
         return None;
     }
     let (w, h) = match v.split_once('/') {
-        Some((w, h)) => (w.trim().parse::<f32>().ok()?, h.trim().parse::<f32>().ok()?),
-        None => (v.parse::<f32>().ok()?, 1.0),
+        Some((w, h)) => (w.trim().css_f32()?, h.trim().css_f32()?),
+        None => (v.css_f32()?, 1.0),
     };
     if w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0 {
         Some(w / h)
@@ -5013,8 +5020,33 @@ fn parse_aspect_ratio(v: &str) -> Option<f32> {
 }
 
 /// Plain number (flex-grow: 1).
+/// CSS number parser. Rust's float grammar also accepts `NaN`, `inf` and
+/// `Infinity`; CSS's does not (numbers are finite decimal forms), so a page
+/// writing `style.left = 'NaNpx'` must see the whole declaration dropped the
+/// way Chrome drops it — a stored NaN poisons the layout solve and collapses
+/// boxes (tmall's 选择视频 dialog, #129). Every numeric parse in this module
+/// funnels through this one gate.
+fn css_f32(s: &str) -> Option<f32> {
+    // NB: this body must stay on `.parse()` directly — routing through the
+    // trait method below is mutual recursion (the sed that rewrote the forty
+    // old call sites also rewrote this line once; the test run stack-overflowed).
+    let n = s.parse::<f32>().ok()?;
+    n.is_finite().then_some(n)
+}
+
+/// Method posture over [`css_f32`] so the mechanical rewrite of the old
+/// `.parse::<f32>().ok()` call sites stays one token wide.
+trait CssF32 {
+    fn css_f32(&self) -> Option<f32>;
+}
+impl CssF32 for str {
+    fn css_f32(&self) -> Option<f32> {
+        css_f32(self)
+    }
+}
+
 fn parse_num_f32(v: &str) -> Option<f32> {
-    v.parse::<f32>().ok()
+    css_f32(v)
 }
 
 /// Whitespace-separated track list: `1fr 2fr 100px auto`. Unknown tokens
@@ -5113,16 +5145,16 @@ fn parse_track_size(tok: &str) -> Option<TrackSize> {
         return Some(TrackSize::Auto);
     }
     if let Some(fr) = tok.strip_suffix("fr") {
-        return fr.parse::<f32>().ok().map(TrackSize::Fr);
+        return fr.css_f32().map(TrackSize::Fr);
     }
     if let Some(px) = parse_px_f32(tok) {
         return Some(TrackSize::Px(px));
     }
     if let Some(r) = tok.strip_suffix("rem") {
-        return r.parse::<f32>().ok().map(|n| TrackSize::Px(n * 16.0));
+        return r.css_f32().map(|n| TrackSize::Px(n * 16.0));
     }
     if let Some(p) = tok.strip_suffix('%') {
-        return p.parse::<f32>().ok().map(TrackSize::Percent);
+        return p.css_f32().map(TrackSize::Percent);
     }
     if tok == "0" {
         return Some(TrackSize::Px(0.0));
@@ -5233,7 +5265,7 @@ fn parse_px_f32(v: &str) -> Option<f32> {
     if v == "0" {
         return Some(0.0);
     }
-    v.strip_suffix("px")?.parse::<f32>().ok()
+    v.strip_suffix("px")?.css_f32()
 }
 
 /// font-size accepts px/em/rem/% and the common absolute keywords. em/%
@@ -5643,9 +5675,9 @@ pub fn parse_color(v: &str) -> Option<Color> {
             .filter(|s| !s.is_empty())
             .map(|tok| {
                 if let Some(pct) = tok.strip_suffix('%') {
-                    pct.parse::<f32>().ok().map(|p| p * 255.0 / 100.0)
+                    pct.css_f32().map(|p| p * 255.0 / 100.0)
                 } else {
-                    tok.parse::<f32>().ok()
+                    tok.css_f32()
                 }
             })
             .collect();
@@ -5786,7 +5818,7 @@ pub fn parse_linear_gradient(raw: &str) -> Option<LinearGradient> {
         }
         let (head, tail) = p.rsplit_once(' ')?;
         let c = parse_color(head.trim())?;
-        let pos = tail.trim().strip_suffix('%')?.trim().parse::<f32>().ok()? / 100.0;
+        let pos = tail.trim().strip_suffix('%')?.trim().css_f32()? / 100.0;
         colors.push(c);
         positions.push(Some(pos));
     }
@@ -6020,7 +6052,7 @@ pub fn cascade_element(
         let attr_h = tree
             .with_node(node_id, |n| {
                 n.get_attribute("height")
-                    .and_then(|v| v.trim().parse::<f32>().ok())
+                    .and_then(|v| v.trim().css_f32())
             })
             .flatten();
         if let Some(h) = attr_h {
@@ -6035,7 +6067,7 @@ pub fn cascade_element(
         let attr_w = tree
             .with_node(node_id, |n| {
                 n.get_attribute("width")
-                    .and_then(|v| v.trim().parse::<f32>().ok())
+                    .and_then(|v| v.trim().css_f32())
             })
             .flatten();
         if let Some(w) = attr_w {

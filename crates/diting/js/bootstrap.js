@@ -9216,6 +9216,15 @@ globalThis.getComputedStyle = (el, pseudoElt) => {
     if (snapshot.rendered && Object.prototype.hasOwnProperty.call(snapshot.rendered, kebab)) {
       return snapshot.rendered[kebab];
     }
+    // Box offsets outrank the inline echo: Chrome's resolved value for a
+    // positioned element is the used value (its geometry), and an inline
+    // write the parser dropped — style.left='NaNpx' (#129) — must never
+    // read back through the computed face.
+    if (!pseudoName && (kebab === 'left' || kebab === 'top'
+        || kebab === 'right' || kebab === 'bottom')) {
+      const dim = dimensionFor(kebab);
+      if (dim != null) return dim;
+    }
     // Inline value next — CSSOM writes not yet folded into a snapshot
     // (or no layout run at all). Pseudo-elements carry no inline style
     // (their cascade lives in the host's pseudo tables), so this branch

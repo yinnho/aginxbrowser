@@ -2866,3 +2866,45 @@ fn content_declaration_lands_in_computed_style() {
     // Default stays unset — the getComputedStyle face maps it to "normal".
     assert_eq!(ComputedStyle::default().content, None);
 }
+
+#[test]
+fn nonfinite_numbers_drop_declarations() {
+    // #129: page JS can compute a NaN and write `style.left = 'NaNpx'`.
+    // Rust's float grammar accepts `NaN`/`inf`/`Infinity`; CSS's does not —
+    // Chrome drops the whole declaration, and a stored NaN poisons the
+    // layout solve (tmall's 选择视频 dialog collapsed to 100x20).
+    let mut s = ComputedStyle::default();
+    assert!(
+        !apply_declarations(&mut s, "left: NaNpx"),
+        "NaNpx must be an invalid <length>"
+    );
+    assert!(!apply_declarations(&mut s, "top: Infinitypx"));
+    assert!(!apply_declarations(&mut s, "width: -infpx"));
+    // The margin family's arm reports success unconditionally (its None
+    // side resolves to 0, same computed value as Chrome's dropped
+    // declaration) — so the contract to pin here is that the NaN lands
+    // nowhere, not the arm's return value.
+    apply_declarations(&mut s, "margin-left: nan px".replace(' ', "").as_str());
+    assert_eq!(s, ComputedStyle::default(), "no non-finite value may land in a slot");
+
+    // A finite sibling declaration in the same block still applies.
+    let mut s = ComputedStyle::default();
+    apply_declarations(&mut s, "left: 40px; top: NaNpx; right: 10px");
+    assert_eq!(s.left, Some(Length::Px(40.0)));
+    assert_eq!(s.top, None, "the NaN declaration drops, the rest survive");
+    assert_eq!(s.right, Some(Length::Px(10.0)));
+
+    // Numbers without units follow the same grammar (z-index: NaN).
+    let mut s = ComputedStyle::default();
+    assert!(!apply_declarations(&mut s, "z-index: NaN"));
+    assert_eq!(s, ComputedStyle::default());
+
+    // `auto` is the one non-length that IS legal on a box offset: it must
+    // apply (resetting the slot), unlike a dropped NaN declaration.
+    let mut s = ComputedStyle::default();
+    assert!(apply_declarations(&mut s, "left: 40px"));
+    assert!(apply_declarations(&mut s, "left: auto"));
+    assert_eq!(s.left, None, "left: auto resets the slot");
+    assert!(!apply_declarations(&mut s, "left: NaNpx"));
+    assert_eq!(s.left, None);
+}

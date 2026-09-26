@@ -15710,3 +15710,40 @@ fn document_evaluate_xpath_subset() {
             std::time::Duration::from_secs(90)
         );
     }
+
+    /// #129: page JS can compute a NaN and write `style.left = 'NaNpx'`.
+    /// The Rust parser drops the declaration (no slot, no layout poison),
+    /// and the computed face answers the used value from geometry — the
+    /// inline echo must not read the dropped declaration back out.
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn computed_box_offsets_never_echo_dropped_nan_decl() {
+        let mut rt = setup_runtime(
+            "<html><head><style>#o { position: absolute; left: 40px; width: 100px; }</style>\
+             </head><body><div id='o'>x</div></body></html>",
+        );
+        let out = rt.evaluate(r#"
+            var el = document.getElementById('o');
+            var before = getComputedStyle(el).left;
+            el.style.left = 'NaNpx';
+            var after = getComputedStyle(el).left;
+            var rect = el.getBoundingClientRect().left;
+            // `left: auto` is legal and DOES reset — back to the static
+            // position (body margin 8px), unlike the dropped NaN write.
+            el.style.left = 'auto';
+            var autoLeft = getComputedStyle(el).left;
+            return [before, after, String(rect), autoLeft].join('|');
+        "#).unwrap();
+        let got = out.as_str().unwrap().to_string();
+        assert!(
+            !got.contains("NaN"),
+            "computed left may never read back a dropped NaN declaration: {got}"
+        );
+        // The valid declared offset still resolves, and after the rejected
+        // write it keeps answering geometry. `auto` then resets — away from
+        // 40px to the static position (whose exact arithmetic is the
+        // layout layer's, not this face contract).
+        let parts: Vec<&str> = got.split('|').collect();
+        assert_eq!(parts[0..3].join("|"), "40px|40px|40");
+        assert_ne!(parts[3], "40px", "left: auto must reset the offset");
+    }
