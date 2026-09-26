@@ -1300,20 +1300,23 @@ fn session_thread(
                                 // at completion) — surface what is still
                                 // flying so a timed-out caller can tell a
                                 // slow save from a dead one before re-issuing.
+                                // #130: the key is always present, `[]` when
+                                // quiet — an absent field is indistinguishable
+                                // from a wrong endpoint / stale version for
+                                // the reading agent, so "zero in flight"
+                                // must read as an empty array, not silence.
                                 let in_flight = page.inner.scripted_in_flight();
-                                if !in_flight.is_empty() {
-                                    let now_ms = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_millis() as u64)
-                                        .unwrap_or(0);
-                                    payload["in_flight"] = json!(
-                                        in_flight.iter().map(|f| json!({
-                                            "url": f.url,
-                                            "method": f.method,
-                                            "age_ms": now_ms.saturating_sub(f.dispatched_at_ms),
-                                        })).collect::<Vec<_>>()
-                                    );
-                                }
+                                let now_ms = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis() as u64)
+                                    .unwrap_or(0);
+                                payload["in_flight"] = json!(
+                                    in_flight.iter().map(|f| json!({
+                                        "url": f.url,
+                                        "method": f.method,
+                                        "age_ms": now_ms.saturating_sub(f.dispatched_at_ms),
+                                    })).collect::<Vec<_>>()
+                                );
                                 // Anti-bot challenges answer 200, so they
                                 // hide among successful rows — surface the
                                 // count at the top level so an agent that
@@ -1321,12 +1324,11 @@ fn session_thread(
                                 // have to scan every URL. Same detection as
                                 // the Challenges command (URL shape + the
                                 // MTop risk-control bodies), so the numbers
-                                // agree.
+                                // agree. Same always-present contract as
+                                // in_flight (#130).
                                 let challenges =
                                     crate::har::challenge_rows(events, &body_of).len();
-                                if challenges > 0 {
-                                    payload["challenges"] = json!(challenges);
-                                }
+                                payload["challenges"] = json!(challenges);
                                 if include_bodies {
                                     let filters = url_contains
                                         .as_deref()

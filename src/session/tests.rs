@@ -3074,6 +3074,57 @@
         );
     }
 
+    /// (#130) Both Network keys are always present — `in_flight: []` and
+    /// `challenges: 0` on a quiet page. An absent field can't be told apart
+    /// from a wrong endpoint or a stale version by the reading agent, which
+    /// is exactly the ambiguity the #119 retester hit ("can't treat a
+    /// missing field as zero or as proof of death").
+    #[tokio::test]
+    async fn network_payload_keeps_in_flight_and_challenges_keys_when_empty() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /quiet",
+            "<html><body>nothing flying</body></html>",
+        )]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/quiet")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+
+        let text = mgr
+            .send(&sid, |reply| SessionCommand::Network {
+                media_only: false,
+                include_bodies: false,
+                url_contains: None,
+                body_max_chars: 0,
+                reply,
+            })
+            .await
+            .unwrap();
+        let val: Value = serde_json::from_str(&text).unwrap();
+        assert!(
+            val["in_flight"].is_array(),
+            "in_flight must be present as an array, got: {val}"
+        );
+        assert!(
+            val["in_flight"].as_array().unwrap().is_empty(),
+            "quiet page must answer zero in flight: {val}"
+        );
+        assert_eq!(
+            val["challenges"], 0,
+            "challenges must be present as a count, got: {val}"
+        );
+    }
+
     /// The session sniffer: a page-side fetch() of a media URL surfaces in
     /// the Network command (media filter extracts the playback link), and
     /// Har returns a parseable HAR 1.2 document whose document entry carries
