@@ -24,7 +24,8 @@ rejected before it touches the filesystem.
 | name | site | state | notes |
 |---|---|---|---|
 | `xcom-profile` | x.com | runs green logged-out | needs foreign egress (`use_proxy: true` baked in) |
-| `juejin-post` | juejin.cn | runs green | post pages are SSR; list pages stall (see flow.md) |
+| `juejin-post` | juejin.cn | runs green | read a post page; list pages stall (see flow.md) |
+| `juejin-publish` | juejin.cn | needs a logged-in session | draft then publish; no proxy; sample title is refused |
 | `zhihu-answer` | zhihu.com | 403 wall logged-out | compose with a logged-in session — see flow.md |
 | `x-reply` | x.com | runs green logged-in | post/reply with full write-header set + auto verify step |
 | `x-read` | x.com | runs green logged-in | user mode (profile+follow state) / tweet mode (thread+did-my-reply-land) |

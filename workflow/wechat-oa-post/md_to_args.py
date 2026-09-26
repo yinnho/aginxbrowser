@@ -40,15 +40,22 @@ def inline(text, tp):
 
 def convert(md, tp):
     blocks = []
+    seen_p = False
+    h_i = 0
     for raw in md.split("\n\n"):
         b = raw.strip()
         if not b or b.startswith("# "):
             continue
         if b.startswith("## "):
-            blocks.append(tp["h2"].replace("{{text}}", inline(b[3:].strip(), tp)))
+            h_i += 1
+            block = tp["h2"].replace("{{text}}", inline(b[3:].strip(), tp))
+            block = block.replace("{{n}}", f"{h_i:02d}")
+            blocks.append(block)
         else:
-            blocks.append(tp["p"].replace("{{text}}",
-                                          inline(b.replace("\n", ""), tp)))
+            text = inline(b.replace("\n", ""), tp)
+            kind = "lead" if (not seen_p and "lead" in tp) else "p"
+            blocks.append(tp[kind].replace("{{text}}", text))
+            seen_p = True
     return (tp["container"].replace("{{header}}", tp.get("header", ""))
             .replace("{{blocks}}", "\n".join(blocks)))
 
