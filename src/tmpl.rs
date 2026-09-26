@@ -1,6 +1,8 @@
 //! 浏览器把 JSON 填进自己的模板，生成 HTML。
-//! 模板目录在浏览器这边：/var/lib/aginxbrowser/templates，注册表也在那里。
-//! 调用方只交 JSON 和模板名。点开时才生成，所以很快。
+//! 模板两层：内置地板（编译期 include_str! 进二进制的出厂稿）+
+//! 盘上层（/var/lib/aginxbrowser/templates，同名覆盖内置——scp 热修
+//! 通道，改完即生效）。注册表也两层同序。调用方只交 JSON 和模板名。
+//! 点开时才生成，所以很快。
 
 use std::path::{Path, PathBuf};
 
@@ -72,6 +74,16 @@ pub fn dir() -> PathBuf {
     installed
 }
 
+/// 内置模板地板：出厂模板编进二进制（id 顺序同 templates/registry.json）。
+/// 盘上层（dir()）永远优先，内置只在注册表层垫底——盘上有同名条目则盘上
+/// 的赢。这样裸装（fresh flash 无模板目录）也全套可用，而
+/// /var/lib/aginxbrowser/templates 仍是 scp 秒生效的热修覆盖通道。
+const BUILTIN: &[(&str, &str)] = &[
+    ("weather", include_str!("../templates/weather.html")),
+    ("reply", include_str!("../templates/reply.html")),
+    ("qr", include_str!("../templates/qr.html")),
+];
+
 pub fn render(template: &str, data: &serde_json::Value) -> Result<String, OpenError> {
     let html = load(template)?;
     Ok(fill(&html, data))
@@ -93,7 +105,6 @@ pub fn open(template: &str, data: &serde_json::Value) -> Result<usize, OpenError
 fn load(id: &str) -> Result<String, OpenError> {
     load_at(&dir(), id)
 }
-
 /// 解析注册表成 (id, file) 对。缺 id 或 file 的条目跳过——注册表是
 /// 浏览器自己目录里的普通 JSON，写坏了不该炸掉整张清单。
 fn registry_list_at(root: &Path) -> Result<Vec<(String, String)>, OpenError> {
@@ -115,20 +126,39 @@ fn registry_list_at(root: &Path) -> Result<Vec<(String, String)>, OpenError> {
         .collect())
 }
 
+/// 盘上注册表 + 内置地板的合并查名。盘上条目按名赢内置；盘上完全没
+/// 注册表（无目录/无文件 = 裸装形状）→ 只剩内置层；注册表在但解析不出
+/// → 按坏热修报错，不静默吞；在册但文件读不出同理。
 fn load_at(root: &Path, id: &str) -> Result<String, OpenError> {
-    let entries = registry_list_at(root)?;
-    let known: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
-    let file = entries
-        .into_iter()
-        .find(|(k, _)| k == id)
-        .map(|(_, f)| f)
-        .ok_or_else(|| OpenError::UnknownTemplate {
+    let disk = match registry_list_at(root) {
+        Ok(list) => list,
+        Err(e @ OpenError::BadRegistry(_)) => return Err(e),
+        // registry_list_at 只产 NoRegistry/BadRegistry 两式；前者=裸装
+        // 形状，落内置地板
+        Err(_) => Vec::new(),
+    };
+    if let Some((_, file)) = disk.iter().find(|(k, _)| k == id) {
+        return std::fs::read_to_string(root.join(file)).map_err(|e| OpenError::NoFile {
             id: id.to_string(),
-            known,
-        })?;
-    std::fs::read_to_string(root.join(&file)).map_err(|e| OpenError::NoFile {
+            why: format!("{file}: {e}"),
+        });
+    }
+    if let Some((_, html)) = BUILTIN.iter().find(|(k, _)| *k == id) {
+        return Ok(html.to_string());
+    }
+    let mut names: Vec<&str> = Vec::new();
+    for k in disk
+        .iter()
+        .map(|(k, _)| k.as_str())
+        .chain(BUILTIN.iter().map(|(k, _)| *k))
+    {
+        if !names.contains(&k) {
+            names.push(k);
+        }
+    }
+    Err(OpenError::UnknownTemplate {
         id: id.to_string(),
-        why: format!("{file}: {e}"),
+        known: names.into_iter().map(str::to_string).collect(),
     })
 }
 
@@ -188,8 +218,9 @@ mod tests {
         assert!(!html.contains("{{"));
     }
 
-    /// 没登记的模板名 → UnknownTemplate 且 known 带走注册表里全部可用名
-    /// ——这是 /open 返 404 的判据，母体拿清单走「安排写模板」分支。
+    /// 没登记的模板名 → UnknownTemplate 且 known 带走全部可用名（盘上
+    /// 优先去重，内置垫后）——这是 /open 返 404 的判据，母体拿清单走
+    /// 「安排写模板」分支。
     #[test]
     fn unknown_template_carries_known_list() {
         let root = fixture(
@@ -201,19 +232,23 @@ mod tests {
         match err {
             OpenError::UnknownTemplate { id, known } => {
                 assert_eq!(id, "晨报");
-                assert_eq!(known, vec!["weather", "listen"]);
+                assert_eq!(known, vec!["weather", "listen", "reply", "qr"]);
             }
             other => panic!("expected UnknownTemplate, got {other:?}"),
         }
     }
 
-    /// registry 缺席 / 解析不出数组 / 条目文件读不出，各归各的码。
+    /// registry 坏 / 条目文件读不出各归各的码；registry 缺席（裸装形状）
+    /// 不再报 NoRegistry——内置地板接住，只有连内置也没有的名字才 404。
     #[test]
     fn registry_and_file_failures_map_to_their_codes() {
         let empty = std::env::temp_dir().join(format!("aginxbrowser-tmpl-empty-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&empty);
         std::fs::create_dir_all(&empty).unwrap();
-        assert!(matches!(load_at(&empty, "x"), Err(OpenError::NoRegistry(_))));
+        assert!(matches!(
+            load_at(&empty, "晨报"),
+            Err(OpenError::UnknownTemplate { known, .. }) if known.contains(&"weather".to_string())
+        ));
 
         let bad = fixture("{ not json", &[]);
         assert!(matches!(load_at(&bad, "x"), Err(OpenError::BadRegistry(_))));
@@ -236,6 +271,34 @@ mod tests {
             &[("weather.html", "<p>{{city}}</p>")],
         );
         assert_eq!(load_at(&ok, "weather").unwrap(), "<p>{{city}}</p>");
+    }
+
+    /// 内置地板：无任何盘上注册表时，出厂三模板原样可用（fresh flash
+    /// 即全套——这正是内置层存在的理由）。
+    #[test]
+    fn builtin_floor_serves_without_disk_templates() {
+        let bare = std::env::temp_dir().join(format!("aginxbrowser-tmpl-bare-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&bare);
+        std::fs::create_dir_all(&bare).unwrap();
+        for id in ["weather", "reply", "qr"] {
+            let html = load_at(&bare, id).unwrap();
+            assert!(html.starts_with('<'), "{id}: built-in should be HTML, got {} bytes", html.len());
+        }
+        // 内置清单防锈：三件齐、无漂流
+        let ids: Vec<&str> = BUILTIN.iter().map(|(k, _)| *k).collect();
+        assert_eq!(ids, vec!["weather", "reply", "qr"]);
+    }
+
+    /// 盘上同名赢内置：热修通道语义——scp 一份 weather.html 覆盖内置稿。
+    #[test]
+    fn disk_entry_overrides_builtin() {
+        let hot = fixture(
+            r#"{"templates":[{"id":"weather","file":"weather.html"}]}"#,
+            &[("weather.html", "<p>HOTFIX</p>")],
+        );
+        assert_eq!(load_at(&hot, "weather").unwrap(), "<p>HOTFIX</p>");
+        // 未覆盖的名字继续走内置
+        assert!(load_at(&hot, "qr").unwrap().starts_with('<'));
     }
 
     /// render 全链：注册表 → 文件 → 填槽。fill 已有金测，这里钉 load+fill 接线。
