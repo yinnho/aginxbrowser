@@ -60,6 +60,31 @@ pub static INTERCEPT_RESOLUTION_TIMEOUT_MS: std::sync::atomic::AtomicU64 =
 #[cfg(feature = "screenshot")]
 type IframeLayoutCache = std::cell::RefCell<Option<(u64, NodeId, u32, u32, std::rc::Rc<LayoutRun>)>>;
 
+/// One REAL per-request timing sample for the JS `performance` resource
+/// buffer (#126): captured around the actual stylesheet/script fetches in
+/// the navigation pipeline, epoch-stamped so the JS side can convert into
+/// the resource clock (`start - performance.timeOrigin`, clamped ≥0 —
+/// pre-init fetches genuinely complete before timeOrigin). Nothing here
+/// is fabricated; requests we cannot time simply get no record.
+#[derive(Debug, Clone)]
+pub struct ResourceTimingRecord {
+    /// Absolute request URL (the entry's `name`).
+    pub name: String,
+    /// W3C initiatorType: "link" (stylesheet) / "script".
+    pub initiator: &'static str,
+    /// Fetch start as epoch milliseconds (SystemTime), not resource-clock.
+    pub start_epoch_ms: f64,
+    /// Wire duration in ms, measured with a monotonic `Instant`.
+    pub duration_ms: f64,
+    /// HTTP status (0 = the fetch failed before a response).
+    pub status: u16,
+    /// Body byte count (the pipeline stores decoded bodies, so this is
+    /// both encodedBodySize and decodedBodySize).
+    pub body_size: usize,
+    /// Parser/render-blocking posture for `renderBlockingStatus`.
+    pub render_blocking: bool,
+}
+
 pub struct JsState {
     pub dom: Option<DomTree>,
     pub url: String,
@@ -194,6 +219,11 @@ pub struct JsState {
     /// decoded CSS text). Joined into the cascade by [`layout_run_all`]
     /// and served to the JS side as `document.styleSheets` rule content.
     pub(crate) ext_sheets: std::cell::RefCell<std::collections::HashMap<String, String>>,
+    /// Real per-request timings backing
+    /// `performance.getEntriesByType('resource')` (#126). Populated by the
+    /// navigation pipeline (stylesheet + script fetches); the JS fetch/XHR
+    /// shims add their own entries locally in the resource clock.
+    pub(crate) resource_timings: std::cell::RefCell<Vec<ResourceTimingRecord>>,
     /// Viewport the layout pipeline should anchor the initial containing
     /// block to, published by the JS persona (`__diting_setPersona`) so
     /// getBoundingClientRect agrees with window.innerWidth/innerHeight.
@@ -452,6 +482,7 @@ impl JsState {
             // getComputedStyle answers initial values and every rect-based
             // consumer (gBCR, elementFromPoint) sees unstyled geometry.
             ext_sheets: std::cell::RefCell::new(std::collections::HashMap::new()),
+            resource_timings: std::cell::RefCell::new(Vec::new()),
         }
     }
 }
@@ -1496,6 +1527,36 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 obj.insert(k.clone(), serde_json::Value::String(v.clone()));
             }
             serde_json::Value::Object(obj).to_string()
+        }
+        // Real per-request resource timings (#126): epoch-stamped fetch
+        // records from the navigation pipeline. The JS side converts them
+        // into the resource clock and merges with its own fetch/XHR
+        // entries; requests without a real measurement never appear.
+        "resource_timings" => {
+            let list = gs.resource_timings.borrow();
+            serde_json::to_string(
+                &list
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "name": r.name,
+                            "initiatorType": r.initiator,
+                            "start": r.start_epoch_ms,
+                            "duration": r.duration_ms,
+                            "status": r.status,
+                            "bodySize": r.body_size,
+                            "renderBlocking": r.render_blocking,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap_or_else(|_| "[]".to_string())
+        }
+        // clearResourceTimings(): the buffer spans BOTH faces (Rust-recorded
+        // subresources + JS-recorded fetch/XHR), so the clear crosses too.
+        "resource_timings_clear" => {
+            gs.resource_timings.borrow_mut().clear();
+            "true".to_string()
         }
         // Stylesheet body for a link that entered the live document (or
         // re-href'd inside it) after navigation — fetched by the bootstrap's

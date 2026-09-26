@@ -1291,8 +1291,11 @@ function __prepareInsertedScript(script) {
             // forever, leaving decorated shop pages empty).
             _OPS.op_dyn_script_fetch_begin();
             try {
+              // #126: one real sample per dynamic script load.
+              const _rtT0 = globalThis.performance ? performance.now() : 0;
               const raw = await _OPS.op_fetch_url(fullUrl, "GET", "{}", "", pageOrigin, "no-cors", "include", "\u0000about:client");
               const parsed = JSON.parse(raw);
+              __recordFetchTiming(_rtT0, fullUrl, 'script', parsed);
               if (!(parsed.status >= 200 && parsed.status <= 299)) {
                 // status 0 means the op refused before any wire traffic —
                 // the reason rides parsed.error (SSRF/pattern block) or
@@ -2033,8 +2036,11 @@ function __prepareInsertedStylesheetLink(link) {
         // Stylesheet requests are no-cors with same-origin credentials (no
         // crossorigin attribute) — unlike classic scripts, whose JSONP-era
         // include policy is deliberately looser.
+        // #126: one real sample; dynamic sheets still block first paint.
+        const _rtT0 = globalThis.performance ? performance.now() : 0;
         const rawResp = await _OPS.op_fetch_url(abs, "GET", "{}", "", pageOrigin, "no-cors", "same-origin", "\u0000about:client");
         const parsed = JSON.parse(rawResp);
+        __recordFetchTiming(_rtT0, abs, 'link', parsed, { renderBlocking: true });
         if (!(parsed.status >= 200 && parsed.status <= 299)) {
           const why = parsed.error || parsed.corsError;
           throw new Error('HTTP ' + (parsed.status || 0) + (why ? ': ' + why : ''));
@@ -7517,6 +7523,45 @@ function _raceAbortSignal(signal, opCall) {
   });
 }
 
+// #126: record one real fetch/XHR sample into the resource buffer. `t0`
+// brackets the op call in the resource clock; status and body sizes come
+// from the op's parsed reply. Failure shapes (blocked/CORS/abort) record
+// duration with status 0 and no sizes — Chrome keeps those entries too.
+// `opts` carries per-site extras (e.g. renderBlocking for stylesheets).
+function __recordFetchTiming(t0, url, initiator, parsed, opts) {
+  const p = globalThis.performance;
+  if (!p || typeof p._recordResource !== 'function') return;
+  const o = {
+    name: String(url || ''),
+    startTime: t0,
+    duration: Math.max(0, performance.now() - t0),
+    initiatorType: initiator || 'fetch',
+    responseStatus: parsed && parsed.status ? parsed.status : 0,
+    encodedBodySize: 0, decodedBodySize: 0, transferSize: 0,
+  };
+  if (parsed && parsed.bodyBase64) {
+    const bytes = parsed.bodyBase64.length ? _base64ToUint8Array(parsed.bodyBase64) : [];
+    o.encodedBodySize = o.decodedBodySize = bytes.length;
+  } else if (parsed && typeof parsed.body === 'string') {
+    o.encodedBodySize = o.decodedBodySize = parsed.body.length;
+  }
+  if (o.encodedBodySize) {
+    // Response headers are real wire cost: approximate with the
+    // serialized `name: value\r\n` pairs.
+    let hb = 0;
+    if (parsed && parsed.headers && typeof parsed.headers === 'object') {
+      for (const [k, v] of Object.entries(parsed.headers)) hb += String(k).length + String(v).length + 4;
+    }
+    o.transferSize = o.encodedBodySize + hb;
+  }
+  if (opts) for (const k of Object.keys(opts)) o[k] = opts[k];
+  p._recordResource(o);
+}
+// Async XHR delegates to the fetch shim below; this one-shot hint lets
+// that single record carry initiatorType 'xmlhttprequest' instead of
+// 'fetch' (consumed synchronously at shim entry, cleared after).
+var _initiatorHint = null;
+
 globalThis.fetch = async (input, init = {}) => {
   // AbortSignal (fetch §4.1): a pre-aborted signal rejects before anything
   // else happens — no request, no scheme handling. Checked first so data:
@@ -7545,6 +7590,13 @@ globalThis.fetch = async (input, init = {}) => {
   const rawMethod = init.method || (input instanceof Request ? input.method : "GET");
   const upMethod = String(rawMethod).toUpperCase();
   const method = /^(CONNECT|DELETE|GET|HEAD|OPTIONS|POST|PUT|TRACE)$/.test(upMethod) ? upMethod : String(rawMethod);
+  // #126: bracket the WHOLE fetch — data:/blob: resolve locally below and
+  // never reach the op call, but Chrome records their resource-timing entries
+  // too (local decode sizes, zero wire cost). A delegated caller's hint
+  // (async XHR) renames the initiator for this one record.
+  const _rtT0 = globalThis.performance ? performance.now() : 0;
+  const _rtInit = _initiatorHint || 'fetch';
+  _initiatorHint = null;
   // data:/blob: never reach the HTTP client — it cannot fetch either scheme
   // (obscura #907 family). data: carries its MIME inline; blob: reads the
   // synchronous registry the real createObjectURL (in the Worker section
@@ -7556,6 +7608,9 @@ globalThis.fetch = async (input, init = {}) => {
       throw new TypeError("Fetching data: URLs with a method other than GET is unsupported");
     }
     const r = _dataUrlBytes(url);
+    __recordFetchTiming(_rtT0, url, _rtInit, { status: 200 }, {
+      encodedBodySize: r.bytes.length, decodedBodySize: r.bytes.length, transferSize: 0,
+    });
     return new Response(r.bytes, {
       status: 200,
       statusText: "OK",
@@ -7568,11 +7623,15 @@ globalThis.fetch = async (input, init = {}) => {
   if (/^blob:/i.test(url)) {
     const blob = globalThis.__blobObjs && globalThis.__blobObjs[url];
     if (!blob || !(blob._bytes instanceof Uint8Array)) {
+      __recordFetchTiming(_rtT0, url, _rtInit, null);
       throw new TypeError('Failed to fetch: ' + url);
     }
     // Copy: Chrome snapshots blob contents at fetch time; sharing the stored
     // buffer would let one consumed Response's detach alias every later one.
     const bytes = new Uint8Array(blob._bytes);
+    __recordFetchTiming(_rtT0, url, _rtInit, { status: 200 }, {
+      encodedBodySize: bytes.length, decodedBodySize: bytes.length, transferSize: 0,
+    });
     return new Response(bytes, {
       status: 200,
       statusText: "OK",
@@ -7662,8 +7721,15 @@ globalThis.fetch = async (input, init = {}) => {
   // cancellation channel, so the underlying walk keeps going and its eventual
   // settlement is swallowed — but the fetch() promise rejects at abort time
   // with the signal's reason, which is the observable contract pages race on.
-  const raw = await (signal ? _raceAbortSignal(signal, opCall) : opCall);
+  let raw;
+  try {
+    raw = await (signal ? _raceAbortSignal(signal, opCall) : opCall);
+  } catch (e) {
+    __recordFetchTiming(_rtT0, url, _rtInit, null);
+    throw e;
+  }
   const parsed = JSON.parse(raw);
+  __recordFetchTiming(_rtT0, url, _rtInit, parsed);
   if (parsed.blocked) {
     const err = new TypeError('net::ERR_FAILED');
     err.name = 'AbortError';
@@ -7852,6 +7918,11 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     // semantics as the network sync path); async defers to a task so the
     // usual readystatechange/load/loadend sequence stays ordered.
     if (url.startsWith('data:') || url.startsWith('blob:')) {
+      // #126: local resolution still owns a resource-timing entry (Chrome
+      // records XHR'd data:/blob: URLs as xmlhttprequest). Async runs the
+      // record inside the deferred task, so the duration includes the real
+      // timer hop — an honest measurement, not the decode alone.
+      const _rtT0 = globalThis.performance ? performance.now() : 0;
       const applyLocal = function () {
         let bytes = null;
         let ctype = '';
@@ -7866,6 +7937,7 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
           }
         } catch (e) { bytes = null; }
         if (!bytes) {
+          __recordFetchTiming(_rtT0, url, 'xmlhttprequest', null);
           xhr.status = 0;
           xhr.statusText = '';
           xhr._responseHeaders = {};
@@ -7884,6 +7956,9 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
         xhr.status = 200;
         xhr.statusText = '';
         xhr._responseHeaders = ctype ? { 'content-type': ctype } : {};
+        __recordFetchTiming(_rtT0, url, 'xmlhttprequest', { status: 200 }, {
+          encodedBodySize: bytes.length, decodedBodySize: bytes.length, transferSize: 0,
+        });
         const text = _decodeBodyWithCharset(bytes, {
           get: (name) => {
             const lower = String(name).toLowerCase();
@@ -7966,8 +8041,10 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
         for (const [k, v] of Object.entries(this._headers)) hdrs[k] = String(v);
         let pageOrigin = '';
         try { pageOrigin = new URL(_docBase()).origin; } catch(e) {}
+        const _rtT0 = globalThis.performance ? performance.now() : 0;
         const raw = _OPS.op_fetch_url_sync(url, this._method, JSON.stringify(hdrs), bodyStr, pageOrigin, 'cors', this.withCredentials ? 'include' : 'same-origin');
         const parsed = JSON.parse(raw);
+        __recordFetchTiming(_rtT0, url, 'xmlhttprequest', parsed);
         xhr.responseURL = parsed.final_url || parsed.url || url;
         if (parsed.blocked || parsed.corsBlocked) {
           xhr.status = 0;
@@ -8048,13 +8125,18 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
       }, this.timeout);
     }
 
-    fetch(url, {
+    // #126: one record, the XHR's initiator — the hint is consumed at the
+    // fetch shim's synchronous entry, before the first await.
+    _initiatorHint = 'xmlhttprequest';
+    const delegated = fetch(url, {
       method: this._method,
       headers: this._headers,
       body: body || undefined,
       mode: 'cors',
       credentials: this.withCredentials ? 'include' : 'same-origin',
-    }).then(async (resp) => {
+    });
+    _initiatorHint = null;
+    delegated.then(async (resp) => {
       if (xhr._aborted) return;
 
       xhr.status = resp.status;
@@ -10908,22 +10990,41 @@ class PerformanceEntry {
   }
 }
 _markNativeProto(PerformanceEntry.prototype);
-// Resource/ServerTiming entry classes: unconstructible interfaces a detector
-// probes via prototype membership (`'renderBlockingStatus' in
-// PerformanceResourceTiming.prototype`). getEntriesByType('resource') stays
-// honestly empty — the classes only exist so the surface matches Chrome.
+// Resource/ServerTiming entry classes: prototype accessors (same
+// lie-detector posture as FontFace above). Resource entries carry REAL
+// measurements since #126 — fetch/XHR samples captured in the shims
+// below (resource clock directly) plus the navigation pipeline's
+// stylesheet/script fetch timings handed over via the
+// `resource_timings` dom command (epoch-stamped, converted here).
+// Requests without a real measurement still get no entry — the buffer
+// never fabricates.
+const _RT_INTERNAL = Symbol();
 globalThis.PerformanceEntry = PerformanceEntry;
 globalThis.PerformanceResourceTiming = class PerformanceResourceTiming extends PerformanceEntry {
-  constructor() { throw new TypeError("Illegal constructor"); }
-  get initiatorType() { return "other"; }
+  constructor(rec, tok) {
+    if (tok !== _RT_INTERNAL) throw new TypeError("Illegal constructor");
+    super(rec.name, 'resource', rec.startTime, rec.duration);
+    this._prt = rec;
+    __hideOwn(this);
+  }
+  get initiatorType() { return this._prt.initiatorType || "other"; }
   get nextHopProtocol() { return ""; }
-  get renderBlockingStatus() { return "non-blocking"; }
+  get renderBlockingStatus() { return this._prt.renderBlocking ? "blocking" : "non-blocking"; }
   get deliveryType() { return ""; }
   get secureConnectionStart() { return 0; }
-  get transferSize() { return 0; }
-  get encodedBodySize() { return 0; }
-  get decodedBodySize() { return 0; }
-  get responseStatus() { return 0; }
+  get transferSize() { return this._prt.transferSize || 0; }
+  get encodedBodySize() { return this._prt.encodedBodySize || 0; }
+  get decodedBodySize() { return this._prt.decodedBodySize || 0; }
+  get responseStatus() { return this._prt.responseStatus || 0; }
+  toJSON() {
+    return Object.assign(PerformanceEntry.prototype.toJSON.call(this), {
+      initiatorType: this.initiatorType, nextHopProtocol: "",
+      renderBlockingStatus: this.renderBlockingStatus, deliveryType: "",
+      secureConnectionStart: 0, transferSize: this.transferSize,
+      encodedBodySize: this.encodedBodySize, decodedBodySize: this.decodedBodySize,
+      responseStatus: this.responseStatus,
+    });
+  }
 };
 _markNativeProto(globalThis.PerformanceResourceTiming.prototype);
 globalThis.PerformanceServerTiming = class PerformanceServerTiming extends PerformanceEntry {
@@ -10947,6 +11048,8 @@ class _Performance {
   constructor() {
     this._marks = []; this._measures = [];
     this._navEntry = null; this._paintEntries = null;
+    this._resources = [];
+    this._resourceCap = 250;
     this.timeOrigin = 0;
     this.timing = { navigationStart: 0, domContentLoadedEventEnd: 0, loadEventEnd: 0 };
     this.navigation = { type: 0, redirectCount: 0 };
@@ -11076,7 +11179,7 @@ class _Performance {
   }
   _all() {
     const nav = this._navTiming();
-    const list = (nav ? [nav] : []).concat(this._paintTimings(), this._marks, this._measures);
+    const list = (nav ? [nav] : []).concat(this._paintTimings(), this._resourcesAll(), this._marks, this._measures);
     return list.sort((a, b) => a.startTime - b.startTime);
   }
   getEntries() { return this._all().slice(); }
@@ -11091,10 +11194,46 @@ class _Performance {
     if (type === 'paint') return this._paintTimings().slice();
     if (type === 'mark') return this._marks.slice();
     if (type === 'measure') return this._measures.slice();
-    // 'resource' stays honestly empty: we have no per-request network
-    // timings, and a fabricated waterfall would be a lying telemetry
-    // surface (worse than absent). Unknown types return [] like Chrome.
+    if (type === 'resource') return this._resourcesAll().slice();
+    // Unknown types return [] like Chrome.
     return [];
+  }
+  // ---- resource timing (#126) ----
+  // Two faces, both real: shim-captured fetch/XHR samples (recorded here
+  // in the resource clock directly) and the navigation pipeline's
+  // stylesheet/script fetch timings (epoch-stamped in Rust, pulled on
+  // demand and converted). Nothing is synthesized — a request without a
+  // measurement stays absent, which is exactly the failure mode #126
+  // filed against the old always-empty buffer.
+  _recordResource(o) {
+    if (!o || typeof o.name !== 'string') return;
+    if (this._resources.length >= this._resourceCap) return;
+    this._resources.push(new PerformanceResourceTiming(o, _RT_INTERNAL));
+  }
+  _rustResources() {
+    let arr;
+    try { arr = JSON.parse(_domRaw("resource_timings", "", "") || "[]"); }
+    catch (e) { return []; }
+    if (!Array.isArray(arr)) return [];
+    const to = this.timeOrigin || 0;
+    return arr.map((r) => ({
+      name: String(r.name || ''),
+      // Epoch → resource clock. Stylesheet/script fetches genuinely
+      // start before __diting_init sets timeOrigin, so the clamp is the
+      // honest floor for them; the duration is the real measurement.
+      startTime: Math.max(0, (Number(r.start) || 0) - to),
+      duration: Math.max(0, Number(r.duration) || 0),
+      initiatorType: r.initiatorType || 'other',
+      transferSize: r.bodySize || 0,
+      encodedBodySize: r.bodySize || 0,
+      decodedBodySize: r.bodySize || 0,
+      responseStatus: r.status || 0,
+      renderBlocking: !!r.renderBlocking,
+    }));
+  }
+  _resourcesAll() {
+    const rust = this._rustResources().map((o) => new PerformanceResourceTiming(o, _RT_INTERNAL));
+    return this._resources.concat(rust).sort((a, b) => a.startTime - b.startTime);
   }
   clearMarks(name) {
     if (name === undefined) { this._marks = []; return; }
@@ -11104,8 +11243,14 @@ class _Performance {
     if (name === undefined) { this._measures = []; return; }
     this._measures = this._measures.filter((e) => e.name !== String(name));
   }
-  setResourceTimingBufferSize() {}
-  clearResourceTimings() {}
+  setResourceTimingBufferSize(maxSize) {
+    const v = Number(maxSize);
+    if (isFinite(v) && v >= 0) this._resourceCap = Math.floor(v);
+  }
+  clearResourceTimings() {
+    this._resources = [];
+    try { _domRaw("resource_timings_clear", "", ""); } catch (e) {}
+  }
   get eventCounts() {
     if (!this._evtCounts) { this._evtCounts = Object.create(EventCounts.prototype); }
     return this._evtCounts;

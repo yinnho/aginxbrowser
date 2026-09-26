@@ -605,11 +605,22 @@ impl Page {
             let doc_referrer = doc_referrer.clone();
             async move {
                 let parsed = Url::parse(&url_str).unwrap_or_else(|_| Url::parse("about:blank").unwrap());
+                // #126: real resource-timing capture — epoch stamp for the
+                // resource clock, monotonic Instant for the duration. The
+                // record only lands on a completed fetch; failures stay out.
+                let rt_start_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64() * 1000.0)
+                    .unwrap_or(0.0);
+                let rt_t0 = std::time::Instant::now();
                 match client
                     .fetch_with_callbacks(&parsed, Some(css_callbacks.as_ref()), crate::diting_net::ResourceType::Stylesheet, doc_referrer.as_deref())
                     .await
                 {
-                    Ok(resp) => Some((url_str, resp)),
+                    Ok(resp) => {
+                        let dur_ms = rt_t0.elapsed().as_secs_f64() * 1000.0;
+                        Some((url_str, resp, rt_start_ms, dur_ms))
+                    }
                     Err(e) => {
                         tracing::debug!("Failed to fetch stylesheet {}: {}", url_str, e);
                         None
@@ -625,11 +636,22 @@ impl Page {
             .collect()
             .await;
         let mut css_sources: Vec<(String, String)> = Vec::new();
-        for (url_str, resp) in css_results.into_iter().flatten() {
+        let mut css_timings: Vec<crate::diting_js::ops::ResourceTimingRecord> = Vec::new();
+        for (url_str, resp, rt_start_ms, dur_ms) in css_results.into_iter().flatten() {
             // CSS bodies: honor the Content-Type charset; CSS @charset is
             // out of scope for the current scrape-focused pipeline.
             let css = crate::diting_net::decode_non_html(&resp.body, resp.content_type());
             self.record_network_event_with_body(&url_str, "GET", "Stylesheet", resp.status, &resp.headers, &resp.body);
+            css_timings.push(crate::diting_js::ops::ResourceTimingRecord {
+                name: url_str.clone(),
+                initiator: "link",
+                start_epoch_ms: rt_start_ms,
+                duration_ms: dur_ms,
+                status: resp.status,
+                body_size: resp.body.len(),
+                // Stylesheets always block first render in this pipeline.
+                render_blocking: true,
+            });
             css_sources.push((url_str, css));
         }
 
@@ -647,6 +669,8 @@ impl Page {
             let sheets: std::collections::HashMap<String, String> =
                 css_sources.iter().cloned().collect();
             js.set_ext_sheets(sheets);
+            // #126: hand the real fetch timings over with the sheet bodies.
+            js.push_resource_timings(css_timings);
         }
         // Inject CSS as a global so any CSS-aware page shim can read the
         // joined text directly (window.__diting_css).

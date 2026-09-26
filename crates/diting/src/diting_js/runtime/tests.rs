@@ -5791,6 +5791,110 @@
         assert_eq!(v["unknownMethod"], true, "unknown WebGL methods must not throw");
     }
 
+    /// #126: the resource-timing buffer carries REAL entries from both
+    /// faces — the navigation pipeline's fetch timings (Rust-recorded,
+    /// epoch-stamped, converted into the resource clock) and the fetch/XHR
+    /// shims' own samples (recorded in-page). Nothing fabricated: a request
+    /// without a measurement stays absent, and clearResourceTimings
+    /// empties BOTH faces.
+    #[tokio::test(flavor = "current_thread")]
+    async fn resource_timing_buffer_carries_real_entries() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.push_resource_timings(vec![crate::diting_js::ops::ResourceTimingRecord {
+            name: "http://example.com/sheet.css".to_string(),
+            initiator: "link",
+            // Deliberately BEFORE timeOrigin: pre-init fetches clamp to 0.
+            start_epoch_ms: 1.0,
+            duration_ms: 42.5,
+            status: 200,
+            body_size: 1024,
+            render_blocking: true,
+        }]);
+        // The assertions await real fetches, so they ride the
+        // callFunctionOn await-promise channel (evaluate is sync-script
+        // semantics and would hand back the function object itself).
+        let res = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                const out = {};
+                // Rust face: entry shape, clock clamp, blocking posture.
+                let rs = performance.getEntriesByType('resource');
+                out.rustCount = rs.length;
+                const e = rs[0];
+                out.name = e && e.name;
+                out.initiator = e && e.initiatorType;
+                out.entryType = e && e.entryType;
+                out.startTime = e && e.startTime;
+                out.duration = e && e.duration;
+                out.encoded = e && e.encodedBodySize;
+                out.decoded = e && e.decodedBodySize;
+                out.status = e && e.responseStatus;
+                out.blocking = e && e.renderBlockingStatus;
+                out.instance = e instanceof PerformanceResourceTiming;
+                out.illegal = (function(){ try { new PerformanceResourceTiming(); return false; } catch (err) { return /Illegal constructor/.test(err.message); } })();
+                out.getEntriesHasIt = performance.getEntries().some((x) => x.entryType === 'resource' && x.name === 'http://example.com/sheet.css');
+                out.toJSONKeys = e ? Object.keys(e.toJSON()).sort().join(',') : '';
+                // JS face: a real fetch() records its own sample.
+                await fetch('data:text/plain,hello');
+                rs = performance.getEntriesByType('resource');
+                out.afterFetch = rs.length;
+                const f = rs.find((x) => x.initiatorType === 'fetch');
+                out.fetchName = f && f.name.slice(0, 15);
+                out.fetchDur = f && (f.duration >= 0 && f.duration < 1000);
+                out.fetchBody = f && f.encodedBodySize;
+                out.fetchStatus = f && f.responseStatus;
+                // Async XHR delegates to fetch but must label itself.
+                await new Promise((resolve) => {
+                    const x = new XMLHttpRequest();
+                    x.open('GET', 'data:text/plain,wxhr');
+                    x.onload = () => resolve();
+                    x.onerror = () => resolve();
+                    x.send();
+                });
+                const x = performance.getEntriesByType('resource').find((e2) => e2.initiatorType === 'xmlhttprequest');
+                out.xhrEntry = !!x;
+                // Cap: the in-page buffer drops beyond the limit.
+                performance.setResourceTimingBufferSize(3);
+                for (let i = 0; i < 5; i++) await fetch('data:text/plain,cap' + i);
+                const all = performance.getEntriesByType('resource');
+                out.capped = all.filter((e2) => e2.initiatorType === 'fetch').length;
+                // Clear empties BOTH faces (the Rust record included).
+                performance.clearResourceTimings();
+                out.cleared = performance.getEntriesByType('resource').length;
+                return JSON.stringify(out);
+            }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let v = serde_json::from_str::<serde_json::Value>(res.value.unwrap().as_str().unwrap()).unwrap();
+        assert_eq!(v["rustCount"].as_i64().unwrap(), 1, "Rust-recorded sheet must appear");
+        assert_eq!(v["name"], "http://example.com/sheet.css");
+        assert_eq!(v["initiator"], "link");
+        assert_eq!(v["entryType"], "resource");
+        assert_eq!(v["startTime"].as_f64().unwrap(), 0.0, "pre-timeOrigin starts clamp to 0");
+        assert_eq!(v["duration"].as_f64().unwrap(), 42.5, "duration is the real measurement");
+        assert_eq!(v["encoded"].as_i64().unwrap(), 1024);
+        assert_eq!(v["decoded"].as_i64().unwrap(), 1024);
+        assert_eq!(v["status"].as_i64().unwrap(), 200);
+        assert_eq!(v["blocking"], "blocking", "stylesheets block first render");
+        assert_eq!(v["instance"], true, "entries must be PerformanceResourceTiming instances");
+        assert_eq!(v["illegal"], true, "page code still cannot construct one");
+        assert_eq!(v["getEntriesHasIt"], true, "getEntries() must include resource entries");
+        assert!(v["toJSONKeys"].as_str().unwrap().contains("initiatorType"), "toJSON carries resource fields");
+        assert_eq!(v["afterFetch"].as_i64().unwrap(), 2, "fetch() adds one real entry");
+        assert_eq!(v["fetchName"], "data:text/plain");
+        assert_eq!(v["fetchDur"], true, "duration is a real local measurement (data: resolves synchronously, 0 is honest)");
+        assert_eq!(v["fetchBody"].as_i64().unwrap(), 5, "encodedBodySize is the body length");
+        assert_eq!(v["fetchStatus"].as_i64().unwrap(), 200);
+        assert_eq!(v["xhrEntry"], true, "async XHR labels its delegated entry xmlhttprequest");
+        assert_eq!(v["capped"].as_i64().unwrap(), 2, "cap holds: hello fetch + XHR predate it, one slot left for the cap run");
+        assert_eq!(v["cleared"].as_i64().unwrap(), 0, "clearResourceTimings empties both faces");
+    }
+
     #[test]
     fn test_navigator() {
         let mut rt = setup_runtime("<html><body></body></html>");

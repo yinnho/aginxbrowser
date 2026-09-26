@@ -382,6 +382,18 @@ impl JsRuntime {
         *self.state.borrow_mut().ext_sheets.borrow_mut() = sheets;
     }
 
+    /// Append real per-request fetch timings for the JS resource-timing
+    /// buffer (#126). Called from the navigation pipeline as stylesheet
+    /// and script fetches complete; the page's fetch/XHR shims record
+    /// their own entries in-page, in the resource clock directly.
+    pub fn push_resource_timings(&self, recs: Vec<crate::diting_js::ops::ResourceTimingRecord>) {
+        self.state
+            .borrow_mut()
+            .resource_timings
+            .borrow_mut()
+            .extend(recs);
+    }
+
     pub fn take_pending_navigation(&self) -> Option<(String, String, String)> {
         self.state.borrow_mut().pending_navigation.take()
     }
