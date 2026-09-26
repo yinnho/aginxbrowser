@@ -417,11 +417,28 @@ function _getFp() {
 }
 function _fp(key) { return _getFp()[key]; }
 globalThis._eventRegistry = globalThis._eventRegistry || {};
+// Capture-bucket twin of _eventRegistry: listeners registered with
+// addEventListener(type, fn, true) / {capture:true}. The DOM runs a capture
+// leg (document → target) before the target/bubble legs for EVERY event —
+// blur/focus never bubble, so React 16 traps them at the root container as
+// capture listeners, and a dispatch model without a capture phase leaves
+// every page's onBlur/onFocus deaf (#100: the tmall SKU suggest commits its
+// value in onBlur).
+globalThis._eventRegistryCap = globalThis._eventRegistryCap || {};
+const _eventRegistry = globalThis._eventRegistry;
+const _eventRegistryCap = globalThis._eventRegistryCap;
+function _listenerWantsCapture(opts) {
+  return opts === true || !!(opts && (opts.capture === true || opts.capture === 'true'));
+}
+function _bucketFor(reg, key, type) {
+  if (!reg[key]) reg[key] = {};
+  if (!reg[key][type]) reg[key][type] = [];
+  return reg[key][type];
+}
 globalThis._formValues = globalThis._formValues || {};
 globalThis._formChecked = globalThis._formChecked || {};
 globalThis._formIndeterminate = globalThis._formIndeterminate || {};
 globalThis._fileInputs = globalThis._fileInputs || {};
-const _eventRegistry = globalThis._eventRegistry;
 const _formValues = globalThis._formValues;
 const _formChecked = globalThis._formChecked;
 const _formIndeterminate = globalThis._formIndeterminate;
@@ -3205,14 +3222,15 @@ class Element extends Node {
       _scheduleAnimationCheck(document.body || this);
     }
     const key = this._nid;
-    if (!_eventRegistry[key]) _eventRegistry[key] = {};
-    if (!_eventRegistry[key][type]) _eventRegistry[key][type] = [];
-    _eventRegistry[key][type].push(handler);
+    // Capture flag decides the bucket: the two are distinct listeners in
+    // Chrome (removeEventListener only unregisters the matching one).
+    _bucketFor(_listenerWantsCapture(opts) ? _eventRegistryCap : _eventRegistry, key, type).push(handler);
   }
-  removeEventListener(type, handler) {
+  removeEventListener(type, handler, opts) {
     const key = this._nid;
-    if (_eventRegistry[key] && _eventRegistry[key][type]) {
-      _eventRegistry[key][type] = _eventRegistry[key][type].filter(h => h !== handler);
+    const reg = _listenerWantsCapture(opts) ? _eventRegistryCap : _eventRegistry;
+    if (reg[key] && reg[key][type]) {
+      reg[key][type] = reg[key][type].filter(h => h !== handler);
     }
   }
   dispatchEvent(event) {
@@ -3242,6 +3260,37 @@ class Element extends Node {
         }
       } catch (e) { /* keep constructor defaults */ }
     }
+    // Capture phase (DOM spec §2.9): before the target leg, walk the
+    // ancestor path root-first and run each node's capture-bucket
+    // listeners. This leg runs for non-bubbling events too — blur/focus
+    // ONLY reach delegated listeners through it, and React 16 traps both
+    // at the root container with capture=true, so a dispatch model
+    // without a capture phase leaves every page's onBlur/onFocus deaf
+    // (#100: the tmall SKU suggest commits its typed value in onBlur).
+    if (isOrigin) {
+      const path = [];
+      for (let n = this.parentNode; n; n = n.parentNode) path.push(n);
+      for (let i = path.length - 1; i >= 0; i--) {
+        if (event._propagationStopped) break;
+        const node = path[i];
+        const caps = (_eventRegistryCap[node._nid] || {})[event.type] || [];
+        if (!caps.length) continue;
+        event.currentTarget = node;
+        event.eventPhase = 1;
+        for (const h of caps.slice()) {
+          try { h.call(node, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
+          if (event._immediatePropagationStopped) break;
+        }
+      }
+      event.eventPhase = 2;
+      // stopPropagation on the way down means the target and bubble legs
+      // never run — the target is later on the propagation path.
+      if (event._propagationStopped) return !event.defaultPrevented;
+    } else {
+      // Bubble re-entry at an ancestor: its capture bucket already ran in
+      // the origin's capture walk; only the bubble leg fires here.
+      event.eventPhase = 3;
+    }
     // Activation for an unmanaged click: Chrome runs activation behavior for
     // untrusted clicks too, so `cb.dispatchEvent(new MouseEvent('click'))`
     // toggles a checkbox and a label click forwards to its control. click()
@@ -3265,6 +3314,15 @@ class Element extends Node {
         const ret = inlineFn.call(this, event);
         if (ret === false) event.preventDefault();
       } catch(e) { globalThis.__diting_reportUncaughtError(e); }
+    }
+    // At-target listeners fire in both buckets (spec runs the target phase
+    // for capture- and bubble-registered listeners alike).
+    if (isOrigin) {
+      const capHandlers = (_eventRegistryCap[this._nid] || {})[event.type] || [];
+      for (const h of capHandlers) {
+        try { h.call(this, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
+        if (event._immediatePropagationStopped) break;
+      }
     }
     const handlers = (_eventRegistry[this._nid] || {})[event.type] || [];
     for (const h of handlers) {
@@ -5529,11 +5587,25 @@ class Document extends Node {
   createRange() { return new Range(); }
   addEventListener(type, fn, opts) {
     if (typeof fn !== 'function') return;
+    // Capture listeners live in the shared capture registry keyed by _nid:
+    // Element.dispatchEvent's capture walk reaches the document through the
+    // parentNode chain, and looks listeners up there (#100).
+    if (_listenerWantsCapture(opts)) {
+      if (this._nid !== undefined) {
+        _bucketFor(_eventRegistryCap, this._nid, type).push(fn);
+        return;
+      }
+    }
     const L = __lmap(this);
     if (!L[type]) L[type] = [];
     if (!L[type].includes(fn)) L[type].push(fn);
   }
-  removeEventListener(type, fn) {
+  removeEventListener(type, fn, opts) {
+    if (_listenerWantsCapture(opts) && this._nid !== undefined) {
+      const b = (_eventRegistryCap[this._nid] || {})[type];
+      if (b) _eventRegistryCap[this._nid][type] = b.filter(h => h !== fn);
+      return;
+    }
     const L = __evtStore.get(this);
     if (L && L[type]) {
       L[type] = L[type].filter(h => h !== fn);

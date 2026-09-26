@@ -13434,6 +13434,121 @@
         );
     }
 
+    /// #100 (tmall SKU): blur/focus never bubble, so the only way a
+    /// delegated listener sees them is the capture leg — and React 16 traps
+    /// both at the root container as CAPTURE listeners. A dispatch model
+    /// with target+bubble legs only leaves every page's onBlur/onFocus deaf;
+    /// the SKU drawer's suggest input commits its typed value in onBlur, so
+    /// the whole publish flow died at "type a color, it never sticks".
+    #[test]
+    fn test_dispatch_runs_capture_phase_for_non_bubbling_events() {
+        let mut rt = setup_runtime(
+            r#"<html><body><div id="box"><input id="q"></div></body></html>"#,
+        );
+        let result = rt.evaluate(
+            r#"(function(){
+                const log = [];
+                const box = document.getElementById('box');
+                const q = document.getElementById('q');
+                document.addEventListener('blur', function(e){ log.push('doc-cap:' + e.target.id); }, true);
+                box.addEventListener('blur', function(e){ log.push('box-cap:' + e.currentTarget.id); }, true);
+                box.addEventListener('blur', function(){ log.push('box-bubble'); });
+                q.addEventListener('blur', function(){ log.push('q-own'); }, true);
+                q.dispatchEvent(new FocusEvent('blur'));
+                return log.join('|');
+            })()"#,
+        ).unwrap();
+        assert_eq!(
+            result.as_str().unwrap_or(""),
+            "doc-cap:q|box-cap:box|q-own",
+            "capture runs document→container→target for blur; the bubble bucket on the container stays silent (blur does not bubble)"
+        );
+
+        // stopPropagation on the way down stops the whole rest of the
+        // propagation path (container capture, target) — the target is
+        // later on the path than the stopping listener. Fresh runtime: the
+        // first leg's listeners would otherwise pollute this one.
+        let mut rt = setup_runtime(
+            r#"<html><body><div id="box"><input id="q"></div></body></html>"#,
+        );
+        let result = rt.evaluate(
+            r#"(function(){
+                const log = [];
+                const box = document.getElementById('box');
+                const q = document.getElementById('q');
+                document.addEventListener('blur', function(e){ e.stopPropagation(); log.push('stopped'); }, true);
+                box.addEventListener('blur', function(){ log.push('box-cap'); }, true);
+                q.addEventListener('blur', function(){ log.push('q-own'); });
+                q.dispatchEvent(new FocusEvent('blur'));
+                return log.join('|');
+            })()"#,
+        ).unwrap();
+        assert_eq!(
+            result.as_str().unwrap_or(""),
+            "stopped",
+            "stopPropagation in the capture leg prevents the target and container legs"
+        );
+
+        // The capture flag is part of listener identity for removal: a
+        // capture registration is not removed by the bubble-signature call.
+        let mut rt = setup_runtime(
+            r#"<html><body><div id="box"><input id="q"></div></body></html>"#,
+        );
+        let result = rt.evaluate(
+            r#"(function(){
+                const log = [];
+                const box = document.getElementById('box');
+                const q = document.getElementById('q');
+                const cap = function(){ log.push('cap'); };
+                box.addEventListener('blur', cap, true);
+                box.removeEventListener('blur', cap);
+                q.dispatchEvent(new FocusEvent('blur'));
+                log.push('/');
+                box.removeEventListener('blur', cap, true);
+                q.dispatchEvent(new FocusEvent('blur'));
+                return log.join('');
+            })()"#,
+        ).unwrap();
+        assert_eq!(
+            result.as_str().unwrap_or(""),
+            "cap/",
+            "removeEventListener with the matching capture flag unregisters; the bubble-signature call leaves the capture listener in place"
+        );
+    }
+
+    /// #100 end-to-end pin: focus()/blur() fire the real focus family, and
+    /// React 16's exact registration shape — container capture listeners —
+    /// observes the non-bubbling halves. Before the capture phase this saw
+    /// nothing, which is the whole "typed value never commits" failure.
+    #[test]
+    fn test_focus_blur_family_reaches_container_capture_listeners() {
+        let mut rt = setup_runtime(
+            r#"<html><body><div id="root"><input id="q"></div></body></html>"#,
+        );
+        let result = rt.evaluate(
+            r#"(function(){
+                const log = [];
+                const root = document.getElementById('root');
+                const q = document.getElementById('q');
+                ['focus', 'blur'].forEach(function(t){
+                    root.addEventListener(t, function(e){ log.push(t + '@' + e.target.id + ':capture'); }, true);
+                    root.addEventListener(t, function(){ log.push(t + ':bubble'); });
+                });
+                ['focusin', 'focusout'].forEach(function(t){
+                    root.addEventListener(t, function(){ log.push(t + ':bubble'); });
+                });
+                q.focus();
+                q.blur();
+                return log.join('|');
+            })()"#,
+        ).unwrap();
+        assert_eq!(
+            result.as_str().unwrap_or(""),
+            "focus@q:capture|focusin:bubble|blur@q:capture|focusout:bubble",
+            "focus/blur never bubble — only the container's capture leg sees them (React 16 traps them exactly there); the -in/-out halves bubble"
+        );
+    }
+
     /// Upstream obscura #704: postMessage's targetOrigin argument must gate
     /// delivery — '*' or a matching origin delivers, a mismatched origin
     /// drops silently (browsers never throw), '/' requires same-origin with

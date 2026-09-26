@@ -1038,7 +1038,7 @@ Press at `from`, glide through `steps` `mousemove` events, release at `to` — d
 
 ### POST /session/{id}/input
 
-Type text into an input field by index. After writing the value, `input` + `change` events are dispatched (bubbling), so framework-bound forms (Vue/React models, validation listeners) see the text.
+Type text into an input field by index. The element is focused first; after writing the value, `input` + `change` events are dispatched (bubbling), so framework-bound forms (Vue/React models, validation listeners) see the text.
 
 **Request fields:**
 
@@ -1046,7 +1046,7 @@ Type text into an input field by index. After writing the value, `input` + `chan
 |------|------|------|------|
 | index | usize | ✅ | Element index |
 | text | string | ✅ | Text to enter |
-| events | string | `"standard"` | `standard` → `input` + `change` after the value lands; `full` → per-character `keydown`/`keypress`/`input`/`keyup` cycles for strict keyboard listeners |
+| events | string | `"standard"` | `standard` → `input` + `change` after the value lands; `full` → focus, per-character `keydown`/`keypress`/`input`/`keyup` cycles, trailing `change`, then blur — the complete human typing gesture. The tail blur is what commits on forms that save in `onBlur` (React capture-phase blur listeners never saw script-typed text before, #100) |
 
 **Response:**
 

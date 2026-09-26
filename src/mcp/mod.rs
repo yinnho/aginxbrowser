@@ -715,7 +715,9 @@ selections and captcha sliders that only track while the pointer travels.",
 
     #[tool(
         description = "Type text into an input/textarea element by its index (from session_state \
-output), dispatching input/change events (full keyboard cycle per character with events:\"full\"). \
+output), focusing it and dispatching input/change events. events:\"full\" is the complete human \
+typing gesture: per-character keydown/keypress/input/keyup cycles, trailing change, then blur — \
+the tail blur commits on forms that save in onBlur (React capture listeners, #100). \
 A disabled, readonly, or detached field answers `filled:false` with a `reason` instead of a silent \
 write. Hidden inputs are legitimate targets and are filled normally.",
         annotations(title = "Session Input")
