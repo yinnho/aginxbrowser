@@ -266,6 +266,150 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn classic_script_cannot_see_later_parser_scripts() {
+        // #120: KISSY-style loaders locate their own <script> by reverse-
+        // scanning document.getElementsByTagName('script'). Chrome runs a
+        // classic script before the parser has inserted any LATER script
+        // elements, so that scan must not see them — with the whole DOM
+        // pre-built, the scan would find a later combo <script> and derive a
+        // wrong loader base. Dynamically inserted scripts are visible the
+        // moment they land, and after the classic phase everything is.
+        let port = local_http_server(vec![(
+            "/a",
+            200,
+            "<script>window.__a = document.getElementsByTagName('script').length;\n\
+             var d = document.createElement('script');\n\
+             d.textContent = 'window.__dyn = document.getElementsByTagName(\"script\").length;';\n\
+             document.head.appendChild(d);\n\
+             window.__aDyn = document.getElementsByTagName('script').length;</script>\n\
+             <script>window.__b = document.getElementsByTagName('script').length;</script>\n\
+             <script></script>".to_string(),
+        )]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/a")).await.unwrap();
+        // Script A: only itself (later parser scripts B/C hidden; the dynamic
+        // script lands after the first count).
+        assert_eq!(p.evaluate("window.__a"), serde_json::json!(1.0));
+        assert_eq!(p.evaluate("window.__aDyn"), serde_json::json!(2.0));
+        // Script B: A + dynamic + itself; C still hidden.
+        assert_eq!(p.evaluate("window.__b"), serde_json::json!(3.0));
+        // The dynamic script executes via the pump (race vs. the remaining
+        // classic scripts — Chrome has the same ambiguity for plain
+        // appendChild scripts); the pin is that it ran at all and that its
+        // own tag was visible to it (map-absence rule), not its exact count.
+        assert_eq!(p.evaluate("window.__dyn >= 2"), serde_json::json!(true));
+        assert_eq!(
+            p.evaluate("document.getElementsByTagName('script').length"),
+            serde_json::json!(4.0)
+        );
+        assert_eq!(p.evaluate("document.scripts.length"), serde_json::json!(4.0));
+    }
+
+    /// #120: Chrome's non-standard but load-bearing `zoom` — Tmall-class
+    /// publish UIs size their whole panel in design coordinates and set
+    /// `zoom: viewport/1280` on the wrapper. Every declaration-class size
+    /// (px width/height, the px halves of calc, padding/border/margin,
+    /// insets, font size, replaced-element naturals and presentational-hint
+    /// attrs) renders scaled; percentages resolve against the scaled parent
+    /// box; the factor inherits and nested factors multiply.
+    #[tokio::test(flavor = "current_thread")]
+    async fn css_zoom_scales_geometry_and_inherits() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![(
+            "/z",
+            200,
+            r#"<html><head><style>
+                 #plain { zoom: 0.5; width: 200px; }
+                 #kid { width: 50%; height: 30px; }
+                 #gk { width: 100px; }
+               </style></head><body>
+               <div id="plain"><div id="kid"><div id="gk"></div></div></div>
+               <div style="zoom:0.5"><div style="zoom:2"><div id="net1" style="width:100px"></div></div></div>
+               <div style="zoom:150%"><div id="pct" style="width:100px"></div></div>
+               <img id="im" width="100" height="80" style="zoom:0.5">
+               <span id="s1">x</span>
+               <span style="zoom:2"><span id="s2">x</span></span>
+               </body></html>"#
+                .to_string(),
+        )]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/z")).await.unwrap();
+        let mut w = |sel: &str, prop: &str| {
+            p.evaluate(&format!(
+                "document.querySelector('{sel}').getBoundingClientRect().{prop}"
+            ))
+            .as_f64()
+            .unwrap()
+        };
+        // zoom scales the element's own px width; the computed style carries
+        // the scaled used value like Chrome's resolved width.
+        assert_eq!(w("#plain", "width"), 100.0);
+        // Percentages resolve against the SCALED parent content box
+        // (200×0.5 = 100 → 50%), and the child's own px height scales.
+        assert_eq!(w("#kid", "width"), 50.0);
+        assert_eq!(w("#kid", "height"), 15.0);
+        // The factor inherits: a grandkid with no zoom of its own still
+        // renders at half size.
+        assert_eq!(w("#gk", "width"), 50.0);
+        // Nested factors multiply: 0.5 × 2 = 1.
+        assert_eq!(w("#net1", "width"), 100.0);
+        // Percentage syntax folds to the number form.
+        assert_eq!(w("#pct", "width"), 150.0);
+        // Replaced naturals and presentational-hint attrs scale.
+        assert_eq!(w("#im", "width"), 50.0);
+        assert_eq!(w("#im", "height"), 40.0);
+        // Font size scales with it — the line box of the zoomed span is
+        // ~2× its unscaled sibling.
+        let (h1, h2) = (w("#s1", "height"), w("#s2", "height"));
+        assert!(
+            (h2 / h1 - 2.0).abs() < 0.3,
+            "zoomed line box {h2} should be ~2x unzoomed {h1}"
+        );
+        // And the sheet still reports the authored factor to CSSOM readers.
+        assert_eq!(
+            p.evaluate("getComputedStyle(document.querySelector('#plain')).zoom"),
+            serde_json::json!("0.5")
+        );
+    }
+
+    /// #120: `font-size: 0` text — the whitespace-killing idiom; Fusion's
+    /// `.next-input` sets it and its icon `<i>`s inherit — must measure and
+    /// occupy nothing. rustybuzz shapes size-0 runs at the raw upem scale,
+    /// so a single 'x' measured ~500 px and PUA icon glyphs ~1000+, blowing
+    /// every select arrow's 1px table-cell trick out to 2178 px on the Tmall
+    /// publish page (the form-squeezed-right residual after the zoom fix).
+    #[tokio::test(flavor = "current_thread")]
+    async fn font_size_zero_text_occupies_nothing() {
+        let port = local_http_server(vec![(
+            "/fs0",
+            200,
+            format!(
+                r#"<html><head><style>.ib{{display:inline-block;border:1px solid}}</style></head><body>
+               <span class="ib" id="z" style="font-size:0">x</span>
+               <span class="ib" id="pua" style="font-size:0">{pua}</span>
+               <span class="ib" id="s16" style="font-size:16px">x</span>
+               </body></html>"#,
+                pua = '\u{e63d}'
+            ),
+        )]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/fs0")).await.unwrap();
+        let mut w = |id: &str| {
+            p.evaluate(&format!(
+                "document.getElementById('{id}').getBoundingClientRect().width"
+            ))
+            .as_f64()
+            .unwrap()
+        };
+        // Zero-size text occupies nothing: the boxes are their 2px borders
+        // alone, not the ~500/~1000px raw design-unit advances.
+        assert_eq!(w("z"), 2.0);
+        assert_eq!(w("pua"), 2.0);
+        // The control: 16px text still measures its glyph.
+        assert!(w("s16") > 4.0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn navigate_blank_resets_state() {
         let mut p = test_page();
         p.title = "stale".into();
@@ -1336,10 +1480,9 @@ ms.addEventListener('sourceopen', function(){ \
             (
                 "/page",
                 200,
-                format!(
-                    "<html><head><link rel=stylesheet href='/s.css'></head>\
-                     <script src='/j.js'></script></html>"
-                ),
+                "<html><head><link rel=stylesheet href='/s.css'></head>\
+                 <script src='/j.js'></script></html>"
+                    .to_string(),
             ),
             ("/s.css", 200, "body{color:red}".into()),
             ("/j.js", 200, "window.__j = 1;".into()),

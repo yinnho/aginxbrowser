@@ -471,6 +471,33 @@ function _getElementsByClassName(root, classNames) {
   }
   return HTMLCollection._from(matched);
 }
+// Parser-order script visibility (#120): while a classic parser script runs,
+// <script> elements later in the markup are not yet parsed and must be
+// invisible to script-tag queries — KISSY and JSONP loaders locate their own
+// tag by reverse-scanning document.getElementsByTagName('script'), and with
+// the whole DOM pre-built they would find a later combo <script> and derive
+// a wrong loader base. scripts.rs injects __parserScriptOrder (document-order
+// nids of every parser script) and bumps __parserScriptCeiling before each
+// classic script (deferred/async and post-parse phases run at -1 = visible).
+// Scripts absent from the map — dynamically inserted ones — are always
+// visible, matching Chrome: appendChild lands in the tree immediately.
+function _parserScriptHidden(nid) {
+  const ceiling = globalThis.__parserScriptCeiling;
+  if (ceiling == null || ceiling < 0) return false;
+  const idx = globalThis.__parserScriptIdx && globalThis.__parserScriptIdx.get(nid);
+  return idx !== undefined && idx > ceiling;
+}
+function _parserVisibleIds(ids) {
+  const ceiling = globalThis.__parserScriptCeiling;
+  if (ceiling == null || ceiling < 0 || !globalThis.__parserScriptIdx) return ids;
+  const map = globalThis.__parserScriptIdx;
+  const out = [];
+  for (let i = 0; i < ids.length; i++) {
+    const idx = map.get(ids[i]);
+    if (idx === undefined || idx <= ceiling) out.push(ids[i]);
+  }
+  return out;
+}
 // Console argument formatter: DevTools-shaped previews instead of
 // "[object Object]". Depth/width clamped, cycles marked, getters that
 // throw degrade per-property — a log line must never cost the page its
@@ -3023,9 +3050,16 @@ class Element extends Node {
     return list;
   }
   getAttributeNS(ns, n) { return _domParse("get_attribute", this._nid, String(n)); }
-  querySelector(s) { return _wrapEl(+_dom("query_selector_scoped", this._nid, s)); }
+  querySelector(s) {
+    const id = +_dom("query_selector_scoped", this._nid, s);
+    // Parser-order visibility (#120): if the engine's first match is a script
+    // the parser has not reached yet, fall back to the filtered list so the
+    // caller gets the first *visible* match, not null-with-phantoms.
+    if (_parserScriptHidden(id)) return this.querySelectorAll(s)[0] || null;
+    return _wrapEl(id);
+  }
   querySelectorAll(s) {
-    const ids = _domParse("query_selector_all_scoped", this._nid, s) || [];
+    const ids = _parserVisibleIds(_domParse("query_selector_all_scoped", this._nid, s) || []);
     return _nodeList(ids.map(_wrapEl).filter(Boolean));
   }
   getElementsByTagName(t) { return HTMLCollection._from(this.querySelectorAll(t)); }
@@ -5341,9 +5375,13 @@ class Document extends Node {
     const needle = String(id);
     return needle === "" ? null : _wrapEl(+_dom("get_element_by_id", needle));
   }
-  querySelector(s) { return _wrapEl(+_dom("query_selector", s)); }
+  querySelector(s) {
+    const id = +_dom("query_selector", s);
+    if (_parserScriptHidden(id)) return this.querySelectorAll(s)[0] || null;
+    return _wrapEl(id);
+  }
   querySelectorAll(s) {
-    const ids = _domParse("query_selector_all", s) || [];
+    const ids = _parserVisibleIds(_domParse("query_selector_all", s) || []);
     return _nodeList(ids.map(_wrapEl).filter(Boolean));
   }
   getElementsByTagName(t) { return HTMLCollection._from(this.querySelectorAll(t)); }
@@ -5894,9 +5932,16 @@ class DocumentFragment extends Node {
   get nodeName() { return "#document-fragment"; }
   get innerHTML() { return _domParse("inner_html", this._nid) ?? ""; }
   set innerHTML(v) { _dom("set_inner_html", this._nid, String(v ?? "")); }
-  querySelector(s) { return _wrapEl(+_dom("query_selector_scoped", this._nid, s)); }
+  querySelector(s) {
+    const id = +_dom("query_selector_scoped", this._nid, s);
+    // Parser-order visibility (#120): if the engine's first match is a script
+    // the parser has not reached yet, fall back to the filtered list so the
+    // caller gets the first *visible* match, not null-with-phantoms.
+    if (_parserScriptHidden(id)) return this.querySelectorAll(s)[0] || null;
+    return _wrapEl(id);
+  }
   querySelectorAll(s) {
-    const ids = _domParse("query_selector_all_scoped", this._nid, s) || [];
+    const ids = _parserVisibleIds(_domParse("query_selector_all_scoped", this._nid, s) || []);
     return _nodeList(ids.map(_wrapEl).filter(Boolean));
   }
   get children() {
@@ -14424,6 +14469,12 @@ function __ditingTZFromLang() {
   }
   return 'Asia/Shanghai';
 }
+// CDP Emulation.setTimezoneOverride. Empty means the language-derived zone.
+function __ditingTZ() {
+  const pin = globalThis.__diting_tz;
+  if (typeof pin === 'string' && pin.length) return pin;
+  return __ditingTZFromLang();
+}
 // Intl's *default* locale comes from the process locale (V8/ICU follows
 // LANG), not from the configured language — so on a host running under
 // LANG=en_US, navigator.language says zh-CN while
@@ -14453,7 +14504,7 @@ const __ditingNativeOf = new Map();
 // Shared per-call binding for the DateTimeFormat proxies.
 function __ditingDTFArgs(args) {
   if (!args[1]) args[1] = {};
-  if (!args[1].timeZone) args[1].timeZone = __ditingTZFromLang();
+  if (!args[1].timeZone) args[1].timeZone = __ditingTZ();
   args[0] = __ditingLocaleArg(args[0]);
   return args;
 }
@@ -14487,11 +14538,81 @@ const _origResolved = _OrigDateTimeFormat.prototype.resolvedOptions;
 _OrigDateTimeFormat.prototype.resolvedOptions = new Proxy(_origResolved, {
   apply(target, thisArg, args) {
     const r = Reflect.apply(target, thisArg, args);
-    if (r.timeZone === 'UTC') r.timeZone = __ditingTZFromLang();
+    if (r.timeZone === 'UTC') r.timeZone = __ditingTZ();
     return r;
   },
 });
 __ditingNativeOf.set(_OrigDateTimeFormat.prototype.resolvedOptions, _origResolved);
+// Date's own clock still follows the host zone unless these methods read
+// the same pin Intl uses. A proxy over the native keeps
+// Function.prototype.toString on the original.
+function __ditingOffsetMinutes(date) {
+  const dtf = new _OrigDateTimeFormat('en-US', {
+    timeZone: __ditingTZ(), hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  const parts = dtf.formatToParts(date);
+  const pick = (t) => Number(parts.find((p) => p.type === t).value);
+  let hour = pick('hour');
+  if (hour === 24) hour = 0;
+  const asUTC = Date.UTC(pick('year'), pick('month') - 1, pick('day'), hour, pick('minute'), pick('second'));
+  return Math.round((date.getTime() - asUTC) / 60000);
+}
+function __ditingFormatZoned(date, kind) {
+  if (Number.isNaN(date.getTime())) return 'Invalid Date';
+  const tz = __ditingTZ();
+  const dtf = new _OrigDateTimeFormat('en-US', {
+    timeZone: tz, hourCycle: 'h23', weekday: 'short', year: 'numeric',
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
+    timeZoneName: 'longOffset',
+  });
+  const bag = {};
+  for (const p of dtf.formatToParts(date)) if (p.type !== 'literal') bag[p.type] = p.value;
+  const long = new _OrigDateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'long' })
+    .formatToParts(date).find((p) => p.type === 'timeZoneName');
+  let off = bag.timeZoneName || 'GMT';
+  off = off.replace(/GMT([+-])(\d{1,2}):(\d{2})/, (_, s, h, m) => 'GMT' + s + h.padStart(2, '0') + m);
+  off = off.replace(/GMT([+-])(\d{1,2})$/, (_, s, h) => 'GMT' + s + h.padStart(2, '0') + '00');
+  const name = long ? long.value : tz;
+  const day = String(bag.day);
+  const clock = bag.hour + ':' + bag.minute + ':' + bag.second;
+  const datePart = bag.weekday + ' ' + bag.month + ' ' + day + ' ' + bag.year;
+  if (kind === 'date') return datePart;
+  if (kind === 'time') return clock + ' ' + off + ' (' + name + ')';
+  return datePart + ' ' + clock + ' ' + off + ' (' + name + ')';
+}
+function __ditingWrapDate(name, impl) {
+  const orig = Date.prototype[name];
+  if (typeof orig !== 'function') return;
+  const wrapped = new Proxy(orig, {
+    apply(target, thisArg, args) {
+      if (!(thisArg instanceof Date)) return Reflect.apply(target, thisArg, args);
+      return impl(target, thisArg, args);
+    },
+  });
+  __ditingNativeOf.set(wrapped, orig);
+  Date.prototype[name] = wrapped;
+}
+__ditingWrapDate('getTimezoneOffset', (_target, date) => __ditingOffsetMinutes(date));
+__ditingWrapDate('toString', (_target, date) => __ditingFormatZoned(date, 'all'));
+__ditingWrapDate('toDateString', (_target, date) => __ditingFormatZoned(date, 'date'));
+__ditingWrapDate('toTimeString', (_target, date) => __ditingFormatZoned(date, 'time'));
+__ditingWrapDate('toLocaleString', (target, date, args) => {
+  const options = Object.assign({}, args[1]);
+  if (!options.timeZone) options.timeZone = __ditingTZ();
+  return Reflect.apply(target, date, [args[0], options]);
+});
+__ditingWrapDate('toLocaleDateString', (target, date, args) => {
+  const options = Object.assign({}, args[1]);
+  if (!options.timeZone) options.timeZone = __ditingTZ();
+  return Reflect.apply(target, date, [args[0], options]);
+});
+__ditingWrapDate('toLocaleTimeString', (target, date, args) => {
+  const options = Object.assign({}, args[1]);
+  if (!options.timeZone) options.timeZone = __ditingTZ();
+  return Reflect.apply(target, date, [args[0], options]);
+});
 // The remaining (locales, options) Intl constructors get the same
 // default-locale binding via the same proxy treatment.
 (function() {

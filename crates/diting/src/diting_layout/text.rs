@@ -296,6 +296,16 @@ impl FontBook {
     /// Shaped advance of `text` at `font_size`, in px. Kerning (GPOS) and
     /// ligatures apply; CJK comes out at one full-width advance per glyph.
     pub fn advance_width(&self, text: &str, font_size: f32, bold: bool, mono: bool) -> f32 {
+        // #120: font-size 0 is the whitespace-killing idiom (Fusion sets it
+        // on `.next-input` and its icon `<i>`s inherit) and must measure
+        // nothing. rustybuzz treats size 0 as "unset" and shapes at the raw
+        // upem scale instead, so a single 'x' came back ~500 px and PUA
+        // icon glyphs ~1000+ — every select arrow on the Tmall publish page
+        // blew its 1px table-cell trick out to 2178 px. Same guard in
+        // `pdf_shape` and `blit_line`.
+        if font_size <= 0.0 {
+            return 0.0;
+        }
         let mut total = 0.0f32;
         for (sel, seg) in self.segments(text, bold, mono) {
             let bytes = self.face_bytes(sel, bold);
@@ -323,6 +333,10 @@ impl FontBook {
         bold: bool,
         mono: bool,
     ) -> Option<Vec<PdfGlyph>> {
+        // #120 companion guard: zero-size text embeds no glyphs.
+        if font_size <= 0.0 {
+            return Some(Vec::new());
+        }
         let mut out: Vec<PdfGlyph> = Vec::new();
         let mut pen = 0.0f32;
         for (sel, seg) in self.segments(text, bold, mono) {
@@ -722,6 +736,11 @@ impl FontBook {
         x0: f32,
         baseline: f32,
     ) {
+        // #120 companion guard: zero-size text paints nothing (and without
+        // this, the scaler would rasterize upem-sized glyphs).
+        if font_size <= 0.0 {
+            return;
+        }
         let mono_sources = [Source::Outline];
         let fallback_sources = [
             Source::ColorBitmap(StrikeWith::BestFit),

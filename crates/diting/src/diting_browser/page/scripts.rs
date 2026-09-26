@@ -137,6 +137,34 @@ impl Page {
             None => return,
         };
 
+        // Parser-order script visibility (#120): Chrome executes a classic
+        // script before the parser has inserted any LATER script elements, so
+        // self-locating loaders (KISSY reverse-scans
+        // getElementsByTagName('script') for their own tag) must not see them.
+        // Our pipeline parses the whole document first, so we emulate the
+        // contract with a JS-side ceiling: script queries drop parser scripts
+        // positioned after the running one (bootstrap.js _parserVisibleIds).
+        // The order list comes from the DOM script query — every <script>
+        // element in the document, including empty/foreign-type ones the
+        // execution list below legitimately skips.
+        let parser_order: Vec<u32> = match &self.js {
+            Some(js) => js
+                .with_dom(|dom| {
+                    dom.query_selector_all("script")
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|sid| sid.raw())
+                        .collect::<Vec<u32>>()
+                })
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let parser_idx: std::collections::HashMap<u32, usize> = parser_order
+            .iter()
+            .enumerate()
+            .map(|(i, nid)| (*nid, i))
+            .collect();
+
         // Import maps register before any module graph starts (upstream
         // 34373c3). Parser-discovered maps merge in encounter order using the
         // base URL in effect at each element; a later map cannot rebind a
@@ -360,6 +388,20 @@ impl Page {
                     tracing::debug!("Init script error: {}", e);
                 }
             }
+            // #120: hand bootstrap.js the document-order parser script list.
+            // The ceiling starts at -1 (nothing hidden) and each classic
+            // script's prologue bumps it to its own index.
+            if let Ok(order) = serde_json::to_string(&parser_order) {
+                let _ = js.execute_script(
+                    "<parser-order>",
+                    &format!(
+                        "globalThis.__parserScriptOrder={o};\
+                         globalThis.__parserScriptIdx=new Map(globalThis.__parserScriptOrder.map(function(n,i){{return[n,i];}}));\
+                         globalThis.__parserScriptCeiling=-1;",
+                        o = order
+                    ),
+                );
+            }
         }
 
         for (i, script) in all_to_execute.iter().enumerate() {
@@ -400,7 +442,18 @@ impl Page {
                     tracing::info!("Executing script ({} bytes): {}", code.len(), url);
                     self.record_network_event_with_body(&url, "GET", "Script", resp.status, &resp.headers, &resp.body);
                     if let Some(js) = &mut self.js {
-                        let _ = js.execute_script("<current-script>", &format!("globalThis.__currentScriptNid={};", script.nid));
+                        // #120: classic sync scripts run at their parser
+                        // position — later parser scripts are invisible.
+                        // Deferred/async run after parsing completes: ceiling
+                        // -1 keeps everything visible for them.
+                        let ceiling = if script.is_defer || script.is_async {
+                            -1
+                        } else {
+                            parser_idx.get(&script.nid).map(|i| *i as i64).unwrap_or(-1)
+                        };
+                        let _ = js.execute_script("<current-script>", &format!(
+                            "globalThis.__currentScriptNid={nid};globalThis.__parserScriptCeiling={ceiling};",
+                            nid = script.nid, ceiling = ceiling));
                         if let Err(e) = js.execute_script_guarded(&url, &code) {
                             tracing::warn!("Script error ({}): {}", url, e);
                             // Chrome parity (#17): the uncaught throw must
@@ -430,7 +483,18 @@ impl Page {
                         script.inline.len(),
                         script.nid
                     );
-                    let _ = js.execute_script("<current-script>", &format!("globalThis.__currentScriptNid={};", script.nid));
+                    let _ = js.execute_script(
+                        "<current-script>",
+                        &format!(
+                            "globalThis.__currentScriptNid={nid};globalThis.__parserScriptCeiling={ceiling};",
+                            nid = script.nid,
+                            ceiling = if script.is_defer || script.is_async {
+                                -1
+                            } else {
+                                parser_idx.get(&script.nid).map(|i| *i as i64).unwrap_or(-1)
+                            }
+                        ),
+                    );
                     if let Err(e) = js.execute_script_guarded("<inline>", &script.inline) {
                         tracing::warn!("Inline script error: {}", e);
                         // Same window-error reporting as external scripts
@@ -452,6 +516,14 @@ impl Page {
                     let _ = js.execute_script("<current-script>", "globalThis.__currentScriptNid=0;");
                 }
             }
+        }
+
+        // #120: parsing is "done" for every later phase — deferred scripts,
+        // module graphs, DCL/load handlers and the settle loop all run with
+        // the full document visible. Also covers the budget-break path, where
+        // the last classic script's ceiling would otherwise stay armed.
+        if let Some(js) = &mut self.js {
+            let _ = js.execute_script("<parser-clear>", "globalThis.__parserScriptCeiling=-1;");
         }
 
         // Retire the classic-phase watchdog at the phase boundary. When the

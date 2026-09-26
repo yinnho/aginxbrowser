@@ -1833,6 +1833,13 @@ fn build_replaced_leaf(
             (w, h, true)
         }
     };
+    // #120 zoom: the natural box is a declaration-class size — attrs are
+    // presentational hints, decoded image dimensions and the form-control
+    // default boxes are intrinsic — and Chrome renders all of them scaled
+    // inside a zoom subtree. Scaling here (after the match) keeps the ratio
+    // arithmetic above in unscaled coordinates, so ratio_transfer is
+    // unaffected (both axes scale together).
+    let (nat_w, nat_h) = (nat_w * style.zoom_accum, nat_h * style.zoom_accum);
 
     // Attrs block ratio transfer for img and svg: width/height attrs are
     // presentational-hint DECLARATIONS, so a CSS override of one axis does
@@ -8240,6 +8247,7 @@ fn compute_styles_impl(
         depth: usize,
         gated: Option<(usize, &HashMap<usize, Vec<usize>>)>,
         viewport: (f32, f32),
+        zoom_accum: f32,
     ) {
         let Some(tag) = tree
             .with_node(nid, |n| n.as_element().map(|e| e.local.to_string()))
@@ -8288,6 +8296,14 @@ fn compute_styles_impl(
         T_CASCADE.with(|c| c.set(c.get() + t_c.elapsed().as_nanos() as u64));
         let mut cs = cs;
         crate::diting_css::sample_css_animation(&mut cs, keyframes, css_time);
+        // #120 zoom: this node's accumulated factor — ancestors' product
+        // times THIS element's own declaration (`zoom_declared`, never the
+        // inherited `zoom`, which already carries the ancestor factor).
+        // The cascade above (and every pseudo/child below) must see
+        // UNSCALED px — em/% fold against unscaled ancestors — so the
+        // geometry scaling happens only at the out.insert at the bottom,
+        // on a clone.
+        let z = zoom_accum * cs.zoom_declared.unwrap_or(1.0);
         // CSS counters: apply this element's own reset/increment before its
         // pseudos resolve. The reset pushes a shadowing counter whose scope
         // lasts until this element's parent's subtree ends (see
@@ -8385,8 +8401,14 @@ fn compute_styles_impl(
                     depth + 1,
                     gated,
                     viewport,
+                    z,
                 );
             } else {
+                // Slot-assigned nodes inherit from a style already pulled
+                // from `out` — scaled, if that slot sits inside a zoom
+                // subtree (#120: em folding against the scaled font size
+                // double-counts the factor there; zoom+slots hasn't shipped
+                // together in the wild yet).
                 let parent = out
                     .get(&inherit_from)
                     .cloned()
@@ -8407,6 +8429,7 @@ fn compute_styles_impl(
                     depth + 1,
                     gated,
                     viewport,
+                    z,
                 );
             }
         }
@@ -8430,7 +8453,28 @@ fn compute_styles_impl(
             cs.pseudos = Some(Box::new(pseudo_pair));
         }
         pop_out_of_scope(counters, depth);
-        out.insert(nid, cs);
+        // #120 zoom: scale geometry px into display coordinates now that the
+        // whole subtree (children inherited unscaled values, pseudos cascaded
+        // against the unscaled host) has been walked. Pseudo boxes ride the
+        // host's factor — they have no children of their own. Off zoom
+        // subtrees (z == 1) nothing is cloned; the cascade output lands as-is.
+        if (z - 1.0).abs() > f32::EPSILON {
+            let mut scaled = cs.clone();
+            crate::diting_css::scale_computed_px(&mut scaled, z);
+            if let Some(pp) = scaled.pseudos.as_mut() {
+                if let Some(before) = pp.before.as_mut() {
+                    crate::diting_css::scale_computed_px(before, z);
+                }
+                if let Some(after) = pp.after.as_mut() {
+                    crate::diting_css::scale_computed_px(after, z);
+                }
+            }
+            scaled.zoom_accum = z;
+            out.insert(nid, scaled);
+        } else {
+            cs.zoom_accum = 1.0;
+            out.insert(nid, cs);
+        }
     }
     // Pseudo-element rules (::before/::after) for one host: the caller hands
     // in the host's pre-bucketed pseudo matches (slot 0 = before, 1 = after;
@@ -8574,6 +8618,7 @@ fn compute_styles_impl(
             0,
             gated,
             viewport,
+            1.0,
         ),
         None => {
             for child in tree.children(tree.document()) {
@@ -8593,6 +8638,7 @@ fn compute_styles_impl(
                     0,
                     gated,
                     viewport,
+                    1.0,
                 );
             }
         }

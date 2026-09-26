@@ -2904,6 +2904,7 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "justify-content",
     "align-items",
     "opacity",
+    "zoom",
     "transform",
     "animation-name",
     "animation-duration",
@@ -3402,6 +3403,11 @@ fn computed_style_value(
         // answers here — "1" IS the initial value, so no caller chain can
         // know better.
         "opacity" => Some(format_number(s.opacity.unwrap_or(1.0))),
+        // #120 zoom: Chrome reports the COMPUTED factor — inherited, so a
+        // zoomed wrapper's descendants all answer the ancestor's number.
+        // Always a bare number (initial 1); the geometry scaling itself
+        // already lives in the px values this table reports.
+        "zoom" => Some(format_number(s.zoom.unwrap_or(1.0))),
         // Animation batch B / affine batch: the Transform2D serializes as
         // its full CSS matrix (a b c d tx ty) — rotate/skew/matrix join the
         // same composition now. No transform (or `none`) computes to "none";

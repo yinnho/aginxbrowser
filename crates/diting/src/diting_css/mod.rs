@@ -1188,6 +1188,25 @@ pub struct ComputedStyle {
     /// `z-index` (batch 6a), non-inherited; None = auto. Only meaningful on
     /// positioned elements (flex/grid-item support is a later batch).
     pub z_index: Option<i32>,
+    /// `zoom` (#120): the element's computed zoom factor — declared here or
+    /// inherited (Chrome makes zoom an inherited property); `None` = the
+    /// initial 1. Non-standard, but Tmall-class publish UIs size their whole
+    /// panel in design coordinates and set `zoom: viewport/1280` on the
+    /// wrapper; without honoring it every box renders at design size and the
+    /// form overflows the viewport.
+    pub zoom: Option<f32>,
+    /// The zoom THIS element declares (never inherited; `None` = no
+    /// declaration of its own). The accumulated factor a subtree renders
+    /// at is the ancestors' product times this — NOT `zoom` above, which
+    /// already carries the inherited value and would double-count it.
+    pub zoom_declared: Option<f32>,
+    /// Accumulated zoom factor for THIS node (ancestors' product × own),
+    /// filled by compute_styles' tree walk — 1.0 outside zoom subtrees.
+    /// Geometry px in this ComputedStyle are ALREADY scaled by it (the same
+    /// walk), so layout/paint read px as-is; only sizes that never pass
+    /// through the cascade (replaced-element naturals) multiply by it
+    /// themselves.
+    pub zoom_accum: f32,
     /// `opacity` (animation batch A), non-inherited; None = 1 (the initial
     /// value) so untouched subtrees skip alpha work entirely. The paint pass
     /// multiplies it into everything the element's subtree emits — color
@@ -3615,6 +3634,84 @@ pub(crate) enum Importance {
     Any,
 }
 
+/// Multiply every geometry px in a computed style by `z` — the #120 zoom
+/// pass. `Length::Px` (and the px half of `Calc`) only: percentages resolve
+/// against the already-scaled parent box at layout, `auto`/keywords carry no
+/// magnitude, and font keywords were folded to px by the cascade. Font size
+/// scales (text measurement and em-derived children read it after), the px
+/// form of line-height scales while number multipliers stay (they multiply
+/// the now-scaled font size), and shadow offsets/blur/spread scale. The
+/// `zoom`/`zoom_accum` fields themselves are never touched here.
+pub(crate) fn scale_computed_px(c: &mut ComputedStyle, z: f32) {
+    fn scale_len(l: &mut Length, z: f32) {
+        match l {
+            Length::Px(px) => *px *= z,
+            Length::Calc { px, .. } => *px *= z,
+            _ => {}
+        }
+    }
+    fn scale_sides(s: &mut Sides, z: f32) {
+        for l in [&mut s.top, &mut s.right, &mut s.bottom, &mut s.left].into_iter().flatten() {
+            scale_len(l, z);
+        }
+    }
+    scale_sides(&mut c.margin, z);
+    scale_sides(&mut c.padding, z);
+    scale_sides(&mut c.border_width, z);
+    for l in [
+        &mut c.width,
+        &mut c.height,
+        &mut c.min_width,
+        &mut c.max_width,
+        &mut c.min_height,
+        &mut c.max_height,
+        &mut c.top,
+        &mut c.right,
+        &mut c.bottom,
+        &mut c.left,
+        &mut c.flex_basis,
+        &mut c.column_gap,
+        &mut c.row_gap,
+        &mut c.border_radius,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        scale_len(l, z);
+    }
+    if let Some(radii) = c.corner_radii.as_mut() {
+        for (h, v) in radii.iter_mut() {
+            scale_len(h, z);
+            scale_len(v, z);
+        }
+    }
+    if let Some(fs) = c.font_size.as_mut() {
+        *fs *= z;
+    }
+    if let Some(LineHeightSpec::Px(px)) = c.line_height.as_mut() {
+        *px *= z;
+    }
+    if let Some(ws) = c.word_spacing.as_mut() {
+        *ws *= z;
+    }
+    if let Some(layers) = c.box_shadow.as_mut() {
+        for s in layers.iter_mut() {
+            s.dx *= z;
+            s.dy *= z;
+            s.blur *= z;
+            s.spread *= z;
+        }
+    }
+    if let Some(layers) = c.text_shadow.as_mut() {
+        for s in layers.iter_mut() {
+            s.dx *= z;
+            s.dy *= z;
+            s.blur *= z;
+        }
+    }
+}
+
+
 pub(crate) fn apply_declarations_importance(
     style: &mut ComputedStyle,
     declarations: &str,
@@ -4388,6 +4485,28 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             match v.trim().parse::<f32>() {
                 Ok(n) if n.is_finite() => {
                     style.opacity = Some(n.clamp(0.0, 1.0));
+                    true
+                }
+                _ => false,
+            }
+        }
+        "zoom" => {
+            // Chrome's non-standard zoom (#120): <number> | <percentage> |
+            // normal (=1). "reset" (new Chrome's unzoom) stays out of scope —
+            // unparsed, like any keyword we don't model. Zero/negative zoom
+            // is invalid per Chrome's parser.
+            let t = v.trim();
+            let z = if t.eq_ignore_ascii_case("normal") {
+                Some(1.0)
+            } else if let Some(pct) = t.strip_suffix('%') {
+                pct.trim().parse::<f32>().ok().map(|n| n / 100.0)
+            } else {
+                t.parse::<f32>().ok()
+            };
+            match z {
+                Some(n) if n.is_finite() && n > 0.0 => {
+                    style.zoom = Some(n);
+                    style.zoom_declared = Some(n);
                     true
                 }
                 _ => false,
@@ -5787,6 +5906,9 @@ pub fn cascade_element(
         // text-shadow inherits the whole layer list (blitz#271 family) —
         // like color, author rules below re-declare per element.
         style.text_shadow = parent.text_shadow.clone();
+        // zoom inherits computed (Chrome semantics, #120): a wrapper's
+        // zoom covers every descendant until one declares its own.
+        style.zoom = parent.zoom;
         // Custom properties inherit computed (already-substituted-where-
         // possible) values; author rules below may re-declare per element.
         style.custom = parent.custom.clone();
