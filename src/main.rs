@@ -435,6 +435,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/json/", get(crate::cdp::http::json_list))
         .route("/json/list", get(crate::cdp::http::json_list))
         .route("/json/list/", get(crate::cdp::http::json_list))
+        .route("/json/unimplemented", get(crate::cdp::http::json_unimplemented))
         .route("/devtools/:kind/:id", get(crate::cdp::http::devtools_ws));
 
     #[cfg(feature = "screenshot")]

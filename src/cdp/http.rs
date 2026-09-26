@@ -39,6 +39,25 @@ pub async fn json_version(Host(host): Host) -> impl IntoResponse {
     }))
 }
 
+/// `/json/unimplemented` — the Fetch-domain holes a Playwright
+/// `page.route()` caller hits. Kept off `/json/version` so Chrome-shaped
+/// discovery stays the fields Playwright parses.
+pub async fn json_unimplemented() -> impl IntoResponse {
+    axum::Json(json!({
+        "unimplemented": [
+            {
+                "surface": "Fetch.requestPaused",
+                "gap": "document and subresource loads use the navigation transport and are not interceptable",
+                "works": "script-initiated fetch() and XHR pause at the Request stage"
+            },
+            {
+                "surface": "Fetch.takeResponseBodyAsStream",
+                "gap": "Response-stage interception is not implemented"
+            }
+        ]
+    }))
+}
+
 /// `/json/list` (and `/json`) — Chrome's fresh launch lists exactly one
 /// about:blank page, and naive CDP clients depend on that shape: read the
 /// list, connect to the page's `webSocketDebuggerUrl`, drive it with
