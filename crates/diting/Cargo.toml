@@ -139,7 +139,7 @@ sha2 = "0.10"
 # WebCrypto (crypto.subtle) secret-key primitives. RustCrypto, pure Rust, no
 # CMake/OpenSSL, unify on the digest 0.10 / cipher 0.4 stack already in tree.
 hmac = "0.12"
-aes = "0.8"
+aes = "0.9"
 aes-gcm = "0.10"
 cbc = { version = "0.1", features = ["alloc"] }
 ctr = "0.9"
