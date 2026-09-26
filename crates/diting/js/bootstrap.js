@@ -1060,6 +1060,35 @@ function _labeledControl(label) {
 // Element.click() and by unmanaged synthetic dispatches through
 // dispatchEvent() — Chrome runs activation behavior for untrusted clicks too,
 // so `cb.dispatchEvent(new MouseEvent('click'))` toggles like cb.click() does.
+
+// Activation flips `checked` (and `indeterminate`) NATIVELY in Chrome — the
+// C++ pre-click activation never runs any JS setter. Pages routinely install
+// an own-property `checked` trap (React 16's `_valueTracker` is the canonical
+// one: its setter mirrors every assignment into a shadow "last value" so
+// change extraction can diff against it). Flipping through the plain
+// assignment routes the activation into that trap, the tracker sees the new
+// value BEFORE the click event dispatches, and the framework's diff comes up
+// empty — every controlled radio/checkbox onChange goes deaf. Bypass
+// instance-level traps by calling the prototype's native setter directly.
+let _nativeCheckedSet = undefined; // lazy: setter fn | false (unavailable)
+let _nativeIndeterminateSet = undefined;
+function _nativeSet(el, cacheRef, prop, value) {
+  if (cacheRef.v === undefined) {
+    const d = Object.getOwnPropertyDescriptor(el.constructor.prototype, prop) ||
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, prop);
+    cacheRef.v = d && typeof d.set === 'function' ? d.set : false;
+  }
+  if (cacheRef.v) cacheRef.v.call(el, value);
+  else el[prop] = value;
+}
+function _activationSetChecked(el, value) {
+  if (_nativeCheckedSet === undefined) _nativeCheckedSet = { v: undefined };
+  _nativeSet(el, _nativeCheckedSet, 'checked', value);
+}
+function _activationSetIndeterminate(el, value) {
+  if (_nativeIndeterminateSet === undefined) _nativeIndeterminateSet = { v: undefined };
+  _nativeSet(el, _nativeIndeterminateSet, 'indeterminate', value);
+}
 function _preClickFlip(el) {
   if (!el || el.tagName !== 'INPUT' || _isFormControlDisabled(el)) return null;
   const type = (el.getAttribute('type') || '').toLowerCase();
@@ -1075,27 +1104,29 @@ function _preClickFlip(el) {
         if ((r.getAttribute('type') || '').toLowerCase() !== 'radio') continue;
         if ((r.getAttribute('name') || '') !== name || r.form !== el.form) continue;
         st.radioStates.push([r, !!r.checked]);
-        if (r !== el) r.checked = false;
+        if (r !== el) _activationSetChecked(r, false);
       }
     }
-    el.checked = true;
+    _activationSetChecked(el, true);
   } else {
-    el.checked = !st.oldChecked;
+    _activationSetChecked(el, !st.oldChecked);
     st.oldIndeterminate = !!el.indeterminate;
-    el.indeterminate = false;
+    _activationSetIndeterminate(el, false);
   }
   return st;
 }
 
 // A cancelled click restores every prior state the flip touched (the whole
 // radio group included); checkbox activation also restores `indeterminate`.
+// The restore rides the same native-setter bypass as the flip: a cancelled
+// activation must not be visible to page-installed property traps either.
 function _cancelPreClickFlip(st) {
   if (!st) return;
   if (st.radioStates) {
-    for (let i = 0; i < st.radioStates.length; i++) st.radioStates[i][0].checked = st.radioStates[i][1];
+    for (let i = 0; i < st.radioStates.length; i++) _activationSetChecked(st.radioStates[i][0], st.radioStates[i][1]);
   } else {
-    st.el.checked = st.oldChecked;
-    if (st.type === 'checkbox') st.el.indeterminate = st.oldIndeterminate;
+    _activationSetChecked(st.el, st.oldChecked);
+    if (st.type === 'checkbox') _activationSetIndeterminate(st.el, st.oldIndeterminate);
   }
 }
 

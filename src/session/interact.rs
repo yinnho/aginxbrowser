@@ -761,8 +761,13 @@ const CLICK_RECHECK_SCRIPT: &str = r#"(function() {
     // rest (a div-button the page marks unclickable mid-session).
     if (el.matches(':disabled') || el.closest('[aria-disabled="true"],[inert]'))
         return JSON.stringify({clicked: false, reason: 'disabled'});
+    // Real clicks are arbitrated by hit-testing, which ignores opacity — an
+    // opacity:0 input overlaid on its visible label (Fusion/Next radio and
+    // checkbox wrappers) still receives every real click for a11y. Only the
+    // CSS-hiding states (display:none, visibility:hidden) are unclickable,
+    // so checkOpacity stays off and the elementFromPoint gate below decides.
     if (typeof el.checkVisibility === 'function' &&
-        !el.checkVisibility({checkOpacity: true, checkVisibilityCSS: true}))
+        !el.checkVisibility({checkVisibilityCSS: true}))
         return JSON.stringify({clicked: false, reason: 'not_visible'});
     el.scrollIntoView({block: 'center'});
     // Post-scroll geometry, then hit-test the center point. elementFromPoint

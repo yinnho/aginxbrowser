@@ -5379,6 +5379,58 @@
     }
 
     #[test]
+    fn test_click_activation_flips_checked_without_page_traps() {
+        // React 16's `_valueTracker` installs an own-property `checked` trap
+        // on controlled radios/checkboxes whose setter mirrors every JS
+        // assignment into a shadow "last value"; the change extraction later
+        // diffs the DOM state against that shadow. Chrome's pre-click
+        // activation flips `checked` in C++ — the page trap never runs, so
+        // the diff sees false→true and onChange fires. An engine that flips
+        // through the plain JS property routes the activation into the trap,
+        // the shadow syncs ahead of the click event, the diff comes up empty
+        // and every controlled radio onChange goes deaf (the #119 freight
+        // radio face: model stuck on seller-pays). Activation — and its
+        // cancel-restore — must call the prototype's native setter.
+        let mut rt = setup_runtime(
+            r#"<input type=radio name=g id=r1><input type=radio name=g id=r2 checked>
+            <input type=checkbox id=cxl>"#,
+        );
+        let result = rt.evaluate(
+            r#"
+            const proto = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked');
+            const hijack = (el) => {
+                el.__trapCount = 0;
+                Object.defineProperty(el, 'checked', {
+                    get() { return proto.get.call(el); },
+                    set(v) { el.__trapCount++; el.__shadow = '' + v; proto.set.call(el, v); },
+                });
+            };
+            const r1 = document.getElementById('r1'), r2 = document.getElementById('r2'),
+                  cxl = document.getElementById('cxl');
+            [r1, r2, cxl].forEach(hijack);
+            let fired = [];
+            r1.addEventListener('change', () => fired.push('r1'));
+            r1.click();                      // flips r1, unchecks peer r2
+            const afterClick = [r1.checked, r2.checked, fired,
+                                r1.__trapCount, r2.__trapCount, el0(r1)];
+            cxl.addEventListener('click', (e) => e.preventDefault());
+            cxl.click();                     // cancelled: restores without the trap
+            const afterCancel = [cxl.checked, cxl.__trapCount, el0(cxl)];
+            function el0(el) { return ('__shadow' in el) ? el.__shadow : null; }
+            return [afterClick, afterCancel];
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                [true, false, ["r1"], 0, 0, null], // DOM flipped, change fired, traps never ran
+                [false, 0, null],                  // cancel restored through the native path too
+            ])
+        );
+    }
+
+    #[test]
     fn test_element_labels_and_label_control_getters() {
         // obscura#835 lineage: label↔control association must be readable in
         // both directions — Playwright's getByLabel() leans on `label.control`
