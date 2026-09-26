@@ -168,6 +168,25 @@ pub async fn handle(
             }
             Ok(json!({}))
         }
+        // Chrome: empty timezoneId clears. Invalid ids error and do not
+        // change the page. Date and Intl both read the pin.
+        "setTimezoneOverride" => {
+            let tz = params.get("timezoneId").and_then(Value::as_str).ok_or(
+                "Emulation.setTimezoneOverride requires string timezoneId",
+            )?;
+            let Some(page) = ctx.get_session_page_mut(session_id) else {
+                return Err("Emulation.setTimezoneOverride requires a page target".to_string());
+            };
+            if tz.is_empty() {
+                page.set_timezone_override(None);
+                return Ok(json!({}));
+            }
+            if !page.timezone_id_supported(tz) {
+                return Err(format!("Invalid timezoneId: {tz}"));
+            }
+            page.set_timezone_override(Some(tz.to_string()));
+            Ok(json!({}))
+        }
         "setUserAgentOverride" => {
             let ua = params.get("userAgent").and_then(|v| v.as_str()).unwrap_or("");
             let lang = params.get("acceptLanguage").and_then(|v| v.as_str());

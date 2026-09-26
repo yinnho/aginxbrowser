@@ -211,4 +211,18 @@ impl JsRuntime {
     pub fn take_js_network_events(&self) -> Vec<crate::diting_js::ops::JsNetworkEvent> {
         std::mem::take(&mut self.state.borrow_mut().js_network_events)
     }
+
+    /// Pin or clear the page timezone (`Emulation.setTimezoneOverride`).
+    /// The bootstrap reads `globalThis.__diting_tz` per call, so this takes
+    /// effect on the live realm without touching process-global ICU.
+    pub fn set_timezone(&mut self, tz: Option<&str>) {
+        let source = match tz.filter(|tz| !tz.is_empty()) {
+            Some(tz) => {
+                let escaped = tz.replace('\\', "\\\\").replace('\'', "\\'");
+                format!("globalThis.__diting_tz = '{escaped}';")
+            }
+            None => "delete globalThis.__diting_tz;".to_string(),
+        };
+        let _ = self.runtime.execute_script("<set-tz>", source);
+    }
 }

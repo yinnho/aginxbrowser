@@ -284,6 +284,10 @@ pub struct Page {
     /// so the emulation has to be replayed or the page silently flips back
     /// to the persona defaults mid-session (#29).
     emulated_media: Option<EmulatedMedia>,
+    /// CDP `Emulation.setTimezoneOverride`. Lives on the Page so a
+    /// navigation, which rebuilds the realm, replays it. Empty means the
+    /// bootstrap's language-derived zone.
+    timezone_override: Option<String>,
     /// 32-bit seed the JS persona draws its hardware identity from
     /// (screen/dpr/GPU/canvas). Lives on the Page because every navigation
     /// rebuilds the realm and `__diting_init` self-deletes after drawing a
@@ -465,6 +469,7 @@ impl Page {
             viewport_override: None,
             dpr_override: None,
             emulated_media: None,
+            timezone_override: None,
             fp_seed: u64::from_be_bytes(
                 uuid::Uuid::new_v4().into_bytes()[..8].try_into().unwrap(),
             ),
@@ -681,6 +686,7 @@ impl Page {
         self.restore_session_storage();
         self.apply_viewport_override();
         self.apply_emulated_media();
+        self.apply_timezone_override();
     }
 
     /// Capture the live realm's `sessionStorage` into `self.session_storage`

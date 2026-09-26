@@ -41,6 +41,44 @@ impl Page {
         self.apply_emulated_media();
     }
 
+    /// Pin `Emulation.setTimezoneOverride`. `None` clears back to the
+    /// language-derived zone. Replay happens from `init_js` because every
+    /// navigation rebuilds the realm.
+    pub fn set_timezone_override(&mut self, tz: Option<String>) {
+        self.timezone_override = tz.filter(|tz| !tz.is_empty());
+        self.apply_timezone_override();
+    }
+
+    /// True when ICU accepts `tz` as a time zone id. The check runs in the
+    /// page so it sees the same `Intl` the override will use.
+    pub fn timezone_id_supported(&mut self, tz: &str) -> bool {
+        if tz.is_empty()
+            || tz.len() > 80
+            || !tz
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '-' | '/'))
+        {
+            return false;
+        }
+        let Some(js) = &mut self.js else {
+            return false;
+        };
+        let escaped = tz.replace('\\', "\\\\").replace('\'', "\\'");
+        match js.evaluate(&format!(
+            "(function(){{try{{Intl.DateTimeFormat('en-US',{{timeZone:'{escaped}'}});return true}}catch(e){{return false}}}})()"
+        )) {
+            Ok(serde_json::Value::Bool(true)) => true,
+            _ => false,
+        }
+    }
+
+    pub(super) fn apply_timezone_override(&mut self) {
+        let tz = self.timezone_override.clone();
+        if let Some(js) = &mut self.js {
+            js.set_timezone(tz.as_deref());
+        }
+    }
+
     /// Replay the emulated media into the current realm: the bootstrap
     /// recomputes its matchMedia truth tables (firing change events on
     /// crossing MQLs) and pushes the same pairs to the Rust layout state
