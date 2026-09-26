@@ -19,6 +19,15 @@
       "slots": ["question", "body"],
       "panel": "1080x2340",
       "note": "没有专用结果模板时的正文页。"
+    },
+    {
+      "id": "qr",
+      "file": "qr.html",
+      "title": "扫码",
+      "matches": ["扫码", "二维码", "qr"],
+      "slots": ["title", "subtitle", "svg_b64", "url"],
+      "panel": "1080x2340",
+      "note": "二维码上屏页。svg_b64=base64(SVG)（ASCII，白底黑模块含静区），页内 atob 还原——base64 字母表无转义字符，过转义槽无损。"
     }
   ]
 }

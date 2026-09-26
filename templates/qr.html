@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<!-- id: qr  扫码页·磷光终端（2026-09-26 iLink 登录线）。槽位 {{title}} {{subtitle}} {{svg_b64}} {{url}}
+     svg_b64 = base64(SVG)（白底黑模块含静区）。base64 字母表不含 HTML
+     转义字符，过引擎的转义槽无损；页内 atob 还原注入白底面板。离线
+     设备：无外部资源，等宽字体栈同 reply。 -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1080">
+<title>扫码</title>
+<style>
+:root {
+  --bg: #060a07;
+  --bg-glow: #0d1811;
+  --fg: #d8e6d8;
+  --accent: #3dfd8f;
+  --muted: #7d9484;
+  --scan: rgba(63, 221, 143, 0.03);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { background: var(--bg); }
+body {
+  min-height: 2620px;  /* 面板缓存 1080x2620：全页铺磷光底 */
+  color: var(--fg);
+  font: 400 38px/1.78 ui-monospace, "Droid Sans Mono", "Noto Sans Mono", monospace;
+  padding: 120px 90px 160px;
+  position: relative;
+}
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(to bottom, var(--scan) 0 1px, transparent 1px 6px),
+    radial-gradient(120% 46% at 50% 0%, var(--bg-glow), transparent 70%),
+    linear-gradient(to bottom, transparent 76%, rgba(0,0,0,0.55));
+}
+.title {
+  font-size: 46px;
+  color: var(--accent);
+  letter-spacing: 2px;
+}
+.subtitle {
+  color: var(--muted);
+  font-size: 32px;
+  margin: 24px 0 72px;
+}
+.qrpanel {
+  background: #fff;           /* 码必须在亮底上：扫码器对反色码不保证 */
+  border-radius: 36px;
+  padding: 44px;
+  width: 880px;
+  box-shadow: 0 0 90px rgba(63, 221, 143, 0.16);
+}
+.qrpanel svg { display: block; width: 100%; height: auto; }
+.qrpanel .nosvg {
+  color: #23352a;
+  font: 400 30px/1.6 ui-monospace, "Noto Sans Mono", monospace;
+  padding: 60px 0;
+  text-align: center;
+}
+.url {
+  margin-top: 72px;
+  color: var(--muted);
+  font-size: 27px;
+  line-height: 1.6;
+  word-break: break-all;
+}
+</style>
+</head>
+<body>
+<div class="title">{{title}}</div>
+<div class="subtitle">{{subtitle}}</div>
+<div class="qrpanel" id="qrbox"><div class="nosvg">二维码生成失败——用手机浏览器打开下面的链接。</div></div>
+<div class="url">{{url}}</div>
+<script>
+(function () {
+  var b64 = "{{svg_b64}}";
+  /* 槽没填时引擎把 {{…}} 整段删空（fill 的尾扫）——空串就是没码 */
+  if (!b64 || b64.indexOf("{") >= 0) { return; }
+  try { document.getElementById("qrbox").innerHTML = atob(b64); }
+  catch (e) { /* atob 失败：留兜底文案 */ }
+})();
+</script>
+</body>
+</html>
