@@ -5768,16 +5768,44 @@ pub fn layout_solve_rooted(
                         if !overlaps_y || sr.width <= 0.0 {
                             continue;
                         }
-                        let is_float_sib = styles.get(&sib).is_some_and(|s| s.float_side.is_some());
+                        let is_float_sib = styles.get(sib).is_some_and(|s| s.float_side.is_some());
                         if is_float_sib {
                             continue;
                         }
                         // Out-of-flow boxes are never pushed by a float
                         // (CSS: floats only displace in-flow content).
-                        let out_of_flow = styles.get(&sib).is_some_and(|s| {
+                        let out_of_flow = styles.get(sib).is_some_and(|s| {
                             matches!(s.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
                         });
                         if out_of_flow {
+                            continue;
+                        }
+                        // CSS 2.1 §9.5: a float's band moves the BORDER BOX
+                        // only of a later in-flow box that establishes an
+                        // independent formatting context (an overflow-
+                        // clipping box, a table, a flex/grid container, an
+                        // atomic inline). A plain overflow:visible block
+                        // keeps its full width — the float shortens just
+                        // its inner line boxes, which the 8b zone owns.
+                        // Clamping plain blocks collapsed real pages: the
+                        // tmall publish form's width:auto cards were pinned
+                        // to a feedback float's leftover sliver when its
+                        // band stuck out of a shrunk parent (#127).
+                        // overflow:clip is paint-only and does NOT contain
+                        // floats (css-overflow-3), so it stays plain here.
+                        let dodges = styles.get(sib).is_some_and(|s| {
+                            matches!(
+                                s.effective_overflow(),
+                                Overflow::Hidden | Overflow::Auto | Overflow::Scroll
+                            ) || matches!(
+                                s.display,
+                                Some(CssDisplay::Flex)
+                                    | Some(CssDisplay::Grid)
+                                    | Some(CssDisplay::Table)
+                                    | Some(CssDisplay::InlineBlock)
+                            )
+                        });
+                        if !dodges {
                             continue;
                         }
                         match side {
@@ -5810,6 +5838,24 @@ pub fn layout_solve_rooted(
                                 }
                             }
                         }
+                    }
+                    // The level just processed narrowed inside `cur`. If
+                    // `cur` itself establishes an independent formatting
+                    // context, every float inside it is CONTAINED — its
+                    // band can never reach `cur`'s own later siblings, so
+                    // the climb stops here instead of escaping (grid/flex
+                    // already stopped at the top; overflow:clip is paint-
+                    // only and does not contain floats).
+                    if styles.get(&cur).is_some_and(|s| {
+                        matches!(
+                            s.effective_overflow(),
+                            Overflow::Hidden | Overflow::Auto | Overflow::Scroll
+                        ) || matches!(
+                            s.display,
+                            Some(CssDisplay::Table) | Some(CssDisplay::InlineBlock)
+                        )
+                    }) {
+                        break;
                     }
                     below = cur;
                     let Some(grand) = tree.with_node(cur, |n| n.parent).flatten() else { break };

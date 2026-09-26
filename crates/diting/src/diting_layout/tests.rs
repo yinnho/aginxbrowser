@@ -1185,3 +1185,107 @@ mod container_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod float_continuation_tests {
+    // #127: the post-layout float continuation pass (batch 8g) climbed out
+    // of a plain overflow:visible block and clamped later PLAIN blocks'
+    // max-width to the float's leftover sliver. CSS 2.1 §9.5 says a float's
+    // band moves the border box only of a later in-flow box that establishes
+    // an independent formatting context (or a table); a plain block keeps
+    // its full width and only its inner line boxes shorten. On the tmall
+    // publish form this collapsed the width:auto/margin:auto cards to ~95px
+    // because a feedback float's band stuck out of its shrunk parent.
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::{compute_styles, layout_dom};
+
+    const VW: f32 = 1280.0;
+
+    fn card_rect(html: &str, sheet: &str, sel: &str) -> (f32, f32, f32, f32) {
+        let tree = parse_html(html);
+        let rules = parse_stylesheet_for(sheet, (VW, 800.0), CssMediaType::Screen);
+        let styles = compute_styles(&tree, &rules, (VW, 800.0));
+        let rects = layout_dom(&tree, &styles, &crate::diting_fonts::font_book(), VW, 800.0);
+        let id = tree.query_selector(sel).unwrap().unwrap();
+        let r = rects.get(&id).unwrap();
+        (r.x, r.y, r.width, r.height)
+    }
+
+    #[test]
+    fn plain_block_keeps_full_width_beside_escaped_float() {
+        // The float lives inside a shrunk earlier block (height 20px), so
+        // its 60px-tall band sticks out below it and vertically overlaps
+        // the later card — the exact #127 shape. Chrome: the card's BOX
+        // stays full width (its line boxes would wrap, not its border box).
+        let (x, _y, w, _h) = card_rect(
+            r#"<html><body>
+                <div id="msg"><div id="fcell">feedback</div></div>
+                <div id="card"><div id="inner">card</div></div>
+            </body></html>"#,
+            r#"
+                body { margin: 0; }
+                #msg { height: 20px; }
+                #fcell { float: left; width: 700px; height: 60px; }
+                #card { width: auto; margin: 0 auto; }
+                #inner { height: 40px; }
+            "#,
+            "#card",
+        );
+        assert!(
+            (x - 0.0).abs() <= 1.0 && (w - VW).abs() <= 1.0,
+            "plain block after an escaped float keeps full width; got x={x} w={w}"
+        );
+    }
+
+    #[test]
+    fn bfc_block_still_narrows_beside_float() {
+        // §9.5 keeps its teeth: a later sibling that establishes an
+        // independent formatting context (overflow: hidden) must have its
+        // border box dodge the float's band.
+        let (_x, _y, w, _h) = card_rect(
+            r#"<html><body>
+                <div id="msg"><div id="fcell">feedback</div></div>
+                <div id="bfc"><div id="inner">section</div></div>
+            </body></html>"#,
+            r#"
+                body { margin: 0; }
+                #msg { height: 20px; }
+                #fcell { float: left; width: 700px; height: 60px; }
+                #bfc { overflow: hidden; }
+                #inner { height: 40px; }
+            "#,
+            "#bfc",
+        );
+        assert!(
+            (w - (VW - 700.0)).abs() <= 1.0,
+            "overflow:hidden block narrows past the float's right edge; got w={w}"
+        );
+    }
+
+    #[test]
+    fn float_contained_by_bfc_ancestor_reaches_no_outer_blocks() {
+        // The climb must stop at an ancestor that establishes a formatting
+        // context: the float is contained there and can never stick out to
+        // displace that ancestor's own later siblings — even when those
+        // siblings would themselves dodge floats.
+        let (x, _y, w, _h) = card_rect(
+            r#"<html><body>
+                <div id="msg"><div id="fcell">feedback</div></div>
+                <div id="bfc"><div id="inner">section</div></div>
+            </body></html>"#,
+            r#"
+                body { margin: 0; }
+                #msg { height: 20px; overflow: hidden; }
+                #fcell { float: left; width: 700px; height: 60px; }
+                #bfc { overflow: hidden; }
+                #inner { height: 40px; }
+            "#,
+            "#bfc",
+        );
+        assert!(
+            (x - 0.0).abs() <= 1.0 && (w - VW).abs() <= 1.0,
+            "float inside an overflow:hidden block never narrows outer siblings; got x={x} w={w}"
+        );
+    }
+}
