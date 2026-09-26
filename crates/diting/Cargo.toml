@@ -143,7 +143,7 @@ aes = "0.8"
 aes-gcm = "0.10"
 cbc = { version = "0.1", features = ["alloc"] }
 ctr = "0.9"
-pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
 hkdf = "0.12"
 # ECDSA (P-256/P-384) for crypto.subtle — same RustCrypto family as the
 # secret-key ops. `ecdsa` is a direct dep for the hazmat prehash traits;
