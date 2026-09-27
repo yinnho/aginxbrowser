@@ -26,6 +26,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl libfontconfig1 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/aginxbrowser /usr/local/bin/aginxbrowser
+# The wechat-oa-post article composer (the flow itself is baked into the
+# binary; md_to_args.py + templates/ are caller-side tooling) — readable for
+# docker cp / bind-mount extraction, not used by the server at runtime.
+COPY --from=build /src/workflow/wechat-oa-post/md_to_args.py /usr/local/share/aginxbrowser/workflow/wechat-oa-post/
+COPY --from=build /src/workflow/wechat-oa-post/templates /usr/local/share/aginxbrowser/workflow/wechat-oa-post/templates
 
 # Non-root runtime user (uid 65532, the distroless nonroot convention). The
 # server binds 8089 and needs no writes by default — cache, download dir and

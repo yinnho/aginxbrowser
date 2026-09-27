@@ -76,6 +76,10 @@ POST /flow/run {"name": "wechat-oa-post",
 
 正文 HTML 不手写，`md_to_args.py` 按模板拼装出 `args_json`：
 
+- 发行面：除 repo 真源外，release tarball（`workflow/wechat-oa-post/` 下）与
+  Docker 镜像（`/usr/local/share/aginxbrowser/workflow/wechat-oa-post/`）都随包
+  带这两个文件；flow 本体已烤进二进制（BUILTIN_FLOWS），不依赖盘上文件。
+
 ```
 python3 md_to_args.py article.md --title "标题" --digest 摘要 \
     --cover cover.png > args.json

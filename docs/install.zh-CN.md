@@ -149,6 +149,8 @@ tar xzf aginxbrowser.tar.gz && cd aginxbrowser-${VER}-${T}
 
 同一 release 下有对应 `.sha256` 文件可校验下载完整性。
 
+压缩包里还带公众号文章拼装工具：`workflow/wechat-oa-post/`（`md_to_args.py` + `templates/`），在你自己的机器上把 markdown 文章拼成内置 `wechat-oa-post` flow 要的 `args_json`。Docker 镜像同样带这两个文件，位于 `/usr/local/share/aginxbrowser/workflow/wechat-oa-post/`。
+
 ### 方式 D：源码构建
 
 ```bash

@@ -149,6 +149,8 @@ tar xzf aginxbrowser.tar.gz && cd aginxbrowser-${VER}-${T}
 
 Verify the download with the matching `.sha256` file in the same release. Windows releases up to v0.3.2 carry `screenshot` but not `stealth`; the CI matrix builds Windows with the full feature set (BoringSSL/NASM on msvc), so v0.4.0 and later ship `stealth` everywhere — `doctor` reports the compiled-in feature set.
 
+The archive also carries the WeChat OA article composer — `workflow/wechat-oa-post/` (`md_to_args.py` + `templates/`), caller-side tooling that turns a markdown post into `args_json` for the baked-in `wechat-oa-post` flow. The Docker image ships the same files under `/usr/local/share/aginxbrowser/workflow/wechat-oa-post/`.
+
 ### Option D: Build from source
 
 ```bash
