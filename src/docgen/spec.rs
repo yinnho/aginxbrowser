@@ -89,6 +89,51 @@ pub fn validate_views(views: &[View], known_ids: &[&str]) -> Vec<String> {
     out
 }
 
+/// Advisory note (issue #142, after archify #424): the id charset gate
+/// blocks leading-underscore names, but letters-only prototype-chain names
+/// (`constructor`, `valueOf`, …) pass validation and are exactly the names
+/// a bare `{}` dictionary would shadow. This engine's viewer keeps its
+/// dictionaries null-prototype so they stay data, but downstream tooling —
+/// a JSON round-trip into `Map`-less JS, cross-system semantic ids — may
+/// not extend the same courtesy. Say so once, listing the offenders,
+/// instead of rejecting the document.
+pub const JS_PROTO_NAMES: [&str; 9] = [
+    "__proto__",
+    "constructor",
+    "prototype",
+    "toString",
+    "toLocaleString",
+    "valueOf",
+    "hasOwnProperty",
+    "isPrototypeOf",
+    "propertyIsEnumerable",
+];
+
+pub fn reserved_id_note(ids: &[&str]) -> Option<String> {
+    let hits: Vec<&str> = ids
+        .iter()
+        .copied()
+        .filter(|id| JS_PROTO_NAMES.contains(id))
+        .collect();
+    if hits.is_empty() {
+        return None;
+    }
+    let quoted: Vec<String> = hits.iter().map(|h| format!("\"{h}\"")).collect();
+    Some(if hits.len() == 1 {
+        format!(
+            "note: node id {} collides with a JavaScript prototype-chain name — kept as data \
+             here, but avoid it for portability",
+            quoted[0]
+        )
+    } else {
+        format!(
+            "note: node ids {} collide with JavaScript prototype-chain names — kept as data \
+             here, but avoid them for portability",
+            quoted.join(", ")
+        )
+    })
+}
+
 /// Edge variants shared by the dataflow/lifecycle/architecture relations
 /// (archify's common variant enum — the `return` idiom is sequence/workflow
 /// vocabulary and is not offered here).

@@ -17,8 +17,8 @@ use super::graph::RouteRepair;
 use super::lifecycle::render_lifecycle;
 use super::sequence::render_sequence;
 use super::spec::{
-    validate_architecture, validate_dataflow, validate_lifecycle, validate_sequence,
-    validate_views, validate_workflow, DiagramSpec, View,
+    reserved_id_note, validate_architecture, validate_dataflow, validate_lifecycle,
+    validate_sequence, validate_views, validate_workflow, DiagramSpec, View,
 };
 use super::theme::Theme;
 use super::workflow::render_workflow;
@@ -102,13 +102,17 @@ fn parse_fence(body: &str, theme: &'static Theme) -> Result<FenceDiagram, Vec<St
                 return Err(problems);
             }
             let r = render_sequence(spec, theme)?;
+            let mut facts = vec![
+                format!("participants={}", r.participants),
+                format!("messages={}", r.messages),
+                format!("viewBox={}x{}", r.view_box[0], r.view_box[1]),
+            ];
+            if let Some(note) = reserved_id_note(&ids) {
+                facts.push(note);
+            }
             Ok(FenceDiagram {
                 kind: "sequence",
-                facts: vec![
-                    format!("participants={}", r.participants),
-                    format!("messages={}", r.messages),
-                    format!("viewBox={}x{}", r.view_box[0], r.view_box[1]),
-                ],
+                facts,
                 svg: r.svg,
                 title: r.title,
                 repairs: Vec::new(),
@@ -125,14 +129,18 @@ fn parse_fence(body: &str, theme: &'static Theme) -> Result<FenceDiagram, Vec<St
                 return Err(problems);
             }
             let r = render_workflow(spec, theme)?;
+            let mut facts = vec![
+                format!("lanes={}", r.lanes),
+                format!("nodes={}", r.nodes),
+                format!("edges={}", r.edges),
+                format!("viewBox={}x{}", r.view_box[0], r.view_box[1]),
+            ];
+            if let Some(note) = reserved_id_note(&ids) {
+                facts.push(note);
+            }
             Ok(FenceDiagram {
                 kind: "workflow",
-                facts: vec![
-                    format!("lanes={}", r.lanes),
-                    format!("nodes={}", r.nodes),
-                    format!("edges={}", r.edges),
-                    format!("viewBox={}x{}", r.view_box[0], r.view_box[1]),
-                ],
+                facts,
                 svg: r.svg,
                 title: r.title,
                 repairs: r.repairs,
@@ -149,14 +157,18 @@ fn parse_fence(body: &str, theme: &'static Theme) -> Result<FenceDiagram, Vec<St
                 return Err(problems);
             }
             let r = render_dataflow(spec, theme)?;
+            let mut facts = vec![
+                format!("stages={}", r.stages),
+                format!("nodes={}", r.nodes),
+                format!("flows={}", r.flows),
+                format!("viewBox={}x{}", r.view_box[0], r.view_box[1]),
+            ];
+            if let Some(note) = reserved_id_note(&ids) {
+                facts.push(note);
+            }
             Ok(FenceDiagram {
                 kind: "dataflow",
-                facts: vec![
-                    format!("stages={}", r.stages),
-                    format!("nodes={}", r.nodes),
-                    format!("flows={}", r.flows),
-                    format!("viewBox={}x{}", r.view_box[0], r.view_box[1]),
-                ],
+                facts,
                 svg: r.svg,
                 title: r.title,
                 repairs: r.repairs,
@@ -173,14 +185,18 @@ fn parse_fence(body: &str, theme: &'static Theme) -> Result<FenceDiagram, Vec<St
                 return Err(problems);
             }
             let r = render_lifecycle(spec, theme)?;
+            let mut facts = vec![
+                format!("lanes={}", r.lanes),
+                format!("states={}", r.states),
+                format!("transitions={}", r.transitions),
+                format!("viewBox={}x{}", r.view_box[0], r.view_box[1]),
+            ];
+            if let Some(note) = reserved_id_note(&ids) {
+                facts.push(note);
+            }
             Ok(FenceDiagram {
                 kind: "lifecycle",
-                facts: vec![
-                    format!("lanes={}", r.lanes),
-                    format!("states={}", r.states),
-                    format!("transitions={}", r.transitions),
-                    format!("viewBox={}x{}", r.view_box[0], r.view_box[1]),
-                ],
+                facts,
                 svg: r.svg,
                 title: r.title,
                 repairs: r.repairs,
@@ -197,14 +213,18 @@ fn parse_fence(body: &str, theme: &'static Theme) -> Result<FenceDiagram, Vec<St
                 return Err(problems);
             }
             let r = render_architecture(spec, theme)?;
+            let mut facts = vec![
+                format!("components={}", r.components),
+                format!("boundaries={}", r.boundaries),
+                format!("connections={}", r.connections),
+                format!("viewBox={}x{}", r.view_box[0], r.view_box[1]),
+            ];
+            if let Some(note) = reserved_id_note(&ids) {
+                facts.push(note);
+            }
             Ok(FenceDiagram {
                 kind: "architecture",
-                facts: vec![
-                    format!("components={}", r.components),
-                    format!("boundaries={}", r.boundaries),
-                    format!("connections={}", r.connections),
-                    format!("viewBox={}x{}", r.view_box[0], r.view_box[1]),
-                ],
+                facts,
                 svg: r.svg,
                 title: r.title,
                 repairs: r.repairs,
@@ -533,10 +553,13 @@ const VIEWER_JS: &str = r#""use strict";
 
     // The authored directed graph, deduped from the route elements (one
     // edge paints as several elements). Element order keeps BFS deterministic.
-    var ADJ = {};  // from -> [to]
-    var RADJ = {}; // to -> [from]
+    // Null-prototype dictionaries: a node id like "__proto__" or
+    // "constructor" must stay data, never find the prototype chain
+    // (archify #424 same-class hole; issue #142).
+    var ADJ = Object.create(null);  // from -> [to]
+    var RADJ = Object.create(null); // to -> [from]
     (function () {
-      var seen = {};
+      var seen = Object.create(null);
       for (var i = 0; i < routes.length; i++) {
         var f = routes[i].getAttribute("data-from");
         var t = routes[i].getAttribute("data-to");
@@ -549,7 +572,7 @@ const VIEWER_JS: &str = r#""use strict";
     })();
 
     function shortestRoute(src, dst) {
-      var prev = {};
+      var prev = Object.create(null);
       var queue = [src];
       prev[src] = null;
       while (queue.length) {
@@ -571,7 +594,7 @@ const VIEWER_JS: &str = r#""use strict";
     }
 
     function closureOf(src, adj) {
-      var seen = {};
+      var seen = Object.create(null);
       var order = [];
       var queue = [src];
       seen[src] = true;
@@ -590,11 +613,15 @@ const VIEWER_JS: &str = r#""use strict";
     }
 
     // Directed edges participating in a closure, deduped (adjacency is
-    // already deduped, so every in-closure step counts once).
+    // already deduped, so every in-closure step counts once). The seen dict
+    // is null-prototype, so hasOwnProperty must come from Object.prototype
+    // itself — seen.hasOwnProperty would be the same hole the dict's
+    // nullness closes (issue #142).
     function inducedLinks(seen, adj) {
+      var hop = Object.prototype.hasOwnProperty;
       var n = 0;
       for (var k in seen) {
-        if (!seen.hasOwnProperty(k)) { continue; }
+        if (!hop.call(seen, k)) { continue; }
         var outs = adj[k] || [];
         for (var i = 0; i < outs.length; i++) {
           if (seen[outs[i]]) { n++; }
@@ -608,7 +635,7 @@ const VIEWER_JS: &str = r#""use strict";
         el.getAttribute("data-participant-id");
     }
     function litSet() {
-      var lit = {};
+      var lit = Object.create(null);
       var i;
       if (mode === "all") {
         for (i = 0; i < nodes.length; i++) { lit[nodeIdOf(nodes[i])] = true; }
@@ -1003,6 +1030,67 @@ mod tests {
         assert!(doc.html.contains("\\u003c/script>"));
         // Still exactly the island + viewer closers, nothing injected.
         assert_eq!(doc.html.matches("</script>").count(), 2);
+    }
+
+    // ---- issue #142: prototype-name node ids stay data (archify #424) ----
+
+    // Letters-only prototype-chain names pass the id charset gate
+    // ([a-zA-Z][a-zA-Z0-9_-]*) — `__proto__` does not, but `constructor`
+    // and `valueOf` are exactly the names a bare {} dictionary would
+    // shadow.
+    const WF_PROTO: &str = r#"{"workflow":{"title":"Proto bait","lanes":[{"id":"s","label":"Svc"}],
+        "nodes":[
+          {"id":"constructor","lane":"s","col":0,"label":"Bait","type":"backend"},
+          {"id":"valueOf","lane":"s","col":1,"label":"Trap","type":"backend"},
+          {"id":"safe","lane":"s","col":2,"label":"Sink","type":"database"}],
+        "edges":[
+          {"from":"constructor","to":"valueOf","label":"hop"},
+          {"from":"valueOf","to":"safe","label":"hop"}]},
+      "views":[{"id":"v","label":"Bait side","nodes":["constructor","valueOf"]}]}"#;
+
+    #[test]
+    fn prototype_name_ids_render_as_data_and_ship_null_proto_dicts() {
+        let doc = render(&format!("```archify\n{WF_PROTO}\n```\n"));
+        assert!(doc.fences[0].ok, "{:?}", doc.fences[0].detail);
+        // The hostile ids reach the svg as plain data attributes…
+        assert!(doc.html.contains("data-node-id=\"constructor\""));
+        assert!(doc.html.contains("data-from=\"constructor\" data-to=\"valueOf\""));
+        // …and the receipt flags them as a portability hazard without
+        // rejecting the document.
+        assert!(doc.fences[0]
+            .detail
+            .iter()
+            .any(|f| f.contains("collide") && f.contains("\"constructor\"")));
+        // The shipped viewer keeps its dictionaries off the prototype chain
+        // — a bare `= {}` here is the exact archify #424 regression class.
+        assert!(doc.html.contains("var ADJ = Object.create(null);"));
+        assert!(doc.html.contains("var RADJ = Object.create(null);"));
+        assert!(!doc.html.contains("var ADJ = {};"));
+        // Clean ids never trip the note (the corpus contract).
+        let plain = render(&format!("```archify\n{SEQ}\n```\n"));
+        assert!(plain.fences[0]
+            .detail
+            .iter()
+            .all(|f| !f.contains("collide")));
+    }
+
+    #[test]
+    fn dunder_proto_id_is_rejected_by_the_charset_gate() {
+        // The one name the charset gate does catch: leading underscore.
+        // It dies at validation with the fence falling back to a code block
+        // — worth pinning so the gate never quietly widens.
+        let bad = r#"{"workflow":{"title":"X","lanes":[{"id":"s","label":"S"}],
+            "nodes":[
+              {"id":"__proto__","lane":"s","col":0,"label":"B","type":"backend"},
+              {"id":"safe","lane":"s","col":1,"label":"S","type":"backend"}],
+            "edges":[{"from":"__proto__","to":"safe","label":"h"}]}}"#;
+        let doc = render(&format!("```archify\n{bad}\n```\n"));
+        assert!(!doc.fences[0].ok);
+        assert!(doc
+            .fences[0]
+            .detail
+            .iter()
+            .any(|d| d.contains("must match")));
     }
 
     fn svg_of(html: &str) -> &str {
