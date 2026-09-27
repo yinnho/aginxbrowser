@@ -7,7 +7,8 @@
 
 - 账号 `aginxbrowser.bsky.social`（注册要手机验证，只能人工做一次）。
 - 凭证形态是 **app password**（Settings → App passwords 建的专用密码，可随时吊销），
-  不是账号主密码。权威文件：`~/Documents/usa-new/bsky-aginxbrowser-login.md`，
+  不是账号主密码。权威文件：`~/Documents/usa-new/bsky-aginxbrowser-login.md`
+  （作者机器的本地文件；外部用户换自己的，形态 `identifier` + `password`），
   jq 过滤读进命令，值永不回显。
 - 会话：`/session/create {url: "https://bsky.app", use_proxy: true, keepalive: true}`，
   id 落 `/tmp/bsky_session.txt`。

@@ -54,6 +54,8 @@ http step 契约（详见 API.md）：
   ```
   jq -c '{app_id, app_secret}' ~/Documents/usa-new/wechat-aginxos-oa.json
   ```
+  （路径是作者机器的本地凭据文件；换你自己的文件，形状同
+  `{app_id, app_secret}`——公众号后台「基本配置」里取。）
   值不进 transcript、不进 flow.json（那文件会 commit）。
 - 与 oa-gateway（oa.aginx.net，第三方平台 component 模式）无关——那是授权
   回调/消息推送网关，不管发文。

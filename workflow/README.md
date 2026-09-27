@@ -26,6 +26,9 @@ before it touches the filesystem.
 
 | name | site | state | notes |
 |---|---|---|---|
+| `bsky-post` | bsky.social | runs green | app password (`creds_json` vars) → createRecord → verify; page-context xrpc, no cookies — see flow.md |
+| `taobao-live` | live.taobao.com | runs green logged-out | verdict-gated front probe: delivers "no wall + telemetry"; room list awaits engine hydration — see flow.md |
+| `wechat-oa-post` | api.weixin.qq.com | runs green (certified OA) / draft-only (uncertified) | 5 pure http steps (token→cover→draft→publish→verify); account = `creds {app_id, app_secret}` via vars, never in flow.json — see flow.md |
 | `xcom-profile` | x.com | runs green logged-out | needs foreign egress (`use_proxy: true` baked in) |
 | `juejin-post` | juejin.cn | runs green | read a post page; list pages stall (see flow.md) |
 | `juejin-publish` | juejin.cn | needs a logged-in session | draft then publish; no proxy; sample title is refused |
@@ -36,6 +39,14 @@ before it touches the filesystem.
 | `x-follow` | x.com | runs green logged-in | friendships create/destroy; response `following` echoes pre-action state |
 | `x-notifs` | x.com | runs green logged-in | v2 URT notifications feed, read-only triage — the inbox half of the loop |
 | `xhs-post` | xiaohongshu.com | login wall logged-out | creator-platform page automation (no API for personal accounts) — login via `import_curl` + `account`, see flow.md |
+
+Account state enters a flow one of three ways — each flow.md says which it
+takes. A logged-in `session_id` reused at run time (the `x-*` family;
+`xhs-post` gets there via `import_curl` or the account wizard), or
+credentials passed as runtime `vars` by the caller (`wechat-oa-post` takes
+a `creds {app_id, app_secret}` object, `bsky-post` a `creds_json` app
+password), read from a local file on the caller's side — secret values
+never live in flow.json or this repo.
 
 The `x-*` family shares one self-healing prefix (p256 / bearer / ctx+bind)
 and composes: `x-search` finds a target → `x-read` resolves ids and follow
