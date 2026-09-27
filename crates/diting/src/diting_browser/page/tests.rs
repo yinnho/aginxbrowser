@@ -2130,6 +2130,84 @@ ms.addEventListener('sourceopen', function(){ \
         port
     }
 
+    /// #102 fixture: paths listed in `redirects` answer 302 with a relative
+    /// `Location` (the shape real sites send); everything else answers 200.
+    /// Thread-per-connection, same skeleton as `hanging_http_server`.
+    fn redirecting_http_server(redirects: Vec<(&'static str, &'static str)>) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut stream) = conn else { continue };
+                let redirects = redirects.clone();
+                std::thread::spawn(move || {
+                    use std::io::{Read, Write};
+                    let mut buf = [0u8; 4096];
+                    let Ok(n) = stream.read(&mut buf) else { return };
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = head
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap_or("/")
+                        .to_string();
+                    if let Some((_, location)) =
+                        redirects.iter().find(|(p, _)| path.starts_with(p))
+                    {
+                        let resp = format!(
+                            "HTTP/1.1 302 Found\r\nlocation: {}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                            location
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                        return;
+                    }
+                    let resp = "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok".to_string();
+                    let _ = stream.write_all(resp.as_bytes());
+                });
+            }
+        });
+        port
+    }
+
+    /// #102: the document fetch's redirect trail survives on the page —
+    /// `redirect_chain[0]` is the URL the navigation asked for, `url` is
+    /// where the document actually came from. A login bounce, a rewritten
+    /// parameter error and a direct landing are only distinguishable from
+    /// that trail — and a direct navigation must not inherit the previous
+    /// document's.
+    #[tokio::test(flavor = "current_thread")]
+    async fn redirect_chain_rides_navigation_and_resets() {
+        let _g = net_test_guard();
+        // Two hops on purpose: /bounce → /hop → /final exercises the whole
+        // trail, not just one leg.
+        let port = redirecting_http_server(vec![("/bounce", "/hop"), ("/hop", "/final")]);
+        let mut p = test_page();
+
+        p.navigate(&format!("http://127.0.0.1:{port}/final")).await.unwrap();
+        assert!(
+            p.redirect_chain.is_empty(),
+            "direct landing must have no trail: {:?}",
+            p.redirect_chain
+        );
+
+        p.navigate(&format!("http://127.0.0.1:{port}/bounce"))
+            .await
+            .unwrap();
+        assert_eq!(
+            p.redirect_chain,
+            vec![
+                format!("http://127.0.0.1:{port}/bounce"),
+                format!("http://127.0.0.1:{port}/hop"),
+            ],
+            "trail in order, [0] = requested URL"
+        );
+        assert!(
+            p.url_string().ends_with("/final"),
+            "landed document is the tail of the chain: {}",
+            p.url_string()
+        );
+    }
+
     /// #101: a deadline during the document fetch must (a) name the phase
     /// that died, (b) name the document that is actually live, and (c)
     /// roll the optimistic url back so /network's url, /state's

@@ -762,7 +762,12 @@ fn session_thread(
                                             // login wizard's Navigate to the
                                             // captured site.
                                             try_inject_storage(&mut page, &mut pending_storage);
-                                            Ok(SessionNavResponse { url: final_url, title, challenge })
+                                            Ok(SessionNavResponse {
+                                                url: final_url,
+                                                title,
+                                                challenge,
+                                                redirected_from: page.inner.redirect_chain.clone(),
+                                            })
                                         }
                                         Err(e) => {
                                             let msg = format!("navigation failed: {}", e);
@@ -1135,6 +1140,19 @@ fn session_thread(
                             let _ = reply.send(Ok(resp.to_string()));
                         }
 
+                        SessionCommand::CookieMeta { reply } => {
+                            // #102: metadata-only view — which cookies exist
+                            // and how they're scoped (domain/path/flags/
+                            // expiry), never the values. Cookie values are
+                            // credentials; the account face already holds
+                            // that line (AccountSummary), this is the same
+                            // discipline one layer down.
+                            let url_str = page.url();
+                            let cookies = page.context.cookie_jar.get_all_cookie_metadata();
+                            let resp = serde_json::json!({ "url": url_str, "cookies": cookies });
+                            let _ = reply.send(Ok(resp.to_string()));
+                        }
+
                         SessionCommand::Export { reply } => {
                             let jsonl = recorder
                                 .iter()
@@ -1311,6 +1329,18 @@ fn session_thread(
                                      port; clicks, drags and typing land on the real page), solve \
                                      the challenge there, then retry the same request in this session"
                                 ));
+                            } else {
+                                // #102: zero known signatures is not an auth
+                                // verdict. `total: 0` reads as "passed" to a
+                                // caller who can't see the detector's scope —
+                                // say in-band that it means "no wall fired",
+                                // and where the login question is actually
+                                // answered.
+                                payload["note"] = json!(
+                                    "no known challenge signatures in this session's traffic — \
+                                     absence of a wall, not a login verdict; check auth state \
+                                     separately (session_verdict / account_verify)"
+                                );
                             }
                             let _ = reply.send(Ok(payload.to_string()));
                         }

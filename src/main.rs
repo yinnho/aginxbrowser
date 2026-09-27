@@ -626,6 +626,10 @@ fn health_body() -> serde_json::Value {
         "engine": "diting",
         "version": env!("CARGO_PKG_VERSION"),
         "commit": option_env!("AGINXBROWSER_BUILD_COMMIT").unwrap_or("unknown"),
+        // The JS kernel the UA string only implies (#102): the actual V8
+        // executing scripts, so "which engine is this really" doesn't
+        // depend on the persona a session happened to carry.
+        "v8": diting::diting_js::v8_version(),
         "ua": ua,
         "tls": tls,
         "capabilities": {
@@ -951,6 +955,10 @@ mod tests {
         );
         let ua = body["ua"].as_str().expect("ua present");
         assert!(ua.contains("Chrome/"), "persona UA expected, got: {ua}");
+        // #102: the JS kernel version — engine truth behind the UA string,
+        // V8 reports like "15.0.274.2".
+        let v8 = body["v8"].as_str().expect("v8 version present");
+        assert!(v8.contains('.'), "V8 version expected, got: {v8}");
         #[cfg(feature = "stealth")]
         assert_eq!(body["tls"], diting::diting_net::DEFAULT_TLS_FINGERPRINT);
         #[cfg(not(feature = "stealth"))]

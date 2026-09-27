@@ -1063,15 +1063,28 @@ pub(crate) async fn sessions_handler() -> Result<impl IntoResponse, AppError> {
 /// Cookie read-back for one session — the HTTP-face mirror of the MCP
 /// `session_cookies` tool (the Cookies command already existed; only the
 /// route was missing). Values are the full Set-Cookie form so the output
-/// round-trips with `POST /session/create`'s `cookies` field.
+/// round-trips with `POST /session/create`'s `cookies` field. `?meta=true`
+/// switches to the metadata-only view (#102): names/scoping/flags/expiry
+/// without a single value — the observability face for callers who must
+/// not hold credentials.
+#[derive(serde::Deserialize, Default)]
+pub(crate) struct CookiesQuery {
+    meta: Option<bool>,
+}
+
 pub(crate) async fn session_cookies_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<CookiesQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     let mut mgr = session::SESSIONS.lock().await;
-    let text = mgr
-        .send(&id, |reply| session::SessionCommand::Cookies { reply })
-        .await
-        .map_err(session_err)?;
+    let text = if query.meta.unwrap_or(false) {
+        mgr.send(&id, |reply| session::SessionCommand::CookieMeta { reply })
+            .await
+    } else {
+        mgr.send(&id, |reply| session::SessionCommand::Cookies { reply })
+            .await
+    }
+    .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| AppError::Internal(format!("cookies parse error: {}", e)))?;
     Ok((StatusCode::OK, Json(val)))

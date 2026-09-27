@@ -351,6 +351,13 @@ pub struct Page {
     /// attempt that issued them. `pub`: the product crate's /network face
     /// reports the current generation beside the rows.
     pub navigation_epoch: u64,
+    /// The current document's HTTP redirect trail (#102):
+    /// `redirect_chain[0]` is the URL the navigation asked for, `url` is
+    /// where the document actually came from; empty when no redirect
+    /// happened. Reset at the start of each attempt and set from the
+    /// document response, so a failed attempt never leaks a stale trail.
+    /// `pub`: the product crate's navigate face reports it (#102).
+    pub redirect_chain: Vec<String>,
     /// The generation whose document the live JS realm runs — `init_js`
     /// stamps it on every realm swap, which is the commit point of a
     /// navigation. `realm_epoch < navigation_epoch` means the newest
@@ -485,6 +492,7 @@ impl Page {
             carried_network_events: Vec::new(),
             carried_network_url: String::new(),
             navigation_epoch: 0,
+            redirect_chain: Vec::new(),
             realm_epoch: 0,
             network_event_counter: 0,
             session_storage: None,

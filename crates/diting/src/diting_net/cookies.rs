@@ -209,6 +209,36 @@ impl CookieJar {
         result
     }
 
+    /// Metadata-only twin of [`CookieJar::get_all_cookies`] (#102): the
+    /// same live, unexpired walk, minus every value — the "what auth state
+    /// exists" answer for callers who must not hold credentials.
+    pub fn get_all_cookie_metadata(&self) -> Vec<CookieMetadata> {
+        let cookies = self.cookies.read().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut result = Vec::new();
+        for domain_cookies in cookies.values() {
+            for entry in domain_cookies.values() {
+                if entry.expires.is_some_and(|expires| expires <= now) {
+                    continue;
+                }
+                result.push(CookieMetadata {
+                    name: entry.name.clone(),
+                    domain: entry.domain.clone(),
+                    path: entry.path.clone(),
+                    secure: entry.secure,
+                    http_only: entry.http_only,
+                    same_site: entry.same_site.clone(),
+                    expires: entry.expires.map(|e| e as i64),
+                    host_only: entry.host_only,
+                });
+            }
+        }
+        result
+    }
+
     pub fn set_cookies_from_cdp(&self, cookies: Vec<CookieInfo>) {
         let mut jar = self.cookies.write().unwrap();
         for cookie in cookies {
@@ -528,6 +558,30 @@ pub struct CookieInfo {
     pub expires: Option<i64>,
 }
 
+/// Everything about a cookie except its value (#102). Names, scoping and
+/// expiry are metadata an operator reasons about ("which login landed, is
+/// the session cookie Secure, when does it die"); the value is a
+/// credential and never enters a read-back surface. Same discipline as the
+/// account face (AccountSummary), one layer down.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CookieMetadata {
+    pub name: String,
+    pub domain: String,
+    pub path: String,
+    pub secure: bool,
+    #[serde(rename = "httpOnly")]
+    pub http_only: bool,
+    #[serde(default, rename = "sameSite")]
+    pub same_site: String,
+    /// Unix seconds; `None` = session cookie (dies with the session).
+    #[serde(default)]
+    pub expires: Option<i64>,
+    /// Host-anchored (set without a `Domain=` attribute): sent to the
+    /// exact host only, never sibling subdomains.
+    #[serde(rename = "hostOnly")]
+    pub host_only: bool,
+}
+
 fn parse_http_date(s: &str) -> Result<u64, ()> {
     let months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 
@@ -720,6 +774,48 @@ mod tests {
 
         let header = jar.get_cookie_header(&url);
         assert!(header.contains("session=abc123"));
+    }
+
+    /// #102: the metadata face carries every attribute an operator reasons
+    /// about — scoping, flags, expiry, host-anchoring — and never a value.
+    /// `value` must not merely be empty: the serialized face has no such
+    /// key at all, so no downstream surface can grow one by accident.
+    #[test]
+    fn metadata_face_carries_attributes_but_never_values() {
+        let jar = CookieJar::new();
+        let url = Url::parse("https://example.com/login").unwrap();
+        jar.set_cookie(
+            "sess=TOPSECRET-VALUE; Domain=example.com; Path=/; Secure; \
+             HttpOnly; SameSite=None; Max-Age=3600",
+            &url,
+        );
+        // Host-anchored (no Domain attribute): the host_only=true shape.
+        jar.set_cookie("tracker=hunter2", &url);
+        // Expired on arrival: the walk must skip it like get_all_cookies.
+        jar.set_cookie("dead=zzz; Max-Age=0", &url);
+
+        let meta = jar.get_all_cookie_metadata();
+        assert_eq!(meta.len(), 2, "expired-on-arrival must be filtered");
+
+        let sess = meta.iter().find(|m| m.name == "sess").unwrap();
+        assert_eq!(sess.domain, "example.com");
+        assert_eq!(sess.path, "/");
+        assert!(sess.secure);
+        assert!(sess.http_only);
+        assert_eq!(sess.same_site, "None");
+        assert!(sess.expires.is_some(), "Max-Age must land as expiry");
+        assert!(!sess.host_only, "Domain= cookies are not host-anchored");
+
+        let tracker = meta.iter().find(|m| m.name == "tracker").unwrap();
+        assert!(tracker.host_only, "no Domain attr = host-anchored");
+
+        let face = serde_json::to_string(&meta).unwrap();
+        assert!(
+            !face.contains("value"),
+            "the metadata face must not even carry a value key: {face}"
+        );
+        assert!(!face.contains("TOPSECRET"), "{face}");
+        assert!(!face.contains("hunter2"), "{face}");
     }
 
     // obscura #855 perms half: the store file and its directory must not

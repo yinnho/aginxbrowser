@@ -96,6 +96,14 @@ pub enum SessionCommand {
     Cookies {
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Metadata-only cookie read-back (#102):
+    /// `{"url":...,"cookies":[{name,domain,path,secure,httpOnly,sameSite,
+    /// expires,hostOnly}, ...]}` — which auth state exists, without a
+    /// single cookie value leaving the server. The observability twin of
+    /// `Cookies` (which exists to round-trip login state, values and all).
+    CookieMeta {
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     /// Snapshot localStorage/sessionStorage for the page's current origin as
     /// `{"url","origin","local_storage":{k:v},"session_storage":{k:v}}`.
     /// Round-trips with `session_create`'s `storage` field to replay a
@@ -247,6 +255,13 @@ pub struct SessionNavResponse {
     /// the flag is the machine-readable verdict. Absent when it didn't.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub challenge: Option<String>,
+    /// The HTTP redirect trail of this navigation (#102):
+    /// `redirected_from[0]` is the URL you asked for, `url` is where the
+    /// document came from — a login bounce, a parameter-error rewrite and
+    /// a direct landing are distinguishable from the trail alone. Absent
+    /// when the navigation involved no redirect.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub redirected_from: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]

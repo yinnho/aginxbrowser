@@ -306,6 +306,92 @@
         );
     }
 
+    /// #102: the cookie metadata face answers "what auth state exists"
+    /// without a single credential leaving the server. Attributes land
+    /// (domain/path/flags), values don't — and the payload doesn't even
+    /// carry a `value` key to grow one from.
+    #[tokio::test]
+    async fn cookie_meta_face_reports_attributes_but_never_values() {
+        let mut mgr = SessionManager::new();
+        // Domain-declared entries anchor at their own domain, so injection
+        // works with no start_url — the session sits on about:blank and the
+        // jar still holds the login state.
+        let sid = mgr.create(
+            None,
+            false,
+            vec![
+                "sess=TOPSECRET-VALUE; Domain=meta.example; Path=/; Secure; HttpOnly"
+                    .to_string(),
+            ],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+        let text = mgr
+            .send(&sid, |reply| SessionCommand::CookieMeta { reply })
+            .await
+            .unwrap();
+        assert!(
+            !text.contains("TOPSECRET"),
+            "cookie values must never leave the jar: {text}"
+        );
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let rows = val["cookies"].as_array().expect("cookies array");
+        let sess = rows
+            .iter()
+            .find(|r| r["name"] == "sess")
+            .expect("sess row present");
+        assert_eq!(sess["domain"], "meta.example");
+        assert_eq!(sess["path"], "/");
+        assert_eq!(sess["secure"], true);
+        assert_eq!(sess["httpOnly"], true);
+        assert!(
+            sess.get("value").is_none(),
+            "no value key on the metadata face: {sess}"
+        );
+        assert!(
+            mgr.close_and_wait(&sid).await,
+            "session thread must ack close"
+        );
+    }
+
+    /// #102: a clean challenges report must say what zero means — absence
+    /// of a wall, not a login verdict. `total: 0` reads as "passed" to a
+    /// caller who can't see the detector's scope.
+    #[tokio::test]
+    async fn challenges_zero_events_carries_absence_note() {
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+        let text = mgr
+            .send(&sid, |reply| SessionCommand::Challenges { reply })
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(val["total"], 0);
+        let note = val["note"].as_str().expect("note on zero events");
+        assert!(
+            note.contains("not a login verdict"),
+            "note must name what zero does NOT mean: {note}"
+        );
+        assert!(
+            mgr.close_and_wait(&sid).await,
+            "session thread must ack close"
+        );
+    }
+
     /// Regression (obscura #618 class): an eval whose script clicks a submit
     /// button must leave the session on the form's action URL — the click
     /// stores a pending JS navigation that the Eval command drains (same

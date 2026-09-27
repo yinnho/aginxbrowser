@@ -202,11 +202,25 @@ pub struct SessionCreateParams {
 pub struct SessionCookiesParams {
     /// Session ID
     pub session_id: String,
+    /// Metadata-only view (#102): {name, domain, path, secure, httpOnly,
+    /// sameSite, expires, hostOnly} per cookie — no values, ever. For
+    /// checking what auth state exists; leave false for the value-bearing
+    /// export that round-trips login state.
+    #[serde(default)]
+    pub meta: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SessionCloneParams {
     /// Session ID to derive from (stays alive and untouched)
+    pub session_id: String,
+}
+
+/// Storage snapshot's own params (it shared SessionCookiesParams before
+/// #102 gave that struct a `meta` flag — a flag storage has no use for).
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SessionStorageParams {
+    /// Session ID
     pub session_id: String,
 }
 

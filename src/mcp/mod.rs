@@ -485,11 +485,21 @@ the same login in parallel tabs. Returns {session_id (new), cloned_from, url, vi
             })
             .await
         {
-            Ok(resp) => stamped_json(
-                json!({ "url": resp.url, "title": resp.title }),
-                &mgr,
-                &params.session_id,
-            ),
+            Ok(resp) => {
+                let mut out = json!({ "url": resp.url, "title": resp.title });
+                // #102: the redirect trail of this navigation — [0] is what
+                // you asked for, url is where it landed. A login bounce, a
+                // parameter-error rewrite and a direct landing read
+                // differently from the trail alone (same field /fetch has
+                // carried all along).
+                if !resp.redirected_from.is_empty() {
+                    out["redirected_from"] = json!(resp.redirected_from);
+                }
+                if let Some(c) = resp.challenge {
+                    out["challenge"] = json!(c);
+                }
+                stamped_json(out, &mgr, &params.session_id)
+            }
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -531,7 +541,13 @@ the same login in parallel tabs. Returns {session_id (new), cloned_from, url, vi
     }
 
     #[tool(
-        description = "Export the session's current cookies as [\"name=value\", ...] for the page's URL. Use to persist a logged-in session and replay it later via session_create with cookies. Round-trips with session_create's cookies field.",
+        description = "Export the session's current cookies. Default (meta absent/false) is the full \
+Set-Cookie form (\"name=value; Domain=…; Path=/\", flags included) — the login-state reuse face that \
+round-trips with session_create's cookies field. meta:true switches to the metadata-only view (#102): \
+[{name, domain, path, secure, httpOnly, sameSite, expires (unix secs, null = session cookie), \
+hostOnly}] with NO values — cookie values are credentials and never leave the server, so \
+\"which auth state exists\" (is the session cookie Secure, when does it expire, which domains \
+landed) is answerable without holding a single one.",
         annotations(title = "Session Cookies", read_only_hint = true)
     )]
     async fn session_cookies(
@@ -539,12 +555,14 @@ the same login in parallel tabs. Returns {session_id (new), cloned_from, url, vi
         Parameters(params): Parameters<SessionCookiesParams>,
     ) -> String {
         let mut mgr = session::SESSIONS.lock().await;
-        match mgr
-            .send(&params.session_id, |reply| SessionCommand::Cookies {
-                reply,
-            })
-            .await
-        {
+        let send = mgr.send(&params.session_id, |reply| {
+            if params.meta.unwrap_or(false) {
+                SessionCommand::CookieMeta { reply }
+            } else {
+                SessionCommand::Cookies { reply }
+            }
+        });
+        match send.await {
             Ok(text) => stamped(text, &mgr, &params.session_id),
             Err(e) => json!({ "error": e }).to_string(),
         }
@@ -559,7 +577,7 @@ keep the session token in localStorage). Call before the session idles out.",
     )]
     async fn session_storage(
         &self,
-        Parameters(params): Parameters<SessionCookiesParams>,
+        Parameters(params): Parameters<SessionStorageParams>,
     ) -> String {
         let mut mgr = session::SESSIONS.lock().await;
         match mgr

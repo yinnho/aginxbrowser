@@ -472,6 +472,10 @@ impl Page {
 
         self.lifecycle = LifecycleState::Loading;
         self.url = Some(url.clone());
+        // A new attempt invalidates the previous document's redirect trail
+        // (#102): the field describes the CURRENT document's fetch, and a
+        // failed attempt must not leave its trail behind.
+        self.redirect_chain.clear();
 
         if url.scheme() == "about" {
             self.navigate_blank();
@@ -526,6 +530,15 @@ impl Page {
             &response.body,
         );
 
+        // #102: keep the hop trail for the session face — a login bounce,
+        // a rewritten parameter error and a plain landing are
+        // distinguishable only by how the request wandered before the
+        // document arrived.
+        self.redirect_chain = response
+            .redirected_from
+            .iter()
+            .map(|u| u.to_string())
+            .collect();
         if !response.redirected_from.is_empty() {
             self.url = Some(response.url.clone());
         }

@@ -34,7 +34,7 @@ Listens on `0.0.0.0:8089` by default; override via the `AGINXBROWSER_BIND` envir
 
 ### GET /health
 
-Health check. Also the build-identity call: `version` + `commit` answer "which source is this binary" (compare against the release tag to verify doc/tag/binary/source are the same commit), and `ua`/`tls` say what the instance presents to sites — the UA browser traffic carries (`AGINXBROWSER_UA` override, else the pinned persona; imported sessions keep the copied request's own UA by design) and the default TLS fingerprint (`"off"` in non-stealth builds). `commit` is `"unknown"` for git-less builds.
+Health check. Also the build-identity call: `version` + `commit` answer "which source is this binary" (compare against the release tag to verify doc/tag/binary/source are the same commit), `v8` is the JS kernel version actually executing scripts (the engine truth behind the UA string — "15.0.274.2" doesn't depend on which persona a session carried), and `ua`/`tls` say what the instance presents to sites — the UA browser traffic carries (`AGINXBROWSER_UA` override, else the pinned persona; imported sessions keep the copied request's own UA by design) and the default TLS fingerprint (`"off"` in non-stealth builds). `commit` is `"unknown"` for git-less builds.
 
 ```bash
 curl http://127.0.0.1:8089/health
@@ -48,6 +48,7 @@ Response:
   "engine": "diting",
   "version": "0.3.1",
   "commit": "a1b2c3d",
+  "v8": "15.0.274.2",
   "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
   "tls": "chrome145",
   "capabilities": { "screenshot": true, "stealth": true, "captcha_solver": false }
@@ -951,6 +952,8 @@ Navigate to a new URL.
 
 When the navigation lands on an anti-bot wall (punish page / `_____tmd_____/punish`), a `challenge` field joins the response — risk-control pages answer like ordinary pages, the flag is the machine-readable verdict: `{"url": "https://punish.taobao.com/", "title": "...", "challenge": "punish"}`.
 
+When HTTP redirects happened in flight, `redirected_from` joins the response with the full trail (issue #102): `redirected_from[0]` is the URL you asked for, `url` is where the document actually came from. The trail alone separates a login bounce (`login.example.com` → `example.com/dashboard`), a parameter-error rewrite (`…?err=invalid` destination) and a direct landing — same final URL, three different situations. Absent when the navigation involved no redirect.
+
 When a navigation exceeds its deadline (`AGINXBROWSER_NAV_TIMEOUT_MS`, default 30s), the error names the phase that died instead of a bare timer: `document fetch in flight` / `document received, not yet committed` / `document committed, scripts/settle still running` / `loaded after the deadline raced`, plus the **active document URL** and the navigation generation — `navigation exceeded 30000ms deadline (document fetch in flight; active document: https://old.example/; requested: https://new.example/; navigation #3 — /network rows carry the generation as "nav")`. If the attempt never committed, the session's url rolls back to the document still running, so `navigate`'s failure report, `/state` and `eval` describe the same page (#101).
 
 ### POST /session/{id}/preload
@@ -1151,6 +1154,16 @@ curl -sS -X POST http://127.0.0.1:8089/session/create \
 ```
 
 > 🔒 The hosted instance never persists any cookie to disk — cookies live only in session memory and are wiped when the session is reclaimed after 8 minutes idle. Callers hold their own login state (use a throwaway account, not your main one).
+
+**Metadata-only view (`?meta=true`)** — the observability twin of the value-bearing export (issue #102). Answers "what auth state exists" without a single credential leaving the server: which cookies are present, how each is scoped (`domain`/`path`/`secure`/`httpOnly`/`sameSite`), when it dies (`expires`, Unix seconds — `null` = session cookie) and whether it's host-anchored (`hostOnly` = set without a `Domain=` attribute, sent to the exact host only). The payload carries no `value` key at all — values are credentials, and this face is for checking which login landed, not for reusing it.
+
+```bash
+curl -sS "http://127.0.0.1:8089/session/$SID/cookies?meta=true" | jq .
+```
+
+```json
+{"url": "https://example.com/dashboard", "cookies": [{"name": "sessionid", "domain": "example.com", "path": "/", "secure": true, "httpOnly": true, "sameSite": "Lax", "expires": 1761284509, "hostOnly": false}]}
+```
 
 ### GET /session/{id}/export
 
@@ -1378,7 +1391,7 @@ One-call risk-control report: did this session hit an anti-bot wall? Taobao/tmal
 }
 ```
 
-`via` says how the wall was detected: `"url"` = the navigation/request landed on the punish page, `"body"` = a 200-status API response swallowed the challenge. `account` (which identity got walled — matters when scraper and publisher run as different accounts) and `handoff` are present only when there are hits; a clean session returns `{"url", "total": 0, "events": []}`. The human handoff works because the session keeps its cookies and persona: solving in the live view sets the x5sec cookie, and the retry rides it.
+`via` says how the wall was detected: `"url"` = the navigation/request landed on the punish page, `"body"` = a 200-status API response swallowed the challenge. `account` (which identity got walled — matters when scraper and publisher run as different accounts) and `handoff` are present only when there are hits; a clean session returns `{"url", "total": 0, "events": []}` plus a `note` saying what zero means — no known challenge signatures in this session's traffic, i.e. absence of a wall, **not** a login verdict. The login question is answered elsewhere (`session_verdict` / `account_verify`). The human handoff works because the session keeps its cookies and persona: solving in the live view sets the x5sec cookie, and the retry rides it.
 
 ### GET /session/{id}/har
 
@@ -1668,7 +1681,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `session_navigate` | Navigate to a new URL within a session |
 | `session_preload` | Replace the session's document-start preload group (empty array clears). Sources run before each new document's own scripts — including inline `<script>` tags — the only hook that beats pages whose signing layer captures `window.fetch`/XHR natives at parse time |
 | `session_state` | Get the indexed page state |
-| `session_cookies` | Export the session's current cookies as full Set-Cookie strings (`name=value; Domain=…; Path=/`, for login-state reuse — cross-subdomain state survives the round-trip) |
+| `session_cookies` | Export the session's current cookies as full Set-Cookie strings (`name=value; Domain=…; Path=/`, for login-state reuse — cross-subdomain state survives the round-trip). `meta: true` switches to the metadata-only view (issue #102): `{name, domain, path, secure, httpOnly, sameSite, expires, hostOnly}` per cookie, **no values ever** — for checking what auth state exists, leave it false for the value-bearing export that round-trips login state |
 | `session_storage` | Snapshot the session's `localStorage`/`sessionStorage` for the current origin — the half of login state cookies can't carry; restore it in a new session via `session_create`'s `storage` field |
 | `session_console` | Read the session's recent page console output (`log/info/warn/error/dialog` ring buffer of 500, filters: `level`/`since_ts`/`url_contains`/`limit`) — the fastest way to see why a page misbehaves |
 | `session_click` | Click an element by index |
@@ -1734,7 +1747,7 @@ The output is deterministic — same input, same bytes — and the receipt carri
 
 #### Session Operation Parameters
 
-All session operations require the `session_id` parameter. `click`/`input` also need `index` (from `session_state`); `input` additionally needs `text`; `eval` needs `script` (optional `timeout_ms`, default 5000, clamped 100..120000 — a script that outlives the budget returns `EVAL_TIMEOUT` instead of a silent null); `navigate` needs `url`; `clone` needs nothing but the source id. The acting/rendering tools take optional extras: `click_xy` needs `x`/`y` (optional `button`, `click_count`); `drag` needs `from`/`to` (optional `steps`, `delay_ms`, `humanize` — trajectory is humanized by default; `humanize: false` gives exact linear interpolation); `viewport` accepts `width`/`height`/`mobile` (all optional — omit to keep current); `screenshot` accepts `width`/`height`/`full_page`/`selector`/`selector_all`; `wait` takes exactly one of `selector` / `predicate` plus `timeout_ms` (default 10000, max 120000); `export` accepts `format` (`bash` default / `jsonl` / `json` for a flow document); `flow_run` takes exactly one of `flow` / `name`, plus optional `vars` and `session_id`; `network` accepts `filter: "media"` or `include_bodies: true` (plus `url_contains`/`body_max_chars`, and `include_headers` for the outbound header sets); `dialog` accepts `action` (`list` default / `accept` / `dismiss`) plus optional `prompt_text`; `console` accepts `level`/`since_ts`/`url_contains`/`limit`; `storage`/`cookies` take only `session_id`.
+All session operations require the `session_id` parameter. `click`/`input` also need `index` (from `session_state`); `input` additionally needs `text`; `eval` needs `script` (optional `timeout_ms`, default 5000, clamped 100..120000 — a script that outlives the budget returns `EVAL_TIMEOUT` instead of a silent null); `navigate` needs `url`; `clone` needs nothing but the source id. The acting/rendering tools take optional extras: `click_xy` needs `x`/`y` (optional `button`, `click_count`); `drag` needs `from`/`to` (optional `steps`, `delay_ms`, `humanize` — trajectory is humanized by default; `humanize: false` gives exact linear interpolation); `viewport` accepts `width`/`height`/`mobile` (all optional — omit to keep current); `screenshot` accepts `width`/`height`/`full_page`/`selector`/`selector_all`; `wait` takes exactly one of `selector` / `predicate` plus `timeout_ms` (default 10000, max 120000); `export` accepts `format` (`bash` default / `jsonl` / `json` for a flow document); `flow_run` takes exactly one of `flow` / `name`, plus optional `vars` and `session_id`; `network` accepts `filter: "media"` or `include_bodies: true` (plus `url_contains`/`body_max_chars`, and `include_headers` for the outbound header sets); `dialog` accepts `action` (`list` default / `accept` / `dismiss`) plus optional `prompt_text`; `console` accepts `level`/`since_ts`/`url_contains`/`limit`; `storage` takes only `session_id`; `cookies` takes `session_id` plus optional `meta` (true = the metadata-only view, no values).
 
 ### Client Configuration
 
