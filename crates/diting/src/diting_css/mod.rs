@@ -1221,6 +1221,17 @@ pub struct ComputedStyle {
     /// gBCR and hit testing but NOT the layout box (Chrome semantics:
     /// transforms never affect layout).
     pub transform: Option<Transform2D>,
+    /// CSS Transforms L2 individual `translate` property (#140): (x, y) with
+    /// px/percent/0 slots — percent resolves against the element's own border
+    /// box at collect time, same as the transform-list translate. v1 is 2D:
+    /// a third (z) component invalidates the declaration.
+    pub translate_prop: Option<(Length, Length)>,
+    /// Individual `rotate` property (#140): Z-axis angle in degrees. 3D axis
+    /// forms (`rotate: x 45deg`) are dropped — same 2D posture as the
+    /// transform list.
+    pub rotate_prop: Option<f32>,
+    /// Individual `scale` property (#140): (x, y); `scale: 2` is (2, 2).
+    pub scale_prop: Option<(f32, f32)>,
     /// Parsed `animation` shorthand (CSS animations batch). The cascade
     /// only stores it; `sample_css_animation` resolves it against the
     /// stylesheet's `@keyframes` table at a time the caller supplies, then
@@ -2179,6 +2190,70 @@ impl Transform2D {
     }
 }
 
+/// The final transform of an element folds the three CSS Transforms L2
+/// individual properties around the `transform` list (#140):
+/// `translate ∘ rotate ∘ scale ∘ transform` — the individual properties are
+/// applied AFTER the list, exactly the spec's concatenation order.
+///
+/// Composes outward from the list's affine (each individual property wraps
+/// the accumulated matrix): scale multiplies the linear part and the slots
+/// stay symbolic; rotate mixes the slots' axes, so a percent slot — which
+/// can't ride a rotated map — makes the whole composition give up on the
+/// individual properties and keep the plain list (a rare combination; the
+/// honest alternative is dropping the declaration, which is worse).
+/// translate lands outermost and just adds.
+impl ComputedStyle {
+    pub fn effective_transform(&self) -> Option<Transform2D> {
+        let has_ind = self.translate_prop.is_some()
+            || self.rotate_prop.is_some()
+            || self.scale_prop.is_some();
+        let mut m = match self.transform {
+            Some(t) => t,
+            None if !has_ind => return None,
+            None => Transform2D { a: 1.0, b: 0.0, c: 0.0, d: 1.0, tx: Length::Px(0.0), ty: Length::Px(0.0) },
+        };
+        if let Some((sx, sy)) = self.scale_prop {
+            m.a *= sx;
+            m.c *= sx;
+            m.b *= sy;
+            m.d *= sy;
+            m.tx = mul_len(m.tx, sx);
+            m.ty = mul_len(m.ty, sy);
+        }
+        if let Some(deg) = self.rotate_prop {
+            let rad = deg.to_radians();
+            let (sin, cos) = rad.sin_cos();
+            // Percent slots can't ride a rotated axis map (add_len would mix
+            // units) — the rare rotate+percent-translate combination keeps
+            // the plain transform list instead of dropping everything.
+            let (tx_px, ty_px) = match (m.tx, m.ty) {
+                (Length::Px(x), Length::Px(y)) => (x, y),
+                _ => return self.transform,
+            };
+            let (a, b, c, d) = (m.a, m.b, m.c, m.d);
+            m.a = cos * a - sin * b;
+            m.b = sin * a + cos * b;
+            m.c = cos * c - sin * d;
+            m.d = sin * c + cos * d;
+            m.tx = Length::Px(cos * tx_px - sin * ty_px);
+            m.ty = Length::Px(sin * tx_px + cos * ty_px);
+        }
+        if let Some((tx, ty)) = self.translate_prop {
+            // Outermost: adds without passing through the linear part.
+            // Mixed-unit slots (list px + property percent) can't compose —
+            // same give-up posture as the rotate arm.
+            match (add_len(m.tx, tx), add_len(m.ty, ty)) {
+                (Some(x), Some(y)) => {
+                    m.tx = x;
+                    m.ty = y;
+                }
+                _ => return self.transform,
+            }
+        }
+        Some(m)
+    }
+}
+
 /// Parsed `animation` shorthand, v1 subset: ONE animation (the first of a
 /// comma list), direction normal, play-state running. That covers the
 /// declarative-SVG motion grammar (fade / rise / self-draw); the sampler
@@ -2590,6 +2665,95 @@ fn mul_len(a: Length, s: f32) -> Length {
     }
 }
 
+/// Angle in CSS units: deg (the default suffix real sheets write), rad,
+/// turn, grad. Bare nonzero numbers are invalid CSS (Chrome rejects).
+fn parse_angle_deg(s: &str) -> Option<f32> {
+    let s = s.trim();
+    let (n, scale) = if let Some(n) = s.strip_suffix("deg") {
+        (n, 1.0f32)
+    } else if let Some(n) = s.strip_suffix("rad") {
+        (n, 180.0 / std::f32::consts::PI)
+    } else if let Some(n) = s.strip_suffix("turn") {
+        (n, 360.0)
+    } else if let Some(n) = s.strip_suffix("grad") {
+        (n, 0.9)
+    } else if s == "0" {
+        ("0", 1.0)
+    } else {
+        return None;
+    };
+    let deg = n.trim().css_f32()? * scale;
+    deg.is_finite().then_some(deg)
+}
+
+/// `translate: <x> [y]` — the individual property (#140, css-transforms-2).
+/// Slots share the transform-list translate grammar (px/percent/0, viewport
+/// units fold at parse time); a third z component is 3D and drops the
+/// declaration, same 2D posture as the list. `none` is the initial value.
+fn parse_translate_prop(v: &str, vw: f32, vh: f32) -> Option<(Length, Length)> {
+    let v = v.trim();
+    if v.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    let one = |s: &str| -> Option<Length> {
+        let s = s.trim();
+        if let Some(num) = s.strip_suffix('%') {
+            num.trim().css_f32().map(Length::Percent)
+        } else if let Some(num) = s.strip_suffix("px") {
+            num.trim().css_f32().map(Length::Px)
+        } else if let Some(num) = s.strip_suffix("vw") {
+            num.trim().css_f32().map(|n| Length::Px(n * vw / 100.0))
+        } else if let Some(num) = s.strip_suffix("vh") {
+            num.trim().css_f32().map(|n| Length::Px(n * vh / 100.0))
+        } else {
+            (s == "0").then_some(Length::Px(0.0))
+        }
+    };
+    let mut parts = v.split_whitespace();
+    let x = one(parts.next()?)?;
+    let y = match parts.next() {
+        Some(tok) => one(tok)?,
+        None => Length::Px(0.0),
+    };
+    if parts.next().is_some() {
+        return None; // z component: 3D, out of v1 scope
+    }
+    Some((x, y))
+}
+
+/// `rotate: <angle>` — Z-axis only in v1; the axis forms (`x 45deg`) are 3D
+/// and drop the declaration. `none` is the initial value.
+fn parse_rotate_prop(v: &str) -> Option<f32> {
+    let v = v.trim();
+    if v.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    if v.contains(' ') {
+        return None;
+    }
+    parse_angle_deg(v)
+}
+
+/// `scale: <x> [y]` — single value is uniform; negatives are legal (the
+/// flip idiom `scale: -1` relies on them). `none` is the initial value.
+fn parse_scale_prop(v: &str) -> Option<(f32, f32)> {
+    let v = v.trim();
+    if v.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    let num = |s: &str| s.trim().css_f32().filter(|n| n.is_finite());
+    let mut parts = v.split_whitespace();
+    let x = num(parts.next()?)?;
+    let y = match parts.next() {
+        Some(tok) => num(tok)?,
+        None => x,
+    };
+    if parts.next().is_some() {
+        return None; // z component: 3D, out of v1 scope
+    }
+    Some((x, y))
+}
+
 /// Parse a `transform` declaration into one 2D affine [`Transform2D`]
 /// (transform batch; obscura #740 lineage, widened twice). The translate
 /// family (translate/translate3d — z parses and drops, 3D flattens to 2D
@@ -2643,24 +2807,7 @@ pub(crate) fn parse_transform_with_vp(v: &str, vw: f32, vh: f32) -> Option<Trans
     };
     // Angle in CSS units: deg (the default suffix real sheets write), rad,
     // turn, grad. Bare nonzero numbers are invalid CSS (Chrome rejects).
-    let angle = |s: &str| -> Option<f32> {
-        let s = s.trim();
-        let (n, scale) = if let Some(n) = s.strip_suffix("deg") {
-            (n, 1.0f32)
-        } else if let Some(n) = s.strip_suffix("rad") {
-            (n, 180.0 / std::f32::consts::PI)
-        } else if let Some(n) = s.strip_suffix("turn") {
-            (n, 360.0)
-        } else if let Some(n) = s.strip_suffix("grad") {
-            (n, 0.9)
-        } else if s == "0" {
-            ("0", 1.0)
-        } else {
-            return None;
-        };
-        let deg = n.trim().css_f32()? * scale;
-        deg.is_finite().then_some(deg)
-    };
+    let angle = parse_angle_deg;
     let mut t = Transform2D {
         a: 1.0, b: 0.0, c: 0.0, d: 1.0,
         tx: Length::Px(0.0),
@@ -4516,6 +4663,21 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             // — the deck/carousel idiom — folds against the page viewport.
             style.transform = parse_transform_with_vp(v, fonts.viewport_w, fonts.viewport_h);
             style.transform.is_some()
+        }
+        // CSS Transforms L2 individual properties (#140) — the modern
+        // longhand spelling Motion/Framer/GSAP sites emit. Each folds into
+        // effective_transform() at collect time; `none` resets to nothing.
+        "translate" => {
+            style.translate_prop = parse_translate_prop(v, fonts.viewport_w, fonts.viewport_h);
+            style.translate_prop.is_some()
+        }
+        "rotate" => {
+            style.rotate_prop = parse_rotate_prop(v);
+            style.rotate_prop.is_some()
+        }
+        "scale" => {
+            style.scale_prop = parse_scale_prop(v);
+            style.scale_prop.is_some()
         }
         "opacity" => {
             // A number in [0, 1] (animation batch A). The initial value 1

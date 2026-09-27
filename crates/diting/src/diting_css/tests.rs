@@ -319,6 +319,72 @@ fn parse_transform_scales_and_composition_order() {
     assert_eq!((t.tx, t.ty), (Length::Px(12.0), Length::Px(34.0)));
 }
 
+/// CSS Transforms L2 individual properties (#140): parse, and the
+/// concatenation order `translate ∘ rotate ∘ scale ∘ transform` — the
+/// individual props wrap the transform list (applied AFTER it), which is
+/// what separates them from just spelling the functions inside the list.
+#[test]
+fn individual_translate_rotate_scale_parse_and_compose() {
+    let mut s = ComputedStyle::default();
+    assert!(apply_declarations(&mut s, "translate: 10px 20px; rotate: 45deg; scale: 2 3"));
+    assert_eq!(s.translate_prop, Some((Length::Px(10.0), Length::Px(20.0))));
+    assert_eq!(s.rotate_prop, Some(45.0));
+    assert_eq!(s.scale_prop, Some((2.0, 3.0)));
+
+    // Single-value spellings: y defaults (0 / uniform).
+    let mut s = ComputedStyle::default();
+    assert!(apply_declarations(&mut s, "translate: 8px; scale: 2"));
+    assert_eq!(s.translate_prop, Some((Length::Px(8.0), Length::Px(0.0))));
+    assert_eq!(s.scale_prop, Some((2.0, 2.0)));
+
+    // 3D forms drop the declaration (same 2D posture as the list) —
+    // rejected, and the slot stays at its prior value (none).
+    assert!(!apply_declarations(&mut s, "translate: 1px 2px 3px"));
+    assert_eq!(s.translate_prop, None);
+    assert!(!apply_declarations(&mut s, "rotate: x 45deg"));
+    assert_eq!(s.rotate_prop, None);
+
+    // Individual props alone (no transform list) still produce a matrix.
+    let mut s = ComputedStyle::default();
+    assert!(apply_declarations(&mut s, "translate: 4px"));
+    let t = s.effective_transform().unwrap();
+    assert_eq!(t.tx, Length::Px(4.0));
+    assert_eq!(t.a, 1.0);
+
+    // Order: scale wraps the list — its translate slot rides the scale.
+    // `scale: 2` around `translateX(10px)` moves the box 20px; the outer
+    // `translate: 5px` adds without passing through the linear part.
+    let mut s = ComputedStyle::default();
+    assert!(apply_declarations(&mut s, "transform: translateX(10px); scale: 2; translate: 5px"));
+    let t = s.effective_transform().unwrap();
+    assert_eq!(t.a, 2.0);
+    assert_eq!(t.tx, Length::Px(25.0), "10·2 (inner, scaled) + 5 (outer, added)");
+    // Inside the list the order is the reverse spelling — same geometric
+    // result as `scale(2) translateX(10px)`, pinned above.
+    let t = parse_transform("scale(2) translateX(10px)").unwrap();
+    assert_eq!(t.tx, Length::Px(20.0));
+
+    // Rotate wraps the list's translate: 90° sends +x to +y (y-down).
+    // cos(π/2) leaves a float tail (~1e-7) — compare with tolerance.
+    let mut s = ComputedStyle::default();
+    assert!(apply_declarations(&mut s, "transform: translateX(10px); rotate: 90deg"));
+    let t = s.effective_transform().unwrap();
+    match (t.tx, t.ty) {
+        (Length::Px(x), Length::Px(y)) => {
+            assert!(x.abs() < 1e-5, "tx {x}");
+            assert!((y - 10.0).abs() < 1e-5, "ty {y}");
+        }
+        other => panic!("expected px slots, got {other:?}"),
+    }
+
+    // The stacking/containing-block predicates see the folded matrix: an
+    // element with only individual props is still "transformed".
+    let mut s = ComputedStyle::default();
+    assert!(apply_declarations(&mut s, "scale: 2"));
+    assert!(s.effective_transform().is_some());
+    assert!(s.transform.is_none(), "the raw list stays empty for reflection");
+}
+
 /// Spec rule: one unknown function invalidates the whole declaration —
 /// functions this engine has no axis for (3D), bad arity, and unitless
 /// nonzero angles yield None (the element renders untransformed), as do

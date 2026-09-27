@@ -5,7 +5,8 @@ use super::{
     is_cors_safelisted_request_header, parse_cors_header_list, preflight_allows_header,
     preflight_allows_method, validate_fetch_url, FetchCredentials,
 };
-use super::{image_header_dimensions, pbkdf2_derive, PBKDF2_MAX_ITERATIONS, PBKDF2_MAX_OUTPUT_BYTES};
+use super::crypto_secret::{pbkdf2_derive, PBKDF2_MAX_ITERATIONS, PBKDF2_MAX_OUTPUT_BYTES};
+use super::image_header_dimensions;
 
 /// Header-only dimension parsing for the four formats op_image_info
 /// serves. Byte layouts pinned against the spec tables: PNG IHDR (BE

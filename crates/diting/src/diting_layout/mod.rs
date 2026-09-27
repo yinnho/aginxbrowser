@@ -5592,7 +5592,7 @@ pub fn layout_solve_rooted(
                         // ancestor kind that overrides the viewport — a
                         // merely positioned ancestor doesn't pin it.
                         let transformed =
-                            ancestor.is_some_and(|s| s.transform.is_some());
+                            ancestor.is_some_and(|s| s.effective_transform().is_some());
                         if transformed
                             || (!fixed
                                 && ancestor.is_some_and(|s| {
@@ -6283,7 +6283,7 @@ fn establishes_stacking_context(s: &ComputedStyle) -> bool {
             | Some(PositionMode::Sticky)
     );
     (positioned && s.z_index.is_some())
-        || s.transform.is_some()
+        || s.effective_transform().is_some()
         || s.opacity.is_some_and(|o| o < 1.0)
         || s.backdrop_blur.is_some_and(|b| b > 0.0)
 }
@@ -6581,7 +6581,7 @@ pub fn layout_collect(
         let mut offset = offset;
         let mut t_lin = (1.0f32, 0.0f32, 0.0f32, 1.0f32);
         if let Some(dom_id) = node_map.get(&node) {
-            if let Some(t) = styles.get(dom_id).and_then(|s| s.transform) {
+            if let Some(t) = styles.get(dom_id).and_then(|s| s.effective_transform()) {
                 let resolve = |l: crate::diting_css::Length, basis: f32| match l {
                     crate::diting_css::Length::Px(v) => v,
                     crate::diting_css::Length::Percent(p) => p / 100.0 * basis,

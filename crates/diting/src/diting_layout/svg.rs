@@ -253,7 +253,7 @@ fn walk(
         .flatten()
         .and_then(|t| parse_transform(&t))
         .unwrap_or(IDENTITY);
-    let m = if let Some(css_t) = &cs.transform {
+    let m = if let Some(css_t) = &cs.effective_transform() {
         let ref_w = ctx.view_box_extent.map(|v| v.0).unwrap_or(0.0);
         let ref_h = ctx.view_box_extent.map(|v| v.1).unwrap_or(0.0);
         mul(&mul(&ctx.m, &tf), &css_t.to_matrix_with(ref_w, ref_h))
